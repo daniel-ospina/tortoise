@@ -8488,7 +8488,7 @@ async def events_poll(
         # ValueError contract (410/400 mapping) is unchanged: the same
         # exception propagates out of the worker thread.
         result = await asyncio.to_thread(
-            sdk.events_poll, after=after, types=type_list or None, limit=limit)
+            sdk.poll_events, after=after, types=type_list or None, limit=limit)
     except ValueError as e:
         msg = str(e)
         if "cursor expired" in msg:
@@ -9358,7 +9358,7 @@ async def upload_pack_manifest(
         MANIFEST_WIRE_CAP_BYTES,
         MAX_MANIFEST_BYTES,
         upsert_tenant_manifest,
-        validate_manifest,
+        validate_manifest_for_tenant,
     )
     # #2029: reject oversized request bodies BEFORE buffering/parsing them —
     # the 64KB check below alone only fires after request.json() has buffered
@@ -9389,11 +9389,14 @@ async def upload_pack_manifest(
                             detail="missing required field: manifest_yaml")
     if len(manifest_yaml.encode()) > MAX_MANIFEST_BYTES:
         raise HTTPException(status_code=413, detail="manifest exceeds 64KB")
-    result = validate_manifest(manifest_yaml)
+    # #2781: the pre-check seeds the tenant's own installed manifests, exactly
+    # as the install below does — a pre-check that could not see them would
+    # refuse the very manifests it exists to admit.
+    sdk = _make_sdk(namespace=org_id)
+    result = validate_manifest_for_tenant(sdk, manifest_yaml)
     if not result.ok:
         raise HTTPException(status_code=422,
                             detail={"errors": result.errors or ["invalid manifest"]})
-    sdk = _make_sdk(namespace=org_id)
     try:
         record = await asyncio.to_thread(upsert_tenant_manifest, sdk, manifest_yaml)
     except ValueError as e:
@@ -10498,12 +10501,14 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
     # lanes (session_key / _session_key_supabase) and the signup-token
     # recovery lanes carry their own predicates with the SAME
     # revoked_at IS NULL + non-bootstrap exclusions. #2426 note: the
-    # recovery lanes' EXPIRY exclusion diverges (the Supabase
-    # recover_team_key RPC still counts expired-but-unrevoked rows while
-    # its registry twin excludes them) — recorded as out of scope for
-    # #2481 (revoked-only) and tracked in #4550 (the RPC's over-cap branch
-    # can revoke a LIVE key as collateral for expired rows that no longer
-    # occupy a slot); the RPC never 402s.
+    # recovery lanes' EXPIRY exclusion USED to diverge (the Supabase
+    # recover_team_key RPC counted expired-but-unrevoked rows while its
+    # registry twin excluded them, so the RPC's over-cap branch could
+    # revoke a LIVE key as collateral for rows that no longer occupy a
+    # slot) — closed as of #4550: 20261012000006_recover_team_key_expiry
+    # puts the RPC's count on public.api_key_slot_count (the ONE SQL
+    # declaration of this predicate) and gives its revoke-target scan the
+    # same expiry arm. No cap lane omits the expiry axis any more.
     from tortoise.quota import _count_resource
     from tortoise.supabase_control import (
         KeyCapRefusal,
@@ -14900,19 +14905,25 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # INVERTED window still 422s — that is a correctable payload
             # error (the client fixes the window and retries), not a wedge,
             # and the two are deliberately not conflated.
+            from .live import LIFECYCLE_FANOUT_QUERY as _FANOUT_QUERY
+            from .live import classify_lifecycle_fanout as _classify_fanout
             from .live import is_terminal_status as _is_terminal_status
 
             def _terminal_state(point_id: str) -> tuple | None:
                 """The terminal state of ``point_id``, or ``None``.
 
-                The query is deliberately the SAME STATEMENT
-                ``sdk._assert_lifecycle_guard`` runs (#2498) — same MATCH,
-                same three projected columns in the same order, same
-                ``row[0]`` read, and NO ``LIMIT``. A differently-shaped or
+                The query is the SHARED ``live.LIFECYCLE_FANOUT_QUERY`` — the
+                same statement ``sdk._assert_lifecycle_guard`` runs — and the
+                verdict is the same ``live.classify_lifecycle_fanout`` scan,
+                so the two cannot disagree (#7822). A differently-shaped or
                 first-row-only probe could select a DIFFERENT node than the
                 write's own guard: point ids are not unique and row order is
                 server-dependent, and that divergence would either resurrect
-                this bug or silently drop a legitimate supersede.
+                this bug or silently drop a legitimate supersede. Since #7822
+                the guard refuses when ANY node carrying the id is terminal,
+                so this pre-check must report terminal on the same condition —
+                otherwise the mixed duplicate id would 500-wedge again, which
+                is exactly what #3366 exists to prevent.
 
                 ``None`` means "not terminal, or not a statement point": an
                 ``is_operator`` prior is corruption, not a benign replay, so
@@ -14921,13 +14932,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 missing-point path is unchanged.
                 """
                 rows = sdk._get_proj().g.query(
-                    "MATCH (n:Point {id:$id}) "
-                    "RETURN n.is_operator, n.status, "
-                    "coalesce(n.outdated, false)",
-                    params={"id": point_id}).result_set
-                if not rows or bool(rows[0][0]):
-                    return None
-                return (rows[0][1], bool(rows[0][2]))
+                    _FANOUT_QUERY, params={"id": point_id}).result_set
+                kind, status, outdated = _classify_fanout(rows)
+                if kind == "terminal":
+                    return (status, outdated)
+                return None
 
             # #3366: the pre-check's mechanism is documented ONCE, on
             # ``_terminal_state`` above — including the LOCKSTEP requirement
@@ -21578,6 +21587,17 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
     if pc_err is not None:
         raise ValueError(pc_err)
     packs = pc.get("packs", [])
+    # #2781: a restore installs a SET of packs, so a manifest may reference a
+    # sibling that appears later in this same pack_config. Seed every sibling
+    # with a yaml as an available pack, so the validator resolves against the
+    # set the restore will leave behind rather than against install order.
+    # (Before #2781 the validator's temp registry held one manifest and no
+    # cross-pack reference could validate at all.)
+    sibling_yamls = {
+        p.get("namespace"): p.get("yaml") for p in packs
+        if isinstance(p, dict) and isinstance(p.get("namespace"), str)
+        and isinstance(p.get("yaml"), str) and p.get("yaml")
+    }
     for pack in packs:
         ns = pack.get("namespace")
         if not ns:
@@ -21590,13 +21610,17 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
             # residue. The ok-ness check is deliberately NOT duplicated:
             # upsert_tenant_manifest re-validates unconditionally before any
             # graph write with the identical message + zero residue.
-            result = validate_manifest(yaml_text)
+            result = validate_manifest(yaml_text, installed_manifests=sibling_yamls)
             if result.ok and result.namespace != ns:
                 raise ValueError(
                     f"pack_config pack namespace {ns!r} does not match "
                     f"manifest namespace {result.namespace!r}")
             # Validated upsert — ValueError (invalid manifest) quarantines.
-            upsert_tenant_manifest(sdk, yaml_text)
+            # #2781: pass the restore's sibling set so a cross-referencing
+            # pack_config validates as the SET it will become, not in install
+            # order (the sibling may appear later in this same list).
+            upsert_tenant_manifest(
+                sdk, yaml_text, extra_manifests=sibling_yamls)
         else:
             # Starter-pack activation record (idempotent MERGE).
             reg = _get_registry()

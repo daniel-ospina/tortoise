@@ -264,7 +264,7 @@ def test_purged_seq_cursor_expires(sdk_factory, tmp_path):
     event_store.next_seq(proj)  # creates GraphEventMeta (first_seq=1)
     # 1. a FRESH event is pollable → cursor points at seq 1
     event_store.append_event(proj, 1, "PointAdded", {"id": "a"}, "ev-1", ts=now.isoformat())
-    stale = sdk.events_poll()["next_cursor"]
+    stale = sdk.poll_events()["next_cursor"]
     # 2. time passes: backdate the event past retention, purge it (refreshes
     #    the first_seq watermark to last_seq+1 = 2)
     proj.g.query("MATCH (e:GraphEvent) SET e.ts = $old_ts",
@@ -274,4 +274,4 @@ def test_purged_seq_cursor_expires(sdk_factory, tmp_path):
     # 3. the stale cursor (seq 1) is now below the watermark → expired
     import pytest
     with pytest.raises(ValueError, match="cursor expired"):
-        sdk.events_poll(after=stale)
+        sdk.poll_events(after=stale)

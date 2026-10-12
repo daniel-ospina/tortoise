@@ -650,7 +650,7 @@ class TestPointDeleteTwoStore:
             "which is the wrong meaning for a hard delete")
 
     def test_subscriber_surface_unchanged(self, env):
-        """The ``:GraphEvent`` row — and therefore ``events_poll`` — is intact.
+        """The ``:GraphEvent`` row — and therefore ``poll_events`` — is intact.
 
         This is the property that makes the split acceptable: the fix changes
         which store carries the *replay* meaning, not what subscribers see.
@@ -662,7 +662,7 @@ class TestPointDeleteTwoStore:
         types = [r[0] for r in sdk._get_proj().g.query(
             "MATCH (e:GraphEvent) RETURN e.type").result_set]
         assert "PointRetracted" in types
-        polled = sdk.events_poll(after=None)["events"]
+        polled = sdk.poll_events(after=None)["events"]
         assert any(e["type"] == "PointRetracted"
                    and e["payload"] == {"id": pid} for e in polled)
 

@@ -372,7 +372,11 @@ def test_hosted_commit_summary_log_reserves_warning_for_real_warns(
     ), f"a real warn must WARNING-summary, got {lines}"
 
 
-@pytest.mark.parametrize("marker", ["status", "outdated_flag", "terminal_successor"])
+@pytest.mark.parametrize(
+    "marker",
+    ["status", "outdated_flag", "terminal_successor",
+     "duplicate_dead_sibling"],
+)
 def test_hosted_commit_supersede_prior_already_terminal_is_noop(tmp_path, marker):
     """#3366 — a supersede whose PRIOR is already terminal is an idempotent
     no-op, never a fail-closed 500.
@@ -426,6 +430,22 @@ def test_hosted_commit_supersede_prior_already_terminal_is_noop(tmp_path, marker
         _ = g.query(
             "MATCH (p:Point {id:$id}) SET p.status = 'deprecated'",
             params={"id": old_pt_id},
+        ).result_set
+    elif marker == "duplicate_dead_sibling":
+        # #7822: a SECOND node shares the prior id and is terminal. The dead
+        # node is made the LAST row the server returns, so a first-row-only
+        # pre-check reads the LIVE sibling and would proceed to
+        # ``supersede_point`` — whose #7822 guard refuses on ANY terminal row,
+        # turning this arm back into the #3366 fail-closed 500. Both probes
+        # must therefore classify the whole fan-out.
+        sdk.create_point("statement", OLD_PT_CONTENT + " [dup]", id=old_pt_id)
+        dup_rows = g.query(
+            "MATCH (p:Point {id:$id}) RETURN ID(p)", params={"id": old_pt_id},
+        ).result_set
+        assert len(dup_rows) == 2, dup_rows
+        _ = g.query(
+            "MATCH (p:Point) WHERE ID(p) = $nid SET p.status = 'deprecated'",
+            params={"nid": dup_rows[-1][0]},
         ).result_set
     else:
         # The OTHER arm of ``is_terminal_status`` (#2498 widened the rejected
@@ -483,11 +503,17 @@ def test_hosted_commit_supersede_prior_already_terminal_is_noop(tmp_path, marker
         params={"id": old_pt_id},
     ).result_set
     assert row
-    _prior_dead = is_terminal_status(row[0][0], bool(row[0][1]))
-    if marker == "terminal_successor":
-        assert not _prior_dead, row
+    if marker == "duplicate_dead_sibling":
+        # The fan-out itself is the premise: one node can be live while a
+        # sibling is dead, and the verdict must be terminal either way.
+        assert len(row) == 2, row
+        assert any(is_terminal_status(s, bool(o)) for s, o in row), row
     else:
-        assert _prior_dead, row
+        _prior_dead = is_terminal_status(row[0][0], bool(row[0][1]))
+        if marker == "terminal_successor":
+            assert not _prior_dead, row
+        else:
+            assert _prior_dead, row
     # The successor node still exists (it is what dedup landed on, or the
     # fresh mint) — the skip preserves content rather than rolling it back.
     assert int(g.query(

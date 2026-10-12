@@ -354,7 +354,6 @@ ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
     'dream': ('refresh_confidence', '`canonical-sdk-methods.md` — “\\| W13 \\| `stabilize_beliefs` \\| #19 \\| `dream`, `compute_confidence`, `compute_reputation`, `record_calibration` \\| keep — **`compute_confidence` mislabelled read** \\|”'),
     'dream_health_check': ('graph_overview', '`beta-sdk-surface.md` — “\\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \\| ~5 \\| → `graph_overview` where they are orientation. The diagnostics are the held question above. \\|”'),
     'dream_health_state': ('graph_overview', '`beta-sdk-surface.md` — “\\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \\| ~5 \\| → `graph_overview` where they are orientation. The diagnostics are the held question above. \\|”'),
-    'events_poll': ('poll_events', '`beta-sdk-surface.md` — “\\| `events_poll` \\| → row 11 `poll_events`. \\|”'),
     'expand_relationships': ('explore_connections', '`beta-sdk-surface.md` — “\\| `traverse`, `expand_relationships`, `get_org_structure` \\| 3 \\| → `explore_connections`. \\|”'),
     'file_decision': ('write_question', '`beta-sdk-surface.md` — “\\| `file_decision` \\| → rows 20/21 **`write_question`** + **`record_decision`**. It was filing a *question* and calling it a decision. \\|”'),
     'file_human_approval': ('record_decision', '`beta-sdk-surface.md` — “\\| `file_human_approval` \\| 1 \\| → `record_decision`. \\|”'),
@@ -416,6 +415,7 @@ ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
     'org_list': ('get_organisation_account', '`beta-sdk-surface.md` — “\\| 28 \\| `get_organisation_account` \\| Read the account and the plan it is on \\| — \\| admin \\|”'),
     'org_update': ('', "`beta-sdk-surface.md` — “\\| `org_update`, `org_delete`, `membership_get`, `membership_update_role`, `apikey_verify` \\| 5 \\| Console plumbing. `org_delete` is **settled**: an end-customer must never be able to delete the builder's account. **The builder's own account closure is a console operation** — not in the SDK. \\|”"),
     'paginated_query': ('list_knowledge', '`beta-sdk-surface.md` — “\\| `query`, `paginated_query`, `query_points_by_tag` \\| 3 \\| → `list_knowledge`. \\|”'),
+    'poll_events': ('poll_events', '`beta-sdk-surface.md` — “\\| `events_poll` \\| → row 11 `poll_events`. \\|”'),
     'promote_point': ('update_knowledge', "`beta-sdk-surface.md` — “\\| `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` \\| 4 \\| Lifecycle and confidence **state** — a **field on `update_knowledge`** (promote, baseline, quarantine), selected by a **filter on `list_knowledge(kind=…, status=…)`** (drafts). No separate verb. `promote_point` also promotes its incident operators and carries the approval gate, so it is not `update_point(status='live')`. \\|”"),
     'provenance': ('check_confidence', '`beta-sdk-surface.md` — “\\| `provenance`, `belief_timeline`, `session_context`, `volunteer_context` \\| 4 \\| → `check_confidence` where they are confidence context; `poll_events` where they are a timeline. \\|”'),
     'quarantine_batch': ('update_knowledge', "`beta-sdk-surface.md` — “\\| `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` \\| 4 \\| Lifecycle and confidence **state** — a **field on `update_knowledge`** (promote, baseline, quarantine), selected by a **filter on `list_knowledge(kind=…, status=…)`** (drafts). No separate verb. `promote_point` also promotes its incident operators and carries the approval gate, so it is not `update_point(status='live')`. \\|”"),
@@ -646,7 +646,6 @@ TARGETS_LITERAL: dict[str, str] = {
     'dream': 'refresh_confidence',
     'dream_health_check': 'graph_overview',
     'dream_health_state': 'graph_overview',
-    'events_poll': 'poll_events',
     'expand_relationships': 'explore_connections',
     'file_decision': 'write_question',
     'file_human_approval': 'record_decision',
@@ -708,6 +707,7 @@ TARGETS_LITERAL: dict[str, str] = {
     'org_list': 'get_organisation_account',
     'org_update': '',
     'paginated_query': 'list_knowledge',
+    'poll_events': 'poll_events',
     'promote_point': 'update_knowledge',
     'provenance': 'check_confidence',
     'quarantine_batch': 'update_knowledge',
@@ -800,7 +800,6 @@ AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
     'dream': ('deprecated', 'public', 'stated', 'retain'),
     'dream_health_check': ('deprecated', 'public', 'stated', 'retain'),
     'dream_health_state': ('deprecated', 'public', 'stated', 'retain'),
-    'events_poll': ('deprecated', 'public', 'stated', 'retain'),
     'expand_relationships': ('deprecated', 'public', 'stated', 'retain'),
     'file_decision': ('deprecated', 'public', 'stated', 'retain'),
     'file_human_approval': ('deprecated', 'public', 'stated', 'retain'),
@@ -862,6 +861,7 @@ AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
     'org_list': ('deprecated', 'public', 'derived', 'retain'),
     'org_update': ('removed', 'internal', 'stated', 'delete'),
     'paginated_query': ('deprecated', 'public', 'stated', 'retain'),
+    'poll_events': ('stable', 'public', 'stated', 'retain'),
     'promote_point': ('deprecated', 'public', 'stated', 'retain'),
     'provenance': ('deprecated', 'public', 'stated', 'retain'),
     'quarantine_batch': ('deprecated', 'public', 'stated', 'retain'),
@@ -1073,9 +1073,9 @@ def test_structural_counts_and_the_summary_sentence_are_read() -> None:
     distinct, no_def, c1_total, exists, non_target = (int(g) for g in m.groups())
     # The summary counts DISTINCT DESTINATIONS; C1 lists METHODS. They differ by the
     # targets that have no `def` but are never a destination (`Tortoise`,
-    # `check_connection`, `create_memory_graph`) — so 33 vs 36 is correct, and the
-    # sentence must say which is which rather than attributing 33 to C1.
-    assert c1_total == 36, f"Part C1 lists {c1_total} Phase-2 methods, expected 36"
+    # `check_connection`, `create_memory_graph`) — so 32 vs 35 is correct, and the
+    # sentence must say which is which rather than attributing 32 to C1.
+    assert c1_total == 35, f"Part C1 lists {c1_total} Phase-2 methods, expected 35"
     assert c1_total == no_def + 3, (
         f"C1's {c1_total} and the summary's {no_def} destinations should differ by exactly "
         f"the 3 never-a-destination targets"
@@ -1084,10 +1084,10 @@ def test_structural_counts_and_the_summary_sentence_are_read() -> None:
         f"the summary's parts ({no_def}+{exists}+{non_target}) do not sum to its "
         f"distinct-destination count ({distinct})"
     )
-    # Each part is pinned, not just the sum. `exists` is now 4, not 2, because an
+    # Each part is pinned, not just the sum. `exists` is now 5, not 2, because an
     # UNCHANGED row's Target is the method's own name (`create_entity`, `get_entity`,
-    # `approve_merge`, `close`) rather than the old `UNCHANGED` token.
-    assert (distinct, no_def, exists, non_target) == (40, 33, 4, 3), (
+    # `approve_merge`, `close`, `poll_events`) rather than the old `UNCHANGED` token.
+    assert (distinct, no_def, exists, non_target) == (40, 32, 5, 3), (
         "the destination summary moved: "
         f"{distinct} destinations = {no_def} no-def + {exists} existing + {non_target} other"
     )
@@ -1454,16 +1454,16 @@ def test_prose_counts_are_the_literals_the_doc_claims() -> None:
     for pattern in (
         r"(?<![\d])150 public methods",
         r"(?<![\d])40 target methods",
-        r"(?<![\d])117 of the 150 are renames",
-        r"\*\*4\*\* are already targets \(unchanged\)",
+        r"(?<![\d])116 of the 150 are renames",
+        r"\*\*5\*\* are already targets \(unchanged\)",
         r"\*\*25\*\* are discarded with a rationale \(lifecycle `removed` · "
         r"visibility `internal` · delete `delete`\)",
         r"\*\*0\*\* are live but \*\*unlisted\*\* \(visibility `unlisted` — NOT deleted\)",
         r"\*\*1\*\* is \*\*relocated\*\* out of the product SDK \(visibility `internal`\)",
         r"\*\*0\*\* are \*\*contested\*\* \(the docs name conflicting destinations\)",
         r"\*\*3\*\* have no destination",
-        r"only \*\*4\*\* of them exist on `TortoiseSDK` today",
-        r"\*\*36\*\* are Phase 2 work",
+        r"only \*\*5\*\* of them exist on `TortoiseSDK` today",
+        r"\*\*35\*\* are Phase 2 work",
     ):
         assert re.search(pattern, text), f"the headline no longer says {pattern!r}"
 
@@ -1484,8 +1484,8 @@ def test_the_unread_cells_and_the_row_ordinals_are_pinned() -> None:
         f"Part A's row ordinals are {ordinals[:5]}…{ordinals[-2:]}, expected 1..150"
     )
     c1 = text.split("### C1")[1].split("### C2")[0]
-    assert c1.count("| no `def` on `TortoiseSDK` today |") == 36, (
-        "C1's status column no longer repeats its one true statement on all 36 rows"
+    assert c1.count("| no `def` on `TortoiseSDK` today |") == 35, (
+        "C1's status column no longer repeats its one true statement on all 35 rows"
     )
     c4 = text.split("### C4")[1].split("### C5")[0]
     for name, referent in (
@@ -1503,9 +1503,9 @@ def test_the_unread_cells_and_the_row_ordinals_are_pinned() -> None:
 
     rows = part_a_rows()
     # The old flat enum is gone: a row is now classified by its AXES, so these counts are
-    # read off lifecycle/visibility/delete rather than a single token. The four UNCHANGED
+    # read off lifecycle/visibility/delete rather than a single token. The five UNCHANGED
     # rows carry their own name as the target (they are already on the target surface).
-    assert sum(1 for r in rows if r["target"] == r["name"]) == 4
+    assert sum(1 for r in rows if r["target"] == r["name"]) == 5
     assert sum(1 for r in rows if r["lifecycle"] == "removed"
                and r["delete"] == "delete") == 25
     assert sum(1 for r in rows if r["visibility"] == "unlisted") == 0
@@ -1619,7 +1619,7 @@ def test_part_c1_lists_exactly_the_targets_with_no_def() -> None:
     Expected values are recomputed here from the beta doc + a fresh AST walk.
     """
     expected = set(targets_independently()) - set(public_methods_independently())
-    assert len(expected) == 36
+    assert len(expected) == 35
     listed = set(_first_column(_section("C1 — target methods with no `def` on `TortoiseSDK`")))
     assert listed == expected, (
         "Part C1 does not list exactly the target methods with no `def`.\n"
@@ -1752,7 +1752,7 @@ def test_every_group_has_a_pinned_representative() -> None:
         "R5": ("traverse", "explore_connections"),
         "R6": ("audit", "graph_overview"),
         "R7": ("review_connections", "review_link_candidates"),
-        "R8": ("events_poll", "poll_events"),
+        "R8": ("poll_events", "poll_events"),
         "R9": ("list_batch", "list_knowledge"),
         "W1": ("create_point", "create_entity"),
         "W2": ("ingest", "write_knowledge_batch"),

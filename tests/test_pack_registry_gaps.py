@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import yaml
 
@@ -591,8 +592,11 @@ class TestRegisterKinds:
 class TestCrossPackRefs:
     """Test _validate_cross_pack_refs for fromKind/toKind resolution."""
 
-    def test_from_kind_nonexistent_pack_kind_error(self, tmp_path):
-        """fromKind referencing a nonexistent pack kind → error."""
+    def test_from_kind_absent_namespace_is_unresolved_naming_the_pack(self, tmp_path):
+        """#2781: an ABSENT namespace is a missing pack, not a typo — the pack
+        loads and the reference is reported against the pack that is missing.
+        (Pre-#2781 this isolated `dev`, which is how ONE absent pack took two
+        or three others down with it.)"""
         d = str(tmp_path / "packs")
         os.makedirs(f"{d}/dev", exist_ok=True)
         with open(f"{d}/dev/manifest.yaml", "w") as f:
@@ -611,14 +615,16 @@ class TestCrossPackRefs:
                 },
             }, f)
         registry = PackRegistry(d)
-        registry.load_all()
-        assert "dev" in registry.errors
-        assert any(
-            "does not resolve" in e for e in registry.errors["dev"]
-        )
+        loaded = registry.load_all()
+        assert loaded == 1
+        assert not registry.errors
+        assert "dev" in registry.packs
+        msgs = registry.unresolved_refs["dev"]
+        assert any("nonexistent" in m and "not loaded" in m for m in msgs), msgs
+        assert any("does not resolve" in m for m in msgs), msgs
 
-    def test_to_kind_nonexistent_pack_kind_error(self, tmp_path):
-        """toKind referencing a nonexistent pack kind → error."""
+    def test_to_kind_absent_namespace_is_unresolved_naming_the_pack(self, tmp_path):
+        """Same clause for toKind."""
         d = str(tmp_path / "packs")
         os.makedirs(f"{d}/dev", exist_ok=True)
         with open(f"{d}/dev/manifest.yaml", "w") as f:
@@ -637,11 +643,226 @@ class TestCrossPackRefs:
                 },
             }, f)
         registry = PackRegistry(d)
+        loaded = registry.load_all()
+        assert loaded == 1
+        assert not registry.errors
+        assert any("nonexistent" in m and "not loaded" in m
+                   for m in registry.unresolved_refs["dev"])
+
+    def test_unknown_kind_inside_a_PRESENT_pack_is_still_fatal(self, tmp_path):
+        """The typo guard #2781 must not weaken: when the NAMESPACE resolves and
+        only the kind is wrong, the reference is a misspelling of a kind that a
+        loaded pack declares — the referrer is isolated. `thing:isue` is not a
+        missing pack named `thing`."""
+        d = str(tmp_path / "packs")
+        os.makedirs(f"{d}/thing", exist_ok=True)
+        with open(f"{d}/thing/manifest.yaml", "w") as f:
+            yaml.dump({
+                "namespace": "thing",
+                "name": "Thing",
+                "ontology": {"extends": "core", "objectKinds": ["issue"]},
+            }, f)
+        os.makedirs(f"{d}/dev", exist_ok=True)
+        with open(f"{d}/dev/manifest.yaml", "w") as f:
+            yaml.dump({
+                "namespace": "dev",
+                "name": "Development",
+                "ontology": {
+                    "extends": "core",
+                    "objectKinds": ["epic"],
+                    "relations": [{
+                        "predicate": "addresses",
+                        "fromKind": "dev:epic",
+                        "toKind": "thing:isue",
+                        "mechanism": "IMPL",
+                    }],
+                },
+            }, f)
+        registry = PackRegistry(d)
+        loaded = registry.load_all()
+        assert loaded == 1 and "thing" in registry.packs
+        assert "dev" not in registry.packs
+        assert any("thing:isue" in e and "does not resolve" in e
+                   for e in registry.errors["dev"])
+        assert "dev" not in registry.unresolved_refs
+
+    def test_absent_namespace_reports_the_closest_loaded_pack(self, tmp_path):
+        """The diagnostic is actionable: a near-miss namespace names the pack
+        the author probably meant."""
+        d = str(tmp_path / "packs")
+        os.makedirs(f"{d}/dev", exist_ok=True)
+        with open(f"{d}/dev/manifest.yaml", "w") as f:
+            yaml.dump({
+                "namespace": "dev",
+                "name": "Development",
+                "ontology": {
+                    "extends": "core",
+                    "objectKinds": ["issue"],
+                    "relations": [{
+                        "predicate": "addresses",
+                        "fromKind": "deve:issue",
+                        "toKind": "dev:issue",
+                        "mechanism": "IMPL",
+                    }],
+                },
+            }, f)
+        registry = PackRegistry(d)
         registry.load_all()
-        assert "dev" in registry.errors
-        assert any(
-            "does not resolve" in e for e in registry.errors["dev"]
-        )
+        assert any("did you mean 'dev'" in m
+                   for m in registry.unresolved_refs["dev"])
+
+    def test_declared_dependency_absent_is_reported_and_pack_stays_loaded(self, tmp_path):
+        """#2781 indicator 3 — `depends_on` has a CONSUMER. A declared
+        dependency that is not loaded is reported against the declaring pack,
+        naming the missing pack; the declaring pack still loads (indicator 2)."""
+        d = str(tmp_path / "packs")
+        os.makedirs(f"{d}/isolated", exist_ok=True)
+        with open(f"{d}/isolated/manifest.yaml", "w") as f:
+            yaml.dump({
+                "namespace": "isolated",
+                "name": "Isolated",
+                "ontology": {"extends": "core", "objectKinds": ["note"]},
+                "depends_on": ["hr"],
+            }, f)
+        registry = PackRegistry(d)
+        loaded = registry.load_all()
+        assert loaded == 1
+        assert not registry.errors
+        msgs = registry.unresolved_refs["isolated"]
+        assert any("'hr'" in m and "not loaded" in m for m in msgs), msgs
+
+    def test_declared_dependency_present_reports_nothing(self, tmp_path):
+        """A satisfied `depends_on` is silent — the check must not cost the
+        catalog anything."""
+        d = str(tmp_path / "packs")
+        for ns in ("hr", "fund"):
+            os.makedirs(f"{d}/{ns}", exist_ok=True)
+            with open(f"{d}/{ns}/manifest.yaml", "w") as f:
+                yaml.dump({
+                    "namespace": ns,
+                    "name": ns,
+                    "ontology": {"extends": "core", "objectKinds": ["thing"]},
+                    "depends_on": ["hr"] if ns == "fund" else [],
+                }, f)
+        registry = PackRegistry(d)
+        assert registry.load_all() == 2
+        assert not registry.errors and not registry.unresolved_refs
+
+    def test_depends_on_must_be_a_list_of_non_empty_strings(self, tmp_path):
+        """Shape guard: `depends_on: pm` (a bare string) would otherwise iterate
+        as characters and report a dependency on 'p'."""
+        registry = PackRegistry("/tmp/nonexistent")
+        for bad in ("pm", ["pm", ""], [7], [None]):
+            errors = registry._validate({
+                "namespace": "x", "name": "X",
+                "ontology": {"extends": "core", "objectKinds": ["thing"]},
+                "depends_on": bad,
+            })
+            assert any("depends_on must be a list" in e for e in errors), (bad, errors)
+        assert registry._validate({
+            "namespace": "x", "name": "X",
+            "ontology": {"extends": "core", "objectKinds": ["thing"]},
+            "depends_on": None,
+        }) == []
+
+    def test_core_prefixed_typo_stays_fatal_even_with_a_missing_dep(self, tmp_path):
+        """A `core:` ref never names a pack, so a declared-but-absent dependency
+        must not excuse a core-kind typo."""
+        d = str(tmp_path / "packs")
+        os.makedirs(f"{d}/dev", exist_ok=True)
+        with open(f"{d}/dev/manifest.yaml", "w") as f:
+            yaml.dump({
+                "namespace": "dev",
+                "name": "Development",
+                "ontology": {
+                    "extends": "core",
+                    "objectKinds": ["issue"],
+                    "kindDefs": {"issue": {"nearMisses": ["core:NotAKind"]}},
+                },
+                "depends_on": ["hr"],
+            }, f)
+        registry = PackRegistry(d)
+        assert registry.load_all() == 0
+        assert any("core:NotAKind" in e for e in registry.errors["dev"])
+
+    def test_bare_ref_unresolvable_without_a_missing_dep_is_fatal(self, tmp_path):
+        """A bare name with no declared-but-absent dependency has no evidence
+        that a pack is missing — it stays a typo, and the pack is isolated."""
+        d = str(tmp_path / "packs")
+        os.makedirs(f"{d}/dev", exist_ok=True)
+        with open(f"{d}/dev/manifest.yaml", "w") as f:
+            yaml.dump({
+                "namespace": "dev",
+                "name": "Development",
+                "ontology": {
+                    "extends": "core",
+                    "objectKinds": ["issue"],
+                    "kindDefs": {"issue": {"nearMisses": ["gadget"]}},
+                },
+            }, f)
+        registry = PackRegistry(d)
+        assert registry.load_all() == 0
+        assert any("nearMisses target 'gadget'" in e
+                   for e in registry.errors["dev"])
+
+    def test_bare_ref_is_reported_when_a_declared_dep_is_absent(self, tmp_path):
+        """The OTHER half of the clause: the same bare name is a reported gap
+        (not a typo) once the pack declares a dependency it does not have — that
+        declaration is what makes `depends_on` do work."""
+        d = str(tmp_path / "packs")
+        os.makedirs(f"{d}/dev", exist_ok=True)
+        with open(f"{d}/dev/manifest.yaml", "w") as f:
+            yaml.dump({
+                "namespace": "dev",
+                "name": "Development",
+                "ontology": {
+                    "extends": "core",
+                    "objectKinds": ["issue"],
+                    "kindDefs": {"issue": {"nearMisses": ["gadget"]}},
+                },
+                "depends_on": ["hr"],
+            }, f)
+        registry = PackRegistry(d)
+        assert registry.load_all() == 1
+        assert not registry.errors
+        assert any("nearMisses target 'gadget'" in m
+                   for m in registry.unresolved_refs["dev"])
+
+    # ── #2781 regression: the shipped catalog must not cascade ──────────
+
+    @pytest.mark.parametrize("victim", ["project-management", "product-strategy"])
+    def test_dropping_one_catalog_pack_does_not_drop_its_referrers(
+            self, tmp_path, victim):
+        """The failure the issue names, pinned on the REAL catalog.
+
+        Pre-#2781, dropping `project-management` (namespace `pm`) removed 3 of
+        the 5 starter packs — `dev` and `product-strategy` went with it — because
+        an unresolvable cross-pack reference ISOLATED the referring pack, and
+        the isolation then cascaded through the fixpoint. Dropping
+        `product-strategy` did the same to `dev` and `marketing`.
+
+        Post-#2781 every other pack still loads: the absent one is reported
+        against its referrers by name, and nothing is isolated.
+        """
+        import shutil
+
+        src = Path(__file__).resolve().parent.parent / "packs"
+        packs = tmp_path / "packs"
+        shutil.copytree(src, packs,
+                        ignore=shutil.ignore_patterns("_template"))
+        shutil.rmtree(packs / victim)
+        registry = PackRegistry(str(packs))
+        loaded = registry.load_all()
+        survivors = {"agent-ops", "dev", "marketing", "pm", "product-strategy"}
+        survivors.discard({"project-management": "pm",
+                           "product-strategy": "product-strategy"}[victim])
+        assert not registry.errors, registry.errors
+        assert survivors <= set(registry.packs), (
+            f"dropping {victim} cascaded: loaded={sorted(registry.packs)}")
+        assert loaded == len(registry.packs)
+        # Every remaining pack is still addressable by kind expansion.
+        assert "dev:issue" in registry._all_known_kinds()
+        assert registry.expand_kind("dev:issue")
 
     def test_valid_cross_pack_ref_no_error(self, tmp_path):
         """dev:issue → product-strategy:feature (both exist) → no error."""

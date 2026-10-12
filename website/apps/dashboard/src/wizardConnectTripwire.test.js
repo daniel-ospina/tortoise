@@ -24,7 +24,10 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 // #4880/#4365: the wizard's agent-facing copy moved to this JSX-free module so
 // the guards below can assert the RENDERED prompt instead of parsing source.
-import { ONBOARDING_INSTRUCTIONS, WIZARD_CAPTIONS, wizardPromptText } from './wizardPrompts.js'
+import { ONBOARDING_INSTRUCTIONS, WIZARD_CAPTIONS, WIZARD_STEP2_TEXT, wizardPromptText } from './wizardPrompts.js'
+// #3232: the restart cue names the harness from the SAME vocabulary the step-3
+// caption uses, so the rendered cue and the caption cannot drift.
+import { HARNESS_NAMES } from './harnesses.js'
 // #4637: the pin below asserts against the SHARED quote-aware stripper rather
 // than the local `stripBlockAndWholeLineComments` above, which does not remove
 // inline/trailing `//` — a trailing comment carrying the pinned text kept that
@@ -354,9 +357,13 @@ function wizardPromptCardElements(src) {
 }
 
 test('#2936: every shipped WizardPromptCard reports its copy through the one beacon emitter', () => {
+  // #3232: Claude Code and Codex moved to the two-block handshake, which removed
+  // the single-prompt arm from the Codex-Desktop-only branch — so the connect
+  // step renders FOUR cards (the two config-writing blocks, the Codex Desktop
+  // TOML block, and the Claude connector leaves' workflows block).
   const cards = wizardPromptCardElements(mainJsx)
-  assert.equal(cards.length, 5,
-    `the wizard renders 5 prompt cards — found ${cards.length}; a new card must be given an ` +
+  assert.equal(cards.length, 4,
+    `the wizard renders 4 prompt cards — found ${cards.length}; a new card must be given an ` +
     'onCopied (or it copies without any attribution, which is #2936)')
   const sections = new Set()
   for (const card of cards) {
@@ -407,8 +414,13 @@ test('#2912: the connect step renders a family→surface chooser wired to the le
   // action that does not exist on that surface.
   assert.match(connect, /\) : wizardConnectHarness === 'codexDesktop' \? \(\s*<WizardBlock step=\{1\} title=\{harnessKey \? procedureTitle : 'Get your API key'\}>/,
     'the key-embedding Desktop surface renders ONE block, not an empty step 1')
-  assert.match(owner, /const agentDriven1Step = \['claude', 'codex', 'codexDesktop'\]/,
-    "'codexDesktop' must reach the 1-step procedure branch (its own leaf id)")
+  // #3232: the four config-writing leaves (Claude Code, Codex, Cursor, Pi) all
+  // render the two-block handshake; Codex Desktop is the ONE leaf that keeps the
+  // single-block procedure (a human TOML paste with no agent-facing verify).
+  assert.match(owner, /const agentDriven2Step = \['pi', 'cursor', 'claude', 'codex'\]/,
+    'the four config-writing leaves render the two-block procedure')
+  assert.match(owner, /\} else if \(wizardConnectHarness === 'codexDesktop'\) \{/,
+    'Codex Desktop is the one leaf that keeps the single-block procedure')
   // the derivation is now an identity — the old parallel boolean is gone
   assert.match(mainJsx, /const wizardConnectHarness = wizardHarness\n/,
     'wizardConnectHarness is the leaf (no second surface state)')
@@ -1309,7 +1321,8 @@ test('#2912: the build-fork blocks own their rhythm (no inline margins stacking 
 
 // ── #3218 (reported from a live walkthrough) ──────────────────────────────
 
-// The numbered circles must match the parts the USER performs. Pi/Cursor have
+// The numbered circles must match the parts the USER performs. The four
+// config-writing leaves (#3232: Claude Code and Codex joined Pi/Cursor) have
 // three (key → set up → restart/verify) and Claude Desktop/Web have three
 // (key → connector → hand Claude the workflows); before this the third part
 // rendered as a bare caption inside block 2, so the step count lied.
@@ -1319,11 +1332,11 @@ test('#3218: every multi-part connect procedure renders a numbered step 3', () =
   assert.match(owner, /let procedureTail = null/,
     'the tail is derived in the same block as the procedure')
   assert.equal((owner.match(/procedureTailTitle =/g) || []).length, 3,
-    'one `let` declaration + exactly two assignments (Pi/Cursor + Claude Desktop/Web) — ' +
-    'Claude Code / Codex / Codex Desktop must leave the tail null')
-  // Pi/Cursor: the restart-and-verify card is its own numbered block
+    'one `let` declaration + exactly two assignments (the four config-writing leaves + ' +
+    'Claude Desktop/Web) — Codex Desktop must leave the tail null')
+  // the config-writing leaves: the restart-and-verify card is its own numbered block
   assert.match(owner, /procedureTailTitle = `Restart \$\{HARNESS_NAMES\[wizardHarness\]\} and verify`/,
-    'Pi/Cursor title their step 3 after the restart')
+    'the config-writing leaves title their step 3 after the restart')
   assert.match(owner, /procedureTailTitle = 'Give Claude the Tortoise workflows'/,
     'Claude Desktop/Web title their step 3 after the prompt hand-off')
   assert.match(owner, /<WizardBlock step=\{3\} title=\{procedureTailTitle\}>\s*\{procedureTail\}/,
@@ -1334,6 +1347,16 @@ test('#3218: every multi-part connect procedure renders a numbered step 3', () =
     'the step-3 block renders only when a tail exists')
   assert.match(owner, /\{harnessKey && \(\s*<>\s*<WizardBlock step=\{2\} title=\{procedureTitle\}>[\s\S]{0,200}?\{procedureTail && \(/,
     'both procedure blocks sit inside the harnessKey gate (no key → no procedure)')
+  // #3232 review (P2): the continue label's group must be the SAME derivation as
+  // the procedure split. It was a second literal list — `['pi','cursor']` — so
+  // when Claude Code / Codex gained the restart/verify block they kept the
+  // single-prompt "I've set it up" label while rendering three blocks.
+  // MUTATION: re-introducing a literal list here fails the second assertion.
+  assert.match(owner,
+    /agentDriven2Step\.includes\(wizardHarness\) \? 'Done — Continue to dashboard' : "I've set it up — Continue →"/,
+    'the Done label keys on agentDriven2Step (one source for the two-block leaves)')
+  assert.doesNotMatch(owner, /\['pi', 'cursor'\]\.includes\(wizardHarness\)/,
+    'no second literal leaf list may re-appear for the continue label')
 })
 
 // #3218 (item 3): the parenthetical beside the key said "shown once", which
@@ -1430,13 +1453,18 @@ test('#3218: the prompt-card labels describe the prompt, never a rival step numb
 // #3218 (item 4): the agent is told to install the skills BEFORE it is told to
 // restart — the old order (restart, then install) made an agent that acted on
 // the cue load the skills directory before the skills existed.
-test('#3218: the Pi/Cursor step-1 prompts install the skills before the restart note', () => {
+// #3232: the same ordering applies to ALL FOUR config-writing leaves. Claude
+// Code and Codex used to be excluded because their single prompt carried the
+// verify in-session; they now render the two-block shape, so the invariant is
+// asserted over the whole self-install set — a new leaf cannot join without
+// the skills-before-restart order.
+test('#3218/#3232: every config-writing step-1 prompt installs the skills before the restart note', () => {
   // #4365/#4880: asserted on the RENDERED prompt. The builders moved to
   // wizardPrompts.js — an importable, JSX-free module — so this now reads what
   // the agent actually receives. The former source-shape read could not
   // distinguish a reordered interpolation from a rendered reorder, and that
   // mechanism is what produced five false greens (#4880).
-  for (const h of ['pi', 'cursor']) {
+  for (const h of ['pi', 'cursor', 'claude', 'codex']) {
     const p = wizardPromptText(h, 1, 'tk_test', 'included')
     // the rendered body reads "Then install the Tortoise skills (…)" — the
     // capitalised form belongs to the universal command's claim line.
@@ -1453,7 +1481,7 @@ test('#3218: the Pi/Cursor step-1 prompts install the skills before the restart 
     assert.ok(iRestart > iOnboarding,
       `${h}: the onboarding instructions must precede the restart cue`)
     assert.ok(p.slice(iRestart).startsWith(
-      `Tell me when to restart ${h === 'pi' ? 'Pi' : 'Cursor'}.`),
+      `Tell me when to restart ${HARNESS_NAMES[h]}.`),
       `${h}: the restart cue names the harness`)
     // "Nothing actionable may follow the cue" — IMPLEMENTED, not just claimed:
     // the cue is a hand-back, so what follows it is pinned exactly (the docs
@@ -1463,13 +1491,54 @@ test('#3218: the Pi/Cursor step-1 prompts install the skills before the restart 
     // Line-based, not byte-exact: a trailing newline renders harmlessly and must
     // not be a false red, while an inserted actionable note still fails.
     const tailLines = p.slice(iRestart).split('\n')
-    assert.equal(tailLines[0], `Tell me when to restart ${h === 'pi' ? 'Pi' : 'Cursor'}.`,
+    assert.equal(tailLines[0], `Tell me when to restart ${HARNESS_NAMES[h]}.`,
       `${h}: the restart cue names the harness`)
     assert.deepEqual(tailLines.slice(1).filter((line) => line.trim() !== ''),
       ['Docs: https://tortoise.premiselabs.co/docs'],
       `${h}: the restart cue must be the last actionable line — only the docs line may follow it`)
     assert.ok(!INSTALL.test(p.slice(iRestart)),
       `${h}: the restart-before-skills order must not come back`)
+  }
+})
+
+// #3232: the MCP session boundary — no prompt may ask for a server-dependent
+// call in the session that WROTE the config. `tortoise_health` and
+// `tortoise_create_point` only succeed once the client has loaded that config,
+// so both live in the LATER numbered block, after the restart cue. Both calls
+// matter: `tortoise_create_point` is what triggers the server-side onboarding
+// auto-complete (`_maybe_onboarding_auto_complete`), so moving only the verify
+// would leave the memory write unsatisfiable. Before this fix Claude Code and
+// Codex emitted ONE prompt carrying both calls with no restart cue anywhere in
+// the flow (Pi/Cursor already had the two-block handshake).
+test('#3232: every config-writing prompt crosses the MCP session boundary before it calls the server', () => {
+  const SERVER_CALLS = ['tortoise_health', 'tortoise_create_point']
+  // R4 (branch neutrality): the copy may state what a RESTARTED session
+  // guarantees, never what a client can or cannot do — C2 is documented-flow
+  // supported, not reproduced, so a capability claim could outlive the fact.
+  const FORBIDDEN = [
+    /cannot reload/i, /can't reload/i, /won't see it until/i,
+    /must restart for the client/i, /only at next session start/i,
+  ]
+  for (const h of ['pi', 'cursor', 'claude', 'codex']) {
+    const step1 = wizardPromptText(h, 1, 'tk_test', 'included')
+    const step2 = wizardPromptText(h, 2, 'tk_test', 'included')
+    // (a) the cue block (step 1) carries NEITHER server-dependent call — the
+    // old Claude/Codex body asked for both before any restart could load them
+    for (const call of SERVER_CALLS) {
+      assert.equal(step1.indexOf(call), -1,
+        `${h}: the pre-restart block must not ask for ${call}`)
+    }
+    // (b) the LATER block is the shared verify/file block and carries BOTH
+    assert.equal(step2, WIZARD_STEP2_TEXT,
+      `${h}: the post-restart block must be the shared verify/file block`)
+    for (const call of SERVER_CALLS) {
+      assert.ok(step2.includes(call), `${h}: the post-restart block carries ${call}`)
+    }
+    // (c) branch neutrality on both blocks
+    for (const re of FORBIDDEN) {
+      assert.ok(!re.test(step1) && !re.test(step2),
+        `${h}: the copy must not claim what a client can or cannot do (${re})`)
+    }
   }
 })
 

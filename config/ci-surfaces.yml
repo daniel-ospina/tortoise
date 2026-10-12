@@ -565,6 +565,7 @@ surfaces:
   - test_mcp_result_count_telemetry.py
   - test_metering.py
   - test_oauth_consent_pkce.py  # #3496: EXECUTES the MCP consent page's inline auth client (rendered by consent_page_html) under Node `vm` against the vendored supabase bundle — grant type actually used, PKCE verifier store routing, single-origin completion, refusal UX. Registered on `api` because the file it guards most (tortoise/oauth.py) selects that surface.
+  - test_oauth_consent_bridge.py  # #3524: the consent identity bridge's spec guards — RFC 8414 `authorization_endpoint` stability (task 2), the four session-flow properties' confirmed anchors (task 3), the redirect-allowlist record covering the consent page's off-origin sign-in fallback (task 5). DUAL-REGISTERED with `onboarding` (see the entry there): `tortoise/oauth.py` + `tortoise/hosted_api.py` select `api`, but the task-3 half reads `website/apps/dashboard/functions/_shared/auth/token.ts`, and `website/apps/dashboard/functions/` is an `onboarding` SOURCE_PATTERN that does NOT select `api` (a named-surface match replaces the `core` fallback) — so an `api`-only registration leaves the token.ts guard asleep exactly when token.ts moves. It also reads `docs/` records, which the `onboarding` arm selects via the SOURCE_PATTERNS entries added with this fix.
   # #5331: the graph byte meter — tortoise/graph_storage.py plus the graph-storage
   # lane in tortoise/metering.py and tortoise/supabase_control.py. Registered on
   # `api` (metering/supabase seam) and `core` (the new module's default surface), so
@@ -909,6 +910,8 @@ surfaces:
   # without this entry the delete-resurrection guard would not run on the
   # change that can re-open the hole.
   - test_7951_delete_resurrection.py
+  - test_cache_projection.py
+  - test_cache_projection_live.py
   # #4197: the saved-backlog ledger (`tortoise/capture_backlog.py`) and its
   # CLI surface (`tortoise/__main__.py`). `capture_backlog.py` matches no
   # named SOURCE_PATTERN, so it falls through to `core` — registering the
@@ -969,7 +972,18 @@ surfaces:
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
   # write/read marker split. No DB, no network — default `core` surface is correct.
   - test_4220_blog_residue_cleanup.py
+  - test_sdk_retirement.py
   - test_record_schema_placement.py
+  # #7969 (epic #7879, Interface A): the record projection — journal →
+  # Postgres, total + idempotent. Registered against `core` because BOTH
+  # inputs it reads select `core`: `tortoise/record_projection.py` matches no
+  # named SOURCE_PATTERN (the `core` fallback), and the four record migrations
+  # under `supabase/migrations/` do too. So a projection-only or
+  # migration-only change selects `core` and this guard runs with it. Its
+  # DB-level half is NOT here — it is the PGlite replay in
+  # `supabase/tests/pglite/validate.mjs` (the #7968 convention: the SQL half
+  # lives in the harness that has a Postgres, this file stays hermetic).
+  - test_record_projection.py
   # #7968 / PR #8179 review P1: guards the org-erasure wiring — `purge_org_control_plane`
   # must route the organizations delete through the `purge_org_record` RPC
   # (migration 20261012000005), which sets app.record_journal_purge so the
@@ -2029,6 +2043,11 @@ surfaces:
   - test_time_aware_eval_2520.py  # #2520: the eval-lane reorder placement + census (C6, docker-lane)
   - test_time_aware_run_2520.py  # #2520: the run-layer arm wiring (C6; hermetic + docker legs)
   - test_retrieval.py
+  # #7209: DUAL-REGISTERED with `sdk` (whose SOURCE_PATTERNS own
+  # `tortoise/sdk.py`). `tortoise/exceptions.py` is a SHARED_MODULE consumed by
+  # every surface, so the fail-loud guard's exception type must run wherever the
+  # leaf changes — a named-surface match REPLACES the `core` fallback otherwise.
+  - test_7209_write_landing.py
   - test_retrieval_determinism_2952.py  # #2952: ranking determinism w.r.t. elapsed wall-clock (hermetic, no DB)
   - test_3844_annotation_injection.py  # #3844: reader-evidence annotation prefix cannot be forged by a newline in speaker/session_date OR the validity marker (hermetic, no DB)
   - test_6252_body_fence.py  # #6252: body-side sibling of #3844 — the block BODY is fenced so stored content cannot forge a block-scope line (hermetic, no DB); dual core+sdk because tortoise/retrieval.py is SOURCE_PATTERNS["sdk"]
@@ -2486,6 +2505,14 @@ surfaces:
   # half of the invariant a client edit breaks — registering it only under `api` would
   # leave the guard asleep exactly when the client moved.
   - test_dashboard_client_paths_resolve.py
+  # `test_oauth_consent_bridge.py` is DUAL-REGISTERED (#3524): its task-3 half pins
+  # `website/apps/dashboard/functions/_shared/auth/token.ts`, and
+  # `website/apps/dashboard/functions/` is a SOURCE_PATTERN for THIS surface
+  # (tools/ci_selection.py) — measured, a token.ts-only diff selects `['onboarding']`
+  # and NOT `api`. The `api` arm (registered for `tortoise/oauth.py` +
+  # `tortoise/hosted_api.py`) would therefore leave the token.ts guard unrun exactly
+  # when that file changes, so the same file needs this arm too.
+  - test_oauth_consent_bridge.py
   # #4097: the env-truthiness non-divergence guard scans all of `tortoise/**`,
   # including `tortoise/onboarding/**`, and an `onboarding` surface match replaces
   # the `core` fallback (tools/ci_selection.py) — so the guard needs this arm too.
@@ -2640,6 +2667,14 @@ surfaces:
   sdk:
   - test_5359_unchecked_window_writers.py
   - test_7108_operator_scope_predicate.py
+  # #7209: `create_point` must never report success for a write that did not
+  # land — the write-landing guard (`WriteNotLandedError`) and the bounded
+  # retry on the create's FOLLOW-UP writes (TAGGED / extractedFrom). Owns the
+  # SDK write path (`tortoise/sdk.py`, a SHARED_MODULE, so this file is
+  # selected on any sdk change and dual-registered under `core` for an
+  # exceptions.py-only diff). Docker-lane leg (a live URI when configured,
+  # embedded otherwise).
+  - test_7209_write_landing.py
   # #4520: DUAL-REGISTERED with `core` and `battery` — the seam covers the
   # SDK's vector writers (`tortoise/sdk.py`, `session_indexer.py`) and the
   # `tools/ask_spotcheck.py` spot-check write, so an sdk-surface change must

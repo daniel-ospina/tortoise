@@ -217,6 +217,56 @@ def is_terminal_status(status, outdated: bool = False) -> bool:
     return (status or "") in TERMINAL_EXCLUDED_STATUSES or bool(outdated)
 
 
+#: The ONE statement that reads a Point id's lifecycle fan-out. It is run by
+#: the write-side guard (``TortoiseSDK._assert_lifecycle_guard``), by the
+#: hosted commit-receiver pre-check (``hosted_api._terminal_state`` — which
+#: must stay in LOCKSTEP with the guard, #3366), and by the promotion-time
+#: temporal-target probe. Kept here, next to the terminal vocabulary it feeds,
+#: so a second copy cannot drift (#7822).
+LIFECYCLE_FANOUT_QUERY = (
+    "MATCH (n:Point {id:$id}) "
+    "RETURN n.is_operator, n.status, coalesce(n.outdated, false)"
+)
+
+
+def classify_lifecycle_fanout(rows) -> tuple:
+    """Classify EVERY node an id's ``LIFECYCLE_FANOUT_QUERY`` MATCH returned.
+
+    Point ids are NOT unique (the duplicate fan-out is a tested,
+    graph-reachable shape: ``create_point(..., id=X)`` twice) and every
+    lifecycle writer's stamp is a bare ``MATCH (n:Point {id:$id}) SET …`` that
+    binds EVERY matching node. A verdict read off ``rows[0]`` is therefore
+    server-row-order dependent (#7822): on an id carrying one dead and one live
+    node the same call passed or refused depending on which the server happened
+    to return first. The scan is over the WHOLE fan-out:
+
+      - any ``is_operator`` node → ``"operator"`` (outranks terminal, matching
+        the pre-#7822 single-row precedence)
+      - else any terminal node → ``"terminal"``
+      - else every node is a non-terminal statement point → ``"ok"``
+      - no rows at all → ``"absent"``
+
+    Returns ``(kind, status, outdated)``. ``status``/``outdated`` are the
+    offending node's state for ``"operator"``/``"terminal"`` and the
+    representative live state for ``"ok"``. The representative is picked by a
+    STABLE key (status text, then flag), never by position: these values reach
+    error messages and the MCP preview's ``status.from``, and server row order
+    is not a contract.
+    """
+    rows = [(bool(is_op), status, bool(outdated))
+            for is_op, status, outdated in rows]
+    if not rows:
+        return ("absent", None, False)
+    rows.sort(key=lambda r: (str(r[1] or ""), r[2]))
+    for _is_op, status, outdated in rows:
+        if _is_op:
+            return ("operator", status, outdated)
+    for _is_op, status, outdated in rows:
+        if is_terminal_status(status, outdated):
+            return ("terminal", status, outdated)
+    return ("ok", rows[0][1], rows[0][2])
+
+
 def _live_only(clause: str, include_draft: bool = False) -> str:
     """Return a Cypher predicate excluding draft AND terminal nodes.
 

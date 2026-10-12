@@ -256,3 +256,153 @@ def test_lifecycle_writers_have_no_hardcoded_status_subset():
     norm = "".join(src.split())
     assert '("retracted","superseded","archived")' not in norm
     assert "IN$terminal" not in norm
+
+
+# ── #7822: the verdict is over EVERY node carrying the id ───────────────
+
+# Point ids are not unique (``create_point(..., id=X)`` twice is a tested,
+# graph-reachable shape) and every lifecycle writer's stamp is a bare
+# ``MATCH (n:Point {id:$id}) SET …`` that binds EVERY matching node. The
+# pre-#7822 guard read ``row[0]``, so on an id with one dead and one live node
+# its terminal/operator verdict — and therefore whether a dead claim got
+# re-terminalized and its edges transferred — depended on server row order.
+#
+# These tests build the fan-out so that the FIRST row the server returns is the
+# LIVE sibling (the setup query below is the guard's own statement, and the
+# terminal status is written to its LAST row). A first-row-only read therefore
+# sees a live point and PASSES — the pre-#7822 failure is deterministic here,
+# not a row-order coin flip.
+
+
+def _duplicate_with_dead_sibling(sdk, dup: str, *, dead_status="retracted",
+                                 dead_is_operator=False) -> list[tuple]:
+    """Two nodes share ``dup``: the server's FIRST row stays LIVE, the LAST
+    goes terminal (or operator). Returns the pre-state rows so a caller can
+    assert the premise it relies on."""
+    from tortoise.live import LIFECYCLE_FANOUT_QUERY
+
+    sdk.create_point("statement", "dup live sibling", id=dup)
+    sdk.create_point("statement", "dup dead sibling", id=dup)
+    # Same MATCH as the guard's statement, with ID(n) appended — the row order
+    # is the server's, so the node in the LAST row is the one a first-row-only
+    # read would leave unexamined.
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status, "
+        "coalesce(n.outdated, false), ID(n)", params={"id": dup}
+    ).result_set
+    assert len(rows) == 2, rows
+    old_nid = rows[-1][3]
+    sets, params = [], {"nid": old_nid}
+    if dead_is_operator:
+        sets.append("n.is_operator = true")
+    else:
+        sets.append("n.status = $st")
+        params["st"] = dead_status
+    sdk._get_proj().g.query(
+        f"MATCH (n:Point) WHERE ID(n) = $nid SET {', '.join(sets)}",
+        params=params)
+    # Read the POST-SET fan-out with the guard's own statement: the premise a
+    # caller asserts (first row live, last row dead) must hold for the state the
+    # guard actually classifies.
+    return sdk._get_proj().g.query(
+        LIFECYCLE_FANOUT_QUERY, params={"id": dup}).result_set
+
+
+def test_fanout_classifier_is_row_order_independent():
+    """The shared classifier's verdict does not depend on row order (#7822)."""
+    from tortoise.live import classify_lifecycle_fanout
+
+    live, dead = (False, "live", False), (False, "retracted", False)
+    # Both orders of the SAME two rows must give the SAME verdict: terminal.
+    assert classify_lifecycle_fanout([live, dead])[0] == "terminal"
+    assert classify_lifecycle_fanout([dead, live])[0] == "terminal"
+    # Operator outranks terminal (the pre-#7822 single-row precedence).
+    op = (True, "live", False)
+    assert classify_lifecycle_fanout([live, dead, op])[0] == "operator"
+    assert classify_lifecycle_fanout([op, live, dead])[0] == "operator"
+    # All-live (and absent) are unchanged, and the representative is stable.
+    assert classify_lifecycle_fanout([live, (False, "draft", False)]) == (
+        "ok", "draft", False)
+    assert classify_lifecycle_fanout([(False, "draft", False), live]) == (
+        "ok", "draft", False)
+    assert classify_lifecycle_fanout([]) == ("absent", None, False)
+    # The legacy flag is terminal too, on ANY sibling.
+    assert classify_lifecycle_fanout(
+        [live, (False, "live", True)])[0] == "terminal"
+
+
+@pytest.mark.parametrize("method", ["supersede", "retract", "invalidate"])
+def test_duplicate_id_with_a_dead_sibling_is_refused(sdk, method):
+    """Every lifecycle writer refuses when ANY node carrying the id is dead.
+
+    The refusal must be fail-closed: NEITHER sibling is stamped and no edge is
+    transferred, because the writers' stamps bind every matching node.
+    """
+    dup = f"pt_dup_{uuid.uuid4().hex[:8]}"
+    pre = _duplicate_with_dead_sibling(sdk, dup)
+    # The premise, asserted rather than assumed: a first-row-only read of this
+    # fan-out sees a LIVE point, so the pre-#7822 guard would have passed.
+    assert not is_terminal_status(pre[0][1], bool(pre[0][2])), pre
+    assert is_terminal_status(pre[-1][1], bool(pre[-1][2])), pre
+
+    new = _point(sdk)
+    with pytest.raises(ValueError, match="already terminal"):
+        if method == "supersede":
+            sdk.supersede_point(dup, new)
+        elif method == "retract":
+            sdk.retract_point(dup)
+        else:
+            sdk.invalidate_point(dup, new)
+
+    # Fail-closed: the LIVE sibling was not terminalized and the dead one kept
+    # its own state (no partial write on either node).
+    after = {tuple(r) for r in sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status, "
+        "coalesce(n.outdated, false)", params={"id": dup}).result_set}
+    assert after == {tuple(r) for r in pre}, after
+    assert sdk._get_proj().g.query(
+        "MATCH (a:Point {id:$new})-[:CORRECTS]->(b:Point {id:$dup}) "
+        "RETURN count(a)",
+        params={"new": new, "dup": dup}).result_set[0][0] == 0
+
+
+def _operator_edges_at(sdk, pid: str) -> int:
+    """Operator-mediated edges INTO ``pid`` — the set supersede's 2a transfer
+    re-points to the successor (the count alone would not move, so the check
+    must be per-endpoint)."""
+    return sdk._get_proj().g.query(
+        "MATCH (op:Point {is_operator:true})-[r]->(p:Point {id:$id}) "
+        "RETURN count(r)", params={"id": pid}).result_set[0][0]
+
+
+def test_duplicate_id_with_a_dead_sibling_cannot_transfer_edges(sdk):
+    """The #2498 invariant on a duplicated id: a dead claim's edges stay put."""
+    dup = f"pt_dup_{uuid.uuid4().hex[:8]}"
+    _duplicate_with_dead_sibling(sdk, dup)
+    tgt = _point(sdk)
+    # An operator edge into the id. The writer's 2a transfer MATCHes by logical
+    # id, so a passed guard would re-point this edge to the successor.
+    sdk.create_operator("IMPL", dup, [tgt])
+    new = _point(sdk)
+    # The operator writer itself fans out over the duplicate id (one edge per
+    # matching node), so only the BEFORE/AFTER equality is asserted — the
+    # invariant is that a refused transition moves nothing.
+    before_dup = _operator_edges_at(sdk, dup)
+    assert before_dup >= 1, before_dup
+    assert _operator_edges_at(sdk, new) == 0
+    with pytest.raises(ValueError, match="already terminal"):
+        sdk.supersede_point(dup, new)
+    assert _operator_edges_at(sdk, dup) == before_dup, (
+        "guard must reject before any edge transfer")
+    assert _operator_edges_at(sdk, new) == 0
+
+
+def test_duplicate_id_with_an_operator_sibling_is_refused(sdk):
+    """An operator sibling refuses the id for every writer (any-node scan)."""
+    dup = f"pt_dup_{uuid.uuid4().hex[:8]}"
+    pre = _duplicate_with_dead_sibling(sdk, dup, dead_is_operator=True)
+    # Premise: a first-row-only read sees the live statement sibling.
+    assert not bool(pre[0][0]), pre  # (is_operator, status, outdated)
+    assert bool(pre[-1][0]), pre
+    with pytest.raises(ValueError, match="operator"):
+        sdk.retract_point(dup)

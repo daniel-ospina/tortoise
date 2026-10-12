@@ -282,7 +282,10 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp/ --bearer-token-env-
 ```
 
 Persist the export in your shell profile — if it is version-controlled, use a
-non-committed include instead. The skill installer writes Codex
+non-committed include instead. Then **start Codex from a new shell**:
+`--bearer-token-env-var` is read from the launching process's environment, so a
+client started from the old shell (before the export) sends an empty bearer
+token and every call fails to authenticate. The skill installer writes Codex
 skills to `.agents/skills` (Codex's documented skill root — NOT `.codex/skills`,
 which Codex never loads) and adds a repo-root AGENTS.md standing-instructions
 block:
@@ -504,10 +507,22 @@ Guide the human through:
 
 1. Call `tortoise_health` (MCP tool, all 6 harnesses once connected). It
    must report the graph reachable + your organization context.
-2. On failure: retry once; then give an honest diagnostic — config write
-   invalid (harness broken)? Offer the teach-human fallback (the connector
-   steps for Desktop/Web) or re-run the
-   universal command. Never claim connected on a failed `tortoise_health`.
+2. On failure: retry once, then diagnose against these THREE outcomes, in
+   this order — the first is the commonest and the easiest to misread:
+   - **The session has not loaded the server yet** — the `tortoise_*` tools
+     are absent from `tools/list`, or the call failed before any auth
+     exchange. This is NOT a broken config. Have the human restart the
+     client, then retry `tortoise_health` in the NEW session: a session
+     started after the config write reads the config on disk. Never route
+     this outcome to a different connector.
+   - **Credential rejected** — a 401, an empty `Authorization: Bearer`, or a
+     different organization than you expect. The key, or the environment the
+     client was launched with, is wrong: re-check the key, and on Pi / Codex
+     CLI confirm it was exported in the shell that LAUNCHED the client.
+   - **Unsupported / the config write is invalid** — offer the teach-human
+     fallback (the connector steps for Desktop/Web) or re-run the universal
+     command.
+   Never claim connected on a failed `tortoise_health`.
 3. On success — **write the harness-connected checkpoint** (idempotent
    first-write-wins keyed-MERGE; replay is a no-op, so re-running this write
    is safe):
