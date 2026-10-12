@@ -26,6 +26,9 @@ RED (the reverts and their verbatim pytest output are recorded in the PR body):
   RED (the per-key branch stops firing, and a *covered* key is mis-routed).
 * **Mint a route as a status term** — set a route name to ``"empty"`` →
   ``test_the_route_names_are_not_status_terms`` RED.
+* **Coerce a container marker** — drop the `marker not in RESIDENCY_VERDICTS`
+  guard in ``route_residency`` →
+  ``test_a_presence_container_at_the_seam_is_refused_not_coerced`` RED.
 
 Runs on the embedded lane (``TORTOISE_TEST_CARVE_OUT=1``) or a
 ``TORTOISE_DB_URI`` (``tests/conftest.py`` session gate).
@@ -180,6 +183,25 @@ class TestRouteResidency:
         """A typo'd verdict must fail loud — a wrong route is a wrong answer."""
         with pytest.raises(ValueError):
             route_residency(marker="cold")
+
+    @pytest.mark.parametrize("marker", [[], {}, ()])
+    def test_a_presence_container_at_the_seam_is_refused_not_coerced(self, marker):
+        """S5's presence set: `[]`/`{}` are VALUES, never "no marker".
+
+        Test-design `#7967` S5 names the seam failure as "`not-hot` colliding
+        with `[]` / `None` / `{}`", and fixes the boundary at five values —
+        `not-hot`, `[]`, `None`, `{}`, and a real answer — "All five must be
+        distinguished at S5's seam." Only `None` is the NOT-ASSESSED sentinel;
+        a container silently coerced (to `None`, or to a truthy `not-hot`)
+        would make a miss indistinguishable from a resident read, so it must
+        fail loud rather than take a branch.
+
+        Non-vacuity: deleting the `marker not in RESIDENCY_VERDICTS` guard in
+        `route_residency` lets `marker=[]` fall through to `serve` instead of
+        raising, and this test goes RED.
+        """
+        with pytest.raises(ValueError):
+            route_residency(marker=marker)
 
     def test_the_coordinate_rides_the_decision(self):
         """The fetch-from-record repair must know WHAT to fetch."""
