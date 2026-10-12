@@ -474,18 +474,35 @@ _WHERE_REAL_RE = re.compile(
     r"\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_]|CONTAINS|IN\s*\(",
     re.IGNORECASE,
 )
-# #3037: the property-map exemption is STRUCTURAL, never a bare ``"{" in
-# cypher``. That substring test treated a brace in a COMMENT
+# #3037/#8223: the property-map exemption is anchored to the statement's
+# structure — a brace behind a pattern element under an unclosed ``(``/``[`` —
+# never a bare ``"{" in cypher``. That substring test treated a brace in a
+# COMMENT
 # (``MATCH (n) DETACH DELETE n // {``), a ``CALL { ... }`` subquery delimiter
 # (``CALL { MATCH (n) DETACH DELETE n }``) and a brace inside a STRING literal
 # as a property map, so a whole-graph wipe written that way was classified
 # "targeted" and reached a production server graph on the raw-query lane —
-# where L2 is the only layer. A real property map opens INSIDE a node ``(...)``
-# or relationship ``[...]`` pattern; a ``CALL {`` opens after the keyword, and
-# a map literal in ``WITH``/``SET``/``RETURN`` opens at top level, so neither is
-# under an unclosed ``(``/``[``. Comments and literals are blanked before this
-# runs (see ``_mask_cypher_text``).
-_PROPERTY_MAP_RE = re.compile(r"[\(\[]\s*[^(){}\[\]]*\{")
+# where L2 is the only layer.
+#
+# The exemption this grants is NARROW. The brace must sit under an unclosed
+# ``(`` or ``[`` **behind a pattern element** — a variable and/or label,
+# optionally with a type (``(n {…})``, ``(:Label {…})``, ``(n:Label {…})``,
+# ``[r:IMPL {…}]``). A bracket of any other kind therefore does NOT exempt:
+# an expression map literal (``properties({…})``, ``[{…}]``, ``coalesce({…})``,
+# ``keys({…})``), a parenthesised map in a WHERE (``({…}).a = 1``) and a map
+# projection (``n {.a}``) all fail the pattern-element requirement, so a
+# whole-graph wipe carrying one is still classified bulk (#8223). A ``CALL {``
+# opens after the keyword and a top-level map literal opens with no bracket, so
+# neither is exempt either.
+#
+# This is still a LEXICAL test — it does not verify that the bracket really
+# opens a MATCH pattern, so a malformed statement is failed closed by
+# ``_mask_is_unterminated`` first. Delete-target awareness (a property map on a
+# pattern OTHER than the deleted variable) is the separate remainder #8215 and
+# is NOT claimed here (see KNOWN GAPS).
+_PROPERTY_MAP_RE = re.compile(
+    r"[\(\[]\s*:?\s*[A-Za-z_]\w*(?:\s*:\s*[A-Za-z_]\w*)*\s*\{(?!\s*[.,])"
+)
 # The START of a ``CALL { ... }`` subquery. The subquery's own braces are
 # delimiters, not a property map, and a property map INSIDE it does not scope a
 # DELETE outside it — so ``_strip_call_subqueries`` blanks the whole block and
@@ -504,6 +521,19 @@ def _mask_cypher_text(cypher: str) -> str:
     forward reference to a module-level constant, resolved at call time.
     """
     return _LITERAL_OR_COMMENT_RE.sub(" ", cypher)
+
+
+def _mask_is_unterminated(masked: str) -> bool:
+    """True when masking left an unterminated literal or comment behind (#3037).
+
+    ``_LITERAL_OR_COMMENT_RE`` matches only TERMINATED literals and comments, so
+    a malformed statement (``MATCH (n) DETACH DELETE n WHERE x = 'foo({``)
+    keeps its stray quote and a brace after it. An unreadable statement is not
+    evidence of targeting, so the classifier fails closed — every terminated
+    literal/comment was replaced by a space, which means any surviving quote,
+    backtick or block-comment opener marks an unterminated one.
+    """
+    return "'" in masked or '"' in masked or "`" in masked or "/*" in masked
 
 
 def _strip_call_subqueries(statement: str) -> str:
@@ -559,6 +589,12 @@ def _is_bulk_wipe(cypher: str) -> bool:
     up = masked.upper()
     if "DETACH" not in up or "DELETE" not in up:
         return False
+    # #3037: masking removes only TERMINATED literals/comments. A malformed
+    # statement keeps its quote, and a brace after it would still look like a
+    # pattern property map — an unreadable statement is not evidence, so fail
+    # closed BEFORE the target tests.
+    if _mask_is_unterminated(masked):
+        return True
     text = _strip_call_subqueries(masked)
     # Property map on a node/relationship pattern => targeted
     # (e.g. {id:$id}, {org_id:$id})
@@ -2145,19 +2181,28 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 #     its callers swallow it (the hosted sweeper at DEBUG, the SDK lazy hook at
 #     WARNING) — the per-team event cap no-ops without a build failure
 #     (tracked: #3007).
-#   * ``_is_bulk_wipe`` also UNDER-classified (FIXED by #3037): a bare
+#   * ``_is_bulk_wipe`` also UNDER-classified (FIXED by #3037 + #8223): a bare
 #     ``"{" in cypher`` exemption meant a whole-graph wipe whose text contains
 #     a brace (``MATCH (n) DETACH DELETE n // {``, ``CALL { MATCH (n) DETACH
 #     DELETE n }``) was treated as targeted, so on the raw-query lane it reached
 #     a production server graph with no name check and no token. The exemption
-#     is now structural: comments/strings/CALL subqueries are blanked first and
-#     the brace must open inside a node/relationship pattern
-#     (``_mask_cypher_text`` / ``_strip_call_subqueries``).
-#     NARROWER REMAINDER (still open, tracked: #8215): a property map on a
-#     pattern OTHER than the deleted variable still exempts the statement
-#     (``MATCH (n:Point {id:$id}) WITH n MATCH (m) DETACH DELETE m``).
-#     Deciding that needs a delete-target-aware classifier — the same scope
-#     decision #3007 defers.
+#     is now anchored to the statement's structure: comments/strings/CALL
+#     subqueries are blanked first, an
+#     unterminated literal/comment fails closed, and the brace must sit under
+#     an unclosed ``(``/``[`` behind a pattern element (``_mask_cypher_text`` /
+#     ``_strip_call_subqueries`` / ``_mask_is_unterminated`` /
+#     ``_PROPERTY_MAP_RE``). An expression map literal (``UNWIND [{a:1}]``,
+#     ``properties({a:1})``, ``keys({a:1})``, ``({a:1}).a``) no longer counts
+#     (#8223).
+#     REMAINDERS (still open):
+#       - a property map on a pattern OTHER than the deleted variable still
+#         exempts the statement (``MATCH (n:Point {id:$id}) WITH n MATCH (m)
+#         DETACH DELETE m``) — tracked: #8215. Deciding it needs a
+#         delete-target-aware classifier — the same scope decision #3007 defers.
+#       - a bare ``DELETE`` (no ``DETACH``) is not classified at all, though
+#         FalkorDB auto-detaches and ``MATCH (n) DELETE n`` deletes every node
+#         — tracked: #8256 (pre-existing; widening the classifier is its own
+#         scope decision).
 #
 #
 # History: the pre-#2944 bypass was ``_skip_guard``, a plain boolean
