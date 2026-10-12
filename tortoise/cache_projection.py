@@ -36,8 +36,12 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    here**. The issue's own words forbid exactly that — *"the cache is a
    destination, never an input"* — and the placement ruling says what they are:
    *"a field with no PRIMARY claim in the record that exists only here is a
-   defect, not a shortcut."* A record-sourced rebuild drops them, and the drop
-   is **counted and reported**, never silent.
+   defect, not a shortcut."* A record-sourced rebuild **drops** them, and the
+   drop is **named**, not silent — the five classes are listed right here and in
+   ``06-cache-projection.md`` §0.5. It is deliberately **not counted at
+   runtime**: counting them would require the pre-wipe cache read this path
+   forbids, and `rebuild_from_record`'s report is about the RECORD's coverage,
+   not a census of what the wipe destroyed.
 2. **The cache is never authoritative.** A property is projected **iff** the
    schema declares a column for it and does not refuse it. The property→column
    decision is **read from disk** — the schema (#7968) and the placement table
@@ -85,6 +89,7 @@ from .residency import (
     ResidencyDeclaration,
     declare_residency,
 )
+from .security import validate_rel_type
 
 __all__ = [
     "ADDITIONAL_PRIMARY_COLUMNS",
@@ -107,6 +112,7 @@ __all__ = [
     "canonical_property",
     "declaration_for",
     "declaration_is_sound",
+    "declared_key",
     "node_from_row",
     "node_statement",
     "placement_columns",
@@ -326,13 +332,14 @@ def placement_spellings(doc: Path | None = None) -> dict[str, dict[str, tuple[st
     """`{table: {column: (spelling, ...)}}`, sorted — the raw namespace.
 
     ⚠️ **More than one spelling can collapse to one column, and on this schema
-    five DO** — `public.source`'s `session_id`, `event_id`, `source_path`,
-    `created_at` and `document_kind` each appear in the placement table BOTH
-    snake- and camel-cased, because the graph's document writer emits the
-    snake forms while the session-capture writer mints the camel forms (the
-    declaration `projection/entities.py::_SOURCE_NODE_PROPS` says so in its own
-    comment). The record's `snake()` naming is therefore **not injective** over
-    the graph's namespace: a single record column cannot distinguish the two,
+    five DO** — FOUR on `public.source` (`session_id`, `event_id`, `source_path`,
+    `document_kind`) and ONE on `public.event` (`session_id`). Each appears in
+    the placement table BOTH snake- and camel-cased, because the graph's
+    document writer emits the snake forms while the session-capture writer mints
+    the camel forms (the declaration `projection/entities.py::_SOURCE_NODE_PROPS`
+    says so in its own comment). The record's `snake()` naming is therefore
+    **not injective** over the graph's namespace: a single record column cannot
+    distinguish the two,
     and `canonical_property` chooses deterministically. Reported, not hidden —
     a record-sourced cache cannot be byte-identical to a journal-sourced one
     for those five fields until one spelling wins (#7955/#7968).
@@ -652,15 +659,35 @@ def node_statement(node: RecordNode) -> Statement:
         form = "$embedding" if verbatim else "vecf32($embedding)"
         cypher += f", n.embedding = {form}"
         params["embedding"] = embedding
-    elif verbatim:
-        # The marker is PRIMARY; carry it even without a vector, so the cache
-        # records the storage FORM the record holds.
+    if verbatim:
+        # The marker is PRIMARY and the graph writes it as its own clause
+        # (`projection/entities.py`), so it is carried in BOTH branches — with
+        # and without a vector. Dropping it here would make a record-sourced
+        # cache POORER than the record, and the marker is the authority on the
+        # storage FORM: a caller-owned float64 vector would lose its flag and
+        # the next journaled re-emit would narrow it through `vecf32` (#5004).
         props["embedding_verbatim"] = True
     return Statement(cypher=cypher, params=params)
 
 
 def relation_statement(rel: RecordRelation) -> Statement:
-    """Materialize ONE edge, resolving both endpoints by `(label, key)`."""
+    """Materialize ONE edge, resolving both endpoints by `(label, key)`.
+
+    The predicate is interpolated into the query STRUCTURE
+    (`MERGE (src)-[r:TYPE]->(tgt)`), where parameterization is impossible — so
+    it is allowlisted exactly as every other interpolation site in the tree
+    (`projection/__init__.py`, `sdk.py`, `mcp_server.py`) does. `record_plan`
+    builds this before the wipe, so a non-allowlisted predicate refuses the
+    whole projection up front rather than raising mid-materialization.
+    """
+    try:
+        validate_rel_type(rel.rel_type)
+    except ValueError as e:
+        raise UnprojectableRecord(
+            f"relation: rel_type {rel.rel_type!r} is not an allowlisted edge "
+            f"predicate — refusing to interpolate an unvalidated identifier "
+            f"into Cypher"
+        ) from e
     src_kp = KEY_PROPERTY[rel.src_label]
     tgt_kp = KEY_PROPERTY[rel.tgt_label]
     cypher = (
@@ -757,6 +784,25 @@ def _declared_key(scope: str, key: str) -> str:
     return f"{scope}:{key}" if scope else key
 
 
+def declared_key(label: str, key: str, *, scope: str = "") -> str:
+    """The declared coordinate for ONE record node — ``label:key``, scoped.
+
+    ⛔ **The LABEL is part of the coordinate, never discarded.** ``KEY_PROPERTY``
+    gives ``Subject`` and ``Object`` the same key (``name``) and ``Point`` and
+    ``Session`` the same key (``id``), so a bare key string is **not unique
+    across labels**: a key-only declaration collapses ``(Object, "acme")`` and
+    ``(Subject, "acme")`` into ONE hot key, and a projection that wrote only one
+    of them then declares ``complete`` — the fail-OPEN polarity this module
+    forbids (a miss on the omitted label stays ``empty`` instead of becoming
+    ``not-hot``/``degraded``).
+
+    It is the coordinate a reader must pass to
+    ``residency.mark_residency(..., key=...)``, so the writer and the reader
+    speak the same vocabulary rather than agreeing only by accident.
+    """
+    return _declared_key(scope, f"{label}:{key}")
+
+
 def declaration_for(record_keys: Iterable[tuple[str, str]],
                     materialized_keys: Iterable[tuple[str, str]], *,
                     scope: str = "") -> ResidencyDeclaration:
@@ -770,8 +816,10 @@ def declaration_for(record_keys: Iterable[tuple[str, str]],
     reader), so an unenumerated node is a residency MISS — `not-hot`, never an
     absence. That is the polarity this function exists to feed.
     """
-    record = {_declared_key(scope, k) for _label, k in record_keys}
-    written = {_declared_key(scope, k) for _label, k in materialized_keys}
+    record = {declared_key(label, key, scope=scope)
+              for label, key in record_keys}
+    written = {declared_key(label, key, scope=scope)
+               for label, key in materialized_keys}
     if record and written >= record:
         return ResidencyDeclaration(coverage=COVERAGE_COMPLETE,
                                     source="cache-projection")
@@ -792,8 +840,10 @@ def declaration_is_sound(record_keys: Iterable[tuple[str, str]],
     """
     if declaration.partial:
         return True
-    written = {_declared_key(scope, k) for _label, k in materialized_keys}
-    record = {_declared_key(scope, k) for _label, k in record_keys}
+    written = {declared_key(label, key, scope=scope)
+               for label, key in materialized_keys}
+    record = {declared_key(label, key, scope=scope)
+              for label, key in record_keys}
     return written >= record
 
 

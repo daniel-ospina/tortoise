@@ -869,18 +869,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # class). Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "supabase/migrations/2026101200000",
-             "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
-             # #7971: the cache projection (Interface B) and `FalkorProjection`'s
-             # record-sourced rebuild seam. `tortoise/cache_projection.py` is a
-             # NEW module that matches no SOURCE_PATTERNS row, so a change to it
-             # alone selected NO surface — it fell to tier-1 smoke and
-             # `tests/test_cache_projection*.py` (registered `core`) never ran
-             # on the change they exist to catch. The placement table is listed
-             # AGAIN, deliberately: the projection PARSES it for the property
-             # namespace, so a placement-doc-only edit must run the projection's
-             # own parse pins as well as #7968's schema pin. Same
-             # #1349/#3332/#3616 silent-drop class as the migration row above.
-             "tortoise/cache_projection.py")
+             "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md")
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
 NON_PYTHON_PREFIXES = (

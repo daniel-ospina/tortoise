@@ -176,7 +176,25 @@ def test_a_derived_name_in_the_props_tail_is_refused():
 
 
 def test_a_derived_column_on_a_record_row_projects_nothing():
-    """The refusal is by NAME, at every door the row can carry one through."""
+    """A FORWARD GUARD — today no DERIVED row has a column, so it cannot fire.
+
+    `test_no_derived_property_has_a_record_column` asserts the precondition:
+    `#7968`'s schema pin makes a DERIVED/VOLATILE name with a record column
+    impossible, so the column door is shut by construction. The `props`-tail
+    door is the reachable one and is exercised (non-vacuously) by
+    `test_a_derived_name_in_the_props_tail_is_refused`. This test is kept as the
+    guard for the day a future schema gives a DERIVED name a column: it asserts
+    that precondition explicitly, so it can never pass by the loop body simply
+    never running.
+    """
+    with_column = [
+        (table, prop) for table, prop in _rows("D")
+        if rp.snake(prop) in TABLE_COLUMNS.get(table, ())
+    ]
+    assert with_column == [], (
+        "a DERIVED property now HAS a record column — the column door is live "
+        f"and this test's body must decide it: {with_column}"
+    )
     leaked = []
     for table, prop in _rows("D"):
         column = rp.snake(prop)
@@ -235,13 +253,15 @@ def test_an_unclassified_column_fails_loudly():
 def test_the_placement_tables_ambiguities_are_exactly_the_five_declared():
     """A column the table spells two ways cannot be named by the record alone.
 
-    ⚠️ A FINDING, pinned so it cannot drift: `public.source` has five columns the
-    placement table enumerates in BOTH spellings, because the graph's document
-    writer emits the snake forms while the session-capture writer mints the
-    camel forms (`projection/entities.py::_SOURCE_NODE_PROPS` says so itself).
-    `snake()` is therefore **not injective** over the graph's namespace, so a
-    record-sourced cache cannot be byte-identical to a journal-sourced one for
-    these five fields until one spelling wins (#7955/#7968).
+    ⚠️ A FINDING, pinned so it cannot drift: the placement table enumerates
+    FIVE columns in BOTH spellings — four on `public.source` (`session_id`,
+    `event_id`, `source_path`, `document_kind`) and one on `public.event`
+    (`session_id`) — because the graph's document writer emits the snake forms
+    while the session-capture writer mints the camel forms
+    (`projection/entities.py::_SOURCE_NODE_PROPS` says so itself). `snake()` is
+    therefore **not injective** over the graph's namespace, so a record-sourced
+    cache cannot be byte-identical to a journal-sourced one for these five
+    fields until one spelling wins (#7955/#7968).
     """
     assert sorted(cp.ambiguities()) == [
         "event.session_id",
@@ -250,11 +270,25 @@ def test_the_placement_tables_ambiguities_are_exactly_the_five_declared():
         "source.session_id",
         "source.source_path",
     ]
-    # The choice is deterministic and camelCase-first, and it is NOT silent:
-    # every ambiguity's canonical name is reported by `placement_columns`.
-    for column in cp.ambiguities():
-        table, _, col = column.partition(".")
-        assert cp.canonical_property(table, col) == cp.placement_columns()[table][col]
+    # ⛔ The CHOICE is pinned, not just the SET: `canonical_property` delegating
+    # to `placement_columns` would otherwise make the obvious assertion
+    # tautological, and flipping `_prefer` to snake-first would leave the suite
+    # green while silently renaming five graph properties.
+    expected_canonical = {
+        "event.session_id": "sessionId",
+        "source.document_kind": "documentKind",
+        "source.event_id": "eventId",
+        "source.session_id": "sessionId",
+        "source.source_path": "sourcePath",
+    }
+    got = {
+        column: cp.canonical_property(*column.split(".", 1))
+        for column in cp.ambiguities()
+    }
+    assert got == expected_canonical, (
+        "the canonical (chosen) spelling drifted from camelCase-first — a "
+        f"record-sourced cache would rename the field: {got}"
+    )
 
 
 # ── 2. the keys are the contract's, read from the schema ────────────────────
@@ -348,19 +382,30 @@ def test_relation_props_ride_the_edge_and_the_predicate_is_the_rel_type():
 def test_rebuild_equals_record_no_extra_node_and_no_extra_field():
     """The rebuild's field set is EXACTLY the record's — never a superset.
 
-    This is S3's contract clause at the plan level: a superset would be the
+    This is S3's contract clause at the STATEMENT level: a superset would be the
     cache carrying state the record does not hold, i.e. the cache becoming a
-    second authority.
+    second authority. ⛔ The assertion runs over `plan.statements` — the thing
+    that decides what is written — NOT over `plan.node_props()`, which returns
+    `RecordNode.props` and would compare the record to itself (a mutation that
+    made `node_statement` drop a field was invisible to the model-level check).
     """
     view = _view()
     plan = cp.record_plan(view.nodes, view.relations)
     assert plan.node_keys() == {(n.label, n.key) for n in view.nodes}
-    written = plan.node_props()
     for node in view.nodes:
-        got = set(written[(node.label, node.key)])
-        assert got == set(node.props), (
+        stmt = next(
+            s for s in plan.statements
+            if s.cypher.startswith(f"MERGE (n:{node.label} ")
+            and s.params["key"] == node.key
+        )
+        written = set(stmt.params["props"])
+        if "embedding" in stmt.params:
+            # The vector is written as its own clause, not in the props map.
+            written.add("embedding")
+        assert written == set(node.props), (
             f"{node.label}/{node.key}: the cache would carry "
-            f"{sorted(got - set(node.props))} beyond the record"
+            f"{sorted(set(node.props) - written)} less than the record and "
+            f"{sorted(written - set(node.props))} beyond it"
         )
 
 
@@ -386,6 +431,38 @@ def test_a_verbatim_embedding_is_written_verbatim():
     stmt = cp.node_statement(got)
     assert "vecf32" not in stmt.cypher
     assert stmt.params["embedding"] == [0.5]
+    # ⛔ The marker is PRIMARY and must survive WITH the vector, not only without
+    # it: a record-sourced rebuild that dropped it leaves a caller-owned float64
+    # vector unmarked, and the next journaled re-emit narrows it through
+    # `vecf32` (#5004 — the `live != rebuild` class this flag prevents).
+    assert stmt.params["props"]["embedding_verbatim"] is True
+
+
+def test_a_verbatim_marker_without_a_vector_is_still_written():
+    """The no-vector half of the same PRIMARY field."""
+    got = _node("Point", {"id": "p-2", "embedding_verbatim": True})
+    stmt = cp.node_statement(got)
+    assert stmt.params["props"]["embedding_verbatim"] is True
+
+
+def test_a_non_allowlisted_rel_type_is_refused_before_any_statement_is_built():
+    """`rel_type` is interpolated into the query STRUCTURE — it must be allowed.
+
+    `public.relation.rel_type` is `text` with no CHECK, so an arbitrary string
+    reaches the interpolation. The allowlist is the same one every comparable
+    site uses; refusing here means `record_plan` raises BEFORE the wipe, so a
+    hostile row cannot build a plan that destroys the cache and then fails.
+    """
+    bad = cp.RecordRelation(rel_type="x]->(z) DETACH DELETE z //",
+                            src_label="Point", src_key="a",
+                            tgt_label="Point", tgt_key="b")
+    with pytest.raises(cp.UnprojectableRecord):
+        cp.relation_statement(bad)
+    with pytest.raises(cp.UnprojectableRecord):
+        cp.record_plan([], [bad])
+    ok = cp.RecordRelation(rel_type="IMPL", src_label="Point", src_key="a",
+                           tgt_label="Point", tgt_key="b")
+    assert "r:IMPL" in cp.relation_statement(ok).cypher
 
 
 def test_a_refused_record_row_leaves_the_cache_untouched():
@@ -411,22 +488,60 @@ def test_an_unmaterialized_record_key_is_not_hot_and_never_empty():
     materialized = [("Point", "p-1")]
     decl = cp.declaration_for(record_keys, materialized)
     assert decl.coverage == COVERAGE_PARTIAL
-    assert decl.covers("p-1")
-    assert not decl.covers("p-2")
+    assert decl.covers(cp.declared_key("Point", "p-1"))
+    assert not decl.covers(cp.declared_key("Point", "p-2"))
 
-    marker = mark_residency(decl, hits=0, key="p-2")
+    marker = mark_residency(decl, hits=0, key=cp.declared_key("Point", "p-2"))
     assert marker == RESIDENCY_NOT_HOT
     assert apply_residency(STATUS_EMPTY, marker) == STATUS_DEGRADED
     # ...and the covered key still reads `hot`, so the marker did not simply
     # fire for everything.
-    assert mark_residency(decl, hits=0, key="p-1") == RESIDENCY_HOT
+    assert mark_residency(
+        decl, hits=0, key=cp.declared_key("Point", "p-1")) == RESIDENCY_HOT
+
+
+def test_a_homonymous_pair_across_labels_is_not_collapsed_to_one_hot_key():
+    """⛔ THE IDENTITY IS `(label, key)`, NEVER THE KEY ALONE.
+
+    `KEY_PROPERTY` gives `Subject` and `Object` the same key (`name`), so
+    `Object/acme` and `Subject/acme` are TWO record nodes with ONE key string.
+    A declaration that flattens them declares a **hot key that was never
+    written**, and a zero-hit read over the OMITTED label then stands as
+    `empty` — the §17.2 *"no such node"* false negative this module exists to
+    prevent. Reachable through the documented `limit` mode: nodes are sorted by
+    `(label, key)` and truncated, so a bound that cuts between two labels
+    produces a partial write and (before this fix) a `complete` declaration.
+    """
+    record_keys = [("Object", "acme"), ("Subject", "acme")]
+    materialized = [("Object", "acme")]
+    decl = cp.declaration_for(record_keys, materialized)
+    assert decl.coverage == COVERAGE_PARTIAL, (
+        "the declaration claimed complete coverage for a label it did not write"
+    )
+    assert decl.hot_keys == frozenset({"Object:acme"})
+    assert decl.covers(cp.declared_key("Object", "acme"))
+    assert not decl.covers(cp.declared_key("Subject", "acme"))
+
+    marker = mark_residency(decl, hits=0, key=cp.declared_key("Subject", "acme"))
+    assert marker == RESIDENCY_NOT_HOT
+    assert apply_residency(STATUS_EMPTY, marker) == STATUS_DEGRADED
+    # The written label is still hot — the marker did not simply fire always.
+    assert mark_residency(
+        decl, hits=0, key=cp.declared_key("Object", "acme")) == RESIDENCY_HOT
+    # ...and the soundness check sees the collapse too: a `complete` declaration
+    # over this partial write is UNSOUND, which is what makes `declaration_for`
+    # above non-optional rather than a nicety.
+    assert cp.declaration_is_sound(record_keys, materialized, decl) is True
+    lied = ResidencyDeclaration(coverage=COVERAGE_COMPLETE, source="liar")
+    assert cp.declaration_is_sound(record_keys, materialized, lied) is False
 
 
 def test_a_complete_projection_declares_complete_coverage():
     keys = [("Point", "p-1"), ("Object", "acme")]
     decl = cp.declaration_for(keys, keys)
     assert decl.coverage == COVERAGE_COMPLETE
-    assert mark_residency(decl, hits=0, key="p-9") == RESIDENCY_HOT
+    assert mark_residency(
+        decl, hits=0, key=cp.declared_key("Point", "p-9")) == RESIDENCY_HOT
 
 
 def test_declaring_a_key_hot_that_was_not_written_is_the_mutation_this_catches():
@@ -443,7 +558,8 @@ def test_declaring_a_key_hot_that_was_not_written_is_the_mutation_this_catches()
         "the declaration claimed complete coverage for a key it did not write"
     )
     lied = ResidencyDeclaration(coverage=COVERAGE_COMPLETE, source="liar")
-    assert mark_residency(lied, hits=0, key="p-2") == RESIDENCY_HOT
+    assert mark_residency(
+        lied, hits=0, key=cp.declared_key("Point", "p-2")) == RESIDENCY_HOT
     assert cp.declaration_is_sound(
         record_keys, [("Point", "p-1")], lied) is False
 
@@ -452,7 +568,9 @@ def test_the_scope_prefixes_the_declared_keys():
     """Two graphs share one cache instance, so the hot set is scoped."""
     decl = cp.declaration_for([("Point", "p-1"), ("Point", "p-2")],
                               [("Point", "p-1")], scope="g_a")
-    assert decl.hot_keys == frozenset({"g_a:p-1"})
+    assert decl.hot_keys == frozenset({"g_a:Point:p-1"})
+    assert decl.covers(cp.declared_key("Point", "p-1", scope="g_a"))
+    assert not decl.covers(cp.declared_key("Point", "p-1"))
 
 
 def test_an_empty_record_declares_partial_not_complete():

@@ -30,6 +30,7 @@ from tortoise.projection import FalkorProjection
 from tortoise.residency import (
     COVERAGE_COMPLETE,
     COVERAGE_PARTIAL,
+    RESIDENCY_HOT,
     RESIDENCY_NOT_HOT,
     apply_residency,
     mark_residency,
@@ -155,13 +156,53 @@ def test_a_bounded_projection_declares_partial_and_reads_not_hot():
     omitted = next(k for k in ("p-1", "p-2") if k not in present)
     assert declaration.hot_keys, "a partial declaration must enumerate what it wrote"
 
-    marker = mark_residency(declaration, hits=0, key=omitted)
+    marker = mark_residency(declaration, hits=0, key=cp.declared_key("Point", omitted))
     assert marker == RESIDENCY_NOT_HOT
     assert apply_residency(STATUS_EMPTY, marker) == STATUS_DEGRADED
 
     # ...and the record itself still answers: the key is omitted from the CACHE,
     # not lost from the record. That distinction is the whole point.
     assert omitted in {n.key for n in view.nodes}
+
+
+def test_a_homonymous_pair_bounded_between_labels_declares_partial():
+    """⛔ THE IDENTITY IS `(label, key)`, proven through the real API.
+
+    `Object 'acme'` and `Subject 'acme'` are two record nodes with ONE key
+    string (`KEY_PROPERTY` gives both `name`). A bound that cuts between them —
+    the documented `limit` mode, nodes sorted by `(label, key)` — writes one and
+    omits the other. A key-only declaration calls that `complete`, and a miss on
+    the OMITTED label then stands as `empty`: the §17.2 *"no such node"* false
+    negative the marker exists to prevent.
+    """
+    proj = _projection()
+    view = cp.RecordView(nodes=(
+        cp.node_from_row("Object", {"name": "acme", "object_kind": "org",
+                                    "props": {}}),
+        cp.node_from_row("Subject", {"name": "acme", "subject_kind": "org",
+                                     "props": {}}),
+    ))
+    report = proj.rebuild_from_record(view, confirm_destructive=True, limit=1)
+    assert report["nodes_written"] == 1
+    assert report["coverage"] == COVERAGE_PARTIAL, (
+        "a bound that omitted one label's node declared complete coverage"
+    )
+
+    declaration = read_declaration(proj.g)
+    assert declaration.coverage == COVERAGE_PARTIAL
+    # `(label, key)` sort order keeps Object/acme and omits Subject/acme.
+    assert declaration.covers(cp.declared_key("Object", "acme"))
+    assert not declaration.covers(cp.declared_key("Subject", "acme"))
+
+    marker = mark_residency(
+        declaration, hits=0, key=cp.declared_key("Subject", "acme"))
+    assert marker == RESIDENCY_NOT_HOT
+    assert apply_residency(STATUS_EMPTY, marker) == STATUS_DEGRADED, (
+        "the omitted label's miss was allowed to stand as `empty`"
+    )
+    # The written label is still hot — the marker did not simply fire always.
+    assert mark_residency(
+        declaration, hits=0, key=cp.declared_key("Object", "acme")) == RESIDENCY_HOT
 
 
 def test_rebuild_from_record_refuses_without_the_destructive_token():

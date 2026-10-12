@@ -113,13 +113,16 @@ read the cache to decide what to project"* — and the placement ruling says wha
 they are: *"a field with no PRIMARY claim in the record that exists only here is
 a defect, not a shortcut."*
 
-So **this projection does not carry them.** The consequence is not hidden and
-not silent: a record-sourced rebuild **drops** them, and the drop is a
-**counted, reported** outcome of `rebuild_from_record` — the caller sees the
-record's coverage, and the classes are named as the next unit's work
-(journal/record completeness, the `#4240`/`#5089` root). Shipping a
-`rebuild_all`-shape snapshot on this path would import a **cache read** into the
-one path the ruling requires to have none.
+So **this projection does not carry them.** The consequence is named, not
+hidden and not silent: a record-sourced rebuild **drops** them, and the five
+classes are listed here (and in the module docstring). It is deliberately **not
+counted at runtime** — a count would need the same pre-wipe cache read this
+path forbids, and `rebuild_from_record`'s report describes the RECORD's coverage
+(`nodes_written`/`record_nodes`/`coverage`/`declared_keys`), not a census of what
+the wipe destroyed. The classes are the next unit's work (journal/record
+completeness, the `#4240`/`#5089` root). Shipping a `rebuild_all`-shape snapshot
+on this path would import a **cache read** into the one path the ruling requires
+to have none.
 
 ### 0.6 Verification
 
@@ -130,15 +133,19 @@ one path the ruling requires to have none.
   * **the keys are the contract's**, read from `node_identity`'s DDL rather
     than restated.
   * **one-way by construction**: the materializer's statement stream contains
-    no read that could decide what to project (a fake graph raises on any
-    `MATCH … RETURN` that is not an endpoint resolution).
-  * **rebuild == record**: wiping a fake graph and re-projecting yields exactly
-    the record's key set and field set — **no extra field, no extra node**.
+    no read that could decide what to project — every statement is a `MERGE`,
+    asserted over the plan's cypher (the endpoint `MATCH` inside a relation
+    upsert is the one read, and it resolves a RECORD coordinate).
+  * **rebuild == record**: re-projecting the plan writes exactly the record's
+    key set and field set — **no extra field, no extra node** — asserted over
+    the plan's `Statement.params['props']`, not over the input model.
   * **idempotent**: projecting the same view twice yields the same statement
     multiset.
   * **not-hot, never empty**: an unmaterialized record key is `not-hot` and an
-    `empty` read over it becomes **`degraded`**, never `empty`; and a projection
-    that declared coverage it did not write fails the test.
+    `empty` read over it becomes **`degraded`**, never `empty`; the declared
+    identity is `(label, key)`, so two nodes that share a key string
+    (`Object 'acme'` / `Subject 'acme'`) do not collapse into one hot key; and a
+    projection that declared coverage it did not write fails the test.
 * `tests/test_cache_projection_live.py` — the S9 shape, on a real FalkorDB
   (skipped when no engine is reachable, so it never reds a DB-free lane):
   project → **destroy the cache** → re-project from the record alone → assert
@@ -155,7 +162,7 @@ one path the ruling requires to have none.
   step of that path and does not route live writes.
 * **The read path** (`#7970`, deferred by §2.0) and the **residency router**
   (`#7953`).
-* **The five graph-only classes** (§0.5) — reported, not carried.
+* **The five graph-only classes** (§0.5) — dropped (and named), not carried.
 * **Normalising the ~9,700 legacy ids** (`#7955` §1.4, W1b).
 * **No migration-safety surface** (owner scope ruling, 2026-10-10).
 * **No public surface change.**
