@@ -854,9 +854,15 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         match = _DURATION_LINE_RE.match(lines[index])
         assert match is not None  # located by the same regex
         tail = match.group("tail")
-        # A stale `# unmeasured` marker stops being true once measured. Any
-        # other trailing comment is preserved verbatim.
-        if re.fullmatch(r"[ \t]*#\s*unmeasured", tail):
+        # A stale `# unmeasured` marker stops being true once measured, and the
+        # marker is recognised by its LEADING TOKEN rather than by the whole
+        # tail: authors write long-form provenance (`# unmeasured — #7359: …`),
+        # and the old whole-tail `fullmatch` cleared only the bare form, so a
+        # measured row kept a `# unmeasured` claim the refresh had falsified
+        # (#8254 review, P3 — 3 rows went stale that way). Any OTHER trailing
+        # comment is preserved verbatim, including one that merely mentions the
+        # word later on; `\b` keeps a token like `# unmeasuredly` out.
+        if re.match(r"[ \t]*#\s*unmeasured\b", tail):
             tail = ""
         # Reuse the row's RAW key text (`match.group('key')`), not `key`: a
         # quoted key (`'test_a.py'`) must stay quoted when its value is

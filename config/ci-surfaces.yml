@@ -3639,9 +3639,12 @@ durations:
   # above. It is carried (rather than left to the flat 2.0s default) for LPT
   # packing accuracy: the durations map has 720 entries, median 1.5s
   # (fast-pool subset 663, median 1.3s), so 66.7s is ~44x the median. Refresh
-  # from the first post-merge main junit run that includes it — the BARE marker
-  # form is deliberate, because the refresh writer (`tools/ci_timing.py`,
-  # `re.fullmatch(r"[ \t]*#\s*unmeasured", tail)`) can only clear a bare marker.
+  # from the first post-merge main junit run that includes it — the marker must
+  # LEAD the tail: the refresh writer (`tools/ci_timing.py`, `re.match(
+  # r"[ \t]*#\s*unmeasured\b", tail)`) clears any tail whose first token is
+  # `# unmeasured`, and preserves every other comment verbatim — so a long-form
+  # unmeasured claim that does NOT lead with the marker survives the refresh and
+  # goes stale once the value is measured (#8254 review, P3).
   test_destructive_wipe_guard.py: 12.9
   # #3718 (DATA-plane residual): 9 cases (4 parametrized lane cases + the
   # /v1/sessions delete freeze case + the demo-seed serialization case + the
@@ -3675,7 +3678,7 @@ durations:
   test_init_apikey_validation.py: 4.5
   test_orient_direct_consolidation.py: 5.9
   test_oauth_mcp.py: 16.1
-  test_oauth_consent_pkce.py: 3.4  # unmeasured — added by #3496, so no leg of the four documented source runs could collect it; refresh from CI junit.
+  test_oauth_consent_pkce.py: 3.4
   test_mcp_server.py: 4.4
   test_dashboard_client_paths_resolve.py: 3.6
   test_dashboard_login.py: 6.8
@@ -4207,7 +4210,7 @@ durations:
   test_dream_noop_3139.py: 4.0
   test_durability_posture.py: 1.1
   test_embed_metering.py: 12.0  # unmeasured — #4488: locally measured (58 tests, embedded lane: 10.9–16.0s across runs, ~12s under fleet load); no source leg of the sweep collected it — refresh from CI junit.
-  test_embedder_provision.py: 6.1  # unmeasured — #7359: the file gained two subprocess-hang tests (a blocked main thread signalled, and a watchdog dump) at locally measured 8-16s; refresh from CI junit.
+  test_embedder_provision.py: 6.1
   test_entity_delete_rebuild.py: 1.9
   test_env_truthy.py: 14.7
   test_health_client_effect.py: 3.5
@@ -4219,7 +4222,6 @@ durations:
   test_metering_unmetered.py: 60.0  # unmeasured — #4779: locally measured (50 tests, live docker FalkorDB: 42–111s across the review cycles, 275s under fleet load); no source leg of the sweep collected it — refresh from CI junit.
   test_operator_annotator_rebuild.py: 4.8
   test_pi_capture_hooks.py: 10.5
-  test_pi_capture_hooks.py: 10.3
   # #2120: measured locally on the carve-out lane (26 tests, ~6.2s): the plugin
   # artifact + installer + parser, one node --test subprocess, and one real
   # `tortoise install openclaw` CLI run into a temp HOME.
@@ -4356,7 +4358,7 @@ durations:
   # the `# unmeasured` marker until a CI junit artifact carries a measured weight,
   # so it cannot mis-balance the LPT pack.
   test_queue_resweep.py: 2.0  # unmeasured
-  test_docs_lint_baseline.py: 2.5  # unmeasured (#7435: registered under core)
+  test_docs_lint_baseline.py: 2.5
   test_docs_lint_gate.py: 2.0  # unmeasured (#5476: registered under core)
   # #6137: register the fast pool's unmeasured files. Registering them is
   # what keeps `duration_coverage_issues` at 100% — the 43-file relocation
@@ -4383,7 +4385,7 @@ durations:
   test_4542_retract_fold_decay.py: 0.1
   test_4647_store_representable.py: 0.3
   test_4716_capture_operator_ref_remap.py: 1.2
-  test_4921_construct_lock.py: 114.1  # #4921: a NEW file has no CI junit measurement (a file that never ran cannot appear in an artifact). Locally measured this turn: 20 tests, wall time dominated by the 2 forced-interleave tests (two real embedded servers per arm) — 29s on an idle-ish box, ~85s on a loaded one, so the flat #3400 default is set mid-range (60.0) and the true weight is deliberately NOT claimed: it moves with box load more than with the code. The registration is load-bearing in BOTH halves: the surface entry alone leaves durations coverage below the 90% floor and `tools/ci_selection.py --integrity` reds (#4348 trap — do not drop without re-deriving the floor at that head). Refresh from the first post-merge run that includes it.
+  test_4921_construct_lock.py: 114.1  # #4921: MEASURED from the 2026-10-12T04:54:57Z main run (3 tests; 114.13s summed across legs, 60.06s in the slowest single leg) — the two forced-interleave tests (two real embedded servers per arm) dominate, so the weight still moves with box load. The registration is load-bearing in BOTH halves: the surface entry alone leaves durations coverage below the 90% floor and `tools/ci_selection.py --integrity` reds (#4348 trap — do not drop without re-deriving the floor at that head).
   test_4999_vector_mechanism.py: 0.1
   test_5359_unchecked_window_writers.py: 0.6
   test_5361_inverted_window_audit.py: 0.4

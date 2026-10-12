@@ -718,6 +718,82 @@ def test_refresh_durations_is_text_preserving_and_carries_forward(tmp_path: Path
     assert ci_timing.validate_refreshed_manifest(text) == []
 
 
+# A long-form `# unmeasured` tail is what authors actually write (see the #7359
+# and #3496 rows the #8254 review named). The marker is a LEADING TOKEN; only a
+# comment that merely mentions the word later is preserved.
+LONG_FORM_UNMEASURED_MANIFEST = """\
+surfaces:
+  core:
+    - test_alpha.py
+    - test_beta.py
+    - test_gamma.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+durations:
+  test_alpha.py: 99.0  # unmeasured — #3496: added after the sampled run; refresh from CI junit.
+  test_beta.py: 42.0  # a note that only mentions unmeasured rows further on
+  test_gamma.py: 7.0  # unmeasuredly worded, not the marker
+"""
+
+
+def test_refresh_durations_clears_a_long_form_unmeasured_tail(tmp_path: Path) -> None:
+    """#8254 review P3: the marker is a LEADING TOKEN, not the whole tail.
+
+    A measured row whose preserved tail still leads with `# unmeasured` asserts
+    the opposite of its fresh value. The old rule used `re.fullmatch`, so it
+    cleared only a BARE marker and wrote the long-form provenance through — the
+    three rows this review found stale. Non-vacuity: the first assertion below
+    fails on the pre-fix code, because the tail is preserved.
+    """
+    path = _bridge_manifest(tmp_path, LONG_FORM_UNMEASURED_MANIFEST)
+    text, _ = ci_timing.render_refreshed_manifest(
+        path.read_text(),
+        _bridge_weights(test_alpha=12.34, test_beta=4.5, test_gamma=1.0),
+        "T",
+    )
+    # the measured row's stale marker is GONE — line is exactly `key: value`
+    assert "  test_alpha.py: 12.3\n" in text
+    assert "# unmeasured —" not in text
+    # a comment that only MENTIONS the marker later is preserved verbatim ...
+    assert ("  test_beta.py: 4.5  # a note that only mentions unmeasured rows "
+            "further on") in text
+    # ... and so is a word that merely starts with the marker's letters (\b)
+    assert "  test_gamma.py: 1.0  # unmeasuredly worded, not the marker" in text
+    assert ci_timing.validate_refreshed_manifest(text) == []
+
+
+def test_committed_map_marks_no_measured_row_unmeasured() -> None:
+    """The committed-data half of the #8254 P3 fix.
+
+    A row present in the rendered artifact (``docs/ci-timing.json``) IS a
+    measurement, so its tail must not lead with `# unmeasured`. The four rows
+    the review named fail this; the renderer rule that clears them on the next
+    refresh is pinned by the test above. Skips while the artifact is still the
+    #1483 stub, because then nothing has been rendered to contradict.
+    """
+    artifact = json.loads((REPO_ROOT / "docs" / "ci-timing.json").read_text())
+    measured = set(artifact.get("files", {}))
+    if not measured:
+        pytest.skip("docs/ci-timing.json is still the #1483 stub — nothing rendered")
+    lines = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text().split("\n")
+    _, entries = ci_timing._locate_durations_block(lines)
+    assert entries, "no durations rows located in the committed manifest"
+    stale = []
+    for key, index in entries.items():
+        if key not in measured:
+            continue
+        match = ci_timing._DURATION_LINE_RE.match(lines[index])
+        assert match is not None  # the locator used the same regex
+        if re.match(r"[ \t]*#\s*unmeasured\b", match.group("tail")):
+            stale.append(key)
+    assert not stale, (
+        f"{len(stale)} durations row(s) still claim `# unmeasured` while the "
+        f"rendered artifact shows them measured: {stale[:5]}"
+    )
+
+
 def test_refresh_durations_is_reproducible(tmp_path: Path) -> None:
     path = _bridge_manifest(tmp_path)
     weights = _bridge_weights(test_alpha=12.34, test_gamma=4.5)
