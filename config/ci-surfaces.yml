@@ -910,6 +910,17 @@ surfaces:
   # without this entry the delete-resurrection guard would not run on the
   # change that can re-open the hole.
   - test_7951_delete_resurrection.py
+  # #7951 (remaining doors): the write-door INVENTORY — every projection
+  # `.apply()` call site must be classified (chokepoint / closed / replay /
+  # documented exemption), and `_doc_write` must journal before it folds. The
+  # guarded production files are `tortoise/connectors/*.py` and
+  # `tortoise/indexer/github_indexer.py`, which select `core` — so this
+  # registration is what runs the inventory on a connector- or indexer-only
+  # change. (A `tortoise/sdk.py` change selects the FULL matrix
+  # — `ci_selection.py --changed-files tortoise/sdk.py` → `"full": true` — so
+  # it needs no entry here.) `--integrity` also requires every test file to be
+  # classified, which this entry satisfies.
+  - test_7951_write_doors.py
   - test_cache_projection.py
   - test_cache_projection_live.py
   # #4197: the saved-backlog ledger (`tortoise/capture_backlog.py`) and its
