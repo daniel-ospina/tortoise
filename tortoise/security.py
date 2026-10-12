@@ -1059,7 +1059,12 @@ def validate_webhook_url(url: str) -> str:
         raise ValueError(
             f"webhook url scheme must be http or https, not "
             f"{parts.scheme or '(none)'}")
-    if parts.username or parts.password:
+    # Read userinfo through the ONE decoding rule (#3039) rather than by hand off
+    # the urlsplit result: a raw `.username`/`.password` read is exactly the shape
+    # `test_from_uri_userinfo` guards. Local import keeps this module cycle-free.
+    from tortoise.config import parse_uri_userinfo
+
+    if any(parse_uri_userinfo(url)):
         raise ValueError("webhook url must not carry credentials (user:pass@)")
     try:
         # `.rstrip(".")`: a trailing dot is an FQDN spelling of the SAME name

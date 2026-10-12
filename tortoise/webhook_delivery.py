@@ -66,6 +66,8 @@ import time
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 
+from tortoise.env_truthy import FALSY
+
 from .ids import ulid
 from .security import env_int, redact_error, validate_webhook_url
 
@@ -110,7 +112,11 @@ def dispatch_enabled() -> bool:
     raw = os.environ.get(KILL_SWITCH_ENV)
     if raw is None:
         return True
-    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+    value = raw.strip().lower()
+    # Share the canonical vocabulary instead of declaring a literal (#4097).
+    # Semantics are unchanged and deliberately NOT `is_truthy`: this is a kill
+    # switch, so an UNKNOWN value keeps egress ON rather than off.
+    return value != "" and value not in FALSY
 
 
 def backoff_seconds(attempt: int) -> int:
