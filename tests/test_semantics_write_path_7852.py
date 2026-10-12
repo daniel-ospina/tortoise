@@ -27,7 +27,7 @@ import os
 
 import pytest
 
-from tortoise.pack_registry import SEMANTICS_VALUES
+from tortoise.pack_registry import SEMANTICS_DIRECTIONS, SEMANTICS_VALUES
 from tortoise.sdk import TortoiseSDK
 
 
@@ -85,6 +85,24 @@ def test_explicit_direction_outranks_semantics(sdk):
     assert _stored(sdk, op["id"]) == ("unidirectional", "explicit")
 
 
+def test_absent_direction_still_derives_from_semantics(sdk):
+    """`direction=None` is the CYCLE-25 "absent" input — the value the ingest
+    path passes when a connection omits `direction`. It is NOT a declaration:
+    it must not be recorded as basis `explicit`, and it must NOT suppress the
+    semantics step (the P1 both reviewers found)."""
+    a, b = _point(sdk, "a"), _point(sdk, "b")
+    # absent + meaning -> the meaning resolves the direction
+    op = sdk.create_operator("IMPL", a["id"], [b["id"]], direction=None,
+                             semantics="addresses")
+    assert _stored(sdk, op["id"]) == ("unidirectional", "label")
+    # absent + no meaning -> canonicalize per op_type, basis `default`
+    op2 = sdk.create_operator("NAND", a["id"], [b["id"]], direction=None)
+    assert _stored(sdk, op2["id"]) == ("unidirectional", "default")
+    # absent + PART/WHOLE op_type -> IMPL-class default (bidirectional)
+    op3 = sdk.create_operator("composedOf", a["id"], [b["id"]], direction=None)
+    assert _stored(sdk, op3["id"]) == ("bidirectional", "default")
+
+
 def test_default_unchanged_without_semantics(sdk):
     """No semantics → the historical default, unchanged for every op_type
     (the #7813 ruling keeps the SDK default at bidirectional)."""
@@ -121,7 +139,8 @@ def test_retired_semantics_resolves_to_canonical(sdk):
 
 def test_neutral_semantics_carries_no_direction(sdk):
     """`related` is `-`: the connection exists and no confidence transfers, so
-    no direction is recorded — the chain falls through and says so."""
+    no direction is derived — the chain falls through and the warning says
+    what actually happens (the caller-supplied/default direction is recorded)."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
     op = sdk.create_operator("IMPL", a["id"], [b["id"]], semantics="related")
     assert _stored(sdk, op["id"]) == ("bidirectional", "default")
@@ -129,16 +148,33 @@ def test_neutral_semantics_carries_no_direction(sdk):
     assert warns and "no transferable direction" in warns[0]["message"]
 
 
-def test_every_ruled_semantics_maps_or_is_neutral(sdk):
-    """Exhaustive over the closed vocabulary: a ruled value either resolves to a
-    runtime direction or is the neutral `-` class. Guards against a vocabulary
-    addition silently becoming unmapped."""
+def test_neutral_semantics_on_nand_does_not_claim_op_type_default(sdk):
+    """A neutral meaning on NAND keeps the signature default (bidirectional);
+    the warning must not claim the op_type default (which is unidirectional for
+    NAND) — it says the default is recorded, and that is what holds."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
+    op = sdk.create_operator("NAND", a["id"], [b["id"]], semantics="related")
+    assert _stored(sdk, op["id"]) == ("bidirectional", "default")
+    warns = [w for w in op.get("warnings", []) if w.get("code") == "undeclared_relation"]
+    assert warns and "op_type default" not in warns[0]["message"]
+
+
+def test_every_ruled_semantics_maps_or_is_neutral(sdk):
+    """Exhaustive over the closed vocabulary: each ruled value either resolves
+    to the runtime direction its model direction records (basis `label`) or is
+    the neutral `-` class (basis `default`). Derived FROM SEMANTICS_DIRECTIONS,
+    so a vocabulary addition that is not mapped — or is mapped wrongly — fails
+    here rather than passing a two-valued smoke assertion."""
+    a, b = _point(sdk, "a"), _point(sdk, "b")
+    runtime = {"->": "unidirectional", "<->": "bidirectional"}
     for semantics in sorted(SEMANTICS_VALUES):
+        expected = runtime.get(SEMANTICS_DIRECTIONS[semantics])
         op = sdk.create_operator("IMPL", a["id"], [b["id"]], semantics=semantics)
-        direction, basis = _stored(sdk, op["id"])
-        assert direction in ("bidirectional", "unidirectional")
-        assert basis in ("label", "default"), (semantics, basis)
+        got = _stored(sdk, op["id"])
+        if expected is None:
+            assert got == ("bidirectional", "default"), (semantics, got)
+        else:
+            assert got == (expected, "label"), (semantics, got)
 
 
 # ── the MCP surface exposes it ────────────────────────────────────────────

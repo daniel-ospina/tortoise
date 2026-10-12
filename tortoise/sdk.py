@@ -10797,12 +10797,16 @@ class TortoiseSDK:
         # default → 'default'.
         #
         # The signature default is the literal "bidirectional" (#807/#753/#86,
-        # kept by the #7813 ruling), so "differs from that literal" is the one
-        # distinguishible form of explicit. A declared semantics therefore
-        # outranks the DEFAULT (that default is the shadowing #7813 exists to
-        # remove) and never overrides a direction the caller actually chose.
-        direction_basis = "explicit" if direction != "bidirectional" else "default"
+        # kept by the #7813 ruling) and `None` is the CYCLE-25 "absent" input —
+        # canonicalized per op_type below, and the value the ingest path passes
+        # whenever a connection omits `direction` (`conn.get("direction")`).
+        # NEITHER is a declaration: treating `None` as explicit would record a
+        # FALSE provenance and silently disable the semantics step below. A
+        # declared semantics therefore outranks both, and never overrides a
+        # direction the caller actually differentiated.
+        direction_basis = "explicit" if direction not in (None, "bidirectional") else "default"
         if semantics is not None:
+            from tortoise.enforcement import emit_violation
             from tortoise.pack_registry import (
                 SEMANTICS_TRANSITION,
                 SEMANTICS_VALUES,
@@ -10820,6 +10824,8 @@ class TortoiseSDK:
                     ),
                     "semantics": semantics,
                 })
+                emit_violation(code="undeclared_relation",
+                               detail=f"semantics={semantics} (retired -> {canonical})")
                 semantics = canonical
             if semantics not in SEMANTICS_VALUES:
                 warnings.append({
@@ -10832,6 +10838,8 @@ class TortoiseSDK:
                     ),
                     "semantics": semantics,
                 })
+                emit_violation(code="undeclared_relation",
+                               detail=f"semantics={semantics} (out of vocabulary)")
             else:
                 derived = self._direction_from_semantics(semantics)
                 if derived is None:
@@ -10839,18 +10847,26 @@ class TortoiseSDK:
                     # exists and NO confidence transfers. The shipped runtime
                     # encodes only bidirectional/unidirectional (§8 Transition
                     # state — the four-value migration is the separate change
-                    # named on #7852), so no direction can be recorded here;
-                    # the chain falls through and says so.
+                    # named on #7852), so no direction can be derived. Say what
+                    # actually happens: the caller-supplied/signature default is
+                    # what gets recorded (naming the "op_type default" here
+                    # would be false for NAND, whose canonical default is
+                    # unidirectional but whose signature default is
+                    # bidirectional).
                     warnings.append({
                         "code": "undeclared_relation",
                         "message": (
                             f"semantics '{semantics}' carries no transferable "
-                            f"direction ('-') — direction falls through to the "
-                            f"op_type default (#7852)"
+                            f"direction ('-') — no direction is derived from "
+                            f"it, so the caller-supplied/write-path default is "
+                            f"recorded (#7852)"
                         ),
                         "semantics": semantics,
                     })
-                elif direction == "bidirectional":
+                elif direction in (None, "bidirectional"):
+                    # Chain step 2 — basis token `label`, the issue's own D3 name
+                    # for "the relation's declared meaning"; the input actually
+                    # read here is the Layer-2 `semantics`.
                     direction = derived
                     direction_basis = "label"
         # Direction default (CYCLE-25 per-op_type, ontology v3.6 #5):
@@ -12066,12 +12082,15 @@ class TortoiseSDK:
     # The model's four-value direction (ONTOLOGY §8: `->` / `<-` / `<->` / `-`)
     # mapped onto the runtime's two-value vocabulary, which is what the
     # `direction` property stores today (the four-value migration is the
-    # separate scoped change named on #7852). `->` and `<-` are BOTH one-way to
-    # the runtime — which end is the source is carried by the relation's
-    # fromKind/toKind, not by the flag; `-` has no runtime value at all.
+    # separate scoped change named on #7852). `<-` is deliberately ABSENT: the
+    # runtime's `unidirectional` means source→target only (ep.py writes the
+    # target message and withholds the source back-message), so mapping
+    # target→source onto it would record the OPPOSITE direction. No ruled
+    # semantics value produces `<-`, and an unmapped value safely returns None
+    # (falls through with a warning) instead. `-` maps to nothing too — no
+    # confidence transfers.
     _SEMANTICS_RUNTIME_DIRECTION: ClassVar[dict[str, str]] = {
         "->": "unidirectional",
-        "<-": "unidirectional",
         "<->": "bidirectional",
     }
 
