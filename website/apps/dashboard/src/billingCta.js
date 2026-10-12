@@ -30,13 +30,19 @@ export const COMPARE_PLANS_URL = 'https://tortoise.premiselabs.co/#pricing-secti
  *
  * Returns `href: null` in BOTH states on purpose: the CTA is never a link.
  * The secondary "Compare plans" link is rendered separately by the caller.
+ *
+ * `label` is the control's copy and defaults to the historical `Upgrade`, so
+ * every pre-#4386 site is unchanged. A caller whose sentence needs different
+ * wording (the Graphs lock line reads "Upgrade to add more.") supplies it HERE
+ * rather than at the render site — the label belongs to the derivation, so the
+ * enabled and disabled arms can never disagree about what the control says.
  */
-export function checkoutCtaFor(priceId, { anyConfigured = false } = {}) {
+export function checkoutCtaFor(priceId, { anyConfigured = false, label = 'Upgrade' } = {}) {
   if (priceId) {
-    return { label: 'Upgrade', disabled: false, reason: '', priceId, href: null }
+    return { label, disabled: false, reason: '', priceId, href: null }
   }
   return {
-    label: 'Upgrade',
+    label,
     disabled: true,
     reason: anyConfigured ? CHECKOUT_NOT_OFFERED_REASON : CHECKOUT_UNAVAILABLE_REASON,
     priceId: '',

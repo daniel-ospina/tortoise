@@ -1643,6 +1643,15 @@ class CommitRecordState:
     record carries per-commit adjudication state + billing; the Session
     counters carry the budget numerator (value_nodes_held lives on the
     Session, NOT here — §4.1).
+
+    ``value_nodes_declared`` (#4704) is NOT a second numerator — it is THIS
+    payload's OWN declaration: the net-new the write phase added to
+    ``Session.value_nodes_created``, stamped in the SAME statement that
+    added it. NULL ⇒ the payload has not declared yet (its write phase is
+    still ahead of it, or it was held); an int ⇒ it has, and that int is
+    what it declared. ``plan_commit`` reads it so a retry of a
+    partially-written payload counts the payload ONCE instead of
+    re-counting a remainder its own declaration already covers.
     """
 
     client_commit_id: str
@@ -1650,6 +1659,7 @@ class CommitRecordState:
     status: str  # fully_written | held | partial (VALID_COMMIT_STATUSES)
     write_ops_billed: int = 0
     written_at: str | None = None
+    value_nodes_declared: int | None = None
 
 
 def is_l1_replay(record: CommitRecordState | None) -> bool:
@@ -1709,9 +1719,37 @@ def plan_commit(
     # exemption — value points from the commit endpoint are non-episodic and
     # always count (review fix, PR #953: the previous exemption let a held
     # re-submission bypass the ceiling — Session C).
-    delta = reconcile.net_new
+    #
+    # #4704 — a payload that has ALREADY DECLARED its counters
+    # (`record.value_nodes_declared`) is already FULLY inside
+    # `state.value_nodes_created`, while `reconcile.net_new` is only its
+    # REMAINDER (what the failed write had not landed yet — the landed part
+    # now reconciles to zero). Adding that remainder to a prior that already
+    # contains the whole payload double-counts ONE payload inside the very
+    # decision that adjudicates it: both the cumulative and the delta the
+    # soft-band WARN is derived from. The declared TOTAL is used instead, so
+    # `(prior - declared) + declared` IS `state.value_nodes_created` — the
+    # same number the clean attempt computed as `prior + net_new`. That keeps
+    # PL3's contract (a re-submission "checks the 50-ceiling only") reading
+    # the SAME numbers the first attempt read, and makes the retry's `warn`
+    # the clean attempt's warn instead of a fresh verdict off an inflated
+    # total.
+    #
+    # The CEILING is not what this half protects: a first adjudication that is
+    # WRITTEN always satisfied `prior + net_new <= 25` (the hard band holds
+    # above that), so the double-count could never cross 50 on the retry. The
+    # inflation the issue's impact section describes is the PERSISTED one —
+    # every LATER commit reading an inflated `prior_created` — and that half
+    # is the writer's own :CommitRecord-stamped guard.
+    declared = record.value_nodes_declared if record is not None else None
+    if declared is None:
+        delta = reconcile.net_new
+        prior_created = state.value_nodes_created
+    else:
+        delta = declared
+        prior_created = state.value_nodes_created - declared
     budget = adjudicate_budget(
-        prior_created=state.value_nodes_created,
+        prior_created=prior_created,
         delta=delta,
         first_adjudication=is_first_adjudication(record),
         point_ids=[

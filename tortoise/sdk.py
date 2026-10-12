@@ -54,6 +54,11 @@ from .commit_ops import OBJECT_TERMINAL_STATUSES as _OBJECT_TERMINAL_STATUSES
 from .commit_ops import SUBJECT_STATUS_VALUES as _SUBJECT_STATUS_VALUES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import ulid
+from .vector_write import (  # #4520: the ONE clear-then-set vector seam
+    clear_embedding,
+    clear_then_set_prefix,
+    set_embedding_clause,
+)
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import _live_only  # #6597 dream coverage closure mirrors EP liveness
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
@@ -1784,19 +1789,12 @@ _TURN_WRITE_CYPHER = (
     # stale-vector decision (#4194) is sound on a matched node and on a
     # just-created one (prior_ch NULL => nothing to preserve).
     "WITH t, turn, t.content_hash AS prior_ch "
-    # #4524: the vector write below is a SILENT no-op on the embedded engine
-    # when the property already holds a VectorF32 (#4457) — which defeats the
-    # rotation self-heal this statement exists to provide (see the comment
-    # above _TURN_WRITE_CYPHER's callers). Clear it in the SAME statement, so
-    # the clear and the write cannot be separated by a later failure, and ONLY
-    # when a new vector is being written. This guard is mutually exclusive
-    # with the two ELSE limbs below (those run only when turn.emb IS NULL), so
-    # nothing that should be preserved is cleared — and an UNCONDITIONAL clear
-    # would let those limbs store NULL, destroying a live vector instead of
-    # refreshing it.
-    "FOREACH (_ IN CASE WHEN turn.emb IS NOT NULL THEN [1] ELSE [] END | "
-    "    REMOVE t.embedding) "
-    "SET t.content=turn.c, t.pointKind=turn.k, t.is_operator=false, "
+    # #4524/#4520: the shared clear-then-set seam clears t.embedding in the
+    # SAME statement (and only when a new vector is written), so the rotation
+    # self-heal this statement exists to provide is not defeated by the embedded
+    # engine's silent no-op on a `vecf32` overwrite. See `tortoise/vector_write.py`.
+    + clear_then_set_prefix("t", "turn.emb")
+    + "SET t.content=turn.c, t.pointKind=turn.k, t.is_operator=false, "
     "    t.speaker=turn.speaker, t.is_episodic=true, "
     "    t.status=coalesce(t.status, turn.s), "
     "    t.createdAt=coalesce(t.createdAt, $now), "
@@ -17821,8 +17819,9 @@ class TortoiseSDK:
                             merged_keywords, update_props["topics"],
                         )
                         proj.g.query(
-                            "MATCH (e:Event {eventId:$eid}) SET e += $props, "
-                            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+                            "MATCH (e:Event {eventId:$eid}) "
+                            + clear_then_set_prefix("e")
+                            + "SET e += $props, " + set_embedding_clause("e"),
                             params={"eid": event_id, "props": update_props, "embedding": embedding},
                         )
                         updated += 1
@@ -17876,8 +17875,9 @@ class TortoiseSDK:
                             props["keywords"], props["topics"],
                         )
                         proj.g.query(
-                            "MERGE (e:Event {eventId:$eid}) SET e += $props, "
-                            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+                            "MERGE (e:Event {eventId:$eid}) "
+                            + clear_then_set_prefix("e")
+                            + "SET e += $props, " + set_embedding_clause("e"),
                             params={"eid": event_id, "props": props, "embedding": embedding},
                         )
                         ingested += 1
@@ -25190,14 +25190,12 @@ class TortoiseSDK:
         # The CASE-guarded embedding clause stays the ONLY embedding write.
         create_props = {k: v for k, v in props.items()
                         if k not in ("startedAt", "capturedAt")}
+        clear_embedding(proj.g, "(e:Event {eventId:$eid})", "e", {"eid": event_id},
+                        embedding)
         proj.g.query(
             "MERGE (e:Event {eventId:$eid}) "
-            "ON CREATE SET e += $props, "
-            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) "
-            "ELSE e.embedding END "
-            "ON MATCH SET e += $match_props, "
-            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) "
-            "ELSE e.embedding END",
+            "ON CREATE SET e += $props, " + set_embedding_clause("e") + " "
+            "ON MATCH SET e += $match_props, " + set_embedding_clause("e"),
             params={"eid": event_id, "props": props,
                     "match_props": create_props, "embedding": embedding},
         )
@@ -25369,9 +25367,8 @@ class TortoiseSDK:
         # heal — the CASE-guarded $embedding is the ONLY embedding node-write
         # surface (never $props); the marker clear is a targeted REMOVE.
         proj.g.query(
-            "MATCH (e:Event {eventId:$eid}) SET "
-            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN "
-            "vecf32($embedding) ELSE e.embedding END, "
+            "MATCH (e:Event {eventId:$eid}) " + clear_then_set_prefix("e")
+            + "SET " + set_embedding_clause("e") + ", "
             "e.embeddingRepairFailedAt = null",
             params={"eid": event_id, "embedding": embedding},
         )

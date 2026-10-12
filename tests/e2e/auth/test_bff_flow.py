@@ -641,9 +641,7 @@ def _drop_binding_column() -> bool:
                 r[1] == "user_id" for r in con.execute("PRAGMA table_info(auth_flows)")
             )
             con.close()
-            if not still_there:
-                return True
-            return False
+            return bool(not still_there)
         except Exception:
             continue
     return True
@@ -884,7 +882,7 @@ def test_a_signin_failure_still_reaches_the_banner(stack):
     exists and the error arrives on the callback query.
     """
     j = Jar()
-    status, _, headers = j.get(f"{APP}/auth/start", follow=False)
+    status, _, _headers = j.get(f"{APP}/auth/start", follow=False)
     assert status == 302
     assert j.cookie("__Host-authflow"), "a sign-in flow must be live for this control"
 
