@@ -26,6 +26,7 @@ The Tortoise graph's wiring quality has **no maintained measurement surface wire
   - **Fix-string is copy-paste broken** (audit.py:198): `tortoise_mitigate_operator(..., confidence=0.7)` — the SDK/MCP accept `strength=` (sdk.py:1615, mcp_server.py:1021), and 0.7 is outside the skill's documented relevance-attack range 0.10–0.50.
   - **Check 5 (`impl_instead_of_nand`) is a substring classifier** at HIGH severity: flags any IMPL edge whose target contains "not ", "fail", "never", etc. — including v3.5-legal operator-less edges; a false NAND fix changes belief propagation (NAND_BASE_WEIGHT=8.0).
 - **ONTOLOGY v3.5 §8 reification rule** ("an edge carries an operator iff it needs mitigation, or is Point↔Point support/contradict") **makes the issue's "annotate every operator" premise obsolete.** Annotation dims (bias/precision/consistency/directness) are **ARCHIVED in weights.py:58-61** (`annotation_factor = 1.0` — zero engine effect, only tests read `annotator_*`). The body stats (2,056 ops / 6 annotated / 0 mitigations) are stale AND measure the wrong quantity under v3.5.
+  > **UPDATE 2026-10-11 (#6151):** the archive is REVERSED — the dims are an engine consumer again, as a symmetric bounded weight band (0.5–2.0, exactly neutral when unset), by the owner's explicit ruling. The reasoning above about *scope* still holds (grading every operator is not the goal); the claim of "zero engine effect" is now false, and `weights.py` no longer hardcodes `annotation_factor = 1.0`.
 - **No enforcement surface** warns writers per the reification rule. `how-to-use-tortoise` has annotation rules but no gate; the agent-infra skill-enforcer is a static tool-call interceptor with no graph read path.
 - **Remediation cycles ran blind/ad-hoc** (bp_approach_cycle1/3/4, cost_control_cycle1-4, bp_pros_cons_cycle5 against embedded tortoise.db — "Do not run against production Docker"); no verifiable live counts; `audit_graph*.py` in graph-scripts query the removed `context` field (#49) — dead.
 
@@ -46,7 +47,7 @@ The Tortoise graph's wiring quality has **no maintained measurement surface wire
 | MCP server exposes tool_registry ToolDefinitions | [validated] | ToolDefinition + http_policy + sdk_method pattern; annotate/mitigate/get_operator tools exist |
 | #334 executes before/concurrently | [unverified] | #334 scoped same-day, OPEN, plan-comment only, no branch — no live-graph remediation landed yet |
 | Operator-less IMPL/NAND legal post-v3.5 | [validated] | ONTOLOGY.md §8 + #920; makes "6 of 2,056 annotated" misleading |
-| Annotation dims have an engine consumer | [DISPROVEN] | weights.py:58-61 ARCHIVED, annotation_factor=1.0; only tests read annotator_* |
+| Annotation dims have an engine consumer | ~~[DISPROVEN]~~ → **[VALIDATED 2026-10-11]** | was: weights.py:58-61 ARCHIVED, annotation_factor=1.0; only tests read annotator_*. **#6151 reactivated them** as a symmetric bounded weight band (owner ruling, option B) — the dims now drive `compute_operator_weight` |
 
 ### Boundary & Stakeholders
 

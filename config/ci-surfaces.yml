@@ -2282,11 +2282,13 @@ surfaces:
   # `tortoise/` fallback and, until now, ran NONE of the three tests that guard
   # those mechanisms. A regression in either band shipped with green CI while its
   # guard sat unrun in the `ep` list (only `test_weights.py` ran, because it is
-  # dual-registered in `tier1`). Registered here for the same reason as the
-  # entry above; each keeps its `ep` membership too. Deliberately NOT solved by
-  # adding `tortoise/weights.py` to `ep`'s SOURCE_PATTERNS: a SOURCE_PATTERNS
-  # match REPLACES the `core` fallback, so that would narrow a weights.py change
-  # from 456 selected files to the 64-file `ep` surface — a coverage LOSS.
+  # also in the always-selected `tier1` set, which the selection always unions in).
+  # Registered here for the same reason as the entry above; each keeps its `ep`
+  # membership too. Deliberately NOT solved by adding `tortoise/weights.py` to
+  # `ep`'s SOURCE_PATTERNS: a SOURCE_PATTERNS match REPLACES the `core` fallback,
+  # so that would narrow a weights.py change from 456 selected files to the 81
+  # that an ep-only change selects (the 64-entry `ep` list plus tier1) — a
+  # coverage LOSS of ~375 files, traded for three tests.
   - test_weights_mitigation.py
   - test_3815_mitigation_moves_weight.py
   - test_6151_annotation_band.py

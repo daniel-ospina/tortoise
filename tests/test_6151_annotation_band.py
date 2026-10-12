@@ -256,6 +256,47 @@ finally:
         os.environ.pop("TORTOISE_DB_URI", None)
 
 
+def test_an_uninterpretable_dimension_is_neutral_and_never_raises():
+    """A stored value that is not a number must degrade to NEUTRAL, not raise.
+
+    The stored dimensions are not trusted: the generic entity surface can write
+    them without validation (`update_point(op, annotator_bias='oops')` persists
+    the string). `compute_operator_weight` is called on the hot path with no
+    handler, so raising here would let ONE malformed operator abort the whole
+    propagation run. Before #6151 these values were unpacked but unused, so a
+    malformed one was inert — reactivating them must not turn it into a crash.
+    """
+    for bad in ("oops", None, object(), float("nan")):
+        got = annotation_factor(bad, 0.5, 0.5, 0.5)
+        assert got == 1.0, (
+            f"a dimension of {bad!r} produced {got}, not the neutral 1.0 — an "
+            "uninterpretable value is not a rating, and the run must survive it"
+        )
+        # ...and it must SKIP, not be silently treated as the worst rating.
+        assert got != ANNOTATION_FACTOR_MIN
+
+
+def test_an_out_of_range_dimension_cannot_escape_the_band():
+    """The documented band must HOLD for stored values outside [0, 1].
+
+    The band is documented as bounded (0.5 worst, 2.0 best) but the read does no
+    validation, so without an explicit clamp an out-of-range value escapes it:
+    `annotator_bias = 3.0` scored 0.42 — below the documented minimum — and
+    `-1e6` raised OverflowError. The final weight clamp [0.1, 10.0] contains the
+    damage but does not make the annotation contract true.
+    """
+    probes = [3.0, -1e6, 1e9, -5.0, float("inf"), float("-inf"), 0.0, 1.0]
+    for i, dimension in enumerate(("bias", "precision", "consistency", "directness")):
+        for v in probes:
+            args = [0.5, 0.5, 0.5, 0.5]
+            args[i] = v
+            got = annotation_factor(*args)
+            assert ANNOTATION_FACTOR_MIN <= got <= ANNOTATION_FACTOR_MAX, (
+                f"{dimension}={v!r} produced {got}, outside the documented band "
+                f"[{ANNOTATION_FACTOR_MIN}, {ANNOTATION_FACTOR_MAX}]"
+            )
+
+
 @pytest.mark.skipif(not _LIVE_OK, reason="Live FalkorDB (Docker) not available")
 def test_the_band_is_read_from_the_graph(monkeypatch):
     """End-to-end through the reader: the dimensions on the node drive the weight.

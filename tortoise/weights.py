@@ -141,10 +141,47 @@ def annotation_factor(
     Strictly increasing in ``precision``, ``consistency`` and ``directness``, and
     strictly DECREASING in ``bias`` (which enters inverted as ``1 - bias``);
     equivalently, strictly increasing in every quality term.
+
+    Each input is coerced and clamped by ``_annotation_term`` before the mean, so
+    the returned factor is ALWAYS within [``ANNOTATION_FACTOR_MIN``,
+    ``ANNOTATION_FACTOR_MAX``] whatever the store holds, and an uninterpretable
+    value contributes the neutral term rather than raising — see that function
+    for why both matter.
     """
-    terms = (1.0 - bias, precision, consistency, directness)
+    terms = tuple(_annotation_term(v, inverted=(i == 0)) for i, v in enumerate(
+        (bias, precision, consistency, directness)))
     q = sum(terms) / len(terms)
     return ANNOTATION_FACTOR_MAX ** (2.0 * q - 1.0)
+
+
+def _annotation_term(value, *, inverted: bool) -> float:
+    """Coerce one stored rating dimension to its quality term in [0, 1].
+
+    Two jobs, both load-bearing rather than defensive dressing:
+
+    1. **Clamp.** The band is documented as BOUNDED — 0.5 worst, 2.0 best — and
+       without this an out-of-range stored value escapes it (a stored ``bias`` of
+       3.0 scores 0.42, below the documented minimum; ``-1e6`` overflows). The
+       final weight clamp ``[0.1, 10.0]`` contains the damage but does not make
+       the annotation contract true. The stored value is not trusted: it can be
+       written through the generic entity surface, which does not validate.
+
+    2. **Never raise.** Anything uninterpretable contributes the NEUTRAL term.
+       ``ep.py`` calls this on the hot path with no handler, so raising would let
+       ONE malformed row abort the entire propagation run — strictly worse than
+       ignoring the value. It also matches the mechanism's own contract: an unset
+       dimension is neutral, and a stored value that is not a number is not a
+       rating. (Before #6151 these values were unpacked but unused, so a
+       malformed one was inert; reactivating them must not turn it into a
+       crash.)"""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return ANNOTATION_TERM_NEUTRAL
+    if v != v:  # NaN compares unequal to itself
+        return ANNOTATION_TERM_NEUTRAL
+    v = min(max(v, 0.0), 1.0)
+    return (1.0 - v) if inverted else v
 
 
 def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> float:
