@@ -1391,7 +1391,8 @@ function claimIntentInFlight() {
   // key's expiry (ISO string, or null = Never). Cleared wherever newKey is.
   const [newKeyExpiresAt, setNewKeyExpiresAt] = React.useState(null)
   // #2735: rotate's one-time replacement reveal — per team since #4429, one
-  // record per team that rotated a key: {plaintext, expiresAt, warning}.
+  // record per team that rotated a key: {plaintext, expiresAt, warning,
+  // refusal}.
   // DELIBERATELY separate state from newKey/newKeyExpiresAt (the create
   // modal's key): opening and cancelling the create modal must never destroy
   // an unread rotate replacement whose old key is already revoked (#2392
@@ -1418,6 +1419,17 @@ function claimIntentInFlight() {
   // count are now one too high), so it gets its own persistent notice rather
   // than riding the transient `error` slot that `loadAll` overwrites. It rides
   // this record so a team switch cannot silently drop it either.
+  //
+  // #8249: the `refusal` half is the third disclosure — a 2xx whose body
+  // carries NO revealable plaintext. There is nothing to retain there (the
+  // secret is unrecoverable and the displaced row is already revoked), so what
+  // is retained is the MESSAGE: without it, a team switch landing on the RTT
+  // left the user told nothing at all about a rotate that destroyed their key.
+  // It is a field of its own because `warning` is a partial state (both keys
+  // live), not a lost secret — one field for both would muddle the two
+  // disclosures. As with the other two, the derive block below is the single
+  // reader and it resolves the ACTIVE team's record, so a retained refusal can
+  // never render under another team's header.
   const [rotateOutcomes, setRotateOutcomes] = React.useState({})
   // key-create modal state
   const [keyModalOpen, setKeyModalOpen] = React.useState(false)
@@ -6728,6 +6740,15 @@ function claimIntentInFlight() {
   // warning from surfacing on a team whose keys it does not describe.
   const rotateNoticeText = (rotateOutcome && rotateOutcome.warning) || ''
 
+  // #8249: the plaintext-less refusal of the ACTIVE team — the third
+  // disclosure on the same record, and the one that had no retained home. The
+  // block that produced it sat after the team-identity guard and wrote to the
+  // transient `error` slot, so a switch across the rotate RTT dropped the only
+  // notice that the rotate had destroyed a key. Reading it through the same
+  // team-scoped reader keeps a retained refusal off a team whose rows it does
+  // not describe.
+  const rotateRefusalText = (rotateOutcome && rotateOutcome.refusal) || ''
+
   // #4330: Done dismisses the reveal — the key is already live and listed; this
   // only drops the browser's last copy of the plaintext. Guarded so a click
   // cannot silently destroy a shown-once secret the user never copied. The
@@ -6854,9 +6875,38 @@ function claimIntentInFlight() {
           ...prev,
           [_teamAtCall]: { plaintext, expiresAt: (mk && mk.expires_at) || null, warning },
         }))
+      } else {
+        // #8249: the third outcome — a 2xx carrying NO revealable plaintext.
+        // The secret is unrecoverable by now, so there is no secret to retain;
+        // what must be retained is the DISCLOSURE. It is latched with the team
+        // whose row it names, BEFORE the identity guard below, for the same
+        // reason the plaintext is (#4429): the guard scopes WHERE an outcome
+        // renders, it must not decide WHETHER the user is told. A switch
+        // across the RTT used to stop this branch before it ran, so the user
+        // learned about the destroyed key only by noticing a revoked row and
+        // an unexplained extra one.
+        //
+        // `refusal` is its own field: the `warning` beside it is a partial
+        // state (both keys live), not a lost secret, and one field for both
+        // would muddle the two disclosures (#4355/#8249). The server contract
+        // says a `replaced_revoked:false` response also carries the live
+        // replacement's plaintext, but this branch keeps the warning rather
+        // than dropping it — a response that carried both is still one the
+        // user has to act on, and this disclosure is the one that had no
+        // retained home.
+        setRotateOutcomes((prev) => ({
+          ...prev,
+          [_teamAtCall]: {
+            plaintext: '', expiresAt: null,
+            warning: (mk && mk.warning) ? String(mk.warning) : '',
+            refusal: `The server did not return the replacement key\u2019s value, so it cannot be shown. ${rowName} has already been revoked, so applications using the old key have stopped working. Refresh the list, revoke the unused replacement row, and create a new key.`,
+          },
+        }))
       }
       // A stale response may not write anything that renders under the new
-      // team's header (the refusal below, the prefix clear, the refresh).
+      // team's header (the prefix clear and the refresh below). The refusal is
+      // no longer in that list (#8249) — it is latched above, keyed by the
+      // team it names, so a switch retains it instead of dropping it.
       if (orgIdRef.current !== _teamAtCall) return
       // #4342: a 2xx rotate that carries no revealable plaintext is NOT a
       // reveal. The secret is unrecoverable at this point AND the old key was
@@ -6867,16 +6917,21 @@ function claimIntentInFlight() {
       // already refuse the falsy case). The remedy is rotate-specific: create
       // cannot lose a live credential, rotate already has.
       if (!plaintext) {
-        // Refresh FIRST, then surface the reason: `loadAll` owns the same
-        // `error` slot and overwrites it from its own catch, so a compound
-        // failure (the rotate succeeded, the refresh did not) would otherwise
-        // replace the one message that tells the user their old key is gone
-        // and which row to clean up. The identity guard mirrors the
-        // stale-response rule — a switch during the refresh must not carry this
-        // team's error under the new team's header.
+        // #8249: the refusal is NOT written to the `error` slot any more. That
+        // slot is not team-keyed and `loadAll` overwrites it from its own
+        // catch — so it could not hold a disclosure that has to outlive a
+        // switch, and the identity guard above used to drop the write
+        // entirely (the compound failure the old ordering worked around: the
+        // rotate succeeded, so the message is the only thing that tells the
+        // user their old key is gone). The record latched above is the one
+        // home; the banner reads it through `rotateOutcomeFor`, i.e. the
+        // active team's record only.
+        //
+        // The refresh still belongs here: the replacement row exists
+        // server-side and the displaced row is revoked, so the table has to
+        // show both. It runs only when the team is still ours — a stale
+        // response must not refresh another team's list.
         await loadAll('')
-        if (orgIdRef.current !== _teamAtCall) return
-        setError(`The server did not return the replacement key\u2019s value, so it cannot be shown. ${rowName} has already been revoked, so applications using the old key have stopped working. Refresh the list, revoke the unused replacement row, and create a new key.`)
         return
       }
       // #2246 (review, P2)/#4355: the SAME row-truth prefix clear `revokeKey`
@@ -9508,9 +9563,18 @@ function claimIntentInFlight() {
             )}
           </div>
         )}
-        {error && (
+        {/* #8249: the rotate refusal renders from the ACTIVE team's retained
+            outcome record, not from the `error` slot. The slot is not
+            team-keyed and `loadAll` owns it (it overwrites the value from its
+            own catch), so a switch landing on the rotate RTT used to drop the
+            one message that tells the user their key was destroyed; the same
+            element, the same treatment, but a source that outlives the switch
+            and is scoped to the team whose row the message names. A live
+            `error` keeps the slot — it is the more recent event — and the
+            refusal returns when it clears. */}
+        {(error || rotateRefusalText) && (
           <div className="error banner">
-            {errorMessage(error)}
+            {error ? errorMessage(error) : rotateRefusalText}
             {/* #4639: a genuine limit refusal offers the route that WORKS for
                 this team — checkout for a free/anon buyer, the portal for an
                 existing Stripe customer (checkout 409s on an active
