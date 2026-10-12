@@ -185,6 +185,14 @@ surfaces:
   # guard written for it. The `core` half is the primary arm — it pins
   # tortoise/read_status.py (no SOURCE_PATTERN) and tortoise/sdk.py.
   - test_read_status.py
+  # #7952 (§17.2): the COMPLETENESS MARKER — the `residency` field on the
+  # shipped GET /v1/search response (`not-hot` never stands in for an empty
+  # result). Registered here for the same reason as the row above: the route
+  # that serves the field lives in tortoise/hosted_api.py, an EXACT `api`
+  # SOURCE_PATTERN match, so without this arm a hosted_api.py-only change would
+  # run no guard for the field it emits. The `core` arm (below) is the primary
+  # one — it pins tortoise/residency.py (no SOURCE_PATTERN) and tortoise/sdk.py.
+  - test_residency_marker.py
   - test_hosted_aboutobject_journal_4240.py
   # #3718 (read half): the REST graph-READ handlers must not run synchronous
   # FalkorDB I/O on the event loop. Same dual registration as the three guards
@@ -2089,6 +2097,16 @@ surfaces:
   - test_sparse.py
   - test_status_projection.py
   - test_read_status.py  # #3892 (B6): the read-path status contract — the recorded four terms on search/recall (tortoise/read_status.py + tortoise/sdk.py; dual-registered with `api` for the hosted /v1/search field)
+  # #7952 (§17.2 / §17.3): the completeness marker (`not-hot`, never an empty
+  # result) and the second divergence surface (Postgres truth ↔ FalkorDB cache,
+  # divergence as a NUMBER). `core` is the primary arm: neither
+  # tortoise/residency.py nor tortoise/reconciliation.py matches a
+  # SOURCE_PATTERN, so a change to either alone falls through to `core`, and a
+  # zero-hit read of a declared-partial store must be shown to be `degraded` and
+  # not `empty` on the read path that changes here. The marker's own file is
+  # DUAL-REGISTERED with `api` (above) for the hosted /v1/search field.
+  - test_residency_marker.py
+  - test_reconciliation.py
   - test_stop_writes.py
   - test_structural_leg_r4.py
   - test_subjectadded_journal.py        # #2295 SubjectAdded journaling (docker lane)
