@@ -133,18 +133,20 @@ open_pr_count() { # -> echoes the open-PR count; never 0 on failure
   err="$(tr '\n' ' ' < "$O/state/.open-err.$$" 2>/dev/null || true)"
   rm -f "$O/state/.open-err.$$"
   if [ "$rc" -ne 0 ] || ! is_num "$raw"; then
-    sticky="$(cat "$O/state/last-open-n" 2>/dev/null)"
+    sticky="$(cat "$O/state/last-open-n" 2>/dev/null || true)"
     # ⛔ A sticky 0 is NOT reused. A drained queue (last success = 0) is exactly when new PRs are
     # most likely to have arrived before this failure, and returning 0 drives the UNSAFE direction:
     # OWN scope, no reviewer headroom, no merge-priority gate. Reuse only a POSITIVE last-known;
-    # absent / 0 / non-numeric assumes 11 = BROAD, because resuming a drain is idempotent while
-    # opening more lanes is not. THIS is what "never 0 on failure" means.
+    # absent / 0 / non-numeric assumes MERGE_PRIORITY_AT+1 = BROAD, because resuming a drain is
+    # idempotent while opening more lanes is not. THIS is what "never 0 on failure" means, and
+    # keying the fallback to the tunable (not a literal 11) keeps it above the threshold when
+    # MERGE_PRIORITY_AT is configured away from its default of 10.
     if is_num "$sticky" && [ "$sticky" -gt 0 ]; then
       echo "[scope] open=UNKNOWN rc=$rc (${err:-no stderr}) -> sticky last-known=$sticky" >> "$LOG"
       echo "$sticky"
     else
-      echo "[scope] open=UNKNOWN rc=$rc (${err:-no stderr}) -> no positive last-known (sticky='${sticky:-none}'), assuming 11 (BROAD)" >> "$LOG"
-      echo 11
+      echo "[scope] open=UNKNOWN rc=$rc (${err:-no stderr}) -> no positive last-known (sticky='${sticky:-none}'), assuming $(( ${MERGE_PRIORITY_AT:-10} + 1 )) (BROAD)" >> "$LOG"
+      echo $(( ${MERGE_PRIORITY_AT:-10} + 1 ))
     fi
     return 0
   fi

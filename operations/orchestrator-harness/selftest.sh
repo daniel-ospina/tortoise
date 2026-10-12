@@ -571,6 +571,11 @@ SH
   ck "a symlink TO the shim dir cannot enter the daemon PATH" $rc
   case ":$out2:" in *":$DP/realbin:"*) rc=0;; *) rc=1; echo "      symlinked-shim daemon PATH: $out2";; esac
   ck "a symlinked shim dir does not suppress the real binary's directory" $rc
+  # An EXPORTED `gh` function must not hide the real binary's directory: `type -P` ignores functions
+  # (a function is not what launchd execs), so resolution still finds realbin.
+  fnout="$( unset -f gh; gh() { exit 0; }; export -f gh; HOME="$DP/home" PATH="$DRIVE_PATH" bash "$DP/drive.sh" )"
+  case ":$fnout:" in *":$DP/realbin:"*) rc=0;; *) rc=1; echo "      function-perturbed daemon PATH: $fnout";; esac
+  ck "an exported 'gh' function does not hide the real binary's directory" $rc
 fi
 
 # ── 18) the install-time probe EXECUTES every tool, not just resolves it ────────
@@ -582,7 +587,7 @@ awk '/^for bin in tmux uv pi gh; do$/{f=1} f{print} f&&/^done$/{exit}' "$INST" >
 if need "$TMP/probe.sh" "the install-time probe is extracted from the shipped install.sh"; then
   PB="$TMP/probe"; mkdir -p "$PB/bin"
   for b in tmux uv gh; do printf '#!/bin/bash\nexit 0\n' > "$PB/bin/$b"; chmod +x "$PB/bin/$b"; done
-  { echo 'set -u'; echo 'die() { echo "DIED: $*" >&2; exit 9; }'; cat "$TMP/probe.sh"; } > "$PB/drive.sh"
+  { echo 'set -u'; echo 'die() { echo "DIED: $*" >&2; exit 9; }'; echo 'warn() { echo "WARN: $*" >&2; }'; cat "$TMP/probe.sh"; } > "$PB/drive.sh"
   bash -n "$PB/drive.sh" && rc=0 || rc=1
   ck "the probe driver parses" $rc
   printf '#!/bin/bash\nexit 127\n' > "$PB/bin/pi"; chmod +x "$PB/bin/pi"
@@ -593,6 +598,14 @@ if need "$TMP/probe.sh" "the install-time probe is extracted from the shipped in
   PATH="$PB/bin:/usr/bin:/bin" DAEMON_PATH="$PB/bin" bash "$PB/drive.sh" >/dev/null 2>&1; rc=$?
   [ "$rc" = "0" ] && rc=0 || { rc=1; echo "      probe rc=$rc (expected 0 when every resolved tool runs)"; }
   ck "the probe passes when every resolved tool runs" $rc
+  # An EXPORTED shell function named `gh` must NOT satisfy the probe: `command -v` reports it, but a
+  # function is not what launchd execs and the daemon PATH has no gh binary at all.
+  PB2="$PB/bin2"; mkdir -p "$PB2"
+  for b in tmux uv pi; do printf '#!/bin/bash\nexit 0\n' > "$PB2/$b"; chmod +x "$PB2/$b"; done
+  ( unset -f gh pi uv tmux; gh() { exit 0; }; export -f gh; \
+    PATH="$PB2:/usr/bin:/bin" DAEMON_PATH="$PB2" bash "$PB/drive.sh" ) >/dev/null 2>&1; rc=$?
+  [ "$rc" = "9" ] && rc=0 || { rc=1; echo "      probe rc=$rc (expected 9 — an exported gh FUNCTION is not a daemon binary)"; }
+  ck "an exported shell function does not satisfy the probe" $rc
 fi
 
 echo

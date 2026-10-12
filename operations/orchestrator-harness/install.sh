@@ -105,11 +105,13 @@ if [ -x "$HOME/.local/share/pi-node/current/bin/pi" ]; then
   command -v pi >/dev/null 2>&1 && add_dir "$HOME/.local/share/pi-node/current/bin"
 fi
 for bin in tmux gh uv pi; do
-  p="$(command -v "$bin" 2>/dev/null)" || continue
-  # ⛔ Trap (2): a shell function/alias makes `command -v` return a BARE name, and `dirname` of that
-  # is `.` — which the `cd`+`pwd` normalization below would turn into this install shell's CWD,
-  # baking the checkout the install was run from into an unattended daemon's PATH. Skip bare names
-  # BEFORE normalizing (after it, the relative form is gone and the guard in add_dir cannot see it).
+  # ⛔ Resolve the BINARY, not a shell function/alias. `command -v` reports an exported function
+  # REGARDLESS of PATH (and a BARE name for it), so with a `gh`/`pi` function in the environment the
+  # real binary's directory would never be found AND the name would be unusable. `type -P` searches
+  # PATH ONLY (ignoring functions/aliases) and returns an absolute path — exactly what launchd will
+  # exec — so trap (2) (a `.`-dirname from a bare name) cannot arise; the `/*` guard stays as
+  # defence in depth.
+  p="$(type -P "$bin" 2>/dev/null)" || continue
   case "$p" in /*) ;; *) continue ;; esac
   add_dir "$(cd "$(dirname "$p")" 2>/dev/null && pwd)"
 done
@@ -117,39 +119,47 @@ done
 # shim/.pi directory, so the shim can find it. Tested on the PHYSICAL path like add_dir(), so a
 # symlink TO a shim directory is recognised as a shim too.
 for bin in gh pi uv tmux; do
-  p="$(command -v "$bin" 2>/dev/null)" || continue
+  p="$(type -P "$bin" 2>/dev/null)" || continue
   case "$p" in /*) ;; *) continue ;; esac
   _pd="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)" || continue
   case "$_pd" in
     */shims|*/shims/*|*/.pi/*)
       _oldifs="$IFS"; IFS=:
+      # `for d in $PATH` word-splits on `:` and then GLOBS each entry: an entry containing `*`
+      # would expand to directories that are not PATH entries. Disable globbing for the scan.
+      case $- in *f*) _had_noglob=1 ;; *) _had_noglob=0 ;; esac
+      set -f
       for d in $PATH; do
         [ -n "$d" ] || continue
         _dd="$(cd "$d" 2>/dev/null && pwd -P)" || continue
         case "$_dd" in ""|*/shims|*/shims/*|*/.pi/*) continue ;; esac
         if [ -x "$d/$bin" ]; then add_dir "$d"; break; fi
       done
+      [ "$_had_noglob" = 1 ] || set +f
       IFS="$_oldifs" ;;
   esac
 done
 ok "daemon PATH: $DAEMON_PATH"
-# ⛔ PROBE BY EXECUTION — resolving a name is NOT running it. Every failure mode above is silent
-# at runtime, and a shim/wrapper directory that does NOT match the exclusion patterns (e.g. cmux's
-# `cmux-cli-shims`, a real one on this box) can be baked in while resolving the tool to a wrapper
-# that exits 127 — so EVERY tool is EXECUTED under the PATH about to be baked in, not merely
-# looked up. uv is optional (warned above), so a tool this install shell cannot run at all is
-# skipped: the probe checks RESOLUTION and never invents a new hard dependency.
-# This probe catches a shim/wrapper whose real binary is not usable on the daemon PATH; it is still
-# BLIND to trap (3) — TCC refuses the read only when LAUNCHD does it, not when an interactive
-# install shell does.
+# ⛔ PROBE BY EXECUTION AND BY ABSOLUTE PATH. Resolving a name is not running it, and `command -v`
+# cannot answer the daemon's question: it reports an EXPORTED SHELL FUNCTION (which launchd never
+# sees), and executed by bare name it would run the function instead of the daemon's binary — a
+# false green. `type -P` under the daemon PATH returns the absolute binary launchd will exec
+# (ignoring functions/aliases); each is then EXECUTED. A shim/wrapper directory that does not match
+# the exclusion patterns (cmux's `cmux-cli-shims` is a real one) is caught here because its tool
+# exits 127. uv is optional (warned above): its failure WARNS, and is never fatal. Still BLIND to
+# trap (3) — TCC refuses the read only when LAUNCHD does it, not when an interactive shell does.
 for bin in tmux uv pi gh; do
-  command -v "$bin" >/dev/null 2>&1 || continue
-  PATH="$DAEMON_PATH" command -v "$bin" >/dev/null 2>&1 \
-    || die "daemon PATH cannot resolve $bin (the install shell can): $DAEMON_PATH"
+  command -v "$bin" >/dev/null 2>&1 || continue     # not present in this shell at all
+  _p="$(PATH="$DAEMON_PATH" type -P "$bin" 2>/dev/null)"
+  case "$_p" in /*) ;; *) _p="" ;; esac
   # tmux takes -V; the rest take --version. Either way it must actually EXECUTE.
   _vflag="--version"; [ "$bin" = "tmux" ] && _vflag="-V"
-  PATH="$DAEMON_PATH" "$bin" "$_vflag" >/dev/null 2>&1 \
-    || die "daemon PATH resolves a $bin that does not RUN: $DAEMON_PATH"
+  if [ -n "$_p" ] && "$_p" "$_vflag" >/dev/null 2>&1; then continue; fi
+  if [ "$bin" = "uv" ]; then
+    warn "daemon PATH cannot run uv — lane.sh will not sync worktrees: $DAEMON_PATH"
+  else
+    die "daemon PATH cannot run $bin: $DAEMON_PATH"
+  fi
 done
 
 # ── the merge authority ──────────────────────────────────────────────────────────

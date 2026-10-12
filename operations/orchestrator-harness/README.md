@@ -109,6 +109,7 @@ processes in tmux sessions, so a killed worker cannot take the controller down w
 | `state/parked-<PR>` | terminal state: the fixer cap was reached at the head recorded inside the file, so the sweep skips it until a new push re-arms it |
 | `state/rerun-<PR>-<runid>` | CI re-run already requested for this run — prevents loops |
 | `state/merged-<PR>.done` | merge confirmation |
+| `state/last-open-n` | the last SUCCESSFUL open-PR count; reused only when positive if a later count fails — a failure never reads as 0 |
 | `logs/` | one log per worker: `lane-*.log`, `chain-*.log`, `merge-*.log`, `fix-*.log`, `orch-loop.log` |
 | `wip/` | dirty-worktree captures taken before a shutdown (see §6) |
 
@@ -180,7 +181,8 @@ pins; the live total is printed by `./selftest.sh` rather than quoted here.
                        # fail-closed gate classifier, claim atomicity and stale-claim recovery,
                        # the reaper's keep/reap decisions, rejection of a hostile branch name,
                        # install.sh rendering with a hostile path, limit-default consistency,
-                       # placeholder parity, README overclaim guards, credential scan
+                       # placeholder parity, the daemon PATH (shim exclusion + execute-probe) and
+                       # the failed-count fallback, README overclaim guards, credential scan
 ```
 
 **The gate key only reaches the daemon if it is a FILE.** `install.sh` deliberately does not copy a
@@ -488,7 +490,10 @@ algorithmic advantage. The claim worth evaluating is *utilisation*, not *efficie
 same idea and are no longer invoked; they are included for the record, not for use.
 
 **Portability edits applied to every shipped script.** Three per-box constants became
-overridable with this box's values as defaults:
+overridable with this box's values as defaults (the launchd `PATH` is no longer one of them —
+`install.sh` renders the `__PATH__` placeholder from the directories `tmux`/`gh`/`uv`/`pi` actually
+resolve to, refusing any `*/shims`, `*/shims/*` or `*/.pi/*` directory because macOS TCC makes such
+a symlink EPERM under launchd, and then probes each tool by executing it):
 
 ```bash
 OR="${OR:-daniel-ospina/tortoise}"
