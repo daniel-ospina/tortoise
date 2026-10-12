@@ -286,9 +286,21 @@ def _log_and_capture(exc: BaseException, *, where: str) -> None:
       the three correction-#8 revokes  → each the single capture for its terminal path
                                         (family revoke / membership revoke /
                                         poisoned-scope revoke)
-      `exchange_auth_code` / `refresh_grant` pre-consume/pre-mint `except Exception`
+      `exchange_auth_code` pre-mint `except Exception`
                                        → this call IS the single capture for that path
+      `refresh_grant` MINT failure (`where="refresh_grant mint"`)
+                                       → this call IS the single capture for that path
+                                        (it replaces the capture `_issue_tokens` lane 2
+                                        owned before #3025; the pre-mint read handler
+                                        above is a DIFFERENT path and captures the
+                                        pre-mint failure instead — neither re-captures
+                                        the other)
       `oauth_token` boundary           → this call IS the single capture for that path
+
+    LOG-ONLY paths (deliberately NO capture, listed so the absence is not read as
+    an omission): the refused-code burn failure — a control-plane failure while
+    RECORDING an already-decided refusal must not page, and the coherent OAuth
+    error is still raised; the pre-#3025 table made the same choice for its lane 3.
 
     #2863's `_issue_tokens` lanes are gone (#3025): the rollback/observe protocol
     they captured for no longer exists, so neither does its capture accounting.
@@ -1550,8 +1562,8 @@ def exchange_auth_code(cp, body: dict, base: str) -> dict:
         # ── validation of the code row's IMMUTABLE bound fields ──────────────
         # Collected rather than raised one at a time so that a REFUSAL is
         # recorded durably in the same transaction as the claim (the
-        # `reject_note` path) rather than being one of several independent
-        # raises.
+        # `redemption_note='terminal'` path) rather than being one of several
+        # independent raises.
         #
         # ORDER, and why it is not the pre-#3025 order: `validate_scope` used to
         # be the LAST check, inside the now-deleted `_issue_tokens` — i.e. after
@@ -1586,14 +1598,23 @@ def exchange_auth_code(cp, body: dict, base: str) -> dict:
         # RFC 8707: the resource at the token endpoint must resolve to the same
         # org the authorization code was bound to (lenient when omitted — the
         # mcp SDK always sends it, but a bare authorize→token pair is legal).
+        # `parse_resource`'s own 400 is COLLECTED like the rest: it is raised
+        # after the claim, so leaving it outside would make the burn depend on
+        # which helper raised — the pre-#3025 code burned every terminal signal
+        # after the claim, and the `p_burn` path must not silently carve one out.
         if refusal is None:
             resource = body.get("resource")
             if resource:
-                _, requested_org = parse_resource(base, resource)
-                if requested_org is not None and requested_org != observed["org_id"]:
-                    refusal = ("resource-mismatch", OAuthError(
-                        400, "invalid_grant",
-                        "Resource indicator does not match the authorized team."))
+                try:
+                    _, requested_org = parse_resource(base, resource)
+                except OAuthError as exc:              # 400 invalid_resource
+                    refusal = ("invalid-resource", exc)
+                else:
+                    if (requested_org is not None
+                            and requested_org != observed["org_id"]):
+                        refusal = ("resource-mismatch", OAuthError(
+                            400, "invalid_grant",
+                            "Resource indicator does not match the authorized team."))
         if refusal is None:
             try:
                 _assert_org_usable(cp, observed["org_id"])
@@ -1607,12 +1628,20 @@ def exchange_auth_code(cp, body: dict, base: str) -> dict:
             # the pre-#3025 `_settle_redemption` burn was: a control-plane failure
             # while RECORDING a refusal must not turn a coherent OAuth error into
             # a 500 — the code simply stays unclaimed and the client may retry.
+            #
+            # A RETRYABLE signal must NEVER burn (the pre-#3025 rule was
+            # `if consumed and not isinstance(exc, OAuthTemporarilyUnavailable)`).
+            # Nothing reachable inside the collection above is retryable today —
+            # `_assert_org_usable` raises only 403 and the rest are 400s — so this
+            # guard is structural rather than live: it keeps the rule true by
+            # construction instead of by inspecting every callee.
             logger.info("oauth: code refused (%s)", refusal[0])
-            try:
-                _redeem_code_rpc(cp, observed=observed, code=code, scope="",
-                                 burn=True)
-            except Exception as exc:
-                logger.warning("oauth: refused-code burn failed: %s", exc)
+            if not isinstance(refusal[1], OAuthTemporarilyUnavailable):
+                try:
+                    _redeem_code_rpc(cp, observed=observed, code=code, scope="",
+                                     burn=True)
+                except Exception as exc:
+                    logger.warning("oauth: refused-code burn failed: %s", exc)
             raise refusal[1]
 
         attempted = True

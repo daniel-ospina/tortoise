@@ -811,6 +811,58 @@ def test_prev_access_revoke_failure_aborts_the_rotation_and_the_retry_succeeds(
     assert len(_live(cp, "oauth_access_tokens")) == 1     # only the new pair is live
 
 
+def test_the_refresh_mint_failure_path_captures_exactly_once(monkeypatch, fault_client):
+    """The I4 invariant at the capture site #3025 INTRODUCES.
+
+    `refresh_grant`'s mint handler owns the capture that `_issue_tokens` lane 2
+    owned before this change (`where="refresh_grant mint"`). The parametrized
+    test above cannot reach it — it faults the PRE-mint reads — so without this
+    arm the invariant is unpinned at exactly the site the change moved it, which
+    is the same class PR #3097 review cycle 1 finding #5 fixed for the older
+    arms. The `where` tag is asserted for that same reason: a bare count of 1
+    would also hold if the capture came from the global unhandled-exception
+    handler (which tags method/path) instead.
+    """
+    calls = []
+
+    def _cap(exc, **kw):
+        calls.append(kw)
+
+    monkeypatch.setattr("tortoise.sentry.capture_exception", _cap)
+    tc, cp = fault_client
+    _, rt = _seed_refresh_token(cp, "cap-mint-rt")
+    cp.fail_rpc("rotate_oauth_refresh", after_commit=False)
+    r = _post_refresh(tc, cp, rt)
+    assert r.status_code == 503 and r.json()["error"] == "temporarily_unavailable"
+    assert len(calls) == 1, calls
+    assert calls[0].get("tags", {}).get("where") == "refresh_grant mint", calls[0]
+
+
+def test_an_invalid_resource_burns_the_code_like_every_other_refusal(fault_client):
+    """`parse_resource`'s 400 is a TERMINAL refusal like the rest, and it is raised
+    AFTER the code is claimed, so it must BURN.
+
+    The pre-#3025 code burned every non-retryable `OAuthError` raised after the
+    claim (`if consumed and not isinstance(exc, OAuthTemporarilyUnavailable)`).
+    In the #3025 shape the refusal is recorded in the same transaction as the
+    claim, so if `parse_resource` were left OUTSIDE the collector the burn would
+    depend on WHICH helper raised — the sibling `resource-mismatch` burning while
+    `invalid_resource` left the row `unclaimed`. Both branches are pinned here.
+    """
+    tc, cp = fault_client
+    verifier = _seed_code(cp, "bad-resource")
+    r = _post_code(tc, cp, "bad-resource", verifier, resource="not-a-valid-resource-uri")
+    assert r.status_code == 400 and r.json()["error"] == "invalid_resource", r.text
+    row = cp.tables["oauth_codes"][0]
+    assert row["redemption_state"] == "burned", row
+    assert row["redemption_note"] == "terminal", row
+    assert _live(cp, "oauth_access_tokens") == []
+    assert _live(cp, "oauth_refresh_tokens") == []
+    # And the burn is terminal: the same code cannot be exchanged afterwards.
+    r2 = _post_code(tc, cp, "bad-resource", verifier, resource=None)
+    assert r2.status_code == 400 and r2.json()["error"] == "invalid_grant", r2.text
+
+
 @pytest.mark.parametrize("table", ["oauth_clients", "organizations"])
 @pytest.mark.parametrize("grant", ["code", "refresh"])
 def test_exactly_one_capture_per_conversion_path(monkeypatch, fault_client, table, grant):
@@ -996,7 +1048,10 @@ class _RoundTripCounter:
         self.calls: list[str] = []
 
     def _trip(self, op, fn, *a, **k):
-        table = a[0] if a and isinstance(a[0], str) else (k.get("fn") or "?")
+        # The kwarg spelling counts as much as the positional one: a refactor to
+        # `cp.query(table=...)` must not record `query:?` (PR #7565 review).
+        table = a[0] if a and isinstance(a[0], str) else (
+            k.get("table") or k.get("fn") or "?")
         method = k.get("method") or ""
         self.calls.append(f"{op}:{table}{':' + method if method else ''}")
         if self.per_call_s:
@@ -1013,6 +1068,11 @@ class _RoundTripCounter:
         return self._trip("rpc_value", self._inner.rpc_value, *a, **k)
 
     def __getattr__(self, name):
+        # Never proxy dunders or the wrapped plane's own private state: a proxy
+        # that forwards `__deepcopy__`/`__getstate__`/`_inner` silently changes
+        # how the object is copied or pickled (PR #7565 review).
+        if name.startswith("__") or name.startswith("_"):
+            raise AttributeError(name)
         return getattr(self._inner, name)
 
 

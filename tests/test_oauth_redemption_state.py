@@ -334,7 +334,7 @@ def test_a_lost_minted_settle_capture_events_when_compensation_fails(
         fault_client, monkeypatch):
     """The delivery-gate-loss path owns its ONE Sentry capture (I4).
 
-    Nothing has captured yet (`_issue_tokens` succeeded), and the handler only
+    Nothing has captured yet (the mint RPC committed), and the handler only
     logs — so when the compensation ALSO fails, a live never-delivered token row
     must not vanish silently. `capture=False` here is the observability hole a
     review caught; this pins the fix."""
