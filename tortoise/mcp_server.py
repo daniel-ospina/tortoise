@@ -5355,8 +5355,9 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
     # that will raise is the fail-open direction of the same defect).
     # Placed AFTER the 2a loop and BEFORE `succ_rows`: the writer validates
     # every relationship type before its window guard, so an undeclared rel
-    # type must win in BOTH. Own queries — `succ_rows` returns ID(n) only and
-    # its `[0]` indexing is relied on by every pass below.
+    # type must win in BOTH. Own query: `succ_rows` returns ID(n) only, kept
+    # separate from the window query above because its `[0]` indexing is used
+    # by the passes below.
     win_rows = proj.g.query(
         "MATCH (o:Point {id:$old}), (n:Point {id:$new}) "
         "RETURN o.validFrom, n.validFrom, n.createdAt",
@@ -5376,11 +5377,13 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
         )
     succ_rows = proj.g.query("MATCH (n:Point {id:$id}) RETURN ID(n)",
                             params={"id": new_id}).result_set
-    # 2b's self-edge guard mirrors the writer EXACTLY: `succ_rows[0][0]` is a
-    # scalar (the writer reads only the first successor row), so with a
-    # duplicate successor id the writer still transfers an old edge that ends
-    # at a LATER successor. `succ_count` models the writer's MATCH fan-out.
-    succ_first = succ_rows[0][0] if succ_rows else None
+    # 2b's self-edge guard mirrors the writer EXACTLY: the writer compares the
+    # structural target against EVERY successor node (#7822) — point ids are
+    # not unique, so the writer's MERGE binds every node carrying `new_id` and
+    # a scalar read protected only the server's first row, minting the phantom
+    # self-edge at the LATER successor nodes. `succ_count` models the writer's
+    # MATCH fan-out.
+    succ_internals = {r[0] for r in succ_rows}
     succ_count = max(len(succ_rows), 1)
     # Pre-existing edges at the successor: the MERGE-backed legs collapse into
     # an edge that is already there, so it is NOT net-new ("edges that would
@@ -5446,7 +5449,7 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
             params={"old": old_id},
         ).result_set:
             handled_old_edge_ids.add(rid)
-            if succ_first is not None and t_internal == succ_first:
+            if t_internal in succ_internals:
                 dropped.append({"type": rtype, "other": tid or new_id,
                                 "reason": "far endpoint IS the successor — delete-only"})
             else:

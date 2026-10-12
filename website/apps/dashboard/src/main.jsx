@@ -8412,10 +8412,14 @@ function claimIntentInFlight() {
                       const activeFamily = harnessFamilyOf(wizardHarness) || HARNESS_FAMILIES[0]
                       const surfaces = activeFamily.surfaces
                       const displayName = harnessDisplayName(wizardConnectHarness)
-                      const agentDriven2Step = ['pi', 'cursor']
-                      // 'codexDesktop' is the Codex GUI leaf — same payload shape
-                      // as the CLI (a config block instead of an agent prompt).
-                      const agentDriven1Step = ['claude', 'codex', 'codexDesktop']
+                      // #3232: Claude Code and Codex join Pi/Cursor in the
+                      // two-block handshake (key → set up → restart/verify). They
+                      // used to render ONE prompt whose tail called
+                      // `tortoise_health` / `tortoise_create_point` in the same
+                      // session that wrote the MCP config — before any restart
+                      // could load the server. `codexDesktop` stays single-block:
+                      // it is a human TOML paste with no agent-facing verify.
+                      const agentDriven2Step = ['pi', 'cursor', 'claude', 'codex']
                       // #2710: pills are pure display-mode toggles — they must
                       // never queue the shared create modal (it renders only in
                       // the dashboard tree, so it would pop after exit).
@@ -8466,21 +8470,17 @@ function claimIntentInFlight() {
                               onCopied={() => wizardBeacon(wizardConnectHarness, 'prompt')} />
                           </>
                         )
-                      } else if (agentDriven1Step.includes(wizardHarness)) {
+                      } else if (wizardConnectHarness === 'codexDesktop') {
                         // #2827: the Codex Desktop surface configures a TOML file
                         // the HUMAN pastes, so the "give your agent this prompt"
-                        // caption would lie there.
-                        procedure = wizardConnectHarness === 'codexDesktop' ? (
+                        // caption would lie there — and there is no agent-facing
+                        // verify to order against a restart. #3232: it is the ONE
+                        // config-writing leaf that stays single-block.
+                        procedure = (
                           <>
                             <p className="wizard-caption">{HARNESS_INTRO.codexDesktop}</p>
                             <WizardPromptCard text={UNIVERSAL_COMMAND.codexDesktop(harnessKey)} label={HARNESS_COPY_LABEL.codexDesktop}
                               onCopied={() => wizardBeacon(wizardConnectHarness, 'config')} />
-                          </>
-                        ) : (
-                          <>
-                            <p className="wizard-caption">{WIZARD_CAPTIONS.connect}</p>
-                            <WizardPromptCard text={wizardPromptText(wizardConnectHarness, 1, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.promptLabel}
-                              onCopied={() => wizardBeacon(wizardConnectHarness, 'both')} />
                           </>
                         )
                       } else if (wizardKeyless) {
@@ -8671,10 +8671,10 @@ function claimIntentInFlight() {
                                   </WizardBlock>
                                   {/* #3218: the tail renders ONLY for the
                                       procedures that really have a third part
-                                      (Pi/Cursor restart-and-verify; Claude
-                                      Desktop/Web hand Claude the workflows).
-                                      Claude Code / Codex / Codex Desktop stay
-                                      1–2 blocks — a numbered heading with
+                                      (Pi/Cursor and #3232 Claude Code/Codex
+                                      restart-and-verify; Claude Desktop/Web hand
+                                      Claude the workflows). Codex Desktop stays
+                                      single-block — a numbered heading with
                                       nothing under it is the #2912 defect. */}
                                   {procedureTail && (
                                     <WizardBlock step={3} title={procedureTailTitle}>
@@ -8692,7 +8692,10 @@ function claimIntentInFlight() {
                               <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
                                 {wizardConnectBusy ? 'Checking…' : (wizardKeyless
                                   ? (HARNESS_CONTINUE_LABEL[wizardHarness] || "I've connected it — Continue →")
-                                  : (['pi','cursor'].includes(wizardHarness) ? 'Done — Continue to dashboard' : "I've set it up — Continue →"))}
+                                  /* #3232: the group is the SAME derivation as the procedure split —
+                                     a second literal leaf list here left the newly two-block Claude
+                                     Code / Codex reading the single-prompt label. */
+                                  : (agentDriven2Step.includes(wizardHarness) ? 'Done — Continue to dashboard' : "I've set it up — Continue →"))}
                               </button>
                               <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
                             </div>

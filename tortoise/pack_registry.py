@@ -12,6 +12,7 @@ Design:
 from __future__ import annotations
 
 import dataclasses
+import difflib
 import logging
 import os
 from pathlib import Path
@@ -676,6 +677,14 @@ class PackRegistry:
         self.packs_dir = Path(packs_dir)
         self.packs: dict[str, PackManifest] = {}
         self.errors: dict[str, list[str]] = {}  # namespace → error messages
+        # #2781: namespace → UNRESOLVED EXTERNAL REFERENCE messages. Distinct
+        # from `errors` on purpose: an error isolates the pack (its manifest is
+        # unusable), while an unresolved reference is a MISSING PEER — the
+        # pack's own manifest is valid and it stays loaded, so one absent pack
+        # cannot cascade through the catalog. Named "unresolved_refs" rather
+        # than "warnings" because the hosted install path reads it as a
+        # FAIL-CLOSED refusal (see pack_manifest_store.validate_manifest).
+        self.unresolved_refs: dict[str, list[str]] = {}
         # #1930: set by domain_loader._get_registry when the TORTOISE_PACKS_DIR
         # leg was unusable (0 valid packs / load failure) and the registry
         # fell back to the default catalog — a queryable diagnostic for ops.
@@ -692,6 +701,27 @@ class PackRegistry:
         cross-pack) is excluded from self.packs so the compiled vocabulary
         (expansions, brief, register_kinds) only ever sees healthy packs.
         Errors remain queryable via self.errors.
+
+        #2781 — a MISSING PEER is not a broken manifest, and it no longer
+        cascades. Two buckets, deliberately separated:
+
+          * ``self.errors``      — the manifest is unusable (schema/cross-pack
+                                   typo). The pack is ISOLATED (removed from
+                                   ``self.packs``).
+          * ``self.unresolved_refs`` — the pack's own manifest is valid but a
+                                   reference (or a declared ``depends_on``)
+                                   names a pack that is not loaded. The pack
+                                   STAYS loaded; the reference simply matches
+                                   nothing, and the diagnostic names the
+                                   missing pack. Availability over strictness:
+                                   one absent pack must not take down the
+                                   catalog (before #2781, dropping `pm` also
+                                   dropped `dev` and `product-strategy`).
+
+        The hosted INSTALL path is the fail-closed half of the same contract:
+        ``pack_manifest_store.validate_manifest`` refuses an install whose refs
+        or declared dependencies cannot be satisfied by the tenant's installed
+        set (see ``_missing_pack_explanation`` for the exact clause split).
         """
         if not self.packs_dir.exists():
             return 0
@@ -701,6 +731,7 @@ class PackRegistry:
         # call. Reload must be idempotent.
         self.packs = {}
         self.errors = {}
+        self.unresolved_refs = {}
         count = 0
         for manifest_path in sorted(self.packs_dir.glob("*/manifest.yaml")):
             ns = manifest_path.parent.name
@@ -741,6 +772,23 @@ class PackRegistry:
                 "pack registry %s: %d pack(s) failed validation and were "
                 "isolated (see registry.errors): %s",
                 self.packs_dir, len(self.errors), ", ".join(sorted(self.errors)),
+            )
+        # #2781: an unresolved cross-pack reference must never be silent — but
+        # it must not take the pack down either. Warn-once per (dir, message
+        # set) so a repeated load of the same degraded dir does not spam.
+        if self.unresolved_refs:
+            _warn_packs_once(
+                ("unresolved-refs", str(self.packs_dir),
+                 tuple(sorted((ns, tuple(msgs))
+                              for ns, msgs in self.unresolved_refs.items()))),
+                "pack registry %s: %d pack(s) loaded with UNRESOLVED cross-pack "
+                "references — the packs stay loaded; install the named pack(s) "
+                "or declare them in depends_on (see registry.unresolved_refs): "
+                "%s",
+                self.packs_dir, len(self.unresolved_refs),
+                "; ".join(
+                    f"{ns}: {msgs[0]}"
+                    for ns, msgs in sorted(self.unresolved_refs.items())),
             )
         return count
 
@@ -1458,6 +1506,20 @@ class PackRegistry:
                             f"equivalentTo: '{target}' must use 'namespace:kind' format"
                         )
 
+        # depends_on (#2781): the DECLARED pack-level dependency list. Consumed
+        # by load_all (an absent declared dep is reported against the declaring
+        # pack and — per #2781 — explains its unresolved references) and by the
+        # hosted install validator (which refuses the install). SHAPE is checked
+        # here so a malformed value is a schema error instead of a crash or a
+        # phantom dependency in the consumer: `depends_on: pm` (a bare string)
+        # iterates as characters and would report a dependency on `p`.
+        depends_on = raw.get("depends_on") or []
+        if not isinstance(depends_on, list) or not all(
+                isinstance(d, str) and d.strip() for d in depends_on):
+            errors.append(
+                "depends_on must be a list of non-empty pack namespaces"
+            )
+
         return errors
 
     # ── Cross-pack validation ──────────────────────────────────────────
@@ -1472,10 +1534,43 @@ class PackRegistry:
           4. Every chain step resolves — bare steps may be this pack's own
              kinds, core kinds, or kinds declared by exactly ONE other pack
              (ambiguous bare names are errors, R6 §3.2 / plan W-5 failure b).
-        Adds errors to self.errors keyed by pack namespace.
+
+        An UNRESOLVABLE reference lands in one of two buckets (#2781):
+
+          * ``self.errors`` — a typo. The namespace resolves but the kind does
+            not, or a bare name resolves nowhere and the declaring pack's own
+            ``depends_on`` is fully satisfied. The pack is isolated.
+          * ``self.unresolved_refs`` — a MISSING PACK. A namespaced ref whose
+            namespace is not loaded, or any unresolvable ref whose declaring
+            pack also has a ``depends_on`` entry that is not loaded. The pack
+            stays loaded; the diagnostic names the missing pack.
+
+        See ``_missing_pack_explanation`` for why those two clauses are
+        evidence of absence rather than leniency.
         """
+        # Rebuilt (never appended to): load_all re-runs this pass against the
+        # post-isolation surviving set and unresolved keys keep their packs, so
+        # an append would duplicate every message on the second pass.
+        self.unresolved_refs = {}
+
         # Build the set of all known kinds (core + all packs)
         all_known = self._all_known_kinds()
+        loaded = set(self.packs)
+
+        # #2781: declared dependencies that are not loaded. This is BOTH a
+        # report (below) and the evidence clause `_missing_pack_explanation`
+        # uses to tell a MISSING PACK from a typo for a bare kind name.
+        missing_deps: dict[str, list[str]] = {
+            ns: [d for d in pack.depends_on if d not in loaded]
+            for ns, pack in self.packs.items()
+        }
+        for ns, deps in missing_deps.items():
+            for dep in deps:
+                self.unresolved_refs.setdefault(ns, []).append(
+                    f"depends_on: declared dependency '{dep}' is not loaded — "
+                    f"install pack '{dep}' (the pack stays loaded; its "
+                    f"references into '{dep}' are unresolved)"
+                )
 
         # Bare-name index for single-namespace resolution (chain steps,
         # nearMisses): bare kind name → full 'ns:kind' forms.
@@ -1518,12 +1613,9 @@ class PackRegistry:
                     status = self._resolve_kind_ref(
                         kind_val, rel_pack_kinds, all_known, bare_index)
                     if status == "unknown":
-                        msg = (
-                            f"relation '{pred}': {direction} '{kind_val}' "
-                            f"does not resolve to any known kind "
-                            f"(core or loaded pack)"
-                        )
-                        self.errors.setdefault(ns, []).append(msg)
+                        self._report_unresolved(
+                            ns, f"relation '{pred}': {direction} '{kind_val}'",
+                            kind_val, loaded, missing_deps[ns])
 
                 # #7852: every relation nearMisses target resolves to a
                 # declared predicate or a semantics value — the same split
@@ -1541,12 +1633,9 @@ class PackRegistry:
             for kind, targets in pack.kind_equivalences.items():
                 for target in targets:
                     if target not in all_known:
-                        msg = (
-                            f"equivalentTo: target '{target}' (for '{kind}') "
-                            f"does not resolve to any known kind "
-                            f"(core or loaded pack)"
-                        )
-                        self.errors.setdefault(ns, []).append(msg)
+                        self._report_unresolved(
+                            ns, f"equivalentTo: target '{target}' (for '{kind}')",
+                            target, loaded, missing_deps[ns])
 
             # Manifest v3.1 (#1026): resolve every kind reference the v3.1
             # extraction slots declare. SHAPE was checked per-manifest in
@@ -1573,10 +1662,8 @@ class PackRegistry:
                 status = self._resolve_kind_ref(
                     ref, v31_kinds, all_known, bare_index)
                 if status == "unknown":
-                    self.errors.setdefault(ns, []).append(
-                        f"{label} does not resolve to any known kind "
-                        f"(core or loaded pack)"
-                    )
+                    self._report_unresolved(
+                        ns, label, ref, loaded, missing_deps[ns])
                 elif status == "ambiguous":
                     self.errors.setdefault(ns, []).append(
                         f"{label} is ambiguous — declared by multiple packs; "
@@ -1591,12 +1678,9 @@ class PackRegistry:
                         target, pack_kinds, all_known, bare_index
                     )
                     if status == "unknown":
-                        msg = (
-                            f"kindDefs '{kind}': nearMisses target '{target}' "
-                            f"does not resolve to any known kind "
-                            f"(core or loaded pack)"
-                        )
-                        self.errors.setdefault(ns, []).append(msg)
+                        self._report_unresolved(
+                            ns, f"kindDefs '{kind}': nearMisses target '{target}'",
+                            target, loaded, missing_deps[ns])
                     elif status == "ambiguous":
                         msg = (
                             f"kindDefs '{kind}': nearMisses target '{target}' is "
@@ -1613,17 +1697,91 @@ class PackRegistry:
                         step, pack_kinds, all_known, bare_index
                     )
                     if status == "unknown":
-                        msg = (
-                            f"chain '{cid}': step '{step}' does not resolve to "
-                            f"any known kind (core or loaded pack)"
-                        )
-                        self.errors.setdefault(ns, []).append(msg)
+                        self._report_unresolved(
+                            ns, f"chain '{cid}': step '{step}'", step,
+                            loaded, missing_deps[ns])
                     elif status == "ambiguous":
                         msg = (
                             f"chain '{cid}': step '{step}' is ambiguous — "
                             f"declared by multiple packs; use 'namespace:kind'"
                         )
                         self.errors.setdefault(ns, []).append(msg)
+
+    def _report_unresolved(
+        self, ns: str, site: str, ref: str,
+        loaded: set[str], missing_deps: list[str],
+    ) -> None:
+        """Record an unresolvable ``ref`` as FATAL or as an unresolved peer.
+
+        ``site`` is the fully-qualified location prefix (e.g.
+        ``"relation 'addresses': toKind 'pm:issue'"``); ``ref`` is the bare
+        reference it carries. The FATAL half keeps the pre-#2781 message
+        verbatim so existing diagnostics and their assertions are unchanged.
+        """
+        explanation = self._missing_pack_explanation(ref, loaded, missing_deps)
+        if explanation is None:
+            self.errors.setdefault(ns, []).append(
+                f"{site} does not resolve to any known kind (core or loaded pack)"
+            )
+        else:
+            self.unresolved_refs.setdefault(ns, []).append(
+                f"{site} does not resolve to any known kind — {explanation}"
+            )
+
+    @staticmethod
+    def _missing_pack_explanation(
+        ref: str, loaded: set[str], missing_deps: list[str],
+    ) -> str | None:
+        """Why an unresolvable ``ref`` is a MISSING PEER, not a typo (#2781).
+
+        Returns the explanatory tail of the diagnostic, or ``None`` when the
+        ref must stay a hard error (the pack is isolated). Two clauses, each
+        carrying its own evidence:
+
+          1. **A namespaced ref whose namespace is not loaded.** The namespace
+             does not resolve at all, so the ref cannot be a misspelling
+             *inside a present pack* — it names a pack that is simply not
+             installed. (A namespaced ref into a PRESENT pack is excluded from
+             this clause and every other: there the namespace resolves and only
+             the kind can be wrong, which is a typo — `dev:isue` must stay
+             fatal.)
+          2. **The declaring pack has an unloaded ``depends_on`` entry.** A
+             bare name carries no namespace, so its absence is not by itself
+             evidence of anything; but a pack that DECLARED a dependency it
+             does not have has already told us it expects a pack that is not
+             there. That is the declaration doing work — the reason
+             ``depends_on`` exists — and it is what turns a catalog-wide
+             cascade into one reported, survivable gap.
+
+        Neither clause weakens the typo guard where it can be exact: a bare
+        name that resolves nowhere with a complete dependency set, and any
+        ambiguous bare name, remain fatal (they go to ``errors``).
+        """
+        if ":" in ref:
+            if ref.startswith("core:"):
+                # A core ref never names a pack, so no declared dependency can
+                # explain it away (the engine emits this spelling for core kinds
+                # — see _resolve_kind_ref — and a bad kind after it is a typo).
+                return None
+            target_ns = ref.split(":", 1)[0]
+            if target_ns in loaded:
+                return None  # present namespace ⇒ only the kind can be wrong
+            hint = ""
+            close = difflib.get_close_matches(
+                target_ns, sorted(loaded), n=1, cutoff=0.8)
+            if close:
+                hint = f" (did you mean '{close[0]}'?)"
+            return (
+                f"it references pack '{target_ns}', which is not loaded — "
+                f"install pack '{target_ns}' or declare it in depends_on{hint}"
+            )
+        if missing_deps:
+            names = ", ".join(f"'{d}'" for d in missing_deps)
+            return (
+                f"the pack declares depends_on {names}, which is not loaded — "
+                f"install it if this name belongs to that pack"
+            )
+        return None
 
     @staticmethod
     def _pack_kind_set(pack: PackManifest) -> set[str]:

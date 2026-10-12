@@ -143,17 +143,6 @@
     },
     {
       "family": "wizard-caption",
-      "kind": "data",
-      "renders": [
-        {
-          "label": "",
-          "text": "Give this prompt to your agent to connect Tortoise:",
-          "tags": []
-        }
-      ]
-    },
-    {
-      "family": "wizard-caption",
       "kind": "inline",
       "renders": [
         {
