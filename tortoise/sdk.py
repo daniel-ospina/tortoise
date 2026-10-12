@@ -5627,33 +5627,17 @@ class TortoiseSDK:
         # CREATEd but BEFORE PointAdded was journaled, so the graph gained an
         # orphan that a rebuild would drop (live != rebuild). Fail closed here,
         # pre-write, matching the bundle Phase-1 contract.
-        _ef_in = props.get("extractedFrom")
-        if _ef_in is not None:
-            if isinstance(_ef_in, str):
-                if not _ef_in.strip():
-                    # explicit "no provenance" == absent (the bundle contract
-                    # allows an empty list for the same reason), so session
-                    # inference may still apply below.
-                    props.pop("extractedFrom", None)
-            elif isinstance(_ef_in, (list, tuple)):
-                _clean = [r for r in _ef_in
-                          if isinstance(r, str) and r.strip()]
-                if len(_clean) != len(_ef_in):
-                    raise ValueError(
-                        "create_point: extractedFrom must be a non-empty "
-                        f"string or a list of non-empty strings (got {_ef_in!r})"
-                    )
-                if _clean:
-                    props["extractedFrom"] = _clean
-                else:
-                    props.pop("extractedFrom", None)
-            else:
-                raise ValueError(
-                    "create_point: extractedFrom must be a non-empty string "
-                    f"or a list of non-empty strings (got {_ef_in!r}); a "
-                    "non-string scalar would mint a corrupt Source, and raised "
-                    "after the write would leave an un-journaled Point (#3263)"
-                )
+        if props.get("extractedFrom") is not None:
+            # #8171 (review P2): the shape rules that used to be spelled out
+            # here now live in ONE place, `_validate_extracted_from`, shared
+            # with `create_entity`/`create_document`. Keeping a second copy
+            # beside a helper that documents itself as the single home for the
+            # contract is how the two silently drift — the helper's whole
+            # reason to exist is that the doors routing a ref to
+            # `projection._link_source` cannot disagree. Behaviour is
+            # unchanged: this door's inline rules WERE that contract's
+            # definition (#3263).
+            _validate_extracted_from(props, door="create_point")
         if not props.get("extractedFrom"):
             # #3263: branch on TYPE, not truthiness. The contract is "a
             # non-empty string can name a Source", so anything else that is
@@ -23753,7 +23737,7 @@ class TortoiseSDK:
             "node": node,
             "nudges": self._nudge_candidates(
                 name, exclude_ids=[node.get("id") or node.get("eventId")]),
-            **self._provenance_advisory(node, props),
+            **self._provenance_advisory(node, props, entity_type=t),
         }
 
     # ── #8171: the write-time provenance advisory ────────────────────
@@ -23772,14 +23756,47 @@ class TortoiseSDK:
     # `session:<id>` ref for what the writer itself asserts).
     _ENTITY_SOURCE_LABELS: ClassVar[dict[str, str]] = {"document": "Source"}
 
-    def _provenance_advisory(self, node: dict, props: dict) -> dict:
+    def _provenance_advisory(self, node: dict, props: dict,
+                             *, entity_type: str | None = None) -> dict:
         """Advisory when a write lands with no source and no provenance.
 
-        Returns ``{}`` when the node carries provenance (``extractedFrom``),
-        and ``{"advisories": [...]}`` when it does not. Never raises, never
-        blocks — see the block comment above.
+        Returns ``{}`` when the node carries provenance that this door can
+        HONOUR, and ``{"advisories": [...]}`` when it does not. Never raises,
+        never blocks — see the block comment above.
+
+        Sourcedness is not the mere PRESENCE of an ``extractedFrom`` field — it
+        is whether the door will MATERIALIZE it (review P2). Only document-kind
+        writes wire ``extractedFrom`` (``_ENTITY_SOURCE_LABELS``), so a
+        ``subject``/``object``/``event`` that declares one stores the ref as a
+        bare property, mints no ``:Source`` and wires no edge. Treating that as
+        "sourced" made the advisory silent about exactly the invented-provenance
+        gap it exists to report: the node asserts a source nothing can traverse
+        to, which is worse than declaring none (design contract #3).
         """
-        if props.get("extractedFrom") or props.get("sourceKind"):
+        _ref = props.get("extractedFrom")
+        if _ref and self._ENTITY_SOURCE_LABELS.get(entity_type or ""):
+            return {}
+        if _ref:
+            # Declared, but INERT for this type: no writer honours it.
+            _node_id = node.get("id") or node.get("eventId")
+            return {"advisories": [{
+                "code": "extracted_from_inert",
+                "node_id": _node_id,
+                "message": (
+                    f"extractedFrom is not wired for type={entity_type!r}. The "
+                    "ref is stored as a plain property and NO :Source is "
+                    "created, so the provenance cannot be traversed. "
+                    "`extractedFrom` is declared Point -> Source (ONTOLOGY "
+                    "3.3); a derived Event or Object reaches its source "
+                    "through its own `references` link (link_source_to_entity, "
+                    "4.6). Either use a door that wires it, or drop the ref so "
+                    "the node does not assert a source it cannot show."
+                ),
+                "advisory": True,
+            }]}
+        if props.get("sourceKind"):
+            # D10: a document IS a `:Source`, so a declared `sourceKind` IS its
+            # provenance statement — see the block comment above.
             return {}
         # #3263 parity (review P2): `create_point` INFERS `session:<id>` from
         # the write context, so a writer that supplied a usable `session_id` is
@@ -26274,7 +26291,8 @@ class TortoiseSDK:
         # `create_entity(type='document')` does — the two doors disagreeing is
         # the defect the shared guard exists to prevent, and an advisory that
         # reaches only one of two doors cannot change behaviour.
-        result.update(self._provenance_advisory(result, props))
+        result.update(self._provenance_advisory(result, props,
+                                                entity_type="document"))
         return result
 
     def _resolve_source_url(self, url: str) -> str:
@@ -28161,9 +28179,12 @@ def _post_commit(payload: dict, *, base_url=None, api_key=None) -> dict:
 def _validate_extracted_from(props: dict, *, door: str) -> None:
     """#8171: shape-check ``extractedFrom`` BEFORE any graph write.
 
-    The contract is `create_point`'s #3263 one, and it lives here so the doors
-    that route a ref to `projection._link_source` cannot disagree about what a
-    legal source ref is. Three input classes matter, and all three were
+    The contract is `create_point`'s #3263 one, and it lives here so the three
+    doors that route a ref to `projection._link_source` — `create_point`,
+    `create_entity`, `create_document` — cannot disagree about what a legal
+    source ref is. `create_point` used to spell the same rules out inline; it
+    now calls this, so there is one definition rather than a copy that can
+    drift. Three input classes matter, and all three were
     MEASURED to fail badly when unchecked, because `_link_source` fans out with
     `list(source_ref)`:
 

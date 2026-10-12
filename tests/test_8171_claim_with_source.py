@@ -201,17 +201,45 @@ def test_a_sourced_write_carries_no_advisory(tmp_path):
 
 # ── the shape guard (review P1) ────────────────────────────────────────
 #
-# `create_entity` hands the ref to `projection._link_source`, whose fan-out is
-# `list(source_ref)` for a non-str. MEASURED pre-fix, three ways, all worse
-# than a refusal:
+# The choke point is `projection._link_source`, whose fan-out is
+# `list(source_ref)` for a non-str — and the pre-fix callers that reached it
+# with an UNVALIDATED ref were `create_document` (since #394) and the
+# `create_entity` document path this change adds. MEASURED, three ways, all
+# worse than a refusal:
 #   - `extractedFrom=123`  → TypeError AFTER the CREATE → an ORPHAN node the
 #     caller gets no handle to (and an already-journaled EventRecorded on the
 #     event door);
 #   - `extractedFrom={...}` → one fabricated `:Source` PER KEY — an invented
 #     provenance, which the design contract says is worse than none;
 #   - a list with a non-str member → that member silently dropped.
-# `create_point` has refused all three pre-write since #3263; this is the
-# entity door being held to the same contract.
+# `create_point` has refused all three pre-write since #3263; the shape guard is
+# now ONE function all three doors call, so the rules cannot drift apart.
+
+
+def test_an_inert_extracted_from_on_a_non_document_still_advises(tmp_path):
+    """A declared ref this type cannot WIRE is a provenance gap, so advise it.
+
+    Only document-kind writes materialize `extractedFrom`. A subject/object/
+    event that declares one stores the ref as a bare property, mints no
+    `:Source` and wires no edge — the node then asserts a source nothing can
+    traverse to, which is worse than declaring none (design contract #3).
+    Keying the advisory on the PRESENCE of the field made it silent about
+    exactly that gap: the writer is told nothing while the node lies.
+
+    Pairs with `test_entity_domains_other_than_document_get_no_extracted_from_edge`,
+    which pins the inertness. This pins that the inertness is REPORTED.
+
+    MUTATION THAT MUST RED: remove the `if _ref:` inert branch from
+    `_provenance_advisory`, which returns `{}` and silences the writer.
+    """
+    sdk = _sdk(tmp_path)
+    res = sdk.create_entity(type="subject", name="Inert source subject",
+                            extractedFrom="corpus://phantom/subject")
+    advisories = res.get("advisories") or []
+    assert advisories, (
+        "a declared ref that this door cannot wire is a provenance gap")
+    assert advisories[0].get("code") == "extracted_from_inert"
+    assert advisories[0].get("node_id"), "the advisory must name the node"
 
 
 def test_a_non_string_source_ref_is_refused_pre_write(tmp_path):
