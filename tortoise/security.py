@@ -18,9 +18,12 @@ cannot silently go stale when a new edge type is added.
 """
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
+import socket
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # ── Filter keys (sdk.query / sdk.paginated_query) ─────────────────────────
 
@@ -364,7 +367,7 @@ def redact_error(e: BaseException) -> str:
 #     lookbehind on ``sk-`` is what makes it safe — the token must begin at a
 #     character that is not part of another token, so ``disk-…`` cannot match.
 #
-#     Two rule families are deliberately NOT pure vendor-shape matches, and
+#     Three rule families are deliberately NOT pure vendor-shape matches, and
 #     the count matters because a maintainer extending the table by "shapes
 #     only" would not see them:
 #
@@ -375,13 +378,22 @@ def redact_error(e: BaseException) -> str:
 #         contextual-anchor family covers the two ``bearer_token`` rules,
 #         anchored on the ``Authorization: Bearer`` header name / a bare
 #         ``bearer`` keyword; each keeps its anchor text in the output, so the
-#         record stays diagnostic. These are the ONLY rules whose anchor is
-#         contextual; the AWS pair's ID half is covered by a vendor shape.
+#         record stays diagnostic. The AWS pair's ID half is covered by a
+#         vendor shape.
 #         ⛔ The BARE ``bearer`` form is NOT value-shape-less — its body carries
 #         a credential-shape gate, because "any 24+ char space-free span" is not
 #         credential-shaped (#5471): it redacted hyphen/underscore-joined
 #         lowercase identifiers (``authentication-middleware-component-v2``),
 #         destroying captured text and inflating ``capture_redactions``.
+#       * **SCHEME-anchored.** ``connection_url`` (#5326) anchors on a CLOSED
+#         allow-list of URL scheme NAMES (``postgres``, ``redis``, ``docker``,
+#         ``https``, … — ``_CONNECTION_URL_SCHEMES``), then on the URL grammar:
+#         a ``:``-separated password in the userinfo and a host-SHAPED host.
+#         The anchor is a literal NAME, exactly as in the family above; the
+#         name is simply the scheme rather than a parameter or header. It is
+#         also the ONLY rule whose match REPLACES a sub-span of the URL rather
+#         than the whole match (the port, path, query and fragment stay), so the
+#         stored record keeps its shape.
 #
 #     Everything else is anchored on a vendor-shaped prefix, and a
 #     structural/entropy guess (a gitleaks-style generic-api-key rule) is
@@ -460,12 +472,262 @@ def redact_error(e: BaseException) -> str:
 # Shapes a reader may reach for and NOT find here, with the reason: ``ssh-rsa
 # AAAA…`` (a public key is not a secret), a bare 64-hex or 40-char base64 body
 # with no vendor prefix (matches prose), a plain ``password=…`` (the context
-# heuristic above), and vendor prefixes with no fixed grammar to anchor on
-# (``dckr_pat_``, ``pypi-``). One anchored line each when they are adopted.
+# heuristic above), vendor prefixes with no fixed grammar to anchor on
+# (``dckr_pat_``, ``pypi-``), a connection URL on a scheme OUTSIDE
+# ``_CONNECTION_URL_SCHEMES`` (the closed allow-list's inherent property), and a
+# URL whose credential is a bare userinfo token with no ``:``
+# (``https://<token>@host`` — the token itself is claimed by its own vendor rule
+# where one exists, e.g. ``ghp_``). One anchored line each when they are adopted.
 
 #: The visible replacement. One ``kind`` label per pattern so a reader (and the
 #: per-session counter) can tell WHAT was removed without seeing the value.
 _REDACTION_VALUE = "[REDACTED:{kind}]"
+
+
+# ── Connection URLs carrying a password (#5326) ────────────────────────────
+#
+# ``postgres://user:pw@host`` — the shape a pasted ``.env`` line holds, and the
+# one #4911 could not cover: a connection URL has NO vendor prefix to anchor on
+# (the scheme is arbitrary and user-defined), so three revisions were built,
+# measured against production, and removed. This is the replacement design, and
+# each removed revision is answered at the line that answers it:
+#
+#   1. ``\w+://user:pass@`` matched 176 of 21,277 production turn nodes with 0
+#      credentials among them (167 the repo's own documented dev URI, 9 a
+#      URL-shape fixture table). Its class was really "any URL with an ``@``":
+#      it did not require a password (so ``https://user@host`` and
+#      ``https://user:pass@`` qualified) and it did not anchor the scheme.
+#      ⇒ the anchor here is a CLOSED scheme allow-list plus a REQUIRED
+#      ``user:password`` userinfo, and the host must be host-SHAPED.
+#   2. + a dotted-host requirement dropped real credentials on single-label
+#      hosts (``@dbserver``, ``@cache``) and IP literals. ⇒ there is deliberately
+#      no dotted-host gate: ``_CONNECTION_URL_HOST`` accepts a registered name,
+#      a single label, an IPv4/IPv6 literal, and a port.
+#   3. + bounded classes "miss a password containing ``/`` or exceeding the
+#      bound, while a greedy class swallows up to 200 chars of surrounding text
+#      (it destroyed the JSON keys and email values around a URL)".
+#      ⇒ the ``/`` claim is a URL-grammar error, not a bound: a raw ``/`` in a
+#      URL authority ENDS the authority (it starts the path), so it can never be
+#      part of a password and the class must exclude it either way. The
+#      swallowing is real and is fixed by CONSTRUCTION — but by TWO
+#      constructions, not one: the password class is LAZY, excludes the
+#      structured-text delimiters (``_CONNECTION_URL_PASSWORD_STOPS``), and the
+#      host is host-shaped and must not be followed by a REACHABLE ``@`` (the
+#      two boundary assertions below). Laziness
+#      alone is NOT enough: with no host in its OWN authority the walk leaves
+#      the URL, crosses the delimiters to the NEXT field's ``@``-token and
+#      treats that token's domain as the host — the
+#      ``{"url":"postgres://user:pw","email":"ops@example.com"}`` case
+#      measured in review of #5326, which destroyed the JSON keys and the
+#      address. With both, ``{"url":"postgres://user:pw@host","email":"a@b.com"}``
+#      redacts ``pw`` and leaves every key and address byte-identical. A GREEDY
+#      class here re-breaks it — the last-``@`` heuristic walks into the next
+#      field — measured in review of #5326 and pinned by
+#      ``test_a_greedy_class_does_not_swallow_the_surrounding_text``; the
+#      host-absent direction is pinned by
+#      ``test_a_hostless_url_does_not_swallow_a_following_at_token``.
+#      The bound itself (512) is the module's own idiom (see ``jwt``'s 512 and
+#      the PEM label's 40): it keeps per-candidate work a LOCAL, auditable
+#      constant instead of an argument about which runs can overlap. Its recall
+#      residual — a password longer than 512 characters — is recorded below.
+#
+# Why this is not the entropy/context guess the module refuses: the anchor is a
+# literal NAME word for word, exactly like ``aws_secret_access_key`` and the
+# ``bearer_token`` pair — the name happens to be the URL's scheme. Nothing here
+# scores a value; every rejection is structural (a scheme not on the list, no
+# ``:``-separated password, a host that is not host-shaped, or a placeholder).
+#
+# The list is CLOSED and extensible by one line. It carries the schemes whose
+# URL form conventionally puts a PASSWORD in the userinfo — database engines,
+# graph/search/cache engines, message brokers, ``docker`` (Tortoise's OWN
+# ``TORTOISE_DB_URI`` transport, which really is ``docker://:password@host``),
+# the ``http(s)``/``ws(s)`` family (basic auth and provider DSNs such as
+# ``SENTRY_DSN``), and the transfer/directory/mail protocols that carry one.
+# A CUSTOM scheme is therefore not covered — that is the closed allow-list's
+# inherent property, and it is recorded rather than implied.
+_CONNECTION_URL_SCHEMES: frozenset[str] = frozenset({
+    # Database / graph / search / cache engines
+    "postgres", "postgresql", "mysql", "mariadb", "mssql", "oracle",
+    "clickhouse", "cassandra", "couchbase", "couchbases", "mongo",
+    "mongodb", "mongodb+srv", "redis", "rediss", "neo4j", "bolt",
+    "elasticsearch", "opensearch", "influxdb",
+    # Message brokers
+    "amqp", "amqps",
+    # Tortoise's own FalkorDB transport (``TORTOISE_DB_URI``)
+    "docker",
+    # Web / basic auth / provider DSNs
+    "http", "https", "ws", "wss",
+    # Transfer, directory and mail protocols whose URL carries a password
+    "ftp", "ftps", "sftp", "ssh", "smb", "cifs", "ldap", "ldaps",
+    "smtp", "smtps", "imap", "imaps", "pop3", "pop3s",
+})
+
+#: Longest first so the alternation cannot settle on a prefix (``redis`` before
+#: ``rediss``, ``mongo`` before ``mongodb``) and give back the extra segment as
+#: an unmatched tail. Built FROM the frozenset, so the two cannot drift —
+#: ``test_every_scheme_in_the_allow_list_is_actually_matched`` pins it.
+_CONNECTION_URL_SCHEME_ALT = "|".join(
+    re.escape(scheme)
+    for scheme in sorted(_CONNECTION_URL_SCHEMES, key=len, reverse=True)
+)
+
+#: A host: a registered name (``db``, ``localhost``, ``db.internal``,
+#: ``10.0.0.5``, ``my_host``) or a bracketed IPv6 literal. Deliberately NOT a
+#: dotted-name gate — see revision 2 above. Bounded at the DNS name limit (255)
+#: and at 45 characters for the literal (the longest IPv6 form).
+#: ⛔ The trailing character is NOT required to be alphanumeric (an earlier
+#: revision required it and that is what created the leak the boundary below
+#: exists to prevent): ``host-`` and ``host.`` are matched whole, so the
+#: boundary can demand a MAXIMAL host without a trailing ``-``/``.`` being read
+#: as "the host ended, and whatever follows is not part of this URL".
+_CONNECTION_URL_HOST = (
+    r"(?:[A-Za-z0-9_][A-Za-z0-9._-]{0,254}"
+    r"|\[[0-9A-Fa-f:.]{2,45}\])"
+)
+
+#: Characters that terminate a candidate password even though they are not
+#: whitespace or ``/?#``. Two kinds, both of which separate a URL from the
+#: structured text around it: (a) characters that CANNOT appear raw in a URL
+#: userinfo (``"`` ``<`` ``>`` ``{`` ``}``) and (b) the field delimiters
+#: (``'`` ``,`` ``;``) that bound one value from the next in the JSON, CSV and
+#: shell pastes this rule meets.
+#: ⛔ WITHOUT them the LAZY password walk does not stay in its OWN authority:
+#: when the URL has NO host of its own it keeps consuming delimiters until it
+#: reaches the NEXT ``@``-token in the run, reads that token's domain as the
+#: host and eats every key and value in between — measured in review of #5326
+#: on ``{"url":"postgres://user:pw","email":"ops@example.com"}``, where
+#: laziness ALONE (the ``@host`` form) was not enough. Each is a RECALL trade
+#: (a real password may contain ``'``/``,``/``;``): it is taken deliberately,
+#: recorded as residual 5 below, and pinned by
+#: ``test_a_hostless_url_does_not_swallow_a_following_at_token`` and
+#: ``test_a_password_containing_a_field_delimiter_is_declined_whole``.
+_CONNECTION_URL_PASSWORD_STOPS = "\"',;{}<>"
+
+#: Placeholders are not credentials, and refusing them HERE (in the pattern)
+#: rather than in a replacement callable is load-bearing: ``re.subn`` counts
+#: MATCHES, so a callable that returns the match unchanged would still be
+#: counted — which would inflate ``capture_redactions`` on the second pass and
+#: break the #4194 double-pass idempotency (the capture path scrubs the same
+#: turn twice). Refusing at the pattern level leaves nothing to count.
+#:   * ``***`` / ``%2A%2A%2A`` — an already-redacted password (trufflehog's own
+#:     refusal; ``sentry-cli`` and the Sentry docs both write ``***``).
+#:   * ``[REDACTED:<kind>]`` — OUR marker, so re-scanning is a no-op. Also what
+#:     makes the rule order-safe: a specific rule that already claimed a value
+#:     used AS a password (``glpat_``, ``sk-``, ``eyJ``) leaves its marker here,
+#:     which this rule then declines.
+#:   * ``$VAR`` / ``${VAR}`` — an unexpanded reference, not a value (trufflehog
+#:     skips ``$``-prefixed passwords for the same reason).
+#:   * ``<password>`` — the documentation placeholder form.
+_CONNECTION_URL_PLACEHOLDER = (
+    r"(?!(?:\*+|(?:%2[aA])+|\[redacted:[a-z0-9_]+\]"
+    r"|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|<[^>]{0,64}>)@)"
+)
+
+#: The prefilter + the structural confirmation, in one anchored shape:
+#: ``scheme://user:password@host``.
+#:   * ``(?i)`` — a scheme is case-insensitive (``POSTGRES://``); a real paste
+#:     may carry either case.
+#:   * the userinfo splits on the FIRST ``:`` (RFC 3986: userinfo is
+#:     ``user:password``), so the user class excludes ``:`` and ``@``.
+#:   * the password is LAZY and terminated by ``@`` — see revision 3 above. It
+#:     excludes ``/`` (which ENDS the authority), ``?``/``#`` (which start the
+#:     query/fragment), whitespace, and the delimiter stops
+#:     (``_CONNECTION_URL_PASSWORD_STOPS`` — see revision 3); it deliberately
+#:     ALLOWS ``:`` and ``@``,
+#:     because a raw ``:`` in a password is legal and an ``@`` is resolved by the
+#:     host-shape requirement (``user:p@ss@host`` redacts ``p@ss`` whole rather
+#:     than stopping at the first ``@`` and leaving ``ss`` in the graph).
+#:   * ``(?![A-Za-z0-9_@.-])`` — the host must be MAXIMAL: the next character
+#:     may be neither a host-body character nor an ``@``. This is what makes the
+#:     lazy password pick the LAST ``@`` of the authority rather than the first,
+#:     which is the only place a fragment of a real password can be left behind:
+#:     on ``postgres://user:pw@abcd-@x`` a lax boundary lets the host class
+#:     backtrack to ``abcd`` (its next character is ``-``, not ``@``), the match
+#:     settles on the FIRST ``@``, and ``@abcd-`` survives in the graph while the
+#:     count reports a redaction — #5470's false-assurance class. With the
+#:     maximality requirement the password expands to ``pw@abcd-`` and the whole
+#:     span goes. ⛔ The ``-``/``.`` in the excluded set is what stops the
+#:     requirement from becoming a leak in the other direction: they are host
+#:     characters the class consumes, so excluding them here is redundant, while
+#:     a boundary that also excluded them would reject a real ``@host-``/``@host.``
+#:     URL whose next character is a sentence's punctuation.
+#:   * ``(?![^\s/?#"',;{}<>]{0,512}@)`` — and the host must be the URL's OWN
+#:     authority: no further ``@`` may be reachable from the END of the host
+#:     through PASSWORD-LEGAL characters. The maximality check alone is NOT
+#:     enough: on ``postgres://user:p@ss:123@host`` the host class accepts ``ss``
+#:     and the character after it (``:``) is neither a host-body character nor a
+#:     password stop, so the first boundary is satisfied, the match settles on
+#:     the FIRST ``@``, and ``ss:123`` — the tail of the real password
+#:     ``p@ss:123`` — is left in the graph with a redaction reported (#5470
+#:     again). With this assertion the password expands across the reachable
+#:     ``@`` to ``p@ss:123`` and the whole span goes. The scan is BOUNDED at 512
+#:     — the password's own bound — which keeps it a constant-cost lookahead
+#:     rather than a re-scan of the run from every candidate start (#5296): a
+#:     later ``@`` reachable by a ``<=512`` password is always within 509
+#:     characters of the host end, so the bound loses no reachable ``@``. A
+#:     ``@`` shielded by a password STOP (`"` `'` `,` `;` `{` `}` `<` `>`)
+#:     is NOT reachable — it lies outside the password by the class's own
+#:     definition — so it does not force an expansion; that is the delimiter
+#:     trade residual 5 records below. Both directions are pinned in
+#:     ``tests/test_connection_url_redaction_5326.py``.
+#: Only the PASSWORD is replaced (the ``sub`` leaves the port, path, query and
+#: fragment outside the match), so the stored record keeps its scheme, user,
+#: host and database name and stays diagnostic.
+_CONNECTION_URL_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9])"
+    r"(?P<scheme>" + _CONNECTION_URL_SCHEME_ALT + r")://"
+    r"(?P<user>[^\s/?#:@]{0,64}):"
+    + _CONNECTION_URL_PLACEHOLDER +
+    r"(?P<password>[^\s/?#"
+    + re.escape(_CONNECTION_URL_PASSWORD_STOPS)
+    + r"]{1,512}?)@"
+    r"(?P<host>" + _CONNECTION_URL_HOST + r")"
+    r"(?![A-Za-z0-9_@.-])(?![^\s/?#\"',;{}<>]{0,512}@)"
+)
+
+_CONNECTION_URL_REPLACEMENT = (
+    r"\g<scheme>://\g<user>:" + _REDACTION_VALUE.format(kind="connection_url")
+    + r"@\g<host>"
+)
+
+# Recorded residuals, so they are not mistaken for coverage (#5326):
+#
+#   1. A password LONGER than 512 characters is not matched at all (the bound
+#      makes the whole candidate fail, it does not truncate the password). No
+#      real credential body reaches it — bcrypt 60, base64url 43, a 256-bit hex
+#      key 64, a 512-bit one 128 — and a JWT used AS a password is claimed by the
+#      ``jwt`` rule first (whose marker the placeholder gate then declines).
+#      Pinned by ``test_the_bounded_password_class_keeps_a_leak_impossible``.
+#   2. A CUSTOM scheme is not covered: the allow-list is closed by design (the
+#      property the removed revisions lacked — see the note above), so
+#      ``import://user:pw@host`` is not matched. One line to add one.
+#   3. A raw ``?``/``#`` inside a password is read as the query/fragment start
+#      it IS in URL grammar, so ``docker://:P@ssw0rd?x@host`` is not matched —
+#      the same reading ``tools/ask_shape_rate.py`` records against the graph
+#      client. The percent-encoded form (``%3F``) is matched.
+#   4. A URL whose credential is a BARE userinfo token with no ``:``
+#      (``https://<token>@host`` — a PAT in a clone URL) is not matched here;
+#      the token itself is claimed by its own vendor rule where one exists.
+#   5. A raw ``'``/``,``/``;`` (and ``"``/``<``/``>``/``{``/``}``) INSIDE a
+#      password is refused: those delimiters are ALSO what separates a password
+#      from the NEXT field in a pasted JSON/CSV line, so they terminate the
+#      candidate (the recall side of the trade that stops the host-absent
+#      swallow in revision 3). A password that really contains one is declined
+#      AS A WHOLE — never partially rewritten with a prefix redacted, the
+#      #5470 false-assurance direction. The percent-encoded form (``%2C`` /
+#      ``%3B`` / ``%27``) IS matched. Pinned by
+#      ``test_a_hostless_url_does_not_swallow_a_following_at_token`` and
+#      ``test_a_password_containing_a_field_delimiter_is_declined_whole``.
+#      ⚠️ A delimiter AFTER the authority's ``@`` is a DIFFERENT thing: it
+#      bounds the rule's URL rather than sitting inside the password (a password
+#      cannot contain a stop — that is the class's own definition). On
+#      ``postgres://user:abc@def,ghi@host`` the matched URL is therefore
+#      ``postgres://user:abc@def`` (password ``abc``, host ``def``) and the
+#      trailing ``,ghi@host`` is a SEPARATE token OUTSIDE the match, so no byte
+#      of the matched span's password survives. The stricter RFC 3986 reading
+#      (``,`` is a legal reg-name character, so ``abc@def,ghi`` is one userinfo)
+#      is the recall gap this trade accepts, recorded here rather than implied;
+#      it is pinned by ``test_a_delimiter_after_the_at_bounds_the_url``.
 
 #: ``(kind, pattern, replacement)`` — ordered, and the ORDER IS LOAD-BEARING.
 _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
@@ -699,35 +961,9 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("google_api_key",
      re.compile(r"(?<![A-Za-z0-9])AIza[\w-]{35,}(?![A-Za-z0-9])"),
      _REDACTION_VALUE.format(kind="google_api_key")),
-    # Connection URLs carrying a password (``scheme://user:pass@host``) are NOT
-    # covered, and the removal is deliberate — see the note where the rule used
-    # to live (below ``google_api_key``).
-    # ⛔ NO ``connection_url`` RULE — REMOVED AFTER MEASURING IT THREE WAYS.
-    # A password-bearing connection URL (``postgres://user:pw@host``) is a real
-    # credential shape, and three revisions tried to anchor it. Each failed in a
-    # different direction, and the failures are the evidence:
-    #
-    #   1. ``\w+://user:pass@`` (unbounded, no host gate) — matched 176 of 21,277
-    #      production turn nodes and EVERY match was a non-credential (167 this
-    #      repo's own documented dev URI, 9 a URL-shape fixture table).
-    #   2. + a dotted-host requirement — 0 matches on the same corpus, and real
-    #      single-label hosts (``@dbserver``, ``@cache``, the docker-compose
-    #      shape) plus IP literals were missed entirely: a leak, not a
-    #      precision trade.
-    #   3. + a password requirement and bounded user/password classes — the
-    #      bounded classes then miss a password containing ``/`` or longer than
-    #      the bound (leak again), while a greedy class swallows up to 200 chars
-    #      of surrounding text (it destroyed the JSON keys and email values
-    #      around a URL).
-    #
-    # There is no vendor prefix to anchor on — the scheme is arbitrary — and this
-    # module's stated rule is anchored shapes only, with the keyword-anchored
-    # exception family whose anchors are literal parameter/header NAMES (see
-    # ``aws_secret_access_key`` and the ``bearer_token`` pair). A
-    # structural guess is the class of rule whose false-positive rate made the
-    # naive ``sk-``/``CONTAINS 'sk-'`` probe useless, so it is not shipped. The
-    # gap is recorded on #4911 and filed as its own issue rather than papered
-    # over with a rule that is either noisy or incomplete.
+    # ⛔ A PASSWORD-BEARING CONNECTION URL — defined above with its three
+    # removed revisions; registered LAST, at the end of the table (see the
+    # entry there for why the position is load-bearing).
 
     # Slack (bot/user/app/refresh/workflow tokens) — ``xox[baprs]-`` covers the
     # bot/user/app forms, plus the app-level ``xapp-1-…`` and the config
@@ -928,6 +1164,16 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
                 r"|[A-Za-z0-9._\-+/=]*[A-Za-z0-9+/=]{24,})"
                 r"([A-Za-z0-9._\-+/=]{24,})"),
      r"\g<1>" + _REDACTION_VALUE.format(kind="bearer_token")),
+    # ⛔ THE BROADEST ANCHOR IN THE TABLE, SO IT RUNS LAST (#5326). A credential
+    # used AS a connection-URL password (``postgres://user:glpat_…@host``,
+    # ``…:eyJ…@host``) must keep ITS OWN label, and this rule must not claim the
+    # span first — its placeholder gate then declines the marker the specific
+    # rule left, so the label is specific and the span is counted once. Placing
+    # it before ``jwt``/``private_key``/``bearer_token`` was measured to lose the
+    # label: the JWT case came back ``{'connection_url': 1}`` with ``jwt``
+    # absent. Pinned by
+    # ``test_a_specific_rule_wins_the_label_inside_a_connection_url``.
+    ("connection_url", _CONNECTION_URL_RE, _CONNECTION_URL_REPLACEMENT),
 )
 
 #: Every kind the table can emit — the acceptance surface #4911 requires a test
@@ -955,6 +1201,16 @@ def redact_secrets(text: str) -> tuple[str, dict[str, int]]:
     because the capture path redacts the stored text once for the embedding
     batch and once at the write — the same bytes must come out both times
     (#4194).
+
+    ``connection_url`` (#5326) is the one rule whose marker is not the whole
+    match: it replaces the PASSWORD span of ``scheme://user:password@host``, so
+    the scheme, user, host, port, path and query survive and the stored record
+    stays diagnostic. Its idempotency is bought the same way — the placeholder
+    lookahead declines a password that is already ``[REDACTED:<kind>]``, an
+    env reference (``${PGPASSWORD}``) or ``***`` — and it is bought in the
+    PATTERN rather than in a replacement callable deliberately: ``re.subn``
+    counts MATCHES, so a callable that returned the match unchanged would still
+    be counted and would inflate ``capture_redactions`` on the second pass.
     """
     if not isinstance(text, str):
         # #5472: the contract is ``tuple[str, dict]``, so the first element is
@@ -972,6 +1228,143 @@ def redact_secrets(text: str) -> tuple[str, dict[str, int]]:
         if n:
             counts[kind] = counts.get(kind, 0) + n
     return out, counts
+
+
+# ── Outbound URL validation (webhook registration) ────────────────────────
+
+#: The longest accepted webhook URL. Bounded so a registration body cannot
+#: smuggle a multi-KB target into a per-dispatch header/body write.
+MAX_WEBHOOK_URL_LEN = 2048
+
+#: Hostnames that resolve to the loopback interface (or the cloud metadata
+#: endpoint) on the deployments we run on, and that a user could register as a
+#: webhook target. `ipaddress.is_global` already covers the IP-LITERAL forms;
+#: this set covers the NAMES, which are not IP literals and so never reach it.
+#: `169.254.169.254` (the GCP/AWS IMDS address) is covered by the IP branch
+#: (link-local is not global), and is listed here as a NAME only because
+#: `metadata.google.internal` is the name form of the same endpoint.
+_BLOCKED_WEBHOOK_HOSTS = frozenset({
+    "localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback",
+    "metadata", "metadata.google.internal", "metadata.goog",
+})
+
+#: Suffixes that are never a public webhook target: mDNS, private DNS zones,
+#: and the RFC 6761 special-use TLDs (``.test``, ``.invalid``, ``.example``,
+#: ``.local``) plus the single-label DNS names a container network uses.
+_BLOCKED_WEBHOOK_HOST_SUFFIXES = (
+    ".local", ".internal", ".localhost", ".home.arpa", ".test",
+    ".invalid", ".example", ".onion",
+)
+
+
+def validate_webhook_url(url: str) -> str:
+    """Validate an OUTBOUND webhook target (SSRF guard). Returns the URL.
+
+    A tenant-supplied webhook URL is a server-side request to an address the
+    tenant chose — i.e. exactly SSRF. This is the registration-time gate: it
+    rejects the scheme/credential/host shapes that can never be a legitimate
+    public callback, so a new subscription cannot be pointed at the process's
+    own loopback, a private RFC 1918 / ULA address, a link-local address, or
+    the cloud instance-metadata endpoint.
+
+    Rules (each raises ``ValueError`` with a caller-readable message):
+
+    * scheme must be ``http`` or ``https`` — no ``file:``/``gopher:``/
+      ``unix:`` or any other scheme ``httpx`` might be taught to handle;
+    * no userinfo (``https://user:pass@host/``) — the credentials would be
+      stored in the graph and logged in receipts, and they add nothing;
+    * a host is required, and it must not be a blocked name, a blocked
+      suffix, or an IP LITERAL that ``ipaddress.is_global`` rejects
+      (loopback, private, link-local, multicast, reserved, unspecified, and
+      IPv6 ULA all fail that predicate);
+    * the URL must be at most ``MAX_WEBHOOK_URL_LEN`` characters.
+
+    Known residual — DNS REBINDING, deliberately not closed here: a public
+    name that resolves to a private address is accepted (nothing resolves the
+    name at registration), and the name can be re-pointed between registration
+    and dispatch. Closing it needs the connected peer's IP checked against the
+    same policy at CONNECT time (a custom transport), which is a transport
+    change; this predicate is the honest, bounded half and the dispatch path
+    is documented as carrying the residual.
+
+    Why this is not a second loopback predicate (#1647 P1-3, the
+    ``config.LOOPBACK_HOSTS`` single-source rule): it is a DIFFERENT question.
+    That predicate answers "does this URI point at the local test box" for the
+    docker/embedded redirect, over three host names; this one answers "is this
+    an address the process may be made to call", over every non-global range
+    plus the name forms that resolve to one. It also CANNOT reuse that
+    constant: this module is stdlib-only by design (its docstring) and
+    ``config`` imports from ``tortoise``. The containment invariant is pinned
+    by ``tests/test_webhook_delivery.py`` instead — every host the shared
+    predicate refuses is refused here.
+    """
+    if not isinstance(url, str) or not url:
+        raise ValueError("webhook url must be a non-empty string")
+    if len(url) > MAX_WEBHOOK_URL_LEN:
+        raise ValueError(
+            f"webhook url exceeds the {MAX_WEBHOOK_URL_LEN}-character cap")
+
+    try:
+        parts = urlsplit(url)
+    except ValueError as e:  # malformed IPv6 literal / bad port
+        raise ValueError(f"webhook url is not parseable: {e}") from e
+    if parts.scheme not in ("http", "https"):
+        raise ValueError(
+            f"webhook url scheme must be http or https, not "
+            f"{parts.scheme or '(none)'}")
+    # Read userinfo through the ONE decoding rule (#3039) rather than by hand off
+    # the urlsplit result: a raw `.username`/`.password` read is exactly the shape
+    # `test_from_uri_userinfo` guards. Local import keeps this module cycle-free.
+    from tortoise.config import parse_uri_userinfo
+
+    if any(parse_uri_userinfo(url)):
+        raise ValueError("webhook url must not carry credentials (user:pass@)")
+    try:
+        # `.rstrip(".")`: a trailing dot is an FQDN spelling of the SAME name
+        # (``localhost.`` resolves to loopback exactly as ``localhost`` does), so
+        # it must be normalised BEFORE the name blocklist — otherwise every
+        # check below is comparing against a string the resolver never sees.
+        host = (parts.hostname or "").strip().lower().rstrip(".")
+        port = parts.port
+    except ValueError as e:  # non-numeric / out-of-range port
+        raise ValueError(f"webhook url has an invalid port: {e}") from e
+    if not host:
+        raise ValueError("webhook url has no host")
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError(f"webhook url port {port} is outside 1-65535")
+    if host in _BLOCKED_WEBHOOK_HOSTS or host.endswith(_BLOCKED_WEBHOOK_HOST_SUFFIXES):
+        raise ValueError(
+            f"webhook url host {host!r} is a local/private name — a webhook "
+            f"target must be a public address")
+    # A bare single-label host (``http://db/``) is a container-network name on
+    # every deployment we run on: it has no public DNS meaning. Public targets
+    # are FQDNs (``hooks.example.com``) or public IP literals.
+    if "." not in host and ":" not in host:
+        raise ValueError(
+            f"webhook url host {host!r} is a single-label name — a webhook "
+            f"target must be a public host")
+    literal = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+    try:
+        addr = ipaddress.ip_address(literal)
+    except ValueError:
+        # Not the canonical text form — but the C resolver ALSO accepts legacy
+        # numeric spellings (`127.1`, `0x7f.1`, `2130706433`), and `ipaddress`
+        # rejects every one of them. Asking by character class is what let
+        # `0x7f.1` through a digits-only guard: a class covers the spellings you
+        # thought of, and hex octets were not one of them. So ask the SAME
+        # question the resolver asks — if `inet_aton` can read it, it IS an
+        # address, whatever it looks like — and let the is_global check below
+        # refuse it. A DNS name fails inet_aton and keeps the residual above.
+        try:
+            addr = ipaddress.ip_address(
+                socket.inet_ntoa(socket.inet_aton(literal)))
+        except (OSError, ValueError):
+            addr = None  # genuinely a DNS name — the residual above applies
+    if addr is not None and not addr.is_global:
+        raise ValueError(
+            f"webhook url host {host!r} is not a globally routable address "
+            f"(loopback/private/link-local/reserved targets are refused)")
+    return url
 
 
 # ── Publication redaction (public issue bodies / chat messages, #3293) ─────

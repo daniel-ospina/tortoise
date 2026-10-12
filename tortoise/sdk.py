@@ -59,6 +59,8 @@ from .vector_write import (  # #4520: the ONE clear-then-set vector seam
     clear_then_set_prefix,
     set_embedding_clause,
 )
+# #4282 phase 2: retired public names fail with their replacement named (#3836 (c)).
+from .sdk_retired import retirement_hint
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import _live_only  # #6597 dream coverage closure mirrors EP liveness
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
@@ -4598,6 +4600,23 @@ class TortoiseSDK:
     shared test URI is set in the environment (#139).
     """
 
+    def __getattr__(self, name: str):
+        """A retired public SDK name fails with its replacement named (#3836 (c)).
+
+        Reached ONLY when normal attribute lookup fails, so it can never shadow a real
+        method. The dunder is private, so it adds nothing to the public surface
+        (`tools/sdk_surface.py` counts public names on the class).
+
+        A name that was never public keeps the interpreter's own shape — only a name
+        the owner actually retired gets the migration hint.
+        """
+        hint = retirement_hint(name)
+        if hint is not None:
+            raise AttributeError(hint)
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}'"
+        )
+
     def __init__(self, db_path: str | None = None, *, namespace: str | None = None,
                  event_log_path: str | None = None,
                  graph_name: str | None = None):
@@ -5180,7 +5199,7 @@ class TortoiseSDK:
         except Exception:  # noqa: BLE001, RUF100
             raise ValueError("invalid cursor") from None
 
-    def events_poll(self, after: str | None = None, types: list[str] | None = None,
+    def poll_events(self, after: str | None = None, types: list[str] | None = None,
                     limit: int = 100) -> dict:
         """Poll graph/claim events after a cursor (at-least-once; idempotent on replay).
 
@@ -5228,7 +5247,7 @@ class TortoiseSDK:
     _EVENT_PURGE_LAST: float = 0.0  # process-level gate (P1 review fix)
 
     def _maybe_purge_events(self, proj) -> None:
-        """Best-effort, interval-gated retention purge (see events_poll).
+        """Best-effort, interval-gated retention purge (see poll_events).
 
         Runs at most once per TORTOISE_EVENT_RETENTION_INTERVAL seconds per
         PROCESS (module-global monotonic — NOT per-projection: hosted REST/MCP
@@ -5297,7 +5316,7 @@ class TortoiseSDK:
         ``tests/test_object_registered_journal.py`` do the same for
         ``ObjectSuperseded``. Promoting the name to a named parameter silently
         REMOVES it from that payload — a client-visible change to a durable
-        artifact (``events_poll`` returns the payload verbatim), invisible to
+        artifact (``poll_events`` returns the payload verbatim), invisible to
         every existing test. ``recorded_ts`` collides with no caller key, so
         the default path is additive in the strict sense: every existing
         caller's envelope, graph payload and JSONL record are byte-identical.

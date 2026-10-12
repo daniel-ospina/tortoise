@@ -64,6 +64,85 @@ extraction:
 1. **`memory_granularity` at the top level** — the value-brief compiler reads `ontology.memory_granularity`. Top-level is silently ignored. (The `_template` teaches the correct placement — copy it.)
 2. **A `kindDefs` key not declared in `objectKinds`/`pointKinds`/etc.** — the validator rejects it. Every kindDefs key must be a declared kind.
 
+## Declaring a relation — writable, or explicitly declaration-only (#2766)
+
+A `relations[]` entry is a **claim** that your pack's vocabulary includes an edge. Whether the
+relation's own declaration binds a runtime write path is a separate question, and the pack author is
+told the answer rather than having to discover it from a silent drop. **Every declared relation gets a
+write-path verdict**, computed by one resolver (`tortoise/pack_registry.py::relation_write_verdict`) and
+reported in three places that therefore cannot disagree: a warning at pack load, the table `tortoise
+pack validate` prints, and `sdk.list_relations()` (`write_verdict` + `write_paths`).
+
+**There are exactly two declared write paths.** A relation is `writable` when its declaration binds at
+least one of them:
+
+| path | surface | what makes the declaration bind it |
+|---|---|---|
+| `operator` | `sdk.create_operator(op_type=<mechanism>, label=<predicate>)` — the path `sdk.ingest` uses for `connections[].label` | the relation declares a **`mechanism`** (`IMPL`/`NAND`) — the mechanism is what tells a caller which `op_type` the verb means. The predicate is a free Layer-3 label by owner ruling (ONTOLOGY §8, #7852) — `fixes`, `implements`, `deploysTo` all ride one mechanism and stay distinct by their verb — so the declared **`mechanism` is what binds the verb to the operator path**, not a predicate allowlist |
+| `structural` | `sdk.create_edge(<predicate>, from_id, to_id)` and the other structural writers (`create_about_edge`, `sdk.ingest`) | the predicate is one of the structural edge predicates the writers accept (`performs`, `produces`, `uses`, `authoredBy`, `ownedBy`, `managedBy`, `hasMember`, `holdsRole`, `memberOf`, `reportsTo`, `participatesIn`, `hasPart`, `related`, `dependsOn`, `references`, `wasDerivedFrom`, `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDocument`, `aboutSource`, `aboutAction`, `extractedFrom`) |
+
+⛔ **The verdict is about the DECLARATION, not about whether the writer refuses the write.** The two
+writers are not symmetric, and the difference is measured (2026-10-02, #2766):
+
+- `create_edge` is **strict** — a predicate outside the structural list is refused with
+  `Unknown predicate`.
+- `create_operator` is **warn-not-block** (#1934): it accepts **any** label, and warns only when the
+  label is not a declared predicate. So a relation reported `predicate-not-in-allowlist` is still
+  writable by a caller who passes an explicit `op_type`; what the verdict names is a **declaration
+  gap** — the relation binds no mechanism, so nothing declares what that `op_type` should be. It is
+  not a statement that the runtime drops the edge.
+
+The verdict vocabulary:
+
+| verdict | meaning | what to do |
+|---|---|---|
+| `writable` | the declaration binds ≥1 write path | nothing |
+| `declaration-only` | no declared write path, and **you said so** with `declarationOnly: true` | nothing — the marker is the point |
+| `predicate-not-in-allowlist` | no declared write path and **no marker** → the declaration binds no mechanism | declare `mechanism: IMPL`/`NAND` (usually the answer), use a structural predicate, or mark it `declarationOnly: true` |
+
+**The verdict is warn-not-block** (the W2 contract the Layer-2 `semantics` check already uses, the
+repo's precedent for an open-vocabulary path): a `predicate-not-in-allowlist` relation is named at
+load and printed by `tortoise pack validate`, and the pack still loads and `validate` still exits 0.
+Refusing would drop the pack — and every pack sharing its kinds — over one declaration mid-alignment.
+
+```yaml
+  relations:
+    # writable — the operator path; `mechanism` is what the declaration binds
+    - predicate: groundedIn
+      mechanism: IMPL
+      fromKind: myapp:rule
+      toKind: myapp:rationale
+    # writable — the structural path; this verb is in the writer's allowlist
+    - predicate: hasPart
+      fromKind: myapp:concept
+      toKind: myapp:subconcept
+    # NOT writable, said on purpose — no warning
+    - predicate: funds
+      declarationOnly: true   # the declaration binds no mechanism; say so on purpose
+      from: Object
+      to: Object
+```
+
+`declarationOnly: true` is a statement about the **declaration** — it silences the warning above. It
+does **not** stop a caller from writing the label: `create_operator` accepts any label (only
+`create_edge` is strict). What the marker records is that the pack declares no mechanism for the verb.
+
+`declarationOnly: true` on a relation whose declaration *does* bind a write path is reported: the
+runtime will write it anyway, and a marker that cannot take effect is the same silent divergence the
+verdict exists to remove.
+
+> ⚠️ **`relations[].extractable` is declaration-only today.** No runtime consumer reads it
+> (`PackManifest.relation_is_extractable` is exercised by tests only), so `extractable: true` does not
+> by itself change what the extractor mints. It is a carried intent (#2787 → the extractor-v4
+> write-path work, #4894). The verdict above — not this flag — is what tells you whether the
+> relation's declaration binds a write path.
+>
+> **Why a marker and not a third list.** The alternative — a manifest-level mapping table from domain
+> predicate to writable predicate — is a **second** source of truth for a vocabulary that already has
+> one, which is the defect (#2766: four surfaces each derived the relation vocabulary and contradicted
+> each other). Adding a *new* structural predicate is an ontology change (owner territory), not a pack
+> change. The written-down mapping is the `mechanism` field itself, plus the Layer-3 verb.
+
 ## The extractor contract — how a pack reaches the engine
 
 **The value brief is the only seam.** `compile_value_brief()` (`tortoise/value_extractor.py`) compiles the installed manifests — every `packs/*/manifest.yaml`, plus the hosted `/v1/packs/manifests` overlay — into the **value brief**: `{namespaced kind: {description, nearMisses}}` plus each pack's `ontology.memory_granularity`. Everything domain-specific the extractor can be offered arrives through that one compiled artefact. The engine holds the pipeline mechanics and the core ontology; it holds no pack's domain.
@@ -105,7 +184,7 @@ A chain is an ordered kind path the extractor respects when connecting `about_en
 
 ## Testing a pack
 
-1. **Validate** — `tortoise pack validate <dir>` (or `--json` for machines). This runs the same schema + cross-pack validation as the daemon.
+1. **Validate** — `tortoise pack validate <dir>` (or `--json` for machines). This runs the same schema + cross-pack validation as the daemon, and prints the **relation write-path verdict table** (`writable` / `declaration-only` / `predicate-not-in-allowlist`; `--json` carries the full list under `relation_verdicts`).
 2. **Install** — self-hosted: put the pack under `TORTOISE_PACKS_DIR` and restart (or use the packaged `packs/` dir on a clone). Hosted: `POST /v1/packs/manifests` / `tortoise_pack_install` (ontology-only — no connectors/tools on tenant packs).
 3. **Extract** — mine a representative transcript with the offline/mock model and check the minted kinds (`tortoise list-kinds`, queries on the graph). The default render is verbose and carries every installed pack's kinds; keyword selection applies only to `TORTOISE_EXTRACTOR_PROMPT=compact`, and even there a namespace with no engine-side trigger row is injected whole (see "The extractor contract" above).
 4. **Iterate** — fix near-misses by adding `nearMisses` and `synonyms`; tighten chains with `enforcement: warn`; declare `retry` where the classifier hesitates.

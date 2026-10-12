@@ -594,7 +594,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "DedupeRejected, ObjectSuperseded, PointInvalidated).",
         annotations=_ro(),
         http_policy=True,
-        sdk_method="events_poll",
+        sdk_method="poll_events",
     ),
     ToolDefinition(
         name="tortoise_retract_point",

@@ -256,6 +256,22 @@ _VALID_EDGE_PREDICATES = frozenset({
 })
 
 
+# Every structural predicate a WRITER accepts — the union of the three
+# structural write surfaces this module owns:
+#   * create_edge            -> `_VALID_EDGE_PREDICATES`
+#   * create_about_edge      -> the about* set, whose keys are
+#                               `STRUCTURAL_REL_LABELS` (it accepts `aboutPoint`,
+#                               which the generic create_edge set misses #391)
+#   * TortoiseSDK.ingest     -> `_VALID_EDGE_PREDICATES`, plus an explicit
+#                               `extractedFrom` exemption (sdk.py)
+# Consumers that ask "can the runtime write this predicate?" (the #2766
+# write-path verdict) read THIS set, not one of the three subsets, so a
+# predicate added to any single writer moves the answer with it.
+STRUCTURAL_WRITE_PREDICATES = frozenset(
+    _VALID_EDGE_PREDICATES | set(STRUCTURAL_REL_LABELS)
+)
+
+
 def about_document_target_reason(label: str | None,
                                  properties: dict | None) -> str | None:
     """Why this node cannot be an ``aboutDocument`` target, or ``None`` when

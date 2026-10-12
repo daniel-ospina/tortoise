@@ -79,7 +79,7 @@ something derivable from today's code.
 | 26 | `tortoise_dream` | `tool_registry.py:449` | `dream` | no | `refresh_confidence` |
 | 27 | `tortoise_dream_health` | `tool_registry.py:466` | `dream_health_check` | yes | `graph_overview` |
 | 28 | `tortoise_entity_profile` | `tool_registry.py:612` | **none declared** | yes | `explore_connections` |
-| 29 | `tortoise_events_poll` | `tool_registry.py:587` | `events_poll` | yes | `poll_events` |
+| 29 | `tortoise_events_poll` | `tool_registry.py:587` | `poll_events` | yes | `poll_events` |
 | 30 | `tortoise_expand_relationships` | `tool_registry.py:308` | `expand_relationships` | yes | `explore_connections` |
 | 31 | `tortoise_file_decision` | `tool_registry.py:529` | `file_decision` | no | `write_question` |
 | 32 | `tortoise_file_human_approval` | `tool_registry.py:539` | `file_human_approval` | no | `record_decision` |
@@ -210,7 +210,6 @@ Destination rows: **28**. Registry tools: **98**.
 | `explore_connections` | MCP | no `def` on TortoiseSDK |
 | `graph_overview` | MCP | no `def` on TortoiseSDK |
 | `review_link_candidates` | MCP | no `def` on TortoiseSDK |
-| `poll_events` | MCP | no `def` on TortoiseSDK |
 | `check_connection` | MCP | no `def` on TortoiseSDK |
 | `register_source` | MCP | no `def` on TortoiseSDK |
 | `index_sources_from_directory` | MCP | no `def` on TortoiseSDK |

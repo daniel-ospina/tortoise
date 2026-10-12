@@ -565,6 +565,7 @@ surfaces:
   - test_mcp_result_count_telemetry.py
   - test_metering.py
   - test_oauth_consent_pkce.py  # #3496: EXECUTES the MCP consent page's inline auth client (rendered by consent_page_html) under Node `vm` against the vendored supabase bundle — grant type actually used, PKCE verifier store routing, single-origin completion, refusal UX. Registered on `api` because the file it guards most (tortoise/oauth.py) selects that surface.
+  - test_oauth_consent_bridge.py  # #3524: the consent identity bridge's spec guards — RFC 8414 `authorization_endpoint` stability (task 2), the four session-flow properties' confirmed anchors (task 3), the redirect-allowlist record covering the consent page's off-origin sign-in fallback (task 5). DUAL-REGISTERED with `onboarding` (see the entry there): `tortoise/oauth.py` + `tortoise/hosted_api.py` select `api`, but the task-3 half reads `website/apps/dashboard/functions/_shared/auth/token.ts`, and `website/apps/dashboard/functions/` is an `onboarding` SOURCE_PATTERN that does NOT select `api` (a named-surface match replaces the `core` fallback) — so an `api`-only registration leaves the token.ts guard asleep exactly when token.ts moves. It also reads `docs/` records, which the `onboarding` arm selects via the SOURCE_PATTERNS entries added with this fix.
   # #5331: the graph byte meter — tortoise/graph_storage.py plus the graph-storage
   # lane in tortoise/metering.py and tortoise/supabase_control.py. Registered on
   # `api` (metering/supabase seam) and `core` (the new module's default surface), so
@@ -778,6 +779,18 @@ surfaces:
   # `_EXPORT_SKIP_LABELS`), so a change to that classifier alone must still
   # run the pin that says export-skip is not a durability statement.
   - test_rebuild_event_meta_watermark_4653.py
+  # #2081 (epic #2080 W4 phase 2): the outbound webhook delivery layer —
+  # subscription registry, dispatcher, retry/backoff, receipts, HMAC signing,
+  # the SSRF-gated registration REST routes (POST/GET/DELETE
+  # /v1/context/subscriptions + /deliveries) and the dream-cycle dispatch hook
+  # in `_dream_worker`. `tortoise/hosted_api.py` is an exact `api` SOURCE_PATTERN
+  # match, so this arm runs the routes' auth/422 assertions on a hosted change.
+  # DUAL-REGISTERED with `core` (below): the module that carries the delivery
+  # semantics is `tortoise/webhook_delivery.py` (plus the
+  # `security.validate_webhook_url` guard), and NEITHER matches a named surface
+  # — they fall through to `core` — so without that arm a webhook_delivery-only
+  # change would run no guard at all.
+  - test_webhook_delivery.py
   # #3520: the per-session EXTRACTION status (`{status, extractor,
   # outcome_known}`) on BOTH hosted session read surfaces, the `last_error`
   # agreement on the 2xx path, and the appended-at-the-END column positions.
@@ -910,6 +923,8 @@ surfaces:
   # change that can re-open the hole.
   - test_7951_delete_resurrection.py
   - test_8171_claim_with_source.py
+  - test_cache_projection.py
+  - test_cache_projection_live.py
   # #4197: the saved-backlog ledger (`tortoise/capture_backlog.py`) and its
   # CLI surface (`tortoise/__main__.py`). `capture_backlog.py` matches no
   # named SOURCE_PATTERN, so it falls through to `core` — registering the
@@ -970,6 +985,7 @@ surfaces:
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
   # write/read marker split. No DB, no network — default `core` surface is correct.
   - test_4220_blog_residue_cleanup.py
+  - test_sdk_retirement.py
   - test_record_schema_placement.py
   # #7969 (epic #7879, Interface A): the record projection — journal →
   # Postgres, total + idempotent. Registered against `core` because BOTH
@@ -2105,6 +2121,7 @@ surfaces:
   - test_capture_redaction_sinks_5445.py  # #5445/#5446/#5472: the #4911 capture control's role sink, summary depth-guard and helper contract holes (guards tortoise/security.py + sdk.py helpers; `core` is security.py's surface and `sdk` is a SHARED_MODULE so it runs on the full matrix)
   - test_secret_rule_precision_5470.py  # #5470/#5471: span precision in `tortoise/security.py`'s `_SECRET_SHAPES` — the generic `sk-` rule must consume a long token whole (ordering fix, not a narrowed body), and the bare `Bearer` rule must fire on credentials while leaving hyphen/underscore-joined prose byte-identical
   - test_capture_secret_redaction_4911.py  # #4911: the capture write path redacts credential-shaped spans before persistence (guards tortoise/security.py's scrubber + sdk._capture_turn_texts; `core` is security.py's surface and `sdk` is a SHARED_MODULE so this runs on the full matrix — DUAL-REGISTERED under `api` for a hosted_api.py-only PR, see the entry there)
+  - test_connection_url_redaction_5326.py  # #5326: the password-bearing connection URL (`postgres://user:pw@host`) — the `connection_url` rule in tortoise/security.py: the closed scheme allow-list anchor, the URL-grammar confirmation, each removed #4911 revision answered (no-password class, no dotted-host gate, no greedy span), and the documented residuals. NOT dual-registered under `api`: it asserts nothing about hosted_api.py, and its end-to-end capture half is the DUAL-REGISTERED #4911 file
   - test_security.py
   - test_semantic_extractor.py
   - test_ship_test_onboarding.py   # #3806: the ship-test probe's guard (classifier + page-wide claim sweep + DOM/server readers + RED/GREEN mutation evidence); the browser half is tests/e2e/test_ship_test_onboarding.py, run by the dashboard-e2e job
@@ -2329,6 +2346,12 @@ surfaces:
   # to the instrument. Hermetic: pure arithmetic + a module-attribute swap, no
   # graph / embedder / network.
   - test_fusion_formula_ab.py
+  # #2081: the delivery engine's own file (`tortoise/webhook_delivery.py`) and
+  # the SSRF guard (`tortoise/security.py`) match no named SOURCE_PATTERN, so a
+  # change to either selects `core` — this is the registration that keeps the
+  # engine's contract tests on that diff. Dual-registered under `api` (above)
+  # for `tortoise/hosted_api.py`, which is an exact `api` match.
+  - test_webhook_delivery.py
   # #3520: the `core` half of the dual registration documented at the `api`
   # entry — `tortoise/session_projection.py` (the extraction vocabulary and
   # `session_extraction_status`, the ONE derivation every read surface calls)
@@ -2502,6 +2525,14 @@ surfaces:
   # half of the invariant a client edit breaks — registering it only under `api` would
   # leave the guard asleep exactly when the client moved.
   - test_dashboard_client_paths_resolve.py
+  # `test_oauth_consent_bridge.py` is DUAL-REGISTERED (#3524): its task-3 half pins
+  # `website/apps/dashboard/functions/_shared/auth/token.ts`, and
+  # `website/apps/dashboard/functions/` is a SOURCE_PATTERN for THIS surface
+  # (tools/ci_selection.py) — measured, a token.ts-only diff selects `['onboarding']`
+  # and NOT `api`. The `api` arm (registered for `tortoise/oauth.py` +
+  # `tortoise/hosted_api.py`) would therefore leave the token.ts guard unrun exactly
+  # when that file changes, so the same file needs this arm too.
+  - test_oauth_consent_bridge.py
   # #4097: the env-truthiness non-divergence guard scans all of `tortoise/**`,
   # including `tortoise/onboarding/**`, and an `onboarding` surface match replaces
   # the `core` fallback (tools/ci_selection.py) — so the guard needs this arm too.
@@ -4295,6 +4326,7 @@ durations:
   test_capture_graph_ops.py: 0.8
   test_capture_redaction_sinks_5445.py: 0.1
   test_capture_secret_redaction_4911.py: 9.7
+  test_connection_url_redaction_5326.py: 2.7  # #5326: 23 tests (21 at the first cut; #5326 review added 2 that pin the authority-boundary leak). Local wall is fuzz- and box-dependent (~2.7-8 s), so the numeric value stays the pre-merge estimate; a NEW file has no CI junit measurement (a file that never ran cannot appear in an artifact). The registration is load-bearing in BOTH halves: the surface entry alone leaves durations coverage below the 90% floor and `tools/ci_selection.py --integrity` reds (#4348 trap — do not drop without re-deriving the floor at that head). The file is CPU-light (one 6,000-case in-process fuzz, no DB), so unlike the #4921 entry above it does NOT move much with box load. Refresh the value from the first post-merge run that includes it.
   test_capture_validfrom_3945.py: 0.5
   test_ci_last_failed.py: 1.9
   test_ci_manifest.py: 7.2
