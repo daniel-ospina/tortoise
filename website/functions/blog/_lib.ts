@@ -320,9 +320,15 @@ const MD_TOC_RE = /^\\?\[\\?\[\s*toc\s*\\?\]\\?\]$/i;
 const MD_HOUSE_TOC_RE = /^(?:\\?\*\\?\*|__)\s*table of contents\s*:?\s*(?:\\?\*\\?\*|__)$/i;
 // `> **Quick answer:** …`. The colon is REQUIRED — it is what bounds the label,
 // so `> Quick answers are hard.` / `> Quick answerable claims.` stay prose. The
-// closing bold delimiter is bound to the opening one by backreference, so the
-// colon-only spelling can never eat a body-leading `**` / `__` (`__init__`).
-const MD_HOUSE_ANSWER_RE = /^\s*((?:\\?\*\\?\*)|__)?\s*quick answer\s*(?:\1\s*)?\s*:\s*(?:\1)?\s*/i;
+// closing bold delimiter is bound to the opening one by backreference AND
+// consumed in EXACTLY ONE position — either before the colon (`**Quick answer**:`)
+// or after it (`**Quick answer:**`), never both. Allowing it in both positions
+// let the second copy reach past the colon and eat a BODY-leading `**` / `__`,
+// amputating the body's first word and leaking a stray delimiter:
+// `> **Quick answer**: **Bold** start.` published as `Bold** start.`. See the
+// colon-outside-bold regression cases in `tests/test_blog_markdown.mjs`.
+const MD_HOUSE_ANSWER_RE =
+  /^\s*(?:(\\?\*\\?\*|__)\s*quick answer\s*\1\s*:|(\\?\*\\?\*|__)\s*quick answer\s*:\s*\2\s*|quick answer\s*:)\s*/i;
 
 /**
  * Whether the body publishes at least one `##` heading. The generated nav is
@@ -345,10 +351,13 @@ function hasPublishedH2(lines: string[]): boolean {
 
 /**
  * Advance past the author's hand-written table-of-contents list, from its first
- * item. Consumes the WHOLE list region — loose (blank-separated) items and
- * indented nested items included — because the generated nav replaces all of it;
- * stopping at the first contiguous run leaves the tail behind as a stray list.
- * Returns the index of the first line after the region.
+ * item, to the first line that is not part of it. Loose (blank-separated) items
+ * and indented nested items are consumed — stopping at the first contiguous run
+ * would leave the tail behind as a stray list — and blank lines between items
+ * are crossed with no upper bound. It does NOT follow a wrapped item's
+ * continuation line: the renderer continues no list that way, so the region ends
+ * there exactly as every other list branch would end it. Returns the index of
+ * the first line after the region.
  */
 function consumeTocList(lines: string[], start: number): number {
   const isItem = (s: string): boolean => /^\s*(?:\d+\.|[-*])\s+/.test(s);
@@ -587,8 +596,9 @@ export function renderMarkdown(markdown: string): string {
         `<ol>${top.map((e) => `<li><a href="#${escapeHtml(e.id)}">${escapeHtml(e.text)}</a></li>`).join("")}</ol>` +
         `</nav>`
       : "";
-    // Descending: each splice removes one slot, so a later index must be spliced
-    // first or the earlier ones shift.
+    // `splice(index, 1, nav)` replaces one element with one, so the array length
+    // never changes and the indices cannot shift — the iteration order is not
+    // load-bearing. (Descending is kept only because it reads as the safer one.)
     for (const index of [...tocIndices].sort((a, b) => b - a)) out.splice(index, 1, nav);
   }
 

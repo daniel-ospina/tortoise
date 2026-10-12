@@ -750,6 +750,35 @@ console.log("house-style answer box");
     renderMarkdown("> **Quick answer:** **Bold** start.").includes("<p><strong>Bold</strong> start.</p>"),
     "the bolded spelling still leaves a body-leading bold intact",
   );
+  // The closing delimiter glyph is consumed in EXACTLY ONE position, or the
+  // second copy reaches past the colon and eats a BODY-leading `**` / `__`:
+  // the pre-fix regex published `> **Quick answer**: **Bold** start.` as
+  // `Bold** start.` (first word amputated, literal delimiter leaked). These
+  // colon-outside-the-bold spellings are the regression cases for that.
+  assertEq(
+    renderMarkdown("> **Quick answer**: **Bold** start."),
+    '<aside class="callout callout-answer"><p class="callout-label">Quick answer</p>' +
+      "<p><strong>Bold</strong> start.</p></aside>",
+    "the colon-outside-bold spelling does not eat the body's leading bold",
+  );
+  assertEq(
+    renderMarkdown("> **Quick answer** : **Bold** start."),
+    '<aside class="callout callout-answer"><p class="callout-label">Quick answer</p>' +
+      "<p><strong>Bold</strong> start.</p></aside>",
+    "a space before the colon does not widen the consumed span",
+  );
+  assertEq(
+    renderMarkdown("> __Quick answer__: __init__ runs first."),
+    '<aside class="callout callout-answer"><p class="callout-label">Quick answer</p>' +
+      "<p>__init__ runs first.</p></aside>",
+    "the underscore spelling does not eat the body's leading underscore run",
+  );
+  assertEq(
+    renderMarkdown("> \\*\\*Quick answer\\*\\*: \\*\\*Bold\\*\\* start."),
+    '<aside class="callout callout-answer"><p class="callout-label">Quick answer</p>' +
+      "<p>**Bold** start.</p></aside>",
+    "the escaped spelling does not amputate the body's first word",
+  );
   // The marker must be the START of the blockquote, not anywhere inside it.
   assertEq(
     renderMarkdown("> Some context first.\n> **Quick answer:** x"),
