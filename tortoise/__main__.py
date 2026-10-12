@@ -155,6 +155,54 @@ def _cmd_rebuild(args):
                 f"Re-run onboarding for the affected org(s) (#4641).",
                 file=sys.stderr,
             )
+        # #5353: the `:TeamMeta` first-org marker. Printed at zero expected
+        # too, so "this graph had no marker to preserve" is distinguishable
+        # from "preservation was not attempted". The count line and the shape
+        # lines are separate for the same reason as the onboarding pair above:
+        # the projection's `team_meta_gap` is a max over a confirmed loss, an
+        # unverified restore and a pre-preservation UNKNOWN, so the CLI names
+        # the shapes instead of printing the aggregate.
+        team_meta_expected = counts.get("team_meta_expected", 0)
+        team_meta_unverified = counts.get("team_meta_verified") is False
+        if team_meta_unverified:
+            print(f"TeamMeta: restore UNVERIFIED "
+                  f"({team_meta_expected} first-org marker(s) expected)")
+        else:
+            print(f"TeamMeta: {counts.get('team_meta_restored', 0)} of "
+                  f"{team_meta_expected} first-org marker(s) restored")
+        if team_meta_unverified:
+            # "Could not confirm" must not be printed as "gone" (round 5's
+            # rule, applied to this class): the missing flag is unset when the
+            # verification read never produced a result.
+            print(
+                "TeamMeta: the post-restore verification COULD NOT RUN — the "
+                "rebuilt graph's first-org marker is UNVERIFIED: not "
+                "confirmed intact, and NOT observed gone. Check it before "
+                "re-provisioning the team (#5353).",
+                file=sys.stderr,
+            )
+        elif team_meta_expected and not counts.get("team_meta_restored"):
+            print(
+                "TeamMeta: the pre-wipe first-org marker was NOT restored — "
+                "the wipe is unconditional, only the journal is replayed, and "
+                "no replay pass recreates this class, so the `#2789` first-org "
+                "guard now reads 0 and a later provisioning call can mint a "
+                "replacement with the control plane's name and a fresh "
+                "`created`. Re-create the team's marker deliberately "
+                "(#5353).",
+                file=sys.stderr,
+            )
+        if counts.get("team_meta_state_unknown"):
+            print(
+                "TeamMeta: the leftover pre-wipe snapshot does not carry a "
+                "usable marker record — it either predates first-org marker "
+                "preservation or carries a state-UNKNOWN marker from an "
+                "earlier interrupted rebuild — so whether this graph's marker "
+                "was destroyed CANNOT be determined (UNKNOWN, not absent). "
+                "Check the graph's marker before re-provisioning the team "
+                "(#5353).",
+                file=sys.stderr,
+            )
         if counts.get("config_reset"):
             if counts.get("config_reset_read_failed"):
                 # `config_reset` is fail-SAFE, so it does not prove the marker
