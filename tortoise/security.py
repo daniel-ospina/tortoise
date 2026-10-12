@@ -20,6 +20,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+import socket
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -1080,17 +1081,19 @@ def validate_webhook_url(url: str) -> str:
     try:
         addr = ipaddress.ip_address(literal)
     except ValueError:
-        # A NUMERIC host that is not a valid IP literal (``127.1``,
-        # ``0177.0.0.1``, ``1.2.3.4.5``) is not a DNS name — it is a
-        # non-canonical address, and the resolver still sends it into loopback
-        # or private space. `ipaddress` rejecting it must not launder it into
-        # the DNS residual: that is how ``http://127.1/`` reached 127.0.0.1
-        # with every check above passing.
-        if literal and all(c in "0123456789." for c in literal):
-            raise ValueError(
-                f"webhook url host {host!r} is a numeric address that is not a "
-                f"valid IP literal — a webhook target must be a public address") from None
-        addr = None  # a DNS name — the residual above applies
+        # Not the canonical text form — but the C resolver ALSO accepts legacy
+        # numeric spellings (`127.1`, `0x7f.1`, `2130706433`), and `ipaddress`
+        # rejects every one of them. Asking by character class is what let
+        # `0x7f.1` through a digits-only guard: a class covers the spellings you
+        # thought of, and hex octets were not one of them. So ask the SAME
+        # question the resolver asks — if `inet_aton` can read it, it IS an
+        # address, whatever it looks like — and let the is_global check below
+        # refuse it. A DNS name fails inet_aton and keeps the residual above.
+        try:
+            addr = ipaddress.ip_address(
+                socket.inet_ntoa(socket.inet_aton(literal)))
+        except (OSError, ValueError):
+            addr = None  # genuinely a DNS name — the residual above applies
     if addr is not None and not addr.is_global:
         raise ValueError(
             f"webhook url host {host!r} is not a globally routable address "

@@ -126,6 +126,13 @@ def test_secret_is_encrypted_at_rest(sdk_factory):
     "http://localhost./cb",              # trailing dot: an FQDN spelling of loopback
     "http://LOCALHOST.:8080/cb",         # ... and case-insensitive with a port
     "http://127.1/cb",                   # short form: numeric, but ipaddress rejects it
+    "http://0x7f.1/cb",                  # ... and the same address in hex octets
+    "http://0x7f.0.0.1/cb",
+    "http://127.0x1/cb",
+    "http://0x7f.0x0.0x0.0x1/cb",
+    "http://2130706433/cb",              # decimal form of 127.0.0.1
+    "http://0177.0.0.1/cb",              # leading-zero (octal-looking) octet
+    "http://0/cb",                       # 0.0.0.0
     "http://127.0.0.1/cb",
     "http://[::1]/cb",
     "https://169.254.169.254/latest/meta-data/",
