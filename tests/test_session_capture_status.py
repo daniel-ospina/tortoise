@@ -267,7 +267,14 @@ def test_a_store_only_capture_is_not_reported_as_a_failure(status_client, monkey
     recorded on the per-harness failure sub-line.
     """
     monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "TORTOISE_SESSION_API_KEY"):
+    # Scrub every provider key the extraction path can actually consume, taken
+    # from the canonical list rather than a hand-copy: a copy rots the moment a
+    # provider is added, and this assertion then passes or fails by what the
+    # DEVELOPER's shell happens to export. Measured with GEMINI_API_KEY ambient,
+    # the scrub named only three of the four keys `_LLM_PROVIDER_KEYS` holds, so
+    # the extraction leg still ran and the store-only case red as
+    # `extraction_mode='error'` instead of `'no-provider'` (#3520 review).
+    for k in (*_ha._LLM_PROVIDER_KEYS, "TORTOISE_SESSION_API_KEY"):
         monkeypatch.delenv(k, raising=False)
     r = status_client.post("/v1/sessions", json={
         "conversation": _CONV, "harness": "claude", "session_id": "s-3520-store-only"})
