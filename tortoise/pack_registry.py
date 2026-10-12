@@ -306,10 +306,15 @@ SEMANTICS_TRANSITION: dict[str, str] = {
 #                op_type. The predicate itself is a free Layer-3 label
 #                (ONTOLOGY §8, #7852) and is deliberately NOT checked against a
 #                vocabulary — any domain verb can ride a declared mechanism.
-#   structural — ``sdk.create_edge(predicate, from_id, to_id)``: the structural
-#                predicate allowlist. Read from its single home in the writer
-#                (``projection/edges.py::_VALID_EDGE_PREDICATES``) so a
-#                predicate added or removed THERE moves this verdict with it.
+#   structural — ``sdk.create_edge(predicate, from_id, to_id)`` and the other
+#                structural writers (``create_about_edge``, ``sdk.ingest``):
+#                the unions of their predicate sets. Read from its single home
+#                in the writer (``projection/edges.py::
+#                STRUCTURAL_WRITE_PREDICATES``) so a predicate added or
+#                removed THERE moves this verdict with it. It is not one of the
+#                three subsets — reading only ``_VALID_EDGE_PREDICATES``
+#                under-reported ``aboutPoint`` (create_about_edge) and
+#                ``extractedFrom`` (ingest) as unwritable (#8285 review P1).
 #
 # ⛔ DO NOT READ THE VERDICT AS A RUNTIME REFUSAL — it is not one. The two
 # writers are NOT symmetric:
@@ -347,7 +352,9 @@ def relation_write_paths(rel: dict) -> tuple[str, ...]:
     The paths are the two surfaces a caller can reach with the relation AS
     DECLARED (see the block above): ``operator`` is gated on the declared
     ``mechanism`` — the declaration's own op_type — and ``structural`` reads
-    the writer's own allowlist. Empty means the declaration binds no path.
+    the writer's own structural vocabulary (``STRUCTURAL_WRITE_PREDICATES``,
+    the union of every writers' set). Empty means the declaration binds no
+    path.
 
     ⛔ Empty is NOT "the runtime refuses it": ``create_operator`` accepts any
     label (warn-not-block, #1934), and what is missing is a declared mechanism
@@ -356,14 +363,18 @@ def relation_write_paths(rel: dict) -> tuple[str, ...]:
     """
     # Lazy: the pack registry is imported by the extraction path and must not
     # drag the whole projection package in behind it (measured ~60 ms). The
-    # allowlist stays defined in ONE place — the writer — and is read here.
-    from .projection.edges import _VALID_EDGE_PREDICATES
+    # write vocabulary stays defined in ONE place — the writer — and is read
+    # here. It is the UNION of the writers' structural sets (#8285 review P1):
+    # `_VALID_EDGE_PREDICATES` alone excludes `aboutPoint` (create_about_edge)
+    # and `extractedFrom` (ingest), both of which the runtime demonstrably
+    # writes.
+    from .projection.edges import STRUCTURAL_WRITE_PREDICATES
 
     predicate = rel.get("predicate") or ""
     paths: list[str] = []
     if rel.get("mechanism") in CORE_PREDICATES:
         paths.append("operator")
-    if predicate in _VALID_EDGE_PREDICATES:
+    if predicate in STRUCTURAL_WRITE_PREDICATES:
         paths.append("structural")
     return tuple(paths)
 

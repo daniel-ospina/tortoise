@@ -586,6 +586,75 @@ class TestRelationWriteVerdict:
         assert verdict == "writable"
         assert paths == ("structural",)
 
+    def test_structural_leg_counts_every_writer(self):
+        """#8285 review P1: the `structural` leg must cover EVERY structural
+        writer, not just `create_edge`'s set.
+
+        `aboutPoint` is written by `create_about_edge` and `extractedFrom` by
+        `sdk.ingest`; both are declarable with zero validation errors, so
+        reporting them `predicate-not-in-allowlist` asserted a runtime the
+        code contradicts. Before this fix the resolver read only
+        `_VALID_EDGE_PREDICATES` (neither predicate is in it) and this fails.
+        """
+        from tortoise.pack_registry import relation_write_verdict
+
+        for predicate in ("aboutPoint", "extractedFrom"):
+            verdict, paths = relation_write_verdict({"predicate": predicate})
+            assert verdict == "writable", (predicate, verdict)
+            assert paths == ("structural",), (predicate, paths)
+
+    def test_structural_leg_is_the_union_of_the_writers_sets(self):
+        """Drift guard: the verdict must answer from the union of the writers'
+        sets, so a predicate added to any single writer cannot be reported as
+        unwritable again.
+
+        Asserting the whole union (not just the two known misses) is what makes
+        this fail on the pre-fix code for the right reason and keeps holding as
+        the writers grow.
+        """
+        from tortoise.pack_registry import relation_write_verdict
+        from tortoise.projection.edges import (
+            STRUCTURAL_REL_LABELS,
+            STRUCTURAL_WRITE_PREDICATES,
+            _VALID_EDGE_PREDICATES,
+        )
+
+        # The union is exactly the writers' structural vocabulary.
+        assert STRUCTURAL_WRITE_PREDICATES == (
+            _VALID_EDGE_PREDICATES | set(STRUCTURAL_REL_LABELS)
+        )
+        # ... and every member answers `writable` / `structural`.
+        for predicate in sorted(STRUCTURAL_WRITE_PREDICATES):
+            verdict, paths = relation_write_verdict({"predicate": predicate})
+            assert verdict == "writable", (predicate, verdict)
+            assert paths == ("structural",), (predicate, paths)
+        # A predicate outside every writer is still reported — the union does
+        # not turn the verdict permissive.
+        assert relation_write_verdict({"predicate": "blocks"})[0] == \
+            "predicate-not-in-allowlist"
+
+    def test_shipped_docs_structural_list_matches_the_writers(self):
+        """The docs tell authors which predicates are structural; the list must
+        be the writers' union, not one writer's subset.
+
+        Before this fix the list omitted `aboutPoint` and `extractedFrom`, so
+        an author consulting it was told a real write path does not exist.
+        """
+        import re
+        from pathlib import Path
+
+        from tortoise.projection.edges import STRUCTURAL_WRITE_PREDICATES
+
+        root = Path(__file__).resolve().parent.parent
+        docs = (root / "docs" / "EXPANSION_PACKS.md").read_text()
+        match = re.search(r"the writers accept \(([^)]*)\)", docs)
+        assert match, "the structural predicate list moved — update this pin"
+        listed = set(re.findall(r"`([^`]+)`", match.group(1)))
+        assert listed == set(STRUCTURAL_WRITE_PREDICATES), (
+            "docs structural list diverged from the writers",
+            sorted(set(STRUCTURAL_WRITE_PREDICATES) ^ listed),
+        )
+
     def test_declaration_only_is_reported_and_silent(self):
         from tortoise.pack_registry import relation_write_verdict
 

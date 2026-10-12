@@ -79,7 +79,7 @@ least one of them:
 | path | surface | what makes the declaration bind it |
 |---|---|---|
 | `operator` | `sdk.create_operator(op_type=<mechanism>, label=<predicate>)` — the path `sdk.ingest` uses for `connections[].label` | the relation declares a **`mechanism`** (`IMPL`/`NAND`) — the mechanism is what tells a caller which `op_type` the verb means. The predicate is a free Layer-3 label by owner ruling (ONTOLOGY §8, #7852) — `fixes`, `implements`, `deploysTo` all ride one mechanism and stay distinct by their verb — so the declared **`mechanism` is what binds the verb to the operator path**, not a predicate allowlist |
-| `structural` | `sdk.create_edge(<predicate>, from_id, to_id)` | the predicate is one of the structural edge predicates the writer accepts (`performs`, `produces`, `uses`, `authoredBy`, `ownedBy`, `managedBy`, `hasMember`, `holdsRole`, `memberOf`, `reportsTo`, `participatesIn`, `hasPart`, `related`, `dependsOn`, `references`, `wasDerivedFrom`, `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutDocument`, `aboutSource`, `aboutAction`) |
+| `structural` | `sdk.create_edge(<predicate>, from_id, to_id)` and the other structural writers (`create_about_edge`, `sdk.ingest`) | the predicate is one of the structural edge predicates the writers accept (`performs`, `produces`, `uses`, `authoredBy`, `ownedBy`, `managedBy`, `hasMember`, `holdsRole`, `memberOf`, `reportsTo`, `participatesIn`, `hasPart`, `related`, `dependsOn`, `references`, `wasDerivedFrom`, `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDocument`, `aboutSource`, `aboutAction`, `extractedFrom`) |
 
 ⛔ **The verdict is about the DECLARATION, not about whether the writer refuses the write.** The two
 writers are not symmetric, and the difference is measured (2026-10-02, #2766):
@@ -136,7 +136,7 @@ verdict exists to remove.
 > by itself change what the extractor mints. It is a carried intent (#2787 → the extractor-v4
 > write-path work, #4894). The verdict above — not this flag — is what tells you whether the
 > relation's declaration binds a write path.
-
+>
 > **Why a marker and not a third list.** The alternative — a manifest-level mapping table from domain
 > predicate to writable predicate — is a **second** source of truth for a vocabulary that already has
 > one, which is the defect (#2766: four surfaces each derived the relation vocabulary and contradicted
