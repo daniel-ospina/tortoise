@@ -279,4 +279,19 @@ connectors: []
 tools: []
 
 # ── Dependencies ──────────────────────────────────────────────────────────
+# Pack-level dependencies (#2781), by namespace. CONSUMED, not decorative:
+#   * registry load — a declared pack that is not loaded is reported against
+#     THIS pack (naming the missing one) and the pack still loads. The
+#     declaration is also what explains an unresolvable BARE kind reference
+#     (one that carries no `ns:` prefix): with a declared-but-absent
+#     dependency the reference is a reported gap, without one it is treated
+#     as a typo and the pack is isolated.
+#   * hosted install (`validate_manifest`) — FAIL-CLOSED: an upload whose
+#     declared dependency or cross-pack reference cannot be satisfied by the
+#     tenant's installed set (starter catalog + the tenant's own packs) is
+#     refused, naming the missing pack.
 depends_on: []
+# Example — a pack whose relations/nearMisses reach into two other packs:
+# depends_on:
+# - product-strategy
+# - pm

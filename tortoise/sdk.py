@@ -6133,13 +6133,31 @@ class TortoiseSDK:
         # a per-query race and `proj` is as valid after a retry as before it
         # (#7405 review P1-2). `_sync_tags` / `_link_source` below reuse it.
         # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
+        #
+        # #7209: the follow-up writes of a fresh create ride the SAME bounded
+        # retry as the CREATE above. Before this they were bare `proj.g.query`
+        # calls, so a rebuild's per-query abort landing here aborted the write
+        # AFTER the Point had already landed — leaving a half-materialized
+        # point (no TAGGED / no extractedFrom edges), which is a finding that
+        # provenance and tag reads cannot reach: the same "the map loses a
+        # finding" outcome by a narrower route. Every statement in these two
+        # helpers is a MERGE (plus a read-guarded canonicalUrl adopt, itself a
+        # documented no-op on re-run), so re-issuing one after an engine ABORT
+        # cannot duplicate anything — the abort means the statement did not
+        # land, exactly the contract `retryable_aborted_write` is built on.
         tags = props.get("tags") or []
         if isinstance(tags, list):
-            self._sync_tags(proj, pid, tags)
+            self._graph_write_with_retry(
+                lambda: self._sync_tags(proj, pid, tags),
+                what="create_point TAGGED edges",
+            )
         # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
         if props.get("extractedFrom"):
-            proj._link_source(pid, props["extractedFrom"],
-                              source_versions=_source_versions)
+            self._graph_write_with_retry(
+                lambda: proj._link_source(pid, props["extractedFrom"],
+                                          source_versions=_source_versions),
+                what="create_point extractedFrom edges",
+            )
             # Inheritance gate dirty-mark: a freshly-sourced point is always
             # inherit-eligible on the next EP run (no interval wait, #398).
             # #2952: a born point carries no `inherited_at` stamp, so the
@@ -6200,7 +6218,23 @@ class TortoiseSDK:
                          pre_stamped=set() if _born_terminal else {pid})
         # #432+#548 unified: domain payload + full point snapshot for both
         # the :GraphEvent store (subscriptions/poll) and JSONL (rebuild_all).
+        #
+        # #7209: this read-back is the SDK's own proof that the write LANDED,
+        # so it must not be a silent one. `get_point` answers `{}` for a Point
+        # it cannot see — indistinguishable, to the caller, from a successful
+        # create whose result happens not to carry an id. Returning that `{}`
+        # is how a discarded write read as success (#7209); the retry above
+        # closes the abort path, and this guard closes the RESIDUAL the retry
+        # documents but cannot: a state-gated re-issue applied into a rebuilt
+        # graph that the rebuild's own replay then replaces again (#7685's
+        # escalation line — closing it fully needs an engine identity token).
+        # Raising here also stops the `PointAdded` below from journaling a
+        # point the graph does not hold, so a rebuild cannot resurrect a
+        # journal record that never had a node behind it.
         _snapshot = self.get_point(pid)
+        if not _snapshot:
+            from .exceptions import WriteNotLandedError
+            raise WriteNotLandedError(pid, getattr(proj, "graph_name", None))
         self._emit_event("PointAdded", {"id": pid, "kind": kind, "content_hash": ch},
                          point=_snapshot)
         if _source_change_notices:

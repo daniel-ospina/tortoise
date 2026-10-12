@@ -9358,7 +9358,7 @@ async def upload_pack_manifest(
         MANIFEST_WIRE_CAP_BYTES,
         MAX_MANIFEST_BYTES,
         upsert_tenant_manifest,
-        validate_manifest,
+        validate_manifest_for_tenant,
     )
     # #2029: reject oversized request bodies BEFORE buffering/parsing them —
     # the 64KB check below alone only fires after request.json() has buffered
@@ -9389,11 +9389,14 @@ async def upload_pack_manifest(
                             detail="missing required field: manifest_yaml")
     if len(manifest_yaml.encode()) > MAX_MANIFEST_BYTES:
         raise HTTPException(status_code=413, detail="manifest exceeds 64KB")
-    result = validate_manifest(manifest_yaml)
+    # #2781: the pre-check seeds the tenant's own installed manifests, exactly
+    # as the install below does — a pre-check that could not see them would
+    # refuse the very manifests it exists to admit.
+    sdk = _make_sdk(namespace=org_id)
+    result = validate_manifest_for_tenant(sdk, manifest_yaml)
     if not result.ok:
         raise HTTPException(status_code=422,
                             detail={"errors": result.errors or ["invalid manifest"]})
-    sdk = _make_sdk(namespace=org_id)
     try:
         record = await asyncio.to_thread(upsert_tenant_manifest, sdk, manifest_yaml)
     except ValueError as e:
@@ -21584,6 +21587,17 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
     if pc_err is not None:
         raise ValueError(pc_err)
     packs = pc.get("packs", [])
+    # #2781: a restore installs a SET of packs, so a manifest may reference a
+    # sibling that appears later in this same pack_config. Seed every sibling
+    # with a yaml as an available pack, so the validator resolves against the
+    # set the restore will leave behind rather than against install order.
+    # (Before #2781 the validator's temp registry held one manifest and no
+    # cross-pack reference could validate at all.)
+    sibling_yamls = {
+        p.get("namespace"): p.get("yaml") for p in packs
+        if isinstance(p, dict) and isinstance(p.get("namespace"), str)
+        and isinstance(p.get("yaml"), str) and p.get("yaml")
+    }
     for pack in packs:
         ns = pack.get("namespace")
         if not ns:
@@ -21596,13 +21610,17 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
             # residue. The ok-ness check is deliberately NOT duplicated:
             # upsert_tenant_manifest re-validates unconditionally before any
             # graph write with the identical message + zero residue.
-            result = validate_manifest(yaml_text)
+            result = validate_manifest(yaml_text, installed_manifests=sibling_yamls)
             if result.ok and result.namespace != ns:
                 raise ValueError(
                     f"pack_config pack namespace {ns!r} does not match "
                     f"manifest namespace {result.namespace!r}")
             # Validated upsert — ValueError (invalid manifest) quarantines.
-            upsert_tenant_manifest(sdk, yaml_text)
+            # #2781: pass the restore's sibling set so a cross-referencing
+            # pack_config validates as the SET it will become, not in install
+            # order (the sibling may appear later in this same list).
+            upsert_tenant_manifest(
+                sdk, yaml_text, extra_manifests=sibling_yamls)
         else:
             # Starter-pack activation record (idempotent MERGE).
             reg = _get_registry()
