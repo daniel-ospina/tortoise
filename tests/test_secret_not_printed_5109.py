@@ -473,3 +473,42 @@ def test_every_write_mcp_config_call_site_threads_the_config_path(
         f"dropped config_path resolves the global store instead: {printed}"
     )
     assert all(".tortoise/credentials.json" not in ln for ln in printed), printed
+
+
+def test_init_prints_no_literal_key_on_any_arm(monkeypatch, tmp_path, capsys) -> None:
+    """#5109: BEHAVIOURAL — `_cmd_init` puts no literal key on stdout, in any form.
+
+    `_LIVE_VALUE_PATTERNS` enumerates known interpolation spellings, so a
+    regression that aliases first (`_kk = args.api_key; print(f"{_kk}")`, or a
+    renamed local) evades it — and it cannot see a helper that returns the key
+    by a different path. Drive the real command with a sentinel instead and
+    assert the value never reaches either stream. This is the assertion that
+    would have caught the six original `init` sites at the command level.
+    """
+    from unittest import mock
+
+    from tortoise.__main__ import main as cli_main
+
+    sentinel = "tt_" + "12" * 16
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TORTOISE_API_URL", "https://api.premiselabs.co")
+
+    def _response():
+        resp = mock.MagicMock()
+        resp.read.return_value = json.dumps({"org_id": "team5109"}).encode()
+        resp.__enter__.return_value = resp
+        return resp
+
+    arms = [
+        ["init", "--api-key", sentinel, "--harness", "claude"],
+        ["init", "--api-key", sentinel, "--harness", "codex", "--write-mcp-config", "--force"],
+        ["init", "--api-key", sentinel, "--json", "--harness", "claude"],
+        ["init", "--api-key", sentinel, "--json", "--harness", "codex", "--write-mcp-config", "--force"],
+    ]
+    for argv in arms:
+        (tmp_path / ".tortoise").unlink(missing_ok=True)
+        with mock.patch("urllib.request.urlopen", return_value=_response()):
+            assert cli_main(argv) == 0, argv
+        captured = capsys.readouterr()
+        assert sentinel not in captured.out, f"{argv}: literal key on stdout"
+        assert sentinel not in captured.err, f"{argv}: literal key on stderr"
