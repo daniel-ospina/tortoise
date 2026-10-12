@@ -219,6 +219,20 @@ fi
 exec "${REAL_GIT:?REAL_GIT unset}" "$@"
 """
 
+# Fails ONLY `git worktree list`. That is the ONE call the #8175 claim-artifact
+# verifier makes to enumerate the worktrees a claim is measured against, so this
+# stub reaches "verification could not be performed" while every other git
+# surface (main tip, first-parent, refs) stays readable. An unreadable
+# measurement must keep the claim BLOCKING.
+GIT_STUB_WORKTREE_LIST_FAILS = r"""#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = "worktree" ] && [ "${2:-}" = "list" ]; then
+  echo "git-stub: worktree listing unavailable" >&2
+  exit 128
+fi
+exec "${REAL_GIT:?REAL_GIT unset}" "$@"
+"""
+
 SURFACE_ROWS = (
     "open PRs",
     "recently-closed PRs",
@@ -4539,6 +4553,445 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertIn("comment by other-agent [id IC_kwDOAAA123]", out)
         self.assertIn("REMEDY", out)
+
+    # ── claim artifact re-verification (#8175) ─────────────────────────────
+    #
+    # The claim gate re-measures the branch/worktree a claim NAMES. The
+    # decision table preserves #6108: an artifact that EXISTS blocks even at 0
+    # commits ahead, and only what is GONE or demonstrably NOT LIVE is void.
+    # Every test here opts into JEV (the demotion is scoped to a model-decided
+    # ownership claim); the JEV-off rollback stays byte-for-byte `origin/main`
+    # and is pinned by the tests above.
+
+    def test_claim_artifact_extraction_is_conservative(self):
+        # ⛔ ONLY A WORKTREE PATH MAY DEMOTE. A bare branch NAME is a string, and
+        # no string rule can tell a branch from a FILE PATH: `docs/N-notes`,
+        # `docs/N-notes.md`, `docs/N-notes.markdown` and the REAL branch
+        # `chore/1128-bump-agent-infra-v0.1.3` all have the same shape, so
+        # extracting one as a branch voids a claim that named NO artifact.
+        # This pins the narrowing: every branch-shaped token extracts NOTHING,
+        # and a claim that names nothing keeps BLOCKING.
+        cp = _tool_module()
+        for not_an_artifact in (
+            f"fix/{ISSUE}-x",
+            f"refs/heads/fix/{ISSUE}-x",
+            f"docs/{ISSUE}-notes",
+            f"docs/{ISSUE}-notes.md",
+            f"docs/{ISSUE}-notes.markdown",
+            f"src/{ISSUE}_fix.py",
+            f"tests/{ISSUE}_test.py",
+            f"fix/{ISSUE}..x",
+            f"fix/{ISSUE}-a+b",
+            f"chore/{ISSUE}-bump-agent-infra-v0.1.3",
+            f"tests/test_{ISSUE}_x.py",
+            # A FILE directly under `.worktrees/` is not a worktree. The name is
+            # the LAST segment and must be a slug: any dot is refused, because a
+            # dot is what a FILE has and `{ISSUE}-notes.markdown` (a file) is
+            # indistinguishable from `{ISSUE}-bump-v0.1.3` (a real branch).
+            f".worktrees/{ISSUE}-notes.md",
+            f".worktrees/{ISSUE}-notes.markdown",
+            f".worktrees/{ISSUE}-bump-v0.1.3",
+            f".worktrees/{ISSUE}-x status",
+            # A path DEEPER than the two directory layouts this repo uses is not
+            # a worktree either. An extension-less file inside a live worktree
+            # (`…/lane/docs/{ISSUE}-notes`) passed the last-segment checks,
+            # matched no registered entry and verified "gone" — a false CLEAN
+            # the seventh review reproduced end to end.
+            f".worktrees/lane/docs/{ISSUE}-notes",
+            f".worktrees/{ISSUE}-live/docs/{ISSUE}-notes",
+        ):
+            with self.subTest(token=not_an_artifact):
+                self.assertEqual(
+                    cp.claim_named_artifacts(f"see `{not_an_artifact}`", ISSUE),
+                    ([], [], False),
+                )
+        # A WORKTREE PATH does extract: it names a directory this tool
+        # ENUMERATES, so live/gone is measured against the listing the worktree
+        # surface reports. BOTH layouts this repo uses must extract, and a
+        # differently-written reference to the same directory must normalise to
+        # ONE value so it matches the registered path instead of reading as gone.
+        for spelling in (
+            f".worktrees/{ISSUE}-x",
+            f".worktrees/fix/{ISSUE}-x",
+            f"./.worktrees/{ISSUE}-x",
+            f"../elsewhere/.worktrees/{ISSUE}-x",
+            f"/abs/path/.worktrees/{ISSUE}-x",
+        ):
+            # The normalised form is `.worktrees/` + the tail VERBATIM, so a
+            # nested layout keeps its depth — that is what lets it match the
+            # registered path — while every writing of the same NON-nested
+            # directory collapses to one value.
+            expected = ".worktrees/" + spelling.split(".worktrees/", 1)[1]
+            with self.subTest(spelling=spelling):
+                self.assertEqual(
+                    cp.claim_named_artifacts(f"wt `{spelling}`", ISSUE),
+                    ([], [expected], False),
+                )
+        self.assertEqual(
+            cp.claim_named_artifacts("wt `.worktrees/other-thing`", ISSUE),
+            ([], [], False),
+        )
+        # ⛔ A FILE INSIDE a worktree is NOT the worktree. It matches no
+        # enumerated entry, so reading it as a worktree would verify "gone" and
+        # demote a claim that named no artifact.
+        self.assertEqual(
+            cp.claim_named_artifacts(
+                f"wt `.worktrees/{ISSUE}-x/tools/foo.py`", ISSUE),
+            ([], [], False),
+        )
+        # Past the cap the set is incomplete, so it must not be used to demote.
+        # The tokens it DID read are returned for the report; the `True` is what
+        # stops the caller — an incomplete set can never void a claim.
+        nine = " ".join(f"`.worktrees/{ISSUE}-z{i}`" for i in range(9))
+        self.assertEqual(
+            cp.claim_named_artifacts(nine, ISSUE),
+            ([], [f".worktrees/{ISSUE}-z{i}" for i in range(8)], True),
+        )
+
+    def test_claim_verifier_demotes_a_dead_worktree_record(self):
+        # The "worktree not live" arm of the decision table. `_worktree_liveness`
+        # demotes ONLY git's aborted-add marker (`locked initializing`); every
+        # other record fails closed. The verifier must honour that verdict —
+        # reusing the function rather than re-deriving liveness from the path.
+        cp = _tool_module()
+        blocks = [{
+            "path": f"/hub/.worktrees/{ISSUE}-dead",
+            "branch": f"refs/heads/fix/{ISSUE}-dead",
+            "head": "0" * 40,
+            "locked": "initializing",
+        }]
+        verify = cp._claim_artifact_verifier(
+            "git", str(self.repo), 30, ISSUE, blocks, set(), None, None, None,
+        )
+        verdict = verify(
+            f"Claiming this (worktree `.worktrees/{ISSUE}-dead`).")
+        self.assertIsNotNone(verdict, "a dead record must produce a verdict")
+        self.assertFalse(verdict.live)
+        self.assertIn("worktree dead", verdict.basis)
+        self.assertIn("aborted", verdict.basis)
+
+    def test_claim_naming_a_live_branch_still_blocks(self):
+        # #6108 PRESERVED: the branch exists AT origin/main's tip with 0 commits
+        # of its own — the lane-between-`worktree add`-and-first-commit window —
+        # so the claim naming it must NOT be demoted.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        _git(self.repo, "branch", f"fix/{ISSUE}-live")
+        self.gh_fixtures(
+            issue=self.issue_payload(comments=[
+                ("test-agent", f"Claiming this — lane `fix/{ISSUE}-live`."),
+            ]),
+            closed_prs=[],
+        )
+        self.jev_rules(default=0.95)
+        rc, out = self.run_tool(env_extra=self.jev_env())
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("stale claim", out)
+        # ⛔ A BARE BRANCH IS NOT AN ARTIFACT the claim arm can verify — a string
+        # cannot be told from a file path — so this claim names nothing and keeps
+        # blocking, the safe direction. What matches the live ref and reports the
+        # measurement is the BRANCH SURFACE, which is also why a LIVE branch
+        # named in a claim still refuses the dispatch.
+        self.assertIn(f"refs/heads/fix/{ISSUE}-live", out)
+        self.assertIn("0 commit(s) ahead", out)
+
+    def test_stale_claim_with_gone_artifacts_is_advisory(self):
+        # The #8175 defect, in the #6151 shape: the claim names a branch AND a
+        # worktree, both since removed. The claim is VOID — reported BY NAME as
+        # a weak, non-blocking signal — and the dispatch is allowed (exit 0).
+        body = (
+            f"Claiming this — lane `fix/{ISSUE}-refutes-magnitude` "
+            f"(worktree `.worktrees/{ISSUE}-ep-refutes-weight`)."
+        )
+        self.gh_fixtures(
+            issue=self.issue_payload(comments=[("test-agent", body)]),
+            closed_prs=[],
+        )
+        self.jev_rules(default=0.95)
+        rc, out = self.run_tool(env_extra=self.jev_env())
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("VERDICT: COLLISION", out)
+        self.assertIn(
+            "stale claim — its named artifacts are gone/empty; safe to "
+            "re-dispatch",
+            out,
+        )
+        # The ledger must not call a demoted claim a HIT: it is reported as a
+        # non-blocking weak signal, so the hit count excludes it (this printed
+        # "1 hit" beside a CLEAN verdict before the count was fixed).
+        self.assertIn("0 CLEAN, 0 hit", out)
+        # Named: the comment AND the dead artifact are visible in the report.
+        # The BRANCH this claim also names is not measured at all — a branch name
+        # is not extractable (see `claim_named_artifacts`) — and the WORKTREE
+        # alone carries the demotion.
+        self.assertIn("comment by test-agent", out)
+        self.assertIn(
+            f".worktrees/{ISSUE}-ep-refutes-weight: worktree gone", out)
+
+    def test_stale_claim_never_demotes_outside_a_model_decision(self):
+        # The demotion is scoped to a MODEL-DECIDED ownership claim. Two
+        # fail-closed paths must keep blocking even when the named artifacts are
+        # gone: the JEV-OFF rollback seam (which must reproduce origin/main
+        # EXACTLY), and an UNTRUSTED author (blocked without a model call by
+        # design, so demoting on its own self-declared artifacts would let an
+        # outsider clear the gate).
+        body = f"Claiming this — lane `fix/{ISSUE}-gone`."
+        for case, author, env_extra in (
+            ("jev-off", "test-agent", None),
+            ("untrusted-author", "other-agent", self.jev_env()),
+        ):
+            with self.subTest(case=case):
+                self.gh_fixtures(
+                    issue=self.issue_payload(comments=[(author, body)]),
+                    closed_prs=[],
+                )
+                self.jev_rules(default=0.95)
+                rc, out = self.run_tool(env_extra=env_extra)
+                self.assertNotEqual(rc, 0, out)
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertNotIn("stale claim", out)
+
+    def test_claim_naming_a_live_worktree_still_blocks(self):
+        # The other live arm: a registered worktree that `_worktree_liveness`
+        # reports LIVE keeps the claim BLOCKING.
+        self.add_worktree(f".worktrees/{ISSUE}-live", branch=f"fix/{ISSUE}-live")
+        self.gh_fixtures(
+            issue=self.issue_payload(comments=[
+                ("test-agent",
+                 f"Claiming this (worktree `.worktrees/{ISSUE}-live`)."),
+            ]),
+            closed_prs=[],
+        )
+        self.jev_rules(default=0.95)
+        rc, out = self.run_tool(env_extra=self.jev_env())
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("stale claim", out)
+        self.assertIn("worktree live", out)
+
+    def test_claim_naming_no_artifacts_still_blocks(self):
+        # A prose-only claim names NOTHING. "Could not extract an artifact" is
+        # not "the artifacts are gone" — it keeps blocking (fail-closed).
+        self.gh_fixtures(
+            issue=self.issue_payload(comments=[
+                ("test-agent", "I'm working on this now."),
+            ]),
+            closed_prs=[],
+        )
+        self.jev_rules(default=0.95)
+        rc, out = self.run_tool(env_extra=self.jev_env())
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("stale claim", out)
+        self.assertIn("claim-style comment", out)
+
+    def test_claim_whose_zero_ahead_branch_exists_still_blocks(self):
+        # The regression half of #6151 that must NOT fire: the artifact is EMPTY
+        # (0 commits ahead of origin/main) but NOT GONE. #6108's decision is
+        # explicit that an existing branch keeps blocking at 0 ahead, so the
+        # demotion must never be triggered by "no commits yet".
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        _git(self.repo, "branch", f"fix/{ISSUE}-empty")
+        self.gh_fixtures(
+            issue=self.issue_payload(comments=[
+                ("test-agent", f"Claiming this — lane `fix/{ISSUE}-empty`."),
+            ]),
+            closed_prs=[],
+        )
+        self.jev_rules(default=0.95)
+        rc, out = self.run_tool(env_extra=self.jev_env())
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("stale claim", out)
+        self.assertIn("0 commit(s) ahead", out)
+
+    def test_claim_naming_one_live_and_one_gone_artifact_still_blocks(self):
+        # The load-bearing "EVERY named artifact" rule, over the only artifact
+        # class this arm extracts. ONE LIVE WORKTREE keeps the claim BLOCKING
+        # even when another NAMED WORKTREE is gone. A mutation that demoted when
+        # ANY named artifact was dead would pass every other test in this block,
+        # so this pins the direction: the void state is reachable only when
+        # NOTHING the claim named is still live.
+        #
+        # ⛔ BOTH tokens must be WORKTREE paths. An earlier form paired the live
+        # worktree with a GONE BRANCH — and a branch name is not extractable, so
+        # the verifier saw exactly ONE artifact and the ALL-vs-ANY distinction
+        # never arose; a mutant that demoted on any dead artifact went green.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.add_worktree(f".worktrees/{ISSUE}-live", branch=f"fix/{ISSUE}-live")
+        gone = f".worktrees/{ISSUE}-gone"  # named by the claim, never created
+        self.gh_fixtures(
+            issue=self.issue_payload(comments=[
+                ("test-agent",
+                 f"Claiming this — worktrees `{gone}` and "
+                 f"`.worktrees/{ISSUE}-live`."),
+            ]),
+            closed_prs=[],
+        )
+        self.jev_rules(default=0.95)
+        rc, out = self.run_tool(env_extra=self.jev_env())
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("stale claim", out)
+        self.assertIn("artifacts verified live", out)
+        # BOTH named worktrees were re-measured — the live one is what keeps the
+        # claim blocking, and the gone one is reported alongside it.
+        self.assertIn(f".worktrees/{ISSUE}-live: worktree live", out)
+        self.assertIn(f".worktrees/{ISSUE}-gone: worktree gone", out)
+
+    def test_claim_naming_only_a_branch_still_blocks(self):
+        # The narrowing's COST, pinned deliberately. Because a bare branch name
+        # is not extracted, a claim naming ONLY a branch names no artifact and
+        # keeps BLOCKING — including a TERMINAL branch, which an earlier revision
+        # of this change would have voided. Over-blocking is the safe direction;
+        # a false CLEAN is not. A LIVE branch refuses the dispatch anyway, since
+        # the branch surface enumerates branches independently of this arm.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        ref = f"fix/{ISSUE}-abandoned"
+        _git(self.repo, "branch", ref)
+        self.gh_fixtures(
+            issue=self.issue_payload(comments=[
+                ("test-agent", f"Claiming this — lane `{ref}`."),
+            ]),
+            closed_prs=[self._merged_pr_fixture(ref)],
+        )
+        self.jev_rules(default=0.95)
+        rc, out = self.run_tool(env_extra=self.jev_env())
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("stale claim", out)
+
+    def test_claim_extraction_cap_is_fail_closed(self):
+        # Past the cap a backticked token is never EXAMINED, and an unexamined
+        # token could name a LIVE artifact — so a truncated read must never void
+        # the claim. The tokens below are WORKTREE paths (the only class this arm
+        # extracts), so the cap on `len(worktrees)` is actually REACHED and the
+        # live artifact sits PAST it, never measured.
+        #
+        # ⛔ An earlier form prefixed the live worktree with EIGHT BRANCH tokens.
+        # Branch names are not extracted, so `len(worktrees)` never reached the
+        # cap, `unmeasured` was never set, and the run blocked only because the
+        # named worktree was live — the test proved nothing about the cap (and
+        # passed against the pre-fix tool).
+        #
+        # The live artifact is deliberately one the WORKTREE SURFACE cannot match
+        # (no issue number in its path or branch), so the CLAIM GATE is the only
+        # guard standing: a mutant that truncated fail-open (`break` without
+        # `unmeasured = True`) would demote on the eight it did read and CLEAN.
+        self.add_worktree(".worktrees/lane", branch="lane")
+        dead = " ".join(f"`.worktrees/{ISSUE}-dead{i}`" for i in range(1, 9))
+        self.gh_fixtures(
+            issue=self.issue_payload(comments=[
+                ("test-agent",
+                 f"Claiming this — {dead} and the live file "
+                 f"`.worktrees/lane/{ISSUE}-notes`."),
+            ]),
+            closed_prs=[],
+        )
+        self.jev_rules(default=0.95)
+        rc, out = self.run_tool(env_extra=self.jev_env())
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        # The claim was NOT demoted: a truncated set is UNMEASURED, not empty.
+        self.assertNotIn("stale claim", out)
+
+    def test_6151_regression_abandoned_claim_clears_only_when_artifacts_go(self):
+        # The MEASURED #6151 sequence, end to end. A lane claims the issue,
+        # creates `fix/N-refutes-magnitude` at origin/main's tip (0 commits of
+        # its own) and a clean worktree, then abandons both. While the artifacts
+        # EXIST the claim blocks (#6108's decision, pinned above). Deleting the
+        # worktree and the branch — with the comment left UNTOUCHED — must now
+        # clear the refusal, which is precisely what it could not do before
+        # #8175: the comment alone blocked forever and only a human hand-edit
+        # cleared it.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        branch = f"fix/{ISSUE}-refutes-magnitude"
+        wt = self.add_worktree(f".worktrees/{ISSUE}-ep-refutes-weight",
+                               branch=branch)
+        # Precondition: 0 commits ahead of origin/main.
+        counts = self._git_out(
+            "rev-list", "--count", "--left-right", f"origin/main...{branch}",
+        ).split()
+        self.assertEqual(counts[1], "0", counts)
+        body = (
+            f"Claiming this — lane `{branch}` "
+            f"(worktree `.worktrees/{ISSUE}-ep-refutes-weight`)."
+        )
+        self.gh_fixtures(
+            issue=self.issue_payload(comments=[("test-agent", body)]),
+            closed_prs=[],
+        )
+        self.jev_rules(default=0.95)
+        # (a) EMPTY BUT PRESENT -> BLOCKS.
+        rc, out = self.run_tool(env_extra=self.jev_env())
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("stale claim", out)
+        # (b) GONE -> the untouched claim is VOID and the dispatch is allowed.
+        _git(self.repo, "worktree", "remove", "--force", str(wt))
+        _git(self.repo, "branch", "-D", branch)
+        rc, out = self.run_tool(env_extra=self.jev_env())
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn(
+            "stale claim — its named artifacts are gone/empty; safe to "
+            "re-dispatch",
+            out,
+        )
+        self.assertIn("comment by test-agent", out)
+
+    def test_unverifiable_claim_never_demotes(self):
+        # "Verification could not be performed" is NOT "the worktree is gone".
+        # The claim names a WORKTREE and the worktree LISTING is unavailable, so
+        # the verifier holds no measurement — and a missing measurement must
+        # never become a downgrade, so the claim keeps BLOCKING.
+        #
+        # ⚠️ This replaces an earlier form that stubbed `rev-parse refs/heads/*`.
+        # After the branch arm was retired, that stub guarded a path nothing
+        # calls any more, so the test passed with or without it and proved
+        # nothing. It now exercises the arm that actually runs.
+        self.gh_fixtures(
+            issue=self.issue_payload(comments=[
+                ("test-agent",
+                 f"Claiming this (worktree `.worktrees/{ISSUE}-x`)."),
+            ]),
+            closed_prs=[],
+        )
+        self.jev_rules(default=0.95)
+        stub = _write_exec(self.tmp / "git-stub-worktree-list-fails",
+                           GIT_STUB_WORKTREE_LIST_FAILS)
+        rc, out = self.run_tool(
+            git_bin=stub,
+            env_extra={**self.jev_env(), "REAL_GIT": shutil.which("git")},
+        )
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("stale claim", out)
+        # An unreadable listing is INCOMPLETE, never an empty answer.
+        self.assertIn("INCOMPLETE", out)
+
+    def test_claim_naming_a_file_inside_a_worktree_still_blocks(self):
+        # ⛔ A FILE INSIDE A WORKTREE IS NOT THE WORKTREE. The extraction bounds
+        # the tail to the two directory layouts this repo uses
+        # (`.worktrees/<name>` / `.worktrees/<type>/<name>`), so an
+        # extension-less path under a LIVE worktree names NOTHING and the claim
+        # keeps BLOCKING. Reading it as a worktree made it match no registered
+        # entry, verify "gone", and void a claim that named no artifact — a false
+        # CLEAN, reproduced end to end against the head before this fix.
+        self.add_worktree(".worktrees/lane", branch="lane")
+        self.gh_fixtures(
+            issue=self.issue_payload(comments=[
+                ("test-agent",
+                 f"Claiming this — see `.worktrees/lane/docs/{ISSUE}-notes`."),
+            ]),
+            closed_prs=[],
+        )
+        self.jev_rules(default=0.95)
+        rc, out = self.run_tool(env_extra=self.jev_env())
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("stale claim", out)
 
     # ── terminal-injection hardening (#4027 P2-J) ──────────────────────────
 

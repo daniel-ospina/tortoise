@@ -439,9 +439,9 @@ def report_unmetered_increment(lane: str, org_id: str | None,
 
     ``lane`` names the swallow site (one stable token per site) so an alert is
     attributable to the handler that dropped the increment rather than to
-    "metering failed somewhere". The seven lanes are ``write_op``,
+    "metering failed somewhere". The eight lanes are ``write_op``,
     ``object_write_op``, ``subject_write_op``, ``capture_ledger``,
-    ``mcp_write_op``, ``ask_ledger`` and ``embed``.
+    ``mcp_write_op``, ``ask_ledger``, ``embed`` and ``retrieval``.
 
     Never raises: the alert itself must not become a new failure path (a signal
     that can raise is a refusal by another name). The incident — a GitHub issue
@@ -1452,6 +1452,214 @@ def get_embedding_usage(org_id: str) -> dict:
     except Exception as e:
         _logger.warning(
             "embed usage query failed (degrading to zero view): team=%s "
+            "period=%s error=%s", org_id, period.label, e,
+        )
+        return _zero_view(period.label, period)
+
+
+# ── Retrieval lane: per-org SEARCH workload (#4489) ─────────────────────────
+#
+# WHY. Reads are free by DECISION (``product/pricing.json`` →
+# ``billing.reads_free: true``), so the engine cost of answering a query had no
+# meter at all: the only per-org dimension was write-ops, and a read-heavy org
+# and an idle one were indistinguishable. These two functions put that workload
+# on the SAME durable per-period row, so the reading needs no new store and no
+# new read path.
+#
+# NOT a billing change (#4489 is explicit): nothing here prices, caps, throttles
+# or bills. The columns are WORKLOAD, and `get_cohort_spend_usd` does not read
+# them — the spend ceiling is untouched by construction.
+
+
+def record_retrieval_usage(org_id: str | None, *, queries: int = 0,
+                           leg_runs: int = 0, leg_degraded: int = 0,
+                           wall_ms: float = 0.0, leg_fts: int = 0,
+                           leg_vector: int = 0, leg_structural: int = 0,
+                           _selfhost_transport: bool = False) -> dict | None:
+    """Record one batch of RETRIEVAL workload for *org_id* (#4489).
+
+    Window resolution RAISES on an unresolvable anchor (#3825), exactly like the
+    other writers. That raise is a SIGNAL, not a refusal (#3981): the caller
+    (``retrieval_metering.flush_tally``) absorbs it, the read is served, and the
+    dropped increment is reported to the operator on the ``retrieval`` lane. A
+    failure of the increment RPC itself stays non-fatal — logged at WARNING and
+    dropped, not retried at any call site (representing that increment is
+    #3824, the same residual as the other lanes).
+
+    The leg counters are the RECORDED vocabulary (``fts`` / ``vector`` /
+    ``structural``) — a name outside it is folded into ``leg_runs`` at the
+    caller (``retrieval_metering``), so the row shape cannot grow by accident.
+
+    Exemptions mirror ``record_embedding_usage``: ``not org_id`` (stdio/None)
+    or the selfhost-transport ContextVar (the value ``selfhost`` is NEVER the
+    key).
+
+    A NON-FINITE ``wall_ms`` is dropped to 0.0 (with a warning): the value is
+    summed into a figure an operator reads, and a ``nan`` would poison it.
+    """
+    if not org_id or _selfhost_transport or _selfhost_transport_active():
+        return None
+    if not math.isfinite(wall_ms):
+        _logger.warning(
+            "retrieval metering dropped a non-finite wall_ms (team=%s "
+            "wall_ms=%r) — recording 0.0 rather than poisoning the figure",
+            org_id, wall_ms,
+        )
+        wall_ms = 0.0
+    period = _require_period(org_id, "retrieval metering increment")
+    now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    with _ask_meter_lock(org_id):
+        return _record_retrieval_usage_locked(
+            org_id, period, now_iso, queries=queries, leg_runs=leg_runs,
+            leg_degraded=leg_degraded, wall_ms=wall_ms, leg_fts=leg_fts,
+            leg_vector=leg_vector, leg_structural=leg_structural,
+        )
+
+
+def _record_retrieval_usage_locked(org_id: str, period: MeteringPeriod,
+                                   now_iso: str, *, queries: int,
+                                   leg_runs: int, leg_degraded: int,
+                                   wall_ms: float, leg_fts: int,
+                                   leg_vector: int,
+                                   leg_structural: int) -> dict | None:
+    """The serialized retrieval increment body (see the embed sibling)."""
+    try:
+        if _supabase_mode():
+            from tortoise.supabase_control import (  # noqa: I001
+                get_control_plane, metering_increment_retrieval,
+            )
+            metering_increment_retrieval(
+                get_control_plane(), org_id, period.start_iso, period.end_iso,
+                queries=queries, leg_runs=leg_runs, leg_degraded=leg_degraded,
+                wall_ms=wall_ms, leg_fts=leg_fts, leg_vector=leg_vector,
+                leg_structural=leg_structural,
+            )
+            return {"period": period.label,
+                    "period_start": period.start_iso,
+                    "period_end": period.end_iso,
+                    "retrieval_queries": queries,
+                    "retrieval_leg_runs": leg_runs,
+                    "retrieval_leg_degraded": leg_degraded,
+                    "retrieval_wall_ms": wall_ms,
+                    "retrieval_leg_fts": leg_fts,
+                    "retrieval_leg_vector": leg_vector,
+                    "retrieval_leg_structural": leg_structural}
+        sdk = _reg_sdk()
+        reg = sdk._get_registry()
+        reg.query(
+            "MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
+            "SET m.period = $label, m.period_end = $pend, "
+            "    m.retrieval_queries = "
+            "        coalesce(m.retrieval_queries, 0) + $queries, "
+            "    m.retrieval_leg_runs = "
+            "        coalesce(m.retrieval_leg_runs, 0) + $leg_runs, "
+            "    m.retrieval_leg_degraded = "
+            "        coalesce(m.retrieval_leg_degraded, 0) + $leg_degraded, "
+            "    m.retrieval_wall_ms = "
+            "        coalesce(m.retrieval_wall_ms, 0.0) + $wall_ms, "
+            "    m.retrieval_leg_fts = "
+            "        coalesce(m.retrieval_leg_fts, 0) + $leg_fts, "
+            "    m.retrieval_leg_vector = "
+            "        coalesce(m.retrieval_leg_vector, 0) + $leg_vector, "
+            "    m.retrieval_leg_structural = "
+            "        coalesce(m.retrieval_leg_structural, 0) + $leg_structural, "
+            "    m.updated_at = $now",
+            params={"tid": org_id, "pstart": period.start_iso,
+                    "pend": period.end_iso, "label": period.label,
+                    "queries": queries, "leg_runs": leg_runs,
+                    "leg_degraded": leg_degraded, "wall_ms": wall_ms,
+                    "leg_fts": leg_fts, "leg_vector": leg_vector,
+                    "leg_structural": leg_structural, "now": now_iso},
+        )
+        return {"period": period.label,
+                "period_start": period.start_iso,
+                "period_end": period.end_iso,
+                "retrieval_queries": queries,
+                "retrieval_leg_runs": leg_runs,
+                "retrieval_leg_degraded": leg_degraded,
+                "retrieval_wall_ms": wall_ms,
+                "retrieval_leg_fts": leg_fts,
+                "retrieval_leg_vector": leg_vector,
+                "retrieval_leg_structural": leg_structural}
+    except Exception as e:
+        _logger.warning(
+            "retrieval metering increment failed (non-fatal): team=%s "
+            "period=%s error=%s", org_id, period.label, e,
+        )
+        return None
+
+
+def get_retrieval_usage(org_id: str) -> dict:
+    """Retrieval workload for *org_id* in the current period (#4489).
+
+    Returns the ``retrieval_*`` fields for the org's current window — ZEROS for
+    an org with no retrieval records yet: a successful read returning NO row is
+    not an error (the MERGE only creates the record on the first write, P2-14).
+    Read failures degrade to the zero view (never 500, #923), including an
+    unresolvable window.
+    """
+    zeros: dict = {"retrieval_queries": 0, "retrieval_leg_runs": 0,
+                   "retrieval_leg_degraded": 0, "retrieval_wall_ms": 0.0,
+                   "retrieval_leg_fts": 0, "retrieval_leg_vector": 0,
+                   "retrieval_leg_structural": 0}
+
+    def _zero_view(label: str,
+                   period: MeteringPeriod | None = None) -> dict:
+        return {**zeros, "period": label,
+                "period_start": period.start_iso if period else None,
+                "period_end": period.end_iso if period else None}
+
+    if not org_id:
+        return _zero_view(_display_period_label())
+    try:
+        period = _current_period(org_id)
+    except Exception as e:
+        _logger.warning(
+            "retrieval usage query failed (degrading to zero view): team=%s "
+            "error=%s", org_id, e,
+        )
+        return _zero_view(_display_period_label())
+    try:
+        if _supabase_mode():
+            from tortoise.supabase_control import (  # noqa: I001
+                get_control_plane, metering_get_retrieval_usage,
+            )
+            row = metering_get_retrieval_usage(get_control_plane(), org_id,
+                                               period.start_iso)
+            out = {**zeros}
+            out.update({k: row.get(k) for k in zeros if k in row})
+            out.update({"period": period.label,
+                        "period_start": period.start_iso,
+                        "period_end": period.end_iso})
+            return out
+        sdk = _reg_sdk()
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
+            "RETURN m.retrieval_queries, m.retrieval_leg_runs, "
+            "m.retrieval_leg_degraded, m.retrieval_wall_ms, "
+            "m.retrieval_leg_fts, m.retrieval_leg_vector, "
+            "m.retrieval_leg_structural",
+            params={"tid": org_id, "pstart": period.start_iso},
+        ).result_set
+        if not rows:
+            return _zero_view(period.label, period)
+        r = rows[0]
+        return {
+            "retrieval_queries": int(r[0] or 0),
+            "retrieval_leg_runs": int(r[1] or 0),
+            "retrieval_leg_degraded": int(r[2] or 0),
+            "retrieval_wall_ms": float(r[3] or 0.0),
+            "retrieval_leg_fts": int(r[4] or 0),
+            "retrieval_leg_vector": int(r[5] or 0),
+            "retrieval_leg_structural": int(r[6] or 0),
+            "period": period.label,
+            "period_start": period.start_iso,
+            "period_end": period.end_iso,
+        }
+    except Exception as e:
+        _logger.warning(
+            "retrieval usage query failed (degrading to zero view): team=%s "
             "period=%s error=%s", org_id, period.label, e,
         )
         return _zero_view(period.label, period)
