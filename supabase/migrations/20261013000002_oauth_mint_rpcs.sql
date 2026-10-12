@@ -114,6 +114,14 @@ BEGIN
      WHERE id = p_code_id
        AND code_hash = p_code_hash
        AND client_id = p_client_id
+       -- Identity is bound in the CAS too, not merely inserted: the caller reads
+       -- these two from the same row, so a match is free on every real path, and
+       -- binding them makes a caller that passed a MISMATCHED identity fail the
+       -- claim (nothing written, `not_claimable`) instead of minting a pair bound
+       -- to the wrong org. `rotate_oauth_refresh` already derives identity from
+       -- the claimed row; this is the same invariant stated as a predicate.
+       AND user_id = p_user_id
+       AND org_id = p_org_id
        AND used_at IS NULL
        AND redemption_state = 'unclaimed'
        AND expires_at > p_now

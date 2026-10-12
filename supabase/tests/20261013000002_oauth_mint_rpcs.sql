@@ -204,6 +204,45 @@ BEGIN
 END $$;
 
 -- ============================================================================
+-- SECTION 4a-2 — the identity CAS: a mismatched user_id/org_id claims NOTHING
+-- ============================================================================
+-- The identity is inserted from the caller's params, so binding it in the CAS as
+-- well is what makes "the minted pair is bound to the code's own org" true by
+-- construction rather than by trusting the caller to have read the same row.
+-- (`rotate_oauth_refresh` derives identity from the claimed row instead; this is
+-- the same invariant, stated as a predicate.)
+DO $$
+DECLARE
+  v_code_id bigint;
+  v_res     jsonb;
+BEGIN
+  INSERT INTO public.oauth_codes
+      (code_hash, client_id, user_id, org_id, redirect_uri, code_challenge,
+       code_challenge_method, scope, expires_at)
+  VALUES ('3025-code-ident', '3025-client', '3025-user', '3025-org',
+          'https://app.example/cb', '3025-challenge', 'S256', 'mcp',
+          now() + interval '10 minutes');
+  SELECT id INTO v_code_id FROM public.oauth_codes WHERE code_hash = '3025-code-ident';
+
+  v_res := public.redeem_oauth_code(
+      v_code_id, '3025-code-ident', '3025-client', '3025-user', '3025-OTHER-org', 'mcp',
+      '3025-redemption-ident', '3025-r-ident', '3025-rh-ident', '3025-a-ident',
+      '3025-ah-ident', now(), now() + interval '30 days',
+      now() + interval '1 hour');
+
+  PERFORM tests.assert(v_res->>'status' = 'not_claimable',
+      'a mismatched org must fail the identity CAS, got ' || v_res::text);
+  PERFORM tests.assert(
+    (SELECT used_at IS NULL AND redemption_state = 'unclaimed'
+       FROM public.oauth_codes WHERE id = v_code_id),
+    'a failed identity CAS must leave the code UNCLAIMED');
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.oauth_refresh_tokens
+      WHERE id IN ('3025-r-ident')) = 0,
+    'a failed identity CAS must insert NO refresh row');
+END $$;
+
+-- ============================================================================
 -- SECTION 4b — the REFUSAL path: `p_burn` claims AND burns, one transaction,
 -- with NO token row
 -- ============================================================================
