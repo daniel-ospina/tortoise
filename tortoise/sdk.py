@@ -23607,6 +23607,10 @@ class TortoiseSDK:
         Write nudges (nudge, don't enforce): returns ``{node, nudges}`` where
         ``nudges`` lists top related Points (by name/content token overlap) with
         a suggested IMPL/NAND/mitigate relation — advisory only, never enforced.
+
+        Returns ``{node, nudges}`` plus ``advisories`` when the write declared
+        no source and no provenance — see ``_provenance_advisory``. Advisory
+        only: never a block, and it never changes what is stored.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         # #8171 (review P1/P2): the ref must be shape-checked BEFORE any write
@@ -23719,19 +23723,25 @@ class TortoiseSDK:
         # converges instead of duplicating.
         #
         # ⛔ DOCUMENT ONLY, and that restriction is the point (review P1).
-        # `extractedFrom` has a DECLARED domain of Point -> Source
-        # (ONTOLOGY §3.3), and §4.6 says of these very classes: "Derived Events
-        # and Objects reach their source through their own links rather than
-        # `extractedFrom`". Their declared provenance predicate is
+        # The PRIMARY reason is the ontology: `extractedFrom` has a declared
+        # domain of Point -> Source (§3.3), and §4.6 says of these very
+        # classes: "Derived Events and Objects reach their source through their
+        # own links rather than `extractedFrom`". Their declared predicate is
         # `references` (Source -> Event/Object/Source), written by
         # `link_source_to_entity`. Routing subject/object/event through
-        # `_link_source` therefore invented an edge domain the ontology does
-        # not declare — AND wired it live-only, because no `_upsert_subject` /
-        # `_upsert_object` / `_upsert_event` replays it, so `rebuild_all`
-        # silently deleted the edges and `derived = replay(journal)` failed.
-        # The document leg is the capability the consolidation actually lost
-        # (#394/D10), and a document IS a `:Source` — which is also why
-        # `_link_source` keys it by `url` and every other label by `id`.
+        # `_link_source` would invent an edge domain the ontology does not
+        # declare.
+        # A SECOND, independent reason: live-only edges are worse than no
+        # edge, and NO entity label has a replay writer — `_upsert_subject`,
+        # `_upsert_object`, `_upsert_event` and `_upsert_document` all omit
+        # `_link_source`, and `_create_entity` journals no `DocumentCreated`
+        # line at all, so `rebuild_all` has nothing to re-mint the edge from.
+        # That gap is PRE-EXISTING (#2296) and this change neither creates nor
+        # widens it: it restores the materialization `create_document` has had
+        # since #394, so the document door now behaves as its own alias always
+        # did. It is recorded on #8171 rather than claimed fixed here — this
+        # comment must NOT read as a replay-safety guarantee for the document
+        # edge, because there is none yet.
         _prov_ref = props.get("extractedFrom")
         _prov_label = self._ENTITY_SOURCE_LABELS.get(t)
         if _prov_ref and _prov_label:
@@ -26257,6 +26267,14 @@ class TortoiseSDK:
         # source ref. D10: the entity label is Source (a document is a :Source).
         if props.get("extractedFrom"):
             self._get_proj()._link_source(did, props["extractedFrom"], label="Source")
+        # #8171 (review P2): the ADVISORY must be delivered on this door too.
+        # This is the documented alias AND a live MCP tool
+        # (`tortoise_create_document`), so a caller using it would otherwise
+        # get no advisory while the same write through
+        # `create_entity(type='document')` does — the two doors disagreeing is
+        # the defect the shared guard exists to prevent, and an advisory that
+        # reaches only one of two doors cannot change behaviour.
+        result.update(self._provenance_advisory(result, props))
         return result
 
     def _resolve_source_url(self, url: str) -> str:

@@ -16,7 +16,15 @@ Three facts, each falsifiable by a named mutation:
    ``extractedFrom`` STRING as a node property and created NOTHING: no
    ``:Source`` node, no ``extractedFrom`` edge. A caller that had declared a
    source therefore got a node the auditor reads as a provenance gap
-   (``audit.missing_sourceKind``), and a later rebuild had no edge to replay.
+   (``audit.missing_sourceKind``), and the provenance was not traversable.
+
+   NOT claimed here: that the edge survives ``rebuild_all``. It does not, and
+   that gap is PRE-EXISTING (#2296 — ``_create_entity`` journals no
+   ``DocumentCreated`` line and no ``_upsert_*`` replays ``_link_source``).
+   This change neither creates nor widens it; it makes the entity door behave
+   as its own ``create_document`` alias always has. A rebuild-parity assertion
+   belongs to whoever closes #2296, not to this test — asserting it here would
+   have pinned a claim the fix does not deliver.
 
 2. An ``agentSession`` source is not merely present — it is *typed*, so the
    weakness the ruling describes is recorded rather than implied.
@@ -90,7 +98,7 @@ def test_create_entity_materializes_the_declared_source(tmp_path):
         "capability #394 gave create_document is missing here")
     assert _edge_count(proj, node_id, url) == 1, (
         "create_entity stored the extractedFrom STRING but wired no edge, so "
-        "the provenance is not traversable and not replayable")
+        "the provenance is not traversable")
 
 
 def test_create_entity_session_source_is_typed_agent_session(tmp_path):
@@ -366,3 +374,36 @@ def test_the_advisory_does_not_fire_on_a_write_that_carries_a_session_id(
                             documentKind="note", session_id="sess-8171")
     assert not (res.get("advisories") or []), (
         "a write carrying a usable session_id already has a derivable source")
+
+
+def test_create_document_delivers_the_advisory_too(tmp_path):
+    """Both document doors must advise — an advisory on one door only is dead.
+
+    `create_document` is the documented alias AND a live MCP tool
+    (`tortoise_create_document`). If only `create_entity(type='document')`
+    advised, a caller of the alias would be told nothing — and the advisory's
+    entire purpose is to change what the writer does next, which it cannot do
+    on a door that never surfaces it.
+
+    MUTATION THAT MUST RED: drop the `result.update(_provenance_advisory(...))`
+    line from `create_document` — no `advisories` key is returned.
+    """
+    sdk = _sdk(tmp_path)
+    res = sdk.create_document("Unsourced alias doc", "note")
+    advisories = res.get("advisories") or []
+    assert advisories, (
+        "create_document must deliver the same advisory as create_entity")
+    assert advisories[0].get("advisory") is True
+
+
+def test_create_document_with_a_source_is_not_advised(tmp_path):
+    """...and the alias must not advise a write that DID declare its source.
+
+    Pairs with the test above the same way the create_entity pair does: an
+    implementation that always advised would pass the first while turning the
+    advisory into noise.
+    """
+    sdk = _sdk(tmp_path)
+    res = sdk.create_document("Sourced alias doc", "note",
+                              extractedFrom="corpus://notes/8171-alias")
+    assert not (res.get("advisories") or [])

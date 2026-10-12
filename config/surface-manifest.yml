@@ -1042,7 +1042,7 @@ rows:
   cluster_note: group `fetch-by-id` is split across ['graph', 'sessions']; proposed family `graph` — waits for your
     approval
 - name: tortoise_create_entity
-  served_from: tortoise/mcp_server.py:79f1a88a819f3e87
+  served_from: tortoise/mcp_server.py:0d902b52b890e91f
   served_attributes: 764058954f66db36
   family: graph
   family_rank: 2
@@ -1054,7 +1054,8 @@ rows:
   cluster: create
   canonical: true
   job: 'Create an entity — type: subject|object|event|document. Event entities wire about* edges from aboutSubject/aboutObject/aboutPoint/aboutDocument
-    props. Returns {node, nudges} — nudges suggest IMPL/NAND/mitigate connections to related Points (advisory).'
+    props. Returns {node, nudges, advisories?} — nudges suggest IMPL/NAND/mitigate connections to related Points; advisories notes a write that declared no
+    source and no provenance (advisory only, never a block). Declaring extractedFrom materializes the :Source (#8171).'
   dependency: declares TortoiseSDK.create_entity (resolves)
   lifecycle: active
   used_by: never called, tooling, docs

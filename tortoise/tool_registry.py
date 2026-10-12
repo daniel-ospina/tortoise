@@ -1058,8 +1058,11 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         writes=True,
         description="Create an entity — type: subject|object|event|document. "
                     "Event entities wire about* edges from aboutSubject/aboutObject/"
-                    "aboutPoint/aboutDocument props. Returns {node, nudges} — nudges "
-                    "suggest IMPL/NAND/mitigate connections to related Points (advisory).",
+                    "aboutPoint/aboutDocument props. Returns {node, nudges, "
+                    "advisories?} — nudges suggest IMPL/NAND/mitigate connections "
+                    "to related Points; advisories notes a write that declared no "
+                    "source and no provenance (advisory only, never a block). "
+                    "Declaring extractedFrom materializes the :Source (#8171).",
         annotations=_rw(),
         http_policy=True,
         sdk_method="create_entity",
