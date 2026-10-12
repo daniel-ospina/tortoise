@@ -909,6 +909,8 @@ surfaces:
   # without this entry the delete-resurrection guard would not run on the
   # change that can re-open the hole.
   - test_7951_delete_resurrection.py
+  - test_cache_projection.py
+  - test_cache_projection_live.py
   # #4197: the saved-backlog ledger (`tortoise/capture_backlog.py`) and its
   # CLI surface (`tortoise/__main__.py`). `capture_backlog.py` matches no
   # named SOURCE_PATTERN, so it falls through to `core` — registering the
