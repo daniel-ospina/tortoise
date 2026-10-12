@@ -680,6 +680,33 @@ SH
   ck "a name-delegating wrapper is probed under the daemon PATH, not the ambient one" $rc
 fi
 
+# ── load gate: an agent spawn must not be piled onto a post-boot indexing storm ──
+# Driven, not grep'd: a text-presence check passes against a build with the gate neutered to
+# `can_spawn() { true; }` — reproduced before this version replaced it.
+grep -m1 '^can_spawn() {' "$LOOP" > "$TMP/canspawn.sh"
+if need "$TMP/canspawn.sh" "can_spawn() is extracted from the shipped loop"; then
+  MAX_LOAD=16
+  . "$TMP/canspawn.sh"
+  L=0;   can_spawn && rc=0 || rc=1; ck "shipped can_spawn(): load 0 < 16 -> spawn allowed" $rc
+  L=15;  can_spawn && rc=0 || rc=1; ck "shipped can_spawn(): load 15 < 16 -> spawn allowed" $rc
+  L=16;  can_spawn && rc=1 || rc=0; ck "shipped can_spawn(): load 16 -> spawn held back" $rc
+  L=221; can_spawn && rc=1 || rc=0; ck "shipped can_spawn(): load 221 (post-boot storm) -> held back" $rc
+  L="";  can_spawn && rc=0 || rc=1; ck "shipped can_spawn(): unset load defaults to 0 (documented fail-open)" $rc
+fi
+# Assert each of the four spawn SITES, not a count — a count is satisfied by decoy comments,
+# which is exactly how an earlier version of this check passed against a stripped build.
+fixer_sites=$(grep -F "grep -c '^fix-')" "$LOOP" | grep -cF can_spawn)
+merge_site=$(grep -F "grep -c '^merge-')" "$LOOP" | grep -cF can_spawn)
+review_site=$(grep -cF '&& can_spawn \' "$LOOP")
+[ "$fixer_sites" = "2" ] && rc=0 || rc=1
+ck "both fixer spawn sites (conflict + CI-red) carry the load gate" $rc
+[ "$merge_site" = "1" ] && rc=0 || rc=1
+ck "the merge re-review spawn carries the load gate" $rc
+[ "$review_site" = "1" ] && rc=0 || rc=1
+ck "the review-fix spawn carries the load gate" $rc
+grep -q 'gh pr merge "\$PR" --repo "\$OR" --squash >>"\$LOG"' "$LOOP" && rc=0 || rc=1
+ck "the cheap merge path stays ungated" $rc
+
 echo
 echo "==> $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
