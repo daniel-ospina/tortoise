@@ -434,7 +434,7 @@ The full per-property table (216 rows, with the writer clause and the journal ca
 | `authoredBy` | P | projection/entities.py n.authoredBy=coalesce($ab,..) | PointAdded.point.authoredBy (`_META_KEY` handled as edge) |  |
 | `confidence` | D | projection/entities.py n.confidence=coalesce($cf,..); ep.py; dream.py | ConfidenceChanged {confidence}; ALSO written from PointAdded payload | §17.5 + §3: EP scalar 'never stored independently'. ⚠ TENSION: the fixed clause DOES persist a payload value (coalesce), so the code stores what the doc calls derived |
 | `createdAt` | P | projection/entities.py n.createdAt=coalesce($ca,..,$now) | PointAdded.point.createdAt |  |
-| `validFrom` | P | projection/entities.py | PointAdded.point.validFrom; PointSuperseded.valid_from |  |
+| `validFrom` | P | projection/entities.py | PointAdded.point.validFrom | #4021 — `PointSuperseded.valid_from` is the SUCCESSOR's window start (stored as the predecessor's `validTo`), never the predecessor's `validFrom`; it is covered by the `validTo` row |
 | `validTo` | P | projection/entities.py; sdk.py | PointSuperseded.valid_to; PointInvalidated.valid_to |  |
 | `updatedAt` | U | projection/entities.py n.updatedAt=$now | NOT carried — replay re-mints via `_now_iso`() | replay clock, not recorded instant → live≠replay; journal it or accept volatile |
 | `embedding` | P | `_upsert_point_props` (`n.embedding = CASE WHEN $embedding_clear … ELSE vecf32($embedding) END`; `REMOVE n.embedding` rides the same query, `projection/entities.py`); `stamp_journal_embedding` (`sdk.py`) | PointAdded.point.embedding + embedding_model/revision/text_hash (#5004) | §3: JOURNAL IT — re-embed is a re-run not a replay |

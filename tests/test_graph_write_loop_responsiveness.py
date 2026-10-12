@@ -24,7 +24,7 @@ entirely" from "off the loop via the executor" (both are accepted; what is
 rejected is running it on the loop at all).
 
 Mechanism under test (post-review, #3718): the SHORT graph calls (`~35ms`
-class — `create_point`, `create_object`, `create_subject`, `events_poll`) go
+class — `create_point`, `create_object`, `create_subject`, `poll_events`) go
 through `asyncio.to_thread`, the file's house style — the same pattern
 `/v1/search` uses for the same class of short sync graph work. The LONG call
 (`sdk.dream`, seconds) and the `_dream_worker` drain go through the dedicated
@@ -125,7 +125,7 @@ _ENDPOINTS = [
     ("subjects", "create_subject",
      {"method": "POST", "url": "/v1/subjects",
       "json": {"name": "3718-subject"}}),
-    ("events", "events_poll",
+    ("events", "poll_events",
      {"method": "GET", "url": "/v1/events"}),
     ("dream", "dream",
      {"method": "POST", "url": "/v1/dream"}),

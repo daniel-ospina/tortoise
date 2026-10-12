@@ -53,7 +53,7 @@ const snapshot = JSON.parse(readFileSync(join(here, 'wizardRenderedCopy.snapshot
 // The reviewed population, as a census of (family, kind) — pinned by HAND, never
 // derived from the render. A new paragraph in ANY family changes its count here.
 const PROSE_CENSUS = {
-  'wizard-caption:data': 6,
+  'wizard-caption:data': 5,
   'wizard-caption:inline': 3,
   'wizard-note:expression': 1,
   'wizard-note:inline': 2,

@@ -20,6 +20,7 @@ import types
 import pytest
 
 from tortoise.weights import (
+    ANNOTATION_TERM_NEUTRAL,
     MITIGATION_STRENGTH_DEFAULT,
     MITIGATION_STRENGTH_MAX,
     MITIGATION_STRENGTH_MIN,
@@ -35,7 +36,6 @@ def _fake_proj(
     op_type: str = "IMPL",
     input_ops: int = 0,
     mitigation_strengths: list[float | None] | None = None,
-    bias: float = 0.0,
 ) -> types.SimpleNamespace:
     """Projection stub: returns canned rows per query shape.
 
@@ -43,7 +43,17 @@ def _fake_proj(
       1. the operator's own row (op_type + annotation dims),
       2. count of operator-valued targets (input_ops branch),
       3. mitigation_strength values of (op)-[:mitigated_by]->(m) points.
+
+    The annotation dims are the module's own NEUTRAL constant, not literals. A
+    literal here restates the query's coalesce defaults and drifts when they move:
+    when #6151 changed them from the identity `(0.0, 1.0, 1.0, 1.0)` to the neutral
+    0.5, this stub kept the old row, which the new formula reads as a PERFECT
+    rating (factor 2.0) rather than as "unrated" — and every weight assertion here
+    failed at once. (The earlier `bias: float = 0.0` parameter was never passed by
+    any caller; the row it fed was the OLD neutral.)
     """
+
+    _n = ANNOTATION_TERM_NEUTRAL
 
     def query(q: str, params: dict | None = None) -> types.SimpleNamespace:
         if "mitigated_by" in q:
@@ -51,7 +61,7 @@ def _fake_proj(
             return types.SimpleNamespace(result_set=rows)
         if "p.is_operator" in q:
             return types.SimpleNamespace(result_set=[[input_ops]])
-        return types.SimpleNamespace(result_set=[[op_type, bias, 1.0, 1.0, 1.0]])
+        return types.SimpleNamespace(result_set=[[op_type, _n, _n, _n, _n]])
 
     return types.SimpleNamespace(g=types.SimpleNamespace(query=query))
 

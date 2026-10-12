@@ -592,7 +592,7 @@ def event_retention_interval() -> int:
     ``asyncio.sleep(0)``/``sleep(-1)`` return immediately, hammering
     ``_sweep_events``/``_purge_deleted_orgs`` with no delay; in the SDK lazy
     purge the gate ``now - _EVENT_PURGE_LAST < interval`` is always false, so
-    every ``events_poll`` issued a DELETE. A non-numeric value also raised out
+    every ``poll_events`` issued a DELETE. A non-numeric value also raised out
     of the SDK poll. Anything that is not a positive whole number of seconds
     falls back to ``EVENT_RETENTION_INTERVAL_DEFAULT_S`` with a warning.
     """
@@ -611,7 +611,7 @@ def event_retention_interval() -> int:
             "TORTOISE_EVENT_RETENTION_INTERVAL=%r is not a positive number "
             "of seconds — using %ds; a zero/negative interval makes "
             "asyncio.sleep() return immediately and the SDK purge gate always "
-            "false (a DELETE on every events_poll)",
+            "false (a DELETE on every poll_events)",
             raw, EVENT_RETENTION_INTERVAL_DEFAULT_S)
         return EVENT_RETENTION_INTERVAL_DEFAULT_S
     return value

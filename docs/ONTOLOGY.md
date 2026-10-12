@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.23"
+title: "Tortoise — Canonical Ontology v3.24"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-10-11
+updated: 2026-10-12
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.23
+# Tortoise — Canonical Ontology v3.24
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -149,6 +149,30 @@ doc_status: live
 >   safety net. Under `promotion_policy='gated'` ingest still writes every
 >   point — goal included — as `draft`.
 >
+> **Changelog v3.24 (2026-10-12 — issue #7852 W1 — the Layer-2 `semantics` reaches the write path):**
+> `create_operator` (SDK) and `tortoise_create_operator` (MCP) accept an additive, defaulted
+> `semantics` input — the closed Layer-2 vocabulary. A declared meaning RESOLVES the direction (a
+> one-way meaning records `unidirectional`, a mutual one `bidirectional`); the basis the resolution
+> used is recorded on the operator as `direction_basis` — `explicit` (the caller stated a non-default
+> direction), `semantics` (the declared Layer-2 meaning resolved it — the token names the LAYER that
+> produced the value, never the Layer-3 `label` predicate, which is a different input), or `default`
+> (nothing declared). The endpoint-kind step is a
+> separate scoped change. An out-of-vocabulary word warns and the write proceeds — never refuses —
+> and a retired word resolves to its canonical replacement. This is the chain step that had no way
+> to run, so the direction no longer always falls through to the per-op_type default. The four-value
+> **storage** vocabulary is unchanged (see *Transition state*): the model's `-` maps to no runtime
+> value, and `<-` is deliberately left unmapped rather than recorded as the opposite (`unidirectional`
+> is source→target only).
+>
+> **Changelog v3.22 (2026-10-11 — issue #7852 — the Layer-2 semantics vocabulary is closed, and validated):**
+> §8 now states the semantics vocabulary as **the** canonical table — one list, with each value's
+> recorded direction and its meaning — and the registry checks a pack's `relations[].semantics`
+> against it, warning with the valid alternatives when a value is out of vocabulary, retired or
+> missing (warn-not-block, W2). A relation declaration may carry **`nearMisses`**, mirroring
+> `kindDefs`, resolved across loaded packs. The both-ways names state their direction
+> (`mutuallySupportive`, `mutuallyExclusive`); the one-way names keep theirs (`addresses`, `supports`,
+> `refutes`).
+>
 > **Changelog v3.21 (2026-10-09 — issues #7865 + #7813 + #7852 — direction is recorded, and comes from semantics):**
 > §8 and §3.1 stated a blanket `default bidirectional` while the same document recorded a per-path
 > policy and the code implemented a per-op_type canonicalization. **One statement replaces all three:**
@@ -161,7 +185,10 @@ doc_status: live
 > ⚠ **Transition state.** The four-value vocabulary is the model; **the shipped code still accepts only
 > `bidirectional` / `unidirectional`** (`create_operator`, `create_direct_edge`, the ingest contract and
 > EP compare the two names). Until that lands (#7852), **code and payload examples below keep the
-> accepted names** — the model tables state the target.
+> accepted names** — the model tables state the target. **The write path now reads the semantics**:
+> `create_operator` / `tortoise_create_operator` accept `semantics` and resolve the recorded direction
+> from it (recording the basis in `direction_basis`), mapping the model's direction onto the two values
+> the runtime stores (#7852 W1). The four-value **storage** migration remains open.
 >
 > **Changelog v3.20 (2026-09-29 — issue #5566 — the EP affected-set traversal is factor-bearing-only):**
 >
@@ -731,7 +758,7 @@ Each layer answers a different question. All four are live mechanisms.
 > - **Case 2 — substantive correction:** the new point exists *because* a refutation landed. The refuting NAND must **not** re-attach to the successor (it motivated the change); belief recomputes structurally with the refutation gone.
 > Deterministic policy is safe only for content-independent edges (identity edges like `aboutObject` when the target is unchanged; merges carry everything). Semantic edges (IMPL/NAND) route to a carry / drop / **pend** triage with the rationale stored per edge; pended edges are non-voting placeholders surfaced by the ask lane only when an answer depends on them. A refutation that motivated a correction never re-attaches; a refutation that still applies is kept. *Implementation status:* `supersede_point` currently performs the legacy universal transfer (all operator + structural edges); the per-edge triage decomposes under #2421.
 >
-> **Direction flag (code note):** direction is recorded on the operator Point (or on the edge when no operator is present) — four values: `->`, `<-`, `<->`, `-`. It comes from the connection's semantics; the recorded value is authoritative — **the semantics set it at declaration time; today's shipped code does not read the semantics — `create_direct_edge` and the ingest path key off `op_type`, while `create_operator` still takes its `bidirectional` default (#7813)** (see the *Transition state* note in the changelog). Pre-migration operators lacking the property are read as `<->` (legacy semantics preserved).
+> **Direction flag (code note):** direction is recorded on the operator Point (or on the edge when no operator is present) — four values: `->`, `<-`, `<->`, `-`. It comes from the connection's semantics; the recorded value is authoritative — **the semantics set it at declaration time; `create_operator` / `tortoise_create_operator` now accept `semantics` and resolve the direction from it, recording the basis as `direction_basis` (#7852 W1), while `create_direct_edge` and the ingest path still key off `op_type` (#7813)** (see the *Transition state* note in the changelog). Pre-migration operators lacking the property are read as `<->` (legacy semantics preserved).
 >
 > **Edge properties (IMPL/NAND — EP message state, epic 903):** these are **graph-persisted** belief-propagation messages written by `TortoiseEP._flush_cache` and read back by `_load_cache` (warm-start seed, 903-C4). They are load-bearing graph state — documented here so they are not treated as throwaway cache:
 >
@@ -1526,9 +1553,12 @@ and carry confidence as an edge attribute.
   edge. EP reads the operator node first, falls back to the edge.
 - **Direction comes from semantics.** Each semantics value carries a direction, and the authoring
   path resolves and records it — a caller supplies the meaning and need not state a direction. The
-  recorded direction is authoritative. *(Model: today's shipped code does not read the semantics — the
-  direct-edge and ingest paths resolve by `op_type`, and `create_operator` takes its `bidirectional`
-  default (#7813). See the *Transition state* note.)*
+  recorded direction is authoritative. *(Model: `create_operator` / `tortoise_create_operator`
+  accept `semantics` and resolve the direction from it, recording the basis on the operator as
+  `direction_basis` — `explicit` / `semantics` / `default` (#7852 W1). The remaining gap is the
+  four-value **storage** vocabulary: the runtime still records only `bidirectional` /
+  `unidirectional`, and the direct-edge and ingest paths still resolve by `op_type` (#7813). See the
+  *Transition state* note.)*
 - `-` means the connection exists and **no confidence transfers along it**.
 - **Lazy promotion:** a plain edge gains an operator only when mitigation
   becomes needed.
@@ -1547,21 +1577,46 @@ Operator:      (op-123)                                   ← mitigation anchor
 | Layer | Where | What |
 |-------|-------|------|
 | **Mechanism + direction** | operator (`IMPL`/`NAND`) + the recorded direction | How it acts, and which way it runs: `->` `<-` `<->` `-` |
-| **Semantics** | `semantics` field | The meaning: `addresses`, `supports`, `mutuallySupportive`, `mutuallyExclusive`, `refutes`, `causes`, `hasPart`, `dependsOn`, `transacts`, `related` |
+| **Semantics** | `semantics` field | The meaning: `addresses`, `supports`, `mutuallySupportive`, `mutuallyExclusive`, `refutes`, `causes`, `hasPart`, `dependsOn`, `transacts`, `related`, `ownedBy`, `managedBy` |
 | **Predicate + tags** | `operator.label` | The specific verb: `fixes`, `implements`, `deploysTo`, `bearsOn`… plus an optional free tag/note |
 | Epistemic | IMPL/NAND edges | Confidence via EP (0-1 continuum) |
 | Operator | Point (is_operator:true) | Mitigation target |
 
-### Semantic Types
+### The semantics vocabulary (Layer 2)
 
-| Type | Mechanism | Epistemic propagation | Semantic label direction | Example |
-|------|-----------|------------|-------------------------|---------|
-| hasPart | IMPL | Bidirectional cascade (parts↔whole) | `<->` | Epic hasPart Issue |
-| addresses | IMPL | Unidirectional (A supports B) | `->` | Feature addresses Need |
-| supports | IMPL | Unidirectional (A supports B) | `->` | Evidence supports Claim (CLI default label for IMPL, `__main__.py:81`) |
-| opposes | NAND | Both ways for a mutual restatement; one way for a directed attack | `<->` (mutual) or `->` (directed attack) | Feature competesWith Competitor |
+**Core is canonical, and a pack aligns to it.** The vocabulary is closed: a declaration outside it
+is a typo, not a new meaning, and validation warns, naming the valid alternatives. The value is chosen
+by the **co-variance test** — *does the relationship make the two ends' confidence move together?* —
+and the answer is the direction the relation records.
 
-> **Direction is an explicit operator flag, recorded on the write — four values: `->`, `<-`, `<->`, `-`.** The table above shows typical pack declarations; the recorded value is authoritative. *(Today's shipped code accepts only `bidirectional` / `unidirectional` — see the *Transition state* note in the changelog.)*
+| Semantics | Mechanism | Direction | Meaning |
+|-----------|-----------|-----------|---------|
+| `addresses` | IMPL | `->` | Aimed at / applies to — scope. A one-way link carries weak confidence: a pull request existing that addresses a bug is weak evidence the bug is real. |
+| `supports` | IMPL | `->` | Positive evidence, one way |
+| `refutes` | NAND | `->` | Negative evidence, one way — the directed attack: the attacker's truth penalizes the target, with no back-pressure (#753) |
+| `mutuallySupportive` | IMPL | `<->` | Each end reinforces the other |
+| `mutuallyExclusive` | NAND | `<->` | They rule each other out — a mutual restatement |
+| `hasPart` | IMPL | `<->` | Composition — a part reinforces the whole and the whole the part |
+| `causes` | IMPL | `->` | *A brought B about* — **untyped, any kind to any kind, no restriction.** `produces` is the encouraged Layer-3 predicate for a happening → the artifact it created, aligned to `schema:result` / `prov:wasGeneratedBy` |
+| `dependsOn` | IMPL | `->` | A precondition — the condition bears on the dependent, one way |
+| `transacts` | — | `-` | A trade or exchange — association only; no confidence either way |
+| `related` | — | `-` | The deliberately ambiguous generic association, kept rare. **OVERRIDES:** the common practice of typing every association — a deliberate owner ruling, not an accident; no belief path reads it |
+| `ownedBy` / `managedBy` | — | `->` | The core structural rows (§3.6) a pack may name as a relation's meaning |
+
+**Same semantics + different predicates is correct.** `fixes`, `implements` and `deploysTo` all
+carry `addresses`; the **predicate** (Layer 3) keeps them distinct. Semantics is a **meaning**
+vocabulary, not a shape flag — `addresses` and `supports` are different meanings that share a
+direction and are not merged into one word.
+
+> **Direction is recorded on the write — four values: `->`, `<-`, `<->`, `-`.** It comes from the
+> connection's semantics and the recorded value is authoritative. `-` means the connection exists and
+> **no confidence transfers along it**, so direction and confidence-transfer are one axis.
+> *(Today's shipped code accepts only `bidirectional` / `unidirectional` — see the *Transition state*
+> note in the changelog.)*
+
+A relation declaration may also carry **`nearMisses`** — the sibling predicates or semantics it is
+confused with, mirroring `kindDefs`. Each target resolves to a declared predicate or a semantics
+value.
 
 ### Pack Relation Declarations
 
@@ -1572,6 +1627,7 @@ relations:
     semantics: hasPart
     fromKind: dev:epic
     toKind: dev:issue
+    nearMisses: [related]
 ```
 
 ---
@@ -1687,8 +1743,9 @@ adds `decay_clause('n')` to `_fold_point_invalidated`'s SET when it lands.
 Direction-aware EP (§3.1, #86) is the prerequisite that makes reverse
 traversal well-defined: `_affected_claims` follows the recorded direction
 (`->`, `<-`, `<->` or `-`), which the connection's semantics determines *(today's shipped
-code does not read the semantics — it resolves by `op_type`, or takes `create_operator`'s default
-(#7813). See the *Transition state* note.)*
+code reads the semantics on the operator write path — `create_operator` / `tortoise_create_operator`
+resolve it and record `direction_basis` (#7852 W1), while `create_direct_edge` and the ingest path
+still resolve by `op_type` (#7813). See the *Transition state* note.)*
 
 ---
 

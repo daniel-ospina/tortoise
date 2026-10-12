@@ -539,7 +539,8 @@ def _cmd_init(args):
                         print("--harness required with --write-mcp-config (claude|codex|cursor|pi)", file=sys.stderr)
                         return 1
                     rc = _write_mcp_config_file(args.api_key, existing_api_url, harness, mcp_force,
-                                                status_to_stderr=json_mode)
+                                                status_to_stderr=json_mode,
+                                                config_path=config_path)
                     if rc != 0:
                         if json_mode:
                             _emit_json({"status": "error", "error": "mcp_config",
@@ -554,7 +555,7 @@ def _cmd_init(args):
                         "api_url": existing_api_url,
                         "mcp": {
                             "endpoint": f"{existing_api_url}/mcp/",
-                            "auth_header": f"Bearer {args.api_key}",
+                            "auth_header": "Bearer ${TORTOISE_API_KEY}",
                             "configs": {
                                 "claude": {"file": ".mcp.json", "config": _harness_mcp_config("claude", args.api_key, existing_api_url)},
                                 "codex": _harness_mcp_config("codex", args.api_key, existing_api_url),
@@ -702,7 +703,7 @@ def _cmd_init(args):
                 "api_url": base_url,
                 "mcp": {
                     "endpoint": f"{base_url}/mcp/",
-                    "auth_header": f"Bearer {args.api_key}",
+                    "auth_header": "Bearer ${TORTOISE_API_KEY}",
                     "configs": {
                         "claude": {"file": ".mcp.json", "config": _harness_mcp_config("claude", args.api_key, base_url)},
                         "codex": _harness_mcp_config("codex", args.api_key, base_url),
@@ -723,14 +724,15 @@ def _cmd_init(args):
                     print("--harness required with --write-mcp-config (claude|codex|cursor|pi)", file=sys.stderr)
                     return 1
                 return _write_mcp_config_file(args.api_key, base_url, harness, mcp_force,
-                                              status_to_stderr=json_mode)
+                                              status_to_stderr=json_mode,
+                                              config_path=config_path)
             return 0
 
         print("Connected to Tortoise Cloud (team will be resolved from API key)")
         print(f"Config saved to {config_path}")
         print("⚠️  .tortoise contains a plaintext API key — do NOT commit this file.")
         print()
-        _print_mcp_configs(args.api_key, base_url, harness)
+        _print_mcp_configs(args.api_key, base_url, harness, config_path)
         print()
         print("── Onboarding instructions ──")
         print("Give these instructions to your agent to complete setup — they are a")
@@ -747,7 +749,8 @@ def _cmd_init(args):
                 print("--harness required with --write-mcp-config (claude|codex|cursor|pi)", file=sys.stderr)
                 return 1
             return _write_mcp_config_file(args.api_key, base_url, harness, mcp_force,
-                                          status_to_stderr=json_mode)
+                                          status_to_stderr=json_mode,
+                                          config_path=config_path)
         return 0
 
     print("Tortoise init — resolving DB target…")
@@ -1263,11 +1266,22 @@ def _cmd_recover(args) -> int:
         os.replace(tmp_path, config_path)
     except OSError as e:
         print(f"Recovered key could NOT be saved to config: {e}", file=sys.stderr)
+        # #5109 NOTE: DELIBERATE show-once — the key was recovered but could
+        # not be persisted, so it exists nowhere else; no resolution expression
+        # can replace the value. Routed to STDERR so it stays off the payload
+        # stream — the harness still captures stderr in the same tool result,
+        # so this is a deliberate exposure, not containment.
         print(f"   API key (save it now): {data['key']}", file=sys.stderr)
         return 1
     print(f"✅ Key recovered on team {data.get('org_name')} (data intact)")
-    print(f"   API key: {data['key']}")
-    print(f"   Config saved to {config_path} (shown once — store it)")
+    # #5109: the key was just PERSISTED to config_path (0600) above, so a
+    # resolution expression resolves it — print the resolution, never the
+    # value (stdout is the machine-read channel; the harness captures stderr in
+    # the same tool result, so this is a routing choice, not containment; see
+    # the module note on #5109). (`recover` mints a NEW key per invocation, but
+    # that is not what makes the resolution valid; the persistence is.)
+    print(f"   API key: {_key_resolution_expr(config_path)}")
+    print(f"   Config saved to {config_path} (0600 — key stays on disk)")
     print(f"   Recovery token kept: {token[:14]}…")
     return 0
 
@@ -1761,9 +1775,16 @@ def _cmd_signup(args) -> int:
         # and the first's token was never shown).
         print(f"A key was minted but could NOT be saved to {config_path}: {e}",
               file=sys.stderr)
+        # #5109 NOTE: DELIBERATE show-once — the key was minted but could NOT
+        # be persisted, so it exists nowhere else; no resolution expression can
+        # replace the value. Routed to STDERR so it stays off the payload
+        # stream — the harness still captures stderr in the same tool result,
+        # so this is a deliberate exposure, not containment.
         print(f"Your API key (store it manually): {data['key']}", file=sys.stderr)
         orphan_token = config.get("signup_token")
         if orphan_token:
+            # #5109 NOTE: DELIBERATE show-once — same orphan contract as the
+            # key above; STDERR only.
             print(f"   Recovery token (save it now): {orphan_token}", file=sys.stderr)
             print("   RECOVERY TOKEN — save this: it is the only way back into "
                   "this team if your key is lost.", file=sys.stderr)
@@ -1821,11 +1842,16 @@ def _cmd_signup(args) -> int:
                   "a signup token; you cannot use `tortoise recover` for this "
                   "team. The API key above is your only access — store it safely.",
                   file=sys.stderr)
+    # #5109 NOTE: this success branch still echoes the value it just persisted
+    # to config_path. Retained deliberately (the "shown once" contract, #1709)
+    # and raised as an owner decision on #5109 rather than reversed in flight.
     print(f"   API key: {data['key']}")
     print(f"   Config saved to {config_path} (shown once — store it)")
     if new_token:
         # #1709: the recovery token is the SINGLE save point (the only way
         # back into this org if the key is lost). Shown once, like the key.
+        # #5109 NOTE: DELIBERATE — the recovery token is echoed under the same
+        # "shown once" contract as the key above (#1709).
         print(f"   Recovery token: {new_token}")
         print("   RECOVERY TOKEN — save this: it is the only way back into "
               "this team if your key is lost.")
@@ -1838,6 +1864,9 @@ def _cmd_signup(args) -> int:
         print("🔐 Claim your team (optional but recommended):")
         print(f"   1. Open {dashboard}")
         print(f"   2. Sign in with GitHub or Google")  # noqa: F541
+        # #5109 NOTE: DELIBERATE — this echoes a key already persisted above,
+        # but the dashboard claim flow needs the value in hand. Raised as an
+        # owner decision on #5109 rather than reversed in flight.
         print(f"   3. Paste this key when prompted:")  # noqa: F541
         print(f"      {data['key']}")
         print("   Your verified identity attaches to THIS team — same key,"
@@ -2066,6 +2095,40 @@ def _suspended_info(body: str) -> tuple[str, str | None] | None:
     return (f"{msg} Appeal: {url}" if url else msg, url)
 
 
+# #5109 — never interpolate the credential into printed output.
+#
+# This CLI is run BY AN AGENT in this fleet, so what it prints is a tool result —
+# and a tool result is persisted VERBATIM into the session transcript and the
+# task-session log. Printing `export TORTOISE_API_KEY=<literal>` is therefore a
+# credential DISCLOSURE, not a convenience: every captured copy of that output keeps
+# the key. It is one channel into those stores, not the only one — harness-side
+# capture of the same bytes is the other.
+#
+# The printed instruction still WORKS — it resolves the value at use time from the
+# very file this CLI wrote, passed in rather than hard-coded: `init --api-key` saves
+# to `<cwd>/.tortoise` while the global store is `~/.tortoise/credentials.json`, so a
+# hard-coded path would silently export nothing. The bytes on stdout carry no secret.
+def _key_resolution_expr(config_path=None) -> str:
+    """Shell text that resolves the key AT USE TIME from ``config_path``.
+
+    Returns the EXPRESSION, never the key itself. See the #5109 note above for
+    why the value must never be interpolated into printed output.
+
+    Both operands are ``shlex.quote``-d, so a config path containing a quote,
+    ``$``, a backtick or a space cannot break the shell line or make it read the
+    wrong file (the path is embedded in a shell command; a Python ``repr`` is not
+    a shell quoting).
+    """
+    import shlex
+
+    target = str(config_path) if config_path is not None else "~/.tortoise/credentials.json"
+    prog = (
+        "import json,sys,pathlib;"
+        "print(json.loads(pathlib.Path(sys.argv[1]).expanduser().read_text())['api_key'])"
+    )
+    return '"$(python3 -c ' + shlex.quote(prog) + " " + shlex.quote(target) + ')"'
+
+
 def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
     """MCP config for one harness — mirrors website/apps/dashboard/public/welcome.html (#497/#529).
 
@@ -2120,7 +2183,8 @@ def _harness_label(harness: str) -> str:
     return {"claude": "Claude Code", "codex": "Codex", "cursor": "Cursor", "pi": "Pi"}.get(harness, harness)
 
 
-def _print_mcp_configs(api_key: str, api_url: str, harness: str | None) -> None:
+def _print_mcp_configs(api_key: str, api_url: str, harness: str | None,
+                       config_path=None) -> None:
     """Print per-harness MCP config (hosted HTTP shape, #304/#981).
 
     With --harness, print only that harness; without, print the selector UI.
@@ -2134,19 +2198,20 @@ def _print_mcp_configs(api_key: str, api_url: str, harness: str | None) -> None:
         print(f"── MCP Configuration (HTTP) — {_harness_label(harness)} ──")
         if harness == "codex":
             print("Codex manages its own config — run:")
-            print(f"  export TORTOISE_API_KEY={api_key}")
+            print(f"  export TORTOISE_API_KEY={_key_resolution_expr(config_path)}")
             cfg = _harness_mcp_config("codex", api_key, api_url)
             print(f"  {cfg['command']}")
         elif harness == "claude":
-            print("Run this ONE command in your terminal — writes LOCAL scope to ~/.claude.json (private, never committed):")
-            print(f'  claude mcp add --transport http tortoise {endpoint} --header "Authorization: Bearer {api_key}"')
+            print("Run these TWO commands in your terminal — the export, then the registration (writes LOCAL scope to ~/.claude.json; private, never committed):")
+            print(f"  export TORTOISE_API_KEY={_key_resolution_expr(config_path)}")
+            print(f'  claude mcp add --transport http tortoise {endpoint} --header "Authorization: Bearer $TORTOISE_API_KEY"')
             print()
             print("File alternative (.mcp.json) — project scope, committable; env expansion, no literal key in the file:")
-            print(f"  export TORTOISE_API_KEY={api_key}")
+            print(f"  export TORTOISE_API_KEY={_key_resolution_expr(config_path)}")
             print(_json.dumps(_harness_mcp_config(harness, api_key, api_url), indent=2))
         else:  # cursor / pi
             print("Add this to your project's MCP config (env expansion — no literal key on disk):")
-            print(f"  export TORTOISE_API_KEY={api_key}")
+            print(f"  export TORTOISE_API_KEY={_key_resolution_expr(config_path)}")
             print(_json.dumps(_harness_mcp_config(harness, api_key, api_url), indent=2))
         print()
         print(f"→ MCP endpoint: {endpoint}")
@@ -2165,7 +2230,8 @@ def _print_mcp_configs(api_key: str, api_url: str, harness: str | None) -> None:
 
 
 def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool,
-                           status_to_stderr: bool = False) -> int:
+                           status_to_stderr: bool = False,
+                           config_path=None) -> int:
     """Write/merge .mcp.json for file-based harnesses (claude/cursor/pi).
 
     Codex is command-based (#497) — prints the registration command instead.
@@ -2181,11 +2247,18 @@ def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool
     import os
     from pathlib import Path
 
+    status = sys.stderr if status_to_stderr else sys.stdout
+
     if harness == "codex":
-        print("Codex manages its own config — run:")
-        print(f"  export TORTOISE_API_KEY={api_key}")
+        # These three lines are STATUS, not payload: they must follow the same
+        # routing as the lines at the end of this function. Emitting them to
+        # stdout unconditionally put text after the JSON object for
+        # `--harness codex --json`, so `json.loads(stdout)` raised
+        # "Extra data" — the purity the docstring above promises.
+        print("Codex manages its own config — run:", file=status)
+        print(f"  export TORTOISE_API_KEY={_key_resolution_expr(config_path)}", file=status)
         cfg = _harness_mcp_config("codex", api_key, api_url)
-        print(f"  {cfg['command']}")
+        print(f"  {cfg['command']}", file=status)
         return 0
 
     target = Path.cwd() / ".mcp.json"
@@ -2206,11 +2279,10 @@ def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool
         servers["tortoise"] = entry
     else:
         data = {"mcpServers": {"tortoise": entry}}
-    status = sys.stderr if status_to_stderr else sys.stdout
     # The written config references $TORTOISE_API_KEY (page #529 env form) —
     # make sure the var is set in the shell that will launch the agent.
     print(f"ℹ️  This config reads $TORTOISE_API_KEY — export it first:", file=status)  # noqa: F541
-    print(f"   export TORTOISE_API_KEY={api_key}", file=status)
+    print(f"   export TORTOISE_API_KEY={_key_resolution_expr(config_path)}", file=status)
     target.write_text(_json.dumps(data, indent=2) + "\n")
     os.chmod(target, 0o600)
     print(f"✅ Wrote MCP config to {target}", file=status)
@@ -2350,6 +2422,11 @@ def _cmd_org_keys_create(args) -> int:
         })
         return 0
 
+    # #5109 NOTE: DELIBERATE show-once — `team keys create` returns the plaintext
+    # exactly here (only a hash is stored), so printing it is the only way to hand
+    # it to the user. Test-pinned (tests/test_cli_team_keys.py). The `--json` twin
+    # above returns it in the payload for the same reason. Do NOT "tidy" this print
+    # away — it would break key provisioning.
     print(f"Created new API key: {data.get('key')}")
     print(f"  Key prefix:  {data.get('key_prefix')}")
     print(f"  Key ID:      {data.get('id')}")
@@ -6821,13 +6898,48 @@ def _mask_uri_userinfo(target: str) -> str:
     closed (a continuation line may carry the userinfo while the scheme sits on
     an earlier line; an '@' may also precede the scheme, where the
     last-'@'-after-the-scheme rule never looks), and the authority cut set is
-    the same explicit ASCII set. (RESIDUAL,
-    #2987-followup: a continuation line with a NON-empty user, e.g.
-    `user:pw:6379`, is not distinguishable from prose (`C:\foo`, an exception
-    containing a colon) in this helper, so it is emitted — recorded on the issue
-    rather than guessed at.)
+    the same explicit ASCII set.
+
+    #5267 fail-closed: the cut set is not only whitespace, so the region the
+    predicate judges is only the fragment UP TO the first delimiter — a
+    credential in a later delimiter-bounded fragment was never examined and was
+    echoed (`rediss://u:pw@h:1 :S3nPw`, `...@host\r:S3nPw`,
+    `rediss:// :S3nPw/db`). Every fragment beyond the bounded region is now
+    judged by `_credential_tell`, in BOTH implementations, and so is a
+    scheme-less continuation line of a value that carries a scheme
+    (`user:S3nPw:6379`). The full authority predicate cannot be used there:
+    prose is full of `key: value` shapes (`error:`, `12:30:45`, `warn: bad`,
+    `C:\foo`) that must keep printing, so the tell is narrower (see
+    `_credential_tell`).
+
+    (RESIDUAL, #5267: a fragment whose credential shape is a two-field
+    `user:pw`, or a `user:pw:notaport` tail, is not credential-shaped to the
+    tell — it is lexically indistinguishable from prose (`C:\foo`,
+    `key:value`, `config:app:prod`) and failing closed on it would drop the
+    diagnostic. The AUTHORITY form of both (`rediss://user:pw`,
+    `rediss://user:pw:notaport`) still fails closed through
+    `_credential_shaped`, so the residual needs the credential to be split off
+    by a delimiter. A fragment BEFORE the scheme is not judged either (only a
+    pre-scheme '@' fails closed), so `:S3nPw rediss://host:6379` is echoed by
+    both maskers; the fragment walk covers what the bounded region leaves
+    behind on a line, not the prose prefix. Both residuals are recorded in
+    tests/test_boot_regressions.py's leak-bar test and in the #5267 thread,
+    not silently.)
     """
     from urllib.parse import urlsplit
+
+    # #2987/#5267: the authority cut set — path/query/fragment delimiters,
+    # quotes and ASCII whitespace. Spelled out (not `str.isspace()`), and used
+    # for BOTH the bounded region and the fragment walk, so the two can never
+    # diverge. entrypoint.sh's `cut=$'[/?#"\047 \t\v\f\r\n]'` is the same set.
+    _CUT_CHARS = "/?#\"' \t\n\v\f\r"
+
+    # #5267: a scheme-less line is judged as credential material only when the
+    # VALUE carries a scheme somewhere — `user:pw:6379` is a continuation of a
+    # URI value split across lines, while the same text alone (an exception
+    # message, a path) is prose.
+    _lines = target.split("\n")
+    _uri_bearing = any("://" in _line for _line in _lines)
 
     def _scheme_ok(scheme: str) -> bool:
         # RFC 3986 scheme: alpha-led, alnum/+-. thereafter. Restricted to ASCII
@@ -6853,9 +6965,58 @@ def _mask_uri_userinfo(target: str) -> str:
         implementations bound the same region on every input.
         """
         for idx, char in enumerate(rest):
-            if char in "/?#\"' \t\n\v\f\r":
+            if char in _CUT_CHARS:
                 return rest[:idx]
         return rest
+
+    def _credential_tell(fragment: str) -> bool:
+        """True if a single delimiter-bounded FRAGMENT is credential material.
+
+        #5267: the authority region stops at the first delimiter, so a fragment
+        BEYOND it (or, in a multi-line value, the whole of a continuation line)
+        has to be judged on its own. The authority predicate is the wrong tool
+        there — it fails closed on any `key: value` (`error:`, `C:\foo`,
+        `connect:`), which is exactly the prose the helper exists to print
+        unchanged. Two tells are unambiguous instead:
+
+          * a ':'-led fragment with a non-empty tail (`:S3nPw`) — the
+            empty-user form of a dropped '@host' (`_credential_shaped` fails
+            closed on it as an authority too), and a shape no prose takes;
+          * the port-retaining continuation (`user:pw:6379`) — two-or-more ':'
+            with an ALL-DIGIT last field AND at least one ASCII letter. The
+            letter requirement is what separates the credential from the prose
+            that shares its arity (a bare timestamp `12:30:45` has no letter);
+            a single-colon fragment (`error:`, `warn: bad`, `C:\foo`,
+            `connect:`) is excluded by the arity.
+
+        Mirrored by entrypoint.sh::_redact_uri's `_fragment_tell`.
+        """
+        if fragment.startswith(":"):
+            return len(fragment) > 1
+        head, sep, tail = fragment.partition(":")
+        if not sep or not head or ":" not in tail:
+            return False
+        # ASCII only, to match the shell's `[a-zA-Z]` / `[0-9]` classes.
+        if not any(c.isascii() and c.isalpha() for c in fragment):
+            return False
+        last = tail.rpartition(":")[2]
+        return last.isascii() and last.isdigit()
+
+    def _unsafe_tail(text: str) -> bool:
+        """True if any delimiter-bounded fragment of `text` is a tell.
+
+        #5267: the candidate text is everything the bounded authority region
+        does NOT cover — its remaining fragments, or a whole scheme-less
+        continuation line. A leading/embedded delimiter yields an empty
+        fragment, which is never a tell.
+        """
+        start = 0
+        for idx, char in enumerate(text):
+            if char in _CUT_CHARS:
+                if _credential_tell(text[start:idx]):
+                    return True
+                start = idx + 1
+        return _credential_tell(text[start:])
 
     def _credential_shaped(region: str) -> bool:
         """True unless a no-'@' authority is a RECOGNISED-SAFE shape.
@@ -6906,6 +7067,12 @@ def _mask_uri_userinfo(target: str) -> str:
             if (line.startswith(":")
                     and _credential_shaped(_authority_region(line))):
                 return "<uri-redacted-unrecognised-shape>"
+            # #5267: the same line as a continuation of a URI value — the
+            # credential fragment's user field is NON-empty (`user:pw:6379`),
+            # so the ':'-led rule above misses it. Only judged when the value
+            # carries a scheme (see `_uri_bearing`).
+            if _uri_bearing and _unsafe_tail(line):
+                return "<uri-redacted-unrecognised-shape>"
             return line
         out: list[str] = []
         i = 0
@@ -6940,6 +7107,12 @@ def _mask_uri_userinfo(target: str) -> str:
                 # while the shell masks it.
                 rest = line[j + 3:]
                 region = _authority_region(rest)
+                # #5267: a fragment BEYOND the bounded region is judged too,
+                # and must not be re-emitted when IT is the reason for failing
+                # closed (`rediss:// :S3nPw/db` used to keep ` :S3nPw/db`
+                # after the sentinel).
+                if _unsafe_tail(rest[len(region):]):
+                    return "<uri-redacted-unrecognised-shape>"
                 if "@" in line or _credential_shaped(region):
                     if bare:
                         out.append("<uri-redacted-unrecognised-shape>")
@@ -6985,6 +7158,12 @@ def _mask_uri_userinfo(target: str) -> str:
                 # already have printed it. A recognised-safe target (a plain
                 # host, `host:port`, bracketed IPv6) is left byte-identical.
                 region = _authority_region(authority)
+                # #5267: everything after the bounded region is fragment
+                # candidate material (`rediss://u:pw@h:1 :S3nPw`,
+                # `...@host\r:S3nPw`) — judged here, in the branch that used to
+                # echo it verbatim.
+                if _unsafe_tail(authority[len(region):]):
+                    return "<uri-redacted-unrecognised-shape>"
                 if _credential_shaped(region):
                     if bare:
                         # Bare URI (the whole line): the sentinel replaces it,
@@ -7023,8 +7202,10 @@ def _mask_uri_userinfo(target: str) -> str:
             # (`Port could not be cast to integer value as 'notaport'`), so the
             # diagnostic survives; see the PR body.
             remainder = authority[at + 1:]
+            region = _authority_region(remainder)
             if ("://" in remainder
-                    or _credential_shaped(_authority_region(remainder))):
+                    or _credential_shaped(region)
+                    or _unsafe_tail(remainder[len(region):])):
                 return "<uri-redacted-unrecognised-shape>"
             out.append(line[i:k])
             out.append(f"{scheme}://:***@{remainder}")
@@ -7038,7 +7219,7 @@ def _mask_uri_userinfo(target: str) -> str:
             return "<uri-redacted-unrecognised-shape>"
         return result
 
-    return "\n".join(_mask_line(_line) for _line in target.split("\n"))
+    return "\n".join(_mask_line(_line) for _line in _lines)
 
 
 def _index_github_child_cmd(target: str, repo_root: str,
@@ -7610,6 +7791,13 @@ def _cmd_pack_validate(args) -> int:
     Reuses PackRegistry._validate + _validate_cross_pack_refs (thin glue —
     the validator is the single source of truth). Exit 0 clean, 1 errors.
     Accepts the pack dir (packs/<ns>) or its parent (a packs/ dir).
+
+    #2766: also prints the per-relation write-path verdict
+    (writable | declaration-only | predicate-not-in-allowlist) from the one
+    resolver pack load warns with — a relation whose declaration binds no path
+    is reported, never a reason to fail the pack (warn-not-block, W2). The
+    verdict is a DECLARATION check, not a runtime refusal: `create_operator`
+    accepts any label (warn-not-block, #1934); only `create_edge` is strict.
     """
     import json as _json
 
@@ -7626,6 +7814,28 @@ def _cmd_pack_validate(args) -> int:
     for ns, errs in reg.errors.items():
         if (packs_dir / ns / "manifest.yaml").exists() or ns == target.name:
             errors[ns] = errs
+    # #2766: the per-relation write-path verdict, from the ONE resolver pack
+    # load warns with — so `validate` cannot report a relation as bound to a
+    # path its own declaration does not bind. Enumerated from the registry
+    # directly rather than by calling the public SDK method `list_relations()`:
+    # that call would widen
+    # its surface-manifest caller categories and demand a human re-cut, and this
+    # is a CLI reporting view, not a new SDK reachability.
+    from tortoise.pack_registry import RELATION_WRITABLE, relation_write_verdict
+    relations = []
+    for ns in sorted(reg.packs):
+        for rel in reg.packs[ns].relations:
+            verdict, paths = relation_write_verdict(rel)
+            relations.append({
+                "pack": ns,
+                "predicate": rel.get("predicate"),
+                "write_verdict": verdict,
+                "write_paths": list(paths),
+            })
+    verdict_counts: dict[str, int] = {}
+    for rel in relations:
+        verdict_counts[rel["write_verdict"]] = (
+            verdict_counts.get(rel["write_verdict"], 0) + 1)
     ok = not errors
     if getattr(args, "json", False):
         print(_json.dumps({
@@ -7633,6 +7843,10 @@ def _cmd_pack_validate(args) -> int:
             "packs_dir": str(packs_dir),
             "loaded": sorted(reg.packs),
             "errors": errors,
+            "relation_verdicts": {
+                "counts": verdict_counts,
+                "relations": relations,
+            },
         }, indent=2))
     else:
         print(f"tortoise pack validate: {packs_dir}")
@@ -7642,6 +7856,13 @@ def _cmd_pack_validate(args) -> int:
             print(f"  ✗ {ns}:")
             for e in errs:
                 print(f"      {e}")
+        if relations:
+            print("  relation write verdicts:")
+            for rel in sorted(relations, key=lambda r: (r["pack"], r["predicate"])):
+                mark = "✓" if rel["write_verdict"] == RELATION_WRITABLE else "⚠"
+                paths = f" [{', '.join(rel['write_paths'])}]" if rel["write_paths"] else ""
+                print(f"    {mark} {rel['write_verdict']:28s} "
+                      f"{rel['pack']}.{rel['predicate']}{paths}")
         if ok:
             print("✓ Clean — pack(s) validate")
         else:
@@ -9893,6 +10114,9 @@ def _cmd_key_create(args) -> int:
         print(f"  ⚠️  Could not seed team graph: {e}", file=sys.stderr)
 
     # Create the verifiable API key and print ONLY this one.
+    # #5109 NOTE: DELIBERATE show-once — the plaintext is returned exactly here
+    # and exists nowhere else (only a hash is stored), so printing it is the
+    # only way to hand it to the user. Do NOT "tidy" it away.
     key = sdk.apikey_create(org_id, created_by="local-cli")
     print()
     print(f"✅ Created API key: {key['api_key']}")

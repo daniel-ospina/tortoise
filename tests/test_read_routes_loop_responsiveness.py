@@ -51,6 +51,19 @@ that is the declared, non-silent residual (it includes the per-request
 fails on a NEW inline site, which is the "the class cannot silently return"
 guard; the residual is burned down under #3718 (kept open via #2924).
 
+#4660 — the pin used to see ONE class of seam. ``_GRAPH_SEAM_CALLEES`` covers
+the graph reads/attaches, but NOT SDK CONSTRUCTION, which is likewise blocking:
+in embedded mode ``_make_sdk`` runs ``_anchor_usable``'s probe query and, on an
+anchor miss, an eager ``TortoiseSDK(...)`` connect that holds the socket. The pin
+therefore passed while four bodies that PR #4645 claimed to have off-loaded still
+built their SDK on the loop — a reviewer reading the module was what caught it.
+The scan now reports BOTH classes (``_inline_seam_hits``) as separate lists, and
+the construction residual is declared in
+``_OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION``. The behavioural half
+(``sdk_built_on_loop``) lives in the dataplane file, because that probe is
+window-scoped and so can see the construction a sync wrapper hides from any
+source scan.
+
 FLAKE NOTE — the embedded-redislite fixture is not hermetic under this harness
 (#3653/#3685, the same note the write-responsiveness file carries): a
 redislite server's tempdir can vanish while a live client still holds it, so a
@@ -424,12 +437,51 @@ def test_read_route_does_not_freeze_the_event_loop(client, monkeypatch):
 # A locally defined function is scanned only when it is INVOKED on the loop;
 # one handed to a boundary as a reference (possibly wrapped in
 # `functools.partial`) runs in the worker and is skipped.
+#
+# #4660 — a SECOND class of scanned name. The construction seams
+# (`_make_sdk` / `_data_sdk`) are scanned by the same walk but RECORDED
+# separately (`_inline_seam_hits` returns two lists), because "this body builds
+# an SDK on the loop" and "this body runs a graph read/attach on the loop" are
+# different defects with different fixes. What the widened scan still does NOT
+# see, stated rather than implied: SDK construction reached through a sync
+# wrapper (`_open_org_graph_sdk`, `_registry_sdk` — both construct via
+# `_make_sdk` one level down), which is the same helper-mediated boundary the
+# paragraph above names, and which the behavioural probe extension in
+# `tests/test_dataplane_lane_loop_responsiveness.py` (#4660) is the guard for.
 _GRAPH_SEAM_CALLEES = frozenset({"_get_proj", "_get_registry", "dream_health_check"})
+#: SDK CONSTRUCTION seams (#4660) — kept SEPARATE from the graph seams above so
+#: the two classes of violation stay distinguishable in the failure message
+#: (``test_graph_io_is_offloaded``) instead of merging into one count that hides
+#: which of the two regressed.
+#:
+#: Building an SDK is NOT free, and it is not free of the loop: ``_make_sdk``
+#: (which ``_data_sdk`` wraps) runs in embedded mode — no ``TORTOISE_DB_URI``,
+#: the fly.toml default —
+#:
+#: * ``_anchor_usable(anchor, db_path)``, a PROBE QUERY against the keepalive
+#:   anchor, and
+#: * on an anchor miss, ``with _KEEPALIVE_LOCK: ... anchor = TortoiseSDK(...)``
+#:   plus its eager ``_get_proj()`` — an eager connect that HOLDS the socket.
+#:
+#: Both are blocking FalkorDB socket I/O on whatever thread calls them. This is
+#: the gap that let #4645's round-1 P1 through: four of the twelve bodies the PR
+#: claimed to have off-loaded still built their SDK on the loop, and BOTH guards
+#: passed because this seam set did not exist and the behavioural probe only
+#: observed ``_get_proj``. It cost a reviewer reading the module to catch it.
+_SDK_CONSTRUCTION_SEAMS = frozenset({"_make_sdk", "_data_sdk"})
+#: Calls whose callable argument runs in a WORKER. ``_graph_offload`` was the
+#: missing member (#4660): it is the #3498 bounded graph-pool seam
+#: (``_graph_offload`` -> ``_cp_offload(pool="graph")``) and is how
+#: ``_data_sdk_offloaded`` already runs ``_data_sdk`` off the loop — but it was
+#: not declared here, so `_data_sdk_offloaded`'s own (correct, off-loop)
+#: ``_data_sdk`` call was reported as an on-loop construction. A boundary that
+#: is not declared reports the CORRECT shape as a violation, which is how a
+#: real finding gets dismissed as noise.
 _OFFLOAD_BOUNDARY_CALLEES = frozenset({
     "to_thread", "_run_off_loop", "_submit_off_loop", "_run_dream_on_pool",
     "_run_with_close", "run_in_executor",
     "_cp_offload", "_oauth_offload", "run_control_plane_call",
-    "run_on_daemon_worker",
+    "run_on_daemon_worker", "_graph_offload",
 })
 
 #: Async bodies this change OFF-LOADS. A subset assertion: a rename or a
@@ -451,15 +503,18 @@ _OFFLOAD_BOUNDARY_CALLEES = frozenset({
 #: instead — that declaration IS what its visible seam requires: the guard
 #: computes ``inline - declared``, so membership (not the seam) keeps it green,
 #: and dropping the name REDS it.
+#: Async bodies whose sync FalkorDB I/O is off-loaded with NO residuals the
+#: scan can see — neither a graph seam NOR an SDK construction on the loop.
+#:
+#: ⚠️ ``list_points``, ``get_point``, ``org_info``, ``list_sessions``,
+#: ``get_session_detail``, ``dream_health``, ``list_api_keys``, ``list_members``,
+#: ``list_pending_invites_for_me``, ``patch_onboarding_state`` and
+#: ``invite_info`` were members until #4660 widened the scan: their graph READS
+#: are off-loaded, but their ``_data_sdk`` / ``_make_sdk(namespace="registry")``
+#: CONSTRUCTION still runs on the loop. They now live in
+#: ``_OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION`` below — a decided,
+#: visible residual rather than a vacuous declaration.
 _OFFLOADED_ASYNC_BODIES = frozenset({
-    "list_points", "get_point", "org_info", "list_sessions",
-    "get_session_detail", "dream_health",
-    "list_api_keys", "list_members", "list_pending_invites_for_me",
-    "patch_onboarding_state",
-    # The public invite-info read: both of its reads are off-loaded — the
-    # registry legs via ``asyncio.to_thread`` (the sibling registry reads'
-    # house style) and the Supabase control-plane legs via ``_cp_offload``.
-    "invite_info",
     # #3718 residual 3 — the DATA-plane seam outside the REST-converted
     # bodies. These were ``_KNOWN_INLINE_*_RESIDUAL`` until this change
     # off-loaded their projection attach / registry attach / graph round
@@ -475,6 +530,35 @@ _OFFLOADED_ASYNC_BODIES = frozenset({
     "backups_create", "backups_restore", "backups_sweep",
     "backups_purge", "backups_rebaseline", "backups_drill",
     "backups_drill_scheduled",
+})
+
+#: Async bodies whose GRAPH I/O is off-loaded but whose SDK CONSTRUCTION is
+#: still on the loop (#4660). Declared, visible residual — NOT a claim that
+#: these bodies are clean.
+#:
+#: Why they are not simply off-loaded here: off-loading the construction of a
+#: handled read is a behavioural change on the hottest read path (11 routes plus
+#: the hot onboarding PATCH), mixed into what is otherwise a pure guard/inventory
+#: change — exactly the mixing #4660 was deferred out of #4645 to avoid. The
+#: burn-down runs under #3718 (kept open via #2924); ``_data_sdk_offloaded``
+#: (#3773) is the twin the data-plane ones would move onto.
+#:
+#: Two assertions hold for the membership, so this set can only shrink by
+#: actually off-loading the construction:
+#: * every member is FLAGGED by the widened scan — dropping a name without
+#:   converting the body REDS ``test_graph_io_is_offloaded``;
+#: * every member's GRAPH-seam hits are empty — re-inlining a read/attach in one
+#:   of these bodies is still a failure, not an upgrade to "construction-only".
+_OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION = frozenset({
+    "list_points", "get_point", "org_info", "list_sessions",
+    "get_session_detail", "dream_health",
+    "list_api_keys", "list_members", "list_pending_invites_for_me",
+    "patch_onboarding_state",
+    # The public invite-info read: its READS are off-loaded — the registry legs
+    # via ``asyncio.to_thread`` (the sibling registry reads' house style) and the
+    # Supabase control-plane legs via ``_cp_offload`` — but its TWO
+    # ``_make_sdk(namespace="registry")`` attaches are built on the loop.
+    "invite_info",
 })
 
 #: FastAPI route handlers STILL running sync FalkorDB I/O inline. Declared,
@@ -493,6 +577,16 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
     # asyncio.to_thread) but _mint_key is inline exactly as create_api_key's
     # is, so the mint stays atomic under the same all-sync critical section.
     "rotate_api_key",
+    # #4660: the routes the WIDENED scan (SDK-construction seams) newly sees.
+    # Their graph I/O was already declared residual by the graph-seam scan —
+    # what is new is that their INLINE ``_make_sdk`` / ``_data_sdk`` is now
+    # visible and named here rather than passing silently. Same burn-down
+    # (#3718 via #2924); the inventory is posted on #3718.
+    "accept_invite_by_id", "agent_token_revoke", "create_graph", "create_org",
+    "create_org_graph", "issue_insight", "list_graphs", "list_invites",
+    "list_my_orgs", "list_packs", "list_trash", "rescind_invite", "search",
+    "session_context", "topic_summary", "upload_pack_manifest",
+    "volunteer_context",
 })
 
 #: Non-route async bodies with inline sync FalkorDB I/O — the per-request auth
@@ -528,6 +622,19 @@ _KNOWN_INLINE_HELPER_RESIDUAL = frozenset({
     "_require_owner_admin", "_require_owner", "_registry_mismatch_accept_v2",
     "_registry_accept_by_id", "_quarantine_import",
     "_run_indexing",
+    # #4660: the helper bodies the WIDENED scan newly sees. Same class as the
+    # route block above — inline SDK construction that was invisible to the
+    # graph-seam set.
+    #
+    # ``_run_docs_indexing`` is the concrete instance #4660's thread called out:
+    # it keeps an inline ``_make_sdk(namespace=org_id)`` on the loop (two sites)
+    # and surfaced only because a round-2 reviewer followed ``_run_indexing``'s
+    # sync helper by hand. ``_accept_mismatch_v2`` / ``_create_onboarding_org_lane``
+    # / ``_graph_quota_gate`` / ``_restore_trash_graph_locked`` /
+    # ``_agent_recover_flow`` are the same shape.
+    "_accept_mismatch_v2", "_agent_recover_flow",
+    "_create_onboarding_org_lane", "_graph_quota_gate",
+    "_restore_trash_graph_locked", "_run_docs_indexing",
     # #4355: the mint's #528 analytics actor resolution, extracted verbatim out
     # of create_api_key so the rotate route shares it (one implementation). It
     # was inline-on-the-loop before the extraction and still is — same residual,
@@ -564,10 +671,16 @@ def _graph_bound_names(node: ast.AST) -> set[str]:
     return names
 
 
-def _has_inline_graph_io(node: ast.AsyncFunctionDef) -> list[int]:
-    """Line numbers of sync-FalkorDB seams NOT inside an offload boundary."""
+def _inline_seam_hits(node: ast.AsyncFunctionDef) -> tuple[list[int], list[int]]:
+    """``(graph-seam lines, SDK-construction lines)`` NOT inside an offload boundary.
+
+    Two lists, not one (#4660): an SDK built on the loop is a different defect
+    from a graph read run on the loop, and a caller that merged them could not
+    tell which class a failure was, nor report the counts separately.
+    """
     bound = _graph_bound_names(node)
     hits: list[int] = []
+    construction: list[int] = []
 
     # Nested (locally defined) functions. A nested def's body is ON the loop
     # only when it is INVOKED there; one that is merely handed to an offload
@@ -599,7 +712,9 @@ def _has_inline_graph_io(node: ast.AsyncFunctionDef) -> list[int]:
                     visit(child)
                 return
             name = _callee_name(current.func)
-            if name in _GRAPH_SEAM_CALLEES:
+            if name in _SDK_CONSTRUCTION_SEAMS:
+                construction.append(current.lineno)
+            elif name in _GRAPH_SEAM_CALLEES:
                 hits.append(current.lineno)
             elif isinstance(current.func, ast.Attribute):
                 base = current.func.value
@@ -611,10 +726,34 @@ def _has_inline_graph_io(node: ast.AsyncFunctionDef) -> list[int]:
 
     for stmt in getattr(node, "body", []):
         visit(stmt)
-    return hits
+    return hits, construction
+
+
+def _has_inline_graph_io(node: ast.AsyncFunctionDef) -> list[int]:
+    """Line numbers of sync-FalkorDB seams NOT inside an offload boundary.
+
+    BOTH classes (graph seams and SDK construction) merged, ascending — the
+    shape the mutation tests assert. Callers that must tell the classes apart
+    use :func:`_inline_seam_hits`.
+    """
+    hits, construction = _inline_seam_hits(node)
+    return sorted(hits + construction)
+
+
+def _inline_construction_lines() -> dict[str, list[int]]:
+    """Body name -> on-loop SDK-construction lines only (#4660)."""
+    tree = ast.parse(HOSTED_API.read_text())
+    out: dict[str, list[int]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef):
+            _hits, construction = _inline_seam_hits(node)
+            if construction:
+                out[node.name] = construction
+    return out
 
 
 def _inline_graph_io_bodies() -> dict[str, list[int]]:
+    """Body name -> ALL on-loop seam lines (both classes, ascending)."""
     tree = ast.parse(HOSTED_API.read_text())
     return {
         node.name: lines
@@ -622,6 +761,18 @@ def _inline_graph_io_bodies() -> dict[str, list[int]]:
         if isinstance(node, ast.AsyncFunctionDef)
         and (lines := _has_inline_graph_io(node))
     }
+
+
+def _inline_graph_seam_lines() -> dict[str, list[int]]:
+    """Body name -> on-loop GRAPH-seam lines only (class 1 of two, #4660)."""
+    tree = ast.parse(HOSTED_API.read_text())
+    out: dict[str, list[int]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef):
+            hits, _construction = _inline_seam_hits(node)
+            if hits:
+                out[node.name] = hits
+    return out
 
 
 def test_graph_handle_binding_rule_detects_offload_wrapped_binding():
@@ -723,6 +874,57 @@ def test_nested_closure_invocation_rule():
         "(#4455 review)")
 
 
+def test_sdk_construction_seam_is_scanned_and_reported_separately():
+    """#4660: an SDK built on the loop is flagged, as its OWN class.
+
+    The pre-#4660 seam set was graph-only, so ``_make_sdk`` / ``_data_sdk`` —
+    which is where the embedded-mode anchor probe and eager connect live — were
+    INVISIBLE: a body could build its SDK on the loop and both guards stayed
+    green (the #4645 round-1 P1). The class must also stay distinguishable from
+    the graph-seam class, so a failure says which one regressed.
+    """
+    inline = ast.parse(
+        "async def _probe():\n"
+        "    sdk = _data_sdk(org)\n"
+        "    return sdk\n"
+    ).body[0]
+    graph_lines, construction_lines = _inline_seam_hits(inline)
+    assert construction_lines == [2], (
+        "an inline `_data_sdk(...)` was not reported as an SDK-construction "
+        "violation — the #4660 seam set is not wired in")
+    assert graph_lines == [], (
+        "an inline `_data_sdk(...)` was mis-classified as a GRAPH-seam hit; "
+        "the two classes must stay apart so the failure message says which "
+        "one regressed (#4660)")
+    assert _has_inline_graph_io(inline) == [2], (
+        "the merged view must still report the construction site, or every "
+        "existing caller silently loses the new class (#4660)")
+
+    # Off-loaded construction is NOT a violation — the `_graph_offload`
+    # boundary was the missing member that made `_data_sdk_offloaded` itself
+    # report as an on-loop construction (#4660).
+    offloaded = ast.parse(
+        "async def _probe():\n"
+        "    return await _graph_offload(lambda: _data_sdk(org), op='data_sdk')\n"
+    ).body[0]
+    assert _inline_seam_hits(offloaded) == ([], []), (
+        "`_graph_offload` is not declared as an offload boundary — the "
+        "CORRECT off-loop shape (`_data_sdk_offloaded`) reports as a "
+        "violation, and a real finding gets dismissed as noise (#4660)")
+
+    # A construction seam must not be treated as a graph HANDLE binding either:
+    # `sdk = _make_sdk(...)` does not make `sdk.query(...)` a graph-seam hit.
+    handle = ast.parse(
+        "async def _probe():\n"
+        "    sdk = _make_sdk(namespace='registry')\n"
+        "    return sdk.query('MATCH (n) RETURN n')\n"
+    ).body[0]
+    assert _inline_seam_hits(handle) == ([], [2]), (
+        "the construction seam leaked into the graph-handle binding rule "
+        "(#4660: only `_get_proj` / `_get_registry` / `dream_health_check` "
+        "bind a graph handle)")
+
+
 def test_async_body_inventory_is_visible():
     """The scan must be seeing the surface it claims to guard."""
     bodies = [n for n in ast.walk(ast.parse(HOSTED_API.read_text()))
@@ -735,23 +937,86 @@ def test_async_body_inventory_is_visible():
 def test_graph_io_is_offloaded():
     """Every async body with inline sync FalkorDB I/O is either OFF-LOADED or
     an explicitly declared residual — and a declared residual can only shrink
-    by actually converting the body."""
-    inline = _inline_graph_io_bodies()
-    declared = _KNOWN_INLINE_ROUTE_RESIDUAL | _KNOWN_INLINE_HELPER_RESIDUAL
+    by actually converting the body.
 
-    still_inline = sorted(_OFFLOADED_ASYNC_BODIES & set(inline))
+    The two CLASSES are reported separately (#4660): graph seams
+    (``_get_proj`` / ``_get_registry`` / ``dream_health_check`` / ``.g.query``)
+    and SDK construction (``_make_sdk`` / ``_data_sdk``). A merged count would
+    say how many sites are wrong but not which of the two regressed.
+    """
+    inline = _inline_graph_io_bodies()
+    construction = _inline_construction_lines()
+    graph_inline = _inline_graph_seam_lines()
+    declared = (_KNOWN_INLINE_ROUTE_RESIDUAL | _KNOWN_INLINE_HELPER_RESIDUAL
+                | _OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION)
+
+    # Class 1 — the graph seams. A member of EITHER off-loaded set may not
+    # carry one: the graph off-load is the part those bodies DO have, so a
+    # graph-seam hit here is a regression for both sets (#4660).
+    still_inline = sorted(
+        (_OFFLOADED_ASYNC_BODIES
+         | _OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION) & set(graph_inline))
     assert not still_inline, (
         f"{still_inline} are declared OFF-LOADED but still run sync FalkorDB "
-        f"I/O inline at {[(n, inline[n]) for n in still_inline]} — the read "
-        f"off-load regressed (#3718)")
+        f"GRAPH i/o inline at {[(n, graph_inline[n]) for n in still_inline]} — "
+        f"the read/attach off-load regressed (#3718)")
+
+    # Class 2 — SDK construction. Only the fully off-loaded set must be free
+    # of it; the construction-residual set is exactly the declared exception.
+    construction_regressed = sorted(
+        _OFFLOADED_ASYNC_BODIES & set(construction))
+    assert not construction_regressed, (
+        f"{construction_regressed} are declared fully OFF-LOADED but build an "
+        f"SDK on the event loop at "
+        f"{[(n, construction[n]) for n in construction_regressed]} — in "
+        f"embedded mode `_make_sdk` probes the anchor and may eagerly connect, "
+        f"which is blocking FalkorDB socket I/O (#4660). Off-load it (the "
+        f"`_graph_offload` / `_data_sdk_offloaded` seam) or move the body to "
+        f"`_OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION`")
+
+    # The construction-residual set can only shrink by actually off-loading: a
+    # name whose body no longer builds an SDK on the loop is stale and must come
+    # OUT, the same way the fully-off-loaded set is asserted above.
+    stale = sorted(_OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION
+                   - set(construction))
+    assert not stale, (
+        f"{stale} are declared as ON-LOOP SDK-construction residual but no "
+        f"longer construct an SDK on the loop — remove them from "
+        f"`_OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION` (and from "
+        f"this residual entirely if their graph seams are clean too) (#4660)")
 
     undeclared = sorted(set(inline) - declared)
     assert not undeclared, (
         f"async body/bodies {[(n, inline[n]) for n in undeclared]} run "
-        f"synchronous FalkorDB I/O on the event loop and are NOT in the "
-        f"declared residual — off-load them with `await asyncio.to_thread(...)` "
-        f"(short calls) or the dedicated pool (long/stallable work), or add "
-        f"them to the residual with a tracking note (#3718)")
+        f"synchronous FalkorDB I/O (a graph seam or an SDK construction) on "
+        f"the event loop and are NOT in the declared residual — off-load them "
+        f"with `await asyncio.to_thread(...)` (short calls), the dedicated "
+        f"pool (long/stallable work) or `_graph_offload` (SDK construction), or "
+        f"add them to the residual with a tracking note (#3718, #4660)")
+
+
+def test_on_loop_sdk_construction_residual_is_named_head_on():
+    """#4660: the class the pin was blind to is now DECLARED, not silent.
+
+    The failure this guards is not "a site exists" — the sites are the tracked
+    residual — it is that a future refactor could stop seeing the class
+    entirely (empty seam set, boundary swallowing it) and every assertion above
+    would go vacuously green.
+    """
+    assert frozenset({"_make_sdk", "_data_sdk"}) == _SDK_CONSTRUCTION_SEAMS, (
+        "the #4660 construction seam set changed shape — re-derive the "
+        "inventory before trusting this pin")
+    assert "_graph_offload" in _OFFLOAD_BOUNDARY_CALLEES, (
+        "`_graph_offload` is no longer declared an offload boundary — "
+        "`_data_sdk_offloaded` will report as an on-loop construction and bury "
+        "the real findings (#4660)")
+    construction = _inline_construction_lines()
+    assert len(construction) >= 30, (
+        f"the construction scan now sees only {len(construction)} bodies — it "
+        f"is not seeing the surface it claims to guard (#4660)")
+    assert set(_OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION) <= set(construction), (
+        "a declared on-loop SDK-construction body is not flagged by the scan "
+        "at all — the declaration has gone vacuous (#4660)")
 
 
 def test_residual_names_still_exist():
@@ -759,7 +1024,9 @@ def test_residual_names_still_exist():
     tree = ast.parse(HOSTED_API.read_text())
     defined = {n.name for n in ast.walk(tree)
                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    declared = (_OFFLOADED_ASYNC_BODIES | _KNOWN_INLINE_ROUTE_RESIDUAL
+    declared = (_OFFLOADED_ASYNC_BODIES
+                | _OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION
+                | _KNOWN_INLINE_ROUTE_RESIDUAL
                 | _KNOWN_INLINE_HELPER_RESIDUAL)
     ghosts = sorted(declared - defined)
     assert not ghosts, (

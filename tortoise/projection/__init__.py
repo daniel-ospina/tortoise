@@ -41,6 +41,10 @@ from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
     tolerates_altered_numbers,  # #7174/#5011: the replay/apply exemption
 )
 from tortoise.env_truthy import FALSY, env_flag  # #4097: the declared truthy contract
+from tortoise.vector_write import (  # #4520: the ONE clear-then-set vector seam
+    clear_then_set_prefix,
+    set_embedding_clause,
+)
 from tortoise.projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_DELETE_MISS,
     SHAPE_POINT_BELIEF_MISS,
@@ -470,17 +474,134 @@ _WHERE_REAL_RE = re.compile(
     r"\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_]|CONTAINS|IN\s*\(",
     re.IGNORECASE,
 )
+# #3037/#8223: the property-map exemption is anchored to the statement's
+# structure — a brace behind a pattern element under an unclosed ``(``/``[`` —
+# never a bare ``"{" in cypher``. That substring test treated a brace in a
+# COMMENT
+# (``MATCH (n) DETACH DELETE n // {``), a ``CALL { ... }`` subquery delimiter
+# (``CALL { MATCH (n) DETACH DELETE n }``) and a brace inside a STRING literal
+# as a property map, so a whole-graph wipe written that way was classified
+# "targeted" and reached a production server graph on the raw-query lane —
+# where L2 is the only layer.
+#
+# The exemption this grants is NARROW. The brace must sit under an unclosed
+# ``(`` or ``[`` **behind a pattern element** — a variable and/or label,
+# optionally with a type (``(n {…})``, ``(:Label {…})``, ``(n:Label {…})``,
+# ``[r:IMPL {…}]``). A bracket of any other kind therefore does NOT exempt:
+# an expression map literal (``properties({…})``, ``[{…}]``, ``coalesce({…})``,
+# ``keys({…})``), a parenthesised map in a WHERE (``({…}).a = 1``) and a map
+# projection (``n {.a}``) all fail the pattern-element requirement, so a
+# whole-graph wipe carrying one is still classified bulk (#8223). A ``CALL {``
+# opens after the keyword and a top-level map literal opens with no bracket, so
+# neither is exempt either.
+#
+# This is still a LEXICAL test — it does not verify that the bracket really
+# opens a MATCH pattern, so a malformed statement is failed closed by
+# ``_mask_is_unterminated`` first. Delete-target awareness (a property map on a
+# pattern OTHER than the deleted variable) is the separate remainder #8215 and
+# is NOT claimed here (see KNOWN GAPS).
+_PROPERTY_MAP_RE = re.compile(
+    r"[\(\[]\s*:?\s*[A-Za-z_]\w*(?:\s*:\s*[A-Za-z_]\w*)*\s*\{(?!\s*[.,])"
+)
+# The START of a ``CALL { ... }`` subquery. The subquery's own braces are
+# delimiters, not a property map, and a property map INSIDE it does not scope a
+# DELETE outside it — so ``_strip_call_subqueries`` blanks the whole block and
+# a wipe cannot borrow a read-subquery's brace as its "targeted" evidence.
+_CALL_SUBQUERY_START_RE = re.compile(r"\bCALL\s*\{", re.IGNORECASE)
+
+
+def _mask_cypher_text(cypher: str) -> str:
+    """Blank comments, string literals and backtick identifiers (#3037).
+
+    The classifier decides on STRUCTURE — a ``{`` that opens a property map, a
+    ``WHERE`` reference — so a brace (or a ``DETACH DELETE``) that appears only
+    in TEXT must not influence the verdict. Reuses the module's single strip
+    convention, ``_LITERAL_OR_COMMENT_RE`` (defined below with
+    ``_statement_writes``), so the two readers cannot drift apart. It is a
+    forward reference to a module-level constant, resolved at call time.
+    """
+    return _LITERAL_OR_COMMENT_RE.sub(" ", cypher)
+
+
+def _mask_is_unterminated(masked: str) -> bool:
+    """True when masking left an unterminated literal or comment behind (#3037).
+
+    ``_LITERAL_OR_COMMENT_RE`` matches only TERMINATED literals and comments, so
+    a malformed statement (``MATCH (n) DETACH DELETE n WHERE x = 'foo({``)
+    keeps its stray quote and a brace after it. An unreadable statement is not
+    evidence of targeting, so the classifier fails closed — every terminated
+    literal/comment was replaced by a space, which means any surviving quote,
+    backtick or block-comment opener marks an unterminated one.
+    """
+    return "'" in masked or '"' in masked or "`" in masked or "/*" in masked
+
+
+def _strip_call_subqueries(statement: str) -> str:
+    """Blank every ``CALL { ... }`` subquery block (balanced braces, #3037).
+
+    Removing the block removes both the delimiter braces and any property map
+    inside it, so neither can exempt a whole-graph wipe that merely sits next
+    to a CALL read-subquery. A targeted DELETE *inside* a CALL subquery (no
+    such statement in this codebase) would now be refused — the conservative
+    direction, and it belongs to the #3007 over-classification decision rather
+    than here.
+    """
+    text = statement
+    while True:
+        m = _CALL_SUBQUERY_START_RE.search(text)
+        if m is None:
+            return text
+        depth, i, n = 0, text.index("{", m.start()), len(text)
+        while i < n:
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        end = i + 1 if i < n else n
+        text = text[:m.start()] + " " * (end - m.start()) + text[end:]
 
 
 def _is_bulk_wipe(cypher: str) -> bool:
-    up = cypher.upper()
+    """True when ``cypher`` may delete EVERY node of the graph (#99/#3037).
+
+    Bulk = contains DETACH DELETE and carries no targeting construct: a
+    property map on a node/relationship pattern, or a real WHERE clause. The
+    verdict is made on structure, not on raw text — comments, string literals,
+    backtick identifiers and ``CALL { ... }`` subqueries are blanked first, so
+    a stray ``{`` in any of them cannot exempt a whole-graph wipe (#3037).
+    """
+    # Fast path: the overwhelming majority of statements are reads. A DETACH
+    # DELETE cannot be MASKED INTO existence, so a raw-text miss proves the
+    # statement is not a wipe and the scan below is skipped entirely — the
+    # read path pays no more than it did before #3037.
+    up_raw = cypher.upper()
+    if "DETACH" not in up_raw or "DELETE" not in up_raw:
+        return False
+    # The DELETE keyword is read from the masked text (a CALL subquery's
+    # DELETE is still a DELETE; a DETACH DELETE that lives only in a string or
+    # a comment is not a DELETE at all); the TARGETING constructs are read from
+    # the text with CALL subqueries blanked, so a brace or WHERE clause that
+    # lives inside a read-subquery cannot exempt a wipe that sits outside it.
+    masked = _mask_cypher_text(cypher)
+    up = masked.upper()
     if "DETACH" not in up or "DELETE" not in up:
         return False
-    # Property map in MATCH => targeted (e.g. {id:$id}, {org_id:$id})
-    if "{" in cypher:
+    # #3037: masking removes only TERMINATED literals/comments. A malformed
+    # statement keeps its quote, and a brace after it would still look like a
+    # pattern property map — an unreadable statement is not evidence, so fail
+    # closed BEFORE the target tests.
+    if _mask_is_unterminated(masked):
+        return True
+    text = _strip_call_subqueries(masked)
+    # Property map on a node/relationship pattern => targeted
+    # (e.g. {id:$id}, {org_id:$id})
+    if _PROPERTY_MAP_RE.search(text):
         return False
     # Real WHERE clause (property/param/CONTAINS/IN reference) => targeted
-    m = re.search(r"WHERE\s+(.+) ", cypher + " ", re.IGNORECASE)
+    m = re.search(r"WHERE\s+(.+) ", text + " ", re.IGNORECASE)
     if m and _WHERE_REAL_RE.search(m.group(1)):  # noqa: SIM103
         return False
     return True
@@ -808,6 +929,7 @@ def _config_classes() -> tuple[_ConfigClass, ...]:
         # safe.
         from tortoise.pack_manifest_store import PACK_MANIFEST_LABEL
         from tortoise.pack_state import PACK_INSTALL_LABEL
+        from tortoise.residency import DECLARATION_META_KEY
         from tortoise.sdk import TortoiseSDK
 
         classes = (
@@ -815,8 +937,13 @@ def _config_classes() -> tuple[_ConfigClass, ...]:
             _ConfigClass(PACK_MANIFEST_LABEL, "namespace"),
             # `:Meta` is SHARED with derived markers (the FTS keys), so this
             # class is key-scoped: a label-wide read would sweep them in.
+            # `residency` (#7952) is the completeness marker's declared
+            # known-hot set — graph-only operator metadata that a rebuild must
+            # carry, or a declared-partial store silently reverts to
+            # `complete` and the marker cannot fire (§17.2).
             _ConfigClass("Meta", "key", frozenset({
-                TortoiseSDK._CALIBRATION_MARKER_KEY, _CONFIG_RESET_KEY})),
+                TortoiseSDK._CALIBRATION_MARKER_KEY, _CONFIG_RESET_KEY,
+                DECLARATION_META_KEY})),
         )
         # `_CONFIG_CLASS_BY_LABEL` is a side effect so the validator and the
         # restore path can resolve a label without repeating the import dance.
@@ -2060,12 +2187,28 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 #     its callers swallow it (the hosted sweeper at DEBUG, the SDK lazy hook at
 #     WARNING) — the per-team event cap no-ops without a build failure
 #     (tracked: #3007).
-#   * ``_is_bulk_wipe`` also UNDER-classifies: a bare ``"{" in cypher``
-#     exemption means a whole-graph wipe whose text contains a brace
-#     (``MATCH (n) DETACH DELETE n // {``, ``CALL { MATCH (n) DETACH DELETE
-#     n }``) is treated as targeted, so on the raw-query lane it reaches a
-#     production server graph with no name check and no token (tracked:
-#     #3037).
+#   * ``_is_bulk_wipe`` also UNDER-classified (FIXED by #3037 + #8223): a bare
+#     ``"{" in cypher`` exemption meant a whole-graph wipe whose text contains
+#     a brace (``MATCH (n) DETACH DELETE n // {``, ``CALL { MATCH (n) DETACH
+#     DELETE n }``) was treated as targeted, so on the raw-query lane it reached
+#     a production server graph with no name check and no token. The exemption
+#     is now anchored to the statement's structure: comments/strings/CALL
+#     subqueries are blanked first, an
+#     unterminated literal/comment fails closed, and the brace must sit under
+#     an unclosed ``(``/``[`` behind a pattern element (``_mask_cypher_text`` /
+#     ``_strip_call_subqueries`` / ``_mask_is_unterminated`` /
+#     ``_PROPERTY_MAP_RE``). An expression map literal (``UNWIND [{a:1}]``,
+#     ``properties({a:1})``, ``keys({a:1})``, ``({a:1}).a``) no longer counts
+#     (#8223).
+#     REMAINDERS (still open):
+#       - a property map on a pattern OTHER than the deleted variable still
+#         exempts the statement (``MATCH (n:Point {id:$id}) WITH n MATCH (m)
+#         DETACH DELETE m``) — tracked: #8215. Deciding it needs a
+#         delete-target-aware classifier — the same scope decision #3007 defers.
+#       - a bare ``DELETE`` (no ``DETACH``) is not classified at all, though
+#         FalkorDB auto-detaches and ``MATCH (n) DELETE n`` deletes every node
+#         — tracked: #8256 (pre-existing; widening the classifier is its own
+#         scope decision).
 #
 #
 # History: the pre-#2944 bypass was ``_skip_guard``, a plain boolean
@@ -4715,11 +4858,37 @@ def _epistemic_forward_reference(existence, rid, seq) -> bool:
     return future
 
 
+def _reference_fold_non_point_labels(existence, rid, journal_seq) -> tuple[str, ...]:
+    """The REFERENCE-FOLD labels (``:Subject`` / ``:Object`` / ``:Event``) under
+    which ``rid`` EXISTS at ``journal_seq`` — the existence resolver both the
+    non-Point belief EXEMPTION and the non-Point belief FOLD read.
+
+    ``_fold_confidence_changed`` sweeps ALL FOUR epistemic labels and writes
+    every one that matches (the live writers ``TortoiseEP._write_node`` /
+    ``_flush_cache`` never stop at the first match either, #7853 P2), so a
+    belief whose id is carried under more than one label lands on EACH carrier.
+    A caller that folds the belief — not merely exempts the miss — therefore
+    has to fold the same SET, or the reference fold and the graph disagree on a
+    multi-label id.
+
+    Returned in a DETERMINISTIC order (the label set is a ``frozenset``), so a
+    caller writing into an ordered structure cannot depend on hash order.
+    ``()` means the write resolved no reference-fold node at all.
+    """
+    if (not isinstance(existence, dict) or not isinstance(rid, str)
+            or not isinstance(journal_seq, int)):
+        return ()
+    return tuple(
+        label for label in sorted(_REFERENCE_FOLD_ENTITY_LABELS)
+        if _existence_state(*existence.get((label, rid), ((), ())),
+                            journal_seq) == _EXISTENCE_EXISTS)
+
+
 def _reference_fold_non_point_target(existence, rid, journal_seq) -> bool:
     """True when the journal materializes ``rid`` as a REFERENCE-FOLD entity
     (``:Subject`` / ``:Object`` / ``:Event``) that EXISTS at ``journal_seq``.
 
-    #7936 interim. The #7813 widening makes EP journal a ``ConfidenceChanged``
+    #7936. The #7813 widening makes EP journal a ``ConfidenceChanged``
     for any of the four epistemic labels, but ``_apply_one``'s index is the
     point-only ``{id: point}`` dict — it has no representation for a non-Point
     target. That is a BOUND of this index, NOT a fold-miss: the graph fold
@@ -4750,18 +4919,15 @@ def _reference_fold_non_point_target(existence, rid, journal_seq) -> bool:
     (#7936 P2). Adding the value gate here would change what this predicate
     means for its existence-only readers.
 
-    NOTE the index itself is still point-only: the exemption suppresses the
-    false miss, it does not fold the belief into ``fold()`` /
-    ``InMemoryProjection`` (that needs the ``(label, id)`` re-key in #7936).
+    The predicate is the boolean face of
+    :func:`_reference_fold_non_point_labels`, so the exemption and the FOLD
+    cannot decide existence differently: the labels the caller folds the belief
+    onto are exactly the labels this answers True for (see ``_apply_one``'s
+    ``entities`` index, #7936). The exemption is reached on EVERY caller (it is
+    what keeps a healthy graph green); the fold needs the entity index, so a
+    Point-only caller still drops the belief and the caller says so.
     """
-    if (not isinstance(existence, dict) or not isinstance(rid, str)
-            or not isinstance(journal_seq, int)):
-        return False
-    for label in _REFERENCE_FOLD_ENTITY_LABELS:
-        creates, deletes = existence.get((label, rid), ((), ()))
-        if _existence_state(creates, deletes, journal_seq) == _EXISTENCE_EXISTS:
-            return True
-    return False
+    return bool(_reference_fold_non_point_labels(existence, rid, journal_seq))
 
 
 def journal_object_surviving_keys(
@@ -4874,11 +5040,50 @@ def _object_hard_deleted_ids(hard_deleted: dict) -> frozenset[str]:
         if _hard_deleted_any(hard_deleted, "Object", rid))
 
 
+def _apply_belief_props(dest: dict, ev: dict) -> None:
+    """Apply ONE ``ConfidenceChanged`` record's belief properties onto ``dest``.
+
+    THE belief-write seam, shared by the point-only index (``_apply_one``'s
+    ``:Point`` arm), the non-Point entity index (its ``entities`` arm) and —
+    through ``fold_with_entities`` — ``consistency``'s non-Point content leg.
+    One implementation is the point: ``_fold_confidence_changed``'s
+    presence-conditional shape and its two value gates are already pinned to
+    ``_apply_one`` as the single source of fold semantics (#330 parity), and a
+    second hand-written copy of the same loop is exactly what drifts.
+
+    Presence-conditional, exactly like ``_fold_confidence_changed``: only the
+    keys the record carries are written; a key present with ``None`` writes
+    ``None`` (the journaled CLEAR — the writer's SET removes the property, and
+    every comparison normaliser drops a ``None`` so the two sides still agree).
+    ``_belief_prop_value_ok`` / ``_belief_bool_value_ok`` are the ONE value
+    gates the graph fold also uses, so a corrupt line degrades identically on
+    both sides.
+    """
+    for key in BELIEF_PROPS:
+        if key not in ev:
+            continue
+        value = ev[key]
+        if not _belief_prop_value_ok(key, value):
+            continue
+        dest[key] = value
+    # #2884 A5: the boolean flag riding the same record (`assess_source`'s
+    # `outdated=true`) — same presence-conditional shape and its own strict
+    # bool gate, so the pure fold and the graph fold agree.
+    for key in BELIEF_BOOL_PROPS:
+        if key not in ev:
+            continue
+        value = ev[key]
+        if not _belief_bool_value_ok(value):
+            continue
+        dest[key] = value
+
+
 def _apply_one(points: dict[str, dict], ev: dict,
                journal_first_materialized: dict[tuple[str, str], int]
                | None = None,
                journal_seq: int | None = None,
-               journal_existence: dict | None = None) -> None:
+               journal_existence: dict | None = None,
+               entities: dict | None = None) -> None:
     """Fold ONE normalized journal record into the pure point index.
 
     ``journal_first_materialized`` / ``journal_seq`` are the whole-journal
@@ -4894,7 +5099,24 @@ def _apply_one(points: dict[str, dict], ev: dict,
     :func:`_reference_fold_non_point_target`) — a last-delete-wins membership
     map cannot express re-creation or a delete on either side of the write.
 
-    All three default to ``None`` for a bare ``_apply_one(points, ev)`` (no
+    ``entities`` is the OPTIONAL non-Point belief index, keyed ``(label, id)``
+    (#7936): when supplied, a ``ConfidenceChanged`` whose target is a
+    journaled ``:Subject`` / ``:Object`` / ``:Event`` is FOLDED onto every
+    reference-fold label the id EXISTS under at this record, through the shared
+    :func:`_apply_belief_props`. That fold happens whether or not a ``:Point``
+    shares the id: the graph fold sweeps all four labels and writes every
+    carrier, so a Point-sharing id has to fill the index too or the comparison
+    goes blind to the non-Point carrier (#7936 P2 review). Without it the arm
+    can only warn — the
+    ``{id: point}`` index has no representation for a non-Point node, which is
+    the parity gap this parameter closes for the BATCH fold
+    (:func:`fold_with_entities`) and for a ``rebuild``-ed ``InMemoryProjection``.
+    The one-record incremental path (``InMemoryProjection.apply``) still cannot
+    fold it: it has no journal to ask which label the id is, and this index
+    does not model the non-Point CREATION records (see the bound on
+    ``_reference_fold_non_point_target``'s warning arm).
+
+    All four default to ``None`` for a bare ``_apply_one(points, ev)`` (no
     journal to consult), which preserves the pre-existing behaviour.
     """
     ev = _norm(ev)
@@ -5210,41 +5432,60 @@ def _apply_one(points: dict[str, dict], ev: dict,
                     event_type="ConfidenceChanged", seq=journal_seq, id=rid,
                     detail="reference fold: belief write matched no Point",
                 )
-            for key in BELIEF_PROPS:
-                if key not in ev:
-                    continue
-                value = ev[key]
-                if not _belief_prop_value_ok(key, value):
-                    continue
-                p[key] = value
-            # #2884 A5: the boolean flag riding the same record
-            # (`assess_source`'s `outdated=true`) — same presence-conditional
-            # shape and its own strict bool gate, so the pure fold and the
-            # graph fold agree.
-            for key in BELIEF_BOOL_PROPS:
-                if key not in ev:
-                    continue
-                value = ev[key]
-                if not _belief_bool_value_ok(value):
-                    continue
-                p[key] = value
+            _apply_belief_props(p, ev)
+            # #7936 P2 (review): the SAME id may ALSO be carried by a
+            # `:Subject`/`:Object`/`:Event`. `_fold_confidence_changed`
+            # sweeps all four epistemic labels and writes EVERY carrier, so
+            # on the duplicate-id shape (`PointAdded X` +
+            # `ObjectRegistered X`, pinned by
+            # `test_fold_confidence_changed_sweeps_every_label_not_just_the_first`)
+            # the graph holds the belief on BOTH nodes. `points` holds only the
+            # Point, so without this the companion index carries no
+            # journal-side expectation for the non-Point carrier and
+            # `_compare_entities` — presence-conditional from the journal side
+            # — skips it: a corrupted or lost non-Point belief stays a false
+            # green, the exact class #7936 exists to remove. The Point arm must
+            # therefore fold the reference-fold labels too, not only the
+            # `elif` (Point-absent) arm. `()` when the caller has no ordered
+            # boundary (the one-record incremental path), so nothing is
+            # guessed without a journal.
+            if entities is not None:
+                for _label in _reference_fold_non_point_labels(
+                        journal_existence, rid, journal_seq):
+                    _apply_belief_props(
+                        entities.setdefault((_label, rid), {}), ev)
         elif (_writable_id(rid) and _foldable_prop
                 and _reference_fold_non_point_target(
                     journal_existence, rid, journal_seq)):
-            # #7936 interim: the id IS materialized by the journal — as a
+            # #7936: the id IS materialized by the journal — as a
             # `:Subject`/`:Object`/`:Event` — AND at least one carried belief
             # value survives the value gate, so the graph fold WILL resolve and
-            # write it. `points` cannot represent it, so this point-only fold
-            # DROPS the belief (the graph fold does not). Say so instead of
-            # dropping it silently, and do NOT record a miss: a false
-            # `non-folded` reds a healthy graph and, tested first, masks a
+            # write it. `points` cannot represent it. Do NOT record a miss: a
+            # false `non-folded` reds a healthy graph and, tested first, masks a
             # genuine content divergence on it (#7936). The `_foldable_prop`
             # half is the P2: with every value corrupt `rebuild_all` refuses,
             # so the exemption must fall through to the miss arm below.
-            logger.warning(
-                "reference fold: ConfidenceChanged targets the non-Point "
-                "epistemic node %r; the in-memory {id: point} index cannot "
-                "hold it (the graph fold resolves it) — #7936", rid)
+            #
+            # The belief is FOLDED whenever the caller supplied the non-Point
+            # index, onto EVERY reference-fold label the id EXISTS under at
+            # this record — the same set `_fold_confidence_changed` sweeps, so
+            # a multi-label id is written on all of its carriers here too
+            # (#7936; `_reference_fold_non_point_labels` is the ONE existence
+            # resolver the exemption above also reads). Without the index
+            # (``_fold_journal`` is Point-only by contract, and the one-record
+            # incremental path has no journal) the drop is SURFACED instead of
+            # happening silently.
+            _labels = _reference_fold_non_point_labels(
+                journal_existence, rid, journal_seq)
+            if entities is None:
+                logger.warning(
+                    "reference fold: ConfidenceChanged targets the non-Point "
+                    "epistemic node %r; the in-memory {id: point} index cannot "
+                    "hold it (the graph fold resolves it) — #7936", rid)
+            else:
+                for _label in _labels:
+                    _apply_belief_props(
+                        entities.setdefault((_label, rid), {}), ev)
         elif (journal_existence is not None and journal_seq is not None
                 and _writable_id(rid)
                 and _has_prop
@@ -5314,20 +5555,52 @@ def _apply_one(points: dict[str, dict], ev: dict,
         logger.warning("unrecognized event type %r — not folded by this index", t)
 
 
-def fold(events: list[dict]) -> dict[str, dict]:
+def fold_with_entities(events: list[dict]) -> tuple[dict[str, dict], dict]:
+    """``fold`` PLUS the non-Point belief index — ``(points, entities)``.
+
+    ``entities`` is keyed ``(label, id)`` and holds the belief properties a
+    ``ConfidenceChanged`` wrote to a ``:Subject`` / ``:Object`` / ``:Event``
+    (#7936). Before it, this fold represented POINTS ONLY, so a belief write to
+    any of the other three epistemic labels was dropped while the graph fold
+    (``_fold_confidence_changed``) resolved and wrote it — the ``_apply_one``
+    parity contract at the top of this module ("an incrementally-updated
+    projection and ``fold(read_all())`` can never diverge") stopped holding the
+    moment #7853 widened EP propagation across all four labels.
+
+    ``fold`` is deliberately UNCHANGED: it keeps the public ``{id: point}``
+    contract every existing caller depends on (``ingest``, ``sdk``, ``api``,
+    ``m0``, ``embeddings`` all index it by POINT id), and this companion
+    carries the rest of the fold instead of re-keying them. The remaining
+    durable step — one ``(label, id)`` index deriving ``log_points`` /
+    ``db_points`` / ``_compare_views`` / the fingerprint from a single view —
+    stays open on #7936 and is deliberately NOT smuggled in here: re-keying the
+    digest would move ``content_hash`` for every existing baseline, and the
+    sidecar has no format-migration path (a bumped ``format_version`` is
+    untrusted forever and the baseline is never re-recorded).
+
+    ``entities`` is a BATCH/replay view: it is built from the journal's ordered
+    existence boundary, which the one-record incremental path does not have.
+    """
     points: dict[str, dict] = {}
+    entities: dict = {}
     first_materialized = journal_first_materialization(events)
     # #7936 review: the ORDERED boundary, hoisted ONCE — the non-Point belief
-    # exemption asks whether the target EXISTS at each record (re-creation and
-    # deletes on either side of the write), and rebuilding it per record is the
-    # O(N²) class this module already fixed.
+    # exemption AND the fold ask whether the target EXISTS at each record
+    # (re-creation and deletes on either side of the write), and rebuilding it
+    # per record is the O(N²) class this module already fixed.
     existence = journal_epistemic_existence(events)
     for seq, ev in enumerate(events):
         _apply_one(points, ev,
                    journal_first_materialized=first_materialized,
                    journal_seq=seq,
-                   journal_existence=existence)
-    return points
+                   journal_existence=existence,
+                   entities=entities)
+    return points, entities
+
+
+def fold(events: list[dict]) -> dict[str, dict]:
+    """The POINT-only view of the fold — see :func:`fold_with_entities`."""
+    return fold_with_entities(events)[0]
 
 
 def split(points: dict[str, dict]) -> tuple[list[dict], list[dict]]:
@@ -5360,9 +5633,21 @@ class Projection(Protocol):
 class InMemoryProjection:
     def __init__(self):
         self.points: dict[str, dict] = {}
+        # #7936: the non-Point belief index, keyed ``(label, id)`` — the
+        # ``:Subject`` / ``:Object`` / ``:Event`` half of the fold that the
+        # ``{id: point}`` index cannot hold. ``rebuild`` fills it from the
+        # journal; ``apply`` is bounded (see its comment).
+        self.entities: dict = {}
 
     def apply(self, event: dict) -> None:
-        _apply_one(self.points, event)
+        # #7936 BOUND: a one-record fold has no journal, so it cannot say which
+        # reference-fold label an unknown id is — ``_apply_one`` surfaces the
+        # drop rather than guessing, and never manufactures a ``non-folded``
+        # record the batch path would not. ``rebuild`` is the path that holds
+        # the non-Point belief; the durable ``(label, id)`` re-key that would
+        # let the incremental path fold the non-Point CREATION records too
+        # stays open on #7936.
+        _apply_one(self.points, event, entities=self.entities)
 
     def rebuild(self, log, *, confirm_destructive: bool = False) -> None:
         """Fold the log into memory.
@@ -5380,7 +5665,10 @@ class InMemoryProjection:
         events = log.read_all()
         _refuse_revival_torn_tail(
             getattr(log, "torn_tail_revival_records", lambda: [])())
-        self.points = fold(events)
+        # #7936: the BATCH fold, so the non-Point belief index is filled too —
+        # a rebuilt in-memory projection must not silently lack a belief the
+        # graph fold wrote.
+        self.points, self.entities = fold_with_entities(events)
 
 
 def _validate_uri_scheme(scheme: str) -> str:
@@ -8756,7 +9044,30 @@ class FalkorProjection(
                     if (isinstance(_del_label, str)
                             and _del_label in _CANONICAL_ENTITY_LABELS):
                         anchor = last_recreate_seq.get((_del_label, rid))
-                    else:
+                    elif ev.get("op") == "delete":
+                        # #7936 — the ANY-KIND anchor is for the LEGACY ID-WIDE
+                        # DELETE ONLY. `last_recreate_seq_any` is the bare-id max
+                        # over kinds precisely because a delete record with a
+                        # missing/non-canonical label folds id-wide
+                        # (`_delete_entity_by_id(rid, None)`), so gating it on the
+                        # id's last re-creation is what keeps a legitimate
+                        # delete→recreate :Point from being destroyed.
+                        #
+                        # Applying it to a NON-delete op (a state op or an op
+                        # outside the vocabulary) silently EXEMPTED a record the
+                        # fold cannot replay — a fail-open: `_fold_entity_mutation`
+                        # would have recorded `state-op-miss` / `unknown-op` and
+                        # failed the run, and all three INLINE engines
+                        # (`rebuild(log)`, `recover_from_log`, `backup.restore`)
+                        # plus the reference fold DO fail it, so `rebuild_all`
+                        # alone reported a journal complete that the other four
+                        # reject (measured: 4-vs-1 on
+                        # `[EntityMutated(label=Widget, id=X, ...), PointAdded(X)]`,
+                        # and on the `label=null` / unknown-op variants). For a
+                        # DELETE the same shape is verdict-neutral — a 0-row
+                        # delete is the EXEMPT `delete-miss` either way — so this
+                        # narrowing changes no delete verdict and removes the
+                        # silent-drop divergence.
                         anchor = last_recreate_seq_any.get(rid)
                 if anchor is not None and seq <= anchor:
                     continue
@@ -9551,7 +9862,9 @@ class FalkorProjection(
             if gap:
                 clauses.append("n += $props")
                 params["props"] = gap
+            restore_guard = ""
             if restore_embedding:
+                restore_guard = clear_then_set_prefix("n", "$emb")
                 if sp.get("embedding_verbatim"):
                     # #5004 round-7: a CALLER-owned vector must keep its RAW
                     # form. `vecf32()` is the ONE form it must not take (it
@@ -9567,11 +9880,12 @@ class FalkorProjection(
                     # `vecf32()` cast exactly like `_upsert_point_props`: the
                     # HNSW index rejects a bare list, and a bare-list write
                     # would leave the restored vector unsearchable.
-                    clauses.append("n.embedding = vecf32($emb)")
+                    clauses.append(set_embedding_clause("n", "$emb"))
                 params["emb"] = list(emb)
             try:
                 self.g.query(
-                    "MATCH (n:Point {id:$pid}) SET " + ", ".join(clauses),
+                    "MATCH (n:Point {id:$pid}) " + restore_guard
+                    + "SET " + ", ".join(clauses),
                     params=params,
                 )
             except Exception as e:
@@ -10691,6 +11005,93 @@ class FalkorProjection(
                 "onboarding_gap": onboarding_gap,
                 "onboarding_missing_total": onboarding_missing_total,
                 "onboarding_state_unknown": onboarding_unknown}
+
+    def rebuild_from_record(self, view, *, confirm_destructive: bool = False,
+                            declare: bool = True, scope: str = "",
+                            limit: int | None = None) -> dict:
+        """The record-sourced sibling of :meth:`rebuild_all` (#7971).
+
+        ``rebuild_all`` rebuilds the cache from **the journal** (a ``log_dir``
+        of JSONL files). This rebuilds it from **the record** — Postgres's own
+        layer tables — which is what ``STORAGE-ARCHITECTURE.md`` §2.0 means by
+        *"data goes to postgres and it's loaded to hot (falkor)"*. The
+        machinery is shared (the destructive-token gate, the disposability
+        guard, the wipe, the index creation); what changes is the **SOURCE**.
+
+        Three properties, each enforced rather than promised:
+
+        * **Refuse before touching the graph.** The whole plan is built from
+          the record first (``cache_projection.record_plan``), so a record row
+          the projection cannot place raises BEFORE the wipe — a half-applied
+          projection is not reachable.
+        * **One-way.** Nothing here reads the cache to decide what to project
+          (``rebuild_all``'s pre-wipe snapshot does exactly that, for five
+          graph-only classes; this path deliberately does not — see
+          ``tortoise/cache_projection.py``).
+        * **The declaration follows the writes.** ``coverage`` is `complete`
+          **iff** every record key was materialised; ``limit`` bounds how many
+          nodes are written, and a bounded run therefore declares `partial`,
+          enumerating what it wrote. That is the seam through which the
+          completeness marker (#7952) can FIRE — it is not an eviction policy
+          (§2.0 holds the FalkorDB limit high; the trigger for partiality is
+          still §17.3's).
+
+        ``limit`` is a bound and nothing more: nodes are taken in a
+        deterministic key order, and a relation whose endpoint falls outside
+        the bound is a no-op (the same verdict the record projection's own
+        endpoint resolution gives an absent endpoint).
+        """
+        from tortoise.cache_projection import (
+            declaration_for,
+            project_records,
+            record_plan,
+            write_declaration,
+        )
+
+        nodes = tuple(view.nodes)
+        if limit is not None:
+            if limit < 0:
+                raise ValueError(f"limit must be >= 0, got {limit}")
+            nodes = tuple(sorted(nodes, key=lambda n: (n.label, n.key))[:limit])
+            kept = {(n.label, n.key) for n in nodes}
+            relations = tuple(
+                r for r in view.relations
+                if (r.src_label, r.src_key) in kept
+                and (r.tgt_label, r.tgt_key) in kept)
+        else:
+            relations = tuple(view.relations)
+
+        plan = record_plan(nodes, relations)  # raises BEFORE any wipe
+
+        self._assert_destructive_confirmed(confirm_destructive,
+                                          "rebuild_from_record")
+        self._assert_test_graph(
+            "REFUSING to run bulk DETACH DELETE on non-test graph")
+        self._wipe_all_nodes(confirm_destructive=confirm_destructive,
+                             operation="rebuild_from_record")
+        self._ensure_indexes()
+        statements = project_records(self.g, plan)
+
+        declaration = None
+        if declare:
+            materialized = plan.node_keys()
+            declaration = declaration_for(
+                view.record_keys,
+                [(label, key) for label, key in materialized],
+                scope=scope,
+            )
+            write_declaration(self.g, declaration)
+
+        return {
+            "nodes_written": len(nodes),
+            "relations_written": len(relations),
+            "statements": statements,
+            "record_nodes": len(view.nodes),
+            "record_relations": len(view.relations),
+            "coverage": declaration.coverage if declaration else None,
+            "declared_keys": len(declaration.hot_keys or ()) if declaration else 0,
+            "source": "record",
+        }
 
     def query(self, cypher: str, **params):
         # L2 guard (#99): refuse bulk graph-wipe on non-test graphs. There is
@@ -12212,9 +12613,10 @@ class FalkorProjection(
         params: dict = {"id": pid}
         set_clauses: list[str] = []
         wrote_embedding = False
-        # #4457/#4520: the `REMOVE n.embedding` prefix, spliced ahead of the SET
-        # list in the SAME atomic query when (and only when) a real vector is
-        # being written below. See the embedding block for why.
+        # #4457/#4520: the shared clear-then-set prefix (`tortoise/vector_write.py`),
+        # spliced ahead of the SET list in the SAME atomic query when (and only
+        # when) a real vector is being written below. See the embedding block
+        # for why.
         embed_clear = ""
         wrote_content_hash = False
 
@@ -12288,11 +12690,9 @@ class FalkorProjection(
                 # wipe-on-None branch is unaffected and a fresh node simply has
                 # nothing to remove. Same workaround as `_upsert_point_props`
                 # (#4457) and the Subject/Object/Document/Event seams (#4524).
-                if params["embedding"] is not None:
-                    embed_clear = "REMOVE n.embedding "
+                embed_clear = clear_then_set_prefix("n")
                 set_clauses.append(
-                    "n.embedding = CASE WHEN $embedding IS NULL THEN NULL "
-                    "ELSE vecf32($embedding) END")
+                    set_embedding_clause("n", preserve_on_null=False))
                 wrote_embedding = True
             if not skip_hash:
                 # #2795: content_hash is derived from content — mirror the live

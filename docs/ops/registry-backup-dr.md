@@ -503,6 +503,22 @@ containing an embedded quote inside a JSON payload (the escaped `\"` defeats
 quote pairing). The primary control for both is the source — the three
 key-parsing sites emit a sha256 fingerprint, never the raw value.
 
+**Publication redaction — the APP side (#3293):** the incidents the app files
+itself (every `AlertStore` incident: `RESTORE_DRILL_FAILED` from the scheduled
+drill, the abuse/billing/analytics operator kinds) reach the same **public**
+issue body, so `tortoise/security.redact_for_publication()` runs on the app's
+half of that body **at the boundary** — `alert_store._title` / `_body` /
+`_telegram_text`, the last point before publication, so no caller can publish
+unredacted text. It is NOT the same table as the driver's `redact()`: it
+composes `redact_secrets` (anchored vendor shapes), the error-message patterns
+(URI userinfo, filesystem paths) and credential-bearing **query parameters**
+(`?X-Amz-Signature=…` — a signed storage URL echoed by a failed upload), which
+`redact_secrets` alone does not cover. It deliberately omits the driver's
+key-NAME-anchored (`backup_key=…`) and bare ≥20-char catch-all rules, because a
+DR incident body LEANS on `backup_key` (the RTO-breach alert names the artifact
+to restore) and those two would redact exactly the field triage needs. Rule
+detail: `tortoise/security.py` §"Publication redaction".
+
 **Credential requirement:** the driver **fails closed** if `GITHUB_TOKEN`
 is unset — Actions does not export it into step envs, so
 `.github/workflows/registry-backup-cron.yml` passes `${{ secrets.GITHUB_TOKEN }}`
