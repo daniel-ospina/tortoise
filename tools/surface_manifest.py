@@ -28,20 +28,17 @@ WHAT `check` DOES NOT PROVE — APPROVAL IS NOT MACHINE-CARRIED
     review. A green run is not consent. (The repository ruleset the #3863 scope doc
     proposed as the carrier was REJECTED on #4282 as over-engineering.)
 
-    PROVENANCE IS STAGED, NOT YET COMPARED HERE (#4185, first PR). `read_approval` reads
-    the owner's approval from `docs/product/canonical-mcp-tools.md`; it is landed and
-    tested, but the manifest's top-level `approval_status` / `approval_principal` /
-    `approval_pr` / `approval_date` remain in `NON_DERIVABLE_DOC_KEYS`, so `check` does
-    NOT compare them yet. That is deliberate: CI's required `surface-guard` job pins the
-    BASE copy of `tools/surface-guard.py`, whose per-row `approval` rule fires on
-    `approval_status: approved`, so flipping the committed manifest in this PR cannot be
-    green. A follow-up PR — once the new guard is on `main` — removes these keys from the
-    deny-list, flips the manifest to the derived `approved`, and arms the comparison.
-    Until then `tools/surface-guard.py` still enforces provenance whenever a manifest
-    CLAIMS an approval. Compliance with the owner-approved TARGET recorded in
-    `docs/product/canonical-mcp-tools.md` and `docs/product/beta-sdk-surface.md` is a
-    separate question, answered against the live surface by
-    `tools/surface-target-check.py`.
+    PROVENANCE IS DERIVED AND COMPARED (#4185; flip landed by #8144). `read_approval`
+    reads the owner's approval from `docs/product/canonical-mcp-tools.md` at cut time, and
+    the manifest's top-level `approval_status` / `approval_principal` / `approval_pr` /
+    `approval_date` are compared by `check` — a hand-edit that disagrees with the document
+    reds the lint. They were briefly excluded while the flip was staged in a two-PR split
+    (#8026 landed the tooling; #8144 flipped the copy and removed the exclusion).
+    `tools/surface-guard.py` independently re-reads the same document and reds a manifest
+    that CLAIMS an approval disagreeing with it. Compliance with the owner-approved TARGET
+    recorded in `docs/product/canonical-mcp-tools.md` and
+    `docs/product/beta-sdk-surface.md` is a separate question, answered against the live
+    surface by `tools/surface-target-check.py`.
 
     OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).
 
@@ -199,12 +196,10 @@ RENDERED_FILE = ROOT / "docs" / "product" / "mcp-sdk-surface.md"
 MANIFEST_HEADER = (
     "# OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).\n"
     "#\n"
-    "# The top-level approval is STAGED from docs/product/canonical-mcp-tools.md (#4185) by\n"
-    "# `tools/surface_manifest.py::read_approval`; the committed copy is still\n"
-    "# `pending-owner-approval` because CI's required `surface-guard` pins the BASE guard,\n"
-    "# whose per-row `approval` rule fires on `approved`. A follow-up PR (#8144) flips it\n"
-    "# once the new guard is on main; do not hand-edit the four values — re-cut (the cut\n"
-    "# copies the doc).\n"
+    "# The top-level approval is READ from docs/product/canonical-mcp-tools.md (#4185) by\n"
+    "# `tools/surface_manifest.py::read_approval` and copied into this file by a re-cut.\n"
+    "# Do not hand-edit the four values: `check` compares them against the document, so a\n"
+    "# hand-edit that disagrees reds the lint. Edit the document, then re-cut.\n"
     "#\n"
     "# `high_water_counts` is a GROWTH PIN, not a derivation: `cut` carries it forward and\n"
     "# `tools/surface-guard.py` reds when the live surface EXCEEDS it. Raising it is a\n"
@@ -433,13 +428,13 @@ def read_approval(path: Path | None = None) -> dict:
 #     way back (`cut` resets it to False forever). Verified: `exemption: true` on an SDK row
 #     makes the guard report "1 exempt" and the check FAIL "recorded {True}, derived {False}".
 #   * `cut_at_commit` is provenance: `cut` records the commit it ran at.
-#   * the top-level `approval_status` / `approval_principal` / `approval_pr` /
-#     `approval_date` keys are excluded for THIS PR (#4185, first PR): `read_approval`
-#     is landed, but flipping the committed manifest to the derived `approved` reds CI's
-#     required `surface-guard`, which pins the BASE guard's per-row `approval` rule. A
-#     follow-up PR (new guard on `main`) removes them from this set and arms the
-#     comparison. `tools/surface-guard.py` still enforces provenance whenever a manifest
-#     CLAIMS an approval.
+#   * the four top-level `approval_*` keys are deliberately NOT here. They are DERIVED
+#     (#4185): `read_approval` reads them from `docs/product/canonical-mcp-tools.md` at
+#     cut time, and `check` therefore compares them — a hand-edit that disagrees with the
+#     document reds the lint. They were excluded only while the staged flip was pending
+#     (#8144 was the second half of the two-PR split); the exclusion is gone with the
+#     staging. `tools/surface-guard.py` independently re-reads the same document and reds
+#     a manifest that CLAIMS an approval disagreeing with it.
 #   * `high_water_counts` is a hand-set GROWTH PIN, not a derivation: `cut` carries it
 #     forward and `tools/surface-guard.py` reds when the live surface EXCEEDS it. It is
 #     excluded here because it is not a function of the code — it is the ceiling the
@@ -455,12 +450,10 @@ NON_DERIVABLE_ROW_KEYS = frozenset(
 NON_DERIVABLE_DOC_KEYS = frozenset(
     {
         "cut_at_commit",
-        # Staged provenance (#4185, first PR): see the block above. A follow-up PR removes
-        # these four keys once the new guard is on `main`.
-        "approval_status",
-        "approval_principal",
-        "approval_pr",
-        "approval_date",
+        # NOTE: the four top-level `approval_*` keys are NOT in this set. They are DERIVED
+        # from `docs/product/canonical-mcp-tools.md` by `read_approval` (#4185), so `check`
+        # compares them — see the block above. They were excluded only while the staged
+        # flip was pending; #8144 landed the flip and removed the exclusion.
         # The growth pin (#4185 review P1): carried by `cut`, enforced by the guard.
         "high_water_counts",
         # `response_fields` records hand-authored response FIELDS, outside the gated
@@ -1311,12 +1304,12 @@ def build_doc(commit: str | None = None) -> dict:
         # Hand-authored, and deliberately NOT gated — carried forward, never re-derived.
         "response_fields": _carried_response_fields(),
         # READ from `docs/product/canonical-mcp-tools.md`, never typed here (#4185).
-        # This is the one field pair the manifest no longer maintains itself: the `cut`
+        # This is the one field group the manifest does not maintain itself: the `cut`
         # COPIES it from the canonical doc at cut time, so an approval recorded after the
-        # cut needs a re-cut to land. `check` does NOT compare them yet — the four keys are
-        # still in `NON_DERIVABLE_DOC_KEYS` (see the header block). What catches a hand-edit
-        # that disagrees with the doc is `tools/surface-guard.py`, whose provenance
-        # comparison runs whenever the manifest CLAIMS an approval.
+        # cut needs a re-cut to land. `check` DOES compare them — the four keys are not in
+        # `NON_DERIVABLE_DOC_KEYS` (see the header block) — so a hand-edit that disagrees
+        # with the doc reds the lint. `tools/surface-guard.py` independently re-reads the
+        # same document and reds a manifest that CLAIMS an approval disagreeing with it.
         "approval_status": approval["status"],
         "approval_principal": approval["principal"],
         "approval_pr": approval["pr"],

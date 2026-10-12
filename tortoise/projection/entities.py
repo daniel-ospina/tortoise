@@ -32,6 +32,11 @@ from tortoise.projection.nonfolded import (
     record_non_folded,
 )
 from tortoise.source_identity import normalize_source_url, resolve_source_key
+from tortoise.vector_write import (
+    clear_embedding,
+    clear_then_set_prefix,
+    set_embedding_clause,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +83,12 @@ def has_usable_mitigation_strength(payload: dict) -> bool:
     * a map/list/``None`` strength is dropped by that passthrough (the Point
       layer's ``_POINT_LIST_PROPS`` is EMPTY), so the node ends up with no
       strength and a fabricated edge dampens at the fallback anyway;
-    * a non-numeric value is persisted, and then makes
-      ``weights.compute_operator_weight`` RAISE on every read of that operator.
+    * a non-numeric value is persisted. It used to make
+      ``weights.compute_operator_weight`` RAISE on every read of that operator;
+      since #6151 that read degrades an unreadable strength to the fallback, so
+      the value is merely useless rather than poisonous — but the fold below
+      still refuses it, because admitting it would persist a strength nothing
+      can ever read.
     * an out-of-band value (``-0.5``, ``5.0``, ``2**62``) is refused by the
       writer's own band check (``sdk.mitigate_operator``: ``if not 0 <=
       strength <= 1: raise ValueError``), so admitting it would authorise a
@@ -687,6 +696,59 @@ def _point_source_transit(p: dict):
     return kept or None
 
 
+#: #8006: the declared payload-LIST props whose canonical GRAPH form is a
+#: space-joined STRING. ONE declaration, read by ``_upsert_point_props`` (which
+#: applies the flatten rule before the list policy can deny them), by
+#: ``flatten_search_keys_prop`` below, and by ``consistency.py`` (which must not
+#: call a value "uncarried" that the writer in fact carries — its tables are
+#: read from the writer's own declarations precisely so a change here cannot
+#: silently desync it).
+#: ⛔ NOT a substitute for ``_POINT_LIST_PROPS``: these keys are NOT written as
+#: arrays. They are flattened to a string, the only form the fulltext index can
+#: match (#5482/#5444).
+_POINT_FLATTEN_LIST_PROPS: frozenset = frozenset({"search_keys"})
+
+
+def flatten_search_keys_prop(props: dict) -> None:
+    """R2 (#1541) D3 — THE ONE HOME of the flatten rule for
+    ``_POINT_FLATTEN_LIST_PROPS`` keys (today: ``search_keys``).
+
+    Those props must be FLAT space-joined STRINGS in the graph: FalkorDB's
+    fulltext index (``db.idx.fulltext.createNodeIndex``,
+    ``("Point", ["content", "search_keys"])``) does NOT index array-valued
+    properties (verified on server v4.16.7: a list-valued ``search_keys`` never
+    matches, the flat string does). E3's canonical PAYLOAD keeps the list
+    (``commit_schema`` pins ``list[str]``); the GRAPH value is derived here.
+
+    #8006: this lives in the PROJECTION, not on the SDK write doors, because
+    the projection's Point writer is the SHARED door every write reaches —
+    ``TortoiseSDK.create_point``/``update_point``/``update_entity`` flatten on
+    their way in, and ``EventAPI.add_point`` (the E3 producer seam, whose
+    payload the SDK never touches) reaches the node only through
+    ``_upsert_point_props``. Keeping the rule on the doors alone left that
+    third door storing NOTHING: the list policy in ``_persist_extra_props``
+    drops undeclared lists/arrays BEFORE the declared-key check, and
+    ``_POINT_LIST_PROPS`` is deliberately EMPTY — an ARRAY is never the right
+    answer here, it is the #5482/#5444 shape (unfindable by FTS).
+    ``_upsert_point_props`` therefore applies this rule on the payload, so the
+    live write and the rebuild replay agree by construction (#330 parity).
+
+    No-op for str values, None, and absent keys (absent search_keys → no prop
+    written, the pre-E3 shape). An empty/blank list POPS the key (E3's
+    ``or None`` convention), so a blank list never clears an existing value.
+    """
+    for key in _POINT_FLATTEN_LIST_PROPS:
+        value = props.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            flat = " ".join(str(s).strip() for s in value if str(s).strip())
+            if flat:
+                props[key] = flat
+            else:
+                props.pop(key, None)
+
+
 class _EntityHandlers:
     """Mixin: entity upsert/delete methods for FalkorProjection."""
 
@@ -1096,11 +1158,13 @@ class _EntityHandlers:
     # landed yet) — known passthrough keys that must NOT trip the drift
     # warning. NOTE (#2958 review): a LIST-valued entry here is INERT for that
     # warning — the list policy in `_persist_extra_props` filters lists out
-    # BEFORE they can reach the extras dict the drift warning inspects, so such
-    # an entry is documentation-only until `_POINT_LIST_PROPS` is populated
-    # from D1's contract.py. `tags` is exactly that case: it is DENIED on
-    # replay (its raw-list half-restore is refused — #2897) and the drop is
-    # reported by the undeclared-list warning below, NOT suppressed here.
+    # BEFORE they can reach the extras dict the drift warning inspects.
+    # `search_keys` is the case that does NOT reach that policy: its list form
+    # is flattened to the canonical graph STRING by `_upsert_point_props`
+    # before the list rule can be consulted (#8006). `tags` is the case the
+    # NOTE describes: it is DENIED on replay (its raw-list half-restore is
+    # refused — #2897) and the drop is reported by the undeclared-list warning
+    # below, NOT suppressed here.
     _POINT_DECLARED_PROPS: frozenset = frozenset({
         "quote", "when", "search_keys", "speaker", "source_turn_id", "tags",
         # E4 (#5007): the verbatim span POINTER — offsets into the Source's raw
@@ -1132,7 +1196,8 @@ class _EntityHandlers:
     # #2795 (D2 mechanic 1): list-valued props are persisted ONLY when their
     # key is declared here. Arrays are not fulltext-indexed and the canonical
     # form is the declared `flatten=list` STRING (`search_keys` -> space-joined
-    # by `_flatten_search_keys_prop`); `tags` is owned by its own `_sync_tags`
+    # by `flatten_search_keys_prop`, applied on the SHARED Point writer so all
+    # three doors agree — #8006); `tags` is owned by its own `_sync_tags`
     # path and its TAGGED-edge replay is out of scope (#2897), so a raw-list
     # half-restore is refused. NOTE the live/rebuild boundary this creates:
     # `sdk.create_point` still writes raw lists directly (`SET n += $props`),
@@ -1140,6 +1205,10 @@ class _EntityHandlers:
     # gap (the drop is now REPORTED, not silent). Empty pre-D1: no list prop
     # passes through the generic Point filter today. Replaced by contract.py's
     # declared set in D1.
+    # ⛔ NOT the fix for `search_keys`: populating this set stores an ARRAY,
+    # which the FTS index cannot match — it re-mints #5482. `search_keys` is
+    # populated as a flattened STRING instead (module-level
+    # `_POINT_FLATTEN_LIST_PROPS`, #8006).
     _POINT_LIST_PROPS: frozenset = frozenset()
 
     def _persist_extra_props(self, match_clause: str, match_params: dict,
@@ -1217,6 +1286,12 @@ class _EntityHandlers:
         the writer's own outcome, and a second hand-spelled copy of the
         writer's condition drifts from it. Every other caller ignores the
         return.
+        #8006: the declared flatten-list prop (``search_keys``) is normalized
+        to its canonical GRAPH form at the top of this function, so the
+        ``EventAPI``/extractor seam — which never passes through an SDK write
+        door — reaches the node with the SAME value the SDK doors write, live
+        and on replay alike. A blank list is popped there, so it is a
+        non-persisted key, never a write.
 
         #4457: when a NEW embedding is written, the ``REMOVE n.embedding``
         clause rides in the SAME query ahead of the SET list. On the embedded
@@ -1242,6 +1317,32 @@ class _EntityHandlers:
         1.0 — LANDS and therefore MISSES the discard; the engine defect is
         tracked separately (#4520).
         """
+        # #8006: the declared flatten-list prop (``search_keys``) is normalized
+        # to its canonical GRAPH form HERE — on the SHARED Point writer, which
+        # is the door every write reaches — rather than on the SDK write doors
+        # alone. ``EventAPI.add_point`` (the E3 producer seam, plus every
+        # extractor/mining/CLI caller that mirrors its signature) never passes
+        # through ``create_point``/``update_point``, so with the rule on the
+        # doors only, its list-valued ``search_keys`` was dropped outright by
+        # the ``_persist_extra_props`` list policy and the node held NOTHING
+        # (``_POINT_LIST_PROPS`` stays EMPTY on purpose: an ARRAY is not
+        # indexed by FTS — that is the #5482/#5444 shape, not a fix). Applying
+        # it on the payload here also fixes the REPLAY "for free": rebuild
+        # pass 1a calls this same function (#330 parity), so the live write and
+        # the rebuilt node hold the same value.
+        #
+        # A conditional SHALLOW COPY, never an in-place mutation: on the live
+        # path ``p`` IS the journal record, and the journal must keep E3's
+        # list spelling — the graph value is DERIVED from it, not recorded, so
+        # a rebuild re-derives it. The copy is taken only when a list/tuple is
+        # actually present (the SDK doors already flattened theirs), and the
+        # blank-list pop is visible to the drop-report loop below, which would
+        # otherwise log a false "list prop dropped" for a key that was
+        # deliberately normalized away.
+        if any(isinstance(p.get(k), (list, tuple))
+               for k in _POINT_FLATTEN_LIST_PROPS):
+            p = dict(p)
+            flatten_search_keys_prop(p)
         op = p.get("operator")
         if not isinstance(op, dict):
             # #331 (review r5): parity with _create_edges' r4 guard — a
@@ -1482,15 +1583,15 @@ class _EntityHandlers:
             set_clauses.append("n.is_episodic=$episodic")
             params["episodic"] = bool(p["is_episodic"])
         # Phase 2 #49: context removed — never written
-        # #4457: clear the property FIRST, in the same atomic query, so the
+        # #4457/#4520: the shared clear-then-set seam (`tortoise/vector_write.py`)
+        # clears the property FIRST, in the same atomic query, so the
         # conditional `vecf32` write below actually lands on the embedded
-        # engine (the overwrite there can be silently discarded — see the
-        # docstring). Only emitted when a new embedding is being written, so
-        # the CASE's preserve-the-existing-value branch is unaffected, and
-        # `MERGE`-created nodes simply have nothing to remove.
-        embed_clear = "REMOVE n.embedding " if embedding is not None else ""
+        # engine (the overwrite there can be silently discarded). The Cypher
+        # guard fires only when a real vector is written, so the CASE's
+        # preserve-the-existing-value branch is unaffected and a `MERGE`-created
+        # node simply has nothing to remove.
         self.g.query(
-            "MERGE (n:Point {id:$id}) " + embed_clear
+            "MERGE (n:Point {id:$id}) " + clear_then_set_prefix("n")
             + "SET " + ", ".join(set_clauses),
             params=params,
         )
@@ -2841,11 +2942,8 @@ class _EntityHandlers:
         # written, so the ``ELSE s.embedding`` preserve branch is untouched and
         # a fresh MERGE has nothing to remove. Key is ``name`` — the SAME key
         # the MERGE uses (not ``id``), or this misses its own node.
-        if embedding is not None:
-            self.g.query(
-                "MATCH (s:Subject {name:$name}) REMOVE s.embedding",
-                params={"name": name},
-            )
+        clear_embedding(self.g, "(s:Subject {name:$name})", "s", {"name": name}, embedding)
+        _set_emb = set_embedding_clause("s")
         self.g.query(
             "MERGE (s:Subject {name:$name}) "
             "ON CREATE SET s.id=$id, s.subjectKind=$sk, s.createdAt=coalesce($ca, $now), "
@@ -2858,7 +2956,7 @@ class _EntityHandlers:
             # With status projection-owned, this clause SEEDS a fresh/
             # re-created Subject and ON MATCH never touches it.
             "            s.status=coalesce($st, 'live'), "
-            "            s.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE s.embedding END "
+            "            " + _set_emb + " "
             "ON MATCH SET s.id=coalesce($id, s.id), "
             "            s.subjectKind=coalesce($sk, s.subjectKind), "
             # #2295: ON MATCH createdAt ADOPTS only when absent
@@ -2872,7 +2970,7 @@ class _EntityHandlers:
             # stubs — a createdAt-CARRYING EventAPI-first node keeps its own
             # value under existing-wins (accepted divergence, #2295 plan).
             "            s.createdAt=coalesce(s.createdAt, $ca), "
-            "            s.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE s.embedding END",
+            "            " + _set_emb,
             params={"id": sid, "name": name,
                     "sk": ev.get("subject_kind", "other"),
                     "ca": ev.get("createdAt"), "now": _now_iso(),
@@ -2927,21 +3025,18 @@ class _EntityHandlers:
         # discard a ``vecf32`` overwrite, and this embedding sits inside
         # ON CREATE/ON MATCH, so PRE-REMOVE it in a separate query. Emitted
         # only when a new vector is being written; key ``name``, the MERGE key.
-        if embedding is not None:
-            self.g.query(
-                "MATCH (o:Object {name:$name}) REMOVE o.embedding",
-                params={"name": name},
-            )
+        clear_embedding(self.g, "(o:Object {name:$name})", "o", {"name": name}, embedding)
+        _set_emb = set_embedding_clause("o")
         self.g.query(
             "MERGE (o:Object {name:$name}) "
             "ON CREATE SET o.id=$id, o.objectKind=coalesce($ok, 'other'), o.createdAt=coalesce($ca, $now), o.title=coalesce($title, ''), "
             "            o.status=coalesce($st, 'live'), "
-            "            o.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE o.embedding END "
+            "            " + _set_emb + " "
             "ON MATCH SET o.id=coalesce($id, o.id), "
             "            o.objectKind=coalesce($ok, o.objectKind), "
             "            o.createdAt=coalesce(o.createdAt, $ca), "
             "            o.title=coalesce($title, o.title), "
-            "            o.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE o.embedding END",
+            "            " + _set_emb,
             params={"id": oid, "name": name,
                     "ok": ok,
                     "st": ev.get("status"),  # #1350: status ON CREATE only —
@@ -3185,9 +3280,8 @@ class _EntityHandlers:
         # written, so the ``ELSE s.embedding`` preserve branch is untouched.
         # #5026/D10: the node is the document ``:Source`` (retired ``:Document``),
         # so the REMOVE and the SET list both bind ``s``.
-        embed_clear = "REMOVE s.embedding " if embedding is not None else ""
         self.g.query(
-            "MERGE (s:Source {url:$id}) " + embed_clear +
+            "MERGE (s:Source {url:$id}) " + clear_then_set_prefix("s") +
             "SET s.id=coalesce(s.id, $id), "
             "    s.title=coalesce($title, s.title), "
             # #5422: the document :Source's version anchor (ONTOLOGY §4.6 —
@@ -3239,7 +3333,7 @@ class _EntityHandlers:
             "    s.sourcePath=coalesce($sp, s.sourcePath), "
             "    s.ingestedAt=coalesce(s.ingestedAt, $now), "
             "    s._searchText=coalesce($st, s._searchText, s.title), "
-            "    s.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE s.embedding END, "
+            "    " + set_embedding_clause("s") + ", "
             "    s.updatedAt=$now "
             # D10 B6 (fourth door, review round 3): the retired fields must be
             # SCRUBBED on promotion, not merely refused on write. A PRE-RULING
@@ -3403,15 +3497,11 @@ class _EntityHandlers:
         # property in a separate query first. Emitted ONLY when a new embedding
         # is being written, leaving the ``ELSE e.embedding`` preserve branch
         # untouched.
-        if embedding is not None:
-            self.g.query(
-                "MATCH (e:Event {eventId: $eid}) REMOVE e.embedding",
-                params={"eid": eid},
-            )
+        clear_embedding(self.g, "(e:Event {eventId: $eid})", "e", {"eid": eid}, embedding)
         self.g.query(
             "MERGE (e:Event {eventId: $eid}) "
-            "ON CREATE SET e += $props, e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) END "
-            "ON MATCH SET e += $props, e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+            "ON CREATE SET e += $props, " + set_embedding_clause("e", preserve_on_null=False) + " "
+            "ON MATCH SET e += $props, " + set_embedding_clause("e"),
             params={"eid": eid, "props": props, "embedding": embedding},
         )
         # ── Auto-create structural edges (#122) ──

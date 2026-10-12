@@ -373,6 +373,12 @@ const suites = [
   // "the suite exists" is then mistaken for "the suite passes". Add the entry
   // in the same commit as the file.
   '20261010000001_metering_period_end_refresh.sql',  // #4242
+  // #7968 — the four-layer record schema (event stream / semantic / epistemic /
+  // procedural), the (label, key) identity contract, the EP-scalar carve-out and
+  // the RLS boundary. NOTE: this list is EXPLICIT, not a glob — a suite file that
+  // is not named here never runs, and "the suite exists" is then mistaken for
+  // "the suite passes". Add the entry in the same commit as the file.
+  '20261012000001_record_schema.sql',  // #7968
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');

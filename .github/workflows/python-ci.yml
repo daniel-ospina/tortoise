@@ -3185,7 +3185,15 @@ jobs:
     # the REQUIRED aggregate, so a stalled registry must not hold
     # `python-ci-gate` pending for hours on every PR.
     timeout-minutes: 5
-    runs-on: ubuntu-latest
+    # #7867: a VERSION-PINNED hosted label, NOT `ubuntu-latest`. On this repo
+    # `ubuntu-latest` ALSO matches the self-hosted ARM64 pool — the repo says so
+    # itself in finding-provenance.yml: "The self-hosted runners on this repo
+    # also advertise ubuntu-latest (self-hosted,Linux,ARM64,ubuntu-latest) … the
+    # routing is ambiguous, not fixed" — so `ubuntu-latest` does NOT mean
+    # "GitHub-hosted with its own egress IP". That premise is load-bearing here:
+    # this leg pulls its actionlint image with a single literal reference.
+    # `ubuntu-24.04` is claimed by no self-hosted runner.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: actionlint (workflow syntax + Actions-expression errors)
@@ -3200,8 +3208,15 @@ jobs:
             echo "no workflow files matched — refusing to certify an empty surface"
             exit 1
           fi
+          # #7867: deliberately NOT routed through the GHCR/mirror resolver.
+          # This leg is pinned to a HOSTED label (`runs-on: ubuntu-24.04`, see
+          # the job header), so it has its own egress IP and never shares the
+          # fleet's anonymous Docker Hub quota — there is nothing to fall back
+          # FROM. Keeping the pin literal and unquoted in the `docker run` line
+          # is also structural: tests/test_ci_selection.py reads it from there.
           docker run --rm -v "$PWD:/repo" -w /repo \
-            rhysd/actionlint:1.7.12 -shellcheck= "${files[@]}"
+            rhysd/actionlint:1.7.12 \
+            -shellcheck= "${files[@]}"
 
   python-ci-gate:
     if: always()

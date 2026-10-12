@@ -46,8 +46,12 @@ class CreatePointRequest(BaseModel):
     # client writes a LIVE point that ``/v1/dream`` then refuses (the
     # fail-closed #344/#1157 gate) and can never make it EP-able. Resolved
     # into the ep_alpha/ep_beta baseline, NOT stored as a Point prop (unlike
-    # confidence/authoredBy above); on a dedup hit ``create_point`` drops it
-    # with a logged warning.
+    # confidence/authoredBy above). A dedup hit is the DEFAULT path here
+    # (``dedup`` defaults True, unlike the hosted mirror), so #7980 matters
+    # more on this surface: ``create_point`` now applies the authored prior to
+    # the existing point when it carries no baseline yet, and preserves the
+    # one it already has (with a logged warning) otherwise — never a silent
+    # drop.
     credibility: str | int | float | None = None
 
     @field_validator("kind")

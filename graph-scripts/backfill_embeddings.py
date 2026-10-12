@@ -58,6 +58,11 @@ import argparse
 import json
 import os
 
+from tortoise.vector_write import (  # #4520: the ONE clear-then-set vector seam
+    clear_then_set_prefix,
+    set_embedding_clause,
+)
+
 DEFAULT_URI = "docker://:falkordb@127.0.0.1:16379/tortoise"
 DEFAULT_BATCH = 500
 
@@ -318,7 +323,8 @@ def _backfill_graph(db, graph_name: str, labels: list[str],
                 g.query(
                     f"UNWIND $batch AS row "
                     f"MATCH (n:{label} {{{cfg['id_prop']}: row.id}}) "
-                    "SET n.embedding = vecf32(row.emb)",
+                    + clear_then_set_prefix("n", "row.emb")
+                    + "SET " + set_embedding_clause("n", "row.emb"),
                     params={"batch": batch},
                 )
                 updated += len(batch)
@@ -408,6 +414,12 @@ def _repair_legacy_event_embeddings(g, *, dry_run: bool, limit: int) -> int:
     Vectorf32 but was List") — one legacy node poisons Event vector search.
     vecf32() on an already-vecf32 node errors, so each node is rewritten in a
     try/except and failures are counted (expected on fully-migrated DBs).
+
+    This is a Δ = 0 SELF-RECAST and is deliberately OUT of #4520's vector-write
+    seam: the ``SET`` reads the same property a clear guard would remove, so
+    routing it through ``clear_then_set_prefix`` would destroy the value. It
+    replaces no stored vector, so it cannot hit the small-Δ dropped-overwrite
+    defect the seam exists for. See ``tortoise/vector_write.py``.
     """
     rows = g.query(
         "MATCH (n:Event) WHERE n.embedding IS NOT NULL "

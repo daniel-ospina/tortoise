@@ -123,6 +123,10 @@ TIMESTAMPTZ_COLUMNS: set[tuple[str, str]] = {
     ("invitations", "otp_expires_at"),
     ("invitations", "otp_sent_at"),
     ("invitations", "otp_verified_at"),
+    # #7968 the record: the journal's own append-only envelope (the event
+    # stream layer). recorded_at is the row's write clock, not an ontology
+    # property — the ontology instants ride the payload verbatim.
+    ("journal_event", "recorded_at"),
     ("link_intents", "consumed_at"),
     ("link_intents", "created_at"),
     ("link_intents", "expires_at"),
@@ -132,6 +136,9 @@ TIMESTAMPTZ_COLUMNS: set[tuple[str, str]] = {
     ("metering_records", "updated_at"),
     ("metering_unmetered_increments", "first_observed_at"),
     ("metering_unmetered_increments", "last_observed_at"),
+    # #7968 the record: the (label, key) identity registry — one row per node in
+    # every layer. key_property is generated from node_label (W1's contract).
+    ("node_identity", "created_at"),
     ("oauth_access_tokens", "created_at"),
     ("oauth_access_tokens", "expires_at"),
     ("oauth_access_tokens", "revoked_at"),
@@ -1274,6 +1281,23 @@ class FakeControlPlane:
                         raise RuntimeError(
                             "duplicate key value violates unique constraint "
                             "\"uq_member_identity_active\"")
+        if fn == "purge_org_record":
+            # #7968 / PR #8179 P2: the SECURITY DEFINER org-erasure RPC
+            # (migration 20261012000005). It sets
+            # `app.record_journal_purge='on'` transaction-locally so the
+            # organizations -> graphs -> journal_event cascade may pass the
+            # append-only trigger, then hard-deletes the org row. The fake
+            # models the OBSERVABLE effect (the org row is gone) — the GUC
+            # and the cascade are the real DB's, exercised by the PGlite
+            # suite. Returning None for this fn silently would let
+            # `purge_org_control_plane` leave the org row behind and hide the
+            # defect the RPC fixes.
+            oid = (body or {}).get("p_org_id")
+            self.tables["organizations"] = [
+                t for t in self.tables.get("organizations", [])
+                if t.get("id") != oid
+            ]
+            return None
         if fn != "provision_team":
             return None
         return self._provision_team_emulation(body or {})

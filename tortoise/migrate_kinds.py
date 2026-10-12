@@ -40,8 +40,21 @@ MIGRATIONS: list[tuple[str, str, str]] = [
     ("database",     "dev:database",                  "object"),
     ("software",     "dev:software",                  "object"),
     ("infrastructure", "dev:infrastructure",          "object"),
-    ("deployment",   "dev:deployment",                "object"),
+    # `deployment` is a CORE event kind (ONTOLOGY §5); dev no longer declares it
+    # as an objectKind (#7848), so there is no pack form to migrate a legacy
+    # `objectKind: deployment` to. Such nodes are LEFT AS-IS — a row here could
+    # only set `objectKind` to another Object kind, which would mislabel a
+    # build/deploy event as an entity. Canonical form is `:Event
+    # {eventKind: 'deployment'}`; relocating it is #2786's cross-layer work.
     ("indicator",    "dev:indicator",                 "object"),
+    # #7848 owner ruling: `requirement` is an OBJECT kind declared once by
+    # product-strategy (it used to be a dev pointKind). This row only matches
+    # `:Object {objectKind:'requirement'}`, because `_do_migrate` derives the
+    # label from ENTITY_LABELS — it SETs a kind property, it cannot relocate a
+    # node between labels. Legacy `:Point {pointKind:'requirement'}` nodes are
+    # therefore not migrated; deciding point→object relocation is the same
+    # follow-up the `bug` note below carries (#2786).
+    ("requirement",  "product-strategy:requirement",  "object"),
 
     # ── Point kinds ────────────────────────────────────────────────────
     ("useCase",      "product-strategy:useCase",      "point"),
@@ -49,7 +62,6 @@ MIGRATIONS: list[tuple[str, str, str]] = [
     ("userJourney",  "product-strategy:userJourney",  "point"),
     ("workflow",     "product-strategy:workflow",     "point"),
     ("valueProposition", "product-strategy:valueProposition", "point"),
-    ("requirement",  "dev:requirement",               "point"),
     # bug is now an OBJECT kind (Problem subclass, dev 0.3.0 problem-family
     # landing) — a legacy bug POINT can no longer be re-typed dev:bug point
     # (commit-schema calibration). Legacy dev:bug points pre-date the re-

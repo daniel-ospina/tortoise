@@ -42,10 +42,10 @@ from tortoise.value_extractor import (
 
 DEV = "dev"
 MARKETING = "marketing"
-#: A real kindDef'd point kind per pack (so the asserts are about NAMESPACES,
-#: not a declare-vs-kindDef distinction).
-DEV_POINT = "dev:requirement"
-MARKETING_POINT = "marketing:contentBrief"
+#: A real point kind per pack (so the asserts are about NAMESPACES, not a
+#: declare-vs-kindDef distinction).
+DEV_POINT = "dev:technicalDebt"
+MARKETING_POINT = "marketing:contentPerformance"
 #: A real kindDef'd object/document kind per pack (the enforcer's vocabulary).
 DEV_OBJECT = "dev:code"
 MARKETING_OBJECT = "marketing:campaign"
@@ -118,7 +118,7 @@ class TestCaller1ClassifyLaterKindIndex:
             "fixture: the union spec must carry marketing kinds"
         assert _pack_kinds(gated, MARKETING) == set(), \
             "a dev-only gate must drop every marketing kind from the index"
-        # NOTE: use an OBJECT kind — a point-only kind (dev:requirement) is
+        # NOTE: use an OBJECT kind — a point-only kind (dev:technicalDebt) is
         # excluded from the index by design (FIX A, #1695); this test is
         # about the namespace gate, not the point-kind exclusion.
         assert DEV_OBJECT in gated, "the installed pack's kinds must survive"
@@ -382,8 +382,8 @@ class TestCaller2SdkV2GateOutage:
 
     @staticmethod
     def _payload():
-        """A Layer-1-VALID payload carrying ``marketing:contentBrief`` — a
-        kind the catalogue union ADMITS and a dev-only graph REJECTS. If the
+        """A Layer-1-VALID payload carrying ``marketing:contentPerformance`` —
+        a kind the catalogue union ADMITS and a dev-only graph REJECTS. If the
         outage degraded to the union this payload would validate and POST,
         so the assertions below also pin the fail-closed direction."""
         from tests.test_commit_schema import _finalize, _point, _raw_payload
@@ -503,7 +503,7 @@ class TestCaller3HostedCommitDoor:
 
         FAIL-ON: ``validate_payload_dict(raw)`` is called with ``vocab=None``,
         so Layer-1 uses the process-global union and ACCEPTS
-        ``marketing:contentBrief`` on a dev-only graph.
+        ``marketing:contentPerformance`` on a dev-only graph.
         REACHABLE: the seeded ``dev`` record is the only activation, the
         payload really carries the marketing point kind, and the positive
         control below really is accepted — so the 422 is caused by the gate.

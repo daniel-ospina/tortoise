@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import re
 import sys
-from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -45,6 +44,7 @@ from tests._html_links import (  # noqa: E402
     _AnchorHrefParser,
     blog_entry_hrefs,
     extract_anchor_hrefs,
+    extract_element_ids,
     is_blog_entry,
 )
 
@@ -534,6 +534,56 @@ _DECLARED_FOREIGN_RISK = frozenset({
 })
 
 
+def _seam_declared_limit_reasons(html: str) -> list[str]:
+    """Why `html` reaches a construct `tests/_html_links.py` does not model.
+
+    One implementation for BOTH ratchets below, which ask this of two different
+    scopes: the link rule covers the served+indexable pages, the id rule
+    (#4118) covers every page the id guard reads. Two hand-synced copies of these
+    four checks would be the drift class this module exists to close — the same
+    argument that put the two link rules in one module (#3962).
+
+    The reasons (the caller prefixes the page):
+
+      * an HTML INTEGRATION POINT or MathML text integration point reached in
+        foreign content, where the seam's tree model is known incomplete;
+      * a foreign-ROOT end tag matching no open root (the cross-namespace case);
+      * any other end tag closed inside foreign content, which is handled today
+        but is one edit from the case above;
+      * a WEDGE — a construct the seam detects and refuses to read (`<frameset>`,
+        the script-data escaped state).
+    """
+    parser = _AnchorHrefParser()
+    parser.feed(html)
+    parser.close()
+    reasons: list[str] = []
+    risky = sorted({tag for tag in parser.foreign_tags if tag in _DECLARED_FOREIGN_RISK})
+    if risky:
+        reasons.append(f"reaches {risky} in foreign content")
+    if parser.foreign_root_mismatch:
+        # The precise cross-namespace trigger (item 5 of #3970): a foreign-ROOT end
+        # tag that matches no open root, e.g. `</math>` under `<svg>`. A browser
+        # ignores it and stays foreign; a bare counter left foreign content, so
+        # this is where the model is known to be wrong in a way that matters.
+        reasons.append(
+            f"has a foreign-root end tag matching no open root "
+            f"{sorted(set(parser.foreign_root_mismatch))}"
+        )
+    if parser.foreign_unmatched_endtags:
+        # Wider RATCHET, kept deliberately: any other end tag inside foreign
+        # content. Those are handled correctly today, but the covered pages use
+        # only self-closing SVG children, so a page that starts closing SVG
+        # elements by name is one edit from the case above (review finding,
+        # #3962). The message says which of the two fired.
+        reasons.append(
+            f"closes element(s) inside foreign content "
+            f"{sorted(set(parser.foreign_unmatched_endtags))}"
+        )
+    if parser.wedged_reason:
+        reasons.append(f"stops being readable ({parser.wedged_reason})")
+    return reasons
+
+
 def test_no_in_scope_page_makes_the_extractors_declared_limits_live() -> None:
     """Keep the extractor's declared limits honest (#3962 review, #3970).
 
@@ -560,37 +610,11 @@ def test_no_in_scope_page_makes_the_extractors_declared_limits_live() -> None:
     limit live, so widening the extractor or the page chrome is a decision taken
     with #3970 in hand rather than a silent change of meaning.
     """
-    offenders: list[str] = []
-    for page in sorted(_in_scope_pages()):
-        parser = _AnchorHrefParser()
-        parser.feed(_read(page))
-        parser.close()
-        risky = sorted({tag for tag in parser.foreign_tags if tag in _DECLARED_FOREIGN_RISK})
-        if risky:
-            offenders.append(f"website/{page.name} reaches {risky} in foreign content")
-        if parser.foreign_root_mismatch:
-            # The precise cross-namespace trigger (item 5 of #3970): a foreign-ROOT end
-            # tag that matches no open root, e.g. `</math>` under `<svg>`. A browser
-            # ignores it and stays foreign; a bare counter left foreign content, so
-            # this is where the model is known to be wrong in a way that matters.
-            offenders.append(
-                f"website/{page.name} has a foreign-root end tag matching no open root "
-                f"{sorted(set(parser.foreign_root_mismatch))}"
-            )
-        if parser.foreign_unmatched_endtags:
-            # Wider RATCHET, kept deliberately: any other end tag inside foreign
-            # content. Those are handled correctly today, but the covered pages use
-            # only self-closing SVG children, so a page that starts closing SVG
-            # elements by name is one edit from the case above (review finding,
-            # #3962). The message says which of the two fired.
-            offenders.append(
-                f"website/{page.name} closes element(s) inside foreign content "
-                f"{sorted(set(parser.foreign_unmatched_endtags))}"
-            )
-        if parser.wedged_reason:
-            offenders.append(
-                f"website/{page.name} stops being readable ({parser.wedged_reason})"
-            )
+    offenders = [
+        f"website/{page.name} {reason}"
+        for page in sorted(_in_scope_pages())
+        for reason in _seam_declared_limit_reasons(_read(page))
+    ]
     assert not offenders, (
         f"in-scope page(s) now reach a construct the extractor does not model: "
         f"{offenders}. `tests/_html_links.py` declares those limits out of scope "
@@ -1014,90 +1038,20 @@ def test_product_hero_offers_the_blog() -> None:
 # guard reds on any page that documents its own ids.
 
 
-class _IdCollector(HTMLParser):
-    """The `id` of every element the stdlib tokenizer reports as a start tag.
-
-    `handle_starttag` is the right hook: the tokenizer emits no start tag inside
-    a comment — which is exactly the #3436 false positive, a raw-text scan that
-    counted the removal note quoting `<section id="beta-gate">` as a second
-    element.
-
-    Only the FIRST `id` attribute on a tag is read — the stdlib hands over every
-    one of a duplicate pair, while a browser keeps the first — and an empty value
-    is treated as no id at all, because `getElementById("")` matches nothing and
-    two elements with `id=""` are not a collision a script can observe.
-
-    TWO KNOWN DIVERGENCES from a browser, in opposite directions. Both are
-    inherited from the stdlib tokenizer rather than modelled here, and neither
-    is an exhaustive list — this is a tokenizer's view of a document, not a
-    browser's:
-
-      * OVER-count: an `id` a browser does not expose as a document element.
-        `<template>` content is the pinned case — a browser keeps it in an inert
-        fragment `getElementById` never reaches, while the stdlib parses it as
-        ordinary markup. This direction is fail-loud, the one a duplicate-id
-        guard must err in: a false positive is a red test a human reads, while a
-        false negative ships the defect.
-      * UNDER-count, and SILENT: a construct where the stdlib stops emitting
-        start tags and a browser does not. `<svg><style>…</style></svg>` is the
-        case that has bitten: the stdlib switches to raw text by tag name, with
-        no foreign-content awareness. `tests/_html_links.py` documents the same
-        class of tokenizer divergence for the link extractor and #3970 tracks
-        its limits; #4118 lists the ones found for this collector so far and
-        would remove them by extracting ids through that render-fidelity seam
-        instead of maintaining a second parser.
-
-    `test_no_covered_page_makes_the_id_collectors_declared_limit_live` is the
-    mitigation for the silent direction — the module's idiom for a limit that
-    cannot yet be modelled — and it covers the `<svg>`-raw-text case only.
-    """
-
-    @property
-    def _support_cdata(self) -> bool:
-        """False: a CDATA section is CDATA only INSIDE foreign content.
-
-        `HTMLParser` ships this as unconditional ``True``, and honouring
-        `<![CDATA[ … ]]>` in HTML content makes the tokenizer swallow everything
-        up to `]]>` — where a browser ends a BOGUS COMMENT at the first `>`
-        instead, so the rest of the document is real markup. That is a SILENT
-        miss, the direction that must not happen.
-
-        This collector does not model foreign content, so it has to pick ONE
-        value: `False` errs LOUD there (it counts markup a browser inside
-        `<svg>`/`<math>` does not expose) and matches a browser everywhere else.
-        `tests/_html_links.py` derives the value from its foreign-context depth,
-        which this class does not track.
-        """
-        return False
-
-    @_support_cdata.setter
-    def _support_cdata(self, flag: bool) -> None:
-        # The stdlib assigns this during `reset()`; the derived value above is the
-        # authority, so the write is accepted and ignored.
-        del flag
-
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.ids: list[tuple[str, int]] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        for name, value in attrs:
-            if name == "id":
-                # FIRST id wins, empty or not — the stdlib hands over both
-                # attributes of a duplicate pair and a browser keeps the first,
-                # so `id="" id="x"` leaves the element with no id.
-                if value:
-                    self.ids.append((value, self.getpos()[0]))
-                return
-
-
 def _duplicate_element_ids(html: str) -> dict[str, list[int]]:
-    """{id: [line, …]} for every id declared on more than one element."""
-    collector = _IdCollector()
-    collector.feed(html)
+    """{id: [line, …]} for every id declared on more than one element.
+
+    Thin wrapper over `tests/_html_links.py::extract_element_ids`, the same seam
+    the blog guard's link rule reads: one parser for this module's "what does a
+    browser put in the document tree?" question (#4118). The guard used to carry
+    its own `HTMLParser` subclass here, and each divergence found in it (one per
+    review cycle — foreign raw text, CDATA in HTML content, an abrupt-close
+    comment) had to be re-modelled there or declared and gated in its own right.
+    Reading the seam removes the class: the same three constructs are the seam's
+    problem, handled once and pinned once.
+    """
     lines: dict[str, list[int]] = {}
-    for value, line in collector.ids:
+    for value, line in extract_element_ids(html):
         lines.setdefault(value, []).append(line)
     return {value: at for value, at in lines.items() if len(at) > 1}
 
@@ -1183,122 +1137,181 @@ def test_id_uniqueness_guard_fails_on_a_deliberately_duplicated_id() -> None:
     ) == {}
     # A repeated ATTRIBUTE is dropped by the tokenizer before a browser sees it.
     assert _duplicate_element_ids('<div id="dup" id="dup"></div>') == {}
-    # A CDATA section in HTML content (the `_support_cdata` override, #4118):
-    # honouring it would swallow to `]]>`, where a browser ends the comment at
-    # the first `>` and parses the rest as markup. Pinned because no real page
-    # reaches the construct, so nothing else here would notice a regression.
+    # An EMPTY id is no id: `getElementById("")` matches nothing, so two of them
+    # are not a collision a script can observe. This extractor's policy, stated
+    # because Chromium's `querySelectorAll('[id]')` does list both.
+    assert _duplicate_element_ids('<div id=""></div><div id=""></div>') == {}
+    # A CDATA section in HTML content: honouring it would swallow to `]]>`, where
+    # a browser ends the comment at the first `>` and parses the rest as markup.
+    # Chromium-verified: two elements with id=dup.
     assert _duplicate_element_ids(
         '<div id="dup"></div><![CDATA[ > <div id="dup"></div> ]]>'
     ) == {"dup": [1, 1]}
-    # An `id` in `<template>` content IS counted: a browser keeps that content
-    # inert in a fragment `getElementById` never reaches, while the stdlib parses
-    # it as markup. That is the fail-loud direction, pinned so changing it is
-    # deliberate; `<template>` is pinned because it is unaffected by the stdlib's
-    # raw-text set, which varies by interpreter.
+    # An element's OWN id counts even where its CONTENT is not markup — the
+    # suppression is about content, and both of these are real elements to
+    # `getElementById` (Chromium-verified: two elements with id=dup each).
     assert _duplicate_element_ids(
-        '<template><div id="dup"></div></template><div id="dup"></div>'
+        '<style id="dup">/* x */</style><div id="dup"></div>'
+    ) == {"dup": [1, 1]}
+    assert _duplicate_element_ids(
+        '<template id="dup"></template><div id="dup"></div>'
     ) == {"dup": [1, 1]}
 
 
-# Foreign-content roots: a browser does not switch to raw text inside these, so
-# the stdlib's tag-name-only switch diverges there (see `_IdCollector`).
-_FOREIGN_ROOTS = frozenset({"svg", "math"})
+# ── #4118: the collector IS the render-fidelity seam ────────────────────────
+#
+# The guard's ids now come from `tests/_html_links.py::extract_element_ids`, so
+# the divergences #4118 listed are the seam's problem instead of a second
+# parser's. Every outcome below was verified against headless Chromium
+# (2026-10-11) — the ground truth the issue states, and the same check the seam's
+# own #3962 pins were built on.
 
 
-class _ForeignRawtextProbe(_IdCollector):
-    """Raw-text switches the tokenizer makes while foreign content is open.
+def test_id_guard_sees_the_constructs_that_used_to_be_missed_silently() -> None:
+    """#4118: the SILENT-miss divergences are closed, pinned against Chromium.
 
-    `set_cdata_mode` IS the suppression event: it is the tokenizer's own call,
-    made for every tag whose content it then refuses to parse as markup. Hooking
-    it, rather than listing tag names, is what makes this probe complete — an
-    earlier revision checked `HTMLParser.CDATA_CONTENT_ELEMENTS` and was blind to
-    `title`, `textarea` and `plaintext`, which the stdlib suppresses through
-    `RCDATA_CONTENT_ELEMENTS` and its own plaintext rule (review finding). A tag
-    the collector suppresses cannot be missed here, because both read the same
-    call.
+    Both constructs below were reported by the id guard as "no duplicate" while a
+    browser has two elements with that id — the direction a duplicate-id guard
+    must not have, because nothing fails: the defect ships.
 
-    A nesting-insensitive counter is enough for a PRE-CONDITION check: it can
-    over-report (a 13.2.6.5 breakout leaves the browser in HTML content while
-    this counter still counts the root as open), and over-reporting only asks
-    for a hand check.
-
-    It covers the `<svg>`-raw-text case and no more — the tokenizer has other
-    browser divergences (`_IdCollector` says so, and #4118 lists them), so a
-    green run here is evidence about this one path, not a clean bill of health.
+    The raw-text case is the whole family, not `<style>`: the stdlib's switch is
+    driven by `set_cdata_mode` (from `CDATA_CONTENT_ELEMENTS`,
+    `RCDATA_CONTENT_ELEMENTS` and its own plaintext rule), which fires on a tag
+    NAME with no foreign-content awareness. Enumerating the set is how the
+    earlier revision was blind to `title`/`textarea`/`plaintext`, so the seam
+    suppresses the tokenizer's switch itself instead (#4118 comment thread);
+    these cases pin the outcome for every tag that switch covers.
     """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.depth = 0
-        self.hits: list[tuple[str, int]] = []
-
-    def set_cdata_mode(self, elem: str, *args: object, **kwargs: object) -> None:
-        if self.depth:
-            self.hits.append((elem, self.getpos()[0]))
-        super().set_cdata_mode(elem, *args, **kwargs)  # type: ignore[arg-type]
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in _FOREIGN_ROOTS:
-            self.depth += 1
-        super().handle_starttag(tag, attrs)
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in _FOREIGN_ROOTS and self.depth:
-            self.depth -= 1
-
-
-@pytest.mark.parametrize("page", _all_website_pages(), ids=lambda p: p.name)
-def test_no_covered_page_makes_the_id_collectors_declared_limit_live(
-    page: Path,
-) -> None:
-    """Guard the guard: the collector's declared SILENT miss must stay unreached.
-
-    `HTMLParser` switches to raw text by tag name with no foreign-content
-    awareness, while a browser inside `<svg>`/`<math>` does not — so markup
-    inside `<svg><style>…</style></svg>` is a real element to the browser and no
-    element to the collector. Unlike the over-count `_IdCollector` documents,
-    this one is a MISS, and it is only safe while no covered page reaches it:
-    the parametrized assertion fails the moment one does. This is ONE divergence,
-    not all of them (#4118).
-    """
-    probe = _ForeignRawtextProbe()
-    probe.feed(_read(page))
-    assert not probe.hits, (
-        f"website/{page.name} opens {probe.hits} inside `<svg>`/`<math>`. The id "
-        f"collector cannot see markup inside such an element while a browser "
-        f"does, so a duplicate id there would be MISSED (silently). Check this "
-        f"page by hand, and fix the collector (#4118) rather than relaxing this "
-        f"assertion."
-    )
-
-
-def test_the_declared_limit_probe_fires_on_the_construct_it_names() -> None:
-    """Guard the guard: pin the probe's UNHIT branch.
-
-    The parametrized test only ever asserts `not probe.hits` over real pages, so
-    a probe that silently stopped detecting anything would leave it green on
-    every page — the vacuous-guard shape this module already pins for
-    `_guard_reachable_for`'s sentinel branch.
-    """
-    live = _ForeignRawtextProbe()
-    live.feed('<svg><textarea><div id="dup"></div></textarea></svg>')
-    assert live.hits == [("textarea", 1)], (
-        f"the probe did not detect a suppressed tag inside `<svg>` (got "
-        f"{live.hits!r}), so `test_no_covered_page_makes_the_id_collectors_"
-        f"declared_limit_live` is vacuously green and the limit could be live on "
-        f"a covered page. `textarea` exercises the RCDATA path, which a "
-        f"CDATA-only probe missed."
-    )
-    for outside in (
-        '<style>.x{}</style><div id="a"></div>',
-        '<svg><div id="a"></div></svg><textarea>t</textarea>',
+    # 1. A raw-text tag inside FOREIGN content holds markup, not text. Under BOTH
+    #    foreign roots, at two depths, in the self-closing spelling.
+    for raw in (
+        "style", "script", "xmp", "iframe", "noembed", "noframes",
+        "textarea", "title", "plaintext",
     ):
-        quiet = _ForeignRawtextProbe()
-        quiet.feed(outside)
-        assert not quiet.hits, (
-            f"the probe reports {quiet.hits!r} OUTSIDE foreign content in "
-            f"{outside!r}, where the collector and a browser agree — it would "
-            f"fail every page rather than guard one."
+        inner = f'<{raw}><div id="dup"></div></{raw}>'
+        assert _duplicate_element_ids(
+            f'<svg>{inner}</svg><div id="dup"></div>'
+        ) == {"dup": [1, 1]}, raw
+        assert _duplicate_element_ids(
+            f'<math>{inner}</math><div id="dup"></div>'
+        ) == {"dup": [1, 1]}, raw
+        assert _duplicate_element_ids(
+            f'<svg><g>{inner}</g></svg><div id="dup"></div>'
+        ) == {"dup": [1, 1]}, raw
+        assert _duplicate_element_ids(
+            f'<svg><{raw}/><div id="dup"></div></svg>'
+            f'<div id="dup"></div><div id="dup"></div>'
+        ) == {"dup": [1, 1, 1]}, raw
+    # The same tag is STILL raw text in HTML content — the fix must not have
+    # turned suppression off, which would count markup a browser keeps as text
+    # (the fail-loud direction, but a wrong answer all the same).
+    assert _duplicate_element_ids(
+        '<xmp><div id="dup"></div></xmp><div id="dup"></div>'
+    ) == {}
+    assert _duplicate_element_ids(
+        '<textarea><div id="dup"></div></textarea><div id="dup"></div>'
+    ) == {}
+    # A 13.2.6.5 BREAKOUT tag ends the foreign context, so the raw-text tag after
+    # it is the HTML one again and its "markup" is text — Chromium-verified, and
+    # the case a foreign-DEPTH-ONLY fix gets wrong.
+    assert _duplicate_element_ids(
+        '<svg><p><style><div id="dup"></div></style></svg><div id="dup"></div>'
+    ) == {}
+    assert _duplicate_element_ids(
+        '<svg><br><style><div id="dup"></div></style></svg><div id="dup"></div>'
+    ) == {}
+    # 2. An ABRUPT-CLOSE comment ends where a browser ends it. `HTMLParser`
+    #    searches for a later `--!?>` FIRST, so one of these spellings swallowed
+    #    everything up to the next `-->` — including the element below.
+    assert _duplicate_element_ids(
+        '<!--> <div id="dup"></div> --><div id="dup"></div>'
+    ) == {"dup": [1, 1]}
+    assert _duplicate_element_ids(
+        '<!---><div id="dup"></div>--><div id="dup"></div>'
+    ) == {"dup": [1, 1]}
+    # 3. The OVER-count direction the old collector documented is gone as a side
+    #    effect of reading the seam: `<template>` content is a browser's inert
+    #    fragment, which `getElementById` never reaches, so it is not a duplicate
+    #    (Chromium-verified: ONE element with id=dup). Pinned because it is a
+    #    behaviour CHANGE, not a bug fix — the old guard red on this.
+    assert _duplicate_element_ids(
+        '<template><div id="dup"></div></template><div id="dup"></div>'
+    ) == {}
+    # `<noscript>` likewise, and for the mirror reason: with scripting ENABLED —
+    # the browser default, and the only mode this guard's question is asked in —
+    # its content is raw text, not elements (Chromium-verified: one element).
+    assert _duplicate_element_ids(
+        '<noscript><div id="dup"></div></noscript><div id="dup"></div>'
+    ) == {}
+    # A self-closing element is ONE element, and the two forms reach
+    # `_record_id` from different handlers (`<svg>`/`<math>` through the foreign
+    # branch, everything else through `handle_starttag`). Recording on both paths
+    # would report a duplicate where a browser has a single element, so each form
+    # is pinned alone — a lone element must never be a duplicate
+    # (Chromium-verified: one element either way).
+    assert _duplicate_element_ids('<svg id="dup"/>') == {}
+    assert _duplicate_element_ids('<g id="dup"/>') == {}
+
+
+def test_no_page_the_id_guard_reads_makes_the_seams_declared_limits_live() -> None:
+    """Guard the guard: the seam's declared limits must stay unreached (#4118).
+
+    The id guard now reads its ids from `tests/_html_links.py`, so every page it
+    covers is subject to that seam's declared limits (#3970) as well — and a page
+    that reaches one can make the guard see too FEW ids, a SILENT miss. That is
+    the risk `_ForeignRawtextProbe` gated for one construct before this change,
+    which is why replacing the collector had to replace its gate too rather than
+    delete it.
+
+    The scope is `_all_website_pages()`, deliberately wider than the blog guard's
+    own ratchet: that one covers the served+indexable pages, because a link can
+    only be followed from a page a visitor reaches, while an id collision is a
+    property of the DOCUMENT. `404.html` is served on every miss and the app's
+    auth pages run their own scripts, so a missed duplicate there is just as
+    real.
+    """
+    offenders = [
+        f"{page.relative_to(REPO_ROOT).as_posix()} {reason}"
+        for page in _all_website_pages()
+        for reason in _seam_declared_limit_reasons(_read(page))
+    ]
+    assert not offenders, (
+        f"page(s) the id guard reads now reach a construct the shared extractor "
+        f"does not model: {offenders}. Those limits are declared out of scope in "
+        f"`tests/_html_links.py` because no covered page used them (#3970); while "
+        f"one is live here the id guard can MISS a duplicate silently — the "
+        f"direction #4118 exists to close. Either model the construct (see "
+        f"#3970) or change the page, and update the declaration and this test in "
+        f"the same PR."
+    )
+
+
+def test_the_declared_limit_helper_fires_on_the_constructs_it_names() -> None:
+    """Guard the guard: pin the UNHIT branch of BOTH ratchets above.
+
+    Both only ever assert an empty offender list over real pages, so a helper
+    that silently stopped detecting anything would leave them green on every page
+    — the vacuous-guard shape this module already pins for
+    `_guard_reachable_for`'s sentinel branch. One case per check, plus the clean
+    direction so a helper that fired on everything would be caught too.
+    """
+    assert _seam_declared_limit_reasons(
+        '<svg><foreignObject><div></div></foreignObject></svg>'
+    ), "the HTML integration point check detected nothing"
+    assert _seam_declared_limit_reasons(
+        '<svg></math>'
+    ), "the foreign-root-mismatch check detected nothing"
+    assert _seam_declared_limit_reasons(
+        '<svg></g>'
+    ), "the unmatched-end-tag check detected nothing"
+    assert _seam_declared_limit_reasons(
+        '<frameset><div></div></frameset>'
+    ), "the wedge check detected nothing"
+    for clean in ('<div></div>', '<svg><path/></svg>'):
+        assert not _seam_declared_limit_reasons(clean), (
+            f"the limit scan reports a construct in {clean!r}, where the seam "
+            f"models the document exactly — it would fail every page rather "
+            f"than guard one."
         )
 
 

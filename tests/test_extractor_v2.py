@@ -3560,7 +3560,7 @@ class TestClassifyStage:
         points = {k for k, md in spec.items()
                   if md.get("section") == "points"}
         assert points == {"statement"}
-        assert "dev:requirement" not in spec
+        assert "dev:risk" not in spec
         assert "dev:technicalDebt" not in spec
 
     def test_flag_off_byte_identical_no_telemetry_growth(self, monkeypatch):
@@ -3871,21 +3871,21 @@ class TestClassifyStage:
 
     def test_point_kind_report_agrees_with_point_gate(self):
         """FIX P: the report's points lane agrees with the point write gate
-        — pack point kinds WITH kindDefs (dev:requirement,
+        — pack point kinds WITH kindDefs (dev:technicalDebt,
         product-strategy:useCase/...) sit in the master's pack_kinds
         (the master-wide ``master_kind_forms`` bare forms would hide them)
         but the gate repairs them to statement — the report must FLAG them."""
         embed = {"entities": [], "events": [],
                  "points": [
                      {"content": "p1",
-                      "pointKind": "dev:requirement"},
+                      "pointKind": "dev:technicalDebt"},
                      {"content": "p2",
                       "pointKind": "product-strategy:useCase"},
                      {"content": "p3", "pointKind": "statement"}],
                  "operators": [], "chain_notes": [],
                  "link_before_create": []}
         minted = v2._minted_kind_report(embed)
-        assert any("dev:requirement" in m for m in minted), minted
+        assert any("dev:technicalDebt" in m for m in minted), minted
         assert any("product-strategy:useCase" in m for m in minted), minted
         assert not any("statement" in m for m in minted)
         # and execute_embed's point gate agrees: those kinds repair

@@ -65,11 +65,16 @@ installed (the probe reports unavailability instead of raising ImportError).
 """
 from __future__ import annotations
 
+import contextlib
+
 __all__ = [
     "HybridRetrievalUnavailable",
+    "VectorOverwriteDiscarded",
     "hybrid_retrieval_available",
     "merge_leg_trace",
     "require_hybrid_retrieval",
+    "require_vector_overwrite_integrity",
+    "vector_overwrite_available",
 ]
 
 #: The remediation named on every refusal. The `uv sync` warning is load-bearing:
@@ -92,6 +97,158 @@ class HybridRetrievalUnavailable(RuntimeError):
     Raised by :func:`require_hybrid_retrieval` so a real lane fails closed
     instead of silently measuring keyword-only retrieval.
     """
+
+
+class VectorOverwriteDiscarded(HybridRetrievalUnavailable):
+    """The store SILENTLY DISCARDS a small-Δ ``vecf32`` overwrite (#4520).
+
+    A subclass of :class:`HybridRetrievalUnavailable` on purpose: it is a
+    *dense-leg* refusal, so the runners' existing
+    ``except HybridRetrievalUnavailable`` arm-skip handler records it as a
+    retrieval refusal with no new failure path, and a caller may still catch
+    the subtype specifically when it wants to distinguish the cause.
+    """
+
+
+#: A scratch label — never a product label, so the probe node can never be
+#: confused with, or ranked as, real content. The discard is label- and
+#: index-independent (measured), so an unindexed scratch label detects it.
+_VECTOR_PROBE_LABEL = "_TortoiseVectorProbe"
+#: The probe writes `base`, then overwrites ONE component by this much. Real
+#: embedder output never moves a component by ~1.0 (the embedded engine's
+#: landing threshold), so this is the realistic case — and a one-hot probe
+#: (Δ = 1.0) LANDS even on the defective engine and would hide the defect.
+_VECTOR_PROBE_DELTA = 0.02
+_VECTOR_PROBE_DIM = 384
+
+
+def _probe_vector(seed: float) -> list[float]:
+    """Deterministic, realistic-looking vector: small components in ±0.05."""
+    return [seed + 0.0001 * i for i in range(_VECTOR_PROBE_DIM)]
+
+
+def _probe_one_write(graph, label: str, probe_id: str,
+                     vector: list[float], *, seam: bool) -> list[float] | None:
+    """Overwrite the probe node's vector and return what the store READ back.
+
+    ``seam=True`` writes through the product's clear-then-set seam (the write
+    path the product actually uses); ``seam=False`` issues the RAW overwrite
+    (the engine-level canary, reported as a diagnostic but never gated on).
+    """
+    if seam:
+        # The product's write path — the only path a store must support.
+        from tortoise.vector_write import (
+            clear_then_set_prefix,
+            set_embedding_clause,
+        )
+        query = (f"MATCH (n:{label} {{id:$id}}) " + clear_then_set_prefix("n")
+                 + "SET " + set_embedding_clause("n"))
+    else:
+        query = f"MATCH (n:{label} {{id:$id}}) SET n.embedding = vecf32($embedding)"
+    graph.query(query, params={"id": probe_id, "embedding": vector})
+    rows = graph.query(
+        f"MATCH (n:{label} {{id:$id}}) RETURN n.embedding",
+        params={"id": probe_id}).result_set
+    return list(rows[0][0]) if rows and rows[0][0] is not None else None
+
+
+def _landed(got: list[float] | None, want: list[float]) -> bool:
+    return got is not None and abs(got[0] - want[0]) <= _VECTOR_PROBE_DELTA / 2
+
+
+def vector_overwrite_available(graph) -> tuple[bool, str | None]:
+    """Probe one store's VECTOR WRITE PATH for the #4520 silent discard.
+
+    Writes a scratch vector, OVERWRITES it with a realistic small-Δ vector
+    **through the product's clear-then-set seam** (``tortoise/vector_write.py``),
+    reads it back and compares the **VALUE** — a ``typeof`` check passes while
+    the value is stale, which is the whole trap. The scratch node is deleted in
+    a ``finally``, so a successful probe leaves no residue.
+
+    ``graph`` is any handle with ``.query(cypher, params=…)``
+    (``FalkorProjection.g`` / a ``_GuardedGraph``). Returns ``(available,
+    reason)``; any failure (a raising query, an unreadable vector) is
+    UNAVAILABLE — the fail-closed direction of the embedder probe.
+
+    WHY THE SEAM, NOT THE RAW ENGINE: the writers #4520 migrated route through
+    the seam, and the seam is what makes the embedded engine land the overwrite.
+    Gating on the RAW overwrite would refuse the embedded store *even after the
+    fix* — and the embedded store is the a4 real lane's default target — so it
+    would deterministically skip the treatment arm. The probe therefore answers
+    the PRODUCT question (does a small-Δ overwrite through our own write path
+    land?) and the raw-engine result is reported as a diagnostic on failure.
+    """
+    import uuid
+    probe_id = f"probe-{uuid.uuid4().hex}"
+    base = _probe_vector(-0.02)
+    moved = list(base)
+    moved[0] += _VECTOR_PROBE_DELTA
+    label = _VECTOR_PROBE_LABEL
+    try:
+        graph.query(
+            f"CREATE (n:{label} {{id:$id}}) SET n.embedding = vecf32($embedding)",
+            params={"id": probe_id, "embedding": base})
+        got = _probe_one_write(graph, label, probe_id, moved, seam=True)
+        # Diagnostic only (never gated): does the RAW engine overwrite land?
+        raw_discards = None
+        if not _landed(got, moved):
+            try:
+                graph.query(
+                    f"MATCH (n:{label} {{id:$id}}) "
+                    "SET n.embedding = vecf32($embedding)",
+                    params={"id": probe_id, "embedding": base})
+                raw = _probe_one_write(graph, label, probe_id, moved, seam=False)
+                raw_discards = not _landed(raw, moved)
+            except Exception:
+                raw_discards = None
+    except Exception as e:
+        return False, f"the vector-write probe could not run ({type(e).__name__}: {e})"
+    finally:
+        with contextlib.suppress(Exception):  # cleanup is best-effort
+            graph.query(f"MATCH (n:{label} {{id:$id}}) DELETE n",
+                        params={"id": probe_id})
+    if _landed(got, moved):
+        return True, None
+    detail = ("the RAW engine overwrite ALSO discards it" if raw_discards
+              else "the raw engine overwrite lands, so the seam itself is not "
+                   "taking effect on this store" if raw_discards is False
+              else "the raw engine check was inconclusive")
+    return False, (
+        f"a small-Δ ({_VECTOR_PROBE_DELTA}/component) vector OVERWRITE through "
+        f"the product's clear-then-set write seam did not land — the store "
+        f"returned the PRE-write value; the type was still Vectorf32, so a "
+        f"typeof check would have passed ({detail})")
+
+
+def require_vector_overwrite_integrity(graph) -> None:
+    """Fail closed unless ``graph``'s store lands a small-Δ vector overwrite.
+
+    Call at real-lane start-up (before ingest) on the store the lane will
+    measure. Raises :class:`VectorOverwriteDiscarded` — a
+    :class:`HybridRetrievalUnavailable` subclass the runners already handle —
+    when the store silently keeps the stale vector. This is the fail-loud half
+    of #4520: the shared write seam (``tortoise/vector_write.py``) makes the
+    write land, and this probe validates that the SEAM lands on this store.
+
+    It CANNOT see a writer that bypasses the seam — the probe itself writes
+    through the seam, so a bypass is invisible to it. Writer routing is a static
+    property of the call sites, guarded for the ENUMERATED set by
+    ``tests/test_vector_write_seam_4520.py``'s inventory net (which pins the
+    writers this change migrated — it is not a proof about unenumerated
+    writers).
+    """
+    available, reason = vector_overwrite_available(graph)
+    if not available:
+        raise VectorOverwriteDiscarded(
+            f"the vector leg is UNTRUSTWORTHY on this store ({reason}). On the "
+            f"embedded engine (falkordblite/redislite) a `vecf32` overwrite of "
+            f"an existing vector is silently discarded unless a component moves "
+            f"by ~1.0, and real embedder output never does — so dense retrieval "
+            f"can answer from a vector that no longer describes the stored "
+            f"content (#4520). Fix: route the writer through "
+            f"`tortoise/vector_write.py` (clear the property in the same "
+            f"operation as the write), or run the lane against a server "
+            f"FalkorDB (TORTOISE_DB_URI=docker://...) where the overwrite lands.")
 
 
 def _probe() -> tuple[bool, str | None]:
@@ -140,6 +297,11 @@ def require_hybrid_retrieval() -> None:
     ``embeddings`` extra and how to verify the fix — a lane that cannot
     run hybrid must not run at all, because its number would be a
     keyword-only number wearing the product's label.
+
+    The STORE is a SEPARATE gate: a lane that will ingest calls
+    :func:`require_vector_overwrite_integrity` on the store handle once it
+    exists (the runner has no store at this point), so a store that silently
+    discards a small-Δ vector overwrite (#4520) is refused before ingest.
     """
     available, reason = _probe()
     if not available:

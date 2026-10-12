@@ -35,6 +35,10 @@ from .file_indexer import (
     derive_session_id,
     parse_frontmatter,
 )
+from .vector_write import (  # #4520: the ONE clear-then-set vector seam
+    clear_then_set_prefix,
+    set_embedding_clause,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -775,8 +779,9 @@ def main():
                     }
                     if exists:
                         proj.g.query(
-                            "MATCH (e:Event {eventId: $eid}) SET e += $props, "
-                            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE e.embedding END",
+                            "MATCH (e:Event {eventId: $eid}) "
+                            + clear_then_set_prefix("e")
+                            + "SET e += $props, " + set_embedding_clause("e"),
                             params={"eid": event_id, "props": props, "embedding": embedding}
                         )
                         print(json.dumps({"status": "updated", "eventId": event_id}))
@@ -784,7 +789,7 @@ def main():
                         props["startedAt"] = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
                         proj.g.query(
                             "CREATE (e:Event {eventId: $eid}) SET e += $props, "
-                            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) END",
+                            + set_embedding_clause("e", preserve_on_null=False),
                             params={"eid": event_id, "props": props, "embedding": embedding}
                         )
                         print(json.dumps({"status": "ingested", "eventId": event_id}))

@@ -3847,11 +3847,18 @@ def test_extract_session_llm_passthroughs_source_turn_id(sdk, monkeypatch):
 
 # #3778: the M2 lane's `props` describes the NODE, never the folded statement
 # dict. The seam's write is the shared EventAPI → projection door, so a field
-# the projection does not persist (`search_keys` as a list — no
-# `_flatten_search_keys_prop` on that door, `_POINT_LIST_PROPS` is empty) and a
-# field that belongs to a FOLDED canonical (written by an earlier occurrence)
-# are both values the node does not hold. Echoing the folded dict advertised
-# them anyway — the #2813 symptom on the M2 lane, in both directions.
+# that belongs to a FOLDED canonical (written by an earlier occurrence) is a
+# value the node does not hold. Echoing the folded dict advertised it anyway —
+# the #2813 symptom on the M2 lane, in both directions.
+#
+# #8006 UPDATE: `search_keys` no longer belongs in that "does not hold" class.
+# The shared projection writer now applies the R2 D3 flatten rule on the
+# payload (`projection/entities.py::flatten_search_keys_prop`, called from
+# `_upsert_point_props`), so this door stores the space-joined STRING exactly
+# as `create_point` does. The divergence the test below still guards is
+# REPRESENTATION: the payload says `["alpha", "beta"]`, the node says
+# `"alpha beta"`, so a payload echo advertises the list — the same #2813
+# symptom, one layer down.
 
 class _E3FieldsExtractor:
     """Emits ONE point with the four E3 fields (plus E4 spans) passed as
@@ -3874,15 +3881,20 @@ def test_extract_session_llm_reports_stored_props_not_the_folded_payload(
         sdk, monkeypatch, force_sparse_tfidf):
     """#3778 (create path): the response's ``props`` equals the resolved
     NODE's stored props — not the folded statement dict's. The probe-verified
-    divergence: the projection persists the scalar E3/E4 fields but DROPS the
-    list-valued ``search_keys`` (the EventAPI door never calls
-    ``_flatten_search_keys_prop``), so a payload echo advertised a field the
-    node does not hold — the #2813 symptom ("the reply looked correct while
+    divergence: a payload echo advertised a field whose STORED form differs
+    from the payload's — the #2813 symptom ("the reply looked correct while
     the node stored nothing") on the M2 lane.
+
+    #8006 UPDATE: the E3 ``search_keys`` list IS now stored on this door — the
+    shared projection writer flattens it to the graph's space-joined string
+    (``flatten_search_keys_prop``). So the pinned divergence for that field is
+    REPRESENTATION, not presence: the payload says ``["alpha", "beta"]`` and
+    the node says ``"alpha beta"``. A payload echo would advertise the LIST.
 
     MUTATION THAT REDS THIS TEST: restore the payload echo
     (``props = {k: v for k, v in p.items() if k in
-    _CAPTURE_PASSTHROUGH_PROPS}``) — ``search_keys`` reappears in the reply."""
+    _CAPTURE_PASSTHROUGH_PROPS}``) — ``search_keys`` reappears in the reply as
+    ``["alpha", "beta"]`` instead of the stored ``"alpha beta"``."""
     monkeypatch.setattr("tortoise.sdk._build_session_llm_extractor",
                         lambda: _E3FieldsExtractor())
     proj = sdk._get_proj()
@@ -3893,8 +3905,8 @@ def test_extract_session_llm_reports_stored_props_not_the_folded_payload(
     entry = extracted[0]
     quote, when, sk, tid = _read_passthrough_props(sdk, entry["id"])
     assert (quote, when, tid) == ("q top", "2026-08-01", "turn-7")
-    # The node holds NO search_keys — list props are dropped by the projection.
-    assert sk is None
+    # #8006: the node HOLDS search_keys, in its canonical flattened form.
+    assert sk == "alpha beta"
     # The reply is exactly what the graph holds, field for field (the same
     # read-back helper the v2 dedup-hit lane uses — one contract, both lanes).
     assert entry["props"] == sdk._read_capture_passthrough_props(
@@ -3902,8 +3914,10 @@ def test_extract_session_llm_reports_stored_props_not_the_folded_payload(
     assert entry["props"] == {
         "quote": "q top", "when": "2026-08-01",
         "source_turn_id": "turn-7", "span_start": 0, "span_end": 10,
+        "search_keys": "alpha beta",
     }, entry["props"]
-    assert "search_keys" not in entry["props"], entry["props"]
+    # …and NOT the payload's list spelling (the representation trap above).
+    assert entry["props"]["search_keys"] != ["alpha", "beta"], entry["props"]
 
 
 def test_extract_session_llm_fold_reports_the_canonicals_stored_props(
@@ -6185,6 +6199,109 @@ def test_session_capture_tool_stdio_honest_error(tmp_path, monkeypatch):
         _current_org_id.reset(tok)
     assert "error" in result, result
     assert "hosted mode" in result["error"], result
+
+
+# ── #4288: the per-org capture_extract setting on the AGENT-FACING surface ───
+# #4258 landed the setting on the hosted REST route + the dashboard. #4288
+# tracks the MCP/SDK surface. The WRITE half (a tool parameter or a state-PATCH
+# tool) is owner-gated — a frozen-baseline re-cut, per #4288 and the #4282
+# mandate — so it is NOT implemented here and NOT asserted. What these two
+# tests pin is the non-gated half that was previously UNPROVEN: the MCP capture
+# tool already HONOURS the setting (OFF = store, never refuse), and the setting
+# is already READABLE through the existing agent-facing onboarding tool.
+
+def test_session_capture_tool_honours_capture_extract_off_4288(tmp_path, monkeypatch):
+    """#4288: with the per-org setting OFF (#4258, owner ruling on #3892), a
+    capture through the MCP tool still STORES the session and its turns — never
+    a refusal — and skips extraction, reporting that under its OWN
+    ``extraction-disabled`` mode.
+
+    WHY THIS IS NOT REDUNDANT WITH #4258's TESTS: those drive the REST route
+    (``client.post("/v1/sessions")``) only. The MCP tool is a SEPARATE served
+    surface — its own slot reservation, offload hand-off and receipt plumbing —
+    and it is the surface agents actually capture through. An MCP-lane
+    regression that extracted anyway would silently contradict the user's
+    explicit opt-out on the path they use, and no existing test would catch it.
+
+    The provider IS configured (the mock seam), so the user setting is the ONLY
+    reason extraction is skipped — this is the guard against routing the OFF
+    state through the keyless ``no-provider`` reason.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.mcp_server import tortoise_session_capture
+
+    org = "team-4288-mcp"
+    sid = "s-4288-extract-off"
+    marker = "captureextractoffmcpzzq"
+    with _mcp_team_context(tmp_path, monkeypatch, org_id=org):
+        assert ha_mod._llm_provider_available() is True
+        ha_mod._update_onboarding_state(org, capture_extract=False)
+
+        result = tortoise_session_capture(
+            conversation=[{"role": "user", "content": (
+                f"we decided the {marker} session stores but does not extract")}],
+            harness="pi", session_id=sid)
+
+        # (1) never refused; the receipt is truthful under its OWN mode — not
+        # folded into "llm" (a false claim) or "no-provider" (a false reason).
+        assert not result.get("error"), result
+        assert result["extraction_mode"] == "extraction-disabled", result
+        assert result["extracted"] == 0, result
+        assert result["turns"] == 1, result
+        warnings = " ".join(result["warnings"])
+        assert "capture_extract" in warnings, warnings
+        assert "STORED" in warnings, warnings
+
+        # (2) the capture LANDED: the Session and its turn Point exist …
+        proj = ha_mod._make_sdk(namespace=org)._get_proj()
+        assert proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) RETURN count(t)",
+            params={"sid": sid}).result_set[0][0] == 1
+        # … and NO extracted (non-episodic) point was minted.
+        assert proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+            "WHERE p.is_episodic IS NULL OR p.is_episodic = false RETURN count(p)",
+            params={"sid": sid}).result_set[0][0] == 0
+
+        # (3) the durable lane separates the USER setting ("disabled") from the
+        # transient keyless reason ("none", #4258), so a later re-capture with
+        # the setting back ON re-attempts extraction (#2335 TRUE retry).
+        row = proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
+            params={"sid": sid}).result_set[0]
+        assert row[0] is False and row[1] == "disabled", row
+
+        # (4) the MCP surface wrote its own per-harness receipt — the
+        # agent-facing evidence the dashboard row reads.
+        st = ha_mod._get_onboarding_state(org)
+        assert st.get("session_capture_receipt_pi"), st
+
+
+def test_onboarding_state_tool_reads_capture_extract_4288(tmp_path, monkeypatch):
+    """#4288, READ half: the setting is ALREADY readable on the agent-facing
+    surface — ``tortoise_onboarding_state`` (the ``onboarding`` family, bound to
+    GET /v1/onboarding/state) returns ``capture_extract`` for the org.
+
+    This pins the half of #4288's outcome that needs NO frozen-baseline re-cut:
+    an agent can already discover whether this org's captures will be extracted,
+    before it decides how to report a capture's outcome. The WRITE half (a
+    parameter on the capture tool, or a state-PATCH tool) is the owner-gated
+    remainder tracked on #4288.
+
+    Polarity (#4258): an older stored state with the key ABSENT must read ON,
+    never OFF — so the first read happens on a team whose stored state is ``{}``.
+    """
+    from tortoise.mcp_server import tortoise_onboarding_state
+
+    with _mcp_team_context(tmp_path, monkeypatch, org_id="team-4288-read",
+                           seed_recording=False) as org:
+        # a team provisioned BEFORE the setting existed (stored state ``{}``)
+        default_state = tortoise_onboarding_state()
+        assert default_state.get("capture_extract") is True, default_state
+
+        _ha._update_onboarding_state(org, capture_extract=False)
+        off_state = tortoise_onboarding_state()
+        assert off_state.get("capture_extract") is False, off_state
 
 
 # ═══════════════════════════════════════════════════════════════════════════

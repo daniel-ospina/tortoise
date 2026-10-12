@@ -217,6 +217,144 @@ class TestValidationEdgeCases:
         })
         assert not errors
 
+    # ── Layer 2 — the semantics vocabulary (#7852) ──────────────────────
+
+    def test_relation_unknown_semantics_warns_naming_alternatives(self, caplog):
+        """An unknown semantics value is flagged, never refused (W2)."""
+        import logging
+
+        registry = PackRegistry("/tmp/nonexistent")
+        with caplog.at_level(logging.WARNING, logger="tortoise.pack_registry"):
+            errors = registry._validate({
+                "namespace": "dev", "name": "Dev",
+                "ontology": {
+                    "extends": "core",
+                    "objectKinds": ["issue", "code"],
+                    "relations": [{
+                        "predicate": "addresses",
+                        "fromKind": "dev:issue",
+                        "toKind": "dev:code",
+                        "mechanism": "IMPL",
+                        "semantics": "suports",
+                    }],
+                },
+            })
+        assert not any("semantics" in e for e in errors), errors
+        assert "'suports'" in caplog.text
+        # The warning names the valid alternatives.
+        assert "supports" in caplog.text
+        assert "mutuallyExclusive" in caplog.text
+
+    def test_semantics_directions_covers_every_value(self):
+        """A value cannot be added without stating the direction it records."""
+        from tortoise.pack_registry import (
+            SEMANTICS_DIRECTIONS,
+            SEMANTICS_VALUES,
+        )
+
+        assert set(SEMANTICS_DIRECTIONS) == set(SEMANTICS_VALUES)
+        assert set(SEMANTICS_DIRECTIONS.values()) <= {"->", "<-", "<->", "-"}
+
+    def test_relation_canonical_semantics_accepted(self):
+        registry = PackRegistry("/tmp/nonexistent")
+        for value in ("addresses", "mutuallySupportive", "mutuallyExclusive",
+                      "refutes", "causes", "transacts", "related",
+                      "hasPart", "dependsOn"):
+            errors = registry._validate({
+                "namespace": "dev", "name": "Dev",
+                "ontology": {
+                    "extends": "core",
+                    "objectKinds": ["issue", "code"],
+                    "relations": [{
+                        "predicate": "addresses",
+                        "fromKind": "dev:issue",
+                        "toKind": "dev:code",
+                        "mechanism": "IMPL",
+                        "semantics": value,
+                    }],
+                },
+            })
+            assert not any("semantics" in e for e in errors), (value, errors)
+
+    def test_relation_transitional_semantics_not_refused(self):
+        """A retired word warns (packs align in #7848) but never blocks."""
+        registry = PackRegistry("/tmp/nonexistent")
+        errors = registry._validate({
+            "namespace": "dev", "name": "Dev",
+            "ontology": {
+                "extends": "core",
+                "objectKinds": ["issue", "code"],
+                "relations": [{
+                    "predicate": "competesWith",
+                    "fromKind": "dev:issue",
+                    "toKind": "dev:code",
+                    "mechanism": "NAND",
+                    "semantics": "opposes",
+                }],
+            },
+        })
+        assert not any("semantics" in e for e in errors), errors
+
+    def test_relation_semantics_must_be_non_empty_string(self):
+        registry = PackRegistry("/tmp/nonexistent")
+        for bad in ("", 7, ["addresses"]):
+            errors = registry._validate({
+                "namespace": "dev", "name": "Dev",
+                "ontology": {
+                    "extends": "core",
+                    "objectKinds": ["issue", "code"],
+                    "relations": [{
+                        "predicate": "addresses",
+                        "fromKind": "dev:issue",
+                        "toKind": "dev:code",
+                        "mechanism": "IMPL",
+                        "semantics": bad,
+                    }],
+                },
+            })
+            assert any("must be a non-empty" in e for e in errors), (bad, errors)
+
+    def test_relation_near_misses_must_be_list_of_strings(self):
+        registry = PackRegistry("/tmp/nonexistent")
+        for bad in ("supports", [1], ["supports", ""]):
+            errors = registry._validate({
+                "namespace": "dev", "name": "Dev",
+                "ontology": {
+                    "extends": "core",
+                    "objectKinds": ["issue", "code"],
+                    "relations": [{
+                        "predicate": "addresses",
+                        "fromKind": "dev:issue",
+                        "toKind": "dev:code",
+                        "mechanism": "IMPL",
+                        "nearMisses": bad,
+                    }],
+                },
+            })
+            assert any("nearMisses" in e for e in errors), (bad, errors)
+
+    def test_relation_missing_semantics_warns_naming_alternatives(self, caplog):
+        """A relation with no meaning is flagged, never refused."""
+        import logging
+
+        registry = PackRegistry("/tmp/nonexistent")
+        with caplog.at_level(logging.WARNING, logger="tortoise.pack_registry"):
+            errors = registry._validate({
+                "namespace": "pm", "name": "PM",
+                "ontology": {
+                    "extends": "core",
+                    "objectKinds": ["issue", "sprint"],
+                    "relations": [{
+                        "predicate": "blocks",
+                        "from": "Object",
+                        "to": "Object",
+                    }],
+                },
+            })
+        assert not any("semantics" in e for e in errors), errors
+        assert "declares no semantics" in caplog.text
+        assert "addresses" in caplog.text
+
     def test_relation_valid_cardinalities(self):
         """All four valid cardinality values should pass."""
         registry = PackRegistry("/tmp/nonexistent")
@@ -327,6 +465,8 @@ def query_registry(tmp_path):
                     "toKind": "test:code",
                     "mechanism": "IMPL",
                     "cardinality": "one_to_many",
+                    "semantics": "addresses",
+                    "nearMisses": ["supports"],
                 },
                 {
                     "predicate": "competesWith",
@@ -388,6 +528,15 @@ class TestListRelations:
         assert addr["cardinality"] == "one_to_many"
         comp = [r for r in relations if r["predicate"] == "competesWith"][0]  # noqa: RUF015
         assert "cardinality" not in comp
+
+    def test_includes_semantics_and_near_misses_when_present(self, query_registry):
+        relations = query_registry.list_relations()
+        addr = [r for r in relations if r["predicate"] == "addresses"][0]  # noqa: RUF015
+        assert addr["semantics"] == "addresses"
+        assert addr["nearMisses"] == ["supports"]
+        comp = [r for r in relations if r["predicate"] == "competesWith"][0]  # noqa: RUF015
+        assert "semantics" not in comp
+        assert "nearMisses" not in comp
 
 
 class TestListConnectors:
@@ -540,3 +689,56 @@ class TestCrossPackRefs:
         ]
         assert cross_ref_errors == [], \
             f"Unexpected cross-pack ref errors: {cross_ref_errors}"
+
+    def test_relation_near_misses_unresolvable_target_error(self, tmp_path):
+        """A nearMisses target that is no predicate and no semantics → error."""
+        d = str(tmp_path / "packs")
+        os.makedirs(f"{d}/dev", exist_ok=True)
+        with open(f"{d}/dev/manifest.yaml", "w") as f:
+            yaml.dump({
+                "namespace": "dev",
+                "name": "Development",
+                "ontology": {
+                    "extends": "core",
+                    "objectKinds": ["issue"],
+                    "relations": [{
+                        "predicate": "addresses",
+                        "fromKind": "dev:issue",
+                        "toKind": "dev:issue",
+                        "mechanism": "IMPL",
+                        "nearMisses": ["noSuchPredicate"],
+                    }],
+                },
+            }, f)
+        registry = PackRegistry(d)
+        registry.load_all()
+        assert any(
+            "nearMisses target 'noSuchPredicate'" in e
+            for e in registry.errors.get("dev", [])
+        )
+
+    def test_relation_near_misses_resolves_to_semantics(self, tmp_path):
+        """A nearMisses target may be another semantics value."""
+        d = str(tmp_path / "packs")
+        os.makedirs(f"{d}/dev", exist_ok=True)
+        with open(f"{d}/dev/manifest.yaml", "w") as f:
+            yaml.dump({
+                "namespace": "dev",
+                "name": "Development",
+                "ontology": {
+                    "extends": "core",
+                    "objectKinds": ["issue"],
+                    "relations": [{
+                        "predicate": "addresses",
+                        "fromKind": "dev:issue",
+                        "toKind": "dev:issue",
+                        "mechanism": "IMPL",
+                        "nearMisses": ["mutuallySupportive"],
+                    }],
+                },
+            }, f)
+        registry = PackRegistry(d)
+        registry.load_all()
+        assert not any(
+            "nearMisses" in e for e in registry.errors.get("dev", [])
+        )

@@ -687,7 +687,8 @@ class _EdgeHandlers:
                 # (``EventAPI.add_point(**fields)``), so descriptor-alone minted
                 # the edge for a payload that was never a mitigation, while a
                 # present-but-malformed strength is either dropped by the writer
-                # or poisons every weight read. ``is False`` also excludes the
+                # or ignored at read time (#6151: the read degrades an unusable
+                # strength to the fallback rather than raising). ``is False`` also excludes the
                 # SDK's generic operator (``is_operator: true``) and
                 # ``rebuild_all``'s #548 graph-only synthesis, whose
                 # ``op_type``-bearing node may carry no flag.

@@ -169,7 +169,10 @@ from tortoise.sdk import (
     _supersede_window_start_source,  # #3985: the ONE home for the stored-start predicate
     _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk.capture_session)
 )
-from tortoise.security import redact_error  # billing webhook + checkout error logging
+from tortoise.security import (  # billing webhook + checkout error logging; #3293 drill incident detail
+    redact_error,
+    redact_for_publication,
+)
 from tortoise.session_auth import get_current_user, verify_session_jwt
 from tortoise.session_projection import (  # #5498: the ONE session projection
     SESSION_DETAIL_FIELDS,
@@ -6647,8 +6650,10 @@ class CreatePointRequest(BaseModel):
     # and never make it EP-able through this surface. Forwarded to
     # ``create_point``'s ``credibility=`` and consumed into the
     # ep_alpha/ep_beta baseline — NOT stored as a Point prop (unlike
-    # confidence/authoredBy above). On a DEDUP HIT ``create_point`` drops it
-    # with a logged warning (the existing point keeps its own baseline).
+    # confidence/authoredBy above). On a DEDUP HIT ``create_point`` applies it
+    # to the existing point IF that point carries no baseline yet, and keeps
+    # the baseline it already has otherwise (with a logged warning) — never a
+    # silent drop either way (#7980).
     credibility: str | int | float | None = None
 
     @field_validator("kind")
@@ -8725,11 +8730,33 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     ``unconfigured``, see ``tortoise/read_status.py``) — so a store that could
     not be reached is never served as a clean empty result. Unset/``0`` leaves
     this response byte-identical.
+
+    #7952 (§17.2): the COMPLETENESS MARKER rides its OWN field, ``residency``
+    (``hot`` / ``not-hot``), and is NOT a fifth status term — a residency
+    verdict is a directive about WHERE TO LOOK, not a status of the read. When
+    ``TORTOISE_RESIDENCY`` is truthy and the consulted scope declares itself
+    PARTIAL, a read that falls outside the known-hot set returns
+    ``residency: "not-hot"`` and its ``status`` is never ``empty`` (§17.3): a
+    partial store cannot establish "nothing matched". An unassessable read (a
+    store that is DOWN) leaves ``residency`` ABSENT and, because the marker's
+    own contract forbids a silent empty, carries the impairment term
+    ``degraded`` — emitted even when ``TORTOISE_READ_STATUS`` is off, so a
+    residency-only deployment is never served a bare empty. Unset/``0`` leaves
+    this response byte-identical.
     """
     _require_scope(org, "graphs:read", "search")
     from tortoise.read_status import read_status_enabled as _read_status_enabled
+    from tortoise.residency import residency_enabled as _residency_enabled
+    from tortoise.status_vocabulary import STATUS_DEGRADED as _STATUS_DEGRADED
 
-    status_out: dict | None = {} if _read_status_enabled() else None
+    # The sink is the READ PATH's carrier for both fields; each field is
+    # emitted only under its own flag. The ONE exception is the impairment
+    # term: a residency-only deployment that could not assess the store still
+    # emits `status: degraded` (see below), because an absent marker over a
+    # bare empty would re-create the §17.2 silent-empty.
+    _status_on = _read_status_enabled()
+    _residency_on = _residency_enabled()
+    status_out: dict | None = {} if (_status_on or _residency_on) else None
     sdk = _data_sdk(org)
     try:
         # #1676 (launch capacity): tortoise_fts_query is CPU-blocking — the
@@ -8758,9 +8785,20 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
         out.append(props)
     response = {"results": out, "count": len(out)}
     if status_out is not None:
-        # The SDK sets this on every return path; a missing term is a bug, not
-        # a reason to emit null under a vocabulary of exactly four terms.
-        response["status"] = status_out["status"]
+        # The SDK sets `status` on every return path; a missing term is a bug,
+        # not a reason to emit null under a vocabulary of exactly four terms.
+        # #7952: `residency` is present only when the known-hot set could be
+        # READ and a verdict was reached, so an unassessable read (a store that
+        # is DOWN) leaves the field absent — never a guessed `not-hot` for an
+        # unreachable cache. But an absent marker over a bare empty would be
+        # byte-identical to a genuine empty result (§17.2), so when the marker's
+        # own flag is on the impairment term `degraded` is emitted even if
+        # TORTOISE_READ_STATUS is off.
+        if _status_on or (
+                _residency_on and status_out.get("status") == _STATUS_DEGRADED):
+            response["status"] = status_out["status"]
+        if _residency_on and "residency" in status_out:
+            response["residency"] = status_out["residency"]
     return response
 
 
@@ -14511,17 +14549,64 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # ── 1. Session node + budget counters (is_episodic: true — MECE ISSUE 2;
     # the value-chain container is episodic; the VALUE Points below are the
     # non-episodic quota/budget discriminator). ──
+    #
+    # #4704 — THESE THREE ARE APPLIED EXACTLY ONCE PER LOGICAL PAYLOAD, and
+    # the guard is the :CommitRecord, inside THIS statement (never a
+    # read-then-write). They are the ONLY non-idempotent writes in the phase
+    # (every later step is MERGE-keyed), and the phase is RE-RUN BY DESIGN: a
+    # failure at a later step surfaces as the fail-closed 500 whose contract
+    # is "retry with the same client_commit_id", and L1 does not replay a
+    # `partial` record — so the retry re-enters HERE. Unguarded, that applied
+    # `commit_count +1` and `value_nodes_created + net_new` a second time for
+    # one payload, and `value_nodes_created` is the budget numerator
+    # `adjudicate_budget` reads as `prior_created`: the session's remaining
+    # budget was understated for every LATER commit, so a payload the true
+    # spend would have written is HELD at the >25 band instead, and once that
+    # inflated numerator crosses 50 the client's re-submission of it 402s.
+    #
+    # `r.value_nodes_declared` IS the stamp: NULL ⇒ this payload has not
+    # declared its value-node contribution on the Session yet; an int ⇒ it
+    # has, and that int is what it declared. The stamp and the arithmetic are
+    # one statement, so they cannot half-apply (a crash leaves both or
+    # neither). `write_ops_billed` is the SAME shape for the billing half
+    # (PL4: "billed exactly once"); this is that contract for the counter
+    # half. The numerator itself stays on the Session (§4.1 division of
+    # labour) — the record only remembers what IT declared, which is what
+    # stops a retry from declaring again (`plan_commit` reads the stamp back
+    # to adjudicate the retry against the payload's TOTAL, not the remainder).
+    #
+    # `collect(r)` collapses the record match to ONE row: a plain join would
+    # evaluate the guard once PER row and apply the counters once per duplicate
+    # record. With NO record at all (the direct callers of this helper — the
+    # supersession/binding/span tests) `recs` is `[null]`, `pending` is true (a
+    # null property IS NULL) and the counters apply exactly as before: nothing
+    # is stamped, because exactly-once needs a logical-payload identity and a
+    # caller with no record has none. `IS NULL` — not truthiness — is the test,
+    # so a merge-only payload's `0` is a real declaration and still guards
+    # `commit_count`/`draft_count`. The FOREACH is a LATER clause than the SET,
+    # so `pending` reads the pre-statement stamp.
     drafts = sum(1 for pr in reconcile.points
                  if pr.action in ("new", "supersede")
                  and pr.point.status == "draft")
     proj.g.query(
+        "OPTIONAL MATCH (r:CommitRecord {client_commit_id:$cid}) "
+        "WITH collect(r) AS recs "
+        "WITH recs, all(x IN recs WHERE x.value_nodes_declared IS NULL) "
+        "     AS pending "
         "MERGE (s:Session {id:$sid}) "
         "SET s.is_episodic=true, s.created_at=coalesce(s.created_at, $now), "
-        "    s.value_nodes_created = coalesce(s.value_nodes_created, 0) + $created, "
-        "    s.draft_count = coalesce(s.draft_count, 0) + $drafts, "
-        "    s.commit_count = coalesce(s.commit_count, 0) + 1, "
-        "    s.updated_at=$now",
-        params={"sid": session_id, "now": now, "created": reconcile.net_new,
+        "    s.value_nodes_created = coalesce(s.value_nodes_created, 0) + "
+        "        (CASE WHEN pending THEN $created ELSE 0 END), "
+        "    s.draft_count = coalesce(s.draft_count, 0) + "
+        "        (CASE WHEN pending THEN $drafts ELSE 0 END), "
+        "    s.commit_count = coalesce(s.commit_count, 0) + "
+        "        (CASE WHEN pending THEN 1 ELSE 0 END), "
+        "    s.updated_at=$now "
+        "FOREACH (x IN [y IN recs WHERE y IS NOT NULL AND "
+        "               y.value_nodes_declared IS NULL] | "
+        "         SET x.value_nodes_declared = $created)",
+        params={"cid": payload.client_commit_id, "sid": session_id,
+                "now": now, "created": reconcile.net_new,
                 "drafts": drafts},
     )
 
@@ -33033,9 +33118,15 @@ async def backups_drill(request: Request):
             org_id=org_id, backup_key=backup_key,
         )
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=f"Drill rejected: {e}") from e
+        raise HTTPException(
+            status_code=409,
+            detail=f"Drill rejected: {redact_for_publication(str(e))}",
+        ) from e
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=f"Drill failed: {e}") from e
+        raise HTTPException(
+            status_code=503,
+            detail=f"Drill failed: {redact_for_publication(str(e))}",
+        ) from e
 
 
 @app.post("/v1/internal/backups/drill-scheduled")
@@ -33081,20 +33172,46 @@ async def backups_drill_scheduled(request: Request):
         try:
             await asyncio.to_thread(
                 alerts.open_incident, _DRILL_FAILED_KIND, "global",
-                {"error": str(e), "source": "drill-scheduled"},
+                # #3293: an exception MESSAGE is app-controlled text and this
+                # detail is published verbatim into a PUBLIC issue body
+                # (``alert_store._body``). ``error_type`` is the bounded half
+                # the other operator incidents already carry
+                # (``operator_alert.alert_abuse_fault``); the message goes
+                # through the publication scrubber before it joins it.
+                {"error_type": type(e).__name__,
+                 "error": redact_for_publication(str(e)),
+                 "source": "drill-scheduled"},
             )
         except Exception:
             _logger.warning("RESTORE_DRILL_FAILED open failed (ValueError path)", exc_info=True)
-        raise HTTPException(status_code=409, detail=f"Drill rejected: {e}") from e
+        # #3293 review: the response body is echoed verbatim into a PUBLIC
+        # Actions log by the drill drivers (``registry-drill*.sh``), so the
+        # raw exception is a publication sink too — scrub it here, not only in
+        # the incident detail above. Internal-key auth gates WHO may call, not
+        # where the caller writes the response.
+        raise HTTPException(
+            status_code=409,
+            detail=f"Drill rejected: {redact_for_publication(str(e))}",
+        ) from e
     except RuntimeError as e:
         try:
             await asyncio.to_thread(
                 alerts.open_incident, _DRILL_FAILED_KIND, "global",
-                {"error": str(e), "source": "drill-scheduled"},
+                # #3293: see the ValueError path above — same public sink, same
+                # scrub. This is the path a STORAGE error takes, i.e. the one
+                # most likely to echo a signed URL or endpoint in its message.
+                {"error_type": type(e).__name__,
+                 "error": redact_for_publication(str(e)),
+                 "source": "drill-scheduled"},
             )
         except Exception:
             _logger.warning("RESTORE_DRILL_FAILED open failed (RuntimeError path)", exc_info=True)
-        raise HTTPException(status_code=503, detail=f"Drill failed: {e}") from e
+        # #3293 review: see the ValueError path above — same public-Actions-log
+        # sink, same boundary scrub.
+        raise HTTPException(
+            status_code=503,
+            detail=f"Drill failed: {redact_for_publication(str(e))}",
+        ) from e
     if result.get("status") == "drill_ok" and not result.get("within_rto", True):
         # Restore succeeded but missed the committed RTO — incident-worthy
         # (restore speed is a target, not an accident).
