@@ -5765,10 +5765,6 @@ class TortoiseSDK:
                 # (would make the `if props:` guard always truthy and bump
                 # updatedAt on every dedup hit, #80 review).
                 props.pop("content_hash", None)
-                if credibility is not None:
-                    _logger.warning(
-                        "credibility=%r ignored — point %s already exists and dedup=True",
-                        credibility, pid)
                 # #3263 (review P1): `extractedFrom` must NOT ride the
                 # update_point prop path on a dedup hit. update_point writes the
                 # node property but never calls _link_source, so the Point would
@@ -5826,6 +5822,54 @@ class TortoiseSDK:
                     # P2-1: re-capture would churn confidence for every point).
                     props["updatedAt"] = now
                     self.update_point(pid, **props)
+                # #7980: an authored ``credibility`` is a WRITE, not a no-op.
+                # This path used to log-and-drop it, so a caller that supplied
+                # one got HTTP 200 back on a point that has NO baseline: not
+                # EP-able, and the fail-closed #344/#1157 calibration gate then
+                # refuses the whole graph (`/v1/dream` errors). That is the
+                # #4032 silent-false-green shape, on the field #7909 added to
+                # BOTH REST surfaces — and on self-host it was the DEFAULT path
+                # (``selfhost_api.CreatePointRequest.dedup`` defaults True).
+                #
+                # FIRST-WRITER-WINS: the prior is applied only while the
+                # existing point has none. That is the contract this suite
+                # already pins (tests/test_sdk_dedup.py::
+                # test_dedup_with_extra_props — "must not overwrite the
+                # existing baseline"), and it follows #844: a set baseline is
+                # IMMUTABLE evidence, so a dedup hit — which matches by
+                # CONTENT HASH, and so may be an unrelated writer stating a
+                # different belief — never rewrites the one already there. A
+                # point that does carry one keeps it and SAYS SO, loudly:
+                # never a silent drop. Consistency: ``confidence`` (a plain
+                # prop) is already applied on a dedup hit, and
+                # ``mitigate_operator``'s idempotent path applies an authored
+                # belief to an existing point rather than dropping it.
+                if cred_prior is not None:
+                    _existing = self.get_point(pid)
+                    if not _existing.get("baseline_set"):
+                        self.set_point_baseline(
+                            pid, cred_prior[0], cred_prior[1],
+                            source=BASELINE_SOURCE_SET_BY_AUTHOR)
+                    elif (_existing.get("baseline_source"),
+                          _existing.get("ep_alpha"),
+                          _existing.get("ep_beta")) != (
+                              BASELINE_SOURCE_SET_BY_AUTHOR,
+                              cred_prior[0], cred_prior[1]):
+                        # Nothing was dropped when the point ALREADY carries
+                        # exactly this author-stated prior — the self-host
+                        # default path makes that the NORMAL idempotent retry,
+                        # and a WARNING on every healthy retry is how a
+                        # warning stops being read. The provenance token is
+                        # compared too: an equal-valued baseline that is
+                        # INHERITED (or a legacy token-less row) is still a
+                        # different claim, and inheritance will recompute it.
+                        _logger.warning(
+                            "credibility=%r not applied — point %s already "
+                            "exists with a %r baseline, and a dedup hit never "
+                            "overwrites the baseline a point already carries "
+                            "(#7980, #844)",
+                            credibility, pid,
+                            _existing.get("baseline_source"))
                 return self.get_point(pid)
 
         # Issue #52 — warn when caller passes an explicit non-ULID id

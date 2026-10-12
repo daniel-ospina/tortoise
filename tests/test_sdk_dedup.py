@@ -58,6 +58,76 @@ class TestDedupAlwaysPersistsHash:
         assert p2.get("baseline_source") == p1.get("baseline_source")
 
 
+class TestDedupHitAppliesAuthoredBaseline:
+    """Issue #7980 — an authored ``credibility`` is a WRITE, never a silent drop.
+
+    The dedup-hit branch used to log-and-drop the resolved prior, so a caller
+    that supplied one got a 200 back on a point with NO baseline: not EP-able,
+    and the fail-closed #344/#1157 calibration gate then refused the whole
+    graph (``/v1/dream`` errors). That is the #4032 silent-false-green shape,
+    on the field #7909 added to BOTH REST surfaces.
+
+    FIRST-WRITER-WINS: the prior is applied only while the existing point has
+    none — see ``TestDedupAlwaysPersistsHash::test_dedup_with_extra_props``,
+    which pins the other half (a dedup hit never overwrites a set baseline,
+    which is IMMUTABLE evidence per #844).
+    """
+
+    def test_dedup_hit_calibrates_an_uncalibrated_point(self, sdk):
+        content = "#7980 dedup hit applies the authored baseline"
+        first = sdk.create_point("statement", content, dedup=True)
+        # No credibility on the first write, so the point carries no baseline.
+        assert not first.get("baseline_set"), first
+        second = sdk.create_point("statement", content, dedup=True,
+                                  credibility="gold")
+        assert first["id"] == second["id"], "still a dedup hit — no duplicate"
+        assert second.get("baseline_set") is True, second
+        assert second.get("baseline_source") == "set-by-author", second
+        assert second.get("ep_alpha") == 10.0, second
+        assert second.get("ep_beta") == 1.0, second
+        # The in-memory prior EP actually runs with must agree with the graph.
+        assert sdk._evidence.get(first["id"]) == (10.0, 1.0)
+
+    def test_dedup_hit_leaves_the_graph_ep_able(self, sdk):
+        """The observable #7980 symptom, not just the prop: the write reported
+        success and the fail-closed gate then refused the graph."""
+        content = "#7980 the graph stays EP-able after the hit"
+        sdk.create_point("statement", content, dedup=True)
+        sdk.create_point("statement", content, dedup=True, credibility="high")
+        # Raised CalibrationError before the fix: a live point with no baseline.
+        sdk.compute_confidence()
+
+    def test_dedup_hit_preserves_an_existing_baseline_and_says_so(
+            self, sdk, caplog):
+        """Never an overwrite — and never a SILENT keep either: the caller is
+        told which belief won."""
+        import logging
+
+        content = "#7980 dedup hit preserves the authored baseline"
+        first = sdk.create_point("statement", content, dedup=True,
+                                 credibility="gold")
+        assert first.get("ep_alpha") == 10.0
+        # A retry stating the SAME belief loses nothing — the point already
+        # carries exactly that author-stated prior — so it must stay quiet.
+        # The self-host surface dedups by DEFAULT, which makes this retry the
+        # normal path; a WARNING on it is how a warning stops being read.
+        with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+            retry = sdk.create_point("statement", content, dedup=True,
+                                     credibility="gold")
+        assert retry.get("ep_alpha") == 10.0, retry
+        assert not [r for r in caplog.records if "not applied" in r.getMessage()], [
+            r.getMessage() for r in caplog.records]
+        # A DIFFERENT belief is the case that must be audible: it is dropped.
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+            second = sdk.create_point("statement", content, dedup=True,
+                                      credibility="T1")  # T1 ⇒ ep_alpha 5
+        assert second.get("ep_alpha") == 10.0, second
+        assert second.get("baseline_source") == "set-by-author", second
+        assert any("not applied" in r.getMessage() for r in caplog.records), [
+            r.getMessage() for r in caplog.records]
+
+
 class TestCrossContextDedup:
     """Issue #93 → #49: create_point dedup contract after context deprecation.
 
