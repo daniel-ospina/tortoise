@@ -74,6 +74,7 @@ import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -315,6 +316,12 @@ def _read_placement_rows(doc: Path | None = None) -> list[tuple[str, str]]:
     return rows
 
 
+#: NOTE on caching: the parsers below read FILES, and every accessor is memoized.
+#: That is not premature — `_props_from_row` runs PER RECORD ROW, so an uncached
+#: parse would read the placement doc once per row (a 45k-node rebuild: 45k file
+#: reads). The cache is keyed on the path, so a test pointing at a fixture doc
+#: gets its own entry.
+@lru_cache(maxsize=8)
 def placement_spellings(doc: Path | None = None) -> dict[str, dict[str, tuple[str, ...]]]:
     """`{table: {column: (spelling, ...)}}`, sorted — the raw namespace.
 
@@ -350,6 +357,7 @@ def _prefer(spellings: Sequence[str]) -> str:
     return camel[0] if camel else spellings[0]
 
 
+@lru_cache(maxsize=8)
 def placement_columns(doc: Path | None = None) -> dict[str, dict[str, str]]:
     """`{table: {column: the canonical graph property name}}`."""
     return {t: {c: _prefer(v) for c, v in cols.items()}
@@ -372,6 +380,7 @@ def canonical_property(table: str, column: str) -> str:
     )
 
 
+@lru_cache(maxsize=32)
 def projected_columns(table: str) -> frozenset[str]:
     """The record columns that carry AUTHORITY — i.e. that get projected.
 
@@ -417,6 +426,7 @@ def ambiguities() -> dict[str, tuple[str, ...]]:
     }
 
 
+@lru_cache(maxsize=32)
 def _refused(table: str) -> frozenset[str]:
     """The names the schema (or the projection) refuses as a `props` key."""
     from .record_projection import refused_props_names
