@@ -176,7 +176,7 @@ _MINIMAL_RECORDS: dict[str, dict] = {
     "SessionRecorded": {"id": "sess1", "turn_count": 2, "is_episodic": True},
     "SessionDeleted": {"id": "sess1"},
     "EntityLinked": {"id": "p1", "source_label": "Point", "source_id": "p1",
-                     "target_label": "Object", "target_id": "n1",
+                     "target_label": "Object", "target_id": "o1",
                      "edge_type": "aboutObject"},
     "DirectEdgeCreated": {"id": "p1->p2:IMPL", "src": "p1", "tgt": "p2",
                           "edge_type": "IMPL"},
@@ -895,6 +895,99 @@ def test_session_deleted_removes_the_agent_session_source_stub():
                and "public.source" in s for s in node_sql), node_sql
     assert any(s.startswith("DELETE FROM public.node_identity")
                and "public.session" in s for s in node_sql), node_sql
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 4c. EDGE ENDPOINTS — the label's canonical key, never the raw journal id
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_entity_linked_endpoint_resolves_to_the_name_keyed_object():
+    """An `Object` endpoint is addressed by `id` but KEYED by `name`.
+
+    The fold matches `MATCH (t:Object {id:$tid})`
+    (`_fold_entity_linked_reason`) and the producer emits the graph `id`
+    (`sdk.py::link_entity(proj,"Point",pid,o.id)`), while
+    `relation.tgt_key` is a composite FK into `node_identity`, whose Object key
+    is `name`. Writing the raw journal id attached the edge to a PHANTOM
+    `Object/o1` — and the hard-delete cascade, which resolves the id to the
+    name-keyed row, could never remove it. The endpoint's key must therefore be
+    RESOLVED from the projection's own object row, and no identity row may be
+    minted for the raw id.
+    """
+    statements = rp.mutations_for(
+        {"type": "EntityLinked", "ts": "T", "id": "p1",
+         "source_label": "Point", "source_id": "p1",
+         "target_label": "Object", "target_id": "o1",
+         "edge_type": "aboutObject"},
+        org_id="o", graph_id="g",
+    )
+    assert len(statements) == 1, statements
+    insert = statements[0]
+    assert insert.sql.startswith("INSERT INTO public.relation"), insert.sql
+    # The key columns are the JOINED node rows' canonical keys, not `%s` params
+    # carrying the journal id.
+    assert "src.node_key" in insert.sql and "tgt.node_key" in insert.sql
+    assert "(SELECT node_key FROM public.object" in insert.sql, insert.sql
+    assert "(SELECT node_key FROM public.point" in insert.sql, insert.sql
+    # The resolution matches the journal id exactly as the fold's MATCH does.
+    assert "o1" in insert.params and "p1" in insert.params
+    # No phantom FK parent: the fold's `MATCH` creates no endpoints either.
+    assert not any("node_identity" in s.sql for s in statements), statements
+
+
+def test_entity_linked_with_an_absent_endpoint_lands_no_edge_and_no_identity():
+    """A link whose endpoint has no row is the fold's `\"absent\"` verdict.
+
+    The fold's `MATCH (s),(t) MERGE (s)-[r]->(t)` 0-rows when either endpoint is
+    absent — no edge. The projection joined its endpoint lookups, so the same
+    absent endpoint yields ZERO source rows for the insert: it must not land an
+    edge, and it must not mint the phantom `node_identity` the raw-id write did.
+    """
+    statements = rp.mutations_for(
+        {"type": "EntityLinked", "ts": "T", "id": "p1",
+         "source_label": "Point", "source_id": "p1",
+         "target_label": "Object", "target_id": "no-such-object",
+         "edge_type": "aboutObject"},
+        org_id="o", graph_id="g",
+    )
+    assert len(statements) == 1, statements
+    insert = statements[0]
+    # Both endpoints are joined (not written as literals), so an absent row
+    # suppresses the whole insert rather than fabricating a key.
+    assert " FROM (SELECT node_key FROM public.point" in insert.sql, insert.sql
+    assert ", (SELECT node_key FROM public.object" in insert.sql, insert.sql
+    assert "no-such-object" in insert.params
+    assert not any("node_identity" in s.sql for s in statements), statements
+
+
+def test_the_edge_endpoint_key_and_the_delete_cascade_agree():
+    """The link's `tgt_key` and the delete's identity key must be ONE row.
+
+    The hard delete resolves the node's canonical key from its `id` before the
+    cascade; the link must resolve the same row. If the link wrote the raw
+    journal id while the delete removed the name-keyed identity, the edge
+    outlived the object — `Object/o1` was never a `node_identity` row the
+    delete could cascade. Both statements read `public.object` by `id`.
+    """
+    link = rp.mutations_for(
+        {"type": "EntityLinked", "ts": "T", "id": "p1",
+         "source_label": "Point", "source_id": "p1",
+         "target_label": "Object", "target_id": "o1",
+         "edge_type": "aboutObject"},
+        org_id="o", graph_id="g",
+    )[0]
+    delete = rp.mutations_for(
+        {"type": "EntityMutated", "ts": "T", "id": "o1", "label": "Object",
+         "op": "delete"},
+        org_id="o", graph_id="g",
+    )
+    assert "SELECT node_key FROM public.object" in link.sql, link.sql
+    identity_delete = delete[0]
+    assert identity_delete.sql.startswith("DELETE FROM public.node_identity")
+    assert "SELECT node_key FROM public.object" in identity_delete.sql, \
+        identity_delete.sql
+    assert "o1" in link.params and "o1" in identity_delete.params
 
 
 # ════════════════════════════════════════════════════════════════════════════

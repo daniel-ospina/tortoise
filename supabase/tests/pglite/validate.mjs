@@ -710,7 +710,11 @@ try {
   // DirectEdgeCreated landed, the hard delete's identity cascade removes the
   // `IMPL(op1 -> p2)` edge incident to the deleted p2, the `session:{id}`
   // agentSession Source stub is created then removed with its session, and the
-  // two surviving sources + one object + one subject + two relations remain.
+  // two surviving sources + one object + one subject + two relations remain:
+  // the `aboutObject` edge to the SURVIVING object (keyed by name) and the
+  // `IMPL(op1 -> p1)` edge. The second Object (`o2`) is hard-deleted, the
+  // absent-endpoint link lands nothing, and `delete_only` + the p2 hard-delete
+  // cascade leave exactly two.
   const expected = { journal: String(wantJournal), points: '2',
                      sources: '2', objects: '1', subjects: '1',
                      sessions: '0', relations: '2' };
@@ -780,6 +784,51 @@ try {
           WHERE node_label = 'Source' AND node_key = 'session:sess1')       AS identity_row`);
   if (Number(stub.rows[0].source_row) || Number(stub.rows[0].identity_row)) {
     console.error(`✗ #7969: the SessionDeleted left its agentSession Source stub: ${JSON.stringify(stub.rows)}`);
+    process.exit(1);
+  }
+
+  // The `EntityLinked` endpoint is addressed by its journal `id` (`o1`,
+  // `link_entity(proj,"Point",pid,o.id)`), but the relation's endpoints are
+  // composite FKs into `node_identity`, whose key for an Object is its `name`.
+  // Writing the raw id through attached the edge to a PHANTOM `Object/o1` and
+  // left it alive when the Object was hard-deleted (the cascade resolves the
+  // id to the name-keyed row). Assert the resolution, not the row count.
+  const objectEdge = await db.query(
+    `SELECT count(*) AS n FROM public.relation
+      WHERE rel_type = 'aboutObject' AND src_label = 'Point' AND src_key = 'p1'
+        AND tgt_label = 'Object' AND tgt_key = 'release-1.0'`);
+  if (Number(objectEdge.rows[0].n) !== 1) {
+    console.error(`✗ #7969: the EntityLinked endpoint did not resolve to the name-keyed Object: ${JSON.stringify(objectEdge.rows)}`);
+    process.exit(1);
+  }
+  const phantomIdentity = await db.query(
+    `SELECT count(*) AS n FROM public.node_identity
+      WHERE node_label = 'Object' AND node_key IN ('o1', 'no-such-object')`);
+  if (Number(phantomIdentity.rows[0].n)) {
+    console.error(`✗ #7969: an EntityLinked endpoint minted a phantom Object node_identity: ${JSON.stringify(phantomIdentity.rows)}`);
+    process.exit(1);
+  }
+  // An absent endpoint is the fold's `absent` verdict: NO edge, and no
+  // identity row for the key it named.
+  const absentEdge = await db.query(
+    `SELECT count(*) AS n FROM public.relation
+      WHERE tgt_label = 'Object' AND tgt_key = 'no-such-object'`);
+  if (Number(absentEdge.rows[0].n)) {
+    console.error(`✗ #7969: an EntityLinked to an ABSENT Object landed ${absentEdge.rows[0].n} edge(s)`);
+    process.exit(1);
+  }
+  // A hard-deleted Object cascades its identity row (and therefore its edges):
+  // the `aboutObject` edge to `release-2.0` must not survive `o2`'s delete.
+  const o2 = await db.query(
+    `SELECT
+       (SELECT count(*) FROM public.object WHERE node_key = 'release-2.0')          AS node_row,
+       (SELECT count(*) FROM public.node_identity
+          WHERE node_label = 'Object' AND node_key = 'release-2.0')                 AS identity_row,
+       (SELECT count(*) FROM public.relation
+          WHERE tgt_label = 'Object' AND tgt_key = 'release-2.0')                   AS edges`);
+  if (Number(o2.rows[0].node_row) || Number(o2.rows[0].identity_row) ||
+      Number(o2.rows[0].edges)) {
+    console.error(`✗ #7969: the hard-deleted Object kept state: ${JSON.stringify(o2.rows)}`);
     process.exit(1);
   }
 

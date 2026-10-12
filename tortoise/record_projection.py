@@ -117,6 +117,16 @@ NODE_TABLES: dict[str, tuple[str, str]] = {
     "point": ("Point", "id"),
 }
 
+#: node label → the record table that materializes it (the inverse of
+#: :data:`NODE_TABLES`). An edge endpoint names its label, and the relation's
+#: `(label, key)` FK is into `node_identity`, so the endpoint's key must be the
+#: label's CANONICAL key (`Object`/`Subject`→`name`, `Source`→`url`,
+#: `Point`/`Session`→`id`, `Event`→`event_id`), resolved from the projection's
+#: own node row — never the raw journal id.
+_LABEL_TABLES: dict[str, str] = {
+    label: table for table, (label, _key_column) in NODE_TABLES.items()
+}
+
 #: The columns an `EntityMutated` record's identity (`payload["id"]`) is matched
 #: against, per node table. The graph fold matches the label's OR-set identity
 #: (`_ENTITY_ID_PROP` + `_CANONICAL_ENTITY_SECONDARY_ID_PROPS`), NOT the table's
@@ -552,7 +562,11 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
     "EntityLinked": Mutation(
         RelationUpsert(),
         note="#3664 — flat logical endpoints; `edge_type` and both labels are "
-             "validated against a frozen vocabulary by the graph fold",
+             "validated against a frozen vocabulary by the graph fold. The "
+             "journal addressing id is the GRAPH id, while `relation`'s FK key "
+             "is the label's canonical key, so the endpoint is resolved from "
+             "the projection's own node row (an absent endpoint lands no "
+             "edge — the fold's `absent` verdict)",
     ),
     "DirectEdgeCreated": Mutation(
         RelationUpsert(),
@@ -995,6 +1009,51 @@ def _relation_coordinates(
     return rel_type, str(src_label), src, str(tgt_label), tgt, payload.get("idx", 0)
 
 
+def _endpoint_resolution(
+    org_id: str,
+    graph_id: str,
+    label: str,
+    journal_id: str,
+    alias: str,
+) -> tuple[str, list[Any]]:
+    """The node row an edge endpoint addresses, keyed by the label's key column.
+
+    The graph fold addresses an `EntityLinked` endpoint by **`id`** —
+    `MATCH (t:{label} {id:$tid})` in
+    `projection/entities.py::_fold_entity_linked_reason` — and that is what the
+    producers emit (`sdk.py::link_entity` passes `o.id`;
+    `subject_binding._resolve_target` returns `n.id`). But the RECORD's
+    canonical key is `Point`/`Session`→`id`, `Event`→`event_id`,
+    `Source`→`url`, `Object`/`Subject`→`name`
+    (`node_identity.key_property`, migration `20261012000001`), and
+    `relation.src_key`/`tgt_key` are composite FKs into `node_identity`.
+
+    Writing the raw journal id straight through therefore attached the edge to
+    a PHANTOM identity (`Object/o1` where the row is keyed `release-1.0`), which
+    the hard-delete cascade could never reach — the record kept an edge to a
+    node it had removed. This resolves `node_key` from the projection's own node
+    row, matching the journal id with the SAME predicate the hard-delete
+    cascade uses (:data:`_ENTITY_MATCH_COLUMNS`), and the caller joins on the
+    result: an endpoint with no row produces **no relation at all**, which is
+    the fold's own `"absent"` verdict rather than a minted phantom.
+    """
+    table = _LABEL_TABLES.get(label)
+    if table is None:
+        raise RecordProjectionError(
+            f"edge endpoint names label {label!r}, which is not a record node "
+            f"label ({sorted(_LABEL_TABLES)})"
+        )
+    match = _ENTITY_MATCH_COLUMNS.get(table, ("node_key",))
+    predicate = " OR ".join(f"{column} = %s" for column in match)
+    if len(match) > 1:
+        predicate = f"({predicate})"
+    return (
+        f"(SELECT node_key FROM public.{table} "
+        f"WHERE org_id = %s AND graph_id = %s AND {predicate}) {alias}",
+        [org_id, graph_id, *([journal_id] * len(match))],
+    )
+
+
 def _relation_upsert_statement(
     org_id: str,
     graph_id: str,
@@ -1008,26 +1067,35 @@ def _relation_upsert_statement(
         "relation", {k: payload[k] for k in rel.attrs if k in payload},
         columns=columns, refused=refused,
     )
-    statements = [
-        _identity_statement(org_id, graph_id, Node("point", src_label, "id"), src),
-        _identity_statement(org_id, graph_id, Node("point", tgt_label, "id"), tgt),
-    ]
+    # The endpoints are RESOLVED, never minted: the fold's `MATCH … MERGE`
+    # creates no endpoints, and an infinite source of phantom `node_identity`
+    # rows is exactly what let a link survive its object's hard delete. The
+    # `FROM` join yields ZERO rows when either endpoint is absent, so the whole
+    # insert is a no-op — the fold's `"absent"` verdict, not a dropped edge
+    # that still materializes a key.
+    src_select, src_params = _endpoint_resolution(
+        org_id, graph_id, src_label, src, "src")
+    tgt_select, tgt_params = _endpoint_resolution(
+        org_id, graph_id, tgt_label, tgt, "tgt")
     columns_ = ["org_id", "graph_id", "rel_type", "src_label", "src_key",
                 "tgt_label", "tgt_key", "idx", *col_values, "props"]
+    select_list = ", ".join([
+        "%s", "%s", "%s", "%s", "src.node_key", "%s", "tgt.node_key", "%s",
+        *(["%s"] * len(col_values)), "%s",
+    ])
     params: list[Any] = [
-        org_id, graph_id, rel_type, src_label, src, tgt_label, tgt, idx,
+        org_id, graph_id, rel_type, src_label, tgt_label, idx,
         *(_jsonb_or_scalar(c, v) for c, v in col_values.items()), json.dumps(tail),
+        *src_params, *tgt_params,
     ]
-    placeholders = ", ".join(["%s"] * len(columns_))
     updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in [*col_values, "props"])
-    statements.append(Statement(
+    return [Statement(
         f"INSERT INTO public.relation ({', '.join(columns_)}) "
-        f"VALUES ({placeholders}) "
+        f"SELECT {select_list} FROM {src_select}, {tgt_select} "
         "ON CONFLICT (org_id, graph_id, rel_type, src_label, src_key, "
         f"tgt_label, tgt_key, idx) DO UPDATE SET {updates}",
         tuple(params),
-    ))
-    return statements
+    )]
 
 
 def _relation_delete_statement(
@@ -1252,11 +1320,21 @@ class ReplayReport:
 
 def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
            graph_id: str) -> ReplayReport:
-    """Replay a journal into the record, in ONE transaction.
+    """Replay a journal into the record, on the CALLER's transaction.
 
     `§3`: *"One transaction covers the journal and its projection — no dual
-    write between them."* The connection is any DB-API 2.0 connection; this
-    module does not choose the driver (the chokepoint, `#7951`, does).
+    write between them."* The transaction that invariant names spans the journal
+    APPEND and this projection, and this module does not perform the append —
+    the chokepoint (`#7951`, Interface C) does. Only the caller can therefore
+    own the boundary: a `commit()` here would commit the projection ALONE and
+    leave the append and the record in two transactions, which is the dual
+    write §3 forbids. `replay()` executes the plan on `conn` and neither commits
+    nor rolls back; the caller commits on success and rolls back on failure, and
+    an exception propagates with the caller's transaction still open.
+
+    It is the companion of :func:`replay_plan`, not an alternative to it: the
+    chokepoint may use either, because the transaction boundary lives on the
+    caller's side in both.
 
     IDEMPOTENCE. Every emitted mutation is absolute: an upsert writes the same
     values onto the same row, a patch writes the same values, a delete finds
@@ -1271,13 +1349,8 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     """
     plan = replay_plan(records, org_id=org_id, graph_id=graph_id)
     cursor = conn.cursor()
-    try:
-        for statement in plan:
-            cursor.execute(statement.sql, statement.params)
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+    for statement in plan:
+        cursor.execute(statement.sql, statement.params)
     report = ReplayReport(events=len(records), statements=0)
     for statement in plan:
         if _JOURNAL_INSERT_PREFIX in statement.sql:

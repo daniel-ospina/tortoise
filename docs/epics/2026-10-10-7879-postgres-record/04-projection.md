@@ -80,21 +80,37 @@ Interface A states four properties, and the failure each one prevents:
    `ON CONFLICT (org_id, graph_id, seq) DO NOTHING`.
 6. **`public.node_identity` first, always** — the `(label, key)` FK parent, which
    is what makes Interface E enforceable rather than conventional (S6).
+7. **Edge endpoints are RESOLVED, never minted.** An `EntityLinked` endpoint is
+   addressed by the journal `id` (the fold's own `MATCH (t:{label} {id:$tid})`),
+   but `relation.src_key`/`tgt_key` are composite FKs into `node_identity`, whose
+   key is the label's canonical key (`Object`/`Subject`→`name`, `Source`→`url`,
+   `Point`/`Session`→`id`, `Event`→`event_id`). The projection joins the node row
+   by `id` and takes its `node_key`; an endpoint with no row lands **no relation
+   at all** — the fold's own `"absent"` verdict, not a phantom identity the hard
+   delete can never reach.
+8. **The caller owns the transaction.** `replay_plan()` materializes, `replay()`
+   executes on the caller's connection and **does not commit or roll back**: §3's
+   one transaction spans the journal *append* (the chokepoint, `#7951`, not this
+   module) and this projection, so only the caller can own its boundary.
 
 ### 0.4 Verification
 
-* `tests/test_record_projection.py` — 57 hermetic tests (no DB): totality against
+* `tests/test_record_projection.py` — 66 hermetic tests (no DB): totality against
   the graph fold's own dispatch vocabulary, the producers' own emit sites
   (including the `_*_RECORD_TYPE` constants — so a NEW producer reds the suite),
   and `log.py`'s torn-tail-harmless classification; the
   carve-out proven by the projection's **output** rather than by its intent;
   every PRIMARY property storable (the "record poorer than the history" failure);
-  idempotence by statement shape; the `(label, key)` refusals.
+  idempotence by statement shape; the `(label, key)` refusals; and the edge
+  endpoints resolved to the label's canonical key (an `id != name` Object link
+  and an absent endpoint, both against the real producer shape).
 * `supabase/tests/pglite/validate.mjs` — **the DB half of S1, on a real
-  Postgres.** A committed 32-record journal fixture covering the whole declared
+  Postgres.** A committed 39-record journal fixture covering the whole declared
   vocabulary is replayed against the migrated schema **twice**, in one
   transaction per replay, and the tables are compared byte for byte; the EP
-  scalars the journal carries are asserted absent from the stored rows; and an
+  scalars the journal carries are asserted absent from the stored rows; an
+  `EntityLinked` to an `id != name` Object is asserted to resolve to the
+  `name`-keyed row and to disappear with it on hard delete; and an
   undeclared record type is asserted to **fail** the replay.
 * `python tools/ci_selection.py --integrity` — the new test is registered where
   its inputs select (`core`), so a projection-only or migration-only change runs it.
