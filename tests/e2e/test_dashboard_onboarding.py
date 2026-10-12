@@ -384,7 +384,10 @@ def _wait_until(fn, *, timeout_ms: int = 5_000, message: str = "") -> None:
 def _mint_from_connect(page: Page) -> None:
     """#2710: the documented connect-step path — mint from inside the wizard."""
     page.get_by_role("button", name="Create an API key").click()
-    expect(page.locator(".wizard-prompt-card")).to_be_visible(timeout=10_000)
+    # #3232: the DEFAULT leaf (Claude Code) now renders TWO prompt cards
+    # (set up + restart/verify), so this wait must name the first — a bare
+    # locator is a Playwright strict-mode violation on any two-block leaf.
+    expect(page.locator(".wizard-prompt-card").first).to_be_visible(timeout=10_000)
 
 
 def _expect_left_wizard(page: Page) -> None:
@@ -441,7 +444,11 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     # The pasted durable key is accepted (row-truth match) → the keyed leaf now
     # renders its setup prompt (procedure step 2) and the wizard can advance.
     expect(page.locator(".wizard-prompt-card").first).to_be_visible(timeout=5_000)
-    expect(page.get_by_role("button", name="I've set it up — Continue →")).to_be_visible(timeout=5_000)
+    # #3232: the default Claude Code leaf now renders the restart/verify block, so
+    # its advance reads "Done — Continue to dashboard" (the same group as
+    # Pi/Cursor); the single-block "I've set it up" label is for leaves with no
+    # second part.
+    expect(page.get_by_role("button", name="Done — Continue to dashboard")).to_be_visible(timeout=5_000)
     page.get_by_role("button", name="Skip for now").click()
     # STEP 3: done — the wizard REPORTS what the server observed; NO
     # `harness-connected` write and NO onboarding_complete PATCH (the node's
@@ -573,7 +580,8 @@ def test_owner_connect_step_mints_never_expiring_key_in_flow(page: Page) -> None
     # the wizard cannot reach Connected. The deleted human writer is exactly
     # what used to make this pass as a false positive, so this control is the
     # direct test of the fix.
-    page.get_by_role("button", name="I've set it up — Continue →").click()
+    # #3232: Claude Code is a two-block leaf now — its advance reads "Done …".
+    page.get_by_role("button", name="Done — Continue to dashboard").click()
     # #3428 (lane B3, review cycle 1 P1-3): scope the exit evidence to the
     # VISIBLE final screen. review cycle 6 (item 2): "No connection observed
     # yet" is also text inside the sr-only step announcement (clipped, not
@@ -1085,11 +1093,15 @@ def test_3218_multi_part_procedures_render_a_numbered_step_three(page: Page) -> 
     assert titles[0].endswith("Add the Claude Web connector"), titles
     assert titles[1].endswith("Give Claude the Tortoise workflows"), titles
 
-    # Claude Code is a single-prompt flow — the circles stay (1, 2).
+    # #3232: Claude Code joins the two-part shape — 1 key → 2 Set up Claude
+    # Code → 3 Restart Claude Code and verify. Before this it was a SINGLE
+    # prompt whose tail asked for `tortoise_health` / `tortoise_create_point` in
+    # the session that wrote the MCP config, i.e. before any restart could load
+    # the server, so the verify could not succeed.
     page.get_by_role("button", name="Claude Code").click()
     titles = page.locator(".wizard-block-title").all_inner_texts()
-    assert len(titles) == 2, f"Claude Code stays at two numbered blocks, got {titles}"
-    assert titles[1].endswith("Set up Claude Code"), titles
+    assert len(titles) == 3, f"Claude Code must render three numbered blocks, got {titles}"
+    assert titles[2].endswith("Restart Claude Code and verify"), titles
 
 
 def test_3218_key_row_states_the_visibility_window(page: Page) -> None:
