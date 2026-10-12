@@ -43,8 +43,8 @@ that holds a **JS-readable, parent-domain** session cookie (`sb-tortoise-auth-to
 | The page mints session material client-side | `supabaseClient.auth.signInWithPassword` / `signInWithOAuth`, `oauth.py:2380-2560` |
 | The page reads the session back out of the cookie | `storage: cookieStorage, storageKey: COOKIE_NAME`, `oauth.py:2198-2199` |
 | The page POSTs the raw `access_token` as a bearer | `/oauth/consent` `oauth.py:2578-2585`; `/oauth/consent/preview` `oauth.py:2256-2262` |
-| The AS accepts **only** that bearer — it has no other identity source | `verify_session_jwt(request)` (`session_auth.py:588-643`) reads `request.headers["Authorization"]` and nothing else |
-| `/oauth/authorize` carries **no** identity | `hosted_api.py:34756` — the authorize handler reads query params only |
+| The AS accepts **only** that bearer — it has no other identity source | `verify_session_jwt(request)` (`session_auth.py:588-643`) reads `request.headers.get("Authorization", "")` (`:600`) and nothing else |
+| `/oauth/authorize` carries **no** identity | `hosted_api.py:34756-34757` — the authorize handler reads query params only |
 
 Under the BFF the browser holds one credential it cannot read: a host-only `__Host-session` cookie on
 `app.premiselabs.co`. It is **not sent to `api.premiselabs.co`** (host-only by definition, `SCOPE.md` §4 W6
@@ -170,7 +170,7 @@ consolidation dropped their citation block. Confirmed against today's code:
 
 | # | Property (`SCOPE.md` §4 W3) | Authoritative anchor (CONFIRMED) | Server-side equivalent that exists today | Gap |
 |---|---|---|---|---|
-| 1 | **single-flight** — one in-flight auth attempt per flow, the others await it | `oauth.py:2287` (`let previewInFlight`), `oauth.py:2389` (`if (previewInFlight) return previewInFlight;`), `oauth.py:2411` | `token.ts:169-176` — CAS `… AND refresh_token = ?5`; the loser **re-reads the winner's token** instead of clobbering it | none |
+| 1 | **single-flight** — one in-flight auth attempt per flow, the others await it | `oauth.py:2287` (`let previewInFlight`), `oauth.py:2389` (`if (previewInFlight) return previewInFlight;`), `oauth.py:2411` | `token.ts:169-176` — CAS `… AND refresh_token = ?5` (`:170`); `token.ts:181-190` — the loser **re-reads the winner's token** instead of clobbering it | none |
 | 2 | **refresh-once** — a refresh must not be issued twice concurrently | `oauth.py:2289` (`staleRefreshes`), `:2392`, `:2397-2405` (≤1 per stale cycle) | `token.ts:77-104` (`invalidateCachedToken`, `cooldownMs = 30_000`) + the 60 s `REFRESH_SKEW_MS` cache (`token.ts:30`, used `:145`) | none |
 | 3 | **never-sign-out** — a transient failure must never clear the session (the #3485 class) | `oauth.py:2296` (*"NEVER call the auth logout API here"*; function at `:2295`), `:2409` (`showExpiredSignin`, never a refresh-token revoke) | `token.ts:126-142` — `no_session` (401) and `unavailable` (503) kept distinct (`:128`, `:131`, `:142`); `token.ts:154-158` — a `403`/`404`/`400` from the provider is **infrastructure**, not a dead session (`isRefreshTokenDead(refreshed.status, refreshed.error)`) | none |
 | 4 | **auto-advance** — progress the flow without requiring a manual click | `oauth.py:2796-2805` (`onAuthStateChange` `INITIAL_SESSION`/`SIGNED_IN` → `runConsentFlow`), with the in-flight guard held across the stale cycle (`:2400-2405`) | **none — this is the property the bridge changes** | the bridge replaces the event with a deterministic state: one credentialed mint call decides *signed-in* vs *go to `/auth?next=…`*, and the return to the consent URL **is** the advance. There is no session-change event to wait on, so "the user must not have to reload" becomes a property of the redirect chain, not of a listener. |
@@ -202,7 +202,7 @@ The mint requires the browser to reach the session origin even though the consen
 
 - **Same-origin:** the endpoint is built from the *serving* origin, so it is never cross-origin to the
   issuer — and it cannot become so, because both derive from the same `base`.
-- **Not inert:** `GET /oauth/authorize` (`hosted_api.py:34756`) is a live handler that validates the client
+- **Not inert:** `GET /oauth/authorize` (`hosted_api.py:34756-34757`) is a live handler that validates the client
   and the redirect URI before rendering (`validate_authorize_params`), and it is the URL clients actually
   discover and use.
 - **Unchanged by this issue:** the bridge leaves the page's *location* alone, so `authorization_endpoint`
@@ -210,8 +210,8 @@ The mint requires the browser to reach the session origin even though the consen
   token shape is preferred over the relocate-UI shape, which would have made the endpoint a cross-origin
   redirect target.
 - **Guard:** `tests/test_oauth_consent_bridge.py::test_rfc8414_authorization_endpoint_stays_same_origin`
-  pins all four facts (same origin as `issuer`, exact path, identical value from both well-known routes,
-  and still the live handler), so a future `base` change cannot silently cross the origins.
+  pins the same-origin, exact-path and trailing-slash cases, plus that both well-known routes still
+  carry their decorator, so a future `base` change cannot silently cross the origins.
 
 ## 6. Task 5 — sign-in fallback origin: **NOT allowlisted, and the record is what is wrong**
 
@@ -253,7 +253,7 @@ bridge plus the page rewrite. Deleted by this issue when the bridge lands (not b
 | Item | Where |
 |---|---|
 | the inline `cookieStorage` adapter + the aux-store probe chain | `oauth.py:2097-2255` |
-| `COOKIE_NAME`/`COOKIE_DOMAIN`/`COOKIE_PATH`/`SIZE_GUARD`/`SIZE_CAP` and both `document.cookie` writers | `oauth.py:2017-2040`, `:2179`, `:2189` |
+| `COOKIE_NAME`/`COOKIE_DOMAIN`/`COOKIE_PATH`/`SIZE_GUARD`/`SIZE_CAP` and both `document.cookie` writers | `oauth.py:2001-2024` (`:2001`, `:2016`, `:2017`, `:2018`, `:2024`), `:2179`, `:2189` |
 | the supabase-js CDN `<script>` + `createClient` + `flowType: "pkce"` + `detectSessionInUrl` | `oauth.py:1975-1977`, `:2196-2206` |
 | `pkceIncapable`/`CAPABILITY`/`renderCapability`, the provider + email sign-in handlers, `showTerminalFallback`, `sanitiseUrl`, `loadParams`/`LOAD_TRANSIENT` | `oauth.py:2401-2805` |
 | `onAuthStateChange` (property 4's anchor) | `oauth.py:2796` |
