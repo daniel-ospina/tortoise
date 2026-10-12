@@ -213,6 +213,60 @@ def registered_source_types() -> frozenset[str]:
 # (#4626 / #2766 / #5322)
 CORE_PREDICATES = frozenset({"IMPL", "NAND"})
 
+# ── Layer 2 — the semantics vocabulary (ONTOLOGY §8, #7852) ──────────────
+# A relation has three layers: `mechanism` (how it acts — IMPL/NAND) +
+# `direction` (which way it runs), `semantics` (what it MEANS), and the
+# `predicate` (the specific verb). The semantics vocabulary is **CLOSED** —
+# core is canonical and a pack aligns to it, so a value outside this set is a
+# typo, never a new meaning, and validation names the valid alternatives
+# (warn-not-block, per W2 — see `_validate`).
+#
+# A value is chosen by the CO-VARIANCE TEST: does the relationship make the
+# two ends' confidence move together? `SEMANTICS_DIRECTIONS` records the one
+# the value carries; the two sets are pinned equal, so a value cannot be added
+# without stating the direction it records.
+SEMANTICS_VALUES = frozenset({
+    # epistemic — confidence moves along the edge
+    "addresses", "supports", "refutes", "causes",
+    "mutuallySupportive", "mutuallyExclusive",
+    # structural / neutral
+    "hasPart", "dependsOn", "transacts", "related",
+    # core structural rows (ONTOLOGY §3.6) a pack may name as a meaning
+    "ownedBy", "managedBy",
+})
+
+# The direction each ruled semantics value records (ONTOLOGY §8, #7852):
+# `->` source→target, `<-` target→source, `<->` both ways, `-` none (the
+# connection exists and NO confidence transfers — direction and
+# confidence-transfer are one axis). Every value in `SEMANTICS_VALUES` appears
+# here — the two sets are pinned equal by a test, so a value cannot be added
+# without stating the direction it records.
+SEMANTICS_DIRECTIONS: dict[str, str] = {
+    "addresses": "->",
+    "supports": "->",
+    "refutes": "->",
+    "causes": "->",
+    "dependsOn": "->",
+    "ownedBy": "->",
+    "managedBy": "->",
+    "mutuallySupportive": "<->",
+    "mutuallyExclusive": "<->",
+    "hasPart": "<->",
+    "transacts": "-",
+    "related": "-",
+}
+
+# Values shipped packs still declare, ruled to collapse onto the core
+# vocabulary. Recognised (never an error, so a pack is not dropped
+# mid-transition) and warned naming the canonical word. The pack alignment
+# is #7848; no NEW declaration should use a key of this map.
+SEMANTICS_TRANSITION: dict[str, str] = {
+    "opposes": "mutuallyExclusive",
+    "produces": "causes",
+    "holds": "ownedBy",
+    "funds": "transacts",
+}
+
 # ── Manifest v3.1 (epic #909 §1.4/§1.5): extraction behaviour slots (#1026) ──
 # Per-pack slots that let a pack shape extraction for its own domain while the
 # engine stays pack-agnostic: the pack drives the extractor, the extractor holds
@@ -877,6 +931,66 @@ class PackRegistry:
                         f"relation '{pred}': 'extractable' must be a boolean"
                     )
 
+                # Layer 2 (#7852, W2): the semantics vocabulary is CLOSED and
+                # every declared value is checked against it —**warn-not-block**,
+                # the contract W2 states and the repo's own precedent for an
+                # open-vocabulary path (#1934). An out-of-vocabulary or retired
+                # word, and a missing meaning, are warned WITH the valid
+                # alternatives; none of them drops the pack (a refusal would
+                # drop every pack that shares its kinds). The only hard error is
+                # a shape error — a non-string value, which no vocabulary can
+                # express.
+                if "semantics" in rel:
+                    semantics = rel.get("semantics")
+                    if not isinstance(semantics, str) or not semantics:
+                        errors.append(
+                            f"relation '{pred}': 'semantics' must be a non-empty "
+                            f"string"
+                        )
+                    elif semantics in SEMANTICS_TRANSITION:
+                        _warn_packs_once(
+                            ("relation-semantics-transition", ns, semantics),
+                            "relation '%s': semantics %r is retired in favour of "
+                            "%r (ONTOLOGY §8, #7852) — packs align to the core "
+                            "vocabulary (#7848)",
+                            pred, semantics, SEMANTICS_TRANSITION[semantics],
+                        )
+                    elif semantics not in SEMANTICS_VALUES:
+                        # An OUT-OF-VOCABULARY word is flagged, never refused.
+                        # W2's contract is warn-not-block (the repo's own
+                        # precedent for an open-vocabulary write path, #1934):
+                        # a refusal here would drop the pack — and the packs
+                        # that share its kinds — on a single typo.
+                        _warn_packs_once(
+                            ("relation-semantics-unknown", ns, semantics),
+                            "relation '%s': semantics %r is not in the core "
+                            "vocabulary (ONTOLOGY §8, #7852) — valid values: %s",
+                            pred, semantics, ", ".join(sorted(SEMANTICS_VALUES)),
+                        )
+                else:
+                    # A missing meaning is flagged, never refused, in a
+                    # transitional pack: completeness of the vocabulary is the
+                    # target and a pack mid-alignment must keep loading.
+                    _warn_packs_once(
+                        ("relation-semantics-missing", ns, pred),
+                        "relation '%s' declares no semantics — the Layer-2 "
+                        "meaning (ONTOLOGY §8, #7852); valid values: %s",
+                        pred, ", ".join(sorted(SEMANTICS_VALUES)),
+                    )
+
+                # #7852: `nearMisses` names the sibling predicates/semantics a
+                # relation is confused with, mirroring kindDefs (R6
+                # §3.1/§3.5). SHAPE is checked here; RESOLUTION is cross-pack,
+                # after every pack is loaded.
+                if "nearMisses" in rel:
+                    nms = rel.get("nearMisses")
+                    if (not isinstance(nms, list)
+                            or any(not isinstance(n, str) or not n for n in nms)):
+                        errors.append(
+                            f"relation '{pred}': 'nearMisses' must be a list of "
+                            f"non-empty strings"
+                        )
+
             # Validate hierarchies
             hierarchies = ont.get("hierarchies", [])
             if not isinstance(hierarchies, list):
@@ -1353,6 +1467,16 @@ class PackRegistry:
                 _ns, kind = full.split(":", 1)
                 bare_index.setdefault(kind, []).append(full)
 
+        # The relation nearMisses universe (#7852): a relation may be confused
+        # with another predicate or with another semantics value, so both are
+        # valid targets. Predicates are declared and matched BARE by contract
+        # (#2030), so a target is bare too.
+        all_predicates = set(CORE_PREDICATES) | set(SEMANTICS_VALUES)
+        for _ns, _pack in self.packs.items():
+            all_predicates.update(
+                r.get("predicate") for r in _pack.relations if r.get("predicate")
+            )
+
         # Check every relation's fromKind/toKind
         for ns, pack in self.packs.items():
             for rel in pack.relations:
@@ -1368,6 +1492,18 @@ class PackRegistry:
                             f"(core or loaded pack)"
                         )
                         self.errors.setdefault(ns, []).append(msg)
+
+                # #7852: every relation nearMisses target resolves to a
+                # declared predicate or a semantics value — the same split
+                # kindDefs uses (shape per-manifest, resolution here, because a
+                # bare name is not decidable from one manifest alone).
+                for target in rel.get("nearMisses", []) or []:
+                    if target not in all_predicates:
+                        self.errors.setdefault(ns, []).append(
+                            f"relation '{pred}': nearMisses target '{target}' does "
+                            f"not resolve to any declared predicate or semantics "
+                            f"value (core or loaded pack)"
+                        )
 
             # Check every equivalentTo target resolves
             for kind, targets in pack.kind_equivalences.items():
@@ -1737,6 +1873,13 @@ class PackRegistry:
                     entry["to"] = r.get("to")
                 if r.get("cardinality"):
                     entry["cardinality"] = r["cardinality"]
+                # Layer 2 (#7852): the MEANING a relation declares, and the
+                # siblings it is confused with. Declared-only today — the
+                # declaration is what the vocabulary is validated against.
+                if r.get("semantics"):
+                    entry["semantics"] = r["semantics"]
+                if r.get("nearMisses"):
+                    entry["nearMisses"] = list(r["nearMisses"])
                 relations.append(entry)
         return relations
 
