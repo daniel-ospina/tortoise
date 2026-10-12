@@ -1388,21 +1388,35 @@ function claimIntentInFlight() {
   // #2426: the show-once card's authoritative server echo of the minted
   // key's expiry (ISO string, or null = Never). Cleared wherever newKey is.
   const [newKeyExpiresAt, setNewKeyExpiresAt] = React.useState(null)
-  // #2735: rotate's one-time replacement reveal — {plaintext, expiresAt}.
+  // #2735: rotate's one-time replacement reveal — per team since #4429, one
+  // record per team that rotated a key: {plaintext, expiresAt, warning}.
   // DELIBERATELY separate state from newKey/newKeyExpiresAt (the create
   // modal's key): opening and cancelling the create modal must never destroy
   // an unread rotate replacement whose old key is already revoked (#2392
-  // class "a click must not destroy the one-time secret"). Cleared on the
-  // reveal's own Copy & done and on logout/team switch.
-  const [rotatedKey, setRotatedKey] = React.useState(null)
-  // #4355: the rotate partial-state disclosure. `POST /v1/team/keys/{id}/rotate`
-  // creates the replacement FIRST and then CLAIM-revokes the old row; when the
+  // class "a click must not destroy the one-time secret").
+  //
+  // WHY IT IS KEYED BY TEAM, AND WHY A SWITCH NO LONGER CLEARS IT (#4429).
+  // Rotate is a DESTRUCTIVE server call: `POST /v1/team/keys/{id}/rotate` mints
+  // the replacement and revokes the displaced row in ONE operation (#4355),
+  // and its response is the ONLY delivery of the replacement's plaintext
+  // (hash-only server-side — "shown once"). A team switch across that RTT used
+  // to hit the stale-response guard and drop the plaintext, so the old key was
+  // revoked AND the replacement was unrecoverable: the user lost a working
+  // credential and got nothing. The outcome is now tagged with the team that
+  // owns it and RETAINED, and the derive block below is the single reader that
+  // scopes it — a record renders only for its own team, so retention can never
+  // put one team's plaintext under another team's header. Cleared on the
+  // record's own Copy & done (the plaintext only — `warning` is not a secret)
+  // and on logout.
+  //
+  // #4355: the `warning` half is the partial-state disclosure. When the
   // destructive leg could not be completed AND its rollback also failed, the
   // response carries `replaced_revoked:false` + a `warning` and BOTH keys are
-  // live. That is a state the user has to act on (the "what is live" surfaces
-  // and the count are now one too high), so it gets its own persistent notice
-  // rather than riding the transient `error` slot that `loadAll` overwrites.
-  const [rotateNotice, setRotateNotice] = React.useState('')
+  // live — a state the user has to act on (the "what is live" surfaces and the
+  // count are now one too high), so it gets its own persistent notice rather
+  // than riding the transient `error` slot that `loadAll` overwrites. It rides
+  // this record so a team switch cannot silently drop it either.
+  const [rotateOutcomes, setRotateOutcomes] = React.useState({})
   // key-create modal state
   const [keyModalOpen, setKeyModalOpen] = React.useState(false)
   const [keyModalBusy, setKeyModalBusy] = React.useState(false)
@@ -4954,8 +4968,9 @@ function claimIntentInFlight() {
     setNewKeyExpiresAt(null) // #2426: expiry echo rides the show-once card
     // #4330 (review cycle 2, P2): the dialog's cap notice is per-session data.
     setKeyModalCapNotice('')
-    setRotatedKey(null) // #2735: the rotate reveal is one-time plaintext — never survives logout
-    setRotateNotice('') // #4355: the rotate partial-state notice belongs to the old user's keys
+    // #4429: the rotate outcomes belong to the old user. (A team switch
+    // deliberately does NOT clear them — see `switchTeam`.)
+    setRotateOutcomes({})
     // #1082: clear the claim intent on logout (a stale pasted key must not
     // auto-claim the next user's session).
     setClaimKey('')
@@ -5653,8 +5668,15 @@ function claimIntentInFlight() {
     setBackupsStatus('loading') // #1923: mirror the backupInfo reset
     setNewKey(null)        // Round-16: the plaintext key card was shown once on the old team
     setNewKeyExpiresAt(null) // #2426: expiry echo rides the show-once card
-    setRotatedKey(null)    // #2735: the rotate reveal is one-time plaintext — never survives a team switch
-    setRotateNotice('')    // #4355: a partial-state warning is about THIS team's keys — never the new team's
+    // #4429: `rotateOutcomes` is deliberately NOT cleared by a team switch —
+    // the two clears that used to sit here are gone. A rotate is destructive
+    // server-side and its response is the only delivery of the replacement's
+    // plaintext, so an outcome retained for the team we are leaving must
+    // outlive the switch: that retention IS the fix for a switch landing
+    // mid-RTT (the old key is revoked, and the secret would otherwise be
+    // destroyed with it). The outcome is team-keyed and renders only on the
+    // team that owns it (`rotateOutcomeFor`), so it cannot leak into the new
+    // team's header, and it is cleared on logout and on its own Copy & done.
     setNewKeyName('')      // key-label: a typed label must not leak onto another team's mint
     setNewKeyExpiryDate('') // #2426: a picked Custom date must not leak onto another team's mint
     setEditingKeyId(null)  // key-label: close any in-flight inline rename across teams
@@ -6658,13 +6680,31 @@ function claimIntentInFlight() {
     return revealablePlaintext(response && response.key) || revealablePlaintext(response && response.api_key)
   }
 
+  // #4429: the rotate outcome OF THE ACTIVE TEAM — the ONE reader that scopes
+  // the retained per-team outcomes to the team that owns them. Every consumer
+  // of a rotate outcome goes through here (the reveal, its expiry, the
+  // partial-state notice) and nothing else reads `rotateOutcomes`, so a switch
+  // can retain an outcome without any surface ever rendering it under the
+  // wrong team's header.
+  function rotateOutcomeFor(outcomes, orgId) {
+    if (!outcomes || !orgId) return null
+    return outcomes[orgId] || null
+  }
+
+  const rotateOutcome = rotateOutcomeFor(rotateOutcomes, currentOrgId)
+
   // #4342: the rotate replacement's key, derived ONCE for the same reason as
   // `newKeyReveal` above — the reveal renders iff this is a non-empty string,
-  // so a falsy `rotatedKey.plaintext` can never produce the empty `.key-value`
-  // box and is never handed to `navigator.clipboard.writeText`. `regenerateKey`
-  // already refuses to latch a plaintext-less mint (the old key is revoked by
-  // then); this is the render-side half of that same guard.
-  const rotatedKeyReveal = (rotatedKey && revealablePlaintext(rotatedKey.plaintext)) || ''
+  // so a falsy `rotateOutcome.plaintext` can never produce the empty
+  // `.key-value` box and is never handed to `navigator.clipboard.writeText`.
+  // `regenerateKey` already refuses to latch a plaintext-less mint (the old key
+  // is revoked by then); this is the render-side half of that same guard.
+  const rotatedKeyReveal = (rotateOutcome && revealablePlaintext(rotateOutcome.plaintext)) || ''
+
+  // #4355/#4429: the partial-state disclosure, from the same team-scoped
+  // record — reading it through `rotateOutcome` is what keeps a retained
+  // warning from surfacing on a team whose keys it does not describe.
+  const rotateNoticeText = (rotateOutcome && rotateOutcome.warning) || ''
 
   // #4330: Done dismisses the reveal — the key is already live and listed; this
   // only drops the browser's last copy of the plaintext. Guarded so a click
@@ -6711,9 +6751,11 @@ function claimIntentInFlight() {
     // revoke), so the client no longer has a window between the two legs. What
     // it keeps is the stale-response rule below: a team switch during the RTT
     // must not land this team's reveal (or its warning) under the new team's
-    // header. The replacement is still never installed into the browser (no
-    // localStorage/teamKeysRef/apiKey write) — it is shown once via
-    // `setRotatedKey`, and the old key is revoked by the same call (#2246).
+    // header. #4429: the guard scopes what renders, it no longer DISCARDS the
+    // outcome — the latch sits before it, keyed by the owning team. The
+    // replacement is still never installed into the browser (no
+    // localStorage/teamKeysRef/apiKey write) — it is delivered once through
+    // `rotateOutcomes`, and the old key is revoked by the same call (#2246).
     if (busy) return
     const row0 = (keys || []).find((k) => (k.id || k.key_id) === keyId)
     const rowName = (row0 && row0.name) || 'this API key'
@@ -6761,21 +6803,47 @@ function claimIntentInFlight() {
         useSession: true,
         body: JSON.stringify(rbody),
       })
-      // #4342/#4355: the single call has already revoked the old key AND (when
-      // it could) revoked the displaced row — so a team switch across this RTT
-      // must not land the reveal or the partial-state notice under the new
-      // team's header. Bail after reloading the true state instead.
+      // #4429: the single call has already minted the replacement AND revoked
+      // the displaced row, so THIS response is the only delivery of the
+      // replacement's plaintext (hash-only server-side — "shown once"). The
+      // outcome is therefore latched BEFORE the team-identity guard, tagged
+      // with the team that owns it: a switch across this RTT must never discard
+      // a secret the server can no longer hand out again. Retention is safe
+      // because the derive block's `rotateOutcomeFor` is the only reader — a
+      // retained outcome renders on its own team's surface and nowhere else.
+      //
+      // The identity guard below still governs every CROSS-TEAM write: the
+      // refusal names THIS team's row, the prefix clear reads THIS team's held
+      // plaintexts, and `loadAll` refreshes THIS team's key list — none of
+      // those may land on the new team.
+      const plaintext = revealableMintPlaintext(mk)
+      if (plaintext) {
+        // #4355: the server states whether the displaced row was actually
+        // revoked. When the destructive leg could not be completed AND its
+        // rollback also failed, BOTH keys are live — the server still returns
+        // the live replacement's plaintext (the only alternative is losing a
+        // live secret) and a warning. It rides the outcome so a switch cannot
+        // drop it, and it is disclosed on the owning team's surface only.
+        const warning = (mk && mk.warning) ? String(mk.warning) : ''
+        // Functional update: a latch for ANOTHER team must not wipe an outcome
+        // retained for a third one, and a concurrent rotate on this team must
+        // not lose this latch to a stale closure.
+        setRotateOutcomes((prev) => ({
+          ...prev,
+          [_teamAtCall]: { plaintext, expiresAt: (mk && mk.expires_at) || null, warning },
+        }))
+      }
+      // A stale response may not write anything that renders under the new
+      // team's header (the refusal below, the prefix clear, the refresh).
       if (orgIdRef.current !== _teamAtCall) return
       // #4342: a 2xx rotate that carries no revealable plaintext is NOT a
       // reveal. The secret is unrecoverable at this point AND the old key was
       // revoked by the call above, so the only honest outcome is to say so —
-      // never to latch `rotatedKey` with a falsy (or non-string, or blank)
-      // plaintext, which rendered an empty `.key-value` box whose copy wrote
-      // the empty string (the #4330 class on the rotate surface; `mintGraphKey`
-      // and `createKey` already refuse the falsy case). The remedy is
-      // rotate-specific: create cannot lose a live credential, rotate already
-      // has.
-      const plaintext = revealableMintPlaintext(mk)
+      // never to latch a falsy (or non-string, or blank) plaintext, which
+      // rendered an empty `.key-value` box whose copy wrote the empty string
+      // (the #4330 class on the rotate surface; `mintGraphKey` and `createKey`
+      // already refuse the falsy case). The remedy is rotate-specific: create
+      // cannot lose a live credential, rotate already has.
       if (!plaintext) {
         // Refresh FIRST, then surface the reason: `loadAll` owns the same
         // `error` slot and overwrites it from its own catch, so a compound
@@ -6789,31 +6857,24 @@ function claimIntentInFlight() {
         setError(`The server did not return the replacement key\u2019s value, so it cannot be shown. ${rowName} has already been revoked, so applications using the old key have stopped working. Refresh the list, revoke the unused replacement row, and create a new key.`)
         return
       }
-      // #4355: the server states whether the displaced row was actually
-      // revoked. When the destructive leg could not be completed AND its
-      // rollback also failed, BOTH keys are live — the server still returns
-      // the live replacement's plaintext (the only alternative is losing a
-      // live secret) and a warning. Surface it as its own persistent notice:
-      // this is a state the user has to clean up, and it is exactly what the
-      // other "what is live" surfaces now over-count by one.
-      setRotateNotice(mk && mk.warning ? String(mk.warning) : '')
       // #2246 (review, P2)/#4355: the SAME row-truth prefix clear `revokeKey`
       // performs. The server revoked the displaced row inside this call, so an
       // in-memory welcome/connect plaintext belonging to THAT row must not
       // outlive it — otherwise the overview "live" claim and the connect
       // snippet keep embedding a credential this rotate just killed. (The
-      // rotate replacement itself is shown once via setRotatedKey and is never
-      // installed into the browser, so nothing else needs clearing.)
+      // rotate replacement itself is delivered once through `rotateOutcomes`
+      // above and is never installed into the browser, so nothing else needs
+      // clearing.)
       if (row0 && row0.key_prefix) {
         if (welcomeKey && welcomeKey.startsWith(row0.key_prefix)) setWelcomeKey('')
         if (wizardDurableKey && wizardDurableKey.startsWith(row0.key_prefix)) setWizardDurableKey('')
       }
       // #2246: no held install — the replacement is shown once and managed
-      // from the table like any other durable. #2735: its OWN reveal state
-      // (rotatedKey), never the create modal's newKey — the create modal's
-      // dismiss paths clear newKey, which would destroy this unread
-      // replacement (the old key is already revoked by this point).
-      setRotatedKey({ plaintext: plaintext, expiresAt: (mk && mk.expires_at) || null })
+      // from the table like any other durable. #2735: its OWN outcome state
+      // (`rotateOutcomes`), never the create modal's newKey — the create
+      // modal's dismiss paths clear newKey, which would destroy this unread
+      // replacement (the old key is already revoked by this point). #4429:
+      // latched above, BEFORE the identity guard — see the comment there.
       await loadAll('')
     } catch (e) {
       if (orgIdRef.current !== _teamAtCall) return // stale switch — not our state, not our error
@@ -6868,14 +6929,22 @@ function claimIntentInFlight() {
   // clipboard: the plaintext is read through the same type guard the reveal
   // gate uses, and a falsy read returns before the clipboard is touched.
   async function copyRotatedKey() {
-    const plaintext = rotatedKey ? revealablePlaintext(rotatedKey.plaintext) : ''
+    const plaintext = rotateOutcome ? revealablePlaintext(rotateOutcome.plaintext) : ''
     if (!plaintext) return
     try {
       // #2735: clear the one-time plaintext ONLY after the clipboard write
       // resolves. The old key is already revoked, so a failed write that still
       // cleared the reveal would destroy the only copy of the live replacement.
+      // #4429: clear THIS team's plaintext only, and only the plaintext — an
+      // outcome retained for another team is not this button's to destroy, and
+      // the partial-state `warning` is not a secret and must outlive the copy
+      // (it is the user's only notice that a key is still live).
       await navigator.clipboard.writeText(plaintext)
-      setRotatedKey(null)
+      setRotateOutcomes((prev) => {
+        const cur = prev[currentOrgId]
+        if (!cur) return prev
+        return { ...prev, [currentOrgId]: { ...cur, plaintext: '', expiresAt: null } }
+      })
     } catch {
       // Keep it visible + select it for a manual copy (mirrors revealKey's
       // fallback and copyNewKey's).
@@ -7008,8 +7077,8 @@ function claimIntentInFlight() {
       // prefix clear closes it. #4355 note: rotate no longer reaches here (it
       // is ONE call to /rotate, which revokes the displaced row server-side),
       // so `regenerateKey` performs this SAME prefix clear itself — the
-      // replacement is shown via setRotatedKey, and the welcome plaintext must
-      // not survive its own row's rotation.
+      // replacement is delivered through `rotateOutcomes`, and the welcome
+      // plaintext must not survive its own row's rotation.
       if (row0 && row0.key_prefix) {
         if (welcomeKey && welcomeKey.startsWith(row0.key_prefix)) setWelcomeKey('')
         if (wizardDurableKey && wizardDurableKey.startsWith(row0.key_prefix)) setWizardDurableKey('')
@@ -9874,16 +9943,19 @@ function claimIntentInFlight() {
             {/* #4330: the SAME notice component the create-key modal renders. */}
             {capNotice && <CapNotice text={capNotice} team={team} route={nudgeRoute(team)} checkoutPending={checkoutPending} billingPending={billingPending} onUpgrade={upgradeToPrice} onManage={manageBilling} />}
 
-            {/* #4355: the rotate partial-state disclosure. `replaced_revoked:false`
-                means the replacement was created but the displaced row could not
-                be revoked AND its rollback failed — BOTH keys are live, so the
-                count is one over what the user intended and the table lists a
-                key they meant to retire. Rendered as its own persistent notice
-                (not the transient `error` slot, which `loadAll` overwrites). */}
-            {rotateNotice && (
+            {/* #4355/#4429: the rotate partial-state disclosure, read from the
+                ACTIVE team's retained rotate outcome. `replaced_revoked:false`
+                means the replacement was created but the displaced row could
+                not be revoked AND its rollback failed — BOTH keys are live, so
+                the count is one over what the user intended and the table
+                lists a key they meant to retire. Rendered as its own
+                persistent notice (not the transient `error` slot, which
+                `loadAll` overwrites). The team scope is the outcome record's:
+                a switch retains the outcome but never renders it here. */}
+            {rotateNoticeText && (
               <p className="small" role="alert" data-rotate-notice
                  style={{ margin: '0 0 1rem', color: 'var(--warn, #b45309)' }}>
-                {rotateNotice}
+                {rotateNoticeText}
               </p>
             )}
 
@@ -9892,15 +9964,16 @@ function claimIntentInFlight() {
                 `.new-key` block — but regenerateKey still set newKey/
                 newKeyExpiresAt, so a rotate minted the replacement and then
                 never showed it (the user could not configure the new key).
-                Restored inline from its OWN state (rotatedKey), so the create
-                modal's dismiss paths (which clear newKey) can never destroy
-                this already-revoked-old-key replacement. */}
+                Restored inline from its OWN outcome state (`rotateOutcomes`),
+                so the create modal's dismiss paths (which clear newKey) can
+                never destroy this already-revoked-old-key replacement, and a
+                team switch can no longer destroy it either (#4429). */}
             {rotatedKeyReveal && (
               <div className="new-key">
                 <strong>Your new key (shown once):</strong>
                 <code className="key-value">{rotatedKeyReveal}</code>
-                {rotatedKey.expiresAt ? (
-                  <span className="dim">expires {fmtExpiryDate(rotatedKey.expiresAt)}</span>
+                {rotateOutcome.expiresAt ? (
+                  <span className="dim">expires {fmtExpiryDate(rotateOutcome.expiresAt)}</span>
                 ) : (
                   <span className="dim">never expires</span>
                 )}

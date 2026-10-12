@@ -58,13 +58,19 @@ test('#2735/#4342: the rotate copy clears only after the clipboard write succeed
   // non-empty string — the old inline `writeText(rotatedKey.plaintext)` could
   // run with '' (a silent no-op copy that then cleared the reveal).
   const body = fnBody('copyRotatedKey')
-  assert.match(body, /const plaintext = rotatedKey \? revealablePlaintext\(rotatedKey\.plaintext\) : ''/,
+  assert.match(body, /const plaintext = rotateOutcome \? revealablePlaintext\(rotateOutcome\.plaintext\) : ''/,
     'the copy must read the plaintext through the non-blank-string predicate')
   assert.match(body, /if \(!plaintext\) return/, 'a falsy plaintext must return before the clipboard')
   assert.match(body, /await navigator\.clipboard\.writeText\(plaintext\)/,
     'the rotate copy must await the clipboard write with the guarded string')
   assert.match(body, /catch \{[\s\S]{0,400}selectNodeContents/,
     'a failed write must keep the plaintext visible and select it for manual copy')
+  // #4429: the clear is team-scoped and clears the PLAINTEXT only — a retained
+  // outcome for another team is not this button's to destroy, and the
+  // partial-state warning is not a secret (clearing it would erase the user's
+  // only notice that a key is still live).
+  assert.match(body, /setRotateOutcomes\(\(prev\) => \{[\s\S]{0,160}\{ \.\.\.cur, plaintext: '', expiresAt: null \}/,
+    'the copy must clear only the active team\'s plaintext, keeping its warning')
   const start = mainJsx.indexOf('className="new-key"')
   assert.notEqual(start, -1, 'the rotate reveal block must exist')
   const block = mainJsx.slice(start, mainJsx.indexOf('</div>', start) + 6)
@@ -73,19 +79,25 @@ test('#2735/#4342: the rotate copy clears only after the clipboard write succeed
     'no raw writeText may remain inline in the reveal — the guarded function owns it')
 })
 
-test('#2735/#4342: rotate renders the one-time replacement reveal (regression guard)', () => {
+test('#2735/#4342/#4429: rotate renders the one-time replacement reveal (regression guard)', () => {
   // #2667 deleted the standalone `.new-key` block while regenerateKey kept
   // setting newKey — rotate minted the replacement and never showed it. The
-  // reveal now renders from its OWN `rotatedKey` state, so the create modal's
-  // dismiss paths (which clear newKey) can never destroy it.
+  // reveal now renders from its OWN per-team outcome state (`rotateOutcomes`),
+  // so the create modal's dismiss paths (which clear newKey) can never destroy
+  // it, and neither can a team switch (#4429).
   // #4342: the gate is the DERIVED non-empty string, not the raw object — a
   // falsy plaintext can no longer render an empty `.key-value` box.
-  assert.match(mainJsx, /const rotatedKeyReveal = \(rotatedKey && revealablePlaintext\(rotatedKey\.plaintext\)\) \|\| ''/,
+  // #4429: the derivation reads the outcome through `rotateOutcomeFor`, which
+  // resolves the ACTIVE team's record — the retained outcome of another team
+  // can never render here.
+  assert.match(mainJsx, /const rotatedKeyReveal = \(rotateOutcome && revealablePlaintext\(rotateOutcome\.plaintext\)\) \|\| ''/,
     'the rotate reveal must be gated on a non-empty, non-blank plaintext string (#4342)')
+  assert.match(mainJsx, /const rotateNoticeText = \(rotateOutcome && rotateOutcome\.warning\) \|\| ''/,
+    'the partial-state notice must render from the same team-scoped outcome (#4429)')
   assert.match(mainJsx, /\{rotatedKeyReveal && \(/,
     'the rotate reveal must render from the derived non-empty reveal')
-  assert.match(mainJsx, /setRotatedKey\(\{ plaintext: plaintext,/,
-    'regenerateKey must set the rotate reveal from the mint response')
+  assert.match(mainJsx, /setRotateOutcomes\(\(prev\) => \(\{/,
+    'regenerateKey must latch the rotate outcome from the response')
   assert.match(mainJsx, /Your new key \(shown once\)/,
     'the reveal must label the key as shown once')
 })

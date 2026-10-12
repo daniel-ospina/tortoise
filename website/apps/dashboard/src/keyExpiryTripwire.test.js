@@ -131,13 +131,19 @@ test('#2426: the show-once key card states the expiry (server echo / never)', ()
   assert.match(rotBody, /const plaintext = revealableMintPlaintext\(mk\)/,
     'rotate derives the replacement plaintext through the shareable non-blank-string predicate')
   assert.match(rotBody, /if \(!plaintext\) \{/, 'rotate must refuse a plaintext-less mint')
-  assert.ok(rotBody.indexOf('if (!plaintext) {') < rotBody.indexOf('setRotatedKey({ plaintext: plaintext'),
-    'the refusal must come BEFORE the reveal latch — no empty reveal can be set (#4342)')
+  // #4429: the latch moved ABOVE the team-identity guard — the rotate is
+  // destructive server-side, so its response is the only delivery of the
+  // replacement's plaintext and a switch across the RTT must not drop it. The
+  // refusal still sits AFTER the guard (its copy names this team's row).
+  assert.ok(rotBody.indexOf('setRotateOutcomes((prev) =>') < rotBody.indexOf('if (orgIdRef.current !== _teamAtCall) return'),
+    'the outcome latch must precede the team-identity guard (#4429)')
+  assert.ok(rotBody.indexOf('if (plaintext) {') < rotBody.indexOf('setRotateOutcomes((prev) =>'),
+    'the reveal latch is gated on a revealable plaintext — a plaintext-less rotate latches nothing (#4342)')
   assert.match(rotBody, /has already been revoked/, 'the refusal must state the OLD key is already revoked')
-  assert.match(rotBody, /setRotatedKey\(\{ plaintext: plaintext, expiresAt: \(mk && mk\.expires_at\) \|\| null \}\)/,
-    'rotate captures the server expiry echo into rotatedKey')
+  assert.match(rotBody, /\[_teamAtCall\]: \{ plaintext, expiresAt: \(mk && mk\.expires_at\) \|\| null, warning \}/,
+    'rotate captures the server expiry echo + the partial-state warning into the per-team outcome')
   assert.match(mainJsx, /expires \{fmtExpiryDate\(newKeyExpiresAt\)\}/, 'modal card shows the create expiry date')
-  assert.match(mainJsx, /expires \{fmtExpiryDate\(rotatedKey\.expiresAt\)\}/, 'rotate reveal shows the replacement expiry date')
+  assert.match(mainJsx, /expires \{fmtExpiryDate\(rotateOutcome\.expiresAt\)\}/, 'rotate reveal shows the replacement expiry date')
   assert.match(mainJsx, /never expires/, 'card states Never explicitly')
 })
 
