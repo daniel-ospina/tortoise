@@ -126,6 +126,11 @@ import { readSession, sessionGateAction } from './sessionGate.js'
 // `node --test` unit-tested (authBounce.test.js), and mirrored by the /auth
 // page's return-to allowlist.
 import { authBounceTarget } from './authBounce.js'
+// #1871: what the OAuth return for a LINK flow must do — commit or not, and what
+// to tell the user. Pure and `node --test` unit-tested (linkReturn.test.js); the
+// verdict exists because a link return is the one round-trip that must never
+// continue under an account the user did not start from.
+import { LINK_UID_KEY, linkReturnPlan } from './linkReturn.js'
 
 // #3501: the dashboard talks to its OWN origin. `functions/api/v1/[[path]].ts`
 // resolves the `__Host-session` cookie server-side and attaches the Bearer to
@@ -2563,7 +2568,23 @@ function claimIntentInFlight() {
       // then 302s the browser. The app's ?link_flow= search param +
       // sessionStorage marker carry the ref; the mount effect POSTs
       // link-commit on return.
-      try { sessionStorage.setItem('tt_link_flow', intent_ref) } catch { /* best-effort */ }
+      //
+      // #1871: persist the PRE-round-trip uid alongside the ref, exactly as the
+      // same-provider re-auth does (`tt_reauth_pending`). It is the "pre" half
+      // of the return-path comparison: if the provider round-trip comes back as
+      // another account, the mount effect sees it and stops instead of
+      // committing the link under whoever the browser is now signed in as. The
+      // read is the SAME `/api/session` the mount gate uses — there is no client
+      // session to ask.
+      let preLinkUid = null
+      try {
+        const pre = await readSession()
+        preLinkUid = pre.kind === 'signed-in' ? pre.user.id : null
+      } catch { /* best-effort: no stored uid means no client-side comparison */ }
+      try {
+        sessionStorage.setItem('tt_link_flow', intent_ref)
+        sessionStorage.setItem(LINK_UID_KEY, preLinkUid || '')
+      } catch { /* best-effort */ }
       // Navigate — never fetch: the response is a cross-origin redirect and
       // the link call needs the server-held token, which only the BFF has.
       const linkNext = `${window.location.pathname}?link_flow=${encodeURIComponent(intent_ref)}`
@@ -2859,6 +2880,9 @@ function claimIntentInFlight() {
 
   // #1765: OAuth-return intent-ref contract — POST link-commit on return
   // (the server-authority gates must actually run), then land on Profile.
+  // #1871: but ONLY when the round-trip came back as the same account, and only
+  // once the account question has been answered — the verdict is `linkReturnPlan`
+  // (pure, unit-tested).
   // Also resumes a re-auth-pending change-email after the provider round.
   React.useEffect(() => {
     if (!sessionBooted) return  // review-fix: the OAuth-return commit must
@@ -2869,6 +2893,40 @@ function claimIntentInFlight() {
     if (!linkFlow && !reauth) return
     ;(async () => {
       if (linkFlow && sessionTokenRef.current) {
+        let storedUid = null
+        try { storedUid = sessionStorage.getItem(LINK_UID_KEY) || null } catch { /* best-effort */ }
+        // What the browser is signed in as NOW. `/api/session` is the only
+        // authority (the BFF holds the session); `unavailable` is deliberately
+        // not a mismatch — a transient store fault must not read as an account
+        // switch (the #3485 class).
+        let returnedUid = null
+        try {
+          const returned = await readSession()
+          returnedUid = returned.kind === 'signed-in' ? returned.user.id : null
+        } catch { /* best-effort */ }
+        const plan = linkReturnPlan({
+          mismatchFlag: params.get('link_mismatch') === '1',
+          providerError: params.get('link_failed') || '',
+          storedUid,
+          returnedUid,
+        })
+        if (!plan.commit) {
+          // The link did not complete as THIS account. Say so on the profile —
+          // never POST link-commit from here: that is a write, and the account
+          // is exactly what is in doubt (and pointless after a failed
+          // round-trip).
+          setProfileError(plan.notice)
+          setTab('profile')
+          await fetchIdentity()
+          try { sessionStorage.removeItem('tt_link_flow') } catch { /* best-effort */ }
+          try { sessionStorage.removeItem(LINK_UID_KEY) } catch { /* best-effort */ }
+          const u = new URL(window.location.href)
+          u.searchParams.delete('link_flow')
+          u.searchParams.delete('link_mismatch')
+          u.searchParams.delete('link_failed')
+          window.history.replaceState({}, '', u.pathname + u.search + u.hash)
+          return
+        }
         try {
           const res = await api('/v1/user/identity/link-commit', {
             method: 'POST', useSession: true,
@@ -2884,6 +2942,7 @@ function claimIntentInFlight() {
           setProfileError(e.message || 'Could not complete linking — refresh your profile')
         } finally {
           try { sessionStorage.removeItem('tt_link_flow') } catch { /* best-effort */ }
+          try { sessionStorage.removeItem(LINK_UID_KEY) } catch { /* best-effort */ }
           const u = new URL(window.location.href)
           u.searchParams.delete('link_flow')
           window.history.replaceState({}, '', u.pathname + u.search + u.hash)

@@ -37,7 +37,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import pytest
-from bff_test_helpers import d1_sqlite_files, require_toolchain
+from bff_test_helpers import d1_sqlite_files, dashboard_persist_args, require_toolchain
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DASHBOARD_DIR = REPO_ROOT / "website" / "apps" / "dashboard"
@@ -163,6 +163,16 @@ def stack():
             wrangler, "pages", "dev", "dist",
             "--port", str(APP_PORT), "--ip", "127.0.0.1",
             "--d1", "SESSIONS",
+            # PIN the D1 state root — see `dashboard_persist_args`. Wrangler
+            # resolves it by walking UP from the cwd, so in a checkout nested
+            # under a directory holding a `.env`/`package.json` the seed below
+            # (`d1_sqlite_files(DASHBOARD_DIR)`) and the server it feeds
+            # disagree about which database they mean: the seeded session rows
+            # land where the server never looks and every seeded-cookie case
+            # answers 401. The unpinned root is also machine-global, so two
+            # checkouts share one database. In CI the walk stops at the
+            # checkout, so this is a no-op there.
+            *dashboard_persist_args(),
             "-b", f"SUPABASE_URL={MOCK_URL}",
             "-b", "SUPABASE_ANON_KEY=mock-anon-key",
             "-b", f"AUTH_CALLBACK_URL={APP}/auth/callback",
@@ -369,14 +379,21 @@ def test_link_rejects_invalid_provider_with_400(stack, bad):
 # ---------------------------------------------------------------------------
 # Contract: the flow is bound to the CURRENT session's user
 #
-# What the code ACTUALLY enforces, asserted here:
+# What the code enforces, asserted here:
 #   (1) the server-side GoTrue call carries the session's credential, so the
 #       user is fixed at initiation by GoTrue; and
 #   (2) the flow row records the session's user_id.
 #
-# What is NOT enforced, and is reported rather than tested around:
-#   /auth/callback does not read auth_flows.user_id, so the D1-side binding is
-#   RECORDED, not ENFORCED. The cross-account guarantee rests on (1).
+# The completion half is enforced too, as of #1871: `/auth/callback` READS that
+# recorded uid and, for a `link` flow, refuses to mint a session when the
+# exchanged subject is not the user the flow was bound to (it returns to the
+# flow's `next` with `link_mismatch=1` and the browser keeps the session it had).
+# That guard is asserted where it runs — `test_bff_flow.py`,
+# `test_a_link_return_for_another_account_never_replaces_the_session` and its
+# paired same-account control — because it needs a PKCE code this suite's mock
+# does not implement. It is a BACKSTOP: GoTrue itself refuses the cross-account
+# case at the identity level (`internal/api/identity.go::linkIdentityToUser` →
+# 422 `identity_already_exists`) before any token is issued.
 # ---------------------------------------------------------------------------
 def test_link_flow_is_bound_to_the_current_session_user(stack):
     # Two distinct users, each with their own session. If the binding were a
