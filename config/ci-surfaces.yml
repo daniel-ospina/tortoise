@@ -2277,6 +2277,19 @@ surfaces:
   # matches no SOURCE_PATTERNS entry, so a declaration-only change selects
   # `core` via the `tortoise/` fallback.
   - test_session_capture_status.py
+  # #6151: the weight mechanisms live in `tortoise/weights.py`, which matches no
+  # SOURCE_PATTERNS entry — so a weights.py change selects `core` via the
+  # `tortoise/` fallback and, until now, ran NONE of the three tests that guard
+  # those mechanisms. A regression in either band shipped with green CI while its
+  # guard sat unrun in the `ep` list (only `test_weights.py` ran, because it is
+  # dual-registered in `tier1`). Registered here for the same reason as the
+  # entry above; each keeps its `ep` membership too. Deliberately NOT solved by
+  # adding `tortoise/weights.py` to `ep`'s SOURCE_PATTERNS: a SOURCE_PATTERNS
+  # match REPLACES the `core` fallback, so that would narrow a weights.py change
+  # from 456 selected files to the 64-file `ep` surface — a coverage LOSS.
+  - test_weights_mitigation.py
+  - test_3815_mitigation_moves_weight.py
+  - test_6151_annotation_band.py
   ep:
   # #2884 D3: the EP/dream belief-state journal+replay guard. `tortoise/dream.py`
   # selects `ep`, so this registration is what runs the guard on a dream.py
