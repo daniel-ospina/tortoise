@@ -43,7 +43,8 @@ mutual one `bidirectional`), and the basis the resolution used is recorded on
 the operator as **`direction_basis`** (`explicit` / `label` / `default`). An
 out-of-vocabulary word **warns and the write proceeds** — it never refuses
 (warn-not-block). This is **W1** of #7852's three-layer relation model, which
-the owner approved verbatim: *"w1 yes approved"* (2026-10-09).
+the owner approved verbatim: *"w1 yes approved"* (2026-10-09), relayed into
+this document by **PR #8283**.
 `approved: 2026-09-18` / `approval_pr: 4120` above stay the original ruling's;
 this paragraph records the amendment. (The **four-value direction storage**
 vocabulary — `->` / `<-` / `<->` / `-` in the runtime and the ingest contract —
