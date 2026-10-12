@@ -142,7 +142,14 @@ open_pr_count() { # -> echoes the open-PR count; never 0 on failure
     # The fallback must exceed BOTH the merge-priority tunable AND the scope gate's threshold (a
     # literal 10 below), so it is max(MERGE_PRIORITY_AT, 10) + 1 — keying it to the tunable alone
     # left a below-default tunable landing in OWN, the unsafe direction, on a failed count.
-    fc="${MERGE_PRIORITY_AT:-10}"; [ "$fc" -ge 10 ] || fc=10; fc=$(( fc + 1 ))
+    # ⛔ Normalize to base 10 BEFORE the arithmetic: `[ … -ge … ]` parses base 10 but `$(( … ))`
+    # parses base 0, where a leading 0 is OCTAL — so a tunable of `010` passed the guard as "ten"
+    # and then evaluated as 8, returning 9 and landing in OWN again. Reject non-digits, then force
+    # base 10 with `10#`.
+    fc="${MERGE_PRIORITY_AT:-10}"
+    case "$fc" in ''|*[!0-9]*) fc=10 ;; esac
+    [ "$fc" -ge 10 ] || fc=10
+    fc=$(( 10#$fc + 1 ))
     if is_num "$sticky" && [ "$sticky" -gt 0 ]; then
       echo "[scope] open=UNKNOWN rc=$rc (${err:-no stderr}) -> sticky last-known=$sticky" >> "$LOG"
       echo "$sticky"

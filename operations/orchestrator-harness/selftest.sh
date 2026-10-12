@@ -509,6 +509,15 @@ SH
   _mp="$( PATH="$OC:$PATH" O="$OC" OR="acme/widget" LOG="$LOG" MERGE_PRIORITY_AT=15 bash "$OC/drive.sh" )"
   [ "$_mp" = "16" ] && rc=0 || { rc=1; echo "      MERGE_PRIORITY_AT=15 produced '$_mp' (expected 16)"; }
   ck "an above-default MERGE_PRIORITY_AT (15) falls back to 16, above the tunable" $rc
+  # (b4) a leading-zero tunable must be read as DECIMAL: `[ … -ge 10 ]` parses base 10 but `$(( … ))`
+  # parses base 0, in which `010` is octal 8 — so the guard ratified "ten" and the arithmetic
+  # returned 9, landing in OWN, the same unsafe direction the tunable-keyed fallback was fixed for.
+  _mp="$( PATH="$OC:$PATH" O="$OC" OR="acme/widget" LOG="$LOG" MERGE_PRIORITY_AT=010 bash "$OC/drive.sh" )"
+  [ "$_mp" = "11" ] && rc=0 || { rc=1; echo "      MERGE_PRIORITY_AT=010 produced '$_mp' (expected 11)"; }
+  ck "a leading-zero MERGE_PRIORITY_AT (010) is decimal 10, falls back to 11" $rc
+  _mp="$( PATH="$OC:$PATH" O="$OC" OR="acme/widget" LOG="$LOG" MERGE_PRIORITY_AT=notanum bash "$OC/drive.sh" )"
+  [ "$_mp" = "11" ] && rc=0 || { rc=1; echo "      MERGE_PRIORITY_AT=notanum produced '$_mp' (expected 11)"; }
+  ck "a non-numeric MERGE_PRIORITY_AT falls back to 11 without aborting" $rc
   # (c) SUCCESS: the count is returned and persisted for the next failure
   cat > "$OC/gh" <<'SH'
 #!/bin/bash
