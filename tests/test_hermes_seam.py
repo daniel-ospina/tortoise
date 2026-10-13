@@ -423,6 +423,47 @@ def test_pre_llm_call_no_session_id_still_injects(tmp_path, monkeypatch):
     assert out == {"context": _BLOCK}
 
 
+def test_pre_llm_call_reads_text_parts_not_a_multimodal_repr(
+        tmp_path, monkeypatch):
+    """#2121 review: ``user_message`` is ``str | list``.
+
+    A multimodal turn passes the content parts as a LIST, and an image part
+    carries a base64 data URL. ``str()`` on that list hands the reflex Python's
+    repr of the parts, so the reflex searches a repr; the 5 s timeout then
+    fires and the seam records a FALSE ``install-inert`` breadcrumb for an
+    install that is perfectly healthy -- on every image turn. Only the text
+    parts are the turn, and the prompt handed to the reflex is bounded.
+    """
+    module = _install_and_load(tmp_path, monkeypatch, block=_BLOCK)
+    seen: dict[str, str] = {}
+
+    def _capture(prompt, session_id):
+        seen["prompt"] = prompt
+        return _BLOCK
+
+    monkeypatch.setattr(module, "_reflex_block", _capture)
+    parts = [
+        {"type": "text", "text": "what does this screenshot show?"},
+        {"type": "image_url",
+         "image_url": {"url": "data:image/png;base64," + "A" * 20_000}},
+    ]
+    out = module.on_pre_llm_call(user_message=parts, session_id="sess-9")
+    assert out == {"context": _BLOCK}
+    assert seen["prompt"] == "what does this screenshot show?"
+    assert "base64" not in seen["prompt"]
+    assert "image_url" not in seen["prompt"]
+
+    # A text-only list and a plain string are the same turn.
+    assert module._prompt_text([{"type": "text", "text": "hi"}]) == "hi"
+    assert module._prompt_text("hi") == "hi"
+
+    # A huge text turn reaches the reflex BOUNDED, never whole.
+    module.on_pre_llm_call(user_message=[{"type": "text",
+                                          "text": "x" * 50_000}])
+    assert len(seen["prompt"]) == module.MAX_PROMPT_CHARS
+    assert seen["prompt"] == "x" * module.MAX_PROMPT_CHARS
+
+
 def test_pre_llm_call_bounds_the_block_below_the_hermes_spill_cap(
         tmp_path, monkeypatch):
     """Hermes spills >10,000-char hook context to disk and shows a preview;

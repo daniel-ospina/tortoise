@@ -54,6 +54,16 @@ logger = logging.getLogger(__name__)
 # the reflex's own pointer budget keep the real blocks far smaller.
 MAX_INJECT_CHARS = 8000
 
+# The reflex SEARCHES the turn's text; it must never be handed the whole
+# payload. ``pre_llm_call``'s ``user_message`` is a string for a text turn and,
+# for a multimodal turn, the content-part LIST as sent — where an image part
+# carries a base64 data URL. ``str()`` on that list sends Python's repr of the
+# parts (megabytes, for one image) to the reflex: it searches a repr, blows the
+# 5 s timeout, and then leaves a FALSE ``install-inert`` breadcrumb for an
+# install that is perfectly healthy — on every image turn (#2121 review).
+# Bounding the prompt keeps the attachment out of the reflex's stdin.
+MAX_PROMPT_CHARS = 4000
+
 # The reflex is a local CLI invocation; it must never turn an agent turn into
 # a wait. A timeout failure is a clean no-injection, exactly like an empty
 # graph (content fail-open).
@@ -196,6 +206,30 @@ def _tortoise_candidates() -> list[list[str]]:
     return cmds
 
 
+def _prompt_text(user_message) -> str:
+    """The turn's TEXT, from either payload shape Hermes may pass.
+
+    ``pre_llm_call``'s ``user_message`` is a ``str`` for a text turn and the
+    content-part LIST for a multimodal one. A text part is searched; an image
+    part is not a question and its data URL is not text. Coercing the list with
+    ``str()`` is what made the seam search a repr and then mis-record a healthy
+    install as inert, so the parts are read structurally instead.
+    """
+    if isinstance(user_message, str):
+        return user_message
+    if isinstance(user_message, (list, tuple)):
+        parts: list[str] = []
+        for part in user_message:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                text = part.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts)
+    return "" if user_message is None else str(user_message)
+
+
 def _reflex_block(user_message: str, session_id: str) -> str:
     """Run the shared reflex over one turn; "" on any failure (fail-open).
 
@@ -240,8 +274,14 @@ def _reflex_block(user_message: str, session_id: str) -> str:
     return ""
 
 
-def on_pre_llm_call(user_message: str = "", session_id: str = "", **kwargs):
+def on_pre_llm_call(user_message: str | list = "", session_id: str = "",
+                    **kwargs):
     """``pre_llm_call`` handler — return the reflex block, or None.
+
+    ``user_message`` is the turn as Hermes sends it: a string for a text turn,
+    or the content-part LIST for a multimodal turn (an image part carries a
+    base64 data URL, so the list must never be stringified). Only the turn's
+    text parts are searched, bounded by ``MAX_PROMPT_CHARS``.
 
     Returns ``None`` (no injection) for: the kill switch, an empty turn, an
     empty graph, nothing above the confidence gate, or any reflex failure.
@@ -252,7 +292,7 @@ def on_pre_llm_call(user_message: str = "", session_id: str = "", **kwargs):
     try:
         if _disabled():
             return None
-        block = _reflex_block(str(user_message or ""),
+        block = _reflex_block(_prompt_text(user_message)[:MAX_PROMPT_CHARS],
                               str(session_id or ""))
         if not block.strip():
             return None
