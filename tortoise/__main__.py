@@ -3328,7 +3328,7 @@ def _install_read_hook_impl(args) -> int:
     - The shipped hook path is shlex-quoted into every registration command
       so spaces/quotes in the install path cannot break the harness exec.
     """
-    import json as _json, shlex as _shlex, sys as _sys  # noqa: E401, I001
+    import json as _json, shlex as _shlex, shutil as _shutil, sys as _sys  # noqa: E401, I001
     from pathlib import Path as _P
 
     # #3918: every WRITE below goes through the shipped atomic helper — a
@@ -3376,6 +3376,13 @@ def _install_read_hook_impl(args) -> int:
               "injection hook; Cursor has no per-turn shell-hook read seam — "
               "its beforeSubmitPrompt event cannot inject. IDE-ONLY: Cursor "
               "cloud agent sessions are not captured)")
+        print("  tortoise install hermes  → <dir>/.hermes/plugins/"
+              "tortoise-volunteer/ (the pre_llm_call PLUGIN — Hermes' per-turn "
+              "injection surface; import with `tortoise sessions import "
+              "--harness hermes --file <state.db>`. ACTIVATION: a project "
+              "install needs HERMES_ENABLE_PROJECT_PLUGINS=1 AND "
+              "`hermes plugins enable tortoise-volunteer` — Hermes plugins "
+              "are opt-in, so the directory alone injects nothing)")
         print("Other seams (docs/matrix only, this wave): "
               "gemini, opencode — see "
               "docs/research/2026-09-01-gbrain-learnings/platform-seams.md")
@@ -3384,7 +3391,11 @@ def _install_read_hook_impl(args) -> int:
     root = _P(getattr(args, "dir", "."))
     harness = args.harness
     script = Path(__file__).resolve().parent / "claude-hooks" / "volunteer-turn.sh"
-    if not script.exists():
+    # The shared shell hook is only read by the command-shaped seams. Hermes'
+    # read half is a Python plugin that never executes it, so gating the
+    # install on a file it does not use reported an unrelated failure on any
+    # surface shipping the plugin without the shared hook (#2121 review P3).
+    if harness != "hermes" and not script.exists():
         print(f"volunteer-turn.sh not found at {script} — cannot install",
               file=_sys.stderr)
         return 1
@@ -3428,6 +3439,18 @@ def _install_read_hook_impl(args) -> int:
                                     "command": f"{quoted_script} devin"}]}]
     elif harness == "cline":
         target = root / ".cline" / "hooks" / "UserPromptSubmit"
+        registration = None
+    elif harness == "hermes":
+        # Hermes' per-turn surface is the ``pre_llm_call`` PLUGIN hook — a
+        # Python callback, not a shell command (verified against hermes-agent
+        # @ main 2026-10-11: plugins/AGENTS.md + website/docs/developer-guide/
+        # plugins/index.md + agent/turn_context.py). There is therefore no
+        # config file whose "command" can point at volunteer-turn.sh: the read
+        # half installs the shipped plugin DIRECTORY, which Hermes discovers
+        # from ``<root>/.hermes/plugins/`` (project) or ``$HERMES_HOME/plugins/``
+        # (global). ``registration`` stays None — the JSON-merge path below is
+        # for the command-shaped harnesses only.
+        target = root / ".hermes" / "plugins" / "tortoise-volunteer"
         registration = None
     else:
         # Never let a harness with no read seam fall into the cline target —
@@ -3592,6 +3615,107 @@ def _install_read_hook_impl(args) -> int:
             print(f"Installed {target}")
             print("Then enable hooks in Cline settings (Hook feature) — "
                   "project .cline/hooks or global ~/.cline/hooks both work.")
+        return 0
+
+    # ── hermes: a directory PLUGIN (plugin.yaml + __init__.py), not a
+    #    command registration. See the target assignment above for why.
+    #    Ownership is the shipped marker line: an existing
+    #    ``tortoise-volunteer`` directory this installer cannot prove it wrote
+    #    is never overwritten and never deleted (#2383's rule applied to a
+    #    directory-shaped seam). ──────────────────────────────────────────
+    if harness == "hermes":
+        src_dir = Path(__file__).resolve().parent / "hermes-plugin"
+        bundled = {name: src_dir / name
+                   for name in ("plugin.yaml", "__init__.py")}
+        missing = sorted(n for n, p in bundled.items() if not p.is_file())
+        if missing:
+            print(f"shipped Hermes plugin not found ({', '.join(missing)} "
+                  f"under {src_dir}) — cannot install", file=_sys.stderr)
+            return 1
+        marker = "tortoise-hermes-plugin"
+        if target.exists() and not target.is_dir():
+            print(f"{target} exists and is not a directory — refusing to "
+                  "touch it.", file=_sys.stderr)
+            return 1
+        ours = False
+        if target.is_dir():
+            try:
+                ours = marker in (target / "__init__.py").read_text(
+                    encoding="utf-8", errors="replace")
+            except OSError:
+                ours = False
+            if not ours:
+                if uninstall:
+                    print(f"{target} is not our {marker} plugin — refusing "
+                          "to delete it.", file=_sys.stderr)
+                else:
+                    print(f"{target} already exists and is not our "
+                          f"{marker} plugin — refusing to overwrite it. "
+                          "Move it aside or install into another dir.",
+                          file=_sys.stderr)
+                return 1
+        if dry:
+            verb = "uninstall from" if uninstall else "write"
+            print(f"[dry-run] would {verb} {target}:")
+            for name in sorted(bundled):
+                print(f"  {name}")
+            return 0
+        if uninstall:
+            # Remove ONLY the files this installer wrote. Anything else left in
+            # the directory (a user's extra module, a __pycache__ Hermes's own
+            # import created) keeps the directory alive — an uninstall must
+            # never delete config it cannot prove it created.
+            for name in bundled:
+                (target / name).unlink(missing_ok=True)
+            cache = target / "__pycache__"
+            if cache.is_dir():
+                _shutil.rmtree(cache, ignore_errors=True)
+            leftovers = sorted(p.name for p in target.iterdir())
+            if leftovers:
+                print(f"Removed the {marker} plugin files from {target} — "
+                      f"left unrelated files in place: "
+                      f"{', '.join(leftovers)}")
+            else:
+                target.rmdir()
+                print(f"Removed {target}")
+            return 0
+        if target.is_symlink() and not target.exists():
+            # #2121 review: a DANGLING in-root symlink at the plugin path is
+            # neither a directory nor a file — ``exists()`` follows the link
+            # and is False, so the ownership guards above skip it and the
+            # ``mkdir(exist_ok=True)`` below re-raises ``FileExistsError``
+            # (opaque, rc 1) while the write-free dry run reports success
+            # over the same tree. The file seams REPLACE a dangling leaf
+            # symlink (``_atomic_write_text`` → ``os.replace``); a
+            # directory-shaped seam does the same — drop the dead link and
+            # create the real dir. The symlink-escape guard above already
+            # refused any link resolving OUTSIDE the install root.
+            target.unlink()
+        target.mkdir(parents=True, exist_ok=True)
+        for name, src in sorted(bundled.items()):
+            # #3918: ATOMIC write, like every other seam in this function.
+            # `write_text` truncates in place (a crash/ENOSPC mid-write can
+            # leave a truncated plugin), and it writes THROUGH a leaf symlink
+            # in `target` — the guard above only walks root → target, never
+            # the leaf files. `os.replace` closes both.
+            _atomic_write_text(target / name, src.read_text(encoding="utf-8"))
+        print(f"{'Updated' if ours else 'Installed'} {target}")
+        print("Hermes discovers project plugins from ./.hermes/plugins/ (and "
+              "global ones from $HERMES_HOME/plugins/). Validate with "
+              "`hermes plugins doctor --ci`; session ingestion is "
+              "`tortoise sessions import --harness hermes --file <state.db>`.")
+        # Hermes loads plugins through TWO opt-ins, and this installer
+        # performs neither: project plugins are OFF by default
+        # (``HERMES_ENABLE_PROJECT_PLUGINS``, plugins_discovery.py)
+        # and non-bundled plugins are opt-in via ``plugins.enabled``
+        # (``gate_manifest``). Printing success without them is an inert
+        # install read as a working seam (#3808 R13, #2121 review P1).
+        print("ACTIVATION (required — Hermes plugins are opt-in; without "
+              "both steps this plugin is discovered but never loaded and "
+              "injects nothing): set HERMES_ENABLE_PROJECT_PLUGINS=1 in the "
+              "environment Hermes runs in (project plugins are disabled by "
+              "default), then run `hermes plugins enable "
+              "tortoise-volunteer` and restart Hermes.")
         return 0
 
     # ── codex / claude: JSON registration file (merge-aware). ──────────
@@ -6289,7 +6413,9 @@ def _cmd_sessions_import(args) -> int:
     from urllib.error import URLError, HTTPError
     from http.client import HTTPException as _HTTPException
 
-    from tortoise.session_import import MAX_TURNS, parse_transcript, window_turns
+    from tortoise.session_import import (
+        MAX_TURNS, hermes_selected_session_id, parse_transcript,
+        window_turns)
     # #3615: this is the SECOND transcript-upload primitive (same
     # POST /v1/sessions) — it carries the same explicit-consent gate so it
     # cannot be used as a consent bypass for the first.
@@ -6312,7 +6438,25 @@ def _cmd_sessions_import(args) -> int:
     # claude-desktop). Resolved BEFORE the existence check so a missing file
     # still records its breadcrumb under the right harness.
     harness = {"desktop": "claude-desktop"}.get(args.harness, args.harness)
-    if not file_path.exists():
+    # #2121: Hermes is the ONE many-sessions-per-file store, so its argument
+    # may carry the documented `::<session-id>` selector. The composite string
+    # is not a filesystem path, so resolve it BEFORE the existence check (and
+    # before the content-hash read) — otherwise the selector that the `--file`
+    # help text and `parse_hermes` both advertise dies here with a misleading
+    # "Session file not found". `parse_transcript` still receives the FULL
+    # argument (it re-splits); we resolve only for the existence check and the
+    # DB path the key is derived from.
+    read_path = file_path
+    if harness == "hermes":
+        from tortoise.session_import.parsers import _hermes_split_selector
+        db_path, _selector = _hermes_split_selector(file_path)
+        # `parse_hermes` accepts the store DIRECTORY too (it appends state.db);
+        # read/hash the real DB file in that case.
+        read_path = db_path / "state.db" if db_path.is_dir() else db_path
+        check_path = db_path
+    else:
+        check_path = file_path
+    if not check_path.exists():
         print(f"Session file not found: {args.file}", file=_sys.stderr)
         _record_capture_error(harness, f"session file not found: {args.file}")
         return 1
@@ -6344,9 +6488,27 @@ def _cmd_sessions_import(args) -> int:
             file=_sys.stderr,
         )
 
-    raw = file_path.read_bytes()
+    if harness == "hermes":
+        # #2121: a Hermes store holds MANY sessions and MUTATES as Hermes runs,
+        # so hashing the store FILE is not a per-session key — `<db>` (newest)
+        # and `<db>::<that same id>` derived two ids for ONE session (filed
+        # twice), an unrelated session's appended turn re-keyed it, and a live
+        # WAL store's byte-identical main file made a genuine re-import look
+        # "already imported". Key on the SESSION the argument resolves to plus
+        # its parsed turns, identically for both spellings (#2121 review).
+        try:
+            resolved_session = hermes_selected_session_id(str(file_path))
+        except ValueError:
+            # parse_transcript already succeeded, so this is unreachable in
+            # practice; fall back to a content-only key rather than failing.
+            resolved_session = ""
+        key_material = ("hermes\x00" + resolved_session + "\x00"
+                        + _json.dumps(turns, ensure_ascii=False,
+                                      sort_keys=True)).encode("utf-8")
+    else:
+        key_material = read_path.read_bytes()
     session_id = args.session_id or (
-        "imp_" + hashlib.sha256(raw).hexdigest()[:12])
+        "imp_" + hashlib.sha256(key_material).hexdigest()[:12])
 
     # Local receipt — 2xx-only (a failed POST must never look imported).
     receipt = _import_receipt_for(session_id)
@@ -10767,7 +10929,8 @@ def main(argv: list[str] | None = None) -> int:
              "(requires TORTOISE_CAPTURE=1 — explicit consent; a credential "
              "is not consent)")
     sess_import.add_argument("--file", required=True,
-                             help="Path to the session transcript (JSONL or text)")
+                             help="Path to the session transcript (JSONL, text, "
+                                  "or a Hermes state.db[::session-id])")
     # #2120 review P1: the accepted harnesses are DERIVED from the parser
     # registry, never re-listed. The hand-maintained list that stood here had
     # already fallen behind it: `openclaw` parsed correctly, but
@@ -10780,7 +10943,9 @@ def main(argv: list[str] | None = None) -> int:
         "--harness", required=True,
         choices=[*_SESSION_IMPORT_PARSERS, "desktop"],
         help="Harness format to parse (each harness has its own record "
-             "shape; 'desktop' is an alias for claude-desktop)")
+             "shape; 'desktop' is an alias for claude-desktop; 'hermes' reads "
+             "$HERMES_HOME/state.db and selects its most recent session "
+             "unless the path carries '::<session-id>')")
     sess_import.add_argument(
         "--session-id", default=None,
         help="Explicit idempotency key (default: content-hash derived)")
@@ -10832,9 +10997,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Install a harness seam (per-turn memory hook + session capture)")
     inst.add_argument(
         "harness", nargs="?",
-        choices=["codex", "claude", "cline", "devin", "cursor", "pi", "openclaw"],
+        choices=["codex", "claude", "cline", "devin", "cursor", "pi",
+                 "hermes", "openclaw"],
         help="Harness to install (codex | claude | cline | devin | cursor | "
-             "pi | openclaw)")
+             "pi | hermes | openclaw)")
     inst.add_argument(
         "--dir", default=".",
         help="Project directory to install into (default: cwd)")
@@ -10910,10 +11076,15 @@ def main(argv: list[str] | None = None) -> int:
     dc.add_argument("--criteria", help="JSON dict of criteria")
     dc.add_argument("--findings", help="JSON dict of findings")
     dc.add_argument("--edges", help="JSON list of edges, e.g. '[\"crit:1\", \"IMPL\", \"opt:a\"]' or full edge dicts")
-    dc.add_argument("--direction", choices=["bidirectional", "unidirectional"], default=None,
+    from tortoise.live import ACCEPTED_DIRECTION_VALUES  # #7852 the shared direction vocabulary
+    dc.add_argument("--direction", choices=sorted(ACCEPTED_DIRECTION_VALUES), default=None,
                     help="Direction recorded on every operator this run wires (#7813): "
-                         "'bidirectional' (mutual, the default when omitted) or "
-                         "'unidirectional' (directed attack — no back-pressure).")
+                         "the Layer-1 four-value vocabulary (#7852) — '->' "
+                         "(source→target), '<-' (target→source), '<->' (both, "
+                         "the default when omitted) or '-' (none: no confidence "
+                         "transfers) — plus the legacy aliases 'bidirectional' "
+                         "(≡'<->') and 'unidirectional' (≡'->'). "
+                         "Use the --direction=VALUE form for the arrow tokens.")
     dc.add_argument("--context-free", action="store_true",
                     help="Deprecated no-op — context-free (explicit factors) is the only mode since #49 Phase 2",)
     dc.add_argument("--db", help=(

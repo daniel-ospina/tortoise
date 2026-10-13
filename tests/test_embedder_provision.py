@@ -26,7 +26,8 @@ reproduces that latch and fails against the old implementation.
 
 Plus the lockstep guard: the model/revision the CI provisions must be the exact
 pair `tortoise/embeddings.py` ships (#1349 T10 — a drifted pin would serve the
-WRONG embedder from the cache).
+WRONG embedder from the cache). The same guard covers the third copy of that
+pair, the `Dockerfile.hosted` bake, since it is the one production loads (#4809).
 """
 from __future__ import annotations
 
@@ -270,6 +271,35 @@ def test_pins_match_the_shipped_embedder():
 
     assert ep.MODEL == embeddings.EMBEDDING_MODEL
     assert ep.REVISION == embeddings.EMBEDDING_MODEL_REVISION
+
+
+def test_dockerfile_bake_matches_the_shipped_embedder():
+    """#4809 — the THIRD hardcoded copy of the pin is the image bake (#1349 T10).
+
+    `tools/embedder_provision.py` (`test_pins_match_the_shipped_embedder`) and
+    `tools/embedder_probe.py` (`test_probe_models_registry_spec_locked`) each
+    assert their pin against `tortoise/embeddings.py`. `Dockerfile.hosted` — the
+    copy that decides which weights PRODUCTION loads — did not, so a drifted
+    literal there would silently ship an embedder the VULN-001 pin does not
+    name. The bake is deliberately fetched from the Hub at build time (#4809
+    decision, recorded at the bake site); this is the guard that keeps the pin
+    it fetches the SHIPPED one.
+    """
+    from tortoise import embeddings
+
+    dockerfile = (_ROOT / "Dockerfile.hosted").read_text(encoding="utf-8")
+    bake = [
+        line
+        for line in dockerfile.splitlines()
+        if "SentenceTransformer(" in line and not line.lstrip().startswith("#")
+    ]
+    assert len(bake) == 1, f"expected exactly one build-time bake, found {len(bake)}"
+    assert f"'{embeddings.EMBEDDING_MODEL}'" in bake[0], bake[0]
+    assert f"revision='{embeddings.EMBEDDING_MODEL_REVISION}'" in bake[0], bake[0]
+    # The org-qualified cache dir the FATAL guard asserts is derived from the
+    # same model id; #160-followup was a mismatch between the two.
+    cache_dir = "models--" + embeddings.EMBEDDING_MODEL.replace("/", "--")
+    assert f"/app/model/{cache_dir}" in dockerfile, cache_dir
 
 
 # ── Wiring: the workflows cannot silently go back to a quiet degrade ─────

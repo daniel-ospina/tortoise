@@ -302,6 +302,13 @@ surfaces:
   # holds two uniquely-hosted_api pins (test_alert_store_from_forwards_the_writer,
   # test_analytics_store_delegates_to_the_incident_seam).
   - test_operator_alert.py
+  # #4780: the incident-kind registry's generated checks read and pin the
+  # alert-plane emitters, including `tortoise/hosted_api.py` and
+  # `tortoise/email_notify.py` — both exact `api` SOURCE_PATTERNS whose match
+  # REPLACES the `core` fallback. Without this arm an `api`-file-only PR would
+  # never run the check that those files' kinds are declared and documented.
+  # Same silent-drop shape as the #3981 entry above.
+  - test_incident_kinds.py
   - test_onboarding_email_http.py
   # #2006 (W11): the onboarding funnel-event guard. Load-bearing HERE: four of
   # the five emission sites live in tortoise/hosted_api.py, which selects the
@@ -738,6 +745,14 @@ surfaces:
   - test_selfhost_volunteer_context.py # volunteer §3.2 selfhost transport (embedded)
   - test_volunteer_reflex_harness_seam.py  # W3 reflex graded seam (volunteer.decide)
   - test_platform_seams.py            # epic #2080 end-state seams wave-1: per-turn volunteer CLI + install + shipped hook (embedded, lane-agnostic)
+  # #2121: the Hermes seam — `tortoise install hermes` writes the pre_llm_call
+  # directory plugin, and `sessions import --harness hermes` reads
+  # $HERMES_HOME/state.db. Dual-registered exactly like test_platform_seams.py:
+  # tortoise/__main__.py (the CLI half) is an `api`-classified source, while
+  # tortoise/hermes-plugin/ and tortoise/session_import/ named-surface-match
+  # NOTHING and fall back to `core` (see the test_session_import_codex.py
+  # note below for the same #2938/#1349 silent-drop class).
+  - test_hermes_seam.py
   - test_write_ahead_mint.py
   # #3808: the CLI half of the capture install (`tortoise install <harness>`
   # in tortoise/__main__.py, an api-classified source) — dual-registered so a
@@ -1970,6 +1985,16 @@ surfaces:
   - test_ingest_v2_parallel.py
   - test_ingest_validation.py
   - test_integration_search.py
+  # #4780: the incident-kind registry's generated checks — runbook ⇄ code set
+  # equality (both directions), the frozen string set, the emitted flag against a
+  # scan of the emitters, and the no-bare-literal rule. It reads
+  # `tortoise/incident_kinds.py` (no named surface → this `core` arm is the
+  # fallback) AND the alert-plane emitters, including `tortoise/hosted_api.py` and
+  # `tortoise/email_notify.py`, which are exact `api` SOURCE_PATTERNS — so the
+  # `api` arm below is load-bearing for an api-file-only diff (a named-surface
+  # match REPLACES the `core` fallback, #2938 convention). Registered in this
+  # position to keep the list's alphabetical grouping.
+  - test_incident_kinds.py
   - test_issue_insight.py
   - test_joint_index_ingest.py
   - test_judge_harness.py
@@ -2380,6 +2405,14 @@ surfaces:
   # W2-b (#2098): BPRE write-path gate — core fallback catches engine
   # code with no surface mapping (tortoise/session_import/ parsers etc.).
   - eval/write_path/test_write_path_benchmark.py
+  # #2121: the Hermes seam — the shipped plugin template
+  # (tortoise/hermes-plugin/) and the session-store parser
+  # (tortoise/session_import/parsers.py) name no SOURCE_PATTERNS surface, so a
+  # plugin/parser-only PR selects `core` via the `tortoise/` fallback and this
+  # is the arm that runs the guard. Dual-registered with `api` (the CLI half:
+  # `install hermes` + `sessions import --harness hermes`), the same
+  # #2938/#1349 silent-drop class that test_session_import_codex.py documents.
+  - test_hermes_seam.py
   # #3575 P1-B: this pins tortoise/pi-hooks/tortoise-capture.ts — the artifact
   # HARNESS_INSTALL.pi installs. `tortoise/pi-hooks/` matches no SOURCE_PATTERNS
   # entry, so a change to the extension selects `core` via the `tortoise/`
@@ -2891,6 +2924,15 @@ surfaces:
   # MCP declaration. Embedded-only (the fixture builds `TortoiseSDK(<tmpfile>)`
   # and replays the journal), so it is ALSO registered in `carve_out` below.
   - test_semantics_write_path_7852.py
+  # #7852 v3.25: the four-value direction STORAGE vocabulary — every write path
+  # accepts `->` / `<-` / `<->` / `-` and every reader normalizes through
+  # `live.direction_flows` (EP message reach, the analyze BFS, the dedup
+  # equivalence class). `sdk` owns it (`tortoise/sdk.py` is a SHARED_MODULE → the
+  # full matrix; a `tortoise/live.py`-only change falls back to `core`, which
+  # owns carve-out members, so the carve-out leg still runs it). Embedded-only
+  # (the fixture builds `TortoiseSDK(<tmpfile>)`), so it is ALSO registered in
+  # `carve_out` below.
+  - test_direction_storage_7852.py
   # #3849: the ask_lane-only selection leg. `tortoise/ask_lane.py` maps to
   # `sdk`, so these two must be dual-registered here or they stop running on
   # an ask_lane-only PR (a SOURCE_PATTERNS match REPLACES the core fallback).
@@ -3380,6 +3422,11 @@ carve_out:
 # replay, so the carve-out is load-bearing (a URI-set lane would redirect it).
 # Also in the `sdk` surface above, which is where the diff selects it.
 - test_semantics_write_path_7852.py
+# #7852 v3.25: the four-value direction storage vocabulary is embedded-only —
+# the fixture builds `TortoiseSDK(<tmpfile>)` and reads EP message state off the
+# live graph, so a URI-set lane would redirect it. Also in the `sdk` surface
+# above, which is where a diff selects it.
+- test_direction_storage_7852.py
 - test_redis_guard.py
 # #4524: the vecf32 overwrite-seam guards. The defect is embedded-only (the
 # server lane lands the same write), so the module is module-level
