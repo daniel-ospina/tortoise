@@ -33,6 +33,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -118,6 +119,13 @@ def stack():
             "-b", f"SUPABASE_URL={MOCK_URL}",
             "-b", "SUPABASE_ANON_KEY=mock-anon-key",
             "-b", f"APP_ORIGIN={APP}",
+            # #3529: `/api/v1` answers 503 `proxy_not_configured` BEFORE it
+            # reaches the guard, so without this binding the route's origin-layer
+            # cases would assert against that 503 and never exercise the guard at
+            # all. The value is deliberately unreachable: the cases below are
+            # refused by the guard (403) or by their own auth (401), so the
+            # upstream is never contacted.
+            "-b", f"API_ORIGIN={MOCK_URL}",
         ],
         cwd=str(DASHBOARD_DIR),
     )
@@ -292,6 +300,31 @@ GUARDED_ROUTES = [
     ("POST", "/auth/link", None),
     ("POST", "/api/profile", {"displayName": "x"}),
     ("PATCH", "/api/profile", {"displayName": "x"}),
+    # #3529 class 3 — the BFF *session* endpoint and the other session-gated
+    # mutations. The guard was RETROFITTED onto these in the #4104 review (the
+    # cookie is same-SITE, so a sibling subdomain's forged request arrives WITH
+    # it attached) and nothing asserted it bit at any of them.
+    ("POST", "/api/session", None),
+    ("POST", "/api/provision", {}),
+    # #3529 class 3 — the recovery confirmation MINTS a session, so the forge
+    # needs no cookie at all and SameSite can never have protected it.
+    ("POST", "/auth/confirm", {}),
+    # #3529 class 3 — the blog-api Token Handler carries the full guard because
+    # every one of its bodies is JSON.
+    ("POST", "/blog/api/posts", {}),
+]
+
+# The two generic proxies carry the ORIGIN layer ONLY: they forward the caller's
+# Content-Type verbatim (an arbitrary API body may not be JSON), so the
+# media-type layer would answer 415 to a legitimate call. That layer is
+# therefore the whole CSRF protection on them, and nothing asserted it bit on
+# either route until #3529 — `guardOrigin` was added in the same #4104 review and
+# left untested. Paths are spelled at the wildcard so one case covers the route.
+ORIGIN_ONLY_ROUTES = [
+    ("POST", "/api/v1/teams"),
+    ("PUT", "/api/v1/teams/1"),
+    ("POST", "/api/sb/rest/v1/blog_posts"),
+    ("DELETE", "/api/sb/rest/v1/blog_posts?id=eq.1"),
 ]
 
 
@@ -333,6 +366,142 @@ def test_every_guarded_route_rejects_a_cross_origin_request(stack, method, path,
         f"{method} {path} must refuse a request from {EVIL_ORIGIN} with 403 (the "
         f"guard is missing at this call site), got {status} {body}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #3529 class 3 — the origin layer on the generic proxies
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("method,path", ORIGIN_ONLY_ROUTES)
+def test_origin_only_proxy_routes_refuse_a_cross_origin_state_change(stack, method, path):
+    """A forged state change from a sibling subdomain must be refused, not proxied.
+
+    `SameSite=Lax` is same-SITE, not same-origin: `tortoise.premiselabs.co` (or
+    XSS there) reaches both proxies WITH the victim's cookie attached, so the
+    cookie is not the protection — `guardOrigin` is, and on these two routes it
+    is the ONLY layer. A refusal that still forwarded would be no refusal, so the
+    upstream call log must also stay empty.
+    """
+    _calls()  # reset the upstream log before the forged request
+    req = urllib.request.Request(f"{APP}{path}", method=method, data=b"{}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Origin", EVIL_ORIGIN)
+    opener = urllib.request.build_opener(_NoRedirect())
+    try:
+        with opener.open(req, timeout=30) as r:
+            status, body = r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        status, body = e.code, e.read().decode("utf-8", "replace")
+    assert status == 403, (
+        f"{method} {path} from {EVIL_ORIGIN} must be 403 — the origin layer is "
+        f"these proxies' only CSRF protection, got {status} {body}"
+    )
+    assert json.loads(body)["error"] == "forbidden_origin", body
+    assert _calls() == [], "a cross-origin request reached the upstream"
+
+
+@pytest.mark.parametrize("method,path", ORIGIN_ONLY_ROUTES)
+def test_origin_only_proxy_routes_allow_an_absent_origin(stack, method, path):
+    """The defence must not be a blanket reject.
+
+    A browser cannot omit `Origin` on a cross-site form post (it would have sent
+    one), and genuine non-browser callers omit it. Such a request must get PAST
+    the guard and be refused by the route's own auth logic instead — 401 for the
+    missing session cookie, never `forbidden_origin`.
+    """
+    req = urllib.request.Request(f"{APP}{path}", method=method, data=b"{}")
+    req.add_header("Content-Type", "application/json")
+    opener = urllib.request.build_opener(_NoRedirect())
+    try:
+        with opener.open(req, timeout=30) as r:
+            status, body = r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        status, body = e.code, e.read().decode("utf-8", "replace")
+    assert status != 403, (
+        f"{method} {path} with no Origin must not be refused by the CSRF guard: "
+        f"got {status} {body}"
+    )
+    assert "forbidden_origin" not in body, body
+
+
+# ---------------------------------------------------------------------------
+# STRUCTURAL PARITY — every guarded route is a tested route (#3529 class 3)
+# ---------------------------------------------------------------------------
+# The behavioural cases above only cover the routes someone remembered to list,
+# which is the exact shape of the #4104 defect: the guard was added to the
+# session-gated mutations in review, and nothing mechanical would have noticed a
+# route left out — or a route that quietly LOSES its guard in a later refactor.
+# The scan derives the guarded-route set FROM THE SOURCE and asserts it EQUALS
+# the set the cases here exercise, in BOTH directions.
+FUNCTIONS_DIR = REPO_ROOT / "website" / "apps" / "dashboard" / "functions"
+_GUARD_CALL_RE = re.compile(r"guardStateChangingRequest|guardOrigin")
+
+#: The route PATTERN each guarded source file serves. A `[[path]]` catch-all
+#: becomes `/*`.
+GUARDED_ROUTE_PATTERNS = {
+    "/auth/password",
+    "/auth/signup",
+    "/auth/api-key",
+    "/auth/reset",
+    "/auth/resend",
+    "/auth/set-email",
+    "/auth/update-password",
+    "/auth/link",
+    "/auth/confirm",
+    "/api/profile",
+    "/api/session",
+    "/api/provision",
+    "/blog/api/*",
+    "/api/v1/*",
+    "/api/sb/*",
+}
+
+
+def _guarded_route_patterns_from_source() -> set[str]:
+    """Every route file that calls a CSRF guard, as a route pattern."""
+    found: set[str] = set()
+    for path in sorted(FUNCTIONS_DIR.rglob("*.ts")):
+        rel = path.relative_to(FUNCTIONS_DIR)
+        if rel.parts[0] == "_shared":
+            continue  # the guard's own module — not a route
+        if not _GUARD_CALL_RE.search(path.read_text(encoding="utf-8")):
+            continue
+        route = "/" + "/".join(rel.parts)[: -len(".ts")]
+        found.add(route.replace("/[[path]]", "/*"))
+    return found
+
+
+def test_every_guarded_route_is_exercised_by_a_case_here() -> None:
+    """Parity, both directions — a guarded route with no case fails, and so
+    does a case whose route no longer carries a guard."""
+    found = _guarded_route_patterns_from_source()
+    assert found == GUARDED_ROUTE_PATTERNS, (
+        "the source's guarded-route set and the routes the cases here exercise "
+        "have drifted. A route that adds a CSRF guard without a case, or one "
+        "that LOSES its guard, must be reconciled deliberately (#3529 class 3).\n"
+        f"  in source but not declared: {sorted(found - GUARDED_ROUTE_PATTERNS)}\n"
+        f"  declared but not in source: {sorted(GUARDED_ROUTE_PATTERNS - found)}"
+    )
+
+
+def test_the_guarded_route_scan_is_not_vacuous() -> None:
+    """A scan that finds nothing would make the parity test pass vacuously."""
+    found = _guarded_route_patterns_from_source()
+    assert len(found) >= 14, (
+        f"the scan found only {len(found)} guarded routes ({sorted(found)}) — a "
+        "moved directory or a broken glob makes the parity test meaningless"
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    sorted({p for _, p, _ in GUARDED_ROUTES} | {p for _, p in ORIGIN_ONLY_ROUTES}),
+)
+def test_each_case_path_lands_on_a_declared_guarded_pattern(path: str) -> None:
+    """The cases and the parity registry are one set, not two lists."""
+    assert any(
+        path == pattern or (pattern.endswith("/*") and path.startswith(pattern[:-1]))
+        for pattern in GUARDED_ROUTE_PATTERNS
+    ), f"{path} is exercised by a case but matches no declared guarded pattern"
 
 
 if __name__ == "__main__":
