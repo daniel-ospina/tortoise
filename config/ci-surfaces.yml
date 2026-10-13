@@ -2832,6 +2832,17 @@ surfaces:
   - test_7951_write_doors.py
   - test_5359_unchecked_window_writers.py
   - test_7108_operator_scope_predicate.py
+  # #5346: a PAGED read must order by a TOTAL key, or its pages are not
+  # adjacent. `paginated_query` — and therefore the MCP
+  # `tortoise_query(offset=/page=)` / `tortoise_paginated_query` path — plus
+  # `search_sessions`' legacy keyword fallback both ordered by a NON-unique key
+  # (`createdAt` / `startedAt`), so consecutive `SKIP`/`LIMIT` windows were not
+  # ranges of one order: a page walk duplicated rows and silently SKIPPED
+  # others while `hasMore` still reported completion (measured: 390 of 21,281
+  # never read on the hosted graph). `sdk` owns both reads (`tortoise/sdk.py`
+  # is a SHARED_MODULE, so an sdk diff selects the full matrix anyway), and
+  # this pin is the one that must run on it.
+  - test_5346_paged_read_total_order.py
   # #7209: `create_point` must never report success for a write that did not
   # land — the write-landing guard (`WriteNotLandedError`) and the bounded
   # retry on the create's FOLLOW-UP writes (TAGGED / extractedFrom). Owns the

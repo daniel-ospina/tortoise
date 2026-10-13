@@ -2200,3 +2200,100 @@ class TestTeamInfoBillingSurface:
         assert body["nodes_used"] is None
         assert body["max_nodes"] == 10000
         assert body["tier"] == "free"
+
+
+class TestBillingErrorToHttpMapping:
+    """#4725 — ``_billing_error_to_http`` must be SUBCLASS-FIRST.
+
+    ``StripeAPIError(BillingError)`` and ``BillingConfigError(BillingError)``
+    both subclass the base, so a base branch placed above a subclass branch
+    silently swallows it. Before the fix, the ``BillingError`` branch (400)
+    ran before the ``StripeAPIError`` branch (502), so every Stripe outage —
+    network failure, rotated key, any 5xx from api.stripe.com — answered
+    ``400 Bad Request``, blaming the caller for an upstream failure, and the
+    502 branch was unreachable dead code.
+    """
+
+    def test_each_billing_exception_maps_to_its_documented_status(self):
+        """Pin all three documented mappings (503/502/400)."""
+        from tortoise.hosted_api import _billing_error_to_http
+
+        cases = [
+            (BillingConfigError("STRIPE_PRICE_IDS is not set"), 503),
+            (billing.StripeAPIError("stripe POST customers -> 500"), 502),
+            (BillingError("unknown price id"), 400),
+        ]
+        for exc, expected in cases:
+            got = _billing_error_to_http(exc).status_code
+            assert got == expected, f"{type(exc).__name__} -> {got}, want {expected}"
+
+    def test_stripe_api_error_is_never_reported_as_a_caller_error(self):
+        """The regression itself: an upstream failure is 502, not 400.
+
+        Asserted as an explicit ``!= 400`` as well, so the failure message
+        names the defect (blaming the caller) instead of only the number.
+        """
+        from tortoise.hosted_api import _billing_error_to_http
+
+        resp = _billing_error_to_http(billing.StripeAPIError("stripe GET subscriptions -> 503"))
+        assert resp.status_code != 400, "upstream Stripe failure blamed on the caller"
+        assert resp.status_code == 502
+
+    def test_subclass_relationship_that_makes_the_order_load_bearing(self):
+        """Document WHY the order matters.
+
+        If StripeAPIError ever stops subclassing BillingError, the ordering
+        rationale in ``_billing_error_to_http`` needs revisiting — this test
+        is the tripwire that says so, rather than pinning it silently.
+        """
+        assert issubclass(billing.StripeAPIError, BillingError)
+        assert issubclass(BillingConfigError, BillingError)
+        assert not issubclass(BillingConfigError, billing.StripeAPIError)
+        assert not issubclass(billing.StripeAPIError, BillingConfigError)
+
+    def test_unrelated_exception_still_falls_back_to_502(self):
+        """The catch-all (call sites pass anything from ``except Exception``)
+        must stay 502 — a reorder that made 400 the catch-all would silently
+        re-blame the caller for every unknown failure."""
+        from tortoise.hosted_api import _billing_error_to_http
+
+        assert _billing_error_to_http(RuntimeError("boom")).status_code == 502
+
+    def test_checkout_stripe_outage_answers_502(self, monkeypatch, billing_client):
+        """End-to-end symptom: a Stripe outage during checkout is an upstream
+        failure (502), and the caller's request was fine.
+
+        This is the shape the #4640 review missed — a stubbed 400 assertion
+        passed against the broken path because the real call's StripeAPIError
+        was mapped to 400.
+        """
+        def _outage(*a, **kw):
+            raise billing.StripeAPIError("stripe POST customers failed: connect timeout")
+
+        monkeypatch.setattr(billing.StripeClient, "create_customer", _outage)
+        r = billing_client["client"].post(
+            "/v1/billing/checkout",
+            json={"price_id": "price_200proMM"},
+            headers=billing_client["headers"],
+        )
+        assert r.status_code == 502, r.text
+        assert "connect timeout" in r.json()["detail"]
+
+    def test_portal_stripe_outage_answers_502(self, monkeypatch, billing_client):
+        """Same mapping on the portal leg — every call site routes through the
+        one helper, so the fix must hold for all of them, not just checkout."""
+        sdk = billing_client["sdk"]
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_portal1'",
+            params={"id": billing_client["org_id"]},
+        )
+
+        def _outage(*a, **kw):
+            raise billing.StripeAPIError("stripe POST billing_portal/sessions -> 502")
+
+        monkeypatch.setattr(billing.StripeClient, "create_portal_session", _outage)
+        r = billing_client["client"].post(
+            "/v1/billing/portal",
+            headers=billing_client["headers"],
+        )
+        assert r.status_code == 502, r.text

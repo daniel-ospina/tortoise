@@ -33850,16 +33850,24 @@ def _billing_error_to_http(exc: Exception) -> HTTPException:
     """Map billing exceptions to HTTP responses — degrade, never crash.
 
     BillingConfigError (missing STRIPE_* env, lazy by design) → 503;
-    BillingError (bad input like an unknown price id) → 400;
-    StripeAPIError (upstream failure) → 502.
+    StripeAPIError (upstream failure) → 502;
+    BillingError (bad input like an unknown price id) → 400.
+
+    Order is load-bearing (subclass-first): ``BillingConfigError`` and
+    ``StripeAPIError`` BOTH subclass ``BillingError``, so the base branch must
+    come last. Before #4725 the ``BillingError`` branch sat above the
+    ``StripeAPIError`` branch, which made the 502 leg unreachable dead code —
+    every Stripe outage (network failure, rotated key, any 5xx from
+    ``api.stripe.com``) answered 400, blaming the caller for an upstream
+    failure. Pinned by tests/test_billing.py::TestBillingErrorToHttpMapping.
     """
     from tortoise.billing import BillingConfigError, BillingError, StripeAPIError
     if isinstance(exc, BillingConfigError):
         return HTTPException(status_code=503, detail=str(exc))
-    if isinstance(exc, BillingError):
-        return HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, StripeAPIError):
         return HTTPException(status_code=502, detail=str(exc))
+    if isinstance(exc, BillingError):
+        return HTTPException(status_code=400, detail=str(exc))
     return HTTPException(status_code=502, detail=str(exc))
 
 
