@@ -8131,6 +8131,8 @@ class FalkorProjection(
             "RDB backup, instead of trusting this rebuild."
         )
 
+    @_fail_closed("rebuild(log)")
+    @tolerates_altered_numbers
     def rebuild(self, log, *, confirm_destructive: bool = False) -> None:
         """#7951 §17.1: the REPLAY entry point for one EventLog.
 
@@ -8140,12 +8142,19 @@ class FalkorProjection(
         1, they must NOT be journaled again. Opening the scope here (rather
         than at each `apply` call) means a fold added to any of this engine's
         helpers is covered without a second declaration.
+
+        #7174/#5011: BOTH markers are declared on THIS public name, not on the
+        private ``_replay_log`` — ``rebuild`` is the whole-journal replay engine
+        the exemption set names (``cypher_guard.tolerates_altered_numbers``'
+        docstring and ``test_7174_param_boundary_numeric_guard``), and the guard
+        reads the MODULE-LEVEL attribute. ``functools.wraps`` on the marker
+        wrappers is the documented thing the guard inspects, so placing them on
+        the wrapper keeps the exemption on the public entry point while the
+        implementation stays extracted.
         """
         with _replay_write_scope():
             self._replay_log(log, confirm_destructive=confirm_destructive)
 
-    @_fail_closed("rebuild(log)")
-    @tolerates_altered_numbers
     def _replay_log(self, log, *, confirm_destructive: bool = False) -> None:
         """Wipe the graph and replay one EventLog. DESTRUCTIVE.
 

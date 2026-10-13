@@ -2672,8 +2672,7 @@ _GRAPH_EVENT_TYPES = frozenset({
 #   2. POST-APPLY-SNAPSHOT PAYLOAD (the one real apply-first). When the record
 #      cannot be constructed until the fold has produced it, there is no
 #      pre-fold record to append. The dominant case is `create_point`, whose
-#      `PointAdded` payload IS `get_point(pid)` — the applied node — and whose
-#      canonical id can be an apply result (dedup / name MERGE). Such a site
+#      `PointAdded` payload IS `get_point(pid)` — the applied node. Such a site
 #      applies first and inherits window (a); the window closes only at §17.1's
 #      one atomic write. A site that CAN form its record before the fold MUST
 #      NOT take this exception.
@@ -5120,9 +5119,15 @@ class TortoiseSDK:
             # #7951 §17.1: this projection is the DERIVED CACHE OF A JOURNAL
             # whenever one is configured, so it is under the single-writer
             # guard — a fold or a mutating raw-query on it is refused unless a
-            # live door or a replay engine declared itself. Binding here (the
-            # one place the SDK resolves its projection) is what makes the
-            # guard cover every SDK entry point without naming any of them.
+            # live door or a replay engine declared itself. Binding HERE arms
+            # every path that reaches the projection THROUGH `_get_proj`,
+            # without naming any of them. It does NOT reach a caller that
+            # assigns `_proj` directly and never calls this method: the
+            # docker-URI MCP lane at `mcp_server.py:985`
+            # (`_sdk._proj = _proj`) is journal-less by construction, so a bind
+            # there is a provable no-op (its own comment records this), and the
+            # `_projection_for(target)` assignments in `__main__.py` hand the
+            # SDK a projection that was never bound either.
             self._proj._bind_journal(self._event_log_path)
             # (B) #2952: explicit embedder warm-up at ENGINE INIT —
             # best-effort, non-fatal, and non-blocking (daemon thread) so a

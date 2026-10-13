@@ -510,8 +510,8 @@ def test_create_point_is_apply_first_a_recorded_deviation(
     briefly AHEAD of the TRUTH (window (a) of the ordering contract at the top
     of `tortoise/sdk.py`). It is that contract's recorded exception 2: the
     record IS the applied node (`RETURN properties(n)`), so there is no
-    pre-fold payload to append, and the canonical id can be an apply result. A
-    crash in the gap leaves a node no replay reproduces.
+    pre-fold payload to append. A crash in the gap leaves a node no replay
+    reproduces.
 
     The order CANNOT be corrected in this increment without changing the
     journal payload's shape on the highest-traffic write path (the pre-fold
