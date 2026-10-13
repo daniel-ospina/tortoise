@@ -1816,6 +1816,12 @@ surfaces:
   # Same rationale and pattern as test_boot_regressions.py above.
   - test_enforcement.py
   - test_entity_delete_rebuild.py   # #3299 journaled delete → rebuild_all survivor rule (last_recreate_seq)
+  # #3589: the ONE live discovery salvaged from closed PR #3326 — the writer
+  # half of #3389 (`_connect_issue_objects`, `tortoise/sdk.py`, a SHARED_MODULE
+  # → an sdk-only diff selects this surface). strict xfail, owner #3590, so an
+  # sdk change that fixes it makes the pin XPASS and FAIL. Registered here
+  # beside its sibling #3299 delete test, whose model the salvage re-measured.
+  - test_3589_3326_salvage.py
   - test_entity_stage.py
   - test_enumeration_surfaces.py
   # #5128: the class-level half of the interpreter-guard fix — every
