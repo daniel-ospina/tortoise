@@ -411,13 +411,33 @@ def _bound_from_the_sanctioned_sources(pytestconfig) -> float:
     return float(ini)
 
 
+def _parsed_argv(pytestconfig) -> list[str]:
+    """The argv pytest PARSED, for a SKIP DECISION — never a live env re-read.
+
+    ``invocation_params.args`` is the command line as pytest saw it at startup.
+    It deliberately excludes ``PYTEST_ADDOPTS`` (verified: pytest's parser merges
+    that separately), because that variable is process-global and a
+    ``tests/conftest.py`` can write it AFTER the real argv was parsed — which is
+    how a repo-writable value reached the skip and hid a disarmed run
+    (round-2 review, sixth and seventh passes). Consequence, deliberate and
+    documented rather than silent: an env-supplied opt-out (``PYTEST_ADDOPTS=
+    '--timeout=0'``, ``PYTEST_ADDOPTS='--timeout-method=thread'``) is REFUSED, the
+    same way ``PYTEST_TIMEOUT=0`` is; pass the flag on the command line.
+    """
+    return list(pytestconfig.invocation_params.args)
+
+
 def _sanctioned_cli_args(pytestconfig) -> list[str]:
-    """The argv a user actually passed: ``invocation_params`` plus ``PYTEST_ADDOPTS``.
+    """CLI args for VALUE resolution only: ``PYTEST_ADDOPTS`` first, then argv.
 
     ``invocation_params.args`` does NOT carry ``PYTEST_ADDOPTS`` while
-    ``config.getvalue`` does, so scanning it alone made an equivalent invocation
+    ``config.getvalue`` does, so scanning argv alone made an equivalent invocation
     (``PYTEST_ADDOPTS='--timeout=7'``) read as a disagreement and false-red
     (round-2 review, second pass).
+
+    ⚠️ Use this for what the VALUE compares against; for anything that decides a
+    SKIP, use :func:`_parsed_argv`, or repo-writable env state can hide a disarmed
+    run (round-2 review, seventh pass).
     """
     extra = os.environ.get("PYTEST_ADDOPTS", "")
     # ENV FIRST: pytest inserts PYTEST_ADDOPTS at the FRONT of argv
@@ -449,17 +469,21 @@ def _last_flag_value(args: list[str], *names: str) -> str | None:
 
 
 def _method_from_the_sanctioned_sources(pytestconfig) -> str:
-    """The method a user asked for: ``--timeout-method`` -> ini -> the default.
+    """The method the USER asked for: parsed argv -> ini -> the default.
 
     Same reasoning as :func:`_bound_from_the_sanctioned_sources`: a conftest can
     move ``config.option.timeout_method``, so the guard must not read the value it
     is checking from the thing being checked. Both the modern spelling and the
-    deprecated ``--timeout_method`` alias are accepted — pytest-timeout
-    registers both onto the same dest, and matching only the modern one reported
-    a disagreement for a run that resolved exactly what it asked for (round-2
+    deprecated ``--timeout_method`` alias are accepted — pytest-timeout registers
+    both onto the same dest, and matching only the modern one reported a
+    disagreement for a run that resolved exactly what it asked for (round-2
     review, third pass).
+
+    Reads :func:`_parsed_argv`, NOT the env-inclusive scan: this feeds a SKIP, and
+    the env-inclusive form let repo code reach the skip through the METHOD branch
+    after the value branch had been closed (round-2 review, seventh pass).
     """
-    args = _sanctioned_cli_args(pytestconfig)
+    args = _parsed_argv(pytestconfig)
     cli = _last_flag_value(args, "--timeout-method", "--timeout_method")
     if cli is not None:
         return cli
@@ -469,21 +493,20 @@ def _method_from_the_sanctioned_sources(pytestconfig) -> str:
 def _explicit_optout(pytestconfig) -> str | None:
     """Why the USER asked for no signal timer, or ``None`` (the timer must be armed).
 
-    Only sources repo CODE cannot write: the argv pytest PARSED (which is
-    ``invocation_params.args`` — notably NOT a live re-read of
-    ``os.environ['PYTEST_ADDOPTS']``, because a ``tests/conftest.py`` can write
-    that variable while pytest has already parsed the real one, and an earlier
-    revision that re-read it could be skipped to green by repo code) and the ini
-    file or its ``-o`` override. ``os.environ['PYTEST_TIMEOUT']`` is deliberately
-    NOT one of them either: it is process-global, so a conftest setting it to
-    ``0`` at import time used to satisfy the old ``expected <= 0`` skip while
-    arming nothing at all. A run that genuinely wants no bound says so on the
-    command line — ``--timeout=0`` — which is also what the failure message
-    below tells the reader.
+    Only sources repo CODE cannot write: the argv pytest PARSED
+    (:func:`_parsed_argv` — notably NOT a live re-read of
+    ``os.environ['PYTEST_ADDOPTS']``, for BOTH the value and the method branch,
+    because a ``tests/conftest.py`` can write that variable while pytest has
+    already parsed the real one; an earlier revision closed only the value branch
+    and the method branch still let repo code reach the skip) and the ini file or
+    its ``-o`` override. ``os.environ['PYTEST_TIMEOUT']`` is deliberately NOT one
+    of them either: it is process-global, so a conftest setting it to ``0`` at
+    import time used to satisfy the old ``expected <= 0`` skip while arming
+    nothing at all. A run that genuinely wants no bound says so on the command
+    line — ``--timeout=0`` — which is also what the failure message below tells
+    the reader.
     """
-    cli = _last_flag_value(
-        list(pytestconfig.invocation_params.args), "--timeout"
-    )
+    cli = _last_flag_value(_parsed_argv(pytestconfig), "--timeout")
     if cli is not None and float(cli) == 0:
         return "the command line asked for --timeout=0"
     if float(pytestconfig.getini("timeout") or 0) == 0:
@@ -598,6 +621,12 @@ def timeout_guard_end_of_session_audit(pytestconfig, request):
     is stated here rather than implied.
     """
     yield
+    if not pytestconfig.pluginmanager.hasplugin("timeout"):
+        # The test body already failed with the actionable message; calling
+        # getini here would add a second, opaque `unknown configuration value`
+        # error to a run that is already correctly red (round-2 review, seventh
+        # pass).
+        return
     if _explicit_optout(pytestconfig) is not None:
         return
     _assert_arming_hooks_are_pytest_timeouts_own(pytestconfig)
@@ -678,7 +707,10 @@ def test_the_per_test_timer_is_actually_armed(pytestconfig, request, timeout_gua
         f"func_only={item_settings.func_only!r} although the sanctioned sources say "
         "`signal` with no func_only exemption: `thread` starves on a GIL-holding "
         "stall (#7649), and func_only leaves SETUP/TEARDOWN unbounded while this "
-        "check's ITIMER read (call phase) stays green"
+        "check's ITIMER read (call phase) stays green. If this was intentional, "
+        "pass `--timeout-method=` on the COMMAND LINE: an opt-out supplied through "
+        "`PYTEST_ADDOPTS`/`PYTEST_TIMEOUT` is refused, because repo code can write "
+        "those and hide a disarmed run."
     )
     remaining = harness_alarm_remaining()
     assert remaining > 0, (
