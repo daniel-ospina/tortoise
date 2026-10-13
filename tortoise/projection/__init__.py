@@ -11309,8 +11309,12 @@ class FalkorProjection(
                         params={"id": oid},
                     ).result_set
                     for row in rows:
-                        # r.idx can be null (legacy edge) — Cypher handles a
-                        # null idx in the pattern; validate ONLY the rel type.
+                        # r.idx may be null (e.g. mitigate_operator's
+                        # idx-less edges) — a null idx canNOT ride an `{idx}`
+                        # pattern (`MERGE {idx:null}` is refused, and
+                        # `MATCH {idx:null}` never matches), so the legs below
+                        # merge on the bare pattern and delete by ID.
+                        # Validate ONLY the rel type here.
                         validate_rel_type(row[1])
                         op_seq = operator_created_seq.get(row[0])
                         if op_seq is not None and fseq is not None \

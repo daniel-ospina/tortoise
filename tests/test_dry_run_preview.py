@@ -640,6 +640,55 @@ class TestBlastRadius:
         assert any(t == old for _, t in kept), kept
         assert preview["edges_dropped"], "the successor self-edge must be delete-only"
 
+    def test_supersede_preview_is_null_idx_safe_for_a_mitigation(self, sdk):
+        """#6180 P1: `mitigate_operator` writes `(op)-[:mitigated_by]->(m)`
+        with NO idx, so the writer MERGEs the BARE pattern and the preview must
+        model exactly that — a null-idx row is net-new only when the successor
+        carries no same-(operator, type) edge, and a pre-wired one at ANY idx
+        lands in `edges_already_present_at_new`. Without this the preview would
+        over-report `edges_created_at_new` for every mitigation point (the
+        fail-open direction the module docstring warns about). Also pins that
+        the retained alreadyDecided INPUT mirror is visible in
+        `edges_kept_attached`."""
+        from tortoise.mcp_server import _preview_supersede
+
+        # (a) the idx-less `mitigated_by` edge is net-new at the successor
+        src, tgt = _seed_point(sdk, "src"), _seed_point(sdk, "tgt")
+        op = sdk.create_operator("IMPL", src, [tgt])
+        mit = sdk.mitigate_operator(op["id"], "no control group", 0.3)
+        new = _seed_point(sdk, "new-context")
+        before = _edge_keys_at(sdk, new)
+        preview = _preview_supersede(sdk, mit["id"], new)
+        real = sdk.supersede(mit["id"], new)
+        net_new = _edge_keys_at(sdk, new) - before
+        assert preview["edges_created_at_new"] == len(net_new), (
+            f"preview said {preview['edges_created_at_new']} net-new, "
+            f"the graph gained {len(net_new)}")
+        assert preview["edges_transferred_from_old"] == real["edges_transferred"]
+
+        # (b) a successor pre-wired with the same (operator, type) edge at ANY
+        # idx is already-present, not net-new (the bare MERGE matches it)
+        old2, new2 = _seed_point(sdk, "old2"), _seed_point(sdk, "new2")
+        op2 = sdk.create_operator("IMPL", old2, [tgt])
+        mit2 = sdk.mitigate_operator(op2["id"], "second", 0.3)
+        sdk._get_proj().g.query(
+            "MATCH (o:Point {id:$o}), (n:Point {id:$n}) "
+            "MERGE (o)-[:mitigated_by {idx:3}]->(n)",
+            params={"o": op2["id"], "n": new2},
+        )
+        preview2 = _preview_supersede(sdk, mit2["id"], new2)
+        assert preview2["edges_already_present_at_new"] >= 1, (
+            "the pre-wired idx-3 edge must be classified already-present")
+
+        # (c) the alreadyDecided INPUT mirror stays on the prior AND is visible
+        old3, new3 = _seed_point(sdk, "old3"), _seed_point(sdk, "new3")
+        keep_op = sdk.create_operator("IMPL", old3, [tgt],
+                                      label="alreadyDecided")
+        preview3 = _preview_supersede(sdk, old3, new3)
+        kept3 = {(e["type"], e["from"], e["to"])
+                 for e in preview3["edges_kept_attached"]}
+        assert ("INPUT", old3, keep_op["id"]) in kept3, kept3
+
     def test_supersede_preview_agrees_when_a_same_type_repoint_target_exists(
             self, sdk):
         """The SECOND precondition of the divergence: a direct IMPL/NAND

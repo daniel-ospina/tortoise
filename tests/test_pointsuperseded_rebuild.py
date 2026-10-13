@@ -1923,7 +1923,16 @@ def test_idxless_mitigation_edge_survives_rebuild(sup):
     `mitigated_by` edge with NO idx. The live transfer must not raise on
     `MERGE … {idx:null}`, and `rebuild_all` must not raise either — the
     `PointSuperseded` fold is journaled BEFORE the transfers, so a raise here
-    wedges every later rebuild of the journal (the disaster-recovery path)."""
+    wedges every later rebuild of the journal (the disaster-recovery path).
+
+    Scope: this asserts the `mitigated_by` transfer and that rebuild does not
+    raise. It does NOT assert full live==rebuilt parity for a mitigation — the
+    pre-existing #5048 `IMPL`/`INPUT` fold divergence (projection/edges.py's
+    `_create_edges` mints an `(op)-[:INPUT]->(m)` back-link that the
+    filter-less pass-2b typed collector then repoints) also applies here. That
+    divergence was previously UNOBSERVABLE because `rebuild_all` raised on
+    `MERGE {idx:null}` before this fix; it is recorded on #5048, not treated as
+    new here."""
     _, events, sdk = sup
     s = sdk.create_point("statement", "s", status="live")["id"]
     t = sdk.create_point("statement", "t", status="live")["id"]
