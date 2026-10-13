@@ -125,6 +125,22 @@ def _strip_markdown(text: str) -> str:
     return _MARKDOWN_EMPHASIS.sub("", text)
 
 
+def _writer_scan_text(path: Path, text: str) -> str:
+    """The text to scan for writer numbers, formatted away and §9-aware.
+
+    The historical citation is exempted **by name**, and only on the page that
+    carries it: §9 of `docs/capacity.md` quotes the predecessor claim. It is not
+    "a figure inside quotes" (a stale figure quoted elsewhere is still
+    published), and it is not every surface's (a quoted `"2 concurrent
+    writers"` copied into the quickstart must still be a recognised stale
+    figure) — #8492 fourth review, observation.
+    """
+    text = _strip_markdown(text)
+    if path == CAPACITY:
+        text = _HISTORICAL_CITATION.sub("", text)
+    return text
+
+
 def _read(path: Path) -> str:
     assert path.is_file(), f"missing public surface: {path}"
     return path.read_text(encoding="utf-8")
@@ -438,7 +454,7 @@ def test_no_writer_number_escapes_the_binding_on_a_public_surface():
     """
     n = _integration_writer_coverage()
     for path in (CAPACITY, QUICKSTART, ENV_EXAMPLE, SELF_HOSTED_HTML):
-        text = _HISTORICAL_CITATION.sub("", _strip_markdown(_read(path)))
+        text = _writer_scan_text(path, _read(path))
         for line in text.splitlines():
             embedded_line = bool(re.search(r"\bembedded\b", line, re.IGNORECASE))
             for match in _WRITER_NUMBER.finditer(line):
@@ -455,6 +471,24 @@ def test_no_writer_number_escapes_the_binding_on_a_public_surface():
                         "a write-concurrency statement the binding does not "
                         f"recognise; every verified writer count must be {n}"
                     )
+
+
+def test_the_historical_citation_is_exempted_only_where_it_lives():
+    """§9's exemption is `docs/capacity.md`'s alone — not every surface's.
+
+    #8492's fourth review observed that stripping the citation from all four
+    surfaces let a quoted `"2 concurrent writers"` copied into the quickstart
+    escape both writer scans. Keyed to the page that carries it, the same
+    string anywhere else is a recognised stale figure again.
+    """
+    quoted = 'the predecessor said "2 concurrent writers" while the test covered 5'
+    assert not _WRITER_NUMBER.search(_writer_scan_text(CAPACITY, quoted)), (
+        "docs/capacity.md §9's historical citation is its one legitimate use"
+    )
+    assert _WRITER_NUMBER.search(_writer_scan_text(QUICKSTART, quoted)), (
+        "a quoted stale figure on another surface escaped the catch-all — the "
+        "exemption must not travel with the string"
+    )
 
 
 # ── "Unmeasured" is a published answer, and must stay published ──────────────

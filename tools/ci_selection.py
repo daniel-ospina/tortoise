@@ -401,6 +401,18 @@ SOURCE_PATTERNS = {
                    # quickstart-only diff would otherwise select NOTHING and leave the
                    # figure unpinned in the file a self-hoster actually reads.
                    "docs/quickstart-selfhosted.md",
+                   # #3329: the guard DERIVES the published write-concurrency figure
+                   # from this test file's own loop bound, so a change to it can
+                   # invalidate the prose the guard pins. Without this entry a
+                   # `tests/test_embedded_concurrency.py`-only diff matched only
+                   # the `tests/` -> `core` fallback and did NOT select
+                   # `test_capacity_page.py` — a PR that bumped the coverage to
+                   # six writers and left the docs stale merged green, and the
+                   # drift surfaced only on the post-merge `push` full run (the
+                   # #3442 shape). Same #1349/#3332/#3616 class: the derived
+                   # source needs the same reachability guarantee as the docs it
+                   # feeds (#8492).
+                   "tests/test_embedded_concurrency.py",
                    # #3524: `test_oauth_consent_bridge.py` also pins the two auth
                    # records its subject is specified in — the consent bridge spec
                    # (`docs/engineering/auth/consent-identity-bridge.md`) and the
