@@ -318,6 +318,12 @@ def test_disagreement_does_not_report_co_targets_as_conflicting(sdk):
         for r in proj.g.query(TEMPLATES["disagreement"]["cypher"],
                               params={"limit": 20}).result_set
     }
+    rows = proj.g.query(TEMPLATES["disagreement"]["cypher"],
+                        params={"limit": 20}).result_set
+    assert len(rows) == len(pairs), (
+        "each conflict must be emitted ONCE, not once per direction — the "
+        f"formatter prints a then b in a fixed order: {rows}"
+    )
     assert frozenset((atk, v1)) in pairs, f"the real conflict pair is missing: {pairs}"
     assert frozenset((atk, v2)) in pairs, f"the real conflict pair is missing: {pairs}"
     assert frozenset((v1, v2)) not in pairs, (

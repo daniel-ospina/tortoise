@@ -10772,9 +10772,22 @@ class TortoiseSDK:
                 if other_id == pid:
                     continue
                 nand = proj.g.query(
-                    "MATCH (op:Point {is_operator:true})-[:NAND]->"
+                    # #6871: a NAND operator's idx 0 endpoint is its SOURCE, so
+                    # the link is source-vs-target. Without the roles two
+                    # CO-TARGETS of one operator (whose real attacker is a
+                    # third point, absent from the timeline) were labelled
+                    # NAND-linked to each other — a fabricated link in a
+                    # temporal chain. NOT reachable by D12, which is cap
+                    # placement inside the shared relationships reader
+                    # (docs/scoping/2026-08-17-1353-relationships-decoration-
+                    # scoping.md): this read neither calls that function nor
+                    # feeds topic_summarization's disputed-pair detection.
+                    "MATCH (op:Point {is_operator:true})-[r1:NAND]->"
                     "(:Point {id:$a}), "
-                    "(op)-[:NAND]->(:Point {id:$b}) RETURN count(op)",
+                    "(op)-[r2:NAND]->(:Point {id:$b}) "
+                    "WHERE (r1.idx = 0 AND r2.idx >= 1) "
+                    "   OR (r1.idx >= 1 AND r2.idx = 0) "
+                    "RETURN count(op)",
                     params={"a": pid, "b": other_id},
                 ).result_set
                 if nand and nand[0][0] > 0:

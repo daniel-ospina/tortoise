@@ -21,19 +21,20 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["disagree", "conflict", "oppose", "contradict", "tension", "contested"],
         "description": "Find NAND conflicts between high-confidence claims",
         "subgraph_vars": ["a", "b"],
-        # #6871: match the CANONICAL conflict pair, which is source-vs-target —
-        # `why._CONFLICTS_CYPHER` and `ranking.resolve_contested_relevance` both
-        # scope it that way, and `ep.py` builds `pairs = [(input_ids[0],
-        # input_ids[j]) for j >= 1]`. Identity-only matching also bound two
-        # CO-TARGETS of the same NAND operator as `a`/`b`, and co-targets do not
-        # contradict each other — a fan-out operator minted false conflicts
-        # between claims that merely share an attacker. The guard is SYMMETRIC
-        # because a conflict pair has no preferred print order (`_format_pairs`
-        # emits both endpoints without order); what it fixes is the ROLE.
+        # #6871: match the CANONICAL conflict pair ONCE — source (idx 0) vs
+        # target (idx >= 1). `why._CONFLICTS_CYPHER` and
+        # `ranking.resolve_contested_relevance` both scope it that way, and
+        # `ep.py` builds `pairs = [(input_ids[0], input_ids[j]) for j >= 1]`.
+        # Identity-only matching also bound two CO-TARGETS of the same NAND
+        # operator as `a`/`b`, so a fan-out minted conflicts between claims that
+        # merely share an attacker. The guard is ONE arm, not a symmetric pair:
+        # two arms emit each conflict twice (`_format_pairs` prints `a` then `b`
+        # in a fixed order and does not dedupe), inflating the count and eating
+        # the LIMIT.
         "cypher": """
             MATCH (a:Point)<-[r_in:NAND]-(op:Point {op_type:\"NAND\"})-[r_out:NAND]->(b:Point)
-            WHERE ((r_in.idx = 0 AND r_out.idx >= 1)
-                   OR (r_in.idx >= 1 AND r_out.idx = 0))
+            WHERE r_in.idx = 0
+              AND r_out.idx >= 1
               AND a.id <> b.id
               AND a.is_operator = false
               AND b.is_operator = false
