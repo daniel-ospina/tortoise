@@ -265,18 +265,82 @@ def _build_two_sided_edit(tmp_path: Path) -> Path:
     conflict-free and its blob is neither side's alone; `origin/main` is a real
     remote at main's tip, so the gate measures it after fetching.
     """
+    return _build_two_sided_edit_lines(
+        tmp_path, main_body=b"A\nB\nM\n", branch_body=b"F\nB\nC\n")
+
+
+def _build_two_sided_edit_lines(tmp_path: Path, *, main_body: bytes,
+                                branch_body: bytes) -> Path:
+    """Two-sided edit of shared.txt with caller-supplied final bodies.
+
+    Both sides descend from `A\\nB\\nC\\n`; `pr` gets `branch_body`, `main`
+    gets `main_body`. The common base is a real remote so the gate fetches it.
+    Callers assert the merge is conflict-free and its blob is not main's — the
+    two conditions the arm needs to fire.
+    """
     repo = tmp_path / "repo"
     repo.mkdir()
     _git_ok(repo, "init", "-q", "-b", "main", "--template=", ".")
-    _write(repo, "shared.txt", "A\nB\nC\n")
+    (repo / "shared.txt").write_bytes(b"A\nB\nC\n")
     _git_ok(repo, "add", "shared.txt")
     _git_ok(repo, "commit", "-q", "-m", "c0")
     _git_ok(repo, "checkout", "-q", "-b", "pr")
-    _write(repo, "shared.txt", "F\nB\nC\n")
-    _git_ok(repo, "commit", "-qam", "branch edits line 1")
+    (repo / "shared.txt").write_bytes(branch_body)
+    _git_ok(repo, "commit", "-qam", "branch edits shared.txt")
     _git_ok(repo, "checkout", "-q", "main")
-    _write(repo, "shared.txt", "A\nB\nM\n")
-    _git_ok(repo, "commit", "-qam", "main edits line 3")
+    (repo / "shared.txt").write_bytes(main_body)
+    _git_ok(repo, "commit", "-qam", "main edits shared.txt")
+    _make_remote(tmp_path, repo)
+    _git_ok(repo, "checkout", "-q", "pr")
+    return repo
+
+
+def _build_union_delete_modify(tmp_path: Path) -> Path:
+    """main DELETES a line that `pr` MODIFIES, in a `merge=union` file.
+
+    `.gitattributes` unions `union.txt` — exactly as this repo unions
+    `config/ci-surfaces.yml` (`.gitattributes`), the file #1431's own false red
+    was measured on. The overlapping delete/modify therefore merges
+    CONFLICT-FREE, and the union keeps the branch's line: main's deletion is not
+    applied even though main's added-line count is zero.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_ok(repo, "init", "-q", "-b", "main", "--template=", ".")
+    _write(repo, ".gitattributes", "union.txt merge=union\n")
+    _write(repo, "union.txt", "a\nb\nc\n")
+    _git_ok(repo, "add", ".gitattributes", "union.txt")
+    _git_ok(repo, "commit", "-q", "-m", "c0")
+    _git_ok(repo, "checkout", "-q", "-b", "pr")
+    _write(repo, "union.txt", "a\nb-changed\nc\n")
+    _git_ok(repo, "commit", "-qam", "branch modifies b")
+    _git_ok(repo, "checkout", "-q", "main")
+    _write(repo, "union.txt", "a\nc\n")
+    _git_ok(repo, "commit", "-qam", "main deletes b")
+    _make_remote(tmp_path, repo)
+    _git_ok(repo, "checkout", "-q", "pr")
+    return repo
+
+
+def _build_binary_main_change(tmp_path: Path) -> Path:
+    """main edits a genuinely binary path; `pr` edits shared.txt.
+
+    A real binary change is the case the structural `--numstat` signal must
+    still classify as unmeasurable (None), not lose to the substring scan.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_ok(repo, "init", "-q", "-b", "main", "--template=", ".")
+    (repo / "blob.bin").write_bytes(b"\x00\x01\x02\n")
+    _write(repo, "shared.txt", "A\nB\nC\n")
+    _git_ok(repo, "add", "blob.bin", "shared.txt")
+    _git_ok(repo, "commit", "-q", "-m", "c0")
+    _git_ok(repo, "checkout", "-q", "-b", "pr")
+    _write(repo, "shared.txt", "F\nB\nC\n")
+    _git_ok(repo, "commit", "-qam", "branch edits shared.txt")
+    _git_ok(repo, "checkout", "-q", "main")
+    (repo / "blob.bin").write_bytes(b"\x00\x01\x03\n")
+    _git_ok(repo, "commit", "-qam", "main edits blob.bin")
     _make_remote(tmp_path, repo)
     _git_ok(repo, "checkout", "-q", "pr")
     return repo
@@ -387,6 +451,16 @@ def _run(cwd: Path, *extra: str,
 def _out(p: subprocess.CompletedProcess) -> str:
     """Both streams — the gate writes its failure text to stderr."""
     return p.stdout + p.stderr
+
+
+def _load_mod():
+    """Import the gate under test as a module (heredoc-free, hermetic)."""
+    spec = importlib.util.spec_from_file_location("drift_guard_under_test",
+                                                 _script())
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def _payload(cwd: Path, *extra: str,
@@ -692,6 +766,109 @@ def test_two_sided_clean_edit_is_a_silent_revert(tmp_path: Path) -> None:
     assert "SILENTLY REVERTING" in _out(_run(repo))
 
 
+def test_mains_deletion_dropped_by_a_union_is_not_reported_as_kept(
+        tmp_path: Path) -> None:
+    """#1431 review (P1): a zero additions-only `lost` must not claim "kept".
+
+    `.gitattributes` unions the file, exactly as this repo unions
+    `config/ci-surfaces.yml`. main DELETES a line the branch MODIFIES; the union
+    resolves the overlap CLEANLY and keeps the branch's line, so main's deletion
+    is not applied. main added no lines, so the additions-only `lost` is 0 by
+    construction — yet the merge does not preserve main's change. Pre-fix the
+    closing line asserted "every line main contributed is present … not a
+    revert", a false statement on an input this repo's own config produces.
+    The fix reports preservation as UNPROVEN instead.
+    """
+    repo = _build_union_delete_modify(tmp_path)
+    tree = _git(repo, "merge-tree", "--write-tree", "--name-only",
+                "origin/main", "HEAD")
+    assert tree.returncode == 0, "fixture must be a CLEAN merge — " + tree.stderr
+    merged_tree = tree.stdout.splitlines()[0]
+    # The union kept the branch's line; main's deletion is NOT applied.
+    assert _git_ok(repo, "show", f"{merged_tree}:union.txt").splitlines() == [
+        "a", "b-changed", "c"]
+    assert _git_ok(repo, "show", "origin/main:union.txt").splitlines() == ["a", "c"]
+    assert _git_ok(repo, "rev-parse", f"{merged_tree}:union.txt") != _git_ok(
+        repo, "rev-parse", "origin/main:union.txt")
+
+    payload, p = _payload(repo)
+    assert p.returncode == 1, payload  # the VERDICT is unchanged
+    (entry,) = payload["reverts"]
+    assert entry["path"] == "union.txt", entry
+    assert entry["added"] == 0 and entry["deleted"] == 1, entry
+    assert entry["lost"] == 0, entry
+    assert entry["contested"] is True, entry
+
+    text = _out(_run(repo))
+    assert "main's content kept" not in text, text
+    assert "not a revert" not in text, text
+    assert "preservation UNPROVEN" in text, text
+
+
+def test_a_text_line_mentioning_binary_files_is_not_treated_as_binary(
+        tmp_path: Path) -> None:
+    """#1431 review (P2): binary is git's STRUCTURAL signal, not a substring.
+
+    A TEXTUAL path whose main-added line merely contains the phrase "Binary
+    files" (live in-tree in `.github/workflows/ci.yml`, `docs/ai-review-gate.md`,
+    …) was classified binary by `if "Binary files" in r.stdout`, so the gate
+    printed `UNMEASURED — binary path` for a path it could measure. `--numstat`'s
+    `-` marker is the structural signal; this is exactly the union-vs-revert
+    question the PR set out to answer, answered incorrectly for that path.
+    """
+    repo = _build_two_sided_edit_lines(
+        tmp_path,
+        main_body=b"A\nB\nC\n# note: Binary files a/x and b/x differ\n",
+        branch_body=b"F\nB\nC\n")
+    mod = _load_mod()
+    mb = _git_ok(repo, "merge-base", "origin/main", "pr")
+    assert mod._main_added_lines(repo, mb, "origin/main", "shared.txt") == [
+        "# note: Binary files a/x and b/x differ"]
+
+    payload, p = _payload(repo)
+    assert p.returncode == 1, payload
+    (entry,) = payload["reverts"]
+    assert entry["lost"] == 0, entry
+    text = _out(_run(repo))
+    assert "UNMEASURED" not in text, text
+    assert "main's content kept" in text, text
+
+
+def test_an_added_line_beginning_with_plus_plus_is_kept(tmp_path: Path) -> None:
+    """#1431 review (P2): `not ln.startswith("+++")` dropped CONTENT, not headers.
+
+    A main-added content line `++i;` renders in the patch as `+++i;` and was
+    filtered out as if it were the `+++ b/<path>` file header, silently
+    understating main's contribution. The fix collects `+` lines only inside a
+    `@@` hunk, so the header — which precedes the first hunk — cannot leak in
+    and `++i;` is kept. The second assertion pins that the undercount is
+    MATERIAL: a merge lacking that line is one lost line, not zero.
+    """
+    repo = _build_two_sided_edit_lines(
+        tmp_path, main_body=b"A\nB\nC\n++i;\n", branch_body=b"F\nB\nC\n")
+    mod = _load_mod()
+    mb = _git_ok(repo, "merge-base", "origin/main", "pr")
+    assert mod._main_added_lines(repo, mb, "origin/main", "shared.txt") == ["++i;"]
+    without = _blob(repo, b"F\nB\nC\n")  # a merge that lacks main's added line
+    assert mod._lost_lines(repo, mb, "origin/main", "shared.txt", without) == 1
+
+
+def test_a_genuinely_binary_path_is_still_unmeasurable(tmp_path: Path) -> None:
+    """Regression: the structural signal must not LOSE the binary case.
+
+    `--numstat`'s `-` is what now decides binary; a real binary change must
+    still answer None so `_lost_lines` propagates unmeasurable rather than a
+    fabricated 0.
+    """
+    repo = _build_binary_main_change(tmp_path)
+    mod = _load_mod()
+    mb = _git_ok(repo, "merge-base", "origin/main", "pr")
+    assert mod._main_diff_lines(repo, mb, "origin/main", "blob.bin") is None
+    assert mod._main_added_lines(repo, mb, "origin/main", "blob.bin") is None
+    # No collateral damage: the text path in the same fixture still measures.
+    assert mod._main_added_lines(repo, mb, "origin/main", "shared.txt") == []
+
+
 def test_a_red_names_whether_mains_content_actually_survived(
         tmp_path: Path) -> None:
     """#1431: the VERDICT is blob identity; `lost` measures which red it is.
@@ -711,12 +888,17 @@ def test_a_red_names_whether_mains_content_actually_survived(
 
     MUTATION-MEASURED LIMIT, stated so it is not mistaken for full coverage:
     a mutant that hardcodes `"lost": 0` at the call site SURVIVES this file.
-    That mutant is EQUIVALENT on every fixture reachable end-to-end, because a
-    conflict-free merge preserves both sides' non-overlapping changes and
-    overlapping ones conflict — so `lost > 0` cannot be produced by a fixture.
-    The non-zero direction is therefore covered where it is reachable (the
-    `_lost_lines` helper, below, and `_lost_summary`'s branches) rather than
-    pretended end-to-end.
+    That mutant is EQUIVALENT on every fixture reachable end-to-end, but NOT
+    for the reason a naive reading gives: `merge=union` — this repo's own
+    `.gitattributes` — resolves an overlap WITHOUT a conflict, so the union
+    fixture reachable below IS produced by CI's configuration; it simply cannot
+    raise `lost` above 0 there, because main added no lines in it. The
+    dropped-deletion case is handled by the MESSAGE (`_lost_summary`'s UNPROVEN
+    branch, pinned end-to-end by
+    `test_mains_deletion_dropped_by_a_union_is_not_reported_as_kept`), not by
+    `lost`. The non-zero direction is therefore covered where it is reachable
+    (the `_lost_lines` helper, below, and `_lost_summary`'s branches) rather
+    than pretended end-to-end.
     """
     repo = _build_two_sided_edit(tmp_path)
     payload, p = _payload(repo)
@@ -764,6 +946,11 @@ def test_an_unmeasurable_path_is_never_reported_as_kept(tmp_path: Path) -> None:
     assert mod._lost_note(None) == "  (main's added lines absent: UNMEASURED — binary path)"
     assert "content lost" in mod._lost_note(3)
     assert "content kept" in mod._lost_note(0)
+    # #1431 review: a zero additions-only `lost` on a path whose lines the
+    # branch ALSO touched is not preservation — a union can drop main's side
+    # there. Saying "content kept" was the false statement the review measured.
+    assert "UNPROVEN" in mod._lost_note(0, True)
+    assert "content kept" not in mod._lost_note(0, True)
 
 
 def test_the_closing_line_distinguishes_all_three_measurements() -> None:
@@ -789,8 +976,16 @@ def test_the_closing_line_distinguishes_all_three_measurements() -> None:
     assert "IS lost" in lost and "2" in lost and "1 path(s)" in lost, lost
     assert "UNMEASURED" in unmeasured, unmeasured
     assert "treat those as unproven" in unmeasured, unmeasured
-    # The three must be mutually distinguishable, not three phrasings of one.
-    assert len({kept, lost, unmeasured}) == 3, (kept, lost, unmeasured)
+    # #1431 review: a CONTESTED path (branch touched the same base lines, so a
+    # union can drop main's side) with zero additions-only `lost` is a fourth
+    # message — UNPROVEN, never "kept / not a revert".
+    contested = mod._lost_summary([{"lost": 0, "contested": True}])
+    assert "UNPROVEN" in contested, contested
+    assert "not a revert" not in contested, contested
+    assert "content kept" not in contested, contested
+    # The four must be mutually distinguishable, not four phrasings of one.
+    assert len({kept, lost, unmeasured, contested}) == 4, (
+        kept, lost, unmeasured, contested)
 
 
 def test_threshold_arm_reports_distance_without_failing(tmp_path: Path) -> None:
