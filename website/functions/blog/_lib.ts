@@ -11,6 +11,7 @@
 
 import { RELAXED_CSP } from "../_shared/security-headers.ts";
 import { createAnchorAllocator } from "./_shared/slug.ts";
+import { parseVideoMarker, videoObjectJsonLd, type VideoRef } from "./_shared/video.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 export interface BlogPost {
@@ -60,6 +61,35 @@ export function validUrl(u: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * A safe `href` for an author-written link (#8313).
+ *
+ * `validUrl` correctly rejects `javascript:`/`data:`/`//host`, but it ALSO
+ * rejected every RELATIVE reference — so `[another post](/blog/foo)` and
+ * `[jump](#a-heading)` were both rewritten to a literal `"#"`, silently: the
+ * stored markdown was right, the CMS showed the right link, and only the
+ * rendered HTML was wrong. Internal linking is how a hub-and-spoke content set
+ * works at all, so this was a live defect for the SEO engine.
+ *
+ * The fix accepts a same-origin RELATIVE reference while keeping the scheme
+ * rejection intact — the two are different jobs and only the second was wrong.
+ * Anything carrying a scheme must still be http(s), which is what stops
+ * `javascript:` and `data:`. Protocol-relative (`//host`) is rejected because it
+ * inherits the page scheme and points off-origin, which is not "relative" here.
+ */
+export function validHref(href: string): boolean {
+  const h = href.trim();
+  if (!h) return false;
+  // Protocol-relative: off-origin, and not what an author means by "relative".
+  if (h.startsWith("//")) return false;
+  // Carries a scheme? Then it must be http(s) — the original security property.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(h)) return validUrl(h);
+  // No scheme: an in-page fragment, an absolute path, or a relative path.
+  // Reject control characters and whitespace, which have no business in an href
+  // and are a common smuggling vector.
+  return !/[\u0000-\u001f\u007f\s]/.test(h);
 }
 
 // Cover URLs embedded in CSS style attributes — stricter: scheme-checked AND
@@ -163,8 +193,14 @@ function inline(text: string): string {
       out += `<img src="${safeSrc}" alt="${escapeHtml(unescapeMd(m[5] ?? ""))}">`;
     } else if (m[7] !== undefined) {
       const href = m[9] ?? "";
-      const safeHref = validUrl(href) ? escapeHtml(href) : "#";
-      out += `<a href="${safeHref}" target="_blank" rel="noopener">${escapeHtml(unescapeMd(m[8] ?? ""))}</a>`;
+      const safeHref = validHref(href) ? escapeHtml(href) : "#";
+      // An INTERNAL link (relative/fragment) opens in the same tab and needs no
+      // `noopener`; an off-site absolute link keeps the hard-won `_blank` +
+      // `noopener`. Previously every link was treated as external (#8313).
+      const external = /^https?:\/\//i.test(href.trim());
+      out += external
+        ? `<a href="${safeHref}" target="_blank" rel="noopener">${escapeHtml(unescapeMd(m[8] ?? ""))}</a>`
+        : `<a href="${safeHref}">${escapeHtml(unescapeMd(m[8] ?? ""))}</a>`;
     }
     last = re.lastIndex;
   }
@@ -428,6 +464,29 @@ export function renderMarkdown(markdown: string): string {
 
   while (i < lines.length) {
     const line = lines[i];
+
+    // Video embed (#7751). Intercepted BEFORE the link/paragraph branches so
+    // the marker is never rendered as literal text; an unrecognised payload
+    // falls through and stays ordinary content, exactly like an unknown
+    // `[!X]` alert degrades to a blockquote. The iframe `src` is CONSTRUCTED
+    // from a provider-validated id (see _shared/video.ts), never taken from the
+    // author's URL, so no off-site or `javascript:` frame can reach the page.
+    const videoMarker = MD_VIDEO_RE.exec(line.trim());
+    if (videoMarker) {
+      const payload = videoMarker[1].replace(/\\?\]\\?\]\s*$/, "").trim();
+      const ref = payload ? parseVideoMarker(payload) : null;
+      if (ref) {
+        flushPara(paragraphBuf);
+        out.push(
+          `<figure class="video-embed"><iframe src="${escapeHtml(ref.embedUrl)}" ` +
+            `title="${escapeHtml(ref.title ?? "Video")}" loading="lazy" ` +
+            `allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" ` +
+            `referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe></figure>`,
+        );
+        i++;
+        continue;
+      }
+    }
 
     // Table-of-contents placeholder (filled in once every heading is known)
     if (MD_TOC_RE.test(line.trim())) {
@@ -762,9 +821,55 @@ function breadcrumbJsonLd(post: BlogPost, url: string): unknown {
   };
 }
 
+// Video embed marker (#7751): `[[video: <url>]]`, optionally
+// `[[video: <url> | <title> | PT12M34S | 2026-10-10]]`. TipTap escapes the
+// brackets, so the pattern tolerates `\[`. The PAYLOAD is captured to the end
+// of the line and the trailing `]]` stripped afterwards, because the payload
+// itself may contain separators.
+const MD_VIDEO_RE = /^\\?\[\\?\[\s*video\s*:\s*(.*)$/i;
+
+/**
+ * The video references in an article body — the renderer's promotion of the
+ * `[[video: …]]` convention (#7751). Pure, so the structured data it feeds is
+ * testable without a runtime, and so `articleJsonLd` can build `VideoObject`
+ * from the SAME parse that emitted the embed: one source, never two.
+ */
+export function extractVideo(markdown: string): VideoRef[] {
+  const found: VideoRef[] = [];
+  let inFence = false;
+  for (const raw of markdown.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (/^```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const m = MD_VIDEO_RE.exec(line);
+    if (!m) continue;
+    const payload = m[1].replace(/\\?\]\\?\]\s*$/, "").trim();
+    const ref = parseVideoMarker(payload);
+    if (ref) found.push(ref);
+  }
+  return found;
+}
+
 /** `FAQPage` for an article that has an FAQ section, or `null` when it has none. */
 function faqPageJsonLdFor(post: BlogPost): unknown | null {
   return faqPageJsonLd(extractFaq(post.body));
+}
+
+/**
+ * `VideoObject` for an article that embeds a video, or `null` when it has none.
+ *
+ * The video is a ranking surface of its own (#7751), so this is emitted
+ * ALONGSIDE `BlogPosting`/`BreadcrumbList`/`FAQPage` rather than replacing
+ * anything. `post.published_at`/title/excerpt stand in for the video's own
+ * metadata when the marker does not carry it, which is correct for the intended
+ * shape: an interview published with its article.
+ */
+function videoObjectJsonLdFor(post: BlogPost, url: string): unknown | null {
+  const [video] = extractVideo(post.body);
+  return video ? videoObjectJsonLd(video, post, url) : null;
 }
 
 /**
@@ -777,6 +882,7 @@ const ARTICLE_SCHEMA_BUILDERS: ReadonlyArray<(post: BlogPost, url: string) => un
   blogPostingJsonLd,
   breadcrumbJsonLd,
   faqPageJsonLdFor,
+  videoObjectJsonLdFor,
 ];
 
 /**
@@ -897,6 +1003,8 @@ h1.art-title{font-family:var(--serif);font-size:40px;line-height:1.2;color:#fff;
 .art-body pre{background:#0b1220;border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:16px 0}
 .art-body pre code{border:0;background:transparent;padding:0;color:inherit}
 .art-body .table-wrap{overflow-x:auto;margin:16px 0}
+.art-body .video-embed{margin:22px 0;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:#000}
+.art-body .video-embed iframe{display:block;width:100%;aspect-ratio:16/9;height:auto;border:0}
 .art-body table{border-collapse:collapse;margin:16px 0;width:100%}
 .art-body .table-wrap table{margin:0}
 .art-body th,.art-body td{border:1px solid var(--border);padding:8px 12px;text-align:left}

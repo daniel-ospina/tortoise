@@ -14,7 +14,7 @@
 // Run (Node >= 22.6):
 //   node --experimental-strip-types tests/test_blog_markdown.mjs
 
-import { renderMarkdown, extractFaq, faqPageJsonLd, articleJsonLd, jsonLd } from "../website/functions/blog/_lib.ts";
+import { renderMarkdown, extractFaq, faqPageJsonLd, articleJsonLd, jsonLd, extractVideo, validHref } from "../website/functions/blog/_lib.ts";
 
 let failures = 0;
 const ok = (msg) => console.log(`  ✓ ${msg}`);
@@ -827,6 +827,190 @@ console.log("house-style answer box");
     renderMarkdown("> [!ANSWER] Explicit marker.").includes('class="callout callout-answer"'),
     "the explicit [!ANSWER] marker still works (no regression)",
   );
+}
+
+// ── #7751: video embed + VideoObject ───────────────────────────────────────
+console.log("");
+console.log("video embed marker + VideoObject structured data (#7751)");
+{
+  const YT = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+
+  // The marker renders an iframe and never leaks as literal text.
+  const out = renderMarkdown(`Before.\n\n[[video: ${YT}]]\n\nAfter.`);
+  assert(out.includes("<iframe"), "the video marker renders an iframe");
+  assert(out.includes("video-embed"), "the embed is wrapped for responsive layout");
+  assert(
+    out.includes("https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"),
+    "the src is the privacy-preserving constructed embed URL",
+  );
+  assert(!out.includes("[[video"), "the marker text is not left in the output");
+  assert(out.includes("Before.") && out.includes("After."), "surrounding prose survives");
+
+  // Escaped brackets, as TipTap writes them.
+  const escaped = renderMarkdown(`\\[\\[video: ${YT}\\]\\]`);
+  assert(escaped.includes("<iframe"), "TipTap-escaped brackets are recognised too");
+
+  // ⛔ THE SECURITY PROPERTY: the src is CONSTRUCTED from a validated id, so an
+  // author cannot point the iframe at another origin, whatever they type.
+  for (const hostile of [
+    "[[video: javascript:alert(1)]]",
+    "[[video: https://evil.example.com/watch?v=dQw4w9WgXcQ]]",
+    "[[video: https://www.youtube.com/watch?v=<script>]]",
+    "[[video: data:text/html,<script>alert(1)</script>]]",
+    "[[video: //evil.example.com/embed/x]]",
+  ]) {
+    const h = renderMarkdown(hostile);
+    assert(!h.includes("<iframe"), `no iframe for a rejected payload: ${hostile}`);
+    // The rejected marker falls through as ORDINARY TEXT (like an unknown
+    // `[!X]` alert), so the URL string legitimately appears as visible prose.
+    // What must never happen is an iframe POINTING somewhere off-site — so the
+    // assertion is on the src, not on the presence of the text.
+    const src = /<iframe[^>]*src="([^"]*)"/.exec(h);
+    assert(src === null, `no off-site iframe src for: ${hostile}`);
+  }
+
+  // Providers: every accepted YouTube shape, plus Vimeo.
+  for (const [url, id] of [
+    ["https://youtu.be/dQw4w9WgXcQ", "dQw4w9WgXcQ"],
+    ["https://www.youtube.com/embed/dQw4w9WgXcQ", "dQw4w9WgXcQ"],
+    ["https://www.youtube.com/shorts/dQw4w9WgXcQ", "dQw4w9WgXcQ"],
+    ["https://m.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"],
+  ]) {
+    const refs = extractVideo(`[[video: ${url}]]`);
+    assertEq(refs.length, 1, `recognised: ${url}`);
+    assertEq(refs[0]?.id, id, `id extracted from ${url}`);
+  }
+  const vimeo = extractVideo("[[video: https://vimeo.com/123456789]]");
+  assertEq(vimeo[0]?.provider, "vimeo", "Vimeo is recognised");
+  assertEq(
+    vimeo[0]?.embedUrl,
+    "https://player.vimeo.com/video/123456789",
+    "Vimeo embed URL is constructed",
+  );
+  assertEq(vimeo[0]?.thumbnailUrl, null, "Vimeo has no derivable thumbnail (not fabricated)");
+
+  // Optional metadata, recognised by SHAPE so the common case needs no ceremony.
+  const withMeta = extractVideo(`[[video: ${YT} | My interview | PT12M34S | 2026-10-10]]`);
+  assertEq(withMeta[0]?.title, "My interview", "an explicit video title is picked up");
+  assertEq(withMeta[0]?.duration, "PT12M34S", "the ISO duration is picked up");
+  assertEq(withMeta[0]?.uploadDate, "2026-10-10", "the upload date is picked up");
+  // Out of order, and a non-ISO duration is not mistaken for one.
+  const shuffled = extractVideo(`[[video: ${YT} | 2026-10-10 | 12 minutes]]`);
+  assertEq(shuffled[0]?.uploadDate, "2026-10-10", "fields are order-independent");
+  assertEq(shuffled[0]?.title, "12 minutes", "a non-ISO duration is treated as the title");
+  assertEq(shuffled[0]?.duration, null, "a non-ISO duration is not accepted");
+
+  // A marker inside a FENCE is code, not an embed.
+  assertEq(
+    extractVideo("```\n[[video: " + YT + "]]\n```").length,
+    0,
+    "a marker inside a fenced code block is not an embed",
+  );
+  assertEq(extractVideo("no marker here").length, 0, "a body with no marker yields no video");
+
+  // The structured data joins the existing builders rather than replacing them.
+  const post = {
+    id: "1",
+    slug: "a-post",
+    title: "The State of Agentic Memory",
+    body: `[[video: ${YT}]]\n\nProse.`,
+    excerpt: "An excerpt.",
+    cover_image_url: null,
+    tags: ["agent-memory"],
+    author: null,
+    meta_title: null,
+    meta_description: "A description.",
+    published_at: "2026-10-12T00:00:00Z",
+    updated_at: "2026-10-12T00:00:00Z",
+  };
+  const nodes = articleJsonLd(post, "https://tortoise.premiselabs.co/blog/a-post");
+  const types = nodes.map((n) => n["@type"]);
+  assertEq(types.includes("VideoObject"), true, "VideoObject is emitted for an article with a video");
+  assertEq(types.includes("BlogPosting"), true, "BlogPosting is still emitted alongside it");
+  assertEq(types.includes("BreadcrumbList"), true, "BreadcrumbList is still emitted");
+
+  const video = nodes.find((n) => n["@type"] === "VideoObject");
+  assertEq(video.name, post.title, "name falls back to the article title");
+  assertEq(video.description, "A description.", "description falls back to meta_description");
+  assertEq(video.uploadDate, "2026-10-12T00:00:00Z", "uploadDate falls back to published_at");
+  assertEq(video.embedUrl, "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ", "embedUrl is the constructed one");
+  assertEq(
+    Array.isArray(video.thumbnailUrl) && video.thumbnailUrl[0].includes("i.ytimg.com"),
+    true,
+    "thumbnailUrl is derived for YouTube",
+  );
+
+  // No video → no node. Absence must not be invented.
+  const noVideo = articleJsonLd({ ...post, body: "Just prose." }, "https://x/blog/a");
+  assertEq(
+    noVideo.some((n) => n["@type"] === "VideoObject"),
+    false,
+    "an article with no video emits no VideoObject",
+  );
+
+  // The schema cannot break out of its <script>.
+  const hostileTitle = articleJsonLd(
+    { ...post, title: "Bad </script><script>alert(1)</script>" },
+    "https://x/blog/a",
+  );
+  const rendered = hostileTitle.map(jsonLd).join("");
+  assertEq(rendered.includes("</script><script>alert(1)"), false, "a hostile title cannot close the script tag");
+}
+
+// ── #8313: relative links, without weakening the scheme rejection ──────────
+console.log("");
+console.log("relative + internal links resolve; non-http schemes stay rejected (#8313)");
+{
+  const hrefOf = (md) => (/<a href="([^"]*)"/.exec(renderMarkdown(md)) ?? [])[1];
+
+  // The defect: every relative reference became a literal "#" — silently. The
+  // stored markdown was correct, so it was invisible in the CMS.
+  assertEq(hrefOf("[x](#a-heading)"), "#a-heading", "an in-page anchor keeps its fragment");
+  assertEq(hrefOf("[x](/blog/other)"), "/blog/other", "an absolute-path internal link resolves");
+  assertEq(
+    hrefOf("[x](/blog/state-of-agentic-memory-2026-transcript)"),
+    "/blog/state-of-agentic-memory-2026-transcript",
+    "the transcript link that #7751's convention depends on resolves",
+  );
+  assertEq(hrefOf("[x](relative/page)"), "relative/page", "a bare relative path resolves");
+
+  // An internal link must NOT be treated as external (it was, on every link).
+  assertEq(
+    renderMarkdown("[x](/blog/other)").includes("target=\"_blank\""),
+    false,
+    "an internal link does not open a new tab",
+  );
+  assertEq(
+    renderMarkdown("[x](https://example.com/a)").includes("target=\"_blank\""),
+    true,
+    "an external link still opens a new tab",
+  );
+  assertEq(
+    renderMarkdown("[x](https://example.com/a)").includes("rel=\"noopener\""),
+    true,
+    "an external link still carries rel=noopener",
+  );
+
+  // ⛔ NON-NEGOTIABLE: the fix must NOT be a fail-open. The scheme check that
+  // made this defect also blocked these, and it has to keep blocking them.
+  for (const bad of [
+    "javascript:alert(1)",
+    "JaVaScRiPt:alert(1)",
+    "vbscript:msgbox(1)",
+    "data:text/html,<script>alert(1)</script>",
+    "//evil.example.com/x",
+    "file:///etc/passwd",
+  ]) {
+    assertEq(hrefOf(`[x](${bad})`), "#", `still rejected: ${bad}`);
+  }
+  // Control characters cannot be smuggled into an href. Asserted on the
+  // predicate directly: a NUL is stripped by `escapeHtml` before the link regex
+  // runs, so there is no anchor to inspect at all — the property is that the
+  // href is never ACCEPTED, not that it is replaced with "#".
+  assertEq(validHref("/blog/a\u0000b"), false, "a NUL byte in an href is rejected");
+  assertEq(validHref("/blog/a b"), false, "a space in an href is rejected");
+  assertEq(validHref("/blog/a\nb"), false, "a newline in an href is rejected");
+  assertEq(validHref(""), false, "an empty href is rejected");
 }
 
 console.log("");
