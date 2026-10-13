@@ -547,7 +547,13 @@ def main() -> int:
     duplicates = cross_db_duplicates(args.port, args.graph)
     collision = "" if duplicates is None else collision_message(args.graph, duplicates)
     if duplicates is None:
-        say(f"note: could not scan other logical DBs for the {COLLISION_UPSTREAM} collision")
+        # ⛔ OUTSIDE THE `--quiet` GATE, like the collision and the counts. "The scan did
+        # not run" is a FACT about the graph, not step narration: under the scheduled job's
+        # `--quiet` an unrun scan and a clean scan would otherwise produce byte-identical
+        # logs, and `None` is expressly NOT "no collision" (see `cross_db_duplicates`).
+        # The same claim/narration line the counts() docstring draws, one item over.
+        print(f"note: could not scan other logical DBs for the {COLLISION_UPSTREAM} "
+              f"collision - the collision check did NOT run", file=sys.stderr)
     if collision:
         print(collision, file=sys.stderr)
 

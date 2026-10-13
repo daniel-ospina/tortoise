@@ -691,16 +691,30 @@ def test_main_keeps_the_generic_recurs_note_without_a_collision(
     assert "recurs on the next container restart" in capsys.readouterr().out
 
 
-def test_main_says_so_when_the_collision_scan_could_not_run(monkeypatch, capsys):
+@pytest.mark.parametrize("quiet", [False, True], ids=["loud", "quiet"])
+def test_main_says_so_when_the_collision_scan_could_not_run(
+        monkeypatch, capsys, quiet: bool):
     """`None` must not read as "no collision": an unrun check is said out loud.
 
-    Mutation: treat `None` like `[]` -> the log claims a clean scan that never happened -> RED.
+    ⛔ INCLUDING UNDER `--quiet` -- that is the ONLY mode the launchd job runs in
+    (installer `ProgramArguments`: `<PY> <TOOL> --quiet`), so a note routed through
+    `say()` is invisible in exactly the log an unattended run produces, and an unrun
+    scan would be byte-identical to a clean one.
+
+    Mutation: treat `None` like `[]` -> the log claims a clean scan that never
+    happened -> RED. Mutation (the pre-fix shape): route the note through `say()`
+    -> the quiet case goes silent while the loud case still passes -> RED.
     """
     db = _FakeDb({"tortoise": _GraphState(nodes=BIG, edges=9)})
-    _run_main(monkeypatch, db)
+    _run_main(monkeypatch, db, *(["--quiet"] if quiet else []))
     monkeypatch.setattr(gwr, "cross_db_duplicates", lambda *a, **k: None)
     assert gwr.main() == 0
-    assert "could not scan other logical DBs" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "could not scan other logical DBs" in captured.err
+    assert "did NOT run" in captured.err
+    # The note is a FACT about the graph, so it is not narration: nothing about it may
+    # ride on `--quiet`. It must not reappear on stdout, where `say()` would put it.
+    assert "could not scan other logical DBs" not in captured.out
 
 
 # ── the installer: CLI contract, escaping, lint-before-move, load verification ──
