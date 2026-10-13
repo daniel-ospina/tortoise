@@ -99,10 +99,14 @@ function cardsBlock(source) {
 // cannot be produced by the regression it guards (the `"Backups"` original:
 // a QUOTED literal the file never held, which no JSX reintroduction of the
 // card could ever emit) is a tautology, which is the defect this file was
-// fixed for. The `Data points` original was vacuous for the same reason —
-// `grep -c 'Data points' main.jsx` is `0`, so it pinned a label string the file
-// never held either; `card-val` below replaces it with the stat-card FRAME the
-// retired card actually used (`<div className="card"><div className="card-val">`).
+// fixed for. The `Data points` original was a DIFFERENT, WEAKER defect — it was
+// NOT a tautology: `Data points` was the card's real (unquoted) label, JSX text
+// a reintroduction DOES emit, so the check did fire and did guard its
+// regression. It was weak because it pinned one label string, so a rename
+// silently retired it. `card-val` below replaces it with the stat-card FRAME
+// the retired card actually used (`<div className="card"><div className="card-val">`),
+// which is strictly stronger, and the mutation test below pins that the
+// historical stat-card form is still caught.
 const OVERVIEW_FORBIDDEN = [
   { token: '<MemorySources', why: 'no source list on the Overview (Settings + the wizard step own it, #3513)' },
   { token: 'SetupGuideCard', why: 'the setup-guide checklist lives in Settings → Setup guide (DE2E-6)' },
@@ -140,11 +144,12 @@ test('DE2E-2: populated Overview renders EXACTLY the 3 elements (zero toggles)',
   // zero toggles / panels / stat cards on the Overview. #3245: the original
   // check was `"Backups"` — a QUOTED literal main.jsx has never contained and
   // that no JSX reintroduction of the card could emit, so it was
-  // unconditionally true. Its `Data points` neighbour was vacuous for the same
-  // reason (`grep -c 'Data points' main.jsx` is `0`); `card-val` (the retired
-  // stat-card frame) replaces it with the structure a reintroduction would have
-  // to use. Every token below is proven
-  // real by the non-vacuity guard beneath.
+  // unconditionally true. Its `Data points` neighbour was WEAK, not vacuous:
+  // `Data points` is the card's real (unquoted) label text, so a reintroduction
+  // DID emit it and the check fired — it just pinned one label string, which a
+  // rename would retire. `card-val` (the retired stat-card frame) replaces it
+  // with the structure a reintroduction would have to use. Every token below is
+  // proven real by the non-vacuity guard beneath.
   for (const { token, why } of OVERVIEW_FORBIDDEN) {
     assert.ok(!ovText.includes(token),
       `${why} — the populated Overview must not contain ${JSON.stringify(token)}`)
@@ -163,18 +168,31 @@ test('#3245: the .cards whitelist is CLOSED — host elements and nested markup 
   assert.equal(src.split(anchor).length - 1, 1,
     'the third card anchor is unique (the mutation base resolves to one site)')
   const baseline = cardsBlock(src).children
+  const historicalStatCard =
+    '<div className="card"><div className="card-val">{team.point_count ?? 0}</div>' +
+    '<div className="card-label">Data points</div></div>'
   const mutations = {
     'a 4th component child': '<ExtraCalmPanel state={onboarding} />',
     'a 4th host <div> child': '<div className="panel">hi</div>',
     'a 4th host <div> with nested markup': '<div className="card"><div className="card-val">9</div></div>',
     'a 4th host <p> child': '<p>All good.</p>',
     'a 4th host <span> child': '<span>extra</span>',
+    'the historical #2000 W4 stat card (the `Data points` form)': historicalStatCard,
   }
   for (const [name, inserted] of Object.entries(mutations)) {
     const mutated = src.replace(anchor, `${anchor}\n              ${inserted}`)
     assert.notDeepEqual(cardsBlock(mutated).children, baseline,
       `${name} must change the extracted .cards children — a whitelist that cannot see it is vacuous (#3245)`)
   }
+  // The retired `Data points` negative check guarded this exact historical
+  // regression form. That check was WEAK (a label rename retires it), never
+  // VACUOUS for the `"Backups"` reason: the card's markup emits the label as
+  // JSX text, so a reintroduction DOES make `!ovText.includes('Data points')`
+  // false. Pinning the emission keeps the corrected comment above
+  // OVERVIEW_FORBIDDEN falsifiable (review P2, comment-accuracy fix).
+  const withHistorical = src.replace(anchor, `${anchor}\n              ${historicalStatCard}`)
+  assert.ok(cardsBlock(withHistorical).ovText.includes('Data points'),
+    'the historical stat-card reintroduction EMITS `Data points` — the retired check was falsifiable (weak), not vacuous (#3245)')
   // the specific hole the review found: a lowercase 4th child was invisible to
   // the uppercase-only matcher
   const hostDiv = src.replace(anchor, `${anchor}\n              <div className="panel">hi</div>`)
