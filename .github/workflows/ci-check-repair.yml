@@ -1,0 +1,105 @@
+name: ci-check-repair
+
+# Repair "no required check at this PR head" — the #8254 failure mode (#8375 item 1).
+#
+# THE DEFECT. A PR head can carry NO check run at all for one or more required
+# status contexts (pricing-artifact, docs, test-isolation, license-surface,
+# legal-e2e, python-ci-gate, ai-review-gate). When that happens the checks can
+# never appear: `mergeStateStatus` stays BLOCKED forever and nothing on the
+# server side notices. **A missing check is not a green check, and it is not a
+# pending one** — it must be ACTIVELY re-triggered.
+#
+# WHY THE OBVIOUS TRIGGER IS WRONG. This is NOT an event-driven repair, and the
+# cadence below is a poll on purpose:
+#   * the condition is a STEADY STATE (a head that stays absent), not an event —
+#     whatever produced it, the head is still absent an hour later, and only a
+#     poll sees that;
+#   * the event that matters most here is one the repair workflow cannot receive:
+#     the #8254 reproduction is a PR opened by `github-actions[bot]` (ci-timing's
+#     refresh job), whose `pull_request` runs GitHub creates but HOLDS — the runs
+#     exist with ZERO jobs and ZERO check runs;
+#   * a `pull_request`-triggered repair would race the very event it repairs (the
+#     absence is only observable AFTER that event's runs have settled) and would
+#     re-trigger itself.
+#
+# CADENCE. Every 30 minutes. A stalled PR is fully blocked, so the repair is
+# worth one cheap API pass per PR; and the pass cannot thrash, because the tool
+# treats a producing run that is still in flight as PENDING (a check that will
+# arrive) and never re-triggers it. Re-triggering more often than a CI cycle
+# (~37 min here) would only re-trigger work already in flight.
+#
+# WHAT IT DOES — AND DOES NOT DO. It re-runs the existing workflow runs at the
+# head (same sha, same event context), and it REPORTS the cases that need a new
+# PR event, which the automatic `GITHUB_TOKEN` cannot create. It never merges and
+# never moves a head: `tools/ci_check_repair.py` carries no merge capability at
+# all. The merge rail stays local, where the evidence lives.
+#
+# EXIT CODE. Non-zero when a PR needs a repair this credential cannot perform.
+# That is the signal the local fallback keys on: it reads the most recent
+# `ci-check-repair` run and takes over when this workflow did not succeed — the
+# GitHub→local transition the issue requires to be logged and notified.
+#
+# `schedule` / `workflow_dispatch` ONLY. The tool is the single implementation;
+# the local launcher (`tools/ci-check-repair-local.sh`) invokes the SAME file.
+on:
+  schedule:
+    # Every 30 minutes, offset off the top of the hour. GitHub documents that
+    # scheduled events are most delayed at the start of each hour ("delayed during
+    # high load, especially at the start of each hour" —
+    # https://docs.github.com/en/actions/how-tos/troubleshoot-workflows), so minute
+    # 0 is the worst minute to ask for. A delayed fire is fine here: the next tick
+    # repeats the check.
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+permissions:
+  # Read the PRs and their check runs.
+  contents: read
+  checks: read
+  pull-requests: read
+  # Re-run a workflow run at the head (POST /actions/runs/{id}/rerun).
+  actions: write
+
+concurrency:
+  # Never cancel a repair in flight: the tool's close/reopen path (used only
+  # under a user credential, never here) is a close→reopen PAIR, and a cancelled
+  # run between the two would leave a PR closed. Serialising is enough — the pass
+  # is short and idempotent.
+  group: ci-check-repair
+  cancel-in-progress: false
+
+jobs:
+  # NOT a branch-protection required context. It repairs and reports; it gates
+  # nothing, so a red here cannot block a merge.
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      # tools/ci_check_repair.py is stdlib-only; this pin is what supplies the
+      # >=3.12 interpreter the repo's tools expect (#5128).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Repair PRs whose required checks never ran
+        env:
+          # `gh` reads the token from the ENVIRONMENT; Actions exposes it only as
+          # a context (#3092 — a `gh` call with no env binding fails every time).
+          GH_TOKEN: ${{ github.token }}
+          # Under `GITHUB_ACTIONS=true` the tool knows the credential is the
+          # automatic token, whose events do NOT create workflow runs, so it
+          # reports those PRs instead of pretending a close/reopen would work.
+          GITHUB_ACTIONS: "true"
+        run: |
+          set +e
+          python3 tools/ci_check_repair.py --apply --json | tee /tmp/ci-check-repair.json
+          rc=${PIPESTATUS[0]}
+          set -e
+          {
+            echo "### ci-check-repair"
+            echo '```json'
+            cat /tmp/ci-check-repair.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "ci-check-repair exit=$rc (0 = nothing to do or repaired; 1 = needs a local fallback; 2 = could not measure)"
+          exit "$rc"

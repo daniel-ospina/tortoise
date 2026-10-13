@@ -1401,6 +1401,15 @@ surfaces:
   # green on macOS (it was, at c73656c59). Same surface as its queue siblings
   # above.
   - test_install_queue_reconcile_schedule.py
+  - test_ci_check_repair.py
+  # #8375 item 1: the "no required check at this PR head" repair — a scheduled
+  # workflow, a local fallback launcher, and a launchd installer, all sharing one
+  # stdlib tool. Same surface as its queue/rail siblings above: it pins
+  # tools/ci_check_repair.py's classification (PENDING vs DEAD vs UNTRIGGERED),
+  # the two repair paths' exclusivity, and the fact that the tool carries no merge
+  # capability at all. Pure unit tests, no network. MUST be registered here or
+  # `tools/ci_selection.py --integrity` reds `manifest-integrity`, which is a
+  # `needs:` leg of the REQUIRED `python-ci-gate`.
   - test_rebuild_parity_fail_loud_3585.py
   - test_registry_integrity.py
   # NOTE (rebase): this PR also registered `test_pack_extraction_slots_v31.py`
@@ -5306,6 +5315,7 @@ durations:
   test_queue_conflict_census.py: 0.5
   test_queue_reconcile.py: 0.6  # unmeasured
   test_install_queue_reconcile_schedule.py: 2.0  # unmeasured — new file; carries the flat default until tools/ci_timing.py --refresh-durations collects it. Do NOT substitute a local timing (#3419/#3750: a duration is a SHARD-LAYOUT input, and a local reading does not model CI).
+  test_ci_check_repair.py: 2.0  # unmeasured — new file; carries the flat default until tools/ci_timing.py --refresh-durations collects it. Do NOT substitute a local timing (#3419/#3750: a duration is a SHARD-LAYOUT input, and a local reading does not model CI).
   test_queue_window_observe.py: 0.6
   test_registry_integrity.py: 0.7
   test_salience_labels_4917.py: 0.1
