@@ -653,8 +653,10 @@ def main(argv: list[str] | None = None) -> int:
         "--repair-embeddings", action="store_true",
         help="Rewrite Event embeddings stored as plain lists into vecf32 "
         "(pre-#244 _upsert_event wrote plain lists). Shape consistency: every "
-        "stored embedding typed like the other writers produce — a read of a "
-        "right-width numeric List is normalised since #8316, while a wrong "
+        "stored EVENT embedding typed the way this repo's own writers produce "
+        "them — a verbatim caller-supplied Point embedding is deliberately a "
+        "plain List (PR #3018) and is not this repair's business. A right-width "
+        "numeric List is normalised at read time since #8316, while a wrong "
         "width or a non-numeric List still aborts one (#8430).",
     )
     ap.add_argument(
