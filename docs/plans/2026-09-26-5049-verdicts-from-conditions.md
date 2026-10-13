@@ -8,9 +8,11 @@
 reusable contract (`tests/_verdict.py`) that expresses four of #5049's five refactor rules — rule
 1 (no wall-clock expiry produces FAIL), rule 2 (deadline sufficiency is measured), rule 4
 (process globals reset per test), rule 5 (host capability is a SKIP) — and apply it to a coherent
-first set of the 31 members folded into #5049. Rule 3 (exact equality on a derived quantity) is a
-numerical-tolerance surface named separately in "Remaining members"; it is not expressible as a
-wait/skip contract and is deliberately not claimed here.
+first set of the 31 members folded into #5049. Rule 3 (exact equality on a derived quantity) is
+not expressible as a wait/skip contract, so it is not one of the four rules that contract carries;
+it is instead converted in this increment by pinning the embedding derivation to a deterministic
+content-addressed encoder (`tests/test_rebuild_recreate_content_parity.py`, the #4512 member — see
+**Converted in this increment**).
 
 **Issue:** #5049 (`complexity:complex`, `tech-debt`) · **Branch:** `fix/5049-conditions-not-ambient`
 · **Base:** `origin/main @ 99a98ddc5` · **Team:** organisation-design-team (repo default)
