@@ -234,6 +234,19 @@ def repair(db, name: str, verbose: bool = True) -> tuple[bool, str]:
     clone_db = db.select_graph(scratch)
 
     def drop_clone(reason: str) -> None:
+        # ⛔ PRESENCE-GUARDED: NEVER DROP THE CLONE WHEN THE SOURCE IS GONE. The callers of
+        # this helper include paths that run BEFORE the pre-RENAME presence check (the
+        # incomplete-copy and #3154 index-audit failures), so `drop_clone` can be reached
+        # with the source already vanished -- and then it deletes the ONLY surviving copy.
+        # Reproduced with the module's own fake: `copy_drops_edges` + `copy_drops_source`
+        # and `#3154 audit raises` + `copy_drops_source` both left `graphs: []`, and the
+        # second is the worse case -- the clone is data-complete, writable and
+        # probe-passed, and only its INDEX is corrupt. Guarding here covers every present
+        # and future call site in one place rather than at each one.
+        if not graph_exists(db, name):
+            say(f"  note: RETAINED clone {scratch} ({reason}) -- the source is gone, so "
+                f"this clone may be the only copy")
+            return
         # The scratch clone is the ONLY key this module deletes, it is run-unique (never the
         # live graph), and this process's own `GRAPH.COPY` created it -- so it is dropped with
         # a raw `GRAPH.DELETE` (`clone_db.delete()`), the same form `hosted_backup`'s restore
