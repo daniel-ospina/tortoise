@@ -1008,8 +1008,9 @@ def test_issue_ingest_no_longer_consumes_points_quota(client, tmp_path,
 def test_resolve_repos_failure_preserves_persisted_cursors(client, tmp_path,
                                                             monkeypatch):
     """P2: a PRE-WALK failure (resolve_repos raising) must not WIPE
-    previously persisted cursors — the finally persists the loaded state back
-    (a `cursors={}` blind write would silently drop the resume point).
+    previously persisted cursors — the shared tail persists the loaded state
+    back (before the `failed` status is written; a `cursors={}` blind write
+    would silently drop the resume point).
     (Formerly the points-quota preflight failure; that gate is removed in
     #1844 — the object-only job writes zero points — so the pre-walk failure
     surface is now resolve_repos.)"""

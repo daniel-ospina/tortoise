@@ -16,11 +16,15 @@ inventory and fails if any of them goes back inline. (``_run_indexing`` was a
 12th member until round-4 review found its declaration VACUOUS: its dominant
 graph work is ``indexer.index_repo``'s projection walk, one level down in
 another module, plus the ``_update_onboarding_state`` writes neither scan can
-see. It is now a declared residual under #4709 — and post-#4709 the walk and
-all THREE writes ARE off the loop: the walk in one worker hand-off inside
-``index_repo`` (``_project_items``), the writes on the index job's own pool
+see. It is now a declared residual under #4709 — and post-#4709 the walk
+(``_project_items``, which also carries the O(file) journal registration read
+``_journal_registered_entities`` as its first statement) and the two
+``_update_onboarding_state`` writes ARE off the loop: the walk in one worker
+hand-off inside ``index_repo``, the writes on the index job's own pool
 (``_run_off_loop(_INDEX_EXECUTOR, ...)`` + ``_echo=False``), never the loop's
-shared default executor. What stays INLINE is the ``_make_sdk`` construction,
+shared default executor — and the single cursor persist runs BEFORE the
+terminal ``completed``/``failed`` status write. What stays INLINE is the
+``_make_sdk`` construction,
 the ``_get_proj()`` attach handed to ``backfill_legacy_closed`` and the
 ``_relink_sessions_after_index`` pass — all three the same tortoise#7500
 constraint, because a worker-thread construction or attach resolves the

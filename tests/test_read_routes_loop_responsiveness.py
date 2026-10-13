@@ -497,8 +497,9 @@ _OFFLOAD_BOUNDARY_CALLEES = frozenset({
 #: reference — but its later onboarding WRITES still run through sync helpers
 #: the scan cannot see; those are part of the residual, not covered by this set.
 #: ⚠️ The same caveat is why ``_run_indexing`` is NOT here. #4709 took its
-#: WALK and its three ``_update_onboarding_state`` writes off the loop (the walk
-#: inside ``index_repo`` via ``_project_items``, the writes via
+#: WALK and its two ``_update_onboarding_state`` writes off the loop (the walk
+#: inside ``index_repo`` via ``_project_items`` — which also carries the O(file)
+#: journal registration read as its first statement — the writes via
 #: ``_run_off_loop(_INDEX_EXECUTOR, ...)`` + ``_echo=False``), but the
 #: ``_make_sdk`` construction, the attach handed to ``backfill_legacy_closed``
 #: and that scan ITSELF still run in the body,
@@ -617,9 +618,11 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
 #: #7500-bound: it takes the same `proj` handle, so it CAN move to the index
 #: pool; it stays inline because the `github_legacy_backfill_done` marker
 #: bounds it to ONE run per org. The WALK (now `index_repo._project_items`,
-#: another module) and all THREE
-#: `_update_onboarding_state` writes (now the index job's own pool —
-#: `_run_off_loop(_INDEX_EXECUTOR, ...)` — plus `_echo=False`)
+#: another module — it also carries the O(file) journal registration read as
+#: its first statement) and the single cursor persist
+#: (`_update_onboarding_state`, shared by the `completed` and `failed` exits,
+#: on the index job's own pool — `_run_off_loop(_INDEX_EXECUTOR, ...)` — plus
+#: `_echo=False`, and written BEFORE the terminal status)
 #: ARE off the loop as of #4709. `test_run_indexing_residual_is_named_head_on`
 #: pins exactly which calls may still sit inline here, so the walk or a write
 #: cannot silently come back.
@@ -1124,7 +1127,7 @@ def test_run_indexing_residual_is_named_head_on():
     node = _async_body_named("_run_indexing")
 
     # (1) the onboarding writes: OFF the loop, NOT behind a bound, and the
-    # cursor persist ordered BEFORE the `completed` status.
+    # cursor persist ordered BEFORE the terminal (`completed`/`failed`) status.
     assert _inline_calls_to(
         node, frozenset({"_update_onboarding_state"})) == [], (
         "#4709 regressed: `_run_indexing` writes onboarding state INLINE — a "
@@ -1132,22 +1135,22 @@ def test_run_indexing_residual_is_named_head_on():
         "measured); off-load it on the index job's own pool "
         "(`_run_off_loop(_INDEX_EXECUTOR, ...)`)")
     write_seams = _offload_boundaries(node, "_update_onboarding_state")
-    assert len(write_seams) == 3, (
-        f"#4709: expected THREE `_update_onboarding_state` hand-offs (backfill "
-        f"marker; the completion-path persist; the `finally` persist that "
-        f"covers partial/failed runs), found {len(write_seams)}")
+    assert len(write_seams) == 2, (
+        f"#4709: expected TWO `_update_onboarding_state` hand-offs (the "
+        f"legacy-backfill marker; the single cursor persist shared by the "
+        f"`completed` and `failed` exits), found {len(write_seams)}")
     assert all(s in _UNBOUNDED_OFFLOAD_SEAMS for s in write_seams), (
         f"#4709: an onboarding write rides a BOUNDED seam {write_seams} — a "
         f"bound cancels only the await, never the worker (CPython #87185), so "
         f"it abandons a worker MID-WRITE (#2863); the recorded decision is "
         f"NO BOUND")
 
-    # #4709 ordering guarantee: the completion-path persist must come BEFORE
-    # the `completed` status write. Persisting only in the `finally` meant the
-    # status was visible to a poller before the cursor was durable — masked
-    # while the write ran on the loop (it blocked the poller's GET), a real
-    # window once the write is off the loop. A client reading state on
-    # `completed` (the dashboard, and the tests in
+    # #4709 ordering guarantee: the single cursor persist must run BEFORE the
+    # terminal status write, for `completed` AND `failed`. Persisting only in
+    # the `finally` meant the status was visible to a poller before the cursor
+    # was durable — masked while the write ran on the loop (it blocked the
+    # poller's GET), a real window once the write is off the loop. A client
+    # reading state on a terminal status (the dashboard, and
     # `test_github_index_lifecycle.py`) then sees the PREVIOUS cursor and
     # re-walks the whole backlog.
     completed_lines = [
@@ -1170,35 +1173,43 @@ def test_run_indexing_residual_is_named_head_on():
         "the return is discarded, and the echo is "
         "`_get_onboarding_projection`'s blocking registry read (#4625)")
     # #4709 ordering guarantee, pinned on the NAMED calls. It must NOT be
-    # satisfiable by the other two hand-offs: the legacy-backfill marker always
-    # precedes the status write, so a "SOME write is before `completed`" check
+    # satisfiable by the other hand-off: the legacy-backfill marker always
+    # precedes the status write, so a "SOME write is before the status" check
     # is true by construction and cannot fail for the regression it names.
-    # Only the two `**_index_state_updates(...)` persists carry the cursor: the
-    # completion-path one must be BEFORE the status write, and the `finally`
-    # fallback AFTER it (it is the partial/failed-run persist).
+    # There is exactly ONE `**_index_state_updates(...)` persist — the cursor
+    # one — and it must precede BOTH terminal status writes.
     state_persist_calls = [
         c for c in write_calls if _carries_index_state_updates(c)]
-    assert len(state_persist_calls) == 2, (
-        f"#4709: expected TWO `_update_onboarding_state(..., "
-        f"**_index_state_updates(...))` persists (the completion path + the "
-        f"`finally` fallback), found {len(state_persist_calls)}")
-    persists_before = [
-        c.lineno for c in state_persist_calls if c.lineno < completed_lines[0]]
-    persists_after = [
-        c.lineno for c in state_persist_calls if c.lineno > completed_lines[0]]
-    assert len(persists_before) == 1, (
-        "#4709 ordering regressed: the COMPLETION-path persist "
+    assert len(state_persist_calls) == 1, (
+        f"#4709: expected ONE `_update_onboarding_state(..., "
+        f"**_index_state_updates(...))` persist shared by BOTH terminal "
+        f"exits, found {len(state_persist_calls)} — a second site means the "
+        f"persist was duplicated (or re-split across the `finally`), so the "
+        f"completion/failed paths can diverge again")
+    persist_line = state_persist_calls[0].lineno
+    failed_lines = [
+        c.lineno for c in ast.walk(node)
+        if isinstance(c, ast.Call) and _callee_name(c.func) == "_job"
+        and any(k.arg == "status" and getattr(k.value, "value", None)
+                == "failed" for k in c.keywords)
+    ]
+    assert failed_lines, (
+        "#4709: no `_job(status='failed', ...)` write found — the failure "
+        "arms regressed or moved somewhere the ordering pin cannot see")
+    assert persist_line < completed_lines[0], (
+        "#4709 ordering regressed: the CURSOR persist "
         "(`_update_onboarding_state(..., **_index_state_updates(...))`) does "
         "NOT run BEFORE `_job(status='completed', ...)` — the job reports "
-        "`completed` while the cursor is still only in the `finally`, so a "
+        "`completed` while the cursor is still only in the tail, so a "
         "client that reads state on `completed` sees the previous cursor and "
         "re-walks the whole backlog")
-    assert len(persists_after) == 1, (
-        "#4709: expected the `finally` FALLBACK persist to remain AFTER "
-        "`_job(status='completed', ...)`; found none — either the fallback was "
-        "removed (a partial/failed run would persist nothing, breaking the "
-        "mid-walk-raise contract) or both persists preceded the status write "
-        "and this pin needs re-deriving")
+    assert persist_line < max(failed_lines), (
+        "#4709 ordering regressed: the CURSOR persist runs AFTER the tail "
+        "`_job(status='failed', ...)` write — the failure path reports "
+        "`failed` before the now-off-loop persist lands, so a poller that "
+        "reads state on `failed` (test_midwalk_fetch_error_stamps_indexed_at) "
+        "observes the PREVIOUS cursor and re-walks the whole backlog; "
+        "pre-#4709 this window was masked because the persist ran ON the loop")
 
     # (2) what stays on the loop is pinned as an EXACT count so no site can
     # appear or leave unnoticed. Most are the tortoise#7500 constraint (the SDK
@@ -1276,6 +1287,23 @@ def test_index_repo_projection_walk_is_offloaded():
         index_repo, frozenset({"_project_issue", "_project_pr"})) == [], (
         "#4709 regressed: the per-item projection loop is back in the ASYNC "
         "body of `index_repo` — it must live in the sync `_project_items`")
+    # #7951 P2-a / #4709: the journal registration read (`EventLog.read_all()`
+    # over the WHOLE, unbounded journal) used to run inline on the loop just
+    # above the hand-off. It feeds the walk's entity door, so it rides the
+    # SAME worker hand-off — pinned both ways (absent from the async body,
+    # present in the sync walk) so a re-siting is visible.
+    assert _inline_calls_to(
+        index_repo, frozenset({"_journal_registered_entities"})) == [], (
+        "#4709 regressed: `index_repo` reads the whole journal "
+        "(`_journal_registered_entities` -> `EventLog.read_all()`, O(file)) "
+        "INLINE on the event loop — it must ride the walk hand-off as the "
+        "first statement of the sync `_project_items`")
+    assert _inline_calls_to(
+        walk, frozenset({"_journal_registered_entities"})) == [
+            "_journal_registered_entities"], (
+        "#4709: the sync walk no longer reads the journal registrations — the "
+        "entity door's pre-fix-binary backfill (#7951 P2-a) would silently "
+        "degrade, or the read moved somewhere neither scan can see")
     in_walk = _inline_calls_to(
         walk, frozenset({"_project_issue", "_project_pr"}))
     assert sorted(set(in_walk)) == ["_project_issue", "_project_pr"], (

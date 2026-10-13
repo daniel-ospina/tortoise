@@ -1197,10 +1197,6 @@ class GitHubIndexer:
         """
         client = await self._get_client()
         proj = sdk._get_proj()
-        # #7951 P2-a: read the journal's registrations ONCE per run so the
-        # entity door can backfill a node a pre-fix binary wrote (graph only)
-        # and skip re-journaling one already recorded.
-        journal_ids = self._journal_registered_entities(sdk)
         stats: dict[str, Any] = {
             "repo": repo,
             "total_fetched": 0,
@@ -1248,7 +1244,7 @@ class GitHubIndexer:
         await _run_index_off_loop(
             self._project_items, sdk, proj, repo, items, stats, cursor,
             quota_check, on_progress, total_estimate, cap_hit, walk_complete,
-            boundary_stop, journal_ids)
+            boundary_stop)
         await self._close()
         return stats
 
@@ -1256,8 +1252,7 @@ class GitHubIndexer:
                        stats: dict[str, Any], cursor: dict | None,
                        quota_check, on_progress,
                        total_estimate: int | None, cap_hit: bool,
-                       walk_complete: bool, boundary_stop: bool,
-                       journal_ids: set) -> None:
+                       walk_complete: bool, boundary_stop: bool) -> None:
         """#4709: the SYNCHRONOUS half of ``index_repo``.
 
         The per-item projection loop plus the cursor/truncation/DRAIN mint,
@@ -1274,7 +1269,16 @@ class GitHubIndexer:
         #4645's hand-offs. Using the already-attached handle from the worker is
         the established cross-thread shape
         (``_capture_session_probe_off_loop``, the dream pools).
+
+        #7951 P2-a / #4709: the journal registration read is the FIRST
+        statement here, not on the loop. ``_journal_registered_entities``
+        loops ``EventLog.read_all()``, which is O(file) over the WHOLE,
+        unbounded journal; it used to run inline immediately above this
+        hand-off and parked the event loop for the legacy-org read on every
+        repo (the failure class #4709 exists to remove). It feeds this walk's
+        entity door (``journal_ids``), so it rides the SAME hand-off.
         """
+        journal_ids = self._journal_registered_entities(sdk)
         last: dict | None = None
         # #1989 review round 2: track the NEWEST processed item too — a
         # multi-second run whose walk completes uncapped mints the boundary
