@@ -61,7 +61,19 @@ FAILING_CHECKS="$(gh pr checks "$PR" --repo "$OR" --json name,state 2>/dev/null 
 import sys,json
 try: d=json.load(sys.stdin)
 except Exception: raise SystemExit
-print(' '.join(c['name'] for c in d if c.get('state') in ('FAILURE','ERROR','CANCELLED','TIMED_OUT')))
+# The SAME allow-list polarity the loop's classifier and admin-merge.sh use (agent-infra#1714): a
+# check is FAILING only when its state is neither a NAMED in-flight spelling nor one of the NON-RED
+# conclusions. CANCELLED/STALE are non-red by that rule - a superseded run
+# (cancel-in-progress: true) is normal, and handing one to a fixer burns a capped attempt on a PR
+# that is not red, while the old deny-list named CANCELLED as failing.
+INFLIGHT=('queued','in_progress','waiting','requested','pending')
+NONRED=('success','neutral','skipped','cancelled','stale')
+red=[]
+for c in (d if isinstance(d,list) else []):
+    s=str(c.get('state') or '').lower()
+    if s in INFLIGHT or s in NONRED: continue
+    red.append(str(c.get('name') or ''))
+print(' '.join(red))
 " 2>/dev/null)"
 for c in $FAILING_CHECKS; do
   echo "=== failing required check: $c ===" >> "$L-failing.txt"

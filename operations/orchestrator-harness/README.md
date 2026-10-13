@@ -200,7 +200,7 @@ secret into a world-readable plist, and launchd inherits no shell environment �
 | `MAX_FIX` | `3` | concurrent `fix-<PR>` fixers |
 | `MAX_FIX_TRIES` | `3` | per-PR fixer attempts before it is left alone |
 | `MIN_SWAP_FREE` | `600` | MB; with `MAX_LOAD` raised this and `MIN_MEM_FREE_MB` are the binding gates in practice |
-| `MIN_MEM_FREE_MB` | `512` | MB of *available* memory (`free`+`inactive`); macOS shows pressure as compression with swap flat, so swap alone does not see it |
+| `MIN_MEM_FREE_MB` | `512` | MB of *available* memory (`MemAvailable` on Linux, else `MemFree`+`Cached`; `free`+`inactive` on macOS). macOS shows pressure as compression with swap flat, so swap alone does not see it |
 | `BATCH` | `2` | issues dispatched per cycle |
 | `CYC` | `240` | seconds between cycles |
 | `STALE_MIN` | `40` | a worker whose log has not grown in this many minutes is presumed hung and its session is killed (§6) |
@@ -226,6 +226,31 @@ self-test extracts from the shipped file; left as a named follow-up rather than 
 it just moves the pressure into the compressor. `swap_total=0` right after boot is treated as
 *uninitialised*, not as pressure (that bug silently blocked all dispatch for the first minutes
 after a restart until it was fixed).
+
+**The capacity probes are portable: Linux cell + macOS host.** `#1702`. Every probe used to be a
+macOS primitive, so on a Linux cell `load1()` returned empty (the `MAX_LOAD` gate could never bind),
+swap read as `0` (the gate skipped by its own "uninitialised" rule), and the reaper's
+`stat -f '%m'` became an arithmetic error that killed the controller one cycle after its first
+dispatch — every lane/merge/fix writes the log the reaper stats. Each probe now has a Linux path
+(`/proc/loadavg`, `/proc/meminfo`, `nproc`) and a macOS one (`sysctl`, `vm_stat`), and the reaper's
+mtime probe is a GNU-then-BSD `stat` ladder with a numeric guard (GNU first on purpose: GNU
+`stat -f` writes the filesystem listing to **stdout** before exiting 1, so a BSD-first `||` ladder is
+the bug itself).
+
+⚠️ **Available memory was the fifth macOS-only probe, and the only one that fails CLOSED.** The gate
+is deliberately "UNKNOWN is not ample" (`mem_probe_failed` → do not add work), so with a `vm_stat`-only
+probe every Linux cell set `MEM_UNKNOWN=1` on every cycle: load, lanes and swap could all be healthy
+and the memory gate still bound — the controller completed cycles, logged `mem_probe_failed` and
+dispatched nothing, which is a *different* false green from the one #1702 removes. `mem_avail_mb()`
+therefore reads `/proc/meminfo` (`MemAvailable`, else `MemFree`+`Cached`) on a cell and keeps the
+`vm_stat` `free`+`inactive` parse on macOS. The fail-closed ruling for a genuinely unreadable probe is
+unchanged — only its Linux measurability is.
+
+A load reading that is *unreadable* stays the documented **fail-open** (`can_spawn()` defaults it to
+`0`): both supported platforms are measurable now, and failing closed on an unreadable probe would
+turn "no load back-pressure" into a permanent controller outage. `install.sh` still refuses to run
+off macOS (it renders a launchd plist) — the portability that matters is `orch-loop.sh`, the file
+`cloud-cell-supervisor.sh` starts.
 
 ---
 
@@ -443,6 +468,7 @@ because the self-test now drives every one of them:
 | `retired/auto-loop.sh` and `retired/sweep.sh` still carried the fail-open `ai-review-gate` classifier | shipping "the record" with the very bug being fixed invites reuse of it | both annotated in place as retired-with-known-fail-open |
 | §3 and §8 admitted cross-box duplication while §5.1b said "one owner per PR" | the invariant was stated more strongly than the code delivers | §5.1b scoped to per-box; §7.2b states the open cross-box gap |
 | **a PR branch name was interpolated into the `sh -c` string `tmux new-session` executes** | **arbitrary command execution on the unattended host that holds the merge key.** git permits `'` `;` `$` `` ` `` `&` `\|` `(` `)` `{` `}` `"` `<` `>` `#` in a ref name, so a fork PR on `fix/x';touch${IFS}/tmp/x;#` broke out of the quotes. Reproduced end-to-end before fixing | `safe_ref` allowlist + `check-ref-format`; numeric-only PR ids; and worker args now travel in a file (`--argv`) so no PR-derived value is interpolated at all |
+| **the check classifier was a deny-list** (`bad = FAILURE\|ERROR\|CANCELLED\|TIMED_OUT\|ACTION_REQUIRED`) | a conclusion in **neither** list — one GitHub has not documented, or a **null** one — read `PENDING`, and `PENDING` arms the merge (`gh pr merge --auto`): the merge decision failed **open**. At the same time `CANCELLED` was named *red*, so a normally-superseded run (`cancel-in-progress: true`) was routed to `fix-one.sh` or to `gh run rerun` — failing **closed** on a green PR. `fix-one.sh`'s failing-check list named `CANCELLED` too, so such a run burned a capped fixer attempt (agent-infra#1714) | the classifier is an **allow-list with polarity**, the rule `admin-merge.sh` and `record-review.sh` already implement: non-red only for a NAMED conclusion (`success`/`neutral`/`skipped`/`cancelled`/`stale`), in-flight only for a NAMED status, and **everything else RED** — so an unrecognised or null conclusion blocks instead of arming; grouping is per `(app, name)` (newest attempt by `id`) so one app cannot mask another's; and an **empty** surface is `NOCHECKS`, never `GREEN`. `fix-one.sh` uses the same allow-list (agent-infra#1714) |
 | the claim-file guard added in the first fix round introduced a permanent stall | the controller treated *the existence of* `mergeclaim-<PR>.lock` as "in flight", but only `merge-one.sh` removes it — a SIGKILLed worker or a reboot mid-merge left the PR skipped forever with no fixer and no re-record | `claim_live()` tests the recorded pid with `kill -0` and removes a dead owner's claim |
 | 6 self-test checks passed vacuously because an empty extraction did not fail the check | the round-1 vacuity fix was incomplete: checks depending on `sess()`, the claim block or the reaper passed when the shipped script had no such code | `need()` turns a missing extraction into a FAIL; each check was then re-proved against the pre-fix tree it pins |
 | **a hung worker held a concurrency slot for 9 hours** | `pi -p` has no timeout and the caps count **tmux sessions**, so a hung reviewer (or a runaway `find /` it spawned) permanently reduced merge throughput while the queue looked busy — three slots were dead weight overnight on 2026-10-12 | portable `run_agent()` wall-clock limit (bash `wait` + watchdog subshell, since macOS ships no `timeout`) plus a `reap_stale_workers()` sweep that kills any worker silent for `STALE_MIN` minutes |
