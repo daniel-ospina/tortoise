@@ -16915,10 +16915,15 @@ class TortoiseSDK:
         property) — the #2199 token family, ONE of:
           - "set-by-author" (default): belief stated directly by whoever filed
             the point (human OR agent — species is tracked in authoredBy).
-            NEVER recomputed by ``_apply_source_inheritance`` — EXCEPT a
-            baseline created with the #398 ``credibility`` label, which IS
-            recomputed so the authored assertion joins the aggregate as one
-            weak supporter (and the #2199 default stays its base).
+            NEVER recomputed by ``_apply_source_inheritance``. This writer is
+            the EXPLICIT belief path (#844), so it CLEARS the #398
+            ``credibility`` label (#6151 review P1): an explicit baseline
+            SUPERSEDES the authored word. A word-bearing baseline written by
+            ``create_point(credibility=…)`` / ``mitigate_operator`` (whose
+            label is stamped by ``_stamp_authored_word`` AFTER this call) is
+            still recomputed so its weak assertion joins the aggregate as one
+            supporter — but once the author sets the baseline HERE, the label
+            is gone and the value is frozen against source recomputation.
           - "inherited-from-source": derived from Source evidence, recomputed
             per EP run subject to the per-point time gate (``n.inherited_at``).
           - "system-default": no belief was stated when filed; the system
@@ -16954,12 +16959,40 @@ class TortoiseSDK:
         self._evidence[claim_id] = (alpha, beta)
         # Persist to graph so baselines survive SDK restarts
         proj = self._get_proj()
+        # #398 (owner ruling 2026-10-12), #6151 review P1 — an EXPLICIT baseline
+        # SUPERSEDES the authored word. The `credibility` label is the recompute
+        # guard's ONLY exception (`_apply_source_inheritance`): a label-bearing
+        # `set-by-author` baseline is recomputed so its weak authored body can
+        # be displaced by a real source. That exception must NOT survive an
+        # explicit write — the guard's own invariant is "a frozen
+        # `set-by-author`/`system-default` baseline is label-less", and without
+        # this clear an explicit write on a word-bearing point stayed
+        # re-openable. MEASURED before the fix: `set_point_baseline(0.4)` + a T1
+        # source recomputed to 5.1 and + an originating session to 1.1, with
+        # `baseline_source` flipped to `inherited-from-source` — the author's
+        # value silently overwritten in both cases.
+        #
+        # The clear rides the SAME statement as the baseline, so it shares the
+        # baseline's journal class exactly: no new event, and `credibility`
+        # joins `ep_alpha`/`baseline_*` in the documented live≠rebuild residual
+        # below (this method emits no `PointAdded`/`PointRevised` at all) — the
+        # gap is neither widened nor narrowed.
+        #
+        # `source=BASELINE_SOURCE_INHERITED` is the recompute's OWN write: it is
+        # the derivation the label exists to enable, so it does NOT clear the
+        # label. Clearing there would drop the word from every later recompute
+        # and let the revert pass neutralise a word-bearing point whose sources
+        # are removed. Only the two EXPLICIT (frozen) provenance classes
+        # supersede the word.
+        _set_clause = (
+            "n.ep_alpha = $a, n.ep_beta = $b, n.baseline_set = true, "
+            "n.baseline_source = $src, "
+            "n.posterior_alpha = null, n.posterior_beta = null"
+        )
+        if source != BASELINE_SOURCE_INHERITED:
+            _set_clause += ", n.credibility = null"
         written = proj.g.query(
-            "MATCH (n:Point {id: $id}) "
-            "SET n.ep_alpha = $a, n.ep_beta = $b, n.baseline_set = true, "
-            "    n.baseline_source = $src, "
-            "    n.posterior_alpha = null, n.posterior_beta = null "
-            "RETURN n.id",
+            f"MATCH (n:Point {{id: $id}}) SET {_set_clause} RETURN n.id",
             params={"id": claim_id, "a": alpha, "b": beta, "src": source},
         ).result_set
         # #2884 D3/FIX-3: a baseline clears the posteriors LIVE (`null`), so a
@@ -17080,14 +17113,22 @@ class TortoiseSDK:
             CARRIER RULE below (a session that `references` an attached source
             is provenance, zero) — see the carrier-rule comment in the body.
           - Baseline provenance: an EXPLICIT `set_point_baseline` /
-            system-default baseline with NO #398 `credibility` label is FROZEN
-            against source recomputation (#844), with NO exception. A baseline
-            carrying the #398 `credibility` label IS recomputed so its authored
-            assertion joins the aggregate as one weak body; inherited baselines
+            system-default baseline is FROZEN against source recomputation
+            (#844), with NO exception — and `set_point_baseline` ENFORCES that
+            class by CLEARING the #398 `credibility` label when it writes
+            (#6151 review P1: an explicit write SUPERSEDES the authored word).
+            A baseline carrying the #398 `credibility` label IS recomputed so
+            its authored assertion joins the aggregate as one weak body — that
+            label is only ever present on a baseline written by a WORD input
+            (`create_point(credibility=…)` / `mitigate_operator` /
+            `_stamp_authored_word`), never by an explicit `set_point_baseline`;
+            inherited baselines
             (baseline_source='inherited-from-source')
             recompute per run subject to the per-point time gate
-            (``n.inherited_at``); points with no baseline (baseline_source IS
-            NULL AND baseline_set IS NOT true) are ALWAYS eligible.
+            (``n.inherited_at``) and KEEP the label (the recompute's own write
+            is the derivation the label enables); points with no baseline
+            (baseline_source IS NULL AND baseline_set IS NOT true) are ALWAYS
+            eligible.
             RESIDUAL (stated, not closed): a label-bearing Point whose source
             edges are ALL removed keeps its last inherited prior (the revert
             pass skips it, because its word is still a source), so that prior
@@ -17100,9 +17141,11 @@ class TortoiseSDK:
             belief, #844), and it is also how a PRE-RULING authored baseline
             (created before the label existed) behaves. The two are
             INDISTINGUISHABLE in the data — the label is the only signal, and
-            `set_point_baseline` writes none — so no SOURCE-only code-level
-            condition can recompute the legacy row without also un-freezing
-            every explicit user baseline. So the label-less `set-by-author`
+            `set_point_baseline` CLEARS it on every explicit write (#6151
+            review P1), so a row this writer produced is label-less by
+            construction — no SOURCE-only code-level condition can recompute
+            the legacy row without also un-freezing every explicit user
+            baseline. So the label-less `set-by-author`
             baseline is frozen UNCONDITIONALLY — no session, originating or
             carrying, re-opens it (the originating-session exception was
             removed, #6151 review round 5). Not backfilled because we have NOT
@@ -17435,7 +17478,11 @@ class TortoiseSDK:
             # inherited-from-source`), the same #844 breach one path over.
             # Every documented WORD input writes the label, so an agent-authored
             # word still recomputes above; a label-less row is genuinely
-            # explicit (frozen) or the documented legacy residual. #7951 owns
+            # explicit (frozen) or the documented legacy residual. An explicit
+            # `set_point_baseline` CLEARS the label as it writes (#6151 review
+            # P1), so a word-bearing `set-by-author` row here is ALWAYS a
+            # `create_point(credibility=…)` / `mitigate_operator` authored
+            # assertion, never a re-opened explicit baseline. #7951 owns
             # the single write chokepoint.
             is_word_point = pid in author_word
             if (bl_src is None and bl_set) or (

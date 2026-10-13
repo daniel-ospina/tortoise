@@ -940,6 +940,106 @@ class TestAuthorAsSourceIntegration:
         after = sdk.get_point(mid)
         assert after["ep_alpha"] == pytest.approx(7.1), after
 
+    def test_carrying_a_neutral_source_is_not_originating(self, sdk):
+        """#6151 review P3 — the `attached` set must include UNTIERED
+        (neutral) sources, or a session that merely CARRIES one is misread as
+        ORIGINATING and adds a weak authored body it should not.
+
+        The scenario: a WORDLESS Point with an attached NEUTRAL source (a
+        `document` with no `credibilityTier`; `resolve_tier` returns None for
+        it) plus an `agentSession` that `references` that source. The session
+        delivered the source, so it is provenance and contributes ZERO; the
+        point therefore keeps no baseline at all. The pre-broadening `attached`
+        query matched only TIERED sources, so the neutral source was invisible,
+        `carries` was False, and the session was misread as ORIGINATING — the
+        point wrongly acquired the weak body (1.1 instead of neutral). This is
+        the falsifier the review asked for: reverting the query to tiered-only
+        turns it red (probe recorded in the land report).
+        """
+        sdk.create_source("https://neutral-carried.example", "document")
+        sdk.create_source("session:neutral-carrier", "agentSession")
+        sdk._get_proj().g.query(
+            "MATCH (a:Source {url:$a}),(b:Source {url:$b}) "
+            "CREATE (a)-[:references]->(b)",
+            params={"a": "session:neutral-carrier",
+                    "b": "https://neutral-carried.example"},
+        )
+        p = sdk.create_point("statement", "wordless carried neutral",
+                             extractedFrom="https://neutral-carried.example")["id"]
+        sdk._get_proj()._link_source(p, "session:neutral-carrier")
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        pt = sdk.get_point(p)
+        # Carrying contributes NOTHING: the point is never recomputed and
+        # stays neutral. A misread ORIGINATING session would write 1.1.
+        assert pt.get("ep_alpha") in (None, 1.0), pt
+
+
+class TestExplicitBaselineSupersedesTheWord:
+    """#6151 review P1 — an explicit `set_point_baseline` SUPERSEDES the word.
+
+    The `credibility` label is the recompute guard's ONLY exception: it keeps a
+    word-bearing `set-by-author` baseline recomputable so a real source can
+    displace the weak authored body. While the label stayed in place an
+    EXPLICIT `set_point_baseline(...)` on such a point was still treated as an
+    authored assertion and silently replaced. Measured before the fix:
+    `set_point_baseline(0.4)` then a recompute -> 5.1 with a T1 source attached
+    and 1.1 with an originating session, with `baseline_source` flipped to
+    `inherited-from-source`. An explicit baseline is not an authored assertion,
+    so the write must clear the label and let the #844 freeze apply.
+    """
+
+    @pytest.mark.parametrize("carrier", ["t1-source", "originating-session"])
+    def test_explicit_baseline_survives_carrier(self, sdk, carrier):
+        if carrier == "t1-source":
+            sdk.create_source("https://p1doc.example", "document", tier="T1",
+                              sourceDate=FRESH)
+            attached = "https://p1doc.example"
+        else:
+            sdk.create_source("session:p1-origin", "agentSession")
+            attached = "session:p1-origin"
+        # Born with an authored word: label + one weak body.
+        p = sdk.create_point("statement", f"word then explicit ({carrier})",
+                             status="live", credibility="gold",
+                             extractedFrom=attached)["id"]
+        assert sdk.get_point(p)["credibility"] == "T0"
+        # The author's explicit belief — supersedes the word.
+        sdk.set_point_baseline(p, 0.4, 1.0, source="set-by-author")
+        after_write = sdk.get_point(p)
+        assert after_write["ep_alpha"] == pytest.approx(0.4), after_write
+        assert after_write["baseline_source"] == "set-by-author", after_write
+        assert after_write.get("credibility") is None, after_write
+        # Any attached evidence (real source or originating session) must not
+        # re-open the explicit baseline.
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        after = sdk.get_point(p)
+        assert after["ep_alpha"] == pytest.approx(0.4), after
+        assert after["ep_beta"] == pytest.approx(1.0), after
+        assert after["baseline_source"] == "set-by-author", after
+        assert after.get("credibility") is None, after
+
+    def test_ruled_word_path_still_displaced_by_a_real_source(self, sdk):
+        """The fix must not break the ruled word path: a written word is still
+        ONE weak body + label (0.5238), and a real T1 source still displaces
+        it (5.1 -> 0.8361).
+        """
+        sdk.create_source("https://wordpath.example", "document", tier="T1",
+                          sourceDate=FRESH)
+        p = sdk.create_point("statement", "word keeps its body",
+                             status="live", credibility="gold",
+                             extractedFrom="https://wordpath.example")["id"]
+        born = sdk.get_point(p)
+        assert born["ep_alpha"] == pytest.approx(TIER_PRIORS["T4"][0])  # 1.1
+        assert born["credibility"] == "T0"
+        assert born["baseline_source"] == "set-by-author"
+        assert mean_from_beta(born["ep_alpha"], born["ep_beta"]) == \
+            pytest.approx(0.5238, abs=1e-4)
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        after = sdk.get_point(p)
+        assert after["ep_alpha"] == pytest.approx(5.1), after
+        assert mean_from_beta(after["ep_alpha"], after["ep_beta"]) == \
+            pytest.approx(0.8361, abs=1e-4)
+        assert after["credibility"] == "T0", after  # label survives the recompute
+
 
 class TestLowFactorFloodBound:
     def test_low_factor_flood_bounded(self):
