@@ -1600,7 +1600,14 @@ class TestPointsCreateConfidenceAndAuthor:
         assert props.get("baseline_set") is True, props
         from tortoise.sdk import BASELINE_SOURCE_SET_BY_AUTHOR
         assert props.get("baseline_source") == BASELINE_SOURCE_SET_BY_AUTHOR, props
-        assert props.get("ep_alpha") == 10.0, props
+        # #398 (owner ruling 2026-10-12): the declared word is ONE weak evidence
+        # body, not the ladder prior it names (gold ⇒ 10.0 was superseded), and
+        # it is kept as the `credibility` label so a real source can later
+        # displace it. This test previously passed only because the dedup-hit
+        # path wrote the word's ladder prior and no label (the defect).
+        from tortoise.source_credibility import AUTHOR_ASSERTION_WEAK_PC
+        assert props.get("credibility") == "T0", props
+        assert props.get("ep_alpha") == 1.0 + AUTHOR_ASSERTION_WEAK_PC, props
 
     def test_bad_credibility_is_rejected_not_500(self, client):
         # A ladder word the store cannot resolve must be ANSWERED with a 4xx

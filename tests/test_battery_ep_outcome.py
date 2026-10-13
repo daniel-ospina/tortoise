@@ -58,8 +58,15 @@ def _force_embedded_lane() -> None:
 
 
 def test_retrieve_confidence_never_none(tmp_path) -> None:
-    """Memory.confidence on the real path = the EP posterior mean (seed
-    baselines: medium Beta(3,1) mean 0.75) — never None."""
+    """Memory.confidence on the real path = the EP posterior mean — never
+    None.
+
+    RE-PINNED (#398 owner ruling 2026-10-12): the seeded claims author a
+    credibility WORD. The word is a validated LABEL and ONE weak evidence
+    body, not the ladder prior it names, so the seeded baseline is the weak
+    body (Beta(1.1, 1) → 0.5238), not Beta(3,1) → 0.75. The never-None
+    contract is unchanged; the mean is only sanity-checked, never exact.
+    """
     store = _store(tmp_path)
     try:
         mems = store.retrieve("")
@@ -69,10 +76,17 @@ def test_retrieve_confidence_never_none(tmp_path) -> None:
             assert 0.0 <= m.confidence <= 1.0
         claims = [m for m in mems if m.kind == "claim"]
         assert claims
-        # Beta(3,1) medium-credibility prior mean is 0.75 — but never
-        # over-fit the exact constant: a legit prior/weight evolution must
-        # not break the never-None contract (tolerance 0.1).
-        assert any(abs(m.confidence - 0.75) < 0.1 for m in claims)
+        # The seeded authored word is ONE weak body → 0.5238. The tolerance is
+        # 0.01, NOT the earlier 0.1: the ruled weak mean is only 0.0238 above
+        # neutral (0.5), so a 0.1 window would still pass if the weak body
+        # vanished entirely — the exact regression this pins (#6151 review P3).
+        # 0.01 keeps the never-None contract from over-fitting a future prior
+        # while making a DROPPED body fail loudly.
+        from tortoise.source_credibility import AUTHOR_ASSERTION_WEAK_PC
+        _weak_mean = (1.0 + AUTHOR_ASSERTION_WEAK_PC) / (2.0 + AUTHOR_ASSERTION_WEAK_PC)
+        assert any(abs(m.confidence - _weak_mean) < 0.01 for m in claims), (
+            f"no claim carried the weak authored body "
+            f"({_weak_mean:.4f}): {[m.confidence for m in claims]}")
     finally:
         store.close()
 
@@ -124,8 +138,17 @@ def test_contested_non_decisive_even_when_converged(tmp_path, ep_variance
         claims = [m for m in mems if m.kind == "claim"]
         assert claims
         sdk = store._arm._sdk(store._scenario)
+        # #398 owner ruling 2026-10-12: the credibility WORD is a validated
+        # LABEL and ONE weak evidence body. The point is given an EXPLICIT
+        # status so it does NOT receive the #2199 system default (a born-live
+        # decide part would start at Beta(3,1) + the weak body, variance
+        # 0.036 < the 0.04 row, and could not express a WEAK contradiction).
+        # With an explicit status the word is the weak body alone
+        # (Beta(1.1, 1), variance 0.080 > 0.04) — the test's intent (a weak
+        # conflicting NAND → CONTESTED) is preserved under the ruled rule.
         ev = sdk.create_point(kind="evidence", content="weak contradictory "
-                             "probe", credibility="unverified")
+                             "probe", credibility="unverified",
+                             status="live")
         sdk.create_operator("NAND", ev["id"], [claims[0].id],
                             direction="unidirectional")
         store._arm.decide_cycles = 1

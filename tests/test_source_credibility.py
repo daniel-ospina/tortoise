@@ -16,12 +16,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 from tortoise.source_credibility import (
+    AUTHOR_ASSERTION_WEAK_PC,
     FACTOR_MAX,
     FACTOR_MIN,
     SOURCE_KIND_DEFAULTS,
     TIER_PRIORS,
     aggregate_prior,
     assessment_factor,
+    author_support_pc,
     decay_factor,
     derive_reliability,
     mean_from_beta,
@@ -29,6 +31,8 @@ from tortoise.source_credibility import (
     register_source_kind_default,
     resolve_source_tier,
     resolve_tier,
+    session_support_pc,
+    weak_support_pc,
 )
 
 FRESH = "2024-01-01T00:00:00+00:00"
@@ -462,6 +466,479 @@ class TestBaselineProvenance:
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
         alpha2 = sdk.get_point(p["id"])["ep_alpha"]
         assert alpha2 == alpha1
+
+    def test_baseline_system_default_cannot_be_forged_via_props(self, sdk):
+        """#6151 review P3 — the recorded #2199 birth fact is SERVER-owned.
+
+        `_apply_source_inheritance` re-injects the +2.0 default ONLY on a point
+        carrying `baseline_system_default`, so a caller able to set that prop
+        could self-grant the default on a point that was never born live. It is
+        refused at the props boundary (`_sanitize_props`, shared by
+        `create_point` and `update_point`) — the same hard-reject mechanism as
+        `embedding_verbatim`, chosen over strip-and-ignore because there is no
+        legitimate caller intent to substitute, so a silent strip would let an
+        attempted self-grant pass unnoticed.
+        """
+        with pytest.raises(ValueError, match="baseline_system_default"):
+            sdk.create_point("option", "forged default", status="draft",
+                             baseline_system_default=True)
+        # A legitimately-created explicit-status part carries NO such marker.
+        p = sdk.create_point("option", "plain draft", status="draft")["id"]
+        assert sdk.get_point(p).get("baseline_system_default") is None
+        with pytest.raises(ValueError, match="baseline_system_default"):
+            sdk.update_point(p, baseline_system_default=True)
+        assert sdk.get_point(p).get("baseline_system_default") is None, (
+            "a rejected update must not have written the marker")
+
+    def test_credibility_is_not_a_generic_property(self, sdk):
+        """#7951 — ``credibility`` is a documented WORD INPUT, not a generic
+        prop.
+
+        On the generic bag it bypassed the authored-assertion accounting
+        (measured: an INERT label on a born-live decide part, frozen at 3.0
+        even under a real T1 source; a label with no baseline and no body; an
+        unvalidated/uncanonicalised value stored verbatim). It is refused on
+        every generic surface — ``update_point`` / ``create_entity`` /
+        ``update_entity`` — with a pointer at the documented input, and nothing
+        is written.
+        """
+        p = sdk.create_point("statement", "no word")["id"]
+        assert sdk.get_point(p).get("credibility") is None
+        with pytest.raises(ValueError, match="credibility"):
+            sdk.update_point(p, credibility="gold")
+        with pytest.raises(ValueError, match="credibility"):
+            sdk.update_entity(p, credibility="banana")
+        with pytest.raises(ValueError, match="credibility"):
+            sdk.create_entity("subject", "generic cred", credibility="gold")
+        assert sdk.get_point(p).get("credibility") is None, (
+            "a rejected generic write must not have stored the label")
+
+
+class TestAuthorAsSourceAndDifference:
+    """#398 + #6151 — an authored assertion is a SOURCE and the aggregation
+    keeps the difference SHAPE, but is SUPPORT-ONLY today.
+
+    The author's declared word is ONE evidence body at the weakest registered
+    weight, the SAME whoever wrote it (owner ruling 2026-10-12): the word is a
+    validated LABEL, not a strength. Contradiction stays EP's domain
+    (`phi_nand`), so a NAND edge never enters this prior — folding it here is
+    the rejected alternative (#6151).
+    """
+
+    def test_support_only_prior_is_the_pre_change_output(self):
+        """No source-level dissent signal exists -> the default return is the
+        positive-only prior (beta = 1), byte-for-byte."""
+        assert aggregate_prior([("T1", FRESH, FRESH, 1.0)], recency_decay=1.0) == \
+            TIER_PRIORS["T1"]
+
+    def test_difference_shape_is_retained_for_a_future_dissent_signal(self):
+        """The ``(1 + max(net, 0), 1 + max(-net, 0))`` shape still subtracts a
+        negative net (kept for a future SOURCE-LEVEL dissent input), and no
+        ``nc_base(tier)`` negative pseudo-count is defined anywhere."""
+        alpha, beta = aggregate_prior([], recency_decay=1.0, extra_support_pc=-4.0)
+        assert (alpha, beta) == (1.0, 5.0)
+
+    def test_author_prior_has_no_attacks_parameter(self):
+        """A NAND edge can never enter this prior: the signature exposes no
+        such input — folding it is the rejected alternative (#6151)."""
+        import inspect
+        params = inspect.signature(aggregate_prior).parameters
+        assert "attacks" not in params
+        assert "extra_support_pc" in params
+
+    def test_superseded_claim_takes_its_own_source_strength(self):
+        """(c) a newer reading from the SAME source does not invent or erase
+        strength — it is the source's own tier."""
+        alpha, beta = aggregate_prior([("T1", FRESH, FRESH, 1.0)], recency_decay=1.0)
+        assert (alpha, beta) == TIER_PRIORS["T1"]
+        assert mean_from_beta(alpha, beta) == pytest.approx(5.0 / 6.0)
+
+    def test_word_combines_with_a_source_not_a_ceiling(self):
+        """The word is ONE weak body that combines with the claim's sources —
+        a stronger source can carry the claim above what the author declared.
+        weak (0.1) + one T1 source (pc 4.0) -> 1 + 0.1 + 4.0 = 5.1."""
+        weak = author_support_pc("gold")
+        assert weak == AUTHOR_ASSERTION_WEAK_PC
+        alpha, _beta = aggregate_prior(
+            [("T1", FRESH, FRESH, 1.0)], recency_decay=1.0,
+            extra_support_pc=weak,
+        )
+        assert alpha == pytest.approx(5.1)
+        assert mean_from_beta(alpha, 1.0) > mean_from_beta(*TIER_PRIORS["T3"])
+
+    def test_word_weight_is_one_constant_the_same_for_both_authors(self):
+        """The rule: one weak weight, the same whoever wrote it. The word is
+        a validated LABEL — it does not select a weight, and it is the weakest
+        REGISTERED weight (T4's pc), so no word outranks any real source."""
+        assert author_support_pc("gold") == AUTHOR_ASSERTION_WEAK_PC
+        assert author_support_pc("low") == AUTHOR_ASSERTION_WEAK_PC
+        assert author_support_pc("gold") == author_support_pc("unverified")
+        assert pytest.approx(pc_base("T4")) == AUTHOR_ASSERTION_WEAK_PC
+        alpha, _beta = aggregate_prior(
+            [], recency_decay=1.0,
+            extra_support_pc=author_support_pc("gold"),
+        )
+        assert alpha == pytest.approx(TIER_PRIORS["T4"][0])  # 1.1 -> 0.5238
+
+    def test_unknown_word_is_rejected_not_weighted(self):
+        """The ladder vocabulary is still VALIDATED (kept as a label): a value
+        outside it is rejected (None), never silently given a weight."""
+        assert author_support_pc("very-sure") is None
+        assert author_support_pc("T9") is None
+        assert author_support_pc(None) is None
+
+    def test_originating_agent_session_weak_carrying_zero(self):
+        """#398 carrier rule: originating -> weak, carrying -> provenance (zero)."""
+        assert session_support_pc(carries_attached_source=False) == \
+            AUTHOR_ASSERTION_WEAK_PC
+        assert session_support_pc(carries_attached_source=True) == 0.0
+
+    def test_weak_flood_grows_sublinearly(self):
+        """Same log2(N+1) anti-Sybil law as a tier: 1000 stacked assertions
+        still lose to a single low-tier (T3) source."""
+        flood = weak_support_pc(1000)
+        assert flood < pc_base("T3")
+        assert flood > weak_support_pc(1)  # still a real, growing contribution
+        a_flood, _ = aggregate_prior([], recency_decay=1.0,
+                                     extra_support_pc=flood)
+        a_t3, _ = aggregate_prior([("T3", FRESH, FRESH, 1.0)],
+                                  recency_decay=1.0)
+        assert mean_from_beta(a_flood, 1.0) < mean_from_beta(a_t3, 1.0)
+
+    def test_no_attacks_preserves_the_positive_only_prior(self):
+        """Default call is byte-for-byte the pre-change output (beta = 1)."""
+        assert aggregate_prior([("T1", FRESH, FRESH, 1.0)], recency_decay=1.0) == \
+            TIER_PRIORS["T1"]
+
+
+class TestAuthorAsSourceIntegration:
+    """The ruled weights through the real graph path (`_apply_source_inheritance`)."""
+
+    def test_unsourced_assertion_alone_is_the_weak_body(self, sdk):
+        """#398 owner ruling 2026-10-12: a person-typed `gold` with NO source
+        starts at ONE weak body (0.523), not the 10:1 T0 prior (0.909); the
+        word is kept as a LABEL on the Point."""
+        p = sdk.create_point("statement", "person typed gold", status="live",
+                             credibility="gold")["id"]
+        pt = sdk.get_point(p)
+        assert pt["ep_alpha"] == pytest.approx(TIER_PRIORS["T4"][0])  # 1.1
+        assert pt["ep_beta"] == pytest.approx(1.0)
+        assert pt["credibility"] == "T0"  # the declared word, kept as a label
+        assert pt["baseline_source"] == "set-by-author"
+
+    def test_originating_agent_session_is_weak(self, sdk):
+        sdk.create_source("session:orig", "agentSession")
+        p = sdk.create_point("statement", "agent reasoned it",
+                             extractedFrom="session:orig")
+        sdk._apply_source_inheritance(recency_decay=1.0)
+        pt = sdk.get_point(p["id"])
+        assert pt["ep_alpha"] == pytest.approx(1.0 + weak_support_pc(1))
+        assert pt["ep_beta"] == 1.0
+        assert pt["ep_alpha"] == pytest.approx(TIER_PRIORS["T4"][0])  # weakest rung
+
+    def test_carrying_agent_session_contributes_zero(self, sdk):
+        """A session that `references` an attached document is provenance."""
+        sdk.create_source("https://doc.example", "document", tier="T1")
+        sdk.create_source("session:carrier", "agentSession")
+        sdk._get_proj().g.query(
+            "MATCH (a:Source {url:$a}),(b:Source {url:$b}) "
+            "CREATE (a)-[:references]->(b)",
+            params={"a": "session:carrier", "b": "https://doc.example"},
+        )
+        p = sdk.create_point("statement", "carried document claim",
+                             extractedFrom="https://doc.example")
+        sdk._get_proj()._link_source(p["id"], "session:carrier")
+        sdk._apply_source_inheritance(recency_decay=1.0)
+        pt = sdk.get_point(p["id"])
+        # T1 document only — the carrying session adds nothing
+        assert pt["ep_alpha"] == pytest.approx(TIER_PRIORS["T1"][0])
+
+    @pytest.mark.parametrize("session_kind", ["carrier", "originator"])
+    def test_no_session_kind_unfreezes_an_explicit_baseline(
+            self, sdk, session_kind):
+        """#844 immutability — an explicit `set_point_baseline` survives ANY
+        session, CARRIER or ORIGINATOR.
+
+        The #2199/#844 guard now has EXACTLY ONE exception: the #398
+        `credibility` label (a word-bearing point is an authored assertion
+        whose weak body must be displaceable by a real source). An agent
+        session is evidence of a DIFFERENT write path, and letting EITHER kind
+        re-open an explicit baseline silently replaced the author's value
+        (measured `0.4 -> 1.1`, `set-by-author -> inherited-from-source`): the
+        carrying case was the round-2 regression this test first pinned, the
+        originating case the round-5 one. Both must now stay
+        0.4 / 'set-by-author' / no label.
+        """
+        sdk.create_source("https://explicitdoc.example", "document", tier="T1",
+                          sourceDate=FRESH)
+        sess = f"session:explicit-{session_kind}"
+        sdk.create_source(sess, "agentSession")
+        if session_kind == "carrier":
+            sdk._get_proj().g.query(
+                "MATCH (a:Source {url:$a}),(b:Source {url:$b}) "
+                "CREATE (a)-[:references]->(b)",
+                params={"a": sess, "b": "https://explicitdoc.example"},
+            )
+        p = sdk.create_point("statement", f"explicit baseline + {session_kind}",
+                             status="live",
+                             extractedFrom="https://explicitdoc.example")["id"]
+        # The author's explicit belief — #844 says this is immutable evidence.
+        sdk.set_point_baseline(p, 0.4, 1.0, source="set-by-author")
+        sdk._get_proj()._link_source(p, sess)
+        before = sdk.get_point(p)
+        assert before["ep_alpha"] == pytest.approx(0.4), before
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        after = sdk.get_point(p)
+        assert after["ep_alpha"] == pytest.approx(0.4), after
+        assert after["ep_beta"] == pytest.approx(1.0), after
+        assert after["baseline_source"] == "set-by-author", after
+        assert after.get("credibility") is None, after  # no word ⇒ no exception
+
+    def test_word_is_a_source_combined_with_the_claim_sources(self, sdk):
+        """An authored gold word + a T1 source is the SOURCE aggregate
+        (1 + 0.1 + 4 = 5.1) — the word is one weak body, not the claim's own
+        frozen strength, and the real source displaces it."""
+        sdk.create_source("https://pw.example", "document", tier="T1",
+                          sourceDate=FRESH)
+        p = sdk.create_point("statement", "gold word + T1 source", status="live",
+                             credibility="gold", extractedFrom="https://pw.example")
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        pt = sdk.get_point(p["id"])
+        assert pt["ep_alpha"] == pytest.approx(5.1)
+        assert pt["baseline_source"] == "inherited-from-source"
+
+    def test_agent_word_is_weak_not_the_declared_tier(self, sdk):
+        """An agent-authored gold claim: the agentSession IS the evidence body
+        (weak); the word is not a T0 source, so the prior collapses from 0.909
+        to the weakest registered weight, exactly like a person's word."""
+        sdk.create_source("session:agent-gold", "agentSession")
+        p = sdk.create_point("statement", "agent asserts gold", status="live",
+                             credibility="gold",
+                             extractedFrom="session:agent-gold")
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        pt = sdk.get_point(p["id"])
+        assert pt["ep_alpha"] == pytest.approx(1.0 + weak_support_pc(1))
+        assert pt["ep_alpha"] == pytest.approx(TIER_PRIORS["T4"][0])
+
+    def test_nand_edge_never_changes_the_prior(self, sdk):
+        """#6151 rejected alternative: the prior reads NO NAND edge. The same
+        T1 topology gives Beta(5,1) whether or not the refutes edge exists."""
+        sdk.create_source("https://na.example", "document", tier="T1",
+                          sourceDate=FRESH)
+        sdk.create_source("https://nb.example", "document", tier="T1",
+                          sourceDate=FRESH)
+        a = sdk.create_point("statement", "A", status="live",
+                             extractedFrom="https://na.example")["id"]
+        b = sdk.create_point("statement", "B", status="live",
+                             extractedFrom="https://nb.example")["id"]
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        assert sdk.get_point(a)["ep_alpha"] == pytest.approx(5.0)
+        sdk.create_operator("NAND", b, [a])
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        assert sdk.get_point(a)["ep_alpha"] == pytest.approx(5.0)
+        assert sdk.get_point(a)["ep_beta"] == pytest.approx(1.0)
+
+    def test_equal_t1_pair_under_nand_settles_669_post_ep(self, sdk):
+        """(a) POST-EP: the symmetric ``phi_nand`` makes BOTH sides pay, so an
+        equal T1 pair settles at ~0.6689, not the prior-level 0.5. Expected and
+        correct under this design — contradiction stays EP's domain."""
+        sdk.create_source("https://ea.example", "document", tier="T1",
+                          sourceDate=FRESH)
+        sdk.create_source("https://eb.example", "document", tier="T1",
+                          sourceDate=FRESH)
+        a = sdk.create_point("statement", "A", status="live",
+                             extractedFrom="https://ea.example")["id"]
+        b = sdk.create_point("statement", "B", status="live",
+                             extractedFrom="https://eb.example")["id"]
+        sdk.create_operator("NAND", b, [a])
+        res = sdk.compute_confidence(anchors=[a, b], max_hops=2,
+                                     recency_decay=1.0,
+                                     require_calibration=False)
+        ca = res["confidences"][a]["mean"]
+        cb = res["confidences"][b]["mean"]
+        assert ca == pytest.approx(0.6689, abs=0.005)
+        assert cb == pytest.approx(0.6689, abs=0.005)
+
+    def test_weak_agent_claim_sinks_below_half_under_a_weak_refuter(self, sdk):
+        """(b) POST-EP: an agent-authored claim has no self-declared strength to
+        defend (prior 0.5238), so a weak T4 refutation pushes it below 0.5.
+        Identical to the person case — the weight no longer varies by author."""
+        sdk.create_source("session:agent-b", "agentSession")
+        c = sdk.create_point("statement", "agent reasoned it", status="live",
+                             credibility="gold",
+                             extractedFrom="session:agent-b")["id"]
+        sdk.create_source("https://weak.example", "document", tier="T4",
+                          sourceDate=FRESH)
+        w = sdk.create_point("statement", "weak refuter", status="live",
+                             extractedFrom="https://weak.example")["id"]
+        sdk.create_operator("NAND", w, [c])
+        res = sdk.compute_confidence(anchors=[c, w], max_hops=2,
+                                     recency_decay=1.0,
+                                     require_calibration=False)
+        assert res["confidences"][c]["mean"] < 0.5
+
+    def test_person_word_claim_sinks_below_half_under_a_weak_refuter(self, sdk):
+        """THE KEY MEASUREMENT (owner ruling 2026-10-12): a person-typed `gold`
+        with NO source must land BELOW 0.5 when refuted by a weak T4 source.
+        Before the ruling a person's word carried the T0 prior, so the same
+        refutation only moved 0.9091 -> 0.8992."""
+        c = sdk.create_point("statement", "person typed gold", status="live",
+                             credibility="gold")["id"]
+        sdk.create_source("https://weak.example", "document", tier="T4",
+                          sourceDate=FRESH)
+        w = sdk.create_point("statement", "weak refuter", status="live",
+                             extractedFrom="https://weak.example")["id"]
+        sdk.create_operator("NAND", w, [c])
+        res = sdk.compute_confidence(anchors=[c, w], max_hops=2,
+                                     recency_decay=1.0,
+                                     require_calibration=False)
+        assert res["confidences"][c]["mean"] < 0.5
+
+    def test_cancellation_through_a_chain(self, sdk):
+        """(d) cancellation through a chain is POST-EP, not prior-level: a
+        refuted premise keeps its source-derived prior and a downstream claim
+        sees the contradiction only through EP. Pinned: the priors stay
+        Beta(5,1) and the chain settles at the balanced 0.6689."""
+        sdk.create_source("https://cha.example", "document", tier="T1",
+                          sourceDate=FRESH)
+        sdk.create_source("https://chb.example", "document", tier="T1",
+                          sourceDate=FRESH)
+        a = sdk.create_point("statement", "chain A", status="live",
+                             extractedFrom="https://cha.example")["id"]
+        b = sdk.create_point("statement", "chain B", status="live",
+                             extractedFrom="https://chb.example")["id"]
+        sdk.create_operator("NAND", b, [a])
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        # the contradiction is NOT in the prior
+        assert sdk.get_point(a)["ep_alpha"] == pytest.approx(5.0)
+        assert sdk.get_point(b)["ep_alpha"] == pytest.approx(5.0)
+        res = sdk.compute_confidence(anchors=[a, b], max_hops=2,
+                                     recency_decay=1.0,
+                                     require_calibration=False)
+        assert res["confidences"][a]["mean"] == pytest.approx(0.6689, abs=0.005)
+        assert res["confidences"][b]["mean"] == pytest.approx(0.6689, abs=0.005)
+
+
+    def test_explicit_status_part_gets_no_2199_default_in_recompute(self, sdk):
+        """#6151 Defect 2 — the #2199 default is injected ONLY where #2199
+        actually grants one: a decide part BORN live (no explicit status). An
+        explicit-status part keeps full manual control, so a word there adds its
+        OWN weak body and nothing more — never an unearned +2.1.
+
+        Measured before the defect fix: an explicit-status draft option with a
+        word + a T4 source landed at 0.7619 (the word acting as if #2199 had
+        granted it a 2.0 default). After: the word's one weak body + the T4
+        source -> 1.2 (0.5455), versus the same part with NO word -> 1.1
+        (0.5238); the labelled claim stays >= the unlabelled one. The born-live
+        part really did receive the provision and keeps it (3.0 + word + T4).
+        """
+        sdk.create_source("https://d2t4.example", "document", tier="T4",
+                          sourceDate=FRESH)
+        word = sdk.create_point("option", "draft word", status="draft",
+                                credibility="gold",
+                                extractedFrom="https://d2t4.example")["id"]
+        plain = sdk.create_point("option", "draft no word", status="draft",
+                                 extractedFrom="https://d2t4.example")["id"]
+        live_word = sdk.create_point("option", "live word",
+                                     credibility="gold",
+                                     extractedFrom="https://d2t4.example")["id"]
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        w, p, lw = (sdk.get_point(i) for i in (word, plain, live_word))
+        # The explicit-status part recorded NO provision, so the recompute must
+        # not invent one: the word is its own 0.1 weak body, over the T4 0.1.
+        assert w.get("baseline_system_default") is None, w
+        assert w["ep_alpha"] == pytest.approx(1.2), w
+        assert p["ep_alpha"] == pytest.approx(1.1), p
+        assert w["ep_alpha"] >= p["ep_alpha"]  # labelled >= unlabelled
+        # The born-live part DID receive the #2199 provision and keeps it.
+        assert lw.get("baseline_system_default") is True, lw
+        assert lw["ep_alpha"] == pytest.approx(3.0 + 0.1 + 0.1), lw
+        assert lw["ep_alpha"] >= 3.0  # never below the unlabelled frozen default
+
+    def test_carrying_agent_session_does_not_suppress_the_word(self, sdk):
+        """#6151 review P2 — an agent's declared word must NOT be dropped
+        merely because its session CARRIES an attached source.
+
+        A carrying session contributes ZERO (provenance, not evidence), so
+        there is nothing to double-count; the word is the claim's only extra
+        body and must count. Measured before the fix: person 5.1 vs
+        agent-with-carrying-session 5.0 (the word silently suppressed).
+        """
+        sdk.create_source("https://carrydoc.example", "document", tier="T1",
+                          sourceDate=FRESH)
+        sdk.create_source("session:carrier", "agentSession")
+        sdk._get_proj().g.query(
+            "MATCH (a:Source {url:$a}),(b:Source {url:$b}) "
+            "CREATE (a)-[:references]->(b)",
+            params={"a": "session:carrier", "b": "https://carrydoc.example"},
+        )
+        person = sdk.create_point("statement", "person word + T1",
+                                  status="live", credibility="gold",
+                                  extractedFrom="https://carrydoc.example")["id"]
+        agent = sdk.create_point("statement", "agent word + carried T1",
+                                 status="live", credibility="gold",
+                                 extractedFrom="https://carrydoc.example")["id"]
+        sdk._get_proj()._link_source(agent, "session:carrier")
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        pv, av = sdk.get_point(person), sdk.get_point(agent)
+        assert pv["ep_alpha"] == pytest.approx(5.1), pv  # word + T1
+        assert av["ep_alpha"] == pytest.approx(5.1), av
+        assert av["ep_alpha"] == pytest.approx(pv["ep_alpha"]), (
+            "a carrying session must not suppress the declared weak body")
+
+    def test_mitigation_word_rises_when_a_real_source_lands(self, sdk):
+        """#6151 review P2 — the mitigation CREATE path must persist the word
+        LABEL, or the recompute guard skips the mitigation for ever.
+
+        Before the fix `mitigate_operator` wrote the corrected value (3.1) but
+        no `credibility` prop, so a real T1 source left `ep_alpha` at 3.1 — a
+        self-declaration no refutation could move. After: the label + the
+        recorded #2199 marker are persisted, and the T1 source raises it to
+        1 + default(2.0) + word(0.1) + T1(4.0) = 7.1.
+        """
+        a = sdk.create_point("statement", "mit input", status="live")["id"]
+        b = sdk.create_point("statement", "mit output", status="live")["id"]
+        op = sdk.create_operator("IMPL", a, [b])["id"]
+        mid = sdk.mitigate_operator(op, "reduces impact", strength=0.3,
+                                    credibility="low")["id"]
+        before = sdk.get_point(mid)
+        assert before["ep_alpha"] == pytest.approx(
+            3.0 + AUTHOR_ASSERTION_WEAK_PC), before
+        assert before["credibility"] == "T3", before  # 'low' ⇒ T3, as a label
+        assert before["baseline_system_default"] is True, before
+        assert before["baseline_source"] == "set-by-author", before
+        # Attach a REAL T1 source and run the recompute.
+        sdk.create_source("https://mit-t1.example", "document", tier="T1",
+                          sourceDate=FRESH)
+        sdk._get_proj()._link_source(mid, "https://mit-t1.example")
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        after = sdk.get_point(mid)
+        assert after["ep_alpha"] == pytest.approx(7.1), after
+        assert after["ep_alpha"] > before["ep_alpha"], (
+            "a real source must displace the mitigation's weak authored body")
+
+    def test_mitigation_idempotent_path_persists_label_and_marker(self, sdk):
+        """#6151 review P2 — the idempotent (re-mitigation) path persists the
+        same label + marker the create path does, so a re-mitigated word is
+        also displaceable by a real source."""
+        a = sdk.create_point("statement", "mit2 input", status="live")["id"]
+        b = sdk.create_point("statement", "mit2 output", status="live")["id"]
+        op = sdk.create_operator("IMPL", a, [b])["id"]
+        first = sdk.mitigate_operator(op, "first", strength=0.3)  # no word
+        second = sdk.mitigate_operator(op, "second", strength=0.4,
+                                       credibility="high")
+        assert second["id"] == first["id"], "still the idempotent path"
+        mid = second["id"]
+        pt = sdk.get_point(mid)
+        assert pt["credibility"] == "T1", pt
+        assert pt["baseline_system_default"] is True, pt
+        assert pt["ep_alpha"] == pytest.approx(3.0 + AUTHOR_ASSERTION_WEAK_PC), pt
+        sdk.create_source("https://mit2-t1.example", "document", tier="T1",
+                          sourceDate=FRESH)
+        sdk._get_proj()._link_source(mid, "https://mit2-t1.example")
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        after = sdk.get_point(mid)
+        assert after["ep_alpha"] == pytest.approx(7.1), after
 
 
 class TestLowFactorFloodBound:

@@ -172,7 +172,13 @@ class TestPointsCRUD:
             props = self._persisted_props(pid)
             assert props.get("baseline_set") is True, props
             assert props.get("baseline_source") == "set-by-author", props
-            assert props.get("ep_alpha") == 10.0, props
+            # #398 (owner ruling 2026-10-12): ONE weak evidence body, kept as the
+            # `credibility` label — not the word's ladder prior (gold ⇒ 10.0).
+            # This passed before only because the dedup-hit path carried the
+            # defect (the word's ladder prior, no label).
+            from tortoise.source_credibility import AUTHOR_ASSERTION_WEAK_PC
+            assert props.get("credibility") == "T0", props
+            assert props.get("ep_alpha") == 1.0 + AUTHOR_ASSERTION_WEAK_PC, props
 
     def test_bad_credibility_is_rejected_not_500(self, monkeypatch, tmp_path):
         # A ladder word the store cannot resolve is a client error — 4xx, not

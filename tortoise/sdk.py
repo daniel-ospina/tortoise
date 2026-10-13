@@ -2827,7 +2827,8 @@ _RESERVED_ACTOR_PROPS = frozenset(
     {"actor_user_id", "owner", "initiated_by", "agent_id"})
 
 
-def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
+def _sanitize_props(props: dict, *, reject_id: bool = False,
+                    reject_credibility: bool = False) -> dict:
     """#329: reject server-managed fields on tenant write surfaces.
 
     ``sourcePath``/``source_path`` are server-filesystem fields consumed by the
@@ -2847,6 +2848,14 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     against the store's numeric domain (INT64 int / double number) and a value
     the store would silently alter is REJECTED with a key-naming ValueError —
     this runs before the ``sourcePath``/``id`` rejects below.
+
+    ``reject_credibility`` (#7951): the GENERIC props surfaces
+    (``update_point`` / ``create_entity`` / ``update_entity``) refuse
+    ``credibility`` — it is a documented WORD INPUT of
+    ``create_point(credibility=…)`` / ``mitigate_operator(credibility=…)``, not
+    a generic property, and through a generic bag it bypassed the
+    authored-assertion accounting. #7951 is the structural home (ONE write
+    chokepoint instead of per-path patching).
     """
     props = dict(props)
     # #2600: reserved actor keys are STRIP-AND-IGNORE (never a 4xx — the
@@ -2945,6 +2954,39 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
         raise ValueError(
             f"{sorted(_embed_identity_keys)} are server-managed embedding "
             "journal fields and cannot be set via props."
+        )
+    # #6151 (review P3): `baseline_system_default` is the RECORDED #2199 birth
+    # fact — `_apply_source_inheritance` re-injects the system default ONLY on a
+    # point that carries it, so a caller able to set it could self-grant the
+    # +2.0 default on a point that was never born live (an EXPLICIT-status /
+    # set-by-author claim), making a self-declaration look like a recorded
+    # provision. HARD-REJECT rather than strip-and-ignore, following the
+    # `embedding_verbatim`/`embedding_preserved` precedent above: unlike the
+    # reserved ACTOR keys (where the server always has an authoritative value to
+    # substitute), there is no legitimate caller intent for this key, so a
+    # silent strip would let an attempted self-grant pass unnoticed. The
+    # legitimate writers set it AFTER this boundary — `create_point` puts it in
+    # its one-write CREATE map, and the internal baseline writer
+    # `_stamp_authored_word` writes it directly — so neither re-enters here.
+    if "baseline_system_default" in props:
+        raise ValueError(
+            "'baseline_system_default' is a server-managed baseline-provision "
+            "marker and cannot be set via props."
+        )
+    # #7951 (review round 5): `credibility` is NOT a generic prop — it is the
+    # author's declared WORD, a documented input of `create_point` /
+    # `mitigate_operator`, which validate it and run the authored-assertion
+    # accounting. Measured through a generic update bag: an INERT label on a
+    # born-live part (frozen at 3.0 even under a real T1 source), a label with
+    # no baseline and no body, and an unvalidated value stored verbatim
+    # ('gold', 'banana'). Fail closed; #7951 owns the single chokepoint.
+    if reject_credibility and "credibility" in props:
+        raise ValueError(
+            "'credibility' is not a generic property — it is a documented input "
+            "of create_point(credibility=…) and mitigate_operator(credibility=…), "
+            "which validate the ladder word and record it as the "
+            "authored-assertion label. Use one of those, or set_point_baseline "
+            "for an explicit belief (#7951)."
         )
     # #2491: outdated is the terminalizing flag written ONLY by the lifecycle
     # writers via raw cypher (invalidate_point/supersede_point SET
@@ -5598,17 +5640,30 @@ class TortoiseSDK:
         Decision parts (#2199) — pointKind in {decision, option, criterion,
         evidence} created WITHOUT an explicit status — land LIVE (not draft)
         with an explicit, provenance-recorded starting belief: the default
-        prior 'medium' = Beta(3,1) stamped ``system-default`` unless the
-        author passes ``credibility`` (plain-language ladder word
-        gold/high/medium/low/unverified, T0-T4 form, or numeric 0-4), which
-        is stamped ``set-by-author``. Decision parts are human-authored
-        judgment with no document Source to inherit belief from; the explicit
+        prior 'medium' = Beta(3,1) stamped ``system-default``. A passed
+        ``credibility`` (plain-language ladder word gold/high/medium/low/
+        unverified, T0-T4 form, or numeric 0-4) is a LABEL, stamped
+        ``set-by-author``, that ADDS one weak evidence body on top of that
+        baseline rather than replacing it (#398). Decision parts are
+        human-authored judgment with no document Source to inherit belief
         default keeps the documented decide flow rankable on the first try
         with zero promote/calibrate chores and no silent Beta(1,1)-as-
-        calibrated (the #7478 guard). Author-set baselines on any kind are
-        unchanged. Callers that explicitly pass a status (e.g. the capture/
-        extraction paths, which pass status="draft" + extractedFrom) keep
-        full manual control — no system default is applied.
+        calibrated (the #7478 guard). Callers that explicitly pass a status
+        (e.g. the capture/extraction paths, which pass status="draft" +
+        extractedFrom) keep full manual control — no system default is applied.
+
+        ``credibility`` is a VALIDATED LABEL, not a strength (#398 owner
+        ruling 2026-10-12): an authored, unsourced assertion is ONE evidence
+        body at the weakest registered weight, the same whoever wrote it. The
+        word is a SOURCE that ADDS that weak body ON TOP OF whatever baseline
+        the claim already has — never replacing it — so a decide part born live
+        starts at Beta(3,1) + the weak body, a plain claim at the weak body
+        alone, and a labelled claim can never score below the same claim
+        unlabelled. The word no longer selects the ladder prior itself, but
+        the ladder vocabulary is still validated (unknown words raise) and the
+        word is persisted as the ``credibility`` Point property. Real sources
+        attached later can carry the claim above the word through ordinary
+        inheritance.
         """
         self._validate_kind(kind)
         _coerce_props(props)
@@ -5849,61 +5904,99 @@ class TortoiseSDK:
                                 "ref on the FIRST write, or re-create the Point",
                                 pid, _missing,
                             )
-                if props:
+                # #7980 + #398: an authored ``credibility`` is a WRITE, never a
+                # silent drop, and it obeys the SAME rule as the create path —
+                # ONE weak evidence body (the declared word is a validated
+                # LABEL, not the claim's strength), added ON TOP OF whatever
+                # baseline the claim already legitimately has.
+                #
+                # The persisted `credibility` label is what marks this baseline
+                # as an AUTHORED ASSERTION: `_apply_source_inheritance` then
+                # recomputes it, so a real source attached later displaces the
+                # weak body through ordinary aggregation. An EXPLICIT
+                # `set_point_baseline` / inherited baseline with no such label
+                # stays IMMUTABLE evidence (#844): a dedup hit — which matches
+                # by CONTENT HASH, and so may be an unrelated writer stating a
+                # different belief — never rewrites it, and SAYS SO (the
+                # self-host surface dedups by DEFAULT, which makes the
+                # same-word retry the NORMAL path, so that one stays quiet).
+                _word_applied = False
+                if cred_prior is not None:
+                    from tortoise.source_credibility import (
+                        AUTHOR_ASSERTION_WEAK_PC,
+                        canonical_tier,
+                    )
+                    _existing = self.get_point(pid)
+                    _word_label = canonical_tier(credibility)
+                    _existing_label = _existing.get("credibility")
+                    _bl_src = _existing.get("baseline_source")
+                    _apply_word = False
+                    _record_default = False
+                    _base_a, _base_b = 1.0, 1.0
+                    _drop_note = None
+                    if _existing_label:
+                        # Already an authored assertion — FIRST-WRITER-WINS. A
+                        # retry stating the SAME word loses nothing; a DIFFERENT
+                        # word is dropped and must be audible.
+                        if _existing_label != _word_label:
+                            _drop_note = (
+                                "already carries the authored assertion "
+                                f"{_existing_label!r}")
+                    elif not _existing.get("baseline_set"):
+                        # No baseline yet — and `baseline_set` false is PROOF the
+                        # #2199 default was never granted (#6151 review P2): the
+                        # ONLY shape #2199 ever provisions is a decide part BORN
+                        # live, and that part always carries `baseline_set=true`
+                        # from its create (`_baseline_create_fields`, :187). So
+                        # this branch is an explicit-STATUS decide part or a
+                        # pre-#2199 row, and the default must NOT be granted
+                        # from `kind`/`explicit_status` HERE — that is the
+                        # current CALL's context, not the existing point's
+                        # birth. Measured before the fix: a born-draft option
+                        # dedup-hit with credibility=gold landed at
+                        # 3.1/0.7561 (an unearned +2.0 alpha); after, the word
+                        # is its own weak body on neutral -> 1.1/0.5238.
+                        _apply_word = True
+                    elif _bl_src == BASELINE_SOURCE_SYSTEM_DEFAULT \
+                            or _existing.get("baseline_system_default"):
+                        # The #2199 provision is this claim's recorded base; the
+                        # author's word ADDS the weak body ON TOP of it and
+                        # never deletes it (#398: a labelled claim is never
+                        # weaker than the same claim unlabelled).
+                        _base_a = _existing.get("ep_alpha") or 1.0
+                        _base_b = _existing.get("ep_beta") or 1.0
+                        _record_default = True
+                        _apply_word = True
+                    else:
+                        _drop_note = (
+                            f"already exists with a {_bl_src!r} baseline")
+                    if _apply_word:
+                        self.set_point_baseline(
+                            pid, _base_a + AUTHOR_ASSERTION_WEAK_PC,
+                            _base_b, source=BASELINE_SOURCE_SET_BY_AUTHOR)
+                        # #7951: the word LABEL and the #2199 birth marker are
+                        # written through the server-owned internal route, NOT
+                        # the generic props bag — `_sanitize_props` rejects a
+                        # caller-supplied `credibility` on those surfaces, so
+                        # this is the one legitimate writer here.
+                        self._stamp_authored_word(
+                            pid, label=_word_label,
+                            system_default=(True if _record_default else None))
+                        _word_applied = True
+                    if _drop_note is not None:
+                        _logger.warning(
+                            "credibility=%r not applied — point %s %s, and a "
+                            "dedup hit never overwrites the baseline a point "
+                            "already carries (#7980, #844)",
+                            credibility, pid, _drop_note)
+                if props or _word_applied:
                     # Only touch the existing point when the caller passed
-                    # other props — a pure dedup hit (no props) must not bump
-                    # updatedAt or re-trigger EP dirty-marking (#490 review
-                    # P2-1: re-capture would churn confidence for every point).
+                    # other props (or an applied word) — a pure dedup hit (no
+                    # props) must not bump updatedAt or re-trigger EP
+                    # dirty-marking (#490 review P2-1: re-capture would churn
+                    # confidence for every point).
                     props["updatedAt"] = now
                     self.update_point(pid, **props)
-                # #7980: an authored ``credibility`` is a WRITE, not a no-op.
-                # This path used to log-and-drop it, so a caller that supplied
-                # one got HTTP 200 back on a point that has NO baseline: not
-                # EP-able, and the fail-closed #344/#1157 calibration gate then
-                # refuses the whole graph (`/v1/dream` errors). That is the
-                # #4032 silent-false-green shape, on the field #7909 added to
-                # BOTH REST surfaces — and on self-host it was the DEFAULT path
-                # (``selfhost_api.CreatePointRequest.dedup`` defaults True).
-                #
-                # FIRST-WRITER-WINS: the prior is applied only while the
-                # existing point has none. That is the contract this suite
-                # already pins (tests/test_sdk_dedup.py::
-                # test_dedup_with_extra_props — "must not overwrite the
-                # existing baseline"), and it follows #844: a set baseline is
-                # IMMUTABLE evidence, so a dedup hit — which matches by
-                # CONTENT HASH, and so may be an unrelated writer stating a
-                # different belief — never rewrites the one already there. A
-                # point that does carry one keeps it and SAYS SO, loudly:
-                # never a silent drop. Consistency: ``confidence`` (a plain
-                # prop) is already applied on a dedup hit, and
-                # ``mitigate_operator``'s idempotent path applies an authored
-                # belief to an existing point rather than dropping it.
-                if cred_prior is not None:
-                    _existing = self.get_point(pid)
-                    if not _existing.get("baseline_set"):
-                        self.set_point_baseline(
-                            pid, cred_prior[0], cred_prior[1],
-                            source=BASELINE_SOURCE_SET_BY_AUTHOR)
-                    elif (_existing.get("baseline_source"),
-                          _existing.get("ep_alpha"),
-                          _existing.get("ep_beta")) != (
-                              BASELINE_SOURCE_SET_BY_AUTHOR,
-                              cred_prior[0], cred_prior[1]):
-                        # Nothing was dropped when the point ALREADY carries
-                        # exactly this author-stated prior — the self-host
-                        # default path makes that the NORMAL idempotent retry,
-                        # and a WARNING on every healthy retry is how a
-                        # warning stops being read. The provenance token is
-                        # compared too: an equal-valued baseline that is
-                        # INHERITED (or a legacy token-less row) is still a
-                        # different claim, and inheritance will recompute it.
-                        _logger.warning(
-                            "credibility=%r not applied — point %s already "
-                            "exists with a %r baseline, and a dedup hit never "
-                            "overwrites the baseline a point already carries "
-                            "(#7980, #844)",
-                            credibility, pid,
-                            _existing.get("baseline_source"))
                 return self.get_point(pid)
 
         # Issue #52 — warn when caller passes an explicit non-ULID id
@@ -5939,16 +6032,51 @@ class TortoiseSDK:
         # it: the seeded decision fell below the observation hits). One write,
         # one index entry, on every engine.
         _create_baseline: tuple[float, float, str] | None = None
+        # #2199 system default: a decide part BORN live (no explicit status in
+        # the call) gets Beta(3,1). Computed FIRST because #398's declared word
+        # is a SOURCE that ADDS one weak evidence body to whatever baseline the
+        # claim already has — it must never delete this recorded provision.
+        _system_baseline: tuple[float, float] | None = None
+        if not explicit_status and kind in DECIDE_PART_KINDS:
+            from tortoise.source_credibility import credibility_prior
+            _system_baseline = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
+            # RECORD the #2199 provision ON the point (`baseline_system_default`,
+            # a declared Point prop). The recompute must re-inject the default
+            # ONLY where #2199 actually granted one (#6151 defect 2): a decide
+            # part BORN live has it, a decide part created with an EXPLICIT
+            # status is documented as keeping full manual control (no default).
+            # The `baseline_source` token alone cannot tell the two apart once a
+            # word re-stamps the baseline `set-by-author`, so the birth fact is
+            # persisted here rather than inferred later.
+            props["baseline_system_default"] = True
         if cred_prior is not None:
-            _alpha, _beta = cred_prior
-            _create_baseline = (_alpha, _beta, BASELINE_SOURCE_SET_BY_AUTHOR)
-        elif not explicit_status and kind in DECIDE_PART_KINDS:
+            # #398 (owner ruling 2026-10-12): the declared word is a validated
+            # LABEL and ONE weak evidence body — a SOURCE that ADDS to the
+            # baseline the claim already has, never replacing it. A decide part
+            # born live therefore starts at Beta(3,1) + weak body; a plain
+            # claim (no #2199 default) starts at the weak body alone. Either
+            # way a labelled claim can never score BELOW the same claim
+            # unlabelled — typing a word is never punished. Real sources
+            # attached later raise the claim further through ordinary
+            # inheritance (`_apply_source_inheritance` folds the weak body back
+            # in as one supporter).
+            # The persisted `credibility` property is that LABEL (and the marker
+            # that this baseline is an authored assertion — an EXPLICIT
+            # `set_point_baseline` carries no such label and stays frozen).
+            from tortoise.source_credibility import (
+                AUTHOR_ASSERTION_WEAK_PC,
+                canonical_tier,
+            )
+            _base_a, _base_b = (
+                _system_baseline if _system_baseline is not None else (1.0, 1.0))
+            _create_baseline = (_base_a + AUTHOR_ASSERTION_WEAK_PC, _base_b,
+                                BASELINE_SOURCE_SET_BY_AUTHOR)
+            props["credibility"] = canonical_tier(credibility)
+        elif _system_baseline is not None:
             # #2199: system default applies ONLY to decide parts that were
             # BORN live (no explicit status in the call) — see the tail
             # comment block below for the full rationale.
-            from tortoise.source_credibility import credibility_prior
-            _alpha, _beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
-            _create_baseline = (_alpha, _beta, BASELINE_SOURCE_SYSTEM_DEFAULT)
+            _create_baseline = (*_system_baseline, BASELINE_SOURCE_SYSTEM_DEFAULT)
 
         # #2952: EVERY property of a new Point is written in the CREATE's
         # property map — ONE graph write per point, no post-CREATE clause. A
@@ -6195,14 +6323,16 @@ class TortoiseSDK:
         # #2199: decision parts (kind in DECIDE_PART_KINDS) that were born
         # live get an EXPLICIT, provenance-recorded prior so the documented
         # decide flow ranks on the first try with zero undocumented
-        # promote/calibrate chores. The author can override the default with
-        # ``credibility`` (plain-language ladder word gold/high/medium/low/
-        # unverified, T0-T4 form, or numeric 0-4 → Beta via the single-sourced
-        # ladder); an override stamps provenance 'set-by-author'. No belief
-        # stated → the standard starting belief 'medium' = Beta(3,1), stamped
-        # 'system-default' — an EXPLICIT default with labeled provenance, never
-        # a silent Beta(1,1)-as-calibrated uniform (the #7478 guard).
-        # Author-set credibility on ANY kind/status is unchanged.
+        # promote/calibrate chores. A passed ``credibility`` (plain-language
+        # ladder word gold/high/medium/low/unverified, T0-T4 form, or numeric
+        # 0-4) is a validated LABEL that ADDS one weak evidence body on top of
+        # that baseline (#398) — it never replaces it — and stamps provenance
+        # 'set-by-author'. No word → the standard starting belief 'medium' =
+        # Beta(3,1), stamped 'system-default' — an EXPLICIT default with
+        # labeled provenance, never a silent Beta(1,1)-as-calibrated uniform
+        # (the #7478 guard).
+        # Author-set credibility on ANY kind/status ADDS to the baseline the
+        # same way.
         #
         # The graph write already happened inside the CREATE (above) — this
         # block only records the in-memory evidence cache + EP message
@@ -8764,11 +8894,15 @@ class TortoiseSDK:
 
         For :Object-labeled nodes, version is auto-incremented on every update.
         Status changes are validated against POINT_STATUS_VALUES.
+
+        ``credibility`` is refused here (#7951) — it is a documented word input
+        of ``create_point``/``mitigate_operator``, not a generic property.
         """
         proj = self._get_proj()
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         # #329: id mutation + server-managed fields rejected
-        props = _sanitize_props(props, reject_id=True)
+        props = _sanitize_props(props, reject_id=True,
+                                reject_credibility=True)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
         # E4 (#5007): same rule as `create_point` / the `Point` model — an
@@ -11129,11 +11263,16 @@ class TortoiseSDK:
                 the decide layer and by EP's read path.
             credibility: optional plain-language starting belief for the
                 mitigation reason itself (gold/high/medium/low/unverified,
-                T0-T4 form, or numeric 0-4) — stamped 'set-by-author'.
-                Default None → the #2199 system starting belief ('medium',
-                Beta(3,1), provenance 'system-default') so the mitigation
-                point is a calibrated live evidence point and the decide
-                flow ranks on the first try (no CalibrationError).
+                T0-T4 form, or numeric 0-4) — a VALIDATED LABEL, stamped
+                'set-by-author'. Per the #398 owner ruling (2026-10-12) the
+                word does NOT select the ladder prior: it is ONE weak evidence
+                body that ADDS to the mitigation's baseline, so the mitigation
+                starts at the #2199 system default (Beta(3,1)) plus the weak
+                body and never scores below the same mitigation unlabelled.
+                Default None → the #2199 system starting belief
+                ('medium', Beta(3,1), provenance 'system-default') so the
+                mitigation point is a calibrated live evidence point and the
+                decide flow ranks on the first try (no CalibrationError).
 
         Raises ValueError if id not found, not an operator, strength out of
         [0, 1], or credibility outside the ladder.
@@ -11156,13 +11295,25 @@ class TortoiseSDK:
         # fails before any write (never a silent Beta(1,1) fallback, #7478).
         author_prior = None
         if credibility is not None:
-            author_prior = credibility_prior(credibility)
-            if author_prior is None:
+            # Validate the label (the ladder vocabulary is kept) but do NOT use
+            # the ladder prior: #398 owner ruling 2026-10-12 makes an authored
+            # assertion ONE weak evidence body, the same whoever wrote it. That
+            # body ADDS to the mitigation's baseline (the #2199 system default
+            # Beta(3,1)), so an explicit word can never score below the same
+            # mitigation left unlabelled.
+            from tortoise.source_credibility import (
+                AUTHOR_ASSERTION_WEAK_PC,
+                canonical_tier,
+            )
+            if credibility_prior(credibility) is None:
                 raise ValueError(
                     f"Unknown credibility {credibility!r}. Ladder words: "
                     "gold / high / medium / low / unverified "
                     "(or the T0-T4 / numeric forms)."
                 )
+            _mit_default = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
+            author_prior = (_mit_default[0] + AUTHOR_ASSERTION_WEAK_PC,
+                            _mit_default[1])
         # Idempotency: check for existing mitigation
         proj = self._get_proj()
         existing = proj.g.query(
@@ -11185,11 +11336,29 @@ class TortoiseSDK:
                 self.set_point_baseline(
                     mid, author_prior[0], author_prior[1],
                     source=BASELINE_SOURCE_SET_BY_AUTHOR)
+                # #6151 review P2: persist the word LABEL and the recorded
+                # #2199 birth marker. Without the label the recompute guard
+                # (`_apply_source_inheritance`) skips this point forever, so a
+                # word-bearing mitigation is a self-declaration NO refutation
+                # can move (measured: a T1 source left ep_alpha at 3.1). The
+                # mitigation's base ALWAYS includes the #2199 default
+                # (author_prior is the default Beta(3,1) + the weak body), so
+                # the marker is accurate.
+                # (#6151 review P3) This is an EXISTING point, so unlike the
+                # CREATE path below there is no PointAdded snapshot to carry
+                # the two props — see `_stamp_authored_word`'s JOURNAL note:
+                # they are lost on rebuild_all. Recorded, not silently widened.
+                self._stamp_authored_word(
+                    mid, label=canonical_tier(credibility),
+                    system_default=True)
             elif not self.get_point(mid).get("baseline_set"):
                 alpha, beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
                 self.set_point_baseline(
                     mid, alpha, beta,
                     source=BASELINE_SOURCE_SYSTEM_DEFAULT)
+                # The healed legacy mitigation carries the recorded #2199
+                # default too (same birth fact `create_point` records).
+                self._stamp_authored_word(mid, system_default=True)
             # The OPERATOR is the dirty root here, not the mitigation: EP reads
             # the changed strength off the operator's factor, and only a
             # seeded operator pulls its inputs into the affected set. The
@@ -11237,6 +11406,18 @@ class TortoiseSDK:
             alpha, beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
             source = BASELINE_SOURCE_SYSTEM_DEFAULT
         self.set_point_baseline(mid, alpha, beta, source=source)
+        # #6151 review P2/P3: persist BOTH the word LABEL (so a later real
+        # source displaces the weak body through the recompute instead of the
+        # mitigation freezing) and the recorded #2199 birth marker (so the
+        # recompute re-injects the default as the base rather than replacing
+        # it). Server-owned write (`baseline_system_default` is rejected from
+        # caller props); it runs BEFORE the PointAdded emit below so both props
+        # ride the journal snapshot and survive a rebuild.
+        if author_prior is not None:
+            self._stamp_authored_word(
+                mid, label=canonical_tier(credibility), system_default=True)
+        else:
+            self._stamp_authored_word(mid, system_default=True)
         # Dreaming (#85): new mitigation + IMPL edge change propagation.
         self._mark_dirty([mid, id])
         # #548: emit events for rebuild parity
@@ -16658,6 +16839,74 @@ class TortoiseSDK:
             if pid not in self._evidence:
                 self._evidence[pid] = (alpha, beta)
 
+    def _stamp_authored_word(self, point_id: str, *,
+                             label: str | None = None,
+                             system_default: bool | None = None) -> None:
+        """Server-owned write of the #398 word LABEL + the #2199 birth marker.
+
+        Both properties are SERVER-owned on this route and must not go through
+        ``update_point``/``create_point`` props:
+
+          * ``credibility`` — the #398 validated LABEL that marks a baseline as
+            an AUTHORED ASSERTION, so ``_apply_source_inheritance`` recomputes
+            it (a real source later displaces the weak body) instead of
+            freezing it forever (#6151 review P2).
+          * ``baseline_system_default`` — the RECORDED #2199 birth fact the
+            recompute gates its ``+2.0`` re-injection on. ``_sanitize_props``
+            now HARD-REJECTS it from caller props (#6151 review P3: a caller
+            must not self-grant the default), so the internal writers need a
+            route that does not re-enter that boundary; this is it.
+
+        Only the keys actually supplied are written (``None`` = leave alone),
+        so the caller can stamp the label without asserting a marker that does
+        not apply. Called BEFORE the ``PointAdded`` emit on the creation path,
+        so both properties ride the journal snapshot and survive a rebuild.
+
+        JOURNAL (live ≠ rebuild) — DELIBERATE, DOCUMENTED GAP. This writer
+        emits NO event of its own, so a property it writes is journalled ONLY
+        when a later ``PointAdded`` full snapshot picks it up through the replay
+        open-set passthrough (``_upsert_point_props``). MEASURED per path: on
+        the two CREATE paths (stamp before the emit) BOTH properties ride that
+        ``PointAdded`` and survive; on the two EXISTING-point callers (the
+        idempotent re-mitigation and the dedup-hit path, whose ``update_point``
+        emits ``PointRevised`` — a FIXED whitelist: content / context /
+        embedding / hash / annotator dims / ``BELIEF_PROPS``, never an open-set
+        prop) ``credibility`` is LOST: live ``'T1'`` → rebuilt ``None``.
+        ``baseline_system_default`` SURVIVES the existing-point paths too — not
+        by a second mechanism, but because it is a BIRTH fact already in the
+        point's ORIGINAL ``PointAdded`` snapshot (measured: marker ``True`` →
+        rebuilt ``True`` while ``credibility`` went ``None``). INFERRED, not
+        measured: a pre-#6151 mitigation that acquires the marker only on an
+        existing-point re-stamp would lose it exactly as ``credibility`` does.
+
+        The ``credibility`` half is the SAME class as the pre-existing
+        ``set_point_baseline`` gap (see its #2884 note: ``ep_alpha`` /
+        ``ep_beta`` / ``baseline_*`` are in ``_POINT_DENY`` and no journaled
+        event carries them). Closing it is NOT a small, safe change: it needs
+        either a second ``PointAdded`` for a point that already exists
+        (mis-stating a re-write as a creation, with the pass-1a creation
+        boundary reading it as delete→recreate) or an open-set fold in
+        ``projection._revise_point`` — a change to the replay boundary model
+        that governs EVERY Point prop, well beyond this fix. So it is RECORDED
+        here rather than silently widened (#6151 review P3), and it is a
+        live-vs-rebuild divergence only: the live behaviour — the one the
+        recompute and the decide flow read — is correct on every path.
+        """
+        sets: list[str] = []
+        params: dict[str, Any] = {"id": point_id}
+        if label is not None:
+            sets.append("n.credibility = $label")
+            params["label"] = label
+        if system_default is not None:
+            sets.append("n.baseline_system_default = $sd")
+            params["sd"] = bool(system_default)
+        if not sets:
+            return
+        self._get_proj().g.query(
+            f"MATCH (n:Point {{id:$id}}) SET {', '.join(sets)} RETURN n.id",
+            params=params,
+        )
+
     def set_point_baseline(self, claim_id: str, alpha: float, beta: float, *,
                            source: str = BASELINE_SOURCE_SET_BY_AUTHOR) -> dict:
         """Set Beta prior evidence for a claim. Persists to graph immediately.
@@ -16666,7 +16915,10 @@ class TortoiseSDK:
         property) — the #2199 token family, ONE of:
           - "set-by-author" (default): belief stated directly by whoever filed
             the point (human OR agent — species is tracked in authoredBy).
-            NEVER recomputed by ``_apply_source_inheritance``.
+            NEVER recomputed by ``_apply_source_inheritance`` — EXCEPT a
+            baseline created with the #398 ``credibility`` label, which IS
+            recomputed so the authored assertion joins the aggregate as one
+            weak supporter (and the #2199 default stays its base).
           - "inherited-from-source": derived from Source evidence, recomputed
             per EP run subject to the per-point time gate (``n.inherited_at``).
           - "system-default": no belief was stated when filed; the system
@@ -16728,6 +16980,10 @@ class TortoiseSDK:
         # pre-existing `baseline_set`, so the correct payload is the
         # statement's OUTCOME, not its input params) and is filed as a
         # residual for the controller. `confidence` is untouched here.
+        # NOTE (#6151 review P3): `_stamp_authored_word` — the other writer in
+        # this family — carries the SAME live≠rebuild gap on the
+        # existing-point paths; its docstring records the mechanism, the
+        # measured symptom, and why closing it is not a small change.
         if self._event_log_path:
             for row in written:
                 self._emit_event(
@@ -16802,23 +17058,59 @@ class TortoiseSDK:
             per-source ``factor_i`` = assessment factor (1.0 until assess_source
             lands — Task 5).
           - Positive-only: NAND contradiction is EP's factor domain — inheritance
-            never folds negative pseudo-counts (double-count guard).
+            never folds negative pseudo-counts (double-count guard). The
+            aggregate's difference SHAPE is retained for a future source-level
+            dissent signal, but no such signal exists today, so the against-side
+            is never populated from a NAND edge (#6151 rejected alternative).
+          - The author's declared word (#398, owner ruling 2026-10-12) is a
+            SUPPORTER in this same aggregate: ONE evidence body at the weakest
+            registered weight, the SAME whoever wrote it. The word is a
+            validated LABEL — it neither sets the claim's strength nor varies
+            the weight by author. An agent's `agentSession` IS the evidence body
+            for an agent assertion, so the word is not counted a second time
+            when it is present; it is NOT a ceiling: a stronger source can carry
+            the claim above what the author declared.
           - Independence model (#5543): the per-point source set is COLLAPSED BY
             S0a IDENTITY (`:Source.canonicalUrl`, falling back to
             `normalize_source_url(url)`), so one document reached through several
             `:Source` nodes contributes ONE source. A source with no identity at
             all stays DISTINCT (there is no key to collapse on, and folding
-            unknowns would weaken evidence). RESIDUAL, stated not closed: a
-            session `:Source` and the documents it `references` have different
-            identities by design and still count twice — see the INDEPENDENCE
-            MODEL note on `source_credibility.aggregate_prior`.
-          - Baseline provenance (2x2 mapping): author-set/system-default
-            baselines (baseline_source = 'set-by-author' / 'system-default', or
-            legacy baseline_set=true with no token) are NEVER recomputed;
-            inherited baselines (baseline_source='inherited-from-source')
+            unknowns would weaken evidence). The session/:Source double-count
+            that identity collapse alone could not merge is closed by the
+            CARRIER RULE below (a session that `references` an attached source
+            is provenance, zero) — see the carrier-rule comment in the body.
+          - Baseline provenance: an EXPLICIT `set_point_baseline` /
+            system-default baseline with NO #398 `credibility` label is FROZEN
+            against source recomputation (#844), with NO exception. A baseline
+            carrying the #398 `credibility` label IS recomputed so its authored
+            assertion joins the aggregate as one weak body; inherited baselines
+            (baseline_source='inherited-from-source')
             recompute per run subject to the per-point time gate
             (``n.inherited_at``); points with no baseline (baseline_source IS
             NULL AND baseline_set IS NOT true) are ALWAYS eligible.
+            RESIDUAL (stated, not closed): a label-bearing Point whose source
+            edges are ALL removed keeps its last inherited prior (the revert
+            pass skips it, because its word is still a source), so that prior
+            can carry the deleted sources' weight until the point is touched
+            again.
+            LEGACY-ROW RESIDUAL (deliberate; NO migration or backfill): a
+            label-less `set-by-author` baseline is frozen against SOURCE
+            recomputation — attaching sources later cannot move it. That is
+            correct for a genuinely EXPLICIT `set_point_baseline` (authored
+            belief, #844), and it is also how a PRE-RULING authored baseline
+            (created before the label existed) behaves. The two are
+            INDISTINGUISHABLE in the data — the label is the only signal, and
+            `set_point_baseline` writes none — so no SOURCE-only code-level
+            condition can recompute the legacy row without also un-freezing
+            every explicit user baseline. So the label-less `set-by-author`
+            baseline is frozen UNCONDITIONALLY — no session, originating or
+            carrying, re-opens it (the originating-session exception was
+            removed, #6151 review round 5). Not backfilled because we have NOT
+            launched: no customer graph carries a pre-ruling authored
+            baseline. A legacy row that should be
+            recomputable is RE-STATED with a `credibility` label (create with
+            `credibility=`, or re-mitigate), which is what marks it an authored
+            assertion.
           - Gate: recompute at most once per ``recompute_interval`` (default 3600s,
             env TORTOISE_EP_REINHERIT_INTERVAL; 0 = always), unless the gate was
             dirty-marked by a write event. Epsilon guard (rel 1e-9) suppresses
@@ -16835,8 +17127,12 @@ class TortoiseSDK:
             _parse_timestamp,  # ONE parser for this package — never duplicate it
             aggregate_prior,
             assessment_factor,
+            author_support_pc,
+            credibility_prior,
             pc_base,
             resolve_tier,
+            session_support_pc,
+            weak_support_pc,
         )
         # #5543: the S0a identity key. The write path already applies this
         # decision; the belief path below is the one that had not called it.
@@ -16873,23 +17169,22 @@ class TortoiseSDK:
         for tsrc, by_assessor in latest_by_source.items():
             factor_by_source[tsrc] = assessment_factor(by_assessor.values())
 
-        # Inherit-eligible points:
-        #   (baseline_source IS NULL AND baseline_set IS NOT true)  → always eligible
-        #   (baseline_source = 'inherited-from-source')              → gated by inherited_at
+        # The query is BROADENED to every sourced point, not only the
+        # inherit-eligible ones: a `set-by-author` authored-assertion baseline
+        # (#398) now recomputes so its weak body joins the aggregate as one
+        # supporter, and the per-point gate below still keeps a truly EXPLICIT
+        # `set_point_baseline` (no `credibility` label) untouched. The label
+        # rides the row via `n.credibility`.
         where = (
             "WHERE n.is_operator = false "
             "AND (n.pointKind IS NULL OR n.pointKind <> 'assessment') "
-            "AND ("
-            "  (n.baseline_source IS NULL AND (n.baseline_set IS NULL OR n.baseline_set = false)) "
-            "  OR n.baseline_source = 'inherited-from-source'"
-            ") "
             "AND (s.credibilityTier IS NOT NULL OR s.sourceKind IS NOT NULL) "
         )
         rows = proj.g.query(
             f"MATCH (n:Point)-[:extractedFrom]->(s:Source) {where} "
             "RETURN n.id, s.url, s.credibilityTier, s.sourceKind, "
             "s.sourceDate, s.ingestedAt, n.baseline_source, n.inherited_at, "
-            "s.canonicalUrl",
+            "s.canonicalUrl, n.credibility",
             params={},
         ).result_set
 
@@ -16921,9 +17216,28 @@ class TortoiseSDK:
         from collections import defaultdict
         point_sources: dict[str, list[dict]] = defaultdict(list)
         _identity_slot: dict[tuple[str, str], int] = {}
-        for pid, url, ctier, skind, sdate, ingested, bl_src, inherited_at, canonurl in rows:  # noqa: B007
+        # #398: an `agentSession` is a real but WEAK supporter when it
+        # ORIGINATES the claim, and ZERO when it CARRIES a source already
+        # attached to the same claim (the session is provenance, not evidence).
+        # Its weight is not a tier, so it is collected separately from the
+        # tier groups and folded in as ``extra_support_pc``.
+        session_sources: list[tuple[str, str]] = []  # (pid, session_url)
+        author_word: dict[str, str] = {}  # pid -> declared label (T0-T4 form)
+        for pid, url, ctier, skind, sdate, ingested, bl_src, inherited_at, canonurl, word_label in rows:  # noqa: B007
+            # #398: the point's declared label (persisted at create) marks its
+            # baseline as an authored assertion — captured before the
+            # neutral-source `continue` so a label on a point whose only source
+            # is neutral is still seen.
+            if word_label:
+                author_word[pid] = word_label
             tier = resolve_tier(ctier, skind)
             if tier is None:
+                # #398: `agentSession` used to resolve to None (neutral, i.e.
+                # NO weight — a claim only an agent knows sat permanently at
+                # alpha=1/beta=1, ignorance). The ruling makes it weak when it
+                # originates, zero when it carries.
+                if skind == "agentSession" or ctier == "agentSession":
+                    session_sources.append((pid, url))
                 continue  # neutral source — no inheritance contribution
             # Identity = the ALREADY-MATERIALISED S0a key. `:Source` carries
             # `canonicalUrl` (written by the write path), which is precisely the
@@ -16981,6 +17295,63 @@ class TortoiseSDK:
             if cand_eff is not None and (kept_eff is None or cand_eff > kept_eff):
                 kept["sourceDate"], kept["ingestedAt"] = sdate, ingested
 
+        # ── #398 carrier rule ────────────────────────────────────────────
+        # A session Source is a CARRIER when it `references` (Ontology §3.4 —
+        # the EXISTING Source -> Source relation) another Source that is ALSO
+        # attached to the same claim: the session delivered that body of
+        # evidence, so it is provenance and contributes zero. This closes the
+        # double-count residual the pre-change docstring recorded (a session
+        # and the documents it references have different S0a identities, so
+        # identity collapse alone could not merge them).
+        point_extra_support: dict[str, float] = defaultdict(float)
+        # #6151 review P2: only a session that ORIGINATES the claim contributes
+        # the weak body, and only such a session may suppress a declared word
+        # that would double-count it. A session that merely CARRIES an attached
+        # source contributes ZERO, so there is nothing to double-count and it
+        # must NOT suppress the author's word. ⛔ This set NO LONGER un-freezes
+        # an explicit baseline in the guard below (#6151 review round 5: the
+        # label is the only exception, because an originating session also
+        # replaced an explicitly-set baseline — the same #844 breach one path
+        # over from the carrying case this set was introduced for).
+        agent_originated: set[str] = set()
+        weak_bodies: dict[str, int] = defaultdict(int)
+        if session_sources:
+            ref_rows = proj.g.query(
+                "MATCH (s:Source)-[:references]->(o:Source) RETURN s.url, o.url",
+                params={},
+            ).result_set
+            referenced: dict[str, set] = defaultdict(set)
+            for s_url, o_url in ref_rows:
+                if s_url and o_url:
+                    referenced[s_url].add(o_url)
+            # #6151 review P3: `attached` must be EVERY source the claim
+            # carries, not only the TIERED ones `point_sources` holds. The
+            # broadened evidence query filters to `credibilityTier OR
+            # sourceKind IS NOT NULL`, so a session referencing an attached but
+            # NEUTRAL (untiered) source was misread as ORIGINATING. This query
+            # is scoped to the session-bearing points, so it adds no row for
+            # any other point.
+            attached_rows = proj.g.query(
+                "MATCH (n:Point)-[:extractedFrom]->(s:Source) "
+                "WHERE n.id IN $ids RETURN n.id, s.url",
+                params={"ids": sorted({pid for pid, _ in session_sources})},
+            ).result_set
+            attached_by_point: dict[str, set] = defaultdict(set)
+            for _pid, _url in attached_rows:
+                if _url:
+                    attached_by_point[_pid].add(_url)
+            for pid, s_url in session_sources:
+                attached = set(attached_by_point.get(pid, ()))
+                attached.discard(s_url)
+                carries = bool(referenced.get(s_url, set()) & attached)
+                if session_support_pc(carries_attached_source=carries) > 0.0:
+                    agent_originated.add(pid)
+                    weak_bodies[pid] += 1
+            # Same anti-Sybil growth as a tier (log2(N+1)): one weak body is
+            # exactly AUTHOR_ASSERTION_WEAK_PC, a flood grows sub-linearly.
+            for pid, n in weak_bodies.items():
+                point_extra_support[pid] = weak_support_pc(n)
+
         # Revert: points with an inherited baseline but NO eligible sources
         # (all edges deleted or all sources neutral) return to neutral — subject
         # to the same per-point gate (dirty-marked or interval elapsed).
@@ -16991,6 +17362,9 @@ class TortoiseSDK:
         revert_rows = proj.g.query(
             "MATCH (n:Point) WHERE n.baseline_source = 'inherited-from-source' "
             "AND (n.pointKind IS NULL OR n.pointKind <> 'assessment') "
+            # #398: a label-bearing Point is never reverted to neutral — its
+            # authored assertion is itself a source, so it always keeps a prior.
+            "AND n.credibility IS NULL "
             "RETURN n.id, n.inherited_at",
             params={},
         ).result_set
@@ -17036,14 +17410,39 @@ class TortoiseSDK:
             self._evidence.pop(pid, None)
             self._mark_dirty([pid])
 
-        for pid, sources in point_sources.items():
+        for pid in set(point_sources) | set(point_extra_support) | set(author_word):
+            sources = point_sources.get(pid, [])
             # Fetch the point's current baseline marker state
             row = proj.g.query(
                 "MATCH (n:Point {id:$id}) RETURN n.baseline_source, n.inherited_at, "
-                "coalesce(n.ep_alpha, 1.0), coalesce(n.ep_beta, 1.0)",
+                "coalesce(n.ep_alpha, 1.0), coalesce(n.ep_beta, 1.0), "
+                "coalesce(n.baseline_set, false), "
+                "coalesce(n.baseline_system_default, false)",
                 params={"id": pid},
             ).result_set
-            bl_src, inherited_at, cur_a, cur_b = row[0] if row else (None, None, 1.0, 1.0)
+            bl_src, inherited_at, cur_a, cur_b, bl_set, decide_default = (
+                row[0] if row else (None, None, 1.0, 1.0, False, False))
+
+            # #2199/#844: an EXPLICIT ``set_point_baseline`` / system-default
+            # baseline is FROZEN against source recomputation, and a legacy
+            # ``baseline_set=true`` row with no provenance token is explicit too
+            # (the pre-marker era). The ONE exception is the #398
+            # ``credibility`` label: a word-bearing Point is an authored
+            # assertion whose weak body must be displaceable by a real source.
+            # ⛔ An ORIGINATING agent session is NOT a second exception —
+            # removed (#6151 review round 5) because it silently replaced an
+            # explicitly-set baseline (`0.4 -> 1.1`, `set-by-author ->
+            # inherited-from-source`), the same #844 breach one path over.
+            # Every documented WORD input writes the label, so an agent-authored
+            # word still recomputes above; a label-less row is genuinely
+            # explicit (frozen) or the documented legacy residual. #7951 owns
+            # the single write chokepoint.
+            is_word_point = pid in author_word
+            if (bl_src is None and bl_set) or (
+                bl_src in (BASELINE_SOURCE_SET_BY_AUTHOR, BASELINE_SOURCE_SYSTEM_DEFAULT)
+                and not (bl_src == BASELINE_SOURCE_SET_BY_AUTHOR and is_word_point)
+            ):
+                continue
 
             is_inherited = bl_src == BASELINE_SOURCE_INHERITED
             if is_inherited and inherited_at is not None and recompute_interval > 0:
@@ -17063,8 +17462,46 @@ class TortoiseSDK:
                 (src["tier"], src["sourceDate"], src["ingestedAt"], src["factor"])
                 for src in sources
             ]
+            # #398: the author's assertion is ONE weak supporter in this same
+            # aggregate — the SAME weight whoever wrote it and whatever word it
+            # names (the word is a label, not a strength). An agent's word is NOT
+            # added here: its `agentSession` source IS that evidence body
+            # (already in `point_extra_support`, weak when originating / zero
+            # when carrying), so adding it again would double-count.
+            extra_support = point_extra_support.get(pid, 0.0)
+            # #2199 is a SEPARATE recorded provision the word must not delete:
+            # a decide part BORN live starts at the system default Beta(3,1),
+            # and recomputing a labelled decide part must keep that provision as
+            # the aggregate's base rather than replacing it. Without this a
+            # labelled decide part attached to even a weak (T4) source dropped
+            # to 1.2 (0.5455) while the SAME part unlabelled stays frozen at the
+            # default 3.0 (0.75) — a labelled claim weaker than its unlabelled
+            # counterpart, exactly the inversion the owner ruling forbids. A
+            # wordless decide part never reaches this loop (the #2199
+            # system-default guard above skips it), so its frozen 0.75 is
+            # untouched.
+            #
+            # #6151 defect 2: re-inject the default ONLY on a point whose create
+            # RECORDED it (`baseline_system_default`) — i.e. a decide part BORN
+            # live. A decide part created with an EXPLICIT status never received
+            # the default (the create docstring: full manual control), so the
+            # word there adds its own weak body alone and never an unearned
+            # +2.1. Scoping on the birth fact (not on `p_kind`) is what makes
+            # that distinction, because a word re-stamps the baseline token
+            # `set-by-author` on both.
+            if is_word_point and decide_default:
+                extra_support += credibility_prior(DECIDE_DEFAULT_CREDIBILITY)[0] - 1.0
+            # Only an ORIGINATING session suppresses the word: its agentSession
+            # IS the evidence body, so adding the word too would double-count.
+            # A CARRYING session contributes zero, so the word is the only body
+            # of evidence it has and must be counted (#6151 review P2).
+            if is_word_point and pid not in agent_originated:
+                word_pc = author_support_pc(author_word[pid])
+                if word_pc:
+                    extra_support += word_pc
             alpha, beta = aggregate_prior(
                 groups, recency_decay=recency_decay, now=now,
+                extra_support_pc=extra_support,
             )
 
             # Epsilon guard: skip identical rewrites (no dirty churn).
@@ -22783,7 +23220,8 @@ class TortoiseSDK:
         # explicit `is_episodic` parameter below (internal callers), merged
         # into the event dict AFTER sanitize.
         if not _skip_sanitize:
-            props = _sanitize_props(props, reject_id=True)
+            props = _sanitize_props(props, reject_id=True,
+                                    reject_credibility=True)
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         proj = self._get_proj()
@@ -23227,7 +23665,8 @@ class TortoiseSDK:
 
     def _update_entity(self, id_val: str, **props) -> dict:
         # #329: id + sourcePath/source_path are server-managed — reject
-        props = _sanitize_props(props, reject_id=True)
+        props = _sanitize_props(props, reject_id=True,
+                                reject_credibility=True)
         # #3998 (D30): the generic entity surface reaches `:Source` TOO, and its
         # per-label branch below writes caller props with a live `SET n += $p`.
         # Without this the closed :Source surface declared in
