@@ -3296,13 +3296,20 @@ def test_reaper_lock_distinguishes_a_refusal_from_contention(tmp_path):
     # The exact reason is platform-dependent (macOS refuses at `fdopen`,
     # Linux at the `S_ISREG` check); what must hold is that it is a FAULT.
     assert bad.refusal, "a non-regular lock path is a fault, not contention"
-    # A later contention attempt clears the stale fault marker.
+    # A later contention attempt on the SAME object clears the stale fault
+    # marker. It must be the object that already FAULTED: a fresh `_ReaperLock`
+    # gets `refusal = None` from `__init__`, so asserting on one pins only
+    # "contention does not set a fault" and leaves `acquire()`'s
+    # `self.refusal = None` reset unbound (#4299 review, cycle 2 — a mutation
+    # deleting that line left the whole suite green).
     fifo_dir2 = tmp_path / ".tortoise-reaper-c"
     holder2 = er._ReaperLock(str(fifo_dir2 / ".reaper.lock"))
     assert holder2.acquire()
     try:
-        bad2 = er._ReaperLock(holder2.path)
-        assert bad2.acquire() is False and bad2.refusal is None
+        bad.path = holder2.path
+        assert bad.acquire() is False and bad.refusal is None, (
+            "a later contention attempt on the previously faulted object must "
+            "clear the stale fault marker — `acquire()` resets `refusal`")
     finally:
         holder2.release()
 
@@ -3369,6 +3376,12 @@ def test_a_fossil_record_does_not_block_the_next_sweep(tmp_path, monkeypatch):
     A record naming a dead pid with no holder at all is not a lock — the next
     acquire succeeds (flock is free) and rewrites the record with its own
     pid AND start time, so the fossil cannot mislead the next reader either.
+
+    The start time is bound OVER THE SEAM. The record's `start=` comes from the
+    holder's own `ps -o lstart=` probe, which returns ``None`` on a 2s timeout
+    on a loaded host (#4299 review, cycle 2) — so asserting ``start is not
+    None`` against the real probe would red on a GREEN commit. Pin what the
+    holder RESOLVES and assert the record carries exactly that.
     """
     import tortoise.embedded_reaper as er
     path = str(tmp_path / f".tortoise-reaper-{os.geteuid()}" / ".reaper.lock")
@@ -3376,6 +3389,7 @@ def test_a_fossil_record_does_not_block_the_next_sweep(tmp_path, monkeypatch):
     with open(path, "w") as fh:
         fh.write("pid=999999\nstart=1.0\n")   # a fossil: no holder
     monkeypatch.setattr(er, "_LOCK_PATH", path)
+    monkeypatch.setattr(er, "_process_start_time", lambda pid: 1234.5)
     lock = er._ReaperLock(path)
     assert lock.acquire() is True, "a fossil record must not be a lock"
     try:
@@ -3383,15 +3397,16 @@ def test_a_fossil_record_does_not_block_the_next_sweep(tmp_path, monkeypatch):
         parsed = er._parse_lock_record(text)
         assert parsed is not None, text
         pid, start = parsed
-        assert pid == os.getpid() and start is not None, (
-            "the new holder must record pid AND start (#4299)")
+        assert pid == os.getpid() and start == 1234.5, (
+            "the new holder must record pid AND the start time it resolved "
+            "BEFORE the flock (#4299)")
         verdict = er._lock_holder_verdict()
         # The record now carries OUR identity — the fossil's dead pid is gone.
         # Asserted classification-independently, because `_holder_kind` is a
         # heuristic over the holder's argv and this test must not pin a probe:
-        # if `ps -o lstart=` times out (2s, on a loaded host) the honest verdict
-        # is the `unknown` pole, and an xdist worker's argv carries no `pytest`
-        # (#4299 review, cycle 1). The classification itself is pinned by
+        # a `ps` timeout would yield the honest `unknown` pole, and an xdist
+        # worker's argv carries no `pytest` (#4299 review, cycle 1). The
+        # classification itself is pinned by
         # `test_holder_kind_checks_the_runner_before_the_module_marker` with an
         # explicit argv. What must hold here: the fossil never survives — OUR
         # pid is the recorded one and it is not read as a stale record.
