@@ -397,22 +397,72 @@ while true; do
     HEAD_N="$(gh pr view "$PR" --repo "$OR" --json headRefOid --jq .headRefOid 2>/dev/null)"
     # parked = the fixer cap was reached at THIS head; a later push re-arms the PR.
     [ -n "${HEAD_N:-}" ] && [ "$(cat "$O/state/parked-$PR" 2>/dev/null)" = "$HEAD_N" ] && continue
-    V="$(gh pr checks "$PR" --repo "$OR" --json name,state 2>/dev/null | python3 -c "
+    V="$(gh pr checks "$PR" --repo "$OR" --json name,state,workflow 2>/dev/null | python3 -c "
 import sys,json
 try: d=json.load(sys.stdin)
 except Exception: print('NOCHECKS'); raise SystemExit
-m={c['name']:c['state'] for c in d}
+# The source is either the check-runs API shape (an object carrying a check_runs list) or the flat
+# list \`gh pr checks --json\` prints. Both normalise to one row list; anything else is unreadable.
+rows=d.get('check_runs') if isinstance(d,dict) else d
+if not isinstance(rows,list): print('NOCHECKS'); raise SystemExit
 want='$REQ'.split()
-bad=lambda s: s in ('FAILURE','ERROR','CANCELLED','TIMED_OUT','ACTION_REQUIRED')
-ok=lambda s: s in ('SUCCESS','FAILURE','ERROR','CANCELLED','TIMED_OUT','ACTION_REQUIRED','SKIPPED','NEUTRAL')
-# ai-review-gate IS the merge authority, so it must be an explicit SUCCESS. SKIPPED/NEUTRAL
-# there means no signed review exists; reading that as satisfied would merge without evidence.
-gate=m.get('ai-review-gate','')
-if gate != 'SUCCESS' and not bad(gate):
-    print('FAILED:ai-review-gate'); raise SystemExit
-fail=[n for n in want if bad(m.get(n,''))]
-pend=[n for n in want if not ok(m.get(n,''))]
-print(('FAILED:'+','.join(fail)) if fail else (('PENDING:'+','.join(pend)) if pend else 'GREEN'))
+# ⛔ ALLOW-LISTS, NEVER A DENY-LIST (agent-infra#1714). A conclusion is NON-RED only if it is NAMED
+# here - the identical five spellings admin-merge.sh (NON_RED_CONC) and record-review.sh
+# (target_head_red) use, so the harness and the merge rail cannot disagree. 'not in the red set' is
+# not a synonym for non-red: a token this code has never seen (a vendor adds a conclusion, GitHub
+# returns a newer spelling, the value is null) must FAIL CLOSED, so it is RED. The deny-list this
+# replaced named the red tokens and filed EVERYTHING ELSE as PENDING, so an unrecognised or NULL
+# conclusion reached \`gh pr merge --auto\` instead of blocking - the fail-open the issue is about.
+NONRED=('success','neutral','skipped','cancelled','stale')
+# IN FLIGHT means a status the API NAMES as in flight - the same five the rail uses. Any OTHER
+# non-completed spelling is judged by its CONCLUSION under the allow-list, so an unrecognised status
+# with a null conclusion is RED, not pending (the rail's #1353 fail-open shape, closed the same
+# way). \`expected\` is deliberately NOT here: it is not a named in-flight spelling, so a check
+# GitHub has announced but not reported reads RED - the fail-closed direction, matching the rule.
+INFLIGHT=('queued','in_progress','waiting','requested','pending')
+# One entry per (app, name) - NOT per name: a same-named check under two apps must not let one
+# app's result mask the other's (agent-infra#1714). \`app.slug\` when the source supplies it (the
+# check-runs API), otherwise the workflow name (\`gh pr checks\` exposes no app field), and the
+# NEWEST attempt by id when the source supplies one. Ties, and sources with no id at all, take the
+# last row seen - all the information \`gh pr checks\` carries.
+groups={}
+for c in rows:
+    if not isinstance(c,dict): continue
+    name=str(c.get('name') or '')
+    app=c.get('app')
+    if isinstance(app,dict): app=app.get('slug') or ''
+    if not app: app=c.get('workflow') or ''
+    try: cid=int(c.get('id') or c.get('databaseId') or 0)
+    except Exception: cid=0
+    if 'status' in c or 'conclusion' in c:
+        status=str(c.get('status') or '').lower(); concl=str(c.get('conclusion') or '').lower()
+    else:
+        st=str(c.get('state') or '').lower()
+        status,concl=(st,'') if st in INFLIGHT else ('completed',st)
+    k=(str(app),name)
+    prev=groups.get(k)
+    if prev is None or cid>=prev[0]: groups[k]=(cid,status,concl)
+rank={'nonred':0,'pending':1,'red':2}
+named={}
+gate=[]
+for k in groups:
+    status=groups[k][1]; concl=groups[k][2]
+    v='pending' if status in INFLIGHT else ('nonred' if concl in NONRED else 'red')
+    if k[1]=='ai-review-gate': gate.append((v,concl))
+    if k[1] not in named or rank[v]>rank[named[k[1]]]: named[k[1]]=v
+# ai-review-gate IS the merge authority, so it must be an explicit SUCCESS. SKIPPED/NEUTRAL there
+# means no signed review exists; reading that as satisfied would merge without evidence. This is
+# also why GREEN always carries at least one MEASURING success: a surface of nothing but
+# cancelled/stale/skipped/neutral rows can never read green - those are non-red, never green.
+gate_ok=len(gate)>0 and all(v=='nonred' and c=='success' for v,c in gate)
+# Read it in this order: RED if any required check is red (a completed red is final - nothing in
+# flight can un-fail it); otherwise NOT YET KNOWN while any is in flight or never reported;
+# otherwise GREEN. An EMPTY surface is NOCHECKS, never GREEN - a missing check is not a green check,
+# and NOCHECKS reaches neither the merge nor the fixer arm below.
+fail=[n for n in want if named.get(n)=='red']
+pend=[n for n in want if named.get(n)=='pending' or n not in named]
+if 'ai-review-gate' in want and not gate_ok and 'ai-review-gate' not in fail: fail.insert(0,'ai-review-gate')
+print('NOCHECKS' if not groups else ('FAILED:'+','.join(fail) if fail else ('PENDING:'+','.join(pend) if pend else ('GREEN' if want else 'NOCHECKS'))))
 " 2>/dev/null)"
     # A CONFLICTING PR can never merge: `gh pr merge` fails every cycle and the queue looks stuck
     # while nothing changes. Route it to the fixer, which integrates origin/main and resolves the
