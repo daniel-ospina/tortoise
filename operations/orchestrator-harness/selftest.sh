@@ -250,11 +250,14 @@ for v in MAX_LOAD MAX_LANES MAX_REVIEW MERGE_PRIORITY_AT MAX_FIX MAX_FIX_TRIES M
   # Exactly ONE definition per file is part of the invariant: bash applies the LAST assignment, so a
   # file that defines a limit twice -- correctly at first, differently later -- would otherwise pass on
   # whichever one `head -1` happened to read. Compare the FULL list of definitions, and require one.
-  na="$(sed -n -E "s/^$v=\"\\\$\{$v:-([^\"]*)\}\".*/\1/p" "$LOOP" | wc -l | tr -d ' ')"
-  nb="$(sed -n -E "s/^$v=\"\\\$\{$v:-([^\"]*)\}\".*/\1/p" "$INST" | wc -l | tr -d ' ')"
+  # Count with awk, not `wc -l`: wc counts NEWLINES, so a file whose final line is the duplicate
+  # (and lacks a trailing newline) undercounts to 1 and the guard passes vacuously -- the very failure
+  # this block exists to prevent. awk counts records, including a final partial line.
+  na="$(sed -n -E "s/^$v=\"\\\$\{$v:-([^\"]*)\}\".*/\1/p" "$LOOP" | awk 'END{print NR+0}')"
+  nb="$(sed -n -E "s/^$v=\"\\\$\{$v:-([^\"]*)\}\".*/\1/p" "$INST" | awk 'END{print NR+0}')"
   [ "$na" = "1" ] && [ "$nb" = "1" ] || { echo "      $v: defined ${na}x in orch-loop, ${nb}x in install (must be exactly once)"; rc=1; continue; }
-  a="$(sed -n -E "s/^$v=\"\\\$\{$v:-([^\"]*)\}\".*/\1/p" "$LOOP" | head -1)"
-  b="$(sed -n -E "s/^$v=\"\\\$\{$v:-([^\"]*)\}\".*/\1/p" "$INST" | head -1)"
+  a="$(sed -n -E "s/^$v=\"\\\$\{$v:-([^\"]*)\}\".*/\1/p" "$LOOP" | awk 'NR==1')"
+  b="$(sed -n -E "s/^$v=\"\\\$\{$v:-([^\"]*)\}\".*/\1/p" "$INST" | awk 'NR==1')"
   [ -n "$a" ] && [ "$a" = "$b" ] || { echo "      $v: orch-loop='${a:-?}' install='${b:-?}'"; rc=1; }
 done
 ck "orch-loop.sh defaults match install.sh for all 10 limits" $rc
