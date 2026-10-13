@@ -2866,6 +2866,13 @@ surfaces:
   - test_welcome_url_consolidation.py
   - test_website_static.py
   - test_website_docs_consistency.py  # #3332: checks each public page against its canonical source (status vocab, EP mechanism, ontology link)
+  # #8379 (finding 2): the authoring contract renders as a real document, not as one
+  # giant code block. Registered HERE because `website/functions/blog/` is a SOURCE_PATTERN
+  # of this surface AND the doc itself is a CONCRETE path (`docs/blog-authoring.md`) —
+  # `docs/` alone is NOT a pattern and is in NON_PYTHON_PREFIXES, so without that entry a
+  # docs-only diff selected NO surface and the guard never saw the page it guards (the
+  # #8334/#3524 silent-drop class, one level up).
+  - test_blog_authoring_doc.py
   # #8334 review (P2): the #3525 CSP plan doc must not keep asserting the third-party RUM
   # origin #4706 removed. Registered HERE because `website/apps/dashboard/functions/` is a
   # SOURCE_PATTERN of this surface AND the doc itself is named as a CONCRETE path
@@ -4453,6 +4460,7 @@ durations:
   test_tmpdir_hygiene_4096.py: 13.3
   test_turn_embedding_write_path_4194.py: 1.4
   test_website_docs_consistency.py: 6.6
+  test_blog_authoring_doc.py: 2.0  # unmeasured — new file; refresh from the first post-merge run via tools/ci_timing.py --refresh-durations
   test_csp_plan_doc_consistency.py: 2.0  # unmeasured — new file; refresh from the first post-merge run via tools/ci_timing.py --refresh-durations
   test_install_reaper_schedule.py: 7.8  # unmeasured
   test_contact_form.py: 2.0  # unmeasured

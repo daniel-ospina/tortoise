@@ -102,6 +102,7 @@ aboutObjects: tortoise
 | Client/server package split (`tortoise-client` thin driver, #526) | `docs/client-server-split.md` |
 | Beta feedback & bug reporting (#1199) | `docs/beta-feedback.md` |
 | Blog keyword research — topic taxonomy + keyword map (#1862) | `docs/research/2026-08-28-tortoise-blog-keywords/research.md` |
+| **Writing a blog post body** — the authoring contract: the supported markdown subset, the `[[toc]]` / `[[video: …]]` markers, the transcript convention, the reciprocal internal link, and what is deliberately NOT supported (#7751/#8313) | `docs/blog-authoring.md` |
 | Tortoise agent daemon epic research — OAuth/attribution second-pass verdict + industry code audit (#2554, 2026-09-08) | `docs/research/2026-09-08-tortoise-agent-daemon.md` |
 | Actor attribution in agent-memory graphs — industry code audit (Zep/Mem0/Letta/LangMem/basic-memory, #2554) | `docs/research/memory-attribution-industry-findings.md` |
 | Standard-harness reuse audit — do we need to invent the battery's key decisions (#1416, 2026-09-10) | `docs/research/2026-09-10-standard-harness-reuse-audit.md` |

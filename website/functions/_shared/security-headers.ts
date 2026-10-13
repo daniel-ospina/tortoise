@@ -39,7 +39,13 @@ export const RELAXED_CSP = csp(
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
   "connect-src 'self' https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com",
-  "frame-src https://challenges.cloudflare.com",
+  // #7751: the blog renders video embeds (`blog/_lib.ts` -> `_shared/video.ts`).
+  // `frame-src` is present and restrictive, so it — NOT `default-src` — governs
+  // the nested browsing context: without these two origins every embed is
+  // CSP-blocked while the article (and its `VideoObject`) renders. The origins
+  // are the renderer's own constructed embed hosts, asserted against the
+  // renderer's provider list by `tests/test_blog_markdown.mjs`.
+  "frame-src https://challenges.cloudflare.com https://www.youtube-nocookie.com https://player.vimeo.com",
   "object-src 'none'",
   "base-uri 'none'",
   "frame-ancestors 'none'",

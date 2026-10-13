@@ -1374,6 +1374,23 @@ class _EntityHandlers:
         # keeps the replay open-set passthrough from logging a FALSE
         # `"Point prop %r is not declared"` drift warning on every rebuild.
         "goalState",
+        # #398 (owner ruling 2026-10-12): the author's declared credibility
+        # WORD, persisted by `create_point(credibility=…)` as a validated
+        # LABEL (it no longer sets the claim's strength). `_apply_source_
+        # inheritance` reads it to treat the authored assertion as ONE weak
+        # evidence body and to keep recomputing an authored baseline as real
+        # sources arrive. Declared so the replay open-set passthrough does not
+        # log a FALSE `"Point prop %r is not declared"` drift warning on every
+        # rebuild.
+        "credibility",
+        # #6151 defect 2: the #2199 system-default provision, recorded on a
+        # decide part BORN live (no explicit status). `_apply_source_
+        # inheritance` re-injects the default ONLY where this marker says one
+        # was granted, so a decide part created with an EXPLICIT status never
+        # gets an unearned default. Declared so the replay open-set passthrough
+        # does not log a FALSE `"Point prop %r is not declared"` drift warning
+        # on every rebuild.
+        "baseline_system_default",
     })
     # #2795 (D2 mechanic 1): list-valued props are persisted ONLY when their
     # key is declared here. Arrays are not fulltext-indexed and the canonical
