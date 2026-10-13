@@ -14,10 +14,12 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 O="${O:-$HOME/orchestrator}"
-REPO="${REPO:-/Users/home/eldato/tortoise}"
+REPO="${REPO:-/Users/danielospina/Documents/GitHub/tortoise}"
 OR="${OR:-daniel-ospina/tortoise}"
 
-MAX_LOAD="${MAX_LOAD:-16}"
+# sanity ceiling only; the swap/RAM gates below are the real constraint.
+_NCPU="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+MAX_LOAD="${MAX_LOAD:-$(( _NCPU * 10 ))}"
 MAX_LANES="${MAX_LANES:-4}"
 MAX_REVIEW="${MAX_REVIEW:-4}"
 MERGE_PRIORITY_AT="${MERGE_PRIORITY_AT:-10}"

@@ -3,14 +3,34 @@
 # Fast, non-blocking cycle: heartbeat -> merge sweep -> capacity-gated dispatch -> background refresh.
 set -u
 OR="${OR:-daniel-ospina/tortoise}"
-REPO="${REPO:-/Users/home/eldato/tortoise}"
+# ⛔ THE OLD DEFAULT POINTED AT A PATH THAT DOES NOT EXIST ON THIS BOX
+# (/Users/home/eldato/tortoise). Under the shipped launchd job this is only a FALLBACK --
+# install.sh renders its own REPO into the plist via __REPO__, and that value overrides this one.
+# It still matters for every REPO-less run (manual starts, the runbook, a re-install without env),
+# and there a missing path is indistinguishable from "nothing to do" -- the same class as the
+# gh-shim failure (#8246). Corrected, and made to fail LOUD rather than run against a path with
+# nothing in it. (Corrected after a fresh-context verifier showed the original comment misstated
+# the mechanism -- see the review on this PR.)
+REPO="${REPO:-/Users/danielospina/Documents/GitHub/tortoise}"
+if [ ! -d "$REPO" ]; then echo "orch-loop: FATAL REPO=$REPO does not exist" >&2; exit 78; fi
 O="${O:-$HOME/orchestrator}"
 export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH
 export AGENT_SKIP_REVIEW_GATE=1 ELDATO_SKIP_VGATE=1
 
 MAX_FIX="${MAX_FIX:-3}"
 MAX_FIX_TRIES="${MAX_FIX_TRIES:-3}"
-MAX_LOAD="${MAX_LOAD:-16}"
+# ⛔ MAX_LOAD IS A SANITY CEILING, NOT A THROUGHPUT TARGET -- and 16 was too tight for this box.
+# Measured 2026-10-13 over 3940 log lines of the live harness: 103 were
+# `[dispatch] skipped (load=N>=max_load=16)` and 96 were merge-priority. The gate DID open when
+# load dipped below 16 (13 `[dispatch] load=` lines exist in that window), so the accurate claim is
+# that it is too tight for a 17-workspace fleet on 10 cores -- NOT that it never opened. The box
+# merged 25 PRs in a day at load 17-52 and has been observed functioning at ~100; a ceiling at 16
+# leaves the dispatcher off for most of the day.
+# (Corrected after a fresh-context verifier counted the dispatch lines the first claim ignored.)
+# The REAL capacity constraint is the machine (available RAM / swap) -- see the gate chain below.
+# Derive the ceiling from the core count so it scales, and keep the env override.
+_NCPU="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+MAX_LOAD="${MAX_LOAD:-$(( _NCPU * 10 ))}"
 MAX_LANES="${MAX_LANES:-4}"
 MAX_REVIEW="${MAX_REVIEW:-4}"   # keep in sync with install.sh's default and README §4
 MERGE_PRIORITY_AT="${MERGE_PRIORITY_AT:-10}"   # above this many open PRs, drain before dispatching
@@ -112,6 +132,36 @@ mp_reason() { # <open_prs> <lanes>
     echo "merge-priority (${1} open PRs — draining before opening more)"
   fi
 }
+res_line() {
+  local idle pmem f i w cmp avail swapfree swaptotal dline duse procs runnable svcs rate
+  # CPU
+  local cpu; cpu="$(top -l 2 -n 0 2>/dev/null | awk '/CPU usage/{c=$0} END{sub(/^CPU usage: /,"",c); print c}')"
+  # RAM (16 KiB pages on Apple silicon; compute from the header rather than hardcoding)
+  pmem="$(vm_stat 2>/dev/null | awk '
+    /page size of/ {ps=$8}
+    /Pages free/ {gsub(/[.]/,"",$3); f=$3}
+    /Pages inactive/ {gsub(/[.]/,"",$3); i=$3}
+    /Pages wired/ {gsub(/[.]/,"",$4); w=$4}
+    /occupied by compressor/ {gsub(/[.]/,"",$5); c=$5}
+    END {if (ps=="") ps=16384; printf "%.2fG free/%.2fG inactive/%.2fG wired/%.2fG comp/%.2fG avail", f*ps/1e9, i*ps/1e9, w*ps/1e9, c*ps/1e9, (f+i)*ps/1e9}')"
+  # swap + disk + processes
+  swapfree="$(sysctl -n vm.swapusage 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="free"){printf "%.0fM",$(i+2); exit}}')"
+  swaptotal="$(sysctl -n vm.swapusage 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="total"){printf "%.0fM",$(i+2); exit}}')"
+  dline="$(df -g /System/Volumes/Data 2>/dev/null | awk 'NR==2{printf "%dG free/%d%% used",$4,$5}')"
+  procs="$(ps -Ao pid= 2>/dev/null | wc -l | tr -d ' ')"
+  runnable="$(ps -Ao stat= 2>/dev/null | grep -c '^R')"
+  # the macOS service sinks that have burned this box before, and kernel_task (thermal/I-O)
+  svcs="$(ps -Ao pcpu=,comm= 2>/dev/null | awk '
+    /opendirectoryd/ {o+=$1}
+    /automountd/ {a+=$1}
+    /kernel_task/ {k+=$1}
+    /fseventsd/ {f+=$1}
+    /mds_stores|mds$/ {m+=$1}
+    END {printf "opendirectoryd=%.0f%% automountd=%.0f%% kernel_task=%.0f%% fseventsd=%.0f%% mds=%.0f%%", o,a,k,f,m}')"
+  # GitHub API ceiling — a capacity limit that is NOT on this machine
+  rate="$(gh api rate_limit --jq '.resources.graphql | "\(.remaining)/\(.limit)"' 2>/dev/null)"
+  echo "[res] cpu(${cpu:-?}) | mem(${pmem:-?}) | swap(${swapfree:-?}/${swaptotal:-?}) | disk(${dline:-?}) | procs=$procs runnable=$runnable | svc(${svcs:-?}) | gh_gql=${rate:-?}" >> "$LOG"
+}
 review_slots() { # <open_prs>
   if [ "${1:-0}" -gt "$MERGE_PRIORITY_AT" ]; then echo $((MAX_REVIEW + 2)); else echo "$MAX_REVIEW"; fi
 }
@@ -172,6 +222,7 @@ open_pr_count() { # -> echoes the open-PR count; never 0 on failure
 
 while true; do
   heartbeat
+  res_line   # MEASURE every resource; decide nothing from it
   reap_stale_workers
   L="$(load1)"
   echo "=== $(date) load=$L lanes=$(tmux ls 2>/dev/null | grep -c '^lane-') backlog=$(wc -l < "$O/candidates.txt" | tr -d ' ') ===" >> "$LOG"

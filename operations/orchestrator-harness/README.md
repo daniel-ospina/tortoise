@@ -193,7 +193,7 @@ secret into a world-readable plist, and launchd inherits no shell environment â€
 
 | Var | Value | Why |
 |---|---|---|
-| `MAX_LOAD` | `16` | dispatch stops above this 1-min load |
+| `MAX_LOAD` | `cores*10` (100 on a 10-core box; sanity ceiling) | dispatch stops above this 1-min load |
 | `MAX_LANES` | `4` | concurrent implementation lanes |
 | `MAX_REVIEW` | `4` | concurrent `merge-<PR>` reviewers |
 | `MERGE_PRIORITY_AT` | `10` | above this many open PRs, **merging takes priority**: dispatch of new lanes stops (unless none are running) and reviewer headroom rises to `MAX_REVIEW+2` |
