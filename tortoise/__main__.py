@@ -2960,10 +2960,15 @@ def _cmd_install_hooks(args) -> int:
     # that `else` branch): `tortoise install pi --uninstall` would otherwise
     # inspect — and could rewrite — `<dir>/.cline/hooks/UserPromptSubmit`.
     if uninstall and harness == "pi":
+        # Derived from the install contract, never retyped (#3502). The
+        # `cursor` and `openclaw` sibling branches below already interpolate
+        # their layout; a literal here names a file the installer no longer
+        # writes the moment the contract's `install_name` moves — the exact
+        # hardcoded-copy drift class #3502 exists to close.
         print("pi has no shell-hook read seam — nothing for --uninstall to "
               "remove. The pi capture extension (~/.pi/agent/extensions/"
-              "tortoise-capture.ts) is left in place; delete that file to "
-              "uninstall it.")
+              f"{_pi_capture_extension_name()}) is left in place; delete that "
+              "file to uninstall it.")
         return 0
     # `cursor` has no shell-hook read seam either: routing `--uninstall` to
     # `_install_read_hook` exited 1 with "no shell-hook read seam" while the
@@ -3074,15 +3079,53 @@ def _cmd_install_hooks(args) -> int:
     return _install_read_hook(args)
 
 
+#: Why a Pi restart must be a NEW terminal rather than a ``/reload``.
+#: ``/reload`` DOES re-scan extensions/config/skills/MCP registrations — the
+#: pi docs say auto-discovered extensions can be hot-reloaded with it — but it
+#: keeps the process environment the launching shell handed Pi, and the capture
+#: extension reads ``TORTOISE_API_KEY`` from exactly there, so a reload
+#: silently keeps the stale or empty key. Declared ONCE (#3502): the install
+#: report and ``tortoise setup``'s harness block both print it, and they used
+#: to disagree — `tortoise setup` said "Run /reload in Pi to activate", which
+#: the dashboard's Pi setup (``website/apps/dashboard/src/harnesses.js``)
+#: already contradicted. Same hardcoded-prose drift class as the phantom
+#: extension name this module used to advertise.
+_PI_RESTART_GUIDANCE = (
+    "Restart Pi from a NEW terminal — a /reload re-scans extensions but "
+    "keeps the environment (that is where TORTOISE_API_KEY lives)."
+)
+
 #: Pi's capture seam is its whole install; the MCP wiring is set up by the
 #: dashboard (or ``tortoise setup``), and the extension only loads in a fresh
 #: Pi process. Printed after a real (non-dry-run) run, whether or not that run
 #: wrote the file.
 _PI_MCP_GUIDANCE = (
     "The Tortoise MCP config comes from the dashboard's Pi setup (or "
-    "`tortoise setup`); restart Pi from a NEW terminal — a /reload keeps the "
-    "old environment."
+    "`tortoise setup`). " + _PI_RESTART_GUIDANCE
 )
+
+
+def _pi_capture_extension_name() -> str:
+    """The Pi capture extension's REAL install name — never a literal (#3502).
+
+    Derived from the install contract's single declaration
+    (``hook_install.ARTIFACT_CONTRACTS["pi"].install_name``, re-exported as
+    ``capture_install.PI_EXTENSION_NAME``), so every sentence the installer
+    prints about the extension names the file the installer actually writes.
+
+    This module used to hardcode ``tortoise-context`` — an extension that has
+    never existed anywhere in this repo or in agent-infra — and promise a
+    per-turn context injection the SHIPPED extension does not do. Pi's
+    extension API does have that seam (``before_agent_start`` can inject a
+    message, and our own extensions use it); what is missing is Tortoise's
+    wiring of it (#2119, still open). Saying otherwise is a false claim about
+    the harness, not honest copy. Nothing failed when the prose drifted from
+    the artifact because nothing coupled the two; deriving it here is that
+    coupling.
+    """
+    from tortoise.capture_install import PI_EXTENSION_NAME
+
+    return PI_EXTENSION_NAME
 
 
 def _install_capture_seam(args, install_capture) -> int:
@@ -3326,8 +3369,8 @@ def _install_read_hook_impl(args) -> int:
               "(UserPromptSubmit → volunteer-turn.sh devin; Claude-hooks "
               "output contract)")
         print("  tortoise install pi      → ~/.pi/agent/extensions/"
-              "tortoise-capture.ts (the capture extension; Pi has no "
-              "shell-hook read seam)")
+              f"{_pi_capture_extension_name()} (the capture extension; Pi has "
+              "no shell-hook read seam)")
         print("  tortoise install cursor  → ~/.cursor/hooks.json "
               "(the sessionEnd capture hook + the sessionStart cold-context "
               "injection hook; Cursor has no per-turn shell-hook read seam — "
@@ -7528,23 +7571,38 @@ def _cmd_onboard(args) -> int:
         from tortoise._embedded import EMBEDDED_FALLBACK_NOTICE
         print()
         print(EMBEDDED_FALLBACK_NOTICE)
-    print()
-    print("Tortoise is ready. Agents can now:")
-    print("  • Query the graph via tortoise_suggest_entry_points()")
-    print("  • File decisions with tortoise_create_point()")
-    print("  • Auto-capture via tortoise-context extension")
-    print()
-    print("Next: tortoise serve    — start MCP server for agents")
-    print("      tortoise setup    — configure per-role memory")
-    print()
+    for line in _onboard_ready_lines():
+        print(line)
+    return 0
+
+
+def _onboard_ready_lines() -> list[str]:
+    """The ``tortoise onboard`` completion banner, as the exact lines printed.
+
+    A function rather than inline ``print`` calls so the #3502 extension-name
+    drift guard reads the text the user actually sees without re-running the
+    wizard — the banner is a surface that advertises an extension, so it has
+    to be gradeable by the same test as the harness block.
+    """
     # #544/#1998 (M8) / #4365: reference the ONE live onboarding document.
     # It is INSTRUCTIONS the agent reads — the skill installer ships the three
     # reusable capabilities only, never onboarding. Hand its markdown to your
     # agent after connecting it to the local MCP server (the archived prompt is
     # retired — never two live scripts).
-    print("Onboarding instructions — give this document to your agent to complete setup:")
-    print("  https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md")
-    return 0
+    return [
+        "",
+        "Tortoise is ready. Agents can now:",
+        "  • Query the graph via tortoise_suggest_entry_points()",
+        "  • File decisions with tortoise_create_point()",
+        f"  • Auto-capture via {_pi_capture_extension_name()} extension",
+        "",
+        "Next: tortoise serve    — start MCP server for agents",
+        "      tortoise setup    — configure per-role memory",
+        "",
+        "Onboarding instructions — give this document to your agent to "
+        "complete setup:",
+        "  https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md",
+    ]
 
 
 def _cmd_verify(args):
@@ -8273,9 +8331,28 @@ def _print_harness_instructions(harness: str) -> None:
     if harness == "pi" or harness == "multiple":
         print()
         print("Pi:")
-        print("  ✅ tortoise-context extension auto-injects context when you mention issues.")
-        print("  Run /reload in Pi to activate.")
-        print("  Or call tortoise_help() anytime.")
+        # #3502: the name is DERIVED from the install contract
+        # (``_pi_capture_extension_name``), never written as prose. This block
+        # used to advertise a `tortoise-context` extension that has never
+        # existed and promise a per-turn auto-injection the SHIPPED extension
+        # does not do — the install path's one product promise, made falsely to
+        # the harness we ourselves run on. It also told the user to `/reload` to
+        # activate it, contradicting both the install report and the dashboard's
+        # Pi setup.
+        #
+        # The replacement says what the extension DOES, and scopes the gap to
+        # Tortoise's wiring, NOT to Pi: Pi's extension API has a per-turn
+        # injection seam (``before_agent_start`` injects a message, and our own
+        # `skill-enforcer`/`loop-enforcer`/`cmux-session` extensions use it), so
+        # "Pi cannot inject" would be a false impossibility claim of the same
+        # class as the promise it replaces. What is missing is Tortoise's use of
+        # that seam (#2119, still open).
+        _pi_ext = _pi_capture_extension_name()
+        print(f"  ✅ {_pi_ext} extension captures your sessions into Tortoise.")
+        print(f"  {_PI_RESTART_GUIDANCE}")
+        print("  It files your sessions; it does not inject context per turn yet")
+        print("  (#2119). Call tortoise_help() or the Tortoise MCP tools when you")
+        print("  want graph context.")
         print("  Add tortoise MCP to your .mcp.json:")
         print("    " + _json.dumps(_harness_stdio_config("pi"), indent=4).replace("\n", "\n    "))
     if harness == "claude" or harness == "multiple":

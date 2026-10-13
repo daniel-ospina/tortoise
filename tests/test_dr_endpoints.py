@@ -8,6 +8,7 @@ import json
 import os
 import re
 import tempfile
+from collections import Counter
 from typing import ClassVar
 from uuid import uuid4
 
@@ -261,6 +262,57 @@ class TestDrStatus:
         body = r.json()
         assert body["enabled"] is True
         assert "watcher" in body and "driver" in body
+
+    def test_status_publishes_the_telemetry_drop_block(self, client, mem_storage,
+                                                       monkeypatch):
+        """#4095: the NORMAL return — the body the hourly driver and an operator
+        actually read — must carry the allowlist-drop block.
+
+        #3821 counted allowlist-dropped telemetry keys but the counter had no
+        reader outside the test suite and is lost on every deploy, so the
+        "always counts" guarantee was unobservable in production. This asserts
+        the VALUE (a named site, a total), not just the key's presence: the
+        endpoint builds the block unconditionally, so `"telemetry" in body`
+        would also pass on a permanently-empty report.
+        """
+        monkeypatch.setattr(ha_mod, "_TELEMETRY_DROP_COUNTS", Counter())
+        monkeypatch.setattr(ha_mod, "_TELEMETRY_DROP_REPORTED", {})
+        ha_mod._report_unregistered("status_site", "subject", {"k"})
+
+        r = client.get("/v1/internal/backups/status", headers=INTERNAL_HEADERS)
+
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "watcher" in body, "this test must exercise the NORMAL return"
+        assert body["telemetry"]["sites"]["status_site|subject"] == 1
+        assert body["telemetry"]["total"] == 1
+        assert body["telemetry"]["markers"] == 1
+
+    def test_status_publishes_the_telemetry_drop_block_on_the_degraded_path(
+            self, client, monkeypatch):
+        """The storage-error EARLY return must carry it too — the drop counter
+        is in-process state, and an unusable object store must not hide it.
+
+        The PATH is asserted, not just the key: without `_backup_storage()` the
+        handler early-returns a body with no ``watcher``, so asserting only
+        presence would silently stop being evidence for this clause (the #3944
+        analytics block is held to the same two-path rule).
+        """
+        def _no_storage():
+            raise RuntimeError("no R2 credentials")
+
+        monkeypatch.setattr(ha_mod, "_backup_storage", _no_storage)
+        monkeypatch.setattr(ha_mod, "_TELEMETRY_DROP_COUNTS", Counter())
+        monkeypatch.setattr(ha_mod, "_TELEMETRY_DROP_REPORTED", {})
+        ha_mod._report_unregistered("degraded_site", "subject", {"k"})
+
+        r = client.get("/v1/internal/backups/status", headers=INTERNAL_HEADERS)
+
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["storage_error"], "this test must exercise the degraded return"
+        assert "watcher" not in body
+        assert body["telemetry"]["sites"]["degraded_site|subject"] == 1
 
     def test_status_surfaces_last_sweep_rollup(self, client, dr_env, mem_storage):
         """#2372: /status surfaces the sweep's per-graph roll-up (totals,
