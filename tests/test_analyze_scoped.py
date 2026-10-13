@@ -30,7 +30,12 @@ def _seed_small_graph(sdk: TortoiseSDK) -> tuple[str, str, str]:
     )
     proj.g.query(
         "MATCH (a:Point {id:$a}), (op:Point {id:$op}), (b:Point {id:$b}) "
-        "CREATE (a)<-[:NAND]-(op)-[:NAND]->(b)",
+        # #6871: a REAL operator edge carries its role index — `create_operator`
+        # writes idx 0 for the source and idx >= 1 for the targets. Leaving the
+        # index off made this fixture match only because the reader had no role
+        # guard, so it silently stopped exercising `disagreement` once the guard
+        # landed.
+        "CREATE (a)<-[:NAND {idx:0}]-(op)-[:NAND {idx:1}]->(b)",
         params={"a": a, "op": op_id, "b": b},
     )
 

@@ -293,3 +293,54 @@ def test_state_counter_evidence_does_not_surface_the_attacker(sdk):
         "the attacker was surfaced as contested by the NAND it wrote"
     )
     assert len(ce.get(vic, [])) == 1, "the attacked claim must stay contested"
+
+
+def test_disagreement_does_not_report_co_targets_as_conflicting(sdk):
+    """#6871 on `tortoise_analyze`: a conflict is source-vs-target.
+
+    `why._CONFLICTS_CYPHER` and `ranking.resolve_contested_relevance` both scope
+    a conflict to the operator's idx=0 endpoint against an idx>=1 one, and
+    `ep.py` pairs `input_ids[0]` with each `input_ids[j >= 1]` — co-targets are
+    never pairs. Identity-only matching also bound two CO-TARGETS of one NAND
+    operator, so a fan-out minted conflicts between claims that merely share an
+    attacker.
+    """
+    from tortoise.analyze import TEMPLATES
+
+    atk = sdk.create_point("hypothesis", "ATKMARK", status="live")["id"]
+    v1 = sdk.create_point("hypothesis", "VICTIM1MARK", status="live")["id"]
+    v2 = sdk.create_point("hypothesis", "VICTIM2MARK", status="live")["id"]
+    sdk.create_operator("NAND", atk, [v1, v2])
+    proj = sdk._get_proj()
+
+    pairs = {
+        frozenset((r[0], r[3]))
+        for r in proj.g.query(TEMPLATES["disagreement"]["cypher"],
+                              params={"limit": 20}).result_set
+    }
+    assert frozenset((atk, v1)) in pairs, f"the real conflict pair is missing: {pairs}"
+    assert frozenset((atk, v2)) in pairs, f"the real conflict pair is missing: {pairs}"
+    assert frozenset((v1, v2)) not in pairs, (
+        "two CO-TARGETS of the same NAND operator were reported as conflicting — "
+        "sharing an attacker is not a contradiction"
+    )
+
+
+def test_state_counter_evidence_still_sees_a_direct_nand(sdk):
+    """The P1-shape protection on the state surface.
+
+    `_state_counter_evidence`'s clause scopes the idx requirement to
+    OPERATOR-mediated edges, so an operator-less direct NAND — which carries no
+    `idx` — must still surface its attacker.
+    """
+    datk = sdk.create_point("hypothesis", "DIRECT-ATK", status="live")["id"]
+    dvic = sdk.create_point("hypothesis", "DIRECT-VIC", status="live")["id"]
+    sdk.create_direct_edge("NAND", datk, dvic)
+
+    ce = sdk._state_counter_evidence([datk, dvic])
+    assert [e["id"] for e in ce.get(dvic, [])] == [datk], (
+        "a direct NAND edge is counter-evidence and must still surface"
+    )
+    assert ce.get(datk, []) == [], (
+        "the direct attacker is not itself contested by the edge it wrote"
+    )
