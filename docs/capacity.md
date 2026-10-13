@@ -177,7 +177,7 @@ committed, so quoting a curve here would be quoting something nobody ran.
 | Bare `:Point` (label and `id` only) | **102–174 B**, and it moves with `n` — fixed per-instance overhead dominates at small graphs | `docs/research/2026-09-25-4503-edge-accounting/measurement.md` |
 | Dressed `IMPL` edge (direction, confidence, weight, label, batch_id) | **≈ 210 B** marginal | `docs/research/2026-09-25-4503-edge-accounting/measurement.md` |
 | EP-bearing edge (dressed plus the four message slots) | **≈ 259 B** — 0.73× a dressed Point | `docs/research/2026-09-25-4503-edge-accounting/measurement.md` |
-| Per-Point graph-wide (embedded comparator) | **≈ 1.50 KB stored / ≈ 2.05 KB resident** | `docs/research/2026-09-25-4503-edge-accounting/measurement.md` |
+| Per-embedding vector (`vecf32`, 384-dim) | **≈ 1.50 KB stored** (the fixed-width payload) + **≈ 0.55 KB HNSW share (derived)** = **≈ 2.05 KB resident** | `docs/architecture/STORAGE-ARCHITECTURE.md` |
 
 The node figures are the output of `tools/edge_census.py`'s isolated per-element
 probe at n=5,000, and an independently run probe measured a props-only Point at
@@ -197,7 +197,8 @@ curve, and one of those guards has a **measured failure threshold**.
 
 | Dimension | Value | Source |
 |---|---|---|
-| EP affected-claim frontier guard (operators per hop) | **200** (`_EP_GUARD_FRONTIER_CAP`) | `tortoise/ep.py` |
+| EP affected-claim frontier guard (new **claims** per hop) | **200** (`_EP_GUARD_FRONTIER_CAP`) | `tortoise/ep.py` |
+| Operator-set cap on an explicit-k BFS (the ranking's operator input) | **200 operators**, truncated deterministically by id with a stderr warning | `tortoise/analyze.py` |
 | EP degenerate-run guard | fires when the pass has collected **≥ 50%** of the graph's claims, on graphs of **≥ 500** claims | `tortoise/ep.py` |
 | Dreaming per-pass window budget (stale-first) | **200** operators (`TORTOISE_DREAM_WINDOW_BUDGET`) | `tortoise/dream.py` |
 | Dreaming full-mode operator cap (`dream_all`) | **200,000** (`max_total_operators`) | `tortoise/dream.py` |
@@ -208,7 +209,10 @@ curve, and one of those guards has a **measured failure threshold**.
 On a **3,353-Point** graph with **2,073 dirty** claims, a two-hop EP
 affected-claim BFS **times out after 13.4 s** once the operator frontier reaches
 around 200, and a pass that reported `converged: true` **still left `ep_dirty`
-set**. Twelve of fourteen per-anchor passes raised the timeout. The full
+set**. Twelve of fourteen per-anchor passes raised the timeout. That ~200 is the
+hop query's own growth (the two-hop pattern traverses operators), and
+`tortoise/analyze.py` separately caps the collected operator set at 200 — it is
+**not** `_EP_GUARD_FRONTIER_CAP`, which bounds **new claims per hop**. The full
 measurement, the traces, and the three distinct failure modes are in **#6211**,
 which is open.
 
@@ -247,7 +251,7 @@ measurement. Naming them is the point of the section: the honest answer is
 | Memory footprint per deployment tier | Per-element sizes exist; a per-tier curve does not | — |
 | Hosted multi-tenant capacity (graphs per instance, isolation cost) | Not measured | — |
 | Graph-size ceiling on self-hosted and embedded | No cap is applied; the bound is host sizing | — |
-| Vector-index RAM per embedding on the FalkorDB path | Not measured | — |
+| Exact HNSW-only RAM per embedding on the FalkorDB path (index-level attribution) | §6's ≈ 2.05 KB resident is a **derived** blend (payload + index share); the HNSW-only split is not measured | `docs/research/2026-09-24-4333-node-volume-storage-cost/research-brief.md` |
 | Network latency between client and daemon | Every number above is measured at or near the store | — |
 
 ## 9. Why these numbers stay true

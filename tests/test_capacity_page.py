@@ -58,10 +58,71 @@ _PATH_TOKEN = re.compile(r"`([A-Za-z0-9_][\w./-]*\.(?:md|py|json|yml|html|ts|js)
 #: explicit 'unmeasured' label**" — so it is an allowed outcome, not an escape:
 #: the row has to say the word.
 _UNMEASURED_CELL = re.compile(r"unmeasured", re.IGNORECASE)
-#: A published write-concurrency figure, in either doc phrasing.
-_PUBLISHED_WRITERS = re.compile(r"integration-tested to (\d+) (?:concurrent )?writers")
-#: The page/website phrasing for the verified writer-process coverage.
-_WRITER_PROCESSES = re.compile(r"(\d+) (?:concurrent )?writer processes")
+#: Every phrasing the public surfaces use to publish the verified write-
+#: concurrency figure. The #8492 drift entered through a phrasing the guard did
+#: not know ("concurrent writers verified at 2 processes"), so this is the union
+#: of the wordings in the tree rather than one literal:
+#:   "integration-tested to 5 concurrent writers"  (docs)
+#:   "integration-tested to 5 writers"             (`.env.example`)
+#:   "concurrent writers verified at 5 processes"  (quickstart env table)
+#:   "verified to 5 concurrent writer processes"   (website)
+#:   "5 writer processes on one graph"             (capacity §2)
+#: One scan therefore returns **every** published statement of the figure,
+#: whichever wording a surface chose.
+_PUBLISHED_WRITERS = re.compile(
+    r"integration-tested to (\d+) (?:concurrent )?writers"
+    r"|verified (?:at|to) (\d+) (?:concurrent )?(?:writer )?process(?:es)?"
+    r"|(\d+) (?:concurrent )?writer processes"
+)
+
+
+#: The fewest sourced rows each top-level section of `docs/capacity.md` must
+#: keep. Keyed on the heading so each section is checked on its own: the global
+#: floor this replaced could not see §6's five rows being deleted while 24 rows
+#: elsewhere kept the total above it (#8492 ISSUE 3). Raise a number when you add
+#: rows; never lower one without deleting the section.
+_SECTION_MIN_ROWS = {
+    "## 1. Pick the deployment mode first": 0,  # mode table has no Source column
+    "## 2. Write concurrency": 3,
+    "## 3. Request rate limits": 5,
+    "## 4. Graph size (hosted node cap)": 5,
+    "## 5. Retrieval latency": 6,  # §5.1 targets (5) + §5.2 measured path (1)
+    "## 6. Storage footprint per element": 5,
+    "## 7. Belief propagation and dreaming": 6,
+}
+
+
+def _published_writer_counts(text: str) -> list[int]:
+    """Every write-concurrency number published in ``text`` (any phrasing)."""
+    return [
+        int(value)
+        for match in _PUBLISHED_WRITERS.finditer(text)
+        for value in match.groups()
+        if value
+    ]
+
+
+#: Markdown emphasis/code formatting is not meaning: strip it so bolding a
+#: number cannot hide it from the writer scans.
+_MARKDOWN_EMPHASIS = re.compile(r"[*`]")
+#: The one historical citation the page deliberately carries: §9 quotes the
+#: predecessor claim's figure. Exempted **by name**, not by "it sits inside
+#: quotes" — a stale figure in a quoted span anywhere else is still published.
+_HISTORICAL_CITATION = re.compile(r'"2 concurrent writers"', re.IGNORECASE)
+#: Any digit qualifying a writer term, in either order and across light markdown
+#: punctuation ("5 writers", "0 — concurrent writers", "writers: 2"). The union
+#: above knows only the phrasings in the tree today; this catch-all makes a NEW
+#: wording ("we tested 2 writers concurrently") a red test instead of an escape.
+_WRITER_NUMBER = re.compile(
+    r"(\d+)[^\w\n]{0,6}(?:concurrent\s+)?writers?"
+    r"|writers?[^\w\n]{0,20}(\d+)",
+    re.IGNORECASE,
+)
+
+
+def _strip_markdown(text: str) -> str:
+    """Drop emphasis/backtick formatting so a bolded number is still scanned."""
+    return _MARKDOWN_EMPHASIS.sub("", text)
 
 
 def _read(path: Path) -> str:
@@ -100,6 +161,19 @@ def _source_tables(text: str) -> list[list[list[str]]]:
             i += 1
         tables.append((header, data))
     return [d for h, d in tables if h and h[-1] == "Source"]
+
+
+def _sections(text: str) -> dict[str, str]:
+    """Top-level (``## ``) section heading → that section's body text."""
+    sections: dict[str, str] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            current = line.strip()
+            sections[current] = ""
+        elif current is not None:
+            sections[current] += line + "\n"
+    return sections
 
 
 def _integration_writer_coverage() -> int:
@@ -198,27 +272,130 @@ def test_every_measured_row_names_a_source_that_exists():
     )
 
 
-def test_the_page_has_measured_content_in_every_section_it_claims():
-    """A page that keeps its headings and empties its tables must fail."""
-    text = _read(CAPACITY)
-    rows = [row for table in _source_tables(text) for row in table]
-    # §1 modes, §2 concurrency, §3 rate limits, §4 caps, §5.1 targets,
-    # §5.2 measured read path, §6 storage, §7 EP.
-    assert len(rows) >= 20, (
-        f"docs/capacity.md carries only {len(rows)} sourced rows; the page "
-        "publishes measurements across eight sections"
+def test_the_vector_cost_row_cites_an_artifact_that_owns_the_figure():
+    """#8492 ISSUE 2: a Source cell may not point at a file denying the number.
+
+    The `1.50 KB stored / 2.05 KB resident` row cited
+    `docs/research/2026-09-25-4503-edge-accounting/measurement.md`, whose own
+    results table says the embedded-Point comparator is "**not measured in this
+    probe** — `#4333` §3.4 owns it". A citation that resolves but disowns the
+    figure is exactly what a path-existence check cannot see.
+    """
+    rows = [row for table in _source_tables(_read(CAPACITY)) for row in table]
+    row = next((r for r in rows if "1.50 KB" in " ".join(r)), None)
+    assert row is not None, (
+        "docs/capacity.md no longer publishes the per-vector cost row "
+        "(1.50 KB stored / 2.05 KB resident)"
     )
+    source = row[-1]
+    assert "2026-09-25-4503-edge-accounting" not in source, (
+        "the vector-cost row is attributed to the 4503 edge-accounting probe, "
+        "which states the embedded-Point comparator is NOT measured there and "
+        "assigns the figure to #4333 §3.4"
+    )
+    assert (
+        "STORAGE-ARCHITECTURE.md" in source
+        or "4333-node-volume-storage-cost" in source
+    ), (
+        "the vector-cost row must name the artifact that owns the figure "
+        "(docs/architecture/STORAGE-ARCHITECTURE.md or the #4333 brief §3.4); "
+        f"it names: {source}"
+    )
+
+
+def test_the_ep_frontier_guard_row_names_claims_not_operators():
+    """#8492 (third review): `_EP_GUARD_FRONTIER_CAP` bounds new **claims** per hop.
+
+    `tortoise/ep.py:36` states the guard as "one hop producing > cap new
+    claims", and it fires on `len(new_frontier) > _EP_GUARD_FRONTIER_CAP` where
+    `new_frontier` holds claim ids (`ep.py:1126`). The row's Dimension text said
+    "operators per hop", contradicting both its own subject ("affected-claim
+    frontier guard") and its cited source, and conflating the constant with the
+    separate 200-operator cap `tortoise/analyze.py::_bfs_select_operators`
+    applies to the ranking's operator input.
+    """
+    rows = [row for table in _source_tables(_read(CAPACITY)) for row in table]
+    row = next((r for r in rows if "_EP_GUARD_FRONTIER_CAP" in " ".join(r)), None)
+    assert row is not None, (
+        "docs/capacity.md no longer publishes the EP frontier-guard row "
+        "(`_EP_GUARD_FRONTIER_CAP`)"
+    )
+    dimension = row[0]
+    assert "claim" in dimension.lower(), (
+        "the `_EP_GUARD_FRONTIER_CAP` row must name the thing the constant "
+        f"bounds (new claims per hop); it reads: {dimension!r}"
+    )
+    assert not re.search(r"\boperators?\b", dimension, re.IGNORECASE), (
+        "the `_EP_GUARD_FRONTIER_CAP` row describes the constant as bounding "
+        "operators; ep.py's guard bounds new CLAIMS per hop. The operator cap is "
+        "a different guard (`tortoise/analyze.py` op_cap) and belongs in its own "
+        f"row; the dimension reads: {dimension!r}"
+    )
+
+
+def test_the_operator_cap_has_its_own_row_sourced_to_analyze():
+    """The operator 200 is a different bound, and must not hide behind ep.py.
+
+    `tortoise/analyze.py::_bfs_select_operators(op_cap=200)` truncates the
+    collected operator set for an explicit-k BFS. #8492 found the page naming
+    operators as if `ep.py::_EP_GUARD_FRONTIER_CAP` owned that number; publishing
+    the operator cap against `analyze.py` keeps the two 200s distinguishable.
+    """
+    rows = [row for table in _source_tables(_read(CAPACITY)) for row in table]
+    owned = [
+        row
+        for row in rows
+        if "analyze.py" in row[-1]
+        and re.search(r"\boperators?\b", row[0], re.IGNORECASE)
+    ]
+    assert owned, (
+        "docs/capacity.md does not publish the explicit-k operator cap sourced "
+        "to `tortoise/analyze.py`; the operator 200 the §7 failure threshold "
+        "discusses has no row of its own, so it reads as ep.py's claim cap"
+    )
+
+
+def test_the_page_has_measured_content_in_every_section_it_claims():
+    """A page that keeps its headings and empties its tables must fail.
+
+    Per-section, not global: deleting §6's five measured rows (heading and prose
+    kept) left the global total at 24 and all ten tests green (#8492 ISSUE 3).
+    """
+    sections = _sections(_read(CAPACITY))
+    for heading, minimum in _SECTION_MIN_ROWS.items():
+        assert heading in sections, (
+            f"docs/capacity.md lost the section '{heading}', which published "
+            f"{minimum} sourced rows"
+        )
+        count = sum(len(table) for table in _source_tables(sections[heading]))
+        assert count >= minimum, (
+            f"docs/capacity.md section '{heading}' carries {count} sourced rows; "
+            f"it published {minimum}. A section that keeps its heading and "
+            "empties its table must fail."
+        )
+    # A Source-headed table with no data rows is an emptied table anywhere.
+    for heading, body in sections.items():
+        for table in _source_tables(body):
+            assert table, (
+                f"docs/capacity.md section '{heading}' has a Source-headed "
+                "table with no data rows"
+            )
 
 
 # ── The verified figure is derived, not restated ─────────────────────────────
 
 
 def test_published_write_concurrency_matches_the_integration_test():
-    """The check that would have caught "2" while the test covered 5."""
+    """The check that would have caught "2" while the test covered 5.
+
+    Applied to **every** surface that publishes the figure, in **any** of the
+    phrasings the docs use. `docs/quickstart-selfhosted.md`'s env table said
+    "concurrent writers verified at 2 processes" while the single-literal pattern
+    this replaces could not see it (#8492 ISSUE 1).
+    """
     n = _integration_writer_coverage()
-    for path in (CAPACITY, QUICKSTART, ENV_EXAMPLE):
-        text = _read(path)
-        found = [int(v) for v in _PUBLISHED_WRITERS.findall(text)]
+    for path in (CAPACITY, QUICKSTART, ENV_EXAMPLE, SELF_HOSTED_HTML):
+        found = _published_writer_counts(_strip_markdown(_read(path)))
         assert found, (
             f"{path.relative_to(ROOT)} no longer publishes a verified "
             f"write-concurrency figure; {LIVE_WRITER_TEST} covers {n}"
@@ -230,18 +407,54 @@ def test_published_write_concurrency_matches_the_integration_test():
         )
 
 
-def test_capacity_page_and_website_publish_the_verified_writer_count():
+def test_the_writer_count_pattern_recognizes_every_phrasing_the_docs_use():
+    """Pin the phrasings, so a new wording is a red test, not a silent escape.
+
+    The #8492 drift re-entered through `verified at N processes`, which the
+    single-literal pattern did not match. Each phrasing the public surfaces use
+    must resolve to the same number, or the binding above is asleep.
+    """
+    for phrasing in (
+        "integration-tested to 5 concurrent writers",
+        "integration-tested to 5 writers",
+        "concurrent writers verified at 5 processes",
+        "verified to 5 concurrent writer processes",
+        "5 writer processes on one graph",
+    ):
+        assert _published_writer_counts(phrasing) == [5], phrasing
+
+
+def test_no_writer_number_escapes_the_binding_on_a_public_surface():
+    """A phrasing the union does not know must still not publish a stale number.
+
+    The union covers the phrasings in the tree today; this catch-all makes a NEW
+    wording ("we tested 2 writers concurrently") red instead of escaping the
+    binding (#8492 follow-up). Markdown emphasis is stripped first, so bolding a
+    number cannot hide it, and §9's historical citation is exempted **by name**
+    (not by "it is in quotes"), so a stale figure inside a quoted span elsewhere
+    is still caught. The embedded lane is 0 writers by contract, so a 0 is
+    accepted only where the line says `embedded`; every other writer count must
+    be the derived coverage.
+    """
     n = _integration_writer_coverage()
-    for path in (CAPACITY, SELF_HOSTED_HTML):
-        found = [int(v) for v in _WRITER_PROCESSES.findall(_read(path))]
-        assert found, (
-            f"{path.relative_to(ROOT)} does not state the verified writer-process "
-            f"coverage ({n}) in runnable terms"
-        )
-        assert all(v == n for v in found), (
-            f"{path.relative_to(ROOT)} states {found} writer processes but "
-            f"{LIVE_WRITER_TEST} runs {n}"
-        )
+    for path in (CAPACITY, QUICKSTART, ENV_EXAMPLE, SELF_HOSTED_HTML):
+        text = _HISTORICAL_CITATION.sub("", _strip_markdown(_read(path)))
+        for line in text.splitlines():
+            embedded_line = bool(re.search(r"\bembedded\b", line, re.IGNORECASE))
+            for match in _WRITER_NUMBER.finditer(line):
+                value = int(match.group(1) or match.group(2))
+                if value == 0:
+                    assert embedded_line, (
+                        f"{path.relative_to(ROOT)} publishes {match.group(0)!r}: "
+                        "0 writers is the embedded lane's contract and must be "
+                        "stated on an embedded line"
+                    )
+                else:
+                    assert value == n, (
+                        f"{path.relative_to(ROOT)} publishes {match.group(0)!r}, "
+                        "a write-concurrency statement the binding does not "
+                        f"recognise; every verified writer count must be {n}"
+                    )
 
 
 # ── "Unmeasured" is a published answer, and must stay published ──────────────

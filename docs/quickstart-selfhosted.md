@@ -146,7 +146,7 @@ tortoise index directory ~/notes --db docker://:falkordb@localhost:6379/tortoise
 
 | Var | Default | Precedence / notes |
 |-----|---------|--------------------|
-| `TORTOISE_DB_URI` | (unset → embedded) | Docker URI for the durable multi-writer graph; concurrent writers verified at 2 processes |
+| `TORTOISE_DB_URI` | (unset → embedded) | Docker URI for the durable multi-writer graph; concurrent writers verified at 5 processes |
 | `TORTOISE_INGEST_BASE_DIR` | (unset → no sandbox) | SECURITY sandbox: corpus dirs + progress files + resolved symlink targets must stay under it. Not the corpus selector. A typo here = pre-walk error |
 | `TORTOISE_SESSION_CORPUS` | `~/.tortoise/docs/conversations` | The session-end hook's sweep-corpus selector (passed positionally). ⚠️ The base-dir-vs-corpus confusion: setting this to the real corpus while the DB points at a test graph sweeps the whole corpus into the wrong DB |
 | `TORTOISE_MAX_FILE_MB` | `50` | Two-layer size guard (float MB); at/over the limit → rejected before any read |
