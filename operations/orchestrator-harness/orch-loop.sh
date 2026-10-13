@@ -437,6 +437,24 @@ PY
   # Name the binding gate: an earlier version logged "skipped (load=…)" while load was never
   # consulted, so a lanes-bound or swap-bound stall looked like a load stall.
   GATE_WHY="$(mp_reason "${OPEN_N:-0}" "$LANES")"
+  # ⛔ A P0-BLOCKER OUTRANKS THE MERGE-PRIORITY GATE (BP0, #8468).
+  # The gate's job is "drain before opening more" — but it cannot tell WHAT is at the head of the
+  # backlog, and with `MERGE_PRIORITY_AT=10` and the loop averaging 18-19 open PRs it is closed for
+  # most of the day. That was survivable while the backlog was ordered by issue number (the PRs
+  # being drained and the work being opened were BOTH non-P0); now that the backlog is in priority
+  # order, refusing to open a lane while the head is a P0-blocker is the one case where the gate
+  # actively blocks the highest-severity work. Measured 2026-10-13: 19 open PRs, 0 lanes started,
+  # 33 open P0-blockers, 0 P0/P1 closed in 12h.
+  # Scope: ONLY the merge-priority reason is overridden. Load, lanes, swap and memory still bind,
+  # so this can open at most the P0 lane the other gates already allow. Set
+  # P0_BYPASS_MERGE_PRIORITY=0 to restore the unconditional gate.
+  if [ -n "$GATE_WHY" ] && [ "${P0_BYPASS_MERGE_PRIORITY:-1}" != "0" ]; then
+    _head="$(head -1 "$O/candidates.txt" 2>/dev/null)"
+    if [ -n "${_head:-}" ] && [ "$(awk -F'\t' -v n="$_head" '$1==n{print $2; exit}' "$O/.prio" 2>/dev/null)" = "0" ]; then
+      echo "[dispatch] merge-priority OVERRIDDEN for a P0-blocker at the backlog head (#$_head, ${OPEN_N} open PRs)" >> "$LOG"
+      GATE_WHY=""
+    fi
+  fi
   if [ -n "$GATE_WHY" ]; then :
   elif [ "$L" -ge "$MAX_LOAD" ]; then GATE_WHY="load=$L>=max_load=$MAX_LOAD"
   elif [ "$LANES" -ge "$MAX_LANES" ]; then GATE_WHY="lanes=$LANES>=max_lanes=$MAX_LANES"
