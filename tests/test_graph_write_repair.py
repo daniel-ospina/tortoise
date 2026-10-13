@@ -121,7 +121,8 @@ class _FakeDb:
     def __init__(self, graphs: dict, *, copy_drops_edges: bool = False,
                  copy_bumps_source: int = 0, copy_drops_source: bool = False,
                  copy_empties_source: bool = False,
-                 copy_mixed: tuple[int, int] | None = None) -> None:
+                 copy_mixed: tuple[int, int] | None = None,
+                 copy_clone_ahead: int = 0) -> None:
         self.graphs = graphs
         self.commands: list[tuple] = []
         self._copy_drops_edges = copy_drops_edges
@@ -140,6 +141,11 @@ class _FakeDb:
         #: MIXED case, nodes UP while edges DOWN, which is a LOSS and must retain the clone
         #: even though a node-count-only test would read it as a gain.
         self._copy_mixed = copy_mixed
+        #: Build the CLONE ahead of the source by this many nodes, with the source left at its
+        #: entry baseline -- the case where the clone snapshotted a concurrent write that the
+        #: source has since lost, so the clone holds the only copy of that delta while the
+        #: source still reads at `before_*`.
+        self._copy_clone_ahead = copy_clone_ahead
         # `repair()` reaches GRAPH.COPY/RENAME through `db.connection`.
         self.connection = self
 
@@ -157,7 +163,7 @@ class _FakeDb:
             # A freshly copied graph is WRITABLE even when the source is broken (the
             # defect lives in the RDB reload path, not in GRAPH.COPY).
             self.graphs[dst] = _GraphState(
-                nodes=st.nodes,
+                nodes=st.nodes + self._copy_clone_ahead,
                 edges=0 if self._copy_drops_edges else st.edges,
                 writable=True,
             )
@@ -589,8 +595,10 @@ def test_drop_clone_never_deletes_the_last_copy_when_the_source_is_gone(monkeypa
     Mutation: remove the presence guard inside `drop_clone` -> both cases below leave
     `graphs: []` and go RED.
     """
-    # (i) the copy is incomplete (edges dropped) AND the source vanished
-    db = _FakeDb({"tortoise": _defect_state(nodes=BIG)}, copy_drops_edges=True,
+    # (i) the copy is incomplete (edges dropped) AND the source vanished. The source MUST
+    # carry edges, or dropping them leaves `clone_fp == before` and the incomplete-copy
+    # branch is never taken -- the case then exercises no `drop_clone` call at all.
+    db = _FakeDb({"tortoise": _defect_state(nodes=BIG, edges=10)}, copy_drops_edges=True,
                  copy_drops_source=True)
     ok, msg = gwr.repair(db, "tortoise")
     assert ok is False
@@ -598,8 +606,14 @@ def test_drop_clone_never_deletes_the_last_copy_when_the_source_is_gone(monkeypa
     retained = [k for k in db.graphs if k.startswith("__gwr_")]
     assert retained, f"the LAST COPY was deleted; remaining graphs: {sorted(db.graphs)}"
     assert db.graphs[retained[0]].nodes == BIG
-
-    # (h) the clone passes every check but its #3154 index audit, and the source vanished
+    # ⛔ PIN THE PRESENCE GUARD ITSELF. Without this assertion the guard is
+    # green-without-fix: removing it leaves the suite passing, because the loss check
+    # below then reads the absent key, AUTO-CREATES it empty, and retains on (0, 0) --
+    # the same verdict reached by a different path. The guard's real contribution is that
+    # the absent source is NOT re-materialised, so assert that (#8451 review cycle 4, P2).
+    assert "tortoise" not in db.graphs, (
+        "the absent source was re-materialised by a read -- the presence guard did not fire"
+    )
     def _boom(*_a, **_k):
         raise RuntimeError("boolean index survived the drop")
 
@@ -608,6 +622,9 @@ def test_drop_clone_never_deletes_the_last_copy_when_the_source_is_gone(monkeypa
     ok2, msg2 = gwr.repair(db2, "tortoise")
     assert ok2 is False
     assert "boolean-index audit failed" in msg2, msg2
+    retained2 = [k for k in db2.graphs if k.startswith("__gwr_")]
+    assert retained2, f"the LAST COPY was deleted; remaining graphs: {sorted(db2.graphs)}"
+    assert db2.graphs[retained2[0]].nodes == BIG, "the retained clone lost its data"
 
     # (j) the source is PRESENT BUT EMPTIED -- presence is TRUE, so the absence guard
     # alone passes and `drop_clone` used to delete the last DATA-BEARING copy. This is
@@ -630,9 +647,29 @@ def test_drop_clone_never_deletes_the_last_copy_when_the_source_is_gone(monkeypa
     retained4 = [k for k in db4.graphs if k.startswith("__gwr_")]
     assert retained4, f"the LAST COPY was deleted; remaining graphs: {sorted(db4.graphs)}"
     assert db4.graphs[retained4[0]].nodes == BIG, "the retained clone lost its data"
-    retained2 = [k for k in db2.graphs if k.startswith("__gwr_")]
-    assert retained2, f"the LAST COPY was deleted; remaining graphs: {sorted(db2.graphs)}"
-    assert db2.graphs[retained2[0]].nodes == BIG, "the retained clone lost its data"
+
+
+def test_drop_clone_compares_against_the_clone_not_the_entry_baseline(monkeypatch, fake_lock):
+    """The clone is the yardstick -- `before_*` is not.
+
+    On the incomplete-copy path `clone_fp != before` BY CONSTRUCTION, so a guard that only
+    asks whether the source lost relative to `before_*` misses the case where the CLONE
+    holds a concurrent write the source has since lost: `clone_fp > before`, the source
+    reads back at exactly `before`, and the source-relative test passes while
+    `drop_clone` destroys the only copy of that delta.
+
+    Mutation: compare only against `before_*` (drop the `clone_fp` clauses) -> the clone
+    holding the only copy of the delta is deleted and this goes RED.
+    """
+    db = _FakeDb({"tortoise": _defect_state(nodes=BIG, edges=100)}, copy_drops_edges=True,
+                 copy_clone_ahead=5)
+    ok, msg = gwr.repair(db, "tortoise")
+    assert ok is False
+    assert msg, "the refusal must explain itself"
+    retained = [k for k in db.graphs if k.startswith("__gwr_")]
+    assert retained, f"the ONLY copy of the delta was deleted; graphs: {sorted(db.graphs)}"
+    # The clone must still hold what the source no longer has.
+    assert db.graphs[retained[0]].nodes == BIG + 5, db.graphs[retained[0]]
 
 
 def test_repair_retains_the_clone_when_the_source_is_emptied_before_the_swap(monkeypatch, fake_lock):

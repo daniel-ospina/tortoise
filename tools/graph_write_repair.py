@@ -264,10 +264,25 @@ def repair(db, name: str, verbose: bool = True) -> tuple[bool, str]:
             say(f"  note: RETAINED clone {scratch} ({reason}) -- could not verify the "
                 f"source ({type(exc).__name__}: {exc}), so this clone may be the only copy")
             return
-        if _now[0] < before_nodes or _now[1] < before_edges:
-            say(f"  note: RETAINED clone {scratch} ({reason}) -- the source LOST data "
-                f"({_now} vs {(before_nodes, before_edges)}), so this clone may be the "
-                f"only copy")
+        # ⛔ AND THE YARDSTICK MUST BE THE CLONE, NOT `before_*`. On the incomplete-copy path
+        # `clone_fp != before` BY CONSTRUCTION, and `before_*` is the entry baseline -- so
+        # asking only whether the source lost relative to `before_*` misses the case that
+        # matters: the clone snapshotted a concurrent write which the source has since lost,
+        # leaving `clone_fp > before` and the source reading back at exactly `before`.
+        # Measured (review cycle 4, case 31): before=(1500,100), +5 landed before the COPY
+        # snapshot, the source lost them, and the clone holding the only copy of that delta
+        # was dropped. The baseline survived, so this is a delta loss rather than a wipe --
+        # but the data in that clone existed nowhere else.
+        # Retain unless the source DOMINATES the clone on BOTH axes. Named trade-off: this
+        # also retains a clone whose delta was a deliberate revert; retaining is the
+        # consistent choice under this module's own rule ("retain the clone: it may be the
+        # only copy"), and the alternative would have to be stated as a residual.
+        if (_now[0] < before_nodes or _now[1] < before_edges
+                or _now[0] < clone_fp[0] or _now[1] < clone_fp[1]):
+            say(f"  note: RETAINED clone {scratch} ({reason}) -- the source does not "
+                f"dominate it ({_now} vs clone {clone_fp}, baseline "
+                f"{(before_nodes, before_edges)}), so this clone may hold the only copy "
+                f"of that data")
             return
         # The scratch clone is the ONLY key this module deletes, it is run-unique (never the
         # live graph), and this process's own `GRAPH.COPY` created it -- so it is dropped with
