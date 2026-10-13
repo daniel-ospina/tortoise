@@ -38,14 +38,21 @@ export const BRAND_SUFFIX = " | Tortoise";
 // punctuation-led spelling and its repetitions are treated as the brand suffix.
 // The `+` makes a repeated suffix ("… | Tortoise | Tortoise") collapse to one.
 //
-// ⛔ `metaTitle` is NOT unconditionally idempotent, and the earlier claim that it
-// was is wrong (the verifier measured it). Truncation can EXPOSE a mid-title
-// punctuation-led "Tortoise" — "… knowledge graphs —  Tortoise explained" cut to
-// "… knowledge graphs —  Tortoise" — and a second pass cannot tell that exposed
-// tail from a suffix the model wrote, so it strips it. `generate-seo.ts` does NOT
-// depend on the property: it measures whether the REPAIR fired directly, so the
-// divergence cannot reach `keyword_ok`. Do not reintroduce a second `enforce`
-// pass as the source of `repairFired`.
+// ⛔ THE SUFFIX-ONLY CONTRACT, stated once (it is easy to mistake for a bug).
+// A title that is NOTHING BUT a brand tail — "| Tortoise", "— Tortoise",
+// "]Tortoise_" — returns "", and `generate-seo.ts` answers 502 because it has
+// nothing to repair. That is DELIBERATE and PRE-EXISTING: main and every earlier
+// head already returned "" for "| Tortoise" and "— Tortoise". What was NOT
+// consistent was the `_` spellings, which `\b` blocked, so they leaked through as
+// GARBAGE TITLES — "]Tortoise | Tortoise", "_TORTOISE | Tortoise" — and the
+// trailing-separator strip then emptied them on a SECOND pass. `(?![A-Za-z])`
+// below removes that inconsistency: every suffix-only spelling now takes the same
+// pre-existing path.
+// ⛔ `metaTitle` is idempotent at THIS head: the post-truncate strip re-runs the
+// full suffix pattern, so a tail that truncation EXPOSES is removed in the same
+// pass and a second pass finds nothing. (`generate-seo.ts` does not depend on the
+// property either way — it measures whether the REPAIR fired directly.) Do not
+// reintroduce a second `enforce` pass as the source of `repairFired`.
 const BRAND_SUFFIX_TAIL_RE = /(?:\s*[\p{P}\p{S}]\s*Tortoise(?![A-Za-z])[\p{P}\p{S}\s]*)+$/iu;
 
 export interface SeoFields {

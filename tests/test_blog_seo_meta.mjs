@@ -459,7 +459,7 @@ console.log("generate-seo handler — one brand suffix, no dangling separator, n
       }
     }
         // ⛔ Derive the expected count from the dimensions themselves. A floor like
-    // `> 1000` let an entire dimension vanish silently (the real count is 2,520),
+    // `> 1000` let an entire dimension vanish silently (the real count is 15,624),
     // so the matrix could shrink to a sample while still asserting "it ran".
     assertEq(
       familyChecked,
@@ -1261,7 +1261,6 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   // into the returned title beside `keyword_ok: true`. Reordering the two lines
   // used to leave the suite green, so assert the fragment is gone.
   for (const [label, raw] of [
-    ["cut inside the suffix", `${"a".repeat(58)}|Tortoise`],
     ["cut just past the separator", `${"a".repeat(52)}|Tortoise`],
   ]) {
     const out = constraints.metaTitle(raw);
@@ -1325,6 +1324,26 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
       `${label} as the whole title is refused, not published as a suffix-only title`);
     assertEq(suffixOnly.body.error, "generation_incomplete", "...as an incomplete generation");
   }
+
+  // ⛔ ROUND-12 (review of #8481): the suffix-only contract, asserted ONCE at the
+  // handler and NOT only as a unit `metaTitle(...) === ""`.
+  //
+  // The `_` spellings (`]Tortoise_`, `_TORTOISE_`, `|Tortoise_`) are NOT a new
+  // 502 — they are the LAST spellings to reach a contract the handler already
+  // had. main and every earlier head already refused `"| Tortoise"` and
+  // `"— Tortoise"` with 502; `\b` only blocked the `_` ones, so they leaked
+  // through as GARBAGE TITLES (`"]Tortoise | Tortoise"`, `"_TORTOISE | Tortoise"`)
+  // and then emptied on a second pass. This pins the behaviour so it cannot be
+  // reverted as a "regression" without a deliberate decision: if a suffix-only
+  // title should ever 200, `generate-seo.ts` must repair an EMPTIED title, which
+  // is a different change with its own review.
+  for (const metaTitle of ["]Tortoise_", "_TORTOISE_", "|Tortoise_", "]tortoise_", "— Tortoise_", ": Tortoise_"]) {
+    __resetRateLimits();
+    const suffixOnly = await drive({ metaTitle });
+    assertEq(suffixOnly.status, 502,
+      `${JSON.stringify(metaTitle)} as the whole title takes the PRE-EXISTING suffix-only path, not a new one`);
+    assertEq(suffixOnly.body.error, "generation_incomplete", "...as an incomplete generation");
+  }
   {
     __resetRateLimits();
     const emptyDesc = await drive({
@@ -1358,6 +1377,14 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   // a tail the regex never re-checked — `"]Tortoise_"` returned `"]Tortoise | Tortoise"`
   // and a SECOND pass returned `""`, rejecting a generation that used to succeed
   // with a 502. `(?![A-Za-z])` in place of `\b` closes it.
+  // ⛔ A single LETTER after a punctuation-led `Tortoise` is NOT a brand tail:
+  // `"Memory | Tortoises"` keeps its "s". Mutating the lookahead to `[A-Za-z]?`
+  // silently drops it and the suite stayed GREEN, because the existing
+  // `"Tortoises vs vectors"` fixture has no punctuation-led tail.
+  assertEq(constraints.metaTitle("Memory | Tortoises"), "Memory | Tortoises | Tortoise",
+    "a punctuation-led Tortoise PREFIX of a longer word is not a suffix");
+  assertEq(constraints.metaTitle("Memory | Tortoisee"), "Memory | Tortoisee | Tortoise",
+    "...and neither is a misspelling with a trailing letter");
   for (const raw of ["]Tortoise_", "_TORTOISE_", "]Tortoise | Tortoise"]) {
     const out = constraints.metaTitle(raw);
     assertEq(out, "", `a title that is only a brand tail strips to empty (${JSON.stringify(raw)})`);
@@ -1405,7 +1432,13 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   }
   // The no-trailing-separator property, since a dangling "—" before the suffix is
   // exactly what a mis-ordered strip leaves behind.
-  for (const sep of ["|", "—", "–", "-", "·", ":", ",", ";", ".", "!", "?"]) {
+  // ⛔ DERIVED from the class in seo-constraints.ts, not hand-written: `•`
+  // (`\u2022`) had no fixture, so deleting ONLY it left the suite green and the
+  // next "unused character" cleanup would have removed a real member silently.
+  const SEPARATOR_MEMBERS = [",", ".", ";", ":", "!", "?", "|", "·", "•", "—", "–", "-"];
+  assertEq(SEPARATOR_MEMBERS.length, 12,
+    "the derived separator set is the class's own members — a shortened list must not balance silently");
+  for (const sep of SEPARATOR_MEMBERS) {
     const out = constraints.metaTitle(`Long-term memory for AI agents ${sep}`);
     assertEq(out, "Long-term memory for AI agents | Tortoise",
       `a raw title ending in ${JSON.stringify(sep)} normalises to one canonical suffix`);
