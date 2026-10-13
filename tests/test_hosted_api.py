@@ -6396,22 +6396,16 @@ _2600_UUID_B = "22222222-2222-4222-8222-222222222222"
 #
 # Deliberately NOT re-issued: every OTHER 5xx (a genuine handler error must
 # still fail on the first call), and the route's 402 quota refusal (gate 5,
-# hosted_api.py:12630). 402 is TRANSIENT to the durable spool for a different
-# purpose — a refused capture must not be destroyed (#4714) — but it is an
-# org-level condition a bounded in-test re-issue cannot clear, so the tests
-# that pin it must see it on the first call. Applied per call-site rather than
-# to the shared client fixture, because (a)
-# `test_capture_gate_409_when_recording_off` and
-# `test_capture_gate_boundary_422_before_409` deliberately assert a 409 on this
-# route and a blanket retry would mask it, and (b) a test that is SUPPOSED to
-# fail must not be handed four retries first — for the same reason the two
-# failing-extractor tests in TestSessionActorStamp2600
-# (`test_failed_prior_true_retry_keeps_first_writer_actor`,
-# `test_raise_shape_repost_replays_keeps_actor`) keep a bare `tc.post`: they
-# assert extractor call counts a re-issue would consume. Bounded, and never a
-# pass: the LAST response is returned, so an exhausted retry still fails the
-# caller's own status assertion loudly. Pinned by
-# `TestCaptureTransportRetry3246`.
+# hosted_api.py:12630) — TRANSIENT to the durable spool for a different purpose
+# (#4714), but an org-level condition a bounded in-test re-issue cannot clear.
+#
+# Applied per call-site (not to the shared client fixture): a test pinning a
+# FIRST-CALL refusal, or one meant to fail, must not be handed re-issues first.
+# The two failing-extractor tests in TestSessionActorStamp2600 keep a bare
+# `tc.post` for the same reason — they assert extractor call counts a re-issue
+# would consume. Bounded, and never a pass: the LAST response is returned, so an
+# exhausted retry still fails the caller's own status assertion loudly. Pinned
+# by `TestCaptureTransportRetry3246`.
 _CAPTURE_TRANSIENT_TRANSPORT = frozenset({504, 429, 409})
 
 #: Cap on the `Retry-After` the helper will honour. The advertised delay is the
