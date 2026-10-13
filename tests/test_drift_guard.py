@@ -346,6 +346,57 @@ def _build_binary_main_change(tmp_path: Path) -> Path:
     return repo
 
 
+def _build_three_way(tmp_path: Path, *, base: bytes, branch: bytes,
+                     main: bytes, name: str = "shared.txt") -> Path:
+    """A repo whose mb/branch/main bodies for one file are caller-supplied.
+
+    The common base is `base`; `pr` commits `branch`; main commits `main`. A
+    real bare `origin` makes the gate fetch. Callers must assert the merge they
+    care about is conflict-free — this helper does not.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_ok(repo, "init", "-q", "-b", "main", "--template=", ".")
+    (repo / name).write_bytes(base)
+    _git_ok(repo, "add", name)
+    _git_ok(repo, "commit", "-q", "-m", "c0")
+    _git_ok(repo, "checkout", "-q", "-b", "pr")
+    (repo / name).write_bytes(branch)
+    _git_ok(repo, "commit", "-qam", "branch edits")
+    _git_ok(repo, "checkout", "-q", "main")
+    (repo / name).write_bytes(main)
+    _git_ok(repo, "commit", "-qam", "main edits")
+    _make_remote(tmp_path, repo)
+    _git_ok(repo, "checkout", "-q", "pr")
+    return repo
+
+
+def _build_main_rename(tmp_path: Path) -> Path:
+    """main's ONLY change is a pure RENAME of the path the branch edited.
+
+    mb: X.txt = A/B/C/D/E. `pr` rewrites line 5. main renames X.txt -> Y.txt
+    without touching content. `git merge-tree` (rename detection) applies the
+    branch's edit to Y.txt, so every line of main's CONTRIBUTION survives. A
+    per-path `--no-renames` diff reports Y.txt as a whole-file add, which is
+    what made `lost` claim main's content was lost (#1431 review).
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_ok(repo, "init", "-q", "-b", "main", "--template=", ".")
+    (repo / "X.txt").write_bytes(b"A\nB\nC\nD\nE\n")
+    _git_ok(repo, "add", "X.txt")
+    _git_ok(repo, "commit", "-q", "-m", "c0")
+    _git_ok(repo, "checkout", "-q", "-b", "pr")
+    (repo / "X.txt").write_bytes(b"A\nB\nC\nD\nF5\n")
+    _git_ok(repo, "commit", "-qam", "branch edits line 5")
+    _git_ok(repo, "checkout", "-q", "main")
+    _git_ok(repo, "mv", "X.txt", "Y.txt")
+    _git_ok(repo, "commit", "-qam", "main renames X.txt -> Y.txt")
+    _make_remote(tmp_path, repo)
+    _git_ok(repo, "checkout", "-q", "pr")
+    return repo
+
+
 def _make_remote(tmp_path: Path, repo: Path) -> None:
     """Give `repo` a REAL bare `origin` whose `main` is its current tip.
 
@@ -805,6 +856,73 @@ def test_mains_deletion_dropped_by_a_union_is_not_reported_as_kept(
     assert "preservation UNPROVEN" in text, text
 
 
+def test_a_deleted_line_readded_by_the_branch_is_not_reported_as_lost(
+        tmp_path: Path) -> None:
+    """#1431 review (P1): a duplicate line is not a dropped deletion.
+
+    mb = a/DUPLICATE/b/c. `pr` APPENDS another DUPLICATE; main DELETES the
+    first. The conflict-free merge applies main's deletion and keeps the
+    branch's appended line — nothing of main's is lost. A whole-file multiset
+    match found the surviving DUPLICATE and printed "main's content IS lost".
+    The two edits are in different regions, so `contested` is false: only the
+    deletion half could produce the false claim, and it must not.
+    """
+    repo = _build_three_way(
+        tmp_path,
+        base=b"a\nDUPLICATE\nb\nc\n",
+        branch=b"a\nDUPLICATE\nb\nc\nDUPLICATE\n",
+        main=b"a\nb\nc\n")
+    tree = _git(repo, "merge-tree", "--write-tree", "--name-only",
+                "origin/main", "HEAD")
+    assert tree.returncode == 0, "fixture must be a CLEAN merge — " + tree.stderr
+    merged_tree = tree.stdout.splitlines()[0]
+    assert _git_ok(repo, "show", f"{merged_tree}:shared.txt").splitlines() == [
+        "a", "b", "c", "DUPLICATE"]
+    assert _git_ok(repo, "show", "origin/main:shared.txt").splitlines() == [
+        "a", "b", "c"]
+
+    payload, p = _payload(repo)
+    assert p.returncode == 1, payload
+    (entry,) = payload["reverts"]
+    assert entry["lost"] == 0, entry
+    assert entry["contested"] is False, entry
+    text = _out(_run(repo))
+    assert "main's content IS lost" not in text, text
+    assert "main's content kept" in text, text
+
+
+def test_a_deleted_blank_line_still_in_the_file_is_not_reported_as_lost(
+        tmp_path: Path) -> None:
+    """#1431 review (P1): a second blank line is not a dropped deletion.
+
+    mb = a/b/<blank>/c/<blank>/d. `pr` rewrites line 1; main deletes the FIRST
+    blank. The conflict-free merge keeps exactly one blank (the untouched
+    second), so main's deletion IS applied. A whole-file multiset found a blank
+    and printed "main's content IS lost"; the edits are in different regions,
+    so `contested` is false and only the deletion half can produce it.
+    """
+    repo = _build_three_way(
+        tmp_path,
+        base=b"a\nb\n\nc\n\nd\n",
+        branch=b"A\nb\n\nc\n\nd\n",
+        main=b"a\nb\nc\n\nd\n")
+    tree = _git(repo, "merge-tree", "--write-tree", "--name-only",
+                "origin/main", "HEAD")
+    assert tree.returncode == 0, "fixture must be a CLEAN merge — " + tree.stderr
+    merged_tree = tree.stdout.splitlines()[0]
+    assert _git_ok(repo, "show", f"{merged_tree}:shared.txt").splitlines() == [
+        "A", "b", "c", "", "d"]
+
+    payload, p = _payload(repo)
+    assert p.returncode == 1, payload
+    (entry,) = payload["reverts"]
+    assert entry["lost"] == 0, entry
+    assert entry["contested"] is False, entry
+    text = _out(_run(repo))
+    assert "main's content IS lost" not in text, text
+    assert "main's content kept" in text, text
+
+
 def test_a_text_line_mentioning_binary_files_is_not_treated_as_binary(
         tmp_path: Path) -> None:
     """#1431 review (P2): binary is git's STRUCTURAL signal, not a substring.
@@ -869,6 +987,73 @@ def test_a_genuinely_binary_path_is_still_unmeasurable(tmp_path: Path) -> None:
     assert mod._main_added_lines(repo, mb, "origin/main", "shared.txt") == []
 
 
+def test_a_renamed_path_is_not_reported_as_content_lost(tmp_path: Path) -> None:
+    """#1431 review (P1): a rename main made is not a whole-file addition.
+
+    `git merge-tree` detects main's rename and applies the branch's edit to the
+    renamed path; every line of main's contribution survives. Measuring main's
+    contribution with a per-path `--no-renames` diff reports the destination as
+    a whole-file add, so a line the BRANCH rewrote read as main's loss and the
+    gate printed "main's content IS lost" on a preserving merge. `lost` must be
+    0 and no line of main's may be reported as absent.
+    """
+    repo = _build_main_rename(tmp_path)
+    tree = _git(repo, "merge-tree", "--write-tree", "--name-only",
+                "origin/main", "HEAD")
+    assert tree.returncode == 0, "fixture must be a CLEAN merge — " + tree.stderr
+    merged_tree = tree.stdout.splitlines()[0]
+    # The rename survived and the branch's edit was applied under it.
+    assert _git_ok(repo, "show", f"{merged_tree}:Y.txt").splitlines() == [
+        "A", "B", "C", "D", "F5"]
+    assert _git_ok(repo, "show", "origin/main:Y.txt").splitlines() == [
+        "A", "B", "C", "D", "E"]
+    assert _git_ok(repo, "rev-parse", f"{merged_tree}:Y.txt") != _git_ok(
+        repo, "rev-parse", "origin/main:Y.txt")
+
+    mod = _load_mod()
+    mb = _git_ok(repo, "merge-base", "origin/main", "pr")
+    # main's contribution to the renamed path is NOT a whole-file addition.
+    assert mod._main_added_lines(repo, mb, "origin/main", "Y.txt") == []
+
+    payload, p = _payload(repo)
+    assert p.returncode == 1, payload  # the VERDICT (blob identity) is unchanged
+    (entry,) = payload["reverts"]
+    assert entry["path"] == "Y.txt", entry
+    assert entry["lost"] == 0, entry
+    text = _out(_run(repo))
+    assert "main's content IS lost" not in text, text
+    assert "main's content kept" in text, text
+
+
+def test_a_crlf_added_line_is_measured_byte_exact(tmp_path: Path) -> None:
+    """#1431 review (P2): a CRLF line's `\\r` is content, not a terminator.
+
+    `_git` captures with `text=True`, whose universal-newline decoding strips
+    `\\r`, so main's added `M\\r` compared equal to a merged `M` and `lost` said
+    "content kept" for a merge that does not carry main's bytes. The line
+    helpers read byte-exact; the CR is part of the line and a CR-less merged
+    line is one lost line.
+    """
+    repo = _build_three_way(
+        tmp_path,
+        base=b"A\r\nB\r\nC\r\n",
+        branch=b"F\r\nB\r\nC\r\n",
+        main=b"A\r\nB\r\nC\r\nM\r\n")
+    mod = _load_mod()
+    mb = _git_ok(repo, "merge-base", "origin/main", "pr")
+    assert mod._main_added_lines(repo, mb, "origin/main", "shared.txt") == ["M\r"]
+    tree = _git(repo, "merge-tree", "--write-tree", "--name-only",
+                "origin/main", "HEAD")
+    assert tree.returncode == 0, "fixture must be a CLEAN merge — " + tree.stderr
+    merged_oid = _git_ok(repo, "rev-parse",
+                         f"{tree.stdout.splitlines()[0]}:shared.txt")
+    assert mod._lost_lines(repo, mb, "origin/main", "shared.txt",
+                           merged_oid) == 0
+    # A merged blob carrying the line WITHOUT the CR is not main's bytes.
+    lf_only = _blob(repo, b"F\r\nB\r\nC\r\nM\n")
+    assert mod._lost_lines(repo, mb, "origin/main", "shared.txt", lf_only) == 1
+
+
 def test_a_red_names_whether_mains_content_actually_survived(
         tmp_path: Path) -> None:
     """#1431: the VERDICT is blob identity; `lost` measures which red it is.
@@ -888,17 +1073,16 @@ def test_a_red_names_whether_mains_content_actually_survived(
 
     MUTATION-MEASURED LIMIT, stated so it is not mistaken for full coverage:
     a mutant that hardcodes `"lost": 0` at the call site SURVIVES this file.
-    That mutant is EQUIVALENT on every fixture reachable end-to-end, but NOT
-    for the reason a naive reading gives: `merge=union` — this repo's own
-    `.gitattributes` — resolves an overlap WITHOUT a conflict, so the union
-    fixture reachable below IS produced by CI's configuration; it simply cannot
-    raise `lost` above 0 there, because main added no lines in it. The
-    dropped-deletion case is handled by the MESSAGE (`_lost_summary`'s UNPROVEN
-    branch, pinned end-to-end by
+    That is a COVERAGE gap, NOT an equivalence claim: no fixture in this suite
+    is known to raise the `lost > 0` aggregate end-to-end, so the non-zero
+    direction is exercised through `_lost_lines` and `_lost_summary` directly
+    (below) rather than pretended. It is NOT unreachable in principle — a merge
+    driver can drop a main-added line without a conflict, and a fixture that
+    did would distinguish the mutant. A dropped DELETION is reported by the
+    MESSAGE (`_lost_summary`'s UNPROVEN branch, pinned end-to-end by
     `test_mains_deletion_dropped_by_a_union_is_not_reported_as_kept`), not by
-    `lost`. The non-zero direction is therefore covered where it is reachable
-    (the `_lost_lines` helper, below, and `_lost_summary`'s branches) rather
-    than pretended end-to-end.
+    `lost`: line content cannot attribute a surviving line to a dropped
+    deletion (see `test_a_deleted_line_readded_by_the_branch_...`).
     """
     repo = _build_two_sided_edit(tmp_path)
     payload, p = _payload(repo)
@@ -956,11 +1140,11 @@ def test_an_unmeasurable_path_is_never_reported_as_kept(tmp_path: Path) -> None:
 def test_the_closing_line_distinguishes_all_three_measurements() -> None:
     """`_lost_summary` must separate kept / lost / unmeasured (#1431).
 
-    A pure helper on purpose: the `lost > 0` and unmeasured aggregates cannot
-    be produced by an end-to-end fixture (see the note above), so the branches
-    are exercised directly. Collapsing any two of them would let a red claim
-    the wrong thing about reality — "main's content is lost" on a union, or
-    "content kept" on a path that could not be measured at all.
+    A pure helper on purpose: no fixture in this suite is known to raise the
+    `lost > 0` aggregate end-to-end — a coverage limit, not an impossibility —
+    so the branches are exercised directly. Collapsing any two of them would
+    let a red claim the wrong thing about reality — "main's content is lost" on
+    a union, or "content kept" on a path that could not be measured at all.
     """
     spec = importlib.util.spec_from_file_location("drift_guard_under_test",
                                                  _script())
