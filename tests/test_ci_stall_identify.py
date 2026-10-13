@@ -419,10 +419,15 @@ def _parsed_argv(pytestconfig) -> list[str]:
     that separately), because that variable is process-global and a
     ``tests/conftest.py`` can write it AFTER the real argv was parsed — which is
     how a repo-writable value reached the skip and hid a disarmed run
-    (round-2 review, sixth and seventh passes). Consequence, deliberate and
-    documented rather than silent: an env-supplied opt-out (``PYTEST_ADDOPTS=
-    '--timeout=0'``, ``PYTEST_ADDOPTS='--timeout-method=thread'``) is REFUSED, the
-    same way ``PYTEST_TIMEOUT=0`` is; pass the flag on the command line.
+    (round-2 review, sixth and seventh passes).
+
+    Consequence, deliberate and documented rather than silent: the FLAG spelling of
+    an env-supplied opt-out (``PYTEST_ADDOPTS='--timeout=0'``, ``PYTEST_ADDOPTS=
+    '--timeout-method=thread'``) is REFUSED, the same way ``PYTEST_TIMEOUT=0`` is —
+    pass the flag on the command line. An ``-o``/ini override is still honoured
+    wherever it is written (``PYTEST_ADDOPTS='-o timeout=0'`` skips): pytest
+    applies those at parse time, before any conftest can run, so they are not
+    runtime-repo-writable.
     """
     return list(pytestconfig.invocation_params.args)
 
@@ -708,9 +713,9 @@ def test_the_per_test_timer_is_actually_armed(pytestconfig, request, timeout_gua
         "`signal` with no func_only exemption: `thread` starves on a GIL-holding "
         "stall (#7649), and func_only leaves SETUP/TEARDOWN unbounded while this "
         "check's ITIMER read (call phase) stays green. If this was intentional, "
-        "pass `--timeout-method=` on the COMMAND LINE: an opt-out supplied through "
-        "`PYTEST_ADDOPTS`/`PYTEST_TIMEOUT` is refused, because repo code can write "
-        "those and hide a disarmed run."
+        "pass `--timeout-method=` on the COMMAND LINE: the flag spelling of an "
+        "opt-out supplied through `PYTEST_ADDOPTS`/`PYTEST_TIMEOUT` is refused, "
+        "because repo code can write those at runtime and hide a disarmed run."
     )
     remaining = harness_alarm_remaining()
     assert remaining > 0, (
