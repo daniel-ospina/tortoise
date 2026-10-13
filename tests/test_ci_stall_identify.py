@@ -41,6 +41,8 @@ from pathlib import Path
 
 import pytest_timeout
 
+from tests._signal_hygiene import harness_alarm_remaining
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
@@ -414,6 +416,64 @@ def test_the_resolved_bound_matches_the_sanctioned_sources(pytestconfig):
         f"(CLI -> PYTEST_TIMEOUT -> ini) give {expected!r}: an in-process hook "
         "overwrote it, so a bare run in this checkout would arm no killer — the "
         "shape #5035 exists for (43h48m)"
+    )
+
+
+def test_the_per_test_timer_is_actually_armed(pytestconfig):
+    """Round-2 review, third door: a SOURCE value is not an ARM.
+
+    ``get_env_settings`` proves what pytest-timeout *would* use, not that
+    anything was armed. The arming path is a firstresult hook: the plugin's
+    ``pytest_runtest_protocol``/``pytest_runtest_call`` call
+    ``pytest_timeout_set_timer(item, settings)``, and ``settings`` is rebuilt
+    from the snapshot ``config._env_timeout*`` taken once in the plugin's
+    ``pytest_configure``. A conftest that implements that hookspec and returns a
+    non-None value — or that adds ``pytest.mark.timeout(0)`` in
+    ``pytest_collection_modifyitems`` — therefore arms NOTHING while
+    ``get_env_settings`` still reads 300, and every other test here stays green.
+    Reproduced by a reviewer on an earlier head of this PR: a probe in ``tests/``
+    printed ``armed_itimer_remaining=0.0`` under either attack and ``294.6``
+    without one, with all 15 tests of this file plus
+    ``test_timeout_not_disarmable`` passing.
+
+    So this pins the MECHANISM rather than the number: the harness's own
+    ``ITIMER_REAL`` must actually be running while this item runs — the same read
+    the ``harness_sigalrm_integrity`` fixture uses — and the snapshot the runtest
+    protocol consumes must still be ``signal``/no-func_only. It is SKIPPED when
+    the run itself asks for no timer (``--timeout=0``, ``PYTEST_TIMEOUT=0``) or a
+    non-``signal`` method, because an unarmed ITIMER is then the request, not a
+    defect.
+
+    Mutations that make this RED (verified): append a
+    ``pytest_timeout_set_timer`` implementation returning ``True``, or a
+    ``pytest_collection_modifyitems`` adding ``pytest.mark.timeout(0)``, to
+    ``tests/conftest.py``.
+    """
+    expected = _bound_from_the_sanctioned_sources(pytestconfig)
+    settings = pytest_timeout.get_env_settings(pytestconfig)
+    if expected <= 0 or settings.method != "signal":
+        pytest.skip(
+            f"this run asks for no signal timer (bound={expected}, "
+            f"method={settings.method!r}): an unarmed ITIMER_REAL is the request"
+        )
+    snapshot_method = getattr(pytestconfig, "_env_timeout_method", settings.method)
+    snapshot_func_only = getattr(pytestconfig, "_env_timeout_func_only", False)
+    assert snapshot_method == "signal" and snapshot_func_only is False, (
+        f"the runtest protocol will actually use method={snapshot_method!r}, "
+        f"func_only={snapshot_func_only!r} although the sanctioned sources say "
+        "`signal` with no func_only exemption: an in-process hook changed the "
+        "value that arms the item (`thread` starves on a GIL-holding stall — "
+        "#7649; func_only leaves fixtures unbounded)"
+    )
+    remaining = harness_alarm_remaining()
+    assert remaining > 0, (
+        "ITIMER_REAL is not armed while this item runs, although the config "
+        f"resolves a {expected}s bound with the signal method: something "
+        "short-circuited the firstresult `pytest_timeout_set_timer`, so a bare "
+        "run in this checkout arms NO killer — the incident's shape (#5035, 43h48m)"
+    )
+    assert remaining <= expected, (
+        f"the armed timer ({remaining}s) exceeds the resolved bound {expected}s"
     )
 
 
