@@ -80,8 +80,9 @@ _EMITTER_SOURCES = (
 #: just orphaned and its next recurrence will file a second issue.
 FROZEN_KIND_STRINGS = frozenset({
     "STALE", "POOL_STALE", "NEVER_BACKED_UP", "METADATA_LOST",
-    "BACKUP_SET_MISSING", "DRIVER_DOWN", "R2_DOWN", "ALERTER_DOWN",
-    "APP_DOWN", "WATCHER_DOWN", "SWEEP_CONFIG_ERROR", "SWEEP_OFF_STALE",
+    "BACKUP_SET_MISSING", "DRIVER_DOWN", "R2_DOWN", "R2_UNLISTABLE",
+    "ALERTER_DOWN", "APP_DOWN", "WATCHER_DOWN", "SWEEP_CONFIG_ERROR",
+    "SWEEP_OFF_STALE",
     "SWEEP_NO_COVERAGE", "PURGE_FAILED", "RECONCILE_FAILED",
     "NO_ELIGIBLE_TEAMS", "ENUM_DELTA", "GRAPH_NAME_RESOLUTION_FAIL",
     "LIVENESS_NO_WORK", "SIZE_GUARD_ABORT", "DATA_LOSS_CANDIDATE",
@@ -387,10 +388,14 @@ def test_spec_lookup_is_strict_about_unknown_kinds():
 #: the wrong side of it is exactly what this set is here to catch. A failure
 #: means either the boundary moved (argue it here) or a kind was mis-declared.
 DR_RECOVERY_KINDS_3146 = frozenset({
-    "R2_DOWN", "APP_DOWN", "WATCHER_DOWN", "SWEEP_CONFIG_ERROR",
-    "SWEEP_OFF_STALE", "SWEEP_NO_COVERAGE", "POOL_STALE", "PURGE_FAILED",
-    "RECONCILE_FAILED", "STALE", "NEVER_BACKED_UP", "METADATA_LOST",
-    "BACKUP_SET_MISSING", "DRIVER_DOWN",
+    # #3147 split R2 into two tiers; BOTH are bounded measurements that can
+    # hover at their boundary, so both carry the window (R2_DOWN is the
+    # watcher-owned reachability tier, R2_UNLISTABLE the driver-owned listing
+    # tier).
+    "R2_DOWN", "R2_UNLISTABLE", "APP_DOWN", "WATCHER_DOWN",
+    "SWEEP_CONFIG_ERROR", "SWEEP_OFF_STALE", "SWEEP_NO_COVERAGE", "POOL_STALE",
+    "PURGE_FAILED", "RECONCILE_FAILED", "STALE", "NEVER_BACKED_UP",
+    "METADATA_LOST", "BACKUP_SET_MISSING", "DRIVER_DOWN",
 })
 
 
@@ -567,27 +572,29 @@ def _closes(close_log: Path) -> list[str]:
 
 
 def test_driver_recovery_window_needs_two_consecutive_healthy_runs(tmp_path):
-    """#3146 acceptance, driver side: ONE healthy run must not clear R2_DOWN.
+    """#3146 acceptance, driver side: ONE healthy run must not clear R2_UNLISTABLE.
 
     Two consecutive healthy runs clear it; a single one only counts and leaves
     the incident open with its sentinel intact. Measured on the shipping script
     (the functions are extracted and executed, not re-described), because the
-    driver is the writer for the kind whose measurement flaps.
+    driver is the writer for the kind whose measurement flaps. R2_UNLISTABLE is
+    the driver-owned LISTING tier (#3147); the reachability tier, R2_DOWN, is
+    watcher-owned and the driver's ``resolve_global`` deliberately refuses it.
     """
-    seed = {"ops/alerts/R2_DOWN/_.json": {
-        "kind": "R2_DOWN", "issue_number": 42,
+    seed = {"ops/alerts/R2_UNLISTABLE/_.json": {
+        "kind": "R2_UNLISTABLE", "issue_number": 42,
         "filed_at": "2026-01-01T00:00:00Z"}}
     proc, store, close_log = _driver_window_harness(
         tmp_path, seed=seed,
-        body=("resolve_global R2_DOWN 'first healthy run'\n"
-              "resolve_global R2_DOWN 'second healthy run'\n"),
+        body=("resolve_global R2_UNLISTABLE 'first healthy run'\n"
+              "resolve_global R2_UNLISTABLE 'second healthy run'\n"),
     )
     assert proc.returncode == 0, proc.stderr
     assert _closes(close_log) == ["close:42"], (
         "exactly ONE close — the SECOND healthy run; the first only counts: "
         f"{_closes(close_log)}")
     assert "healthy reading 1/2" in proc.stderr, proc.stderr
-    body = json.loads((store / "ops_alerts_R2_DOWN__.json").read_text())
+    body = json.loads((store / "ops_alerts_R2_UNLISTABLE__.json").read_text())
     assert body["healthy_streak"] == 1, body
 
 
@@ -599,12 +606,12 @@ def test_driver_recovery_window_reads_the_legacy_fresh_streak(tmp_path):
     declared window of 2 and closes — the count carried over rather than being
     discarded.
     """
-    seed = {"ops/alerts/R2_DOWN/_.json": {
-        "kind": "R2_DOWN", "issue_number": 42,
+    seed = {"ops/alerts/R2_UNLISTABLE/_.json": {
+        "kind": "R2_UNLISTABLE", "issue_number": 42,
         "filed_at": "2026-01-01T00:00:00Z", "fresh_streak": 1}}
     proc, _store, close_log = _driver_window_harness(
         tmp_path, seed=seed,
-        body="resolve_global R2_DOWN 'healthy run'\n",
+        body="resolve_global R2_UNLISTABLE 'healthy run'\n",
     )
     assert proc.returncode == 0, proc.stderr
     assert _closes(close_log) == ["close:42"], _closes(close_log)
@@ -612,12 +619,12 @@ def test_driver_recovery_window_reads_the_legacy_fresh_streak(tmp_path):
 
 def test_driver_recovery_window_is_the_global_clear_now_lever(tmp_path):
     """ALERT_RECOVERY_STREAK=1 restores the pre-#3146 "clear on one poll"."""
-    seed = {"ops/alerts/R2_DOWN/_.json": {
-        "kind": "R2_DOWN", "issue_number": 42,
+    seed = {"ops/alerts/R2_UNLISTABLE/_.json": {
+        "kind": "R2_UNLISTABLE", "issue_number": 42,
         "filed_at": "2026-01-01T00:00:00Z"}}
     proc, _store, close_log = _driver_window_harness(
         tmp_path, seed=seed,
-        body="resolve_global R2_DOWN 'healthy run'\n",
+        body="resolve_global R2_UNLISTABLE 'healthy run'\n",
         env_extra={"ALERT_RECOVERY_STREAK": "1"},
     )
     assert proc.returncode == 0, proc.stderr
