@@ -16,6 +16,32 @@ import { SLUG_MAX } from "./slug.ts";
 
 export const BRAND_SUFFIX = " | Tortoise";
 
+// ⛔ A REPEATING, punctuation-insensitive match for any brand-suffix spelling the
+// model may have emitted, so the suffix is appended exactly once.
+//
+// Two earlier versions were wrong, and each was caught only by a review round:
+//   1. `t.endsWith(BRAND_SUFFIX)` matched the exact string only, so `"|Tortoise"`
+//      (no space) got a SECOND suffix — 92% of a near-miss matrix.
+//   2. `/[\s|—–-]*[|—–-]\s*Tortoise\.?\s*$/i` allowed at most ONE trailing dot and
+//      a fixed separator set, so `"| Tortoise.."`, `"| Tortoise!"`, `": Tortoise"`,
+//      `"· Tortoise"` and an already-doubled title all still doubled (68%).
+//
+//   3. An explicit character list (`[|—–-·:•]`, then `[\s.,;:!?…·]*`) STILL only
+//      covered the characters I happened to think of: `","` as a separator and
+//      `"•"`, `")"`, `"]"`, `"}"`, `"”"`, `"*"`, `"/"`, and a trailing `-`/`–`/`—`
+//      all doubled (21.2% of a 74,520-spelling matrix), so the fix kept failing
+//      the same way one round later. Enumerating characters is the bug.
+//
+// Hence `[\p{P}\p{S}]`: ANY Unicode punctuation or symbol, in any run, on either
+// side — a CLASS, not a list. A bare space is still NOT a separator, so a title
+// that legitimately ends in the word ("Why Tortoise") is left alone, while every
+// punctuation-led spelling and its repetitions are treated as the brand suffix.
+// The `+` keeps it idempotent, which matters because `generate-seo.ts` enforces,
+// repairs, then enforces AGAIN — a first pass that left a suffix behind would be
+// appended to by the second, and the caller would receive a title that differs
+// from the one `keyword_ok` was computed on.
+const BRAND_SUFFIX_TAIL_RE = /(?:\s*[\p{P}\p{S}]\s*Tortoise\b[\p{P}\p{S}\s]*)+$/iu;
+
 export interface SeoFields {
   slug: string;
   excerpt: string;
@@ -53,30 +79,38 @@ export const constraints: Constraints = {
   truncateAtWord,
 
   metaTitle(raw: string): string {
-    let t = truncateAtWord(raw.trim(), META_TITLE_MAX);
-    if (!t) return "";
-    // IDEMPOTENT (#8293): `generate-seo.ts` enforces the model output, repairs
-    // the keyword, then enforces AGAIN so the repair cannot exceed the field
-    // limits. Appending unconditionally would give the second pass a doubled
-    // brand suffix ("… | Tortoise | Tortoise") — user-visible, because SSR
-    // renders the stored value verbatim. A title that already carries the
-    // suffix is left alone, so `enforce(enforce(x)) === enforce(x)`.
-    if (t.endsWith(BRAND_SUFFIX)) return t;
-    // Brand suffix when it fits — meta_title is the FINAL title (SSR renders
-    // the stored value verbatim; the suffix is only appended to the title
-    // fallback when meta_title is null). Editor maxLength=60 includes the
-    // suffix, so this matches the contract.
-    const withSuffix = `${t}${BRAND_SUFFIX}`;
-    if (withSuffix.length <= META_TITLE_MAX) return withSuffix;
-    // No room for the suffix — keep the truncated base (SSR appends nothing).
+    // ⛔ Strip ANY brand-suffix spelling the model may have emitted, then append
+    // the canonical one ONCE. `t.endsWith(BRAND_SUFFIX)` recognised only the
+    // exact string " | Tortoise", so any near-miss — "|Tortoise", "| tortoise",
+    // "  |  Tortoise", "| Tortoise." — failed the check and got a SECOND suffix
+    // appended, user-visible in the SERP and the <title> tag as
+    // "… |Tortoise | Tortoise". Measured at 92% of green verdicts across a
+    // near-miss suffix matrix (#8446 review).
     //
-    // A model title that already ends in a separator reaches here intact: it
-    // emitted its OWN " | Tortoise" which did not fit, so the truncation cut
-    // inside the suffix and left the "|" behind. `truncateAtWord` strips a
-    // trailing separator, but strip again here because this branch is reached
-    // with the caller's raw text on the `meta_title` path too, and a title
-    // ending in a bare "|" is user-visible in the SERP and the <title> tag.
-    return t.replace(/[\s,.;:!?|—-]+$/, "").trim();
+    // A separator is REQUIRED before the word, so a title that legitimately ends
+    // in it ("Why Tortoise") is left alone; only "… |… Tortoise" is treated as the
+    // brand suffix.
+    //
+    // Stripping BEFORE appending also makes the function idempotent in general,
+    // which the `endsWith` shortcut achieved only for the exact spelling: the old
+    // version could strip a trailing separator via `.trim()` and then append on a
+    // SECOND pass, defeating its own `enforce(enforce(x)) === enforce(x)` claim in
+    // ~0.16% of random inputs.
+    const stripped = truncateAtWord(raw.trim(), META_TITLE_MAX)
+      .replace(BRAND_SUFFIX_TAIL_RE, "")
+      .replace(/[\s,.;:!?|—–-]+$/, "")
+      .trim();
+    if (!stripped) return "";
+    // Brand suffix when it fits — meta_title is the FINAL title (SSR renders the
+    // stored value verbatim; the suffix is only appended to the title fallback
+    // when meta_title is null). Editor maxLength=60 includes the suffix, so this
+    // matches the contract.
+    const withSuffix = `${stripped}${BRAND_SUFFIX}`;
+    if (withSuffix.length <= META_TITLE_MAX) return withSuffix;
+    // No room for the suffix — keep the base (SSR appends nothing). `stripped`
+    // has already had every trailing separator removed, so a title ending in a
+    // bare "|" — user-visible in the SERP and the <title> tag — cannot escape.
+    return stripped;
   },
 
   metaDescription(raw: string): string {

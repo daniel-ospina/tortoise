@@ -31,6 +31,7 @@ from tests._github_mock import MockGitHubTransport, gh_issue, gh_pr
 from tortoise import github_map
 from tortoise.indexer.github_indexer import GitHubFetchError, GitHubIndexer
 from tortoise.log import EventLog
+from tortoise.projection import _replay_write_scope  # #7951 §17.1: replay folds need the scope
 
 
 @pytest.fixture(autouse=True)
@@ -1639,7 +1640,12 @@ def test_7951_prefix_object_in_graph_is_backfilled_to_the_journal(tmp_path):
     try:
         proj = sdk._get_proj()
         obj = github_map.issue_to_object(gh_issue(1), "acme/repo1")
-        proj.apply(obj)  # the PRE-FIX door: live graph, no journal append
+        # #7951 §17.1: the seed reproduces the PRE-FIX binary's graph-only
+        # state (a node with no journal carrier). A fold with no live write
+        # behind it is a replay, so it declares the replay scope; the guard
+        # would otherwise refuse it, which is the whole point of this lane.
+        with _replay_write_scope():
+            proj.apply(obj)  # the PRE-FIX door: live graph, no journal append
         assert _jdoor_object_count(proj, _JDOOR_OID) == 1
         assert _jdoor_journal(events) == [], "premise: the journal is empty"
 
@@ -1675,7 +1681,8 @@ def test_7951_prefix_event_in_graph_is_backfilled_to_the_journal(tmp_path):
         ev = github_map.issue_to_event(gh_issue(1), "acme/repo1",
                                        previous_state=None)
         eid = ev["eventId"]
-        proj.apply(ev)  # the PRE-FIX door: live graph, no journal append
+        with _replay_write_scope():
+            proj.apply(ev)  # the PRE-FIX door: live graph, no journal append
         assert _jdoor_event_count(proj, eid) == 1
         assert _jdoor_journal(events) == [], "premise: the journal is empty"
 
@@ -1723,7 +1730,8 @@ def test_7951_frozen_created_backfill_replays_the_live_state(tmp_path):
         ev = github_map.issue_to_event(gh_issue(1), "acme/repo1",
                                        previous_state=None)
         assert ev["eventKind"] == "github.issue.open" and ev["endedAt"] is None
-        proj.apply(ev)
+        with _replay_write_scope():
+            proj.apply(ev)
         assert _jdoor_journal(events) == [], "premise: the journal is empty"
         live_before = _jdoor_event_state(proj, _JDOOR_EID)
 

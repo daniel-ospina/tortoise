@@ -48,6 +48,25 @@ produces the duplicate issue; skipping (1) or (4) is what strands the sentinel.
 
 The runbook row for each kind lives in ``docs/ops/registry-backup-dr.md``
 (§"Alert taxonomy + triage") and is pinned to this module by the test.
+
+⛔ ONE KIND = ONE RECOVERY CONDITION = ONE EVIDENCE TIER (#3147)
+---------------------------------------------------------------
+R2_DOWN used to cover two failure modes with two different evidence
+requirements: (a) R2 is unreachable — a probe does not reach it; (b) R2 answers
+but the pool cannot be listed (``R2_LIST_OK=0``, typically a missing
+``ListObjects`` permission). The two need different recovery evidence, so the
+watcher could not safely clear the kind and ADR-011 had to refuse it the right
+to close R2_DOWN at all — a guard around a modelling error rather than a model.
+The vocabulary now models it: :data:`KIND_R2_DOWN` keeps the frozen key (a
+rename would orphan the dedup object; see the playbook above) with its meaning
+NARROWED to reachability, and :data:`KIND_R2_UNLISTABLE` is the new key for the
+listing tier. Each has its own owner (see :data:`SPECS`), its own runbook row,
+and its own issue-title token, so the watcher legitimately clears the tier its
+probe covers and the driver retains the whole-pool measurement.
+
+The operational home for the split is ``docs/ops/registry-backup-dr.md``
+§"The two R2 tiers (#3147)". ADR-011 is a dated, human-gated decision record
+and is deliberately not edited by that change.
 """
 
 from __future__ import annotations
@@ -93,8 +112,23 @@ class KindSpec:
 # ── The vocabulary — ONE constant per kind ───────────────────────────────────
 # ⛔ Never change a value. See the module docstring's migration playbook.
 
-# Driver-owned DR substrate (its own R2 preflight + storage_error + a measured pool).
+# DR substrate + reachability. The group is by SUBSTRATE, not by owner: #3147
+# moved R2_DOWN's owner to the watcher (a probe reaching R2 is a condition the
+# watcher's own read tests) while R2_UNLISTABLE and the rest stay driver-owned.
+#: #3147: the FROZEN R2 reachability key, its meaning NARROWED to the
+#: reachability tier only (the substrate does not answer a probe). The string is
+#: retained, not renamed to `R2_UNREACHABLE`, because it IS the R2 dedup key
+#: (``ops/alerts/R2_DOWN/_.json``) and the ``[DR] R2_DOWN`` adoption token — a
+#: rename is the migration playbook, not a refactor. The unlistable tier, which
+#: used to share this key, is now :data:`KIND_R2_UNLISTABLE`.
 KIND_R2_DOWN = "R2_DOWN"
+#: #3147: R2 answers (a probe reaches it) but the pool cannot be LISTED
+#: (``R2_LIST_OK=0``) — typically the access key lacks ``ListObjects`` — or the
+#: app reports a ``storage_error``. A NEW key: no live dedup object or open issue
+#: existed under it, so there is nothing to migrate. Distinct from
+#: :data:`KIND_R2_DOWN` because the two need different recovery evidence and so
+#: have different owners (see the module docstring).
+KIND_R2_UNLISTABLE = "R2_UNLISTABLE"
 KIND_APP_DOWN = "APP_DOWN"
 KIND_WATCHER_DOWN = "WATCHER_DOWN"
 KIND_SWEEP_CONFIG_ERROR = "SWEEP_CONFIG_ERROR"
@@ -175,7 +209,18 @@ def _spec(owner: str, *, emitted: bool = True, manual_close: bool = False,
 #: kind -> its declaration. The ONE site for a kind's metadata.
 SPECS: dict[str, KindSpec] = {
     # driver: its own R2 preflight + storage_error + a measured pool.
-    KIND_R2_DOWN: _spec(WRITER_DRIVER, meaning="R2 unreachable or not listable"),
+    # #3147: R2 reachability is decided by a PROBE REACHING the substrate — a
+    # condition the watcher's own R2 read also tests — so the WATCHER owns the
+    # reachability tier (it clears R2_DOWN on its next positive read) and the
+    # driver, which cannot clear it, files it when its own preflight fails.
+    # The whole-pool measurement stays with the only surface that performs it.
+    KIND_R2_DOWN: _spec(
+        WRITER_WATCHER,
+        meaning="R2 unreachable — no probe reaches the substrate (#3147)"),
+    KIND_R2_UNLISTABLE: _spec(
+        WRITER_DRIVER,
+        meaning="R2 answers but the pool cannot be listed (R2_LIST_OK=0) or the "
+                "app reports storage_error (#3147)"),
     KIND_APP_DOWN: _spec(WRITER_DRIVER, meaning="app unreachable from the driver"),
     KIND_WATCHER_DOWN: _spec(WRITER_DRIVER, meaning="watcher heartbeat stale"),
     KIND_SWEEP_CONFIG_ERROR: _spec(

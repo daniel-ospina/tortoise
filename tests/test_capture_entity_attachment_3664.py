@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import pytest
 
+# #7951 §17.1: replay folds need the scope.
+from tortoise.projection import _replay_write_scope
 from tortoise.sdk import TortoiseSDK
 
 CONV = [
@@ -1032,8 +1034,10 @@ def test_entity_linked_fold_rejects_unknown_label_and_rel(journal_sdk):
     proj = sdk._get_proj()
     g = proj.g
     # Endpoints that DO exist, so an unguarded interpolation is observable.
-    proj.apply({"type": "SessionRecorded", "id": "canary-session",
-                "created_at": "2026-01-01T00:00:00+00:00", "turn_count": 1})
+    # #7951 §17.1: a hand-built journal record folded directly is a REPLAY.
+    with _replay_write_scope():
+        proj.apply({"type": "SessionRecorded", "id": "canary-session",
+                    "created_at": "2026-01-01T00:00:00+00:00", "turn_count": 1})
     pid = sdk.create_point("statement", "canary")["id"]
     oid = sdk.create_object("canary-object")["id"]
 
@@ -1412,7 +1416,8 @@ def test_link_entity_rejects_ontology_invalid_triple(journal_sdk):
     proj = sdk._get_proj()
     g = proj.g
     pid = sdk.create_point("statement", "p")["id"]
-    proj.apply({"type": "SessionRecorded", "id": "s-triple"})
+    with _replay_write_scope():
+        proj.apply({"type": "SessionRecorded", "id": "s-triple"})
 
     # (Session)-[:aboutSubject]->(Subject): each field valid, table forbids.
     with pytest.raises(ValueError, match="ONTOLOGY"):

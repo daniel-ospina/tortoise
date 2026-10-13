@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,91 @@ SUPPORTED_URI_SCHEMES = ("docker", "redis", "rediss")
 # set so the fail-before-first-write chain cannot diverge (pinned by
 # test_loopback_predicate_single_source).
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+#: #4240 — base dir for the hosted lane's per-graph JSONL rebuild journal.
+#: Unset ⇒ **no journal** (byte-identical to pre-#4240: the lane journals
+#: nothing). Set ⇒ every hosted data SDK is built with an ``event_log_path``,
+#: so the JSONL-only reassembly records (``EntityLinked``, ``SessionRecorded``,
+#: ``ObjectRegistered``, ``PointAdded``, ``EntityMutated``) actually land and
+#: ``rebuild_all`` / ``rebuild`` / ``recover_from_log`` can reconstruct the
+#: capture — closing the #2296 live-only-edge hazard for this lane.
+#: ⚠️ The JSONL is a DOMAIN EVENT LOG, **never the durability mechanism**
+#: (``docs/durability-posture.md``): it makes the derived graph REBUILDABLE,
+#: it does not keep it alive.
+#: ⚠️ Records are fail-soft at the write site (a failed append is counted and
+#: logged, never raised — the graph mutation already succeeded). The deployed
+#: guard is ``entrypoint.sh``'s boot-time WRITABILITY probe (not just
+#: ``mkdir -p``): a base dir that exists but cannot be written fails the boot
+#: loudly for a NON-ROOT uid (mode bits), and for EROFS/ENOSPC on ANY uid
+#: (root cannot bypass those). It does NOT cover a mode-bit failure when the
+#: server runs as root — ``Dockerfile.hosted`` sets no ``USER``, so on Fly the
+#: process is uid 0 and the probe write succeeds on a mode-0500 dir. That case
+#: is covered by the runtime signal, not the boot: a failed append logs at
+#: ERROR, increments ``tortoise_journal_write_failures_total`` and is disclosed
+#: on the capture receipt (``TortoiseSDK._emit_event``). A journal that starts
+#: failing AFTER that probe (the foreseeable trigger is ENOSPC once the journal
+#: grows below the volume's free space) is recorded, not fatal — see #5612 and
+#: ``TortoiseSDK._emit_event``.
+_HOSTED_EVENT_LOG_ENV = "TORTOISE_EVENT_LOG_BASE_DIR"
+
+
+#: The graph-name charset ``TortoiseSDK.__init__`` enforces (namespace and
+#: graph_name alike). The journal key must satisfy it or it can escape base.
+_JOURNAL_KEY_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$")
+
+
+def _resolve_event_log_path(*, namespace: str | None,
+                            graph_name: str | None) -> str | None:
+    """Per-graph JSONL rebuild journal path for the hosted lane (#4240).
+
+    ONE file per graph under ``TORTOISE_EVENT_LOG_BASE_DIR``, so a rebuild of a
+    graph replays exactly its own journal and two orgs can never share one. The
+    key is the SDK's OWN derived graph name (``sdk._derive_graph_name``) — the
+    ONE derivation of namespace/graph_name → graph, so the journal can never
+    name a graph the SDK did not open. A local re-derivation is the divergence
+    class the #4240 review found: the branches are not obvious
+    (``namespace="test-foo"`` opens ``test_foo_tortoise``, NOT ``org_test-foo``).
+
+    Returns ``None`` when the base dir is unset — no journal (the pre-#4240
+    behaviour; embedded/dev/CI stay journal-less) — and for the registry
+    control plane / the unnamed default graph, which are not org data graphs
+    and are never rebuilt from this journal.
+
+    Charset: the key is validated against the SDK's OWN graph-name rule and a
+    violation RAISES. Sanitizing instead would silently key the journal to a
+    directory no graph uses — and the prior guard kept ``.``, so a ``..`` key
+    survived until ``TortoiseSDK.__init__`` rejected it, i.e. the stated
+    anti-traversal guard was dead.
+
+    ⛔ This lives HERE, not in ``hosted_api``, because of what an *import* of
+    ``hosted_api`` costs: it builds the whole FastAPI app at module scope
+    (~1 s) and, more importantly, its presence in ``sys.modules`` IS the
+    runtime deployment discriminator every self-host branch reads
+    (``mcp_server.tortoise_pack_install``, ``operator_alert.alert_store``,
+    ``mcp_server``'s own fast-path invariant). The MCP lane must resolve its
+    journal without importing the hosted app; ``hosted_api`` re-exports this
+    name for its own lane and the existing callers, so there is still exactly
+    ONE derivation (#7951 review P1).
+    """
+    base = os.environ.get(_HOSTED_EVENT_LOG_ENV)
+    if not base:
+        return None
+    if graph_name is None and (not namespace or namespace == "registry"):
+        return None
+    # Function-level: ``sdk`` imports ``projection``, which imports THIS
+    # module, so a module-level import would close the cycle. ``tortoise.sdk``
+    # is already loaded by the time any caller here runs (mcp_auth/hosted_api
+    # both import it), so this is a ``sys.modules`` lookup — and it is the
+    # ONLY derivation, never a re-implementation.
+    from tortoise.sdk import _derive_graph_name
+    key = _derive_graph_name(namespace=namespace, graph_name=graph_name)
+    if not _JOURNAL_KEY_RE.match(key):
+        raise ValueError(
+            f"refusing to build a journal path for unsafe key {key!r} "
+            f"(namespace={namespace!r}, graph_name={graph_name!r}) — it is not "
+            "a valid graph name and could escape the journal base dir")
+    return os.path.join(base, key, "events.jsonl")
 
 
 def is_loopback_uri(uri: str | None) -> bool:

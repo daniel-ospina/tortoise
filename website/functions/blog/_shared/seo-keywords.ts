@@ -36,8 +36,15 @@ export function keywordsFor(tag: string): string[] {
  */
 export function primaryKeyword(tags: string[]): string | null {
   for (const tag of tags) {
-    const first = keywordsFor(tag)[0];
-    if (first) return first;
+    for (const candidate of keywordsFor(tag)) {
+      // A keyword that normalises to nothing carries no term. Returning it would
+      // make `containsKeyword` return true unconditionally (it treats an empty
+      // needle as "already present") and `ensureKeyword` a silent no-op — the
+      // #8320 vacuity, reachable from a DATA-ONLY edit to keywords.ts, which is
+      // documented as the single file a keyword-research pass edits (#8446
+      // review). Skip it rather than return it.
+      if (normalizeForMatch(candidate)) return candidate;
+    }
   }
   return null;
 }
@@ -58,6 +65,75 @@ export function primaryKeyword(tags: string[]): string | null {
  */
 export function resolvePrimaryKeyword(suppliedTags: string[], generatedTags: string[]): string | null {
   return primaryKeyword(suppliedTags.length > 0 ? suppliedTags : generatedTags);
+}
+
+/**
+ * Every keyword in the researched vocabulary, deduped, in a stable order.
+ *
+ * Used to SEED THE PROMPT when the caller supplied no tags (#8445): without it
+ * the model is told "no mapped keywords", composes a fluent title with no
+ * keyword in it, and the repair then forces one on — producing
+ * `"<keyword>: <its own title>"`. The model cannot be asked for a keyword we
+ * have not shown it, and it cannot be asked for the TAG-DERIVED one because
+ * that is derived from the tags it has not written yet.
+ *
+ * ⛔ The default is the WHOLE vocabulary, deliberately. `canonicalKeyword` accepts
+ * every one of these terms, so a seed list narrower than the validator makes the
+ * two disagree: the prompt would present a partial list as the complete choice
+ * set ("choose exactly ONE of these researched keywords") while the validator
+ * would have accepted a term that was never offered.
+ *
+ * Order is ROUND-ROBIN ACROSS TAGS, not tag-then-keywords. `TAG_KEYWORDS` is a
+ * plain object, so insertion order decided which tags survived a cap — with the
+ * previous `limit = 60`, the first two tags consumed it and nine of the twelve
+ * contributed nothing (#8446 review). A cap is still supported for callers that
+ * want one, and round-robin makes any cap fair across tags instead of starving
+ * whichever tags happen to be declared last.
+ */
+export function allKeywords(limit = Number.POSITIVE_INFINITY): string[] {
+  const cap = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : Number.POSITIVE_INFINITY;
+  const lists = Object.keys(TAG_KEYWORDS).map((tag) => keywordsFor(tag));
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (let depth = 0; out.length < cap; depth++) {
+    let sawAny = false;
+    for (const list of lists) {
+      if (depth >= list.length) continue;
+      sawAny = true;
+      const kw = list[depth];
+      const norm = normalizeForMatch(kw);
+      if (!norm || seen.has(norm)) continue;
+      seen.add(norm);
+      out.push(kw);
+      if (out.length >= cap) return out;
+    }
+    if (!sawAny) break;
+  }
+  return out;
+}
+
+/**
+ * The researched spelling of `keyword`, or null when it is not one of ours.
+ *
+ * The model returns its own spelling (`"LONG-TERM MEMORY FOR AI AGENTS"`,
+ * `"Long  Term  Memory  for  AI  Agents"`), and the vocabulary check deliberately
+ * normalises. But `primary_keyword` is documented as "the keyword the response is
+ * verified against" and callers compare it against `TAG_KEYWORDS`/tags, so the
+ * UN-normalised claim would not match anything the caller can look up — the same
+ * article could return two different strings for one keyword (#8446 review).
+ * Canonicalising here also bounds the value: a vocabulary term is at most
+ * `TAG_LEN_MAX` characters, so no separate length guard is needed at the call
+ * site.
+ */
+export function canonicalKeyword(keyword: string): string | null {
+  const norm = normalizeForMatch(keyword);
+  if (!norm) return null;
+  for (const tag of Object.keys(TAG_KEYWORDS)) {
+    for (const kw of keywordsFor(tag)) {
+      if (normalizeForMatch(kw) === norm) return kw;
+    }
+  }
+  return null;
 }
 
 /** Normalize for a contains-check: lowercase, punctuation -> spaces. */

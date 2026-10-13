@@ -45,7 +45,7 @@ from tortoise.sdk import TortoiseSDK
 
 # ── Live-FalkorDB + FTS availability ───────────────────────────────────────
 _URI = os.environ.get(
-    "TORTOISE_DB_URI",
+    "TORTOISE_DB_URI",  # empty-uri-default-ok: #2815 skip declared; converting flips the tier-2 lane
     _live_utils.docker_uri("tortoise_test_matrix")).rstrip("/")
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
