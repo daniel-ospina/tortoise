@@ -210,6 +210,25 @@ switch (scenario) {
     out.changeCounts = out.updates.map((u) => u.changes);
     break;
   }
+  case "single_flight_failure": {
+    // The FAILURE mirror of `single_flight`: the shared attempt is refused by the
+    // provider (a retryable 5xx, or a terminal `invalid_grant`). Two concurrent
+    // callers must still share ONE fetch and receive the SAME classification, and
+    // the map entry must be CLEARED so the next call retries instead of reusing the
+    // dead promise. `afterFetchCount == 2` is what proves the clear: a `finally`
+    // that never runs on the failure path leaves the rejected envelope cached.
+    const db = new FakeD1(row({ access_token_expires_at: Date.now() + 1_000 }));
+    installFetch(opts.responses);
+    env.SESSIONS = db;
+    out.results = await Promise.all([
+      token.getAccessTokenForSession(env, "h1"),
+      token.getAccessTokenForSession(env, "h1"),
+    ]);
+    out.fetchCount = out.fetches.length;
+    out.after = await token.getAccessTokenForSession(env, "h1");
+    out.afterFetchCount = out.fetches.length;
+    break;
+  }
   case "cas_loser": {
     // The CROSS-ISOLATE race the in-flight map cannot see: another isolate
     // rotates the token between our SELECT and our CAS. `beforeCas` mutates the
@@ -348,6 +367,53 @@ def test_property_1_single_flight_issues_exactly_one_refresh() -> None:
     assert out["changeCounts"] == [1], (
         f"write outcomes were {out['changeCounts']!r} — expected exactly one rotation"
     )
+
+
+def test_property_1_a_shared_failure_is_delivered_to_every_waiter_and_cleared() -> None:
+    """A failed shared refresh reaches EVERY waiter — and its map entry is cleared.
+
+    `single_flight` proves the success path; this is its failure mirror, and the
+    half a regression would go silent on. Two concurrent callers must share exactly
+    ONE provider attempt even when that attempt FAILS — neither gets a second fetch,
+    and both receive the SAME classification: a retryable 5xx is `unavailable`, a
+    terminal `invalid_grant` is `no_session`. And because the in-flight entry is
+    removed in a `finally`, a SUBSEQUENT call must issue a NEW fetch — a failure
+    envelope left in the map would pin the session to the fault forever, and a
+    clear that only ran on success would never run here at all.
+
+    Removing the `finally` (or clearing only on success) leaves the shared rejected
+    envelope in `inFlightRefreshes`, so the follow-up call reuses it and
+    `afterFetchCount` stays 1 instead of 2 — this test goes red on that assertion.
+    Verified by mutation (see the PR body).
+    """
+    for responses, expected_reason in (
+        ([{"status": 500, "body": {"error": "boom"}}], "unavailable"),
+        ([{"status": 400, "body": {"error": "invalid_grant"}}], "no_session"),
+    ):
+        out = _run("single_flight_failure", responses=responses)
+        # ONE attempt is shared by both concurrent callers, however it ends.
+        assert out["fetchCount"] == 1, (
+            f"two concurrent callers issued {out['fetchCount']} provider refreshes on a "
+            f"failure ({expected_reason}) — the in-flight guard must dedupe the ATTEMPT, "
+            "not only the success"
+        )
+        # BOTH waiters get the SAME failure class — one shared promise, not a lucky one.
+        assert out["results"] == [
+            {"ok": False, "reason": expected_reason},
+            {"ok": False, "reason": expected_reason},
+        ], (
+            f"the shared failure was not delivered to both waiters as {expected_reason!r}: "
+            f"{out['results']!r}"
+        )
+        # The entry was CLEARED: the next call retries instead of reusing the dead envelope.
+        assert out["afterFetchCount"] == 2, (
+            f"a subsequent call issued {out['afterFetchCount']} total fetches (expected 2) — "
+            "the failed in-flight entry was not cleared in a `finally`, so the session is "
+            "pinned to the fault"
+        )
+        assert out["after"] == {"ok": False, "reason": expected_reason}, (
+            f"the retry did not reclassify the failure: {out['after']!r}"
+        )
 
 
 def test_property_1_the_cas_serves_a_cross_isolate_loser_without_clobbering() -> None:
@@ -520,7 +586,7 @@ _AUTH = (
 
 
 def test_property_4_auto_advance_without_a_manual_click() -> None:
-    """The flow advances to the AS authorize URL, never back into the calling route.
+    """The flow advances to the authorize URL it is given, never to a route of its own.
 
     The reference page runs the flow on load AND on every `INITIAL_SESSION` /
     `SIGNED_IN` event, so a session that lands during a sign-in hop is picked up
@@ -532,10 +598,13 @@ def test_property_4_auto_advance_without_a_manual_click() -> None:
     round trip with still no session stops instead of bouncing forever
     (#3485/#3503).
 
-    The advance target is asserted BOTH ways — it equals the rebuilt authorize
-    URL and it differs from the calling route — so the self-redirect loop cannot
-    be reintroduced silently. Removing the property is a decision table that no
-    longer advances — verified by mutation (see the PR body).
+    The advance target is pinned as a PASS-THROUGH: the decision must return the
+    `authorize_url` it was handed, never substitute `auth_url`, a hardcoded AS URL,
+    or the route that called the decision. A table of constants cannot tell a
+    pass-through from a hardcode — so a second run feeds DISTINCT sentinels and
+    asserts the decision echoes them, which is what makes the self-redirect loop
+    falsifiable. Verified by mutation (see the PR body): advancing to `auth_url`
+    or to any hardcoded route goes red on the sentinel below.
     """
     cases = [
         {"session": "usable", "authorize_url": _AUTHORIZE, "auth_url": _AUTH, "attempted": False},
@@ -558,24 +627,39 @@ def test_property_4_auto_advance_without_a_manual_click() -> None:
         {"action": "unavailable", "status": 503},
     ], f"the advance decision table changed: {out['results']!r}"
 
-    # The loop is structurally gone: the advance target differs from the route
-    # that calls the decision (and from the sign-in hop).
-    for advance in out["results"][:2]:
-        assert advance["to"] != _CALLING_ROUTE, (
-            "a usable session 302s back to the route that called the decision — on return "
-            "from sign-in the browser is already there, so this is an infinite redirect loop"
-        )
-        assert advance["to"] != _AUTH, (
-            "a usable session 302s to the sign-in hop instead of advancing the flow"
-        )
+    # The decision RETURNS THE INPUT it was given — it does not pick a route. The
+    # sentinels differ from every fixture constant (the AS URL, the sign-in hop,
+    # the calling route), so a substitution or a hardcode cannot pass by accident:
+    # `to: input.auth_url` — the cycle-1 loop regression — is red here, and so is a
+    # hardcoded `_CALLING_ROUTE` or `_AUTHORIZE`, because neither is the sentinel.
+    sentinel_authorize = "https://sentinel.invalid/authorize?client_id=SENTINEL&state=SENTINEL"
+    sentinel_auth = "https://sentinel.invalid/auth?next=%2Fconsent%3Fconsent_retry%3D1"
+    echoed = _run("auto_advance", cases=[
+        {"session": "usable", "authorize_url": sentinel_authorize, "auth_url": sentinel_auth, "attempted": False},
+        {"session": "none", "authorize_url": sentinel_authorize, "auth_url": sentinel_auth, "attempted": False},
+    ])["results"]
+    assert echoed == [
+        {"action": "advance", "status": 302, "to": sentinel_authorize},
+        {"action": "sign_in", "status": 302, "to": sentinel_auth},
+    ], (
+        "the decision substituted a route of its own instead of returning the URL it was "
+        f"handed: {echoed!r}. Advancing to `auth_url` (or to the calling route, "
+        f"{_CALLING_ROUTE}) is the self-redirect loop this property exists to exclude"
+    )
 
-    # The `attempted` carrier is a NAMED param, distinct from `stale=1`, and the
-    # sign-in hop's return target carries it (the round trip that sets it).
+    # The `attempted` carrier is a NAMED param, distinct from `stale=1`. The sign-in
+    # target is read from the PRODUCT's output (not the `_AUTH` fixture) so the two
+    # assertions below are about what the decision emits: the module declares
+    # `CONSENT_RETRY_PARAM`, and the URL it returns must carry that name. The route
+    # that mints the hop is §9 step 3 and is not built here — this pins the
+    # decision's contract, not a producer that does not exist.
     assert out["consentRetryParam"] == "consent_retry"
-    return_to = parse_qs(urlparse(_AUTH).query)["next"][0]
+    sign_in_target = out["results"][2]["to"]
+    return_to = parse_qs(urlparse(sign_in_target).query)["next"][0]
     assert f"{out['consentRetryParam']}=1" in return_to, (
-        "the sign-in hop's return target does not carry the already-attempted marker — "
-        "the loop guard's `attempted` input has no producer"
+        "the sign-in target the decision returns does not carry the already-attempted "
+        f"marker named by CONSENT_RETRY_PARAM ({out['consentRetryParam']!r}) — the loop "
+        "guard's `attempted` input has no producer"
     )
     assert "stale" not in return_to, (
         "the return target reuses `stale=1`, which marks an out-of-date snapshot and means "
