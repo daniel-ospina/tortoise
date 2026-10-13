@@ -2501,6 +2501,17 @@ surfaces:
   # restore assertion bound must stay BELOW the client socket timeout so
   # "overran its bound" and "the socket timed out" remain distinguishable.
   - test_7846_restore_doc_and_bounds.py
+  # #3513 (epic #1714 R1): the integration grid's tile inventory is ONE
+  # declaration asserted across the surfaces that must agree (the JS grid ↔
+  # `tortoise/demand.py::DEMAND_DECLARED_TILES` ↔ every
+  # `config/connector_manifest.yaml` connector). DUAL-registered with
+  # `onboarding` for the JS direction: a `website/apps/dashboard/src/` diff
+  # selects `onboarding`, while BOTH backend sources of that declaration match
+  # NO named surface and fall through to THIS `core` fallback — so without this
+  # arm a manifest/declared-tile addition that grows the inventory with no grid
+  # tile is green in its own PR and surfaces as an unrelated red in the next
+  # dashboard PR (#1349/#7076 class). Text-only: no docker, no node, no network.
+  - test_integrations_grid_inventory.py
   # #5275: the ARMED fail-loud contract must survive the READ path.
   # `tortoise/search_engine.py` (the `fallback_tfidf` sink) selects `core`,
   # so this is the surface that runs the guard on that diff; `tortoise/sdk.py`
@@ -2715,6 +2726,12 @@ surfaces:
   # contract under test when only the client moves. Dual-registered with `api`
   # and `core` (see the `api` arm).
   - test_data_source_capture.py
+  # #3513 (epic #1714 R1): the integration grid's tile inventory is ONE
+  # declaration, asserted across the surfaces that must agree (the JS grid ↔
+  # the demand record's keys ↔ the connector manifest). Text-only (parses the
+  # dashboard module), so it needs no docker, no node, no network — and it must
+  # run on a `website/apps/dashboard/src/` diff, which selects THIS surface.
+  - test_integrations_grid_inventory.py
   - test_onboarding_auto_complete.py
   # #3517: the capture disclosure's single source of truth + the non-LLM
   # renderer + the false-promise grep (lane-agnostic: no DB, no network — one
