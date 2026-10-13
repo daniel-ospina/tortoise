@@ -32,8 +32,18 @@ MAX_FIX_TRIES="${MAX_FIX_TRIES:-3}"
 # sysctl -n hw.ncpu is macOS-only: on a Linux cell sysctl may be absent entirely (Debian's procps
 # does not ship it any more — verified in debian:stable-slim) and hw.ncpu is a macOS key regardless,
 # so the fallback silently pinned _NCPU=4 for EVERY cell and MAX_LOAD=40 with it (#1702).
+is_num() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 _NCPU="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
+# Coerce HERE — immediately before the ONLY reads of _NCPU and MAX_LOAD, not in the input-validation
+# block 30 lines below. A guard placed THERE guarded nothing (#1702 review): MAX_LOAD is derived on
+# the next line, a non-numeric _NCPU already made `$(( _NCPU * 10 ))` fail, and under `set -u` the
+# loop then aborted at the first `[ "$L" -ge "$MAX_LOAD" ]` — the same failure class this PR fixes.
+# MAX_LOAD gets the same coercion for the same reason every other threshold below does: it is
+# supplied by the launchd plist, and a typo there would open the load gate rather than close it
+# (`[ -ge ]` on a non-number is FALSE, and a false test in the gate chain ALLOWS dispatch).
+is_num "${_NCPU:-}"    || _NCPU=4
 MAX_LOAD="${MAX_LOAD:-$(( _NCPU * 10 ))}"
+is_num "${MAX_LOAD:-}" || MAX_LOAD=$(( _NCPU * 10 ))
 MAX_LANES="${MAX_LANES:-4}"
 MAX_REVIEW="${MAX_REVIEW:-4}"   # keep in sync with install.sh's default and README §4
 MERGE_PRIORITY_AT="${MERGE_PRIORITY_AT:-10}"   # above this many open PRs, drain before dispatching
@@ -59,13 +69,11 @@ safe_ref() {
   case "${1:-}" in ''|*[!A-Za-z0-9._/-]*) return 1 ;; esac
   git -C "$REPO" check-ref-format --branch "$1" >/dev/null 2>&1
 }
-is_num() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 # A non-numeric threshold makes `[ -le ]` ERROR -- which returns false, and a false test in the gate
 # chain OPENS the gate. So a typo in the plist env (MIN_MEM_FREE_MB=abc) would silently remove the very
 # back-pressure these gates exist to apply. Coerce to the documented default instead of failing open.
 is_num "${MIN_SWAP_FREE:-600}"   || MIN_SWAP_FREE=600
 is_num "${MIN_MEM_FREE_MB:-512}" || MIN_MEM_FREE_MB=512
-is_num "${_NCPU:-}"             || _NCPU=4
 
 # ── portable OS primitives ─────────────────────────────────────────────────────
 # This harness runs on macOS (the operator's box, launchd) AND on a Linux cell
@@ -115,6 +123,37 @@ swap_usage_mb() { # [<meminfo-file>]
       {for(i=1;i<=NF;i++){if($i=="total")t=$(i+2); if($i=="free")f=$(i+2)}}
       END {if (t=="" || f=="") exit 1; printf "%d %d\n", f, t}'
   fi
+}
+# Available memory as MB. Linux: /proc/meminfo MemAvailable, falling back to MemFree+Cached on a
+# kernel too old to expose it; macOS: `free` + `inactive` vm_stat pages (top's "unused" PhysMem is a
+# different figure, and macOS shows pressure as COMPRESSION with swap flat). NON-ZERO rc when
+# unmeasurable, and the CALLER MUST keep treating that as UNKNOWN -> do not add work: unlike load and
+# swap this probe is deliberately FAIL-CLOSED ("UNKNOWN, not ample"), and that ruling is not this
+# function's to change. Before #1702 there was no Linux path at all, so on a cell the probe yielded
+# empty, MEM_UNKNOWN was set every cycle, and the capacity gate named `mem_probe_failed` forever —
+# the controller completed cycles and dispatched nothing, which is the false green #1702 exists to
+# remove. The macOS page size is derived from vm_stat's own header (16 KiB is Apple silicon; Intel
+# Macs are supported and a hardcoded 16384 over-reports memory 4x -- the unsafe direction).
+# The argument is a TEST SEAM (the call site passes nothing).
+mem_avail_mb() { # [<meminfo-file>]
+  local p="${1:-/proc/meminfo}" mb
+  if [ -r "$p" ]; then
+    mb="$(awk '
+      /^MemAvailable:/ {a=$2}
+      /^MemFree:/ {f=$2}
+      /^Cached:/ {c=$2}
+      END {if (a!="") v=a; else if (f!="" && c!="") v=f+c; else exit 1
+           printf "%d", v/1024}' "$p" 2>/dev/null)" || return 1
+  else
+    mb="$(vm_stat 2>/dev/null | awk '
+      /page size of/ {ps=$8}
+      /Pages free/ {gsub(/[.]/,"",$3); f=$3}
+      /Pages inactive/ {gsub(/[.]/,"",$3); i=$3}
+      END {if (ps=="") ps=16384; if (f=="" || i=="") exit 1
+           printf "%d", (f+i)*ps/1048576}')" || return 1
+  fi
+  is_num "$mb" || return 1
+  printf '%s\n' "$mb"
 }
 # $O is operator config, not attacker input, but a quote or metacharacter here would break every
 # spawn (the tmux command string is executed via sh -c). Fail loudly instead of failing mysteriously.
@@ -502,21 +541,15 @@ PY
   if _sw="$(swap_usage_mb)"; then SWFREE="${_sw%% *}"; SWTOTAL="${_sw##* }"; fi
   is_num "$SWFREE" || SWFREE=9999
   is_num "$SWTOTAL" || SWTOTAL=0
-  # Available memory = free + inactive (top's "unused" PhysMem is NOT it; that is a different figure).
-  # Derive the page size from vm_stat's own header rather than hardcoding it: 16 KiB is Apple
-  # silicon, but install.sh supports Intel Macs (it adds /usr/local/bin), where a hardcoded 16384
-  # over-reports available memory 4x -- the unsafe direction.
-  VMSTAT_OUT="$(vm_stat 2>/dev/null)"
-  if [ -z "$VMSTAT_OUT" ]; then
+  # Available memory through the portable helper: /proc/meminfo (MemAvailable, else MemFree+Cached)
+  # on a cell; `free`+`inactive` vm_stat pages on macOS. It fails CLOSED (rc != 0 -> UNKNOWN -> do
+  # not add work) -- before #1702 the probe was vm_stat-only and therefore failed closed on EVERY
+  # Linux cell, which is the false green (cycles complete, nothing ever dispatches) this PR removes.
+  if MEMAVAIL_MB="$(mem_avail_mb)"; then
+    MEM_UNKNOWN=0
+  else
     # The probe itself failed. UNKNOWN, not ample: we cannot see capacity, so we do not add work.
     MEMAVAIL_MB=0; MEM_UNKNOWN=1
-  else
-    MEMAVAIL_MB="$(printf '%s\n' "$VMSTAT_OUT" | awk '
-      /page size of/ {ps=$8}
-      /Pages free/ {gsub(/[.]/,"",$3); f=$3}
-      /Pages inactive/ {gsub(/[.]/,"",$3); i=$3}
-      END {if (ps=="") ps=16384; printf "%d", (f+i)*ps/1048576}')"
-    MEM_UNKNOWN=0
   fi
   echo "[cap] load=$L/$MAX_LOAD lanes=$LANES/$MAX_LANES mem_avail=${MEMAVAIL_MB}M/${MIN_MEM_FREE_MB}M swap_free=${SWFREE}M/${MIN_SWAP_FREE}M" >> "$LOG"
   # Four gates. swap_total=0 => swap uninitialised (fresh boot), NOT pressure — allow.
@@ -527,9 +560,10 @@ PY
   elif [ "$L" -ge "$MAX_LOAD" ]; then GATE_WHY="load=$L>=max_load=$MAX_LOAD"
   elif [ "$LANES" -ge "$MAX_LANES" ]; then GATE_WHY="lanes=$LANES>=max_lanes=$MAX_LANES"
   elif [ "$SWTOTAL" -ne 0 ] && [ "$SWFREE" -le "${MIN_SWAP_FREE:-600}" ]; then GATE_WHY="swap_free=${SWFREE}M<=min_swap_free=${MIN_SWAP_FREE:-600}M"
-  # "A failed probe is UNKNOWN, not ample" is only true if MEM_UNKNOWN can be SET, and awk's END
-  # block always prints (`printf "%d"` yields 0 for unset fields), so testing for an empty
-  # MEMAVAIL_MB could never be true. The vm_stat call is therefore tested on its own, above.
+  # "A failed probe is UNKNOWN, not ample" is only true if MEM_UNKNOWN can be SET, and it is set
+  # from mem_avail_mb()'s EXIT STATUS (its awk `exit 1`s on absent fields) rather than from an empty
+  # string: awk's END block always ran, so `printf "%d"` yielded 0 for unset fields and a test for
+  # an empty MEMAVAIL_MB could never be true. The helper is therefore tested on its own, above.
   elif [ "${MEM_UNKNOWN:-0}" = "1" ]; then GATE_WHY="mem_probe_failed (capacity unknown -> do not add work)"
   elif [ "$MEMAVAIL_MB" -le "$MIN_MEM_FREE_MB" ]; then GATE_WHY="mem_avail=${MEMAVAIL_MB}M<=min_mem_free_mb=${MIN_MEM_FREE_MB}M"
   fi

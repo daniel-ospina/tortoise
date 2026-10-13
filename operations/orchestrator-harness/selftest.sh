@@ -900,7 +900,15 @@ ck "refresh-candidates.sh dedupes the backlog in place and nothing running it re
 mkdir -p "$TMP/gnubin"
 cat > "$TMP/gnubin/stat" <<'SH'
 #!/bin/bash
-if [ "${1:-}" = "-c" ]; then /usr/bin/stat -f '%m' "${3:-}"; exit $?; fi
+# GNU coreutils shape, emulated on ANY host:
+#   -c '%Y' <file>  -> succeeds, printing the epoch (real GNU behaviour)
+#   -f '%m' <file>  -> prints the FILESYSTEM LISTING on stdout and exits 1 (real GNU behaviour)
+# The -c branch MUST NOT delegate to the ambient /usr/bin/stat. Doing so emulates "GNU success" with
+# a BSD binary on a mac and with a GNU one on Linux — either way the drive tests the HOST, not the
+# GNU shape, and on Linux the branch returned GNU's listing/failure so the reaper skipped every
+# session and the drive below reaped nothing (the four §19 checks false-redded the fixed tree).
+# `date -r <file> +%s` is the portable way to ask any host for a file's epoch mtime.
+if [ "${1:-}" = "-c" ]; then date -r "${3:-}" +%s; exit $?; fi
 if [ "${1:-}" = "-f" ]; then echo "/dev/disk1 234881024 1234 5678 9% /"; exit 1; fi
 exit 1
 SH
@@ -911,10 +919,14 @@ sed -n '/^file_mtime_epoch() {/,/^}/p' "$LOOP" > "$TMP/mtime-body.sh"
 if need "$TMP/mtime-body.sh" "file_mtime_epoch() is extracted from the shipped loop"; then
   { grep -m1 '^is_num() {' "$LOOP"; cat "$TMP/mtime-body.sh"; } > "$TMP/mtime.sh"
   : > "$TMP/mt.log"; touch -t 202601010000 "$TMP/mt.log"
-  want="$(/usr/bin/stat -f '%m' "$TMP/mt.log")"
+  # The expected epoch is the FILE's, asked of the host portably. `/usr/bin/stat -f '%m'` is BSD-only:
+  # on GNU coreutils it prints the filesystem listing to stdout and exits 1, so `want` became a
+  # listing and the comparisons below failed against a CORRECT helper. `date -r <file> +%s` works on
+  # both (GNU and BSD date accept a reference file), so this check no longer assumes the host's shape.
+  want="$(date -r "$TMP/mt.log" +%s)"
   got="$(bash -c ". '$TMP/mtime.sh'; file_mtime_epoch '$TMP/mt.log'")"
-  [ "$got" = "$want" ] && rc=0 || { rc=1; echo "      bsd got '$got' want '$want'"; }
-  ck "file_mtime_epoch(): the BSD/macOS path returns the file's epoch mtime" $rc
+  [ "$got" = "$want" ] && rc=0 || { rc=1; echo "      host got '$got' want '$want'"; }
+  ck "file_mtime_epoch(): the host's real stat path returns the file's epoch mtime" $rc
   got="$(PATH="$TMP/gnubin:$PATH" bash -c ". '$TMP/mtime.sh'; file_mtime_epoch '$TMP/mt.log'")"
   [ "$got" = "$want" ] && rc=0 || { rc=1; echo "      gnu got '$(printf '%s' "$got" | tr '\n' '|')'"; }
   ck "file_mtime_epoch(): the GNU shape (stat -f prints a listing) still yields ONE numeric epoch" $rc
@@ -951,8 +963,16 @@ SH
   ck "shipped reaper, GNU stat shape: the cycle COMPLETES (rc 0) with no arithmetic abort" $rc
   case "$out" in *"merge-999"*) rc=0;; *) rc=1;; esac
   ck "shipped reaper, GNU stat shape: the stale session is reaped" $rc
-  case "$out" in *"merge-100"*) rc=1;; *) rc=0;; esac
-  ck "shipped reaper, GNU stat shape: the fresh session is left alone" $rc
+  # ⛔ NOT a bare "does not contain merge-100": that is trivially true when the reaper ABORTS, so it
+  # PASSED on the pre-fix code (verified against origin/main's orch-loop.sh). Assert the POSITIVE in
+  # the same check — the run completed (rc 0) AND the killed set is EXACTLY the stale session — so a
+  # crash and an over-reaching reaper both fail here. The stub records `$3` of `kill-session -t
+  # "=$s"`, i.e. the exact-match token `=merge-999`; `grep -o` + stripping keeps the comparison exact
+  # rather than a substring match that `=merge-999 =merge-100" would also satisfy.
+  case "$out" in *"rc=0"*) rc=0;; *) rc=1; echo "      not rc=0: $out";; esac
+  killed_list="$(printf '%s\n' "$out" | grep -o 'killed=.*' | sed 's/^killed= *//')"
+  [ "$killed_list" = "=merge-999" ] || { rc=1; echo "      killed exactly: '$killed_list'"; }
+  ck "shipped reaper, GNU stat shape: completes (rc 0) and reaps exactly the stale session" $rc
   grep -q 'reap-worker' "$TMP/RG/rw.log" 2>/dev/null && rc=0 || rc=1
   ck "shipped reaper, GNU stat shape: the kill is logged" $rc
 fi
@@ -984,25 +1004,69 @@ if need "$TMP/swap.sh" "swap_usage_mb() is extracted from the shipped loop"; the
   [ "$got" = "2047 2048" ] && rc=0 || { rc=1; echo "      got '$got'"; }
   ck "shipped swap_usage_mb(): the macOS (sysctl vm.swapusage) path still yields <free> <total> MB" $rc
 fi
+# Available memory is the FIFTH macOS-only probe and the only one that fails CLOSED: before #1702 a
+# cell reported no vm_stat, so MEM_UNKNOWN was set every cycle and `mem_probe_failed` bound the gate
+# FOREVER when load/lanes/swap were healthy — the controller ran, logged, and never dispatched a
+# lane. That is the false green #1702 removes, so the Linux path is driven explicitly here.
+sed -n '/^mem_avail_mb() {/,/^}/p' "$LOOP" > "$TMP/mem.sh"
+if need "$TMP/mem.sh" "mem_avail_mb() is extracted from the shipped loop"; then
+  { grep -m1 '^is_num() {' "$LOOP"; cat "$TMP/mem.sh"; } > "$TMP/memfull.sh"
+  # MemAvailable 6144000 kB = 6000 MB; MemFree+Cached = 2048000+4096000 = 6144000 kB too, so one
+  # expectation separates "read MemAvailable" from "read MemFree+Cached".
+  printf 'MemTotal:       16000000 kB\nMemFree:         2048000 kB\nCached:          4096000 kB\nMemAvailable:    6144000 kB\n' > "$TMP/meminfo2"
+  got="$(bash -c ". '$TMP/memfull.sh'; mem_avail_mb '$TMP/meminfo2'")"
+  [ "$got" = "6000" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "shipped mem_avail_mb(): the Linux (/proc/meminfo MemAvailable) path yields available MB" $rc
+  # Pre-3.14 kernels have no MemAvailable; MemFree+Cached is the documented fallback.
+  printf 'MemTotal:       16000000 kB\nMemFree:         2048000 kB\nCached:          4096000 kB\n' > "$TMP/meminfo3"
+  got="$(bash -c ". '$TMP/memfull.sh'; mem_avail_mb '$TMP/meminfo3'")"
+  [ "$got" = "6000" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "shipped mem_avail_mb(): falls back to MemFree+Cached when MemAvailable is absent" $rc
+  # macOS path kept: (1000 free + 2000 inactive) * 16384 B / 1 MiB = 46 (truncated).
+  got="$(bash -c "vm_stat() { printf 'Mach Virtual Memory Statistics: (page size of 16384 bytes)\\nPages free: 1000.\\nPages inactive: 2000.\\n'; }; . '$TMP/memfull.sh'; mem_avail_mb '$TMP/absent-meminfo'")"
+  [ "$got" = "46" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "shipped mem_avail_mb(): the macOS (vm_stat free+inactive) path still yields available MB" $rc
+  # UNKNOWN must stay distinguishable from "0 MB available": the gate fails CLOSED on the former.
+  got="$(bash -c "vm_stat() { :; }; . '$TMP/memfull.sh'; mem_avail_mb '$TMP/absent-meminfo' && echo OK || echo NONZERO")"
+  [ "$got" = "NONZERO" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "shipped mem_avail_mb(): an unreadable probe returns non-zero (UNKNOWN), not a false 0" $rc
+fi
 # The regression guard that does not depend on any single spelling of the call site: a macOS-only
-# probe anywhere OUTSIDE the three helpers is the bug, still shipped.
+# kernel probe anywhere OUTSIDE the portable helpers is the bug, still shipped. `vm_stat` is included
+# because it is the probe whose Linux absence was the LAST false green (the guard previously scoped
+# only load/swap/mtime and so could not see it). `res_line` is exempt: it is a log-only measurement
+# (`res_line` is called under "MEASURE every resource; decide nothing from it"), its memory field
+# degrades to `?` off macOS, and it cannot gate dispatch — the gate's available-memory figure is
+# mem_avail_mb(), whose call site is asserted separately below.
 outside="$(awk '
   /^[[:space:]]*#/ {next}
-  /^file_mtime_epoch\(\) \{|^load1\(\) \{|^swap_usage_mb\(\) \{/ {h=1}
+  /^file_mtime_epoch\(\) \{|^load1\(\) \{|^swap_usage_mb\(\) \{|^mem_avail_mb\(\) \{|^res_line\(\) \{/ {h=1}
   h && /^\}/ {h=0; next}
   h {next}
-  /sysctl -n (vm\.loadavg|vm\.swapusage)|stat -f .%m./ {print FNR": "$0}
+  /sysctl -n (vm\.loadavg|vm\.swapusage)|stat -f .%m.|vm_stat/ {print FNR": "$0}
 ' "$LOOP")"
 [ -z "$outside" ] && rc=0 || { rc=1; echo "      outside the helpers: $outside"; }
-ck "no call site uses a macOS-only load/swap/mtime probe outside the portable helpers" $rc
+ck "no call site uses a macOS-only load/swap/mtime/memory probe outside the portable helpers" $rc
 grep -q 'if _sw="$(swap_usage_mb)"; then SWFREE=' "$LOOP" && rc=0 || rc=1
 ck "the dispatch gate reads swap through swap_usage_mb()" $rc
+grep -q 'if MEMAVAIL_MB="$(mem_avail_mb)"; then' "$LOOP" && rc=0 || rc=1
+ck "the dispatch gate reads available memory through mem_avail_mb() (not a bare vm_stat)" $rc
 grep -q 'm="$(file_mtime_epoch "$f")" || continue' "$LOOP" && rc=0 || rc=1
 ck "the reaper reads the log mtime through file_mtime_epoch() and skips on unknown" $rc
 # install.sh renders MAX_LOAD into the plist from its OWN _NCPU and section 7 compares the two
 # files' effective defaults — a divergence there would only surface ON a Linux host, so pin it here.
 grep -q 'nproc 2>/dev/null' "$INST" && rc=0 || rc=1
 ck "install.sh derives _NCPU portably too (its MAX_LOAD must match the loop's on any host)" $rc
+# ⛔ ORDER, not presence: the `_NCPU` coercion was added in the input-validation block, ~30 lines
+# AFTER `MAX_LOAD="${MAX_LOAD:-$(( _NCPU * 10 ))}"` — its only read. A guard that runs after the
+# arithmetic cannot protect it ("dead-guard"), so the property to pin is that the coercion line
+# PRECEDES the MAX_LOAD line. Both are asserted line-ordered; the check fails on the pre-fix file.
+_ncpu_guard_line="$(grep -n 'is_num "${_NCPU:-}"' "$LOOP" | head -1 | cut -d: -f1)"
+_maxload_line="$(grep -n '^MAX_LOAD="' "$LOOP" | head -1 | cut -d: -f1)"
+[ -n "$_ncpu_guard_line" ] && [ -n "$_maxload_line" ] && [ "$_ncpu_guard_line" -lt "$_maxload_line" ] && rc=0 || rc=1
+ck "orch-loop.sh coerces _NCPU BEFORE MAX_LOAD reads it (guard is not guard-after-use)" $rc
+grep -q 'is_num "${MAX_LOAD:-}"' "$LOOP" && rc=0 || rc=1
+ck "orch-loop.sh coerces a non-numeric MAX_LOAD instead of letting the load gate fail OPEN" $rc
 
 # ── 20) a TERM'd controller EXITS; the lock/claim is not released while it is still running ──
 # agent-infra#1715. The shipped trap was `trap 'rm -f "$LOCKF"' EXIT INT TERM`: for INT/TERM a
