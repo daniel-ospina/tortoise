@@ -639,16 +639,23 @@ class TestAutomateBeatCopy:
       #8466: the file's own `_comment` records that these feature strings lag
       by design pending a pure-doc follow-up, and `per_graph_keys` is in the
       same state.
-    * the tracker-link test — the new copy makes no roadmap claim, so there is
-      no tracker to link.
+    * the tracker-link test — an earlier revision of this copy carried a
+      roadmap claim that needed a link; the owner's final copy does not link a
+      tracker either.
 
-    STILL NOT SHIPPED, and why the copy omits it: a subscription filters the
-    durable `:GraphEvent` types (`webhook_delivery._validated_types` → the 11
-    `CLAIM_EVENT_TYPES` in `tortoise/shared_state/events.py`), i.e. LIFECYCLE
-    events. Nothing fires on an EP belief crossing a confidence threshold;
-    that trigger is #3909 (OPEN, `deferred`, `not-launch-relevant`) and §5.3 of
+    ⚠️ THE COPY IS THE OWNER'S, VERBATIM, AND ONE OF ITS TWO CLAUSES IS ROADMAP.
+    The paragraph reads "Define confidence threshold or lifecycle events to fire
+    webhooks." The LIFECYCLE half ships: `webhook_delivery._validated_types`
+    filters the durable `:GraphEvent` types → the 11 `CLAIM_EVENT_TYPES` in
+    `tortoise/shared_state/events.py`. The CONFIDENCE-THRESHOLD half does NOT:
+    no subscription carries a threshold/condition field, and nothing fires on
+    an EP belief crossing a threshold — that trigger is #3909 (OPEN,
+    `deferred`, `not-launch-relevant`), and §5.3 of
     `docs/plans/2026-10-11-2081-webhook-delivery.md` says #3909 reuses this
-    layer rather than adding a second dispatcher.
+    layer. The owner ruled on 2026-10-13 that the beat carries this copy
+    anyway (see the OVERRIDES line on #8466). ⛔ DO NOT "fix" the paragraph by
+    deleting the clause as an unshipped-availability claim: that edit was made
+    in PR #8470 and reverted by the owner's instruction.
 
     What is left is a paraphrase guard, and it is deliberately weak: the pin is
     a hand-maintained SECOND COPY of a prose claim (the durable binding is
@@ -659,10 +666,10 @@ class TestAutomateBeatCopy:
     advertised before #3432, shipped-but-disclaimed after.
     """
 
-    # The paragraph's rendered text (#8466).
+    # The paragraph's rendered text (#8466) — the owner's copy, verbatim.
     EXPECTED_PARAGRAPH_TEXT = (
-        "Define lifecycle events to fire webhooks. Automate investment "
-        "decisions, agent actions, and more."
+        "Define confidence threshold or lifecycle events to fire webhooks. "
+        "Automate investment decisions, agent actions, and more."
     )
 
     def test_automate_beat_paragraph_is_pinned(self):
@@ -674,10 +681,13 @@ class TestAutomateBeatCopy:
         """
         assert _beat_text(_automate_paragraph_markup()) == self.EXPECTED_PARAGRAPH_TEXT, (
             "the 04 · Automate paragraph changed. Before updating this pin, "
-            "answer: does the new copy state anything in the present tense that "
-            "the product does not do? LIFECYCLE-event push delivery ships "
-            "(tortoise/webhook_delivery.py + /v1/context/subscriptions); a "
-            "CONFIDENCE-THRESHOLD trigger does not (#3909)."
+            "answer: is the paragraph still the owner's copy VERBATIM? It is an "
+            "owner-authored sentence, not a derivable availability statement — "
+            "the confidence-threshold clause is roadmap (#3909) and is here by "
+            "the owner's 2026-10-13 ruling (OVERRIDES on #8466). Removing that "
+            "clause as an unshipped-availability claim was done in PR #8470 and "
+            "reverted; do not repeat it. LIFECYCLE-event push delivery does "
+            "ship: tortoise/webhook_delivery.py + /v1/context/subscriptions."
         )
 
 
