@@ -262,6 +262,11 @@ class TestSelfHostJournal8497:
     * ``test_every_selfhost_sdk_construction_carries_the_journal`` — the
       inventory guard: the #8497 defect WAS one door silently omitting the
       argument, so a new unarmed door must red.
+    * ``test_the_explicit_probe_runs_once_per_value_not_per_request`` — FAILS
+      while the explicit (shipped-compose) branch re-probes on every call.
+    * ``test_persistent_dir_sees_a_same_filesystem_bind_mount`` /
+      ``test_an_existing_non_mount_root_says_it_armed_nothing`` — FAIL while the
+      gate is ``ismount`` alone and the declined default stays silent.
     """
 
     def _mounted_data_root(self, tmp_path, monkeypatch, *, mounted=True) -> str:
@@ -292,6 +297,46 @@ class TestSelfHostJournal8497:
             "a plain directory on the container's writable layer must NOT count "
             "as persistent — an existence gate is the #8497 T5 defect")
 
+    def test_mountinfo_parser_reads_the_mount_point_field(self):
+        """The mount-table probe's parser (the bind-mount half of the gate).
+
+        ``os.path.ismount`` alone misses a same-filesystem bind mount, so the
+        gate consults ``/proc/self/mountinfo``; this pins the field and the
+        escaped-character decoding so a malformed parse cannot silently
+        disarm that second probe.
+        """
+        from tortoise import config
+
+        line = "36 35 0:32 / /data\\040volume rw,relatime - ext4 /dev/sda1 rw"
+        assert config._parse_mountinfo(line) == frozenset({"/data volume"})
+        # Hostile/absent input degrades to "no mounts", never to a false mount.
+        assert config._parse_mountinfo("") == frozenset()
+        assert config._parse_mountinfo("garbage line") == frozenset()
+
+    def test_persistent_dir_sees_a_same_filesystem_bind_mount(
+            self, tmp_path, monkeypatch):
+        """A bind mount on the SAME filesystem is persistent but not detected
+        by ``ismount`` — the gate must still arm on it.
+
+        Reproduced shape (Linux/CPython 3.12): ``mount --bind /srv/tortoise
+        /data`` has ``st_dev`` equal to its parent's and a different inode, so
+        ``os.path.ismount`` returns False even though the mount table names it.
+        The operator gets a durable /data and would otherwise be silently
+        journal-less — the #8526 review P2/P3-2 miss.
+        """
+        from tortoise import config
+
+        root = tmp_path / "bind-mounted"
+        root.mkdir()
+        monkeypatch.setattr(config.os.path, "ismount", lambda _p: False)
+        monkeypatch.setattr(
+            config, "_mount_points",
+            lambda: frozenset({os.path.realpath(str(root))}))
+
+        assert config._persistent_dir(str(root)) is True, (
+            "a same-filesystem bind mount is persistent, but `ismount` reads it "
+            "as ephemeral — the mount table must be consulted too")
+
     def test_default_arms_a_real_journal_when_the_data_root_is_a_mount(
             self, tmp_path, monkeypatch):
         monkeypatch.delenv("TORTOISE_EVENT_LOG_BASE_DIR", raising=False)
@@ -319,6 +364,44 @@ class TestSelfHostJournal8497:
         assert config.ensure_selfhost_event_log(data_root=root) == str(explicit)
         # The operator's path is authoritative: the default was never created.
         assert not (tmp_path / "data" / "events").exists()
+
+    def test_the_explicit_probe_runs_once_per_value_not_per_request(
+            self, monkeypatch, tmp_path):
+        """The memo must cover the EXPLICIT branch — the SHIPPED path.
+
+        ``docker-compose.yml`` sets ``TORTOISE_EVENT_LOG_BASE_DIR``, so every
+        ``/v1/*`` request, every self-host MCP tool call and every readiness
+        probe reaches the explicit branch. Before the fix the memo was only
+        consulted while the env was UNSET, so each of those paid a real
+        ``makedirs`` + ``mkstemp`` + ``unlink`` on the journal volume — the cost
+        ``_SELFHOST_JOURNAL_ARMED``'s docstring says the memo exists to avoid
+        (#8526 review P2).
+        """
+        from tortoise import config
+
+        explicit = str(tmp_path / "operator-chosen")
+        monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", explicit)
+        probes: list[str] = []
+        real = config._probe_journal_dir
+
+        def _spy(base: str) -> bool:
+            probes.append(base)
+            return real(base)
+
+        monkeypatch.setattr(config, "_probe_journal_dir", _spy)
+
+        assert [config.ensure_selfhost_event_log() for _ in range(3)] == [
+            explicit] * 3
+        assert probes == [explicit], (
+            "the explicit branch re-probed the journal dir on every call — the "
+            "memo is dead on the shipped compose deployment (#8526)")
+
+        # ...and a CHANGED value IS probed: the memo is keyed by value, not by
+        # "have we probed anything yet".
+        other = str(tmp_path / "second-choice")
+        monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", other)
+        assert config.ensure_selfhost_event_log() == other
+        assert probes == [explicit, other]
 
     def test_unwritable_default_refuses_loudly_and_arms_nothing(
             self, tmp_path, monkeypatch, caplog):
@@ -350,6 +433,30 @@ class TestSelfHostJournal8497:
         assert "TORTOISE_EVENT_LOG_BASE_DIR" not in os.environ
         # No filesystem side effect at all on a non-persistent root.
         assert not (tmp_path / "data" / "events").exists()
+
+    def test_an_existing_non_mount_root_says_it_armed_nothing(
+            self, tmp_path, monkeypatch, caplog):
+        """A root that EXISTS but is not a mount must not be silent.
+
+        `Dockerfile.selfhost` bakes ``/data`` at build time, so a bare
+        ``docker run`` and a same-filesystem bind mount both land on this
+        branch. Silence there is indistinguishable from a correctly
+        journal-less dev lane — the "deployment is journal-less and nobody
+        knows" state #8497 closes (#8526 review P2/P3-2).
+        """
+        monkeypatch.delenv("TORTOISE_EVENT_LOG_BASE_DIR", raising=False)
+        root = tmp_path / "data"
+        root.mkdir()
+
+        from tortoise import config
+
+        monkeypatch.setattr(config, "_persistent_dir", lambda _p: False)
+        with caplog.at_level(logging.WARNING):
+            assert config.ensure_selfhost_event_log(data_root=str(root)) is None
+
+        assert any("no default armed" in r.message for r in caplog.records), (
+            "a root that exists but is not a persistent mount armed nothing "
+            "silently — the operator cannot tell it apart from a dev lane")
 
     def test_rest_door_carries_the_journal_and_arms_the_guard(
             self, monkeypatch, tmp_path):
@@ -421,40 +528,87 @@ class TestSelfHostJournal8497:
             expected_base, "org_selfhost", "events.jsonl"), sdk.event_log_path
 
     def test_every_selfhost_sdk_construction_carries_the_journal(self):
-        """The door inventory for the self-host surface.
+        """The door inventory for the WHOLE self-host surface.
 
         #8497 existed because ONE door silently omitted ``event_log_path=``. A
         behavioural test on ``_sdk()`` cannot see a construction added beside
-        it, so the inventory guard is what catches the NEXT one. Scope, stated
-        honestly: it matches the two node kinds the codebase uses
-        (``TortoiseSDK(...)`` and ``module.TortoiseSDK(...)``); an aliased import
-        (`from tortoise.sdk import TortoiseSDK as T`) would escape it — the
-        #7951 door-inventory pattern's declared escape surface.
+        it, so the inventory guard is what catches the NEXT one. It spans every
+        module that builds a self-host SDK — ``selfhost_api`` (REST),
+        ``selfhost`` (daemon start + read-only probes) and ``mcp_auth`` (the MCP
+        door) — because a scan of ``selfhost_api`` alone leaves an omission in
+        the other two green (#8526 review P2/P3-1). Scope, stated honestly: it
+        matches the two node kinds the codebase uses (``TortoiseSDK(...)`` and
+        ``module.TortoiseSDK(...)``); an aliased import (`from tortoise.sdk
+        import TortoiseSDK as T`) would escape it — the #7951 door-inventory
+        pattern's declared escape surface.
         """
-        import ast
         import inspect
 
-        from tortoise import selfhost_api
+        from tortoise import mcp_auth, selfhost, selfhost_api
 
-        tree = ast.parse(inspect.getsource(selfhost_api))
-
-        def _is_sdk_call(node: ast.AST) -> bool:
-            if not isinstance(node, ast.Call):
-                return False
-            func = node.func
-            if isinstance(func, ast.Name):
-                return func.id == "TortoiseSDK"
-            if isinstance(func, ast.Attribute):
-                return func.attr == "TortoiseSDK"
-            return False
-
-        calls = [node for node in ast.walk(tree) if _is_sdk_call(node)]
-        assert calls, "inventory guard lost its subject — no TortoiseSDK construction found"
-        unarmed = [
-            node.lineno for node in calls
-            if not any(kw.arg == "event_log_path" for kw in node.keywords)
-        ]
+        armed: list[int] = []
+        unarmed: dict[str, list[int]] = {}
+        for mod in (selfhost_api, selfhost, mcp_auth):
+            mod_armed, mod_unarmed = _journal_inventory(inspect.getsource(mod))
+            armed += mod_armed
+            if mod_unarmed:
+                unarmed[mod.__name__] = mod_unarmed
+        assert armed, (
+            "inventory guard lost its subject — no TortoiseSDK construction "
+            "found in the self-host surface")
         assert not unarmed, (
-            f"TortoiseSDK construction(s) at line(s) {unarmed} omit "
-            "event_log_path — that door writes an UNRECORDED graph, which is "
-            "the #8497 defect (a partial journal looks like a record)")
+            f"TortoiseSDK construction(s) omit event_log_path at {unarmed} — "
+            "that door writes an UNRECORDED graph, which is the #8497 defect "
+            "(a partial journal looks like a record)")
+
+    def test_inventory_reds_on_a_none_valued_journal_argument(self):
+        """``event_log_path=None`` is an UNARMED door, not a keyword to count.
+
+        The guard's first shape matched only the keyword's PRESENCE, so
+        ``TortoiseSDK(..., event_log_path=None)`` — precisely
+        the unarmed-door class the guard exists for — passed it (#8526 review
+        P2).
+        """
+        assert _journal_inventory(
+            'TortoiseSDK(namespace="test_probe")')[1] == [1]
+        assert _journal_inventory(
+            'TortoiseSDK(namespace="test_probe", event_log_path=None)')[1] == [1]
+        assert _journal_inventory(
+            'TortoiseSDK(graph_name=ns,\n'
+            '           event_log_path=_journal_path_for(ns))')[0] == [1]
+
+
+def _journal_inventory(source: str) -> tuple[list[int], list[int]]:
+    """(armed, unarmed) line numbers of every ``TortoiseSDK(...)`` in ``source``.
+
+    Unarmed means the call has NO ``event_log_path`` keyword, or its value is
+    the literal ``None`` — the keyword's presence alone is not the signal.
+    """
+    import ast
+
+    def _is_sdk_call(node: ast.AST) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        if isinstance(func, ast.Name):
+            return func.id == "TortoiseSDK"
+        if isinstance(func, ast.Attribute):
+            return func.attr == "TortoiseSDK"
+        return False
+
+    def _carries_journal(node: ast.Call) -> bool:
+        for kw in node.keywords:
+            if kw.arg != "event_log_path":
+                continue
+            if isinstance(kw.value, ast.Constant):
+                return kw.value.value is not None
+            return True
+        return False
+
+    armed: list[int] = []
+    unarmed: list[int] = []
+    for node in ast.walk(ast.parse(source)):
+        if not _is_sdk_call(node):
+            continue
+        (armed if _carries_journal(node) else unarmed).append(node.lineno)
+    return armed, unarmed

@@ -74,7 +74,12 @@ class _FakeSDKFactory:
         self._conns = list(conns)
         self.built: list[_FakeSDK] = []
 
-    def __call__(self, namespace=None) -> _FakeSDK:
+    def __call__(self, namespace=None, **_kwargs) -> _FakeSDK:
+        # #8497 added ``event_log_path=`` to the real constructions this stands
+        # in for (`selfhost._probe_sdk`, `health_ready._probe`). The fake must
+        # track the real call shape: without ``**_kwargs`` the probe raises
+        # ``TypeError`` before it reaches its query, and the mid-query reset
+        # this file pins becomes untestable.
         sdk = _FakeSDK(self._conns.pop(0))
         self.built.append(sdk)
         return sdk

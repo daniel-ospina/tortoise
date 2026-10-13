@@ -1006,6 +1006,15 @@ surfaces:
   # falls through to `core`, so without this entry the declaration's guard
   # never runs on the change that can delete it.
   - test_7856_goal_state.py
+  # #8497 / PR #8526 review P2-2: DUAL-REGISTERED with `api` (above). The
+  # arming seam this file pins lives in `tortoise/config.py`, which matches no
+  # SOURCE_PATTERNS entry and is not a SHARED_MODULE, so it falls through to
+  # `core` — and a named-surface match REPLACES that fallback. Registered only
+  # under `api`, a `config.py`-only change selected `core` and ran none of the
+  # T1–T8 pins (verified with the repo's own selector: `--changed-files
+  # tortoise/config.py` → surfaces=['core'], test_selfhost_rest.py absent) — the
+  # #1349/#2938/#3154 silent-drop class.
+  - test_selfhost_rest.py
   # #7951: a session DELETE must survive `derived = replay(journal)`. The
   # guarded surface is the journal fold + the hosted delete path
   # (`tortoise/sdk.py`, `tortoise/projection/__init__.py`,

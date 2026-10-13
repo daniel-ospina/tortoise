@@ -147,7 +147,8 @@ def _get_org_sdk() -> TortoiseSDK:
         # `tortoise serve --http` is a documented self-host daemon that never
         # imports that module — so without this the self-host MCP door resolved
         # a `None` journal and wrote an UNRECORDED org_selfhost graph.
-        # Memoized in `config`, so this is a dict lookup after the first call.
+        # Memoized in `config` — the probe runs once per base dir per process,
+        # so this is a lookup after the first call.
         from tortoise.config import ensure_selfhost_event_log
 
         ensure_selfhost_event_log()
