@@ -212,6 +212,21 @@ const server = createServer((req, res) => {
       return json(res, 200, { ok: true, faults: { ...FAULTS } });
     }
 
+    // EVERY request is recorded, including the ones this focused mock does not
+    // implement. The CSRF suite's proxy routes forward to upstream paths this
+    // mock deliberately does not serve (`/v1/*`, `/rest/v1/*`), so without this
+    // catch-all a FORWARDED request was indistinguishable from no request at
+    // all and the suite's "the upstream log is empty" assertion could never
+    // fail (#3529 review). Recording before the 404 is what makes the empty log
+    // observable rather than decorative; `flow: "unhandled"` keeps it distinct
+    // from the five implemented email flows.
+    calls.push({
+      flow: "unhandled",
+      method: req.method,
+      path: url.pathname,
+      search: url.search,
+      authorization: req.headers.authorization ? "present" : null,
+    });
     return json(res, 404, { error: "not_found", path: url.pathname });
   });
 });

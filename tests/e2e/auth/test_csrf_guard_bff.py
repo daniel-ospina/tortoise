@@ -37,6 +37,7 @@ import re
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -56,6 +57,24 @@ MOCK_PORT = int(os.environ.get("CSRF_TEST_MOCK_PORT", "9051"))
 
 APP = ""      # assigned in the `stack` fixture
 MOCK_URL = ""
+
+MIGRATION = REPO_ROOT / "website" / "migrations" / "0001_auth_sessions.sql"
+# A LIVE session the origin-only proxy cases carry. A cross-origin request can
+# only be shown to have been refused BEFORE the upstream if it would have
+# reached the upstream with the guard removed — and that needs a session these
+# routes can resolve, not merely a well-formed cookie (a bogus handle stops at
+# `readCookie`/`getAccessTokenForSession` and never forwards).
+SESSION_COOKIE = "__Host-session"
+SESSION_HANDLE = "e" * 64
+# The cached access token the route mints/uses. Seeding it means the session
+# never refreshes at GoTrue, so the only upstream calls the log can hold are the
+# ones the guard is supposed to prevent.
+SESSION_ACCESS = "mock-csrf-access-token"
+
+# This suite's PRIVATE D1 persist dir, set by the `stack` fixture. Isolation is
+# not optional: the shared `.wrangler` state accumulates rows from every other
+# auth suite forever, and this suite seeds a session row.
+PERSIST: Path | None = None
 
 # The attacker's forged body, valid JSON with an extra field — exactly the shape
 # an `enctype=text/plain` form produces.
@@ -90,19 +109,82 @@ def _wait(port: int, timeout: float = 90.0) -> bool:
     return False
 
 
+def _d1_files() -> list[Path]:
+    assert PERSIST is not None, "stack fixture must run first"
+    # The persist tree also holds `metadata.sqlite` (D1's index plus the
+    # cache/observability stores); picking one of those seeds a database the
+    # Worker never reads, which presents as a route 503, not a seeding error.
+    return [
+        p
+        for p in PERSIST.glob("**/d1/**/*.sqlite")
+        if p.name != "metadata.sqlite"
+    ]
+
+
+def _d1_sqlite() -> Path:
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        files = _d1_files()
+        if files:
+            return max(files, key=lambda p: p.stat().st_mtime)
+        time.sleep(0.3)
+    raise RuntimeError(f"no D1 database sqlite appeared under {PERSIST}")
+
+
+def _warm_d1() -> None:
+    """Materialise the bound D1 file (the SQLite file appears on first ACCESS)."""
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        req = urllib.request.Request(f"{APP}/api/sb/rest/v1/blog_posts?select=id")
+        req.add_header("Cookie", f"{SESSION_COOKIE}=" + "0" * 64)
+        with contextlib.suppress(Exception):
+            urllib.request.urlopen(req, timeout=15).read()
+        if _d1_files():
+            return
+        time.sleep(0.3)
+    raise RuntimeError(f"no D1 database sqlite appeared under {PERSIST}")
+
+
+def _seed() -> None:
+    """Apply the auth migration, then insert ONE live session with a cached token."""
+    con = sqlite3.connect(_d1_sqlite(), timeout=15)
+    try:
+        con.executescript(MIGRATION.read_text(encoding="utf-8"))
+        now = int(time.time() * 1000)
+        con.execute(
+            "INSERT OR REPLACE INTO sessions "
+            "(handle,user_id,refresh_token,revoked,created_at,expires_at,"
+            " access_token,access_token_expires_at) "
+            "VALUES (?,?,?,0,?,?,?,?)",
+            (
+                SESSION_HANDLE,
+                "user-csrf",
+                "mock-refresh",
+                now,
+                now + 400 * 24 * 3600 * 1000,
+                SESSION_ACCESS,
+                now + 3600 * 1000,
+            ),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
 @pytest.fixture(scope="module")
-def stack():
+def stack(tmp_path_factory):
     # FAIL, do not skip: a skipped security suite is indistinguishable from a
     # passing one in CI.
     require_toolchain()
 
-    global APP_PORT, MOCK_PORT, APP, MOCK_URL
+    global APP_PORT, MOCK_PORT, APP, MOCK_URL, PERSIST
     claimed: set[int] = set()
     APP_PORT = pick_free_port(APP_PORT, claimed)
     MOCK_PORT = pick_free_port(MOCK_PORT, claimed)
     assert APP_PORT != MOCK_PORT
     APP = f"http://127.0.0.1:{APP_PORT}"
     MOCK_URL = f"http://127.0.0.1:{MOCK_PORT}"
+    PERSIST = tmp_path_factory.mktemp("csrf-guard-d1")
 
     mock_env = os.environ.copy()
     mock_env["MOCK_PORT"] = str(MOCK_PORT)
@@ -116,15 +198,16 @@ def stack():
             shutil.which("wrangler"), "pages", "dev", "dist",
             "--port", str(APP_PORT), "--ip", "127.0.0.1",
             "--d1", "SESSIONS",
+            "--persist-to", str(PERSIST),
             "-b", f"SUPABASE_URL={MOCK_URL}",
             "-b", "SUPABASE_ANON_KEY=mock-anon-key",
             "-b", f"APP_ORIGIN={APP}",
             # #3529: `/api/v1` answers 503 `proxy_not_configured` BEFORE it
             # reaches the guard, so without this binding the route's origin-layer
             # cases would assert against that 503 and never exercise the guard at
-            # all. The value is deliberately unreachable: the cases below are
-            # refused by the guard (403) or by their own auth (401), so the
-            # upstream is never contacted.
+            # all. The value points at the mock so the session-carrying positive
+            # control can observe a forwarded request; the guard cases below are
+            # refused (403) or refused by their own auth (401) before forwarding.
             "-b", f"API_ORIGIN={MOCK_URL}",
         ],
         cwd=str(DASHBOARD_DIR),
@@ -134,6 +217,8 @@ def stack():
         mock.stop()
         pytest.fail("pages dev failed to start")
     time.sleep(2.5)
+    _warm_d1()
+    _seed()
 
     yield {"app": APP, "mock": MOCK_URL}
     app.stop()
@@ -327,6 +412,17 @@ ORIGIN_ONLY_ROUTES = [
     ("DELETE", "/api/sb/rest/v1/blog_posts?id=eq.1"),
 ]
 
+#: The upstream path each origin-only route reaches on the FAR side of the guard.
+#: `/api/v1` forwards straight to the data path, while `/api/sb` consults the
+#: `is_admin` RPC before it proxies anything — so that RPC is the first (and, for
+#: a legitimate session against this mock, the only) upstream call it makes.
+PROXY_UPSTREAM = {
+    "/api/v1/teams": "/v1/teams",
+    "/api/v1/teams/1": "/v1/teams/1",
+    "/api/sb/rest/v1/blog_posts": "/rest/v1/rpc/is_admin",
+    "/api/sb/rest/v1/blog_posts?id=eq.1": "/rest/v1/rpc/is_admin",
+}
+
 
 @pytest.mark.parametrize("method,path,payload", GUARDED_ROUTES)
 def test_every_guarded_route_rejects_a_text_plain_body(stack, method, path, payload):
@@ -380,11 +476,19 @@ def test_origin_only_proxy_routes_refuse_a_cross_origin_state_change(stack, meth
     cookie is not the protection — `guardOrigin` is, and on these two routes it
     is the ONLY layer. A refusal that still forwarded would be no refusal, so the
     upstream call log must also stay empty.
+
+    The request carries a LIVE session (`SESSION_HANDLE`) on purpose. With no
+    resolvable session both routes answer 401 at `readCookie` BEFORE ever
+    forwarding, so an empty log would prove nothing about the guard — the
+    assertion was unfalsifiable until the case carried a credential the routes
+    would accept (see `test_origin_only_proxy_routes_forward_a_session_without_an_origin`,
+    the positive control that shows this same log DOES record forwarded traffic).
     """
     _calls()  # reset the upstream log before the forged request
     req = urllib.request.Request(f"{APP}{path}", method=method, data=b"{}")
     req.add_header("Content-Type", "application/json")
     req.add_header("Origin", EVIL_ORIGIN)
+    req.add_header("Cookie", f"{SESSION_COOKIE}={SESSION_HANDLE}")
     opener = urllib.request.build_opener(_NoRedirect())
     try:
         with opener.open(req, timeout=30) as r:
@@ -396,7 +500,43 @@ def test_origin_only_proxy_routes_refuse_a_cross_origin_state_change(stack, meth
         f"these proxies' only CSRF protection, got {status} {body}"
     )
     assert json.loads(body)["error"] == "forbidden_origin", body
-    assert _calls() == [], "a cross-origin request reached the upstream"
+    reached = _calls()
+    assert reached == [], (
+        f"{method} {path} reached the upstream from {EVIL_ORIGIN} despite the "
+        f"origin refusal: {reached}"
+    )
+
+
+@pytest.mark.parametrize("method,path", ORIGIN_ONLY_ROUTES)
+def test_origin_only_proxy_routes_forward_a_session_without_an_origin(stack, method, path):
+    """Positive control for the empty upstream log in the cross-origin case.
+
+    With a live session and NO `Origin` the request passes the guard and reaches
+    the upstream, so the mock records a call for this route family. Without this
+    control an empty log on the forged request would be equally explained by the
+    recorder never seeing proxy traffic at all — which is exactly how
+    `assert _calls() == []` was decorative before (#3529 review). Both proxies are
+    covered because they diverge: `/api/v1` forwards straight to the data path,
+    `/api/sb` resolves `is_admin` first.
+    """
+    _calls()  # reset the upstream log before the legitimate request
+    req = urllib.request.Request(f"{APP}{path}", method=method, data=b"{}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Cookie", f"{SESSION_COOKIE}={SESSION_HANDLE}")
+    opener = urllib.request.build_opener(_NoRedirect())
+    try:
+        with opener.open(req, timeout=30) as r:
+            status, body = r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        status, body = e.code, e.read().decode("utf-8", "replace")
+    recorded = [c.get("path") for c in _calls(reset=False)]
+    assert PROXY_UPSTREAM[path] in recorded, (
+        f"{method} {path} with a live session and no Origin did not reach "
+        f"{PROXY_UPSTREAM[path]} — the recorder cannot observe proxy traffic, so "
+        f"the empty-log assertion in "
+        f"test_origin_only_proxy_routes_refuse_a_cross_origin_state_change is "
+        f"vacuous. got {status} {body}; recorded {recorded}"
+    )
 
 
 @pytest.mark.parametrize("method,path", ORIGIN_ONLY_ROUTES)
@@ -416,11 +556,11 @@ def test_origin_only_proxy_routes_allow_an_absent_origin(stack, method, path):
             status, body = r.status, r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         status, body = e.code, e.read().decode("utf-8", "replace")
-    assert status != 403, (
-        f"{method} {path} with no Origin must not be refused by the CSRF guard: "
-        f"got {status} {body}"
+    assert status == 401, (
+        f"{method} {path} with no Origin and no session must be refused by the "
+        f"route's own auth with 401, not by the CSRF guard: got {status} {body}"
     )
-    assert "forbidden_origin" not in body, body
+    assert json.loads(body)["error"] == "not_signed_in", body
 
 
 # ---------------------------------------------------------------------------
@@ -486,8 +626,7 @@ def test_the_guard_scan_matches_call_sites_not_mentions() -> None:
     Dropping `guardOrigin(request, env)` while leaving
     `import { guardOrigin } from "../../_shared/auth/csrf"` in place is
     precisely the refactor this scan exists to catch. A mention-matching regex
-    counts that route as guarded and the parity test stays green — which is why
-    the author's mutation check produced 10 failures where 12 were available.
+    counts that route as guarded and the parity test stays green.
     These two assertions lock the call-site semantics in. Pure source-level: no
     wrangler stack is needed.
     """
