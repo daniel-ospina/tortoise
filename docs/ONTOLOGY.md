@@ -1227,6 +1227,18 @@ model**, never as an invitation to merge the two nodes. The reasoning is pinned 
 > | `version` | ✅ **written by the same clause**, advancing with the hash exactly as §4.6 specifies ("1 at creation, +1 on each content-hash change"), so the pair §4.6 calls a version anchor can no longer be half-written |
 >
 > The recorded ruling is **#5013 Q2** (*"KEEP BOTH AXES. A source is `sourceKind: document` **and** carries a genre"*) plus §4.6's REQUIRED marking — the `#5082` write implements it; it is **not** a licence to read §4.4 as *"a document is a `:Source` that carries no `sourceKind`"*, and **not** a licence to close it by collapsing the two nodes (§4.4's `OVERRIDES`).
+>
+> **What the write does and does not move downstream (`#8525` review).** It does **not** move credibility: a
+> document node resolves **no tier** (`SOURCE_KIND_DEFAULTS['document'] is None`), so it contributes no group
+> to `_apply_source_inheritance`'s aggregate; and the #398 word-point un-freeze requires a **resolved
+> evidence body** (a tiered source, or an ORIGINATING `agentSession` whose weak body is the evidence), so a
+> word Point whose only source is a neutral document keeps its authored `set-by-author` baseline instead of
+> being re-labelled `inherited-from-source` with nothing inherited — the false provenance report
+> (`calibrate_summary` → "inherited from its source's trust rating" for a source with no rating) that the
+> un-guarded write produced on the primary path. It **does** change candidate generation, and that is
+> intended under **D3** ("registered kinds of any tier count"): `_cross_lens_pool` gates on
+> `s.sourceKind IN $registered`, and §5 registers `'document'`, so Points extracted from a document are now
+> eligible for the cross-lens candidate pool.
 
 **Versioning.** Identity is `url`; `contentHash` identifies a **version** of that identity. A re-fetched source whose content differs is a **new version, never an edit** — so **identity is stable and version is per-read**, and the two are never conflated.
 

@@ -211,6 +211,22 @@ def test_section_4_6_records_the_document_scoping() -> None:
         f"on the document path ({ANCHOR_PR} / #5422) — otherwise the note "
         f"overstates the gap the way the markers overstated the code (#5142)"
     )
+    # #8525 review (P1/P2): state the downstream consequences of the write, not
+    # just the field. A future lane that deletes either paragraph must fail here.
+    assert "word-point un-freeze requires a" in section, (
+        "the note must record the belief-path guard that keeps 'no credibility "
+        "inheritance moves' TRUE: a document source resolves no tier, so the "
+        "#398 word-point un-freeze requires a resolved evidence body — without "
+        "it a word Point over a neutral document is re-labelled "
+        "`set-by-author` -> `inherited-from-source` with nothing inherited "
+        "(#8525 review P1)"
+    )
+    assert "cross-lens" in section, (
+        "the note must name the intended D3 consequence of the write: a "
+        "document `:Source` is a REGISTERED kind, so `_cross_lens_pool` now "
+        "admits Points extracted from documents (the #8525 review's P2 — an "
+        "otherwise unstated output change)"
+    )
 
 
 def test_upsert_document_writes_the_source_kind_and_the_anchor_pair() -> None:
