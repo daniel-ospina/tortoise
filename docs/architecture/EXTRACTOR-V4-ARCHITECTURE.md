@@ -537,6 +537,23 @@ This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 
 **⚠️ There is no S4 — do not restore one.** A previous draft listed a separate *"S4 — granularity review"* and folded it back in here. **It is not a step**: its purpose was identical to question 2 above. **The step list is the EIGHT steps of §4.1: S0, S1, S2.1, S2.2, S2.3, S3, S5, S6 — there is no S4 and no pre-load step; the lookup lives in S3 (§4.2).** ⚠️ **An earlier version of this line said "seven" and omitted S2.3 — §4.0 and §4.1 say eight, and eight is correct.**
 
+> **⛔ DRIFT MARKER — this sentence is about the v4 PROPOSAL, not the shipped code (checked 2026-10-13).**
+> A lane reading *"do not restore one"* while looking at `run_s4` will conclude the stage is vestigial and
+> delete it. **It is not vestigial: the live pipeline runs S4, DEFAULT-ON.**
+>
+> | | this design (v4) | shipped code |
+> |---|---|---|
+> | S4 | *"There is no S4"* | `run_s4` defined `extractor_v2.py:2619`, **called `:7396`** in the production extract path |
+> | enablement | removed from the design | `_s4_delta_enabled()` → `env_flag("TORTOISE_S4_DELTA", True)` — **DEFAULT-ON** |
+> | stage order | the eight steps above | `run_s1` `:7290` → `run_s2` `:7314` → **`run_s4` `:7396`** |
+>
+> **Removing `run_s4` is a v4 migration deliverable, not a cleanup** — it is §4.3 **G5** (*"what happens
+> to the live S4 `merge_embed_lists` when S4 leaves the step list"*), tracked at `#5333`. **Never delete
+> it on the strength of this document alone.**
+>
+> The same applies to the step *names*: `S0` / `S3` / `S5` / `S6` occur **0 times** in
+> `extractor_v2.py` — they are v4 design names, not code symbols.
+
 **Why Jev fits:** it is a **decision-only** model — it cannot return a value outside the supplied schema, so it cannot invent an entity or a name. Three primitives, **mixable in one call**: *Choice* (pick from a list), *Score*, *Noul* (0–1 probability). Doc: `https://jevtypesafeai.com/docs#apis`. ⚠️ Measured **$0.000243/item at 3 questions** (~$6/month at 25k items) — **~4–7× cheaper than a frontier LLM, not the vendor's claimed 40–400×** (self-tested).
 
 **Fail-open on uncertainty** (keep, don't drop) — a wrong keep is noise; a wrong drop is memory loss.
@@ -703,17 +720,19 @@ S6  COMMIT
 
 ### 4.3 ⚠️ What the steps above do NOT yet cover (review-provided, all unaddressed)
 
-**The step list is the SHAPE, not a complete specification.** Five gaps were identified by review and are recorded here rather than silently implied by the diagram. **None is a decision; all must be closed before implementation.**
+**The step list is the SHAPE, not a complete specification.** Five gaps were identified by review and are recorded here rather than silently implied by the diagram. **None is a decision; all must be closed before implementation.** ✅ **All five are now filed** — the issue reference is in each row (revalidated 2026-10-13; G3 and G4 had no tracker entry before that, and are `#8495` / `#8496`).
 
 | # | the gap | why it matters |
 |---|---|---|
-| **G1** | **No step PERSISTS the narrative or the raw-fact span.** S6 is *"write entities + connections + metadata/lifecycle"*. §4.0 has no persistence purpose beyond S6. | ⛔ **D1 and §2.4 are not implementable from the steps as written.** If the narrative and the span are not written by a named step, they are not written. **Needs an explicit persistence step (or an explicit S6 sub-job).** |
-| **G2** | **No EMBEDDING-DECISION step.** `STORAGE-ARCHITECTURE.md` §12.2a **decides** the `EMBED` gate exists (*"a row can be worth KEEPING but not worth EMBEDDING"*, *"the lever is what gets an embedding"*) — **and this document never mentions it.** S2.3's kNN path **silently assumes every candidate is embedded.** | ⛔ **The two documents would ship contradictory designs.** The `EMBED` gate and the `KEEP` gate **share one rule set and enforce at TWO points** (§12.2a) — so the second enforcement point needs a home in this step list. |
-| **G3** | **No per-step FAILURE POLICY.** Only S2.2 (*"fail-open — keep"*) and S2.3 (*"never raises"*) state one. | **The S3 failure is the dangerous one: the natural fail-open marks candidates `new` — MANUFACTURING DUPLICATES, the exact failure S3 exists to prevent.** Also: partial S6 has no transaction/retry boundary vs `#4240`/`#4716`; and **re-narrate has no tie-break** for a worse second narrative. |
-| **G4** | ⛔ **`#4911` (no secret redaction) + an append-only immutable raw layer = IMMORTAL SECRETS.** | **`#4911` is listed in §15 as an unrelated capture-path issue. It is not unrelated** — §2.4.2 makes the raw layer **append-only by design**, so **a secret captured once is a secret retained forever.** Redaction must be designed *with* the layer, or the layer's immutability becomes a liability. |
-| **G5** | **No migration or backfill for the ~25k existing nodes.** | No backfill, no re-extraction path, and **no decision on the ~4,900 `the <X>` Objects.** Also unaddressed: **what happens to the live S4 `merge_embed_lists` when S4 leaves the step list** — the code and the design must not disagree. |
+| **G1** → `#5007` (span) · `#4894` (narrative) | **No step PERSISTS the narrative or the raw-fact span.** S6 is *"write entities + connections + metadata/lifecycle"*. §4.0 has no persistence purpose beyond S6. | ⛔ **D1 and §2.4 are not implementable from the steps as written.** If the narrative and the span are not written by a named step, they are not written. **Needs an explicit persistence step (or an explicit S6 sub-job).** |
+| **G2** → `#5008` | **No EMBEDDING-DECISION step.** `STORAGE-ARCHITECTURE.md` §12.2a **decides** the `EMBED` gate exists (*"a row can be worth KEEPING but not worth EMBEDDING"*, *"the lever is what gets an embedding"*) — **and this document never mentions it.** S2.3's kNN path **silently assumes every candidate is embedded.** | ⛔ **The two documents would ship contradictory designs.** The `EMBED` gate and the `KEEP` gate **share one rule set and enforce at TWO points** (§12.2a) — so the second enforcement point needs a home in this step list. |
+| **G3** → `#8495` | **No per-step FAILURE POLICY.** Only S2.2 (*"fail-open — keep"*) and S2.3 (*"never raises"*) state one. | **The S3 failure is the dangerous one: the natural fail-open marks candidates `new` — MANUFACTURING DUPLICATES, the exact failure S3 exists to prevent.** Also: partial S6 has no transaction/retry boundary vs `#4240`/`#4716`; and **re-narrate has no tie-break** for a worse second narrative. |
+| **G4** → `#8496` | ⛔ **`#4911` (no secret redaction) + an append-only immutable raw layer = IMMORTAL SECRETS.** | **`#4911` is listed in §15 as an unrelated capture-path issue. It is not unrelated** — §2.4.2 makes the raw layer **append-only by design**, so **a secret captured once is a secret retained forever.** Redaction must be designed *with* the layer, or the layer's immutability becomes a liability. |
+| **G5** → `#5333` · `#5059` | **No migration or backfill for the ~25k existing nodes.** | No backfill, no re-extraction path, and **no decision on the ~4,900 `the <X>` Objects.** Also unaddressed: **what happens to the live S4 `merge_embed_lists` when S4 leaves the step list** — the code and the design must not disagree. |
 
 **⚠️ And G2 is where the two documents bind:** `STORAGE-ARCHITECTURE.md` §12.2a's decided rule (*one rule set, two enforcement points*) **requires a step to hold the second point.** Until G2 is closed, **the storage doc's central lever has no implementation site.**
+
+**Where the five gaps live in the tracker** (checked 2026-10-13): **G1** `#5007` (span) + `#4894` (narrative placement) · **G2** `#5008` · **G3** `#8495` · **G4** `#8496` · **G5** `#5333` + `#5059`. The owning epic is **`#5087`** (E1 — the selective write path) under tracking **`#5086`**; end-to-end acceptance is capstone **`#7949`**. ⚠️ **G4's original issue `#4911` is CLOSED `COMPLETED` (2026-09-26)** — redaction landed for the capture path that exists today, but the raw-fact layer does not exist yet, so the *design-level* consequence (append-only + no redaction = immortal secrets) needed its own home. That is why `#8496` is filed rather than `#4911` reopened.
 
 ### S3 — RESOLVE (find what exists · disambiguate · attach)
 
@@ -1198,10 +1217,27 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 
 **Two of the three questions this document raises** (§13.8) belong to **D6** and are the owner's: cross-batch connection by LLM or mechanically; and hard fan-out caps. **The third — `aboutObject` as edge or join — is measured, ruled and deferred, NOT open** (§13.8 question 2, §16): the measurement is SPLIT, the owner ruled **KEEP the stored edge** on 2026-09-23, and `#7948` is the filed record.
 
-**Not yet filed from this document (candidates, not decisions):**
+**Filed status — revalidated 2026-10-13 against the tracker.**
 
-- **The raw-vs-narrative measurement** (D3's falsifier, §10) — the next real work, and the one that settles whether Option 4 stays provisional.
-- **Fan-out caps** — mirrored in `STORAGE-ARCHITECTURE.md` §13, because it is a storage decision as much as an extraction one. ⚠️ **Filed and CLOSED: `#5010`** (the cap landed query-side — `tortoise/fanout.py`, `PER_ENTITY_FANOUT_CAP = 200`, PR `#5057`). **The `aboutObject` join-vs-edge question is no longer a candidate here — it is measured, ruled and deferred, and it IS filed (`#7948`); the earlier *"still owner-pending"* note contradicted §13.8 question 2 and §16.**
+This block previously read *"Not yet filed from this document (candidates, not decisions)"* and listed
+items that **have since been filed.** It is corrected rather than deleted, because a stale *"not yet
+filed"* claim is what causes duplicate filing — the same failure the §4.3 gap table had.
+
+| item | issue | state |
+|---|---|---|
+| **The raw-vs-narrative measurement** (D3's falsifier, §10) — *"the next real work"*, settles whether Option 4 stays provisional | **`#7947`** | ✅ **FILED** — this block said *not yet filed* |
+| **Fan-out caps** (mirrored in `STORAGE-ARCHITECTURE.md` §13) | **`#5010`** | ✅ **CLOSED** — cap landed query-side (`tortoise/fanout.py`, `PER_ENTITY_FANOUT_CAP = 200`, PR `#5057`) |
+| **`aboutObject` join-vs-edge** | **`#7948`** | ✅ **FILED** — measured SPLIT, owner ruled **KEEP**, deferred. Not open (§13.8 question 2, §16) |
+| **G1** — narrative + raw-fact span persistence | **`#5007`** (span) · **`#4894`** (narrative) | ✅ filed |
+| **G2** — the EMBED gate | **`#5008`** | ✅ filed |
+| **G3** — per-step failure policy | **`#8495`** | ✅ filed |
+| **G4** — redaction designed with the append-only layer | **`#8496`** | ✅ filed (`#4911` is CLOSED; its design-level consequence was unowned) |
+| **G5** — migration / backfill / the live S4 | **`#5333`** · **`#5059`** | ✅ filed |
+
+**⇒ There are no longer any unfiled candidates in this document.** G1–G5 were recorded in §4.3 as *"all
+must be closed before implementation"*, and three of them had **no tracker entry** until 2026-10-13; they
+do now. The owning epic is **`#5087`** (E1) under tracking **`#5086`**, with end-to-end acceptance in
+capstone **`#7949`**.
 
 ---
 
