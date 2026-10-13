@@ -60,6 +60,11 @@ to the stamp scan (`countStamps`/`stampNames` model it since gap 5), and the ind
 clause that named a *double-quoted* computed callee (`h["set"](…)`) as the spelling that
 evades the readers (it is READ — `nameOf` has a `StringLiteral` branch; the *template*
 spelling is the one that evades).
+
+A later #8367 review added two more, on the same addendum: its "Baseline after the fix"
+claim pinned a whole-suite total that re-stales at every merge of `origin/main`, and
+`### Bounds that remain` did not name the gap-3 umbrella's ATTRIBUTION-ONLY bound (a stamp
+whose header NAME is an expression, in a file outside `HTML_SITES`). Both are guarded below.
 """
 from __future__ import annotations
 
@@ -572,3 +577,153 @@ def test_the_indirection_example_guard_reds_on_the_prefix_clause():
     assert _DOUBLE_QUOTED_COMPUTED_KEY.search(example), (
         "the recorded pre-fix clause must name a double-quoted computed callee — if not, "
         "the guard in test 5 is not the check that catches this defect")
+
+
+# ---------------------------------------------------------------------------
+# 7. The addendum's baseline claim keeps the reproduce command, not a suite total.
+#
+# "Baseline after the fix: 18/18 … the whole dashboard suite 877/877" was measured at the
+# pre-merge head a34745afa5. The branch then merged origin/main (2fd5083bf) at an unchanged
+# tree, which added 3 tests to src/*.test.js: 877 → 880, while the guard's own 18 did not
+# move. A whole-suite total is the evidence class that re-stales; the COMMAND is the part the
+# next lane reproduces. This guard is the doc-side tripwire (#8367 review, Finding 1).
+# ---------------------------------------------------------------------------
+
+_BASELINE_CLAIM = re.compile(r"^Baseline after the fix:.*?(?=\n\n|\Z)", re.M | re.S)
+_DASHBOARD_SUITE_COMMAND = "npm run build && node --test src/*.test.js"
+# A whole-suite pass TOTAL ("dashboard suite 877/877") — digits joined by a slash, optionally
+# bolded. The guard's own `18/18` is not this shape (no suite/dashboard prefix) and must
+# survive: the mutation table's "1 fail, 17/18" columns are keyed to it.
+_DASHBOARD_SUITE_TOTAL = re.compile(
+    r"(?:dashboard|suite)[^.\n]{0,60}?\*{0,2}\d{2,4}\s*/\s*\d{2,4}\*{0,2}", re.I)
+
+
+def _baseline_claim(text: str) -> str:
+    match = _BASELINE_CLAIM.search(text)
+    assert match, (
+        "the addendum has no `Baseline after the fix:` claim — this guard's subject was "
+        "renamed or deleted, so it would pass vacuously (#8367 review)")
+    return match.group(0)
+
+
+def _pins_a_dashboard_suite_total(text: str) -> re.Match:
+    """The whole-suite total in `text`, or None. Whitespace is collapsed first so a
+    markdown reflow cannot hide the count."""
+    return _DASHBOARD_SUITE_TOTAL.search(re.sub(r"\s+", " ", text))
+
+
+def test_baseline_claim_keeps_the_command_and_pins_no_suite_total():
+    paragraph = _baseline_claim(PLAN_DOC.read_text(encoding="utf-8"))
+    assert _DASHBOARD_SUITE_COMMAND in paragraph, (
+        "the baseline claim no longer names the CI job's own command "
+        f"(`{_DASHBOARD_SUITE_COMMAND}`), so the next lane cannot reproduce it")
+    offender = _pins_a_dashboard_suite_total(paragraph)
+    assert not offender, (
+        "the baseline claim pins a whole-suite pass total "
+        f"({offender.group(0)!r}). That number re-stales at every merge of `origin/main` at "
+        "an unchanged tree (877 before the `2fd5083bf` merge, 880 after), which is exactly "
+        "what the #8367 review flagged. Keep the command; do not pin the count.")
+
+
+# The pre-fix baseline claim at 203a16812 — verbatim, before this fix.
+_PREFIX_BASELINE_CLAIM = (
+    "Baseline after the fix: **18/18** in `securityHeaders.test.js`; the whole dashboard suite\n"
+    "**877/877** (`npm run build && node --test src/*.test.js`).")
+
+
+def test_baseline_suite_total_guard_reds_on_the_prefix_claim():
+    assert _pins_a_dashboard_suite_total(_PREFIX_BASELINE_CLAIM), (
+        "the recorded pre-fix claim (`the whole dashboard suite **877/877**`) must match — "
+        "the pattern has drifted and the guard in section 7 is vacuous")
+
+
+def test_baseline_suite_total_guard_clears_the_corrected_claim():
+    assert not _pins_a_dashboard_suite_total(
+        _baseline_claim(PLAN_DOC.read_text(encoding="utf-8"))), (
+        "the corrected baseline claim still carries a suite total — the guard is red on "
+        "right text")
+
+
+# ---------------------------------------------------------------------------
+# 8. `### Bounds that remain` must name the gap-3 umbrella's attribution-only bound.
+#
+# The umbrella keys on `attributableStamps()` = `stampNames` minus the `(unreadable header
+# name)` sentinel, and `countStamps` runs only over `HTML_SITES`. So a stamp whose header
+# NAME is an expression (`h.set(HDR, …)`) in a file outside `HTML_SITES` is neither counted
+# nor classified — the same deliberate bound the array-of-pairs arm draws, and NOT named in
+# the bounds list, so gap 3 reads as though the umbrella covers every stamp shape. The code
+# arm is deliberately absent (a fail-closed arm would red the non-`HTML_SITES` files that
+# stamp no header), which is exactly why the BOUND has to be the recorded artifact.
+# ---------------------------------------------------------------------------
+
+_BOUNDS_SECTION = re.compile(r"^### Bounds that remain.*?(?=\n### |\n## |\Z)", re.M | re.S)
+_GAP3_UMBRELLA = re.compile(r"umbrella", re.I)
+_UNREADABLE_HEADER_NAME = re.compile(
+    r"unreadable[ -](?:header[ -])?name"
+    r"|header\s+name\s+is\s+an\s+expression"
+    r"|h\.set\(HDR", re.I)
+
+
+def _bounds_section(text: str) -> str:
+    match = _BOUNDS_SECTION.search(text)
+    assert match, (
+        "the plan doc has no `### Bounds that remain` section — this guard's subject was "
+        "renamed or deleted, so it would pass vacuously (#8367 review)")
+    return match.group(0)
+
+
+def _bounds_listing_the_gap3_umbrella(section: str) -> list[str]:
+    """Bullets that name the gap-3 umbrella bound AND the unreadable-header-name trigger."""
+    return [
+        bullet for bullet in _BULLET.findall(section)
+        if _GAP3_UMBRELLA.search(bullet) and _UNREADABLE_HEADER_NAME.search(bullet)
+    ]
+
+
+def test_bounds_section_names_the_gap3_umbrella_attribution_bound():
+    section = _bounds_section(PLAN_DOC.read_text(encoding="utf-8"))
+    bullets = _BULLET.findall(section)
+    assert len(bullets) >= 3, (
+        f"only {len(bullets)} bullets parsed out of `### Bounds that remain` — the section "
+        "was reflowed and this guard is reading nothing")
+    assert _bounds_listing_the_gap3_umbrella(section), (
+        "the `### Bounds that remain` list does not name the gap-3 umbrella's "
+        "ATTRIBUTION-ONLY bound: `countStamps` runs only over `HTML_SITES` and the umbrella "
+        "keys on `attributableStamps()`, so a stamp whose header NAME is an expression "
+        "(`h.set(HDR, …)`) in a file outside `HTML_SITES` is neither counted nor "
+        "classified. The bound is deliberate (a fail-closed arm would red the "
+        "non-`HTML_SITES` files that stamp no header), but unnamed it reads as though the "
+        "umbrella covers every stamp shape. Record it here the way the array-of-pairs bound "
+        "is recorded.")
+
+
+# The pre-fix `### Bounds that remain` bullets at 203a16812 — abbreviated, first lines
+# verbatim. None ties the umbrella to an unreadable header name; the array-of-pairs bullet
+# says "unreadable FIRST ELEMENT" (no `name`) and the section never says "umbrella".
+_PREFIX_BOUNDS_BULLETS = (
+    "- **The array-of-pairs arm is ATTRIBUTION-ONLY — there is no fail-closed arm for an "
+    "unreadable\n  first element.** Measured on this tree, the fail-closed form adds +3 to "
+    "`blog/_lib.ts`.\n"
+    "- **`metaCspValues` reads SOURCE `.html` files textually, `<meta>` tag by tag.** A "
+    "policy\n  assembled by concatenating fragments across tags is outside it.\n"
+    "- **The gated-surface bound is not yet equal to the source-scan bound.** A marketing\n"
+    "  `.html`-only diff does NOT currently select the `dashboard` gate.\n")
+
+# The bound as it reads once named (the corrected-bullet control).
+_NAMED_GAP3_UMBRELLA_BOUND = (
+    "- **The gap-3 umbrella is ATTRIBUTION-ONLY — a stamp whose header NAME is an "
+    "expression is neither counted nor classified outside `HTML_SITES`.** `countStamps` "
+    "still runs only over the six `HTML_SITES` files.\n")
+
+
+def test_the_gap3_umbrella_bound_guard_reds_on_the_prefix_bounds_list():
+    assert not _bounds_listing_the_gap3_umbrella(_PREFIX_BOUNDS_BULLETS), (
+        "the recorded pre-fix `Bounds that remain` list must NOT name the gap-3 umbrella "
+        "bound — if it does, the guard in section 8 is not the check that catches this "
+        "defect")
+
+
+def test_the_gap3_umbrella_bound_guard_clears_the_named_bound():
+    assert _bounds_listing_the_gap3_umbrella(_NAMED_GAP3_UMBRELLA_BOUND), (
+        "a bullet that names the gap-3 umbrella bound and its unreadable-header-name "
+        "trigger must clear — the guard is red on right text")
