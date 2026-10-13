@@ -880,7 +880,12 @@ class ConversationMiner:
         }
         api.log.append(record)
         if api.projection is not None:
-            api.projection.apply(record)
+            # #7951 §17.1: journal-first door (its own envelope) — the append
+            # above is the COMMIT POINT, so the fold runs inside the
+            # live-write scope.
+            from tortoise.projection import _live_write_scope
+            with _live_write_scope("conversation_miner._emit_event"):
+                api.projection.apply(record)
 
     @staticmethod
     def _make_event(
