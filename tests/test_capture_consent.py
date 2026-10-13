@@ -566,6 +566,11 @@ def test_quickstart_documents_both_consent_contracts():
     opt-in AND name the surface that is deliberately NOT client-gated, so the
     two contracts cannot drift apart in the doc a user actually reads.
 
+    #3662's hosted-side disposition is now SETTLED (Option 1, owner ruling
+    2026-10-13), so the doc must record it as decided — describing it as an
+    open question is the stale-flag failure the ruling's ``OVERRIDES:`` marker
+    exists to prevent.
+
     The refusal hint points readers at this file by name
     (`CAPTURE_DECLINED_HINT`), so it is the surface the two claims must agree
     on."""
@@ -575,4 +580,14 @@ def test_quickstart_documents_both_consent_contracts():
     assert "tortoise_session_capture" in doc, (
         "the quickstart must name the server-side MCP tool whose gate is the "
         "server policy, not the client opt-in")
-    assert "#3662" in doc, "the deferred hosted-side decision must be traceable"
+    assert "#3662" in doc, "the settled hosted-side decision must be traceable"
+    # Compare on collapsed whitespace: the source wraps prose across lines, so a
+    # bare substring check for a multi-word phrase can pass vacuously — on the
+    # unfixed doc the phrase "open product question" straddles a line break and
+    # the assertion matched nothing at all (caught by the mutation proof).
+    flat = " ".join(doc.split())
+    assert "open product question" not in flat, (
+        "#3662's disposition is settled (Option 1) — the doc must not re-open it")
+    assert "decided, not open" in flat, (
+        "the quickstart must state that the hosted MCP consent disposition is "
+        "settled (#3662, Option 1)")
