@@ -46,7 +46,7 @@ export const BRAND_SUFFIX = " | Tortoise";
 // depend on the property: it measures whether the REPAIR fired directly, so the
 // divergence cannot reach `keyword_ok`. Do not reintroduce a second `enforce`
 // pass as the source of `repairFired`.
-const BRAND_SUFFIX_TAIL_RE = /(?:\s*[\p{P}\p{S}]\s*Tortoise\b[\p{P}\p{S}\s]*)+$/iu;
+const BRAND_SUFFIX_TAIL_RE = /(?:\s*[\p{P}\p{S}]\s*Tortoise(?![A-Za-z])[\p{P}\p{S}\s]*)+$/iu;
 
 export interface SeoFields {
   slug: string;
@@ -130,13 +130,22 @@ export const constraints: Constraints = {
       .trim()
       .replace(BRAND_SUFFIX_TAIL_RE, "")
       .trim();
-    // The trailing-separator class is the SAME `[\p{P}\p{S}]` class as the suffix
-    // strip, not an enumerated list. An enumerated list is exactly how the suffix
-    // strip failed three rounds running; this one had the same hole (`·`, `©`, `•`,
-    // `)` left a dangling separator before the suffix) and no fixture fed it.
+    // ⛔ This class is SEPARATORS ONLY — deliberately NOT `[\p{P}\p{S}]`. A class
+    // that broad DELETES legitimate terminal content, because it cannot tell a
+    // separator from a closing bracket, a percent sign or an emoji:
+    //   "What is a knowledge graph (KG)" -> "…(KG | Tortoise"  (unbalanced)
+    //   "Improve recall by 40%"          -> "…40 | Tortoise"
+    //   "Agent memory 🧠"                 -> "Agent memory"
+    // These are user-visible in the SERP and the <title>, and the suffix strip's
+    // argument does NOT carry over: that one matches a brand TOKEN (so it can be
+    // class-based), this one strips whatever sits at the end.
+    // One suffix strip here, not two: with `(?![A-Za-z])` and a class that consumes
+    // `_`, the regex already matches a trailing run in full, so a re-strip after the
+    // separator strip is unreachable — and an unreachable clause reads as coverage
+    // while providing none (deleting it left the suite green).
     const fitted = truncateAtWord(stripped, META_TITLE_MAX)
       .replace(BRAND_SUFFIX_TAIL_RE, "")
-      .replace(/[\p{P}\p{S}\s]+$/u, "")
+      .replace(/[\s,.;:!?|\u00b7\u2022—–-]+$/, "")
       .trim();
     if (!fitted) return "";
     // Brand suffix when it fits — meta_title is the FINAL title (SSR renders the

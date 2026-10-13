@@ -1337,6 +1337,44 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     assertEq(emptyDesc.body.error, "generation_incomplete", "...as an incomplete generation");
   }
 
+  // ⛔ CONTENT PRESERVATION — the trailing class is SEPARATORS ONLY. Widening it
+  // to all `[\p{P}\p{S}]` deleted terminal content, because it cannot tell a
+  // separator from a closing bracket, a percent sign or an emoji. These landed
+  // UNBALANCED or truncated in the SERP.
+  for (const [raw, expected] of [
+    ["What is a knowledge graph (KG)", "What is a knowledge graph (KG) | Tortoise"],
+    ["Improve recall by 40%", "Improve recall by 40% | Tortoise"],
+    ["Memory for agents (a guide)", "Memory for agents (a guide) | Tortoise"],
+    ["Agent memory 🧠", "Agent memory 🧠 | Tortoise"],
+    ["Tortoiseasy is not Tortoise", "Tortoiseasy is not Tortoise | Tortoise"],
+    ["Tortoises vs vectors", "Tortoises vs vectors | Tortoise"],
+    ["Why Tortoise", "Why Tortoise | Tortoise"],
+  ]) {
+    assertEq(constraints.metaTitle(raw), expected,
+      `terminal content is PRESERVED, not eaten by the separator strip (${JSON.stringify(raw)})`);
+  }
+  // ⛔ The `_` shape: `_` is a word character, so `\b` after `Tortoise` failed
+  // before it, the suffix strip was blocked, and the SEPARATOR strip then exposed
+  // a tail the regex never re-checked — `"]Tortoise_"` returned `"]Tortoise | Tortoise"`
+  // and a SECOND pass returned `""`, rejecting a generation that used to succeed
+  // with a 502. `(?![A-Za-z])` in place of `\b` closes it.
+  for (const raw of ["]Tortoise_", "_TORTOISE_", "]Tortoise | Tortoise"]) {
+    const out = constraints.metaTitle(raw);
+    assertEq(out, "", `a title that is only a brand tail strips to empty (${JSON.stringify(raw)})`);
+    assertEq(constraints.metaTitle(out), out, `...and is idempotent (${JSON.stringify(raw)})`);
+  }
+  assertEq(constraints.metaTitle("guide]Tortoise_"), "guide | Tortoise",
+    "...and real prose before the tail survives it");
+  // ⛔ `truncateAtWord`'s OWN boundary: a raw of EXACTLY the cap must not lose its
+  // last word. `<=` -> `<` silently dropped it and no fixture covered it.
+  {
+    const exact = `${"b".repeat(55)} ${"c".repeat(4)}`;
+    assertEq(exact.length, META_TITLE_MAX, "the fixture is exactly at the cap");
+    // Assert the VALUE, not `startsWith` — the prefix survives under BOTH
+    // boundaries, so a `startsWith` check passed on the bug it named.
+    assertEq(constraints.metaTitle(exact), exact,
+      "an exactly-at-cap title keeps ALL its words and is returned whole (the suffix does not fit)");
+  }
   // ⛔ The two strips fix OPPOSITE halves of the same problem, and the round-10
   // attempt did only one of each in turn:
   //   · stripping only AFTER truncating SPLITS the suffix — `"a"×58 + "|Tortoise"`
@@ -1348,8 +1386,12 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   // Doing both leaves a result ending in neither, which is also what restores full
   // idempotence. Each half gets its own assertion, so removing either strip fails.
   for (const [label, raw, expected] of [
-    ["split suffix", `${"a".repeat(58)}|Tortoise`, "a".repeat(58)],
-    ["split suffix, tighter cut", `${"a".repeat(52)}|Tortoise`, "a".repeat(52)],
+    // ⛔ ONE tuple, not two: the `${"a".repeat(58)}` case yields the fragment `|T`,
+    // which the "partial brand token" regex below cannot match, so that assertion
+    // passed on the very bug it named. Assert the VALUE instead — which is what
+    // catches both cuts.
+    ["split suffix (cut inside the suffix)", `${"a".repeat(58)}|Tortoise`, "a".repeat(58)],
+    ["split suffix (cut just past the separator)", `${"a".repeat(52)}|Tortoise`, "a".repeat(52)],
     ["truncation exposes a mid-title Tortoise",
      "Epistemic confidence in knowledge graphs —  Tortoise explained",
      "Epistemic confidence in knowledge graphs | Tortoise"],
