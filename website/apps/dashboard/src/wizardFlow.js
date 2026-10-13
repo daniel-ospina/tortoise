@@ -1,14 +1,20 @@
-// #1997 (W1): the 4 human steps of the onboarding wizard — single source of
+// #1997 (W1): the human steps of the onboarding wizard — single source of
 // truth for step structure + copy. Pure (no React), node --test unit-tested
 // (setupGuide.js pattern).
 //
+// Epic #1714 R1 (#3513): the Data-sources step is inserted at index 3, so the
+// wizard is FIVE human steps and `done` moves to index 4. The step renders the
+// integrations grid (integrationsGrid.js) and is the single presentation of
+// the source list in the product (the Settings mount renders the same
+// component — one presentation, not two).
+//
 // Epic #1976 plan P1 (wizard): org-create/join → fork card →
-// connect-consent → done. ALL other steps (install/seed/decide) are
-// agent-side or archived (the legacy #1643 wizard render lives in the
+// connect-consent → data-sources → done. ALL other steps (install/seed/decide)
+// are agent-side or archived (the legacy #1643 wizard render lives in the
 // ARCHIVED section of main.jsx — never deleted, A0 rollback path).
 //
 // Contract (issue #1997 O/I/T + DE2E-1/2/3):
-// - EXACTLY 4 human steps, in this order.
+// - The LIVE (post-#1997) step list, in this order.
 // - user-facing copy says "Organization" — never "team"/"workspace"
 //   (DE2E-2 copy sweep; the wizardArchived.test.js source-scan asserts the
 //   live render uses WIZARD_STEPS and the org-create dialog says
@@ -49,6 +55,17 @@ export const WIZARD_STEPS = Object.freeze([
     sub: 'Pick which harness to connect.',
   },
   {
+    id: 'data-sources',
+    // #3513: the step ASKS what to remember, so the label says that. "Data
+    // sources" is the epic's slice name and is the id, not the user copy.
+    // #3513 review P2 (the #2912 class): the card body already instructs
+    // ("Choose what Tortoise should remember. Everything here is optional …"),
+    // so this header sub DESCRIBES the substrate instead of repeating the
+    // instruction — one viewport must not state the guided action twice.
+    label: 'Choose your memory sources',
+    sub: "Each source below becomes part of your Organization's memory.",
+  },
+  {
     id: 'done',
     label: "You're all set",
     // #2912 (PR-gate UX): the step-3 body already ends with "Open Settings →
@@ -69,17 +86,18 @@ export const WIZARD_STEPS = Object.freeze([
 // Pure + exported so it is unit-tested (wizardFlow.test.js) instead of pinned
 // by a source-text grep.
 export function wizardStageLabel(step, { hasOrg = false, paused = false, connected = false, buildFork = false } = {}) {
-  if (step === 3) {
+  if (step === 4) {
     // A real connection OUTRANKS the local skip (#2361 r3): connect → Back →
     // Skip must still read as connected, never as paused. Checked first so the
     // two flags cannot compose into the false "paused" reading.
-    if (connected) return WIZARD_STEPS[3]?.label ?? ''
-    // #3428/#2937 (lane B3): step 3's own label ("You're all set") is itself a
-    // harness-connected CLAIM — the very claim the deleted human writer used to
-    // manufacture. With the writer gone, a user who finishes the connect step
-    // without a server-observed connection lands here with `paused` false, and
-    // the old code greeted them with "You're all set". `connected` is the
-    // caller's server-derived `serverHarnessConnected`.
+    if (connected) return WIZARD_STEPS[4]?.label ?? ''
+    // #3428/#2937 (lane B3): the done step's own label ("You're all set") is
+    // itself a harness-connected CLAIM — the very claim the deleted human
+    // writer used to manufacture. With the writer gone, a user who finishes the
+    // connect step without a server-observed connection lands here with
+    // `paused` false, and the old code greeted them with "You're all set".
+    // `connected` is the caller's server-derived `serverHarnessConnected`.
+    // (#3513 renumbered this step from 3 to 4; the arms are unchanged.)
     //
     // The default is deliberately `false` (fail-honest): a caller that forgets
     // to pass `connected` understates the connection, which is the harmless
@@ -117,25 +135,35 @@ export function wizardStageLabel(step, { hasOrg = false, paused = false, connect
 // The null arms are BOTH "the body already says it" cases:
 //   - step 0 on an org-holding account is a read-only summary whose body opens
 //     "You're set up in <org>…";
-//   - step 3 without a server-observed connection: the <h1> already names the
-//     state (wizardStageLabel's not-connected / paused arms) and the body
-//     carries the recovery.
-// #3725 adds the third: step 3 on the BUILD fork WITH a connection. Its body
-// says "Connected" + "Keep calling the SDK from your app." — so the step's own
-// sub ("Your agent takes over from here.") names an agent the build-fork user
-// does not have. The contradiction is the same one #2912 fixed for the paused
-// arm: two lines in one viewport saying opposite things. Suppress the lede
-// rather than invent a third fork-specific sentence to restate the body.
+//   - the done step (#3513 renumbered it from 3 to 4) without a server-observed
+//     connection: the <h1> already names the state (wizardStageLabel's
+//     not-connected / paused arms) and the body carries the recovery.
+// #3725 adds the third: the done step on the BUILD fork WITH a connection. Its
+// body says "Connected" + "Keep calling the SDK from your app." — so the step's
+// own sub ("Your agent takes over from here.") names an agent the build-fork
+// user does not have. The contradiction is the same one #2912 fixed for the
+// paused arm: two lines in one viewport saying opposite things. Suppress the
+// lede rather than invent a third fork-specific sentence to restate the body.
 // `hasOrg`/`connected` default fail-honest (false), matching
 // `wizardStageLabel`: a caller that forgets an input understates, never
 // over-claims.
 export function wizardStepSub(step, { hasOrg = false, connected = false, buildFork = false } = {}) {
   if (step === 0 && hasOrg) return null
-  if (step === 3) {
+  if (step === 4) {
     if (!connected) return null
     if (buildFork) return null
   }
   return WIZARD_STEPS[step]?.sub ?? null
+}
+
+// #3513: the screen-reader step announcement. The count used to be a bare
+// literal in main.jsx ("Step N of 4"), so inserting a step made sighted users
+// see five while screen readers announced four — a silent a11y regression no
+// snapshot test catches. The count is derived from WIZARD_STEPS, so it can
+// never disagree with what is rendered again. The label is the SAME derivation
+// the visible <h1> uses (`wizardStageLabel`), so the two never drift (#2912).
+export function wizardStepAnnouncement(step, opts = {}) {
+  return `Step ${step + 1} of ${WIZARD_STEPS.length}: ${wizardStageLabel(step, opts)}`
 }
 
 // The fork card (epic plan P4 / I-4): presentation fork, once per org,

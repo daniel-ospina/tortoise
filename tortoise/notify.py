@@ -98,9 +98,13 @@ def file_incident(kind: str, org_id: str = "", detail: dict | None = None) -> bo
     """File (or REUSE) an ops incident on the shared sink. NEVER raises.
 
     The swallow is the point: every caller is a FAILURE path that must still
-    complete (a best-effort send leg), so a dead alert channel — sink disabled,
-    R2/GitHub/Telegram down — degrades to the log line the caller already
-    wrote rather than propagating. Returns True only when THIS call was the
+    complete (a best-effort send leg), so a dead alert channel — no
+    ``DR_ISSUES_PAT``, an unusable object store, or R2/GitHub/Telegram down —
+    degrades to the log line the caller already wrote rather than propagating.
+    There is no sink-disable switch to list as a separate off state: after
+    #4778 the only "off" state is "no channel", described on
+    ``_incident_alert_store`` at the call site below. Returns True only when
+    THIS call was the
     filer; a dedup hit returns False, which is not an error.
 
     Dedup is ``AlertStore.open_incident``'s per-``(kind, org_id)`` create-once
@@ -110,18 +114,22 @@ def file_incident(kind: str, org_id: str = "", detail: dict | None = None) -> bo
     SUBJECT that identifies the outage, not the individual send.
 
     Mirrors the abuse-incident call site below (``abuse_suspended`` /
-    ``abuse_review_needed`` — same
-    ``_backup_config_safe`` → ``_alert_store_from`` → ``open_incident`` path),
-    factored out because more than one send leg now needs it. The hosted_api
+    ``abuse_review_needed`` — same ``_incident_alert_store`` → ``open_incident``
+    path), factored out because more than one send leg now needs it. The hosted_api
     import is function-level for the reason stated at that call site: hosted_api
     imports notify, so a module-level import would cycle.
     """
     try:
         from tortoise import hosted_api as _ha
-        cfg = _ha._backup_config_safe()
-        if cfg is None:
-            return False  # sink disabled — the caller's own log is the record
-        store = _ha._alert_store_from(cfg)
+        # #4778: the ALERT-only policy seam — NOT the sweep-gated raw chain.
+        # A billing-notify failure is a NON-backup path, so its incident must be
+        # VISIBLE on a deployment whose backups are off (the production
+        # default), which is exactly what building the channel from
+        # `_backup_config_safe()` (None whenever `BACKUP_SWEEP_ENABLED` is off)
+        # prevented.
+        store = _ha._incident_alert_store()
+        if store is None:
+            return False  # no channel — the caller's own log is the record
         return bool(store.open_incident(kind, org_id, detail or {}))
     except Exception as e:  # noqa: BLE001, RUF100
         logger.warning("notify: %s incident filing failed (%s)", kind, redact_safe(e))
@@ -285,8 +293,8 @@ def notify_abuse(kind: str, org: dict, details: dict | None = None) -> None:
             logger.warning("abuse notify: telegram failed (%s)", redact_safe(e))
 
     if kind in ("abuse_suspended", "abuse_review_needed"):
-        # Ops incident alert (GH issue + Telegram) — best-effort: absence of
-        # backup config or any failure degrades to the Telegram leg above
+        # Ops incident alert (GH issue + Telegram) — best-effort: absence of the
+        # ALERT channel or any failure degrades to the Telegram leg above
         # (there is no email leg since #3639).
         #
         # #5425: the engine no longer suspends, so ``abuse_review_needed`` is
@@ -298,9 +306,14 @@ def notify_abuse(kind: str, org: dict, details: dict | None = None) -> None:
         # module level (hosted_api imports notify).
         try:
             from tortoise import hosted_api as _ha
-            cfg = _ha._backup_config_safe()
-            if cfg is not None:
-                store = _ha._alert_store_from(cfg)
+            # #4778: the ALERT-only policy seam, not the sweep-gated raw chain.
+            # The abuse path is a REQUEST-path decision with nothing to do with
+            # the backup sweep, so gating the incident on `_backup_config_safe()`
+            # (None whenever `BACKUP_SWEEP_ENABLED` is off — the production
+            # default) made an abuse breach invisible on exactly the deployments
+            # that do not run backups.
+            store = _ha._incident_alert_store()
+            if store is not None:
                 # Round 7: this branch is the OPERATOR-initiated path now — the
                 # engine never suspends (that is what #5425 deleted), so
                 # "Auto-suspended" misattributed an out-of-band decision and read
