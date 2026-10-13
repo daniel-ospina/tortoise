@@ -29,7 +29,10 @@ MAX_FIX_TRIES="${MAX_FIX_TRIES:-3}"
 # (Corrected after a fresh-context verifier counted the dispatch lines the first claim ignored.)
 # The REAL capacity constraint is the machine (available RAM / swap) -- see the gate chain below.
 # Derive the ceiling from the core count so it scales, and keep the env override.
-_NCPU="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+# sysctl -n hw.ncpu is macOS-only: on a Linux cell sysctl may be absent entirely (Debian's procps
+# does not ship it any more — verified in debian:stable-slim) and hw.ncpu is a macOS key regardless,
+# so the fallback silently pinned _NCPU=4 for EVERY cell and MAX_LOAD=40 with it (#1702).
+_NCPU="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 MAX_LOAD="${MAX_LOAD:-$(( _NCPU * 10 ))}"
 MAX_LANES="${MAX_LANES:-4}"
 MAX_REVIEW="${MAX_REVIEW:-4}"   # keep in sync with install.sh's default and README §4
@@ -62,6 +65,57 @@ is_num() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 # back-pressure these gates exist to apply. Coerce to the documented default instead of failing open.
 is_num "${MIN_SWAP_FREE:-600}"   || MIN_SWAP_FREE=600
 is_num "${MIN_MEM_FREE_MB:-512}" || MIN_MEM_FREE_MB=512
+is_num "${_NCPU:-}"             || _NCPU=4
+
+# ── portable OS primitives ─────────────────────────────────────────────────────
+# This harness runs on macOS (the operator's box, launchd) AND on a Linux cell
+# (cloud-cell-supervisor.sh), so every probe below carries both a Linux and a macOS path.
+# Found the hard way (#1702): `stat -f '%m'`, `sysctl -n vm.loadavg` and `sysctl -n vm.swapusage`
+# are BSD/macOS-only. On GNU coreutils `stat -f '%m' F` prints the FILESYSTEM LISTING on STDOUT and
+# exits 1 — so `$(stat -f '%m' F 2>/dev/null || echo $(date +%s))` captured the listing PLUS the
+# fallback, the arithmetic failed, `age` was left unset, and under `set -u` the next
+# `[ "$age" -gt ... ]` aborted the whole controller. Reachable ~1 cycle after the first dispatch on
+# every cell (each lane/merge/fix writes the log the reaper stats). Reproduced on GNU coreutils 9.7
+# (debian:stable-slim): `age: unbound variable`, rc=1, no cycle completes.
+# GNU first, BSD second — deliberately NOT the other way round, and this is why the obvious
+# `stat -f '%m' F || stat -c '%Y' F` ladder is wrong: on GNU the FIRST form does not fail quietly,
+# it writes the listing to stdout before exiting 1, and `||` cannot discard stdout. In this order
+# `stat -c '%Y'` is a clean failure on BSD (empty stdout, rc 1), so exactly one numeric line results.
+file_mtime_epoch() { # <file> -> mtime as epoch seconds; NON-ZERO rc when unreadable (never a guess)
+  local m
+  m="$(stat -c '%Y' "$1" 2>/dev/null || stat -f '%m' "$1" 2>/dev/null)" || return 1
+  is_num "$m" || return 1
+  printf '%s\n' "$m"
+}
+# 1-min load average. THE FIELD DIFFERS: /proc field 1 IS the 1-min load, while macOS
+# `sysctl vm.loadavg` prints `{ 1.70 1.90 2.00 }`, so field 2 is. One shared awk would therefore
+# read the wrong field on one of the two platforms — the bug this function's test pins.
+# The argument is a TEST SEAM (the call site passes nothing), the same idiom as mp_reason() /
+# review_slots(): without it the Linux branch could only be exercised on a Linux host.
+load1() { # [<loadavg-file>]
+  local p="${1:-/proc/loadavg}"
+  if [ -r "$p" ]; then
+    awk '{printf "%d\n", $1}' "$p" 2>/dev/null
+  else
+    sysctl -n vm.loadavg 2>/dev/null | awk '{print int($2)}'
+  fi
+}
+# Swap as MB. Linux reports kB in /proc/meminfo; macOS prints `total = 2048.00M ... free = ...`.
+# Echoes "<free_mb> <total_mb>"; NON-ZERO rc when unmeasurable, so the caller can tell "no swap
+# configured" (total 0 — the documented allow) from "we could not read it". An unreadable probe is
+# NOT treated as pressure: that decision is argued at the gate chain, where the value is consumed.
+# The argument is a TEST SEAM (the call site passes nothing).
+swap_usage_mb() { # [<meminfo-file>]
+  local p="${1:-/proc/meminfo}"
+  if [ -r "$p" ]; then
+    awk '/^SwapTotal:/{t=$2} /^SwapFree:/{f=$2}
+         END {if (t=="" || f=="") exit 1; printf "%d %d\n", f/1024, t/1024}' "$p" 2>/dev/null
+  else
+    sysctl -n vm.swapusage 2>/dev/null | awk '
+      {for(i=1;i<=NF;i++){if($i=="total")t=$(i+2); if($i=="free")f=$(i+2)}}
+      END {if (t=="" || f=="") exit 1; printf "%d %d\n", f, t}'
+  fi
+}
 # $O is operator config, not attacker input, but a quote or metacharacter here would break every
 # spawn (the tmux command string is executed via sh -c). Fail loudly instead of failing mysteriously.
 case "$O" in
@@ -99,11 +153,16 @@ STALE_MIN="${STALE_MIN:-40}"
 # the operator's own shell or any process outside the harness. The PR is re-dispatched by the
 # normal sweep on the next cycle (the claim_live() check then sees a dead owner and frees it).
 reap_stale_workers() {
-  local s f age pid
+  local s f age pid m
   for s in $(tmux ls -F '#{session_name}' 2>/dev/null | grep -E '^(merge|lane|fix)-'); do
     f="$O/logs/$s.log"
     [ -f "$f" ] || continue
-    age=$(( $(date +%s) - $(stat -f '%m' "$f" 2>/dev/null || echo "$(date +%s)") ))
+    # An unreadable mtime means the age is UNKNOWN, and unknown is not evidence of a hang: skip the
+    # session rather than reap it. Never let the probe's failure escape as an arithmetic error — on
+    # a Linux cell that is exactly what aborted the controller one cycle after the first dispatch
+    # (#1702): set -u turned the unassigned `age` into `File: unbound variable`.
+    m="$(file_mtime_epoch "$f")" || continue
+    age=$(( $(date +%s) - m ))
     [ "$age" -gt $((STALE_MIN * 60)) ] || continue
     pid="$(tmux list-panes -t "=$s" -F '#{pane_pid}' 2>/dev/null | head -1)"
     echo "[reap-worker] $s silent ${age}s -> killing session (pane_pid=${pid:-?})" >> "$LOG"
@@ -118,7 +177,6 @@ reap_stale_workers() {
 }
 
 heartbeat() { date +%s > "$O/heartbeat"; }
-load1() { sysctl -n vm.loadavg 2>/dev/null | awk '{print int($2)}'; }
 # Exact session-name test. `tmux has-session -t <name>` prefix-matches, so a guard for PR #82
 # would report "in flight" because `fix-820` exists — starving #82 while that worker lives.
 sess() { tmux ls -F '#{session_name}' 2>/dev/null | grep -qx "$1"; }
@@ -141,7 +199,7 @@ mp_reason() { # <open_prs> <lanes>
   fi
 }
 res_line() {
-  local idle pmem f i w cmp avail swapfree swaptotal dline duse procs runnable svcs rate
+  local idle pmem f i w cmp avail swapfree swaptotal dline duse procs runnable svcs rate _sw
   # CPU
   local cpu; cpu="$(top -l 2 -n 0 2>/dev/null | awk '/CPU usage/{c=$0} END{sub(/^CPU usage: /,"",c); print c}')"
   # RAM (16 KiB pages on Apple silicon; compute from the header rather than hardcoding)
@@ -152,9 +210,10 @@ res_line() {
     /Pages wired/ {gsub(/[.]/,"",$4); w=$4}
     /occupied by compressor/ {gsub(/[.]/,"",$5); c=$5}
     END {if (ps=="") ps=16384; printf "%.2fG free/%.2fG inactive/%.2fG wired/%.2fG comp/%.2fG avail", f*ps/1e9, i*ps/1e9, w*ps/1e9, c*ps/1e9, (f+i)*ps/1e9}')"
-  # swap + disk + processes
-  swapfree="$(sysctl -n vm.swapusage 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="free"){printf "%.0fM",$(i+2); exit}}')"
-  swaptotal="$(sysctl -n vm.swapusage 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="total"){printf "%.0fM",$(i+2); exit}}')"
+  # swap + disk + processes (swap via the portable helper: a macOS-only probe logged '?' on a cell,
+  # which is how the gate's absence stayed invisible in the logs — #1702)
+  swapfree=""; swaptotal=""
+  if _sw="$(swap_usage_mb)"; then swapfree="${_sw%% *}M"; swaptotal="${_sw##* }M"; fi
   dline="$(df -g /System/Volumes/Data 2>/dev/null | awk 'NR==2{printf "%dG free/%d%% used",$4,$5}')"
   procs="$(ps -Ao pid= 2>/dev/null | wc -l | tr -d ' ')"
   runnable="$(ps -Ao stat= 2>/dev/null | grep -c '^R')"
@@ -413,9 +472,21 @@ open(sys.argv[1],"w").write("\n".join(keep)+("\n" if keep else ""))
 PY
   fi
   L="$(load1)"; LANES="$(tmux ls 2>/dev/null | grep -c '^lane-')"
-  SWFREE="$(sysctl -n vm.swapusage 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="free"){print int($(i+2)); exit}}')"
-  SWTOTAL="$(sysctl -n vm.swapusage 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="total"){print int($(i+2)); exit}}')"
-  : "${SWFREE:=9999}"; : "${SWTOTAL:=0}"
+  # A load reading that is empty or non-numeric is the DOCUMENTED FAIL-OPEN (can_spawn() defaults it
+  # to 0). Kept deliberately (#1702): both supported platforms are measurable now, and failing CLOSED
+  # on an unreadable probe would convert "no load back-pressure" into a permanent controller outage on
+  # a host with no procfs and no sysctl — a worse and less recoverable failure than the gate it guards.
+  # The remaining gates (MAX_LANES, memory, merge-priority) still bound dispatch. Coerced here as well
+  # so the gate chain cannot emit "integer expression expected", and so the logged value IS the value
+  # the gate used.
+  is_num "${L:-}" || L=0
+  # swap_total=0 => swap uninitialised (fresh boot), NOT pressure — allow. An UNREADABLE probe is
+  # UNKNOWN and takes that same allow, for the reason above; unlike 0 it is a distinguishable state
+  # (swap_usage_mb returns non-zero), so a future decision to fail closed there has a seam to use.
+  SWFREE=9999; SWTOTAL=0
+  if _sw="$(swap_usage_mb)"; then SWFREE="${_sw%% *}"; SWTOTAL="${_sw##* }"; fi
+  is_num "$SWFREE" || SWFREE=9999
+  is_num "$SWTOTAL" || SWTOTAL=0
   # Available memory = free + inactive (top's "unused" PhysMem is NOT it; that is a different figure).
   # Derive the page size from vm_stat's own header rather than hardcoding it: 16 KiB is Apple
   # silicon, but install.sh supports Intel Macs (it adds /usr/local/bin), where a hardcoded 16384

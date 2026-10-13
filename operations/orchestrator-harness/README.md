@@ -227,6 +227,20 @@ it just moves the pressure into the compressor. `swap_total=0` right after boot 
 *uninitialised*, not as pressure (that bug silently blocked all dispatch for the first minutes
 after a restart until it was fixed).
 
+**The capacity probes are portable: Linux cell + macOS host.** `#1702`. Every probe used to be a
+macOS primitive, so on a Linux cell `load1()` returned empty (the `MAX_LOAD` gate could never bind),
+swap read as `0` (the gate skipped by its own "uninitialised" rule), and the reaper's
+`stat -f '%m'` became an arithmetic error that killed the controller one cycle after its first
+dispatch — every lane/merge/fix writes the log the reaper stats. Each probe now has a Linux path
+(`/proc/loadavg`, `/proc/meminfo`, `nproc`) and a macOS one (`sysctl`), and the reaper's mtime probe
+is a GNU-then-BSD `stat` ladder with a numeric guard (GNU first on purpose: GNU `stat -f` writes the
+filesystem listing to **stdout** before exiting 1, so a BSD-first `||` ladder is the bug itself).
+A load reading that is *unreadable* stays the documented **fail-open** (`can_spawn()` defaults it to
+`0`): both supported platforms are measurable now, and failing closed on an unreadable probe would
+turn "no load back-pressure" into a permanent controller outage. `install.sh` still refuses to run
+off macOS (it renders a launchd plist) — the portability that matters is `orch-loop.sh`, the file
+`cloud-cell-supervisor.sh` starts.
+
 ---
 
 ## 5. Merge policy and safety invariants

@@ -464,8 +464,13 @@ ck "the fixer is given the failing CI log" $rc
 # 2026-10-12 while the caps (which count SESSIONS) reported the slot as busy.
 grep -q '^  reap_stale_workers$' "$LOOP" && rc=0 || rc=1
 ck "the reaper runs every cycle" $rc
-sed -n '/^reap_stale_workers() {/,/^}/p' "$LOOP" > "$TMP/reapw.sh"
-if need "$TMP/reapw.sh" "reap_stale_workers() is extracted from the shipped loop"; then
+sed -n '/^reap_stale_workers() {/,/^}/p' "$LOOP" > "$TMP/reapw-body.sh"
+# The reaper now delegates the mtime probe to the shipped portable helper (#1702), so its unit is
+# the helper PLUS the reaper. Extracting the reaper alone leaves file_mtime_epoch undefined and the
+# reaper silently skips every session (`command not found` -> the `|| continue` guard) — which is
+# exactly what this check caught when the helper was introduced.
+{ grep -m1 '^is_num() {' "$LOOP"; sed -n '/^file_mtime_epoch() {/,/^}/p' "$LOOP"; cat "$TMP/reapw-body.sh"; } > "$TMP/reapw.sh"
+if need "$TMP/reapw.sh" "reap_stale_workers() and its file_mtime_epoch() helper are extracted from the shipped loop"; then
   mkdir -p "$TMP/RW/logs"
   : > "$TMP/RW/logs/merge-999.log"; touch -t 202601010000 "$TMP/RW/logs/merge-999.log"
   : > "$TMP/RW/fresh.log"
@@ -834,6 +839,126 @@ if [ -s "$REFRESH" ]; then
   else rc=1; fi
 else rc=1; fi
 ck "refresh-candidates.sh dedupes the backlog in place and nothing running it re-sorts it" $rc
+
+# ── 19) the harness runs on Linux as well as macOS (#1702) ──────────────────────
+# The shipped cell controller (cloud-cell-supervisor.sh) starts THIS loop on a Linux cell, and every
+# capacity probe it used was macOS-only. Reproduced on GNU coreutils 9.7 (debian:stable-slim):
+# `stat -f '%m' F` prints the FILESYSTEM LISTING on stdout and exits 1, so the `|| echo` fallback
+# APPENDED, the arithmetic failed, `age` was never assigned, and set -u turned the following test
+# into `age: unbound variable` — the controller died one cycle after its first dispatch, on every
+# cell. The Linux branch of each replacement is driven below, with the GNU shapes stubbed.
+# Verified the hard way: dropped into the PRE-FIX tree, these checks FAIL (reproduced against the
+# pre-fix orch-loop.sh: file_mtime_epoch extraction empty and the GNU-shape reaper drive aborts).
+# Called for by the issue's own verification table: a stub `stat` that reproduces the GNU shapes. It
+# is created UNCONDITIONALLY so the reaper drive below really is driven by GNU semantics even when
+# the helper is absent (otherwise the stub would be missing, the real BSD stat would answer, and the
+# drive would pass on the broken copy — verified by running it against the pre-fix tree).
+mkdir -p "$TMP/gnubin"
+cat > "$TMP/gnubin/stat" <<'SH'
+#!/bin/bash
+if [ "${1:-}" = "-c" ]; then /usr/bin/stat -f '%m' "${3:-}"; exit $?; fi
+if [ "${1:-}" = "-f" ]; then echo "/dev/disk1 234881024 1234 5678 9% /"; exit 1; fi
+exit 1
+SH
+chmod +x "$TMP/gnubin/stat"
+sed -n '/^file_mtime_epoch() {/,/^}/p' "$LOOP" > "$TMP/mtime-body.sh"
+# `need` on the helper ALONE: if it is absent (the pre-fix tree) the whole block is skipped, rather
+# than every check inside passing vacuously off `command not found` (which really does return rc!=0).
+if need "$TMP/mtime-body.sh" "file_mtime_epoch() is extracted from the shipped loop"; then
+  { grep -m1 '^is_num() {' "$LOOP"; cat "$TMP/mtime-body.sh"; } > "$TMP/mtime.sh"
+  : > "$TMP/mt.log"; touch -t 202601010000 "$TMP/mt.log"
+  want="$(/usr/bin/stat -f '%m' "$TMP/mt.log")"
+  got="$(bash -c ". '$TMP/mtime.sh'; file_mtime_epoch '$TMP/mt.log'")"
+  [ "$got" = "$want" ] && rc=0 || { rc=1; echo "      bsd got '$got' want '$want'"; }
+  ck "file_mtime_epoch(): the BSD/macOS path returns the file's epoch mtime" $rc
+  got="$(PATH="$TMP/gnubin:$PATH" bash -c ". '$TMP/mtime.sh'; file_mtime_epoch '$TMP/mt.log'")"
+  [ "$got" = "$want" ] && rc=0 || { rc=1; echo "      gnu got '$(printf '%s' "$got" | tr '\n' '|')'"; }
+  ck "file_mtime_epoch(): the GNU shape (stat -f prints a listing) still yields ONE numeric epoch" $rc
+  # Both shapes fail -> non-zero rc with NO guessed age. The reaper then SKIPS the session; it must
+  # not fall back to `date +%s` (age 0 is a guess that reads as a healthy worker either way).
+  got="$(PATH="$TMP/gnubin:$PATH" bash -c ". '$TMP/mtime.sh'; file_mtime_epoch '$TMP/absent.log' && echo ZERO || echo NONZERO")"
+  [ "$got" = "NONZERO" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "file_mtime_epoch(): an unreadable file fails to a non-zero rc instead of guessing an age" $rc
+fi
+# The reaper driven with the GNU stat shape: the pre-fix copy ABORTS here (`age: unbound variable`,
+# rc 1) and kills nothing. Assert rc=0 AND the kill decision — stale reaped, fresh spared — so a
+# "fix" that simply stopped reaping cannot pass this.
+{ grep -m1 '^is_num() {' "$LOOP"; sed -n '/^file_mtime_epoch() {/,/^}/p' "$LOOP"; sed -n '/^reap_stale_workers() {/,/^}/p' "$LOOP"; } > "$TMP/reapw-gnu.sh"
+if need "$TMP/reapw-gnu.sh" "the reaper and its stat helper are extracted for the GNU-shape drive"; then
+  mkdir -p "$TMP/RG/logs"
+  : > "$TMP/RG/logs/merge-999.log"; touch -t 202601010000 "$TMP/RG/logs/merge-999.log"
+  : > "$TMP/RG/logs/merge-100.log"
+  cat > "$TMP/rg.sh" <<SH
+set -u
+PATH="$TMP/gnubin:\$PATH"
+LOG="$TMP/RG/rw.log"; O="$TMP/RG"; STALE_MIN=1; KILLED=""
+tmux() { case "\${1:-}" in
+  ls) printf 'merge-999\nmerge-100\n' ;;
+  list-panes) echo 4242 ;;
+  kill-session) KILLED="\$KILLED \$3" ;;
+esac; }
+kill() { :; }
+. "$TMP/reapw-gnu.sh"
+reap_stale_workers; rc=\$?
+echo "rc=\$rc killed=\$KILLED"
+SH
+  out="$(bash "$TMP/rg.sh" 2>&1)"
+  case "$out" in *"rc=0"*) rc=0;; *) rc=1; echo "      got: $out";; esac
+  ck "shipped reaper, GNU stat shape: the cycle COMPLETES (rc 0) with no arithmetic abort" $rc
+  case "$out" in *"merge-999"*) rc=0;; *) rc=1;; esac
+  ck "shipped reaper, GNU stat shape: the stale session is reaped" $rc
+  case "$out" in *"merge-100"*) rc=1;; *) rc=0;; esac
+  ck "shipped reaper, GNU stat shape: the fresh session is left alone" $rc
+  grep -q 'reap-worker' "$TMP/RG/rw.log" 2>/dev/null && rc=0 || rc=1
+  ck "shipped reaper, GNU stat shape: the kill is logged" $rc
+fi
+sed -n '/^load1() {/,/^}/p' "$LOOP" > "$TMP/load1.sh"
+if need "$TMP/load1.sh" "load1() is extracted from the shipped loop"; then
+  printf '7.42 1.10 0.95 2/345 999\n' > "$TMP/loadavg"
+  got="$(bash -c ". '$TMP/load1.sh'; load1 '$TMP/loadavg'")"
+  [ "$got" = "7" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "shipped load1(): the Linux (/proc/loadavg) path reads FIELD 1 as the 1-min load" $rc
+  # macOS prints '{ 1.70 1.90 2.00 }', so there the 1-min load is field 2. Pin the FIELD, not only
+  # the path: one awk shared by both platforms would pass a path-only check and still read 5-min.
+  got="$(bash -c "sysctl() { echo '{ 3.30 4.40 5.50 }'; }; . '$TMP/load1.sh'; load1 '$TMP/absent-loadavg'")"
+  [ "$got" = "3" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "shipped load1(): the macOS (sysctl vm.loadavg) path reads the 1-min field, not the 5-min" $rc
+fi
+sed -n '/^swap_usage_mb() {/,/^}/p' "$LOOP" > "$TMP/swap.sh"
+if need "$TMP/swap.sh" "swap_usage_mb() is extracted from the shipped loop"; then
+  printf 'MemTotal:       16000000 kB\nSwapTotal:       2048000 kB\nSwapFree:        1024000 kB\n' > "$TMP/meminfo"
+  got="$(bash -c ". '$TMP/swap.sh'; swap_usage_mb '$TMP/meminfo'")"
+  [ "$got" = "1000 2000" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "shipped swap_usage_mb(): the Linux (/proc/meminfo) path converts kB to MB as <free> <total>" $rc
+  # 'we could not read it' must stay distinguishable from 'no swap configured' (total 0, the allow).
+  # BOTH probes are stubbed to fail: with only the meminfo path unavailable the function correctly
+  # falls back to sysctl, which is not the state under test here.
+  got="$(bash -c "sysctl() { :; }; . '$TMP/swap.sh'; swap_usage_mb '$TMP/absent-meminfo' && echo OK || echo NONZERO")"
+  [ "$got" = "NONZERO" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "shipped swap_usage_mb(): an unreadable probe returns non-zero, not a false '0 0'" $rc
+  got="$(bash -c "sysctl() { echo 'total = 2048.00M  used = 1.00M  free = 2047.00M'; }; . '$TMP/swap.sh'; swap_usage_mb '$TMP/absent-meminfo'")"
+  [ "$got" = "2047 2048" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "shipped swap_usage_mb(): the macOS (sysctl vm.swapusage) path still yields <free> <total> MB" $rc
+fi
+# The regression guard that does not depend on any single spelling of the call site: a macOS-only
+# probe anywhere OUTSIDE the three helpers is the bug, still shipped.
+outside="$(awk '
+  /^[[:space:]]*#/ {next}
+  /^file_mtime_epoch\(\) \{|^load1\(\) \{|^swap_usage_mb\(\) \{/ {h=1}
+  h && /^\}/ {h=0; next}
+  h {next}
+  /sysctl -n (vm\.loadavg|vm\.swapusage)|stat -f .%m./ {print FNR": "$0}
+' "$LOOP")"
+[ -z "$outside" ] && rc=0 || { rc=1; echo "      outside the helpers: $outside"; }
+ck "no call site uses a macOS-only load/swap/mtime probe outside the portable helpers" $rc
+grep -q 'if _sw="$(swap_usage_mb)"; then SWFREE=' "$LOOP" && rc=0 || rc=1
+ck "the dispatch gate reads swap through swap_usage_mb()" $rc
+grep -q 'm="$(file_mtime_epoch "$f")" || continue' "$LOOP" && rc=0 || rc=1
+ck "the reaper reads the log mtime through file_mtime_epoch() and skips on unknown" $rc
+# install.sh renders MAX_LOAD into the plist from its OWN _NCPU and section 7 compares the two
+# files' effective defaults — a divergence there would only surface ON a Linux host, so pin it here.
+grep -q 'nproc 2>/dev/null' "$INST" && rc=0 || rc=1
+ck "install.sh derives _NCPU portably too (its MAX_LOAD must match the loop's on any host)" $rc
 
 echo
 echo "==> $pass passed, $fail failed"
