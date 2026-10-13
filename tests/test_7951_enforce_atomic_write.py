@@ -45,6 +45,9 @@ the atomic write, and it remains OPEN on `#7951`.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -551,3 +554,114 @@ def test_create_point_is_apply_first_a_recorded_deviation(
         f"(observed: {cache_at_journal!r})"
     )
     assert _count(proj, "Point", "id", point["id"]) == 1
+
+
+# ── the P1: the MCP lane must NOT drag the hosted app onto stdio/self-host ─
+#
+# `tortoise.hosted_api`'s PRESENCE in `sys.modules` IS the runtime self-host
+# deployment discriminator: `mcp_server.tortoise_pack_install`'s HOSTED-only
+# stub, `operator_alert.alert_store`'s light leg, and the fast-path invariant
+# stated at the top of `mcp_server` all read it. Resolving the MCP lane's
+# journal through a function-level `from tortoise import hosted_api` therefore
+# put the whole hosted FastAPI app in `sys.modules` on EVERY stdio/self-host
+# process — at startup, via `monitoring.register(_get_sdk())` — for a call that
+# provably returns `None` on that lane (`namespace=None, graph_name=None`).
+# The derivation now lives in the lightweight `tortoise.config`.
+
+_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _fresh_interpreter(code: str, tmp_path) -> str:
+    """Run ``code`` in a FRESH interpreter on the stdio/self-host MCP lane.
+
+    A subprocess is REQUIRED to test the invariant: the whole suite shares one
+    interpreter, so an in-process ``sys.modules`` check cannot fail once any
+    test (or another module) has imported ``hosted_api``. The lane's own
+    invariant is about a process that has NOT imported it. This is also how
+    the review measured the regression.
+    """
+    env = dict(os.environ)
+    env.pop("TORTOISE_DB_URI", None)
+    env.pop("TORTOISE_EVENT_LOG_BASE_DIR", None)
+    env["TORTOISE_DB_PATH"] = str(tmp_path / "stdio-lane.db")
+    proc = subprocess.run(
+        [sys.executable, "-c", "import os, sys\n" + code],
+        cwd=str(_ROOT), capture_output=True, text=True, timeout=600, env=env,
+    )
+    assert proc.returncode == 0, (
+        f"the fresh-interpreter probe FAILED (rc={proc.returncode})\n"
+        f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    )
+    return proc.stdout
+
+
+def test_the_stdio_mcp_lane_never_imports_the_hosted_app(tmp_path):
+    """P1 — `mcp_server._get_sdk` must not build the hosted app (#7951).
+
+    RED before the fix (measured): after `_get_sdk()`,
+    ``'tortoise.hosted_api' in sys.modules`` is ``True``, so this assertion
+    fails. The journal is `None` on this lane either way, so the stubbed call
+    bought nothing and cost the self-host discriminator.
+    """
+    code = (
+        "assert 'tortoise.hosted_api' not in sys.modules, 'preloaded'\n"
+        "import tortoise.mcp_server as m\n"
+        "assert 'tortoise.hosted_api' not in sys.modules, (\n"
+        "    'importing tortoise.mcp_server already built the hosted app')\n"
+        "sdk = m._get_sdk()\n"
+        "assert 'tortoise.hosted_api' not in sys.modules, (\n"
+        "    '_get_sdk() imported tortoise.hosted_api — the #3834 fast-path "
+        "invariant is broken')\n"
+        "assert sdk._event_log_path is None, sdk._event_log_path\n"
+        "from tortoise import operator_alert as oa\n"
+        "oa.alert_store()\n"
+        "assert 'tortoise.hosted_api' not in sys.modules, (\n"
+        "    'alert_store() took the hosted leg on the stdio lane')\n"
+        "print('STDIO-LANE-CLEAN')\n"
+    )
+    assert "STDIO-LANE-CLEAN" in _fresh_interpreter(code, tmp_path)
+
+
+def test_the_selfhost_pack_install_stub_survives_stdio_startup(tmp_path):
+    """P1, second harm — the self-host deployment gate stays reachable.
+
+    ``tortoise_pack_install``'s HOSTED-only stub fires only while
+    ``'tortoise.hosted_api'`` is ABSENT from ``sys.modules``. Once startup
+    imported it, a stdio/self-host call fell past the gate to the
+    transport check. RED before the fix (measured): the error is
+    ``'pack install requires the HTTP transport.'``, not the HOSTED-only stub.
+    """
+    code = (
+        "import tortoise.mcp_server as m\n"
+        "m._get_sdk()\n"
+        "out = m.tortoise_pack_install('')\n"
+        "assert out.get('installed') is False, out\n"
+        "assert 'HOSTED-only' in (out.get('error') or ''), out\n"
+        "print('PACK-STUB-OK')\n"
+    )
+    assert "PACK-STUB-OK" in _fresh_interpreter(code, tmp_path)
+
+
+def test_the_mcp_org_journal_resolves_without_the_hosted_app(tmp_path):
+    """P1 — the org lane still gets its journal, WITHOUT importing the app.
+
+    The arming itself (the P0) must be preserved: `mcp_auth._get_org_sdk` still
+    passes this resolved path as `event_log_path=`. Only the import is gone —
+    the derivation now comes from `tortoise.config` (and `hosted_api`
+    re-exports the same function, so there is still exactly ONE derivation).
+
+    RED before the fix (measured): `_journal_path_for` loaded
+    ``tortoise.hosted_api`` at call time.
+    """
+    base = tmp_path / "ev"
+    expected = base / "org_org7951" / "events.jsonl"
+    code = (
+        f"os.environ['TORTOISE_EVENT_LOG_BASE_DIR'] = {str(base)!r}\n"
+        "from tortoise import mcp_auth\n"
+        "p = mcp_auth._journal_path_for(namespace='org7951', graph_name=None)\n"
+        f"assert p == {str(expected)!r}, p\n"
+        "assert 'tortoise.hosted_api' not in sys.modules, (\n"
+        "    '_journal_path_for imported the hosted app')\n"
+        "print('JOURNAL-OK')\n"
+    )
+    assert "JOURNAL-OK" in _fresh_interpreter(code, tmp_path)
