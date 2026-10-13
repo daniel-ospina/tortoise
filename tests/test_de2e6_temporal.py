@@ -194,7 +194,7 @@ class TestDe2e6:
         ``""`` reaches the miner when a caller passes it directly or when
         the frontmatter carries an empty ``startedAt``. ``validFrom=""`` is a
         bound ``_covers`` cannot order against any PARSEABLE query instant, so
-        the point is invisible to every normal ``restore_point_at`` query —
+        the point is invisible to every normal ``get_historical_knowledge`` query —
         hidden from parseable queries only, since an unparseable ``at_date``
         still matches it lexicographically — which is strictly worse than the
         wall-clock stamp this change removed.
@@ -221,7 +221,7 @@ class TestDe2e6:
         Storing ``" 2026-07-01T10:00:00Z"`` verbatim would write an
         unorderable ``validFrom`` — ``_covers`` cannot match it against any
         parseable query instant, so the point is invisible to every normal
-        ``restore_point_at`` query, the same harm the empty-string guard
+        ``get_historical_knowledge`` query, the same harm the empty-string guard
         exists to prevent.
         """
         _mine(sdk, D1_TX, "s-p-pad", f"  {T1}  ", str(tmp_path))

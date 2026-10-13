@@ -6,13 +6,13 @@ nothing mapped it to ``validFrom``, so every Point created on this path was
 born undated. A downstream supersession then stamped the predecessor's
 ``validTo`` from the successor's ``createdAt`` (the no-``validFrom``
 fallback), so the undated successor's open window double-covered the
-predecessor and ``restore_point_at`` answered ``ambiguous`` with no answer
+predecessor and ``get_historical_knowledge`` answered ``ambiguous`` with no answer
 instead of ``found``.
 
 ``docs/ONTOLOGY.md`` §4.7 states ``when`` and ``validFrom`` are one slot under
 two spellings, so the fix maps ``when`` → ``validFrom`` at the create site.
 
-These tests assert through the READ path (``restore_point_at``) and pin BOTH
+These tests assert through the READ path (``get_historical_knowledge``) and pin BOTH
 halves of the contract: a dated session must produce a dated Point (and an
 unambiguous restore across the resulting supersession chain), and an UNDATED
 session must still produce an undated Point — an open window, never a
@@ -92,7 +92,7 @@ def test_capture_maps_when_to_validfrom_so_restore_is_unambiguous(
     """POSITIVE half. Two dated captures form a supersession chain through the
     real ``apply_supersessions`` path. The successor must carry the date the
     extractor held as ``validFrom``; the predecessor's ``validTo`` must then be
-    exactly that date (contiguous windows), so ``restore_point_at`` between
+    exactly that date (contiguous windows), so ``get_historical_knowledge`` between
     them returns the predecessor — never ``ambiguous``.
 
     Pre-fix failure: the successor is created with no ``validFrom``, so
@@ -138,7 +138,7 @@ def test_capture_maps_when_to_validfrom_so_restore_is_unambiguous(
     assert _props(sdk, v1).get("validTo") == "2026-06-14", _props(sdk, v1)
 
     # ...and the READ PATH answers the temporal question with ONE candidate.
-    out = sdk.restore_point_at(v2, "2026-06-12")
+    out = sdk.get_historical_knowledge(v2, "2026-06-12")
     assert out.get("ambiguous") is not True, out
     assert out["found"] is True, out
     assert out["valid_point"]["id"] == v1, out
@@ -168,7 +168,7 @@ def test_capture_without_a_date_leaves_the_point_open_ended(sdk, monkeypatch):
     assert "validFrom" not in props, f"undated capture fabricated a start: {props}"
     assert "when" not in props, props
 
-    out = sdk.restore_point_at(pid, "1999-01-01")
+    out = sdk.get_historical_knowledge(pid, "1999-01-01")
     assert out["found"] is True, out
     assert out["valid_point"]["valid_from"] is None, out
     assert out["valid_point"]["valid_to"] is None, out

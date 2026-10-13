@@ -206,7 +206,6 @@ Destination rows: **28**. Registry tools: **98**.
 | `search_knowledge` | MCP | no `def` on TortoiseSDK |
 | `list_knowledge` | MCP | no `def` on TortoiseSDK |
 | `check_confidence` | MCP | no `def` on TortoiseSDK |
-| `get_historical_knowledge` | MCP | no `def` on TortoiseSDK |
 | `explore_connections` | MCP | no `def` on TortoiseSDK |
 | `graph_overview` | MCP | no `def` on TortoiseSDK |
 | `review_link_candidates` | MCP | no `def` on TortoiseSDK |

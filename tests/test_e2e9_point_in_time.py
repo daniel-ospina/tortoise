@@ -5,7 +5,7 @@ Two sessions, gym 6pm (date D1) → gym 5pm (date D2), extracted + ingested
 through the v2 pipeline (Tasks 0–2), then:
   (a) default KU retrieval answers/ranks the 5pm point (live preference,
       E2E-6 still passes — no ranking change, #1391 exclusion);
-  (b) restore_point_at(live_id, at_date ∈ (D1, D2)) returns the 6pm point;
+  (b) get_historical_knowledge(live_id, at_date ∈ (D1, D2)) returns the 6pm point;
   (c) rendered context for the superseded hit carries
       `[valid D1 → D2; expired …]` (via include_terminal co-retrieval);
   (d) owned negatives: restore before D1 → honest found:false; ambiguous
@@ -163,9 +163,9 @@ def test_default_retrieval_prefers_live(graph):
 # ── (b) restore via chain walk (V3 mechanism) ───────────────────────
 
 def test_restore_returns_superseded_prior(graph):
-    """restore_point_at(live_id, at_date ∈ (D1, D2)) → the 6pm point."""
+    """get_historical_knowledge(live_id, at_date ∈ (D1, D2)) → the 6pm point."""
     sdk = graph
-    out = sdk.restore_point_at(_pid("gym at 5pm"), "2026-06-12")
+    out = sdk.get_historical_knowledge(_pid("gym at 5pm"), "2026-06-12")
     assert out["found"] is True
     assert out["valid_point"]["id"] == _pid("gym at 6pm")
     assert out["valid_point"]["valid_from"] == "2026-06-10"
@@ -178,7 +178,7 @@ def test_restore_returns_superseded_prior(graph):
 def test_restore_at_live_date_returns_live(graph):
     """at_date == the live window → the live point is the answer."""
     sdk = graph
-    out = sdk.restore_point_at(_pid("gym at 5pm"), "2026-07-01")
+    out = sdk.get_historical_knowledge(_pid("gym at 5pm"), "2026-07-01")
     assert out["found"] is True
     assert out["valid_point"]["id"] == _pid("gym at 5pm")
 
@@ -215,7 +215,7 @@ def test_restore_before_earliest_window_honest_absence(graph):
     """Restore at a date before D1 → found:false + nearest window, never a
     fabricated answer."""
     sdk = graph
-    out = sdk.restore_point_at(_pid("gym at 5pm"), "2020-01-01")
+    out = sdk.get_historical_knowledge(_pid("gym at 5pm"), "2020-01-01")
     assert out["found"] is False
     assert "valid_point" not in out
     assert out["nearest"]["id"] == _pid("gym at 6pm")
@@ -233,7 +233,7 @@ def test_restore_ambiguous_windows_explicit_signal(graph):
     proj.g.query(
         "MATCH (n:Point {id:$id}) SET n.validFrom = '2026-06-01'",
         params={"id": new})
-    out = sdk.restore_point_at(new, "2026-06-18")
+    out = sdk.get_historical_knowledge(new, "2026-06-18")
     assert out.get("ambiguous") is True
     assert {c["id"] for c in out["candidates"]} == {old, new}
 
