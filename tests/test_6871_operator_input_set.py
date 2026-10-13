@@ -246,3 +246,38 @@ def test_annotate_ep_batch_still_counts_operator_less_direct_edges(sdk):
         "a direct NAND edge is counter-evidence and must still be counted"
     )
     assert out[hyp].contention == pytest.approx(0.5)
+
+
+def test_annotate_ep_batch_excludes_the_source_edge_on_a_legacy_operator(sdk):
+    """The `is_operator IS NULL` trap: a legacy operator still has an input edge.
+
+    The canonical operator identity is `bool(is_operator or op_type)` — see
+    `graph-scripts/backfill_is_operator.py`, which stamps exactly that class
+    (points carrying `op_type` with no `is_operator`), and the five call sites
+    matching `(is_operator = true OR op_type IS NOT NULL)`. Treating a NULL as
+    "not an operator" therefore fails OPEN: the legacy operator's own idx=0 edge
+    counts again as incoming evidence for its source — the #6871 symptom.
+    """
+    from tortoise.search_engine import annotate_ep_batch
+
+    src = sdk.create_point("evidence", "S: legacy source", status="live")["id"]
+    hyp = sdk.create_point("hypothesis", "H: legacy target", status="live")["id"]
+    sdk.create_operator("IMPL", src, [hyp])
+
+    proj = sdk._get_proj()
+    op_rows = proj.g.query(
+        "MATCH (op:Point {op_type:'IMPL'}) SET op.is_operator = null RETURN op.id"
+    ).result_set
+    assert op_rows, "the operator was not found"
+    assert proj.g.query(
+        "MATCH (op:Point {id:$id}) RETURN op.op_type IS NOT NULL",
+        params={"id": op_rows[0][0]},
+    ).result_set[0][0] is True, "the node still IS an operator canonically"
+
+    out = annotate_ep_batch(proj.g, [src, hyp])
+    assert out[src].evidence.impl_count == 0, (
+        "a legacy operator's idx=0 edge counted as support for its own source"
+    )
+    assert out[hyp].evidence.impl_count == 1, (
+        "the legacy operator's idx>=1 edge must still support the target"
+    )

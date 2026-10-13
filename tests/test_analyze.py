@@ -90,10 +90,11 @@ def test_with_projection(shared_proj):
         proj.g.query("CREATE (:Point {id:'c1', content:'AI strategy is working', confidence:0.85, is_operator:false})")
         proj.g.query("CREATE (:Point {id:'c2', content:'AI strategy needs revision', confidence:0.65, is_operator:false})")
         proj.g.query("CREATE (:Point {id:'op1', content:'NAND', op_type:'NAND', is_operator:true})")
-        # #6871: the operator edge carries its role index (idx 0 = the operator's
-        # source, idx >= 1 = its targets). A real `create_operator` write always
-        # has it, and `disagreement` now requires the source/target roles, so an
-        # idx-less fixture would match nothing.
+        # #6871: a REAL operator edge carries its role index (`create_operator`
+        # writes idx 0 for the source and idx >= 1 for the targets), so the
+        # fixture is aligned to the real write shape. `disagreement` itself is a
+        # NAND read and is deliberately NOT role-guarded here — the NAND
+        # direction dependency is its own root, #8460.
         proj.g.query("MATCH (a:Point {id:'c1'}), (op:Point {id:'op1'}), (b:Point {id:'c2'}) CREATE (a)<-[:NAND {idx:0}]-(op)-[:NAND {idx:1}]->(b)")
 
         result = analyze("where is the disagreement?", proj=proj)
