@@ -69,6 +69,181 @@ ck "shipped classifier: gate SUCCESS + path-filtered legs skipped = GREEN" $rc
 got="$(cl '[{"name":"ai-review-gate","state":"FAILURE"}]')"
 [ "$got" = "FAILED:ai-review-gate" ] && rc=0 || { rc=1; echo "      got '$got'"; }
 ck "shipped classifier: gate FAILURE is reported failed" $rc
+
+# ── 3b) the classifier's POLARITY — an allow-list, not a deny-list ───────────────
+# agent-infra#1714: the classifier named the red conclusions and filed EVERYTHING ELSE as PENDING,
+# so an unrecognised or null conclusion reached `gh pr merge --auto` (fail OPEN), while CANCELLED —
+# non-red, a superseded run is normal — was named red and routed to the fixer. The rule is the one
+# admin-merge.sh and record-review.sh already implement, so these fixtures pin the shipped
+# classifier TO THAT RULE rather than to a copy of it.
+#
+# What each check below is EVIDENCE FOR, stated rather than overclaimed: measured against the
+# pre-fix tree (this file dropped in beside the deny-list scripts), the polarity fixtures fail
+# there — EXCEPT those whose subject predates this change (red stays red, an empty surface is not
+# green) and the §3d shell checks, which guard the backtick hazard this change's own comment text
+# introduces (the deny-list base has no such comments, so they pass there by construction). Those
+# are regression guards, not evidence for the polarity; the fixtures that DO discriminate assert an
+# exact verdict, never "not GREEN" (an empty string from a crashed extractor satisfies any negative
+# assertion).
+full() { # full <required-name> <state|conclusion, or the literal null> -> a full required surface
+  python3 - "$1" "$2" <<'PY'
+import json,sys
+n,s=sys.argv[1],sys.argv[2]
+rows=[{"name":x,"state":"SUCCESS"} for x in ("ai-review-gate","python-ci-gate","docs",
+      "test-isolation","license-surface","legal-e2e","pricing-artifact")]
+for r in rows:
+    if r["name"]==n: r["state"]=None if s=="null" else s
+print(json.dumps(rows))
+PY
+}
+allstates() { # allstates <state|conclusion> -> every required row carrying that same state
+  python3 - "$1" <<'PY'
+import json,sys
+s=sys.argv[1]
+print(json.dumps([{"name":x,"state":s} for x in ("ai-review-gate","python-ci-gate","docs",
+      "test-isolation","license-surface","legal-e2e","pricing-artifact")]))
+PY
+}
+# (a) THE FALSE-GREEN: a null conclusion is RED, never PENDING (PENDING arms auto-merge).
+got="$(cl "$(full docs null)")"
+[ "$got" = "FAILED:docs" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: a null conclusion is RED, not PENDING" $rc
+# (b) a conclusion GitHub has not documented is RED too — the allow-list, not a red-token list.
+got="$(cl "$(full docs MYSTERY_FAILURE)")"
+[ "$got" = "FAILED:docs" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: an unrecognised conclusion is RED, not PENDING" $rc
+# (c) an unrecognised STATUS is judged by its conclusion (the rail's #1353 shape): null -> RED.
+got="$(cl '[{"name":"ai-review-gate","status":"completed","conclusion":"success"},{"name":"docs","status":"completely_finished","conclusion":null}]')"
+[ "$got" = "FAILED:docs" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: an unrecognised status with a null conclusion is RED" $rc
+# (d) CANCELLED/STALE are NON-RED: a superseded run must not block the merge.
+got="$(cl "$(full python-ci-gate CANCELLED)")"
+[ "$got" = "GREEN" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: CANCELLED does not block (non-red)" $rc
+got="$(cl "$(full legal-e2e STALE)")"
+[ "$got" = "GREEN" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: STALE does not block (non-red)" $rc
+# (e) …but they are NOT green either: a surface of nothing but cancelled/stale proves nothing,
+# so it must never read GREEN (a skipped/cancelled shard is not coverage — the rail's doctrine).
+# The FULL required surface, every row cancelled/stale INCLUDING the gate — the gate rule is what
+# refuses it, and asserting the EXACT verdict pins that. An inexact "!= GREEN" would pass on the
+# deny-list too (it reads every CANCELLED row as red, i.e. FAILED), so this fixture would prove
+# nothing about the polarity; the exact form discriminates.
+got="$(cl "$(allstates CANCELLED)")"
+[ "$got" = "FAILED:ai-review-gate" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: an all-cancelled surface cannot read GREEN (the gate refuses it)" $rc
+# STALE across the WHOLE surface, with the gate a real success: non-red rows must not force
+# PENDING. Exact verdict, so the deny-list (which names no STALE token at all and reads them as
+# neither ok nor bad) gives PENDING and fails here.
+got="$(cl "$(python3 - <<'PY'
+import json
+print(json.dumps([{"name":"ai-review-gate","state":"SUCCESS"}]+[{"name":x,"state":"STALE"} for x in
+      ("python-ci-gate","docs","test-isolation","license-surface","legal-e2e","pricing-artifact")]))
+PY
+)")"
+[ "$got" = "GREEN" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: STALE rows across the surface do not force PENDING (non-red)" $rc
+# (f) an EMPTY surface is not green — a missing check is not a green check (absence != green).
+got="$(cl '[]')"
+[ "$got" = "NOCHECKS" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: an EMPTY check surface is NOCHECKS, not GREEN" $rc
+got="$(cl '{}')"
+[ "$got" = "NOCHECKS" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: an unreadable payload is NOCHECKS, not GREEN" $rc
+# (g) RED beats PENDING and beats the greens: a completed red is final.
+got="$(cl "$(full docs FAILURE)")"
+[ "$got" = "FAILED:docs" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: a red among several green is RED" $rc
+got="$(cl '[{"name":"ai-review-gate","state":"SUCCESS"},{"name":"docs","state":"FAILURE"},{"name":"python-ci-gate","state":"IN_PROGRESS"}]')"
+[ "$got" = "FAILED:docs" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: a red is final — it is not masked by an in-flight check" $rc
+# (h) grouping is per (app, name): one app's result must not mask the other's. The red row is
+# placed FIRST and a non-red row LAST, so the pre-fix per-name map (last write wins) reads NEUTRAL
+# and this fixture fails there — with the red last it would pass on the deny-list and prove nothing.
+got="$(cl '[{"name":"ai-review-gate","state":"SUCCESS"},{"name":"docs","state":"FAILURE","workflow":"w2"},{"name":"docs","state":"NEUTRAL","workflow":"w1"}]')"
+[ "$got" = "FAILED:docs" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: a same-named check under two apps cannot mask a red" $rc
+# (i) the NEWEST attempt by id governs (the check-runs API shape). Assert the EXACT verdict, never
+# a "not FAILED" match — an empty string from a crashed extractor satisfies that form (the pre-fix
+# classifier raises TypeError on this payload and prints nothing).
+got="$(cl '{"check_runs":[{"id":1,"name":"ai-review-gate","status":"completed","conclusion":"success","app":{"slug":"a"}},{"id":5,"name":"docs","status":"completed","conclusion":"failure","app":{"slug":"a"}},{"id":9,"name":"docs","status":"completed","conclusion":"success","app":{"slug":"a"}}]}')"
+[ "$got" = "PENDING:python-ci-gate,test-isolation,license-surface,legal-e2e,pricing-artifact" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: a newer passing attempt supersedes an older red" $rc
+# (i2) …and it is by ID, not by position: with the NEWEST attempt listed FIRST and the older red
+# LAST, "last row wins" would read the red. Pinned in both directions, so a regression to
+# last-wins cannot survive whichever order an API happens to return.
+got="$(cl '{"check_runs":[{"id":1,"name":"ai-review-gate","status":"completed","conclusion":"success","app":{"slug":"a"}},{"id":9,"name":"docs","status":"completed","conclusion":"success","app":{"slug":"a"}},{"id":5,"name":"docs","status":"completed","conclusion":"failure","app":{"slug":"a"}}]}')"
+[ "$got" = "PENDING:python-ci-gate,test-isolation,license-surface,legal-e2e,pricing-artifact" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: the newest attempt by id governs even when it is not the last row" $rc
+got="$(cl '{"check_runs":[{"id":1,"name":"ai-review-gate","status":"completed","conclusion":"success","app":{"slug":"a"}},{"id":12,"name":"docs","status":"completed","conclusion":"failure","app":{"slug":"a"}},{"id":9,"name":"docs","status":"completed","conclusion":"success","app":{"slug":"a"}}]}')"
+[ "$got" = "FAILED:docs" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: a newest-by-id red is not masked by a later-listed older green" $rc
+got="$(cl '{"check_runs":[{"id":1,"name":"ai-review-gate","status":"completed","conclusion":"success","app":{"slug":"a"}},{"id":9,"name":"docs","status":"completed","conclusion":"success","app":{"slug":"a"}},{"id":12,"name":"docs","status":"completed","conclusion":"failure","app":{"slug":"a"}}]}')"
+[ "$got" = "FAILED:docs" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: a newer failing attempt supersedes an older green" $rc
+fi
+
+# ── 3c) the fixer's failing-check list uses the SAME polarity (agent-infra#1714) ──
+# The loop hands a red required check to fix-one.sh; its list named CANCELLED as failing, so a
+# normally-superseded run burned a capped fixer attempt on a PR that was not red. Extracted from
+# the shipped fix-one.sh, so this pins the real list rather than a re-implementation of it.
+awk '/^FAILING_CHECKS="/,/^" 2>\/dev\/null\)"$/' "$HERE/fix-one.sh" \
+  | sed -n '/^import sys,json$/,$p' | sed '/^" 2>\/dev\/null)"$/d' > "$TMP/failing_checks.py"
+fc() { printf '%s' "$1" | python3 "$TMP/failing_checks.py" 2>/dev/null; }
+if need "$TMP/failing_checks.py" "the fixer's failing-check list is extracted from fix-one.sh"; then
+got="$(fc '[{"name":"docs","state":"FAILURE"},{"name":"legal-e2e","state":"CANCELLED"},{"name":"test-isolation","state":"STALE"},{"name":"license-surface","state":"NEUTRAL"}]')"
+[ "$got" = "docs" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped fixer list: CANCELLED/STALE are not handed to the fixer" $rc
+got="$(fc '[{"name":"docs","state":null},{"name":"legal-e2e","state":"MYSTERY_FAILURE"}]')"
+[ "$got" = "docs legal-e2e" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped fixer list: a null/unrecognised state IS handed to the fixer (fail closed)" $rc
+got="$(fc '[{"name":"docs","state":"SUCCESS"},{"name":"python-ci-gate","state":"IN_PROGRESS"}]')"
+[ -z "$got" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped fixer list: a green/in-flight surface yields no failing check" $rc
+fi
+
+# ── 3d) the classifier travels through BASH: no backtick command-substitution ────
+# The checks above extract the Python with awk/sed, so they never exercise the shell. The
+# classifier is built as `V="$(… | python3 -c " <python> ")"`; an UNESCAPED backtick inside that
+# double-quoted string is COMMAND-SUBSTITUTED by bash before Python ever sees it. A comment that
+# spells `gh pr merge --auto` therefore RAN that command every cycle (the exact fail-open this
+# PR exists to close), and a backticked `gh pr checks` spliced a multi-line table into the Python
+# source (SyntaxError -> V="" -> no case arm matched). Extract the real assignment and drive it
+# through a logged `gh` shim so the shell, not an awk extraction, is what runs.
+awk '/^    V="\$\(gh pr checks/{f=1} f{print} /^" 2>\/dev\/null\)"$/{f=0}' "$LOOP" > "$TMP/classify_bash.sh"
+if need "$TMP/classify_bash.sh" "the classifier's bash assignment is extracted from orch-loop.sh"; then
+  mkdir -p "$TMP/bin"
+  cat > "$TMP/bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf 'GH_INVOKED: %s\n' "$*" >> "$GH_LOG"
+if [ "${1:-}" = "pr" ] && [ "${2:-}" = "checks" ]; then
+  printf '[{"name":"ai-review-gate","state":"SUCCESS"},{"name":"python-ci-gate","state":"SUCCESS"},{"name":"docs","state":"SUCCESS"},{"name":"test-isolation","state":"SUCCESS"},{"name":"license-surface","state":"SUCCESS"},{"name":"legal-e2e","state":"SUCCESS"},{"name":"pricing-artifact","state":"SUCCESS"}]'
+fi
+exit 0
+SH
+  chmod +x "$TMP/bin/gh"
+  # Assemble a driver: the real assignment verbatim, with the bash-side inputs it reads.
+  {
+    printf '%s\n' 'set -u'
+    printf '%s\n' "OR='example/repo'"
+    printf '%s\n' 'PR=8518'
+    printf '%s\n' "REQ='ai-review-gate python-ci-gate docs test-isolation license-surface legal-e2e pricing-artifact'"
+    cat "$TMP/classify_bash.sh"
+    printf '%s\n' 'printf "V=%s\n" "$V"'
+  } > "$TMP/drive.sh"
+  # Only the pipeline's own `gh pr checks <PR> --json …` may run. A `pr merge` (or a bare
+  # `pr checks`) in the log is a backtick leaking out of a comment as an executed command.
+  : > "$TMP/gh.log"
+  out="$(PATH="$TMP/bin:$PATH" GH_LOG="$TMP/gh.log" bash "$TMP/drive.sh" 2>"$TMP/drive.err")"
+  n="$(wc -l < "$TMP/gh.log" | tr -d ' ')"
+  [ "$n" = "1" ] && rc=0 || { rc=1; echo "      gh calls ($n): $(tr '\n' ';' < "$TMP/gh.log")"; }
+  ck "shipped classifier: comments are not executed as commands (exactly one gh call)" $rc
+  if grep -q 'pr merge' "$TMP/gh.log" 2>/dev/null; then rc=1; else rc=0; fi
+  ck "shipped classifier: no backticked \`gh pr merge\` escapes from a comment" $rc
+  if grep -q 'command not found' "$TMP/drive.err" 2>/dev/null; then rc=1; else rc=0; fi
+  ck "shipped classifier: no backticked word is run as a command" $rc
+  case "$out" in *V=GREEN*) rc=0;; *) rc=1; echo "      out: $out";; esac
+  ck "shipped classifier: the bash substitution still yields GREEN" $rc
 fi
 
 # ── 4) the shipped claim block refuses a second owner ────────────────────────────
