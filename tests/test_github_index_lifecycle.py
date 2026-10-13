@@ -721,7 +721,15 @@ def test_repoll_drains_and_clears_truncated_persisted(client, tmp_path,
     # so the budget below is HEADROOM, not a fix: the same run has been
     # measured at ~47 s under concurrent host/DB load, a saturation artifact of
     # the box, not a property of the walk.
-    _WALK_POLL_S = 300.0
+    #
+    # It MUST stay strictly below the harness per-test ceiling — CI passes
+    # `--timeout=300` on every pytest leg, with `faulthandler_timeout = 280`
+    # (pyproject.toml). A budget at or above 300 can never produce the legible
+    # assertion it exists for: on any walk slow enough to reach it,
+    # pytest-timeout kills the item first and the diagnostic is the timeout
+    # dump, not `job ... not completed`. 240 leaves 40 s under the watchdog and
+    # 60 s under the kill, while still dwarfing the ~47 s loaded-lane walk.
+    _WALK_POLL_S = 240.0
     # run 1: cap 500 → truncated cursor persisted
     r = client.tc.post("/v1/index/github", json={"org": "acme"})
     body = _poll_until(client.tc, r.json()["job_id"], "completed",

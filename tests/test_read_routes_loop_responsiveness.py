@@ -1098,6 +1098,22 @@ def _boundary_calls_for(node, callable_name: str) -> list[ast.Call]:
     ]
 
 
+def _carries_index_state_updates(call: ast.Call) -> bool:
+    """True for a hand-off passing ``**_index_state_updates(...)`` (#4709).
+
+    That ``**`` expansion is what identifies the CURSOR persists — the
+    completion path and the ``finally`` fallback. The third
+    ``_update_onboarding_state`` hand-off passes the legacy-backfill MARKER
+    instead, so it must not be allowed to satisfy the ordering assertion: it
+    always precedes the status write, making a "some write is before
+    `completed`" check true by construction.
+    """
+    return any(
+        k.arg is None and isinstance(k.value, ast.Call)
+        and _callee_name(k.value.func) == "_index_state_updates"
+        for k in call.keywords)
+
+
 def test_run_indexing_residual_is_named_head_on():
     """#4709: the walk AND the onboarding writes are off the loop, on a
     NO-BOUND seam; whatever is still inline is pinned by name.
@@ -1153,13 +1169,36 @@ def test_run_indexing_residual_is_named_head_on():
         "#4709: an off-loaded onboarding write does not pass `_echo=False` — "
         "the return is discarded, and the echo is "
         "`_get_onboarding_projection`'s blocking registry read (#4625)")
-    persist_before_completion = [
-        c.lineno for c in write_calls if c.lineno < completed_lines[0]]
-    assert persist_before_completion, (
-        "#4709 ordering regressed: NO `_update_onboarding_state` hand-off "
-        "runs BEFORE `_job(status='completed', ...)` — the job reports "
+    # #4709 ordering guarantee, pinned on the NAMED calls. It must NOT be
+    # satisfiable by the other two hand-offs: the legacy-backfill marker always
+    # precedes the status write, so a "SOME write is before `completed`" check
+    # is true by construction and cannot fail for the regression it names.
+    # Only the two `**_index_state_updates(...)` persists carry the cursor: the
+    # completion-path one must be BEFORE the status write, and the `finally`
+    # fallback AFTER it (it is the partial/failed-run persist).
+    state_persist_calls = [
+        c for c in write_calls if _carries_index_state_updates(c)]
+    assert len(state_persist_calls) == 2, (
+        f"#4709: expected TWO `_update_onboarding_state(..., "
+        f"**_index_state_updates(...))` persists (the completion path + the "
+        f"`finally` fallback), found {len(state_persist_calls)}")
+    persists_before = [
+        c.lineno for c in state_persist_calls if c.lineno < completed_lines[0]]
+    persists_after = [
+        c.lineno for c in state_persist_calls if c.lineno > completed_lines[0]]
+    assert len(persists_before) == 1, (
+        "#4709 ordering regressed: the COMPLETION-path persist "
+        "(`_update_onboarding_state(..., **_index_state_updates(...))`) does "
+        "NOT run BEFORE `_job(status='completed', ...)` — the job reports "
         "`completed` while the cursor is still only in the `finally`, so a "
-        "client that reads state on `completed` sees the previous cursor")
+        "client that reads state on `completed` sees the previous cursor and "
+        "re-walks the whole backlog")
+    assert len(persists_after) == 1, (
+        "#4709: expected the `finally` FALLBACK persist to remain AFTER "
+        "`_job(status='completed', ...)`; found none — either the fallback was "
+        "removed (a partial/failed run would persist nothing, breaking the "
+        "mid-walk-raise contract) or both persists preceded the status write "
+        "and this pin needs re-deriving")
 
     # (2) what stays on the loop is pinned as an EXACT count so no site can
     # appear or leave unnoticed. Most are the tortoise#7500 constraint (the SDK

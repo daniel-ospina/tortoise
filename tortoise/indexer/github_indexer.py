@@ -82,10 +82,25 @@ _PAGE_SIZE = 100
 #: note in ``tests/test_github_index_lifecycle.py``); an idle-lane fixture is
 #: seconds.
 #:
-#: Non-daemon threads and NO cancel-at-exit hook, deliberately: the walk
-#: MUTATES the graph and persists the cursor, and ``cancel_futures`` at
-#: interpreter exit could abandon a worker mid-write (#2863). Letting the pool
-#: drain at exit is the safe half of that trade.
+#: NO at-exit dispose hook, deliberately — and NOT for the ``cancel_futures``
+#: reason it is easy to assume. ``shutdown(wait=False, cancel_futures=True)``
+#: cancels the QUEUED futures only; a worker already inside the walk is NOT
+#: interruptible and the stdlib's ``threading._shutdown`` join still waits for
+#: it (the LIMITATION ``hosted_api._dispose_capture_executor`` states verbatim,
+#: and ``operator_alert._shutdown_pool`` repeats: "cancel_futures only cancels
+#: the QUEUED ones; the running ones are abandoned to interpreter exit").
+#: So a hook could not "abandon a worker mid-write" — it would only cancel
+#: work that has NOT started. The real trade is the opposite one: with a hook,
+#: a cursor persist or walk still QUEUED at exit is DROPPED; without one, it
+#: is allowed to COMPLETE and the exit join waits. This pool's queued work is
+#: a graph MUTATION plus the persisted resume point, and a silently-cancelled
+#: write is exactly the unobservable failure #2863 names — so completing it is
+#: the side of the trade chosen here. The cost accepted is that a long walk
+#: delays interpreter exit; the orchestrator's kill timeout, not this pool, is
+#: what bounds that. NOTE the departure: the sibling pools
+#: (``hosted_api._CAPTURE_EXECUTOR`` and ``_DEMAND_PING_EXECUTOR``,
+#: ``operator_alert._POOL``) all install a ``threading._register_atexit``
+#: dispose hook; this pool deliberately does not, for the reason above.
 _INDEX_THREAD_PREFIX = "tortoise-index"
 _INDEX_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
@@ -100,6 +115,15 @@ def _submit_index_off_loop(fn, /, *args, **kwargs):
     (a bare ``run_in_executor`` does NOT — cpython#78195): the caller's context
     is copied in the CALLING thread and the worker runs under that copy. The
     walk and the onboarding writes both read caller-context state.
+
+    RECORDED, not fixed: this pair mirrors ``hosted_api._submit_off_loop`` /
+    ``_run_off_loop`` body-for-body, differing only in the bound executor. The
+    obvious dedup goes the wrong way on the dependency graph — ``hosted_api``
+    imports THIS module (lazily, inside its handlers), and the indexer is also
+    reached from the standalone GitHub-index CLI, so importing the hosted app
+    module here would invert the layering and drag the whole app into the CLI.
+    The clean home is a shared leaf module for the generic pair; deferred to
+    avoid growing this change, and to avoid cloning it a second time.
     """
     ctx = contextvars.copy_context()
     return _INDEX_EXECUTOR.submit(ctx.run, functools.partial(fn, *args, **kwargs))
