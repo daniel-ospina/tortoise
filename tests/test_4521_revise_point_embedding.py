@@ -9,7 +9,7 @@ node's ``embedding`` as a Cypher ``List``.
 **Why the write seam still matters.** A ``List`` is no longer the abort this file
 was named for: #8316 normalises a right-width ``List`` at the READ boundary
 (``stored_embedding_vector_expr``), so the ``Type mismatch: expected Null or
-VectorF32 but was List`` abort the REAL dense leg
+Vectorf32 but was List`` abort the REAL dense leg
 (``search_engine.run_vector_query``) used to make no longer happens for a
 right-width stored value (a wrong WIDTH still aborts the MATCH — #8430). The raw
 probe in this file is deliberately STRICTER — it reads ``n.embedding`` rather

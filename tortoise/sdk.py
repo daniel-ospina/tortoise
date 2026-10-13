@@ -9270,7 +9270,7 @@ class TortoiseSDK:
         # silently MISSING from the index-served Point dense leg (#8429) — the
         # write seam exists so a server-owned vector is always the typed,
         # indexable shape. (#8316 has since normalised a right-width `List` at
-        # the READ boundary, so the "expected Null or VectorF32 but was List"
+        # the READ boundary, so the "expected Null or Vectorf32 but was List"
         # abort this comment used to cite no longer happens for the right-width
         # case; a wrong-width or non-numeric value still aborts the MATCH —
         # #8430.) That is the #4521 class on the LIVE path
@@ -24802,7 +24802,7 @@ class TortoiseSDK:
                 #     Decimal/numpy reaches this point — the write guard refuses
                 #     the rest);
                 #   * keys the write did NOT apply are absent, so replay never
-                #     overwrites the typed VectorF32 the upsert created
+                #     overwrites the typed Vectorf32 the upsert created
                 #     (`properties(n)` returns a vector as a plain list;
                 #     re-applying it would demote it and break the vector leg).
                 if "name" in props:

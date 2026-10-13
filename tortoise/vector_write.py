@@ -51,7 +51,7 @@ must NOT be routed into it:
   vector**: the guard REMOVES the property and the ``SET`` then reads the
   property the clear just removed. ``graph-scripts/backfill_embeddings.py``
   holds one, ``_repair_legacy_event_embeddings`` (the pre-#244 plain-``List``
-  → ``VectorF32`` repair), named as out of scope at its definition.
+  → ``Vectorf32`` repair), named as out of scope at its definition.
 * **NULL wipe** — a write whose incoming vector is NULL sets the property to
   NULL rather than replacing its value; the seam's guarantee (that a new vector
   LANDS) does not govern it. Writers that ALSO overwrite still route their
@@ -92,7 +92,7 @@ must NOT be routed into it:
   The defect that verbatim write used to cause is fixed at the READ boundary
   instead (:func:`stored_embedding_vector_expr`, #8316): the stored plain
   ``List`` made ``vec.euclideanDistance`` raise ``Type mismatch: expected Null
-  or VectorF32 but was List`` for the WHOLE ``MATCH``, so ONE caller-vectored
+  or Vectorf32 but was List`` for the WHOLE ``MATCH``, so ONE caller-vectored
   Point degraded the entire dense leg — every other Point included — to
   FTS-only recall. The stored value is untouched (the decision stands); only
   the distance expression normalises the shape it reads.
@@ -224,7 +224,7 @@ def stored_embedding_vector_expr(alias: str) -> str:
     * a plain ``List`` — the VERBATIM caller-owned value (PR #3018's recorded
       decision) — is cast once through ``vecf32()``; a read spelled
       ``<alias>.embedding`` would raise ``Type mismatch: expected Null or
-      VectorF32 but was List`` and abort the WHOLE ``MATCH``, so one such node
+      Vectorf32 but was List`` and abort the WHOLE ``MATCH``, so one such node
       would degrade the entire dense leg to FTS-only recall (#8316);
     * a ``Vectorf32`` — every server-computed embedding — is returned
       unchanged.

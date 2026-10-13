@@ -2,7 +2,7 @@
 
 **The defect (settled, #4457).** On falkordblite/redislite — the DEFAULT
 self-hosted backend — writing a vector onto a property that ALREADY holds a
-``VectorF32`` can be **silently discarded**: the old vector survives and no
+``Vectorf32`` can be **silently discarded**: the old vector survives and no
 error is raised. The docker/server lane lands the identical write, so the same
 commit can pass on the server lane and silently serve a STALE vector on the
 default backend. PR #4517 fixed the Point seam (``_upsert_point_props``); this

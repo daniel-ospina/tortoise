@@ -12,7 +12,7 @@ through ``vecf32``), reaffirmed by #5004 and pinned by
 dense read's per-row expression ``vec.euclideanDistance(n.embedding, _qv)``
 raises::
 
-    Type mismatch: expected Null or VectorF32 but was List
+    Type mismatch: expected Null or Vectorf32 but was List
 
 for the WHOLE ``MATCH`` — so ONE caller-vectored node degraded the ENTIRE dense
 leg, every other node included, to FTS-only recall. ``run_vector_query``
@@ -178,7 +178,7 @@ def test_a_verbatim_embedding_does_not_poison_the_dense_leg(tmp_path):
                 f"the dense leg recorded {reason!r} instead of 'ok' — ONE "
                 "verbatim (`List`) embedding makes `vec.euclideanDistance` "
                 "raise for the WHOLE MATCH ('Type mismatch: expected Null or "
-                "VectorF32 but was List'), degrading every Point to FTS-only "
+                "Vectorf32 but was List'), degrading every Point to FTS-only "
                 "recall (#8316)")
             assert typed_id in hits, (
                 "the typed Point vanished from the dense leg because a "

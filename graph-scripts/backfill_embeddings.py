@@ -599,7 +599,10 @@ def _repair_legacy_event_embeddings(g, *, dry_run: bool, limit: int) -> int:
     numeric `List` (#8316), so this repair serves SHAPE CONSISTENCY — every
     stored embedding typed like the other writers produce (the typed shape the
     Point index cohort requires, #8429). A wrong-width or non-numeric `List`
-    still aborts a read (#8430) and is not repairable by `vecf32()`.
+    still aborts a read (#8430), and the two halves differ HERE: `vecf32()`
+    DOES retype a wrong-width numeric `List`, so it lands in the `rewritten`
+    count without curing the dimension mismatch, while a non-numeric `List`
+    makes the rewrite itself raise and is counted as skipped.
     vecf32() on an already-vecf32 node errors, so each node is rewritten in a
     try/except and failures are counted (expected on fully-migrated DBs).
 
