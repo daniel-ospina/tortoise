@@ -5874,8 +5874,8 @@ def fold_with_entities(events: list[dict]) -> tuple[dict[str, dict], dict]:
     # per record is the O(N²) class this module already fixed.
     existence = journal_epistemic_existence(events)
     # #8317 review round 3: the re-creation boundary, so `_apply_one` preserves a
-    # presence-based prop (`tags`) the payload omits on a bare re-emit, and
-    # drops it on a real delete→recreate — exactly as the graph writer does.
+    # prop (`tags`) the payload states no WRITABLE value for on a bare re-emit,
+    # and drops it on a real delete→recreate — exactly as the graph writer does.
     recreate_seqs = journal_recreate_seqs(events)
     for seq, ev in enumerate(events):
         _apply_one(points, ev,
@@ -9228,7 +9228,8 @@ class FalkorProjection(
                     # change's residual note; this wipe is the node-prop half.)
                     #
                     # #2897: `tags` is wiped here too. Its own clause is
-                    # presence-based and pass 2 re-derives the `:Tag`/`TAGGED`
+                    # presence-and-store gated and pass 2 re-derives the
+                    # `:Tag`/`TAGGED`
                     # half from the node's value, so a re-creation that omits
                     # `tags` would otherwise resurrect the dead incarnation's
                     # tag list AND its edges — state the journal never authored
@@ -13513,12 +13514,16 @@ class FalkorProjection(
             # string, a non-finite float) is what live's `SET n += $props`
             # nulls, so it REMOVES the property (measured: `update_point(tags={
             # "a": 1})` leaves `'tags' IN keys(n)` False). An `int` outside
-            # INT64 is included because its OUTCOME is not uniform: the
-            # carve-out/pytest embedded lane RAISES `Failed to parse the value
-            # of parameter 'tags'` (measured — writing it would abort the
-            # rebuild after the wipe), while a direct embedded SDK and docker
-            # CLAMP it. A fold must not write a value whose fate differs by
-            # engine.
+            # INT64 is included because its OUTCOME is not uniform: FalkorDB
+            # 4.16–4.20 (embedded `falkordblite 0.10.0`, `v4.20.6`) CLAMPS it,
+            # while FalkorDB 6.x RAISES `Failed to parse the value of parameter
+            # 'tags'` (both measured at #8317 review round 5 — writing it would
+            # abort the rebuild after the wipe on a 6.x engine). ⚠️ Attribute
+            # this to the VERSION, never to a "lane":
+            # `FalkorProjection.__init__` redirects a path-based projection onto
+            # `TORTOISE_DB_URI` when that variable is set, so an "embedded lane"
+            # run can be measuring docker. A fold must not write a value whose
+            # fate differs by engine.
             if ev["tags"] is None \
                     or not _store_holds_prop_value(ev["tags"]):
                 set_clauses.append("n.tags = NULL")

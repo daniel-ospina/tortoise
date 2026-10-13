@@ -334,7 +334,7 @@ POINT_PROPS: dict[str, Prop] = {
     # The one explicit EXEMPTION in THIS contract — declared so the omission is visible,
     # not accidental (D2).
     # ⚠️ SUPERSEDED 2026-10-12 — #2897 LANDED and `tags` is CARRIED: `replay_source="journal"`,
-    # `replayable=True`. The fold writes `n.tags` presence-based (`_upsert_point_props`,
+    # `replayable=True`. The fold writes `n.tags` presence-and-store gated (`_upsert_point_props`,
     # `_revise_point`) and re-derives the `:Tag`/`TAGGED` half in pass 2 from the node's own
     # final value, through the one `_sync_tags` routine the live writers also call. Kept
     # verbatim because it is what THIS design proposed and what its review cycle found — but

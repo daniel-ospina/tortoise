@@ -281,7 +281,7 @@ def test_dead_incarnations_tags_do_not_leak_onto_the_recreation(sup, tmp_path):
 
     The pass-1a recreate wipe clears the conditional derived fields because a
     re-creation is a FRESH node live. ``tags`` now has the same shape: its
-    clause is presence-based and pass 2 re-derives the ``:Tag``/``TAGGED`` half
+    clause is presence-and-store gated and pass 2 re-derives the ``:Tag``/``TAGGED`` half
     from the node's OWN value, so without the wipe the dead incarnation's tag
     list survives the MERGE and pass 2 rebuilds the edges for a tag the new
     incarnation never had. This is precisely the risk the #3817 negative control

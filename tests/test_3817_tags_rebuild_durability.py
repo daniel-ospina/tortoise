@@ -65,8 +65,7 @@ load-bearing — and a wrong date only invites a reader to distrust the rest.
 
 So restoring tags on replay is the **implementation** of D2 / #3856 / objective
 6, not a reversal of any decision — and this module was edited **deliberately**
-(the ⚠️ it used to carry said exactly that was required) once that was
-established by a fresh-context adversarial verification, recorded on #2897.
+(the ⚠️ it used to carry recorded what the requirement was).
 
 ## What the fold now does (and why it needs the journal, not the graph)
 
@@ -630,7 +629,8 @@ def test_an_edit_whose_tag_array_cannot_be_a_merge_key_does_not_abort(env):
 # with `_is_persistable_prop_value` — the SHAPE allowlist — while the writer's
 # effective rule is that predicate PLUS the `#7369` transport gate (a value
 # `_value_ok` refuses is nulled before dispatch) PLUS the store's numeric domain
-# (an int outside INT64 is CLAMPED by the engine). A value that passes the shape
+# (an int outside INT64 is CLAMPED by a 4.16–4.20 engine, and refused at
+# parameter parse by a 6.x one). A value that passes the shape
 # test but fails either of the other two is written by nobody and was named by
 # nobody, so it fell through to the field-aware comparison: the journal held it,
 # the graph did not (or held a clamped value), and `check_consistency` reported

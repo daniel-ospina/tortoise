@@ -200,12 +200,17 @@ def _store_holds_prop_value(value) -> bool:
     put the property on the node?* (``_stated_tags``, ``_revise_point``) and
     *may the journal's value be compared against the node's?*
     (``consistency._uncarried``) — because the OUTCOME for a value the numeric
-    domain refuses is NOT uniform across engines and constructions: FalkorDB
-    (docker) and a direct embedded SDK CLAMP a Python ``int`` outside INT64 (the
-    ``numeric_alteration_reason`` reason says "would be SILENTLY clamped"),
-    while the carve-out/pytest embedded lane RAISES ``Failed to parse the value
-    of parameter 'tags'`` (both measured). Writing it would therefore ABORT a
-    ``rebuild_all`` after the wipe on that lane — the class the content and dim
+    domain refuses is NOT uniform across ENGINE VERSIONS (and a "lane" is not
+    an engine identity — ``FalkorProjection.__init__`` redirects a path-based
+    projection onto ``TORTOISE_DB_URI`` when that variable is set, so an
+    "embedded lane" run can be measuring docker): FalkorDB 4.16–4.20 — the
+    embedded ``falkordblite 0.10.0`` build and ``falkordb-server:v4.20.6`` —
+    CLAMP a Python ``int`` outside INT64 (the ``numeric_alteration_reason``
+    reason says "would be SILENTLY clamped"), while FalkorDB 6.x
+    (``falkordb-server:latest``) RAISES ``Failed to parse the value of parameter
+    'tags'`` (all measured — #8317 review round 5). Writing it would therefore
+    ABORT a ``rebuild_all`` after the wipe on a 6.x engine — the class the
+    content and dim
     clauses above refuse to crash on (#325/#3689 review P1) — so a recovery fold
     must contribute NO property for it and a comparison must not compare it.
     "The store holds it exactly as stated" is the only bar safe everywhere,
@@ -220,9 +225,10 @@ def _store_holds_prop_value(value) -> bool:
       * the ``#7369`` transport gate nulls anything ``_value_ok`` refuses — a
         non-finite float, a NUL/lone-surrogate string, a null inside an array,
         a map/bytes/set;
-      * the engine CLAMPS a Python ``int`` outside INT64 (``2**70`` reads back
-        ``9223372036854775807``, measured — ``tortoise/numeric_domain.py``), so
-        the journal's value is not the graph's.
+      * a 4.16–4.20 engine CLAMPS a Python ``int`` outside INT64 (``2**70``
+        reads back ``9223372036854775807``) while a 6.x engine refuses to parse
+        it (both measured — ``tortoise/numeric_domain.py``), so the journal's
+        value is not the graph's either way.
 
     Callers — ``_stated_tags`` and ``_revise_point`` (the write decision) and
     ``consistency._uncarried`` (the comparison decision) — i.e. the SAME bar for
@@ -254,8 +260,8 @@ def _stated_tags(payload) -> tuple[bool, object]:
     map, a non-finite float, a NUL string) or the numeric domain would alter or
     reject, states NO property. The predicate is the store-EXACTNESS gate the
     comparison also uses, deliberately: a value whose fate is not uniform across
-    engines (docker and a direct embedded SDK CLAMP an over-range int; the
-    carve-out/pytest embedded lane rejects it at parameter parse) contributes no
+    engine versions (4.16–4.20 CLAMP an over-range int; 6.x refuses it at
+    parameter parse) contributes no
     property rather than aborting the rebuild after the wipe (#8317 review
     rounds 3-4). The same gate answers ``_revise_point``'s property clause, so
     the add and edit arms cannot disagree.

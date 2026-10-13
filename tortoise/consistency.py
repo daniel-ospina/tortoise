@@ -338,7 +338,8 @@ _UNCARRIED_NON_PERSISTABLE = (
 # predicate (transport gate + numeric domain), not the shape allowlist — so a
 # value that passes the shape test but is nulled by the `#7369` transport gate
 # (a non-finite float, a NUL/surrogate string, a null inside an array) or
-# CLAMPED by the engine (an int outside INT64) gets its own, accurate reason.
+# CLAMPED by a 4.16–4.20 engine / refused at parameter parse by a 6.x one (an
+# int outside INT64) gets its own, accurate reason.
 _UNCARRIED_TAGS_UNWRITABLE = (
     "a `tags` value the store cannot hold as stated — the `#7369` transport "
     "gate nulls what `_value_ok` refuses (non-finite float, NUL/surrogate "
@@ -351,9 +352,11 @@ _UNCARRIED_TAGS_UNWRITABLE = (
 #     out of `_graph_fingerprint`, so a GRAPH-only `tags` on a point whose
 #     JOURNAL value is unwritable goes uncompared. That is PRE-EXISTING
 #     `_uncarried` semantics (every `_UNCARRIED_*` reason behaves this way), not
-#     something the `tags` case introduces — recorded here because `tags` is the
-#     first CASE where a graph value can exist while the journal's is
-#     unwritable;
+#     something the `tags` case introduces — `_UNCARRIED_LIST` and
+#     `_UNCARRIED_NULL` are the PRE-EXISTING cases with this exact behaviour, and
+#     pre-#2897 `tags` was one too (see the reason text above). Recorded on the
+#     `tags` branch because carrying `tags` made the hole observable through a
+#     property `check_consistency` now COMPARES;
 #   * the verdict deliberately differs from the #5011 numeric contract for a
 #     GENERIC prop, where an over-range number is a DIVERGENCE
 #     (`test_an_over_range_int_is_a_divergence_not_a_crash`): `tags` has a
@@ -569,8 +572,9 @@ def _uncarried(journal_by_id: dict) -> dict[str, dict[str, str]]:
                 # `[nan]`/`[NUL]`/`[2**70]`, all reproduced). The predicate is
                 # the writer's EFFECTIVE one, NOT `_is_persistable_prop_value`:
                 # the shape allowlist admits a non-finite float and a huge int,
-                # which the transport gate nulls and the engine clamps
-                # respectively. (Deliberately a NARROW `tags` case, not a reorder
+                # which the transport gate nulls and a 4.16–4.20 engine clamps
+                # (6.x refuses it at parameter parse) respectively. (Deliberately
+                # a NARROW `tags` case, not a reorder
                 # of the generic list/persistable tests above the
                 # `_POINT_HANDLED` check: `provenance` is also
                 # handled-and-dict-valued, and a generic reorder would newly flag
@@ -1074,8 +1078,9 @@ def _fold_journal(events: list[dict]) -> dict:
     # `rebuild_all`.
     _epistemic_existence = journal_epistemic_existence(events)
     # #8317 review round 3: the re-creation boundary, so `_apply_one` preserves a
-    # presence-based prop (`tags`) the payload omits on a bare re-emit, and drops
-    # it on a real delete→recreate — the writer's own MERGE-vs-wipe semantics.
+    # prop (`tags`) the payload states no WRITABLE value for on a bare re-emit,
+    # and drops it on a real delete→recreate — the writer's own MERGE-vs-wipe
+    # semantics.
     _recreate_seqs = journal_recreate_seqs(events)
     by_id: dict = {}
     for seq, ev in enumerate(events):
