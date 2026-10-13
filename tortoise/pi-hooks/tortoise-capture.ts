@@ -407,6 +407,22 @@ function stampPair(
   return [undefined, undefined];
 }
 
+/** The server cap on the client-claimed attribution fields
+ *  (`hosted_api.SessionRequest`): `machine_id` ≤256, `model` ≤128. Beyond
+ *  either is a 422, which `flushSpool` classifies PERMANENT → the entry goes
+ *  terminal. The WRITER bounds both (`deriveMachineId` emits 64 hex chars;
+ *  `modelLabel` slices to 128), but the DRAIN forwards the on-disk meta — so a
+ *  hand-edited / foreign / corrupt `meta.json` (the PR's own threat model) could
+ *  put an over-long field on the wire and strand the capture, the same class the
+ *  harness normalisation closed (#8531 review). TOTAL read: a non-string is
+ *  OMITTED, and control chars / surrounding whitespace are stripped exactly as
+ *  the Python leg's `sanitize_attribution_field` does, so the two legs agree. */
+export function boundAttribution(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const clean = value.replace(/[\x00-\x1f]/g, "").trim();
+  return clean ? clean.slice(0, maxLength) : undefined;
+}
+
 /** The POST /v1/sessions payload — the same shape `tortoise session capture` sends. */
 export function buildCapturePayload(args: {
   sessionId: string;
@@ -435,7 +451,11 @@ export function buildCapturePayload(args: {
     session_id: args.sessionId,
     source: args.source,
     conversation: args.turns,
-    machine_id: args.machineId,
+    // #8531 review: capped at the WIRE (`machine_id` ≤256, `model` ≤128 are
+    // server bounds; exceeding either is a PERMANENT 422 that strands the
+    // entry). Both reads are TOTAL and delegate to the writers' own rule, so the
+    // writer and the wire cannot disagree.
+    machine_id: boundAttribution(args.machineId, 256),
   };
   // #7708: NORMALISED at the WIRE, not only at the writer. The drain forwards
   // whatever is on disk, and the two legs share one directory — so a meta the
@@ -456,7 +476,8 @@ export function buildCapturePayload(args: {
           : "unknown";
     }
   }
-  if (args.model) payload.model = args.model;
+  const wireModel = boundAttribution(args.model, 128);
+  if (wireModel) payload.model = wireModel;
   return payload;
 }
 
@@ -836,6 +857,12 @@ export function readSpoolTurns(dir: string, sessionId: string): Turn[] {
     if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line) as { role?: unknown; content?: unknown };
+      // #8531 review: `role.length > 0` is the writers' contract — neither leg
+      // ever emits an empty role (`extractTurns` requires user/assistant;
+      // Python filters to the same pair) — and Python now applies the SAME
+      // non-empty predicate (`capture_spool.read_spool_turns`). Before that the
+      // legs disagreed about the same bytes: TS skipped `{"role":"",...}` and
+      // routed the log to `transcript_torn`, Python filed it as a turn.
       if (
         typeof parsed.role === "string" &&
         parsed.role.length > 0 &&
@@ -940,11 +967,17 @@ function turnLogHasContent(dir: string, sessionId: string): boolean {
   }
 }
 
-/** Move a turn log ASIDE instead of unlinking it — recoverable, not deleted.
+/** Move a turn log ASIDE instead of unlinking it — kept FOR FORENSICS.
  *  Used when the META is corrupt and the transcript (which the corruption never
  *  touched, and which is the only copy) must survive (#7708). An empty/absent
  *  log is removed. A numeric suffix keeps an earlier orphan from being
- *  clobbered. Best-effort: a rename failure leaves the log in place. */
+ *  clobbered. Best-effort: a rename failure leaves the log in place.
+ *
+ *  NOT re-fileable — the honesty this owes a reader who finds an `.orphan`: the
+ *  entry key is `sha256(session_id)[:32]` and the corrupt meta (the only copy of
+ *  the session id) is REMOVED, so no verb can rebuild the session id the server
+ *  needs. The bytes are kept FOR FORENSICS, not for a retry. (The wording here
+ *  once said "recoverable", which overstated what the name can deliver.) */
 function quarantineLog(log: string): void {
   let size = 0;
   try {

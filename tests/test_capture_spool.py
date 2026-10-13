@@ -3042,3 +3042,81 @@ def test_cli_capture_does_not_raise_on_a_corrupt_terminal_marker(
     assert cli.main(["session", "capture", "--file", str(transcript),
                      "--session-id", sid, "--harness", "claude"]) == 0
     assert "Traceback" not in capsys.readouterr().err
+
+
+def test_the_drain_never_puts_an_over_long_attribution_field_on_the_wire(tmp_path):
+    """`machine_id` (≤256) and `model` (≤128) are SERVER caps, and exceeding
+    either is a 422 — which `classify_failure` reads as PERMANENT, so the entry
+    goes terminal. Both writers bound them, but the WIRE forwarded the on-disk
+    value verbatim: a hand-edited / foreign / corrupt `meta.json` (the PR's own
+    threat model) could strand the capture. Both are now length-capped and
+    type-totalled at the wire (#8531 review).
+
+    MUTATION THAT REDS THIS: restore `"machine_id": meta.get("machine_id")` and
+    `payload["model"] = meta["model"]` → the 257-char id and the 200-char model
+    reach the post.
+    """
+    from tortoise.capture_spool import _write_meta
+
+    def _post_after_edit(sid, mutate):
+        write_spool_entry(tmp_path, _snapshot(sid))
+        meta = read_spool_meta(tmp_path, sid)
+        mutate(meta)
+        _write_meta(tmp_path, meta)
+        posted: list[dict] = []
+        flush_spool(tmp_path, lambda p: (posted.append(dict(p)),
+                                         PostOutcome(ok=True, status=200))[1],
+                    only_session_id=sid)
+        assert posted, sid
+        return posted[0]
+
+    over = _post_after_edit("8531-cap-len", lambda m: (
+        m.__setitem__("machine_id", "m" * 257), m.__setitem__("model", "x" * 200)))
+    assert len(over["machine_id"]) == 256, len(over["machine_id"])
+    assert len(over["model"]) == 128, len(over["model"])
+
+    # POSITIVE CONTROL: a legal value reaches the wire verbatim, so the cap
+    # cannot pass by a leg that simply stopped forwarding either field.
+    legal = _post_after_edit("8531-cap-legal", lambda m: (
+        m.__setitem__("machine_id", "deadbeef"), m.__setitem__("model", "deepseek/v4")))
+    assert legal["machine_id"] == "deadbeef"
+    assert legal["model"] == "deepseek/v4"
+
+    # A NON-STRING (a foreign meta) is omitted, never a crash. The raw
+    # `sanitize_attribution_field` would raise `AttributeError` on `1.str.strip`
+    # — and `_flush_one` raising is what `session drain` must never do.
+    junk = _post_after_edit("8531-cap-junk", lambda m: (
+        m.__setitem__("machine_id", 1), m.__setitem__("model", ["x"])))
+    assert junk["machine_id"] is None
+    assert "model" not in junk
+
+
+def test_an_empty_role_is_not_a_turn_on_either_leg(tmp_path):
+    """The writers only ever emit a non-EMPTY role (`__main__._parse_transcript`
+    filters to user/assistant; the Pi leg's `extractTurns` requires the same
+    pair), so `{"role":"","content":"x"}` is a malformed line, not a turn.
+    Python accepted it and filed it while the Pi leg — which requires
+    `parsed.role.length > 0` — skipped it and routed the log to
+    `transcript_torn` (terminal + kept): the one place the two legs disagreed
+    about the SAME bytes (#8531 review). Both now require a non-empty role.
+
+    MUTATION THAT REDS THIS: drop the `and role` predicate from
+    `read_spool_turns` → the empty-role line is returned as a filed turn again.
+    """
+    from tortoise.capture_spool import _log_path
+
+    sid = "8531-empty-role"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    with _log_path(tmp_path, sid).open("a", encoding="utf-8") as fh:
+        fh.write('{"role": "", "content": "ghost"}\n')
+    assert read_spool_turns(tmp_path, sid) == TURNS, (
+        "an empty role is malformed, not a turn")
+
+    # POSITIVE CONTROL: a NON-EMPTY non-conversational role is still returned —
+    # the reader is not a role-VALUE filter (that is a separate pinned contract,
+    # `test_read_spool_turns_returns_every_stored_role`). Only EMPTINESS is
+    # refused, so this cannot pass by re-adding the user/assistant filter.
+    with _log_path(tmp_path, sid).open("a", encoding="utf-8") as fh:
+        fh.write('{"role": "system", "content": "policy"}\n')
+    assert [t["role"] for t in read_spool_turns(tmp_path, sid)] == \
+        ["user", "assistant", "system"]

@@ -50,6 +50,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from tortoise.session_attribution import sanitize_attribution_field
+
 __all__ = [
     "DEFAULT_BOUNDS",
     "DISCARD_BYTES_EXCEEDED",
@@ -534,9 +536,20 @@ def read_spool_turns(root: Path, session_id: str) -> list[dict]:
             parsed = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(parsed, dict) and isinstance(parsed.get("role"), str) \
-                and isinstance(parsed.get("content"), str):
-            turns.append({"role": parsed["role"], "content": parsed["content"]})
+        # #8531 review: the role must be a non-EMPTY string. The writers only
+        # ever emit the conversational pair (`__main__._parse_transcript`
+        # filters to user/assistant) — an empty role is a value neither leg can
+        # produce, so it is a malformed line, not a turn. The TS leg already
+        # required `parsed.role.length > 0`; accepting `""` here made the two
+        # legs disagree about the SAME bytes: Python filed `{"role":"",...}`
+        # as a turn while the Pi leg skipped it and routed the log to
+        # `transcript_torn` (terminal + kept). A non-EMPTY role is the writers'
+        # contract, so Python is the leg that moves — adding a check can only
+        # stop filing a line no writer emits, while relaxing TS could newly
+        # file a malformed line.
+        role = parsed.get("role") if isinstance(parsed, dict) else None
+        if isinstance(role, str) and role and isinstance(parsed.get("content"), str):
+            turns.append({"role": role, "content": parsed["content"]})
     return turns
 
 
@@ -607,7 +620,7 @@ def _turn_log_has_content(root: Path, session_id: str) -> bool:
 
 
 def _quarantine_log(log: Path) -> Path | None:
-    """Move a turn log ASIDE instead of unlinking it — recoverable, not deleted.
+    """Move a turn log ASIDE instead of unlinking it — kept FOR FORENSICS.
 
     Used by `list_spool_metas` when the META is corrupt: the transcript has
     nothing to do with the corruption and is the only copy, so deleting it turns
@@ -616,6 +629,13 @@ def _quarantine_log(log: Path) -> Path | None:
     ``<name>.turns.jsonl.orphan`` with a numeric suffix so an earlier orphan is
     never clobbered. Best-effort: a rename failure leaves the log in place,
     which is still better than deleting it.
+
+    NOT re-fileable — the honesty this owes the reader who finds an `.orphan`:
+    the entry's key is ``sha256(session_id)[:32]`` and the corrupt meta (the only
+    copy of the session id) is REMOVED, so no verb can reconstruct the session
+    id the server needs. The bytes are preserved FOR FORENSICS (grep a lost turn,
+    recover a prefix by hand), not for a retry. The wording here once said
+    "recoverable", which overstated what the name can deliver.
     """
     if _file_size(log) <= 0:
         with contextlib.suppress(OSError):
@@ -934,6 +954,45 @@ CLIENT_CAPTURED_AT_SOURCES = frozenset({"cli_observed", "file_mtime", "unknown"}
 # then UNLINKED the only copy. Distinct from the EXTRACTION lane
 # (`hosted_api._capture_lane()` returns m2/v2): same word, different meaning.
 CAPTURE_LANES = frozenset({"hook", "store_sync"})
+
+
+#: Server caps on the client-claimed attribution fields
+#: (`hosted_api.SessionRequest`): ``machine_id`` ≤256, ``model`` ≤128. Beyond
+#: either is a 422, and `classify_failure` reads a 422 as PERMANENT — the entry
+#: goes terminal. The WRITERS bound both (`session capture` derives a 64-char
+#: sha256 and sanitises `model` to 128), but the WIRE forwarded the on-disk value
+#: VERBATIM, so a hand-edited / foreign / corrupt `meta.json` (the PR's own
+#: threat model) could put an over-long field on the wire and strand the
+#: capture — the same class `_normalise_harness` closed for `harness`
+#: (#8531 review).
+MACHINE_ID_MAX_LENGTH = 256
+MODEL_MAX_LENGTH = 128
+
+
+def _normalise_machine_id(value: object) -> str | None:
+    """A server-legal ``machine_id``, or ``None`` — a TOTAL read for the wire.
+
+    Delegates to the canonical `sanitize_attribution_field` (the same helper the
+    writers use), so the writer and the wire cannot disagree about what a legal
+    value is. The `isinstance` guard makes the read TOTAL — the raw helper is
+    not (`value.strip()` raises `AttributeError` on a non-string), and
+    `_flush_one` must never raise on a foreign meta. A non-string or empty value
+    is OMITTED (the server field is optional; absence renders unattributed).
+    """
+    if not isinstance(value, str):
+        return None
+    return sanitize_attribution_field(value, max_length=MACHINE_ID_MAX_LENGTH)
+
+
+def _normalise_model(value: object) -> str | None:
+    """A server-legal ``model``, or ``None`` — a TOTAL read for the wire.
+
+    Same class as `_normalise_machine_id`, and the same delegation, so a corrupt
+    meta cannot draw the 422 that marks the entry terminal (#8531 review).
+    """
+    if not isinstance(value, str):
+        return None
+    return sanitize_attribution_field(value, max_length=MODEL_MAX_LENGTH)
 
 
 def _normalise_lane(value: object) -> str | None:
@@ -1662,7 +1721,12 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         "session_id": sid,
         "source": meta.get("source"),
         "conversation": turns,
-        "machine_id": meta.get("machine_id"),
+        # #8531 review: length-capped at the WIRE. `machine_id` ≤256 and
+        # `model` ≤128 are server bounds, and exceeding either is a 422 —
+        # PERMANENT, so a corrupt meta could strand the capture. Both reads are
+        # TOTAL (`_normalise_*` guards the type) and both DELEGATE to the
+        # writers' own sanitizer, so the writer and the wire cannot disagree.
+        "machine_id": _normalise_machine_id(meta.get("machine_id")),
     }
     # #3516 §B: forward the producer lane ONLY when the spool entry carries one
     # (set-only-when-present). A pre-#3516 entry, or a backfill/import entry,
@@ -1700,8 +1764,9 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
                 if isinstance(_drain_src, str)
                 and _drain_src in CLIENT_CAPTURED_AT_SOURCES
                 else "unknown")
-    if meta.get("model"):
-        payload["model"] = meta["model"]
+    _wire_model = _normalise_model(meta.get("model"))
+    if _wire_model:
+        payload["model"] = _wire_model
     # The lane actually put on the wire — part of the CAS identity below.
     posted_lane = payload.get("capture_lane")
     # #3516 §B: the client stamp is part of the posted identity for the SAME

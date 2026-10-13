@@ -2316,3 +2316,68 @@ test("#7708: quarantineEntry records FIRST and keeps the entry (no unlink)", () 
   assert.deepEqual(order, ["record", "read", "write"], "record must precede the mark");
   assert.ok(readSpoolEntry(spool, sid), "quarantine must keep the entry");
 });
+
+test("#8531: buildCapturePayload caps the server-bounded attribution fields at the wire", () => {
+  // `machine_id` ≤256 and `model` ≤128 are SERVER caps; exceeding either is a
+  // 422, which `flushSpool` classifies PERMANENT → the entry goes terminal. The
+  // WRITER bounds both, but the DRAIN forwards the on-disk meta, so a
+  // hand-edited / foreign / corrupt `meta.json` (the PR's own threat model)
+  // could strand the capture (#8531 review).
+  //
+  // MUTATION THAT REDS THIS: forward `args.machineId` / `args.model` verbatim.
+  const over = buildCapturePayload({
+    sessionId: "s",
+    turns: [{ role: "user", content: "x" }],
+    source: "t",
+    machineId: "m".repeat(257),
+    model: "x".repeat(200),
+  });
+  assert.equal((over.machine_id as string).length, 256);
+  assert.equal((over.model as string).length, 128);
+
+  // POSITIVE CONTROL: a legal value reaches the wire verbatim, so the cap
+  // cannot pass by a leg that simply stopped forwarding either field.
+  const legal = buildCapturePayload({
+    sessionId: "s",
+    turns: [{ role: "user", content: "x" }],
+    source: "t",
+    machineId: "deadbeef",
+    model: "deepseek/deepseek-v4-flash",
+  });
+  assert.equal(legal.machine_id, "deadbeef");
+  assert.equal(legal.model, "deepseek/deepseek-v4-flash");
+
+  // A NON-STRING (a foreign meta) is OMITTED, never a crash or a verbatim post.
+  const junk = buildCapturePayload({
+    sessionId: "s",
+    turns: [{ role: "user", content: "x" }],
+    source: "t",
+    machineId: 1 as unknown as string,
+    model: ["x"] as unknown as string,
+  });
+  assert.equal(junk.machine_id, undefined);
+  assert.equal("model" in junk, false);
+});
+
+test("#8531: an empty role is not a turn (the writers' contract on both legs)", () => {
+  // Neither leg's writer ever emits an empty role (`extractTurns` requires
+  // user/assistant; Python filters to the same pair), so `{"role":"",...}` is a
+  // malformed line. Python used to file it while this leg skipped it and routed
+  // the log to `transcript_torn` — the one place the legs disagreed about the
+  // SAME bytes. Python now applies the same non-empty predicate.
+  //
+  // MUTATION THAT REDS THIS: accept an empty role → the malformed line becomes a
+  // filed turn.
+  const spool = tmpSpool();
+  const sid = "empty-role";
+  const entries = join(spool, "entries");
+  mkdirSync(entries, { recursive: true });
+  const log = join(entries, `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(log, '{"role":"","content":"ghost"}\n');
+  assert.deepEqual(readSpoolTurns(spool, sid), []);
+
+  // POSITIVE CONTROL: a NON-EMPTY non-conversational role is still returned —
+  // the reader is not a role-VALUE filter. Only EMPTINESS is refused.
+  writeFileSync(log, '{"role":"system","content":"policy"}\n');
+  assert.deepEqual(readSpoolTurns(spool, sid), [{ role: "system", content: "policy" }]);
+});
