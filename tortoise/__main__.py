@@ -10970,6 +10970,18 @@ def main(argv: list[str] | None = None) -> int:
             _warn = baseline_warning(result, args.log)
             if _warn:
                 print(f"  \u26a0 {_warn}", file=_sys.stderr)
+            # #2897 review round 4: a green verdict must also say what the
+            # projection did NOT carry. `uncarried_journal_fields` holds the KEY
+            # NAMES (the reasons live on the returned dict), and nothing printed
+            # them before this — so "the drop is named, not silent" was true
+            # only of the API while the operator's only surface showed a bare
+            # tick. A dropped field is not a divergence (the exit code is
+            # unchanged), but it is not nothing: name it.
+            _drops = result.get("uncarried_journal_fields") or []
+            if _drops:
+                print("  \u26a0 journal fields not carried by the projection "
+                      f"(reasons in the report): {', '.join(_drops)}",
+                      file=_sys.stderr)
             return 0
         else:
             # #3585 review: a `non-folded` divergence is counts-equal and

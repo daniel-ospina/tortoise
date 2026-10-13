@@ -343,8 +343,22 @@ _UNCARRIED_TAGS_UNWRITABLE = (
     "a `tags` value the store cannot hold as stated — the `#7369` transport "
     "gate nulls what `_value_ok` refuses (non-finite float, NUL/surrogate "
     "string, null inside an array, map/bytes/set) and an int outside INT64 is "
-    "clamped (`_store_holds_prop_value`)"
+    "clamped or refused (`_store_holds_prop_value`)"
 )
+# ⚠️ BOUND, stated rather than implied, on the `tags` branch that reads the
+# reason above (#8317 review round 4):
+#   * an `_uncarried` key is skipped on BOTH sides (journal AND graph) and left
+#     out of `_graph_fingerprint`, so a GRAPH-only `tags` on a point whose
+#     JOURNAL value is unwritable goes uncompared. That is PRE-EXISTING
+#     `_uncarried` semantics (every `_UNCARRIED_*` reason behaves this way), not
+#     something the `tags` case introduces — recorded here because `tags` is the
+#     first CASE where a graph value can exist while the journal's is
+#     unwritable;
+#   * the verdict deliberately differs from the #5011 numeric contract for a
+#     GENERIC prop, where an over-range number is a DIVERGENCE
+#     (`test_an_over_range_int_is_a_divergence_not_a_crash`): `tags` has a
+#     declared carriage rule whose writer states "no property" for that value,
+#     so naming the drop is the accurate verdict. The generic rule is untouched.
 _UNCARRIED_LIST = (
     "list-valued prop the REPLAYED writer refuses (`_POINT_LIST_PROPS` is empty, "
     "#2795); the live path may still write it raw — the live/replay asymmetry "

@@ -3515,6 +3515,7 @@ from tortoise.projection.entities import (  # noqa: E402, I001
     _EntityHandlers,
     _is_persistable_prop_value,
     _PERSISTABLE_MAX_DEPTH,
+    _stated_tags,
     _store_holds_prop_value,
     _usable_instant,
 )
@@ -4591,15 +4592,17 @@ def journal_recreate_seqs(events) -> set[int]:
     the same id — the creations ``rebuild_all`` pass 1a treats as a
     RE-creation (a FRESH node live, so its #4042 wipe applies).
 
-    Mirrors pass 1a's ordered ``pending_deleted`` scan EXACTLY (#4042 / #3860):
+    Mirrors pass 1a's ordered ``pending_deleted`` scan (#4042 / #3860):
     a Point-kind hard delete (``EntityMutated`` op=delete through
     ``_owns_point``, or a ``PointsMerged`` merge id) ARMS the id, and the NEXT
-    creation of that id consumes the arm. A bare same-id re-emit (no delete
-    between) is therefore NOT a recreate — which is what ``_apply_one``'s
-    ``journal_recreate`` gate reads to decide whether a presence-based prop the
-    payload OMITS survives (a MERGE preserves it) or is wiped (a recreate is a
-    fresh node). Reading it any other way either leaks a dead incarnation's
-    tag or drops a live one (#8317 review round 3).
+    creation of that id consumes the arm — the creation is admitted by the same
+    ``_writable_id`` gate pass 1a applies BEFORE computing ``is_recreate``
+    (#8317 review round 4). A bare same-id re-emit (no delete between) is
+    therefore NOT a recreate — which is what ``_apply_one``'s
+    ``journal_recreate`` gate reads to decide whether a ``tags`` value the
+    payload does not state survives (the writer's ``MERGE`` preserves it) or is
+    wiped (a recreate is a fresh node). Reading it any other way either leaks a
+    dead incarnation's tag or drops a live one.
 
     ``seq`` is the enumerate index over the SAME ordered ``events`` list the
     replay engines walk (the seq space ``journal_hard_delete_seqs`` documents),
@@ -4620,8 +4623,12 @@ def journal_recreate_seqs(events) -> set[int]:
                     armed.add(mid)
         elif t in ("PointAdded", "OperatorAdded"):
             p = ev.get("point")
+            # `_writable_id` mirrors pass 1a, which gates a creation on it
+            # BEFORE computing `is_recreate` — a non-writable id never
+            # materialises a node, so it must not consume the arm (#8317 review
+            # round 4).
             if (isinstance(p, dict) and isinstance(p.get("id"), str)
-                    and p["id"] in armed):
+                    and _writable_id(p["id"]) and p["id"] in armed):
                 recreate.add(seq)
                 armed.discard(p["id"])
     return recreate
@@ -5379,26 +5386,32 @@ def _apply_one(points: dict[str, dict], ev: dict,
         # Phase 1 stop-writes: strip context from v2+ events (#49)
         if ev.get("projection_version", 0) >= 2:
             p.pop("context", None)
-        # #8317 review round 3: `_upsert_point_props` writes `tags` with a
-        # PRESENCE-based clause and pass 1a MERGEs, so a same-id re-emit whose
-        # payload OMITS `tags` PRESERVES the node's list. Replacing the entry
-        # outright dropped it from the journal view while the graph kept it, so
-        # `check_consistency` red a faithful graph with an action
-        # ("replay the journal") that reproduces exactly that graph — the
+        # #8317 review rounds 3-4: `_upsert_point_props`'s `tags` clause is
+        # `_stated_tags`-gated, so an ABSENT key, an explicit `None` and a value
+        # the store cannot hold all write NO property — and pass 1a MERGEs, so
+        # the node's existing list SURVIVES. Replacing the entry outright
+        # dropped it from the journal view while the graph kept it, so
+        # `check_consistency` red a faithful graph whose `action` ("replay the
+        # journal") reproduces exactly that graph. Mirror the WRITER'S OUTCOME,
+        # not the key's presence: keying on `"tags" not in p` alone left
+        # `tags: null` (and an unwritable value) folded as a CLEAR, reachable
+        # from the ordinary ingest seam — `EventAPI.add_point(id=…, tags=None)`
+        # (#8317 review round 4). The omitted-key shape is reachable too: the
         # capture turn loop re-emits `PointAdded` for an existing turn with a
-        # hand-built snapshot that carries no `tags` (`sdk.py`), so this is a
-        # production shape, not a hand-written one. Mirror the writer: carry the
-        # previous entry's `tags` when the payload omits the key.
+        # hand-built snapshot that carries no `tags` (`sdk.py`).
         #
         # The ONE exception is a RE-creation (`journal_recreate`): the graph
-        # wipes `n.tags` there (the #4042 pass-1a wipe), so the fold must drop
-        # it too, or the fix would leak a dead incarnation's tag. The caller
-        # derives that flag from the same ordered `pending_deleted` boundary the
-        # projection uses (`journal_recreate_seqs`).
-        if not journal_recreate and "tags" not in p:
-            prev = points.get(p["id"])
-            if isinstance(prev, dict) and "tags" in prev:
-                p = {**p, "tags": prev["tags"]}
+        # wipes `n.tags` there (the #4042 pass-1a wipe, which clears `tags`
+        # alongside the other four), so the fold must drop it too, or the fix
+        # would leak a dead incarnation's tag. The caller derives that flag from
+        # the same ordered `pending_deleted` boundary the projection uses
+        # (`journal_recreate_seqs`).
+        if not journal_recreate:
+            _wrote_tags, _ = _stated_tags(p)
+            if not _wrote_tags:
+                prev = points.get(p["id"])
+                if isinstance(prev, dict) and "tags" in prev:
+                    p = {**p, "tags": prev["tags"]}
         points[p["id"]] = p
         # Flatten speaker from point's provenance into node data
         # #331: non-dict provenance (null/string) must not crash flattening.
@@ -13400,10 +13413,10 @@ class FalkorProjection(
 
         This flag governs only whether the REVISION folds. A recreate that
         omits the property still leaves the dead incarnation's value on the
-        node, because the pass-1a recreate wipe clears only
-        embedding/content_hash/embedding_verbatim/sourceVersionTransit — a
-        pre-existing gap general to every open-set prop (#4042 class), not
-        something this flag can reach.
+        node for most open-set props, because the pass-1a recreate wipe clears
+        only embedding/content_hash/embedding_verbatim/sourceVersionTransit
+        (plus ``tags``, added by #2897) — a pre-existing gap general to every
+        OTHER open-set prop (#4042 class), not something this flag can reach.
 
         Returns ``(embedding_written, content_hash_written)`` (#4305) — the
         same conditional-write outcome ``_upsert_point_props`` reports, and
@@ -13500,9 +13513,12 @@ class FalkorProjection(
             # string, a non-finite float) is what live's `SET n += $props`
             # nulls, so it REMOVES the property (measured: `update_point(tags={
             # "a": 1})` leaves `'tags' IN keys(n)` False). An `int` outside
-            # INT64 is included here even though docker would CLAMP it: the
-            # embedded engine REJECTS it at parameter parse, so writing it would
-            # abort the rebuild after the wipe.
+            # INT64 is included because its OUTCOME is not uniform: the
+            # carve-out/pytest embedded lane RAISES `Failed to parse the value
+            # of parameter 'tags'` (measured — writing it would abort the
+            # rebuild after the wipe), while a direct embedded SDK and docker
+            # CLAMP it. A fold must not write a value whose fate differs by
+            # engine.
             if ev["tags"] is None \
                     or not _store_holds_prop_value(ev["tags"]):
                 set_clauses.append("n.tags = NULL")

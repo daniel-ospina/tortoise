@@ -71,9 +71,11 @@ established by a fresh-context adversarial verification, recorded on #2897.
 ## What the fold now does (and why it needs the journal, not the graph)
 
 * ``_upsert_point_props`` writes the ``n.tags`` **property** half from the
-  payload, **presence-based**: any persistable value the payload states is
-  written verbatim (a non-list scalar included), while ``None``/absent states no
-  property — which is what the live create does too (it builds the node from a
+  payload, **presence-and-store gated** (``_stated_tags``): a value the store
+  holds EXACTLY as stated (``_store_holds_prop_value``) is written verbatim (a
+  non-list scalar included), while ``None``/absent and any value the transport
+  gate refuses or the numeric domain would alter states NO property — which is
+  what the live create does too (it builds the node from a
   ``CREATE (n:Point {…})`` map, not a ``SET``).
   ``_upsert_point_edges`` (pass 2) reconciles the ``:Tag``/``TAGGED`` **edge**
   half from the node's own final value. ``_revise_point`` folds a ``tags`` EDIT
@@ -555,6 +557,71 @@ def test_a_tuple_tag_value_syncs_edges_on_both_arms(env):
     assert report["ok"] is True, (
         "a faithful tuple replay must not be red: "
         + str(report.get("divergent_points")))
+
+
+# ══ The writer's OUTCOME, not the key's presence ═══════════════════════════
+#
+# #8317 review round 4. Round 3 taught the fold to carry a previous `tags` when
+# the payload OMITS the key — but the clause is `_stated_tags`-gated, so
+# `tags: null` and an unwritable value write NO property too, and pass 1a's
+# MERGE therefore PRESERVES the node's list. Keying on omission alone folded
+# `tags: null` as a CLEAR, so the journal view lost the value the graph held and
+# `check_consistency` red a graph the write itself produced — reachable from the
+# ordinary ingest seam (`EventAPI.add_point(id=…, tags=None)`), not only a
+# hand-written journal. Both directions are pinned below, and so is the
+# `_revise_point` sync gate: a `:Tag` MERGE KEY cannot be null, so an edit
+# stating `[None]` must not send it (the sync would raise mid-rebuild).
+
+
+@pytest.mark.parametrize("second", [None, {"a": 1}], ids=["null", "unwritable"])
+def test_a_reemit_that_states_no_writable_tag_keeps_the_graphs_value(env, second):
+    """A second `PointAdded` stating `tags: null` (or an unwritable value)
+    writes NO property, so the MERGE keeps the tag the graph holds.
+
+    The reference fold must ask the WRITER'S outcome (`_stated_tags`), not the
+    key's presence: with only the round-3 omission test, this shape red the
+    checker on a graph the write itself produced (#8317 review round 4).
+    """
+    sdk, events = env
+    _write_journal(events, [
+        {"type": "PointAdded",
+         "point": {"id": "p1", "content": "v1", "tags": ["alpha"]}},
+        {"type": "PointAdded",
+         "point": {"id": "p1", "content": "v2", "tags": second}},
+    ])
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+    assert _tag_hits(sdk, "alpha") == ["p1"], (
+        "the re-emit writes no tag property (MERGE preserves), so the derived "
+        "edge half must survive it")
+    report = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+    assert report["ok"] is True, (
+        "the fold must mirror the writer's OUTCOME, not the key's presence: "
+        + str(report.get("divergent_points")))
+
+
+def test_an_edit_whose_tag_array_cannot_be_a_merge_key_does_not_abort(env):
+    """A `PointRevised` stating `[None]` must not abort the rebuild after the
+    wipe — `:Tag`'s MERGE key cannot be null, so the edge sync is gated on the
+    same write decision the property clause uses (#8317 review round 4).
+
+    Mutation-checked: removing the gate leaves every other test in this module
+    green while `rebuild_all` raises `Cannot merge node using null property
+    value` — the #325/#3689 class (a malformed record must DROP, never strand
+    the recovery).
+    """
+    sdk, events = env
+    _write_journal(events, [
+        {"type": "PointAdded",
+         "point": {"id": "p1", "content": "v1", "tags": ["alpha"]}},
+        {"type": "PointRevised", "id": "p1", "tags": [None]},
+    ])
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+    assert _tag_hits(sdk, "alpha") == [], (
+        "the property half is cleared, so the derived edge half must follow it")
 
 
 # ══ The checker's CARRIAGE predicate is the writer's EFFECTIVE one ═════════

@@ -199,18 +199,18 @@ def _store_holds_prop_value(value) -> bool:
     ⛔ This is the bar for BOTH questions the `tags` fix asks — *does the writer
     put the property on the node?* (``_stated_tags``, ``_revise_point``) and
     *may the journal's value be compared against the node's?*
-    (``consistency._uncarried``) — because the two REPLAY ENGINES disagree about
-    what they do to a value the numeric domain refuses: FalkorDB CLAMPS a
-    Python ``int`` outside INT64 (the ``numeric_alteration_reason`` reason says
-    "would be SILENTLY clamped"), while the EMBEDDED engine REJECTS it at
-    parameter parse (``Failed to parse the value of parameter 'tags'``,
-    measured). Writing it would therefore ABORT a ``rebuild_all`` after the
-    wipe on one engine — the class the content and dim clauses above refuse to
-    crash on (#325/#3689 review P1) — so a recovery fold must contribute NO
-    property for it and a comparison must not compare it. "The store holds it
-    exactly as stated" is the only bar that is safe on both engines, which is
-    why the WRITE question is answered here rather than by the transport gate
-    alone (#8317 review round 3).
+    (``consistency._uncarried``) — because the OUTCOME for a value the numeric
+    domain refuses is NOT uniform across engines and constructions: FalkorDB
+    (docker) and a direct embedded SDK CLAMP a Python ``int`` outside INT64 (the
+    ``numeric_alteration_reason`` reason says "would be SILENTLY clamped"),
+    while the carve-out/pytest embedded lane RAISES ``Failed to parse the value
+    of parameter 'tags'`` (both measured). Writing it would therefore ABORT a
+    ``rebuild_all`` after the wipe on that lane — the class the content and dim
+    clauses above refuse to crash on (#325/#3689 review P1) — so a recovery fold
+    must contribute NO property for it and a comparison must not compare it.
+    "The store holds it exactly as stated" is the only bar safe everywhere,
+    which is why the WRITE question is answered here rather than by the
+    transport gate alone (#8317 review rounds 3-4).
 
     On top of the shape allowlist ``_is_persistable_prop_value`` and the write
     gate, the numeric domain is the second test — a value either gate would
@@ -224,12 +224,12 @@ def _store_holds_prop_value(value) -> bool:
         ``9223372036854775807``, measured — ``tortoise/numeric_domain.py``), so
         the journal's value is not the graph's.
 
-    Its ONLY caller is ``consistency._uncarried`` — the comparison surface:
-    declaring "the graph holds the journal's value" for something the engine
-    clamps contradicts the graph that was just read (#8317 review round 3,
-    reproduced with a hand-written ``PointAdded(tags=[nan])`` and with
-    ``tags=[2**70]``). The WRITE question is ``_annotator_value_ok``'s, asked by
-    ``_stated_tags`` and ``_revise_point``.
+    Callers — ``_stated_tags`` and ``_revise_point`` (the write decision) and
+    ``consistency._uncarried`` (the comparison decision) — i.e. the SAME bar for
+    both questions, for the engine-divergence reason stated above. Declaring
+    "the graph holds the journal's value" for something the engine clamps
+    contradicts the graph that was just read (#8317 review round 3, reproduced
+    with a hand-written ``PointAdded(tags=[nan])`` and with ``tags=[2**70]``).
 
     ``_annotator_value_ok`` lives in the package ``__init__`` — this module is
     imported BY that package, so the import is function-local; by the time any
@@ -253,12 +253,12 @@ def _stated_tags(payload) -> tuple[bool, object]:
     list-only). ``None``/absent, and any value the transport gate refuses (a
     map, a non-finite float, a NUL string) or the numeric domain would alter or
     reject, states NO property. The predicate is the store-EXACTNESS gate the
-    comparison also uses, deliberately: the replay must be fail-safe on BOTH
-    engines (docker clamps an over-range int, embedded rejects it at parameter
-    parse), so a value the store would not hold as stated contributes no
+    comparison also uses, deliberately: a value whose fate is not uniform across
+    engines (docker and a direct embedded SDK CLAMP an over-range int; the
+    carve-out/pytest embedded lane rejects it at parameter parse) contributes no
     property rather than aborting the rebuild after the wipe (#8317 review
-    round 3). The same gate answers ``_revise_point``'s property clause, so the
-    add and edit arms cannot disagree.
+    rounds 3-4). The same gate answers ``_revise_point``'s property clause, so
+    the add and edit arms cannot disagree.
 
     ⚠️ Three corrections to an earlier version of this paragraph, all MEASURED
     on the embedded engine — the helper's ANSWERS were right, its reasoning was
