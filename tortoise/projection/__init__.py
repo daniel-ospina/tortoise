@@ -13740,12 +13740,13 @@ class FalkorProjection(
                 except Exception:
                     params["embedding"] = None  # wipe stale embedding on failure (#19)
                 # #4521: cast with `vecf32()` like every other Point embedding
-                # writer. Without it the recomputed vector landed as a plain
-                # Cypher `List`, and `vec.euclideanDistance` — search_engine's
-                # per-row dense leg — raises "Type mismatch: expected Null or
-                # Vectorf32 but was List", aborting the WHOLE query. So ONE
-                # revised node degraded the entire Point dense leg to FTS-only
-                # recall for that graph, not just its own row. The `CASE` keeps
+                # writer, so a server-owned vector is always the typed shape —
+                # a bare `List` node is absent from the Point HNSW index at all
+                # (#8429). Before #8316 the flip to `List` also aborted the
+                # whole dense READ (`Type mismatch: expected Null or VectorF32
+                # but was List`); the read boundary now normalises a right-width
+                # `List`, so only a wrong width or a non-numeric value still
+                # aborts the MATCH (#8430). The `CASE` keeps
                 # this clause's existing wipe-on-None semantics (`$embedding` is
                 # None for empty content and on encoder failure) while casting
                 # every real vector — `vecf32(NULL)` is not relied upon.

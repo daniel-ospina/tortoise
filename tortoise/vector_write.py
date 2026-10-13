@@ -64,18 +64,21 @@ must NOT be routed into it:
 ``List``. Two branches, with different dispositions:
 
 * **Derived — CLOSED.** ``update_point(content=…)`` re-encodes the content
-  (#4208) and the bare SET used to store the new embedding as a ``List``.
-  Measured: ``create_point`` stores ``Vectorf32``, the content edit flips
-  ``typeof`` to ``List``, and the failure surfaces on the next dense READ,
-  where ``vec.euclideanDistance`` raises ``Type mismatch: expected Null or
-  VectorF32 but was List`` — so ONE content edit degraded the whole Point dense
-  leg to FTS-only. The DERIVED vector is now routed through this seam: the
-  ``embedding`` key is stripped from the verbatim merge and written with
+  (#4208) and the bare SET used to store the new embedding as a ``List``,
+  which flipped ``typeof`` from ``Vectorf32`` to ``List`` on ONE content
+  edit. The DERIVED vector is now routed through this seam: the ``embedding``
+  key is stripped from the verbatim merge and written with
   :func:`clear_then_set_prefix` + :func:`set_embedding_clause`
   (``preserve_on_null=False``), exactly as ``_revise_point`` is, while every
   other key keeps the caller-supplied-patch ``SET n += $props`` semantics. Both
-  halves are required: the ``vecf32()`` cast fixes the type, and the clear
-  lands the small-Δ overwrite the embedded engine would otherwise DISCARD.
+  halves are required: the ``vecf32()`` cast keeps a server-owned value the
+  typed shape every other writer produces — a bare ``List`` node is absent from
+  the Point HNSW index cohort (#8429) — and the clear lands the small-Δ
+  overwrite the embedded engine would otherwise DISCARD. (Before #8316 that
+  flip also made the next dense READ raise ``Type mismatch: expected Null or
+  VectorF32 but was List``; the read boundary now normalises a right-width
+  ``List``, so only a wrong width or a non-numeric value still aborts the
+  MATCH — #8430.)
 * **Caller-supplied — WRITE verbatim, READ normalised.** The verbatim
   ``embedding`` prop (``update_point`` with an explicit vector, and the
   ``update_entity`` Point branch, which never derives) still passes the

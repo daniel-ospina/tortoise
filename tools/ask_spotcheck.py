@@ -463,8 +463,11 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
             f"    {time_sets}"
             f"    {sk_sets}"
             "    t.content_hash=$ch, "
-            # The product's own vector, vecf32-wrapped (the read path's
-            # vec.euclideanDistance rejects a plain-list stored embedding),
+            # The product's own vector, vecf32-wrapped so the stored shape
+            # matches every other writer's (a bare List node is absent from the
+            # Point index cohort, #8429; the read boundary normalises a
+            # right-width List since #8316, and a wrong width or a non-numeric
+            # value still aborts one — #8430),
             # and the product's OWN three-way guard: new vector when one was
             # encoded; else PRESERVE an unchanged turn's vector (so
             # ``embed=False`` models the no-embedder RE-capture too); else
