@@ -703,7 +703,10 @@ def test_main_says_so_when_the_collision_scan_could_not_run(
 
     Mutation: treat `None` like `[]` -> the log claims a clean scan that never
     happened -> RED. Mutation (the pre-fix shape): route the note through `say()`
-    -> the quiet case goes silent while the loud case still passes -> RED.
+    -> it lands on stdout, not on the stderr this test reads -> BOTH parametrized
+    cases RED (measured: 2 failed). The pre-fix version of this test drove only the
+    loud path and asserted on stdout, so it PASSED against that source -- the
+    parametrization over `--quiet` is what turns the contract into a gate.
     """
     db = _FakeDb({"tortoise": _GraphState(nodes=BIG, edges=9)})
     _run_main(monkeypatch, db, *(["--quiet"] if quiet else []))
