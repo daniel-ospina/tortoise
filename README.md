@@ -187,6 +187,8 @@ Full split mechanics (build, version coupling, license boundary): [docs/client-s
 
 Also: `tortoise-serve http [--host] [--port] [--api-key]` (flags override env), and `tortoise-serve` (stdio MCP) for scripting.
 
+**Capacity and limits** — write concurrency per deployment mode, request rate limits, graph-size caps, retrieval latency, storage footprint per element, and belief-propagation cost. Every published number names the committed artifact or code symbol it comes from; dimensions with no measurement are listed as unmeasured rather than estimated: [docs/capacity.md](docs/capacity.md).
+
 ## License & FAQ
 
 Tortoise is **Business Source License 1.1** — see [LICENSE](LICENSE) and the [license notes](docs/license-notes.md) (clause-by-clause precedent + audit).
@@ -205,6 +207,7 @@ Tortoise is **Business Source License 1.1** — see [LICENSE](LICENSE) and the [
 - `integrations/` — thin connectors that talk to Tortoise over MCP (not SDK imports)
 - `website/` — the hosted product's landing pages + dashboard (deploys to Cloudflare Pages)
 - `docs/ONTOLOGY.md` — **canonical ontology v3.4** (co-located with the code it governs)
+- `docs/capacity.md` — **capacity and limits**, measured per deployment mode, with the unmeasured dimensions named
 - `tests/` — test suite
 
 ## Canonical ontology

@@ -2932,6 +2932,15 @@ surfaces:
   - test_welcome_url_consolidation.py
   - test_website_static.py
   - test_website_docs_consistency.py  # #3332: checks each public page against its canonical source (status vocab, EP mechanism, ontology link)
+  # #3329: the public capacity page. Registered HERE because `website/self-hosted.html`
+  # is a SOURCE_PATTERN of this surface, and `docs/capacity.md` is added as a CONCRETE
+  # path below — `docs/` alone is NOT a pattern and is in NON_PYTHON_PREFIXES, so
+  # without that entry a page-only diff selected NO surface and this guard would be
+  # asleep on the one change it exists to catch (the same #8334/#3524 silent-drop class
+  # the entry above names). The published write-concurrency figure is DERIVED from
+  # `tests/test_embedded_concurrency.py`'s own coverage, not restated — that figure was
+  # stale by 2-vs-5 for two months with nothing to detect it.
+  - test_capacity_page.py
   # #8379 (finding 2): the authoring contract renders as a real document, not as one
   # giant code block. Registered HERE because `website/functions/blog/` is a SOURCE_PATTERN
   # of this surface AND the doc itself is a CONCRETE path (`docs/blog-authoring.md`) —
