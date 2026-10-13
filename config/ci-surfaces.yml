@@ -1946,6 +1946,23 @@ surfaces:
   # closed here because the doc's subject code (`tortoise/extractor_v2.py`) matches no
   # named surface either, so `core` is already its lane.
   - test_extractor_v4_step_list_consistency.py
+  # #8498 review P2: the sibling citation guard over the SAME document — §15's
+  # value-gate row must name the shipped symbol (`value_gate._REFERENCE` /
+  # `identifier_only()`), not `#4899`'s *proposed* `^#\d{3,}$` pattern, which the
+  # shipped module contradicts in both directions. Dual-registered (`core` +
+  # `tier1`) for the identical docs-only reason as the step-list guard above: a
+  # `docs/`-only diff takes `select()`'s early return and runs `tier1` only.
+  - test_extractor_v4_doc_citations.py
+  # #8506: the THIRD guard over the same document — citation rot. The doc's
+  # `file.py:NNNN` citations are pinned to an early sha, and two and a half
+  # weeks of landed work left six authority-bearing passages false (the worst
+  # told a lane the D10 `:Document` retirement had NOT landed). The file pins
+  # the retracted phrasings as ABSENT, the repaired passages as PRESENT, the
+  # code facts behind them, and resolves every quoted-symbol citation against
+  # the tree. Same docs-only reason as the two guards above: a `docs/`-only
+  # diff takes `select()`'s early return, so `tier1` is where it must live;
+  # `core` is its home for the code diffs that can re-rotate a passage.
+  - test_extractor_v4_citation_rot.py
   - test_falkordb_compat.py
   # #7076: the degraded-fallback snapshot's OWN guard. test_fallback_snapshot.py
   # was registered only under `api`, while the module it guards
@@ -3333,6 +3350,13 @@ tier1:
 # #5092: the extractor-v4 design's step-list guard is a fast, no-DB file scan, so a
 # docs-only PR runs it here — the same placement as `test_retention_promise.py` above.
 - test_extractor_v4_step_list_consistency.py
+# #8498 review P2: the same document's citation guard (`core` above) — also a fast,
+# no-DB file scan, so a docs-only PR must run it here.
+- test_extractor_v4_doc_citations.py
+# #8506: the same document's citation-ROT guard (`core` above) — same no-DB shape,
+# and the same docs-only PR is exactly the change that can re-introduce a
+# retracted passage.
+- test_extractor_v4_citation_rot.py
 slow_files:
 - test_3311_multilabel_status_vocab.py
 - test_about_edges.py
@@ -4300,6 +4324,8 @@ durations:
   test_extractor.py: 0.5
   test_extractor_doc.py: 0.5
   test_extractor_v4_step_list_consistency.py: 0.1  # #5092: two fenced blocks + one paragraph read; measured 0.01s of test body (session setup excluded)
+  test_extractor_v4_doc_citations.py: 0.1  # #8498 review P2: one row + two module assertions; same no-DB shape as the step-list guard
+  test_extractor_v4_citation_rot.py: 0.1  # #8506: doc-text scans + a handful of file reads; same no-DB shape as the two guards above
   test_file_indexer.py: 0.7
   test_open_kinds.py: 0.3
   test_postmerge_verdict.py: 0.4
@@ -4810,7 +4836,7 @@ durations:
   test_5388_org_enumeration_completeness.py: 2.5
   test_7951_write_doors.py: 6.3
   test_audit_fallback_home_isolation.py: 2.4
-  test_ci_stall_identify.py: 1.8
+  test_ci_stall_identify.py: 16.0  # #5035: the 1.8 predated this PR's subprocess-launching tests. A quiet-machine estimate (measured 12.3, 14.8, 16.3 s; 25.9 s under moderate load and 34-40 s at fleet load 67-79 — the file spawns pytest children, so it tracks box load hard). `tools/ci_timing.py --refresh-durations` is the canonical (CI-measured) writer; this line is a local estimate until it next runs.
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
 # A file here is excluded from EVERY pre-merge leg (fast halves, slow, carve-
