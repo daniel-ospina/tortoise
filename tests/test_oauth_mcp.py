@@ -439,7 +439,12 @@ class TestAuthorizePage:
         reg = _register_client(
             tc, client_name='</script><script>window.pwned=1</script>')
         verifier, challenge = _pkce()  # noqa: RUF059
-        evil_state = '</script><script>window.pwned=1</script>'
+        # #6001: the payload also carries a PLACEHOLDER TOKEN, so this assertion
+        # set covers the substitution-rescan defect as well as the breakout one
+        # — the `_json.loads` parse below is what failed when the token was
+        # re-expanded inside the JSON literal (see the dedicated test that
+        # follows for all four tokens and both attacker-reachable vectors).
+        evil_state = '__SUPABASE_URL__</script><script>window.pwned=1</script>'
         r = tc.get("/oauth/authorize", params={
             "client_id": reg["client_id"], "redirect_uri": REDIRECT,
             "response_type": "code", "code_challenge": challenge,
@@ -462,6 +467,50 @@ class TestAuthorizePage:
         csp = r.headers.get("content-security-policy", "")
         assert "script-src" in csp and "nonce-" in csp
         assert "frame-ancestors 'none'" in csp
+        assert r.text.count('nonce="') == 2  # CDN + inline script tags
+
+    # ═════ #6001 — placeholder substitution must not rescan its own output ═══
+
+    @pytest.mark.parametrize("token", [
+        "__PARAMS__", "__SUPABASE_URL__", "__SUPABASE_ANON_KEY__", "__NONCE__",
+    ])
+    def test_consent_page_inserts_a_placeholder_token_verbatim(
+            self, api_client, token):
+        """#6001: a param value that CONTAINS a placeholder token is inserted
+        verbatim — the substitution pass must never re-examine what it inserted.
+
+        `consent_page_html` substituted with a CHAIN of `str.replace()` calls, so
+        each later pass rescanned the text an earlier pass had injected. `state`
+        is never shape-validated and `client_name` is DCR/CIMD
+        client-controlled, so both vectors are exercised here. Before #6001 the
+        token inside the PARAMS JSON string literal was replaced by the pass
+        meant for the TEMPLATE, and that replacement's text is raw JSON — its own
+        `"` closed the literal early, the inline block became a hard
+        `SyntaxError`, and the page shipped with no PARAMS, no handlers and an
+        inert Authorize button.
+
+        The parse below is the discrimination: the escaping assertions in the
+        test above stay green either way, because escaping happens FIRST and is
+        not the failing stage.
+        """
+        tc, _ = api_client
+        reg = _register_client(tc, client_name=token)
+        _, challenge = _pkce()
+        r = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": token,
+            "scope": "mcp", "resource": ""})
+        assert r.status_code == 200
+        import json as _json
+        payload = r.text.split("const PARAMS = ", 1)[1].split(";", 1)[0]
+        parsed = _json.loads(payload.encode().decode("unicode_escape"))
+        assert parsed["state"] == token, (
+            f"the token in `state` was re-expanded ({parsed['state']!r}) instead "
+            f"of being inserted verbatim")
+        assert parsed["client_name"] == token, (
+            f"the token in `client_name` was re-expanded ({parsed['client_name']!r}) "
+            f"instead of being inserted verbatim")
         assert r.text.count('nonce="') == 2  # CDN + inline script tags
 
     # ═════ #1701 R1 — consent page team-chooser + hardening (static strings) ═══

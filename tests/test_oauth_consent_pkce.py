@@ -101,6 +101,11 @@ Invariants pinned here:
 23 a preview that resolves with no org is REPORTED and leaves Authorize disabled,
    and a caller that lands on the sign-in view with a refusal pending
    (`showExpiredSignin`) neither replaces the refusal nor drops its control
+24 the rendered inline script PARSES when a param VALUE carries a literal
+   placeholder token — `state` (never shape-validated) and `client_name`
+   (DCR/CIMD client-controlled) — i.e. substitution does not rescan its own
+   output (#6001), with a control that re-applies the pre-fix pass and FAILS
+   the same check
 
 Every field the tests assert on is produced by the page's own code running in the
 context, never read back from a shim.
@@ -1487,6 +1492,99 @@ def test_5734_the_consent_view_reports_a_preview_with_no_org() -> None:
     assert r["retrySigninVisible"] == "none", (
         f"a control with no message implying a retry is visible under the "
         f"approve/deny decision: {r}"
+    )
+
+
+# ── invariant 24: the rendered inline script PARSES (#6001) ─────────────────
+
+_PLACEHOLDER_TOKENS = ("__PARAMS__", "__SUPABASE_URL__",
+                       "__SUPABASE_ANON_KEY__", "__NONCE__")
+
+
+def _render_placeholder_page() -> str:
+    """The page with ALL FOUR tokens planted in param VALUES, across BOTH
+    attacker-reachable vectors — `__SUPABASE_URL__` in `state` (never
+    shape-validated) and `__SUPABASE_ANON_KEY__` in `client_name` (DCR/CIMD
+    client-controlled), so neither needs a crafted link. `__PARAMS__` and
+    `__NONCE__` are planted too, because they are the two tokens the pre-#6001
+    pass ORDER got right or nearly right: `__PARAMS__` was substituted before
+    the value carrying it existed (so it survived by luck), and `__NONCE__` was
+    substituted in place — corrupting the value with the nonce rather than
+    breaking the parse. Pinning their survival records both."""
+    sys.path.insert(0, str(REPO_ROOT))
+    from tortoise.oauth import consent_page_html
+
+    html, _nonce = consent_page_html(
+        client_name="__SUPABASE_ANON_KEY__",
+        scope="mcp",
+        params={
+            "client_id": "client-1",
+            "redirect_uri": "https://client.example/cb",
+            "response_type": "code",
+            "state": "__SUPABASE_URL__",
+            "scope": "__NONCE__",
+            "resource": "__PARAMS__",
+            "client_name": "__SUPABASE_ANON_KEY__",
+        },
+        supabase_url="https://proj.supabase.co",
+        supabase_anon_key="anon-key",
+    )
+    return html
+
+
+def _node_check(inline: str) -> tuple[int, str]:
+    """`node --check` the inline block. Exit 0 means the block is syntactically
+    valid JS — the property the whole page rests on, because a script that does
+    not parse is DISCARDED: no `PARAMS`, no storage adapter, no handlers, and an
+    inert Authorize button."""
+    _require_node()
+    with tempfile.TemporaryDirectory(prefix="6001-inline-") as td:
+        src = Path(td) / "page.js"
+        src.write_text(inline)
+        proc = subprocess.run(["node", "--check", str(src)],
+                              capture_output=True, text=True, timeout=60)
+    return proc.returncode, proc.stderr
+
+
+def test_inv24_inline_script_parses_when_a_param_carries_a_placeholder_token() -> None:
+    """#6001: substitution must never rescan its own output.
+
+    `consent_page_html` replaced placeholders with a CHAIN of `str.replace()`
+    calls, so every later pass rescanned what an earlier pass had inserted. A
+    param value carrying a literal `__SUPABASE_URL__` was therefore re-expanded
+    INSIDE the `PARAMS` JSON string literal by the pass meant for the TEMPLATE,
+    and that replacement's text is raw JSON — its own quotes closed the literal
+    early: ``SyntaxError: Unexpected identifier 'https'`` for the entire block.
+
+    Escaping (which runs first) never failed, so the escape assertions in
+    `tests/test_oauth_mcp.py` stayed green while the page was dead; a PARSE is
+    what pins this. The control below is what stops a check that cannot fail
+    from being mistaken for the guard.
+    """
+    html = _render_placeholder_page()
+    inline = _extract_inline(html)
+    for tok in _PLACEHOLDER_TOKENS:
+        assert tok in inline, (
+            f"{tok} did not survive into the rendered page — a value carrying a "
+            f"placeholder token must be inserted verbatim")
+    rc, stderr = _node_check(inline)
+    assert rc == 0, f"the rendered inline script does not parse:\n{stderr}"
+
+    # CONTROL: re-applying the pre-#6001 passes to the SAME rendered page
+    # reproduces the injection the check above detects. Both pass texts are the
+    # exact ones the old chain used (`_json_for_script` output), and the two
+    # passes ran in this order (URL, then anon key) after the PARAMS insert —
+    # which is already reflected in `html`, so this is byte-equal to what the
+    # pre-fix code served for these inputs.
+    legacy = (html.replace("__SUPABASE_URL__", '"https://proj.supabase.co"')
+                  .replace("__SUPABASE_ANON_KEY__", '"anon-key"'))
+    assert '"state": ""https://proj.supabase.co""' in legacy, (
+        "the control did not reproduce the pre-#6001 fragment — it is not a "
+        "control for this assertion")
+    rc_legacy, _ = _node_check(_extract_inline(legacy))
+    assert rc_legacy != 0, (
+        "re-applying the pre-#6001 pass produced a script that STILL parses — "
+        "the check above cannot discriminate"
     )
 
 
