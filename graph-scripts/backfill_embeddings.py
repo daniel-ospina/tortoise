@@ -86,6 +86,10 @@ DEFAULT_BATCH = 500
 #                   node label.
 #   ``text_expr`` — the Cypher expression vectorized, when a bare property is
 #                   not enough.
+#   ``text_pred`` — an optional "has non-empty text" predicate, when
+#                   ``IS NOT NULL`` is not the live run's own test (``''`` is
+#                   non-NULL in Cypher) — kept in ONE place so the dry run and
+#                   the live run cannot disagree (#5126).
 LABEL_CONFIG: dict[str, dict[str, str]] = {
     "Point":    {"label": "Point", "text_prop": "content", "id_prop": "id"},
     "Event":    {"label": "Event", "text_prop": "subject", "id_prop": "eventId"},
@@ -106,7 +110,18 @@ LABEL_CONFIG: dict[str, dict[str, str]] = {
     # enforce — the sweep must cover exactly the nodes the read can return.
     "Document": {"label": "Source", "text_prop": "_searchText", "id_prop": "url",
                  "kind_pred": "n.documentKind IS NOT NULL",
-                 "text_expr": "coalesce(n._searchText, n.title)"},
+                 "text_expr": "coalesce(n._searchText, n.title)",
+                 # The dry run and the live run must agree on "has text", or
+                 # `--dry-run` (the operator's counts-first gate) over-reports:
+                 # the live run drops an empty-after-trim text (`not
+                 # text.strip()`), and `''` is NON-NULL in Cypher, so
+                 # `coalesce('', title)` returns `''` and `IS NOT NULL` counts
+                 # it. The repo itself writes that shape
+                 # (`projection/__init__.py::backfill_document_search_text`
+                 # sets `_searchText = coalesce(title, '')` on a title-less
+                 # document). `trim(x) <> ''` is NULL-falsy, so it subsumes
+                 # the IS NOT NULL arm.
+                 "text_pred": "trim(coalesce(n._searchText, n.title)) <> ''"},
     # #448: the provenance Source embeds its ``url`` (the canonical key, #149).
     # The discriminator is load-bearing: before #5126 ONE branch served both
     # Source surfaces, so a document was embedded as its own URL string.
@@ -222,11 +237,21 @@ def _connect_falkordb(uri: str):
 # :484-488); AgentSession = session_embedding_text(name, summary, keywords,
 # topics) with the summary parsed from the stored content_metadata JSON.
 # Document = the node's stored ``_searchText`` (#5126 / D10): the document fold
-# composes that field with ``_build_search_text(title, summary, topics)`` and
-# the pre-D10 ``title + content`` composition is GONE — ``content`` is retired
-# (ONTOLOGY §4.4: "``content`` is not a graph property") and the ``:Document``
-# label no longer exists. Reading the stored value, rather than re-deriving it,
-# is what makes the parity byte-exact by construction for this one surface.
+# composes that field with ``_build_search_text(title, summary, topics)`` —
+# ``content`` is retired (ONTOLOGY §4.4: "``content`` is not a graph property")
+# and the ``:Document`` label no longer exists. Reading the stored value, rather
+# than re-deriving it, is what makes the FTS parity byte-exact by construction
+# for this one surface.
+#
+# The VECTOR parity is exact only on the index path (``_doc_write``, which sets
+# ``suppress_embedding=True`` and so writes no vector — the sweep is the only
+# producer). On the legacy ``create_document`` /
+# ``create_entity(type='document')`` path ``_upsert_document`` STILL stores a
+# vector composed from ``title + content`` whenever ``suppress_embedding`` is
+# absent (``projection/entities.py::_upsert_document``), so a
+# ``--force-re-embed`` MOVES such a node's vector to its ``_searchText``
+# composition. That is a known, separately filed residual (#8419) — this
+# surface does NOT give byte-exact vector parity on every write path.
 
 # Index-time meeting suppression (projection/entities.py:483) — meetings
 # never receive embeddings. Cypher `eventKind <> 'meeting'` is NULL-falsy for
@@ -337,7 +362,11 @@ def _label_branches(label: str, *, force: bool) -> list[tuple[str, str, str]]:
     # name". The text is an EXPRESSION, not necessarily a bare property — the
     # Document surface's is ``coalesce(_searchText, title)`` (#5126).
     text = _text_expr(label)
-    return [("all", f"{kind_pred}{null_pred}{text} IS NOT NULL",
+    # A surface may tighten "has text" beyond ``IS NOT NULL`` (``text_pred``) so
+    # the dry run and the live run share ONE predicate — the live run drops an
+    # empty-after-trim text, and ``''`` is non-NULL in Cypher (#5126).
+    text_pred = cfg.get("text_pred") or f"{text} IS NOT NULL"
+    return [("all", f"{kind_pred}{null_pred}{text_pred}",
              f"n.{cfg['id_prop']} AS _id, {text} AS _text")]
 
 
@@ -369,6 +398,14 @@ def _dry_run(db, graph_name: str, labels: list[str], *,
     already-embedded rows ARE re-embedded by force, so they count; meetings
     and text-less rows are the unaffected set and are NOT counted. Dry-run
     never computes embeddings and never writes.
+
+    "Text-less" is taken from ``_label_branches``' predicate, so the count and
+    the live pass agree BY CONSTRUCTION wherever a surface declares a
+    ``text_pred`` (the Document surface does: ``''`` is non-NULL in Cypher, so
+    a bare ``IS NOT NULL`` counted rows the live pass skipped — #5126).
+    Residual, recorded rather than silently over-reported: a surface with only
+    a bare property still uses ``IS NOT NULL``, so a *non-empty-check* miss is
+    limited to a whitespace-only value on those surfaces.
     """
     g = db.select_graph(graph_name)
     total = 0

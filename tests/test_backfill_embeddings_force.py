@@ -396,9 +396,14 @@ def test_document_sweep_feeds_the_document_vector_leg(proj, monkeypatch):
     """The sweep's document predicate is the SAME axis the vector leg filters on
     (``run_vector_query(entity_type='document')`` → ``documentKind IS NOT NULL``),
     so a backfilled document is actually RETURNABLE by the read the sweep exists
-    to feed, and the provenance Source does not leak into it. Pre-fix the sweep
-    broke this two ways: it MATCHed a label with no nodes AND the one branch that
-    did run embedded the documents as their URL strings.
+    to feed, and the provenance Source does not leak into it.
+
+    The assertions pin the TEXT each surface encoded, not just retrievability.
+    Presence alone does not discriminate: pre-fix the undiscriminated ``Source``
+    branch embedded the document as its own URL string, and ``doc-1`` is still
+    returned because it is the only ``documentKind IS NOT NULL`` candidate and
+    it carries a non-NULL embedding either way. The negative against
+    ``fake("doc-1")`` is what turns this into a regression pin for #5126.
     """
     g = _g(proj)
     _create(g, "Source", {"url": "https://a.example/provenance",
@@ -411,9 +416,22 @@ def test_document_sweep_feeds_the_document_vector_leg(proj, monkeypatch):
     monkeypatch.setattr("tortoise.embeddings.compute_embedding", fake)
     _backfill_run(mod, proj, list(mod.LABEL_CONFIG))
 
+    text = "Weekly report sprint findings"
+    # The document was encoded from its SEARCH TEXT, never from its url key.
+    assert fake.calls.count(text) == 1, fake.calls
+    assert "doc-1" not in fake.calls, fake.calls
+    # #448 kept: the provenance Source is still embedded from its url — once.
+    assert fake.calls.count("https://a.example/provenance") == 1, fake.calls
+    # The stored vector is the text vector — the pre-fix code stored
+    # ``fake("doc-1")`` here.
+    assert _embedding(g, "Source", "url", "doc-1") == pytest.approx(fake(text))
+    assert _embedding(g, "Source", "url", "doc-1") != pytest.approx(fake("doc-1"))
+
+    # …and the read the sweep exists to feed returns the document (secondary:
+    # true either way, so it is not the regression pin).
     search_engine.reset_circuit_breakers()  # test isolation (#249)
     ids = [r[0] for r in search_engine.run_vector_query(
-        g, fake("Weekly report sprint findings"), limit=10,
+        g, fake(text), limit=10,
         entity_type="document", is_embedded=True)]
     assert "doc-1" in ids, ids
     assert "https://a.example/provenance" not in ids, ids
@@ -698,6 +716,52 @@ def test_dry_run_force_counts_affected_rows_and_reports_purge(
     assert _embedding(g, "Event", "eventId", "meet1") == pytest.approx([0.5] * 384)
     assert _embedding(g, "Event", "eventId", "e1") is None
     assert _embedding(g, "Source", "url", "doc-1") is None
+
+
+def test_dry_run_force_does_not_over_count_text_less_document(
+        proj, monkeypatch, capsys):
+    """#5126 review: ``--dry-run --force-re-embed`` counted a text-less document
+    Source that the live force run then SKIPPED, so the operator's counts-first
+    gate over-reported (and so did the ``N nodes would be re-embedded``
+    headline). ``''`` is non-NULL in Cypher, so a bare ``IS NOT NULL`` counted
+    `coalesce('', title)`; the sweep now uses ONE non-empty-text predicate for
+    both legs.
+
+    Pre-fix this fails twice: the dry run says 2 (not 1), and the live pass
+    records ``skipped == 1`` (not 0).
+    """
+    g = _g(proj)
+    # The repo's own text-less shape (`backfill_document_search_text` writes
+    # `_searchText = coalesce(title, '')` on a title-less document): an EMPTY
+    # (non-NULL) `_searchText`, no title. Plus one real document.
+    _create(g, "Source", {"url": "empty-doc", "documentKind": "brief",
+                           "_searchText": ""})
+    _create(g, "Source", {"url": "real-doc", "documentKind": "brief",
+                           "title": "Real title", "_searchText": "Real title"})
+    # A provenance Source must be untouched by this (its text is the url).
+    _create(g, "Source", {"url": "https://a.example/prov",
+                           "sourceKind": "web"})
+    mod = _load_backfill()
+    fake = _FakeEmbed()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", fake)
+
+    rc = _run_main(mod, proj, "--dry-run", "--force-re-embed",
+                   "--uri", "docker://dummy")
+    assert rc == 0
+    out = capsys.readouterr().out
+    # 1 document (real-doc) + 1 provenance Source = 2; empty-doc is NOT counted.
+    assert "2 nodes would be re-embedded" in out, out
+    assert "Document [:Source]: 1 rows would be re-embedded" in out, out
+    assert "Document [:Source]: 2 rows would be re-embedded" not in out, out
+
+    # The live force run agrees with the dry run it preceded: nothing skipped.
+    stats = _backfill_run(mod, proj, list(mod.LABEL_CONFIG), force=True)
+    assert stats["per_label"]["Document"] == 1, stats
+    assert stats["skipped"] == 0, stats
+    assert stats["updated"] == stats["scanned"] == 2, stats
+    assert _embedding(g, "Source", "url", "real-doc") is not None
+    assert _embedding(g, "Source", "url", "empty-doc") is None
+    assert "" not in fake.calls
 
 
 def test_dry_run_plain_counts_missing_rows_only(proj, monkeypatch, capsys):
