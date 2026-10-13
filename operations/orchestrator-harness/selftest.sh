@@ -242,25 +242,43 @@ ck "the rendered plist PATH contains no */shims or */.pi/* segment" $rc
 # A limit documented in README §4 and rendered by install.sh must not be silently different in
 # orch-loop.sh — MAX_REVIEW was 2 in the loop and 4 everywhere else.
 rc=0
-# Compare the whole default EXPRESSION, not just its digits. A default may be arithmetic (MAX_LOAD is
-# now $(( _NCPU * 10 ))), and the old digit-only regex matched neither file, so the -n guard reddened
-# the check the moment MAX_LOAD stopped being a literal. Comparing the expression also pins the FORM,
-# so the two files cannot drift to different arithmetic that happens to agree today.
-for v in MAX_LOAD MAX_LANES MAX_REVIEW MERGE_PRIORITY_AT MAX_FIX MAX_FIX_TRIES MIN_SWAP_FREE MIN_MEM_FREE_MB BATCH CYC; do
-  # Exactly ONE definition per file is part of the invariant: bash applies the LAST assignment, so a
-  # file that defines a limit twice -- correctly at first, differently later -- would otherwise pass on
-  # whichever one `head -1` happened to read. Compare the FULL list of definitions, and require one.
-  # Count with awk, not `wc -l`: wc counts NEWLINES, so a file whose final line is the duplicate
-  # (and lacks a trailing newline) undercounts to 1 and the guard passes vacuously -- the very failure
-  # this block exists to prevent. awk counts records, including a final partial line.
-  na="$(sed -n -E "s/^$v=\"\\\$\{$v:-([^\"]*)\}\".*/\1/p" "$LOOP" | awk 'END{print NR+0}')"
-  nb="$(sed -n -E "s/^$v=\"\\\$\{$v:-([^\"]*)\}\".*/\1/p" "$INST" | awk 'END{print NR+0}')"
-  [ "$na" = "1" ] && [ "$nb" = "1" ] || { echo "      $v: defined ${na}x in orch-loop, ${nb}x in install (must be exactly once)"; rc=1; continue; }
-  a="$(sed -n -E "s/^$v=\"\\\$\{$v:-([^\"]*)\}\".*/\1/p" "$LOOP" | awk 'NR==1')"
-  b="$(sed -n -E "s/^$v=\"\\\$\{$v:-([^\"]*)\}\".*/\1/p" "$INST" | awk 'NR==1')"
-  [ -n "$a" ] && [ "$a" = "$b" ] || { echo "      $v: orch-loop='${a:-?}' install='${b:-?}'"; rc=1; }
-done
-ck "orch-loop.sh defaults match install.sh for all 10 limits" $rc
+# Assert the EFFECTIVE default, not the source text.
+#
+# Pattern-matching the source was a losing game: four review rounds each closed one spelling of the
+# same hole and left another -- a literal, an arithmetic default, a duplicate definition, a duplicate
+# with no trailing newline, then an indented/bare/conditional reassignment. Each fix taught the regex
+# one more trick while bash kept resolving assignments by its own rules. Executing the assignments and
+# comparing what bash RESOLVES ends the sequence, because it tests the property we actually care about
+# (the two files agree) rather than a spelling of it.
+#
+# Only lines that assign a KNOWN limit var are evaluated -- never the whole script.
+_LIMITS="MAX_LOAD MAX_LANES MAX_REVIEW MERGE_PRIORITY_AT MAX_FIX MAX_FIX_TRIES MIN_SWAP_FREE MIN_MEM_FREE_MB BATCH CYC"
+_LIMIT_RE="^[[:space:]]*(export[[:space:]]+)?($(printf '%s|' $_LIMITS | sed 's/|$//'))="
+eff_defaults() {
+  ( _NCPU=10; export _NCPU
+    if [ "$1" = env ]; then
+      # Second pass: the limits are SET. This distinguishes `VAR="${VAR:-4}"` (honours the
+      # override) from a bare `VAR=4` (ignores it) -- two forms that resolve identically when the
+      # variable is unset, so a single unset pass cannot tell them apart. They diverge exactly where
+      # it matters: the launchd plist supplies these as environment, and it OVERRIDES the script.
+      for v in $_LIMITS; do export "$v=997"; done
+    else
+      for v in $_LIMITS; do unset "$v"; done
+    fi
+    eval "$(grep -E "$_LIMIT_RE" "$2" 2>/dev/null)"
+    for v in $_LIMITS; do printf '%s=%s\n' "$v" "$(eval "printf '%s' \"\${$v:-UNSET}\"")"; done )
+}
+_da="$(eff_defaults unset "$LOOP"; eff_defaults env "$LOOP")"
+_db="$(eff_defaults unset "$INST"; eff_defaults env "$INST")"
+if [ -n "$_da" ] && [ "$_da" = "$_db" ]; then
+  echo "      effective: $(printf '%s' "$_da" | tr '\n' ' ')"
+else
+  echo "      effective defaults DIFFER:"
+  printf '%s\n' "$_da" > "$TMP/da.txt"; printf '%s\n' "$_db" > "$TMP/db.txt"
+  diff "$TMP/da.txt" "$TMP/db.txt" 2>/dev/null | sed 's/^/        /'
+  rc=1
+fi
+ck "orch-loop.sh and install.sh resolve the same effective defaults for all 10 limits" $rc
 
 # ── 8) the dispatch gate consults load and names the binding gate ────────────────
 # MAX_LOAD was rendered into the plist and documented, but never compared to anything.
