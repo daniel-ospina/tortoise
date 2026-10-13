@@ -8,6 +8,23 @@ a textual conflict of its own, the clean case — where the merge result's blob
 for the path is not main's — is what a conflict check cannot see, so the arm
 reports the affected paths and line counts.
 
+❗WHAT THE VERDICT MEASURES, STATED BECAUSE IT IS EASY TO MISREAD (#1431). The
+arm's predicate is BLOB IDENTITY: a path is flagged when the merge result's
+blob differs from main's. A UNION satisfies that too — main adds two
+registrations to a shared file, the branch adds its own, the merge keeps both,
+and the bytes are still not main's — so a red does NOT by itself mean main's
+content was lost. Each reported path therefore also carries `lost`: the number
+of lines `git diff <merge-base> <main>` ADDED that the merge result does not
+carry. `lost == 0` means every line main contributed survived and the red is
+byte-identity (a union, or a diff3 combination); `lost > 0` means main's
+content is genuinely absent; `lost == null` means the path is binary and could
+not be measured. It is main's CONTRIBUTION that is compared, never main's whole
+file: a line the branch legitimately rewrote is not loss, and a whole-file
+comparison reports it as loss — measured against #7455's own fixture, where
+main's `M` survives and only the BRANCH's `A`→`F` line reads as missing. This
+field changes NO verdict: tightening the predicate itself to `lost > 0` would
+reverse #7455's ruling and needs that decision revisited, not a quiet edit.
+
 It also REPORTS, but no longer fails on, how far behind origin/main the branch
 is (#1531's threshold arm, relaxed by #4764). The count was a PROXY for "the
 green we measured does not describe the tree that would land", and it reddened
@@ -37,7 +54,9 @@ The check's two arms are independent:
     against max and advisory since #4764 — it never fails the gate;
   * revert arm (SILENT REVERT): the paths main moved since the merge base
     whose merged content differs from main's, where the merge is
-    conflict-free — i.e. merging the branch would not keep main's version.
+    conflict-free. The verdict is BLOB IDENTITY, so it also fires on a union
+    that kept main's content; `lost` (see above) measures which it is
+    (#1431).
     Measured by ONE virtual merge (`git merge-tree`), so it fails
     REGARDLESS of the commit count and cannot fire on a path only main
     touched (which a 3-way merge preserves by construction, #7455).
@@ -97,6 +116,7 @@ import argparse
 import json
 import os
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 DEFAULT_MAX_BEHIND = 20
@@ -326,6 +346,67 @@ def _tree_blobs(root: Path, tree: str) -> dict[str, str]:
     return blobs
 
 
+def _blob_lines(root: Path, oid: str) -> list[str] | None:
+    """The lines of a blob, or None when it is not text.
+
+    None is "unmeasurable", never "no lines": a binary blob's lines cannot be
+    counted, and a caller reading None as zero would report content loss as no
+    loss. Raises :class:`MeasurementError` on a failed read.
+    """
+    r = _git(root, "cat-file", "blob", oid)
+    if r.returncode != 0:
+        detail = (r.stderr or r.stdout or "").strip().splitlines()
+        raise MeasurementError(
+            f"git cat-file blob {oid} failed (rc {r.returncode}): "
+            f"{detail[0] if detail else 'no detail'}"
+        )
+    if "\0" in r.stdout:
+        return None
+    return r.stdout.splitlines()
+
+
+def _main_added_lines(root: Path, mb: str, base: str, path: str) -> list[str] | None:
+    """Lines main ADDED to `path` between the merge base and the base tip.
+
+    main's CONTRIBUTION to the path — deliberately not main's whole version,
+    which also contains lines the branch may legitimately have rewritten. None
+    means the path is binary (`git diff` says so rather than printing a hunk).
+    Raises :class:`MeasurementError` on a failed read.
+    """
+    r = _git(root, "diff", "--no-renames", "--unified=0", mb, base, "--", path)
+    if r.returncode != 0:
+        detail = (r.stderr or r.stdout or "").strip().splitlines()
+        raise MeasurementError(
+            f"git diff {mb}..{base} -- {path} failed (rc {r.returncode}): "
+            f"{detail[0] if detail else 'no detail'}"
+        )
+    if "Binary files" in r.stdout:
+        return None
+    return [ln[1:] for ln in r.stdout.splitlines()
+            if ln.startswith("+") and not ln.startswith("+++")]
+
+
+def _lost_lines(root: Path, mb: str, base: str, path: str,
+                merged_oid: str) -> int | None:
+    """main's added lines for `path` that the merge result does not carry.
+
+    The arm's verdict keys on the merged blob differing from main's, which a
+    union of two additive edits satisfies just as a revert does — so the
+    verdict alone cannot say whether main's content survived. This counts it:
+    0 means the merge keeps every line main added, whatever the bytes; >0 means
+    main's content is genuinely absent. None means unmeasurable (a binary
+    path). Counted as a multiset, so a line main added twice and the merge kept
+    once is one lost line.
+    """
+    added = _main_added_lines(root, mb, base, path)
+    if added is None:
+        return None
+    merged = _blob_lines(root, merged_oid)
+    if merged is None:
+        return None
+    return sum((Counter(added) - Counter(merged)).values())
+
+
 def silent_reverts(root: Path, mb: str, base: str, head: str) -> list[dict]:
     """Main's post-merge-base changes a merge of this branch would not keep.
 
@@ -363,9 +444,64 @@ def silent_reverts(root: Path, mb: str, base: str, head: str) -> list[dict]:
         return []
     counts = _numstat(root, mb, base)
     return [
-        {"path": p, "added": counts.get(p, (0, 0))[0], "deleted": counts.get(p, (0, 0))[1]}
+        {
+            "path": p,
+            "added": counts.get(p, (0, 0))[0],
+            "deleted": counts.get(p, (0, 0))[1],
+            # main's CONTRIBUTION that the merge result does not carry. The
+            # verdict above is blob identity, which a union also trips; this is
+            # the measured answer to "did main's content actually survive?"
+            # (#1431). Never read None as 0 — that is "unmeasurable".
+            "lost": _lost_lines(root, mb, base, p, merged_blobs[p]),
+        }
         for p in reverted
     ]
+
+
+def _lost_note(lost: int | None) -> str:
+    """Per-path annotation naming WHICH red this is (#1431).
+
+    The verdict is blob identity, so it fires on a union as readily as on a
+    revert; this is the measured discriminator, kept next to the
+    `+added/-deleted` pair that describes main's movement instead.
+    """
+    if lost is None:
+        return "  (main's added lines absent: UNMEASURED — binary path)"
+    if lost == 0:
+        return "  (main's added lines absent: 0 — main's content kept)"
+    return f"  (main's added lines absent: {lost} — main's content lost)"
+
+
+def _lost_summary(reverts: list[dict]) -> str:
+    """The gate's closing line: WHICH red this is (#1431).
+
+    A pure function of the measured `lost` values, so every branch is testable
+    without a fixture that can produce it — the end-to-end fixtures cannot
+    reach the `lost > 0` aggregate (a conflict-free merge preserves both
+    sides' non-overlapping changes; overlaps conflict), which is exactly why
+    the aggregate lives here rather than inline. The verdict is blob identity
+    and cannot tell a union that kept main's content from a revert that lost
+    it; this line says which, because a red whose message asserts lost content
+    is how a union gets misread as a revert.
+    """
+    total = sum(r["lost"] or 0 for r in reverts)
+    unmeasured = sum(1 for r in reverts if r["lost"] is None)
+    if unmeasured:
+        return (
+            "    main's own added lines absent from the merge: "
+            f"{total} in total, UNMEASURED on {unmeasured} path(s) "
+            "(binary) — treat those as unproven.")
+    if total:
+        return (
+            "    main's own added lines absent from the merge: "
+            f"{total} — main's content IS lost on "
+            f"{sum(1 for r in reverts if r['lost'])} path(s).")
+    return (
+        "    main's own added lines absent from the merge: 0 — every "
+        "line main contributed is present, so this red is "
+        "byte-identity (a union or a diff3 combination that keeps "
+        "main's content), not lost content. Re-merging still clears "
+        "it; it is not a revert (#1431).")
 
 
 def main() -> int:
@@ -574,12 +710,13 @@ def main() -> int:
     # line that can never fail must not read like one.
     if reverts:
         lines.append(
-            f"FAIL {branch}: SILENTLY REVERTING {len(reverts)} path(s) where "
-            f"merging this branch into {base_label} would not keep "
-            f"{base_label}'s content "
+            f"FAIL {branch}: SILENTLY REVERTING {len(reverts)} path(s) whose "
+            f"merged content is not {base_label}'s, where merging this branch "
+            f"into {base_label} is conflict-free "
             f"(base {freshness}, merge-base {mb[:12]}):")
         for r in reverts[:MAX_REPORTED_PATHS]:
-            lines.append(f"    {r['path']}  +{r['added']}/-{r['deleted']}")
+            lines.append(f"    {r['path']}  +{r['added']}/-{r['deleted']}"
+                         f"{_lost_note(r['lost'])}")
         if len(reverts) > MAX_REPORTED_PATHS:
             lines.append(f"    … and {len(reverts) - MAX_REPORTED_PATHS} more")
         lines.append(
@@ -588,6 +725,9 @@ def main() -> int:
             f"{base_label}'s version of each path, so a textual conflict "
             f"check cannot see it. Fetch and reconcile before this lands "
             f"(#4174, #7455).")
+        # Say WHICH red this is (#1431) — in a pure helper so each branch is
+        # testable without a fixture that can produce it.
+        lines.append(_lost_summary(reverts))
     return emit(report, lines, 1)
 
 

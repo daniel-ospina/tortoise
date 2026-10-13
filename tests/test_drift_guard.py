@@ -124,6 +124,16 @@ def _git_ok(cwd: Path, *args: str) -> str:
     return r.stdout.strip()
 
 
+def _blob(repo: Path, body: bytes) -> str:
+    """Write a blob (bytes, so binary content stays binary) and return its OID."""
+    r = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"], cwd=str(repo),
+        input=body, capture_output=True, check=False, env=_GIT_ENV, timeout=60,
+    )
+    assert r.returncode == 0, r.stderr
+    return r.stdout.decode().strip()
+
+
 def _write(repo: Path, name: str, body: str) -> None:
     (repo / name).write_text(body, encoding="utf-8")
 
@@ -680,6 +690,107 @@ def test_two_sided_clean_edit_is_a_silent_revert(tmp_path: Path) -> None:
     assert report["behind"] == 1, report  # under the threshold: revert arm only
     assert {r["path"] for r in report["reverts"]} == {"shared.txt"}, report
     assert "SILENTLY REVERTING" in _out(_run(repo))
+
+
+def test_a_red_names_whether_mains_content_actually_survived(
+        tmp_path: Path) -> None:
+    """#1431: the VERDICT is blob identity; `lost` measures which red it is.
+
+    The arm reds when the merge result's blob is not main's, and a UNION
+    satisfies that just as a revert does — so a red cannot be read as "main's
+    content was lost" until main's CONTRIBUTION is measured. This pins both
+    directions on the #7455 fixture, where main added `M` and the branch
+    rewrote line 1:
+
+      * the real merge keeps `M`                 -> lost == 0, "content kept"
+      * a merge result lacking `M`               -> lost == 1, "content lost"
+
+    The predicate is deliberately NOT changed here —
+    `test_two_sided_clean_edit_is_a_silent_revert` still passes unmodified —
+    because narrowing the verdict to `lost > 0` would reverse #7455's ruling.
+
+    MUTATION-MEASURED LIMIT, stated so it is not mistaken for full coverage:
+    a mutant that hardcodes `"lost": 0` at the call site SURVIVES this file.
+    That mutant is EQUIVALENT on every fixture reachable end-to-end, because a
+    conflict-free merge preserves both sides' non-overlapping changes and
+    overlapping ones conflict — so `lost > 0` cannot be produced by a fixture.
+    The non-zero direction is therefore covered where it is reachable (the
+    `_lost_lines` helper, below, and `_lost_summary`'s branches) rather than
+    pretended end-to-end.
+    """
+    repo = _build_two_sided_edit(tmp_path)
+    payload, p = _payload(repo)
+    assert p.returncode == 1, payload
+    (entry,) = payload["reverts"]
+    assert entry["path"] == "shared.txt", entry
+    # main's `M` is in the conflict-free merge (`F\nB\nM\n`), so nothing of
+    # main's contribution is missing even though the bytes are not main's.
+    assert entry["lost"] == 0, entry
+    text = _out(_run(repo))
+    assert "main's content kept" in text, text
+    assert "main's content IS lost" not in text, text
+
+    spec = importlib.util.spec_from_file_location("drift_guard_under_test",
+                                                 _script())
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mb = _git_ok(repo, "merge-base", "origin/main", "pr")
+    # main's added set for shared.txt is exactly {"M"}.
+    assert mod._main_added_lines(repo, mb, "origin/main", "shared.txt") == ["M"]
+    kept = _blob(repo, b"F\nB\nM\n")
+    assert mod._lost_lines(repo, mb, "origin/main", "shared.txt", kept) == 0
+    dropped = _blob(repo, b"F\nB\n")
+    assert mod._lost_lines(repo, mb, "origin/main", "shared.txt", dropped) == 1
+
+
+def test_an_unmeasurable_path_is_never_reported_as_kept(tmp_path: Path) -> None:
+    """A binary blob must answer None (unmeasurable), never 0 (kept).
+
+    Reading `None` as `0` would report content that could not be measured as
+    content that survived — the same fail-open shape the fetch arm exists to
+    prevent (#4174). `_lost_lines` propagates the None rather than defaulting.
+    """
+    repo = _build_two_sided_edit(tmp_path)
+    spec = importlib.util.spec_from_file_location("drift_guard_under_test",
+                                                 _script())
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    binary = _blob(repo, b"\x00\x01\x02binary\n")
+    assert mod._blob_lines(repo, binary) is None
+    mb = _git_ok(repo, "merge-base", "origin/main", "pr")
+    assert mod._lost_lines(repo, mb, "origin/main", "shared.txt", binary) is None
+    assert mod._lost_note(None) == "  (main's added lines absent: UNMEASURED — binary path)"
+    assert "content lost" in mod._lost_note(3)
+    assert "content kept" in mod._lost_note(0)
+
+
+def test_the_closing_line_distinguishes_all_three_measurements() -> None:
+    """`_lost_summary` must separate kept / lost / unmeasured (#1431).
+
+    A pure helper on purpose: the `lost > 0` and unmeasured aggregates cannot
+    be produced by an end-to-end fixture (see the note above), so the branches
+    are exercised directly. Collapsing any two of them would let a red claim
+    the wrong thing about reality — "main's content is lost" on a union, or
+    "content kept" on a path that could not be measured at all.
+    """
+    spec = importlib.util.spec_from_file_location("drift_guard_under_test",
+                                                 _script())
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    kept = mod._lost_summary([{"lost": 0}])
+    lost = mod._lost_summary([{"lost": 2}, {"lost": 0}])
+    unmeasured = mod._lost_summary([{"lost": None}, {"lost": 0}])
+
+    assert "byte-identity" in kept and "not a revert" in kept, kept
+    assert "IS lost" in lost and "2" in lost and "1 path(s)" in lost, lost
+    assert "UNMEASURED" in unmeasured, unmeasured
+    assert "treat those as unproven" in unmeasured, unmeasured
+    # The three must be mutually distinguishable, not three phrasings of one.
+    assert len({kept, lost, unmeasured}) == 3, (kept, lost, unmeasured)
 
 
 def test_threshold_arm_reports_distance_without_failing(tmp_path: Path) -> None:
