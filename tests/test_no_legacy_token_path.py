@@ -44,9 +44,29 @@ WEBSITE = REPO / "website"
 SKIP_DIRS = {"node_modules", "dist", ".git", "archive", ".worktrees", "vendor", ".wrangler"}
 
 # The legacy cross-subdomain bridge: a JS-readable, parent-domain cookie holding a session.
+#
+# #3748: the bridge's OTHER half is the localStorage fallback, and the cookie marker alone
+# cannot see it — `readValidSession()` fell back to Supabase's own per-project storage keys
+# (`sb-<ref>-auth-token`) in `localStorage` when the shared cookie was absent. That fallback
+# is what formed the loop: /auth resolved a valid legacy-only session from its own origin's
+# storage and forwarded, the destination could not see it and bounced back (#3748 measured
+# 91 full document loads in 5 s across two origins). Pin the reader, the key table and both
+# migration helpers — a revert of #4003/#3559 restores exactly these names.
 LEGACY_TOKEN_MARKERS = (
     "sb-tortoise-auth-token",
     "createTortoiseSupabaseClient",
+    "readValidSession",
+    "LEGACY_KEYS",
+    "migrateLegacySession",
+    "migrateLegacyKeysToCookie",
+)
+
+# #3748: the KEY-FORM of the same fallback, so a reintroduction that renames every symbol is
+# still caught. Supabase-js reads its session from `sb-<project-ref>-auth-token`; any browser
+# surface that reads, writes or deletes one is rebuilding the artifact the BFF removed.
+_LEGACY_LOCAL_STORAGE_KEY = re.compile(
+    r"(?:localStorage|sessionStorage)\s*\.\s*(?:getItem|setItem|removeItem)"
+    r"\s*\(\s*['\"]sb-[\w.-]*-auth-token",
 )
 
 # Browser surfaces that are MIGRATED (or must be). These are the files the BFF owns.
@@ -182,7 +202,9 @@ def test_no_legacy_js_readable_token_anywhere(sources):
     """(A) The legacy JS-readable session cookie must be gone from every browser surface.
 
     It is parent-domain and non-HttpOnly by construction — the exact artifact §1 exists to
-    remove. A single surviving reference re-opens the cross-subdomain bridge.
+    remove. A single surviving reference re-opens the cross-subdomain bridge. Since #3748
+    the markers also cover the bridge's localStorage FALLBACK (the reader, the key table
+    and the migration helpers), which the cookie marker alone could not see.
     """
     offenders = []
     for p in sources:
@@ -196,6 +218,43 @@ def test_no_legacy_js_readable_token_anywhere(sources):
         "legacy JS-readable token path still present in browser source:\n"
         + "\n".join(offenders)
         + "\n\nUnder the BFF nothing writes this token, so every consumer of it is broken."
+    )
+
+
+def test_no_browser_surface_touches_a_legacy_session_storage_key(sources):
+    """(A/#3748) No browser surface may read/write a Supabase session key in web storage.
+
+    The cookie marker above names the BRIDGE's cookie; this names the other half — the
+    origin-scoped `sb-<ref>-auth-token` key `readValidSession()` fell back to. It is a
+    KEY-FORM check rather than a symbol check, so a reintroduction that renames
+    `LEGACY_KEYS`/`readValidSession` is still caught: the fallback cannot exist without
+    naming Supabase's storage key.
+
+    What formed the loop (#3748): an unauthenticated /auth read a valid legacy-only
+    session from its OWN origin's storage and forwarded, while the destination origin
+    (same cookie, no such key) saw nothing and bounced back — 91 full document loads in
+    5 s. The bridge is deleted (#3559) and the /auth head gate now asks the server
+    (`/api/session`); this pins the fallback's return.
+    """
+    # NON-VACUITY: a broken pattern would pass this test no matter what the sources hold.
+    assert _LEGACY_LOCAL_STORAGE_KEY.search(
+        "localStorage.getItem('sb-abc-auth-token')"
+    ), "the legacy-storage-key pattern does not match its own canonical form — gate is dead"
+
+    offenders = []
+    for p in sources:
+        text = _code(p)
+        for m in _LEGACY_LOCAL_STORAGE_KEY.finditer(text):
+            rel = p.relative_to(REPO)
+            line = text.count("\n", 0, m.start()) + 1
+            offenders.append(f"  {rel}:{line} {m.group(0)!r}")
+    assert not offenders, (
+        "a browser surface touches a legacy Supabase session storage key:\n"
+        + "\n".join(offenders)
+        + "\n\nThat key is origin-scoped, so a surface that honours it can forward a visitor "
+        "the destination origin cannot see — the #3748 loop. Under the BFF the only "
+        "credential is the host-only HttpOnly `__Host-session`; nothing in the browser may "
+        "read or mirror a session."
     )
 
 
