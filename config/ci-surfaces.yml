@@ -425,6 +425,15 @@ surfaces:
   # this entry the cross-tenant IDOR pins (and the #2642 boundary tests) never
   # run on a diff-based lane at all.
   - test_connector_scope.py
+  # #4685: the OAuth COMPLETION half of the same surface —
+  # `POST /v1/connectors/github/auth` -> the shared GitHub callback -> one
+  # connector row. Registered here because the file drives `@app.*` routes in
+  # `tortoise/hosted_api.py` AND `supabase_control.connector_by_org_source`,
+  # and BOTH files select `api`: without this entry a change to either would
+  # leave the "a completed OAuth leaves a connector" pin unrun (the
+  # #1349/#2938 silent-drop class), and the file would red
+  # `tools/ci_selection.py --integrity` as unclassified.
+  - test_connector_oauth_flow.py
   # #1370: dual-registered with `core` — the same test file covers the hosted
   # commit seam (tortoise/hosted_api.py), so a hosted-only change must run it too.
   - test_subject_binding_1370.py
@@ -1142,7 +1151,7 @@ surfaces:
   # #5361: both halves of the inverted-validity-window guard. Registered under
   # `core` ALONE, which is the surface that actually selects them: the audit half
   # guards tortoise/audit.py (no SOURCE_PATTERNS entry → `core` fallback) and the
-  # read-path half tests TortoiseSDK.restore_point_at; both halves' measure is
+  # read-path half tests TortoiseSDK.get_historical_knowledge; both halves' measure is
   # `_created_sort_key` in tortoise/search_engine.py, also `core`. The registration
   # is load-bearing rather than cosmetic: without it the files are ABSENT from the
   # run set selected by `--changed-files "tortoise/audit.py"` (surfaces ['core'],
@@ -1816,6 +1825,12 @@ surfaces:
   # Same rationale and pattern as test_boot_regressions.py above.
   - test_enforcement.py
   - test_entity_delete_rebuild.py   # #3299 journaled delete → rebuild_all survivor rule (last_recreate_seq)
+  # #3589: the ONE live discovery salvaged from closed PR #3326 — the writer
+  # half of #3389 (`_connect_issue_objects`, `tortoise/sdk.py`, a SHARED_MODULE
+  # → an sdk-only diff selects this surface). strict xfail, owner #3590, so an
+  # sdk change that fixes it makes the pin XPASS and FAIL. Registered here
+  # beside its sibling #3299 delete test, whose model the salvage re-measured.
+  - test_3589_3326_salvage.py
   - test_entity_stage.py
   - test_enumeration_surfaces.py
   # #5128: the class-level half of the interpreter-guard fix — every
@@ -2486,6 +2501,12 @@ surfaces:
   # restore assertion bound must stay BELOW the client socket timeout so
   # "overran its bound" and "the socket timed out" remain distinguishable.
   - test_7846_restore_doc_and_bounds.py
+  # #5275: the ARMED fail-loud contract must survive the READ path.
+  # `tortoise/search_engine.py` (the `fallback_tfidf` sink) selects `core`,
+  # so this is the surface that runs the guard on that diff; `tortoise/sdk.py`
+  # is a SHARED_MODULE (full matrix), so the registration is what pins the file
+  # to a surface at all — without it `--integrity` reds on an unclassified file.
+  - test_5275_required_read_path.py
   ep:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
@@ -2790,6 +2811,16 @@ surfaces:
   - test_welcome_url_consolidation.py
   - test_website_static.py
   - test_website_docs_consistency.py  # #3332: checks each public page against its canonical source (status vocab, EP mechanism, ontology link)
+  # #8334 review (P2): the #3525 CSP plan doc must not keep asserting the third-party RUM
+  # origin #4706 removed. Registered HERE because `website/apps/dashboard/functions/` is a
+  # SOURCE_PATTERN of this surface AND the doc itself is named as a CONCRETE path
+  # (`docs/plans/2026-09-22-3525-csp-no-store.md`) — `docs/` alone is NOT a pattern and is
+  # in NON_PYTHON_PREFIXES, so before that entry a docs-only diff selected NO surface at
+  # all (the #8334 Finding 1 review). A named-surface match replaces the `core` fallback,
+  # so a diff touching the doc or either `security-headers.ts` selects this arm. A
+  # `core`-only registration would leave the guard asleep exactly when the plan doc or a
+  # policy module moves.
+  - test_csp_plan_doc_consistency.py
   sdk:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
@@ -2801,6 +2832,17 @@ surfaces:
   - test_7951_write_doors.py
   - test_5359_unchecked_window_writers.py
   - test_7108_operator_scope_predicate.py
+  # #5346: a PAGED read must order by a TOTAL key, or its pages are not
+  # adjacent. `paginated_query` — and therefore the MCP
+  # `tortoise_query(offset=/page=)` / `tortoise_paginated_query` path — plus
+  # `search_sessions`' legacy keyword fallback both ordered by a NON-unique key
+  # (`createdAt` / `startedAt`), so consecutive `SKIP`/`LIMIT` windows were not
+  # ranges of one order: a page walk duplicated rows and silently SKIPPED
+  # others while `hasMore` still reported completion (measured: 390 of 21,281
+  # never read on the hosted graph). `sdk` owns both reads (`tortoise/sdk.py`
+  # is a SHARED_MODULE, so an sdk diff selects the full matrix anyway), and
+  # this pin is the one that must run on it.
+  - test_5346_paged_read_total_order.py
   # #7209: `create_point` must never report success for a write that did not
   # land — the write-landing guard (`WriteNotLandedError`) and the bounded
   # retry on the create's FOLLOW-UP writes (TAGGED / extractedFrom). Owns the
@@ -3551,6 +3593,14 @@ durations:
   # red `test_duration_coverage_guard_boundary_and_realistic` (the #4348 one-file trap).
   # Refresh from the first post-merge main run that includes it.
   test_read_status.py: 2.0
+  # #5275: unmeasured at PR time (a file ADDED by a PR cannot appear in a
+  # junit artifact, so it has no measured duration — the #4348/#2876 trap).
+  # 20.0 is the local `TORTOISE_TEST_CARVE_OUT=1` reading on this host
+  # (9 tests, 18.4s; three embedded-SDK constructions dominate) rounded up,
+  # the conservative side for a shard-balance veto. Refresh from the first
+  # post-merge run that includes it. Do NOT drop the row without re-deriving
+  # the coverage floor at that head.
+  test_5275_required_read_path.py: 20.0
   test_shared_state_concurrency.py: 0.2
   test_shared_state_events.py: 0.2
   test_shared_state_events_claim.py: 0.1
@@ -4334,6 +4384,7 @@ durations:
   test_tmpdir_hygiene_4096.py: 9.2
   test_turn_embedding_write_path_4194.py: 1.4
   test_website_docs_consistency.py: 6.6
+  test_csp_plan_doc_consistency.py: 2.0  # unmeasured — new file; refresh from the first post-merge run via tools/ci_timing.py --refresh-durations
   test_install_reaper_schedule.py: 7.8  # unmeasured
   test_contact_form.py: 2.0  # unmeasured
   test_contact_rate_limit_behaviour.py: 2.0  # unmeasured
@@ -4483,6 +4534,17 @@ durations:
   test_ci_verdict.py: 0.2
   test_compute_attribution.py: 0.6
   test_connector_scope.py: 0.9
+  # #4685: a NEW file has no CI junit measurement (a file that never ran cannot
+  # appear in an artifact), so this is the pre-merge estimate: the four tests'
+  # CALL times summed to ~1.7 s locally (0.70 + 0.53 + 0.14 + 0.04). The
+  # per-test `setup` bodies are the embedded lane's shared cold-start (measured
+  # 0.2-22 s across runs and mostly one-time), which the packer's per-file
+  # weight must not double-count. Both halves are load-bearing: the surface
+  # entry alone leaves `durations` coverage under the floor and
+  # `tools/ci_selection.py --integrity` reds (#4348 trap), and a durations entry
+  # with no surface registration leaves the file unclassified. Refresh from the
+  # first post-merge run that includes it.
+  test_connector_oauth_flow.py: 2.5
   test_cypher_regex_guard_3595.py: 0.2
   test_definite_description_backfill_5059.py: 0.3
   test_document_source_gold.py: 0.1

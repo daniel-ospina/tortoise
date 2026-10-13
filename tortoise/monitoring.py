@@ -671,6 +671,46 @@ AUDIT_FALLBACK_DROP_COUNT = Counter(
     "Audit events that reached no durable sink (#7924 review)",
     ["reason"],
 )
+# #4095: an allowlist-dropped telemetry key — the same loss class as the audit
+# drop above, and the exact defect #3821 fixed half-way. #3821's choke point
+# (``hosted_api._report_unregistered``) counts, warns once per site and never
+# forwards, but its ``_TELEMETRY_DROP_COUNTS`` structure had NO production
+# reader: it is process-local, lost on every deploy, and was read only by
+# ``tests/test_telemetry_registration.py``. So the "always counts" guarantee
+# was observable in tests and nowhere else — #3677's loss class ("a signal with
+# no channel") re-created one layer up, exactly the D5a lesson from #3997.
+#
+# Single writer: ``record_telemetry_drop`` (the #501/#3677 house shape — the
+# emit path never touches the metric object directly), so the label shape lives
+# in one place. It rides ``metrics()`` for the SAME reason #7924's audit drop
+# does: the HOSTED app exposes no ``/metrics`` route, so the health dict is the
+# surface the fleet actually serves (``mcp_server.tortoise_health`` →
+# ``monitoring.metrics``), and ``/metrics`` carries the text form wherever a
+# scrape exists (``tortoise health-server``).
+TELEMETRY_DROP_COUNT = Counter(
+    "tortoise_telemetry_drops_total",
+    "Telemetry keys dropped by an allowlist filter, by site (#4095)",
+    ["site"],
+)
+# BOUNDED CARDINALITY, owned HERE and not delegated to the caller: the label is
+# rendered by ``hosted_api`` from a code-literal ``(where, subject)`` pair at
+# every call site TODAY, but one of them feeds request-body FIELD NAMES into the
+# fingerprint, and a future site could derive the whole label from traffic. Past
+# the cap every further site folds into ONE shared child, so an authenticated
+# caller cannot grow the Prometheus child set (a scrape-cost bug) by sending
+# unique unknown field names — the ``EGRESS_*`` doctrine.
+TELEMETRY_DROP_MAX_SITES = 64
+#: Where excess site labels fold. A real label can never RENDER as this value:
+#: ``hosted_api._telemetry_drop_site_label`` always joins two parts with ``|``,
+#: so every admitted label contains one and this sentinel is unreachable by
+#: construction (unlike the compute twin's ``__other__``, whose collision with a
+#: legitimate label the #5420 comment has to reason about).
+TELEMETRY_DROP_OTHER = "<other>"
+#: Sites admitted so far. Membership IS the cap registry, so a warm site costs
+#: one set lookup with no lock (the common case: drops are rare, and the same
+#: few sites repeat); the lock is taken only while ADMITTING a new site.
+_TELEMETRY_DROP_SITES: set[str] = set()
+_TELEMETRY_DROP_SITE_LOCK = threading.Lock()
 # #3498 item 1: event-loop LAG = how late each heartbeat tick actually fired
 # relative to its requested interval. The heartbeat (below) already proves the
 # loop is SCHEDULING; this histogram records HOW FAR off schedule it is, so a
@@ -1258,6 +1298,76 @@ def record_audit_fallback_drop(reason: str) -> None:
 def audit_fallback_drop_counts() -> dict[str, int]:
     """In-process snapshot of ``AUDIT_FALLBACK_DROP_COUNT``, by reason (#7924)."""
     return _collect_by_label(AUDIT_FALLBACK_DROP_COUNT, "reason")
+
+
+def _admit_telemetry_drop_site(label: str) -> str:
+    """Admit ``label`` as a telemetry-drop metric child, folding past the cap.
+
+    The bounded-admission form for the #4095 drop dimension. It is hard-bound to
+    ``_TELEMETRY_DROP_SITE_LOCK`` and is therefore a THIRD lock-bound twin beside
+    ``_admit_egress_label`` (#5315) and ``_admit_bounded_label``
+    (#4490/#5420), NOT a generic helper: each admits under its OWN module lock,
+    so one shared body would make one dimension's admission block on another's
+    and let a change to one lock change the other's behaviour — the reason the
+    compute twin records itself as "COMPUTE-BOUND, NOT GENERIC". It carries the
+    compute twin's unlocked folded-label short-circuit (the egress twin lacks
+    it): a label already folded must never take the lock again, or every later
+    drop at that site pays a module-global lock for the process lifetime.
+
+    The FILTER is deliberately NOT copied — ``record_telemetry_drop`` reuses the
+    shared ``_utf8_safe`` sanitizer, per #5420's lesson (a duplicated
+    security-relevant filter drifts on a one-sided edit).
+    """
+    if label in _TELEMETRY_DROP_SITES:
+        return label
+    # The sentinel is unreachable as a real label (every rendered label carries
+    # the ``|`` the join inserts), so this branch cannot misfile a legitimate
+    # site the way the compute twin's ``__other__`` collision could.
+    if len(_TELEMETRY_DROP_SITES) >= TELEMETRY_DROP_MAX_SITES:
+        return TELEMETRY_DROP_OTHER
+    with _TELEMETRY_DROP_SITE_LOCK:
+        if label in _TELEMETRY_DROP_SITES:
+            return label
+        if len(_TELEMETRY_DROP_SITES) >= TELEMETRY_DROP_MAX_SITES:
+            _TELEMETRY_DROP_SITES.add(TELEMETRY_DROP_OTHER)
+            return TELEMETRY_DROP_OTHER
+        _TELEMETRY_DROP_SITES.add(label)
+        return label
+
+
+def record_telemetry_drop(site: str) -> None:
+    """Count one allowlist-dropped telemetry key by site (#4095).
+
+    ``site`` is the ``hosted_api._telemetry_drop_site_label`` rendering of a
+    drop site, which is what the internal ``/status`` block keys on too, so the
+    two published surfaces cannot disagree about which site a drop belongs to.
+
+    The label space is bounded HERE rather than trusted from the caller (see
+    ``_admit_telemetry_drop_site``): once ``TELEMETRY_DROP_MAX_SITES`` distinct
+    sites are admitted, every further one folds into ``TELEMETRY_DROP_OTHER``
+    for the process lifetime. Admission is first-come and permanent — eviction
+    would either drop already-counted drops (removing the child) or grow the
+    child set without bound (keeping it).
+
+    A non-``str`` label is coerced rather than refused, but this is NOT a
+    never-raises contract: a raising label reaches the caller, which contains it
+    (``hosted_api._telemetry_count_drop``) because it must not widen
+    ``_report_unregistered``'s raise contract.
+    """
+    label = _admit_telemetry_drop_site(
+        _utf8_safe(site if isinstance(site, str) else str(site)))
+    TELEMETRY_DROP_COUNT.labels(site=label).inc()
+
+
+def telemetry_drop_counts() -> dict[str, int]:
+    """In-process snapshot of ``TELEMETRY_DROP_COUNT``, keyed by site (#4095).
+
+    ``/metrics`` carries the Prometheus text form of the same counter; this is
+    the readable form, published on ``metrics()`` (the surface the hosted app
+    and the MCP ``tortoise_health`` tool serve) so the drops are observable in
+    production instead of only in tests.
+    """
+    return _collect_by_label(TELEMETRY_DROP_COUNT, "site")
 
 
 def record_cost(team: str, cents: int) -> None:
@@ -3998,7 +4108,8 @@ def _reset_graph_size_worker() -> None:
 
 def metrics(sdk=None, setup_timeout=None) -> dict:
     """Return {status, db, falkordb, graph_size, graph_size_error, last_ingest,
-    errors, journal_write_failures, audit_fallback_drops, uptime}.
+    errors, journal_write_failures, audit_fallback_drops, telemetry_drops,
+    uptime}.
 
     ``db`` is the deep-check result ({ok, observed, latency_ms, error}) added
     by #1384 (#3683 added ``observed``); ``falkordb`` keeps the legacy message
@@ -4125,6 +4236,15 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         # app exposes its own health dict and has no `/metrics` route, so a
         # drop there is counted here but not surfaced by that endpoint.
         "audit_fallback_drops": audit_fallback_drop_counts(),
+        # #4095: an allowlist-dropped telemetry key is the same "signal with no
+        # channel" class as the audit drop above, and #3821's counter had no
+        # production reader at all. It rides THIS payload for the same reason:
+        # the hosted app exposes no `/metrics` route, so `metrics()` (served by
+        # the MCP `tortoise_health` tool and `monitoring.serve_health`) is where
+        # the "always counts" guarantee becomes observable. Keyed by drop SITE
+        # only — never by the dropped key names, which can be caller-supplied
+        # (see `hosted_api._telemetry_drop_block`).
+        "telemetry_drops": telemetry_drop_counts(),
         "uptime": round(time.monotonic() - _start, 2),
     }
 

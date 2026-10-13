@@ -155,6 +155,37 @@ def test_connector_by_org_excludes_credential_enc() -> None:
     assert rows and all("credential_enc" not in r for r in rows)
 
 
+def test_connector_by_org_source_filters_on_org_and_source() -> None:
+    """The (org, source) read carries BOTH terms — the tenancy boundary plus
+    the identity the unique index makes single-row.
+
+    REDs on: an id-only or source-only filter, which would answer with another
+    org's connector for the same source.
+    """
+    rec = _RecordingCP(_cp())
+    row = sc.connector_by_org_source(rec, ORG_A, "github")
+    table, kw = rec.last()
+    assert table == "connectors"
+    assert ("org_id", "eq", ORG_A) in kw["filters"]
+    assert ("source_type", "eq", "github") in kw["filters"]
+    assert "credential_enc" not in kw["select"]
+    assert row is not None and "credential_enc" not in row
+
+
+def test_connector_by_org_source_is_org_scoped_and_per_source() -> None:
+    """Org A's github row, org B's github row, and a MISS for a source the
+    org has none of.
+
+    REDs on: dropping the org term (org A reads org B's row), dropping the
+    source term (a ``slack`` lookup answers with the ``github`` row), or a
+    ``[]``-vs-``None`` mix-up (the create path would never be reached).
+    """
+    cp = _cp()
+    assert sc.connector_by_org_source(cp, ORG_A, "github")["id"] == CONN_A
+    assert sc.connector_by_org_source(cp, ORG_B, "github")["id"] == CONN_B
+    assert sc.connector_by_org_source(cp, ORG_A, "slack") is None
+
+
 def test_connector_update_foreign_org_is_noop_and_false() -> None:
     """A foreign-org PATCH changes nothing and reports False.
 

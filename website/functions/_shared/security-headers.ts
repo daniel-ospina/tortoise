@@ -24,7 +24,9 @@
  * `curl -H 'Accept: text/html' https://premiselabs.co/` shows the tag, while a
  * plain `curl` and a local preview do not). The dashboard copy of this file
  * documents the SRI caveats in full; the guard fails if any policy drops the
- * beacon's script or RUM origin.
+ * beacon's script origin, or re-ADDS the third-party RUM origin — under automatic
+ * injection the beacon POSTs to this origin's own `/cdn-cgi/rum`, so that host is
+ * the manual-embed endpoint only and must not be allowlisted (#4706).
  */
 
 const csp = (...directives: string[]): string => directives.join("; ");
@@ -36,7 +38,7 @@ export const RELAXED_CSP = csp(
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
-  "connect-src 'self' https://cloudflareinsights.com https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com",
+  "connect-src 'self' https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com",
   "frame-src https://challenges.cloudflare.com",
   "object-src 'none'",
   "base-uri 'none'",

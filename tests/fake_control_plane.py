@@ -1883,6 +1883,14 @@ class FakeControlPlane:
                 numeric = [r.get("id") for r in self.tables.get(table, [])
                            if isinstance(r.get("id"), int)]
                 row["id"] = (max(numeric) + 1) if numeric else 1
+            # #4685: `connectors.id` is `UUID PRIMARY KEY DEFAULT
+            # gen_random_uuid()`. Without the mint a row created through the
+            # seam comes back with no id, so a caller that addresses the row it
+            # just created (the OAuth completion's read-then-rotate) would be
+            # exercising a shape the real table cannot produce. Minted before
+            # the unique check so the stored row carries the id the echo does.
+            if table == "connectors" and row.get("id") is None:
+                row["id"] = str(uuid.uuid4())
             # #2636 unique parity (migration 20261001000003,
             # `idx_connectors_org_source`): ONE connector per (org_id,
             # source_type). Without this the fake silently ACCEPTS a duplicate

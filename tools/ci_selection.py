@@ -389,6 +389,14 @@ SOURCE_PATTERNS = {
                    # `startswith` and has no glob support.
                    "docs/engineering/auth/consent-identity-bridge.md",
                    "docs/ops/auth-email-flows.md",
+                   # #8334 review (P2, Finding 1): `test_csp_plan_doc_consistency.py`
+                   # guards the CSP plan doc's copyable policy blocks. `docs/` is in
+                   # NON_PYTHON_PREFIXES and is not itself a pattern, so without this
+                   # CONCRETE entry (the `docs/auth-architecture.md` shape above) a
+                   # docs-only edit to the plan doc selects NO surface and the guard never
+                   # runs on the only change that can break it — which is exactly what the
+                   # registration comment in `config/ci-surfaces.yml` claimed it did.
+                   "docs/plans/2026-09-22-3525-csp-no-store.md",
                    # The guards read the moved Functions themselves — and not only
                    # the gate: `test_admin_return_to.py` reads the gate by exact
                    # path and derives the console's mount path from its directory,

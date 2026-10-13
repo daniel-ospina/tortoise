@@ -28,6 +28,27 @@ Every test below is DIFFERENTIAL against a live ``apply()`` oracle — the
 oracle replays the same journal through the real dispatcher on its own graph,
 so a test can never certify behaviour the live path does not exhibit.
 
+The embedding derivation is **pinned** for this module (#5049 rule 3, the
+#4512 member): the property under test is which content the stored vector was
+derived FROM, not the numeric output of the 90 MB model, so the model is
+replaced by a deterministic content-addressed function. Without the pin the
+verdict was a function of ambient embedder state: the store-write seam
+(``compute_embedding`` → ``compute_embeddings``) reads ``EmbeddingModel.get()``
+per call and returns **no vector at all** when the model is absent, still
+loading, or in its 60 s negative-cache cooldown — the two sides of
+``_assert_parity`` are then ``(None, vector)``, caught by its
+``(is None) == (is None)`` leg. The second leg is two vectors that differ — an
+encoder that changed between the two derivations (a swapped model instance), or
+the stale-vector defect this file exists to catch (a rebuild that stores the
+pre-supersession vector while the node's content is final, #4457/#4517). It is
+the ``==`` signature #4512 recorded. A merely cold/warm model is NOT this leg:
+cold returns ``None``, which is the first leg. The TF-IDF fallback is NOT on
+either path: it lives in ``_encode``, whose callers are all search/matching, and
+``_encode`` is imported nowhere in the projection/rebuild path, so a pair could
+never have been 384-dim model output vs a variable-width TF-IDF vector. See
+``_pinned_embedding`` / ``_assert_parity`` and
+``test_write_seam_returns_no_vector_when_the_model_is_unavailable``.
+
 Run (unique graph — a shared DB lets a concurrent lane wipe ours, #4026):
   TORTOISE_DB_URI='docker://:falkordb@localhost:6380/tortoise_test_b5_4042' \\
       .venv/bin/python -m pytest tests/test_rebuild_recreate_content_parity.py \\
@@ -35,19 +56,65 @@ Run (unique graph — a shared DB lets a concurrent lane wipe ours, #4026):
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from unittest import mock
 
 import pytest
 
+from tortoise import embeddings
+from tortoise.embeddings import EMBEDDING_DIM, EmbeddingModel
 from tortoise.ids import content_hash
 from tortoise.projection import fold
 from tortoise.sdk import TortoiseSDK
 
 
+def _pinned_embedding_vector(content: str) -> list[float]:
+    """A deterministic, content-addressed vector (#5049 rule 3 / #4512).
+
+    Pure function of the text, so two derivations of the same content are
+    byte-identical and a derivation of a DIFFERENT content is not — which is
+    the property ``_assert_parity`` is actually asserting. Width is
+    ``EMBEDDING_DIM`` because a store with a Point HNSW index (the docker lane)
+    drops any row whose width != its declared requirement (#4280), and a
+    dropped row would make the embedding half of this file vacuous.
+    """
+    out: list[float] = []
+    seed = content.encode("utf-8")
+    while len(out) < EMBEDDING_DIM:
+        seed = hashlib.sha256(seed).digest()
+        out.extend(byte / 255.0 for byte in seed)
+    return out[:EMBEDDING_DIM]
+
+
 @pytest.fixture
-def sup(tmp_path):
-    """(events_dir, sdk) with the journal wired."""
+def _pinned_embedding(monkeypatch):
+    """Pin the embedding derivation for every test in this module.
+
+    ``encode_for_store`` / ``encode_batch_for_store`` route through the module
+    globals ``compute_embedding`` / ``compute_embeddings`` (they are the seam an
+    installed encoder double intercepts — #4194/#4280), so patching those two
+    removes the ambient embedder from every write path this file drives. A
+    verdict can no longer be produced by the model being warm, cold, or in
+    60 s cooldown at the moment of a given call — with the pin the seam always
+    yields a vector, so ``_assert_parity`` compares two derivations rather than
+    a vector against ``None`` (#4512 / #5049 rule 3).
+    """
+    monkeypatch.setattr(embeddings, "compute_embedding",
+                        _pinned_embedding_vector)
+    monkeypatch.setattr(
+        embeddings, "compute_embeddings",
+        lambda texts, *a, **k: [_pinned_embedding_vector(t) for t in texts],
+    )
+
+
+@pytest.fixture
+def sup(tmp_path, _pinned_embedding):
+    """(events_dir, sdk) with the journal wired and the embedder pinned.
+
+    ``_pinned_embedding`` is requested (not autouse) so the pin is active
+    BEFORE this fixture constructs the SDK — ordering is the point.
+    """
     db = str(tmp_path / "recreate.db")
     events = tmp_path / "events"
     events.mkdir()
@@ -114,19 +181,25 @@ def _deleted(sdk: TortoiseSDK, pid: str) -> dict:
 def _assert_parity(post: dict, applied: dict) -> None:
     """Content + both derived fields match the live oracle.
 
-    ``content_hash`` is asserted unconditionally (deterministic) so the test
-    cannot pass vacuously in a no-embeddings environment; ``embedding`` is
-    compared, and where the oracle has one, it must be present on both sides.
+    Both derived fields are asserted unconditionally because both derivations
+    are deterministic here: ``content_hash`` from the content, and ``embedding``
+    from the pinned content-addressed encoder (``_pinned_embedding``). Where the
+    oracle has a vector it must be present on both sides, and the comparison is
+    between two derivations under the SAME pin — never between an ambient
+    model output and an ambient fallback.
     """
     assert post["content"] == applied["content"], (
         "rebuild_all diverged from the live apply() oracle (#330)")
     assert post.get("content_hash") == applied.get("content_hash"), (
         "content_hash diverged from the live oracle — a stale indexed dedup "
         "key (or a dead revision's hash leaked onto the re-created node)")
-    assert (post.get("embedding") is None) == (applied.get("embedding") is None)
+    assert (post.get("embedding") is None) == (applied.get("embedding") is None), (
+        "rebuild and the live oracle disagree on whether this node has a "
+        "vector at all")
     if applied.get("embedding") is not None:
         assert post.get("embedding") == applied.get("embedding"), (
-            "embedding derives from content and must not drift independently")
+            "embedding derives from content and must not drift independently "
+            "— rebuild stored the vector of a different content")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -482,3 +555,100 @@ def test_pre_first_creation_derived_half_open(sup, tmp_path):
     post = sdk.get_point(pid)
     assert post["content"] == ""
     _assert_parity(post, applied)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# #5049 rule 3 (#4512): the embedding derivation is PINNED, not ambient
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_pinned_derivation_is_content_addressed(_pinned_embedding):
+    """The pin keeps the whole provenance property assertable.
+
+    Two derivations of the same content are identical, and a different content
+    derives a different vector — so ``_assert_parity``'s embedding comparison
+    still discriminates provenance while depending on nothing ambient.
+    """
+    same_a = embeddings.compute_embedding("REEMITTED")
+    same_b = embeddings.compute_embedding("REEMITTED")
+    other = embeddings.compute_embedding("CHANGED")
+    assert same_a == same_b, "the pin is not deterministic"
+    assert len(same_a) == EMBEDDING_DIM
+    assert other != same_a, "different content derived the same vector"
+    # Single and batched forms route through the same pin (#4194 contract).
+    assert embeddings.compute_embeddings(["REEMITTED"]) == [same_a]
+
+
+def test_write_seam_returns_no_vector_when_the_model_is_unavailable(
+        monkeypatch):
+    """The corrected #4512 mechanism, pinned on the real write seam.
+
+    The ambient leg is model ABSENCE — absent, still loading, or in the 60 s
+    negative cache — and on the store-write seam that yields **no vector at
+    all**, never a TF-IDF vector of a different width. ``_encode``'s
+    ``TfidfVectorizer`` fallback belongs to the search/matching path and is
+    imported nowhere in the rebuild path, so the pre-pin parity pair could
+    never have been 384-dim model output vs variable-width TF-IDF; it was
+    ``(None, vector)``, caught by ``_assert_parity``'s
+    ``(is None) == (is None)`` leg. If a fallback is ever routed through this
+    seam, this reds — the claim the module docstring now makes is load-bearing.
+    """
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        classmethod(lambda cls, *a, **k: None))
+    assert embeddings.compute_embedding("hello world") is None
+    assert embeddings.compute_embeddings(["hello world"]) == [None]
+    # The store's own width guard must pass the absence through, not widen it.
+    assert embeddings.encode_for_store(
+        "hello world", EMBEDDING_DIM) is None
+    assert embeddings.encode_batch_for_store(
+        ["hello world"], EMBEDDING_DIM) == [None]
+
+
+class _FlippingModel:
+    """An ambient embedder whose output changes on every call.
+
+    The #4512 ``==`` signature in miniature — the numeric-drift leg. ``encode``
+    returns a different constant per call, so a parity comparison that read it
+    would compare 1.0s against 2.0s. (The other ambient leg is model absence —
+    absent, loading, or in the 60 s negative cache — where the write seam
+    returns no vector at all and ``_assert_parity``'s ``(is None) == (is None)``
+    leg fires; a TF-IDF fallback is not reachable from this seam.)
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def encode(self, texts, show_progress_bar=False):
+        import numpy as np
+        self.calls += 1
+        return np.full((len(texts), EMBEDDING_DIM), float(self.calls))
+
+
+def test_parity_verdict_never_reads_the_ambient_embedder(sup, tmp_path,
+                                                         monkeypatch):
+    """Mutation control for the #4512 pin.
+
+    ``EmbeddingModel.get()`` is replaced by a model that flips per call — the
+    pre-fix verdict would compare its first output against its second and red.
+    The pin intercepts before the ambient embedder is ever consulted, so the
+    verdict is produced by the parity logic alone.
+    """
+    flipping = _FlippingModel()
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        classmethod(lambda cls, *a, **k: flipping))
+
+    events, sdk = sup
+    pid = sdk.create_point("statement", "ORIG", status="live")["id"]
+    records = _journal(events)
+    records.extend([
+        _revised(sdk, pid, new_content="CHANGED"),
+        _added(sdk, pid, "REEMITTED"),
+    ])
+    _rewrite_journal(events, records)
+
+    applied = _oracle(tmp_path, "oracle_flip", records, pid)
+    _rebuild(sdk, events)
+    post = sdk.get_point(pid)
+    _assert_parity(post, applied)
+    assert flipping.calls == 0, (
+        "the parity verdict read the ambient embedder — the #4512 verdict is "
+        "a function of whether the model was loaded or in cooldown again")

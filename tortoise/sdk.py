@@ -1569,6 +1569,43 @@ def _redact_summary_strings(obj, _depth: int = 0):
     return obj
 
 
+def _capture_turn_frame(turn: dict) -> str:
+    r"""The writer's stored frame ``"[role] <body>"`` for ONE WINDOWED turn.
+
+    The single definition of the stored frame, shared by the writer
+    (``_capture_turn_texts_with_redactions``) and — since #5394 — by the
+    confirmation's RAW model of what the server stored
+    (``session_confirm``), so the two cannot drift. The caller supplies an
+    already-windowed turn (``_capture_turn_window``): NEITHER side re-clips
+    here, because the cap was applied to the PRE-redaction text and its marker
+    records that text's true length (#4897). Re-applying the cap to the
+    SCRUBBED result would re-derive the length from text a #4911 replacement
+    changed — writing a FALSE marker whose "original length" is the
+    post-redaction size (6927 → 5008, reproduced in review) — so the stored
+    body may exceed the cap by the redaction markup, which is a replacement,
+    not conversation. A complete turn stays unmarked.
+
+    ⛔ NEUTRALIZE THE FRAMING DELIMITERS IN THE ROLE (#5445 review). The frame
+    is ``[<role>] <body>`` and ``<role>`` is caller-controlled, so a role
+    containing ``]`` ends the frame early. That is not hypothetical: the #5445
+    role scrub WRITES one — a role holding a credential becomes
+    ``[REDACTED:github_token]``, and the stored text is
+    ``[[REDACTED:github_token]] please review…``. The reader's inverse
+    (``_CAPTURE_ROLE_PREFIX``, ``^\[([^\]]*)\]\s*``) then parses the speaker as
+    ``[REDACTED:github_token`` — dropping the closing bracket — and hands the
+    BODY a stray ``] ``, so ``:Point.speaker`` and the turn the read path serves
+    are both corrupted on the exact path this cluster fixes. Brackets are
+    rewritten in the ROLE only; the body is untouched. (The neutralization is
+    also why a redacted ROLE is served as ``(REDACTED:<kind>)`` and not
+    ``[REDACTED:<kind>]`` — ``session_confirm`` recognises both forms.)
+    """
+    role = _normalize_turn_role(turn.get("role"))
+    role = role.replace("[", "(").replace("]", ")")
+    raw = turn.get("content")
+    content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
+    return f"[{role}] {content}"
+
+
 def _capture_turn_texts_with_redactions(
     windowed: list[dict],
 ) -> tuple[list[str], dict[str, int]]:
@@ -1612,33 +1649,10 @@ def _capture_turn_texts_with_redactions(
     the caller passes.
     """
     redacted, counts = _redact_turn_contents(windowed)
-    texts: list[str] = []
-    for turn in redacted:
-        role = _normalize_turn_role(turn.get("role"))
-        # ⛔ NEUTRALIZE THE FRAMING DELIMITERS IN THE ROLE (#5445 review). The
-        # frame is ``[<role>] <body>`` and ``<role>`` is caller-controlled, so a
-        # role containing ``]`` ends the frame early. That is not hypothetical:
-        # the #5445 role scrub WRITES one — a role holding a credential becomes
-        # ``[REDACTED:github_token]``, and the stored text is
-        # ``[[REDACTED:github_token]] please review…``. The reader's inverse
-        # (``_CAPTURE_ROLE_PREFIX``, ``^\[([^\]]*)\]\s*``) then parses the
-        # speaker as ``[REDACTED:github_token`` — dropping the closing bracket —
-        # and hands the BODY a stray ``] ``, so ``:Point.speaker`` and the turn
-        # the read path serves are both corrupted on the exact path this cluster
-        # fixes. Brackets are rewritten in the ROLE only; the body is untouched.
-        role = role.replace("[", "(").replace("]", ")")
-        raw = turn.get("content")
-        content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
-        # #4897: NO re-clip here. The cap was applied to the PRE-redaction text
-        # by the caller's ``_capture_turn_window``, and its marker records that
-        # text's true length. Re-applying the cap to the SCRUBBED result would
-        # re-derive the length from text the #4911 replacement changed — writing
-        # a FALSE marker whose "original length" is the post-redaction size
-        # (6927 → 5008, reproduced in review) — so the stored body may exceed
-        # the cap by the redaction markup, which is a replacement, not
-        # conversation. A complete turn therefore stays unmarked.
-        texts.append(f"[{role}] {content}")
-    return texts, counts
+    # The frame (including the #5445 role-delimiter neutralization and the
+    # #4897 no-re-clip rule) lives in ONE place, ``_capture_turn_frame``, so
+    # the writer and the #5394 confirmation's RAW model cannot drift.
+    return [_capture_turn_frame(turn) for turn in redacted], counts
 
 
 def _capture_turn_texts(windowed: list[dict]) -> list[str]:
@@ -4266,7 +4280,7 @@ def _refuse_inverted_point_window(g, props: dict, *,
     decision point. None of those writers read the OPPOSITE bound, so a caller
     (or the miner's session date, read against a stored end) could persist
     ``validTo < validFrom`` directly — bypassing the refusal #4021 added inside
-    ``supersede_point``. ``restore_point_at``'s ``_covers`` then covers NO
+    ``supersede_point``. ``get_historical_knowledge``'s ``_covers`` then covers NO
     instant and the point vanishes from every temporal query while every read
     reports honest absence.
 
@@ -4378,7 +4392,7 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     #4021 — the supersession stamped ``old.validTo`` from the SUCCESSOR's
     window start and never read the predecessor's own ``validFrom``, so a
     successor dated earlier than its predecessor persisted
-    ``validTo < validFrom``.  ``restore_point_at``'s ``_covers``
+    ``validTo < validFrom``.  ``get_historical_knowledge``'s ``_covers``
     (``sdk.py``) then rejects an inverted window for EVERY query instant, so
     the predecessor became unreachable from every read surface with no error
     anywhere — a silent, permanent loss of the old fact.
@@ -5636,7 +5650,7 @@ class TortoiseSDK:
         # #5359: the validity window is a CLOSED interval. A caller-supplied
         # inverted pair (`validTo < validFrom`) used to persist verbatim, cover
         # NO instant, and make the point unreachable from every temporal query
-        # (`restore_point_at`) while every read reported honest absence —
+        # (`get_historical_knowledge`) while every read reported honest absence —
         # bypassing the refusal #4021 put inside `supersede_point`. Delegate
         # the predicate to the ONE HOME (`commit_schema.
         # validate_validity_window`, shared with `invalidate_point`'s #5358
@@ -8162,7 +8176,7 @@ class TortoiseSDK:
                     # emits only the `when` spelling) — map it here, or every
                     # capture Point is born undated and a downstream undated
                     # supersession double-covers its predecessor
-                    # (`restore_point_at` → ambiguous). Absent `when` stays
+                    # (`get_historical_knowledge` → ambiguous). Absent `when` stays
                     # absent — never a fabricated now. Deliberately a
                     # create-only dict: folding `validFrom` into the RESPONSE
                     # `props` would change the documented
@@ -9226,7 +9240,7 @@ class TortoiseSDK:
         an independent fact and never reads the point's window START, so a
         future-dated predecessor (``validFrom > now`` — reachable,
         ``create_point`` / ``update_point`` accept a caller ``validFrom``)
-        would persist ``validTo < validFrom``; ``restore_point_at``'s
+        would persist ``validTo < validFrom``; ``get_historical_knowledge``'s
         ``_covers`` then covers NO instant and the point silently disappears
         from every temporal query while the system reports honest absence
         (#4021's sibling, separate root).
@@ -9318,7 +9332,7 @@ class TortoiseSDK:
         - the predecessor's ``validFrom`` is AFTER ``now`` → ValueError
           (#5358). The stamp block writes ``validTo = now`` unconditionally,
           so a future-dated predecessor would persist an INVERTED window
-          (``validTo < validFrom``); ``restore_point_at``'s ``_covers`` then
+          (``validTo < validFrom``); ``get_historical_knowledge``'s ``_covers`` then
           covers no instant and the point silently vanishes from every
           temporal query. Fail-closed refusal BEFORE any mutation (no partial
           write, no journal event), naming ``retract_point`` — the
@@ -9454,7 +9468,7 @@ class TortoiseSDK:
         The kwarg is a CLAIM about the successor's window start, so when the
         successor carries a stored ``validFrom`` the two must be parseable
         timestamps naming the SAME instant (compared by instant via
-        ``_created_sort_key`` — the measure ``restore_point_at``'s ``_covers``
+        ``_created_sort_key`` — the measure ``get_historical_knowledge``'s ``_covers``
         uses). A disagreement raises ``ValueError`` BEFORE any mutation: a
         predecessor ``validTo`` that disagrees either leaves a GAP (a query
         instant covered by neither window) or an OVERLAP (two covering
@@ -9525,11 +9539,11 @@ class TortoiseSDK:
         # PRECONDITION on the kwarg, now stated in that row too: trusting it
         # verbatim broke chain contiguity silently in BOTH directions — an
         # EARLIER kwarg left a GAP (a query instant covered by neither
-        # window, so `restore_point_at` reports honest absence for a period
+        # window, so `get_historical_knowledge` reports honest absence for a period
         # that was in fact covered) and a LATER kwarg left an OVERLAP (two
         # covering candidates ⇒ every instant inside it reads `ambiguous`).
         # The successor's STORED validFrom is the value every read path
-        # computes its window start from (`restore_point_at` → `_covers`), so
+        # computes its window start from (`get_historical_knowledge` → `_covers`), so
         # a disagreeing kwarg can only ever make the chain wrong. Refuse it
         # BEFORE any mutation rather than pick a winner: picking the store
         # would invert the documented order, picking the kwarg re-creates the
@@ -11518,6 +11532,13 @@ class TortoiseSDK:
                         **filters) -> dict:
         """Query points with pagination. Returns {results, total, hasMore}.
 
+        #5346: the order is TOTAL and stable — newest first, ties broken by
+        the internal node id — so walking `skip = 0, limit, 2*limit, …` until
+        `hasMore` is False visits every row exactly once and yields `total`
+        distinct results. Before the tiebreak the order was not total, so such
+        a walk silently dropped and repeated rows (measured: 390 of 21,281
+        never read on the hosted graph).
+
         #432 Task 2: retracted points (status='retracted') are EXCLUDED by
         default — pass include_retracted=True, or an explicit status= filter,
         to surface tombstones. #1391: the default exclusion now covers ALL
@@ -11565,9 +11586,28 @@ class TortoiseSDK:
             f"MATCH (n:Point) WHERE {where} RETURN count(n)",
             params=params,
         ).result_set[0][0]
+        # #5346: the ORDER BY must be a TOTAL order or paging is silently
+        # lossy. `n.createdAt` is NOT unique — one capture stamps a whole
+        # session of turns with a single timestamp — and with only a
+        # non-unique key the tie group's row order is not stable across the
+        # SEPARATE query each page is: consecutive `SKIP`/`LIMIT` windows are
+        # then not adjacent ranges of ONE order, so a page walk DROPS rows and
+        # repeats others, while `hasMore` (computed from the `count(n)` total)
+        # still reports the enumeration complete. Measured on this head
+        # (FalkorDB graph module 4.20.x *and* embedded falkordblite), 3,000
+        # Points sharing one `createdAt`, page size 500: 3,000 rows returned
+        # over 6 pages, only 1,505 distinct ids — 1,495 never read.
+        #
+        # `id(n)` (the internal node id) is unique per node, so
+        # `(createdAt, id(n))` is total and the windows partition it exactly.
+        # Deliberately NOT the more obvious `n.id`: Point ids are NOT unique
+        # (colliding ids are a tested shape — see the every-matching-node scan
+        # in `_find_terminal_dedup_hit`), so it can leave a residual tie and
+        # with it a residual loss window. Same tiebreak, same reasoning, as
+        # `audit.py`'s check-8 scan, which pages on the identical defect.
         rows = proj.g.query(
             f"MATCH (n:Point) WHERE {where} RETURN properties(n)"
-            f" ORDER BY n.createdAt DESC SKIP $skip LIMIT $limit",
+            f" ORDER BY n.createdAt DESC, id(n) DESC SKIP $skip LIMIT $limit",
             params={**params, "skip": skip, "limit": limit},
         ).result_set
         results = [r[0] for r in rows]
@@ -19320,17 +19360,34 @@ class TortoiseSDK:
         # but the trace records WHY: a run can never confuse "no embedder
         # installed" with "embedder present but broken" (present-but-broken
         # used to be conflated into query_vec=None silently).
+        # #5275: ``EmbedderUnavailableError`` is the CONTRACT of
+        # ``TORTOISE_EMBEDDING_MODEL_REQUIRED=1`` — a process that armed it
+        # must not be handed a keyword-only read, and the exception carries
+        # the ``failure_kind`` attribution (name/context/kind) that no trace
+        # term could. It is caught BY NAME and re-raised AHEAD of the generic
+        # handler below: the blanket ``except Exception`` converted the named
+        # refusal into ``model = None`` → the designed-absence reason
+        # ``no_embedder``, so the read returned FTS-only results with no
+        # error and no signal — exactly the outcome #4861 exists to prevent
+        # (#2985). Every OTHER exception keeps the historical degrade: an
+        # encoder bug or a shape error is not the flag's contract.
         query_vec = None
         _vec_reason: str | None = None
         if strategies.get("vector") and query and query.strip():
             from .embeddings import EmbeddingModel
+            from .exceptions import EmbedderUnavailableError
             model = None
             try:
                 model = EmbeddingModel.get()
+            except EmbedderUnavailableError:
+                raise  # #5275: REQUIRED — fail loud, never an FTS-only read
             except Exception:  # noqa: BLE001, RUF100
                 model = None
             if model is None:
-                _vec_reason = "no_embedder"
+                # #5275: a present-but-BROKEN embedder (load_failed /
+                # load_timeout) is not the designed absence the
+                # ``no_embedder`` term names — carry the recorded cause.
+                _vec_reason = EmbeddingModel.absent_reason()
             else:
                 try:
                     query_vec = model.encode([_dense_query])[0].tolist()
@@ -20487,7 +20544,7 @@ class TortoiseSDK:
     # (bounded BFS — a pathological/cyclic chain can't loop forever).
     _RESTORE_CHAIN_GUARD = 32
 
-    def restore_point_at(self, point_id: str, at_date: str) -> dict:
+    def get_historical_knowledge(self, point_id: str, at_date: str) -> dict:
         """Point-in-time restore: what was true at ``at_date`` (E2E-9, #1538).
 
         V3 mechanism: walk the CORRECTS chain from the given (current/live)
@@ -20528,7 +20585,7 @@ class TortoiseSDK:
 
         at_date = str(at_date or "").strip()
         if not at_date:
-            raise ValueError("restore_point_at: at_date must be non-empty")
+            raise ValueError("get_historical_knowledge: at_date must be non-empty")
         proj = self._get_proj()
 
         # Walk the CORRECTS chain: (new)-[:CORRECTS]->(old) — outgoing
@@ -24401,9 +24458,19 @@ class TortoiseSDK:
             params["before"] = _to_iso_utc(before)
         where = " AND ".join(clauses)
         params["offset"] = offset
+        # #5346: same total-order requirement as `paginated_query` — this
+        # legacy fallback is reachable with an `offset` (e.g. an embedded
+        # graph without embeddings, or one whose Event FTS index is absent,
+        # both of which make `has_semantic` False), and `e.startedAt` is not
+        # unique. Without a unique tiebreak the `SKIP`/`LIMIT` windows are not
+        # adjacent ranges of one order: measured on this head, 3,000 sessions
+        # sharing one `startedAt` paged at 500 returned only 2,105 distinct
+        # ids — 895 never read. `id(e)` is unique per node, so
+        # `(startedAt, id(e))` is total.
         rows = proj.g.query(
             f"MATCH (e:Event) WHERE {where} "
-            "RETURN properties(e) ORDER BY e.startedAt DESC SKIP $offset LIMIT $limit",
+            "RETURN properties(e) "
+            "ORDER BY e.startedAt DESC, id(e) DESC SKIP $offset LIMIT $limit",
             params=params,
         ).result_set
         # Fetch a bit extra for scoring headroom, but honor the caller's limit.

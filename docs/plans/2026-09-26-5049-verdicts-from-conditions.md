@@ -8,9 +8,11 @@
 reusable contract (`tests/_verdict.py`) that expresses four of #5049's five refactor rules — rule
 1 (no wall-clock expiry produces FAIL), rule 2 (deadline sufficiency is measured), rule 4
 (process globals reset per test), rule 5 (host capability is a SKIP) — and apply it to a coherent
-first set of the 31 members folded into #5049. Rule 3 (exact equality on a derived quantity) is a
-numerical-tolerance surface named separately in "Remaining members"; it is not expressible as a
-wait/skip contract and is deliberately not claimed here.
+first set of the 31 members folded into #5049. Rule 3 (exact equality on a derived quantity) is
+not expressible as a wait/skip contract, so it is not one of the four rules that contract carries;
+it is instead converted in this increment by pinning the embedding derivation to a deterministic
+content-addressed encoder (`tests/test_rebuild_recreate_content_parity.py`, the #4512 member — see
+**Converted in this increment**).
 
 **Issue:** #5049 (`complexity:complex`, `tech-debt`) · **Branch:** `fix/5049-conditions-not-ambient`
 · **Base:** `origin/main @ 99a98ddc5` · **Team:** organisation-design-team (repo default)
@@ -80,7 +82,8 @@ INCONCLUSIVE. S4 must not turn a *deliberate* absence-as-failure policy into a s
 
 Establishes the contract and converts a **coherent first set**: the process-global sites
 (#4913, the #4017 ambient-env hazard) and the load-sensitive timeout sites (#4742, #4739),
-plus the Node host-capability gate (#4916). Everything else is enumerated under **Remaining
+plus the Node host-capability gate (#4916) and the #4512 embedding-derivation pin (rule 3).
+Everything else is enumerated under **Remaining
 members** with its home and is deliberately NOT touched (owner frame: fix the root; no per-flake
 guards; keep CI lean).
 
@@ -236,13 +239,18 @@ passes the flag → the recorded flag floor is 22.7, matching
 
 ---
 
+## Converted in this increment
+
+| Member | Home | What the conversion pins |
+|---|---|---|
+| #4512 exact-embedding equality (**rule 3**) | `tests/test_rebuild_recreate_content_parity.py` | the parity verdict is a function of the fold/rebuild logic, not of ambient embedder state: the derivation is pinned to a deterministic content-addressed encoder (`_pinned_embedding`). The store-write seam (`compute_embedding` → `compute_embeddings`) returns **no vector at all** when the model is absent/loading/in its 60 s cooldown — never a TF-IDF vector, which lives in the search-only `_encode` — so the pre-pin pair was `(None, vector)` or `(vector, different vector)`. The pin's mutation control reds on the pre-pin code with the exact #4512 assertion, and `test_write_seam_returns_no_vector_when_the_model_is_unavailable` pins the mechanism itself. |
+
 ## Remaining members (not in this increment)
 
 | Member | Home | Why deferred |
 |---|---|---|
 | #4497 redislite RDB schedule in subprocess fixtures | `tests/_embedded.py` + spawn sites | needs a child-process hook or per-site `serverconfig`; **not** reset per test (subprocesses don't import conftest) |
 | #4499 health-truth flake | `tests/test_selfhost.py` | needs a decision (stub probe vs liveness/readiness split) |
-| #4512 exact-embedding equality (**rule 3**) | `tests/test_rebuild_recreate_content_parity.py` | numerical tolerance/pin — a different contract surface, not expressible as a wait/skip |
 | #4601 single-flight timing window | `tests/test_github_index_lifecycle.py` | needs an exposed synchronization seam |
 | #4627 first-commit 10 s transport bound | `tortoise/hosted_api.py` + test | touches the recorded #3834 ruling → owner decision |
 | #4717 order-dependent BFF clickthrough | `tests/e2e/test_auth_bff_clickthrough.py` | needs the leaking precondition identified |
@@ -282,7 +290,7 @@ contract closed it.
 
 ## Acceptance criteria (this increment)
 
-- [ ] `tests/_verdict.py` exists; the contract is the single home for the **converted** sites (rules 1, 2, 4, 5); rule 3 is named separately, and the remaining rule-1 waiters are enumerated below.
+- [ ] `tests/_verdict.py` exists; the contract is the single home for the **converted** sites (rules 1, 2, 4, 5); rule 3 is converted here too — via the content-addressed embedder pin named under **Converted in this increment** — and the remaining rule-1 waiters are enumerated below.
 - [ ] No converted site can produce FAIL from a wall-clock expiry — it SKIPs and names the deadline.
 - [ ] The autouse reset removes the #4913/#4017 ordering dependence (proved by order tests incl. the `monkeypatch` leg).
 - [ ] A too-old/absent-Node host SKIPs at the converted driver sites, on the declared flag floor
