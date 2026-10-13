@@ -786,34 +786,32 @@ else rc=1; fi
 ck "refresh-candidates.sh ranks the tiers P0=0 < P1=1 < P2=2 (a constant rank would starve the P0s)" $rc
 
 # The backlog is consumed top-down, so its ORDER IS the priority — a numeric re-sort put the P0s
-# behind the P2s on every cycle (#8465). Assert the shipped line's BEHAVIOUR, not its spelling: a
-# grep-absence on one literal passes when the dedupe is deleted, or when the backlog is re-sorted
-# under any other spelling (both verified against the earlier check).
+# behind the P2s on every cycle (#8465). Assert BEHAVIOUR, not spelling: drive the shipped TAIL —
+# the dedupe line to EOF, with the real $O redirected into $TMP — against a fixture, and assert the
+# resulting file. Executing it is what makes the check spelling-independent. The textual forms both
+# missed and over-matched: a grep for a command-position `sort` accepted 10 of 16 built variants that
+# really did re-sort the backlog (`LC_ALL=C sort`, `command sort`, `env sort`, a subshell, an `if`, an
+# absolute path, the path in a variable…), and it went RED on a COMMENT that merely quoted the pre-fix
+# line — the natural thing to write here. A comment is inert when executed; it cannot trip this.
+# Driving the dedupe line ALONE is also not enough: that cannot see an ADDED re-sort after it, so this
+# drives to EOF rather than `-m1`.
 if [ -s "$REFRESH" ]; then
-  grep -m1 -E '^awk .!seen\[\$0\]' "$REFRESH" > "$TMP/dedupe.sh"
-  if [ -s "$TMP/dedupe.sh" ]; then
-    sed -e 's#"\$O/candidates\.txt"#in.txt#g' -e 's#"\$O/\.cand"#out.tmp#g' "$TMP/dedupe.sh" > "$TMP/drive.sh"
-    # The substitutions must have LANDED. If a quoting refactor of the shipped line stops them
-    # matching, drive.sh would address the real $O path instead of the fixture — fail closed rather
-    # than run it. (``in.txt`` present AND the real name gone is the evidence they landed.)
-    if grep -q 'in\.txt' "$TMP/drive.sh" && ! grep -q 'candidates\.txt' "$TMP/drive.sh"; then
-      printf '5000\n5001\n100\n9000\n5000\n' > "$TMP/in.txt"
-      ( cd "$TMP" && bash drive.sh )
-      dedupe_got="$(tr '\n' ' ' < "$TMP/in.txt" 2>/dev/null | sed 's/ *$//')"
-      [ "$dedupe_got" = "5000 5001 100 9000" ] && rc=0 || rc=1
-    else rc=1; fi
+  sed -n '/^awk .!seen\[\$0\]/,$p' "$REFRESH" > "$TMP/tail.sh"
+  # Fail closed if the extraction found nothing, or lost the file it is supposed to exercise.
+  if [ -s "$TMP/tail.sh" ] && grep -q 'candidates\.txt' "$TMP/tail.sh"; then
+    # Redirect $O at the SOURCE rather than editing paths: `awk -v` passes the fixture dir without any
+    # shell quoting of `$O` on the command line.
+    awk -v tmp="$TMP" '{gsub(/\$O/, tmp)} 1' "$TMP/tail.sh" > "$TMP/tail-drive.sh"
+    # 5000 leads AND repeats, so one expectation separates all three outcomes: in-place dedupe keeps
+    # the first occurrence (5000 100 9000); a re-sort of ANY spelling moves 100 to the front; a
+    # deleted dedupe leaves both 5000s.
+    printf '5000\n100\n9000\n5000\n' > "$TMP/candidates.txt"
+    ( cd "$TMP" && bash tail-drive.sh ) >/dev/null 2>&1
+    tail_got="$(tr '\n' ' ' < "$TMP/candidates.txt" 2>/dev/null | sed 's/ *$//')"
+    [ "$tail_got" = "5000 100 9000" ] && rc=0 || rc=1
   else rc=1; fi
 else rc=1; fi
-ck "refresh-candidates.sh dedupes the backlog in place (order preserved, duplicates collapsed)" $rc
-
-# ...AND assert that nothing ELSE re-sorts it. Driving the dedupe line in isolation cannot see an
-# ADDED re-sort: a copy that KEEPS the shipped dedupe and adds the pre-fix `sort -n -u -o` line
-# passes the check above while shipping #8465's defect on every cycle (verified on that copy, which
-# the earlier grep-absence form did catch — so this restores coverage the replacement had dropped).
-# Match a command-position `sort` touching candidates.txt so the spelling is irrelevant; the shipped
-# file mentions the name only in comments and in the awk/mv line, which this does not match.
-grep -qE '(^|[|;&])[[:space:]]*sort[[:space:]].*candidates\.txt' "$REFRESH" && rc=1 || rc=0
-ck "refresh-candidates.sh never re-sorts the backlog it deduped" $rc
+ck "refresh-candidates.sh dedupes the backlog in place and nothing after it re-sorts it" $rc
 
 echo
 echo "==> $pass passed, $fail failed"
