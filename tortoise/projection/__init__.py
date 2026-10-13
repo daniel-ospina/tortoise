@@ -13743,7 +13743,7 @@ class FalkorProjection(
                 # writer, so a server-owned vector is always the typed shape —
                 # a bare `List` node is absent from the Point HNSW index at all
                 # (#8429). Before #8316 the flip to `List` also aborted the
-                # whole dense READ (`Type mismatch: expected Null or VectorF32
+                # whole dense READ (`Type mismatch: expected Null or Vectorf32
                 # but was List`); the read boundary now normalises a right-width
                 # `List`, so only a wrong width or a non-numeric value still
                 # aborts the MATCH (#8430). The `CASE` keeps

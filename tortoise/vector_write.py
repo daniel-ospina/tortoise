@@ -76,7 +76,7 @@ must NOT be routed into it:
   the Point HNSW index cohort (#8429) — and the clear lands the small-Δ
   overwrite the embedded engine would otherwise DISCARD. (Before #8316 that
   flip also made the next dense READ raise ``Type mismatch: expected Null or
-  VectorF32 but was List``; the read boundary now normalises a right-width
+  Vectorf32 but was List``; the read boundary now normalises a right-width
   ``List``, so only a wrong width or a non-numeric value still aborts the
   MATCH — #8430.)
 * **Caller-supplied — WRITE verbatim, READ normalised.** The verbatim
