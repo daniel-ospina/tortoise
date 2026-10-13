@@ -31,7 +31,7 @@ replacing the object); `_guard_handle` early-returns an existing proxy. (2) `tes
 (carve-out, redirect-exempt, **already** builds a real embedded projection) gains the runtime marker
 assertion. (3) `tests/test_bounded_raw_clients_3065.py`'s existing AST scanner is **widened to a
 single verdict-returning predicate** that now feeds BOTH the #3065 read-bound inventory and the new
-#6882 guard-seam inventory.
+guard-seam inventory of #6882.
 
 **Scope of record:** `/tmp/pi-6882-scope.md` (adversarial threat surface T1–T8; cycle log below).
 **Issue:** #6882. Finding 2 (bytes payloads) is **already fixed** at this head
@@ -39,7 +39,7 @@ single verdict-returning predicate** that now feeds BOTH the #3065 read-bound in
 `test_cypher_regex_guard_3595.py::test_execute_command_refuses_the_operator_in_a_bytes_payload`) —
 no code change; the PR states that with evidence.
 
-### Pattern Research
+## Pattern Research
 
 **Skipped — the plan introduces zero third-party dependencies and no new external API surface.**
 The only third-party shapes it relies on were read from the *installed, pinned* source, not from
@@ -50,7 +50,7 @@ training data:
 | `falkordb` | 1.6.2 | `FalkorDB.__init__` binds `self.connection` and `self.execute_command` as **instance** attributes; `Graph.__init__` binds `self.execute_command = client.execute_command` and does **not** copy `connection` | `.venv/.../falkordb/falkordb.py:150-151`, `graph.py:38` |
 | `redis` | 7.4.1 | `Redis.execute_command(self, *args, **options)` is a façade: `return self._execute_command(*args, **options)` — the REAL dispatcher. `Redis` has **no** `send_command` (verified `hasattr` is False). `Pipeline` flushes on the Connection layer (`pack_commands`/`send_packed_command`) | `.venv/.../redis/client.py` |
 
-### Integration Surface Map
+## Integration Surface Map
 
 | Integration surface | Layer | Why / bug pattern | Test |
 |---|---|---|---|
@@ -59,11 +59,11 @@ training data:
 | 5 production `guarded_client(...)` constructions | static AST (both branches) + embedded runtime (embedded branch) | **silent revert** of a construction seam: the guard suite stayed green on a `guarded_client(...)` → `FalkorDB(...)` revert | `tests/test_bounded_raw_clients_3065.py` (AST, all 5) + `tests/test_guard.py` (runtime, embedded) |
 | `.connection` consumers: `backup.py:668` (`BGSAVE`), `projection:421` (`_apply_embedded_connect_timeout` → `connection_pool`), `graph_delete_guard:158/181` (`EVAL` Lua lock), `fork_slot:196/212` (`connection_pool`/`pid`), `hosted_backup:2224` (`connection_pool.connection_kwargs`), `projection:7034` (`info`), `:12218` (`_host`/`port`), `:12379` (`MODULE LIST`); test-side `tests/_embedded.py:1160` | anti-regression | **over-fix**: the guard must not break a non-Cypher command or an attribute/identity read | `tests/test_redirect_seam.py`, `tests/test_bounded_raw_clients_3065.py` |
 
-### Journey Test Map
+## Journey Test Map
 
 (not user-facing — no journeys)
 
-### Failure Modes
+## Failure Modes
 
 | Failure | Expected behaviour | Test |
 |---|---|---|
@@ -82,6 +82,7 @@ training data:
 **Intent:** Reproduce issue finding 3 as a failing test, at the real dispatcher too.
 **Acceptance:** the new test fails on the pre-fix module (the `=~` statement reaches the spy wire).
 **Files:**
+
 - Modify: `tests/test_cypher_regex_guard_3595.py`
 
 Steps:
@@ -94,10 +95,10 @@ Steps:
    `AttributeError` rather than exercise the guard. Reusing that stub verbatim is not possible; say
    so in the test docstring.
    The connection itself must be a REAL `redis.Redis` **subclass** (so the in-place contract can be
-   asserted honestly) whose `_execute_command` records instead of dialling:
-   `class _RecordingRedis(redis.Redis): … __init__ calls super()(host="localhost", port=1,
-   socket_timeout=1) and sets `self.sent = []`; `_execute_command` appends `args` and returns an
-   empty result set.` A `_SpyWire`-style plain object would fail the `isinstance` assertion.
+   asserted honestly) whose `_execute_command` records instead of dialling.
+   `_RecordingRedis.__init__` calls `super().__init__(host="localhost", port=1, socket_timeout=1)`
+   and sets `self.sent = []`; `_execute_command` appends `args` and returns an empty result set.
+   A `_SpyWire`-style plain object would fail the `isinstance` assertion.
 2. Add imports of the privates the test drives: `_GUARDED_CHANNEL_MARKER`, `_GuardedHandleProxy`,
    `_carries_marker`, `_guard_handle`, `_guard_connection`, `_guarded_execute_command`.
 3. Write `test_the_client_connection_channel_is_guarded`, asserting for each of four routes —
@@ -118,6 +119,7 @@ Steps:
 **Intent:** Reproduce issue finding 4.
 **Acceptance:** the new test fails on the pre-fix module (`_guard_handle(proxy) is proxy` is `False`).
 **Files:**
+
 - Modify: `tests/test_cypher_regex_guard_3595.py`
 
 Steps:
@@ -135,6 +137,7 @@ Steps:
 **Acceptance:** Tasks 1–2 tests go green; `tests/test_redirect_seam.py` (the `isinstance` + pool-leak
 test) stays green; `ruff` clean.
 **Files:**
+
 - Modify: `tortoise/cypher_guard.py`
 
 Steps:
@@ -186,6 +189,7 @@ Steps:
 **Acceptance:** AST test reds on a revert of any of the 5 sites; the runtime test reds if the
 embedded production construction stops carrying the marker.
 **Files:**
+
 - Modify: `tests/test_bounded_raw_clients_3065.py` (AST — both branches, no store, fast lane)
 - Modify: `tests/test_guard.py` (runtime — embedded; already carve-out + redirect-exempt)
 
@@ -253,6 +257,7 @@ Steps:
 ## Review Cycle Log
 
 ### problem-verify (scope) — Cycle 1
+
 - Verifier 1: P1=1 (redirect-seam `isinstance(p.db.connection, redis.Redis)` would red under the
   draft's replacement proxy), P2=1 (`pipeline`/`send_command` residual), P3=1 (wrong class name in
   the precedent citation), P4=1 (stale "29 tests")
@@ -263,6 +268,7 @@ Steps:
 - Re-dispatching.
 
 ### problem-verify (scope) — Cycle 2
+
 - Verifier 1: P2=1 (the `execute_command`-only target leaves `connection._execute_command`, the
   real dispatcher, open), P4=2 (`projection:12218` row omitted; the marker claim was unimplemented)
 - Controller action: **Incorporated all three** — the mechanism now binds `_execute_command` (with
@@ -271,6 +277,7 @@ Steps:
 - `[ADVERSARIAL-BOUND] cycles=2 threats=8 covered=8 residuals=none`
 
 ### plan-review — Cycle 1
+
 - Plan reviewer: P1=1 (the marker was to be set on a **function instance**, which the module's own
   MRO-based `_carries_marker` cannot read — so the stated idempotence would silently not exist, and
   reading it with a bare `getattr` would let a `MagicMock` forge "already guarded"), P2=2
@@ -292,6 +299,7 @@ Steps:
 - Re-dispatching.
 
 ### plan-review — Cycle 2
+
 - Plan reviewer: **`THREAT SURFACE COVERED`** (no P0/P1/P2 remain). Six P3/P4 advisories, all
   incorporated: keep the `if raw is not None` guard rather than an unconditional assignment; make
   the new stub's `.connection` a real `redis.Redis` **subclass** (else the `isinstance` assertion
