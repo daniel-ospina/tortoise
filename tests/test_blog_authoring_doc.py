@@ -22,6 +22,8 @@ from markdown_it import MarkdownIt
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOC = REPO_ROOT / "docs" / "blog-authoring.md"
+CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+HARNESS = REPO_ROOT / "tests" / "test_blog_markdown.mjs"
 
 # The sections an author must be able to REACH. A fence that never closes swallows
 # every heading beneath it into the code block, so this set is the reader-visible
@@ -91,6 +93,38 @@ def test_closing_fences_carry_no_info_string() -> None:
                 "CommonMark closing fence may be followed only by spaces or tabs, so "
                 "this does not close the block"
             )
+
+
+def test_a_docs_only_edit_runs_the_harness_that_executes_the_examples() -> None:
+    """#8379 (finding 2): the doc's EXAMPLES need a guard a docs-only diff runs.
+
+    This module renders the page with a CommonMark parser, so it sees a broken
+    fence or a missing heading — it cannot see a documented `[[video: …]]`
+    example that no longer embeds. Those assertions live in
+    `tests/test_blog_markdown.mjs`, which the `website` gate runs; a docs-only
+    edit skipped that gate, so a placeholder id that embedded nothing could ship
+    green (it did, the round before). The `changes` job's `website` predicate now
+    names the doc. This pins BOTH ends of that wiring: the gate names the doc and
+    the harness reads it — remove either and the examples stop being executed.
+    """
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    start = workflow.index('"website": any_file(')
+    end = workflow.index('"hosted": any_file(', start)
+    website_gate = workflow[start:end]
+    assert '"docs/blog-authoring.md"' in website_gate, (
+        "docs/blog-authoring.md is not an input of the `website` gate in "
+        ".github/workflows/ci.yml, so a docs-only edit to the contract does not "
+        "run tests/test_blog_markdown.mjs — the harness that executes its "
+        "examples (#8379 finding 2)"
+    )
+    assert '"tests/test_blog_markdown.mjs"' in website_gate, (
+        "the `website` gate no longer names tests/test_blog_markdown.mjs"
+    )
+    harness = HARNESS.read_text(encoding="utf-8")
+    assert "docs/blog-authoring.md" in harness, (
+        "tests/test_blog_markdown.mjs no longer reads docs/blog-authoring.md, so "
+        "the gate entry above guards nothing"
+    )
 
 
 def test_the_rendered_block_count_matches_the_opening_fence_count() -> None:

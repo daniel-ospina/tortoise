@@ -10,6 +10,8 @@
 // off-site iframe can reach the page through this path. `id` is charset-checked
 // per provider, so it cannot break out of the attribute either.
 
+import { unescapeMd } from "./md-escape.ts";
+
 export type VideoProvider = "youtube" | "vimeo";
 
 export interface VideoRef {
@@ -131,7 +133,15 @@ function normaliseDuration(s: string): string | null {
  * video title where the article title is not the video's.
  */
 export function parseVideoMarker(payload: string): VideoRef | null {
-  const parts = payload.split("|").map((p) => p.trim());
+  // Undo CommonMark backslash escapes BEFORE the shape tests (#8379 finding 1).
+  // The canonical body is authored in the TipTap editor, which escapes `_`, `*`,
+  // `~`, `[` and friends; that escapes the URL too (a YouTube id may contain
+  // `_`), and the title is author text exactly like a heading or a link label.
+  // Every other author-facing text path in `_lib.ts` unescapes; this one did not,
+  // so `Episode 2: \*the\* finale` reached the iframe `title` and
+  // `VideoObject.name` with the backslashes intact. Unescaping first also means
+  // an escaped duration/date is recognised by shape, not mistaken for a title.
+  const parts = payload.split("|").map((p) => unescapeMd(p.trim()));
   const head = parts.shift() ?? "";
   const parsed = parseVideoUrl(head);
   if (!parsed) return null;

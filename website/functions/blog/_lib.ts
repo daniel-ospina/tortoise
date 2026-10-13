@@ -10,6 +10,7 @@
 // Local dev: wrangler pages dev reads .env / .dev.vars
 
 import { RELAXED_CSP } from "../_shared/security-headers.ts";
+import { unescapeMd } from "./_shared/md-escape.ts";
 import { createAnchorAllocator } from "./_shared/slug.ts";
 import { parseVideoMarker, videoObjectJsonLd, type VideoRef } from "./_shared/video.ts";
 
@@ -148,19 +149,8 @@ export async function fetchPostBySlug(env: Env, slug: string): Promise<BlogPost 
 // strong/em/code, links, images, tables, hr. ALL text content is escaped;
 // only allowlisted tags are emitted; href/src validated https/http.
 
-// CommonMark backslash escapes (#4481). The canonical body is authored in the
-// TipTap editor, whose serializer escapes ASCII punctuation — `\~`, `\*`,
-// `\[`, `\_` … — so text that is not markup cannot re-parse as markup. That is
-// correct markdown (`~` is escaped because `~~` is GFM strikethrough), but the
-// renderer has to undo it: otherwise the escape backslash leaks into the page
-// and a literal "~" (the summary table's partial-capability marker) renders as
-// "\~". A backslash before a non-punctuation character is literal, per spec.
-const MD_ESCAPE_RE = /\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g;
-
-/** Undo CommonMark backslash escapes: `\~` → `~`, `\\` → `\`. */
-function unescapeMd(s: string): string {
-  return s.replace(MD_ESCAPE_RE, "$1");
-}
+// CommonMark backslash escapes (#4481) now live in `_shared/md-escape.ts` so the
+// body renderer and the video-marker parser share ONE rule (#8379 finding 1).
 
 /** True when `text[index]` is preceded by an odd run of backslashes (escaped). */
 function isEscaped(text: string, index: number): boolean {

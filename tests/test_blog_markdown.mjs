@@ -969,6 +969,41 @@ console.log("video embed marker + VideoObject structured data (#7751)");
     "thumbnailUrl is derived for YouTube (hqdefault, the guaranteed poster)",
   );
 
+  // ⛔ #8379 finding 1: the marker's URL and title are AUTHOR text, and TipTap
+  // escapes the characters that would re-parse as markup — `_` (a legal
+  // YouTube id character), `*`, `~`, `[`. Every other author-facing text path in
+  // `_lib.ts` unescapes; the marker did not, so an escaped title reached the
+  // iframe `title` and `VideoObject.name` with its backslashes intact, and an id
+  // containing `_` was not recognised at all. This is the shape the blog-admin
+  // serializer actually writes (`\[\[video: … \]\]`, `abc\_def\_gh1`).
+  const escapedMarker =
+    "\\[\\[video: https://youtu.be/abc\\_def\\_gh1 | Episode 2: \\*the\\* finale | PT12M34S\\]\\]";
+  const escRef = extractVideo(escapedMarker);
+  assertEq(escRef.length, 1, "an escaped marker whose id contains `_` is still recognised");
+  assertEq(escRef[0]?.id, "abc_def_gh1", "the escaped underscore in the id is undone");
+  assertEq(escRef[0]?.title, "Episode 2: *the* finale", "the escaped title is unescaped");
+  assertEq(
+    escRef[0]?.duration,
+    "PT12M34S",
+    "the duration is still recognised beside an escaped title",
+  );
+  const escHtml = renderMarkdown(escapedMarker);
+  assert(escHtml.includes("<iframe"), "the escaped marker embeds");
+  assert(
+    escHtml.includes('title="Episode 2: *the* finale"'),
+    "the iframe title is the author's title, not its escaped form",
+  );
+  assert(!escHtml.includes("\\*the\\*"), "no escape backslash leaks into the iframe title");
+  const escVideo = articleJsonLd(
+    { ...post, body: `${escapedMarker}\n\nProse.` },
+    "https://x/blog/a",
+  ).find((n) => n["@type"] === "VideoObject");
+  assertEq(
+    escVideo?.name,
+    "Episode 2: *the* finale",
+    "VideoObject.name is the unescaped title, not the editor's escaped form",
+  );
+
   // ── the embed and the structured data cannot disagree about what is code ──
   // (#8379 finding 4: `renderMarkdown` opened a fence on the RAW line while
   // `extractVideo` opened it on the TRIMMED line, so a 1–3 space indented fence
