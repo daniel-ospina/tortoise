@@ -31,7 +31,9 @@ This module makes the takeover loud and immediate instead of silent:
   only the command-line form as an opt-out, since any conftest can set the env) is untouched. ``#5035`` put
   ``timeout = 300`` in ``pyproject.toml``, so a BARE local run now arms it
   exactly as CI always did.
-* ``--timeout-func-only`` runs are **not** covered: pytest-timeout arms its
+* An ini ``timeout_func_only = true`` / marker ``timeout(func_only=True)`` run is
+  **not** covered (there is no such CLI flag — the name only exists as the ini
+  key and the marker field): pytest-timeout arms its
   timer during the call phase, after this fixture's setup has already observed
   no timer.  Stated rather than silently assumed.
 * A call made through a **pre-bound** alias (``from signal import alarm``),
