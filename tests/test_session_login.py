@@ -499,6 +499,38 @@ class TestRateLimitChargePoints:
         r = _exchange(client, key)
         assert r.status_code == 429
 
+    def test_ipv6_64_rotation_shares_one_login_bucket(self, client, fake,
+                                                     monkeypatch):
+        """#5490: rotating the source address INSIDE one delegated /64 must
+        not mint a fresh 5/hr budget. This also pins CHECK/CHARGE symmetry —
+        a charge keyed on the raw address while the check keyed on the /64
+        would charge a bucket the check never read and silently fail OPEN."""
+        self._limiter_on(monkeypatch)
+        monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
+        _seed_team(fake, created_by=_OWNER)
+        key = _mint_key(fake, created_by=_OWNER)
+
+        def _post(fly_ip, api_key="tt_does-not-exist"):
+            return client.post("/v1/session/login",
+                               headers={"Fly-Client-IP": fly_ip},
+                               json={"api_key": api_key})
+
+        # 5 invalid-key 401s from 5 DIFFERENT addresses inside ONE /64 …
+        for i in range(5):
+            r = _post(f"2001:db8:aaaa:1::{i + 1}")
+            assert r.status_code == 401, r.text
+        # … exhaust ONE bucket: the 6th (a VALID key) is 429, not 200.
+        r = _post("2001:db8:aaaa:1::99", key)
+        assert r.status_code == 429, r.text
+        assert set(ha_mod._SESSION_BUCKETS) == {"2001:db8:aaaa:1::/64"}, \
+            set(ha_mod._SESSION_BUCKETS)
+
+        # A different /64 keeps its own budget — the aggregation did not
+        # collapse unrelated clients (the deliberate shared-/64 tradeoff).
+        _patch_gotrue(monkeypatch)
+        r = _post("2001:db8:aaaa:2::1", key)
+        assert r.status_code == 200, r.text
+
     def test_legacy_key_403_does_not_bypass_bucket(self, client, fake, monkeypatch):
         """403s (server decisions — ANON_TEAM_NO_OWNER / KEY_NOT_USER_MINTED)
         charge: 5× 403 → 6th attempt 429. A leaked legacy key can't be

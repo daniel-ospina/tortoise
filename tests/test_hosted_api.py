@@ -10640,6 +10640,189 @@ async def _drive_bucket_check(store, lock, keys, **kw):
     return out
 
 
+class _IpLimiterReq:
+    """Minimal request-like for the IP-keyed limiters: `state.client_ip`
+    drives the real-IP chain and `client.host` is the peer fallback."""
+
+    class _Client:
+        def __init__(self, host):
+            self.host = host
+
+    class _State:
+        client_ip = None
+
+    def __init__(self, client_ip=None, peer="1.2.3.4"):
+        self.state = self._State()
+        self.state.client_ip = client_ip
+        self.client = self._Client(peer)
+
+
+class TestIpv6PrefixBucketKey:
+    """#5490 — a per-IP bucket identity aggregates a NATIVE IPv6 address to
+    its /64, so one client holding a delegated /64 cannot mint 2**64 buckets
+    (and therefore 2**64 budgets) by rotating within it."""
+
+    def test_helper_aggregates_native_ipv6_and_leaves_ipv4_alone(self):
+        k = _ha_mod._ip_bucket_key
+        # IPv4 and every IPv4-mapped spelling are unchanged (#1081 contract).
+        assert k("1.2.3.4") == "1.2.3.4"
+        assert k("::ffff:1.2.3.4") == "1.2.3.4"
+        assert k("::FFFF:1.2.3.4") == "1.2.3.4"
+        assert k("0:0:0:0:0:ffff:1.2.3.4") == "1.2.3.4"
+        # ONE /64 → ONE key while rotating anywhere inside it.
+        a = k("2001:db8:aaaa:1::1")
+        b = k("2001:db8:aaaa:1::ffff:ffff")
+        assert a == b == "2001:db8:aaaa:1::/64"
+        # A different /64 stays independent.
+        assert k("2001:db8:aaaa:2::1") == "2001:db8:aaaa:2::/64"
+        assert a != k("2001:db8:aaaa:2::1")
+        # A malformed address → ONE constant, never the raw string.
+        assert k("not-an-ip") == _ha_mod._IP_BUCKET_MALFORMED_KEY
+        assert k("") == _ha_mod._IP_BUCKET_MALFORMED_KEY
+        assert k("garbage") == k("other-garbage")
+        # Non-str keys (composite tuples) and None pass through — the
+        # primitive's key contract stays OPAQUE.
+        assert k(("invite-accept", "ip", "1.2.3.4")) == \
+            ("invite-accept", "ip", "1.2.3.4")
+        assert k(None) is None
+
+    def test_prefix_is_env_tunable_and_a_bad_value_falls_back(self, monkeypatch):
+        monkeypatch.setenv("TORTOISE_IP_BUCKET_IPV6_PREFIX", "48")
+        # two /64s inside one /48 collapse to the same bucket key
+        assert _ha_mod._ip_bucket_key("2001:db8:aaaa:1::1") == \
+            _ha_mod._ip_bucket_key("2001:db8:aaaa:2::1") == \
+            "2001:db8:aaaa::/48"
+        monkeypatch.setenv("TORTOISE_IP_BUCKET_IPV6_PREFIX", "0")
+        assert _ha_mod._ip_bucket_key("2001:db8:aaaa:1::1") == \
+            "2001:db8:aaaa:1::/64"  # invalid → default, never a /0
+
+    def test_primitive_default_path_rotating_within_a_64_is_one_bucket(
+            self, monkeypatch):
+        """The Request-default arm (no caller key) is definitionally an IP:
+        rotating inside one /64 exhausts ONE bucket at `limit`."""
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+            codes = []
+            for host in ("2001:db8:aaaa:1::1", "2001:db8:aaaa:1::2",
+                         "2001:db8:aaaa:2::1"):
+                try:
+                    await _ha_mod._check_ip_bucket_rate_limit(
+                        _bucket_req(host), buckets=store, lock=lock,
+                        limit=1, window_s=3600, detail="x")
+                    codes.append(200)
+                except _ha_mod.HTTPException as exc:
+                    codes.append(exc.status_code)
+            return store, codes
+
+        store, codes = asyncio.run(_run())
+        assert codes == [200, 429, 200], codes
+        assert set(store) == {"2001:db8:aaaa:1::/64",
+                              "2001:db8:aaaa:2::/64"}, store
+
+    def test_signup_limiter_rotating_within_a_64_cannot_reset_budget(
+            self, monkeypatch):
+        """An IP-keyed CALL SITE (bare-IP key) aggregates before the tuple/
+        string key reaches the primitive."""
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        _ha_mod._SIGNUP_BUCKETS.clear()
+
+        async def _run():
+            codes = []
+            for host in ("2001:db8:aaaa:1::1", "2001:db8:aaaa:1::2",
+                         "2001:db8:aaaa:1::3"):
+                try:
+                    await _ha_mod._check_signup_ip_rate_limit(
+                        _IpLimiterReq(client_ip=host))
+                    codes.append(200)
+                except _ha_mod.HTTPException as exc:
+                    codes.append(exc.status_code)
+            return codes
+
+        try:
+            codes = asyncio.run(_run())
+        finally:
+            _ha_mod._SIGNUP_BUCKETS.clear()
+        assert codes == [200, 200, 429], codes  # default 2/24h
+
+    def test_claim_limiter_rotating_within_a_64_cannot_reset_budget(
+            self, monkeypatch):
+        """The 8th site (issue comment): the claim limiter owns its own store
+        and must aggregate too — /v1/claim is ATO-adjacent."""
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setenv("TORTOISE_CLAIM_MAX_PER_24H", "2")
+        _ha_mod._CLAIM_BUCKETS.clear()
+
+        async def _run():
+            codes = []
+            for host in ("2001:db8:aaaa:1::1", "2001:db8:aaaa:1::2",
+                         "2001:db8:aaaa:1::3"):
+                try:
+                    await _ha_mod._check_claim_rate_limit(
+                        _IpLimiterReq(client_ip=host))
+                    codes.append(200)
+                except _ha_mod.HTTPException as exc:
+                    codes.append(exc.status_code)
+            return codes
+
+        try:
+            codes = asyncio.run(_run())
+            keys = set(_ha_mod._CLAIM_BUCKETS)
+        finally:
+            _ha_mod._CLAIM_BUCKETS.clear()
+        assert codes == [200, 200, 429], codes
+        assert keys == {"2001:db8:aaaa:1::/64"}, keys
+
+    def test_sensitive_op_budget_is_one_per_64_and_charge_key_matches(
+            self, monkeypatch):
+        """A TUPLE-keyed IP site: rotating inside a /64 must share the
+        `(ip, op)` budget, and the deferred charge key must be the SAME
+        aggregated tuple the check used — a mismatch charges a bucket the
+        check never read and fails OPEN."""
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setattr(_ha_mod, "_SENSITIVE_OP_LIMITS", {"export": 1})
+        _ha_mod._SENSITIVE_BUCKETS.clear()
+
+        async def _run():
+            keys = []
+            for host in ("2001:db8:aaaa:1::1", "2001:db8:aaaa:1::2"):
+                keys.append(await _ha_mod._check_sensitive_op_rate_limit(
+                    _IpLimiterReq(client_ip=host), "export",
+                    defer_charge=True))
+            return keys
+
+        try:
+            keys = asyncio.run(_run())
+        finally:
+            _ha_mod._SENSITIVE_BUCKETS.clear()
+        assert keys[0] == keys[1] == ("2001:db8:aaaa:1::/64", "export"), keys
+
+    def test_middleware_ip_fallback_aggregates_ipv6_64(self):
+        mw = _ha_mod.RateLimitMiddleware(lambda *_: None, max_per_minute=100)
+        assert mw._bucket_key("/v1/x", "", "2001:db8:aaaa:1::1") == \
+            "ip:2001:db8:aaaa:1::/64"
+        assert mw._bucket_key("/v1/x", "", "2001:db8:aaaa:1::2") == \
+            "ip:2001:db8:aaaa:1::/64"
+        assert mw._bucket_key("/v1/x", "", "2001:db8:aaaa:2::1") == \
+            "ip:2001:db8:aaaa:2::/64"
+        assert mw._bucket_key("/v1/x", "", "1.2.3.4") == "ip:1.2.3.4"
+        assert mw._bucket_key("/v1/x", "Bearer tt_abc", "1.2.3.4") == \
+            "tt_abc"
+
+    def test_dcr_store_key_shares_the_same_aggregation(self, monkeypatch):
+        """#5490 refactor: the DCR store key delegates to the SHARED helpers,
+        so its /64 aggregation cannot drift from the primitive's."""
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_IPV6_PREFIX", "64")
+        assert _ha_mod._oauth_dcr_store_key("2001:db8:aaaa:1::7") == \
+            "2001:db8:aaaa:1::/64"
+        assert _ha_mod._oauth_dcr_store_key("1.2.3.4") == "1.2.3.4"
+        assert _ha_mod._oauth_dcr_store_key("bogus") == \
+            _ha_mod._OAUTH_DCR_MALFORMED_KEY
+        assert _ha_mod._OAUTH_DCR_MALFORMED_KEY == \
+            _ha_mod._IP_BUCKET_MALFORMED_KEY
+
+
 class TestBoundedIpBucketStore:
     """#3124 — the capacity policy for `_check_ip_bucket_rate_limit`."""
 

@@ -2914,7 +2914,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 return f"{key}@{path}"
             return key
         if client_host:
-            return f"ip:{client_host}"
+            # #5490: the per-IP fallback aggregates a NATIVE IPv6 address to
+            # its /64 — otherwise one client rotating inside its delegated
+            # /64 mints a fresh general-limit budget per source address.
+            return f"ip:{_ip_bucket_key(client_host)}"
         return None
 
     async def dispatch(self, request: Request, call_next):
@@ -7071,6 +7074,11 @@ def _normalize_mapped_ipv6(ip):
     #3130 found exactly that and worked around it in the DCR path only, whose
     docstring records the shared helper as still defective; normalizing by
     ``ipv4_mapped`` regardless of case/spelling makes that claim true.
+
+    This is only the MAPPED case: a NATIVE IPv6 address passes through
+    unchanged by design. The /64 aggregation that stops a delegated IPv6
+    client from minting a bucket per source address is ``_ip_bucket_key``
+    (#5490), applied at the IP-keyed call sites.
     """
     if not isinstance(ip, str) or ":" not in ip:
         return ip
@@ -7080,6 +7088,80 @@ def _normalize_mapped_ipv6(ip):
     except ValueError:  # not an address (e.g. a composite key string)
         return ip
     return str(mapped) if mapped is not None else ip
+
+
+# ── Per-/prefix aggregation for IPv6 IP-keyed buckets (#5490) ────────────
+# `_normalize_mapped_ipv6` handles only IPv4-MAPPED IPv6. A client on a
+# NATIVE IPv6 address is keyed on its full 128-bit address, so one subscriber
+# with a standard /64 delegation (2**64 addresses) presents a fresh bucket
+# key — and therefore a fresh `limit` budget — on every request: the limiter
+# is defeated by address rotation. The store stays bounded (#3124), but there
+# is no budget PER REAL CLIENT. `_check_oauth_dcr_rate_limit` (#2866) already
+# aggregates this way; #5490 makes the IP-keyed call sites do the same.
+#
+# The aggregation is applied at the IP-KEYED CALL SITES, never inside
+# `_check_ip_bucket_rate_limit`: that primitive accepts an OPAQUE Hashable
+# (IP strings, `(ip, op)` tuples, server-side token hashes), so it cannot
+# tell an IP key from a token key — aggregating every malformed string into
+# one constant would merge every token budget in a store.
+#
+# Cross-/prefix cardinality — the stated decision (#5490): aggregating to /64
+# collapses rotation WITHIN one delegation; it does not bound how many
+# delegations a client holds. Unlike #2866, this primitive has NO aggregate
+# dimension (no anonymous global bucket), so N delegated /64s still yield N
+# buckets, each with a full budget. The bound on unbounded cardinality stays
+# #3124's owned-key cap (`max_entries`) plus the ONE shared overflow bucket,
+# which fails CLOSED (once the cap is full, untracked keys share the
+# overflow's single `limit`). Adding a global aggregate dimension here is a
+# separate policy decision and is deliberately not taken in this change.
+_IP_BUCKET_IPV6_PREFIX_DEFAULT = 64
+# A malformed address maps to ONE constant, never to the raw string (D6
+# precedent) — an attacker-chosen garbage address must not mint a bucket.
+_IP_BUCKET_MALFORMED_KEY = "anonymous"
+
+
+def _ipv6_aggregation_prefix(env_name: str, default: int) -> int:
+    """Validated /prefix length read AT CALL TIME (no import-time freeze).
+    An out-of-range value falls back to `default` — never to a disabled
+    limiter (a /0 or /129 aggregation is a policy error, not an off switch;
+    the off switch is RATE_LIMIT_DISABLED)."""
+    prefix = _int_env(env_name, default)
+    if not 1 <= prefix <= 128:
+        return default
+    return prefix
+
+
+def _ipv6_network_key(addr, prefix: int) -> str:
+    """The /prefix network string for an IPv6 address — the ONE place the
+    aggregation key is built, shared with the #2866 DCR store key so the two
+    cannot drift."""
+    return str(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
+
+
+def _ip_bucket_key(ip):
+    """Bucket identity for a client IP (#5490).
+
+    IPv4 and ANY IPv4-mapped IPv6 spelling → the plain IPv4 address (the
+    #1081 contract, unchanged). A NATIVE IPv6 address → its /prefix network
+    (default /64, ``TORTOISE_IP_BUCKET_IPV6_PREFIX``), so one delegated /64
+    cannot mint 2**64 buckets by rotating within it. A malformed address →
+    ONE constant, never the raw attacker-chosen string. Non-str keys
+    (composite tuples) and None pass through unchanged — this helper is for
+    IP-KEYED call sites only, never for the primitive's opaque keys.
+    """
+    if not isinstance(ip, str):
+        return ip
+    normalized = _normalize_mapped_ipv6(ip)
+    try:
+        addr = ipaddress.ip_address(normalized)
+    except ValueError:
+        return _IP_BUCKET_MALFORMED_KEY
+    if addr.version != 6:
+        return str(addr)
+    return _ipv6_network_key(
+        addr,
+        _ipv6_aggregation_prefix("TORTOISE_IP_BUCKET_IPV6_PREFIX",
+                                 _IP_BUCKET_IPV6_PREFIX_DEFAULT))
 
 
 # ── Bounded store policy for the shared per-IP bucket primitive (#3124) ──
@@ -7333,11 +7415,18 @@ async def _check_ip_bucket_rate_limit(
         if not request.client or not request.client.host:
             return
         if key is None:
-            key = request.client.host
+            # #5490: THIS arm's key is definitionally an IP
+            # (request.client.host), so aggregate it to the /64 here. A
+            # caller-SUPPLIED key stays OPAQUE — the primitive cannot tell
+            # an IP key from a token key.
+            key = _ip_bucket_key(request.client.host)
     # P2-2 (coherence): normalize IPv4-mapped IPv6 so a dual-stack client
     # cannot present two keys for one address. Handles every spelling/case of
     # the mapped form (::ffff:1.2.3.4, ::ffff:7f00:1, ::FFFF:...,
-    # 0:0:0:0:0:ffff:...) via ipaddress (#3124 review).
+    # 0:0:0:0:0:ffff:...) via ipaddress (#3124 review). An IP-keyed CALL SITE
+    # has already applied `_ip_bucket_key` (#5490), so this is a no-op for an
+    # aggregated `/64` string (not an address) and for the mapped forms it
+    # already collapsed.
     ip = _normalize_mapped_ipv6(key)
     now = time.time()
     async with lock:
@@ -7423,8 +7512,9 @@ async def _check_register_rate_limit(request: Request) -> None:
     await _check_ip_bucket_rate_limit(
         request, buckets=_register_buckets, lock=_register_lock,
         limit=_REGISTER_MAX_PER_HOUR, window_s=3600,
-        key=(getattr(request.state, "client_ip", None)
-             or (request.client.host if request.client else None)),
+        key=_ip_bucket_key(
+            getattr(request.state, "client_ip", None)
+            or (request.client.host if request.client else None)),
         detail="Too many registration attempts. Please try again later.",
         retry_after_s=3600)
 
@@ -7824,7 +7914,11 @@ async def _check_sensitive_op_rate_limit(
     # (#1081 review P4).
     _ip = (getattr(request.state, "client_ip", None)
            or (request.client.host if request.client else None))
-    _ip = _normalize_mapped_ipv6(_ip)
+    # P3-3 (phase-7): aggregate the IP to its bucket identity HERE (a tuple
+    # bypasses the helper's isinstance guard). #5490: `_ip_bucket_key` does
+    # the IPv4-mapped normalization AND the native-IPv6 /64 aggregation, so
+    # one /64 cannot mint a fresh (ip, op) budget per source address.
+    _ip = _ip_bucket_key(_ip)
     # An unknown client has no identity to bucket on, and this composite key
     # must never be built around a None IP. _check_ip_bucket_rate_limit
     # enforces the same requirement for every Request-carrying caller (#5397
@@ -7977,8 +8071,9 @@ async def _check_signup_ip_rate_limit(request: Request) -> None:
         request, buckets=_SIGNUP_BUCKETS, lock=_SIGNUP_LOCK,
         limit=_int_env("TORTOISE_SIGNUP_IP_LIMIT", 2),
         window_s=window_s,
-        key=(getattr(request.state, "client_ip", None)
-             or (request.client.host if request.client else None)),
+        key=_ip_bucket_key(
+            getattr(request.state, "client_ip", None)
+            or (request.client.host if request.client else None)),
         detail={
             "error_code": "over_signup_ip_rate_limit",
             "message": ("Too many anonymous signups from this IP (max 2 per 24h). "
@@ -8030,7 +8125,7 @@ async def _check_recovery_rate_limit(request: Request,
         request, buckets=_RECOVER_BUCKETS, lock=_RECOVER_LOCK,
         limit=_int_env("TORTOISE_RECOVER_IP_LIMIT", 5),
         window_s=_window_env("TORTOISE_RECOVER_IP_WINDOW_S", 86400),
-        key=_request_ip_key(request),
+        key=_ip_bucket_key(_request_ip_key(request)),
         detail={
             "error_code": "over_recovery_ip_rate_limit",
             "message": ("Too many key-recovery attempts from this IP. "
@@ -8144,12 +8239,19 @@ async def _check_claim_rate_limit(request: Request) -> None:
     reclaiming inactive buckets clears it. An IP charged to the overflow
     bucket can later obtain its own bucket, so one IP is bounded by
     `2 * MAX_PER_24H` in the worst case — the same property the #2866 DCR
-    policy accepts, and the bound is what keeps the store finite. No IPv6
-    prefix keying: a client holding a whole IPv6 /64 gets one bucket per
-    address — the /64 gap is filed on #5490 (the shared-primitive issue);
-    this limiter does not use that primitive, so a fix there must cover this
-    site too (the claim budget is per-IP, and collapsing a shared /64 would
-    make unrelated users share one 2/24h budget).
+    policy accepts, and the bound is what keeps the store finite.
+
+    #5490: the bucket key is the /64 network of a NATIVE IPv6 address, not
+    the raw 128-bit address — otherwise one client holding a standard /64
+    delegation (2**64 addresses) mints a fresh `MAX_PER_24H` budget per
+    source address, defeating the limiter by rotation. IPv4 and IPv4-mapped
+    IPv6 key as before; a malformed address maps to one constant. Accepted
+    tradeoff (stated, not implied): two clients inside ONE /64 now SHARE
+    this budget. That is the deliberate consequence of per-/64 client
+    identification (RIPE-690 / Better Auth default) and it is bounded by
+    the same store cap as before; a claim is a one-time human act, so a
+    shared /64 budget is the cost of not being defeatable. The per-token
+    attempt cap and the window are unchanged.
     """
     if os.environ.get("RATE_LIMIT_DISABLED") == "1":
         return
@@ -8160,10 +8262,12 @@ async def _check_claim_rate_limit(request: Request) -> None:
     if not ip:
         return
     # Normalize IPv4-mapped IPv6 so one dual-stack client cannot present two
-    # keys for one address (#1081 review P4). The other per-IP limiters get
-    # this inside `_check_ip_bucket_rate_limit`; this limiter does not use
-    # that helper, so it must apply it here.
-    ip = _normalize_mapped_ipv6(ip)
+    # keys for one address (#1081 review P4), and aggregate a NATIVE IPv6
+    # address to its /64 (#5490) so one delegated /64 cannot mint a fresh
+    # 2/24h budget per source address. The other per-IP limiters get the same
+    # via their own `_ip_bucket_key` call at the key site; this limiter does
+    # not use that helper, so it must apply it here.
+    ip = _ip_bucket_key(ip)
     limit = _int_env("TORTOISE_CLAIM_MAX_PER_24H", _CLAIM_MAX_PER_24H_DEFAULT)
     # #5493: the WINDOW is read through the floored accessor — with a
     # non-positive window the in-window test `now - t < window_s` is never
@@ -8281,7 +8385,7 @@ async def _check_invite_accept_rate_limit(request: Request, token: str) -> None:
     token_key = _hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
     ip = (getattr(request.state, "client_ip", None)
           or (request.client.host if request.client else None))
-    ip = _normalize_mapped_ipv6(ip)
+    ip = _ip_bucket_key(ip)
     detail = {
         "error_code": "over_invite_accept_rate_limit",
         "message": ("Too many invite-accept attempts. Please try again "
@@ -9177,13 +9281,16 @@ async def session_login(request: Request):
     # prune + 429-check now, charge at the terminal outcome below.
     ip = (getattr(request.state, "client_ip", None)
           or (request.client.host if request.client else None))
-    if ip:
+    # #5490: the BUCKET identity aggregates native IPv6 to its /64; the raw
+    # `ip` is kept for the exchange/audit path below.
+    bucket_ip = _ip_bucket_key(ip)
+    if bucket_ip:
         await _check_ip_bucket_rate_limit(
             request, buckets=_SESSION_BUCKETS, lock=_SESSION_LOGIN_LOCK,
             limit=_SESSION_LOGIN_LIMIT, window_s=_SESSION_LOGIN_WINDOW_S,
             detail={"error_code": "session_login_rate_limited",
                     "message": "Too many session logins. Try again in about an hour."},
-            retry_after_s=_SESSION_LOGIN_WINDOW_S, key=ip,
+            retry_after_s=_SESSION_LOGIN_WINDOW_S, key=bucket_ip,
             defer_charge=True)
 
     # #1719 (Task 5): ONE charge mechanism — the body-wide HTTPException
@@ -9195,15 +9302,15 @@ async def session_login(request: Request):
     try:
         session = await _session_login_exchange(request, token, ip)
     except HTTPException as exc:
-        if exc.status_code in (401, 403) and ip:
+        if exc.status_code in (401, 403) and bucket_ip:
             await _charge_ip_bucket(
-                _SESSION_BUCKETS, _SESSION_LOGIN_LOCK, ip,
+                _SESSION_BUCKETS, _SESSION_LOGIN_LOCK, bucket_ip,
                 limit=_SESSION_LOGIN_LIMIT,
                 window_s=_SESSION_LOGIN_WINDOW_S)
         raise
-    if ip:
+    if bucket_ip:
         await _charge_ip_bucket(
-            _SESSION_BUCKETS, _SESSION_LOGIN_LOCK, ip,
+            _SESSION_BUCKETS, _SESSION_LOGIN_LOCK, bucket_ip,
             limit=_SESSION_LOGIN_LIMIT,
             window_s=_SESSION_LOGIN_WINDOW_S)
     return session
@@ -19908,7 +20015,7 @@ def _forget_invite_accept(request: Request, token: str) -> None:
     token_key = _hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
     ip = (getattr(request.state, "client_ip", None)
           or (request.client.host if request.client else None))
-    ip = _normalize_mapped_ipv6(ip)
+    ip = _ip_bucket_key(ip)
     for buckets, lock, key in (  # noqa: B007
         (_INVITE_ACCEPT_TOKEN_BUCKETS, _INVITE_ACCEPT_TOKEN_LOCK,
          ("invite-accept", "token", token_key)),
@@ -19981,7 +20088,7 @@ async def _check_invite_otp_rate_limit(request: Request, token: str) -> None:
     token_key = _hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
     ip = (getattr(request.state, "client_ip", None)
           or (request.client.host if request.client else None))
-    ip = _normalize_mapped_ipv6(ip)
+    ip = _ip_bucket_key(ip)
     detail = {
         "error_code": "over_invite_otp_rate_limit",
         "message": "Too many verification-code requests. Please try again later.",
@@ -35264,7 +35371,12 @@ _OAUTH_DCR_ANON_KEY = "\x00anon"
 # separate-store layout counts every key), so the KEY VALUE must not drift
 # (#3124 review).
 _OAUTH_DCR_OVERFLOW_KEY = _BUCKET_OVERFLOW_KEY
-_OAUTH_DCR_MALFORMED_KEY = "anonymous"
+# Alias the shared #5490 malformed-address constant rather than re-declaring
+# the literal: this store and the primitive's stores are DISJOINT dicts, so
+# ONE literal is correct — and a re-declared copy is how the two silently
+# drift apart on the next change (the `_OAUTH_DCR_OVERFLOW_KEY` precedent
+# directly above).
+_OAUTH_DCR_MALFORMED_KEY = _IP_BUCKET_MALFORMED_KEY
 
 _OAUTH_DCR_BUCKETS: OrderedDict[str, list[float]] = OrderedDict()
 _OAUTH_DCR_TRUSTED: OrderedDict[str, list[float]] = OrderedDict()
@@ -35360,11 +35472,12 @@ def _oauth_dcr_store_key(client_ip) -> str:
         return _OAUTH_DCR_MALFORMED_KEY
     if addr.version != 6:
         return str(addr)
-    prefix = _int_env("TORTOISE_OAUTH_DCR_IPV6_PREFIX",
-                      _OAUTH_DCR_IPV6_PREFIX_DEFAULT)
-    if not 1 <= prefix <= 128:
-        prefix = _OAUTH_DCR_IPV6_PREFIX_DEFAULT
-    return str(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
+    # #5490: the /prefix computation is the SHARED `_ipv6_network_key` +
+    # `_ipv6_aggregation_prefix` the per-IP primitive's call sites use, so a
+    # bare-IPv6 bucket is aggregated identically on both surfaces.
+    prefix = _ipv6_aggregation_prefix("TORTOISE_OAUTH_DCR_IPV6_PREFIX",
+                                      _OAUTH_DCR_IPV6_PREFIX_DEFAULT)
+    return _ipv6_network_key(addr, prefix)
 
 
 def _oauth_dcr_reclaim(store: OrderedDict, now: float, window_s: int,
