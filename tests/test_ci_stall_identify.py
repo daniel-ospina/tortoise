@@ -97,6 +97,44 @@ def test_faulthandler_timeout_is_armed_below_the_per_test_budget():
     )
 
 
+def test_every_workflow_pytest_install_carries_pytest_timeout():
+    """The P2 fix, guarded: an inert `timeout` key is not a bound (#5035).
+
+    ``timeout`` is an ini key that ONLY pytest-timeout registers. A workflow that
+    installs pytest by hand without the plugin (or without the ``.[test]`` extra
+    that carries it) gets `PytestConfigWarning: Unknown config option: timeout`
+    and arms NO per-test killer — the exact defect this PR exists to close, moved
+    from a developer's box to a runner. The round-1 review found `timeout = 300`
+    was inert on exactly that pair of legs; this pins the pairing so a future
+    hand-rolled install cannot silently re-open it.
+
+    Mutation that makes this RED: drop ``pytest-timeout`` from either install line
+    in ``.github/workflows/blog-write-e2e.yml`` or ``deploy-pages.yml`` (verified:
+    both are reported as offenders).
+    """
+    offenders: list[str] = []
+    for path in sorted(WORKFLOWS_DIR.glob("*.yml")) + sorted(WORKFLOWS_DIR.glob("*.yaml")):
+        text = path.read_text(encoding="utf-8").replace("\\\n", " ")
+        for line in text.splitlines():
+            if line.lstrip().startswith("#") or "pip install" not in line:
+                continue
+            # pytest itself, or any pytest plugin (pytest-playwright, ...): all
+            # of them drag pytest in, and none of them brings pytest-timeout.
+            if not re.search(r"\bpytest\b", line):
+                continue
+            has_plugin = "pytest-timeout" in line
+            has_extra = re.search(r"\.\[[^\]]*\btest\b", line) is not None
+            if not (has_plugin or has_extra):
+                offenders.append(f"{path.name}: {line.strip()}")
+    assert not offenders, (
+        "these workflow `pip install` lines install pytest but neither "
+        "pytest-timeout nor the `.[test]` extra that carries it, so the "
+        "`timeout = 300` config default is INERT there (`Unknown config option: "
+        "timeout`) and the leg has no per-test killer (#5035):\n  "
+        + "\n  ".join(offenders)
+    )
+
+
 def test_a_stall_dumps_its_own_frame(tmp_path):
     """A GIL-holding stall must produce a named frame, not a 15-minute silence.
 

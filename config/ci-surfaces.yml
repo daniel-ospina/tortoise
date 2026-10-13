@@ -4797,7 +4797,7 @@ durations:
   test_5388_org_enumeration_completeness.py: 2.5
   test_7951_write_doors.py: 6.3
   test_audit_fallback_home_isolation.py: 2.4
-  test_ci_stall_identify.py: 1.8
+  test_ci_stall_identify.py: 13.0  # #5035 round-1 review: the 1.8 predated this PR's three subprocess-launching tests. MEASURED 12.4-12.9s over two runs at head 8e5f2512e; the reviewer measured 21.76s under load, so this moves with box load — `tools/ci_timing.py --refresh-durations` is the canonical writer.
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
 # A file here is excluded from EVERY pre-merge leg (fast halves, slow, carve-
