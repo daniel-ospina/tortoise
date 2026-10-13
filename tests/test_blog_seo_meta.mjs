@@ -428,10 +428,17 @@ console.log("generate-seo handler — one brand suffix, no dangling separator, n
     // Then fixing the regex did NOT fix this test: because the list still held
     // only the 8 handled spellings, the suite stayed GREEN on the broken code —
     // a fix whose test cannot fail is not tested. Enumerate the MATRIX.
-    const separators = ["|", "\u2014", "\u2013", "-", "\u00b7", ":", "\u2022", ",", "(", "/"];
-    const gaps = ["", " "];
-    const casings = ["Tortoise", "tortoise", "TORTOISE"];
-    const tails = ["", ".", "..", "!", ",", ";", ":", "?", "\u2026", "\u00b7", "\u2022", ")", "]", "}", "\u201d", "\u2019", "*", "/", "-", "\u2013", "\u2014"];
+    // ⛔ The tail dimension originally had ZERO `\p{S}` (symbol) entries and the
+    // separator dimension exactly one, so narrowing the class to `[\p{P}\s]`
+    // survived the whole suite while the shipped regex still stripped
+    // `"… | Tortoise\u00a9"`. A dimension must span every Unicode category its
+    // class covers, or it tests the categories the author already thought of.
+    const separators = ["|", "\u2014", "\u2013", "-", "\u00b7", ":", "\u2022", ",", "(", "/", "\u00a9", "\u2122", "\u00a7", "+"];
+    const gaps = ["", " ", "  "];
+    const casings = ["Tortoise", "tortoise", "TORTOISE", "Tortoise."];
+    const tails = ["", ".", "..", "!", ",", ";", ":", "?", "\u2026", "\u00b7", "\u2022", ")", "]", "}", "\u201d", "\u2019", "*", "/", "-", "\u2013", "\u2014",
+                   // symbols (\p{S}) — the category the first matrix omitted
+                   "\u00a9", "\u2122", "\u00b0", "+", "=", "<", ">", "$", "\u20ac", "\u00b1"];
     const repeats = ["", " | Tortoise", " | Tortoise | Tortoise"];
     let familyChecked = 0;
     for (const sep of separators) {
@@ -459,6 +466,17 @@ console.log("generate-seo handler — one brand suffix, no dangling separator, n
       separators.length * gaps.length * casings.length * tails.length * repeats.length,
       "the suffix matrix ran EVERY combination of its dimensions, not a sample",
     );
+    // ⛔ The product above is SELF-CONSISTENT: shrinking a list shrinks both
+    // sides, so deleting 5 of 21 tails still balanced (found in round 10). Pin
+    // each dimension's size as well, so a shortened list fails loudly instead of
+    // quietly reducing the matrix to a sample.
+    assertEq(separators.length, 14, "the separator dimension is intact (incl. \\p{S} symbols)");
+    assertEq(gaps.length, 3, "the gap dimension is intact");
+    assertEq(casings.length, 4, "the casing dimension is intact");
+    assertEq(tails.length, 31, "the tail dimension is intact (incl. \\p{S} symbols)");
+    assertEq(repeats.length, 3, "the repeat dimension is intact (incl. 3+ repeats)");
+    assert(tails.some((t) => /[\p{S}]/u.test(t)), "the tail dimension includes SYMBOLS, not only punctuation");
+    assert(separators.some((t) => /[\p{S}]/u.test(t)), "the separator dimension includes a symbol other than |");
     assert(familyChecked >= 2500, `the suffix family matrix actually ran (${familyChecked} spellings)`);
     // A bare space is NOT a separator — the subject word must SURVIVE. Counting
     // "Tortoise" occurrences would be wrong (the subject word and the brand token
@@ -483,6 +501,7 @@ console.log("generate-seo handler — one brand suffix, no dangling separator, n
     // inputs: the old `endsWith` shortcut only held for the exact spelling. The
     // second `enforce` pass runs on the first one's output, so this is load-bearing.
     let nonIdempotent = 0;
+    let midTitleDivergent = 0;
     const words = ["memory", "agents", "recall", "graph", "why", "brief", "and", "in", "confidence"];
     for (let seed = 0; seed < 3000; seed++) {
       let t = "";
@@ -492,15 +511,34 @@ console.log("generate-seo handler — one brand suffix, no dangling separator, n
       while (t.length < target) t += `${words[next() % words.length]} `;
       t = t.trim();
       if (next() % 5 === 0) t += ["|Tortoise", " | Tortoise", ";", "."][next() % 4];
+      // 1-in-8: a punctuation-led "Tortoise" MID-title, followed by prose — the
+      // shape truncation can turn into a fake suffix. Counted SEPARATELY, because
+      // it is legitimately non-idempotent; the strict count below stays exact for
+      // the suffix-bearing case.
+      const midTitle = next() % 8 === 0;
+      if (midTitle) t += " — Tortoise explained in detail with more words appended here";
       const once = constraints.metaTitle(t);
       // Count, then assert ONCE — asserting inside the loop made the suite emit
       // 3,000 assertion lines and drowned every other result in the output.
       if (constraints.metaTitle(once) !== once) {
-        nonIdempotent++;
-        if (nonIdempotent <= 3) console.error(`    non-idempotent input: ${JSON.stringify(t)} → ${JSON.stringify(once)}`);
+        if (midTitle) midTitleDivergent++;
+        else {
+          nonIdempotent++;
+          if (nonIdempotent <= 3) console.error(`    non-idempotent input: ${JSON.stringify(t)} → ${JSON.stringify(once)}`);
+        }
       }
     }
-    assertEq(nonIdempotent, 0, "metaTitle is idempotent across a 3,000-title generated corpus");
+    // ⛔ ...for SUFFIX-BEARING input. That corpus builds prose from a fixed word
+    // list and appends "Tortoise" only as a TERMINAL suffix, so it cannot express
+    // the one shape that breaks idempotence: a MID-TITLE, punctuation-led
+    // "Tortoise" that truncation EXPOSES as a brand-looking tail (found by the
+    // verifier in round 10). A corpus that cannot express the failing shape
+    // proves nothing about it, so the shape is asserted explicitly above — and
+    // the limit is stated here rather than hidden behind an absolute claim.
+    assertEq(nonIdempotent, 0, "metaTitle is idempotent across a 3,000-title suffix-bearing corpus");
+    // The mid-title shape IS divergent (the documented limit). Assert it is
+    // actually exercised, so this corpus cannot silently stop covering it.
+    assert(midTitleDivergent > 0, `the mid-title "Tortoise" shape is exercised (${midTitleDivergent} divergent)`);
     // ⛔ Cap BOUNDARIES. The `!truncated` clause in `keyword_ok` is load-bearing
     // and only tested in the interior; an off-by-one at the cap would be invisible.
     assert(
@@ -809,6 +847,21 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     seenPrompt.includes("long-term memory for ai agents"),
     "the tagless prompt seeds real candidate keywords",
   );
+  // ⛔ P1-1 (round 10): the seed was asserted only by ONE member (`includes`), so
+  // `allKeywords()` -> `allKeywords(3)` survived the whole suite. A capped seed
+  // ships green while the prompt says "choose exactly ONE of these researched
+  // keywords" over a list that is not the validator's domain — the exact round-7
+  // defect (a 59-of-147 seed). Assert the SET, not a sample of it.
+  {
+    const seeded = allKeywords().filter((k) => seenPrompt.includes(k));
+    const missing = allKeywords().filter((k) => !seenPrompt.includes(k));
+    assertEq(seeded.length, allKeywords().length,
+      `the tagless prompt seeds the WHOLE vocabulary, not a sample (${seeded.length}/${allKeywords().length})`);
+    // `assertEq` compares with `===`, so compare the LENGTH, not the array
+    // (two empty arrays are never `===`).
+    assertEq(missing.length, 0,
+      `...and every researched keyword is reachable by the model (missing ${JSON.stringify(missing.slice(0, 3))})`);
+  }
   assert(
     /choose exactly ONE/i.test(seenPrompt),
     "the tagless prompt instructs the model to choose one keyword",
@@ -823,6 +876,33 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     /natural phrase rather than prefixed with a colon/i.test(seenPrompt),
     "the prompt forbids the colon-prefixed shape the repair produced",
   );
+
+  // ⛔ P2-4 (round 10): the SYSTEM_PROMPT clauses had NO assertion at all, and
+  // two of them are behavioural — both could be deleted with the suite green.
+  // `seenPrompt` captures EVERY message (the handler builds `messages` with the
+  // system prompt first and the test joins all contents), so the system prompt is
+  // readable here without exporting a private const.
+  {
+    await drive();
+    // ⛔ Must match the REQUIRED-KEYS sentence, not merely the word anywhere:
+    // the user instruction also says `primary_keyword`, so a bare `.test()` was
+    // satisfied by the user prompt and the system key list could be deleted.
+    assert(
+      /Return ONLY a JSON object with keys:[^.]*primary_keyword/i.test(seenPrompt),
+      "the SYSTEM prompt lists `primary_keyword` in the required JSON keys",
+    );
+    // The vocabulary sentence is what steers the model to emit MAPPABLE tags. On
+    // the tagless path the fallback keyword comes from `enforced.tags`, so losing
+    // this sentence degrades `keyword_ok` to null for calls that used to verify.
+    assert(
+      /tags: 3-5 relevant terms from this vocabulary/i.test(seenPrompt),
+      "the SYSTEM prompt names the tag vocabulary the fallback keyword depends on",
+    );
+    for (const tag of ["agent-memory", "epistemic-memory", "knowledge-graph", "retrieval"]) {
+      assert(seenPrompt.includes(tag), `the SYSTEM prompt names the \`${tag}\` tag`);
+    }
+  }
+
 
   // 2. When the model HONOURS that instruction, the repair must not fire:
   //    the title stays fluent and the verified keyword is the one it chose.
@@ -1151,6 +1231,22 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     }
   }
 
+  // ⛔ P2-1 (round 10): the STRIP must run BEFORE the truncation. If the 60-char
+  // cut lands inside the suffix, `BRAND_SUFFIX_TAIL_RE` (which needs the complete
+  // word `Tortoise\b`) cannot match the fragment, and the partial token survives
+  // into the returned title beside `keyword_ok: true`. Reordering the two lines
+  // used to leave the suite green, so assert the fragment is gone.
+  for (const [label, raw] of [
+    ["cut inside the suffix", `${"a".repeat(58)}|Tortoise`],
+    ["cut just past the separator", `${"a".repeat(52)}|Tortoise`],
+  ]) {
+    const out = constraints.metaTitle(raw);
+    assert(
+      !/\|\s*Tortois(?!e\b)/i.test(out) && !/Tortoise\s*\|\s*Tortoise/i.test(out.replace(/\s*\|\s*Tortoise$/, "")),
+      `a truncated suffix leaves no partial brand token (${label}): ${JSON.stringify(out)}`,
+    );
+  }
+
   // ⛔ P1-2 (round 9): the SECOND trailing-separator strip was untested. Every
   // other fixture ends in the word `Tortoise`, so `BRAND_SUFFIX_TAIL_RE` consumes
   // it and the bare-separator strip never runs — deleting that line left the
@@ -1179,6 +1275,62 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     const suffixOnly = await drive({ metaTitle: " | Tortoise" });
     assertEq(suffixOnly.status, 502, "a title that is only the brand suffix is refused, not published");
     assertEq(suffixOnly.body.error, "generation_incomplete", "...as an incomplete generation");
+  }
+
+  // ⛔ ROUND-10 (verifier): `metaTitle` is NOT idempotent when TRUNCATION EXPOSES a
+  // mid-title punctuation-led "Tortoise" — a second pass strips that exposed tail
+  // as if it were a brand suffix. Asserted here as the DOCUMENTED behaviour, not
+  // as a defect: `generate-seo.ts` no longer derives `repairFired` from a second
+  // enforce pass, so the divergence cannot reach the verdict.
+  //
+  // ⚠️ The verifier reported this as a false `keyword_ok: false`. Measured: it is
+  // NOT reachable — divergence needs the raw title to EXCEED the cap, which
+  // already sets `titleTruncated` and forces `keyword_ok: false` for the honest
+  // reason. 200,000 randomised titles: 8,272 divergent, **0 of them under the
+  // cap**. The clause below pins both halves so a future change to the truncation
+  // flags cannot silently resurrect it.
+  for (const [t, p1, p2] of [
+    ["Epistemic confidence in knowledge graphs —  Tortoise explained",
+     "Epistemic confidence in knowledge graphs —  Tortoise",
+     "Epistemic confidence in knowledge graphs | Tortoise"],
+    ["Why retrieval matters for autonomous systems -  Tortoise for teams",
+     "Why retrieval matters for autonomous systems -  Tortoise",
+     "Why retrieval matters for autonomous systems | Tortoise"],
+  ]) {
+    assertEq(constraints.metaTitle(t), p1, `pass 1 strips the model's own suffix then truncates: ${JSON.stringify(p1.slice(0, 30))}…`);
+    assertEq(constraints.metaTitle(p1), p2, "...and pass 2 strips the tail TRUNCATION exposed — hence non-idempotent");
+    assert(t.trim().length > META_TITLE_MAX, "...which only happens when the raw title EXCEEDS the cap");
+  }
+  {
+    __resetRateLimits();
+    const exposed = await drive({
+      primaryKeyword: "long-term memory for ai agents",
+      metaTitle: "Long-term memory for AI agents: epistemic confidence in knowledge graphs —  Tortoise explained",
+      metaDescription: "A description that names no keyword at all.",
+    });
+    assertLive(exposed, "exposedProse");
+    assertEq(
+      exposed.body.keyword_ok,
+      false,
+      "an over-cap title is honestly not green — the reason is the CAP, not a phantom repair",
+    );
+    // ⛔ The keyword is in the TITLE, so the repair does NOT fire — that isolates
+    // the cap as the ONLY reason for `false`, which is what this fixture is for.
+    assert(
+      !exposed.body.meta_title.startsWith("long-term memory for ai agents: "),
+      "...and it was NOT repair-prefixed, so the cap is the only reason for `false`",
+    );
+    assert(
+      exposed.body.meta_title.toLowerCase().includes("long-term memory for ai agents"),
+      "...the keyword is the model's own placement, carried into the returned title",
+    );
+    // The keyword IS present and the contract normalised it — the verdict is
+    // false ONLY because the cap cut the title, which is the honest reason.
+    assert(
+      exposed.body.meta_title.includes("long-term memory for ai agents") ||
+        exposed.body.meta_description.includes("long-term memory for ai agents"),
+      "...the keyword is still carried, so `false` does not mean 'keyword missing'",
+    );
   }
 
   // ⛔ P1-1 (round 9): the TITLE branch of `chosenUsed`'s OR was untested.
@@ -1324,7 +1476,13 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
       } catch { suppliedPrompt = ""; }
       return Response.json({
         choices: [{ message: { content: JSON.stringify({
-          slug: "a-slug", excerpt: "An excerpt.", tags: ["agent-memory"],
+          slug: "a-slug", excerpt: "An excerpt.",
+          // ⛔ The MODEL's tags DIFFER from the caller's (`["agent-memory"]`).
+          // With both set to the same tag, honouring the caller and honouring the
+          // model are indistinguishable — so a regression switching to the
+          // model's tags on this path survived the whole suite (found in round
+          // 10). The caller's tags must be authoritative HERE.
+          tags: ["knowledge-graph"],
           meta_title: "Long-Term Memory for AI Agents: Recall vs Learning | Tortoise",
           meta_description: "Long-term memory for AI agents measures recall but not learning, and Tortoise tracks confidence instead.",
           // ⛔ DELIBERATELY a DIFFERENT, VALID keyword from another tag. The
@@ -1350,6 +1508,11 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   assert(
     /PRIMARY keyword: "long-term memory for ai agents"/.test(suppliedPrompt),
     "with tags, the prompt still names the caller's keyword explicitly",
+  );
+  assertEq(
+    supplied.primary_keyword,
+    primaryKeyword(["agent-memory"]),
+    "the CALLER's tags decide the keyword, even though the model proposed a different tag",
   );
   assert(
     !/choose exactly ONE/i.test(suppliedPrompt),

@@ -36,10 +36,16 @@ export const BRAND_SUFFIX = " | Tortoise";
 // side — a CLASS, not a list. A bare space is still NOT a separator, so a title
 // that legitimately ends in the word ("Why Tortoise") is left alone, while every
 // punctuation-led spelling and its repetitions are treated as the brand suffix.
-// The `+` keeps it idempotent, which matters because `generate-seo.ts` enforces,
-// repairs, then enforces AGAIN — a first pass that left a suffix behind would be
-// appended to by the second, and the caller would receive a title that differs
-// from the one `keyword_ok` was computed on.
+// The `+` makes a repeated suffix ("… | Tortoise | Tortoise") collapse to one.
+//
+// ⛔ `metaTitle` is NOT unconditionally idempotent, and the earlier claim that it
+// was is wrong (the verifier measured it). Truncation can EXPOSE a mid-title
+// punctuation-led "Tortoise" — "… knowledge graphs —  Tortoise explained" cut to
+// "… knowledge graphs —  Tortoise" — and a second pass cannot tell that exposed
+// tail from a suffix the model wrote, so it strips it. `generate-seo.ts` does NOT
+// depend on the property: it measures whether the REPAIR fired directly, so the
+// divergence cannot reach `keyword_ok`. Do not reintroduce a second `enforce`
+// pass as the source of `repairFired`.
 const BRAND_SUFFIX_TAIL_RE = /(?:\s*[\p{P}\p{S}]\s*Tortoise\b[\p{P}\p{S}\s]*)+$/iu;
 
 export interface SeoFields {
@@ -91,26 +97,43 @@ export const constraints: Constraints = {
     // in it ("Why Tortoise") is left alone; only "… |… Tortoise" is treated as the
     // brand suffix.
     //
-    // Stripping BEFORE appending also makes the function idempotent in general,
-    // which the `endsWith` shortcut achieved only for the exact spelling: the old
-    // version could strip a trailing separator via `.trim()` and then append on a
-    // SECOND pass, defeating its own `enforce(enforce(x)) === enforce(x)` claim in
-    // ~0.16% of random inputs.
-    const stripped = truncateAtWord(raw.trim(), META_TITLE_MAX)
+    // Stripping before appending removes the old `endsWith` shortcut's
+    // double-append for every spelling rather than the exact one — but see the
+    // note on `BRAND_SUFFIX_TAIL_RE`: idempotence holds for suffix-BEARING input,
+    // not universally, because truncation can create a brand-looking tail.
+    // ⛔ STRIP FIRST, then truncate — the reverse order loses the suffix match.
+    // `BRAND_SUFFIX_TAIL_RE` requires the COMPLETE word `Tortoise\b`, so if the
+    // 60-char cut lands inside the suffix the fragment is left behind and neither
+    // strip can touch it: `"a"×58 + "|Tortoise"` came back as `"a"×58 + "|T"`,
+    // and through the handler `"epistemic memory guide|Tortois"` was returned as
+    // `"…|Tortois | Tortoise"` beside `keyword_ok: true` — the round-6/7 symptom
+    // again, this time from a partial token the model wrote. Stripping first means
+    // the suffix is gone before the cut can split it, and the cut then only ever
+    // sees the model's own prose.
+    // ⛔ The trailing-separator strip lives on `fitted`, NOT here — one copy, and
+    // the one that matters. `truncateAtWord` returns its input UNCHANGED when it
+    // already fits, so only the post-truncate strip covers the common short-title
+    // case; a second copy on `stripped` was redundant (deleting it left the suite
+    // green, which is how the duplication was found in round 10).
+    const stripped = raw
+      .trim()
       .replace(BRAND_SUFFIX_TAIL_RE, "")
+      .trim();
+    const fitted = truncateAtWord(stripped, META_TITLE_MAX)
       .replace(/[\s,.;:!?|—–-]+$/, "")
       .trim();
-    if (!stripped) return "";
+    if (!fitted) return "";
     // Brand suffix when it fits — meta_title is the FINAL title (SSR renders the
     // stored value verbatim; the suffix is only appended to the title fallback
     // when meta_title is null). Editor maxLength=60 includes the suffix, so this
     // matches the contract.
-    const withSuffix = `${stripped}${BRAND_SUFFIX}`;
+    const withSuffix = `${fitted}${BRAND_SUFFIX}`;
     if (withSuffix.length <= META_TITLE_MAX) return withSuffix;
-    // No room for the suffix — keep the base (SSR appends nothing). `stripped`
-    // has already had every trailing separator removed, so a title ending in a
-    // bare "|" — user-visible in the SERP and the <title> tag — cannot escape.
-    return stripped;
+    // No room for the suffix — keep the base (SSR appends nothing). `fitted` is
+    // the STRIPPED text, already truncated, with every trailing separator
+    // removed, so a title ending in a bare "|" — user-visible in the SERP and
+    // the <title> tag — cannot escape.
+    return fitted;
   },
 
   metaDescription(raw: string): string {
