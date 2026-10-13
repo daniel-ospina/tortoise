@@ -2034,3 +2034,45 @@ def test_recovery_window_is_not_defeated_by_a_double_resolve(monkeypatch):
 
     w.poll()
     assert ch.issues == {}, "the second consecutive healthy poll closes it"
+
+
+def test_recovery_window_is_not_defeated_by_a_not_eligible_double_resolve(monkeypatch):
+    """#3146 (review P2): the `not_eligible` branch and the BSM block must not
+    both credit a healthy observation for the same org in one poll.
+
+    An org downgraded out of the eligible set IS a key of ``per_team`` (state
+    ``not_eligible``) but is deliberately NOT in ``backup_set_missing``
+    (``compute_status``: an ineligible org owes no archive), so it always lands
+    in the BSM block's ``to_resolve`` while the ``not_eligible`` branch ALSO
+    resolves ``BACKUP_SET_MISSING`` for it. Two resolve CALLS in one healthy
+    poll credit two healthy observations, so the declared window of 2 closes on
+    the FIRST healthy poll — the same double-credit the union fixed for the
+    census∩carried org, one site over.
+
+    The ``not_eligible`` branch owns this kind for such an org: it is the ONLY
+    closer on a DEGRADED poll, where the whole BSM block is gated off behind
+    ``r2_confirmed`` (see ``test_watcher_not_eligible_closes_preexisting_
+    backup_set_missing``), and eligibility is a control-plane fact, not an R2
+    measurement. So the BSM block must not resolve it a second time.
+    """
+    monkeypatch.delenv("ALERT_RECOVERY_STREAK", raising=False)
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_other", 0.5)
+    _seed_state(storage, "team_other")
+    w = _watcher(storage, ch, orgs=("team_a", "team_other"),
+                 eligible_provider=lambda: ["team_other"])
+    w.poll()  # healthy poll: establishes the surface (team_a → not_eligible)
+    assert ch.issues == {}
+    assert w._last_status["per_team"]["team_a"] == "not_eligible"
+
+    w._alerts.open_incident("BACKUP_SET_MISSING", "team_a")
+
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "not_eligible"
+    assert any("BACKUP_SET_MISSING — team_a" in t for t in ch.issues.values()), (
+        "the first healthy poll must NOT close a window of 2 — a second "
+        "resolve for the same not_eligible org in the same poll would")
+
+    w.poll()
+    assert ch.issues == {}, "the second consecutive healthy poll closes it"

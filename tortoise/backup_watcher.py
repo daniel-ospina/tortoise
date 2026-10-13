@@ -1092,8 +1092,25 @@ class BackupWatcher:
                 # `cur | pending` so a failure is retried next poll — the same
                 # convention `_last_graph_keys` and `_pending_team_resolves`
                 # use.
-                to_resolve = ((set(status["per_team"]) - cur_bsm)
-                              | (self._last_backup_set_missing - cur_bsm))
+                # #3146 (review P2): the `not_eligible` branch above ALREADY
+                # resolves this kind for an org downgraded out of the eligible
+                # set, and such an org is a `per_team` key that is deliberately
+                # ABSENT from `cur_bsm` (`compute_status`: an ineligible org
+                # owes no archive), so it would otherwise appear in BOTH
+                # universes below. Exclude it: the store counts one healthy
+                # observation per resolve CALL, so the second call would close
+                # on the FIRST healthy poll — the same self-defeat the union
+                # fixes one subject over. The `not_eligible` branch owns the
+                # subject for such an org: it is the ONLY closer on a DEGRADED
+                # poll (this whole block is gated on `r2_confirmed`), and
+                # eligibility is a control-plane fact, not an R2 measurement.
+                not_eligible_orgs = {
+                    org for org, state in status["per_team"].items()
+                    if state == "not_eligible"
+                }
+                to_resolve = (
+                    (set(status["per_team"]) - cur_bsm)
+                    | (self._last_backup_set_missing - cur_bsm)) - not_eligible_orgs
                 pending_bsm: set[str] = set()
                 for org in sorted(to_resolve):
                     if not self._alert_leg("resolve_incident", KIND_BACKUP_SET_MISSING, org):
