@@ -16,7 +16,9 @@ os.environ.setdefault("TORTOISE_ENCRYPTION_KEY",
 os.environ.setdefault("GITHUB_CLIENT_ID", "test-client-id")
 os.environ.setdefault("GITHUB_CLIENT_SECRET", "test-client-secret")
 
+import asyncio
 import sys
+import threading
 import time
 from contextlib import suppress
 from datetime import datetime
@@ -711,16 +713,26 @@ def test_repoll_drains_and_clears_truncated_persisted(client, tmp_path,
         return self._client
 
     monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
+    # #4709: EXPLICIT poll budget for this test's 500-item walk. The module's
+    # 8 s default is sized for the small fixtures; this fixture is the one
+    # heavyweight run (600 items, cap 500) and its walk is REAL work on the
+    # graph — measured on the docker lane at ~47 s for run 1 and ~10 s for the
+    # 100-item DRAIN re-poll. That budget was never exercised before #4709:
+    # with the walk ON the loop the POST itself was refused by the 10 s
+    # transport bound, so the test failed earlier (`KeyError: 'job_id'`).
+    _WALK_POLL_S = 300.0
     # run 1: cap 500 → truncated cursor persisted
     r = client.tc.post("/v1/index/github", json={"org": "acme"})
-    body = _poll_until(client.tc, r.json()["job_id"], "completed")
+    body = _poll_until(client.tc, r.json()["job_id"], "completed",
+                       timeout_s=_WALK_POLL_S)
     assert body["repos_processed"] == 1
     state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
     assert state["github_index_cursor"]["acme/repo1"] == {
         "updated_at": S, "number": 500, "truncated": True}
     # re-poll 1 (DRAIN): drains the remaining 100 → CLEAN persisted cursor
     r2 = client.tc.post("/v1/index/github/re-poll")
-    body2 = _poll_until(client.tc, r2.json()["job_id"], "completed")
+    body2 = _poll_until(client.tc, r2.json()["job_id"], "completed",
+                        timeout_s=_WALK_POLL_S)
     assert body2["repos_processed"] == 1
     state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
     assert state["github_index_cursor"]["acme/repo1"] == {
@@ -730,11 +742,100 @@ def test_repoll_drains_and_clears_truncated_persisted(client, tmp_path,
     # and the run stays exact-once (0 new mints)
     n_queries_before = len(t.issue_query_params())
     r3 = client.tc.post("/v1/index/github/re-poll")
-    body3 = _poll_until(client.tc, r3.json()["job_id"], "completed")
+    body3 = _poll_until(client.tc, r3.json()["job_id"], "completed",
+                        timeout_s=_WALK_POLL_S)
     assert body3["events_minted"] == 0, "exact-once — 0 new mints"
     new_queries = t.issue_query_params()[n_queries_before:]
     assert any("since" in p for p in new_queries), \
         "a clean persisted cursor must exit DRAIN (the next run uses since)"
+
+
+# ── #4709: the walk runs OFF the event loop ───────────────────────
+
+def test_projection_walk_runs_off_the_event_loop(client, tmp_path,
+                                                 monkeypatch):
+    """#4709: the projection walk runs on a WORKER thread, and the loop stays
+    free while it is blocked.
+
+    Two assertions, both falsified by the pre-#4709 shape:
+
+    * ``asyncio.get_running_loop()`` succeeds only on the loop thread — a
+      worker has no running loop. Every ``_project_issue`` must be recorded
+      with ``on_loop=False`` (the mechanism, in the style of
+      ``tests/test_dataplane_lane_loop_responsiveness.py``), and on a thread
+      OTHER than the one that ran the awaited ``_get_client``.
+    * a concurrent ``GET /v1/onboarding/state`` is answered INSIDE the blocked
+      walk's window. Inline, the walk parks the single loop: that request can
+      only return after the 10 s transport wait bound has refused it (the
+      ``KeyError: 'job_id'`` shape this issue was reproduced with).
+    """
+    _provision(client.db_path, org_id=client.org_id)
+    t = MockGitHubTransport(issues=[gh_issue(n) for n in range(1, 4)],
+                            repos=["acme/repo1"])
+
+    loop_threads: list[threading.Thread] = []
+    walk_threads: list[tuple[threading.Thread, bool]] = []
+    entered = threading.Event()
+    released = threading.Event()
+
+    async def _fake_get_client(self):
+        # Awaited ON the loop, immediately before the hand-off — this is the
+        # loop thread the walk must NOT be running on.
+        loop_threads.append(threading.current_thread())
+        if self._client is None:
+            self._client = httpx.AsyncClient(transport=t)
+        return self._client
+
+    orig_project_issue = GitHubIndexer._project_issue
+
+    def _blocking_project_issue(self, sdk, proj, repo, issue, **kw):
+        try:
+            asyncio.get_running_loop()
+            on_loop = True
+        except RuntimeError:
+            on_loop = False
+        walk_threads.append((threading.current_thread(), on_loop))
+        entered.set()
+        released.wait(15)  # hold the walk so the window is unambiguous
+        return orig_project_issue(self, sdk, proj, repo, issue, **kw)
+
+    monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
+    monkeypatch.setattr(GitHubIndexer, "_project_issue",
+                        _blocking_project_issue)
+
+    r = client.tc.post("/v1/index/github", json={"org": "acme"})
+    # A blocked loop refuses this POST at the 10 s transport bound (no
+    # `job_id`) — assert it legibly rather than KeyError-ing below.
+    assert r.status_code == 200 and "job_id" in r.json(), (
+        f"the index POST was not admitted ({r.status_code}: {r.text[:200]}) — "
+        f"the projection walk is holding the event loop (#4709)")
+    assert entered.wait(15), (
+        "the projection walk never started — this run proves nothing (#4709)")
+
+    started = time.perf_counter()
+    concurrent = client.tc.get("/v1/onboarding/state")
+    elapsed = time.perf_counter() - started
+
+    assert walk_threads, ("no projection call was recorded — vacuous run")
+    assert all(not on_loop for _, on_loop in walk_threads), (
+        f"the projection walk ran ON the event loop "
+        f"({[t.name for t, o in walk_threads if o]}) — one walk freezes every "
+        f"concurrent request on the single-worker app (#4709)")
+    assert all(wt not in loop_threads for wt, _ in walk_threads), (
+        "the walk ran on the very thread that awaited `_get_client` — it was "
+        "never handed to a worker (#4709)")
+    assert concurrent.status_code == 200, (
+        f"a concurrent read was NOT served while the walk was blocked "
+        f"({concurrent.status_code}: {concurrent.text[:200]}) — the walk is "
+        f"parking the loop (#4709)")
+    assert elapsed < 5.0, (
+        f"the concurrent read took {elapsed:.1f}s while the walk was blocked "
+        f"— it queued behind the walk instead of being served (#4709)")
+
+    released.set()
+    body = _poll_until(client.tc, r.json()["job_id"], "completed")
+    assert body["repos_processed"] == 1, body
+    assert body["events_minted"] >= 3, body
 
 
 # ── P2 (PR #1792): marker / 404 / quota-break honesty ────────────────

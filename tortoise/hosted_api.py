@@ -30968,29 +30968,43 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
     (liveness-evicted / replaced by a newer run) — a stale run must never keep
     writing status or resurrect a live walk.
 
-    ⚠️ #3718 residual (#4709): this body's graph work is INLINE — the
-    dominant `indexer.index_repo` projection walk (its own `_get_proj()`
-    attach + a synchronous per-item `proj.apply`/`proj.g.query` loop in
-    another module), the `_make_sdk` construction, the one-time
-    `backfill_legacy_closed` scan (whose `org_sdk._get_proj()` attach IS a
-    seam the AST scan SEES), the `_relink_sessions_after_index` relink pass
-    and the two `_update_onboarding_state` writes. Only that direct seam is
-    visible to the scan; the rest is helper-mediated one level down and is
-    not. The body therefore MUST stay declared in
-    `_KNOWN_INLINE_HELPER_RESIDUAL`, never in `_OFFLOADED_ASYNC_BODIES`:
-    `test_graph_io_is_offloaded` computes `inline - declared`, so dropping
-    the entry REDS the guard rather than passing it.
+    ⚠️ #4709 — the WALK and the ONBOARDING WRITES are now off the loop; the
+    SDK construction / attach sites are deliberately LEFT ON it, and the
+    relink pass is a declared residual.
 
-    ⚠️ The three worker hand-offs this body briefly carried were REVERTED.
-    Off-loading a BACKGROUND task's `_make_sdk` / first `_get_proj()`
-    resolves the per-test embedded DB path from a POOL thread, whose
-    inherited test-module stamp must match the main thread's CURRENT stem
-    (epic #1686) — a pool thread reused across tests resolves None, the
-    redirect takes the non-per-test path, and the job writes where the
-    test's reader never looks. Measured: with them, three tests in
-    `tests/test_github_index_lifecycle.py` fail deterministically when that
-    file runs after `tests/test_github_connector.py` (the CI shard order);
-    without them the file matches main's result exactly.
+    * ``indexer.index_repo``'s synchronous projection walk (the per-item
+      ``proj.apply``/``proj.g.query`` loop AND the cursor/truncation/DRAIN
+      mint) runs in ONE worker hand-off INSIDE ``index_repo``
+      (``_project_items``). The 600-item fixture that could not complete
+      within the 10 s transport bound now leaves the loop free.
+    * both ``_update_onboarding_state`` writes ride ``asyncio.to_thread`` with
+      ``_echo=False`` (their return is discarded — the write-only contract
+      #4625 added) and with NO BOUND: a bounded ``wait_for`` cancels only the
+      await, never the worker (CPython #87185), so it would abandon a worker
+      MID-WRITE — the #2863 hazard #4625's bounded-mutation rule names. That is
+      the explicit bound/no-bound decision this issue requires.
+    * WHAT STAYS ON THE LOOP, and why it is not an omission: the
+      ``_make_sdk`` construction and the single ``org_sdk._get_proj()`` attach
+      handed to ``backfill_legacy_closed``; ``index_repo``'s own attach too
+      (it attaches on ITS caller's loop before handing the handle to the
+      worker). Off-loading those resolves the store path from a POOLED worker
+      thread, whose inherited test-module stamp is stale once the pool thread
+      is reused across tests — the job then writes where the test's reader
+      never looks (tortoise#7500; measured as 3 reds under #4645, which is why
+      its hand-offs were reverted). They can move only once #7500 lands.
+    * ``_relink_sessions_after_index`` (the completion relink pass) is ALSO
+      still inline: it is a sync helper that constructs its own SDK and
+      attaches, so it carries the same #7500 constraint. Declared, not
+      silently absorbed.
+
+    Consequence for the guard: this body stays declared in
+    ``_KNOWN_INLINE_HELPER_RESIDUAL``. Both remaining sites are one level
+    down (helper/other-module) or are an SDK construction, and
+    ``_OFFLOADED_ASYNC_BODIES`` asserts NO construction and NO graph seam in
+    the body — so membership there would be the vacuous declaration the
+    round-4 review removed. ``test_run_indexing_residual_is_named_head_on`` in
+    ``tests/test_read_routes_loop_responsiveness.py`` pins the exact remaining
+    sites so this cannot drift back into a silent claim.
     """
     from tortoise.indexer.github_indexer import GitHubFetchError, GitHubIndexer
     # P2: generation/owner token stamped at mint. A liveness-evicted entry
@@ -30998,6 +31012,11 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
     # writing status — it aborts silently at the next status-write or
     # repo boundary.
     owner = _INDEX_JOB_OWNERS.get(job_id)
+    # #4709: set once the cursor/flag state has been persisted. The COMPLETION
+    # path persists BEFORE it reports `completed` (see there); the `finally`
+    # covers every other exit. Without the flag the persist would run twice on
+    # the happy path — harmless but pointless writes on a mutating CAS.
+    persisted = False
 
     def _beat() -> None:
         """Progress beat handed to the walk (#3539 §D)."""
@@ -31073,10 +31092,20 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
                 _logger.warning(
                     "legacy -closed backfill failed (team=%s): %s", org_id, e)
             else:
-                # #4709: sync onboarding write still ON the loop (declared
-                # residual — see the `_run_indexing` docstring).
-                _update_onboarding_state(
-                    org_id, github_legacy_backfill_done=True)
+                # #4709: the write is OFF the loop with NO BOUND — the bound
+                # decision #4625 requires, recorded here. This write MUTATES
+                # the jsonb state via a compare-and-set, and a bounded
+                # `wait_for` cancels only the await, never the worker thread
+                # (CPython #87185): it would abandon a worker MID-WRITE and
+                # claim a retryable state it cannot observe (#2863). So the
+                # answer is `asyncio.to_thread` (waits for completion).
+                # `_echo=False`: the return is DISCARDED here, which is the
+                # documented WRITE-ONLY contract (#4625) — it skips
+                # `_get_onboarding_projection`'s blocking registry probes
+                # without changing what is written.
+                await asyncio.to_thread(
+                    _update_onboarding_state, org_id, _echo=False,
+                    github_legacy_backfill_done=True)
 
         # ── Cursor + repo scope (Tasks 2/4). First-run scope = ONE repo
         # regardless of org size (P2-4 pre-decided fallback) with the honest
@@ -31131,6 +31160,21 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
                  repos_processed=totals["repos_processed"],
                  repos_total=len(walk_repos))
 
+        # #4709: persist the cursor/flags BEFORE the status flips to
+        # `completed`, so the status is a truthful "the run is done AND its
+        # resume point is durable" signal. The persist used to happen ONLY in
+        # the finally — i.e. AFTER `completed` was already visible to a
+        # poller — and the resulting window was masked only because the write
+        # ran ON the loop (it blocked the poller's GET). With the write off the
+        # loop the window is real: a client that reads state on `completed`
+        # (exactly what `tests/test_github_index_lifecycle.py` and the
+        # dashboard do) can observe the PREVIOUS cursor and re-walk the whole
+        # backlog. `_index_state_updates` is the same computation the finally
+        # used, so the fields persisted are byte-identical.
+        await asyncio.to_thread(
+            _update_onboarding_state, org_id, _echo=False,
+            **_index_state_updates(cursors, totals))
+        persisted = True
         _job(status="completed", progress=100,
              points_created=totals["points_created"],
              statements_superseded=totals["statements_superseded"],
@@ -31167,17 +31211,17 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
         # processed): a 0-repo failure (resolve_repos 404, pre-walk raise)
         # leaves it untouched so the next run keeps the ONE-repo
         # bounded first-run pacing (P2, PR #1792).
-        updates: dict = {"github_index_cursor": cursors}
-        if totals["repos_processed"] > 0:
-            updates["github_indexed"] = True
-            # #1894: stamp the last-indexed timestamp in the SAME branch that
-            # flips the bool (parity semantics — "last time indexing ran and
-            # made progress", incl. quota-partial/mid-walk-error runs with >=1
-            # repo processed, mirroring github_indexed's resumable-cursor
-            # behavior).
-            updates["github_indexed_at"] = datetime.now(UTC).isoformat()
-        # #4709: sync onboarding write still ON the loop (declared residual).
-        _update_onboarding_state(org_id, **updates)
+        # #4709: OFF the loop, NO BOUND and `_echo=False` — a mutating jsonb
+        # compare-and-set; a bound would abandon the worker mid-write
+        # (#2863/#4625; a bounded `wait_for` cancels only the await, never the
+        # worker — CPython #87185), and the return is DISCARDED so the
+        # write-only `_echo=False` contract applies (it also skips
+        # `_get_onboarding_projection`'s blocking registry probes). Skipped on
+        # the happy path — the completion path above already persisted.
+        if not persisted:
+            await asyncio.to_thread(
+                _update_onboarding_state, org_id, _echo=False,
+                **_index_state_updates(cursors, totals))
         # Evict after an hour (T1-P14: eviction-expired polls render
         # honestly).
         import asyncio as _asyncio
@@ -31185,6 +31229,25 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
             _INDEX_JOB_EVICT_S,
             lambda: (_INDEX_JOBS.pop(job_id, None),
                      _INDEX_JOB_OWNERS.pop(job_id, None)))
+
+
+def _index_state_updates(cursors: dict, totals: dict) -> dict:
+    """The onboarding fields the GitHub index job persists (#4709).
+
+    ONE computation shared by the completion path (which persists BEFORE it
+    reports ``completed``, so the status is truthful) and the ``finally``
+    (which covers partial/failed runs). ``github_indexed`` flips True ONLY on
+    real progress (>=1 repo processed) — a 0-repo failure (``resolve_repos``
+    404, pre-walk raise) leaves it untouched so the next run keeps the
+    ONE-repo bounded first-run pacing (P2, PR #1792) — and
+    ``github_indexed_at`` is stamped in the SAME branch (#1894 parity:
+    "last time indexing ran and made progress").
+    """
+    updates: dict = {"github_index_cursor": cursors}
+    if totals["repos_processed"] > 0:
+        updates["github_indexed"] = True
+        updates["github_indexed_at"] = datetime.now(UTC).isoformat()
+    return updates
 
 
 def _relink_sessions_after_index(org_id: str) -> None:

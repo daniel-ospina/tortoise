@@ -1109,6 +1109,12 @@ class GitHubIndexer:
         #1895: a 0-processed run that did NOT cap/quota-cut mints a CLEAN
         boundary cursor from the input (drops ``truncated``) so a fully-
         drained backlog exits DRAIN — see the cursor-mint below.
+
+        #4709: the synchronous projection walk + cursor mint run in ONE
+        worker hand-off (``_project_items``). The projection ATTACH stays on
+        the caller's loop (tortoise#7500 — a pooled worker resolves the store
+        path from a stale test stem) and the attached handle rides the
+        hand-off.
         """
         client = await self._get_client()
         proj = sdk._get_proj()
@@ -1137,6 +1143,55 @@ class GitHubIndexer:
             await self._fetch_items(
                 client, repo, cursor, cap, on_progress=on_progress))
         stats["total_fetched"] = len(items)
+        # #4709: the projection walk is SYNCHRONOUS graph I/O (``proj.apply`` /
+        # ``proj.g.query`` per item) and it runs in ONE worker hand-off. The
+        # hand-off covers the WHOLE synchronous region — the per-item loop AND
+        # the cursor/truncation/DRAIN mint below — deliberately: the region was
+        # ACCIDENTALLY atomic when it ran inline (the single-threaded loop
+        # serialized it), and a per-item hand-off would ADD interleaving points
+        # between statements the original ran uninterleaved.
+        #
+        # ``asyncio.to_thread`` carries NO BOUND: the wait cannot abandon the
+        # worker. A bounded ``wait_for`` cancels only the await, never the
+        # thread (CPython #87185), so it would abandon a worker MID-WRITE of the
+        # graph — the #2863 hazard #4625's bounded-mutation rule exists to
+        # prevent. This walk MUTATES (objects/events + the persisted cursor),
+        # so the decision is deliberately no bound.
+        #
+        # ``quota_check`` rides the SAME hand-off (it is re-checked per item);
+        # its ``QuotaCheckError`` fail-closed re-raise and the
+        # ``QuotaExceededError`` → ``quota_hit`` break keep their semantics — a
+        # raise in the worker propagates out of the await unchanged.
+        await asyncio.to_thread(
+            self._project_items, sdk, proj, repo, items, stats, cursor,
+            quota_check, on_progress, total_estimate, cap_hit, walk_complete,
+            boundary_stop, journal_ids)
+        await self._close()
+        return stats
+
+    def _project_items(self, sdk, proj, repo: str, items: list[dict],
+                       stats: dict[str, Any], cursor: dict | None,
+                       quota_check, on_progress,
+                       total_estimate: int | None, cap_hit: bool,
+                       walk_complete: bool, boundary_stop: bool,
+                       journal_ids: set) -> None:
+        """#4709: the SYNCHRONOUS half of ``index_repo``.
+
+        The per-item projection loop plus the cursor/truncation/DRAIN mint,
+        run as ONE worker hand-off by ``index_repo`` so neither the loop nor
+        the mint can park the hosted event loop. Mutates ``stats`` in place and
+        raises exactly what the inline region raised (``QuotaCheckError`` /
+        ``QuotaExceededError`` semantics unchanged).
+
+        ``proj`` is the handle ``index_repo`` attached ON THE LOOP. The attach
+        must stay there: ``FalkorProjection.__init__`` resolves the store path
+        from the CONSTRUCTING thread's test stem, so a pooled worker (reused
+        across tests, its inherited stem stale) would resolve a DIFFERENT store
+        and split reader from writer — tortoise#7500, the defect that reverted
+        #4645's hand-offs. Using the already-attached handle from the worker is
+        the established cross-thread shape
+        (``_capture_session_probe_off_loop``, the dream pools).
+        """
         last: dict | None = None
         # #1989 review round 2: track the NEWEST processed item too — a
         # multi-second run whose walk completes uncapped mints the boundary
@@ -1289,8 +1344,6 @@ class GitHubIndexer:
                     # complete drain (plan §Follow-ups gap audit).
                     "gap_audit_required": True,
                 }
-        await self._close()
-        return stats
 
 
 def _content_hash(text: str) -> str:
