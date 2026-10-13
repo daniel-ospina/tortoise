@@ -1569,6 +1569,43 @@ def _redact_summary_strings(obj, _depth: int = 0):
     return obj
 
 
+def _capture_turn_frame(turn: dict) -> str:
+    r"""The writer's stored frame ``"[role] <body>"`` for ONE WINDOWED turn.
+
+    The single definition of the stored frame, shared by the writer
+    (``_capture_turn_texts_with_redactions``) and — since #5394 — by the
+    confirmation's RAW model of what the server stored
+    (``session_confirm``), so the two cannot drift. The caller supplies an
+    already-windowed turn (``_capture_turn_window``): NEITHER side re-clips
+    here, because the cap was applied to the PRE-redaction text and its marker
+    records that text's true length (#4897). Re-applying the cap to the
+    SCRUBBED result would re-derive the length from text a #4911 replacement
+    changed — writing a FALSE marker whose "original length" is the
+    post-redaction size (6927 → 5008, reproduced in review) — so the stored
+    body may exceed the cap by the redaction markup, which is a replacement,
+    not conversation. A complete turn stays unmarked.
+
+    ⛔ NEUTRALIZE THE FRAMING DELIMITERS IN THE ROLE (#5445 review). The frame
+    is ``[<role>] <body>`` and ``<role>`` is caller-controlled, so a role
+    containing ``]`` ends the frame early. That is not hypothetical: the #5445
+    role scrub WRITES one — a role holding a credential becomes
+    ``[REDACTED:github_token]``, and the stored text is
+    ``[[REDACTED:github_token]] please review…``. The reader's inverse
+    (``_CAPTURE_ROLE_PREFIX``, ``^\[([^\]]*)\]\s*``) then parses the speaker as
+    ``[REDACTED:github_token`` — dropping the closing bracket — and hands the
+    BODY a stray ``] ``, so ``:Point.speaker`` and the turn the read path serves
+    are both corrupted on the exact path this cluster fixes. Brackets are
+    rewritten in the ROLE only; the body is untouched. (The neutralization is
+    also why a redacted ROLE is served as ``(REDACTED:<kind>)`` and not
+    ``[REDACTED:<kind>]`` — ``session_confirm`` recognises both forms.)
+    """
+    role = _normalize_turn_role(turn.get("role"))
+    role = role.replace("[", "(").replace("]", ")")
+    raw = turn.get("content")
+    content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
+    return f"[{role}] {content}"
+
+
 def _capture_turn_texts_with_redactions(
     windowed: list[dict],
 ) -> tuple[list[str], dict[str, int]]:
@@ -1612,33 +1649,10 @@ def _capture_turn_texts_with_redactions(
     the caller passes.
     """
     redacted, counts = _redact_turn_contents(windowed)
-    texts: list[str] = []
-    for turn in redacted:
-        role = _normalize_turn_role(turn.get("role"))
-        # ⛔ NEUTRALIZE THE FRAMING DELIMITERS IN THE ROLE (#5445 review). The
-        # frame is ``[<role>] <body>`` and ``<role>`` is caller-controlled, so a
-        # role containing ``]`` ends the frame early. That is not hypothetical:
-        # the #5445 role scrub WRITES one — a role holding a credential becomes
-        # ``[REDACTED:github_token]``, and the stored text is
-        # ``[[REDACTED:github_token]] please review…``. The reader's inverse
-        # (``_CAPTURE_ROLE_PREFIX``, ``^\[([^\]]*)\]\s*``) then parses the
-        # speaker as ``[REDACTED:github_token`` — dropping the closing bracket —
-        # and hands the BODY a stray ``] ``, so ``:Point.speaker`` and the turn
-        # the read path serves are both corrupted on the exact path this cluster
-        # fixes. Brackets are rewritten in the ROLE only; the body is untouched.
-        role = role.replace("[", "(").replace("]", ")")
-        raw = turn.get("content")
-        content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
-        # #4897: NO re-clip here. The cap was applied to the PRE-redaction text
-        # by the caller's ``_capture_turn_window``, and its marker records that
-        # text's true length. Re-applying the cap to the SCRUBBED result would
-        # re-derive the length from text the #4911 replacement changed — writing
-        # a FALSE marker whose "original length" is the post-redaction size
-        # (6927 → 5008, reproduced in review) — so the stored body may exceed
-        # the cap by the redaction markup, which is a replacement, not
-        # conversation. A complete turn therefore stays unmarked.
-        texts.append(f"[{role}] {content}")
-    return texts, counts
+    # The frame (including the #5445 role-delimiter neutralization and the
+    # #4897 no-re-clip rule) lives in ONE place, ``_capture_turn_frame``, so
+    # the writer and the #5394 confirmation's RAW model cannot drift.
+    return [_capture_turn_frame(turn) for turn in redacted], counts
 
 
 def _capture_turn_texts(windowed: list[dict]) -> list[str]:
