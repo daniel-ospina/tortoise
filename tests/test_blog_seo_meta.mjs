@@ -378,6 +378,70 @@ console.log("generate-seo handler — one brand suffix, no dangling separator, n
   assertEq(suffixCount, 1, `the brand suffix is appended once, not twice (got ${JSON.stringify(happy.body.meta_title)})`);
   assertEq(happy.body.keyword_ok, true, "keyword_ok is true when the keyword is genuinely present");
 
+  // ⛔ The suffix check above only exercises the APPEND path (the mock writes no
+  // suffix), so it cannot see the near-miss corruption: `metaTitle` used to
+  // recognise only the EXACT string " | Tortoise", so any other spelling got a
+  // SECOND suffix appended — user-visible as "… |Tortoise | Tortoise" while
+  // `keyword_ok` stayed green, because the raw title was short (#8446 review,
+  // measured at 92% of a near-miss matrix). Assert the canonicalisation directly,
+  // and assert it for EVERY spelling rather than one.
+  {
+    const base = "long-term memory for ai agents";
+    const nearMisses = [
+      "| Tortoise", "|Tortoise", "| tortoise", "  |  Tortoise",
+      " \u2014 Tortoise", "| Tortoise.", "- Tortoise", " | TORTOISE",
+    ];
+    for (const variant of nearMisses) {
+      const out = constraints.metaTitle(`${base}${variant}`);
+      assertEq(out, `${base} | Tortoise`, `near-miss suffix ${JSON.stringify(variant)} is canonicalised, not doubled`);
+      assertEq((out.match(/Tortoise/gi) || []).length, 1, `...exactly one brand token for ${JSON.stringify(variant)}`);
+    }
+    // The separator is REQUIRED: a title legitimately ending in the word is not
+    // mistaken for the brand suffix.
+    assertEq(
+      constraints.metaTitle("Why Tortoise"),
+      "Why Tortoise | Tortoise",
+      "a title ending in the word with no separator is left alone (only the suffix is appended)",
+    );
+    // ⛔ Idempotency was claimed in a comment and falsified in ~0.16% of random
+    // inputs: the old `endsWith` shortcut only held for the exact spelling. The
+    // second `enforce` pass runs on the first one's output, so this is load-bearing.
+    let nonIdempotent = 0;
+    const words = ["memory", "agents", "recall", "graph", "why", "brief", "and", "in", "confidence"];
+    for (let seed = 0; seed < 3000; seed++) {
+      let t = "";
+      let r = seed * 1103515245 + 12345;
+      const next = () => (r = (r * 1103515245 + 12345) & 0x7fffffff);
+      const target = 20 + (next() % 70);
+      while (t.length < target) t += `${words[next() % words.length]} `;
+      t = t.trim();
+      if (next() % 5 === 0) t += ["|Tortoise", " | Tortoise", ";", "."][next() % 4];
+      const once = constraints.metaTitle(t);
+      // Count, then assert ONCE — asserting inside the loop made the suite emit
+      // 3,000 assertion lines and drowned every other result in the output.
+      if (constraints.metaTitle(once) !== once) {
+        nonIdempotent++;
+        if (nonIdempotent <= 3) console.error(`    non-idempotent input: ${JSON.stringify(t)} → ${JSON.stringify(once)}`);
+      }
+    }
+    assertEq(nonIdempotent, 0, "metaTitle is idempotent across a 3,000-title generated corpus");
+    // ⛔ Cap BOUNDARIES. The `!truncated` clause in `keyword_ok` is load-bearing
+    // and only tested in the interior; an off-by-one at the cap would be invisible.
+    assert(
+      constraints.metaTitle("x".repeat(60)).length <= 60,
+      "a 60-char title is not treated as over the cap",
+    );
+    assertEq(
+      constraints.metaTitle(`${"a".repeat(55)}${" "}${"b".repeat(4)}`).length <= 60,
+      true,
+      "a title exactly at the cap stays within it",
+    );
+    const over = constraints.metaTitle(`${"a".repeat(58)} tail`);
+    assert(over.length <= 60, `a 63-char title is shortened (got ${over.length})`);
+    assertEq(constraints.metaDescription("d".repeat(155)).length, 155, "a 155-char description is NOT shortened");
+    assertEq(constraints.metaDescription("d".repeat(156)).length, 155, "a 156-char description IS shortened to the cap");
+  }
+
   // The repair's truncation can land inside the brand suffix; the fragment must
   // not survive as a dangling " |".
   const dangling = await drive(
@@ -859,6 +923,77 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     "a description the length contract cut is not the model's text, so the verdict is false",
   );
 
+  // ⛔ CAP BOUNDARIES for the `!truncated` clause. Its assertions above test
+  //    `constraints` directly, so an off-by-one in `generate-seo.ts`'s own
+  //    comparison was invisible: mutating `>` to `>=` (or to `> cap + 1`) left
+  //    the suite green. These two fixtures sit exactly ON the caps.
+  //
+  //    Exactly 60 chars → NOT truncated → green; with `>=` it would be false.
+  const titleAtCap = "Long-Term Memory for AI Agents Explained in Depth Right Now!";
+  assertEq(titleAtCap.length, 60, "(fixture precondition: the title is exactly the cap)");
+  const atCap = await drive({
+    primaryKeyword: "long-term memory for ai agents",
+    metaTitle: titleAtCap,
+    metaDescription: "A description naming long-term memory for ai agents comfortably within its own cap.",
+  });
+  assertEq(
+    atCap.body.keyword_ok,
+    true,
+    "a title EXACTLY at the cap is not truncated, so the verdict stays true",
+  );
+
+  //    One char OVER the title cap → truncated → false; with `> cap + 1` it would
+  //    be true. The keyword sits at the FRONT so it survives the cut and the
+  //    enforced check cannot catch this — only the cap comparison can.
+  const titleOverCap = "Long-Term Memory for AI Agents Explained in Depth Right Now!!";
+  assertEq(titleOverCap.length, 61, "(fixture precondition: the title is one char over the cap)");
+  const overTitle = await drive({
+    primaryKeyword: "long-term memory for ai agents",
+    metaTitle: titleOverCap,
+    metaDescription: "A description naming long-term memory for ai agents comfortably within its own cap.",
+  });
+  assert(
+    overTitle.body.meta_title.toLowerCase().includes("long-term memory for ai agents"),
+    "...the keyword really does survive the truncation, so only the cap check catches it",
+  );
+  assertEq(
+    overTitle.body.keyword_ok,
+    false,
+    "a title one char OVER the cap is truncated, so the verdict is false",
+  );
+
+  //    Exactly 155 chars → NOT truncated → green; with `>=` it would be false.
+  //    WITHOUT this fixture the description half of the `!truncated` clause was
+  //    untested: the title fixtures masked `>` → `>=` for the description, so the
+  //    combined mutation still failed — via the title only (caught by the
+  //    verifier, not by me).
+  const descAtCap = 'long-term memory for ai agents records why a belief changed, compared with recall-only systems that x x x x x x x x x x x x x x x x x x x x x x x x x x x x';
+  assertEq(descAtCap.length, 155, "(fixture precondition: the description is exactly the cap)");
+  const descAtCapCase = await drive({
+    primaryKeyword: "long-term memory for ai agents",
+    metaTitle: "Long-Term Memory for AI Agents",
+    metaDescription: descAtCap,
+  });
+  assertEq(
+    descAtCapCase.body.keyword_ok,
+    true,
+    "a description EXACTLY at the cap is not truncated, so the verdict stays true",
+  );
+
+  //    Exactly 156 chars → truncated → false; with `> cap + 1` it would be true.
+  const longDesc = `Long-term memory for ai agents ${"x".repeat(156 - "Long-term memory for ai agents ".length)}`;
+  assertEq(longDesc.length, 156, "(fixture precondition: the description is one char over the cap)");
+  const overDesc = await drive({
+    primaryKeyword: "long-term memory for ai agents",
+    metaTitle: "Long-Term Memory for AI Agents",
+    metaDescription: longDesc,
+  });
+  assertEq(
+    overDesc.body.keyword_ok,
+    false,
+    "a description one char OVER the cap is truncated, so the verdict is false",
+  );
+
   assertKeywordOk("fluent", fluent, "Epistemic Memory: Why Confidence Matters | Tortoise",
     "Epistemic memory records why a belief changed. Tortoise tracks confidence and updates beliefs when information conflicts.");
   assertKeywordOk("descriptionOnly", descriptionOnly, "Why Confidence Matters More Than Recall | Tortoise",
@@ -889,6 +1024,11 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
 
   // 3. ⛔ The model must not be able to introduce a keyword the research never
   //    produced. An unknown choice falls back to the tag-derived keyword.
+  //
+  //    Rate limiter reset for the same reason as elsewhere in this block: the
+  //    fixtures above spend the per-window budget (AGENT_RATE, 20/min), and a
+  //    429 surfaces here as an unrelated failure in the middle of the reasoning.
+  __resetRateLimits();
   const invented = await drive({
     primaryKeyword: "make money fast with ai agents",
     generatedTags: ["agent-memory"],
@@ -902,6 +1042,13 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   );
 
   // 4. A model that says nothing usable still falls back correctly.
+  //
+  //    The rate limiter is reset here for the same reason as in block 5: the
+  //    assertions below are about keyword resolution, and a 429 from the budget
+  //    spent by the fixtures above would surface as an unrelated failure in the
+  //    middle of that reasoning (it did, while the cap-boundary fixtures were
+  //    being added).
+  __resetRateLimits();
   const silent = await drive({ primaryKeyword: null });
   assertEq(
     silent.body.primary_keyword,
@@ -911,6 +1058,14 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
 
   // 5. The tag-SUPPLIED path is unchanged: the caller's intent wins and the
   //    prompt names their keyword rather than a candidate list.
+  //
+  //    ⛔ Reset the agent rate limiter first. It is per-key per-window
+  //    (AGENT_RATE, 20/min) and the blocks above spend most of that budget, so
+  //    adding requests earlier in this file silently starved THIS block with a
+  //    429 — surfacing as four unrelated assertion failures that had nothing to
+  //    do with the change (found while adding the cap-boundary fixtures). The
+  //    limiter is imported for exactly this; not calling it here was the bug.
+  __resetRateLimits();
   let suppliedPrompt = "";
   globalThis.fetch = async (url, init) => {
     const u = String(url);
