@@ -155,7 +155,7 @@ are identity-dependent. They fall into four families, each with a verdict:
 under an arbitrary id, a reference carrying the *derived* id of `SHARED` mints a **second
 carrier of one logical entity**:
 
-```
+```text
 carriers of name 'SHARED' == [['ARBITRARY_ID', 'live'],
                               ['obj-2c8f61dbe32e30a50debc0b61b', None]]
 ```
@@ -183,15 +183,15 @@ Not ported, and deliberately not to be resurrected:
 
 ## Acceptance, against #3589's own checklist
 
-- [x] **A written inventory, each test classified (A)/(B)/(C), scenario named in one line** — this document.
-- [x] **(A) tests ported and green on the new model** — **vacuous**: (A) is empty. No test in PR #3326 compiles against `main`'s API; every contract that outlived the model is already pinned in `main` (the `held` rows above), and the 21 tests that reach the API through no discarded symbol assert the *tombstone* vocabulary, which `main` replaced with a hard delete.
-- [x] **(B) scenarios captured into the shared fixture; each has a deliberate verdict** — captured in `tests/fixtures/entity_identity_vectors.json` (#3590 Slice 0, the #3589 mechanism) with `verdict` + `owner` per vector; the four family verdicts are recorded above. The one *unexpected* verdict is carried into `main` as a firing instrument rather than prose.
-- [x] **Every deferred-behaviour item carries an issue reference** — the fixture's loader refuses a `verdict ∈ {xfail, pending}` without an `owner` (`tests/identity_vectors.py`: *"#3589 forbids a permanently-skipped test with no owner"*); every owner named here is **#3590** (open) or a closed-with-live-owner pair (#3389 → #5048 → #3590).
-- [x] **Nothing ported asserts the deleted model** — `tests/test_3589_3326_salvage.py` is the only artifact ported, and it asserts nothing the PR's API added; it asserts the *identity* contract (one entity → one node) that the deleted model was a (rejected) attempt to satisfy.
+* [x] **A written inventory, each test classified (A)/(B)/(C), scenario named in one line** — this document.
+* [x] **(A) tests ported and green on the new model** — **vacuous**: (A) is empty. No test in PR #3326 compiles against `main`'s API; every contract that outlived the model is already pinned in `main` (the `held` rows above), and the 21 tests that reach the API through no discarded symbol assert the *tombstone* vocabulary, which `main` replaced with a hard delete.
+* [x] **(B) scenarios captured into the shared fixture; each has a deliberate verdict** — captured in `tests/fixtures/entity_identity_vectors.json` (#3590 Slice 0, the #3589 mechanism) with `verdict` + `owner` per vector; the four family verdicts are recorded above. The one *unexpected* verdict is carried into `main` as a firing instrument rather than prose.
+* [x] **Every deferred-behaviour item carries an issue reference** — the fixture's loader refuses a `verdict ∈ {xfail, pending}` without an `owner` (`tests/identity_vectors.py`: *"#3589 forbids a permanently-skipped test with no owner"*); every owner named here is **#3590** (open) or a closed-with-live-owner pair (#3389 → #5048 → #3590).
+* [x] **Nothing ported asserts the deleted model** — `tests/test_3589_3326_salvage.py` is the only artifact ported, and it asserts nothing the PR's API added; it asserts the *identity* contract (one entity → one node) that the deleted model was a (rejected) attempt to satisfy.
 
 ## Evidence commands
 
-```
+```bash
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_3589_3326_salvage.py -q -p no:cacheprovider
 #   1 xfailed   (strict xfail: the live #3389/#3590 shape)
 
