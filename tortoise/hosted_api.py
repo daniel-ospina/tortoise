@@ -31215,6 +31215,17 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
       is reused across tests — the job then writes where the test's reader
       never looks (tortoise#7500; measured as 3 reds under #4645, which is why
       its hand-offs were reverted). They can move only once #7500 lands.
+    * ``backfill_legacy_closed``'s OWN SCAN is ALSO still inline, and it is a
+      declared residual too — but NOT a #7500 site. It runs two full-:Event
+      reads plus one journaled ``apply`` per mint (``github_indexer.py``), all
+      synchronously on the loop. It takes the same ``proj`` handle the attach
+      does, so it CAN be off-loaded to the index pool; it is left inline
+      because it is a ONE-TIME cost, gated on the
+      ``github_legacy_backfill_done`` marker (set only on success), so it runs
+      at most once per org and never on a re-walk. Named here because the
+      pre-#4709 docstring named it, and the first revision of this bullet
+      dropped it — an exhaustive-sounding list with a hole is how a real
+      residual goes invisible.
     * ``_relink_sessions_after_index`` (the completion relink pass) is ALSO
       still inline: it is a sync helper that constructs its own SDK and
       attaches, so it carries the same #7500 constraint. Declared, not

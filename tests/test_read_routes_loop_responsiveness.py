@@ -500,8 +500,8 @@ _OFFLOAD_BOUNDARY_CALLEES = frozenset({
 #: WALK and its three ``_update_onboarding_state`` writes off the loop (the walk
 #: inside ``index_repo`` via ``_project_items``, the writes via
 #: ``_run_off_loop(_INDEX_EXECUTOR, ...)`` + ``_echo=False``), but the
-#: ``_make_sdk`` construction
-#: and the attach handed to ``backfill_legacy_closed`` still run in the body,
+#: ``_make_sdk`` construction, the attach handed to ``backfill_legacy_closed``
+#: and that scan ITSELF still run in the body,
 #: and an attach that moved to a worker would resolve the embedded per-test
 #: store from a reused pool thread's STALE stem (tortoise#7500, the defect that
 #: reverted #4645's hand-offs). This set asserts NO construction and NO graph
@@ -602,18 +602,22 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
 #: off-loaded its `_control_plane_source` resolve.
 #:
 #: `_run_indexing` is here (not in `_OFFLOADED_ASYNC_BODIES`) because, after
-#: #4709, two sites in its OWN body still run on the loop and both are the
-#: tortoise#7500 constraint rather than an omission: the `_make_sdk`
-#: construction, and the `org_sdk._get_proj()` attach passed to
+#: #4709, sites in its OWN body still run on the loop, and they are declared
+#: residuals rather than omissions. Two are the tortoise#7500 constraint: the
+#: `_make_sdk` construction, and the `org_sdk._get_proj()` attach passed to
 #: `backfill_legacy_closed`. A worker-thread construction/attach resolves the
 #: embedded per-test store path from a reused pool thread's STALE inherited
 #: stem (epic #1686's currency check then fails closed to the non-per-test
 #: path), so the job writes to a store the test's reader never looks at —
 #: measured as 3 deterministic reds under #4645, whose hand-offs were
 #: reverted for it. The attach can move only once #7500 lands.
-#: `_relink_sessions_after_index` (the completion relink pass) is the third
-#: inline graph site, same constraint — a sync helper that builds its own SDK.
-#: The WALK (now `index_repo._project_items`, another module) and all THREE
+#: `_relink_sessions_after_index` (the completion relink pass) is a third,
+#: same constraint — a sync helper that builds its own SDK.
+#: `backfill_legacy_closed`'s OWN one-time SCAN is the fourth and is NOT
+#: #7500-bound: it takes the same `proj` handle, so it CAN move to the index
+#: pool; it stays inline because the `github_legacy_backfill_done` marker
+#: bounds it to ONE run per org. The WALK (now `index_repo._project_items`,
+#: another module) and all THREE
 #: `_update_onboarding_state` writes (now the index job's own pool —
 #: `_run_off_loop(_INDEX_EXECUTOR, ...)` — plus `_echo=False`)
 #: ARE off the loop as of #4709. `test_run_indexing_residual_is_named_head_on`
@@ -1157,13 +1161,18 @@ def test_run_indexing_residual_is_named_head_on():
         "`completed` while the cursor is still only in the `finally`, so a "
         "client that reads state on `completed` sees the previous cursor")
 
-    # (2) what stays on the loop is EXACTLY the tortoise#7500 sites: the SDK
-    # construction and the one attach handed to `backfill_legacy_closed` —
-    # plus the relink pass, whose own SDK build carries the same constraint.
-    # Pinned as an exact count so a THIRD site cannot appear unnoticed, and so
-    # off-loading one of these fails here (update the pin with the residual).
+    # (2) what stays on the loop is pinned as an EXACT count so no site can
+    # appear or leave unnoticed. Most are the tortoise#7500 constraint (the SDK
+    # construction, the attach handed to `backfill_legacy_closed`, the relink
+    # pass); `backfill_legacy_closed`'s OWN one-time scan is a declared
+    # residual rather than a #7500 site — it can be off-loaded (same `proj`
+    # handle) and is only left inline because the
+    # `github_legacy_backfill_done` marker bounds it to one run per org.
+    # Off-loading or re-siting any of these fails here: update the pin WITH the
+    # residual AND the docstring in `hosted_api._run_indexing`.
     inline = _inline_calls_to(node, frozenset({
         "_make_sdk", "_data_sdk", "_get_proj", "_relink_sessions_after_index",
+        "backfill_legacy_closed",
     }))
     assert inline.count("_make_sdk") == 1, (
         f"#4709: `_run_indexing` has {inline.count('_make_sdk')} inline "
@@ -1182,6 +1191,15 @@ def test_run_indexing_residual_is_named_head_on():
         "#4709: the completion relink pass is still a declared inline "
         "residual (it builds its own SDK — same #7500 constraint); if it was "
         "off-loaded, record that here")
+    assert inline.count("backfill_legacy_closed") == 1, (
+        f"#4709: `_run_indexing` has {inline.count('backfill_legacy_closed')} "
+        "inline `backfill_legacy_closed` scan(s); the single one is a declared "
+        "on-loop residual (two full-:Event reads plus a journaled mint per row, "
+        "`indexer/github_indexer.py`), bounded to ONE run per org by the "
+        "`github_legacy_backfill_done` marker. It is NOT a #7500 site — it "
+        "takes the `proj` handle, so it CAN move to the index pool; if it was "
+        "off-loaded (or a second site appeared), record that here and in the "
+        "`hosted_api._run_indexing` docstring")
 
 
 def test_index_repo_projection_walk_is_offloaded():

@@ -24,7 +24,11 @@ shared default executor. What stays INLINE is the ``_make_sdk`` construction,
 the ``_get_proj()`` attach handed to ``backfill_legacy_closed`` and the
 ``_relink_sessions_after_index`` pass — all three the same tortoise#7500
 constraint, because a worker-thread construction or attach resolves the
-embedded per-test store from a stale pooled-thread stem. The AST pin
+embedded per-test store from a stale pooled-thread stem — plus
+``backfill_legacy_closed``'s OWN one-time SCAN (two full-:Event reads plus a
+journaled mint per row), which is NOT #7500-bound and stays inline only
+because the ``github_legacy_backfill_done`` marker bounds it to one run per
+org. The AST pin
 ``test_run_indexing_residual_is_named_head_on`` in that file holds this shape.)
 
 This file adds the BEHAVIOURAL half, in the same style as that file: the
