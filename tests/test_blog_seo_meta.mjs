@@ -15,6 +15,7 @@ import {
   containsKeyword,
   normalizeForMatch,
   ensureKeyword,
+  isKnownKeyword,
 } from "../website/functions/blog/_shared/seo-keywords.ts";
 import { rateLimited, __resetRateLimits } from "../website/functions/blog/_shared/agent-auth.ts";
 import { constraints } from "../website/functions/blog/_shared/seo-constraints.ts";
@@ -385,6 +386,184 @@ console.log("metaTitle never returns a value ending in a dangling separator (#83
     metaTitle("Long-term Memory for AI Agents: Recall vs Learning | Tortoise"),
     "Long-term Memory for AI Agents: Recall vs Learning",
     "the exact live response no longer ends in a bare pipe",
+  );
+}
+
+// ── #8445: the model must be ASKED for the keyword, not told nothing ───────
+// On the tagless path the old prompt said "No mapped keywords — derive terms
+// from the content itself", so the model wrote a fluent title with no keyword
+// and the repair bolted one on the front as "<keyword>: <title>", truncating it.
+console.log("");
+console.log("the tagless prompt SEEDS candidate keywords and honours the model's choice (#8445)");
+{
+  const { onRequestPost } = await import("../website/functions/blog/api/generate-seo.ts");
+
+  let seenPrompt = "";
+  const drive = async (opts = {}) => {
+    seenPrompt = "";
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      if (u.includes("/rest/v1/blog_agent_keys")) {
+        return Response.json([{ agent_name: "pipeline", active: true }]);
+      }
+      if (u.includes("openrouter.ai")) {
+        try {
+          seenPrompt = JSON.parse(String(init?.body ?? "{}")).messages.map((m) => m.content).join("\n");
+        } catch {
+          seenPrompt = "";
+        }
+        return Response.json({
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                slug: "a-slug",
+                excerpt: "A concrete excerpt that earns the click.",
+                tags: opts.generatedTags ?? ["agent-memory"],
+                meta_title: opts.metaTitle ?? "Agent Memory 2026: Recall vs Learning | Tortoise",
+                meta_description: opts.metaDescription ??
+                  "Agent memory systems measure recall, not learning. Tortoise tracks confidence and updates beliefs when information conflicts.",
+                ...(opts.primaryKeyword === undefined ? {} : { primary_keyword: opts.primaryKeyword }),
+              }),
+            },
+          }],
+          usage: { prompt_tokens: 10, completion_tokens: 20 },
+        });
+      }
+      return Response.json({});
+    };
+    const request = new Request("https://tortoise.premiselabs.co/blog/api/generate-seo", {
+      method: "POST",
+      headers: { "X-Agent-Key": "test-key", "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "A title", body: "Sentence. ".repeat(40) }),
+    });
+    const res = await onRequestPost({
+      request,
+      env: { SUPABASE_URL: "https://db.test", SUPABASE_SERVICE_ROLE_KEY: "svc", OPENROUTER_API_KEY: "or" },
+    });
+    return { status: res.status, body: await res.json() };
+  };
+
+  // 1. The prompt must SHOW the model the candidates. Asking for a keyword the
+  //    model was never shown is the defect this fixes.
+  await drive();
+  assert(
+    seenPrompt.includes("long-term memory for ai agents"),
+    "the tagless prompt seeds real candidate keywords",
+  );
+  assert(
+    /choose exactly ONE/i.test(seenPrompt),
+    "the tagless prompt instructs the model to choose one keyword",
+  );
+  assert(
+    !seenPrompt.includes("No mapped keywords"),
+    "the old do-nothing instruction is gone",
+  );
+  // The instruction must explicitly forbid the colon-prefix shape the repair
+  // used to produce, or the model will reproduce it.
+  assert(
+    /natural phrase rather than prefixed with a colon/i.test(seenPrompt),
+    "the prompt forbids the colon-prefixed shape the repair produced",
+  );
+
+  // 2. When the model HONOURS that instruction, the repair must not fire:
+  //    the title stays fluent and the verified keyword is the one it chose.
+  const fluent = await drive({
+    primaryKeyword: "long-term memory for ai agents",
+    metaTitle: "Long-Term Memory for AI Agents: Recall vs Learning | Tortoise",
+    metaDescription:
+      "Long-term memory for AI agents measures recall but not learning. Tortoise tracks confidence and updates beliefs when information conflicts.",
+  });
+  assertEq(fluent.body.primary_keyword, "long-term memory for ai agents", "the model's chosen keyword is the verified one");
+  assertEq(fluent.body.keyword_ok, true, "the keyword genuinely landed");
+  assertEq(
+    fluent.body.meta_title.startsWith("long-term memory for ai agents: "),
+    false,
+    `the repair did NOT bolt the keyword on (got ${JSON.stringify(fluent.body.meta_title)})`,
+  );
+  assert(
+    fluent.body.meta_title.toLowerCase().includes("long-term memory for ai agents"),
+    "...and the title still carries the keyword, written naturally",
+  );
+
+  // 3. ⛔ The model must not be able to introduce a keyword the research never
+  //    produced. An unknown choice falls back to the tag-derived keyword.
+  const invented = await drive({
+    primaryKeyword: "make money fast with ai agents",
+    generatedTags: ["agent-memory"],
+    metaTitle: "Make money fast with AI agents today",
+    metaDescription: "A description that does not happen to contain the real keyword either.",
+  });
+  assertEq(
+    invented.body.primary_keyword,
+    primaryKeyword(["agent-memory"]),
+    "an unvalidated keyword is rejected and the researched one is used",
+  );
+
+  // 4. A model that says nothing usable still falls back correctly.
+  const silent = await drive({ primaryKeyword: null });
+  assertEq(
+    silent.body.primary_keyword,
+    primaryKeyword(["agent-memory"]),
+    "a null choice falls back to the tag-derived keyword",
+  );
+
+  // 5. The tag-SUPPLIED path is unchanged: the caller's intent wins and the
+  //    prompt names their keyword rather than a candidate list.
+  let suppliedPrompt = "";
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    if (u.includes("/rest/v1/blog_agent_keys")) return Response.json([{ agent_name: "pipeline", active: true }]);
+    if (u.includes("openrouter.ai")) {
+      try {
+        suppliedPrompt = JSON.parse(String(init?.body ?? "{}")).messages.map((m) => m.content).join("\n");
+      } catch { suppliedPrompt = ""; }
+      return Response.json({
+        choices: [{ message: { content: JSON.stringify({
+          slug: "a-slug", excerpt: "An excerpt.", tags: ["agent-memory"],
+          meta_title: "Long-Term Memory for AI Agents: Recall vs Learning | Tortoise",
+          meta_description: "Long-term memory for AI agents measures recall but not learning, and Tortoise tracks confidence instead.",
+          // ⛔ DELIBERATELY a DIFFERENT, VALID keyword from another tag. The
+          // caller's tags are an explicit statement of intent, so this must NOT
+          // override them. Omitting the field here made this assertion vacuous
+          // and let exactly that regression through (caught in review).
+          primary_keyword: "agent memory architecture",
+        }) } }],
+        usage: { prompt_tokens: 10, completion_tokens: 20 },
+      });
+    }
+    return Response.json({});
+  };
+  const suppliedRes = await onRequestPost({
+    request: new Request("https://tortoise.premiselabs.co/blog/api/generate-seo", {
+      method: "POST",
+      headers: { "X-Agent-Key": "test-key", "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "A title", body: "Sentence. ".repeat(40), tags: ["agent-memory"] }),
+    }),
+    env: { SUPABASE_URL: "https://db.test", SUPABASE_SERVICE_ROLE_KEY: "svc", OPENROUTER_API_KEY: "or" },
+  });
+  const supplied = await suppliedRes.json();
+  assert(
+    /PRIMARY keyword: "long-term memory for ai agents"/.test(suppliedPrompt),
+    "with tags, the prompt still names the caller's keyword explicitly",
+  );
+  assert(
+    !/choose exactly ONE/i.test(suppliedPrompt),
+    "with tags, no candidate list is seeded — the caller's intent governs",
+  );
+  assertEq(
+    supplied.primary_keyword,
+    primaryKeyword(["agent-memory"]),
+    "with tags, the caller's tag-derived keyword is still the one verified",
+  );
+  // The override must not fire even though the model returned a VALID keyword.
+  assert(
+    supplied.primary_keyword !== "agent memory architecture",
+    "a model-chosen keyword does NOT override the caller's tags",
+  );
+  assertEq(
+    isKnownKeyword("agent memory architecture"),
+    true,
+    "(the ignored keyword was itself valid — the guard is about precedence, not validity)",
   );
 }
 

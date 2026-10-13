@@ -24,6 +24,8 @@ import {
   keywordsFor,
   primaryKeyword,
   resolvePrimaryKeyword,
+  allKeywords,
+  isKnownKeyword,
   ensureKeyword,
   containsKeyword,
 } from "../_shared/seo-keywords.ts";
@@ -82,7 +84,7 @@ Rules:
 - tags: 3-5 relevant terms from this vocabulary if they fit: agent-memory, epistemic-memory, knowledge-graph, semantic-memory, episodic-memory, mcp, self-hosting, retrieval, belief-propagation, sessions, memory-systems, provenance. Free-form tags allowed but keep them concrete.
 - meta_title: under 60 chars INCLUDING " | Tortoise" — front-load the search term.
 - meta_description: under 155 chars, active voice, include one concrete benefit.
-Return ONLY a JSON object with keys: slug, excerpt, tags, meta_title, meta_description.`;
+Return ONLY a JSON object with keys: slug, excerpt, tags, meta_title, meta_description, primary_keyword.`;
 
 function buildUserPrompt(title: string, body: string, tags: string[], primary: string | null): string {
   const kw = injectKeywords(tags);
@@ -90,10 +92,20 @@ function buildUserPrompt(title: string, body: string, tags: string[], primary: s
   // different instruction from a bag of suggestions to "weave in", which is what
   // the previous prompt said. Best practice is one main keyword per article —
   // asking for nine is what pushes a model toward stuffing.
+  //
+  // When the CALLER supplied no tags there is no tag-derived primary, and the old
+  // line here ("No mapped keywords — derive terms from the content itself") left
+  // the model with nothing to aim at: it wrote a fluent title, and the repair
+  // then bolted the keyword on the front as `"<keyword>: <title>"` and truncated
+  // it (#8445). Asking for a keyword we never showed the model is not possible,
+  // so the candidates are seeded here instead.
+  const candidates = primary ? [] : allKeywords();
   const kwLine = primary
     ? `PRIMARY keyword: "${primary}". It MUST appear verbatim in meta_title and meta_description.\n` +
       `Other keywords — use naturally in tags or the excerpt, never stuffed: ${kw.filter((k) => k !== primary).join(", ") || "(none)"}`
-    : "No mapped keywords — derive terms from the content itself.";
+    : candidates.length > 0
+      ? `PRIMARY keyword: choose exactly ONE of these researched keywords — the one that best matches the article — and make it appear verbatim and as EARLY as possible in meta_title and meta_description, written as a natural phrase rather than prefixed with a colon. Return the exact keyword you used as "primary_keyword".\nCandidates: ${candidates.join(", ")}`
+      : "No candidate keywords are available — derive terms from the content itself, and return primary_keyword as null.";
   const bodyPreview = body.slice(0, MAX_BODY_PREVIEW);
   return `Title: ${title}\n\nTags (comma-separated): ${tags.join(", ") || "(none)"}\n\n${kwLine}\n\nArticle content:\n${bodyPreview}`;
 }
@@ -260,7 +272,25 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   // Prefer the caller's tags when they exist (they are an explicit statement of
   // intent); otherwise use the model's own tags, which describe what the article
   // is actually about. Deterministic, so the repair below is reproducible.
-  const primary = resolvePrimaryKeyword(tags, enforced.tags);
+  //
+  // The model's own CHOICE wins ONLY when the caller supplied no mapped tag.
+  // The prompt seeds a candidate list on that path and asks the model to return
+  // the exact keyword it used, so verifying that string checks the keyword the
+  // model was actually asked for — instead of inferring one from tags it wrote
+  // for a different purpose.
+  //
+  // ⛔ On the TAG-SUPPLIED path the override must NOT apply: there the prompt
+  // names the CALLER's keyword, and the caller's intent is authoritative (the
+  // contract `resolvePrimaryKeyword` documents). Applying the model's choice
+  // unconditionally let a model silently swap the caller's tag-derived keyword
+  // for a different known keyword, discarding explicit intent.
+  // Validated against the vocabulary either way, so the model can never
+  // introduce a term the research did not produce.
+  const chosen = typeof result.json.primary_keyword === "string" ? result.json.primary_keyword.trim() : "";
+  const primary =
+    promptPrimary === null && chosen && isKnownKeyword(chosen)
+      ? chosen
+      : resolvePrimaryKeyword(tags, enforced.tags);
 
   // VERIFY, DON'T HOPE (#8293). The prompt above ASKS for the primary keyword;
   // a prompt is a request, not a guarantee, and the previous behaviour never

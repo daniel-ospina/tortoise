@@ -60,6 +60,50 @@ export function resolvePrimaryKeyword(suppliedTags: string[], generatedTags: str
   return primaryKeyword(suppliedTags.length > 0 ? suppliedTags : generatedTags);
 }
 
+/**
+ * Every keyword in the researched vocabulary, deduped, in a stable order.
+ *
+ * Used to SEED THE PROMPT when the caller supplied no tags (#8445): without it
+ * the model is told "no mapped keywords", composes a fluent title with no
+ * keyword in it, and the repair then forces one on — producing
+ * `"<keyword>: <its own title>"`. The model cannot be asked for a keyword we
+ * have not shown it, and it cannot be asked for the TAG-DERIVED one because
+ * that is derived from the tags it has not written yet.
+ */
+export function allKeywords(limit = 60): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const tag of Object.keys(TAG_KEYWORDS)) {
+    for (const kw of keywordsFor(tag)) {
+      const norm = normalizeForMatch(kw);
+      if (!norm || seen.has(norm)) continue;
+      seen.add(norm);
+      out.push(kw);
+      if (out.length >= limit) return out;
+    }
+  }
+  return out;
+}
+
+/**
+ * True when `keyword` is one of the researched keywords.
+ *
+ * The model may CHOOSE a keyword (#8445), and its choice is then the value the
+ * guarantee verifies. It must therefore be checked against the vocabulary
+ * before use — otherwise the model could introduce a term the research never
+ * produced, and we would verify the article against a keyword nobody chose.
+ */
+export function isKnownKeyword(keyword: string): boolean {
+  const norm = normalizeForMatch(keyword);
+  if (!norm) return false;
+  for (const tag of Object.keys(TAG_KEYWORDS)) {
+    for (const kw of keywordsFor(tag)) {
+      if (normalizeForMatch(kw) === norm) return true;
+    }
+  }
+  return false;
+}
+
 /** Normalize for a contains-check: lowercase, punctuation -> spaces. */
 export function normalizeForMatch(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
