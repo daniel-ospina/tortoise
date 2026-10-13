@@ -1030,6 +1030,13 @@ surfaces:
   # → `"full": true` — so it needs no entry here.) `--integrity` also
   # requires every test file to be classified, which this entry satisfies.
   - test_7951_write_doors.py
+  # #5141: `graph-scripts/backfill_references.py` matches no named surface and
+  # falls through to `core`, so this arm is what runs the script's smoke test on
+  # a graph-script-only diff. The pre-existing coverage could not see the
+  # defect: `test_references_edge.py` inlines a MIRROR of the backfill loop, so
+  # the script's own query building (which raised `KeyError: 'id'` before it
+  # wrote anything) was never executed by a test.
+  - test_backfill_references_5141.py
   - test_cache_projection.py
   - test_cache_projection_live.py
   # #4197: the saved-backlog ledger (`tortoise/capture_backlog.py`) and its
