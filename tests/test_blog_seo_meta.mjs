@@ -78,6 +78,39 @@ console.log("primary keyword — ONE main keyword, deterministically chosen");
       `tag "${tag}" yields a usable primary or null, never a term-less string`,
     );
   }
+  // ⛔ The guard above passes on the SHIPPED data whether or not it exists,
+  //    because no current keyword normalises to empty — so it cannot fail and
+  //    proves nothing (caught in review). The guard protects against a
+  //    DATA-ONLY edit to keywords.ts, which is the file a keyword-research pass
+  //    edits; simulate exactly that by injecting a punctuation-only first
+  //    keyword and restoring the array afterwards.
+  {
+    const tag = "agent-memory";
+    const original = TAG_KEYWORDS[tag];
+    try {
+      TAG_KEYWORDS[tag] = ["…", ...original];
+      const picked = primaryKeyword([tag]);
+      assert(
+        normalizeForMatch(picked) !== "",
+        `a punctuation-only first keyword is skipped, not returned (got ${JSON.stringify(picked)})`,
+      );
+      assertEq(
+        picked,
+        original[0],
+        "...and the next usable keyword is chosen instead",
+      );
+      // The contains-check treats an empty needle as "already present", so a
+      // term-less primary would make the whole guarantee vacuous.
+      assertEq(
+        containsKeyword("anything at all", "…"),
+        true,
+        "(this is why: a term-less needle makes containsKeyword vacuously true)",
+      );
+    } finally {
+      TAG_KEYWORDS[tag] = original;
+    }
+    assertEq(primaryKeyword([tag]), original[0], "the vocabulary is restored after the probe");
+  }
 }
 
 // ── The seeded candidate list must equal what the validator accepts ────────
@@ -376,11 +409,27 @@ console.log("generate-seo with NO request tags — the keyword check must not be
     "boolean",
     `keyword_ok is a real verdict, not a vacuous pass (got ${JSON.stringify(noTags.body.keyword_ok)})`,
   );
-  assertEq(noTags.body.keyword_ok, true, "the keyword genuinely landed, so the verdict is true");
+  // ⛔ `keyword_ok` reports whether the MODEL placed the keyword, so on this
+  // default mock — whose title is "Agent Memory 2026: Recall vs Learning" and
+  // whose keyword is the tag-derived "long-term memory for ai agents" — the
+  // honest answer is FALSE. The repair puts the keyword in (the #8293 guarantee
+  // below), but the model did not, and the verdict must say so. Asserting
+  // `true` here was the tautology the review found: computed after the repair,
+  // the value could never be anything else (#8446 review, P2).
+  assertEq(
+    noTags.body.keyword_ok,
+    false,
+    "the model's own text omitted the keyword, so the verdict is false — NOT a tautology",
+  );
+  assertEq(
+    noTags.body.meta_title.toLowerCase().includes(String(noTags.body.primary_keyword).toLowerCase()),
+    true,
+    "...while the RETURNED title still carries it, because the repair is the #8293 guarantee",
+  );
 
-  // The verdict must be EARNED on this path, not vacuous. When the model's own
-  // text omits the keyword, the repair puts it there — so `true` here means the
-  // repair ran and the keyword really is present in both fields.
+  // The verdict must be as EARNED as the repair. Two cases, opposite verdicts:
+  // the model omits the keyword (false), and the model places it (true). If
+  // both produced `true`, the field would be measuring the repair, not the model.
   const repairedCase = await driveNoTags({
     metaTitle: "A title with no keyword in it at all",
     metaDescription: "Also nothing relevant here whatsoever, just filler prose.",
@@ -392,8 +441,8 @@ console.log("generate-seo with NO request tags — the keyword check must not be
   );
   assertEq(
     repairedCase.body.keyword_ok,
-    true,
-    "the verdict passes because the repair placed the keyword, not vacuously",
+    false,
+    "the model omitted the keyword, so the repair had to fire and the verdict is false",
   );
   const kw = repairedCase.body.primary_keyword;
   assertEq(
@@ -405,6 +454,18 @@ console.log("generate-seo with NO request tags — the keyword check must not be
     repairedCase.body.meta_description.toLowerCase().includes(kw.toLowerCase()),
     true,
     "the keyword is genuinely IN the repaired description",
+  );
+  // The SAME keyword, model-placed instead of repaired → verdict flips to true.
+  // This pair is what makes `keyword_ok` falsifiable rather than tautological.
+  const modelPlaced = await driveNoTags({
+    metaTitle: `Long-Term Memory for AI Agents: Recall vs Learning | Tortoise`,
+    metaDescription:
+      "Long-term memory for AI agents measures recall, not learning. Tortoise tracks confidence and updates beliefs when information conflicts.",
+  });
+  assertEq(
+    modelPlaced.body.keyword_ok,
+    true,
+    "...and when the MODEL places the same keyword, the verdict is true — so it distinguishes the two",
   );
 
   // No tag maps to the vocabulary at all → nothing was verified. That is
@@ -553,6 +614,70 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     "...and the title still carries the keyword, written naturally",
   );
 
+  // 2b. ⛔ The model's CLAIM is not evidence it USED the keyword. A model that
+  //     returns a valid keyword it never wrote into either field must not have
+  //     it honoured — otherwise the repair force-prefixes it and we are back to
+  //     "<keyword>: <its title>" with a green verdict, which is #8445 itself
+  //     reached through a different door (#8446 review, P1). Vocabulary
+  //     membership proves the string is OURS; only the generated text proves the
+  //     model used it.
+  const claimsUnused = await drive({
+    primaryKeyword: "epistemic memory",
+    metaTitle: "Knowledge Graph RAG: A Practical Guide | Tortoise",
+    metaDescription:
+      "A practical guide to knowledge graph retrieval augmented generation for production systems.",
+  });
+  assert(
+    claimsUnused.body.primary_keyword !== "epistemic memory",
+    `a claimed keyword the model never wrote is NOT honoured (got ${JSON.stringify(claimsUnused.body.primary_keyword)})`,
+  );
+  assertEq(
+    claimsUnused.body.primary_keyword,
+    primaryKeyword(["agent-memory"]),
+    "...and the tag-derived fallback is used instead",
+  );
+  assertEq(
+    claimsUnused.body.keyword_ok,
+    false,
+    "...with an honest false verdict, not the green one a force-prefix used to produce",
+  );
+  assert(
+    !claimsUnused.body.meta_title.startsWith("epistemic memory: "),
+    `...and the unused keyword is not prefixed onto the title (got ${JSON.stringify(claimsUnused.body.meta_title)})`,
+  );
+
+  // 2c. The "used" test covers EITHER generated field, deliberately. A model
+  //     that places the keyword only in the description has still used it, and
+  //     treating that as "unused" would fall back to a DIFFERENT keyword and
+  //     repair the title with it — two keywords in one post, one of them
+  //     unverified, which is the exact failure #8445's fix direction warns about.
+  //     The repair then prefixes the SAME keyword into the title, and the verdict
+  //     is honestly false because the model did not put it there.
+  const descriptionOnly = await drive({
+    primaryKeyword: "epistemic memory",
+    metaTitle: "Why Confidence Matters More Than Recall | Tortoise",
+    metaDescription:
+      "Epistemic memory records why a belief changed, and why that matters more than recall alone.",
+  });
+  assertEq(
+    descriptionOnly.body.primary_keyword,
+    "epistemic memory",
+    "a keyword the model used in EITHER field is honoured — not swapped for a second keyword",
+  );
+  assertEq(
+    descriptionOnly.body.keyword_ok,
+    false,
+    "...while the verdict stays false: the model did not put it in the title, the repair did",
+  );
+  assert(
+    descriptionOnly.body.meta_title.startsWith("epistemic memory: "),
+    `...and the repair prefixed the SAME keyword into the title (got ${JSON.stringify(descriptionOnly.body.meta_title)})`,
+  );
+  assert(
+    !descriptionOnly.body.meta_title.includes(String(primaryKeyword(["agent-memory"]))),
+    "...so the tag-derived fallback keyword appears NOWHERE: one article, one primary keyword",
+  );
+
   // 3. ⛔ The model must not be able to introduce a keyword the research never
   //    produced. An unknown choice falls back to the tag-derived keyword.
   const invented = await drive({
@@ -641,19 +766,30 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   //    forced into the generated title. Gating the override on
   //    `promptPrimary === null` instead of `tags.length === 0` did exactly that
   //    and reported `keyword_ok: true`, i.e. an unearned guarantee (caught in
+  //    ⛔ The mock's model BOTH claims AND USES a real keyword, deliberately.
+  //    With a claim it does not use, the "was it actually used" check absorbs
+  //    the gate bug and this test passes either way — verified: reverting the
+  //    gate to `promptPrimary === null` gave 0 failures. Exercising the two
+  //    conditions independently is the only way each stays falsifiable.
+  //
   //    review). The honest answer here is null: nothing was verified.
+  let freeformPrompt = "";
   globalThis.fetch = async (url, init) => {
     const u = String(url);
     if (u.includes("/rest/v1/blog_agent_keys")) return Response.json([{ agent_name: "pipeline", active: true }]);
     if (u.includes("openrouter.ai")) {
-      if (init) JSON.parse(String(init.body ?? "{}"));
+      try {
+        freeformPrompt = JSON.parse(String(init?.body ?? "{}")).messages.map((m) => m.content).join("\n");
+      } catch {
+        freeformPrompt = "";
+      }
       return Response.json({
         choices: [{ message: { content: JSON.stringify({
           slug: "a-slug",
           excerpt: "A concrete excerpt that earns the click.",
           tags: ["kubernetes"],
-          meta_title: "Kubernetes Operators Explained | Tortoise",
-          meta_description: "Kubernetes operators explained for teams running stateful workloads.",
+          meta_title: "Agent Memory Architecture Explained",
+          meta_description: "Agent memory architecture for teams running Kubernetes operators.",
           primary_keyword: "agent memory architecture",
         }) } }],
         usage: { prompt_tokens: 10, completion_tokens: 20 },
@@ -670,6 +806,19 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     env: { SUPABASE_URL: "https://db.test", SUPABASE_SERVICE_ROLE_KEY: "svc", OPENROUTER_API_KEY: "or" },
   });
   const freeform = await freeformRes.json();
+  // ⛔ The prompt and the handler must agree about what "tagless" means. The
+  //    seeding and the override are two separate expressions of one condition;
+  //    if they drift, the prompt offers a choice the code then discards and the
+  //    model is asked to do work that cannot matter (#8446 review, P2). Asserted
+  //    on the PROMPT, not just the response, so the drift is visible.
+  assert(
+    !/choose exactly ONE/i.test(freeformPrompt),
+    "with an unmapped CALLER tag, the prompt does NOT offer a candidate choice the handler would discard",
+  );
+  assert(
+    /do not map to a researched keyword/i.test(freeformPrompt),
+    "...it says why instead, rather than falling back to the old do-nothing line",
+  );
   assertEq(
     freeform.primary_keyword,
     null,
@@ -678,8 +827,9 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   assertEq(freeform.keyword_ok, null, "...and keyword_ok is null (nothing verified), never true");
   assertEq(
     freeform.meta_title,
-    "Kubernetes Operators Explained | Tortoise",
-    "...and the generated title is left alone rather than prefixed with a keyword nobody asked for",
+    "Agent Memory Architecture Explained | Tortoise",
+    "...and the generated title is left as the model wrote it — no keyword prefix, no rewrite " +
+      "(the ` | Tortoise` suffix is the length contract's own, not the repair's)",
   );
 }
 

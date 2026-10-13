@@ -296,16 +296,25 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   //
   // ⛔ And on the TAG-SUPPLIED path the override must NOT apply: there the
   // prompt names the CALLER's keyword, and the caller's intent is authoritative
-  // (the contract `resolvePrimaryKeyword` documents). Applying the model's
-  // choice unconditionally let a model silently swap the caller's tag-derived
-  // keyword for a different known keyword, discarding explicit intent.
-  // Validated against the vocabulary either way, so the model can never
-  // introduce a term the research did not produce.
+  // (the contract `resolvePrimaryKeyword` documents).
+  //
+  // ⛔ The claim is honoured only when the model's OWN OUTPUT contains it.
+  // `isKnownKeyword` alone proves only that the string is one of ours — it says
+  // nothing about whether the model USED it. A model returning a valid keyword
+  // it never wrote would otherwise become the value the repair force-prefixes,
+  // reproducing the exact #8445 symptom (`"<keyword>: <its title>"`) while
+  // reporting `keyword_ok: true` (#8446 review, P1). Presence in either
+  // generated field counts as "used", so a keyword the model placed in one field
+  // never becomes a SECOND keyword through a different fallback.
+  const rawTitle = typeof result.json.meta_title === "string" ? result.json.meta_title : "";
+  const rawDescription = typeof result.json.meta_description === "string" ? result.json.meta_description : "";
   const chosen = typeof result.json.primary_keyword === "string" ? result.json.primary_keyword.trim() : "";
-  const primary =
-    tags.length === 0 && chosen && isKnownKeyword(chosen)
-      ? chosen
-      : resolvePrimaryKeyword(tags, enforced.tags);
+  const chosenUsed =
+    tags.length === 0 &&
+    chosen !== "" &&
+    isKnownKeyword(chosen) &&
+    (containsKeyword(rawTitle, chosen) || containsKeyword(rawDescription, chosen));
+  const primary = chosenUsed ? chosen : resolvePrimaryKeyword(tags, enforced.tags);
 
   // VERIFY, DON'T HOPE (#8293). The prompt above ASKS for the primary keyword;
   // a prompt is a request, not a guarantee, and the previous behaviour never
@@ -339,17 +348,27 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   return json(
     {
       ...repaired,
-      // `null` means "no primary keyword could be derived, so nothing was
-      // verified" — NOT success. Reporting `true` there was the vacuity #8320
-      // fixed; a caller that needs a guarantee must read a non-null value.
-      // `false` still means the field limits won the tie over the repair, which
-      // is a real signal rather than a silent miss.
+      // ⛔ `keyword_ok` answers ONE question: did the MODEL put the keyword
+      // there? It is computed on the ENFORCED fields BEFORE the repair below
+      // runs (#8446 review, P2). Computed after it, the value is a TAUTOLOGY —
+      // `ensureKeyword` guarantees its result contains the keyword, so the
+      // answer was always `true` whenever `primary` was non-null and the
+      // `false` branch was unreachable. (Issue #8445 indicator 2 asks for
+      // exactly this reading: "`keyword_ok` is `true` because the model put
+      // the keyword there, and the repair remains only a backstop".)
+      //
+      // So: `true` = the model placed it unaided; `false` = the repair had to
+      // fire, i.e. generation fell short of what the prompt asked for. The
+      // repair still runs either way — it is the #8293 guarantee that the
+      // stored field carries the keyword — but it no longer reports itself as
+      // the model's work. `null` = no primary keyword could be derived, so
+      // nothing was verified (never a positive claim).
       primary_keyword: primary,
       keyword_ok:
         primary === null
           ? null
-          : containsKeyword(repaired.meta_title, primary) &&
-            containsKeyword(repaired.meta_description, primary),
+          : containsKeyword(enforced.meta_title, primary) &&
+            containsKeyword(enforced.meta_description, primary),
       provider: result.provider,
       input_tokens: result.inputTokens,
       output_tokens: result.outputTokens,
