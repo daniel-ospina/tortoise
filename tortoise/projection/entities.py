@@ -3978,15 +3978,20 @@ class _EntityHandlers:
             # `DocumentCreated` fold writes — §4.6 marks `sourceKind` REQUIRED
             # on every `:Source`, and #5013 Q2 keeps the TYPE axis here while
             # the genre rides `documentKind` (the two are different questions,
-            # §4.4). It is ON CREATE ONLY with the same `coalesce` semantics as
-            # `_upsert_document` (#398's never-overwrite contract), so a node an
-            # authoritative writer already stamped (a `_mint_source_stub` stub,
-            # a connector/session Source) keeps its kind.
+            # §4.4). Written on BOTH arms: create stamps 'document', match
+            # FILLS a NULL — which is exactly the effect of
+            # `_upsert_document`/`_execute_commit_writes`' plain-`SET` +
+            # `coalesce` (#398's never-overwrite contract). An authoritative
+            # kind (a `_mint_source_stub` stub, a connector/session Source) is
+            # kept, and a document node minted by THIS writer before the fix
+            # (or replayed from an old journal line) is repaired by the next
+            # fold instead of staying NULL forever.
             self.g.query(
                 "MERGE (s:Source {url:$id}) "
                 "ON CREATE SET s.id=$id, s.title=$id, "
                 "              s.sourceKind=coalesce(s.sourceKind, 'document'), "
-                "              s.documentKind='transcript'",
+                "              s.documentKind='transcript' "
+                "ON MATCH SET s.sourceKind=coalesce(s.sourceKind, 'document')",
                 params={"id": obj},
             )
             self.g.query(

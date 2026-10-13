@@ -240,30 +240,66 @@ def test_upsert_document_writes_the_source_kind_and_the_anchor_pair() -> None:
     )
 
 
+def _document_source_writers() -> dict[str, str]:
+    """Every function in `tortoise/` whose string literals build a `:Source`
+    MERGE that sets `documentKind` — i.e. every writer that can create a
+    document `:Source`. Derived MECHANICALLY: a hand-picked list is exactly how
+    the two writers #8525's review found (and the doc named none of them) went
+    unnamed.
+    """
+    import ast
+
+    writers: dict[str, str] = {}
+    for path in sorted((REPO / "tortoise").rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:  # pragma: no cover — a syntax error fails elsewhere
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            src = " ".join(
+                child.value for child in ast.walk(node)
+                if isinstance(child, ast.Constant) and isinstance(child.value, str)
+            )
+            if "MERGE (s:Source" in src and "documentKind" in src:
+                writers[f"{path.name}::{node.name}"] = src
+    return writers
+
+
+#: The writers `_document_source_writers()` must find — #4.6's claim is
+#: UNIVERSAL, so a NEW writer (or a removed one) is a doc/claim change, not a
+#: silent addition.
+PINNED_DOCUMENT_SOURCE_WRITERS = frozenset({
+    "entities.py::_upsert_document",
+    "entities.py::_event_plain_merge",
+    "hosted_api.py::_execute_commit_writes",
+})
+
+
 def test_every_document_source_writer_stamps_source_kind() -> None:
     """The §4.6 note and the four `_required_sweep` harnesses now assert
-    `sourceKind` on **every** `:Source` — a universal. Three paths can create a
-    document `:Source`; the PR #8525 review found two of them still writing
-    `sourceKind = NULL` while the doc and the sweeps claimed otherwise. Pin all
-    three writers here so a future removal of any one of them cannot leave the
-    doc and the sweeps as a false green.
+    `sourceKind` on **every** `:Source` — a universal. Every path that can create
+    a document `:Source` must stamp it; the PR #8525 review found two of them
+    still writing `sourceKind = NULL` while the doc and the sweeps claimed
+    otherwise.
+
+    The writer set is DERIVED, not hardcoded: a new document writer changes the
+    derived set and fails the pin, so it cannot leave the doc's "every writer"
+    claim false and the four sweeps a false green the way #8525's two unnamed
+    writers did.
     """
-    import inspect
-
-    from tortoise.hosted_api import _execute_commit_writes
-    from tortoise.projection.entities import _EntityHandlers
-
-    write = "coalesce(s.sourceKind, 'document')"
-    writers = {
-        "_upsert_document (DocumentCreated fold)": _EntityHandlers._upsert_document,
-        "_event_plain_merge (objectType='Document' branch)": _EntityHandlers._event_plain_merge,
-        "_execute_commit_writes (/v1/sessions transcript MERGE)": _execute_commit_writes,
-    }
-    for name, fn in writers.items():
-        src = inspect.getsource(fn)
-        assert write in src, (
+    writers = _document_source_writers()
+    assert set(writers) == set(PINNED_DOCUMENT_SOURCE_WRITERS), (
+        "the set of document-`:Source` writers changed — stamp "
+        "`coalesce(s.sourceKind, 'document')` on any new writer, update the "
+        "§4.6 note, and re-pin here in the same change (#5082/#8525). "
+        f"derived={sorted(writers)}"
+    )
+    for name, src in writers.items():
+        assert "coalesce(s.sourceKind, 'document')" in src, (
             f"{name} must stamp `sourceKind='document'` on the document :Source "
             f"— §4.6 marks it REQUIRED on every :Source, the four "
             f"_required_sweep harnesses assert it on every :Source, and #5082 "
-            f"is only closed if all three writers agree (#8525 review)"
+            f"is only closed if every writer agrees (#8525 review)"
         )

@@ -2212,6 +2212,26 @@ def test_upsert_event_document_source_kind_is_create_only_398(live_proj):
     assert _doc_axes(proj, "doc-sk-evt2") == ["agentSession", "transcript"]
 
 
+def test_upsert_event_document_source_kind_repairs_a_pre_fix_null(live_proj):
+    """#5082: a document `:Source` minted by THIS writer before the fix (or
+    replayed from an old journal line) carries `sourceKind = NULL`. The write
+    must FILL it on the match arm — an `ON CREATE`-only write leaves the
+    pre-existing node NULL forever (re-review P3 on 59e5d44d6), and the
+    `coalesce` keeps an authoritative kind intact."""
+    proj = live_proj
+    proj.g.query(
+        "MERGE (s:Source {url:'doc-sk-evt3'}) "
+        "SET s.documentKind='transcript'")
+    pre = proj.g.query(
+        "MATCH (s:Source {url:'doc-sk-evt3'}) RETURN s.sourceKind").result_set
+    assert pre and pre[0][0] is None, pre
+    proj.apply({"type": "EventRecorded", "event": {
+        "id": "evt-sk-3", "eventKind": "sessionCaptured",
+        "subject": "agent-pi", "object": "doc-sk-evt3",
+        "objectType": "Document"}})
+    assert _doc_axes(proj, "doc-sk-evt3") == ["document", "transcript"]
+
+
 def test_upsert_event_legacy_string_uses_still_works(live_proj):
     """#125 backward compat: legacy string uses still create Object objectKind='other'."""
     proj = live_proj
