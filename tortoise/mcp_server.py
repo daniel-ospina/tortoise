@@ -952,6 +952,11 @@ def _get_sdk():
         return _sdk
 
     _db_uri = os.environ.get("TORTOISE_DB_URI", "")
+    # #7951 P0: the base/stdio lane resolves its journal through the SAME
+    # derivation the hosted lane uses (never a second one). Function-level
+    # import: importing ``hosted_api`` at module scope would build the whole
+    # hosted FastAPI app on the tool fast path (#3834).
+    from tortoise.mcp_auth import _journal_path_for as _journal_path_for_7951
     if _db_uri.startswith(("docker://", "redis://", "rediss://")):
         from tortoise.projection import FalkorProjection  # noqa: I001
         import time as _time
@@ -971,8 +976,21 @@ def _get_sdk():
                 _proj = FalkorProjection.from_uri(_db_uri)
                 if attempt > 0:
                     _log.warning("Docker connection succeeded on attempt %d", attempt + 1)
-                _sdk = TortoiseSDK()
+                _sdk = TortoiseSDK(
+                    event_log_path=_journal_path_for_7951(
+                        namespace=None, graph_name=None))
+                # The projection is assigned DIRECTLY, which bypasses
+                # ``TortoiseSDK._get_proj`` — the one place that binds the
+                # journal — so bind it here explicitly. Leaving this out is
+                # the exact seam that made §17.1's guard inert on this lane
+                # (#7951 P0). The resolved path is ``None`` for the unnamed
+                # default graph (``_resolve_event_log_path`` draws that
+                # boundary in ``hosted_api``, and REST's default graph is
+                # journal-less for the same reason), in which case the SDK is
+                # simply not journal-backed and the guard is correctly a
+                # no-op.
                 _sdk._proj = _proj
+                _sdk._proj._bind_journal(_sdk._event_log_path)
                 break
             except Exception as e:
                 if attempt < 2:
@@ -985,11 +1003,17 @@ def _get_sdk():
         # File path — use Lite mode (backward compat: bare non-docker URI).
         # resolve_db_path() rejects relative paths + applies canonical default.
         from tortoise.config import resolve_db_path as _resolve_db_path
-        _sdk = TortoiseSDK(db_path=_resolve_db_path(_db_uri))
+        _sdk = TortoiseSDK(
+            db_path=_resolve_db_path(_db_uri),
+            event_log_path=_journal_path_for_7951(
+                namespace=None, graph_name=None))
     else:
         # No URI: default to canonical embedded path via resolve_db_path()
         from tortoise.config import resolve_db_path as _resolve_db_path
-        _sdk = TortoiseSDK(db_path=_resolve_db_path())
+        _sdk = TortoiseSDK(
+            db_path=_resolve_db_path(),
+            event_log_path=_journal_path_for_7951(
+                namespace=None, graph_name=None))
     return _sdk
 
 # #329: node/edge-creating MCP write tools that MUST be quota-gated. Completeness

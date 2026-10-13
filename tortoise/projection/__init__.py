@@ -2889,6 +2889,20 @@ def _journal_safe_params(params, cypher=None):
 # handle that separates a journaled live write from a direct one. Converting
 # that 300+-site surface is §17.1's mechanism (1), the atomic write, and it is
 # recorded as still-open on `#7951` rather than papered over here.
+#
+# ⛔ THE RESIDUAL IS THREE ESCAPES, NOT ONE — named so it is stated, not
+# discovered. A writer that wants to write this cache directly has:
+#   1. `proj.g.query("CREATE …")`     — the guarded handle itself (the SDK's
+#      own live lane, above);
+#   2. `proj.g._g.query("CREATE …")`  — one private hop past the handle into
+#      the raw `_GuardedGraph`;
+#   3. `proj.db.select_graph(<g>).query("CREATE …")` — straight at the
+#      falkordb client, naming ANY graph.
+# All three are verified ALLOWED against a journal-backed projection. (2) and
+# (3) are the same class as (1) — they bypass the same fold — and none of the
+# three is guarded in this increment. They are the surface §17.1's atomic
+# write has to close; a lexical inventory cannot, because each is one hop
+# below anything a runtime signal is placed on.
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -6422,8 +6436,23 @@ class FalkorProjection(
     # #7951 §17.1: whether this projection is the DERIVED CACHE OF A CONFIGURED
     # JOURNAL, and so under the single-writer guard. A CLASS attribute (not set
     # in ``__init__``) so the ``object.__new__`` guard stubs that skip
-    # ``__init__`` read the refusing default instead of raising `AttributeError`
-    # — the same property the `_replay_*` ContextVar properties have.
+    # ``__init__`` do not raise `AttributeError` — the same property the
+    # `_replay_*` ContextVar properties have.
+    #
+    # ⛔ READ THE POLARITY — the two defaults point OPPOSITE ways:
+    #   * ``_journal_backed = False`` here is the PERMISSIVE default. A
+    #     projection that never bound a journal is NOT under the guard, because
+    #     with no journal there is no truth store for its cache to be ahead of
+    #     (§17.1 has nothing to enforce). Only ``_bind_journal`` sets it
+    #     ``True``, and only a live door that OWNS a journal calls it.
+    #   * the REFUSAL lives in the authorization ContextVar
+    #     (``_CACHE_WRITE_AUTHORIZED``, default ``None`` = refusal), and it is
+    #     read ONLY on the ``_journal_backed`` branch. So the gate refuses by
+    #     default *given a journal*, which is the fail-closed direction.
+    # A stub that skips ``__init__`` therefore reads "no journal configured"
+    # and is ALLOWED to fold — it is not silently authorized against a bound
+    # journal (it cannot be: nothing turned ``True``), and no stub can flip the
+    # refusal off on a projection whose journal really was bound.
     _journal_backed: bool = False
     _journal_path: str | None = None
 

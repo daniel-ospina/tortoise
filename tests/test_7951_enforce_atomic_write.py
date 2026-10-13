@@ -304,6 +304,81 @@ def test_the_authorization_is_context_local(sdk_with_journal):
     assert _count(proj, "Subject", "id", "subj-thread") == 0
 
 
+# ── the P0: the MCP surface must ARM the guard ───────────────────────────
+
+def test_the_mcp_lane_is_armed(tmp_path, monkeypatch):
+    """P0 — the surface agents actually write through must not bypass §17.1.
+
+    Before this fix, `mcp_auth._get_org_sdk` built `TortoiseSDK(graph_name=ns)`
+    / `TortoiseSDK(namespace=org)` with NO `event_log_path`, so `_get_proj`'s
+    `_bind_journal` bound `None` and the guard was INERT on the hosted MCP
+    lane: a direct `proj.apply` silently wrote the derived cache (reproduced
+    live before the fix — `journal_backed=False`, NO RAISE). The journal is now
+    resolved through the SAME `hosted_api._resolve_event_log_path` the REST
+    lane uses, so the two lanes cannot disagree.
+
+    Covers BOTH branches of `_get_org_sdk`: an org-wide key (namespace) and a
+    graph-bound key (explicit `graph_name`). Also proves the arming did not
+    break the lane's write path (the guarded handle still writes; the
+    sanctioned fold door still folds).
+
+    MUTATION: drop `event_log_path=` from either `TortoiseSDK(...)` in
+    `mcp_auth._get_org_sdk` and the matching assertion fails.
+    """
+    from tortoise import mcp_auth
+
+    monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", str(tmp_path))
+
+    def _armed(sdk):
+        proj = sdk._get_proj()
+        assert proj._journal_backed is True, (
+            "the MCP lane built a journal-LESS SDK — §17.1's guard is inert "
+            "on the surface agents write through (the P0): "
+            f"event_log_path={sdk._event_log_path!r}"
+        )
+        with pytest.raises(DirectCacheWriteRefused) as exc:
+            proj.apply(_subject(proj, "subj-mcp-direct"))
+        assert "17.1" in str(exc.value)
+        return proj
+
+    # (a) hosted HTTP mode, ORG-WIDE key → the namespace branch.
+    tok = mcp_auth._current_org_id.set("org7951")
+    try:
+        sdk = mcp_auth._get_org_sdk()
+        assert sdk._event_log_path == str(
+            tmp_path / "org_org7951" / "events.jsonl"), (
+            f"the MCP lane resolved a different journal: {sdk._event_log_path!r}"
+        )
+        proj = _armed(sdk)
+        # The arming must not have broken the lane's own writes: the SDK's
+        # live handle write still lands, and the chokepoint still folds.
+        assert sdk.create_point("statement", "mcp write").get("id")
+        sdk._apply_and_journal(proj, _subject(proj, "subj-mcp-ok"))
+        assert _count(proj, "Subject", "id", "subj-mcp-ok") == 1
+    finally:
+        mcp_auth._current_org_id.reset(tok)
+
+    # (b) hosted HTTP mode, GRAPH-BOUND key → the explicit graph_name branch.
+    toks = [
+        mcp_auth._current_org_id.set("org7951"),
+        mcp_auth._current_graph_id.set("g7951"),
+        mcp_auth._current_graph_namespace.set("org_t7951_g7951"),
+    ]
+    try:
+        sdk_g = mcp_auth._get_org_sdk()
+        assert sdk_g._event_log_path == str(
+            tmp_path / "org_t7951_g7951" / "events.jsonl"), (
+            f"the graph-bound MCP lane resolved a different journal: "
+            f"{sdk_g._event_log_path!r}"
+        )
+        _armed(sdk_g)
+    finally:
+        # LIFO: reset in the reverse of the set order above.
+        mcp_auth._current_graph_namespace.reset(toks[2])
+        mcp_auth._current_graph_id.reset(toks[1])
+        mcp_auth._current_org_id.reset(toks[0])
+
+
 # ── §17.1's ordering, seen from S9 (the engine stopped) ───────────────────
 
 def test_a_live_write_whose_fold_fails_is_already_in_the_journal(
@@ -332,3 +407,60 @@ def test_a_live_write_whose_fold_fails_is_already_in_the_journal(
         "the journal does NOT hold the record although the fold failed — the "
         "append did not precede the fold, so this write is unrecoverable"
     )
+
+
+def test_create_point_is_apply_first_a_recorded_deviation(
+        sdk_with_journal, monkeypatch):
+    """§17.1's ORDER is NOT yet journal-first on `create_point` — PINNED, not
+    claimed away.
+
+    `create_point` writes the Point through the guarded HANDLE
+    (`proj.g.query("CREATE (n:Point {…})")`) and appends its `PointAdded`
+    record only afterwards, from `get_point(pid)` — so the DERIVED store is
+    briefly AHEAD of the TRUTH (window (a) of the ordering contract at the top
+    of `tortoise/sdk.py`). It is that contract's recorded exception 2: the
+    record IS the applied node (`RETURN properties(n)`), so there is no
+    pre-fold payload to append, and the canonical id can be an apply result. A
+    crash in the gap leaves a node no replay reproduces.
+
+    The order CANNOT be corrected in this increment without changing the
+    journal payload's shape on the highest-traffic write path (the pre-fold
+    values differ from `properties(n)` — e.g. a server-computed embedding is
+    stored `vecf32`-narrowed, #5004), which is exactly the `derived =
+    replay(journal)` break this lane exists to prevent. Closing it needs
+    §17.1's mechanism (1), the atomic write, still OPEN on #7951.
+
+    This test pins the ACTUAL order so the residual is checkable and no later
+    lane can claim `create_point` is journal-first (the review's P1).
+
+    ⛔ WHEN THE ATOMIC WRITE LANDS: flip the assertion to
+    `order.index("journal-PointAdded") < order.index("cache-create")` and
+    delete exception 2 from the ordering contract.
+    """
+    sdk = sdk_with_journal
+    proj = sdk._get_proj()
+    # How many Point rows the CACHE holds at the instant `PointAdded` is
+    # journalled. `1` = the node was already written (apply-first); `0` = the
+    # record went first (journal-first, what §17.1 requires).
+    cache_at_journal: list[int] = []
+
+    real_emit = sdk._emit_event
+
+    def spy_emit(type_, *args, **kwargs):
+        if type_ == "PointAdded" and args:
+            cache_at_journal.append(
+                _count(proj, "Point", "id", args[0]["id"]))
+        return real_emit(type_, *args, **kwargs)
+
+    monkeypatch.setattr(sdk, "_emit_event", spy_emit)
+
+    point = sdk.create_point("statement", "an apply-first claim")
+    assert point.get("id"), f"create_point returned no id: {point!r}"
+
+    assert cache_at_journal == [1], (
+        "create_point's order CHANGED — if the journal record now precedes the "
+        "cache write (observed count 0), delete this deviation pin and remove "
+        "exception 2 from the ordering contract in `tortoise/sdk.py` "
+        f"(observed: {cache_at_journal!r})"
+    )
+    assert _count(proj, "Point", "id", point["id"]) == 1

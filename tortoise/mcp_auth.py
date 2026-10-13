@@ -76,6 +76,33 @@ def _get_base_sdk() -> TortoiseSDK:
 
 
 # ── Org-scoped SDK (D2) ────────────────────────────────────────────────────
+def _journal_path_for(namespace: str | None,
+                      graph_name: str | None) -> str | None:
+    """The per-graph JSONL journal path for an MCP-lane SDK (`#7951` P0).
+
+    Delegates to ``hosted_api._resolve_event_log_path`` — the ONE derivation
+    of namespace/graph_name → ``<base>/<graph>/events.jsonl`` (#4240) — so an
+    MCP-lane SDK can never key its journal to a graph the SDK does not open.
+    Inventing a second derivation here is exactly the #4240 review's
+    divergence class (``namespace='test-foo'`` opens
+    ``test_foo_tortoise``, NOT ``org_test-foo``).
+
+    Returns ``None`` when ``TORTOISE_EVENT_LOG_BASE_DIR`` is unset (the
+    journal-less lanes stay byte-identical) AND for the unnamed default /
+    registry graphs, which are not org data graphs — the same boundary
+    ``hosted_api._make_sdk`` draws. A ``None`` here means the SDK is NOT
+    journal-backed, so `#7951`'s guard has nothing to enforce (there is no
+    truth store for its cache to be ahead of) — not that the gate was
+    forgotten.
+
+    Function-level import: ``hosted_api`` imports ``mcp_server``, which
+    imports this module, so a module-level import would close the cycle.
+    """
+    from tortoise import hosted_api as _ha
+    return _ha._resolve_event_log_path(namespace=namespace,
+                                       graph_name=graph_name)
+
+
 def _get_org_sdk() -> TortoiseSDK:
     """Request-scoped SDK: org namespace in HTTP mode, base SDK in stdio.
 
@@ -88,15 +115,29 @@ def _get_org_sdk() -> TortoiseSDK:
     keys (C3) — a deleted graph's key fails resolution (401), so no
     per-call re-probe (REST's _data_sdk probe is defense-in-depth for the
     resolve→open window; MCP's resolve→open window is the same request).
-    Org-wide keys / OAuth / selfhost → the default graph (unchanged)."""
+    Org-wide keys / OAuth / selfhost → the default graph (unchanged).
+
+    #7951 P0: every SDK built here is handed its per-graph JSONL journal
+    (``_journal_path_for``), so ``TortoiseSDK._get_proj`` binds it and §17.1's
+    single-writer guard is ARMED on this lane. Before this, no MCP-lane SDK
+    carried an ``event_log_path`` and the guard was inert on the surface
+    agents actually write through."""
     org_id = _current_org_id.get()
     if org_id is None:
         return _get_base_sdk()
     gid = _current_graph_id.get()
     ns = _current_graph_namespace.get()
     if gid and ns:
-        return TortoiseSDK(graph_name=ns)
-    sdk = TortoiseSDK(namespace=org_id)
+        # #7951 P0: pass the journal so `_get_proj`'s `_bind_journal` ARMS
+        # §17.1's guard on THIS lane. Without it the MCP surface built a
+        # journal-backed-intent SDK with no `event_log_path`, so the guard was
+        # inert exactly where agents write (the reviewer's reproduction).
+        return TortoiseSDK(
+            graph_name=ns,
+            event_log_path=_journal_path_for(namespace=None, graph_name=ns))
+    sdk = TortoiseSDK(
+        namespace=org_id,
+        event_log_path=_journal_path_for(namespace=org_id, graph_name=None))
     if org_id == SELFHOST_ORG_ID:
         # #2007 (W12): the selfhost SDK-init seam — the selfhost MCP transport
         # (`tortoise/selfhost.py`'s mounted /mcp, and `serve --http --auth

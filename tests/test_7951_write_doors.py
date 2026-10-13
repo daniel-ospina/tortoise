@@ -165,8 +165,15 @@ _DOORS: dict[tuple[str, str], tuple[str, int]] = {
     # `backfill_legacy_closed` routes through `sdk._apply_and_journal` whenever
     # an SDK is supplied, which production always does
     # (`hosted_api._run_indexing`). The `sdk is None` arm is a TEST HELPER's
-    # seam (tests/test_github_indexer.py drives the indexer directly); it folds
-    # without journalling and is pinned as that, not claimed as a live door.
+    # seam (tests/test_github_indexer.py drives the indexer directly) that
+    # falls back to a bare `proj.apply`. It is NOT "pinned as folding without
+    # journalling": on a JOURNAL-BACKED projection §17.1's guard now REFUSES
+    # it (`DirectCacheWriteRefused`) and the journal stays untouched —
+    # `test_indexer_sdk_less_fallback_fails_closed_on_a_journal_backed_projection`
+    # pins exactly that. It folds only where there is no journal to derive from
+    # (a journal-less projection, outside §17.1's reach), which is why the
+    # production route is pinned to pass an explicit `sdk=`
+    # (`test_indexer_production_backfill_route_passes_an_sdk`).
     ("tortoise/indexer/github_indexer.py", "GitHubIndexer.backfill_legacy_closed"):
         ("exempt:test-seam", 1),
 
