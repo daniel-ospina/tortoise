@@ -63,7 +63,7 @@ this paragraph records the amendment.
 > `bidirectional` / `unidirectional` remain **accepted and readable aliases**
 > (`bidirectional` ≡ `<->`, `unidirectional` ≡ `->`); storage is verbatim, so no
 > data migration was required. The `w1 yes approved` ruling above is unchanged.
-
+>
 > This document is the **approval record**, not the generated baseline. The generated
 > list of what exists *today* is `docs/product/mcp-sdk-surface.md`, rendered from
 > `config/surface-manifest.yml`. This file records what the surface is *approved to become*.
