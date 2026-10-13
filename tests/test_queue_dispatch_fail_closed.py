@@ -12,15 +12,19 @@ THE DEFECT
     dispatched 0` and EXITED 0 -- byte-identical to a healthy, fed, empty fleet. 17 lanes sat
     idle while every run read `: 0`.
 
-WHAT EACH CASE PINS (each can FAIL on the unfixed code)
+WHAT EACH CASE PINS (each can FAIL on the unfixed code, except the two marked)
     * `test_failed_read_raises_*`      -- rc != 0 must RAISE, not return [].
     * `test_timed_out_read_raises_*`   -- the live mechanism (rc is None) must RAISE.
     * `test_empty_roster_is_refused`   -- [] is a refusal, matching lane-status.py:1670.
+    * `test_degraded_roster_is_refused`-- a partial (TSV-only) roster must not read as the fleet.
     * `test_unparseable_output_raises` -- garbage must not read as "no lanes".
-    * `test_abort_summary_*`           -- the abort banner cannot be mistaken for an empty fleet.
+    * `test_queue_read_*`              -- the SAME polarity one function down (`claim_next`).
     * `test_process_exit_*`            -- the exit code crosses the REAL process boundary
                                           (proves `sys.exit(main())`, not a discarded return).
-    * `test_healthy_read_still_works`  -- fail-closed did not break the good path.
+    * `test_healthy_read_still_works`  -- (over-fix guard; passes on both versions, by design).
+    * `test_abort_summary_*`           -- (banner-text pin; calls the helper directly, so it is
+                                          NOT coupled to the fail-open mutation -- it only bites
+                                          if the banner regresses).
 
 MUTATION (how this test is proven to bite)
     Point `QUEUE_DISPATCH_SUT` at a copy with the original fail-open restored and the suite
@@ -118,6 +122,73 @@ def test_unparseable_output_raises(sut, fake_home):
     sut.LANE_STATUS = str(fake_home / ".pi" / "agent" / "scripts" / "lane-status.py")
     with pytest.raises(sut.LaneReadError):
         sut.lanes(scan_timeout=10)
+
+
+def test_degraded_roster_is_refused(sut, fake_home):
+    """A PARTIAL (TSV-only) roster is rc=0 and non-empty -- it must still be refused.
+
+    lane-status marks every row `degraded` when the cmux registry read failed, and such a
+    roster is missing every live-only lane; `lane-actions.py` refuses the same payload.
+    """
+    rows = [{"lane": "real-lane", "ws": "W1", "verdict": "DONE-IDLE", "degraded": False},
+            {"lane": "live-only-lane", "ws": "W2", "verdict": "DONE-IDLE", "degraded": True}]
+    _stub_lane_status(fake_home, "import json; print(json.dumps(%r))\n" % (rows,))
+    sut.LANE_STATUS = str(fake_home / ".pi" / "agent" / "scripts" / "lane-status.py")
+    with pytest.raises(sut.LaneReadError) as ei:
+        sut.lanes(scan_timeout=10)
+    assert "DEGRADED" in str(ei.value).upper()
+    assert "live-only-lane" in str(ei.value)
+
+
+def test_scan_timeout_env_is_parsed_defensively(sut, monkeypatch):
+    """A bad tuning knob is a fallback, never a crash and never an unbounded read."""
+    monkeypatch.setenv("QUEUE_DISPATCH_SCAN_TIMEOUT", "not-a-number")
+    assert sut._env_scan_timeout() == sut.SCAN_TIMEOUT_DEFAULT
+    monkeypatch.setenv("QUEUE_DISPATCH_SCAN_TIMEOUT", "0")
+    assert sut._env_scan_timeout() == sut.SCAN_TIMEOUT_DEFAULT
+    monkeypatch.setenv("QUEUE_DISPATCH_SCAN_TIMEOUT", "inf")
+    assert sut._env_scan_timeout() == sut.SCAN_TIMEOUT_DEFAULT
+    monkeypatch.setenv("QUEUE_DISPATCH_SCAN_TIMEOUT", "90")
+    assert sut._env_scan_timeout() == 90.0
+
+
+# ---------------------------------------------------------------------------
+# the same polarity one function down: the work-queue read
+# ---------------------------------------------------------------------------
+
+def _stub_claim(home: Path, body: str) -> str:
+    p = home / "claim-stub.py"
+    p.write_text(body)
+    return str(p)
+
+
+def test_queue_read_failure_raises_never_empty(sut, fake_home):
+    """`claim.py` exits 2 for an unreadable queue. That must not read as 'nothing left'."""
+    sut.CLAIM = _stub_claim(fake_home, "import sys; sys.stderr.write('missing queue'); sys.exit(2)\n")
+    with pytest.raises(sut.QueueReadError) as ei:
+        sut.claim_next("lane", "REMEDY.tsv")
+    assert "rc=2" in str(ei.value)
+
+
+def test_queue_read_silent_output_raises_never_empty(sut, fake_home):
+    """rc=0 with NO output is UNKNOWN, not an empty queue (the explicit empty answer is NONE)."""
+    sut.CLAIM = _stub_claim(fake_home, "import sys; sys.exit(0)\n")
+    with pytest.raises(sut.QueueReadError):
+        sut.claim_next("lane", "REMEDY.tsv")
+
+
+def test_queue_read_none_is_genuinely_empty(sut, fake_home):
+    """OVER-FIX GUARD: an explicit NONE (read, and empty) still returns (None, path)."""
+    sut.CLAIM = _stub_claim(fake_home, "print('NONE')\n")
+    item, path = sut.claim_next("lane", "REMEDY.tsv")
+    assert item is None
+    assert path.endswith("REMEDY.tsv")
+
+
+def test_queue_read_item_is_returned(sut, fake_home):
+    sut.CLAIM = _stub_claim(fake_home, "print('PR 123 fix the thing')\n")
+    item, _path = sut.claim_next("lane", "REMEDY.tsv")
+    assert item == "PR 123 fix the thing"
 
 
 def test_abort_summary_cannot_be_mistaken_for_an_empty_fleet(sut, capsys):

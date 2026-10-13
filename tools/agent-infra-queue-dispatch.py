@@ -110,7 +110,15 @@ COOLDOWN_S = 15 * 60
 # Hard wall-clock bound (seconds) for the ONE fleet read per pass. lane-status.py has no
 # internal deadline, so this is the only stop between a stalled scan and an unbounded wait.
 # Hitting it raises LaneReadError -> the pass ABORTS (exit 3); it is never an empty fleet.
-SCAN_TIMEOUT_DEFAULT = 240.0
+#
+# WHY 600 AND NOT TIGHTER. The same file records the measured cost: ~250-300s at fleet load
+# (queue-dispatch.py main(); lane-status.py:1610,1626). A bound BELOW the real cost turns a
+# slow-but-successful read into a chronic abort, which is fail-closed but useless. So the
+# DEFAULT is a self-bound above the measured cost, and a caller that wants the abort to fire
+# INSIDE its own slice must hand that slice over -- QUEUE_DISPATCH_DEADLINE_EPOCH (absolute
+# epoch seconds), which CAPS this value down. heartbeat-loop.sh does not set it yet; that is
+# reported as a required out-of-repo change, not made here.
+SCAN_TIMEOUT_DEFAULT = 600.0
 
 # class -> (queue file, human label)  the queue to pull from for that class
 #
@@ -323,12 +331,21 @@ def lanes(scan_timeout=None):
     ONE SCAN PER PASS. This function is called exactly once, fleet-wide, and never with
     `--only` (see `main()` for why the second, subset read was removed). Issuing only the
     fleet-wide read matters for a reason beyond this file's own cost: `lane-status.py`'s
-    snapshot cache is a SINGLE FILE keyed on `--only` (`lane-status.py:1646`, written at
-    `lane-status.py:1927-1928`), so a `--only` call from here OVERWRITES the fleet-wide
-    snapshot the tick paid for (`orchestrator-heartbeat.sh:291`, `lane-status.last.json`)
-    and makes every later consumer in the pass -- `lane-actions.py` (line-actions), and
-    therefore `pr-doctor` -- MISS the cache and re-run a full ~250-300s fleet scan. By never
-    issuing `--only`, this tool can no longer evict that snapshot.
+    snapshot cache is a SINGLE FILE `~/.pi/agent/state/lane-status.cache` keyed on `--only`
+    (read at `lane-status.py:1646-1651`, written at `:1927-1928`), so a `--only` call from here
+    OVERWRITES the fleet-wide snapshot under the `[null]` key. The next fleet-wide consumer
+    then MISSES and re-runs a full ~250-300s scan -- which is exactly what `lane-actions.py`
+    does in its invoke path (`lane-actions.py:1425-1443`), and therefore what `pr-doctor`
+    pays (`pr-doctor.py:238`). By never issuing `--only`, this tool can no longer evict that
+    snapshot. (⛔ NOT `lane-status.last.json`: that file is the heartbeat's `tee` copy
+    (`orchestrator-heartbeat.sh:291-292`) and no `--only` call touches it. An earlier
+    revision of this docstring named it; that was wrong, corrected here.)
+
+    PARTIAL READS ARE REFUSED TOO. `lane-status.py` marks every row `degraded` when the cmux
+    registry read failed (`lane-status.py:1906`, `degraded=(LIVE_READABLE is False)`), and such
+    a roster is the hand-written TSV alone -- every live-only lane INVISIBLE. It is non-empty
+    and rc=0, so it would otherwise read as a complete, healthy fleet; `lane-actions.py`
+    already refuses exactly this payload (`_refuse_if_degraded`), and so do we.
 
     FAIL-CLOSED. A failed, timed-out, truncated or EMPTY read raises `LaneReadError`; it is
     NEVER returned as an empty list. MEASURED 2026-10-13 (the P0 this fixes): `sh()` returns
@@ -340,7 +357,14 @@ def lanes(scan_timeout=None):
     cmd = ["python3", LANE_STATUS, "--json"]
     # Never hand `subprocess.run(timeout=None)` an unbounded read by accident: `None` means
     # "wait forever" there, which is precisely the unbounded step this bound exists to remove.
-    _tmo = float(scan_timeout) if scan_timeout else float(SCAN_TIMEOUT_DEFAULT)
+    # `<= 0` and NaN/Inf are treated the same way -- a non-finite or non-positive bound is not
+    # a bound, and passing it through would silently disable the guard.
+    try:
+        _tmo = float(scan_timeout)
+    except (TypeError, ValueError):
+        _tmo = float(SCAN_TIMEOUT_DEFAULT)
+    if not (_tmo > 0) or _tmo == float("inf"):
+        _tmo = float(SCAN_TIMEOUT_DEFAULT)
     rc, out = sh(cmd, timeout=_tmo)
     if rc is None:
         raise LaneReadError(
@@ -367,6 +391,17 @@ def lanes(scan_timeout=None):
         raise LaneReadError(
             "lane-status.py returned an EMPTY roster -- an empty fleet is not a read "
             "(refusing, exactly as lane-status.py:1670 does)")
+    _degraded = [r.get("lane") for r in rows
+                 if isinstance(r, dict) and r.get("degraded")]
+    if _degraded:
+        # A DEGRADED (TSV-ONLY) ROSTER IS A PARTIAL READ, NOT A COMPLETE FLEET. Every live-only
+        # lane is absent from it, so it UNDER-REPORTS the fleet (it read rc=0 and is non-empty,
+        # so nothing else here would catch it). Named lanes, so the abort says who is missing.
+        raise LaneReadError(
+            f"lane-status.py returned a DEGRADED roster ({len(_degraded)} row(s) could not see "
+            f"the cmux registry -- live-only lanes are INVISIBLE): "
+            f"{', '.join(str(x) for x in _degraded[:8])}"
+            + (" ..." if len(_degraded) > 8 else ""))
     return rows
 
 
@@ -428,6 +463,19 @@ def mark_sent(lane: str) -> None:
         open(p, "w").close()
 
 
+class QueueReadError(RuntimeError):
+    """The work queue could NOT be read. NOT the same value as 'the queue is empty'.
+
+    The SAME polarity as `LaneReadError`, one function down: `claim.py` exits 2 for an
+    unreadable/missing queue (`claim.py:70-76`, "a missing queue is UNKNOWN, not empty"), and
+    `sh()` returns `(None, "(timeout)")` on a kill. Collapsing those to `None` made `main()`
+    print `SKIP <lane>: <queue> has nothing left` and exit 0 -- a failed read spent as an empty
+    queue, which is the very defect this file was fixed for. The function's own docstring
+    states the violated rule: "An empty result from a queue you did not read is not evidence
+    of absence".
+    """
+
+
 def claim_next(lane_id: str, queue_file: str):
     """Take the next unclaimed item for this lane FROM THE QUEUE ITS CLASS NAMES.
 
@@ -436,14 +484,22 @@ def claim_next(lane_id: str, queue_file: str):
     read REMEDY.tsv -- and a dispatcher that trusted that answer would report "nothing left"
     forever while 46 work orders sat unread. An empty result from a queue you did not read is
     not evidence of absence (the same rule that caught the unguarded find earlier).
+
+    RETURNS: (item, path) with `item` a real row, or (None, path) ONLY when the queue was
+    READ and genuinely answered NONE. A read that failed raises `QueueReadError`.
     """
     path = os.path.join(STATE, queue_file)
     rc, out = sh(["python3", CLAIM, "next", lane_id, "--queue", path], timeout=60)
-    if rc != 0 or not out.strip():
-        return None, path
+    if rc is None:
+        raise QueueReadError(f"claim.py TIMED OUT reading {queue_file} (rc=None) -- UNKNOWN, not empty")
+    if rc != 0:
+        raise QueueReadError(
+            f"claim.py exited rc={rc} reading {queue_file}: {(out or '').strip()[:160] or '(no output)'}")
+    if not out.strip():
+        raise QueueReadError(f"claim.py produced no output reading {queue_file} (rc=0) -- UNKNOWN, not empty")
     first = out.strip().splitlines()[0].strip()
     if not first or first.upper().startswith("NONE"):
-        return None, path
+        return None, path          # READ, and genuinely empty
     return first, path
 
 
@@ -581,6 +637,28 @@ def _single_instance():
     return fh  # keep the handle open for the process lifetime
 
 
+def _env_scan_timeout() -> float:
+    """The default scan bound from the environment, parsed DEFENSIVELY.
+
+    A non-numeric `QUEUE_DISPATCH_SCAN_TIMEOUT` must not turn `--help` (or any run) into a
+    traceback at argparse time -- a bad tuning knob is a warning and a fallback, never a crash.
+    """
+    raw = os.environ.get("QUEUE_DISPATCH_SCAN_TIMEOUT")
+    if raw is None:
+        return float(SCAN_TIMEOUT_DEFAULT)
+    try:
+        v = float(raw)
+    except ValueError:
+        print(f"  ⚠ QUEUE_DISPATCH_SCAN_TIMEOUT={raw!r} is not a number — using "
+              f"{SCAN_TIMEOUT_DEFAULT}s")
+        return float(SCAN_TIMEOUT_DEFAULT)
+    if not (v > 0) or v == float("inf"):
+        print(f"  ⚠ QUEUE_DISPATCH_SCAN_TIMEOUT={raw!r} is not a usable bound — using "
+              f"{SCAN_TIMEOUT_DEFAULT}s")
+        return float(SCAN_TIMEOUT_DEFAULT)
+    return v
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="actually send (default: dry run)")
@@ -600,14 +678,14 @@ def main():
     # ⛔ BOUND THE FLEET READ'S WALL CLOCK. lane-status.py has NO internal deadline, so a scan
     # at heavy load can outlive this process's slice and be killed from outside (`sh()` returns
     # `(None, '(timeout)')`). The bound matters ONLY because hitting it now ABORTS with exit 3
-    # (`LaneReadError` -> `_abort_unreadable`) instead of being spent as an empty fleet. Precedence:
-    #   --scan-timeout   >   QUEUE_DISPATCH_DEADLINE_EPOCH (an ABSOLUTE epoch the caller must not
-    #                        be exceeded -- how a supervisor hands over its own remaining slice)  >
-    #   QUEUE_DISPATCH_SCAN_TIMEOUT   >   240s
+    # (`LaneReadError` -> `_abort_unreadable`) instead of being spent as an empty fleet.
+    # Resolution order: `--scan-timeout` (default: QUEUE_DISPATCH_SCAN_TIMEOUT, else the constant),
+    # then CAPPED DOWN by QUEUE_DISPATCH_DEADLINE_EPOCH (an ABSOLUTE epoch the caller must not be
+    # exceeded -- how a supervisor hands over its own remaining slice). The deadline can only
+    # LOWER the bound, never raise it past an explicit flag.
     # RECOMMENDED out-of-repo change (reported, not made): heartbeat-loop.sh should export
     # QUEUE_DISPATCH_DEADLINE_EPOCH when it launches this tool, so the bound tracks its slice.
-    ap.add_argument("--scan-timeout", type=float,
-                    default=float(os.environ.get("QUEUE_DISPATCH_SCAN_TIMEOUT", 240)),
+    ap.add_argument("--scan-timeout", type=float, default=_env_scan_timeout(),
                     help="hard wall-clock bound (s) for the one fleet read; hitting it ABORTS "
                          "the pass (exit 3) — it is never spent as an empty fleet")
     ap.add_argument("--cooldown", type=int, default=COOLDOWN_S)
@@ -752,7 +830,15 @@ def main():
         # finished_the_work -> fall through to the claim
 
         qfile = CLASS_QUEUE.get(cls, ("?",))[0]
-        item, qpath = claim_next(lane, qfile)
+        try:
+            item, qpath = claim_next(lane, qfile)
+        except QueueReadError as exc:
+            # ⛔ A FAILED QUEUE READ IS NOT AN EMPTY QUEUE. Withhold THIS lane and say so --
+            # never print "nothing left" (which is what the old fail-open did) and never
+            # dispatch an item we could not verify. Bounded to one lane: the rest of the pass
+            # proceeds, and the next tick retries this one.
+            print(f"  READ-FAILED {lane}: {exc} — withholding this lane (NOT read as empty)")
+            continue
         if not item:
             print(f"  SKIP {lane}: {qfile} has nothing left (read {qpath})")
             continue

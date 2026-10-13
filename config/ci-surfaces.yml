@@ -1166,6 +1166,11 @@ surfaces:
   - test_6131_operator_mutation_vocabulary.py
   - test_comove_dispatch_3627.py
   - test_fleet_state.py
+  # #7957/#parent-P0: the fail-closed guard for `queue-dispatch.py`'s lane read. DB-free, no
+  # network, no cmux, no dispatch -- every live source is a stub under a throwaway HOME, so the
+  # default `core` surface is correct. (The file it exercises is a review copy of the out-of-repo
+  # live tool; the test binds to the copy at `tools/agent-infra-queue-dispatch.py`.)
+  - test_queue_dispatch_fail_closed.py
   - test_graph_script_provenance.py
   - test_heavy_import_guard.py
   # #7655: the suite-wide guard that refuses an in-process `signal.alarm` /
