@@ -2739,6 +2739,15 @@ surfaces:
   # `tortoise/hosted_api.py`) would therefore leave the token.ts guard unrun exactly
   # when that file changes, so the same file needs this arm too.
   - test_oauth_consent_bridge.py
+  # #3524 task 3: the BEHAVIOURAL guard for the four session-flow properties.
+  # It reads `website/apps/dashboard/functions/_shared/auth/{token,consent-flow}.ts`
+  # and executes them under Node, so `website/apps/dashboard/functions/` — a
+  # SOURCE_PATTERN for THIS surface — is exactly the diff that must run it
+  # (`tools/ci_selection.py`: a token.ts-only diff selects `['onboarding']` and
+  # NOT `api`). It does NOT read `tortoise/oauth.py`, so the `api` arm is not
+  # needed here; the static anchors in `test_oauth_consent_bridge.py` own that
+  # direction. Registered once, on the surface whose sources it reads.
+  - test_oauth_session_flow_properties.py
   # #4097: the env-truthiness non-divergence guard scans all of `tortoise/**`,
   # including `tortoise/onboarding/**`, and an `onboarding` surface match replaces
   # the `core` fallback (tools/ci_selection.py) — so the guard needs this arm too.

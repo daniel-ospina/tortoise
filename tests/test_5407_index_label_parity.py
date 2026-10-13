@@ -105,7 +105,8 @@ def test_every_entity_type_resolves_to_an_indexed_label() -> None:
 def test_point_range_indexes_are_declared() -> None:
     """``Point``'s ranged set is declared as a label plus props."""
     assert _POINT_RANGE_INDEX_LABEL == "Point"
-    assert _POINT_RANGE_INDEX_PROPS == ("id", "pointKind", "content_hash")
+    assert _POINT_RANGE_INDEX_PROPS == ("id", "pointKind", "content_hash",
+                                       "key")
 
 
 @pytest.mark.parametrize("kind", ["fulltext", "range"])

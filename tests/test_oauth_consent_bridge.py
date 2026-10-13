@@ -37,6 +37,9 @@ REPO = Path(__file__).resolve().parent.parent
 OAUTH = REPO / "tortoise" / "oauth.py"
 HOSTED = REPO / "tortoise" / "hosted_api.py"
 TOKEN_TS = REPO / "website/apps/dashboard/functions/_shared/auth/token.ts"
+CONSENT_FLOW_TS = (
+    REPO / "website/apps/dashboard/functions/_shared/auth/consent-flow.ts"
+)
 SPEC = REPO / "docs/engineering/auth/consent-identity-bridge.md"
 ALLOWLIST_RECORD = REPO / "docs/ops/auth-email-flows.md"
 
@@ -132,15 +135,18 @@ _PAGE_PROPERTIES = {
     "auto-advance": (OAUTH, "supabaseClient.auth.onAuthStateChange("),
 }
 
-#: The same three properties, already re-implemented server-side by the BFF (#3522/#4054). The
-#: bridge's job for them is to ROUTE the page onto this path, not to write them again.
+#: The same three properties, already re-implemented server-side by the BFF (#3522/#4054), plus
+#: property 4's new decision. Each entry is (module, the token that carries the guarantee).
+#: The bridge's job for 1-3 is to ROUTE the page onto this path, not to write them again.
 _BFF_PROPERTIES = {
     # CAS on the OLD refresh token: the loser re-reads the winner's token instead of clobbering it.
-    "single-flight": "AND refresh_token = ?5",
+    "single-flight": (TOKEN_TS, "AND refresh_token = ?5"),
     # Do not refresh until just before expiry, and bound how often a rejection may force one.
-    "refresh-once": "const REFRESH_SKEW_MS = 60_000;",
+    "refresh-once": (TOKEN_TS, "const REFRESH_SKEW_MS = 60_000;"),
     # `no_session` (401) and `unavailable` (503) stay DISTINCT — collapsing them is #3485.
-    "never-sign-out": '| { ok: false; reason: "unavailable" }',
+    "never-sign-out": (TOKEN_TS, '| { ok: false; reason: "unavailable" }'),
+    # Property 4's decision — the event listener's server-side replacement (#3524 task 3).
+    "auto-advance": (CONSENT_FLOW_TS, "export function decideConsentAdvance("),
 }
 
 
@@ -158,24 +164,33 @@ def test_the_four_properties_have_live_implementation_sites() -> None:
             "the guard have drifted apart"
         )
 
-    for prop, token in _BFF_PROPERTIES.items():
+    for prop, (path, token) in _BFF_PROPERTIES.items():
         # At-least-once here: the cooldown stamp legitimately appears in both the DDL and the SQL.
-        assert any(token in line for line in _lines(TOKEN_TS)), (
-            f"the BFF no longer carries the {prop!r} property ({token!r} is absent from "
-            "token.ts) — the spec's claim that it is already server-side is now false"
+        assert any(token in line for line in _lines(path)), (
+            f"{path.name} no longer carries the {prop!r} property ({token!r} is absent) — the "
+            "spec's claim that it is server-side is now false"
         )
 
 
-def test_auto_advance_is_the_property_with_no_server_side_equivalent_yet() -> None:
-    """`auto-advance` is the gap the bridge closes — the claim is falsifiable, so pin it.
+def test_auto_advance_records_its_server_side_status() -> None:
+    """`auto-advance` is the property whose server-side form is NEW here — so pin its status.
 
-    Properties 1–3 already have server-side equivalents. If a 4th ever acquires one, the spec's
-    §3 table ("Gap: none — this is the property the bridge changes") becomes wrong and this test
-    reds for the right reason.
+    Properties 1–3 already had server-side equivalents. Property 4's decision now exists
+    (`consent-flow.ts::decideConsentAdvance`) but is NOT routed yet, because §9 orders the
+    bridge's steps 2→4 to land together. Both halves are claims, and both are falsifiable:
+    if the decision is deleted the `auto-advance` entry above reds, and if the spec stops
+    recording the un-routed gap this test reds. Neither may quietly become "done".
     """
     spec = SPEC.read_text()
     assert "auto-advance" in spec
-    assert "**none — this is the property the bridge changes**" in spec
+    assert "decideConsentAdvance" in spec, (
+        "the spec no longer names property 4's server-side decision — the implementation and "
+        "the contract have drifted apart"
+    )
+    assert "the route that calls it is §9 step 3 and is NOT built" in spec, (
+        "the spec no longer records that property 4's decision is UN-ROUTED. That gap is the "
+        "honest status; deleting the record turns a partial delivery into a false claim"
+    )
 
 
 def test_the_consent_page_still_does_not_call_any_logout_api() -> None:
@@ -240,3 +255,16 @@ def test_the_spec_binds_every_authorize_param_single_use_and_a_ttl() -> None:
         "class 4(i)",                                             # the half that is still open
     ):
         assert clause in spec, f"the token contract no longer states {clause!r}"
+
+
+def test_the_spec_names_the_behavioural_guard_for_all_four_properties() -> None:
+    """The spec must point at the file that PROVES the four properties, not only at anchors.
+
+    `test_oauth_consent_bridge.py` pins WHERE they live; `tests/test_oauth_session_flow_properties.py`
+    pins WHAT they do (and each of its tests goes red when its property is deleted). A spec that
+    names only the anchors lets "the four properties" be satisfied by prose again.
+    """
+    assert "tests/test_oauth_session_flow_properties.py" in SPEC.read_text(), (
+        "the spec no longer names the behavioural guard for the four properties — the contract "
+        "would be anchor-only again, which is the state #3524 task 3 exists to end"
+    )
