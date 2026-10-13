@@ -117,10 +117,13 @@ unified index path — [§4b Index a local corpus](#4b-index-a-local-corpus-of-m
 ## 4b. Index a local corpus of markdown files (the unified index path)
 
 `tortoise index directory <corpus-dir> [--db URI] [--corpus-name NAME] [--metadata]`
-walks a directory of `.md` files and writes **Sources + Events** (a Source per
-file — the file's document *is* that Source, per D10 — plus a session/meeting
-Event for session exports) —
-idempotent across runs (re-runs converge to `skipped`).
+walks a directory of `.md` files and writes **Sources + Events** — a corpus
+Source per file, plus, for a doc-classified file, the per-file document (a
+`:Source` carrying `documentKind`, keyed by its `documentId` and linked from
+the file Source by a `references` edge — D10 retires the `:Document` label,
+it does not merge the file Source and the document into one node) — and a
+session/meeting Event for session exports. It is idempotent across runs
+(re-runs converge to `skipped`).
 
 ```bash
 tortoise index directory ~/notes --db docker://:falkordb@localhost:6379/tortoise
@@ -339,7 +342,8 @@ what actually carries the new order to an existing install.
 ### How to restore (backup → wipe → rebuild → re-index)
 
 1. Back up: (1) the corpus files (source of truth), (2) the FULL `events/`
-   JSONL directory (the sole replay source for Sources/Events/Documents),
+   JSONL directory (the sole replay source for Sources and Events, document
+   Sources included — their `DocumentCreated` events replay onto `:Source`),
    (3) the db file.
 2. Restore onto a fresh graph — `rebuild_all` is line-tolerant (a torn
    trailing line from a crash is skipped, never fatal). The rebuild wipes the

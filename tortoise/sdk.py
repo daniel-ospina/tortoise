@@ -14768,7 +14768,9 @@ class TortoiseSDK:
 
         Args:
             approver_id: Subject id (or name) of the human approving.
-            artifact_id: Object/Document id (or name) of the artifact approved.
+            artifact_id: Object id, or the url of the document Source, of the
+                artifact approved (D10: a document is a ``:Source``, not a
+                ``:Document`` node).
             point_ids: claim Point ids the approval covers (non-operator).
             decision_content: optional content override for the decision Point
                 (default ``"Approved: <artifact>"``).
@@ -25050,7 +25052,10 @@ class TortoiseSDK:
             aboutDocument props are extracted and wired as typed edges
             (Event)-[:aboutSubject]->(Subject) etc. rather than stored as
             string properties (ID or name resolution, legacy behavior).
-          - document → Document node (documentKind required, status='draft')
+          - document → a document ``:Source`` keyed ``url = id`` (documentKind
+            required; D10 (ONTOLOGY v3.15 §4.4) retires ``:Document`` — a
+            document is a ``:Source``, so this routes through the deprecated
+            label alias and journals ``DocumentCreated``)
 
         Write nudges (nudge, don't enforce): returns ``{node, nudges}`` where
         ``nudges`` lists top related Points (by name/content token overlap) with
