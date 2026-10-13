@@ -53,6 +53,60 @@ from tortoise.vector_write import (
 logger = logging.getLogger(__name__)
 
 
+# #6239: live's TWO ``PointPromoted`` emitters are both gated on the Point's
+# status at the instant they fire, so a replay that re-applies the snapshot's
+# ``status='live'`` unconditionally can re-liven a Point live never re-livened:
+#
+#   * ``sdk.promote_point`` promotes through a ``WHERE n.status = 'draft'`` CAS
+#     (the reviewer-gated draft→live door);
+#   * the capture auto-promotion's candidate query is
+#     ``n.status IS NULL OR n.status = 'draft'``.
+#
+# ``None`` therefore answers BOTH "the node carries no status" and "the node
+# does not exist yet" — the #2256 shape where a ``PointPromoted`` snapshot is
+# the node's ONLY durable record and the replay must materialize it live.
+_PROMOTE_LEGAL_PRIOR_STATUS: frozenset = frozenset({"draft"})
+
+
+def promote_status_applies(prior_status) -> bool:
+    """#6239: may a ``PointPromoted``'s ``status='live'`` be written over
+    ``prior_status``?
+
+    ``True`` only where live itself could have emitted the record — see
+    ``_PROMOTE_LEGAL_PRIOR_STATUS``. Anything else (``superseded`` — a supersede
+    is status-TERMINAL — ``retracted``, ``archived``, a legacy word, the empty
+    string) is a status the promote could not have overwritten live, so the
+    record's status write is a NO-OP on every replay engine.
+
+    This is the ONE predicate shared by the graph replay engines
+    (``apply()``, ``rebuild_all``'s inline pass and its post-supersede re-fold)
+    and by the reference fold (``consistency._fold_journal``), so the promoted
+    status cannot drift between them — before #6239 ``rebuild_all`` kept the
+    terminal ``superseded`` while the chronological ``apply()`` arm re-livened
+    it, and neither engine agreed with the other.
+
+    The rest of the snapshot still folds (content/embedding/…), exactly as
+    ``rebuild_all``'s inline pass has always applied it; only the status column
+    is withheld.
+    """
+    return prior_status is None or prior_status in _PROMOTE_LEGAL_PRIOR_STATUS
+
+
+def gated_promote_payload(p: dict, prior_status) -> dict:
+    """``p`` with its ``status`` withheld when
+    :func:`promote_status_applies` is False.
+
+    The withheld form is ``{"status": None}``, which the shared Point writer
+    reads as ``n.status=coalesce($st, n.status, 'live')`` — i.e. it PRESERVES
+    the existing terminal status instead of re-livening it. A copy is returned
+    only when something is withheld, so the un-gated path stays byte-identical
+    to the pre-#6239 payload.
+    """
+    if promote_status_applies(prior_status):
+        return p
+    return {**p, "status": None}
+
+
 def is_non_operator_payload(payload: dict) -> bool:
     """True when a journal Point payload states its OWN non-operator identity.
 
@@ -2471,6 +2525,23 @@ class _EntityHandlers:
         """Upsert a Point: node properties via _upsert_point_props, then edges."""
         self._upsert_point_props(p)
         self._upsert_point_edges(p, contains_session=contains_session)
+
+    def _point_status(self, pid: str):
+        """The replayed ``status`` of a Point, or ``None`` when the node does
+        not exist or carries no ``status``.
+
+        #6239: the ONE reader for the promote gate. Every replay engine asks the
+        same question — "was this Point ``draft``/status-less at the record's
+        position?" — of its own graph state, so the gate cannot drift between
+        them. A missing node and a status-less node are deliberately the SAME
+        answer: the capture path promotes an unset status, and the #2256
+        promote-only journal materializes the node from the snapshot itself, so
+        both must read as "promote legal" (see ``promote_status_applies``).
+        """
+        row = self.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.status",
+            params={"id": pid}).result_set
+        return row[0][0] if row else None
 
     def _delete(self, pid: str) -> None:
         self.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": pid})
