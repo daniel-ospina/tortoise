@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-import pytest  # noqa: F401
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -576,10 +576,38 @@ class TestClosedVocab:
         assert any("objectKind" in e for e in closed.get("errors") or []), closed
 
 
-class TestModelAdapterBounds:
-    """T13 (#1272): the production BYOK adapter sends explicit bounds."""
+@pytest.fixture()
+def _keyed_provider_shell(monkeypatch):
+    """#5161: stand in for a dev shell that exports the provider keys.
 
-    def test_adapter_body_has_bounds(self, monkeypatch):
+    Ordered BEFORE ``no_provider_keys`` in the test signatures below — pytest
+    instantiates same-scope fixtures in signature order (the ordering note in
+    ``conftest.no_provider_keys`` is the contract) — so the derived scrub has a
+    keyed environment to scrub.
+
+    On CI (which exports no keys) this fixture is the ONLY reason the hazard
+    exists, and that is the point: it makes the hermeticity of these two tests
+    checkable in CI instead of only on a keyed box. Pre-#5161 the hand-list
+    delenvs deleted DEEPSEEK/OPENROUTER/selector but NOT ``VENICE_API_KEY``, so
+    this fixture reddens them exactly as an ambient venice key did.
+
+    The explicit selector is set too, so an unscrubbed run fails closed
+    (ValueError) rather than merely routing to a prefix-normalizing adapter.
+    """
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-deepseek")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fake-openrouter")
+    monkeypatch.setenv("VENICE_API_KEY", "fake-venice")
+    monkeypatch.setenv("TORTOISE_EXTRACTOR_PROVIDER", "venice")
+
+
+class TestModelAdapterBounds:
+    """T13 (#1272): the production BYOK adapter sends explicit bounds.
+
+    #5161: the provider environment is hermetic — scrubbed by the DERIVED set
+    (``no_provider_keys``, #3695/#5477), never a hand-written key list.
+    """
+
+    def test_adapter_body_has_bounds(self, monkeypatch, _keyed_provider_shell, no_provider_keys):
         from tortoise.sdk import _model_adapter  # noqa: I001
         import requests as _requests
         captured = {}
@@ -594,14 +622,17 @@ class TestModelAdapterBounds:
             captured["body"] = kwargs.get("json", {})
             return _FakeResp()
 
-        # #1530: exercise the no-key lenient path deterministically (the
-        # dev shell carries real DEEPSEEK/OPENROUTER keys — routing would
-        # pick deepseek-direct and strip the family prefix). With no keys the
-        # adapter degrades to the single OpenRouter adapter (D3), which sends
-        # the family-prefixed id unchanged.
-        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-        monkeypatch.delenv("TORTOISE_EXTRACTOR_PROVIDER", raising=False)
+        # #1530 / #5161: exercise the no-key lenient path deterministically.
+        # ``no_provider_keys`` removes EVERY key the resolvers honour — the
+        # hand-list this test used to carry stopped at DEEPSEEK/OPENROUTER, so
+        # an ambient VENICE_API_KEY (or this fixture) routed to VeniceModel,
+        # which normalizes the family prefix away and reddened the assertion
+        # below. With no keys the adapter degrades to the single OpenRouter
+        # adapter (D3), which sends the family-prefixed id unchanged.
+        from tortoise.model_adapters import resolve_extractor_provider
+        assert resolve_extractor_provider() == (None, None), (
+            "#5161: this test's premise is the keyless lenient route — a keyed"
+            " environment here means the scrub missed a key the resolver reads")
         monkeypatch.setattr(_requests.Session, "post", _fake_post)
         adapter = _model_adapter("deepseek/deepseek-v4-flash")
         out = adapter.complete(system="s", user="u")
@@ -611,7 +642,8 @@ class TestModelAdapterBounds:
         assert body["temperature"] == 0.0
         assert body["model"] == "deepseek/deepseek-v4-flash"
 
-    def test_adapter_body_uncapped_omits_max_tokens(self, monkeypatch):
+    def test_adapter_body_uncapped_omits_max_tokens(
+            self, monkeypatch, _keyed_provider_shell, no_provider_keys):
         """#1468: max_tokens=None must OMIT the cap from the request body —
         the uncapped output budget the v2 session extractor's flash fallback
         needs (capped adapters truncate and silently lose chunks). Mirrors
@@ -632,11 +664,10 @@ class TestModelAdapterBounds:
             return _FakeResp()
 
         monkeypatch.setattr(_requests.Session, "post", _fake_post)
-        # #1530: no-key lenient path (see test_adapter_body_has_bounds) — the
-        # family-prefixed id must survive on the OpenRouter default route.
-        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-        monkeypatch.delenv("TORTOISE_EXTRACTOR_PROVIDER", raising=False)
+        # #1530 / #5161: no-key lenient path (see test_adapter_body_has_bounds
+        # for why the scrub is DERIVED via ``no_provider_keys`` and not a
+        # hand-list) — the family-prefixed id must survive on the OpenRouter
+        # default route.
         adapter = _model_adapter("deepseek/deepseek-v4-flash",
                                  max_tokens=None, temperature=0.0)
         out = adapter.complete(system="s", user="u")
