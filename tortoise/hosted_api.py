@@ -13250,8 +13250,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         try:
             # #2031: hosted extraction compiles the vocabulary from the
             # tenant's pack view (shared catalog + THIS org's custom packs,
-            # memoized per (graph_identity, pack_config_version) — #1154/
-            # #1350) so the tenant's pack kinds reach the prompts and write
+            # memoized per (graph_identity, pack_config_version) — the key
+            # `pack_manifest_store.tenant_view` is the authority for, whose
+            # `version` also carries the #2714 approval set — #1154/#1350)
+            # so the tenant's pack kinds reach the prompts and write
             # gates. The tenant identity comes from the tenant-scoped sdk
             # (only org["org_id"] is consumed — the MCP tool passes a
             # minimal org dict). Fail-open: a vocab-compile hiccup must
