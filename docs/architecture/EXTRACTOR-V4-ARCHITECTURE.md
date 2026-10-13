@@ -539,20 +539,33 @@ This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 
 > **⛔ DRIFT MARKER — this sentence is about the v4 PROPOSAL, not the shipped code (checked 2026-10-13).**
 > A lane reading *"do not restore one"* while looking at `run_s4` will conclude the stage is vestigial and
-> delete it. **It is not vestigial: the live pipeline runs S4, DEFAULT-ON.**
+> delete it. **It is not vestigial: the live pipeline runs S4, and nothing gates it.**
 >
 > | | this design (v4) | shipped code |
 > |---|---|---|
-> | S4 | *"There is no S4"* | `run_s4` defined `extractor_v2.py:2619`, **called `:7396`** in the production extract path |
-> | enablement | removed from the design | `_s4_delta_enabled()` → `env_flag("TORTOISE_S4_DELTA", True)` — **DEFAULT-ON** |
-> | stage order | the eight steps above | `run_s1` `:7290` → `run_s2` `:7314` → **`run_s4` `:7396`** |
+> | S4 | *"There is no S4"* | `merge_embed_lists(s2, s4)` def `extractor_v2.py:2673`, **consumed at `:7414`**; `run_s4` called **`:7396`** |
+> | gating | removed from the design | the call sits under `if story:` with **no flag gate** — S4 runs whenever a story exists |
+> | the S4 flag | — | ⚠️ `TORTOISE_S4_DELTA` selects the **delta vs complete-list contract of S4's OUTPUT**, **not** whether S4 runs (`:689-710`) |
+> | stage order | the eight steps above | `run_s1` `:7290` → `run_s2` `:7314` → `S2.2 VET` `:7331` → `S3 search_graph` `:7375` → **`run_s4` `:7396`** → `S5` |
 >
-> **Removing `run_s4` is a v4 migration deliverable, not a cleanup** — it is §4.3 **G5** (*"what happens
-> to the live S4 `merge_embed_lists` when S4 leaves the step list"*), tracked at `#5333`. **Never delete
-> it on the strength of this document alone.**
+> **⚠️ `TORTOISE_S4_DELTA=0` does NOT disable S4** — it selects the legacy complete-list contract. No flag
+> turns S4 off today, so "set the flag to turn it off" is not available.
 >
-> The same applies to the step *names*: `S0` / `S3` / `S5` / `S6` occur **0 times** in
-> `extractor_v2.py` — they are v4 design names, not code symbols.
+> **Removing `run_s4` is a v4 migration deliverable, not a cleanup** — it is §4.3 **G5**'s S4 clause,
+> tracked at **`#8500`**. ⚠️ **Not `#5333`**: that issue's own body scopes it to the deletion/relocation
+> half and states it *must not absorb* other work, and it contains no reference to `S4`. **Never delete
+> `run_s4` on the strength of this document alone.**
+>
+> **On the step *names*:** the code's own stages are **S1–S5** (`[S1] STORY SUMMARY` … `[S5] EMBED`, module
+> docstring `:10-29`), with `S2.2 VET` present in the production path (`:7331`). **Only `S0` and `S6` have
+> no code counterpart** — those two are v4 design names. ⚠️ **An earlier version of this marker claimed
+> `S3` and `S5` were absent from the code as well; that was wrong** — `S3` and `S5` appear 51 and 22 times
+> in `extractor_v2.py`, including as production stage comments.
+>
+> **⚠️ Currency of these line numbers:** the figures above are at the **current tip**. This document's
+> other citations are pinned to `c79ba1cf2` and **some are stale at the tip** — e.g. `merge_embed_lists`
+> is cited here as def `:2284` / called `:4845`, but is actually `:2673` / `:7414`. The header's rule
+> stands: *the symbol name is authoritative and the line number is a convenience.*
 
 **Why Jev fits:** it is a **decision-only** model — it cannot return a value outside the supplied schema, so it cannot invent an entity or a name. Three primitives, **mixable in one call**: *Choice* (pick from a list), *Score*, *Noul* (0–1 probability). Doc: `https://jevtypesafeai.com/docs#apis`. ⚠️ Measured **$0.000243/item at 3 questions** (~$6/month at 25k items) — **~4–7× cheaper than a frontier LLM, not the vendor's claimed 40–400×** (self-tested).
 
@@ -724,15 +737,15 @@ S6  COMMIT
 
 | # | the gap | why it matters |
 |---|---|---|
-| **G1** → `#5007` (span) · `#4894` (narrative) | **No step PERSISTS the narrative or the raw-fact span.** S6 is *"write entities + connections + metadata/lifecycle"*. §4.0 has no persistence purpose beyond S6. | ⛔ **D1 and §2.4 are not implementable from the steps as written.** If the narrative and the span are not written by a named step, they are not written. **Needs an explicit persistence step (or an explicit S6 sub-job).** |
+| **G1** → `#5064` (span; `#5007` is CLOSED `COMPLETED`, consolidated here) · `#4894` (narrative) | **No step PERSISTS the narrative or the raw-fact span.** S6 is *"write entities + connections + metadata/lifecycle"*. §4.0 has no persistence purpose beyond S6. | ⛔ **D1 and §2.4 are not implementable from the steps as written.** If the narrative and the span are not written by a named step, they are not written. **Needs an explicit persistence step (or an explicit S6 sub-job).** |
 | **G2** → `#5008` | **No EMBEDDING-DECISION step.** `STORAGE-ARCHITECTURE.md` §12.2a **decides** the `EMBED` gate exists (*"a row can be worth KEEPING but not worth EMBEDDING"*, *"the lever is what gets an embedding"*) — **and this document never mentions it.** S2.3's kNN path **silently assumes every candidate is embedded.** | ⛔ **The two documents would ship contradictory designs.** The `EMBED` gate and the `KEEP` gate **share one rule set and enforce at TWO points** (§12.2a) — so the second enforcement point needs a home in this step list. |
 | **G3** → `#8495` | **No per-step FAILURE POLICY.** Only S2.2 (*"fail-open — keep"*) and S2.3 (*"never raises"*) state one. | **The S3 failure is the dangerous one: the natural fail-open marks candidates `new` — MANUFACTURING DUPLICATES, the exact failure S3 exists to prevent.** Also: partial S6 has no transaction/retry boundary vs `#4240`/`#4716`; and **re-narrate has no tie-break** for a worse second narrative. |
 | **G4** → `#8496` | ⛔ **`#4911` (no secret redaction) + an append-only immutable raw layer = IMMORTAL SECRETS.** | **`#4911` is listed in §15 as an unrelated capture-path issue. It is not unrelated** — §2.4.2 makes the raw layer **append-only by design**, so **a secret captured once is a secret retained forever.** Redaction must be designed *with* the layer, or the layer's immutability becomes a liability. |
-| **G5** → `#5333` · `#5059` | **No migration or backfill for the ~25k existing nodes.** | No backfill, no re-extraction path, and **no decision on the ~4,900 `the <X>` Objects.** Also unaddressed: **what happens to the live S4 `merge_embed_lists` when S4 leaves the step list** — the code and the design must not disagree. |
+| **G5** → `#5333` · `#5059` · `#8500` (the S4 clause) | **No migration or backfill for the ~25k existing nodes.** | No backfill, no re-extraction path, and **no decision on the ~4,900 `the <X>` Objects.** Also unaddressed: **what happens to the live S4 `merge_embed_lists` when S4 leaves the step list** — the code and the design must not disagree. |
 
 **⚠️ And G2 is where the two documents bind:** `STORAGE-ARCHITECTURE.md` §12.2a's decided rule (*one rule set, two enforcement points*) **requires a step to hold the second point.** Until G2 is closed, **the storage doc's central lever has no implementation site.**
 
-**Where the five gaps live in the tracker** (checked 2026-10-13): **G1** `#5007` (span) + `#4894` (narrative placement) · **G2** `#5008` · **G3** `#8495` · **G4** `#8496` · **G5** `#5333` + `#5059`. The owning epic is **`#5087`** (E1 — the selective write path) under tracking **`#5086`**; end-to-end acceptance is capstone **`#7949`**. ⚠️ **G4's original issue `#4911` is CLOSED `COMPLETED` (2026-09-26)** — redaction landed for the capture path that exists today, but the raw-fact layer does not exist yet, so the *design-level* consequence (append-only + no redaction = immortal secrets) needed its own home. That is why `#8496` is filed rather than `#4911` reopened.
+**Where the five gaps live in the tracker** (checked 2026-10-13): **G1** `#5064` (span — `#5007` is CLOSED, consolidated into `#5064`) + `#4894` (narrative placement) · **G2** `#5008` · **G3** `#8495` · **G4** `#8496` · **G5** `#5333` + `#5059` + `#8500` (the S4 clause). The owning epic is **`#5087`** (E1 — the selective write path) under tracking **`#5086`**; end-to-end acceptance is capstone **`#7949`**. ⚠️ **G4's original issue `#4911` is CLOSED `COMPLETED` (2026-09-26)** — redaction landed for the capture path that exists today, but the raw-fact layer does not exist yet, so the *design-level* consequence (append-only + no redaction = immortal secrets) needed its own home. That is why `#8496` is filed rather than `#4911` reopened. ⚠️ **G5's S4 clause needed `#8500` for the same reason** — neither `#5333` (whose own body scopes it to the deletion/relocation half and says it must not absorb other work) nor `#5059` covers *"what happens to the live S4 `merge_embed_lists`"*.
 
 ### S3 — RESOLVE (find what exists · disambiguate · attach)
 
@@ -1213,9 +1226,9 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 | §13 connections & relevance | **`#2730`** · **`#1026`** · `#4240` | cross-batch connection is **mechanical** in the nearest comparable; entity edges were **deleted** at 53% of link rows |
 | §13.6–§13.8 `aboutObject` stored edge vs derived join | **`#7948`** (the filed record: measured SPLIT · ruled **KEEP** · deferred) · `#5010` (the cap, CLOSED) | the measured, classified read-site enumeration — and the finding that the comparable's conclusion does **NOT** transfer |
 | §14 not established | `#4894` | the small-sample-first measurement list |
-| **capture-path issues (same pipeline, not steps)** | `#4897` · `#4911` · `#4714` · `#4614` | mid-word truncation at 5,000 chars · **no secret redaction** · **2 of 4 harnesses 404** · invisible quota refusals |
+| **capture-path issues (same pipeline, not steps)** | `#4897` · `#4911` · `#4714` · `#4614` | mid-word truncation at 5,000 chars · ~~no secret redaction~~ (**`#4911` CLOSED `COMPLETED` 2026-09-26** — the redaction landed; the *v4 raw-layer* consequence is `#8496`, §4.3 G4) · **2 of 4 harnesses 404** · invisible quota refusals |
 
-**Two of the three questions this document raises** (§13.8) belong to **D6** and are the owner's: cross-batch connection by LLM or mechanically; and hard fan-out caps. **The third — `aboutObject` as edge or join — is measured, ruled and deferred, NOT open** (§13.8 question 2, §16): the measurement is SPLIT, the owner ruled **KEEP the stored edge** on 2026-09-23, and `#7948` is the filed record.
+**Two of the three questions this document raises** (§13.8) belong to **D6** and are the owner's: cross-batch connection by LLM or mechanically (the third was hard fan-out caps, and it is **CLOSED** — `#5010`, see the table below). **The third — `aboutObject` as edge or join — is measured, ruled and deferred, NOT open** (§13.8 question 2, §16): the measurement is SPLIT, the owner ruled **KEEP the stored edge** on 2026-09-23, and `#7948` is the filed record.
 
 **Filed status — revalidated 2026-10-13 against the tracker.**
 
@@ -1228,16 +1241,18 @@ filed"* claim is what causes duplicate filing — the same failure the §4.3 gap
 | **The raw-vs-narrative measurement** (D3's falsifier, §10) — *"the next real work"*, settles whether Option 4 stays provisional | **`#7947`** | ✅ **FILED** — this block said *not yet filed* |
 | **Fan-out caps** (mirrored in `STORAGE-ARCHITECTURE.md` §13) | **`#5010`** | ✅ **CLOSED** — cap landed query-side (`tortoise/fanout.py`, `PER_ENTITY_FANOUT_CAP = 200`, PR `#5057`) |
 | **`aboutObject` join-vs-edge** | **`#7948`** | ✅ **FILED** — measured SPLIT, owner ruled **KEEP**, deferred. Not open (§13.8 question 2, §16) |
-| **G1** — narrative + raw-fact span persistence | **`#5007`** (span) · **`#4894`** (narrative) | ✅ filed |
+| **G1** — narrative + raw-fact span persistence | **`#5064`** (span; `#5007` CLOSED → consolidated) · **`#4894`** (narrative) | ✅ filed |
 | **G2** — the EMBED gate | **`#5008`** | ✅ filed |
 | **G3** — per-step failure policy | **`#8495`** | ✅ filed |
 | **G4** — redaction designed with the append-only layer | **`#8496`** | ✅ filed (`#4911` is CLOSED; its design-level consequence was unowned) |
-| **G5** — migration / backfill / the live S4 | **`#5333`** · **`#5059`** | ✅ filed |
+| **G5** — migration / backfill / the live S4 | **`#5333`** · **`#5059`** · **`#8500`** (the S4 clause) | ✅ filed |
 
 **⇒ There are no longer any unfiled candidates in this document.** G1–G5 were recorded in §4.3 as *"all
-must be closed before implementation"*, and three of them had **no tracker entry** until 2026-10-13; they
-do now. The owning epic is **`#5087`** (E1) under tracking **`#5086`**, with end-to-end acceptance in
-capstone **`#7949`**.
+must be closed before implementation"*, and **two** of them (`#8495`, `#8496`) had no tracker entry until
+2026-10-13. Two G5 sub-clauses also needed their own homes rather than a reopen of a closed issue, and got
+them on the same day: the S4 clause is **`#8500`** (`#5333`'s body explicitly refuses to absorb it). The
+owning epic is **`#5087`** (E1) under tracking **`#5086`**, with end-to-end acceptance in capstone
+**`#7949`**.
 
 ---
 
