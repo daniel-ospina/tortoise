@@ -55,13 +55,20 @@ class _Row:
         self.result_set = [[value]]
 
 
+class _EmptyRows:
+    """An empty ``CALL db.indexes()`` catalogue (no boolean index — the healthy case)."""
+
+    def __init__(self) -> None:
+        self.result_set: list = []
+
+
 @dataclasses.dataclass
 class _GraphState:
     nodes: int
     edges: int = 0
     writable: bool = True
     #: Raised on CREATE when `writable` is False. A real ``ResponseError`` carrying
-    #: `DEFECT` is the only thing `retryable_aborted_write` accepts.
+    #: the ``DEFECT`` sentence is the only thing `graph_abort_family` accepts.
     error: BaseException | None = None
     #: How many nodes a probe CREATE lands. 2 simulates a count that moved wrongly.
     create_delta: int = 1
@@ -77,6 +84,9 @@ class _FakeGraph:
         if st is None:  # a Cypher read on a missing graph auto-creates in FalkorDB;
             raise RuntimeError(f"graph {self.name!r} does not exist")  # the fake must not
         head = cypher.strip().upper()
+        if "DB.INDEXES()" in head:
+            # #3154 audit: an empty catalogue == no boolean is_operator index.
+            return _EmptyRows()
         if "COUNT(N)" in head:
             return _Row(st.nodes)
         if "COUNT(R)" in head:
@@ -96,10 +106,14 @@ class _FakeGraph:
 
 
 class _FakeDb:
-    def __init__(self, graphs: dict, *, copy_drops_edges: bool = False) -> None:
+    def __init__(self, graphs: dict, *, copy_drops_edges: bool = False,
+                 copy_bumps_source: int = 0) -> None:
         self.graphs = graphs
         self.commands: list[tuple] = []
         self._copy_drops_edges = copy_drops_edges
+        #: Nodes added to the SOURCE right after GRAPH.COPY, simulating a concurrent
+        #: fleet write landing between the copy and the pre-RENAME re-read.
+        self._copy_bumps_source = copy_bumps_source
         # `repair()` reaches GRAPH.COPY/RENAME through `db.connection`.
         self.connection = self
 
@@ -121,6 +135,8 @@ class _FakeDb:
                 edges=0 if self._copy_drops_edges else st.edges,
                 writable=True,
             )
+            if self._copy_bumps_source:
+                self.graphs[src].nodes += self._copy_bumps_source
         elif cmd == "RENAME":
             src, dst = args
             self.graphs[dst] = self.graphs.pop(src)
@@ -212,6 +228,43 @@ def test_probe_busy_loading_is_unknown_never_defect():
     assert kind == "unknown"
 
 
+def test_probe_write_slot_contention_is_unknown_never_defect():
+    """A LOST WRITE RACE is not the reload defect.
+
+    `retryable_aborted_write` accepts this arm state-independently, but the graph is
+    healthy and must not be swapped for a stale COPY. Mutation: classify with
+    `retryable_aborted_write` (or drop the `graph_abort_family` gate) -> `defect` -> RED.
+    """
+    err = redis_exc.ResponseError("another write is in progress, retry the query")
+    db = _FakeDb({"g": _GraphState(nodes=5, writable=False, error=err)})
+    kind, detail = gwr.probe(db, "g")
+    assert kind == "unknown", detail
+
+
+def test_probe_constraint_path_write_abort_is_unknown_never_defect():
+    """The OTHER state-independent write-slot literal is a transient refusal too.
+
+    Mutation: `retryable_aborted_write` -> `defect` -> RED.
+    """
+    err = redis_exc.ResponseError("Write query aborted: another write is in progress")
+    db = _FakeDb({"g": _GraphState(nodes=5, writable=False, error=err)})
+    kind, detail = gwr.probe(db, "g")
+    assert kind == "unknown", detail
+
+
+def test_probe_misconf_is_unknown_never_defect():
+    """`MISCONF`/`Can't persist` is a persistence outage, not the reload defect.
+
+    Repairing it would issue a whole-graph COPY against a server refusing to persist.
+    Mutation: `retryable_aborted_write` -> `defect` -> RED.
+    """
+    err = redis_exc.ResponseError(
+        "MISCONF Errors writing to the AOF file: No space left on device")
+    db = _FakeDb({"g": _GraphState(nodes=5, writable=False, error=err)})
+    kind, detail = gwr.probe(db, "g")
+    assert kind == "unknown", detail
+
+
 def test_probe_refuses_a_write_whose_count_did_not_move_by_one():
     """A write accepted but a count that moved by 2 is not a healthy graph."""
     db = _FakeDb({"g": _GraphState(nodes=5, writable=True, create_delta=2)})
@@ -228,6 +281,19 @@ def test_main_unknown_exits_2_and_never_repairs(monkeypatch, capsys):
     Mutation: fold "unknown" into the repair branch -> exit 0 and a swap -> RED.
     """
     err = redis_exc.BusyLoadingError("Redis is loading the dataset in memory")
+    db = _FakeDb({"tortoise": _GraphState(nodes=BIG, writable=False, error=err)})
+    _run_main(monkeypatch, db)
+    assert gwr.main() == 2
+    assert not [c for c in db.commands if c[0] in ("GRAPH.COPY", "RENAME")], db.commands
+
+
+def test_main_write_slot_contention_exits_2_and_never_repairs(monkeypatch, capsys):
+    """A healthy graph whose probe CREATE merely lost the write slot is NOT repaired.
+
+    Mutation: gate on `retryable_aborted_write` -> exit 0 with GRAPH.COPY + RENAME, and
+    every fleet write between them is discarded -> RED.
+    """
+    err = redis_exc.ResponseError("another write is in progress, retry the query")
     db = _FakeDb({"tortoise": _GraphState(nodes=BIG, writable=False, error=err)})
     _run_main(monkeypatch, db)
     assert gwr.main() == 2
@@ -339,6 +405,62 @@ def test_a_clone_that_lost_edges_is_never_swapped_in(monkeypatch, capsys, fake_l
     assert not [c for c in db.commands if c[0] == "RENAME"], db.commands
     assert db.graphs["tortoise"].edges == 42, "the source was modified"
     assert _scratch_graphs(db) == [], "the incomplete clone was not dropped"
+
+
+def test_repair_runs_the_boolean_index_audit_on_the_clone(monkeypatch, fake_lock, capsys):
+    """#3154: every GRAPH.COPY site audits the boolean is_operator index before the swap.
+
+    Mutation: drop the `_audit_copied_boolean_indexes(...)` call -> the spy records no
+    call -> RED.
+    """
+    calls = []
+
+    def _spy(g, *, graph_name, stage, raise_on_failure=True):
+        calls.append((graph_name, stage))
+        return False
+
+    monkeypatch.setattr("tortoise.hosted_backup._audit_copied_boolean_indexes", _spy)
+    db = _FakeDb({"tortoise": _defect_state()})
+    _run_main(monkeypatch, db)
+    assert gwr.main() == 0
+    assert len(calls) == 1, calls
+    assert calls[0][0].startswith("__gwr_"), calls
+    assert calls[0][1] == "graph-write-repair clone", calls
+
+
+def test_repair_refuses_to_swap_when_the_boolean_index_audit_fails(monkeypatch, fake_lock, capsys):
+    """A clone whose boolean index survived the audit is NEVER swapped in (#3154).
+
+    Mutation: swallow the audit's RuntimeError / swap anyway -> RENAME runs on a graph
+    whose `is_operator = false` predicate is silently dead -> RED.
+    """
+    def _boom(*_a, **_k):
+        raise RuntimeError("boolean index survived the drop")
+
+    monkeypatch.setattr("tortoise.hosted_backup._audit_copied_boolean_indexes", _boom)
+    db = _FakeDb({"tortoise": _defect_state()})
+    _run_main(monkeypatch, db)
+    assert gwr.main() == 3
+    assert not [c for c in db.commands if c[0] == "RENAME"], db.commands
+    assert _scratch_graphs(db) == [], "the un-audited clone was not dropped"
+
+
+def test_repair_refuses_when_the_source_gained_a_node_after_the_copy(monkeypatch, capsys, fake_lock):
+    """A concurrent ADDITION between COPY and RENAME refuses the swap (any change is stale).
+
+    The pre-RENAME re-read previously refused only on a node LOSS, so a fleet write that
+    ADDED a node passed the check and the older clone overwrote it -- silently discarding
+    the write while reporting REPAIRED.
+
+    Mutation: refuse only on `now_fp[0] < before_nodes` -> the RENAME runs and the source's
+    extra node is lost -> RED.
+    """
+    db = _FakeDb({"tortoise": _defect_state()}, copy_bumps_source=1)
+    _run_main(monkeypatch, db)
+    assert gwr.main() == 3
+    assert not [c for c in db.commands if c[0] == "RENAME"], db.commands
+    assert db.graphs["tortoise"].nodes == BIG + 1, "the concurrent write was overwritten"
+    assert _scratch_graphs(db) == [], "the stale clone was not dropped"
 
 
 def test_repair_refuses_a_graph_below_min_nodes(monkeypatch, capsys, fake_lock):
@@ -552,3 +674,35 @@ def test_installer_arms_the_job_quiet_and_points_at_the_checkout(tmp_path):
     assert str(tmp_path / "repo" / ".venv" / "bin" / "python") in text, text
     assert str(tmp_path / "repo" / "tools" / "graph_write_repair.py") in text, text
     assert "bootstrap" in sb["launchctl_log"].read_text(encoding="utf-8")
+
+
+def test_installer_uninstall_refuses_while_the_job_is_still_loaded(tmp_path):
+    """`--uninstall` verifies the bootout: a job STILL loaded keeps its plist.
+
+    Without the verification, `rm -f` removes the plist while launchd keeps firing the job
+    every StartInterval -- the repair looks uninstalled but is not. Mutation: drop the
+    post-bootout `launchctl print` check -> the plist is removed -> RED.
+    """
+    sb = _sandbox(tmp_path)
+    sb["env"]["STUB_PRINT_EXIT"] = "0"  # still loaded after bootout
+    sb["plist"].parent.mkdir(parents=True, exist_ok=True)
+    sb["plist"].write_text("<plist/>", encoding="utf-8")
+    script = _repo_copy(tmp_path)
+    res = _run(sb, script, "--uninstall", "--apply")
+    assert res.returncode == 3, (res.stdout, res.stderr)
+    assert "STILL LOADED after bootout" in res.stderr, res.stderr
+    assert sb["plist"].exists(), "the plist was removed while the job stayed loaded"
+    assert "bootout" in sb["launchctl_log"].read_text(encoding="utf-8")
+
+
+def test_installer_uninstall_removes_the_plist_once_the_job_is_gone(tmp_path):
+    """`--uninstall` removes the plist only after verifying the job booted out."""
+    sb = _sandbox(tmp_path)
+    sb["env"]["STUB_PRINT_EXIT"] = "1"  # not loaded after bootout
+    sb["plist"].parent.mkdir(parents=True, exist_ok=True)
+    sb["plist"].write_text("<plist/>", encoding="utf-8")
+    script = _repo_copy(tmp_path)
+    res = _run(sb, script, "--uninstall", "--apply")
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "uninstalled" in res.stdout, res.stdout
+    assert not sb["plist"].exists(), "the plist was not removed"

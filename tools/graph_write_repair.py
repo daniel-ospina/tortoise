@@ -34,9 +34,13 @@ the failure that destroyed this graph once already: `GRAPH.DELETE` + copy-back l
 window in which a Cypher read on the missing graph AUTO-CREATES an empty one (so the
 copy-back then fails with `destination key already exists`), and the graph is left EMPTY.
 `RENAME` has no such window, so this module contains no `GRAPH.DELETE` of the live graph at
-all. The repo's own primitives are used for the pieces that do delete
-(`graph_delete_guard.graph_delete_lock`, `safe_graph_delete`), and presence is always
-established with `graph_exists` -- never by querying a graph whose existence is assumed.
+all. The run-unique scratch clone is the ONLY key this module deletes, and it is dropped with
+a raw `GRAPH.DELETE` -- the same form `hosted_backup`'s restore cleanup uses for its own
+`GRAPH.COPY` staging copies. `graph_delete_guard.safe_graph_delete` is deliberately NOT used
+for it: that primitive re-acquires the non-reentrant delete lock this run already holds on
+its failure paths, cannot acquire it, and refuses after its full wait (the clone then leaks
+and the run stalls while the caller believes it cleaned up). Presence is always established
+with `graph_exists` -- never by querying a graph whose existence is assumed.
 
 REPAIR ONLY ON THE SPECIFIC DEFECT
 ----------------------------------
@@ -140,19 +144,29 @@ def is_defect(db, name: str, exc: BaseException) -> bool:
     """Is this exception the reload defect -- via the REPO'S classifier, not a new one.
 
     ⛔ DO NOT hand-roll a substring test for this sentence. `tortoise/retry.py` already
-    measured and rejected that: `retryable_aborted_write` anchors the clause (and requires
+    measured and rejected that: its graph-abort pattern anchors the clause (and requires
     the trailing `, aborting`), specifically because a MID-MESSAGE occurrence must not
-    match, and it takes a PRESENCE PROBE because on the v6 core the one sentence covers two
-    realities -- a rebuild and a plain deletion. An unanchored `in` test (this module's first
-    version) both matched the sentence inside `could not parse query: <sentence>` AND would
-    have treated a genuine concurrent deletion as the reload defect. One classifier, reused.
+    match -- an unanchored `in` test (this module's first version) matched the sentence
+    inside `could not parse query: <sentence>`.
+
+    ⛔ AND DO NOT use `retryable_aborted_write` here. That is the SDK's RETRY predicate, and
+    it returns True for its STATE-INDEPENDENT arms as well -- the engine's write-slot refusal
+    (`another write is in progress, retry the query` / `Write query aborted: ...`) and
+    `MISCONF`/`Can't persist` -- WITHOUT consulting the graph at all. A repair gate built on
+    it classifies a HEALTHY graph that merely lost one write race as the reload defect and
+    swaps it for a stale COPY, silently discarding every fleet write that landed between the
+    COPY and the RENAME; on `MISCONF` it additionally issues a whole-graph write against a
+    server that is refusing to persist. That is the 2026-10-13 incident class (a non-defect
+    failure authorising the destructive swap). The narrow question here is "is this the
+    GRAPH-ABORT family?", which is exactly `graph_abort_family`, gated on presence.
     """
     from tortoise.graph_delete_guard import graph_exists
-    from tortoise.retry import retryable_aborted_write
+    from tortoise.retry import graph_abort_family
 
     try:
-        return bool(retryable_aborted_write(
-            exc, graph_exists=lambda: graph_exists(db, name)))
+        if not graph_abort_family(exc):
+            return False
+        return bool(graph_exists(db, name))
     except Exception:
         return False
 
@@ -208,6 +222,7 @@ def probe(db, name: str) -> tuple[str, str]:
 def repair(db, name: str, verbose: bool = True) -> tuple[bool, str]:
     """COPY -> verify clone -> atomic RENAME. No GRAPH.DELETE of the live graph, ever."""
     from tortoise.graph_delete_guard import graph_delete_lock, graph_exists
+    from tortoise.hosted_backup import _audit_copied_boolean_indexes
 
     def say(msg: str) -> None:
         if verbose:
@@ -219,11 +234,15 @@ def repair(db, name: str, verbose: bool = True) -> tuple[bool, str]:
     clone_db = db.select_graph(scratch)
 
     def drop_clone(reason: str) -> None:
-        # ⛔ DROP THE CLONE OUTSIDE THE LOCK. `safe_graph_delete` takes `graph_delete_lock`
-        # itself, so calling it INSIDE an already-held lock cannot acquire and refuses after
-        # its full wait -- the clone leaks and the run stalls, while the caller believes it
-        # cleaned up (measured by review: `inner safe_graph_delete returned=False after 1.0s`).
-        # A leaked clone is not worth failing the run over.
+        # The scratch clone is the ONLY key this module deletes, it is run-unique (never the
+        # live graph), and this process's own `GRAPH.COPY` created it -- so it is dropped with
+        # a raw `GRAPH.DELETE` (`clone_db.delete()`), the same form `hosted_backup`'s restore
+        # cleanup uses for its own staging copies. `safe_graph_delete` is deliberately NOT
+        # used: it re-acquires the non-reentrant delete lock this run already holds on the
+        # failure paths, cannot acquire it, and refuses after its full wait -- the clone
+        # leaked and the run stalled while the caller believed it had cleaned up (measured by
+        # review: `inner safe_graph_delete returned=False`). A leaked clone is not worth
+        # failing the run over.
         with contextlib.suppress(Exception):
             clone_db.delete()
         say(f"  note: dropped clone {scratch} ({reason})")
@@ -268,13 +287,34 @@ def repair(db, name: str, verbose: bool = True) -> tuple[bool, str]:
                 # RETAIN the clone: it may be the only copy. Never clean up a failed repair.
                 return False, (f"the clone is not usable ({kind}: {detail}) - refusing to "
                                f"swap; clone {scratch} retained")
-            say("  [3/4] clone is complete (nodes AND edges) and writable")
+
+            # #3154: GRAPH.COPY is the CORRUPTING step for a boolean `is_operator` index -- it
+            # can copy the index WITHOUT its `false` posting entries, after which
+            # `n.is_operator = false` matches ZERO rows while the data stays intact. Every
+            # other copy-then-swap site in the repo audits for it (hosted restore/import); this
+            # is the third GRAPH.COPY site and it must not be the one that skips the audit.
+            # The shared primitive drops any boolean index it finds and RAISES if one survives
+            # -- a survivor means we must not swap in a graph whose `= false` predicate is
+            # silently dead.
+            try:
+                _audit_copied_boolean_indexes(
+                    clone_db, graph_name=scratch, stage="graph-write-repair clone")
+            except RuntimeError as exc:
+                drop_clone("clone carries an unrepairable boolean index (#3154)")
+                return False, (f"the clone's #3154 boolean-index audit failed ({exc}) - "
+                               f"refusing to swap")
+
+            say("  [3/4] clone is complete (nodes AND edges), writable, and index-audited")
 
             # Re-read immediately before the irreversible step: the section may have outlived
             # the lock's TTL, and a second run's stale clone must not overwrite a graph the
             # fleet has written to since.
             now_fp = fingerprint(db.select_graph(name))
-            if now_fp[0] < before_nodes or not graph_exists(db, name):
+            # ANY change is staleness, not just a node LOSS: a concurrent ADDITION passes a
+            # `< before_nodes` test, the older clone is then swapped in, and the write that
+            # landed between COPY and RENAME is silently discarded -- the post-swap
+            # `after >= before` check cannot see it.
+            if now_fp != (before_nodes, before_edges) or not graph_exists(db, name):
                 drop_clone("source changed under us")
                 return False, (f"the source changed during the repair ({now_fp} vs "
                                f"{(before_nodes, before_edges)}) - refusing to swap over it")
