@@ -527,6 +527,13 @@ def test_supersede_does_not_duplicate_a_prewired_operator_edge(sdk):
         "CREATE (op)-[:IMPL {idx:0}]->(new)",
         params={"op": op["id"], "new": new["id"]},
     )
+    # ... and the shared INPUT mirror, so `mirror == 1` below genuinely tests
+    # the MERGE collapse (a CREATE-based mirror leg would double it).
+    proj.g.query(
+        "MATCH (op:Point {id:$op}), (new:Point {id:$new}) "
+        "CREATE (new)-[:INPUT {idx:0}]->(op)",
+        params={"op": op["id"], "new": new["id"]},
+    )
 
     sdk.supersede_point(old["id"], new["id"])
 

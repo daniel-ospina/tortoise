@@ -689,6 +689,29 @@ class TestBlastRadius:
                  for e in preview3["edges_kept_attached"]}
         assert ("INPUT", old3, keep_op["id"]) in kept3, kept3
 
+        # (d) the 2a-INPUT null-idx classification (`pre_op_in_any`): an
+        # IDX-LESS mirror (`mitigate_operator`-style) whose successor is
+        # pre-wired with the mirror at ANY idx must be already-present, not
+        # net-new (the writer's bare MERGE matches it) — the INPUT-side mirror
+        # of (b). Reverting `op_id in pre_op_in_any` to the idx-keyed
+        # membership makes this assertion fail.
+        old4, new4 = _seed_point(sdk, "old4"), _seed_point(sdk, "new4")
+        op4 = sdk.create_operator("IMPL", src, [tgt])
+        sdk._get_proj().g.query(
+            "MATCH (o:Point {id:$o}), (op:Point {id:$op}) "
+            "CREATE (o)-[:INPUT]->(op)",  # NO idx (the null-idx class)
+            params={"o": old4, "op": op4["id"]},
+        )
+        sdk._get_proj().g.query(
+            "MATCH (o:Point {id:$o}), (n:Point {id:$n}) "
+            "MERGE (n)-[:INPUT {idx:3}]->(o)",
+            params={"o": op4["id"], "n": new4},
+        )
+        preview4 = _preview_supersede(sdk, old4, new4)
+        assert preview4["edges_already_present_at_new"] >= 1, (
+            "the pre-wired idx-3 INPUT mirror must be classified "
+            "already-present")
+
     def test_supersede_preview_agrees_when_a_same_type_repoint_target_exists(
             self, sdk):
         """The SECOND precondition of the divergence: a direct IMPL/NAND
