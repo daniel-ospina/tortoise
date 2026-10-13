@@ -99,6 +99,18 @@ DURABLE_ROW = {"id": "k-paste", "name": "agent key", "key_prefix": PASTED_KEY[:1
                "created_via": "dashboard", "enabled": True, "expires_at": None,
                "revoked_at": None}
 
+# #3513: the Data-sources step renders its grid from the onboarding projection
+# (`MemorySources state={onboarding}` — main.jsx). `_wire` DEFAULTs to a 401,
+# which leaves `onboarding` null and the step renders its "Couldn't load memory
+# sources" card INSTEAD of the grid — so any spec that asserts the grid must
+# SERVE a projection. `fork` is deliberately ABSENT: the re-entry door then
+# resumes ON the fork card (`resumeStep` → step 1, #2005) and `_walk_to_connect`
+# reaches the connect step. `github_connected` is false so the done screen's
+# incomplete-setup variant ("GitHub was not connected") is the one asserted.
+GRID_PROJECTION = {"org_id": "team_o", "status": "active",
+                   "onboarding_complete": False, "completed_steps": [],
+                   "session_recording": False, "github_connected": False}
+
 
 def _row(prefix: str, **over) -> dict:
     """A key row matching `prefix`, overridable for the refusal cases."""
@@ -404,8 +416,9 @@ def _expect_left_wizard(page: Page) -> None:
 
 def test_first_timer_wizard_human_steps(page: Page) -> None:
     """#1997 (W1) + #2323 (Option B): a returning-style session (team
-    exists, empty graph) walks the NEW 4 HUMAN steps (epic plan P1):
-    org-create/join → fork card → connect-consent → done.
+    exists, empty graph) walks the NEW 5 HUMAN steps (epic plan P1, #3513
+    inserted data-sources at index 3):
+    org-create/join → fork card → connect-consent → data-sources → done.
     The org-create step is a READ-ONLY summary for accounts that already
     hold an org — it NEVER mints a second org (cap['org_create'] stays
     empty). The done step exits WITHOUT patching onboarding_complete
@@ -450,7 +463,17 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     # second part.
     expect(page.get_by_role("button", name="Done — Continue to dashboard")).to_be_visible(timeout=5_000)
     page.get_by_role("button", name="Skip for now").click()
-    # STEP 3: done — the wizard REPORTS what the server observed; NO
+    # #3513: the connect step's Skip now lands on the DATA-SOURCES step (index
+    # 3) — the integrations grid — not on done. It is the single source-list
+    # presentation in the product. The GRID itself is asserted in the dedicated
+    # grid specs below: it renders only from a served onboarding projection
+    # (GRID_PROJECTION), while this journey deliberately keeps `_wire`'s default
+    # 401 so the walk still exercises the step-0 read-only org summary shape.
+    expect(page.locator(".welcome-title")).to_have_text(
+        "Choose your memory sources", timeout=10_000)
+    # Skip does NOT block on an incomplete connection and advances to done.
+    page.get_by_role("button", name="Skip", exact=True).click()
+    # STEP 4: done — the wizard REPORTS what the server observed; NO
     # `harness-connected` write and NO onboarding_complete PATCH (the node's
     # gate owns completion; accept-and-drop).
     # #2912 (PR-gate UX): skipping = the PAUSED state, so the <h1> names that
@@ -503,6 +526,101 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     # mount mint is deleted; connect-step durable sourcing is #2211-owned and
     # rides POST /v1/team/keys)
     assert cap.get("session_key_posts", 0) == 0, f"zero-mint violated: {cap.get('session_key_posts')} session-key POSTs"
+
+
+def test_data_sources_grid_renders_in_order_and_continue_reaches_done(page: Page) -> None:
+    """#3513: the Data-sources step renders the integrations grid as the single
+    source-list presentation — shipped tiles first in the pinned order, the
+    Coming-soon group LOWER in the same grid at FULL contrast with a badge and
+    never disabled — and Continue reaches `done` at index 4."""
+    _seed_cookie(page, "u-onb")
+    _wire(page, key_rows=[DURABLE_ROW], onboarding_projection=GRID_PROJECTION)
+    _walk_to_connect(page)
+    page.get_by_role("button", name="Skip for now").click()
+    expect(page.locator(".integrations-grid")).to_be_visible(timeout=10_000)
+    # the sr-only step count reads "of 5" (the literal regression this pins).
+    # #3513 review P1: the wizard renders TWO span.sr-only[role='status'] nodes
+    # (the welcome-head status and the step announcement), so an unscoped
+    # locator hits Playwright strict mode before any text comparison — scope to
+    # the wizard card's span, which is the one that carries the announcement.
+    expect(page.locator(".wizard span.sr-only[role='status']")).to_contain_text("of 5", timeout=5_000)
+    # RENDER ORDER is asserted on the DOM, not inferred from the array literal:
+    # sessions → issues → docs, then the coming-soon group.
+    keys = page.locator(".integration-tile").evaluate_all(
+        "els => els.map(e => e.dataset.integrationKey)")
+    assert keys[:3] == ["agent_sessions", "github_issues", "github_documents"], keys
+    assert {"slack", "linear", "supabase_org"}.issubset(set(keys[3:])), keys
+    # a coming-soon tile: badge, full contrast, still clickable (never disabled)
+    coming = page.locator(".integration-tile.coming-soon").first
+    expect(coming.locator(".integration-badge")).to_have_text("Coming soon")
+    assert coming.is_disabled() is False, "a coming-soon tile must stay clickable (the click is the signal)"
+    assert coming.evaluate("el => getComputedStyle(el).opacity") == "1", \
+        "a coming-soon tile must be FULL contrast — never opacity-muted into reading as disabled"
+
+    # #8327 review P1: the panels must ACTUALLY collapse. `.toggle-row` sets
+    # `display: flex` (author origin outranks the UA `[hidden]` sheet), so the
+    # `hidden` attribute alone left all four panels on screen while each tile's
+    # aria-expanded advertised the opposite. Assert the COMPUTED display, not
+    # the attribute: the recording tile opens two sibling panels by default,
+    # and expanding another tile collapses them (one at a time).
+    def _visible_panel_count() -> int:
+        return page.locator(".integration-panel").evaluate_all(
+            "els => els.filter(e => getComputedStyle(e).display !== 'none').length")
+
+    expect(page.locator("#integration-panel-sessions")).to_be_visible()
+    expect(page.locator("#integration-panel-issues")).to_be_hidden()
+    assert _visible_panel_count() == 2, \
+        "only the default-open tile's panels (sessions + extract) may be in flow at entry"
+    page.locator('.integration-tile[data-integration-key="github_issues"]').click()
+    expect(page.locator("#integration-panel-issues")).to_be_visible()
+    expect(page.locator("#integration-panel-sessions")).to_be_hidden()
+    assert _visible_panel_count() == 1, \
+        "expanding one tile must collapse the other — never all four panels at once"
+    # Continue does not block on an incomplete connection and reaches done.
+    page.get_by_role("button", name="Continue →").click()
+    expect(page.locator("div.done")).to_be_visible(timeout=10_000)
+    # the incomplete-setup variant names what did not finish (GitHub unconnected)
+    expect(page.locator("div.done")).to_contain_text("GitHub was not connected", timeout=10_000)
+
+
+def test_coming_soon_modal_dialog_contract_and_skip_reaches_done(page: Page) -> None:
+    """#3513: the Coming-soon dialog's pinned contract — role=dialog,
+    aria-modal, aria-labelledby on the "Not available yet" heading, initial
+    focus into the dialog, Escape closes and returns focus to the invoking
+    tile — and the tile is keyboard reachable (Enter activates). Skip reaches
+    `done` at index 4 too."""
+    _seed_cookie(page, "u-onb")
+    _wire(page, key_rows=[DURABLE_ROW], onboarding_projection=GRID_PROJECTION)
+    _walk_to_connect(page)
+    page.get_by_role("button", name="Skip for now").click()
+    expect(page.locator(".integrations-grid")).to_be_visible(timeout=10_000)
+
+    dialog = page.locator("[role='dialog']")
+    coming = page.locator(".integration-tile.coming-soon").first
+    # keyboard reachability: the tile is a real tab stop and Enter activates it
+    coming.focus()
+    page.keyboard.press("Enter")
+    expect(dialog).to_be_visible(timeout=5_000)
+    assert dialog.get_attribute("aria-modal") == "true"
+    assert dialog.get_attribute("aria-labelledby") == "integration-modal-title"
+    expect(page.locator("#integration-modal-title")).to_have_text("Not available yet")
+    # initial focus moved INTO the dialog (the Close button autofocuses)
+    assert page.evaluate("() => document.activeElement && document.activeElement.textContent.trim()") == "Close"
+    # Escape closes and returns focus to the invoking tile. The restore is
+    # DEFERRED one animation frame (main.jsx closeComingSoon →
+    # requestAnimationFrame → dialogFocus.restoreFocus), so an instantaneous
+    # read samples <body> in the tick React detaches the focused Close button
+    # (this is exactly how the spec redded dashboard-e2e on the first head).
+    # The deferral is intentional and pinned by integrationsGridRender.test.js;
+    # this side waits for it.
+    page.keyboard.press("Escape")
+    expect(dialog).to_have_count(0)
+    _wait_until(lambda: page.evaluate(
+        "() => document.activeElement && document.activeElement.dataset.integrationKey") is not None,
+        message="focus returned to the tile that opened the dialog, never <body>")
+    # Skip reaches done
+    page.get_by_role("button", name="Skip", exact=True).click()
+    expect(page.locator("div.done")).to_be_visible(timeout=10_000)
 
 
 def test_owner_connect_step_mints_never_expiring_key_in_flow(page: Page) -> None:
@@ -582,6 +700,8 @@ def test_owner_connect_step_mints_never_expiring_key_in_flow(page: Page) -> None
     # direct test of the fix.
     # #3232: Claude Code is a two-block leaf now — its advance reads "Done …".
     page.get_by_role("button", name="Done — Continue to dashboard").click()
+    # #3513: the connect advance lands on the Data-sources step; take its Skip.
+    _skip_data_sources_to_done(page)
     # #3428 (lane B3, review cycle 1 P1-3): scope the exit evidence to the
     # VISIBLE final screen. review cycle 6 (item 2): "No connection observed
     # yet" is also text inside the sr-only step announcement (clipped, not
@@ -623,6 +743,8 @@ def test_owner_wizard_complete_exit_after_mint_is_modal_free(page: Page) -> None
     _walk_to_connect(page)
     _mint_from_connect(page)
     page.get_by_role("button", name="Skip for now").click()
+    # #3513: the connect skip lands on the Data-sources step; take its Skip.
+    _skip_data_sources_to_done(page)
     # #2912 (PR-gate UX): skipped → paused, and the heading says so (cycle 6
     # item 2: the observation phrasing, both forks).
     expect(page.locator(".welcome-title")).to_have_text(
@@ -974,6 +1096,8 @@ def test_member_without_key_reaches_keyless_claude_connectors(
     # it lands on the honest not-connected done step and the exit is still
     # reachable (the user is never trapped).
     expect(page.locator(".harness-families")).to_have_count(0, timeout=10_000)
+    # #3513: the keyless advance lands on the Data-sources step; take its Skip.
+    _skip_data_sources_to_done(page)
     # #3428 (review cycle 1 P1-3): assert the VISIBLE final screen, not the
     # unscoped body — the step label also lives in the sr-only step
     # announcement, so a body-wide assertion cannot falsify a `.done`-body
@@ -1303,12 +1427,31 @@ def _connected_projection(*, receipt: str | None = None, probe: str | None = Non
     return proj
 
 
-def _advance_to_done(page: Page) -> None:
-    """Land on step 3 from the connect step's skip escape (the done step's
-    body is gated on the SERVER projection, so how we advanced does not
-    matter — this keeps the capture-tense tests focused on the projection)."""
-    page.get_by_role("button", name="Skip for now").click()
+def _skip_data_sources_to_done(page: Page) -> None:
+    """#3513: leave the Data-sources step (index 3) for done (index 4).
+
+    The connect step's skip/advance now lands on the Data-sources step, so any
+    journey that used to reach `div.done` one hop after connect must also get
+    past this step. Continue — NOT Skip — because Continue leaves
+    `wizardPaused` exactly as the caller set it (the connect step's skip pauses,
+    its advance does not), so a caller's paused/not-paused reading survives the
+    hop; the grid's Skip would pause an advance-path journey and flip the done
+    title to the paused wording. Wait on the step TITLE, never on the grid:
+    `MemorySources` renders its error card when the onboarding projection is
+    unserved (see GRID_PROJECTION), and the step is real either way."""
+    expect(page.locator(".welcome-title")).to_have_text("Choose your memory sources", timeout=10_000)
+    page.get_by_role("button", name="Continue →").click()
     expect(page.locator("div.done")).to_be_visible(timeout=10_000)
+
+
+def _advance_to_done(page: Page) -> None:
+    """Land on the done step from the connect step's skip escape (the done
+    step's body is gated on the SERVER projection, so how we advanced does not
+    matter — this keeps the capture-tense tests focused on the projection).
+    #3513: the connect skip lands on the Data-sources step (index 3), so take
+    the grid step's own skip to reach done (index 4)."""
+    page.get_by_role("button", name="Skip for now").click()
+    _skip_data_sources_to_done(page)
 
 
 def test_connected_screen_states_capture_in_present_tense_on_an_observed_receipt(page: Page) -> None:
@@ -1395,7 +1538,8 @@ def test_keyless_no_capability_leaf_prints_no_capture_sentence(page: Page) -> No
     page.get_by_role("button", name=re.compile("Claude Web")).click()
     page.get_by_role(
         "button", name=re.compile(r"I've connected it — Continue")).click()
-    expect(page.locator("div.done")).to_be_visible(timeout=10_000)
+    # #3513: the keyless advance lands on the Data-sources step; take its Skip.
+    _skip_data_sources_to_done(page)
     expect(page.locator(".welcome-title")).to_have_text("You're all set", timeout=10_000)
     done = page.locator("div.done")
     expect(done).to_contain_text("Connected", timeout=10_000)

@@ -47,22 +47,33 @@ test('DE2E-2: populated Overview renders EXACTLY the 3 elements (zero toggles)',
   assert.ok(!ovText.includes('"Backups"'), 'backups stat card gone from the Overview')
 })
 
-test('DE2E-2: MemorySources renders ONLY in Settings (live) + the ARCHIVED wizard block', () => {
+test('DE2E-2/#3513: MemorySources is the SINGLE source-list presentation — Settings + the wizard step (archived block dead)', () => {
   const sites = [...src.matchAll(/<MemorySources/g)].map((m) => m.index)
-  assert.equal(sites.length, 2, `expected 2 render sites (Settings + archived), got ${sites.length}`)
+  assert.equal(sites.length, 3,
+    `expected 3 render sites (Settings + wizard data-sources step + ARCHIVED), got ${sites.length}`)
   const ovStart = src.indexOf(OVERVIEW_POPULATED)
   const setStart = src.indexOf(SETTINGS_SECTION)
   const tabDef = src.indexOf(SETTINGS_TAB_DEF)
   const archivedIdx = src.indexOf(ARCHIVED_MARK)
   assert.ok(tabDef > -1 && archivedIdx > -1, 'component + archived anchors')
+  // #3513: the unchanged invariant is "no source list on the Overview". The
+  // CHANGE is that the live render sites are now TWO mounts of ONE component —
+  // Settings and the wizard's Data-sources step — both spreading the same
+  // `memorySourcesProps` bundle (one order, one output), so the grid (not a
+  // competing toggle list) is the single presentation at both. The archived
+  // block stays dead. (review P2: the `surface` prop these assertions used to
+  // pin was never read by the component — it was dropped, so it is not pinned.)
+  assert.equal((src.match(/<MemorySources\s*\{\.\.\.memorySourcesProps\}/g) || []).length, 2,
+    'exactly two live mounts, both spreading the shared prop bundle')
   for (const pos of sites) {
     // never inside the populated-Overview branch (between overview and settings)
     assert.ok(!(pos > ovStart && pos < setStart), 'MemorySources leaked onto the Overview')
     // every site is the SettingsTab component (live, rendered only from the
-    // settings section) or inside the archived legacy wizard block (dead)
+    // settings section), the wizard step, or inside the archived legacy wizard
+    // block (dead)
     const inSettingsTab = pos > tabDef && pos < archivedIdx
     const inArchived = pos > archivedIdx && pos < ovStart
-    assert.ok(inSettingsTab || inArchived, `MemorySources site at ${pos} must be Settings or ARCHIVED`)
+    assert.ok(inSettingsTab || inArchived, `MemorySources site at ${pos} must be Settings/wizard or ARCHIVED`)
   }
 })
 
@@ -76,7 +87,7 @@ test('DE2E-2/6: SettingsTab has all FOUR homes (P3: Setup guide, GitHub connect,
   assert.ok(tabText.includes('id="settings-memory-heading"'), 'Memory sources home')
   assert.ok(tabText.includes('id="settings-capture-heading"'), 'Captured sessions home (DE2E-11)')
   assert.ok(tabText.includes('SetupGuideCard state={state} loading={loading}'), 'Setup guide renders the graph-held state')
-  assert.ok(tabText.includes('<MemorySources {...memorySourcesProps} />'), 'Memory sources home renders the toggles')
+  assert.ok(tabText.includes('<MemorySources {...memorySourcesProps} />'), 'Memory sources home renders the grid')
 })
 
 test('DE2E-2 copy sweep: new Overview/Settings copy says Organization, never workspace', () => {

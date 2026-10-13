@@ -736,26 +736,29 @@ def test_falkor_live_point_write_preserves_unknown_prop():
 
 def test_falkor_rebuild_undeclared_list_prop_denied(caplog):
     """#2795 (D2 mechanic 1): an UNDECLARED list prop is never written raw —
-    including `tags`, whose raw list would half-restore a node without its
-    TAGGED edges (#2897) — and the drop is REPORTED (indicator 4)."""
+    and the drop is REPORTED (indicator 4).
+
+    ``tags`` used to be this test's exemplar. #2897 replayed it (its own clause
+    plus the pass-2 :Tag/TAGGED sync), so the generic undeclared-list policy is
+    pinned on ``custom_list`` and the tag restore is asserted in
+    ``tests/test_3817_tags_rebuild_durability.py``."""
     if _skip_if_no_falkor():
         pytest.skip("redislite falkordb unavailable")
     import logging
     api, log = _api()
     pid = api.add_point("list prop", provenance("d.txt", [0, 5], "q"),
-                        custom_list=["a", "b"], tags=["alpha"])
+                        custom_list=["a", "b"])
     proj = _shared_proj()
     try:
         with caplog.at_level(logging.WARNING,
                              logger="tortoise.projection.entities"):
             proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
         row = proj.query(
-            "MATCH (n:Point {id:$id}) RETURN n.custom_list, n.tags", id=pid
+            "MATCH (n:Point {id:$id}) RETURN n.custom_list", id=pid
         ).result_set
         assert row and row[0][0] is None, row
-        assert row[0][1] is None, row
         assert any("undeclared list props" in r.getMessage()
-                   and "tags" in r.getMessage()
+                   and "custom_list" in r.getMessage()
                    for r in caplog.records), caplog.text
     finally:
         pass  # shared session projection — module helper owns close

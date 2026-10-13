@@ -17,8 +17,12 @@ const active = (over = {}) => ({
   completed_steps: ['team-named'], ...over,
 })
 
-test('#2005: the derivation only ever returns a real wizard step', () => {
-  assert.equal(WIZARD_STEPS.length, 4, 'the wizard is 4 human steps')
+test('#2005/#3513: the derivation only ever returns a real wizard step', () => {
+  assert.equal(WIZARD_STEPS.length, 5, 'the wizard is 5 human steps since #3513')
+  // #3513: done moved to index 4 — the derivation's done constant must match
+  // the live step list, or a resume door would open the wrong screen.
+  assert.equal(RESUME_STEP_DONE, WIZARD_STEPS.length - 1)
+  assert.equal(WIZARD_STEPS[RESUME_STEP_DONE].id, 'done')
   const states = [
     null, undefined, {}, active(),
     active({ fork: 'self' }), active({ fork: 'build' }),

@@ -257,8 +257,10 @@ def suspended_message() -> str:
 #: incident): ``record_event`` in :meth:`AbuseEngine.record_point_create` (a
 #: recording-leg drop — folding it into ``UNMETERED_INCREMENT`` would break
 #: ``tests/test_metering_window_admission.py::test_mcp_abuse_failure_is_not_
-#: reported_as_a_dropped_increment``), ``_notify`` (the notification leg, and
-#: the sweep-gated sibling of #4778), ``MemoryAbuseStore._durable``, and the
+#: reported_as_a_dropped_increment``), ``_notify`` (the notification leg — after
+#: #4778 it reaches the un-gated ``_incident_alert_store`` seam and is NOT
+#: sweep-gated; the residual is only "no ``DR_ISSUES_PAT``, or an unusable
+#: object store"), ``MemoryAbuseStore._durable``, and the
 #: R3/R8/geo trackers — all different defect classes from "the enforcement
 #: decision could not complete".
 DECISION_FAULT_LANES: dict[str, tuple[str, str]] = {
@@ -768,8 +770,11 @@ def _alert_dict(row: dict) -> dict:
         #
         # Round 6: the promise "and will be in touch" was removed. Delivery of
         # the operator signal is BEST-EFFORT — the durable dashboard row is
-        # written first, but the ops notification depends on channel config and
-        # the tracked ops incident is sweep-gated (#4778). A customer-facing
+        # written first, but the ops notification depends on channel config.
+        # #4778 routed the tracked ops incident through the un-gated
+        # `_incident_alert_store` seam, so it is not sweep-gated: it is absent
+        # only when no alert channel can be built at all (no `DR_ISSUES_PAT`,
+        # or an unusable object store). A customer-facing
         # string must not promise a human follow-up the plumbing cannot
         # guarantee; it now states what IS true (nothing was disabled) and
         # leaves the route where the customer can reach us.
