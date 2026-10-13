@@ -42,9 +42,21 @@ Exit code: the launcher's own (0 ok / 1 unresolved / 2 could-not-measure).
 """
 from __future__ import annotations
 
+import sys
+
+# #5128 (same class as tools/ci_check_repair.py): refuse a <3.12 interpreter
+# HERE, before the rest of the imports, so a stale local `python3` fails LOUDLY
+# with a remedy instead of with whichever 3.12-only construct happens to trip
+# first. launchd starts the checkout's PINNED interpreter, but a human running
+# this file by hand can hit the ambient 3.9 that the repo's own tools refuse.
+if sys.version_info < (3, 12):  # noqa: UP036 -- intentional RUNTIME guard
+    print(f"tools/ci_check_repair_launchd.py requires Python >= 3.12 (got "
+          f"{sys.version_info[0]}.{sys.version_info[1]}) -- run it as "
+          f"`uv run python tools/ci_check_repair_launchd.py`", file=sys.stderr)
+    raise SystemExit(2)
+
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 LAUNCHER = Path(__file__).resolve().with_name("ci-check-repair-local.sh")

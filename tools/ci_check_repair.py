@@ -91,9 +91,9 @@ applied" — there was never an attempt to make. Callers that key on exit 0 as "
 window is discharged" (tools/ci-check-repair-local.sh) always pass `--apply`.
 
 Usage:
-  python3 tools/ci_check_repair.py                 # dry-run report
-  python3 tools/ci_check_repair.py --apply         # perform repairs
-  python3 tools/ci_check_repair.py --apply --json  # machine-readable
+  uv run python tools/ci_check_repair.py                 # dry-run report
+  uv run python tools/ci_check_repair.py --apply         # perform repairs
+  uv run python tools/ci_check_repair.py --apply --json  # machine-readable
 """
 from __future__ import annotations
 
@@ -128,8 +128,8 @@ REPO_DEFAULT = "daniel-ospina/tortoise"
 # protection. The live↔record pin is `tools/mergify_config_guard.py` (clause I1,
 # the `live_observed_contexts` half of the record) — NOT
 # `.github/scripts/check-required-set.py`, which is a different instrument: it
-# compares live against `.mergify.yml` and `.github/settings.yml` and never reads
-# this record. Read here as the FALLBACK for when live branch protection is
+# compares live against `.mergify.yml` and the settings declaration and never
+# reads this record. Read here as the FALLBACK for when live branch protection is
 # unreadable, which is the normal case inside Actions, where the automatic token
 # has no admin scope.
 REQUIRED_RECORD_DEFAULT = "docs/ci/required-contexts.json"
@@ -301,7 +301,7 @@ def resolve_required(repo: str, record_path: Path, live: bool = True) -> list[st
     the record is the normal Actions path. When BOTH are readable and DISAGREE the
     tool refuses (exit 2). The live↔record pin is `tools/mergify_config_guard.py`
     (clause I1) rather than `.github/scripts/check-required-set.py`, which checks
-    the live set against `.mergify.yml` and `.github/settings.yml` instead. Two
+    the live set against `.mergify.yml` and the settings declaration instead. Two
     consequences are recorded rather than hidden:
 
       * the pin is re-read on a QUARTERLY, MANUALLY-OWNED cadence (plan D14), so

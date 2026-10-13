@@ -481,25 +481,40 @@ def test_workflow_state_reports_exit_codes_the_launcher_keys_on(tmp_path, monkey
 def test_installer_refuses_to_pin_a_schedule_to_an_ephemeral_worktree(tmp_path):
     """A plist pointing into `.worktrees/...` dies when the lane's PR merges.
 
-    Without the hatch the installer must re-point at the main checkout — and when
-    main does not have the code yet (i.e. before this change lands) it must REFUSE
-    rather than install a job that cannot run.
+    HERMETIC (the earlier version ran the REAL installer from this checkout's own
+    linked worktree with the real `launchctl`, so once `main` gained
+    `tools/ci-check-repair-local.sh` it bootstrapped a live job pointing at a temp
+    plist and failed its own `assert not agents.exists()`). This builds a
+    throwaway `main` repo plus a linked worktree and asserts the installer
+    re-points at `main` and REFUSES — `main` has no launcher by construction, so
+    the outcome does not depend on the checkout the test runs from. No launchd
+    path is reached: the refusal exits before `uname`/`require_standard_agents_dir`.
     """
+    main = tmp_path / "main"
+    (main / "tools").mkdir(parents=True)
+    (main / "README.md").write_text("x\n")
+    subprocess.run(["git", "init", "-q", "-b", "main", str(main)], check=True)
+
+    def _git(*args):
+        subprocess.run(["git", "-C", str(main), *args], check=True)
+
+    _git("add", "-A")
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init")
+    wt = tmp_path / "wt"
+    _git("worktree", "add", "-q", str(wt), "-b", "lane")
+    assert not (main / "tools" / "ci-check-repair-local.sh").exists()
+
     repo = Path(__file__).resolve().parents[1]
     agents = tmp_path / "LaunchAgents"
     env = {**os.environ, "AGENTS_DIR": str(agents),
-           "CI_REPAIR_ALLOW_NONSTANDARD_AGENTS_DIR": "1", "TORTOISE_REPO": str(repo)}
+           "CI_REPAIR_ALLOW_NONSTANDARD_AGENTS_DIR": "1", "TORTOISE_REPO": str(wt)}
     env.pop("CI_REPAIR_ALLOW_WORKTREE_INSTALL", None)
     r = subprocess.run(["bash", str(repo / "tools/install-ci-check-repair-schedule.sh")],
                        capture_output=True, text=True, env=env, timeout=120)
-    common = subprocess.run(["git", "-C", str(repo), "rev-parse", "--path-format=absolute",
-                             "--git-common-dir"], capture_output=True, text=True).stdout.strip()
-    if not common.endswith("/.git") or Path(common[:-5]).resolve() == repo.resolve():
-        pytest.skip("not a linked worktree")
-    assert "MAIN checkout" in r.stderr
+    assert r.returncode == 2, (r.returncode, r.stderr)
+    assert "MAIN checkout" in r.stderr, r.stderr
+    assert "no tools/ci-check-repair-local.sh yet" in r.stderr, r.stderr
     assert not agents.exists(), "refused install wrote to the launchd dir"
-    if r.returncode == 2:
-        assert "no tools/ci-check-repair-local.sh yet" in r.stderr
 
 
 def test_installer_creates_the_log_directory_launchd_opens_before_exec():
