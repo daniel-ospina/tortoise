@@ -100,8 +100,8 @@ So restoring tags on replay is the **implementation** of D2 / #3856 / objective
 * **Re-gate the fold on ``isinstance(ev.get("tags"), list)``** — the clear form
   (``tags=None``) then skips BOTH halves, pass 1a's creation list survives on
   the node and pass 2 resurrects the tag; ``test_a_cleared_tag_is_not_
-  resurrected`` fails. This is the mutation the #8317 review actually found
-  live, so it is the one the suite most needs to be able to catch.
+  resurrected`` fails. This is the mutation the suite most needs to be able to catch:
+  it is the one a live graph actually produced.
 * **Write only a list in ``_upsert_point_props``** — a scalar ``tags`` the live
   writer stored is dropped on replay and ``check_consistency`` reports a
   ``tags`` divergence on a graph the live path wrote:
@@ -446,7 +446,7 @@ def test_a_non_list_tag_value_is_restored_verbatim(env):
 
 
 def test_a_non_persistable_tag_edit_removes_the_property_like_live(env):
-    """The EDIT form of #8317 review round 2's finding: a ``tags`` value the
+    """The EDIT form of the carriage widening: a ``tags`` value the
     STORE cannot hold must clear the property, exactly as ``None`` does — the
     dict is degraded to null by ``#7369`` before the live writer ever sees it.
 
@@ -560,10 +560,10 @@ def test_a_tuple_tag_value_syncs_edges_on_both_arms(env):
 
 # ══ The writer's OUTCOME, not the key's presence ═══════════════════════════
 #
-# #8317 review round 4. Round 3 taught the fold to carry a previous `tags` when
-# the payload OMITS the key — but the clause is `_stated_tags`-gated, so
-# `tags: null` and an unwritable value write NO property too, and pass 1a's
-# MERGE therefore PRESERVES the node's list. Keying on omission alone folded
+# The fold must carry a previous `tags` when the payload states no WRITABLE
+# value: the clause is `_stated_tags`-gated, so `tags: null` and an unwritable
+# value write NO property, and pass 1a's MERGE therefore PRESERVES the node's
+# list. Keying on omission alone folded
 # `tags: null` as a CLEAR, so the journal view lost the value the graph held and
 # `check_consistency` red a graph the write itself produced — reachable from the
 # ordinary ingest seam (`EventAPI.add_point(id=…, tags=None)`), not only a
@@ -578,8 +578,8 @@ def test_a_reemit_that_states_no_writable_tag_keeps_the_graphs_value(env, second
     writes NO property, so the MERGE keeps the tag the graph holds.
 
     The reference fold must ask the WRITER'S outcome (`_stated_tags`), not the
-    key's presence: with only the round-3 omission test, this shape red the
-    checker on a graph the write itself produced (#8317 review round 4).
+    key's presence: with only the omission-only test, this shape red the
+    checker on a graph the write itself produced.
     """
     sdk, events = env
     _write_journal(events, [
@@ -603,7 +603,7 @@ def test_a_reemit_that_states_no_writable_tag_keeps_the_graphs_value(env, second
 def test_an_edit_whose_tag_array_cannot_be_a_merge_key_does_not_abort(env):
     """A `PointRevised` stating `[None]` must not abort the rebuild after the
     wipe — `:Tag`'s MERGE key cannot be null, so the edge sync is gated on the
-    same write decision the property clause uses (#8317 review round 4).
+    same write decision the property clause uses.
 
     Mutation-checked: removing the gate leaves every other test in this module
     green while `rebuild_all` raises `Cannot merge node using null property
@@ -625,7 +625,7 @@ def test_an_edit_whose_tag_array_cannot_be_a_merge_key_does_not_abort(env):
 
 # ══ The checker's CARRIAGE predicate is the writer's EFFECTIVE one ═════════
 #
-# #8317 review round 3. The `tags` branch of `_uncarried` classified carriage
+# The `tags` branch of `_uncarried` classified carriage
 # with `_is_persistable_prop_value` — the SHAPE allowlist — while the writer's
 # effective rule is that predicate PLUS the `#7369` transport gate (a value
 # `_value_ok` refuses is nulled before dispatch) PLUS the store's numeric domain
@@ -667,8 +667,8 @@ def test_a_tag_value_the_store_cannot_hold_is_named_not_a_false_divergence(
     false red about the graph this code just wrote. `main` named every
     list-valued `tags` as uncarried; #2897 correctly started COMPARING writable
     lists, and this pins the boundary of that widening: a value either the
-    transport gate nulls or the engine clamps is still a named drop, not a
-    comparison.
+    transport gate nulls or an engine alters (4.16–4.20 clamps it; 6.x refuses
+    it at parameter parse) is still a named drop, not a comparison.
     """
     sdk, events = env
     _write_journal(events, [{
@@ -690,7 +690,7 @@ def test_a_tag_value_the_store_cannot_hold_is_named_not_a_false_divergence(
 
 # ══ A bare same-id re-emit MERGEs — the fold must mirror that ═════════════
 #
-# #8317 review round 3. `_upsert_point_props` writes `tags` with a
+# `_upsert_point_props` writes `tags` with a
 # PRESENCE-based clause and pass 1a MERGEs, so a same-id `PointAdded` whose
 # payload OMITS `tags` PRESERVES the node's list — while the reference fold's
 # PointAdded arm REPLACED the entry and dropped it. Journal view had no tags,

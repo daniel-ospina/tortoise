@@ -26,12 +26,14 @@ from tortoise.live import (
     epistemic_label_queries,  # #7853: id-anchored reads sweep labels, one query per label
 )
 
-# #8317 review round 3: the store's NUMERIC domain (INT64 clamp / non-finite
-# reject) — a leaf module, so this cannot cycle. `_annotator_value_ok` answers
-# the WRITE question (shape + the `#7369` parameter-parse refusals); the numeric
-# axis is the second half of the COMPARISON question only, because an int
-# outside INT64 IS written (clamped), so clearing it on replay would drop a
-# property the live graph carries.
+# The store's NUMERIC domain (INT64 / non-finite reject) — a leaf module, so
+# this cannot cycle. `_annotator_value_ok` answers the shape + `#7369`
+# parameter-parse half; the numeric axis is added to BOTH questions (write and
+# comparison — `_store_holds_prop_value`), because a value the domain alters or
+# refuses is not held as stated: FalkorDB 4.16–4.20 CLAMPS an int outside INT64
+# while FalkorDB 6.x REFUSES it at parameter parse, so writing it would abort a
+# replay after the wipe on 6.x and comparing it would report a divergence no
+# journal value can explain.
 from tortoise.numeric_domain import numeric_alteration_reason
 
 # #7719: the SHARED terminalizer-miss classifier and the non-folded recorder.
@@ -233,9 +235,10 @@ def _store_holds_prop_value(value) -> bool:
     Callers — ``_stated_tags`` and ``_revise_point`` (the write decision) and
     ``consistency._uncarried`` (the comparison decision) — i.e. the SAME bar for
     both questions, for the engine-divergence reason stated above. Declaring
-    "the graph holds the journal's value" for something the engine clamps
-    contradicts the graph that was just read (#8317 review round 3, reproduced
-    with a hand-written ``PointAdded(tags=[nan])`` and with ``tags=[2**70]``).
+    "the graph holds the journal's value" for something an engine alters
+    (4.16–4.20 clamps it; 6.x refuses it at parameter parse) contradicts the
+    graph that was just read — reproduced with a hand-written
+    ``PointAdded(tags=[nan])`` and with ``tags=[2**70]``.
 
     ``_annotator_value_ok`` lives in the package ``__init__`` — this module is
     imported BY that package, so the import is function-local; by the time any
