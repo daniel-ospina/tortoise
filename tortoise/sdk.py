@@ -11518,6 +11518,13 @@ class TortoiseSDK:
                         **filters) -> dict:
         """Query points with pagination. Returns {results, total, hasMore}.
 
+        #5346: the order is TOTAL and stable — newest first, ties broken by
+        the internal node id — so walking `skip = 0, limit, 2*limit, …` until
+        `hasMore` is False visits every row exactly once and yields `total`
+        distinct results. Before the tiebreak the order was not total, so such
+        a walk silently dropped and repeated rows (measured: 390 of 21,281
+        never read on the hosted graph).
+
         #432 Task 2: retracted points (status='retracted') are EXCLUDED by
         default — pass include_retracted=True, or an explicit status= filter,
         to surface tombstones. #1391: the default exclusion now covers ALL
@@ -11565,9 +11572,28 @@ class TortoiseSDK:
             f"MATCH (n:Point) WHERE {where} RETURN count(n)",
             params=params,
         ).result_set[0][0]
+        # #5346: the ORDER BY must be a TOTAL order or paging is silently
+        # lossy. `n.createdAt` is NOT unique — one capture stamps a whole
+        # session of turns with a single timestamp — and with only a
+        # non-unique key the tie group's row order is not stable across the
+        # SEPARATE query each page is: consecutive `SKIP`/`LIMIT` windows are
+        # then not adjacent ranges of ONE order, so a page walk DROPS rows and
+        # repeats others, while `hasMore` (computed from the `count(n)` total)
+        # still reports the enumeration complete. Measured on this head
+        # (FalkorDB graph module 4.20.x *and* embedded falkordblite), 3,000
+        # Points sharing one `createdAt`, page size 500: 3,000 rows returned
+        # over 6 pages, only 1,505 distinct ids — 1,495 never read.
+        #
+        # `id(n)` (the internal node id) is unique per node, so
+        # `(createdAt, id(n))` is total and the windows partition it exactly.
+        # Deliberately NOT the more obvious `n.id`: Point ids are NOT unique
+        # (colliding ids are a tested shape — see the every-matching-node scan
+        # in `_find_terminal_dedup_hit`), so it can leave a residual tie and
+        # with it a residual loss window. Same tiebreak, same reasoning, as
+        # `audit.py`'s check-8 scan, which pages on the identical defect.
         rows = proj.g.query(
             f"MATCH (n:Point) WHERE {where} RETURN properties(n)"
-            f" ORDER BY n.createdAt DESC SKIP $skip LIMIT $limit",
+            f" ORDER BY n.createdAt DESC, id(n) DESC SKIP $skip LIMIT $limit",
             params={**params, "skip": skip, "limit": limit},
         ).result_set
         results = [r[0] for r in rows]
@@ -24418,9 +24444,19 @@ class TortoiseSDK:
             params["before"] = _to_iso_utc(before)
         where = " AND ".join(clauses)
         params["offset"] = offset
+        # #5346: same total-order requirement as `paginated_query` — this
+        # legacy fallback is reachable with an `offset` (e.g. an embedded
+        # graph without embeddings, or one whose Event FTS index is absent,
+        # both of which make `has_semantic` False), and `e.startedAt` is not
+        # unique. Without a unique tiebreak the `SKIP`/`LIMIT` windows are not
+        # adjacent ranges of one order: measured on this head, 3,000 sessions
+        # sharing one `startedAt` paged at 500 returned only 2,105 distinct
+        # ids — 895 never read. `id(e)` is unique per node, so
+        # `(startedAt, id(e))` is total.
         rows = proj.g.query(
             f"MATCH (e:Event) WHERE {where} "
-            "RETURN properties(e) ORDER BY e.startedAt DESC SKIP $offset LIMIT $limit",
+            "RETURN properties(e) "
+            "ORDER BY e.startedAt DESC, id(e) DESC SKIP $offset LIMIT $limit",
             params=params,
         ).result_set
         # Fetch a bit extra for scoring headroom, but honor the caller's limit.
