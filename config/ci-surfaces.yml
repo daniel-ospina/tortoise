@@ -3140,6 +3140,19 @@ surfaces:
   # `eval` and would otherwise skip the guard — the #1349/#2938 silent-drop
   # class (surface audit: `... <- tortoise/embeddings.py`, registered: core).
   - test_7809_hosted_prewarm_warmup_flag.py
+  # #3094: DUAL-REGISTERED with `core` (below). The empty-means-unset URI-read
+  # census (`test_no_empty_default_tortoise_db_uri_reads`) scans `tests/**` AND
+  # `tools/longmem_eval/**`, and `tools/longmem_eval/` is a SOURCE_PATTERNS
+  # entry of THIS surface — so a `tools/longmem_eval/run.py`-only change
+  # selects `eval`, REPLACING the `core` fallback, and without this arm the
+  # census would not run on exactly the change it covers. That was the closed
+  # #2840 census's defect: it scanned `tests/**` and was registered in `core`
+  # alone, so it was blind to its own `tools/longmem_eval/run.py` fix site (the
+  # #1349/#2938/#4367 silent-drop class). The `tests/` half is `core`'s — any
+  # `tests/**` change adds `core`, so one arm per census ROOT is the complete
+  # set (`test_empty_default_uri_census_is_registered_on_every_surface_it_`
+  # `covers` is the ratchet).
+  - test_uri_env_mutations_declared.py
   # #4097: registered in `core`/`sdk`/`api`/`ep`/`eval`/`onboarding` — the guard
   # scans all of `tortoise/**`, and this surface owns `tortoise/embeddings.py`
   # (a module #4097 migrated) and `tortoise/cross_lens.py`.
