@@ -26,10 +26,10 @@ This module makes the takeover loud and immediate instead of silent:
   watchdog; ``tortoise/embedded_reaper.py``): it silences the guard for the
   block and restores the harness handler + timer afterwards.
 * Calls made by ``pytest_timeout`` itself are allowed: its ``cancel()`` zeroes
-  ``ITIMER_REAL`` when a test fails or enters pdb, and a run with no timer armed
-  (no ``--timeout`` flag and ``PYTEST_TIMEOUT`` unset — though note ``#5035``
-  put ``timeout = 300`` in ``pyproject.toml``, so a BARE local run now arms it
-  exactly as CI always did) is untouched.
+  ``ITIMER_REAL`` when a test fails or enters pdb, and a run that arms no timer
+  (``--timeout=0``, or ``PYTEST_TIMEOUT=0``) is untouched. ``#5035`` put
+  ``timeout = 300`` in ``pyproject.toml``, so a BARE local run now arms it
+  exactly as CI always did.
 * ``--timeout-func-only`` runs are **not** covered: pytest-timeout arms its
   timer during the call phase, after this fixture's setup has already observed
   no timer.  Stated rather than silently assumed.

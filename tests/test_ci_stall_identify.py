@@ -39,6 +39,8 @@ import tomllib
 from collections import Counter
 from pathlib import Path
 
+import pytest_timeout
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
@@ -283,6 +285,17 @@ def test_the_resolved_bound_from_the_repo_config_is_the_ci_budget(tmp_path):
     ``PYTEST_TIMEOUT`` and ``PYTEST_ADDOPTS`` cleared, so it measures what a bare
     ``pytest`` in this checkout actually gets.
 
+    The probe also pins the ``method``/``func_only`` pair the comment in
+    ``pyproject.toml`` calls "the default ``signal``": the default is the only
+    method that reaches a GIL-holding stall (``thread`` starves on the GIL —
+    #7649), and ``func_only`` exempts fixtures, so a default that silently
+    changed would leave the key armed and still not bound the incident's shape.
+
+    Scope limit, stated rather than assumed: the probe file lives in
+    ``tmp_path``, OUTSIDE the rootdir, so pytest loads no repo ``conftest.py``
+    for it. A conftest-side disarm is therefore invisible HERE and is pinned
+    in-process by ``test_the_resolved_bound_matches_the_sanctioned_sources``.
+
     Mutation that makes this RED: add ``addopts = "--timeout=0"`` to
     ``[tool.pytest.ini_options]`` (verified: the probe resolves 0.0 and fails),
     or reduce the value below the CI reference.
@@ -293,11 +306,20 @@ def test_the_resolved_bound_from_the_repo_config_is_the_ci_budget(tmp_path):
         "\n"
         "\n"
         "def test_probe(pytestconfig):\n"
-        "    resolved = pytest_timeout.get_env_settings(pytestconfig).timeout\n"
+        "    settings = pytest_timeout.get_env_settings(pytestconfig)\n"
+        "    resolved = settings.timeout\n"
         "    assert resolved is not None and float(resolved) > 0, (\n"
         "        'a bare run resolves NO per-test bound (resolved=%r)' % (resolved,)\n"
         "    )\n"
-        "    print('RESOLVED=%r' % (float(resolved),))\n",
+        "    assert settings.method == 'signal', (\n"
+        "        'the default timeout METHOD is %r, not signal: the thread method '\n"
+        "        'starves on a GIL-holding stall (#7649)' % (settings.method,)\n"
+        "    )\n"
+        "    assert settings.func_only is False, (\n"
+        "        'func_only=%r exempts fixtures from the bound' % (settings.func_only,)\n"
+        "    )\n"
+        "    print('RESOLVED=%r METHOD=%r FUNC_ONLY=%r'\n"
+        "          % (float(resolved), settings.method, settings.func_only))\n",
         encoding="utf-8",
     )
     env = {
@@ -329,9 +351,69 @@ def test_the_resolved_bound_from_the_repo_config_is_the_ci_budget(tmp_path):
         "the REPO config resolves no terminating per-test bound for a bare run "
         f"(the incident's shape):\n{output}"
     )
-    assert f"RESOLVED={float(reference)}" in output, (
-        f"a bare run under the repo config resolved a bound other than the main "
-        f"gate's {float(reference)}:\n{output}"
+    assert f"RESOLVED={float(reference)} METHOD='signal' FUNC_ONLY=False" in output, (
+        f"a bare run under the repo config did not resolve the main gate's "
+        f"{float(reference)}s with the default signal method and no func_only "
+        f"exemption:\n{output}"
+    )
+
+
+def _bound_from_the_sanctioned_sources(pytestconfig) -> float:
+    """What pytest-timeout SHOULD resolve: CLI -> env -> ini, its own order.
+
+    Recomputed from the sources rather than read back from
+    ``config.option.timeout``, because that attribute is the thing a conftest
+    can overwrite: reading it back would make the check self-confirming.
+    ``getini`` reflects ``-o`` overrides, so that form is covered too.
+    """
+    args = list(pytestconfig.invocation_params.args)
+    for i, arg in enumerate(args):
+        if arg == "--timeout" and i + 1 < len(args):
+            return float(args[i + 1])
+        if arg.startswith("--timeout="):
+            return float(arg.split("=", 1)[1])
+    env = os.environ.get("PYTEST_TIMEOUT")
+    if env:
+        return float(env)
+    ini = pytestconfig.getini("timeout")
+    assert ini not in ("", None), (
+        "no `timeout` in [tool.pytest.ini_options], and neither --timeout nor "
+        "PYTEST_TIMEOUT supplies one (#5035)"
+    )
+    return float(ini)
+
+
+def test_the_resolved_bound_matches_the_sanctioned_sources(pytestconfig):
+    """Round-2 review: a CONFTEST can zero the resolved option, and the key stays 300.
+
+    Round 1 closed the ``addopts`` vector by resolving the value in a child
+    process. That child cannot see this one: its probe file is written to
+    ``tmp_path``, which is outside the rootdir, so the repo ``conftest.py`` files are
+    never loaded for it and a conftest that overwrites the option (in
+    ``pytest_configure``: ``config.option.timeout = 0``), or that implements the
+    ``pytest_timeout_set_timer`` hookspec without arming anything, leaves a real
+    bare run in this checkout armed with nothing — while every other test in
+    this file stays green. That is the incident's shape, reintroduced through a
+    door none of them watched.
+
+    This reads the value from the OUTER config, which HAS loaded the real
+    conftest chain, and compares it to the same resolution recomputed from the
+    sanctioned sources. Comparing against the sources rather than against the
+    CI budget keeps a legitimate ``--timeout=0``/``PYTEST_TIMEOUT=0`` run green
+    (the value then IS what the sources say) while still catching an
+    in-process overwrite — so the guard is not vacuous on the CI legs that pass
+    ``--timeout=300``.
+
+    Mutation that makes this RED: append ``def pytest_configure(config):\n    config.option.timeout = 0`` to ``tests/conftest.py`` (verified: this test
+    fails while the other three config pins stay green).
+    """
+    expected = _bound_from_the_sanctioned_sources(pytestconfig)
+    resolved = pytest_timeout.get_env_settings(pytestconfig).timeout
+    assert resolved is not None and float(resolved) == expected, (
+        f"the resolved per-test bound is {resolved!r}, but the sanctioned sources "
+        f"(CLI -> PYTEST_TIMEOUT -> ini) give {expected!r}: an in-process hook "
+        "overwrote it, so a bare run in this checkout would arm no killer — the "
+        "shape #5035 exists for (43h48m)"
     )
 
 

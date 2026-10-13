@@ -301,7 +301,10 @@ disable_error_code = [
 # no LOOSER than that (see the test): where a leg needs more it declares more,
 # and pytest-timeout gives an item's own `@pytest.mark.timeout(N)` marker
 # priority over this value (`_get_item_settings`), so every existing 600/900/
-# 1800s eval mark keeps its budget. `timeout_method` stays the default `signal`.
+# 1800s eval mark keeps its budget. `timeout_method` stays the default `signal`
+# and `timeout_func_only` stays false — both PINNED by
+# `tests/test_ci_stall_identify.py` (the only method that reaches a GIL-holding
+# stall is `signal`; `thread` starves on the GIL — #7649).
 #
 # ⚠️ This is NOT a no-op on every leg: CI invocations that pass no `--timeout`
 # and run a selection gain a bound here — that is the same defect this issue
