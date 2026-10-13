@@ -38,8 +38,10 @@ records the amendment.
 **`semantics`** input — the Layer-2 meaning vocabulary §8 already records. The
 parameter is **additive and defaulted** (`semantics=None`), so every existing
 caller keeps its behaviour; when it is supplied the direction the edge records
-follows the declared meaning (a one-way meaning records `unidirectional`, a
-mutual one `bidirectional`), and the basis the resolution used is recorded on
+follows the declared meaning (a one-way meaning recorded `unidirectional`, a
+mutual one `bidirectional` — the runtime's interim pair at W1; since **v3.25**
+the declared meaning's own model value is recorded verbatim, see the correction
+below), and the basis the resolution used is recorded on
 the operator as **`direction_basis`** (`explicit` / `semantics` / `default`) — the token
 names the layer that produced the value (`semantics` = the declared Layer-2 meaning
 resolved it), never the Layer-3 `label` predicate, which is a different input. An
@@ -48,11 +50,20 @@ out-of-vocabulary word **warns and the write proceeds** — it never refuses
 the owner approved verbatim: *"w1 yes approved"* (2026-10-09), relayed into
 this document by **PR #8283**.
 `approved: 2026-09-18` / `approval_pr: 4120` above stay the original ruling's;
-this paragraph records the amendment. (The **four-value direction storage**
-vocabulary — `->` / `<-` / `<->` / `-` in the runtime and the ingest contract —
-is the separate scoped change #7852 still names; the write path maps the
-semantics onto the runtime's two accepted values meanwhile.)
+this paragraph records the amendment.
 
+> **Correction, 2026-10-12 (v3.25 — same issue #7852).** The W1 sentence above
+> describes W1's interim behaviour, when the runtime could store only the pair
+> `unidirectional` / `bidirectional`. The **four-value direction storage**
+> vocabulary that change named has since landed: the runtime records the
+> declared meaning's own model direction verbatim — `->` (one-way), `<-`
+> (reverse one-way), `<->` (mutual), `-` (none: the connection exists and no
+> confidence transfers) — and interprets it on every path (`create_operator`,
+> `create_direct_edge`, the ingest contract, EP and the analyze BFS).
+> `bidirectional` / `unidirectional` remain **accepted and readable aliases**
+> (`bidirectional` ≡ `<->`, `unidirectional` ≡ `->`); storage is verbatim, so no
+> data migration was required. The `w1 yes approved` ruling above is unchanged.
+>
 > This document is the **approval record**, not the generated baseline. The generated
 > list of what exists *today* is `docs/product/mcp-sdk-surface.md`, rendered from
 > `config/surface-manifest.yml`. This file records what the surface is *approved to become*.

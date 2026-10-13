@@ -195,6 +195,45 @@ def test_1652_installer_core_set_unchanged_and_new_skills_are_documented():
             "the next available set in docs/onboarding.md")
 
 
+# ── #3513: the renumbered SKILL sections must stay findable BY NUMBER ──────
+# The onboarding SKILL.md's sections are cited by NUMBER from outside the file
+# (mcp_server.py, hosted_api.py, tests, and a live research routing pointer).
+# #3513 inserted a new §6 and renumbered the rest, sweeping only the
+# in-document self-references — every external pointer then aimed at the wrong
+# section and nothing failed, because no test pinned a section NUMBER. These
+# derive the number from the heading and assert the referrers cite it, so the
+# next insertion cannot re-stale them silently.
+_ONBOARDING_SKILL = os.path.join(SERVED, "tortoise-onboarding", "SKILL.md")
+
+
+def _skill_section_number(title: str) -> str:
+    text = _read(_ONBOARDING_SKILL)
+    m = re.search(rf"^## (\d+)\.\s+{re.escape(title)}", text, re.M)
+    assert m, f"the served SKILL.md has no `## <n>. {title}` section"
+    return m.group(1)
+
+
+def test_3513_the_renumbered_skill_sections_are_cited_by_their_real_numbers():
+    decide_n = _skill_section_number("Next steps")
+    contract_n = _skill_section_number("Capture-announcement COPY CONTRACT")
+    assert decide_n != contract_n, "the two cited sections must be distinct"
+    mcp = _read(os.path.join(REPO_ROOT, "tortoise", "mcp_server.py"))
+    api = _read(os.path.join(REPO_ROOT, "tortoise", "hosted_api.py"))
+    assert f"`tortoise/onboarding/SKILL.md` §{decide_n}" in mcp, (
+        "mcp_server.py cites the decide protocol's home by a stale section "
+        "number — renumber it with the section (#3513)")
+    assert f"tortoise/onboarding/SKILL.md §{contract_n}" in api, (
+        "hosted_api.py cites the capture-announcement copy contract by a stale "
+        "section number — renumber it with the section (#3513)")
+    for rel, token in (
+        ("tests/test_onboarding_auto_complete.py", f"SKILL.md` §{decide_n}"),
+        ("tests/test_capture_disclosure_template.py", f"SKILL.md §{contract_n}"),
+        ("docs/research/1714-solution-converge.md", f"§{contract_n} (the announcement)"),
+    ):
+        assert token in _read(os.path.join(REPO_ROOT, rel)), (
+            f"{rel} cites a SKILL.md section by a stale number (#3513)")
+
+
 # ── Workflow smoke (embedded) ──────────────────────────────────────────────
 
 @pytest.fixture

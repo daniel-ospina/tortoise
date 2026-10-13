@@ -302,6 +302,13 @@ surfaces:
   # holds two uniquely-hosted_api pins (test_alert_store_from_forwards_the_writer,
   # test_analytics_store_delegates_to_the_incident_seam).
   - test_operator_alert.py
+  # #4780: the incident-kind registry's generated checks read and pin the
+  # alert-plane emitters, including `tortoise/hosted_api.py` and
+  # `tortoise/email_notify.py` — both exact `api` SOURCE_PATTERNS whose match
+  # REPLACES the `core` fallback. Without this arm an `api`-file-only PR would
+  # never run the check that those files' kinds are declared and documented.
+  # Same silent-drop shape as the #3981 entry above.
+  - test_incident_kinds.py
   - test_onboarding_email_http.py
   # #2006 (W11): the onboarding funnel-event guard. Load-bearing HERE: four of
   # the five emission sites live in tortoise/hosted_api.py, which selects the
@@ -738,6 +745,14 @@ surfaces:
   - test_selfhost_volunteer_context.py # volunteer §3.2 selfhost transport (embedded)
   - test_volunteer_reflex_harness_seam.py  # W3 reflex graded seam (volunteer.decide)
   - test_platform_seams.py            # epic #2080 end-state seams wave-1: per-turn volunteer CLI + install + shipped hook (embedded, lane-agnostic)
+  # #2121: the Hermes seam — `tortoise install hermes` writes the pre_llm_call
+  # directory plugin, and `sessions import --harness hermes` reads
+  # $HERMES_HOME/state.db. Dual-registered exactly like test_platform_seams.py:
+  # tortoise/__main__.py (the CLI half) is an `api`-classified source, while
+  # tortoise/hermes-plugin/ and tortoise/session_import/ named-surface-match
+  # NOTHING and fall back to `core` (see the test_session_import_codex.py
+  # note below for the same #2938/#1349 silent-drop class).
+  - test_hermes_seam.py
   - test_write_ahead_mint.py
   # #3808: the CLI half of the capture install (`tortoise install <harness>`
   # in tortoise/__main__.py, an api-classified source) — dual-registered so a
@@ -964,6 +979,15 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #5142: the ONTOLOGY record of the D10 code half — the `format` markers vs
+  # `_SOURCE_HANDLED`, the deferred document/corpus-source node collapse, and
+  # the document `:Source` scoping. Half its subject is `tortoise/projection/
+  # entities.py` (an `entities.py`-only change falls through to `core`), so
+  # without this entry the doc↔code pins would not run on the change that can
+  # break them. Also registered in `tier1` (same #2881 precedent as
+  # `test_durability_posture.py`), because a docs-only `docs/ONTOLOGY.md`
+  # wording edit is what this guard is FOR.
+  - test_5142_ontology_record.py
   - test_2294_ask_degradation_gate.py
   - test_5051_capture_receipt_key_registry.py
   - test_5089_operator_prop_parity.py
@@ -1006,6 +1030,13 @@ surfaces:
   # → `"full": true` — so it needs no entry here.) `--integrity` also
   # requires every test file to be classified, which this entry satisfies.
   - test_7951_write_doors.py
+  # #5141: `graph-scripts/backfill_references.py` matches no named surface and
+  # falls through to `core`, so this arm is what runs the script's smoke test on
+  # a graph-script-only diff. The pre-existing coverage could not see the
+  # defect: `test_references_edge.py` inlines a MIRROR of the backfill loop, so
+  # the script's own query building (which raised `KeyError: 'id'` before it
+  # wrote anything) was never executed by a test.
+  - test_backfill_references_5141.py
   - test_cache_projection.py
   - test_cache_projection_live.py
   # #4197: the saved-backlog ledger (`tortoise/capture_backlog.py`) and its
@@ -1556,12 +1587,17 @@ surfaces:
   - test_rebuild_recreate_content_parity.py  # #4042: a pre-recreation PointRevised must not leak content/embedding/content_hash onto a re-created same-id Point (live apply()/fold() parity; same-journal-file content boundary)
   - test_5048_mitigated_by_replay.py  # #5048: a mitigation's mitigated_by edge, NON-operator identity and revised strength must survive rebuild_all, and check_consistency must not call the faithful rebuild diverged. `tortoise/consistency.py` and `tortoise/projection/entities.py` select `core`; `projection/edges.py` and `projection/__init__.py` are SHARED_MODULEs, and `tortoise/api.py` selects `api`+`core`, so `core` alone reaches every seam this file guards. Lane: DOCKER (the #1647 default) — URI-less it FAILS at the session fixture unless `TORTOISE_TEST_CARVE_OUT=1`.
   - test_rebuild_graph_only_derived_parity.py  # #4305: rebuild_all must not lose live-valid content_hash/embedding for a graph-only Point on a falsy re-emit, nor let the synthetic #548 tail clobber it (live apply() parity, 21 shapes)
-  # #3817: the objective-6 TAGS guard — does a Point's tags survive rebuild_all?
+  # #3817: the objective-6 TAGS guard — do a Point's tags survive rebuild_all?
   # It measures the journal carriage (AC2), the tag-filtered retrieval through
   # `SDK.query_points_by_tag` before and after the rebuild (AC1/AC5), the
-  # no-resurrection case (AC3) and the negative control (AC4), and it pins the
-  # RECORDED DECISION that replay refuses `tags` + reports the drop (#2897;
-  # `tortoise/projection/entities.py:_POINT_LIST_PROPS`). `tortoise/projection/`
+  # no-resurrection cases (AC3, incl. the `None`/`""` clear and the dict edit),
+  # the non-list forms (a scalar and the tuple array) and the negative control
+  # (AC4). The verdict it pins is the CURRENT one after #2897 landed: the
+  # `n.tags` property AND its snapshot-derivable `:Tag`/`TAGGED` half are
+  # CARRIED by the replay (the property by `_upsert_point_props`/`_revise_point`,
+  # the edges by the pass-2 `_sync_tags`) — the reverse of the old "replay
+  # refuses `tags` + reports the drop" pin, which `_POINT_LIST_PROPS` (now
+  # EMPTY) no longer describes. `tortoise/projection/`
   # matches no named surface and falls through to `core` (#2795/
   # `test_unjournaled_mutation_class.py` is the sibling registered here), and
   # `tortoise/sdk.py` is a SHARED_MODULE — so `core` reaches every seam this
@@ -1884,6 +1920,20 @@ surfaces:
   - test_extractor_reliability.py
   - test_extractor_embed_coerce_5060.py  # #5060: execute_embed must not raise on a non-string name/content (whole-session payload loss)
   - test_extractor_v2.py
+  # #5092: the guard for the extractor-v4 design's two step lists. Registered `core`
+  # (where the extractor's other guards live — `test_v4_declared_mechanisms.py`,
+  # `test_vet_gate_5005.py`, `test_salience_labels_4917.py`) AND in `tier1`, because
+  # this guard's ONLY subject is a DOC (`docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`)
+  # and `docs/` is in NON_PYTHON_PREFIXES: a docs-only diff takes `select()`'s early
+  # return and runs the tier-1 smoke set only. `core` is the classification home
+  # (`--integrity` reads it there) and the lane for a code diff that falls through to
+  # `core`; `tier1` is what makes the guard run on the doc-only diff that can break it.
+  # ⚠️ Named limit, not hidden: a diff that changes the doc AND a file selecting a
+  # NON-core named surface (`api`/`ep`/`sdk`/…) drops the doc path and does not run this
+  # guard — the #1349/#3332 silent-drop class the CORE_ALSO comments describe. It is not
+  # closed here because the doc's subject code (`tortoise/extractor_v2.py`) matches no
+  # named surface either, so `core` is already its lane.
+  - test_extractor_v4_step_list_consistency.py
   - test_falkordb_compat.py
   # #7076: the degraded-fallback snapshot's OWN guard. test_fallback_snapshot.py
   # was registered only under `api`, while the module it guards
@@ -1973,6 +2023,16 @@ surfaces:
   - test_ingest_v2_parallel.py
   - test_ingest_validation.py
   - test_integration_search.py
+  # #4780: the incident-kind registry's generated checks — runbook ⇄ code set
+  # equality (both directions), the frozen string set, the emitted flag against a
+  # scan of the emitters, and the no-bare-literal rule. It reads
+  # `tortoise/incident_kinds.py` (no named surface → this `core` arm is the
+  # fallback) AND the alert-plane emitters, including `tortoise/hosted_api.py` and
+  # `tortoise/email_notify.py`, which are exact `api` SOURCE_PATTERNS — so the
+  # `api` arm below is load-bearing for an api-file-only diff (a named-surface
+  # match REPLACES the `core` fallback, #2938 convention). Registered in this
+  # position to keep the list's alphabetical grouping.
+  - test_incident_kinds.py
   - test_issue_insight.py
   - test_joint_index_ingest.py
   - test_judge_harness.py
@@ -2383,6 +2443,14 @@ surfaces:
   # W2-b (#2098): BPRE write-path gate — core fallback catches engine
   # code with no surface mapping (tortoise/session_import/ parsers etc.).
   - eval/write_path/test_write_path_benchmark.py
+  # #2121: the Hermes seam — the shipped plugin template
+  # (tortoise/hermes-plugin/) and the session-store parser
+  # (tortoise/session_import/parsers.py) name no SOURCE_PATTERNS surface, so a
+  # plugin/parser-only PR selects `core` via the `tortoise/` fallback and this
+  # is the arm that runs the guard. Dual-registered with `api` (the CLI half:
+  # `install hermes` + `sessions import --harness hermes`), the same
+  # #2938/#1349 silent-drop class that test_session_import_codex.py documents.
+  - test_hermes_seam.py
   # #3575 P1-B: this pins tortoise/pi-hooks/tortoise-capture.ts — the artifact
   # HARNESS_INSTALL.pi installs. `tortoise/pi-hooks/` matches no SOURCE_PATTERNS
   # entry, so a change to the extension selects `core` via the `tortoise/`
@@ -2509,6 +2577,17 @@ surfaces:
   # restore assertion bound must stay BELOW the client socket timeout so
   # "overran its bound" and "the socket timed out" remain distinguishable.
   - test_7846_restore_doc_and_bounds.py
+  # #3513 (epic #1714 R1): the integration grid's tile inventory is ONE
+  # declaration asserted across the surfaces that must agree (the JS grid ↔
+  # `tortoise/demand.py::DEMAND_DECLARED_TILES` ↔ every
+  # `config/connector_manifest.yaml` connector). DUAL-registered with
+  # `onboarding` for the JS direction: a `website/apps/dashboard/src/` diff
+  # selects `onboarding`, while BOTH backend sources of that declaration match
+  # NO named surface and fall through to THIS `core` fallback — so without this
+  # arm a manifest/declared-tile addition that grows the inventory with no grid
+  # tile is green in its own PR and surfaces as an unrelated red in the next
+  # dashboard PR (#1349/#7076 class). Text-only: no docker, no node, no network.
+  - test_integrations_grid_inventory.py
   # #5275: the ARMED fail-loud contract must survive the READ path.
   # `tortoise/search_engine.py` (the `fallback_tfidf` sink) selects `core`,
   # so this is the surface that runs the guard on that diff; `tortoise/sdk.py`
@@ -2723,6 +2802,12 @@ surfaces:
   # contract under test when only the client moves. Dual-registered with `api`
   # and `core` (see the `api` arm).
   - test_data_source_capture.py
+  # #3513 (epic #1714 R1): the integration grid's tile inventory is ONE
+  # declaration, asserted across the surfaces that must agree (the JS grid ↔
+  # the demand record's keys ↔ the connector manifest). Text-only (parses the
+  # dashboard module), so it needs no docker, no node, no network — and it must
+  # run on a `website/apps/dashboard/src/` diff, which selects THIS surface.
+  - test_integrations_grid_inventory.py
   - test_onboarding_auto_complete.py
   # #3517: the capture disclosure's single source of truth + the non-LLM
   # renderer + the false-promise grep (lane-agnostic: no DB, no network — one
@@ -2819,6 +2904,13 @@ surfaces:
   - test_welcome_url_consolidation.py
   - test_website_static.py
   - test_website_docs_consistency.py  # #3332: checks each public page against its canonical source (status vocab, EP mechanism, ontology link)
+  # #8379 (finding 2): the authoring contract renders as a real document, not as one
+  # giant code block. Registered HERE because `website/functions/blog/` is a SOURCE_PATTERN
+  # of this surface AND the doc itself is a CONCRETE path (`docs/blog-authoring.md`) —
+  # `docs/` alone is NOT a pattern and is in NON_PYTHON_PREFIXES, so without that entry a
+  # docs-only diff selected NO surface and the guard never saw the page it guards (the
+  # #8334/#3524 silent-drop class, one level up).
+  - test_blog_authoring_doc.py
   # #8334 review (P2): the #3525 CSP plan doc must not keep asserting the third-party RUM
   # origin #4706 removed. Registered HERE because `website/apps/dashboard/functions/` is a
   # SOURCE_PATTERN of this surface AND the doc itself is named as a CONCRETE path
@@ -2877,6 +2969,15 @@ surfaces:
   # MCP declaration. Embedded-only (the fixture builds `TortoiseSDK(<tmpfile>)`
   # and replays the journal), so it is ALSO registered in `carve_out` below.
   - test_semantics_write_path_7852.py
+  # #7852 v3.25: the four-value direction STORAGE vocabulary — every write path
+  # accepts `->` / `<-` / `<->` / `-` and every reader normalizes through
+  # `live.direction_flows` (EP message reach, the analyze BFS, the dedup
+  # equivalence class). `sdk` owns it (`tortoise/sdk.py` is a SHARED_MODULE → the
+  # full matrix; a `tortoise/live.py`-only change falls back to `core`, which
+  # owns carve-out members, so the carve-out leg still runs it). Embedded-only
+  # (the fixture builds `TortoiseSDK(<tmpfile>)`), so it is ALSO registered in
+  # `carve_out` below.
+  - test_direction_storage_7852.py
   # #3849: the ask_lane-only selection leg. `tortoise/ask_lane.py` maps to
   # `sdk`, so these two must be dual-registered here or they stop running on
   # an ask_lane-only PR (a SOURCE_PATTERNS match REPLACES the core fallback).
@@ -2937,6 +3038,7 @@ surfaces:
   - test_reader_prerendered.py  # #3011: pre-rendered-evidence reader seam — byte-identical to the hit-list lane (hermetic)
   - test_reader_abstention_calibration.py
   - test_reader_4107_advice_shape.py  # #4107: hermetic characterisation drift pin (detector→None, advice-clause tension)
+  - test_reader_4837_advice_battery.py  # #4837: hermetic pre-registration + decision-rule pin for the advice battery (`tortoise/reader.py` selects sdk)
   - test_coverage_loop.py  # #2567 (docker-lane leg, mirrors test_retrieval.py)
   - test_coverage_loop_rules.py  # #2567 (hermetic rules leg)
   - test_session_reinjection_rules.py  # #2517 (hermetic rules leg, mirrors test_retrieval.py)
@@ -2963,6 +3065,11 @@ surfaces:
   - test_prior_bound_4509.py
   - test_sdk.py
   - test_sdk_dedup.py
+  # #6110: create_point(key=K, dedup=True) treats `key` as a PER-KIND identity —
+  # a re-run folds, a pre-existing collision is warned, a content-dedup hit
+  # never reassigns a key, and the ingest counter shares the writer's
+  # resolution. Hermetic (embedded store).
+  - test_6110_key_identity.py
   - test_search_engine_recency.py
   - test_temporal_constraint.py
   - test_terminal_dedup_nullhash.py  # #2971: _find_terminal_dedup_hit A10 hash-less fallback (rebuild-durable terminal guard)
@@ -3123,6 +3230,7 @@ tier1:
 - test_crypto.py
 - test_decide.py
 - test_durability_posture.py  # #2881: durability authority + scoped source-of-truth gate
+- test_5142_ontology_record.py  # #5142: docs/ONTOLOGY.md §4.4/§4.6 record vs the code (format/`_SOURCE_HANDLED`, the deferred node collapse + its `OVERRIDES:`, the document `:Source` scoping) — dual-registered with `core`
 - test_ep_draft_filter.py
 - test_ep_operatorless.py
 - test_event_store.py
@@ -3149,6 +3257,9 @@ tier1:
 - test_w4_why_enrichment.py
 - test_weights.py
 - test_writer_inventory.py
+# #5092: the extractor-v4 design's step-list guard is a fast, no-DB file scan, so a
+# docs-only PR runs it here — the same placement as `test_retention_promise.py` above.
+- test_extractor_v4_step_list_consistency.py
 slow_files:
 - test_3311_multilabel_status_vocab.py
 - test_about_edges.py
@@ -3361,6 +3472,11 @@ carve_out:
 # replay, so the carve-out is load-bearing (a URI-set lane would redirect it).
 # Also in the `sdk` surface above, which is where the diff selects it.
 - test_semantics_write_path_7852.py
+# #7852 v3.25: the four-value direction storage vocabulary is embedded-only —
+# the fixture builds `TortoiseSDK(<tmpfile>)` and reads EP message state off the
+# live graph, so a URI-set lane would redirect it. Also in the `sdk` surface
+# above, which is where a diff selects it.
+- test_direction_storage_7852.py
 - test_redis_guard.py
 # #4524: the vecf32 overwrite-seam guards. The defect is embedded-only (the
 # server lane lands the same write), so the module is module-level
@@ -4096,6 +4212,7 @@ durations:
   test_embeddings.py: 0.5
   test_extractor.py: 0.5
   test_extractor_doc.py: 0.5
+  test_extractor_v4_step_list_consistency.py: 0.1  # #5092: two fenced blocks + one paragraph read; measured 0.01s of test body (session setup excluded)
   test_file_indexer.py: 0.7
   test_open_kinds.py: 0.3
   test_postmerge_verdict.py: 0.4
@@ -4392,6 +4509,7 @@ durations:
   test_tmpdir_hygiene_4096.py: 13.3
   test_turn_embedding_write_path_4194.py: 1.4
   test_website_docs_consistency.py: 6.6
+  test_blog_authoring_doc.py: 2.0  # unmeasured — new file; refresh from the first post-merge run via tools/ci_timing.py --refresh-durations
   test_csp_plan_doc_consistency.py: 2.0  # unmeasured — new file; refresh from the first post-merge run via tools/ci_timing.py --refresh-durations
   test_install_reaper_schedule.py: 7.8  # unmeasured
   test_contact_form.py: 2.0  # unmeasured
@@ -4429,6 +4547,7 @@ durations:
   test_oauth_redemption_state.py: 3.2  # unmeasured
   test_3036_oauth_retention.py: 0.2  # unmeasured
   test_reader_4107_advice_shape.py: 1.4  # unmeasured
+  test_reader_4837_advice_battery.py: 2.6  # #4837: hermetic (no DB, no reader call) — 23 tests, measured 2.6s on this host
   test_fanout_cap.py: 0.2  # unmeasured
   test_never_across_fold_5080.py: 2.0  # unmeasured
   test_operator_alert.py: 2.0

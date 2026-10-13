@@ -397,6 +397,13 @@ SOURCE_PATTERNS = {
                    # runs on the only change that can break it — which is exactly what the
                    # registration comment in `config/ci-surfaces.yml` claimed it did.
                    "docs/plans/2026-09-22-3525-csp-no-store.md",
+                   # #8379 (finding 2): `test_blog_authoring_doc.py` renders the
+                   # blog authoring contract with a real CommonMark parser. `docs/` is
+                   # in NON_PYTHON_PREFIXES and is not itself a pattern, so without this
+                   # CONCRETE entry a docs-only edit to the contract selects NO surface
+                   # and the guard never runs on the only change that can break it —
+                   # the same silent-drop class as the two docs records above.
+                   "docs/blog-authoring.md",
                    # The guards read the moved Functions themselves — and not only
                    # the gate: `test_admin_return_to.py` reads the gate by exact
                    # path and derives the console's mount path from its directory,

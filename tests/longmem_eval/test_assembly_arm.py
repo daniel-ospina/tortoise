@@ -14,12 +14,18 @@ PRE-REGISTERED METRIC SEMANTICS (plan Task 7, second-model P2-4):
 
 Geometry contracts (pinned by Task 1's committed fixture tests — Task 7 is
 forbidden from editing the substrate):
-  * R9 deep-rank substrate (87 rows): the DEFAULT pool-40 admits NEITHER
-    deep gold; A-WIDENED (pool 40→120 window AND item cap) admits BOTH; the
-    assembled arm admits BOTH on the same graph — the pool DEPTH is the
-    discriminator. #3095 re-measurement (post-#3018): the pre-#3018
-    contract had pDeepG1 in-pool; #3018's deterministic-ranking fix moved
-    the opaque fulltext order (same rows), so both golds are now deep.
+  * R9 deep-rank substrate (87 rows): the DEFAULT pool-40 admits FEWER THAN
+    2 of the two deep golds — the TOLERATED SET is {0, 1}, and that
+    one-sided bound (spec R9 / plan Task 7 pin "<2", never "0") is what
+    the tests below assert. 0 is the measured post-#3018 state and 1 the
+    measured pre-#3018 one; with every row tied on score the two differ only
+    in the engine's opaque sequence, so the bound is deliberately one-sided
+    (see the #3273 note on the assertion). A-WIDENED (pool 40→120 window AND
+    item cap) admits BOTH; the assembled arm admits BOTH on the same graph —
+    the pool DEPTH is the discriminator. #3095 re-measurement (post-#3018):
+    the pre-#3018 contract had pDeepG1 in-pool; #3018's deterministic-ranking
+    fix moved the opaque fulltext order (same rows), so both golds are now
+    deep.
   * R16(b) out-of-subgraph canary: A-DEFAULT admits ≥1 gold (A≥1); B admits
     ZERO (B=0) — the canary question's gold lives on a THIRD object outside
     the resolved subjects' subgraphs.
@@ -226,14 +232,25 @@ def test_r9_admission_table_default_widened_assembled(sdk, monkeypatch):
     q = d["question"]
     a_def = _legacy(sdk, monkeypatch, q)
     # ORDER-INDEPENDENT gold admission (the invariant this test owns): the
-    # DEFAULT window admits FEWER than 2 of the two deep golds.
+    # DEFAULT window admits FEWER than 2 of the two deep golds, written as
+    # the named TOLERATED SET {0, 1}. 0 is the measured post-#3018 state and
+    # 1 the measured pre-#3018 one; with every row tied on score they differ
+    # only in the engine's opaque sequence, not in the pool-depth mechanism
+    # this test guards. #3273: the one-sidedness is therefore deliberate —
+    # `n_gold_def == 0` would re-pin opaque order and re-create the #3095
+    # main-red. The collapse this test exists to catch is the one that makes
+    # the A-widened arm VACUOUS, i.e. BOTH golds in DEFAULT; a SINGLE-gold
+    # leak is a tolerated order fact, not a pool collapse. A starved or
+    # silently-widened DEFAULT window stays loud via the crowd-row and 20..45
+    # bounds below.
     n_gold_def = sum(m in a_def["evidence"]
                      for m in ("fieldtrip", "almanac"))
-    assert n_gold_def < 2, (
+    assert n_gold_def in (0, 1), (
         f"A-default admits both deep golds ({n_gold_def}/2) — the pool-40 "
         "no longer binds above them, so the A-widened arm is vacuous")
     # non-vacuity: a starved/empty default window must fail, not silently
-    # pass the `n_gold_def < 2` guard above (a known in-pool crowd row).
+    # pass the `n_gold_def in (0, 1)` guard above (a known in-pool crowd
+    # row).
     # #3291: the token must be CROWD-UNIQUE. "deep-subject milestone" also
     # appears in the two GOLD rows (tests/_assembly_graph.py:317), so a gold
     # row ALONE satisfied this control and it did not pin crowd-row admission

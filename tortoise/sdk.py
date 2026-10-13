@@ -67,6 +67,10 @@ from .live import _live_only  # #6597 dream coverage closure mirrors EP liveness
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
 from .live import epistemic_label_queries  # #7853 epistemic-label id sweep
 from .live import epistemic_disjunction  # #7853 epistemic-label traversal clause
+from .live import ACCEPTED_DIRECTION_VALUES  # #7852 Layer-1 four-value direction set
+from .live import direction_flows  # #7852 (source→target, target→source) flows
+from .live import direction_spellings  # #7852 stored-token equivalence class
+from .live import is_default_direction  # #7852 "does not differentiate" default
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, resolve_document_target_id, resolve_entity_id)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
@@ -2848,7 +2852,8 @@ _RESERVED_ACTOR_PROPS = frozenset(
     {"actor_user_id", "owner", "initiated_by", "agent_id"})
 
 
-def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
+def _sanitize_props(props: dict, *, reject_id: bool = False,
+                    reject_belief_props: bool = False) -> dict:
     """#329: reject server-managed fields on tenant write surfaces.
 
     ``sourcePath``/``source_path`` are server-filesystem fields consumed by the
@@ -2868,6 +2873,17 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     against the store's numeric domain (INT64 int / double number) and a value
     the store would silently alter is REJECTED with a key-naming ValueError —
     this runs before the ``sourcePath``/``id`` rejects below.
+
+    ``reject_belief_props`` (#7951): the GENERIC props surfaces
+    (``update_point`` / ``create_entity`` / ``update_entity``) refuse the
+    BELIEF fields — ``credibility``, and the baseline fields ``ep_alpha`` /
+    ``ep_beta`` / ``baseline_set`` / ``baseline_source``. ``credibility`` is a
+    documented WORD INPUT of ``create_point(credibility=…)`` /
+    ``mitigate_operator(credibility=…)``; the baseline fields belong to the
+    dedicated writers (``set_point_baseline`` and the source-inheritance
+    recompute), which write them TOGETHER and keep the #398 label in sync.
+    Through a generic bag they bypassed that accounting. #7951 is the
+    structural home (ONE write chokepoint instead of per-path patching).
     """
     props = dict(props)
     # #2600: reserved actor keys are STRIP-AND-IGNORE (never a 4xx — the
@@ -2967,6 +2983,82 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
             f"{sorted(_embed_identity_keys)} are server-managed embedding "
             "journal fields and cannot be set via props."
         )
+    # #6151 (review P3): `baseline_system_default` is the RECORDED #2199 birth
+    # fact — `_apply_source_inheritance` re-injects the system default ONLY on a
+    # point that carries it, so a caller able to set it could self-grant the
+    # +2.0 default on a point that was never born live (an EXPLICIT-status /
+    # set-by-author claim), making a self-declaration look like a recorded
+    # provision. HARD-REJECT rather than strip-and-ignore, following the
+    # `embedding_verbatim`/`embedding_preserved` precedent above: unlike the
+    # reserved ACTOR keys (where the server always has an authoritative value to
+    # substitute), there is no legitimate caller intent for this key, so a
+    # silent strip would let an attempted self-grant pass unnoticed. The
+    # legitimate writers set it AFTER this boundary — `create_point` puts it in
+    # its one-write CREATE map, and the internal baseline writer
+    # `_stamp_authored_word` writes it directly — so neither re-enters here.
+    if "baseline_system_default" in props:
+        raise ValueError(
+            "'baseline_system_default' is a server-managed baseline-provision "
+            "marker and cannot be set via props."
+        )
+    # #7951 (review round 5): `credibility` is NOT a generic prop — it is the
+    # author's declared WORD, a documented input of `create_point` /
+    # `mitigate_operator`, which validate it and run the authored-assertion
+    # accounting. Measured through a generic update bag: an INERT label on a
+    # born-live part (frozen at 3.0 even under a real T1 source), a label with
+    # no baseline and no body, and an unvalidated value stored verbatim
+    # ('gold', 'banana'). Fail closed; #7951 owns the single chokepoint.
+    #
+    # #6151 review P1(b)/P3-2: the SAME generic surfaces must refuse the
+    # BASELINE fields. `baseline_source` is the token the dedup path used to
+    # read as proof of the #2199 provision, and the whole belief quartet is
+    # written by the dedicated chokepoints (`set_point_baseline`, the
+    # inheritance recompute) which keep `ep_alpha`/`ep_beta`/`baseline_*` and
+    # the #398 `credibility` label consistent. Through a generic bag they
+    # bypassed that: `baseline_source='system-default'` forged the #2199
+    # provision (measured +2.0 unearned, 1.2 -> 3.2), and `ep_alpha=0.4` on a
+    # word-bearing `set-by-author` row wrote a "frozen" value the recompute
+    # then replaced (0.4 -> 5.1). Fail closed; #7951 owns the one chokepoint.
+    #
+    # #6151 review P1 (round 6): the BASELINE quartet reject is UNGATED, not
+    # behind `reject_belief_props`. That flag is passed only by
+    # `update_point` / `_create_entity` / `_update_entity`, so
+    # `create_point`'s props bag still accepted them — and the create map is
+    # built as `_create_map.update(_baseline_create_fields())` BEFORE the
+    # caller's props loop (`for _key, _val in props.items()`), so a caller's
+    # `ep_alpha`/`ep_beta`/`baseline_source` OVERRODE the writer's own
+    # baseline values. Measured: `create_point("statement", "forged birth",
+    # ep_alpha=10.0, ep_beta=1.0, baseline_set=True,
+    # baseline_source="set-by-author")` persisted a FROZEN 10.0 a real T1
+    # source could never move, and the `system-default` spelling forged the
+    # #2199 provision at birth. Same server-managed class as
+    # `baseline_system_default` above: reject, never strip, because there is no
+    # legitimate caller intent. Safe to ungate — `create_point` writes its
+    # baseline fields into the create map AFTER this boundary, so no internal
+    # writer re-enters. `credibility` stays gated: it is a DOCUMENTED input of
+    # `create_point`/`mitigate_operator` (validated and accounted there), and
+    # `create_point` pops its nested spelling below.
+    if reject_belief_props and "credibility" in props:
+        raise ValueError(
+            "'credibility' is not a generic property — it is a documented "
+            "input of create_point(credibility=…) and "
+            "mitigate_operator(credibility=…), which validate the ladder "
+            "word and record it as the authored-assertion label. Use one "
+            "of those, or set_point_baseline for an explicit belief "
+            "(#7951)."
+        )
+    _baseline_props = [k for k in
+                       ("ep_alpha", "ep_beta", "baseline_set",
+                        "baseline_source")
+                       if k in props]
+    if _baseline_props:
+        raise ValueError(
+            f"{_baseline_props} are baseline fields the dedicated writers "
+            "own (set_point_baseline for an explicit belief, the "
+            "source-inheritance recompute for a derived one) — they are "
+            "not generic properties and cannot be set via create_point's "
+            "props. Use set_point_baseline(alpha, beta) (#7951)."
+        )
     # #2491: outdated is the terminalizing flag written ONLY by the lifecycle
     # writers via raw cypher (invalidate_point/supersede_point SET
     # n.outdated=true) after they journal + drop EP messages. Accepting it via
@@ -3059,6 +3151,30 @@ def _coerce_props(props: dict) -> dict:
         # Scalar 'props' value — restore as a literal property.
         props["props"] = nested
     return props
+
+
+def _item_dedup_key(item: dict) -> str | None:
+    """The effective dedup ``key`` of an ingest bundle item — the SAME value
+    ``create_point`` sees after ``_coerce_props`` flattens the item (#6110,
+    #8400).
+
+    ``_coerce_props`` gives explicit top-level kwargs precedence over nested
+    ``props`` on collision, and that precedence is by PRESENCE, not by
+    truthiness: a top-level ``key`` whose value is ``None`` still SHADOWS a
+    nested ``props["key"]``. A reader that instead "fell back when the
+    top-level value was None" would consult a key the writer never uses, so
+    the ingest counter/guard would predict a fold for a write that mints —
+    #2892's counter/writer parity broken in the opposite direction (#8400).
+
+    A blank or non-string key is treated as absent (the historic
+    content-only path), exactly as ``_resolve_dedup_hit`` treats it.
+    """
+    if "key" in item:
+        val = item.get("key")
+    else:
+        nested = item.get("props")
+        val = nested.get("key") if isinstance(nested, dict) else None
+    return val if isinstance(val, str) and val.strip() else None
 
 
 # ── ULID validation (Issue #52) ──
@@ -5153,42 +5269,14 @@ class TortoiseSDK:
     def _sync_tags(self, proj: FalkorProjection, pid: str, tags) -> None:
         """Reconcile TAGGED edges for a point against a tags value (#485).
 
-        Idempotent: MERGE creates any missing :Tag nodes + TAGGED edges, and
-        edges to tags no longer in the list are deleted. Only list values are
-        synced — matching create_point's behavior, a non-list tag value is
-        stored as a plain property but gets no edges (and leaves existing
-        edges untouched).
+        DELEGATES to the projection's own `_sync_tags` (#2897): live and
+        replay must run the SAME routine, or the two drift into exactly the
+        raw-list/replayed-edge disagreement this issue is about. The
+        projection is the owner of the write; this method is kept as the SDK
+        entry point so the existing call sites (and their
+        `_graph_write_with_retry` wrapping) are unchanged.
         """
-        if not isinstance(tags, list):
-            return
-        for tag in tags:
-            proj.g.query(
-                "MATCH (p:Point {id:$pid}) "
-                "MERGE (t:Tag {name:$tag}) "
-                "MERGE (p)-[:TAGGED]->(t)",
-                params={"pid": pid, "tag": tag},
-            )
-        # Delete edges to tags no longer in the list (diff via graph read to
-        # avoid list-parameter IN-clause portability concerns on FalkorDB).
-        stale = proj.g.query(
-            "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) RETURN t.name",
-            params={"pid": pid},
-        ).result_set
-        removed = 0
-        for row in stale:
-            if row[0] not in tags:
-                proj.g.query(
-                    "MATCH (p:Point {id:$pid})-[r:TAGGED]->(t:Tag {name:$tag}) "
-                    "DELETE r",
-                    params={"pid": pid, "tag": row[0]},
-                )
-                removed += 1
-        # GC orphaned :Tag nodes when the sync actually removed edges — tag
-        # removal can leave a Tag with no TAGGED referrers (#485). Skipped on
-        # create_point (no stale edges there), so new-point creation never pays
-        # the scan.
-        if removed:
-            proj.g.query("MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t")
+        proj._sync_tags(pid, tags)
 
     # ── Events: cursor-based poll (Task 5) ────────────────────────────
 
@@ -5609,7 +5697,14 @@ class TortoiseSDK:
         # backstop).
         """Create a new Point node. Raises ValueError if kind is invalid.
 
-        Set dedup=True for idempotent creation (matches by content hash).
+        Set dedup=True for idempotent creation. The dedup identity is
+        ``(pointKind, content_hash)`` and — when a ``key`` is supplied —
+        ``(pointKind, key)`` as well: a re-run under the same key FOLDS onto
+        the point already holding it (within that pointKind) instead of
+        minting a second point that shares the key (#6110). A key is therefore
+        unique PER-KIND, never globally, and is never silently reassigned: a
+        content-dedup hit on a point that already holds a DIFFERENT key keeps
+        that key and warns.
 
         LIVE is the default (#1088): a point created WITHOUT an explicit
         ``status`` is live — not draft — whatever its kind. Draft is opt-in:
@@ -5619,17 +5714,30 @@ class TortoiseSDK:
         Decision parts (#2199) — pointKind in {decision, option, criterion,
         evidence} created WITHOUT an explicit status — land LIVE (not draft)
         with an explicit, provenance-recorded starting belief: the default
-        prior 'medium' = Beta(3,1) stamped ``system-default`` unless the
-        author passes ``credibility`` (plain-language ladder word
-        gold/high/medium/low/unverified, T0-T4 form, or numeric 0-4), which
-        is stamped ``set-by-author``. Decision parts are human-authored
-        judgment with no document Source to inherit belief from; the explicit
+        prior 'medium' = Beta(3,1) stamped ``system-default``. A passed
+        ``credibility`` (plain-language ladder word gold/high/medium/low/
+        unverified, T0-T4 form, or numeric 0-4) is a LABEL, stamped
+        ``set-by-author``, that ADDS one weak evidence body on top of that
+        baseline rather than replacing it (#398). Decision parts are
+        human-authored judgment with no document Source to inherit belief
         default keeps the documented decide flow rankable on the first try
         with zero promote/calibrate chores and no silent Beta(1,1)-as-
-        calibrated (the #7478 guard). Author-set baselines on any kind are
-        unchanged. Callers that explicitly pass a status (e.g. the capture/
-        extraction paths, which pass status="draft" + extractedFrom) keep
-        full manual control — no system default is applied.
+        calibrated (the #7478 guard). Callers that explicitly pass a status
+        (e.g. the capture/extraction paths, which pass status="draft" +
+        extractedFrom) keep full manual control — no system default is applied.
+
+        ``credibility`` is a VALIDATED LABEL, not a strength (#398 owner
+        ruling 2026-10-12): an authored, unsourced assertion is ONE evidence
+        body at the weakest registered weight, the same whoever wrote it. The
+        word is a SOURCE that ADDS that weak body ON TOP OF whatever baseline
+        the claim already has — never replacing it — so a decide part born live
+        starts at Beta(3,1) + the weak body, a plain claim at the weak body
+        alone, and a labelled claim can never score below the same claim
+        unlabelled. The word no longer selects the ladder prior itself, but
+        the ladder vocabulary is still validated (unknown words raise) and the
+        word is persisted as the ``credibility`` Point property. Real sources
+        attached later can carry the claim above the word through ordinary
+        inheritance.
         """
         self._validate_kind(kind)
         _coerce_props(props)
@@ -5741,8 +5849,16 @@ class TortoiseSDK:
         # explicit ``credibility`` kwarg binds at the signature; a caller may
         # also reach it through a nested props dict (flattened by _coerce_props
         # above) — the explicit kwarg wins, the pop covers the nested path.
-        credibility = credibility if credibility is not None \
-            else props.pop("credibility", None)
+        # #6151 review P3: pop the nested form UNCONDITIONALLY. The pop used to
+        # be conditional on the kwarg being absent, so a direct SDK caller
+        # passing BOTH forms left `credibility` in `props`; the create path then
+        # overwrote the key (`props["credibility"] = canonical_tier(...)`) and
+        # hid it, but the DEDUP path forwards `props` to `update_point`, which
+        # now HARD-REJECTS `credibility` as a generic property — a ValueError
+        # from an input both surfaces document as valid.
+        _nested_credibility = props.pop("credibility", None)
+        if credibility is None:
+            credibility = _nested_credibility
         # #2199: resolve + validate an author-stated belief BEFORE any graph
         # write — a bad ladder word fails loud with nothing created (never a
         # silent Beta(1,1) fallback, #7478; and never an uncalibrated live
@@ -5813,9 +5929,70 @@ class TortoiseSDK:
             # this lookup, the v2 capture seam, and ``_content_exists`` can
             # never drift apart again — the fork is exactly what let the
             # fallback go missing from ``_content_exists``.
-            existing_id = self._find_point_by_content(content, pointKind=kind)
+            #
+            # #6110: a caller-supplied ``key`` is an IDENTITY, not a label. The
+            # shared resolver treats a point already holding that ``key``
+            # (within this pointKind) as the dedup hit WHATEVER its content, so
+            # a re-run under the same key FOLDS instead of silently minting a
+            # second point that shares the key. The writer and the ingest dedup
+            # counter both call `_resolve_dedup_hit`, so a key-bearing item
+            # cannot report a miss the writer takes as a hit.
+            _supplied_key = props.get("key")
+            _has_key = (isinstance(_supplied_key, str)
+                        and bool(_supplied_key.strip()))
+            existing_id, _key_hits = self._resolve_dedup_hit(
+                content, pointKind=kind,
+                key=_supplied_key if _has_key else None)
+            if _key_hits and len(_key_hits) > 1:
+                # A graph written before #6110 can already hold several points
+                # under one key. Fold onto the first (deterministic query
+                # order) but SAY SO — a silent fold is exactly how the
+                # duplicated-key state stayed invisible.
+                _logger.warning(
+                    "create_point: %d points already share key %r (kind=%r): "
+                    "%r — a pre-existing duplicate the write path cannot "
+                    "repair; returning %s. Re-key the extras or delete them "
+                    "(#6110)",
+                    len(_key_hits), _supplied_key, kind, _key_hits, _key_hits[0])
             if existing_id:
                 pid = existing_id
+                if _has_key:
+                    # One read serves BOTH #6110 audits below.
+                    _existing = self.get_point(pid)
+                    if _key_hits:
+                        # The KEY resolved the dedup. If the content differs, the
+                        # incoming content is NOT stored (the key is the
+                        # identity, and content is first-writer-wins, like the
+                        # calibration baseline, #7980) — say so, or the
+                        # collision stays silent and the caller believes their
+                        # content landed.
+                        if _existing.get("content") != content:
+                            _logger.warning(
+                                "create_point: key %r is already held by point "
+                                "%s with DIFFERENT content — folding onto it "
+                                "and keeping the existing content. The key is "
+                                "the identity; pass a fresh key with "
+                                "dedup=False to mint a second point (#6110)",
+                                _supplied_key, pid)
+                    else:
+                        # The hit came from CONTENT, not from the key: never
+                        # silently REASSIGN an existing point's key. A key
+                        # already held by a point is that point's identity —
+                        # the same first-writer-wins posture the calibration
+                        # baseline carries (#7980). Overwriting it would make
+                        # `query(key=…)` return a point its original owner named
+                        # and lose the first key.
+                        _existing_key = _existing.get("key")
+                        if (isinstance(_existing_key, str) and _existing_key
+                                and _existing_key != _supplied_key):
+                            props.pop("key", None)
+                            _logger.warning(
+                                "create_point: key %r not applied — content "
+                                "matched point %s, which already holds key %r. "
+                                "A dedup hit never reassigns an existing key; "
+                                "pass a fresh key with dedup=False, or update "
+                                "the point explicitly (#6110)",
+                                _supplied_key, pid, _existing_key)
                 # Existing point already stores content_hash — don't re-write it
                 # (would make the `if props:` guard always truthy and bump
                 # updatedAt on every dedup hit, #80 review).
@@ -5870,61 +6047,147 @@ class TortoiseSDK:
                                 "ref on the FIRST write, or re-create the Point",
                                 pid, _missing,
                             )
-                if props:
+                # #7980 + #398: an authored ``credibility`` is a WRITE, never a
+                # silent drop, and it obeys the SAME rule as the create path —
+                # ONE weak evidence body (the declared word is a validated
+                # LABEL, not the claim's strength), added ON TOP OF whatever
+                # baseline the claim already legitimately has.
+                #
+                # The persisted `credibility` label is what marks this baseline
+                # as an AUTHORED ASSERTION: `_apply_source_inheritance` then
+                # recomputes it, so a real source attached later displaces the
+                # weak body through ordinary aggregation. An EXPLICIT
+                # `set_point_baseline` baseline with no such label stays
+                # IMMUTABLE evidence (#844): a dedup hit — which matches by
+                # CONTENT HASH, and so may be an unrelated writer stating a
+                # different belief — never rewrites it, and SAYS SO (the
+                # self-host surface dedups by DEFAULT, which makes the
+                # same-word retry the NORMAL path, so that one stays quiet). An
+                # INHERITED (`inherited-from-source`) baseline is DERIVED, not
+                # explicit, so the word is ADDED on top of it (#6151 review
+                # P2).
+                _word_applied = False
+                if cred_prior is not None:
+                    from tortoise.source_credibility import (
+                        AUTHOR_ASSERTION_WEAK_PC,
+                        canonical_tier,
+                    )
+                    _existing = self.get_point(pid)
+                    _word_label = canonical_tier(credibility)
+                    _existing_label = _existing.get("credibility")
+                    _bl_src = _existing.get("baseline_source")
+                    _apply_word = False
+                    _record_default = False
+                    _base_a, _base_b = 1.0, 1.0
+                    _drop_note = None
+                    if _existing_label and _existing.get("baseline_set"):
+                        # Already an authored assertion WITH its recorded
+                        # baseline — FIRST-WRITER-WINS. A retry stating the SAME
+                        # word loses nothing; a DIFFERENT word is dropped and
+                        # must be audible.
+                        #
+                        # #6151 review P2(b): the label ALONE is NOT proof the
+                        # baseline survived. `credibility` is a DECLARED Point
+                        # prop and replays (`_POINT_DECLARED_PROPS`), while
+                        # `ep_alpha`/`baseline_set`/`baseline_source` sit in
+                        # `_POINT_DENY` and do NOT — so after a `rebuild_all` a
+                        # word-bearing point holds the label with NO baseline.
+                        # Keying first-writer-wins on the label alone made the
+                        # dedup retry a silent no-op there (no `_drop_note`, no
+                        # `_word_applied`): the point stayed uncalibrated
+                        # forever and `compute_confidence(require_calibration=
+                        # True)` raised. The baseline must actually be present
+                        # for the claim to be "already" written; otherwise fall
+                        # through to the apply branch below, which is the
+                        # documented healing write (main re-baselined this
+                        # shape, because `credibility` was not persisted there).
+                        if _existing_label != _word_label:
+                            _drop_note = (
+                                "already carries the authored assertion "
+                                f"{_existing_label!r}")
+                    elif not _existing.get("baseline_set"):
+                        # No baseline recorded — and `baseline_set` false is PROOF
+                        # the #2199 default was never granted (#6151 review P2):
+                        # the ONLY shape #2199 ever provisions is a decide part
+                        # BORN live, and that part always carries
+                        # `baseline_set=true` from its create
+                        # (`_baseline_create_fields`, :187). So this branch is an
+                        # explicit-STATUS decide part or a pre-#2199 row, and the
+                        # default must NOT be granted from `kind`/`explicit_status`
+                        # HERE — that is the current CALL's context, not the
+                        # existing point's birth. Measured before the fix: a
+                        # born-draft option dedup-hit with credibility=gold landed
+                        # at 3.1/0.7561 (an unearned +2.0 alpha); after, the word
+                        # is its own weak body on neutral -> 1.1/0.5238.
+                        #
+                        # This branch ALSO carries the post-rebuild healing write
+                        # (label present, baseline gone) described above: the
+                        # #2199 birth marker DOES replay (it rides the original
+                        # `PointAdded` snapshot), so re-assert it here — a
+                        # born-live decide part must keep its recorded provision
+                        # and the next recompute re-injects the +2.0 on top of
+                        # the word's weak body.
+                        _record_default = bool(
+                            _existing.get("baseline_system_default"))
+                        _apply_word = True
+                    elif _existing.get("baseline_system_default"):
+                        # The #2199 provision is this claim's recorded base; the
+                        # author's word ADDS the weak body ON TOP of it and
+                        # never deletes it (#398: a labelled claim is never
+                        # weaker than the same claim unlabelled). The marker is
+                        # the ONLY legitimate signal: it is written by the birth
+                        # path (`create_point`) and the mitigation grant — never
+                        # inferred from the caller-supplied `baseline_source`
+                        # token (#6151 review P1(b)). The token is writeable
+                        # through `set_point_baseline(source=…)`, so trusting it
+                        # let a caller stamp the marker and collect the +2.0
+                        # default unearned (measured 1.2 -> 3.2).
+                        _base_a = _existing.get("ep_alpha") or 1.0
+                        _base_b = _existing.get("ep_beta") or 1.0
+                        _record_default = True
+                        _apply_word = True
+                    elif _bl_src == BASELINE_SOURCE_INHERITED:
+                        # #6151 review P2: an `inherited-from-source` baseline
+                        # is DERIVED evidence, not an authored belief — the word
+                        # is one more weak body ON TOP of it, exactly as on the
+                        # other dedup cases. This shape used to fall to the
+                        # drop below, so a documented word produced no body and
+                        # no label (measured: an inherited 5.0 stayed 5.0 with
+                        # `credibility` None). The next recompute re-derives it
+                        # from the sources PLUS the word.
+                        _base_a = _existing.get("ep_alpha") or 1.0
+                        _base_b = _existing.get("ep_beta") or 1.0
+                        _apply_word = True
+                    else:
+                        _drop_note = (
+                            f"already exists with a {_bl_src!r} baseline")
+                    if _apply_word:
+                        self.set_point_baseline(
+                            pid, _base_a + AUTHOR_ASSERTION_WEAK_PC,
+                            _base_b, source=BASELINE_SOURCE_SET_BY_AUTHOR)
+                        # #7951: the word LABEL and the #2199 birth marker are
+                        # written through the server-owned internal route, NOT
+                        # the generic props bag — `_sanitize_props` rejects a
+                        # caller-supplied `credibility` on those surfaces, so
+                        # this is the one legitimate writer here.
+                        self._stamp_authored_word(
+                            pid, label=_word_label,
+                            system_default=(True if _record_default else None))
+                        _word_applied = True
+                    if _drop_note is not None:
+                        _logger.warning(
+                            "credibility=%r not applied — point %s %s, and a "
+                            "dedup hit never overwrites the baseline a point "
+                            "already carries (#7980, #844)",
+                            credibility, pid, _drop_note)
+                if props or _word_applied:
                     # Only touch the existing point when the caller passed
-                    # other props — a pure dedup hit (no props) must not bump
-                    # updatedAt or re-trigger EP dirty-marking (#490 review
-                    # P2-1: re-capture would churn confidence for every point).
+                    # other props (or an applied word) — a pure dedup hit (no
+                    # props) must not bump updatedAt or re-trigger EP
+                    # dirty-marking (#490 review P2-1: re-capture would churn
+                    # confidence for every point).
                     props["updatedAt"] = now
                     self.update_point(pid, **props)
-                # #7980: an authored ``credibility`` is a WRITE, not a no-op.
-                # This path used to log-and-drop it, so a caller that supplied
-                # one got HTTP 200 back on a point that has NO baseline: not
-                # EP-able, and the fail-closed #344/#1157 calibration gate then
-                # refuses the whole graph (`/v1/dream` errors). That is the
-                # #4032 silent-false-green shape, on the field #7909 added to
-                # BOTH REST surfaces — and on self-host it was the DEFAULT path
-                # (``selfhost_api.CreatePointRequest.dedup`` defaults True).
-                #
-                # FIRST-WRITER-WINS: the prior is applied only while the
-                # existing point has none. That is the contract this suite
-                # already pins (tests/test_sdk_dedup.py::
-                # test_dedup_with_extra_props — "must not overwrite the
-                # existing baseline"), and it follows #844: a set baseline is
-                # IMMUTABLE evidence, so a dedup hit — which matches by
-                # CONTENT HASH, and so may be an unrelated writer stating a
-                # different belief — never rewrites the one already there. A
-                # point that does carry one keeps it and SAYS SO, loudly:
-                # never a silent drop. Consistency: ``confidence`` (a plain
-                # prop) is already applied on a dedup hit, and
-                # ``mitigate_operator``'s idempotent path applies an authored
-                # belief to an existing point rather than dropping it.
-                if cred_prior is not None:
-                    _existing = self.get_point(pid)
-                    if not _existing.get("baseline_set"):
-                        self.set_point_baseline(
-                            pid, cred_prior[0], cred_prior[1],
-                            source=BASELINE_SOURCE_SET_BY_AUTHOR)
-                    elif (_existing.get("baseline_source"),
-                          _existing.get("ep_alpha"),
-                          _existing.get("ep_beta")) != (
-                              BASELINE_SOURCE_SET_BY_AUTHOR,
-                              cred_prior[0], cred_prior[1]):
-                        # Nothing was dropped when the point ALREADY carries
-                        # exactly this author-stated prior — the self-host
-                        # default path makes that the NORMAL idempotent retry,
-                        # and a WARNING on every healthy retry is how a
-                        # warning stops being read. The provenance token is
-                        # compared too: an equal-valued baseline that is
-                        # INHERITED (or a legacy token-less row) is still a
-                        # different claim, and inheritance will recompute it.
-                        _logger.warning(
-                            "credibility=%r not applied — point %s already "
-                            "exists with a %r baseline, and a dedup hit never "
-                            "overwrites the baseline a point already carries "
-                            "(#7980, #844)",
-                            credibility, pid,
-                            _existing.get("baseline_source"))
                 return self.get_point(pid)
 
         # Issue #52 — warn when caller passes an explicit non-ULID id
@@ -5960,16 +6223,51 @@ class TortoiseSDK:
         # it: the seeded decision fell below the observation hits). One write,
         # one index entry, on every engine.
         _create_baseline: tuple[float, float, str] | None = None
+        # #2199 system default: a decide part BORN live (no explicit status in
+        # the call) gets Beta(3,1). Computed FIRST because #398's declared word
+        # is a SOURCE that ADDS one weak evidence body to whatever baseline the
+        # claim already has — it must never delete this recorded provision.
+        _system_baseline: tuple[float, float] | None = None
+        if not explicit_status and kind in DECIDE_PART_KINDS:
+            from tortoise.source_credibility import credibility_prior
+            _system_baseline = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
+            # RECORD the #2199 provision ON the point (`baseline_system_default`,
+            # a declared Point prop). The recompute must re-inject the default
+            # ONLY where #2199 actually granted one (#6151 defect 2): a decide
+            # part BORN live has it, a decide part created with an EXPLICIT
+            # status is documented as keeping full manual control (no default).
+            # The `baseline_source` token alone cannot tell the two apart once a
+            # word re-stamps the baseline `set-by-author`, so the birth fact is
+            # persisted here rather than inferred later.
+            props["baseline_system_default"] = True
         if cred_prior is not None:
-            _alpha, _beta = cred_prior
-            _create_baseline = (_alpha, _beta, BASELINE_SOURCE_SET_BY_AUTHOR)
-        elif not explicit_status and kind in DECIDE_PART_KINDS:
+            # #398 (owner ruling 2026-10-12): the declared word is a validated
+            # LABEL and ONE weak evidence body — a SOURCE that ADDS to the
+            # baseline the claim already has, never replacing it. A decide part
+            # born live therefore starts at Beta(3,1) + weak body; a plain
+            # claim (no #2199 default) starts at the weak body alone. Either
+            # way a labelled claim can never score BELOW the same claim
+            # unlabelled — typing a word is never punished. Real sources
+            # attached later raise the claim further through ordinary
+            # inheritance (`_apply_source_inheritance` folds the weak body back
+            # in as one supporter).
+            # The persisted `credibility` property is that LABEL (and the marker
+            # that this baseline is an authored assertion — an EXPLICIT
+            # `set_point_baseline` carries no such label and stays frozen).
+            from tortoise.source_credibility import (
+                AUTHOR_ASSERTION_WEAK_PC,
+                canonical_tier,
+            )
+            _base_a, _base_b = (
+                _system_baseline if _system_baseline is not None else (1.0, 1.0))
+            _create_baseline = (_base_a + AUTHOR_ASSERTION_WEAK_PC, _base_b,
+                                BASELINE_SOURCE_SET_BY_AUTHOR)
+            props["credibility"] = canonical_tier(credibility)
+        elif _system_baseline is not None:
             # #2199: system default applies ONLY to decide parts that were
             # BORN live (no explicit status in the call) — see the tail
             # comment block below for the full rationale.
-            from tortoise.source_credibility import credibility_prior
-            _alpha, _beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
-            _create_baseline = (_alpha, _beta, BASELINE_SOURCE_SYSTEM_DEFAULT)
+            _create_baseline = (*_system_baseline, BASELINE_SOURCE_SYSTEM_DEFAULT)
 
         # #2952: EVERY property of a new Point is written in the CREATE's
         # property map — ONE graph write per point, no post-CREATE clause. A
@@ -6186,7 +6484,7 @@ class TortoiseSDK:
         # cannot duplicate anything — the abort means the statement did not
         # land, exactly the contract `retryable_aborted_write` is built on.
         tags = props.get("tags") or []
-        if isinstance(tags, list):
+        if isinstance(tags, (list, tuple)):
             self._graph_write_with_retry(
                 lambda: self._sync_tags(proj, pid, tags),
                 what="create_point TAGGED edges",
@@ -6216,14 +6514,16 @@ class TortoiseSDK:
         # #2199: decision parts (kind in DECIDE_PART_KINDS) that were born
         # live get an EXPLICIT, provenance-recorded prior so the documented
         # decide flow ranks on the first try with zero undocumented
-        # promote/calibrate chores. The author can override the default with
-        # ``credibility`` (plain-language ladder word gold/high/medium/low/
-        # unverified, T0-T4 form, or numeric 0-4 → Beta via the single-sourced
-        # ladder); an override stamps provenance 'set-by-author'. No belief
-        # stated → the standard starting belief 'medium' = Beta(3,1), stamped
-        # 'system-default' — an EXPLICIT default with labeled provenance, never
-        # a silent Beta(1,1)-as-calibrated uniform (the #7478 guard).
-        # Author-set credibility on ANY kind/status is unchanged.
+        # promote/calibrate chores. A passed ``credibility`` (plain-language
+        # ladder word gold/high/medium/low/unverified, T0-T4 form, or numeric
+        # 0-4) is a validated LABEL that ADDS one weak evidence body on top of
+        # that baseline (#398) — it never replaces it — and stamps provenance
+        # 'set-by-author'. No word → the standard starting belief 'medium' =
+        # Beta(3,1), stamped 'system-default' — an EXPLICIT default with
+        # labeled provenance, never a silent Beta(1,1)-as-calibrated uniform
+        # (the #7478 guard).
+        # Author-set credibility on ANY kind/status ADDS to the baseline the
+        # same way.
         #
         # The graph write already happened inside the CREATE (above) — this
         # block only records the in-memory evidence cache + EP message
@@ -8785,11 +9085,15 @@ class TortoiseSDK:
 
         For :Object-labeled nodes, version is auto-incremented on every update.
         Status changes are validated against POINT_STATUS_VALUES.
+
+        ``credibility`` is refused here (#7951) — it is a documented word input
+        of ``create_point``/``mitigate_operator``, not a generic property.
         """
         proj = self._get_proj()
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         # #329: id mutation + server-managed fields rejected
-        props = _sanitize_props(props, reject_id=True)
+        props = _sanitize_props(props, reject_id=True,
+                                reject_belief_props=True)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
         # E4 (#5007): same rule as `create_point` / the `Point` model — an
@@ -10865,16 +11169,23 @@ class TortoiseSDK:
             ``pack_registry.SEMANTICS_VALUES`` (``addresses``, ``supports``,
             ``refutes``, ``mutuallyExclusive``, ``hasPart``, ``related`` …).
             When supplied it RESOLVES the direction (the model's chain step 2):
-            a one-way meaning records ``unidirectional``, a mutual one
-            ``bidirectional``. The basis actually used is recorded on the node
-            as ``direction_basis`` (``explicit`` / ``semantics`` / ``default``).
-            An unknown word warns (warn-not-block, never refuses).
-          - direction: "bidirectional" (default) or "unidirectional" — explicit
-            flag controlling EP back-propagation (ONTOLOGY v3.1 §3.1, §8).
-            Default bidirectional (mutual) for all op types; pass
-            "unidirectional" for a directed attack (no back-pressure). A
-            NON-default explicit value outranks ``semantics``; the signature
-            default does not (it is the default, not a declaration).
+            the meaning's model direction is recorded verbatim — ``->`` for a
+            one-way meaning, ``<->`` for a mutual one, ``-`` for a neutral one
+            (``related`` / ``transacts``, which transfer NO confidence). The
+            basis actually used is recorded on the node as ``direction_basis``
+            (``explicit`` / ``semantics`` / ``default``). An unknown word warns
+            (warn-not-block, never refuses).
+          - direction: the Layer-1 direction recorded on the write (ONTOLOGY
+            §8) — the model's four values ``->`` (source→target), ``<-``
+            (target→source), ``<->`` (both ways) and ``-`` (none: the
+            connection exists and NO confidence transfers), plus the two
+            legacy aliases ``unidirectional`` (≡ ``->``) and ``bidirectional``
+            (≡ ``<->``), which stay accepted and readable. The value is stored
+            VERBATIM. Signature default ``bidirectional`` (mutual) for all op
+            types; pass ``unidirectional`` (or ``->``) for a directed attack
+            (no back-pressure). A NON-default explicit value outranks
+            ``semantics``; the signature default does not (it is the default,
+            not a declaration).
           - Operator carries the label, direction and direction_basis; IMPL/NAND
             edges carry confidence via EP.
           - promote_source: default True fills in a source point's NEVER-SET
@@ -10963,7 +11274,7 @@ class TortoiseSDK:
         # FALSE provenance and silently disable the semantics step below. A
         # declared semantics therefore outranks both, and never overrides a
         # direction the caller actually differentiated.
-        direction_basis = "explicit" if direction not in (None, "bidirectional") else "default"
+        direction_basis = "explicit" if not is_default_direction(direction) else "default"
         if semantics is not None:
             from tortoise.enforcement import emit_violation
             from tortoise.pack_registry import (
@@ -11001,33 +11312,16 @@ class TortoiseSDK:
                                detail=f"semantics={semantics} (out of vocabulary)")
             else:
                 derived = self._direction_from_semantics(semantics)
-                if derived is None:
-                    # `-` (e.g. `related`, `transacts`) means the connection
-                    # exists and NO confidence transfers. The shipped runtime
-                    # encodes only bidirectional/unidirectional (§8 Transition
-                    # state — the four-value migration is the separate change
-                    # named on #7852), so no direction can be derived. Say what
-                    # actually happens: the caller-supplied/signature default is
-                    # what gets recorded (naming the "op_type default" here
-                    # would be false for NAND, whose canonical default is
-                    # unidirectional but whose signature default is
-                    # bidirectional).
-                    warnings.append({
-                        "code": "undeclared_relation",
-                        "message": (
-                            f"semantics '{semantics}' carries no transferable "
-                            f"direction ('-') — no direction is derived from "
-                            f"it, so the caller-supplied/write-path default is "
-                            f"recorded (#7852)"
-                        ),
-                        "semantics": semantics,
-                    })
-                elif direction in (None, "bidirectional"):
+                if derived is not None and is_default_direction(direction):
                     # Chain step 2 — basis `semantics`: the direction was resolved
                     # from the Layer-2 meaning the caller declared, which is the
-                    # input actually read here. (Named for the layer that produced
-                    # it, not the Layer-3 `label` predicate, which is a different
-                    # input and does not touch direction.)
+                    # input actually read here. `is_default_direction` is what
+                    # makes an ABSENT direction (None), the signature default
+                    # (`bidirectional`) and its model spelling (`<->`) all
+                    # "not declared", so the meaning resolves them; an explicit
+                    # one-way value (`->` / `<-` / `unidirectional`) outranks it.
+                    # (The basis names the LAYER that produced the value, never
+                    # the Layer-3 `label` predicate — a different input.)
                     direction = derived
                     direction_basis = "semantics"
         # Direction default (CYCLE-25 per-op_type, ontology v3.6 #5):
@@ -11035,13 +11329,15 @@ class TortoiseSDK:
         # (unchanged), NAND → "unidirectional" (extraction default — ingest IS
         # the extraction path: new-claim-attacks-existing is the common case;
         # bidirectional NAND requires explicit mutual-restatement declaration).
-        # A caller may explicitly pass "unidirectional"/"bidirectional" to
-        # override.
+        # A caller may explicitly pass any ACCEPTED_DIRECTION_VALUES token
+        # (the model's `->` / `<-` / `<->` / `-`, or the legacy
+        # `unidirectional` / `bidirectional`) to override.
         if direction is None:
             direction = self._canonical_direction(op_type, None)
-        if direction not in ("bidirectional", "unidirectional"):
+        if direction not in ACCEPTED_DIRECTION_VALUES:
             raise ValueError(
-                f"direction must be 'bidirectional' or 'unidirectional', got {direction!r}"
+                f"direction must be one of "
+                f"{', '.join(sorted(ACCEPTED_DIRECTION_VALUES))}, got {direction!r}"
             )
         pid = ulid()
         inputs = [source_id] + list(target_ids)  # noqa: RUF005
@@ -11309,11 +11605,16 @@ class TortoiseSDK:
                 the decide layer and by EP's read path.
             credibility: optional plain-language starting belief for the
                 mitigation reason itself (gold/high/medium/low/unverified,
-                T0-T4 form, or numeric 0-4) — stamped 'set-by-author'.
-                Default None → the #2199 system starting belief ('medium',
-                Beta(3,1), provenance 'system-default') so the mitigation
-                point is a calibrated live evidence point and the decide
-                flow ranks on the first try (no CalibrationError).
+                T0-T4 form, or numeric 0-4) — a VALIDATED LABEL, stamped
+                'set-by-author'. Per the #398 owner ruling (2026-10-12) the
+                word does NOT select the ladder prior: it is ONE weak evidence
+                body that ADDS to the mitigation's baseline, so the mitigation
+                starts at the #2199 system default (Beta(3,1)) plus the weak
+                body and never scores below the same mitigation unlabelled.
+                Default None → the #2199 system starting belief
+                ('medium', Beta(3,1), provenance 'system-default') so the
+                mitigation point is a calibrated live evidence point and the
+                decide flow ranks on the first try (no CalibrationError).
 
         Raises ValueError if id not found, not an operator, strength out of
         [0, 1], or credibility outside the ladder.
@@ -11336,13 +11637,25 @@ class TortoiseSDK:
         # fails before any write (never a silent Beta(1,1) fallback, #7478).
         author_prior = None
         if credibility is not None:
-            author_prior = credibility_prior(credibility)
-            if author_prior is None:
+            # Validate the label (the ladder vocabulary is kept) but do NOT use
+            # the ladder prior: #398 owner ruling 2026-10-12 makes an authored
+            # assertion ONE weak evidence body, the same whoever wrote it. That
+            # body ADDS to the mitigation's baseline (the #2199 system default
+            # Beta(3,1)), so an explicit word can never score below the same
+            # mitigation left unlabelled.
+            from tortoise.source_credibility import (
+                AUTHOR_ASSERTION_WEAK_PC,
+                canonical_tier,
+            )
+            if credibility_prior(credibility) is None:
                 raise ValueError(
                     f"Unknown credibility {credibility!r}. Ladder words: "
                     "gold / high / medium / low / unverified "
                     "(or the T0-T4 / numeric forms)."
                 )
+            _mit_default = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
+            author_prior = (_mit_default[0] + AUTHOR_ASSERTION_WEAK_PC,
+                            _mit_default[1])
         # Idempotency: check for existing mitigation
         proj = self._get_proj()
         existing = proj.g.query(
@@ -11365,11 +11678,29 @@ class TortoiseSDK:
                 self.set_point_baseline(
                     mid, author_prior[0], author_prior[1],
                     source=BASELINE_SOURCE_SET_BY_AUTHOR)
+                # #6151 review P2: persist the word LABEL and the recorded
+                # #2199 birth marker. Without the label the recompute guard
+                # (`_apply_source_inheritance`) skips this point forever, so a
+                # word-bearing mitigation is a self-declaration NO refutation
+                # can move (measured: a T1 source left ep_alpha at 3.1). The
+                # mitigation's base ALWAYS includes the #2199 default
+                # (author_prior is the default Beta(3,1) + the weak body), so
+                # the marker is accurate.
+                # (#6151 review P3) This is an EXISTING point, so unlike the
+                # CREATE path below there is no PointAdded snapshot to carry
+                # the two props — see `_stamp_authored_word`'s JOURNAL note:
+                # they are lost on rebuild_all. Recorded, not silently widened.
+                self._stamp_authored_word(
+                    mid, label=canonical_tier(credibility),
+                    system_default=True)
             elif not self.get_point(mid).get("baseline_set"):
                 alpha, beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
                 self.set_point_baseline(
                     mid, alpha, beta,
                     source=BASELINE_SOURCE_SYSTEM_DEFAULT)
+                # The healed legacy mitigation carries the recorded #2199
+                # default too (same birth fact `create_point` records).
+                self._stamp_authored_word(mid, system_default=True)
             # The OPERATOR is the dirty root here, not the mitigation: EP reads
             # the changed strength off the operator's factor, and only a
             # seeded operator pulls its inputs into the affected set. The
@@ -11417,6 +11748,18 @@ class TortoiseSDK:
             alpha, beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
             source = BASELINE_SOURCE_SYSTEM_DEFAULT
         self.set_point_baseline(mid, alpha, beta, source=source)
+        # #6151 review P2/P3: persist BOTH the word LABEL (so a later real
+        # source displaces the weak body through the recompute instead of the
+        # mitigation freezing) and the recorded #2199 birth marker (so the
+        # recompute re-injects the default as the base rather than replacing
+        # it). Server-owned write (`baseline_system_default` is rejected from
+        # caller props); it runs BEFORE the PointAdded emit below so both props
+        # ride the journal snapshot and survive a rebuild.
+        if author_prior is not None:
+            self._stamp_authored_word(
+                mid, label=canonical_tier(credibility), system_default=True)
+        else:
+            self._stamp_authored_word(mid, system_default=True)
         # Dreaming (#85): new mitigation + IMPL edge change propagation.
         self._mark_dirty([mid, id])
         # #548: emit events for rebuild parity
@@ -11971,7 +12314,7 @@ class TortoiseSDK:
     # write guard cannot drift from what EP treats as dead — a flag-outdated
     # (outdated=true, status untouched) point must equally refuse new edges.
     _INGEST_TERMINAL_STATUSES = TERMINAL_EXCLUDED_STATUSES
-    _INGEST_DIRECTION_VALUES = frozenset(("bidirectional", "unidirectional"))
+    _INGEST_DIRECTION_VALUES = ACCEPTED_DIRECTION_VALUES
     _INGEST_LEGACY_WRITE_KINDS = frozenset((
         "decision", "vision", "strategy", "plan", "goal", "target",
         "humanApproval", "observation", "hypothesis",
@@ -12252,34 +12595,20 @@ class TortoiseSDK:
 
     @staticmethod
     def _direction_from_semantics(semantics: str) -> str | None:
-        """The runtime direction a Layer-2 semantics value records (#7852 W1).
+        """The model direction a Layer-2 semantics value records (#7852).
 
-        ``None`` when the value records no transferable direction — `-`
-        (`related`, `transacts`) or an unrecognised word. The vocabulary and
-        the per-value direction are the registry's single source of truth
-        (``pack_registry.SEMANTICS_DIRECTIONS``), so this cannot drift from the
-        validation that admits the word in the first place.
+        ``SEMANTICS_DIRECTIONS`` is the single source of truth, and its values are
+        drawn from the model's four-value vocabulary (`->` / `<->` / `-` — no
+        ruled semantics produces `<-`), so this returns the recorded direction
+        UNCHANGED — including `-` for the
+        neutral meanings (`related`, `transacts`), which must be stored as `-`
+        rather than fall through to the mutual default: `-` means the
+        connection exists and NO confidence transfers (owner ruling), and a
+        fall-through to `bidirectional` would propagate confidence along an
+        edge the model declares belief-free.
         """
         from tortoise.pack_registry import SEMANTICS_DIRECTIONS
-        model_direction = SEMANTICS_DIRECTIONS.get(semantics)
-        if model_direction is None:
-            return None
-        return TortoiseSDK._SEMANTICS_RUNTIME_DIRECTION.get(model_direction)
-
-    # The model's four-value direction (ONTOLOGY §8: `->` / `<-` / `<->` / `-`)
-    # mapped onto the runtime's two-value vocabulary, which is what the
-    # `direction` property stores today (the four-value migration is the
-    # separate scoped change named on #7852). `<-` is deliberately ABSENT: the
-    # runtime's `unidirectional` means source→target only (ep.py writes the
-    # target message and withholds the source back-message), so mapping
-    # target→source onto it would record the OPPOSITE direction. No ruled
-    # semantics value produces `<-`, and an unmapped value safely returns None
-    # (falls through with a warning) instead. `-` maps to nothing too — no
-    # confidence transfers.
-    _SEMANTICS_RUNTIME_DIRECTION: ClassVar[dict[str, str]] = {
-        "->": "unidirectional",
-        "<->": "bidirectional",
-    }
+        return SEMANTICS_DIRECTIONS.get(semantics)
 
     @staticmethod
     def _canonical_direction(op_type: str, direction: str | None) -> str | None:
@@ -12399,8 +12728,8 @@ class TortoiseSDK:
                 violations.append({
                     "section": "connections", "index": index,
                     "message": f"ingest: connections[{index}] direction must "
-                               f"be 'bidirectional' or 'unidirectional', got "
-                               f"{direction!r}",
+                               f"be one of {', '.join(sorted(self._INGEST_DIRECTION_VALUES))}, "
+                               f"got {direction!r}",
                 })
             if route == "operator":
                 # cycle-13 route scoping: create_operator accepts no
@@ -12512,7 +12841,8 @@ class TortoiseSDK:
                 out[event_id] = entry
         return out
 
-    def _find_terminal_dedup_hit(self, content: str, kind: str) -> str | None:
+    def _find_terminal_dedup_hit(self, content: str, kind: str,
+                                 key: str | None = None) -> str | None:
         """Read-only NFC-keyed dedup MATCH (mirrors create_point's dedup key)
         restricted to TERMINAL hits — the Phase-1 mechanism behind the
         bundle-local-refs-resolving-to-terminal-points guard (cycle-17/18).
@@ -12570,8 +12900,33 @@ class TortoiseSDK:
         both, Phase-1 passed the bundle, and Phase-2 ``_check_endpoint_race``
         raised mid-write on a partially-mutated graph, leaving an orphan.
         Composing the predicate here rather than re-listing it is the point:
-        the fork is what let the three sites disagree (#2062/#2971/#2422)."""
+        the fork is what let the three sites disagree (#2062/#2971/#2422).
+
+        #8400: when the item carries a ``key``, that IDENTITY resolves FIRST —
+        the order ``create_point``'s ``_resolve_dedup_hit`` uses — so the guard
+        and the writer resolve the SAME node for a key-bearing item. A point
+        already holding the key IS the dedup hit whatever its content, so on a
+        key HIT the content queries below MUST NOT run (the writer never
+        reaches them); on a key MISS the historic content path runs unchanged.
+        The key leg mirrors the A10 fallback's conservative posture: a graph
+        written before #6110 can already hold several points under one key and
+        the writer's pick among them carries no ORDER BY, so the guard rejects
+        when ANY key holder is terminal rather than betting on which one the
+        writer folds onto."""
         proj = self._get_proj()
+        if isinstance(key, str) and key.strip():
+            # #8400: key-first, exactly as the writer resolves. A key HIT is
+            # the dedup resolution (whatever the content), so return from here
+            # — a fall-through to the content path could reject a bundle whose
+            # writer would legally fold onto a LIVE key holder.
+            key_hits = self._find_points_by_key(key, pointKind=kind)
+            if key_hits:
+                rows = proj.g.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids AND "
+                    f"{_terminal_expression('n')} RETURN n.id LIMIT 1",
+                    params={"ids": key_hits},
+                ).result_set
+                return rows[0][0] if rows else None
         base_clauses, base_params = self._dedup_match_clauses(point_kind=kind)
         status_clauses = (_terminal_expression("n"),)
         rows = proj.g.query(
@@ -12729,7 +13084,14 @@ class TortoiseSDK:
                     # already reported (check 1), skip the dedup-hit scan.
                     continue
                 kind = item.get("kind") or "statement"
-                hit = self._find_terminal_dedup_hit(content, kind)
+                # #8400: pass the item's effective key with `_coerce_props`'
+                # precedence (top-level wins by PRESENCE, not truthiness), so
+                # the guard resolves exactly the point the writer folds onto —
+                # otherwise a key-bearing bundle-local ref slips past this
+                # Phase-1 gate and becomes a Phase-2 raise on an already
+                # partially-mutated graph.
+                hit = self._find_terminal_dedup_hit(
+                    content, kind, key=_item_dedup_key(item))
                 if hit:
                     violations.append({
                         "section": "connections", "index": i,
@@ -12804,8 +13166,8 @@ class TortoiseSDK:
         conflict on same-label pairs. Identical pairs are clean dedup.
         """
         op = ca["operator"]
-        if self._canonical_direction(op, ca.get("direction")) != \
-                self._canonical_direction(op, cb.get("direction")):
+        if direction_flows(self._canonical_direction(op, ca.get("direction"))) != \
+                direction_flows(self._canonical_direction(op, cb.get("direction"))):
             return True
         if ca.get("confidence") != cb.get("confidence"):
             return True
@@ -12870,7 +13232,9 @@ class TortoiseSDK:
                 if ca.get("from") == cb.get("to") and ca.get("to") == cb.get("from"):
                     da = self._canonical_direction(ca["operator"], ca.get("direction"))
                     db = self._canonical_direction(cb["operator"], cb.get("direction"))
-                    if da == "bidirectional" or db == "bidirectional":
+                    # #7852: `bidirectional` and its model spelling `<->` both
+                    # cover both directions — compare the FLOWS, not the name.
+                    if all(direction_flows(da)) or all(direction_flows(db)):
                         violations.append({
                             "section": "connections", "index": ib,
                             "message": f"ingest: connections[{ia}] and "
@@ -13262,7 +13626,18 @@ class TortoiseSDK:
             # hash-less fallback (the fallback main also carried inline here) and
             # carries the same non-operator predicate the writer uses, so the
             # counter matches the writer exactly.
-            existed = self._find_point_by_content(content, pointKind=kind)
+            #
+            # #6110: the resolution is `_resolve_dedup_hit` (key identity
+            # included), the SAME helper the writer calls — otherwise a
+            # key-bearing item would report a content miss that the writer
+            # takes as a key hit, and the counter would say "created" for a
+            # fold. #8400: the key is read with `_coerce_props`' EXACT
+            # precedence through `_item_dedup_key` — a top-level `key: None`
+            # SHADOWS a nested `props["key"]` (presence wins, not truthiness),
+            # so the counter cannot consult a key the writer never uses and
+            # report a fold for a write that mints.
+            existed, _ = self._resolve_dedup_hit(
+                content, pointKind=kind, key=_item_dedup_key(item))
             # #1088 / #2199: decide the status on the WRITE COPY only — never
             # on `item` itself. An explicit per-item status (top-level or
             # nested props) ALWAYS wins: the branches below fill only items
@@ -13915,13 +14290,16 @@ class TortoiseSDK:
             )
         # CYCLE-25: NAND extraction default — direction-absent NAND is
         # "unidirectional" (new-claim-attacks-existing); IMPL stays
-        # bidirectional. An explicit value is preserved verbatim.
+        # bidirectional. An explicit value is preserved verbatim — the model's
+        # four Layer-1 tokens (`->` / `<-` / `<->` / `-`) plus the two legacy
+        # aliases (#7852). The edge stores what the caller declared; every
+        # reader normalizes through `live.direction_flows`.
         if direction is None:
             direction = "unidirectional" if op_type == "NAND" else "bidirectional"
-        if direction not in ("bidirectional", "unidirectional"):
+        if direction not in ACCEPTED_DIRECTION_VALUES:
             raise ValueError(
-                f"create_direct_edge: direction must be 'bidirectional' or "
-                f"'unidirectional', got {direction!r}"
+                f"create_direct_edge: direction must be one of "
+                f"{', '.join(sorted(ACCEPTED_DIRECTION_VALUES))}, got {direction!r}"
             )
 
         # #4647: confidence/weight are narrowed through ``float()`` below, so an
@@ -14112,9 +14490,13 @@ class TortoiseSDK:
             # CYCLE-17/25: direction-absent canonicalizes per op_type (IMPL
             # → bidirectional, NAND → unidirectional) — NEVER `o.direction IS
             # NULL` (direction is always stored; a NULL clause matches
-            # NOTHING and recreates the exactly-once P1 on the default shape)
-            conds.append("o.direction = $direction")
-            params["direction"] = canonical_dir
+            # NOTHING and recreates the exactly-once P1 on the default shape).
+            # #7852: storage is VERBATIM, so one meaning may be spelled with
+            # the model token or its legacy alias — match the whole
+            # equivalence class, or a `->` operator is invisible to a
+            # `unidirectional` re-ingest (a silent duplicate).
+            conds.append("o.direction IN $directions")
+            params["directions"] = sorted(direction_spellings(canonical_dir))
         rows = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
             f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t) "
@@ -14159,7 +14541,7 @@ class TortoiseSDK:
         else:
             pcond.append("o.label IS NULL")
         if direction is not None or canonical_dir is not None:
-            pcond.append("o.direction = $direction")
+            pcond.append("o.direction IN $directions")
         prows = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
             f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t) "
@@ -14722,8 +15104,11 @@ class TortoiseSDK:
             variance_threshold: posterior variance above which a claim is
                 contested (default 0.04 — same signal as search_engine's
                 has_ep-guarded contested flag; deliberately NOT
-                TortoiseEP.get_contested_claims, which flags unmeasured
-                uniform priors — an unmeasured claim is not contested).
+                TortoiseEP.get_contested_claims, which ALSO flags unmeasured
+                uniform priors — an unmeasured claim is not contested. #3415:
+                a declared #2199 baseline prior is prior-only and is no
+                longer flagged there either — the two scans agree on every
+                state except the unmeasured (Beta(1,1)) listing).
             add_limit: max suggestions (default 20).
             prune_limit: max flagged entries (default 50).
             similarity_fn: injectable pairwise-similarity function for
@@ -15226,10 +15611,15 @@ class TortoiseSDK:
         # #2490: terminal claims are EXCLUDED from the variance scan — they
         # decay to vacuity (v=1/12 > threshold) at the terminalizing write and
         # must surface as "stale" (above), never "contested". Deliberate
-        # asymmetry vs get_contested_claims: THIS scan also requires stored EP
-        # params (unmeasured == not contested) while get_contested_claims
-        # coalesces to Beta(1,1) and lists an unmeasured LIVE claim as
-        # contested (its :169-pin). Do not "harmonize" the two.
+        # asymmetry vs get_contested_claims: THIS scan requires stored EP
+        # params for ALL rows (unmeasured == not contested), while
+        # get_contested_claims coalesces to Beta(1,1) and lists an unmeasured
+        # LIVE claim as contested (its :169-pin). Do not "harmonize" the two.
+        # #3415: the ONE state both scans now agree on is the declared
+        # prior-only baseline — get_contested_claims applies
+        # ``ep_prior_only_cypher`` so a #2199 baseline cannot read contested
+        # there either; only the genuinely UNMEASURED (no persisted prior)
+        # listing remains get_contested_claims' deliberate divergence.
         contested: dict[str, dict] = {}
         rows = proj.g.query(
             "MATCH (n:Point) "
@@ -16168,20 +16558,36 @@ class TortoiseSDK:
             params=params,
         ).result_set
         # Direction-aware, mirroring `_bfs_select_operators`'s direct-edge
-        # walk (analyze.py): forward from a window member (a.id IN $ids)
-        # ALWAYS; backward into a window member (b.id IN $ids) ONLY for NAND
-        # or a non-unidirectional IMPL edge. A pass over just the TARGET of a
-        # unidirectional direct IMPL edge legitimately selects nothing — a
+        # walk (analyze.py): forward flow from a window member (a.id IN $ids)
+        # and backward flow into a window member (b.id IN $ids) for a
+        # direction that flows backward, or for NAND minus the new `-` (no
+        # confidence transfers) — NAND keeps its always-both legacy behaviour.
+        # A pass over just the TARGET of a
+        # forward-only direct IMPL edge legitimately selects nothing; likewise
+        # a pass over just the SOURCE of a backward-only (`<-`) edge — a
         # direction-blind probe would false-fire the guard (and, via the
         # lazy read path, break get_confidence). The directed match + count(r)
         # gives one row per factor.
         if window is None:
-            dir_scope = ""
+            # No window: a direct factor is eligible iff it flows AT ALL — the
+            # union of the two windowed clauses below is exactly `direction <> '-'`.
+            # Without this a `-` direct edge (no confidence transfers) inflates
+            # the probe and false-fires DreamNoOpError on a graph whose no-op is
+            # legitimate (the probe must agree with `_bfs_select_operators`,
+            # which never selects `-`).
+            dir_scope = "AND coalesce(r.direction, 'bidirectional') <> '-' "
         else:
             dir_scope = (
-                "AND (a.id IN $ids OR (b.id IN $ids AND "
-                "(type(r) = 'NAND' OR "
-                "coalesce(r.direction, 'bidirectional') <> 'unidirectional'))) "
+                "AND ((a.id IN $ids AND "
+                "((type(r) = 'NAND' AND "
+                "coalesce(r.direction, 'bidirectional') <> '-') OR "
+                "coalesce(r.direction, 'bidirectional') IN "
+                "['bidirectional', '<->', '->', 'unidirectional'])) "
+                "OR (b.id IN $ids AND "
+                "((type(r) = 'NAND' AND "
+                "coalesce(r.direction, 'bidirectional') <> '-') OR "
+                "coalesce(r.direction, 'bidirectional') IN "
+                "['bidirectional', '<->', '<-']))) "
             )
         dir_rows = proj.g.query(
             "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "
@@ -16895,6 +17301,74 @@ class TortoiseSDK:
             if pid not in self._evidence:
                 self._evidence[pid] = (alpha, beta)
 
+    def _stamp_authored_word(self, point_id: str, *,
+                             label: str | None = None,
+                             system_default: bool | None = None) -> None:
+        """Server-owned write of the #398 word LABEL + the #2199 birth marker.
+
+        Both properties are SERVER-owned on this route and must not go through
+        ``update_point``/``create_point`` props:
+
+          * ``credibility`` — the #398 validated LABEL that marks a baseline as
+            an AUTHORED ASSERTION, so ``_apply_source_inheritance`` recomputes
+            it (a real source later displaces the weak body) instead of
+            freezing it forever (#6151 review P2).
+          * ``baseline_system_default`` — the RECORDED #2199 birth fact the
+            recompute gates its ``+2.0`` re-injection on. ``_sanitize_props``
+            now HARD-REJECTS it from caller props (#6151 review P3: a caller
+            must not self-grant the default), so the internal writers need a
+            route that does not re-enter that boundary; this is it.
+
+        Only the keys actually supplied are written (``None`` = leave alone),
+        so the caller can stamp the label without asserting a marker that does
+        not apply. Called BEFORE the ``PointAdded`` emit on the creation path,
+        so both properties ride the journal snapshot and survive a rebuild.
+
+        JOURNAL (live ≠ rebuild) — DELIBERATE, DOCUMENTED GAP. This writer
+        emits NO event of its own, so a property it writes is journalled ONLY
+        when a later ``PointAdded`` full snapshot picks it up through the replay
+        open-set passthrough (``_upsert_point_props``). MEASURED per path: on
+        the two CREATE paths (stamp before the emit) BOTH properties ride that
+        ``PointAdded`` and survive; on the two EXISTING-point callers (the
+        idempotent re-mitigation and the dedup-hit path, whose ``update_point``
+        emits ``PointRevised`` — a FIXED whitelist: content / context /
+        embedding / hash / annotator dims / ``BELIEF_PROPS``, never an open-set
+        prop) ``credibility`` is LOST: live ``'T1'`` → rebuilt ``None``.
+        ``baseline_system_default`` SURVIVES the existing-point paths too — not
+        by a second mechanism, but because it is a BIRTH fact already in the
+        point's ORIGINAL ``PointAdded`` snapshot (measured: marker ``True`` →
+        rebuilt ``True`` while ``credibility`` went ``None``). INFERRED, not
+        measured: a pre-#6151 mitigation that acquires the marker only on an
+        existing-point re-stamp would lose it exactly as ``credibility`` does.
+
+        The ``credibility`` half is the SAME class as the pre-existing
+        ``set_point_baseline`` gap (see its #2884 note: ``ep_alpha`` /
+        ``ep_beta`` / ``baseline_*`` are in ``_POINT_DENY`` and no journaled
+        event carries them). Closing it is NOT a small, safe change: it needs
+        either a second ``PointAdded`` for a point that already exists
+        (mis-stating a re-write as a creation, with the pass-1a creation
+        boundary reading it as delete→recreate) or an open-set fold in
+        ``projection._revise_point`` — a change to the replay boundary model
+        that governs EVERY Point prop, well beyond this fix. So it is RECORDED
+        here rather than silently widened (#6151 review P3), and it is a
+        live-vs-rebuild divergence only: the live behaviour — the one the
+        recompute and the decide flow read — is correct on every path.
+        """
+        sets: list[str] = []
+        params: dict[str, Any] = {"id": point_id}
+        if label is not None:
+            sets.append("n.credibility = $label")
+            params["label"] = label
+        if system_default is not None:
+            sets.append("n.baseline_system_default = $sd")
+            params["sd"] = bool(system_default)
+        if not sets:
+            return
+        self._get_proj().g.query(
+            f"MATCH (n:Point {{id:$id}}) SET {', '.join(sets)} RETURN n.id",
+            params=params,
+        )
+
     def set_point_baseline(self, claim_id: str, alpha: float, beta: float, *,
                            source: str = BASELINE_SOURCE_SET_BY_AUTHOR) -> dict:
         """Set Beta prior evidence for a claim. Persists to graph immediately.
@@ -16903,7 +17377,15 @@ class TortoiseSDK:
         property) — the #2199 token family, ONE of:
           - "set-by-author" (default): belief stated directly by whoever filed
             the point (human OR agent — species is tracked in authoredBy).
-            NEVER recomputed by ``_apply_source_inheritance``.
+            NEVER recomputed by ``_apply_source_inheritance``. This writer is
+            the EXPLICIT belief path (#844), so it CLEARS the #398
+            ``credibility`` label (#6151 review P1): an explicit baseline
+            SUPERSEDES the authored word. A word-bearing baseline written by
+            ``create_point(credibility=…)`` / ``mitigate_operator`` (whose
+            label is stamped by ``_stamp_authored_word`` AFTER this call) is
+            still recomputed so its weak assertion joins the aggregate as one
+            supporter — but once the author sets the baseline HERE, the label
+            is gone and the value is frozen against source recomputation.
           - "inherited-from-source": derived from Source evidence, recomputed
             per EP run subject to the per-point time gate (``n.inherited_at``).
           - "system-default": no belief was stated when filed; the system
@@ -16939,12 +17421,49 @@ class TortoiseSDK:
         self._evidence[claim_id] = (alpha, beta)
         # Persist to graph so baselines survive SDK restarts
         proj = self._get_proj()
+        # #398 (owner ruling 2026-10-12), #6151 review P1 — an EXPLICIT baseline
+        # SUPERSEDES the authored word. The `credibility` label is the recompute
+        # guard's ONLY exception (`_apply_source_inheritance`): a label-bearing
+        # `set-by-author` baseline is recomputed so its weak authored body can
+        # be displaced by a real source. That exception must NOT survive an
+        # explicit write — the guard's own invariant is "a frozen
+        # `set-by-author`/`system-default` baseline is label-less", and without
+        # this clear an explicit write on a word-bearing point stayed
+        # re-openable. MEASURED before the fix: `set_point_baseline(0.4)` + a T1
+        # source recomputed to 5.1 and + an originating session to 1.1, with
+        # `baseline_source` flipped to `inherited-from-source` — the author's
+        # value silently overwritten in both cases.
+        #
+        # The clear rides the SAME statement as the baseline, so it shares the
+        # baseline's journal class exactly: no new event, and `credibility`
+        # joins `ep_alpha`/`baseline_*` in the documented live≠rebuild residual
+        # below (this method emits no `PointAdded`/`PointRevised` at all) — the
+        # gap is neither widened nor narrowed.
+        #
+        # `source=BASELINE_SOURCE_INHERITED` is the recompute's OWN write: it is
+        # the derivation the label exists to enable, so it does NOT clear the
+        # label. Clearing there would drop the word from every later recompute
+        # and let the revert pass neutralise a word-bearing point whose sources
+        # are removed. Only the two EXPLICIT (frozen) provenance classes
+        # supersede the word.
+        #
+        # #6151 review P1(a): the SAME explicit write must also clear the #2199
+        # `baseline_system_default` marker — the OTHER half of the same birth
+        # fact. The marker is what the recompute's `+2.0` re-injection is gated
+        # on, so leaving it behind re-injected the default OVER an explicit
+        # baseline on the next word-bearing recompute (measured 0.4 -> 7.1). An
+        # explicit baseline SUPERSEDES the provision exactly as it supersedes
+        # the word: after this write the point is a frozen author belief, not a
+        # born-live decide part that still carries the default.
+        _set_clause = (
+            "n.ep_alpha = $a, n.ep_beta = $b, n.baseline_set = true, "
+            "n.baseline_source = $src, "
+            "n.posterior_alpha = null, n.posterior_beta = null"
+        )
+        if source != BASELINE_SOURCE_INHERITED:
+            _set_clause += ", n.credibility = null, n.baseline_system_default = null"
         written = proj.g.query(
-            "MATCH (n:Point {id: $id}) "
-            "SET n.ep_alpha = $a, n.ep_beta = $b, n.baseline_set = true, "
-            "    n.baseline_source = $src, "
-            "    n.posterior_alpha = null, n.posterior_beta = null "
-            "RETURN n.id",
+            f"MATCH (n:Point {{id: $id}}) SET {_set_clause} RETURN n.id",
             params={"id": claim_id, "a": alpha, "b": beta, "src": source},
         ).result_set
         # #2884 D3/FIX-3: a baseline clears the posteriors LIVE (`null`), so a
@@ -16965,6 +17484,10 @@ class TortoiseSDK:
         # pre-existing `baseline_set`, so the correct payload is the
         # statement's OUTCOME, not its input params) and is filed as a
         # residual for the controller. `confidence` is untouched here.
+        # NOTE (#6151 review P3): `_stamp_authored_word` — the other writer in
+        # this family — carries the SAME live≠rebuild gap on the
+        # existing-point paths; its docstring records the mechanism, the
+        # measured symptom, and why closing it is not a small change.
         if self._event_log_path:
             for row in written:
                 self._emit_event(
@@ -17039,23 +17562,71 @@ class TortoiseSDK:
             per-source ``factor_i`` = assessment factor (1.0 until assess_source
             lands — Task 5).
           - Positive-only: NAND contradiction is EP's factor domain — inheritance
-            never folds negative pseudo-counts (double-count guard).
+            never folds negative pseudo-counts (double-count guard). The
+            aggregate's difference SHAPE is retained for a future source-level
+            dissent signal, but no such signal exists today, so the against-side
+            is never populated from a NAND edge (#6151 rejected alternative).
+          - The author's declared word (#398, owner ruling 2026-10-12) is a
+            SUPPORTER in this same aggregate: ONE evidence body at the weakest
+            registered weight, the SAME whoever wrote it. The word is a
+            validated LABEL — it neither sets the claim's strength nor varies
+            the weight by author. An agent's `agentSession` IS the evidence body
+            for an agent assertion, so the word is not counted a second time
+            when it is present; it is NOT a ceiling: a stronger source can carry
+            the claim above what the author declared.
           - Independence model (#5543): the per-point source set is COLLAPSED BY
             S0a IDENTITY (`:Source.canonicalUrl`, falling back to
             `normalize_source_url(url)`), so one document reached through several
             `:Source` nodes contributes ONE source. A source with no identity at
             all stays DISTINCT (there is no key to collapse on, and folding
-            unknowns would weaken evidence). RESIDUAL, stated not closed: a
-            session `:Source` and the documents it `references` have different
-            identities by design and still count twice — see the INDEPENDENCE
-            MODEL note on `source_credibility.aggregate_prior`.
-          - Baseline provenance (2x2 mapping): author-set/system-default
-            baselines (baseline_source = 'set-by-author' / 'system-default', or
-            legacy baseline_set=true with no token) are NEVER recomputed;
-            inherited baselines (baseline_source='inherited-from-source')
+            unknowns would weaken evidence). The session/:Source double-count
+            that identity collapse alone could not merge is closed by the
+            CARRIER RULE below (a session that `references` an attached source
+            is provenance, zero) — see the carrier-rule comment in the body.
+          - Baseline provenance: an EXPLICIT `set_point_baseline` /
+            system-default baseline is FROZEN against source recomputation
+            (#844), with NO exception — and `set_point_baseline` ENFORCES that
+            class by CLEARING the #398 `credibility` label AND the #2199
+            `baseline_system_default` marker when it writes (#6151 review P1:
+            an explicit write SUPERSEDES the authored word and the recorded
+            default).
+            A baseline carrying the #398 `credibility` label IS recomputed so
+            its authored assertion joins the aggregate as one weak body — that
+            label is only ever present on a baseline written by a WORD input
+            (`create_point(credibility=…)` / `mitigate_operator` /
+            `_stamp_authored_word`), never by an explicit `set_point_baseline`;
+            inherited baselines
+            (baseline_source='inherited-from-source')
             recompute per run subject to the per-point time gate
-            (``n.inherited_at``); points with no baseline (baseline_source IS
-            NULL AND baseline_set IS NOT true) are ALWAYS eligible.
+            (``n.inherited_at``) and KEEP the label (the recompute's own write
+            is the derivation the label enables); points with no baseline
+            (baseline_source IS NULL AND baseline_set IS NOT true) are ALWAYS
+            eligible.
+            RESIDUAL (stated, not closed): a label-bearing Point whose source
+            edges are ALL removed keeps its last inherited prior (the revert
+            pass skips it, because its word is still a source), so that prior
+            can carry the deleted sources' weight until the point is touched
+            again.
+            LEGACY-ROW RESIDUAL (deliberate; NO migration or backfill): a
+            label-less `set-by-author` baseline is frozen against SOURCE
+            recomputation — attaching sources later cannot move it. That is
+            correct for a genuinely EXPLICIT `set_point_baseline` (authored
+            belief, #844), and it is also how a PRE-RULING authored baseline
+            (created before the label existed) behaves. The two are
+            INDISTINGUISHABLE in the data — the label is the only signal, and
+            `set_point_baseline` CLEARS it on every explicit write (#6151
+            review P1), so a row this writer produced is label-less by
+            construction — no SOURCE-only code-level condition can recompute
+            the legacy row without also un-freezing every explicit user
+            baseline. So the label-less `set-by-author`
+            baseline is frozen UNCONDITIONALLY — no session, originating or
+            carrying, re-opens it (the originating-session exception was
+            removed, #6151 review round 5). Not backfilled because we have NOT
+            launched: no customer graph carries a pre-ruling authored
+            baseline. A legacy row that should be
+            recomputable is RE-STATED with a `credibility` label (create with
+            `credibility=`, or re-mitigate), which is what marks it an authored
+            assertion.
           - Gate: recompute at most once per ``recompute_interval`` (default 3600s,
             env TORTOISE_EP_REINHERIT_INTERVAL; 0 = always), unless the gate was
             dirty-marked by a write event. Epsilon guard (rel 1e-9) suppresses
@@ -17072,8 +17643,12 @@ class TortoiseSDK:
             _parse_timestamp,  # ONE parser for this package — never duplicate it
             aggregate_prior,
             assessment_factor,
+            author_support_pc,
+            credibility_prior,
             pc_base,
             resolve_tier,
+            session_support_pc,
+            weak_support_pc,
         )
         # #5543: the S0a identity key. The write path already applies this
         # decision; the belief path below is the one that had not called it.
@@ -17110,23 +17685,22 @@ class TortoiseSDK:
         for tsrc, by_assessor in latest_by_source.items():
             factor_by_source[tsrc] = assessment_factor(by_assessor.values())
 
-        # Inherit-eligible points:
-        #   (baseline_source IS NULL AND baseline_set IS NOT true)  → always eligible
-        #   (baseline_source = 'inherited-from-source')              → gated by inherited_at
+        # The query is BROADENED to every sourced point, not only the
+        # inherit-eligible ones: a `set-by-author` authored-assertion baseline
+        # (#398) now recomputes so its weak body joins the aggregate as one
+        # supporter, and the per-point gate below still keeps a truly EXPLICIT
+        # `set_point_baseline` (no `credibility` label) untouched. The label
+        # rides the row via `n.credibility`.
         where = (
             "WHERE n.is_operator = false "
             "AND (n.pointKind IS NULL OR n.pointKind <> 'assessment') "
-            "AND ("
-            "  (n.baseline_source IS NULL AND (n.baseline_set IS NULL OR n.baseline_set = false)) "
-            "  OR n.baseline_source = 'inherited-from-source'"
-            ") "
             "AND (s.credibilityTier IS NOT NULL OR s.sourceKind IS NOT NULL) "
         )
         rows = proj.g.query(
             f"MATCH (n:Point)-[:extractedFrom]->(s:Source) {where} "
             "RETURN n.id, s.url, s.credibilityTier, s.sourceKind, "
             "s.sourceDate, s.ingestedAt, n.baseline_source, n.inherited_at, "
-            "s.canonicalUrl",
+            "s.canonicalUrl, n.credibility",
             params={},
         ).result_set
 
@@ -17158,7 +17732,34 @@ class TortoiseSDK:
         from collections import defaultdict
         point_sources: dict[str, list[dict]] = defaultdict(list)
         _identity_slot: dict[tuple[str, str], int] = {}
-        for pid, url, ctier, skind, sdate, ingested, bl_src, inherited_at, canonurl in rows:  # noqa: B007
+        # #398: an `agentSession` is a real but WEAK supporter when it
+        # ORIGINATES the claim, and ZERO when it CARRIES a source already
+        # attached to the same claim (the session is provenance, not evidence).
+        # Its weight is not a tier, so it is collected separately from the
+        # tier groups and folded in as ``extra_support_pc``.
+        session_sources: list[tuple[str, str]] = []  # (pid, session_url)
+        author_word: dict[str, str] = {}  # pid -> declared label (T0-T4 form)
+        for pid, url, ctier, skind, sdate, ingested, bl_src, inherited_at, canonurl, word_label in rows:  # noqa: B007
+            # #398: the point's declared label (persisted at create) marks its
+            # baseline as an authored assertion — captured before the
+            # neutral-source `continue` so a label on a point whose only source
+            # is neutral is still seen.
+            if word_label:
+                author_word[pid] = word_label
+            # #398 (owner ruling 2026-10-12), #6151 review P3-3: an
+            # `agentSession` is a SESSION source — WEAK when it ORIGINATES and
+            # ZERO when it CARRIES — whatever `credibilityTier` a caller may
+            # have stamped. Route it BEFORE `resolve_tier`: an explicit tier
+            # won the documented precedence and entered the tier groups as a
+            # NORMAL source (measured: `credibilityTier='T0'` on an
+            # `agentSession` → ep_alpha 10.0), letting an agent's own assertion
+            # carry a strong body — exactly what the ruling forbids.
+            # `agentSession` is already registered NEUTRAL in
+            # `SOURCE_KIND_DEFAULTS`; this makes the explicit-tier case agree
+            # with it instead of silently overriding the ruling.
+            if skind == "agentSession" or ctier == "agentSession":
+                session_sources.append((pid, url))
+                continue
             tier = resolve_tier(ctier, skind)
             if tier is None:
                 continue  # neutral source — no inheritance contribution
@@ -17218,6 +17819,63 @@ class TortoiseSDK:
             if cand_eff is not None and (kept_eff is None or cand_eff > kept_eff):
                 kept["sourceDate"], kept["ingestedAt"] = sdate, ingested
 
+        # ── #398 carrier rule ────────────────────────────────────────────
+        # A session Source is a CARRIER when it `references` (Ontology §3.4 —
+        # the EXISTING Source -> Source relation) another Source that is ALSO
+        # attached to the same claim: the session delivered that body of
+        # evidence, so it is provenance and contributes zero. This closes the
+        # double-count residual the pre-change docstring recorded (a session
+        # and the documents it references have different S0a identities, so
+        # identity collapse alone could not merge them).
+        point_extra_support: dict[str, float] = defaultdict(float)
+        # #6151 review P2: only a session that ORIGINATES the claim contributes
+        # the weak body, and only such a session may suppress a declared word
+        # that would double-count it. A session that merely CARRIES an attached
+        # source contributes ZERO, so there is nothing to double-count and it
+        # must NOT suppress the author's word. ⛔ This set NO LONGER un-freezes
+        # an explicit baseline in the guard below (#6151 review round 5: the
+        # label is the only exception, because an originating session also
+        # replaced an explicitly-set baseline — the same #844 breach one path
+        # over from the carrying case this set was introduced for).
+        agent_originated: set[str] = set()
+        weak_bodies: dict[str, int] = defaultdict(int)
+        if session_sources:
+            ref_rows = proj.g.query(
+                "MATCH (s:Source)-[:references]->(o:Source) RETURN s.url, o.url",
+                params={},
+            ).result_set
+            referenced: dict[str, set] = defaultdict(set)
+            for s_url, o_url in ref_rows:
+                if s_url and o_url:
+                    referenced[s_url].add(o_url)
+            # #6151 review P3: `attached` must be EVERY source the claim
+            # carries, not only the TIERED ones `point_sources` holds. The
+            # broadened evidence query filters to `credibilityTier OR
+            # sourceKind IS NOT NULL`, so a session referencing an attached but
+            # NEUTRAL (untiered) source was misread as ORIGINATING. This query
+            # is scoped to the session-bearing points, so it adds no row for
+            # any other point.
+            attached_rows = proj.g.query(
+                "MATCH (n:Point)-[:extractedFrom]->(s:Source) "
+                "WHERE n.id IN $ids RETURN n.id, s.url",
+                params={"ids": sorted({pid for pid, _ in session_sources})},
+            ).result_set
+            attached_by_point: dict[str, set] = defaultdict(set)
+            for _pid, _url in attached_rows:
+                if _url:
+                    attached_by_point[_pid].add(_url)
+            for pid, s_url in session_sources:
+                attached = set(attached_by_point.get(pid, ()))
+                attached.discard(s_url)
+                carries = bool(referenced.get(s_url, set()) & attached)
+                if session_support_pc(carries_attached_source=carries) > 0.0:
+                    agent_originated.add(pid)
+                    weak_bodies[pid] += 1
+            # Same anti-Sybil growth as a tier (log2(N+1)): one weak body is
+            # exactly AUTHOR_ASSERTION_WEAK_PC, a flood grows sub-linearly.
+            for pid, n in weak_bodies.items():
+                point_extra_support[pid] = weak_support_pc(n)
+
         # Revert: points with an inherited baseline but NO eligible sources
         # (all edges deleted or all sources neutral) return to neutral — subject
         # to the same per-point gate (dirty-marked or interval elapsed).
@@ -17228,6 +17886,9 @@ class TortoiseSDK:
         revert_rows = proj.g.query(
             "MATCH (n:Point) WHERE n.baseline_source = 'inherited-from-source' "
             "AND (n.pointKind IS NULL OR n.pointKind <> 'assessment') "
+            # #398: a label-bearing Point is never reverted to neutral — its
+            # authored assertion is itself a source, so it always keeps a prior.
+            "AND n.credibility IS NULL "
             "RETURN n.id, n.inherited_at",
             params={},
         ).result_set
@@ -17273,14 +17934,62 @@ class TortoiseSDK:
             self._evidence.pop(pid, None)
             self._mark_dirty([pid])
 
-        for pid, sources in point_sources.items():
+        for pid in set(point_sources) | set(point_extra_support) | set(author_word):
+            sources = point_sources.get(pid, [])
             # Fetch the point's current baseline marker state
             row = proj.g.query(
                 "MATCH (n:Point {id:$id}) RETURN n.baseline_source, n.inherited_at, "
-                "coalesce(n.ep_alpha, 1.0), coalesce(n.ep_beta, 1.0)",
+                "coalesce(n.ep_alpha, 1.0), coalesce(n.ep_beta, 1.0), "
+                "coalesce(n.baseline_set, false), "
+                "coalesce(n.baseline_system_default, false)",
                 params={"id": pid},
             ).result_set
-            bl_src, inherited_at, cur_a, cur_b = row[0] if row else (None, None, 1.0, 1.0)
+            bl_src, inherited_at, cur_a, cur_b, bl_set, decide_default = (
+                row[0] if row else (None, None, 1.0, 1.0, False, False))
+
+            # #2199/#844: an EXPLICIT ``set_point_baseline`` / system-default
+            # baseline is FROZEN against source recomputation, and a legacy
+            # ``baseline_set=true`` row with no provenance token is explicit too
+            # (the pre-marker era). The ONE exception is the #398
+            # ``credibility`` label: a word-bearing Point is an authored
+            # assertion whose weak body must be displaceable by a real source.
+            # ⛔ An ORIGINATING agent session is NOT a second exception —
+            # removed (#6151 review round 5) because it silently replaced an
+            # explicitly-set baseline (`0.4 -> 1.1`, `set-by-author ->
+            # inherited-from-source`), the same #844 breach one path over.
+            # Every documented WORD input writes the label, so an agent-authored
+            # word still recomputes above; a label-less row is genuinely
+            # explicit (frozen) or the documented legacy residual. An explicit
+            # `set_point_baseline` CLEARS the label as it writes (#6151 review
+            # P1), so a word-bearing `set-by-author` row here is ALWAYS a
+            # `create_point(credibility=…)` / `mitigate_operator` authored
+            # assertion, never a re-opened explicit baseline. #7951 owns
+            # the single write chokepoint.
+            is_word_point = pid in author_word
+            # #6151 review round 6 P2: the polarity is “freeze everything that
+            # is NOT a derivation”. The old allow-list
+            # (`bl_src in (set-by-author, system-default)`) let an
+            # UNRECOGNISED token — including the pre-#2199 spellings
+            # `'explicit'` / `'inherited'` that the rename migration has not
+            # rewritten yet — fall through to the recompute. Measured: a legacy
+            # `'explicit'` row with `ep_alpha=0.4` was overwritten to `5.0` +
+            # `'inherited-from-source'`, the same #844 breach the write side
+            # refuses. `'explicit'` is the pre-rename spelling of the authored
+            # class and is frozen like it; `'inherited'` is frozen too
+            # (fail-safe) until
+            # graph-scripts/2199_baseline_source_rename.py rewrites it to the
+            # derived spelling, after which it recomputes normally. Freezing
+            # the unknown-token class by default means a token this code has
+            # never seen can never silently overwrite an author's belief.
+            # The ONE exception is unchanged and stays narrow: the #398
+            # `credibility` label on the CURRENT authored spelling, whose weak
+            # body must be displaceable by a real source.
+            if (bl_src is None and bl_set) or (
+                bl_src not in (None, BASELINE_SOURCE_INHERITED)
+                and not (bl_src == BASELINE_SOURCE_SET_BY_AUTHOR
+                         and is_word_point)
+            ):
+                continue
 
             is_inherited = bl_src == BASELINE_SOURCE_INHERITED
             if is_inherited and inherited_at is not None and recompute_interval > 0:
@@ -17300,8 +18009,46 @@ class TortoiseSDK:
                 (src["tier"], src["sourceDate"], src["ingestedAt"], src["factor"])
                 for src in sources
             ]
+            # #398: the author's assertion is ONE weak supporter in this same
+            # aggregate — the SAME weight whoever wrote it and whatever word it
+            # names (the word is a label, not a strength). An agent's word is NOT
+            # added here: its `agentSession` source IS that evidence body
+            # (already in `point_extra_support`, weak when originating / zero
+            # when carrying), so adding it again would double-count.
+            extra_support = point_extra_support.get(pid, 0.0)
+            # #2199 is a SEPARATE recorded provision the word must not delete:
+            # a decide part BORN live starts at the system default Beta(3,1),
+            # and recomputing a labelled decide part must keep that provision as
+            # the aggregate's base rather than replacing it. Without this a
+            # labelled decide part attached to even a weak (T4) source dropped
+            # to 1.2 (0.5455) while the SAME part unlabelled stays frozen at the
+            # default 3.0 (0.75) — a labelled claim weaker than its unlabelled
+            # counterpart, exactly the inversion the owner ruling forbids. A
+            # wordless decide part never reaches this loop (the #2199
+            # system-default guard above skips it), so its frozen 0.75 is
+            # untouched.
+            #
+            # #6151 defect 2: re-inject the default ONLY on a point whose create
+            # RECORDED it (`baseline_system_default`) — i.e. a decide part BORN
+            # live. A decide part created with an EXPLICIT status never received
+            # the default (the create docstring: full manual control), so the
+            # word there adds its own weak body alone and never an unearned
+            # +2.1. Scoping on the birth fact (not on `p_kind`) is what makes
+            # that distinction, because a word re-stamps the baseline token
+            # `set-by-author` on both.
+            if is_word_point and decide_default:
+                extra_support += credibility_prior(DECIDE_DEFAULT_CREDIBILITY)[0] - 1.0
+            # Only an ORIGINATING session suppresses the word: its agentSession
+            # IS the evidence body, so adding the word too would double-count.
+            # A CARRYING session contributes zero, so the word is the only body
+            # of evidence it has and must be counted (#6151 review P2).
+            if is_word_point and pid not in agent_originated:
+                word_pc = author_support_pc(author_word[pid])
+                if word_pc:
+                    extra_support += word_pc
             alpha, beta = aggregate_prior(
                 groups, recency_decay=recency_decay, now=now,
+                extra_support_pc=extra_support,
             )
 
             # Epsilon guard: skip identical rewrites (no dirty churn).
@@ -17581,6 +18328,71 @@ class TortoiseSDK:
                     "predicate is the whole point of #2949")
         clauses.extend(extra_clauses)
         return clauses, params
+
+    def _find_points_by_key(self, key: str,
+                            pointKind: str | None = None,
+                            exclude_id: str | None = None) -> list[str]:
+        """Resolve the Point id(s) holding ``key`` — the key-identity path
+        (#6110). Returns EVERY match, not just the first.
+
+        Why every match: a graph written before #6110 could already hold
+        several points under one ``key`` (the write path treated ``key`` as a
+        label and minted a sibling whenever the content differed). The write
+        path warns when it sees more than one here, so a pre-existing
+        collision is surfaced instead of being folded onto silently. Returning
+        the list (rather than a single id) is what makes that warning possible
+        without a second query.
+
+        ``pointKind`` scopes the match, exactly as the content identity does:
+        the same key string may name a DISTINCT point in a different kind
+        (#6110 — key is unique per pointKind, not globally). The WHERE clause
+        is the shared ``_dedup_match_clauses`` non-operator predicate, so this
+        path can never resolve a dedup onto an operator node (#2949).
+        """
+        clauses, params = self._dedup_match_clauses(
+            point_kind=pointKind, exclude_id=exclude_id)
+        clauses.append("n.key = $key")
+        params["key"] = key
+        rows = self._get_proj().g.query(
+            f"MATCH (n:Point) WHERE {' AND '.join(clauses)} RETURN n.id",
+            params=params,
+        ).result_set
+        return [r[0] for r in rows]
+
+    def _resolve_dedup_hit(self, content: str, *,
+                           pointKind: str | None = None,
+                           key: str | None = None,
+                           exclude_id: str | None = None
+                           ) -> tuple[str | None, list[str]]:
+        """The ONE dedup resolution every site shares (#2892, #6110).
+
+        Returns ``(point_id_or_None, key_hits)``. ``key_hits`` is the
+        (possibly empty) list of points holding ``key`` within ``pointKind`` —
+        every match, so the WRITER can warn when a pre-#6110 graph already
+        holds several points under one key. Callers that need only the id (the
+        ingest dedup counter) ignore the second element.
+
+        A caller-supplied ``key`` is an IDENTITY, not a label: a point already
+        holding it (within ``pointKind``) IS the dedup hit, whatever its
+        content. Only on a key MISS does the content-hash path run — so a
+        re-run under the same key folds instead of minting a second point that
+        shares the key (#6110). Scoping is per-``pointKind``, mirroring the
+        content identity (``content_hash`` + ``pointKind``): the same key
+        string may name a distinct point in a different kind. A blank or
+        non-string key is treated as absent (the historic content-only path).
+
+        The writer (``create_point``) and the ingest dedup COUNTER
+        (``ingest_bundle``) both call this, so the counter can never predict a
+        hit the writer does not take — or miss a hit the writer does take —
+        for a key-bearing item.
+        """
+        if isinstance(key, str) and key.strip():
+            hits = self._find_points_by_key(key, pointKind=pointKind,
+                                            exclude_id=exclude_id)
+            if hits:
+                return hits[0], hits
+        return self._find_point_by_content(content, pointKind=pointKind,
+                                           exclude_id=exclude_id), []
 
     def _find_point_by_content(self, content: str,
                                pointKind: str | None = None,
@@ -23055,7 +23867,8 @@ class TortoiseSDK:
         # explicit `is_episodic` parameter below (internal callers), merged
         # into the event dict AFTER sanitize.
         if not _skip_sanitize:
-            props = _sanitize_props(props, reject_id=True)
+            props = _sanitize_props(props, reject_id=True,
+                                    reject_belief_props=True)
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         proj = self._get_proj()
@@ -23499,7 +24312,8 @@ class TortoiseSDK:
 
     def _update_entity(self, id_val: str, **props) -> dict:
         # #329: id + sourcePath/source_path are server-managed — reject
-        props = _sanitize_props(props, reject_id=True)
+        props = _sanitize_props(props, reject_id=True,
+                                reject_belief_props=True)
         # #3998 (D30): the generic entity surface reaches `:Source` TOO, and its
         # per-label branch below writes caller props with a live `SET n += $p`.
         # Without this the closed :Source surface declared in

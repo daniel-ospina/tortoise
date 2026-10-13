@@ -291,15 +291,18 @@ def test_d4_bulk_wipe_graph_guard(leg, tmp_path):
 
 
 def test_d5_range_index_identical(leg, tmp_path):
-    """D5 — the point_props range set (id, pointKind, content_hash) is created
-    identically on BOTH engines; is_operator is deliberately absent from the
-    D5 range set on BOTH lanes (#522 embedded, #3154 docker/server — no engine
-    gets a boolean index)."""
+    """D5 — the point_props range set (id, pointKind, content_hash, key) is
+    created identically on BOTH engines; is_operator is deliberately absent
+    from the D5 range set on BOTH lanes (#522 embedded, #3154 docker/server —
+    no engine gets a boolean index). `key` (#8400/#6110) is the sparse
+    high-cardinality dedup IDENTITY the key-first lookup seeks on — indexed
+    on both lanes, unlike the low-cardinality status/op_type props #522
+    declined."""
     proj = _projection(leg, tmp_path, "d5.db")
     try:
         idx = _range_indexes(proj)
         point = idx.get("Point", {})
-        for f in ("id", "pointKind", "content_hash"):
+        for f in ("id", "pointKind", "content_hash", "key"):
             assert "RANGE" in point.get(f, []), \
                 f"Point.{f} must be RANGE-indexed on {leg}: {point}"
         # #3154: is_operator is absent on BOTH lanes — no engine gets a

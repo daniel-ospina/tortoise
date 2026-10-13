@@ -848,18 +848,57 @@ def test_on_record_predicate_has_one_source(monkeypatch):
 
 #: The DECLARED residual raw builders — ``_backup_config_safe()`` /
 #: ``load_config()`` -> ``_alert_store_from`` — that bypass the ALERT-only
-#: policy in ``alert_channel.incident_alert_store`` (D5a class). Each is a
-#: follow-up issue, not a licence for a seventh: a NEW site must route through
-#: ``_incident_alert_store`` instead. Counted by AST call node, so a docstring
-#: mention (``hosted_api._incident_alert_store``'s seam map has one) is not
-#: mistaken for a call site.
+#: policy in ``alert_channel.incident_alert_store`` (D5a class). **The set is now
+#: EMPTY**: #4778 routed every site through the seam, so a raw site is no longer
+#: a known residual but a REGRESSION — the fix is to route it through
+#: ``_incident_alert_store``, never to add it here. Counted by AST call node, so
+#: a docstring mention (``hosted_api._incident_alert_store``'s seam map has one)
+#: is not mistaken for a call site.
 #:
-#: #4777 removed one: ``backups_rebaseline`` built its channel from
+#: The set had shrunk to ``{"hosted_api.py": 3, "notify.py": 2}`` first: #4777
+#: removed one — ``backups_rebaseline`` built its channel from
 #: ``_backup_config_safe()``, so with the sweep OFF (the production default) the
 #: config was ``None``, the constructor dereferenced it, and the endpoint 500ed
 #: AFTER persisting the re-baseline — with BOTH incident resolves skipped. Its
 #: resolve leg is not sweep-gated, so that was never a legitimate residual.
-_DECLARED_RAW_BUILDER_SITES = {"hosted_api.py": 3, "notify.py": 2}
+_DECLARED_RAW_BUILDER_SITES: dict[str, int] = {}
+
+
+#: Names that BUILD a store from a caller-supplied config, i.e. bypass the
+#: ALERT-only policy unless the call sits in a sanctioned home. BOTH spellings
+#: count: the private ``hosted_api._alert_store_from`` wrapper and the public
+#: ``alert_channel.alert_store_from`` it delegates to. Counting only the private
+#: one missed a raw site written as
+#: ``alert_channel.alert_store_from(load_config(), …)`` (review P3).
+_RAW_BUILDER_NAMES = frozenset({"_alert_store_from", "alert_store_from"})
+
+#: Function bodies that are a SANCTIONED home for such a call: the raw
+#: constructor itself (``hosted_api._alert_store_from`` delegates to the public
+#: one) and the policy chokepoint (``alert_channel.incident_alert_store`` builds
+#: from the config IT resolved, then applies the ALERT-only policy). A call
+#: anywhere else is a bypass site.
+_SANCTIONED_RAW_CALL_HOMES = frozenset({"_alert_store_from", "incident_alert_store"})
+
+
+def _raw_builder_call_count(tree) -> int:
+    """Raw builder calls in a parsed module, minus the sanctioned homes."""
+    import ast
+
+    sanctioned: set[int] = set()
+    for fn in ast.walk(tree):
+        if (isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and fn.name in _SANCTIONED_RAW_CALL_HOMES):
+            sanctioned.update(id(node) for node in ast.walk(fn))
+    n = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or id(node) in sanctioned:
+            continue
+        func = node.func
+        name = (func.id if isinstance(func, ast.Name)
+                else getattr(func, "attr", None))
+        if name in _RAW_BUILDER_NAMES:
+            n += 1
+    return n
 
 
 def _raw_builder_call_sites() -> dict[str, int]:
@@ -868,70 +907,74 @@ def _raw_builder_call_sites() -> dict[str, int]:
     sites: dict[str, int] = {}
     for path in sorted((ROOT / "tortoise").glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        n = sum(
-            1 for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and (
-                (isinstance(node.func, ast.Name)
-                 and node.func.id == "_alert_store_from")
-                or (isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "_alert_store_from")))
+        n = _raw_builder_call_count(tree)
         if n:
             sites[path.name] = n
     return sites
 
 
+def test_raw_builder_guard_catches_both_spellings_but_exempts_the_homes():
+    """Non-vacuity for the recurrence guard (review P3).
+
+    A raw site can bypass the ALERT-only policy using the PUBLIC constructor
+    spelling too — ``alert_channel.alert_store_from(load_config(), …)``. The
+    original guard counted only ``_alert_store_from`` call nodes, so that site
+    stayed GREEN. Assert both spellings are caught and that the two sanctioned
+    homes (the raw constructor's own delegate, and the policy chokepoint) are
+    exempt — otherwise this guard would fire on the code it exists to protect.
+    """
+    import ast
+
+    assert _raw_builder_call_count(ast.parse(
+        "def f(cfg):\n"
+        "    return alert_channel.alert_store_from(cfg, storage_factory=s)\n"
+    )) == 1, "qualified public spelling must be caught"
+    assert _raw_builder_call_count(ast.parse(
+        "def f(cfg):\n"
+        "    return alert_store_from(cfg, storage_factory=s)\n"
+    )) == 1, "bare-Name public spelling must be caught"
+
+    assert _raw_builder_call_count(ast.parse(
+        "def _alert_store_from(cfg):\n"
+        "    return alert_channel.alert_store_from(cfg, storage_factory=s)\n"
+    )) == 0, "the raw constructor's own delegate is not a bypass"
+    assert _raw_builder_call_count(ast.parse(
+        "def incident_alert_store(cfg):\n"
+        "    return alert_store_from(cfg, storage_factory=s)\n"
+    )) == 0, "the policy chokepoint is not a bypass"
+
+
 def test_no_new_raw_alert_channel_builder_sites():
-    """Recurrence guard for the D5a class this PR partly removes.
+    """Recurrence guard for the D5a class #4778 REMOVED.
 
     The raw chain builds the channel WITHOUT the ALERT-only policy, so a site
-    on it is silently sweep-gated. The sites below are the declared, filed
-    residuals; a new one turns this RED, which is the point — the fix is to
-    route it through the seam, not to bump the number here.
+    on it is silently sweep-gated: its incidents are invisible on a deployment
+    whose backups are off (the production default). #4778 routed all six sites
+    (``hosted_api.py`` x4, ``notify.py`` x2) through ``_incident_alert_store``,
+    so the declared residual set is EMPTY — any site now turns this RED. Both
+    spellings count (``_alert_store_from`` and ``alert_store_from``), except in
+    the two sanctioned homes (see ``_RAW_BUILDER_NAMES``).
+
+    The fix is ALWAYS to route the site through the seam; never to add it to
+    ``_DECLARED_RAW_BUILDER_SITES``.
     """
     assert _raw_builder_call_sites() == _DECLARED_RAW_BUILDER_SITES, (
-        "a raw alert-channel builder site was added or removed; the declared "
-        "residual set is " + repr(_DECLARED_RAW_BUILDER_SITES))
+        "a raw alert-channel builder site exists; the declared residual set is "
+        + repr(_DECLARED_RAW_BUILDER_SITES)
+        + " — route the site through `_incident_alert_store` instead"
+    )
 
 
-def test_kind_constants_match_the_runbook():
-    """Each new kind has a runbook row naming the manual-close mechanism."""
-    from tortoise import cohort_cost as cc
-
-    runbook = (ROOT / "docs/ops/registry-backup-dr.md").read_text(encoding="utf-8")
-    rows = {ln.split("|")[1].strip(): ln
-            for ln in runbook.splitlines() if ln.startswith("| ")
-            and ln.count("|") >= 3}
-    kinds = (oa.UNMETERED_INCREMENT_KIND, cc.UNENFORCEABLE_INCIDENT_KIND,
-             cc.INCIDENT_KIND, oa.ABUSE_DECISION_FAULT_KIND,
-             oa.ABUSE_ENFORCEMENT_FAULT_KIND, oa.BILLING_NOTIFY_REFUSED_KIND,
-             "abuse_review_needed",  # #5425: the escalation that replaced the suspend
-             oa.PROVIDER_BILLING_EXHAUSTED_KIND)
-    for kind in kinds:
-        assert kind in rows, f"no runbook triage row for {kind}"
-        row = rows[kind]
-        assert "close the GitHub issue" in row and "then delete" in row, (
-            f"the {kind} row must name the close-then-delete procedure: {row}")
-    assert cc.UNENFORCEABLE_INCIDENT_KIND != cc.INCIDENT_KIND
-    assert cc.INCIDENT_KIND not in cc.UNENFORCEABLE_INCIDENT_KIND
-    assert cc.UNENFORCEABLE_INCIDENT_KIND not in cc.INCIDENT_KIND
-    # #4872: the abuse kinds must be their own, not aliases of the metering one
-    # — the R2-unreachable adoption path resolves an incident by GitHub search
-    # on the subject suffix, so a superstring relation would cross-adopt.
-    assert oa.ABUSE_DECISION_FAULT_KIND not in oa.UNMETERED_INCREMENT_KIND
-    assert oa.ABUSE_ENFORCEMENT_FAULT_KIND not in oa.UNMETERED_INCREMENT_KIND
-    assert oa.ABUSE_DECISION_FAULT_KIND not in oa.ABUSE_ENFORCEMENT_FAULT_KIND
-    assert oa.ABUSE_ENFORCEMENT_FAULT_KIND not in oa.ABUSE_DECISION_FAULT_KIND
-    for kind in (oa.ABUSE_DECISION_FAULT_KIND, oa.ABUSE_ENFORCEMENT_FAULT_KIND):
-        assert kind not in cc.INCIDENT_KIND
-        assert kind not in cc.UNENFORCEABLE_INCIDENT_KIND
-    # #3873: a provider-billing exhaustion is its OWN incident, not a spelling of
-    # the Stripe notification drop or of a cohort cap firing — the adoption path
-    # resolves by GitHub search on the subject suffix, so a superstring relation
-    # would cross-adopt.
-    assert oa.PROVIDER_BILLING_EXHAUSTED_KIND != oa.BILLING_NOTIFY_REFUSED_KIND
-    assert oa.PROVIDER_BILLING_EXHAUSTED_KIND not in cc.INCIDENT_KIND
-    assert oa.PROVIDER_BILLING_EXHAUSTED_KIND not in cc.UNENFORCEABLE_INCIDENT_KIND
-    assert cc.INCIDENT_KIND not in oa.PROVIDER_BILLING_EXHAUSTED_KIND
+# #4780: `test_kind_constants_match_the_runbook` lived here. It hand-listed 8
+# kinds and asserted each had a runbook row plus a close-then-delete sentence —
+# the shape #4780 generalizes. It is SUPERSEDED by the registry-generated checks
+# in `tests/test_incident_kinds.py`, which assert runbook ⇄ code set equality in
+# BOTH directions (so a NEW kind cannot be added without a row), the
+# manual-close procedure set exactly, and the prefix-safety property the
+# hand-written non-substring assertions below were approximating (they covered
+# the few pairs the author thought of; #4780 measured that `STALE` IS a substring
+# of `POOL_STALE`/`SWEEP_OFF_STALE` while no kind is a PREFIX of another, which is
+# the property `github_issue.incident_title_matches` actually needs).
 
 
 def test_alert_unmetered_increment_helper_dispatches(monkeypatch):

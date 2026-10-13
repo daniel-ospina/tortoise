@@ -440,111 +440,22 @@ def test_a_filed_incident_is_adopted_from_the_object_without_any_search():
     assert ch.closed, "resolution still works while the search is down"
 
 
-# ── #3033: the documented taxonomy must match the emitted one ─────────────────
-
-
-_ALERT_SOURCES = ("tortoise/alert_store.py", "tortoise/backup_watcher.py",
-                  "tortoise/backup_sweep.py", "tortoise/hosted_api.py",
-                  # #3981's operator-facing kinds are emitted by these modules and
-                  # documented in the runbook, so the #3033 drift scan must see
-                  # their writers rather than read them as unemittable.
-                  "tortoise/cohort_cost.py", "tortoise/operator_alert.py")
-_DRIVER = ".github/scripts/registry-cron.sh"
-def _dead_kinds_documented() -> set[str]:
-    """The kinds the runbook itself declares writer-less (#3033).
-
-    Parsed from the runbook rather than hardcoded: a revert of the runbook's
-    "Kinds with no writer" section must fail the drift test below, not silently
-    re-exempt the kinds.
-    """
-    import re
-    from pathlib import Path
-
-    doc = (Path(__file__).resolve().parent.parent
-           / "docs/ops/registry-backup-dr.md").read_text()
-    section = doc.split("### Kinds with no writer", 1)
-    assert len(section) == 2, "the 'Kinds with no writer' section must exist"
-    return {m.group(1) for m in re.finditer(r"\|\s*`([A-Z][A-Z0-9_]+)`\s*\|", section[1])}
-
-
-def _documented_kinds() -> set[str]:
-    """Kinds in the runbook's triage table (first column, ALL_CAPS tokens)."""
-    import re
-    from pathlib import Path
-
-    doc = (Path(__file__).resolve().parent.parent
-           / "docs/ops/registry-backup-dr.md").read_text()
-    table = doc.split("## Alert taxonomy + triage", 1)[1].split("### How incidents CLOSE", 1)[0]
-    return {m.group(1) for m in re.finditer(r"^\|\s*([A-Z][A-Z0-9_]{3,})\s*\|", table, re.M)}
-
-
-def _emittable_kinds() -> set[str]:
-    """Kinds any producer can actually open/resolve — scanned from the emitters.
-
-    Deliberately mechanical: a kind that exists only in a doc or a test must not
-    count as "monitored".
-    """
-    import re
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parent.parent
-    kinds: set[str] = set()
-    for rel in _ALERT_SOURCES:
-        text = (root / rel).read_text()
-        kinds |= set(re.findall(r'(?:open_incident|resolve_incident)\(\s*"([A-Z][A-Z0-9_]+)"', text))
-        # The watcher's per-leg containment helper takes the op as a string
-        # (`_alert_leg("open_incident", "STALE", key)`) — the call-site pattern
-        # above cannot see it, so a refactor into that helper must not silently
-        # read as "this kind lost its writer".
-        kinds |= set(re.findall(r'_alert_leg\(\s*"(?:open|resolve)_incident",\s*"([A-Z][A-Z0-9_]+)"', text))
-        kinds |= set(re.findall(r'"kind":\s*"([A-Z][A-Z0-9_]+)"', text))
-        # Kinds named by a module constant (e.g. `_DRILL_FAILED_KIND`), which the
-        # call-site scan cannot see.
-        kinds |= set(re.findall(r'_KIND\s*=\s*"([A-Z][A-Z0-9_]+)"', text))
-    driver = (root / _DRIVER).read_text()
-    kinds |= set(re.findall(r'\bfile_alert\s+([A-Z][A-Z0-9_]+)\s', driver))
-    kinds |= set(re.findall(r'\bresolve_global\s+([A-Z][A-Z0-9_]+)\s', driver))
-    return kinds
-
-
-def test_documented_kinds_have_a_writer():
-    """#3033: every kind in the runbook's triage table must have a writer.
-
-    A documented-but-unemittable kind is corrosive: the operator believes a
-    condition will page when it cannot, and the test suite gains a green
-    assertion with no production referent.
-    """
-    documented = _documented_kinds()
-    emittable = _emittable_kinds()
-    dead = _dead_kinds_documented()
-    assert dead == {"ALERTER_DOWN", "LIVENESS_NO_WORK"}, (
-        f"the runbook's writer-less list changed: {dead} — update this test's expectation"
-    )
-    assert "STALE" in documented and "STALE" in emittable, "the scan itself must work"
-    offenders = sorted(documented - emittable - dead)
-    assert not offenders, (
-        f"documented but never emitted: {offenders} — give them a writer or move "
-        "them to the 'Kinds with no writer' section"
-    )
-
-
-def test_dead_kinds_are_documented_as_dead():
-    """#3033: the two unemittable kinds must be marked NOT EMITTED, not left
-    looking live in the triage table."""
-    from pathlib import Path
-
-    doc = (Path(__file__).resolve().parent.parent
-           / "docs/ops/registry-backup-dr.md").read_text()
-    dead_section = doc.split("### Kinds with no writer", 1)
-    assert len(dead_section) == 2, "the 'Kinds with no writer' section must exist"
-    body = dead_section[1]
-    for kind in _dead_kinds_documented():
-        assert f"`{kind}`" in body, f"{kind} must be listed as writer-less"
-    table = doc.split("## Alert taxonomy + triage", 1)[1].split("### How incidents CLOSE", 1)[0]
-    for kind in _dead_kinds_documented():
-        row = [ln for ln in table.splitlines() if ln.startswith(f"| {kind} |")]
-        assert row, f"{kind} must keep a triage row"
-        assert "NOT EMITTED" in row[0], f"{kind}'s triage cell must say NOT EMITTED"
+# ── the documented taxonomy must match the emitted one ──────────────────────
+#
+# #4780: the #3033 checks that used to live here (a regex scan of the emitters
+# plus two hand-listed dead kinds) are SUPERSEDED by the incident-kind registry
+# and its generated checks, which assert the runbook ⇄ code set equality and the
+# emitted flag in BOTH directions instead of only for the kinds listed by hand:
+#
+#     tortoise/incident_kinds.py        (the one declaration site)
+#     tests/test_incident_kinds.py      (the generated checks)
+#
+# The replacement also removes the reason those checks were fragile here: they
+# matched bare kind literals in the emitters, which #4780 deleted — every filing
+# call site now passes a registry constant, so a literal-matching scan would have
+# read as "every kind lost its writer". `tests/test_alert_store.py` keeps the
+# cross-language OWNER contract (`test_kind_owner_contract_with_driver`), which
+# is a different property (who may RESOLVE a kind, not who emits one).
 
 
 # ── #3030 review: the bounded-open-set API + resolve failure semantics ───────

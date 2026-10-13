@@ -31,7 +31,7 @@ EXPECTED_RANGE_EMBEDDED = {
     # — and the copy destination cannot rebuild it (a fresh CREATE on a copy
     # is corrupt too). The full label scan is correct on both. See
     # _ensure_indexes.
-    "Point": ["id", "pointKind", "content_hash"],
+    "Point": ["id", "pointKind", "content_hash", "key"],
     # D10 (#5026): the :Document label is retired — a document is a :Source
     # (its range key is url, below) and no :Document index is created.
     "Subject": ["id", "name"],
@@ -46,8 +46,12 @@ EXPECTED_RANGE_EMBEDDED = {
 
 # ── Epic #1647 T8 (D5/D6): docker sibling expectations ────────────────────
 # D5 (research-brief §2.1): the RANGE sets are IDENTICAL on both engines —
-# point_props (id, pointKind, content_hash) is not mode-split (verified
-# _ensure_indexes L1214-1224). #3154: is_operator is deliberately ABSENT from
+# point_props (id, pointKind, content_hash, key) is not mode-split (verified
+# _ensure_indexes L1214-1224). #8400/#6110: `key` joined the set because the
+# key-first dedup leg runs on every key-bearing write; it is a sparse
+# high-cardinality IDENTITY (a peer of `content_hash`), NOT one of the
+# low-cardinality status/op_type kind-fields #522 declined.
+# #3154: is_operator is deliberately ABSENT from
 # the D5 range set on BOTH lanes — NO engine gets a boolean index (#522
 # embedded, #3154 docker/server GRAPH.COPY).
 EXPECTED_RANGE_DOCKER = {k: list(v) for k, v in EXPECTED_RANGE_EMBEDDED.items()}
@@ -482,6 +486,255 @@ def test_embedded_reopen_false_equality_correct():
             sdk.close()
         if sdk2 is not None:
             sdk2.close()
+
+
+# ── #3441: the presence check is EXACT, and has ONE definition ────────────
+# Found by the #3343 review while verifying the #3154 fix: the
+# hosted_backup copy audit was switched to an exact field-name match, but the
+# embedded #522 repair sweep kept the SUBSTRING form
+# (``"is_operator" in str(_row[1])``), so an unrelated indexed property such as
+# ``is_operator_flag`` read as a dropped boolean index. The observable is a
+# BOUNDED NO-OP — none of the sweep's permutation drops can name
+# ``is_operator_flag``, so nothing is dropped wrongly and nothing fails — but it
+# issues 260 permutation DROP attempts per full sweep for nothing (measured).
+# Hence the tests count the WORK at the handle and pin the helper identity.
+
+
+def test_index_catalogue_presence_check_is_exact():
+    """#3441: the shared presence check matches the FIELD NAME, never a
+    substring.
+
+    Both callers act on the answer (one drops indexes, one gates a whole
+    repair sweep) and neither drop can clear a false positive, so the match
+    has to be exact. A stringified field list — the form a substring test is
+    most easily fooled by — is tokenised rather than searched.
+    """
+    from tortoise.index_catalogue import (
+        index_catalogue_has_field,
+        indexed_field_names,
+    )
+
+    def row(label, props, kinds=None):
+        return [label, props, kinds if kinds is not None else {}]
+
+    # A similarly-named property must NOT answer a question about is_operator.
+    assert index_catalogue_has_field(
+        [row("Point", ["id", "is_operator_flag"])], "is_operator") is False
+    assert index_catalogue_has_field(
+        [row("Point", "['id', 'is_operator_flag']")],
+        "is_operator") is False
+    # The real field must match, in the list and in the stringified form.
+    assert index_catalogue_has_field(
+        [row("Point", ["id", "is_operator"])], "is_operator") is True
+    assert index_catalogue_has_field(
+        [row("Point", "['id', 'is_operator']")], "is_operator") is True
+    # ... and when the row carries it only in the per-property KINDS map.
+    assert index_catalogue_has_field(
+        [row("Point", [], {"is_operator": ["RANGE"]})],
+        "is_operator") is True
+    # The label filter is real: a boolean index under another label is found
+    # only by a caller that does not restrict the label.
+    other = [row("Event", ["is_operator"])]
+    assert index_catalogue_has_field(other, "is_operator") is True
+    assert index_catalogue_has_field(
+        other, "is_operator", label="Point") is False
+    # A short or absent row answers "not index-bearing" rather than raising —
+    # the embedded repair sweep wraps its probe in a bare `except Exception`,
+    # so a raise here would silently skip the repair.
+    assert index_catalogue_has_field(
+        [None, [], ["Point"]], "is_operator") is False
+    assert index_catalogue_has_field(None, "is_operator") is False
+    # Tokenisation is order-preserving and de-duplicated across both columns.
+    assert indexed_field_names(
+        row("Point", "['a', 'b']", {"b": [], "c": []})) == ("a", "b", "c")
+
+
+def test_presence_check_has_one_shared_definition():
+    """#3441 acceptance criterion 4: ONE shared presence check, not two copies.
+
+    The substring defect outlived the #3154 fix precisely because the check was
+    restated at each site. Pinning the shared identity is what stops the next
+    edit from re-forking it.
+    """
+    from tortoise import hosted_backup, index_catalogue, projection
+
+    assert (projection.index_catalogue_has_field
+            is index_catalogue.index_catalogue_has_field)
+    assert (hosted_backup.index_catalogue_has_field
+            is index_catalogue.index_catalogue_has_field)
+
+
+def _point_index_field_names(proj) -> list[list[str]]:
+    """The `properties` cell of every Point row in the live index catalogue."""
+    return [
+        [str(f) for f in (r[1] or [])]
+        for r in proj.g.query("CALL db.indexes()").result_set
+        if r and len(r) > 1 and r[0] == "Point"
+    ]
+
+
+def _reopen_with_drop_recording(db_path, monkeypatch):
+    """Open ``db_path`` while counting the DROP INDEX statements it issues.
+
+    The embedded repair sweep runs ONLY on the full-sweep path (a graph whose
+    schema is not current), so its work is observable only while the handle is
+    being used. `_GuardedGraph` is the projection's ONE handle instantiation
+    site (`self.g = _GuardedGraph(...)`), so recording on a subclass records
+    exactly what the sweep asked the engine to do.
+    """
+    from tortoise import projection as projection_mod
+
+    class _DropRecordingGuardedGraph(projection_mod._GuardedGraph):
+        def __init__(self, g, projection):
+            super().__init__(g, projection)
+            self.drop_index_queries: list[str] = []
+
+        def query(self, cypher, params=None, timeout=None):
+            if str(cypher).upper().lstrip().startswith("DROP INDEX"):
+                self.drop_index_queries.append(str(cypher))
+            return super().query(cypher, params=params, timeout=timeout)
+
+    monkeypatch.setattr(
+        projection_mod, "_GuardedGraph", _DropRecordingGuardedGraph)
+    proj = FalkorProjection(db_path)
+    return proj, proj.g.drop_index_queries
+
+
+def _seed_stale_index_graph(db_path, *, similar_name_only: bool):
+    """Seed a graph so the NEXT open takes the full-sweep path.
+
+    A reopened graph whose schema is already current takes the #4465 fast path
+    and never reaches the repair block, so one required RANGE index is dropped
+    to make the schema genuinely not-current. The sweep then runs exactly as it
+    does on a fresh or partially-indexed graph.
+
+    Returns the LIVE catalogue rows (`CALL db.indexes()`) as they were WHILE the
+    seeded index existed — the genuine/substring answer has to be measured on
+    real engine output, not on a hand-built fixture.
+    """
+    p1 = FalkorProjection(db_path)
+    try:
+        p1.g.query("CREATE (:Point {id:'flag', pointKind:'statement', "
+                    "is_operator_flag:1})")
+        # The property name that MERELY CONTAINS `is_operator`. Present in BOTH
+        # cases: it is the false-positive trigger, so the genuine case proves the
+        # healing still happens while it is in the catalogue.
+        p1.g.query("CREATE INDEX ON :Point(is_operator_flag)")
+        if not similar_name_only:
+            # A genuine legacy boolean index (the pre-#522 shape).
+            p1.g.query("CREATE INDEX ON :Point(is_operator)")
+        rows = p1.g.query("CALL db.indexes()").result_set
+        # Force the next open onto the full-sweep path.
+        p1.g.query("DROP INDEX ON :Point(pointKind)")
+    finally:
+        p1.close()
+    return rows
+
+
+@pytest.mark.embedded_only
+def test_embedded_repair_presence_probe_rejects_a_similar_property_name(
+        tmp_path):
+    """#3441 AC2: the presence probe must answer NO for `is_operator_flag` on
+    the REAL catalogue.
+
+    This is the defect itself: on embedded FalkorDBLite `CALL db.indexes()`
+    reports ONE row per label whose `properties` cell is the UNION of that
+    label's indexed fields, so `is_operator_flag` and `is_operator` sit in the
+    same list and a substring test cannot tell them apart. Measured here on
+    engine output rather than on a hand-built row.
+    """
+    from tortoise.index_catalogue import index_catalogue_has_field
+
+    rows = _seed_stale_index_graph(
+        str(tmp_path / "probe_similar.db"), similar_name_only=True)
+
+    point_fields = [r[1] for r in rows if r and r[0] == "Point"]
+    assert any("is_operator_flag" in str(f) for f in point_fields), \
+        f"the fixture did not seed the unrelated index: {point_fields}"
+    assert index_catalogue_has_field(rows, "is_operator", label="Point") \
+        is False, ("#3441: a substring probe reads `is_operator_flag` as "
+                   f"`is_operator` on this catalogue: {point_fields}")
+
+
+@pytest.mark.embedded_only
+def test_embedded_repair_sweep_ignores_a_similar_property_name(
+        tmp_path, monkeypatch):
+    """#3441 AC2: an index on `is_operator_flag` must NOT trigger the repair.
+
+    Before the fix the substring probe fired the sweep and issued 260
+    permutation DROP INDEX attempts (all naming fields that cannot exist, so
+    every one of them a no-op). The unrelated index itself survived either way
+    — it is not one of the sweep's permutation targets — so the WORK is the
+    signal, and the count is asserted at the handle.
+    """
+    db_path = str(tmp_path / "similar_name.db")
+    _seed_stale_index_graph(db_path, similar_name_only=True)
+
+    proj, drops = _reopen_with_drop_recording(db_path, monkeypatch)
+    try:
+        # (a) The sweep did NOT fire: the only DROPs issued are the two #3154
+        #     purge forms, which are unconditional on every full sweep.
+        assert drops == [
+            "DROP INDEX ON :Point(is_operator)",
+            "DROP INDEX ON :Point(is_operator, lastDreamedAt)",
+        ], ("#3441: the embedded repair sweep fired for a similarly-named "
+             f"property: {len(drops)} DROP attempts: {drops[:4]}")
+        # (b) ... and the unrelated index is untouched (AC2).
+        fields = _point_index_field_names(proj)
+        assert any("is_operator_flag" in row for row in fields), \
+            f"the unrelated index was dropped: {fields}"
+        assert not any("is_operator" in row for row in fields), \
+            f"a boolean index is present: {fields}"
+    finally:
+        proj.close()
+
+
+@pytest.mark.embedded_only
+def test_embedded_repair_still_heals_a_genuine_boolean_index(
+        tmp_path, monkeypatch):
+    """#3441 AC3: a genuine `:Point(is_operator)` index is still detected and
+    still healed — the fix narrows the predicate, it must not disable it.
+
+    Two assertions, because they cover different halves of "still triggers":
+
+    1. The shared probe answers TRUE on the REAL catalogue while the genuine
+       index exists (so the decision that leads to the sweep is unchanged).
+    2. After a reopen through the full-sweep path — with an unrelated
+       `is_operator_flag` index ALSO present, the false-positive trigger — no
+       `is_operator` field remains in the catalogue, i.e. the repair happened.
+
+    NOTE the permutation loop itself is not reachable for the genuine form on
+    the pinned engine: the unconditional #3154 purge runs EARLIER in the same
+    sweep and its `DROP INDEX ON :Point(is_operator)` already removes the
+    index (measured — also for a real composite such as
+    `:Point(content, is_operator)`, so no permutation form survives to the
+    repair block). That is pre-existing behaviour, unchanged here; the
+    permutation loop is the belt-and-braces path for an engine where the
+    single-field DROP does not match a composite.
+    """
+    from tortoise.index_catalogue import index_catalogue_has_field
+
+    db_path = str(tmp_path / "genuine.db")
+    rows = _seed_stale_index_graph(db_path, similar_name_only=False)
+
+    # (1) The probe still says YES for the genuine index, on real engine rows.
+    assert index_catalogue_has_field(rows, "is_operator", label="Point") \
+        is True, ("#3441: the exact-match probe stopped detecting a genuine "
+                  f"is_operator index: {[r[1] for r in rows if r[0] == 'Point']}")
+
+    proj, _drops = _reopen_with_drop_recording(db_path, monkeypatch)
+    try:
+        # (2) The stale boolean index is healed on the full-sweep open.
+        fields = _point_index_field_names(proj)
+        assert not any("is_operator" in row for row in fields), \
+            f"the stale boolean index survived the sweep: {fields}"
+        assert any("is_operator_flag" in row for row in fields), \
+            f"the unrelated index was dropped: {fields}"
+        # ... and the data survives the index heal (the sweep is index-only).
+        assert proj.g.query(
+            "MATCH (n:Point) RETURN count(n)").result_set[0][0] == 1
+    finally:
+        proj.close()
 
 
 def _current_uri() -> str:

@@ -73,7 +73,7 @@ backups = ["boto3>=1.34", "cryptography>=42"]
 # nothing extra. Optional on purpose: without it the parity cell reports
 # not-measured instead of failing (fail-closed, never a default number).
 parity = ["pyarrow>=17"]
-test = ["pytest>=8", "pytest-timeout", "pytest-asyncio>=0.23", "pytest-xdist>=3.6", "playwright>=1.40", "pytest-playwright>=0.9", "cryptography>=42"]  # cryptography: hosted E2E JWKS/ES256 session mint (#303, #1460)
+test = ["pytest>=8", "pytest-timeout", "pytest-asyncio>=0.23", "pytest-xdist>=3.6", "playwright>=1.40", "pytest-playwright>=0.9", "cryptography>=42", "markdown-it-py>=4"]  # cryptography: hosted E2E JWKS/ES256 session mint (#303, #1460). markdown-it-py: tests/test_blog_authoring_doc.py imports it directly (a real CommonMark parser); it was only transitive via fastmcp -> rich, so a rich bump could drop the new guard's import (#8379 finding 3).
 
 # Canonical dev/test tooling (#492, #493) — installed via `uv sync --group dev`.
 # The `test` extra above is the CI/live E2E path (pip install -e '.[test]').
@@ -109,6 +109,13 @@ dev = [
     "ruff==0.16.4",  # #1685: pin ruff (CI lint-command + local `uv run ruff`
     # align — the unpinned agent-infra job install was the drift vector).
     "tiktoken>=0.14.0",
+    # #8379 (finding 3): tests/test_blog_authoring_doc.py imports `markdown_it`
+    # directly (a real CommonMark parser, imported at the module level). It was
+    # only transitive via fastmcp -> rich; declared HERE too so the canonical dev
+    # install (`uv sync --extra embeddings --extra parity`, which does NOT
+    # include the `test` extra) cannot lose it to a rich bump — the same
+    # both-paths rule pytest-xdist follows above.
+    "markdown-it-py>=4",
 ]
 
 # #1929 (epic #1891 slice 1 — packaging foundation): the expansion-pack
@@ -155,6 +162,11 @@ tortoise = ["config/routing.yaml", "../tests/sample_transcript.txt",
           # not found". Named exactly (not *.ts) so the behavioural test file is
           # NOT shipped to users.
           "pi-hooks/tortoise-capture.ts",
+          # #2121: the Hermes seam ships as a directory PLUGIN (`tortoise
+          # install hermes` copies plugin.yaml + __init__.py into
+          # <dir>/.hermes/plugins/tortoise-volunteer/), so a wheel without it
+          # fails the install with "shipped Hermes plugin not found".
+          "hermes-plugin/*.py", "hermes-plugin/*.yaml",
           # #2120: the OpenClaw seam is a plugin DIRECTORY — `tortoise install
           # openclaw` copies every file out of the PACKAGE (the entry, the
           # manifest that makes OpenClaw load it, and package.json), so a wheel
@@ -237,6 +249,15 @@ python_version = "3.12"
 # config so the caller's typecheck-command stays a bare `mypy tortoise/`.
 ignore_missing_imports = true
 check_untyped_defs = true
+# The Hermes plugin ships in a HYPHENATED directory: Hermes loads a plugin
+# DIRECTORY by path, so the directory name is the install contract, not an
+# import name. mypy walks `tortoise/` recursively and refuses a package dir
+# whose name is not a valid identifier (`hermes-plugin contains __init__.py
+# but is not a valid Python package name`); the plugin is loaded by the host
+# interpreter and never as `tortoise.<sub>`, so it is not part of the typed
+# package. Excluded at the config layer so the CI `mypy tortoise/` command
+# stays a bare invocation (#2121).
+exclude = ["tortoise/hermes-plugin/"]
 # Baseline (#1503): every error code present in the 406-error first pass is
 # disabled so the full typecheck runs green. Per-code counts + cleanup order
 # are documented in docs/lint-baseline-1503.md.

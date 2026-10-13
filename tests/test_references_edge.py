@@ -160,12 +160,19 @@ def test_sdk_link_source_to_entity():
 # ── backfill idempotency ───────────────────────────────────────────────────
 
 def _run_backfill_on_proj(proj, limit: int = 0) -> dict:
-    """Inline backfill logic (mirrors backfill_references.py) for testability."""
+    """Inline backfill logic (mirrors backfill_references.py) for testability.
+
+    Loop SHAPE only. The D10 ``aboutDocument`` row is deliberately NOT re-typed
+    here: it stopped being a copy of the script the moment the script's target
+    moved to ``:Source`` addressed by ``url``, and re-typing it (it still said
+    ``Document``, the retired label) is what let the script's own query building
+    break unseen. The script's real execution is covered by
+    ``tests/test_backfill_references_5141.py``.
+    """
     about_edges = {
         "aboutSubject": "Subject",
         "aboutObject": "Object",
         "aboutEvent": "Event",
-        "aboutDocument": "Document",
     }
     sources = proj.g.query(
         "MATCH (s:Source) "

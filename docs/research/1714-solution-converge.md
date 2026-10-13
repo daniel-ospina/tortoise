@@ -23,7 +23,7 @@ This research brief is the pre-decision record, and it still describes a **serve
 - The withdrawn keys are **not** registered state keys and must not be added.
 - The non-LLM disclosure survives for **factual accuracy** (a wrong disclosure is a UX bug), **not** for consent integrity — and there is no "persist the approval before the install runs" requirement.
 
-The live capture contract is `tortoise/onboarding/SKILL.md` §5 (the install ask) and §7 (the announcement), rendering from `tortoise/config/capture_disclosure.json`. Read the 403 material below as HISTORY — and if you are about to act on it, stop and read the two sections named above instead.
+The live capture contract is `tortoise/onboarding/SKILL.md` §5 (the install ask) and §8 (the announcement), rendering from `tortoise/config/capture_disclosure.json`. Read the 403 material below as HISTORY — and if you are about to act on it, stop and read the two sections named above instead.
 
 ## Chosen Approach
 

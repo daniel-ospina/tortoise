@@ -41,7 +41,7 @@ test('legacy wizard labels still exist in source (archived-not-deleted)', () => 
   }
 })
 
-test('live wizard renders WIZARD_STEPS (the 4 human steps), not legacy labels', () => {
+test('live wizard renders WIZARD_STEPS (the 5 human steps), not legacy labels', () => {
   assert.ok(src.includes('WIZARD_STEPS.map'), 'live wizard maps WIZARD_STEPS')
   // #2912: the stage label moved from an in-card `.wizard-title` to the page
   // <h1> (the header now names the STAGE, not the org's set-up status). The
@@ -297,15 +297,60 @@ function classifyCopyReads(source) {
   return { rows, flags, shadowed }
 }
 
-const classified = classifyCopyReads(src)
+/**
+ * #4915: the census covers EVERY render module of the application, not just
+ * main.jsx. The per-harness status rows — and the five copy constants only they
+ * read — moved into `harnessStatusCard.jsx`, so a scan that kept reading main.jsx
+ * alone would have LOST coverage of exactly those constants: they would vanish
+ * from `rows`, the census key-set assertion would fail once, and a subsequent
+ * editor could re-pin a surface that no longer included them. Summing the
+ * per-file rows keeps the property ("every imported copy constant is classified
+ * and read") over the app's render surface. Counts ADD across files, so a name
+ * imported by two modules is one row with the sum of its reads — the
+ * duplicate-import check therefore runs per FILE, where "duplicate" means the
+ * same module importing one name twice.
+ */
+function mergeCopyReads(classifieds) {
+  const merged = new Map()
+  const flags = []
+  const shadowed = []
+  for (const one of classifieds) {
+    flags.push(...one.flags)
+    shadowed.push(...one.shadowed)
+    for (const row of one.rows) {
+      const prev = merged.get(row.name)
+      if (!prev) merged.set(row.name, { ...row })
+      else {
+        prev.live += row.live
+        prev.archived += row.archived
+        prev.shadowed = prev.shadowed || row.shadowed
+      }
+    }
+  }
+  return { rows: [...merged.values()], flags, shadowed }
+}
 
-// Hand-pinned census of `name: [live, archived]`, in import order. `archived`
-// reads are behind the LEGACY_WIZARD_ARCHIVED gate; `live` reads are what a user
-// (or a prompt card) actually receives. Reference-only today: the HARNESS_*
-// install/skill/persist family, whose LIVE carriers are the agent PROMPT
-// (`wizardPromptText`: the dashboard never shows `claude mcp add` — it hands the
-// agent "Add Tortoise MCP at <url>") and, for the capture step,
+// The app's render modules, in census order.
+const COPY_SOURCES = ['main.jsx', 'harnessStatusCard.jsx']
+const copyReadsByFile = Object.fromEntries(
+  COPY_SOURCES.map((file) => [file, classifyCopyReads(readFileSync(join(__dirname, file), 'utf8'))]))
+const classified = mergeCopyReads(Object.values(copyReadsByFile))
+
+// Hand-pinned census of `name: [live, archived]`, summed over the app's render
+// modules (#4915 — `main.jsx` + `harnessStatusCard.jsx`), in import order.
+// `archived` reads are behind the LEGACY_WIZARD_ARCHIVED gate; `live` reads are
+// what a user (or a prompt card) actually receives. Reference-only today: the
+// HARNESS_* install/skill/persist family, whose LIVE carriers are the agent
+// PROMPT (`wizardPromptText`: the dashboard never shows `claude mcp add` — it
+// hands the agent "Add Tortoise MCP at <url>") and, for the capture step,
 // `HARNESS_CAPTURE_INSTALL` in the Memory-sources row.
+//
+// #4915 note: the numbers below did NOT move when the per-harness status rows
+// moved out of main.jsx. That is the point of summing across modules — the five
+// constants those rows read went on being read (live) from their new module, and
+// HARNESS_NAMES / HARNESS_ORDER each traded a main.jsx read for a card read. A
+// pin that had stayed main.jsx-only would have gone red here and, once re-pinned,
+// would have certified a surface that no longer included the rows.
 const COPY_READ_CENSUS = Object.freeze({
   CANONICAL_MCP_URL: [2, 0],
   CAPTURE_OPT_IN_LINE: [4, 0],
@@ -342,17 +387,22 @@ test('#3802: every copy constant main.jsx imports is classified live/archived, a
   assert.deepEqual(classified.shadowed, [],
     'a local declarator shadows an imported copy constant — this scan cannot tell its reads from the module\'s, '
     + 'so the census below would certify a value the application never renders')
+  for (const [file, one] of Object.entries(copyReadsByFile)) {
+    const names = one.rows.map((r) => r.name)
+    assert.equal(new Set(names).size, names.length, `${file} imports a copy constant twice`)
+  }
   const got = {}
   for (const row of classified.rows) {
-    assert.ok(!(row.name in got), `duplicate import of ${row.name}`)
+    assert.ok(!(row.name in got), `duplicate row for ${row.name} — mergeCopyReads must key by name`)
     got[row.name] = [row.live, row.archived]
   }
   assert.deepEqual(Object.keys(got).sort(), Object.keys(COPY_READ_CENSUS).sort(),
     'the imported copy-constant surface changed — a new or removed import must be classified, never skipped')
   assert.deepEqual(got, COPY_READ_CENSUS,
-    'the render reachability of main.jsx\'s copy constants changed. A constant that lost its last live read site is '
-    + 'now reference-only — an edit to it reaches no user, and any test asserting shipped behavior on it needs the '
-    + 'linked assertion on the live copy (#3802). A new live read site is a shipped change. Update the pin deliberately.')
+    'the render reachability of the render modules\' copy constants changed. A constant that lost its last live '
+    + 'read site is now reference-only — an edit to it reaches no user, and any test asserting shipped behavior on '
+    + 'it needs the linked assertion on the live copy (#3802). A new live read site is a shipped change. Update '
+    + 'the pin deliberately.')
 })
 
 test('#3802: every imported copy constant is READ somewhere (no constant that only LOOKS wired)', () => {

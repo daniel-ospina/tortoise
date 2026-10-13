@@ -439,6 +439,31 @@ def test_the_degraded_fallback_guard_runs_for_its_own_source():
     )
 
 
+def test_the_cross_surface_grid_guard_runs_for_each_side_of_its_declaration():
+    """#3513 review P1: the grid inventory test asserts BOTH directions of ONE
+    declaration — the JS grid's tile keys ↔ ``tortoise/demand.py`` ↔
+    ``config/connector_manifest.yaml``. It was registered only under
+    ``onboarding``, so the two BACKEND sources (which match no named surface and
+    select the ``core`` fallback) never ran it: a connector added to the manifest
+    with no grid tile and no mapping was green on its own PR and surfaced as an
+    unrelated red in the next dashboard PR (#1349/#7076 class).
+
+    Pinned as BEHAVIOUR, not as a YAML string: every side of the declaration
+    must select the file that asserts it.
+    """
+    for source in (
+        "website/apps/dashboard/src/integrationsGrid.js",
+        "tortoise/demand.py",
+        "config/connector_manifest.yaml",
+    ):
+        sel = _sel([source])
+        assert "test_integrations_grid_inventory.py" in sel["test_files"], (
+            f"{source} selects {sel['surfaces']} but does NOT run the guard that "
+            "asserts the tile declaration it moves (#3513 review P1) — a drift "
+            "introduced on this side of the cross-surface pair would be silent"
+        )
+
+
 def test_every_named_guard_runs_for_its_own_source():
     """The reverse of `test_every_source_pattern_is_selectable`: path -> selected.
 
@@ -901,6 +926,31 @@ def test_the_csp_plan_doc_guard_runs_on_its_plan_doc_too():
     assert "test_csp_plan_doc_consistency.py" in r["test_files"], (
         f"a docs-only edit to {changed} does not run "
         "tests/test_csp_plan_doc_consistency.py, so its doc guard cannot fire (#8334)"
+    )
+
+
+def test_the_blog_authoring_doc_guard_runs_on_its_doc_too():
+    """#8379 (finding 2): the authoring-doc guard's own subject must select it.
+
+    `test_blog_authoring_doc.py` renders `docs/blog-authoring.md` with a real
+    CommonMark parser (markdownlint cannot see an unterminated fence). `docs/` is
+    in NON_PYTHON_PREFIXES and is not itself a SOURCE_PATTERNS pattern, so without
+    the concrete `docs/blog-authoring.md` entry a docs-only edit selects NO surface
+    and the guard never sees the page it guards — the same silent-drop class as the
+    #3524 docs records and the #8334 plan doc above.
+    """
+    root = Path(__file__).resolve().parents[1]
+    changed = "docs/blog-authoring.md"
+    assert (root / changed).exists(), f"guarded docs record is gone: {changed}"
+    r = _sel([changed])
+    assert r["full"] is False
+    assert "onboarding" in r["surfaces"], (
+        f"{changed} selects {r['surfaces']} — the guard is not in tier1, so a "
+        "docs-only edit to the authoring contract runs it nowhere"
+    )
+    assert "test_blog_authoring_doc.py" in r["test_files"], (
+        f"a docs-only edit to {changed} does not run tests/test_blog_authoring_doc.py, "
+        "so its render guard cannot fire on the change it pins (#8379)"
     )
 
 

@@ -458,7 +458,7 @@ The full per-property table (216 rows, with the writer clause and the journal ca
 | `quote` | P | `_POINT_DECLARED_PROPS` | PointAdded.point.quote | declared payload prop |
 | `when` | P | `_POINT_DECLARED_PROPS` | PointAdded.point.when | declared payload prop |
 | `source_turn_id` | P | `_POINT_DECLARED_PROPS` | PointAdded.point.source_turn_id | declared payload prop |
-| `tags` | P | sdk.py create_point `SET n += $props` (raw list); `_POINT_LIST_PROPS` empty | PointAdded.point.tags | #2897 — raw-list half-restore refused on replay (parity gap) |
+| `tags` | P | create_point builds the node from a `CREATE (n:Point {…})` property map; update_point `SET n += $props`; `_upsert_point_props` (`n.tags=$tags`, presence-and-store gated) + pass-2 `_sync_tags` (`projection/entities.py`); `_revise_point` (`n.tags = $tags`, `n.tags = NULL` for a clear, `projection/__init__.py`) | PointAdded.point.tags; PointRevised.tags (the clear rides as an explicit null) | #2897 — CARRIED: the property plus the snapshot-derivable `:Tag`/`TAGGED` half, re-derived in pass 2 from the node's own final value |
 | `span_start` | P | `_POINT_DECLARED_PROPS` (#5007 E4) | PointAdded.point.span_start | verbatim span pointer |
 | `span_end` | P | `_POINT_DECLARED_PROPS` (#5007 E4) | PointAdded.point.span_end | verbatim span pointer |
 | `annotator_bias` | P | `_POINT_DECLARED_PROPS` (#3689); OperatorAnnotated.bias | PointAdded.point.annotator_bias; OperatorAnnotated |  |

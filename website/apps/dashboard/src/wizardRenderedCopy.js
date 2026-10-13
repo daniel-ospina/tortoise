@@ -108,7 +108,14 @@ export const IMPORTED_NAMES = Object.freeze([
   'HARNESS_SKILLS_IN_PROMPT',
   'HARNESS_SKILLS_IN_STEPS',
   'HARNESS_PERSIST',
-  'HARNESS_CAPTURE_INSTALL',
+  // #4915: `HARNESS_CAPTURE_INSTALL` was here. The per-harness status rows (and
+  // with them the one node that rendered it — `<pre className="snippet">`) moved
+  // out of main.jsx into its own module (`harnessStatusCard.jsx`), so this gate —
+  // whose population is "the prose written IN main.jsx" — no longer sees it, and
+  // `importsFromMain` correctly refuses to certify a name main.jsx does not
+  // import. That node's rendered copy is pinned instead by the DOM lane
+  // (`harnessDisclosureDom.test.jsx`), which is the stronger observation: it
+  // renders the shipped component and reads the text out of a real document.
 ])
 
 // Module-scope literals main.jsx declares. Not imported, so the probe cannot

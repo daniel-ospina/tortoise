@@ -138,6 +138,14 @@ status above applied. Where the body asserts a gap that has since closed, this t
 > (`_session_capture_event_id`, which uses `hashlib.sha256` **directly** and so falls OUTSIDE the
 > `ids.content_hash` golden-vector guard — noted as a coverage gap in that guard); and the revision-c
 > paragraph's two inaccurate claims were corrected.
+>
+> **Post-landing status (2026-10-12) — `tags` is no longer `replay_source="none"`.** #2897 landed:
+> the tags replay the revision-c paragraph filed is now IMPLEMENTED (property + the snapshot-derivable
+> `:Tag`/`TAGGED` half, one `_sync_tags` routine shared by the live writers and the replay fold).
+> The `tags` declaration in D1's block below is therefore marked ⚠️ SUPERSEDED in place rather than
+> rewritten: it is the record of what this design PROPOSED, and the review cycle's finding — that the
+> `none` bucket's "no journal event exists" justification was **false for `tags`** — is what closed it.
+> `contract.py` itself has still NOT landed, so nothing in this document is a live contract.
 
 ---
 
@@ -303,10 +311,15 @@ POINT_PROPS: dict[str, Prop] = {
     #   none    — NOT restored by replay → replayable=False. TWO distinct reasons live here,
     #             and they are NOT the same thing (v5 review cycle 7):
     #               lastDreamedAt — UNJOURNALED: no event carries it (#2884)
-    #               tags          — JOURNALED but IGNORED: the PointAdded snapshot DOES carry it
+    #               tags          — JOURNALED but IGNORED (⚠️ CLOSED 2026-10-12 by #2897 — see the
+    #                               post-landing note at the top of this document; `tags` declares
+    #                               `replay_source="journal"` now and is carried by its own clause
+    #                               plus the pass-2 `:Tag`/`TAGGED` sync). The historical reason
+    #                               this bucket mattered: the PointAdded snapshot DOES carry it
     #                               (only embedding + content_hash are stripped, sdk.py:2319-2325)
-    #                               but the replay writer never writes it → #2897. Do not
-    #                               describe this bucket as "unjournaled"; tags disproves it.
+    #                               while the replay writer never wrote it. Do not describe this
+    #                               bucket as "unjournaled" — tags disproved that, which is why
+    #                               `none` is a bucket distinct from `derived`.
     # EVERY entry MUST set it: D7's durability test is defined as the union of journal +
     # derived, so an unset field silently falls OUTSIDE the very test it needs to pass.
     #
@@ -318,7 +331,15 @@ POINT_PROPS: dict[str, Prop] = {
     "search_keys":    Prop(str, flatten=list,  source="payload", replay_source="journal", replayable=True),
     "speaker":        Prop(str,                source="capture", replay_source="journal", replayable=True),
     "source_turn_id": Prop(str | int,          source="payload", replay_source="journal", replayable=True),  # type pending OD1
-    # The one explicit EXEMPTION — declared so the omission is visible, not accidental (D2):
+    # The one explicit EXEMPTION in THIS contract — declared so the omission is visible,
+    # not accidental (D2).
+    # ⚠️ SUPERSEDED 2026-10-12 — #2897 LANDED and `tags` is CARRIED: `replay_source="journal"`,
+    # `replayable=True`. The fold writes `n.tags` presence-and-store gated (`_upsert_point_props`,
+    # `_revise_point`) and re-derives the `:Tag`/`TAGGED` half in pass 2 from the node's own
+    # final value, through the one `_sync_tags` routine the live writers also call. Kept
+    # verbatim because it is what THIS design proposed and what its review cycle found — but
+    # nothing downstream should read the two lines below as the current contract. The row in
+    # `docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md` was updated.
     "tags":           Prop(list, source="capture", replay_source="none", replayable=False,
                            owned_by="_sync_tags"),  # raw list + :Tag/TAGGED edges; edge replay out of scope
     # derived — the replay writer RECOMPUTES these; it never copies them from the payload.
@@ -524,13 +545,17 @@ A naive `SET n += $extra` is **wrong** and would crash. Required mechanics:
      `tests/test_sdk.py:726` asserts `["tags"] == ["alpha"]`). D1 now declares it explicitly, so it is
      no longer "undeclared" — the earlier label described the state that D1 fixes. D2's rule:
      `tags` is owned by its own `_sync_tags` path, is **not** passed through
-     the generic filter, and **TAGGED-edge replay is out of scope of WS-A**. That last point is a
-     **silent data-loss deferral, not a no-op** — replay currently handles `tags` nowhere
-     (`rg tags tortoise/projection/` → zero hits), so every rebuild drops the `n.tags` property *and*
-     every `TAGGED` edge. Unlike #2884 this is **journaled-but-ignored**, not unjournaled. Filed as
-     **#2897** with #2795; D7 must assert it is **reported**, not silently dropped.
-     `Prop(list, source="capture", replay_source="none", replayable=False, owned_by="_sync_tags")` so the omission is
-     **intentional and visible** rather than an accident of the filter.
+     the generic filter, and **TAGGED-edge replay is out of scope of WS-A**.
+     ⚠️ **CLOSED 2026-10-12 — #2897 LANDED; the rest of this paragraph describes the GAP, not the
+     current state.** The gap it recorded: replay handled `tags` nowhere
+     (`rg tags tortoise/projection/` → zero hits), so every rebuild dropped the `n.tags` property *and*
+     every `TAGGED` edge — a **journaled-but-ignored** silent data loss, not a no-op, and not
+     unjournaled. Filed as **#2897** with #2795, with D7 asserting it must be **reported** rather
+     than silently dropped. It is now CARRIED: the property by `_upsert_point_props` /
+     `_revise_point`, the edges by the pass-2 `:Tag`/`TAGGED` sync, through the one `_sync_tags`
+     routine the live writers also call. The superseded declaration
+     `Prop(list, source="capture", replay_source="none", replayable=False, owned_by="_sync_tags")`
+     is marked ⚠️ SUPERSEDED in place in D1's block above.
    - Otherwise **an undeclared list is denied** — never written raw.
 2. **Explicit `_POINT_HANDLED` skip-set** — every fixed SET-clause key, the MERGE key `id`
    (`MERGE (n:Point {id:$id})`, `entities.py:226` — *not* a SET clause, so not covered by item 1),
@@ -650,7 +675,7 @@ A test must pin that the wipe statement **remains** the unconditional `MATCH (n)
 |---|---|
 | prop durability | every prop the replay writer is **responsible for** survives `rebuild_all` — i.e. every `replay_source="journal"` prop **plus** every `replay_source="derived"` one — including an operator point and an M2 point (the D2 skip-set cases) and `content_hash` (derived). `replay_source="none"` EP state (`lastDreamedAt`, `posterior_alpha/beta`) is **excluded** and tracked separately (#2884) |
 | **`replay_source` completeness** | **every** entry in `POINT_PROPS` declares `replay_source` (no default) — an unset field would silently fall outside the durability row above. Fails loudly on an omission. The D1 block parses as valid Python with **22 distinct keys and no duplicates** (v5 cycle 8) |
-| **`replay_source="none"` is REPORTED, not silent** | every prop in the `none` bucket is either (a) named in a filed issue, or (b) reported by `rebuild_all` (a `dropped_props` counter / WARN naming the key). Today: `lastDreamedAt` + EP state → **#2884**; `tags` → **#2897**. #2795's 4th indicator requires this — a prop that genuinely cannot be replayed must be *reported*, not dropped silently |
+| **`replay_source="none"` is REPORTED, not silent** | every prop in the `none` bucket is either (a) named in a filed issue, or (b) reported by `rebuild_all` (a `dropped_props` counter / WARN naming the key). Today: `lastDreamedAt` + EP state → **#2884**; `tags` → **#2897** — now CLOSED, carried by its own clause plus the pass-2 `:Tag`/`TAGGED` sync. #2795's 4th indicator requires this — a prop that genuinely cannot be replayed must be *reported*, not dropped silently |
 | **hash-function golden vector** | `ids.content_hash("<fixture>") == "<pinned digest>"` — pins the derivation (D1c #2). Guards the write-time id-minting invariant: a change here changes `pt_<sha>`/`ev_<sha>` ids and makes `rebuild_all` a migration, not a repair |
 | **`CONTENT_HASH_VERSION`** | the constant exists in `contract.py`, is asserted non-empty, and any bump to it must be accompanied by a migration note — the version is the marker that tells an operator a rebuild is unsafe |
 | **derived-props are recomputed, not copied** | after `rebuild_all`, `content_hash` is **non-NULL** on every non-operator point — this is the specific assertion v1–v4 lacked (they excluded `content_hash` from passthrough without adding the additive recompute) |
@@ -672,7 +697,7 @@ A test must pin that the wipe statement **remains** the unconditional `MATCH (n)
 
 | Issue | How | Status |
 |---|---|---|
-| #2795 rebuild drops live-only props | D2 open-set passthrough (LANDED #2958) + D1 registry (unbuilt) | **passthrough landed; the typed registry is not.** Reporting half (indicator 4) landed. `tags` (**#2897**) remains genuinely unreplayed |
+| #2795 rebuild drops live-only props | D2 open-set passthrough (LANDED #2958) + D1 registry (unbuilt) | **passthrough landed; the typed registry is not.** Reporting half (indicator 4) landed. `tags` (**#2897**) was genuinely unreplayed and is CARRIED now (CLOSED 2026-10-12) |
 | #2813 capture drops E3 fields; eval lane diverges | D6 landed (#2813); D3 (eval writer) and D1/D7 unbuilt | **product half LANDED**; the eval-writer consolidation (D3) is still open |
 | #2814 rebuild wipes config | D5 — snapshot+restore, `config_reset` marker, guard preserved | **LANDED** — and exceeded by the durable sidecar (#2943) |
 | #2788 (event state nothing reads) | out of scope — same class, separate fix | — |

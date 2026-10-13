@@ -1458,7 +1458,21 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # Both raise before the write and surface as a structured error through
     # `_safe`, so the MCP Source routes stay closed without a denylist that
     # also closes the Point route.
-    "previousValidTo", "previousContentHash"})
+    "previousValidTo", "previousContentHash",
+    # #6151 review round 6 P1: the belief quartet + the #2199 birth marker are
+    # server-managed on `tortoise_create_point` too. `tortoise_create_point`
+    # does `merged = dict(props or {})` and splats it into
+    # `sdk.create_point(**merged)`, and `sdk._sanitize_props` now refuses the
+    # quartet UNGATED — this boundary entry refuses it BEFORE the write is
+    # attempted (the fail-closed check IN FRONT of the backstop), matching the
+    # `embedding_*`/`rawState` pattern above. `credibility` is deliberately NOT
+    # here: it is a documented `create_point`/`mitigate_operator` input and the
+    # SDK validates + accounts it. Harm the quartet closes at birth:
+    # `ep_alpha=10.0` on a `baseline_set=True` row persisted a FROZEN prior a
+    # real T1 source could never move, and `baseline_source='system-default'`
+    # forged the #2199 provision.
+    "ep_alpha", "ep_beta", "baseline_set", "baseline_source",
+    "baseline_system_default"})
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
@@ -3712,7 +3726,7 @@ _ONBOARDING_STATE_TTL = 60.0
 # #3916: the two documented decide protocols file the SAME node (the option
 # set) under two different labels, so the `decide-completed` observation must
 # accept BOTH or it reports "not decided" for a decision that WAS recorded:
-#   * `tortoise/onboarding/SKILL.md` §6 — the generic MCP-tool protocol — files
+#   * `tortoise/onboarding/SKILL.md` §7 — the generic MCP-tool protocol — files
 #     one `decision` point per option; that is also the kind
 #     `tortoise_file_decision` commits the chosen option as (sdk.file_decision),
 #     and the label the #3784 observation originally keyed on;
@@ -4020,7 +4034,7 @@ def _maybe_onboarding_auto_complete(*,
       ``tortoise_file_decision`` succeeded, or ``tortoise_create_point``
       PERSISTED a pointKind in ``DECISION_SHAPED_POINT_KINDS`` (``decision``
       or ``option``). BOTH documented decide protocols are observed: the
-      generic MCP-tool protocol (``tortoise/onboarding/SKILL.md`` §6) files
+      generic MCP-tool protocol (``tortoise/onboarding/SKILL.md`` §7) files
       one ``decision`` point per option, and the ``tortoise-decide`` skill
       files each option as ``option`` — the same node under two labels
       (#3916). A plain point write (e.g. the setup prompt's ``statement``)

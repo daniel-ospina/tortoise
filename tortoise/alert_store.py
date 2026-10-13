@@ -59,6 +59,16 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable  # noqa: UP035
 
+# `KIND_OWNERS` and the four writer names are re-exported (callers and the
+# cross-language contract test import them from HERE), so the writer names carry
+# the re-export noqa rather than being deleted as unused.
+from tortoise.incident_kinds import (
+    KIND_OWNERS,
+    WRITER_APP,  # noqa: F401 — re-exported
+    WRITER_DRIVER,  # noqa: F401 — re-exported
+    WRITER_UNSPECIFIED,
+    WRITER_WATCHER,  # noqa: F401 — re-exported
+)
 from tortoise.security import redact_for_publication
 
 logger = logging.getLogger(__name__)
@@ -93,44 +103,15 @@ IssueOpen = Callable[[int], bool]           # (issue number) -> still open?
 # one kind ("cannot reach R2" vs "can reach it but the key cannot ListObjects"),
 # so the watcher cannot distinguish them and must not clear the driver's.
 #
+# ⛔ The MAP is declared ONCE, in `tortoise/incident_kinds.py` (#4780): each
+# kind's `KindSpec.owner`. It is imported above (not restated) so existing
+# importers and the cross-language contract test keep their names, and so
+# "this kind's resolution authority" has one home to edit. A kind the registry
+# declares with `WRITER_UNSPECIFIED` is therefore *deliberately* unspecified,
+# not merely absent from the map.
+#
 # Mirrored in `.github/scripts/registry-cron.sh` (`kind_owner`); the two MUST
 # agree — `test_kind_owner_contract_with_driver` pins them.
-WRITER_DRIVER = "driver"
-WRITER_WATCHER = "watcher"
-WRITER_APP = "app"
-WRITER_UNSPECIFIED = "unspecified"
-
-KIND_OWNERS: dict[str, str] = {
-    # driver: its own R2 preflight + storage_error + a measured pool.
-    "R2_DOWN": WRITER_DRIVER,
-    "APP_DOWN": WRITER_DRIVER,
-    "WATCHER_DOWN": WRITER_DRIVER,
-    "SWEEP_CONFIG_ERROR": WRITER_DRIVER,
-    "SWEEP_OFF_STALE": WRITER_DRIVER,
-    "SWEEP_NO_COVERAGE": WRITER_DRIVER,
-    "LIVENESS_NO_WORK": WRITER_DRIVER,
-    # #4994: the POOLED pool-stale incident — ONE driver-owned, subject-less
-    # incident naming the N tenants whose default archive the driver's
-    # app-independent direct-R2 leg measured as stale. The per-tenant residual
-    # stays on `STALE` (watcher-owned, below): the watcher resolves it per ORG
-    # in-process, while the driver has no per-org probe, so a per-tenant
-    # incident filed by the driver could never be cleared by its own writer.
-    "POOL_STALE": WRITER_DRIVER,
-    # #4612: the ride-along legs' OWN success is the recovery evidence — the
-    # driver is the only surface that invokes them. Driver-only by construction,
-    # so an explicit entry (not "unspecified") stops any future surface from
-    # clearing them on evidence its probes never covered.
-    "PURGE_FAILED": WRITER_DRIVER,
-    "RECONCILE_FAILED": WRITER_DRIVER,
-    # watcher: archive/stamp freshness + the driver heartbeat, read in-process.
-    "STALE": WRITER_WATCHER,
-    "NEVER_BACKED_UP": WRITER_WATCHER,
-    "METADATA_LOST": WRITER_WATCHER,
-    "BACKUP_SET_MISSING": WRITER_WATCHER,
-    "DRIVER_DOWN": WRITER_WATCHER,
-    # app: the drill resolves on its own success signal.
-    "RESTORE_DRILL_FAILED": WRITER_APP,
-}
 
 
 def kind_owner(kind: str) -> str:
@@ -139,6 +120,10 @@ def kind_owner(kind: str) -> str:
     Unlisted kinds return ``WRITER_UNSPECIFIED`` — anyone may clear them, which
     preserves the pre-#3127 behaviour where authority was never contested
     (``SIZE_GUARD_ABORT``, ``DATA_LOSS_CANDIDATE``, ``abuse_suspended``, ...).
+
+    #4780: ``KIND_OWNERS`` is derived from the incident-kind registry, so a kind
+    the registry declares with ``WRITER_UNSPECIFIED`` is *deliberately*
+    unspecified rather than merely absent.
     """
     return KIND_OWNERS.get(kind, WRITER_UNSPECIFIED)
 
