@@ -105,7 +105,16 @@ issues = [it for it in raw if "pull_request" not in it]
 # Partial sweep -> refuse (2). The floor is min(before, after): a NEW issue opening mid-sweep
 # or one closing cannot make a complete enumeration look short, but a page cap can.
 floor = min((int(x) for x in (exp_before, exp_after) if x.isdigit()), default=None)
-if floor is not None and len(issues) < floor:
+# ⛔ An UNUSABLE total is an UNUSABLE surface, not a licence to skip the guard. The search endpoint
+# has its own, much stricter rate limit than the REST surface that produced the enumeration, so it
+# can 403 while the pagination succeeds — and the old `floor is not None` test then printed a
+# truncated sweep as a complete universe and exited 0, the exact fail-open the floor exists to
+# prevent. The header's contract is exit 2 when a surface cannot be queried (#8469 review P2).
+if floor is None:
+    print("merged-not-closed: the search surface could not be queried, so the sweep cannot "
+          "be shown to be complete — refusing (exit 2)", file=sys.stderr)
+    sys.exit(2)
+if len(issues) < floor:
     print(f"merged-not-closed: enumerated {len(issues)} of {floor} open issue(s) — the "
           f"sweep is PARTIAL; refusing to present it as the whole universe", file=sys.stderr)
     sys.exit(2)

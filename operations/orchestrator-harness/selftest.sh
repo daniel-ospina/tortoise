@@ -158,6 +158,47 @@ PY
   cands="$(tr '\n' ' ' < "$RL/candidates.txt")"
   case "$cands" in *10*20*30*) rc=0;; *) rc=1;; esac
   ck "shipped refresh loop: the pre-flighted CLEAN candidates reach the backlog" $rc
+
+  # ── the no-verdict arm must not starve the entries behind it, and must be bounded (#8469
+  # review P2). Counting every entry against LIMIT let a few persistently non-answering entries
+  # at the head re-spend the whole pass, so the CLEAN entries behind them were never reached.
+  RL2="$TMP/refresh2"; mkdir -p "$RL2/fakesc/.venv/bin"
+  printf '10\n20\n30\n40\n' > "$RL2/.pool"
+  : > "$RL2/checked.txt"; : > "$RL2/candidates.txt"; : > "$RL2/dispatched.txt"
+  cat > "$RL2/fakesc/.venv/bin/python" <<'PY'
+#!/bin/bash
+# 10 and 20 ERROR (no VERDICT line); 30 and 40 are CLEAN. Argv is
+# `collision_preflight.py <N> --repo .`, so the issue number is $2.
+case "$2" in
+  10|20) echo 'boom: TypeError' >&2; exit 1;;
+  *[!0-9]*|"") exit 3;;
+esac
+echo 'VERDICT: CLEAN'
+PY
+  chmod +x "$RL2/fakesc/.venv/bin/python"
+  O="$RL2" LIMIT=2 SC="$RL2/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/refresh2.out" 2>&1
+  c2="$(tr '\n' ' ' < "$RL2/checked.txt")"
+  case "$c2" in *30*40*) rc=0;; *) rc=1;; esac
+  ck "shipped refresh loop: a non-verdict head does not starve the CLEAN entries behind it" $rc
+  case "$c2" in *10*|*20*) rc=1;; *) rc=0;; esac
+  ck "shipped refresh loop: a failed pre-flight is still not blacklisted on attempt 1" $rc
+
+  # A permanently non-answering entry must eventually leave the candidate set: after RETRY_MAX
+  # consecutive attempts it is marked checked, so the cursor advances past it.
+  RL3="$TMP/refresh3"; mkdir -p "$RL3/fakesc/.venv/bin"
+  printf '10\n' > "$RL3/.pool"
+  : > "$RL3/checked.txt"; : > "$RL3/candidates.txt"; : > "$RL3/dispatched.txt"
+  cat > "$RL3/fakesc/.venv/bin/python" <<'PY'
+#!/bin/bash
+case "$2" in *[!0-9]*|"") exit 3;; esac
+echo 'boom: no verdict' >&2; exit 1
+PY
+  chmod +x "$RL3/fakesc/.venv/bin/python"
+  for _pass in 1 2 3; do
+    O="$RL3" LIMIT=2 RETRY_MAX=3 SC="$RL3/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/refresh3.out" 2>&1
+  done
+  if grep -q 'marked checked after 3 attempts' "$TMP/refresh3.out" && [ "$(tr '\n' ' ' < "$RL3/checked.txt")" = "10 " ]; then rc=0; else rc=1; fi
+  ck "shipped refresh loop: a persistently non-verdict entry is retried then bounded (RETRY_MAX)" $rc
 fi
 
 # ── 6) install.sh renders correctly, including values sed would mangle ───────────

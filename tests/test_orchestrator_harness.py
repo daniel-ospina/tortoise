@@ -26,6 +26,16 @@ Findings covered (all reproduced by the reviewer at the pre-fix head):
   emitted NO verdict, blacklisting it forever (``checked.txt=63`` vs
   ``candidates.txt=9`` live). Only a real ``CLEAN``/``COLLISION`` marks it now;
   the no-verdict arm must leave it for the next pass.
+* The no-verdict arm must ALSO be bounded and must not consume the pass budget:
+  counting every entry against ``LIMIT`` let a few persistently non-answering
+  entries at the pool head re-spend the whole pass every time, starving the
+  entries behind them so the backlog could never refill. The budget counts
+  ANSWERED candidates only, and ``RETRY_MAX`` bounds the retries so a
+  permanently failing head entry eventually leaves the candidate set.
+* ``merged-not-closed.sh``'s PARTIAL guard was skipped when the ``search``
+  surface could not be queried: an unusable total left ``floor`` as ``None`` and
+  a truncated sweep printed as a complete universe with exit 0. An unusable
+  total is now an unusable surface (exit 2).
 * ``orch-loop.sh``'s P0 merge-priority override (BP0, default-ON
   ``P0_BYPASS_MERGE_PRIORITY=1``) clears only the merge-priority gate when a
   ``P0-blocker`` is at the head of the backlog. A grep for its text stayed green
@@ -131,6 +141,11 @@ if args[:2] == ["api", "--paginate"]:
     sys.exit(0)
 
 if "search/issues" in path:
+    if cfg.get("search_fail"):
+        # The search surface has a much stricter rate limit than the REST enumeration, so it
+        # can fail while `api --paginate` succeeds. Models the fail-open #8469 review P2.
+        sys.stderr.write("gh stub: search surface unavailable (HTTP 403)\n")
+        sys.exit(1)
     # The search surface excludes PRs, exactly like `is:issue`.
     print(TOTAL - len(PRS)); sys.exit(0)
 
@@ -218,6 +233,23 @@ class MergedNotClosedEnumeration(unittest.TestCase):
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertNotIn(f"of {TOTAL} open issue(s)", p.stdout)
             self.assertIn(f"of {EXPECTED_UNIVERSE} open issue(s)", p.stdout)
+
+    def test_an_unusable_search_total_is_refused_not_treated_as_complete(self):
+        """A search surface that cannot be queried must not disable the partial guard.
+
+        `search/issues` has its own, much stricter rate limit than the REST enumeration, so it
+        can 403 while `api --paginate` succeeds. Pre-fix, both totals came back empty, `floor`
+        stayed `None`, the `floor is not None` test skipped the guard, and a truncated sweep was
+        printed as a complete universe with exit 0 — the fail-open the guard exists to prevent
+        (#8469 review P2). An unusable total is an unusable surface: refuse.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            stub = _Stub(Path(td), truncate_pages=2, search_fail=True)
+            p = stub.run("--label", "P0-blocker")
+            self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+            self.assertIn("search surface could not be queried", p.stderr)
+            # It must not present the 200-row partial sweep as an answer.
+            self.assertNotIn("of 200 open issue(s)", p.stdout)
 
 
 class MergedNotClosedCli(unittest.TestCase):
@@ -431,6 +463,92 @@ class RefreshPoolContract(unittest.TestCase):
             self.assertIn("20", checked, "the later CLEAN candidate was not queued")
             self.assertIn("20", candidates)
             self.assertIn("?#10 no verdict", p.stdout + p.stderr)
+
+    def _drive_loop(self, tmp: Path, pool: str, stub_body: str, limit: str = "3",
+                    runs: int = 1, retry_max: str | None = None):
+        """Extract the shipped refresh loop and drive it against a stub pre-flight.
+
+        Returns ``(procs, states)`` where ``states`` snapshots
+        ``(checked, candidates)`` after EACH run — the retry counter persists in
+        ``$O/state``, so a multi-run test must observe the intermediate passes.
+        """
+        loop = re.search(r'^n=0\n.*?^done < "\$O/\.pool"\n', REFRESH.read_text(),
+                         re.S | re.M)
+        self.assertIsNotNone(loop, "the refresh loop body moved")
+        rl = tmp / "rl"
+        (rl / "fakesc" / ".venv" / "bin").mkdir(parents=True)
+        fake = rl / "fakesc" / ".venv" / "bin" / "python"
+        fake.write_text(stub_body)
+        fake.chmod(0o755)
+        (rl / ".pool").write_text(pool)
+        for name in ("checked.txt", "candidates.txt", "dispatched.txt"):
+            (rl / name).write_text("")
+        loop_script = tmp / "loop.sh"
+        loop_script.write_text(loop.group(0))
+        env = dict(os.environ)
+        env.update(O=str(rl), LIMIT=limit, SC=str(rl / "fakesc"))
+        if retry_max is not None:
+            env["RETRY_MAX"] = retry_max
+        procs, states = [], []
+        for _ in range(runs):
+            procs.append(subprocess.run(["bash", str(loop_script)], capture_output=True,
+                                        text=True, cwd=tmp, env=env))
+            states.append(((rl / "checked.txt").read_text().split(),
+                           (rl / "candidates.txt").read_text().split()))
+        return procs, states
+
+    def test_a_non_verdict_head_does_not_starve_the_entries_behind_it(self):
+        """The pass budget counts ANSWERED candidates, not entries walked.
+
+        Pre-fix, ``n`` incremented for every entry examined, so a few persistently
+        non-answering entries at the pool head spent the whole ``LIMIT`` and the CLEAN
+        entries behind them were never reached — ``candidates.txt`` never refilled and
+        so the backlog could never refill (#8469 review P2). The failed entries must
+        stay unchecked (a transient failure is not a verdict) while the CLEAN entries
+        behind them are queued in the SAME pass.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            stub = ("#!/bin/bash\n"
+                    "case \"$2\" in\n"
+                    "  10|20) echo 'boom: TypeError' >&2; exit 1;;\n"
+                    "  *[!0-9]*|\"\") exit 3;;\n"
+                    "esac\n"
+                    "echo 'VERDICT: CLEAN'\n")
+            procs, states = self._drive_loop(
+                Path(td), "10\n20\n30\n40\n", stub, limit="2")
+            self.assertEqual([p.returncode for p in procs], [0])
+            checked, candidates = states[-1]
+            self.assertEqual(checked, ["30", "40"],
+                             "the CLEAN entries behind a non-verdict head were starved")
+            self.assertEqual(candidates, ["30", "40"])
+            self.assertNotIn("10", checked)
+            self.assertNotIn("20", checked)
+
+    def test_a_persistently_non_verdict_entry_is_retried_then_bounded(self):
+        """A bounded retry eventually leaves the candidate set (the cursor must advance).
+
+        Pre-fix there was no bound at all: a pre-flight that never answered kept the same
+        entry at the head of every pass, so the entries behind it were never examined and
+        the backlog could never refill (#8469 review P2). After ``RETRY_MAX`` consecutive
+        attempts the entry is marked checked — bounded retries, not permanent blacklisting
+        on the first transient failure.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            stub = ("#!/bin/bash\n"
+                    "case \"$2\" in *[!0-9]*|\"\") exit 3;; esac\n"
+                    "echo 'boom: no verdict' >&2; exit 1\n")
+            procs, states = self._drive_loop(
+                Path(td), "10\n", stub, limit="2", runs=3, retry_max="3")
+            self.assertEqual([p.returncode for p in procs], [0, 0, 0])
+            self.assertEqual(states[0][0], [],
+                             "an unanswerable entry was blacklisted on attempt 1")
+            self.assertEqual(states[1][0], [],
+                             "blacklisted before RETRY_MAX attempts")
+            self.assertEqual(states[2][0], ["10"],
+                             "the retry bound never advanced the cursor")
+            self.assertEqual(states[2][1], [])
+            self.assertIn("marked checked after 3 attempts",
+                          procs[-1].stdout + procs[-1].stderr)
 
 
 class MergePriorityOverride(unittest.TestCase):
