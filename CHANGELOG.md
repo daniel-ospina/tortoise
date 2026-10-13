@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### A completed connector OAuth now leaves the connector row it promised (#4685)
+
+`POST /v1/connectors/{source_type}/auth` returned an authorize URL whose
+completion created **no** `connectors` row: the GitHub callback it shares with
+onboarding read only `org_id`/`org`/`created_at` from its CSRF state and stored
+the token on the org, so `GET /v1/connectors` stayed empty after a flow that
+had already claimed otherwise.
+
+- **One connector per org + source; a repeat rotates it.** The completed
+  connector flow creates the row (`source_type: "github"`, credential in the
+  `{access_token, token_type}` object the `connectors` column declares,
+  encrypted) when the org has none, and otherwise rotates that row's
+  `credential_enc` **in place** — `idx_connectors_org_source` is UNIQUE on
+  `(org_id, source_type)`, so a per-attempt connector is not representable. The
+  row's `config` (the repo scope) survives a rotation.
+- **Onboarding is unchanged.** `POST /v1/onboarding/github/connect` keeps its
+  contract — token on the org plus the first index — and writes no connector
+  row. The row is the *connector* flow's promise; the two entry points differ
+  only by the CSRF state they mint.
+- **Self-host is unchanged.** There is no connector store there (every
+  `/v1/connectors` sibling answers 501), so the completion writes no row.
+
 ### `init --json` `auth_header` is a template, not a ready-to-use value (#5109)
 
 `tortoise init --json` reports `mcp.auth_header`. It used to be a ready-to-send

@@ -72,10 +72,22 @@
  * by the edge, so if Cloudflare's injection format changes, this policy becomes
  * a blanket third-party-script allowance with no repo change and no failing test.
  *
- * The beacon reports to `https://cloudflareinsights.com/cdn-cgi/rum`, hence the
- * `connect-src` entry — which has no hash mechanism at all. Every policy below
- * names both, and `securityHeaders.test.js` fails if one does not, because the
- * failure mode is silent (analytics lost, plus a console error on a live page).
+ * The beacon's RUM payload does NOT go to that origin — measured, #4706.
+ * `https://cloudflareinsights.com/cdn-cgi/rum` belongs to the MANUAL embed path
+ * (a snippet whose `data-cf-beacon` has no `version`); under the zone's
+ * AUTOMATIC injection the tag carries `version`, and the beacon POSTs to
+ * `<page origin>/cdn-cgi/rum`, which `connect-src 'self'` already admits. Read
+ * out of the shipped beacon itself (both `send` sites fall back to the relative
+ * `/cdn-cgi/rum?…` whenever `window.__cfBeacon.version` is set — the injected
+ * tag always sets it), and confirmed in a real browser on all eight deployed
+ * surfaces: every RUM POST went to `https://<host>/cdn-cgi/rum` (HTTP 204) and
+ * NOT ONE request went to `cloudflareinsights.com`. Cloudflare's own FAQ says
+ * the same — "For automatic injection, this will be the same domain, so ensure
+ * your `connect-src` includes `'self'`." So every policy below names the SCRIPT
+ * origin and NO third-party RUM origin, and `securityHeaders.test.js` reddens on
+ * either drift: a dropped script origin blocks the tag (silent analytics loss
+ * plus a console error on a live page), and a RE-ADDED RUM origin is a durable
+ * third-party POST destination for anything already executing on these pages.
  *
  * The guard `src/securityHeaders.test.js` asserts each constant is byte-identical
  * to its `_headers` counterpart, so the duplication above cannot drift.
@@ -104,7 +116,7 @@ export const RELAXED_CSP = csp(
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
-  "connect-src 'self' https://cloudflareinsights.com https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com",
+  "connect-src 'self' https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com",
   "frame-src https://challenges.cloudflare.com",
   "object-src 'none'",
   "base-uri 'none'",
@@ -119,7 +131,7 @@ export const STRICT_CSP = csp(
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
-  "connect-src 'self' https://cloudflareinsights.com",
+  "connect-src 'self'",
   "object-src 'none'",
   "base-uri 'none'",
   "frame-ancestors 'none'",
@@ -133,7 +145,7 @@ export const ADMIN_CSP = csp(
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
-  "connect-src 'self' https://cloudflareinsights.com https://*.supabase.co wss://*.supabase.co",
+  "connect-src 'self' https://*.supabase.co wss://*.supabase.co",
   "object-src 'none'",
   "base-uri 'none'",
   "frame-ancestors 'none'",
@@ -157,7 +169,7 @@ export function strictCspWithNonce(nonce: string): string {
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
-    "connect-src 'self' https://cloudflareinsights.com",
+    "connect-src 'self'",
     "object-src 'none'",
     "base-uri 'none'",
     "frame-ancestors 'none'",

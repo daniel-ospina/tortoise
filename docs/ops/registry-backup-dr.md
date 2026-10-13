@@ -660,6 +660,79 @@ warning ahead of it.
 | BILLING_NOTIFY_REFUSED | #4456: a Stripe billing notification was **dropped** — the #3498 offload seam REFUSED the submission (the telemetry pool's backlog was full, or a queued submission was cancelled before any worker ran it). The `WebhookEvent` idempotency marker commits **before** the notification, so Stripe's retry sees `is_first=False` and the notification is lost **permanently**: the org is never told its plan changed. Subject is **PLATFORM-SCOPED** (`""`, stored as `_`) by the #4456 plan — one Resend account serves every team AND the shared telemetry pool makes the refusal cross-tenant, so a per-org key would file N issues for one outage; the affected org travels in the detail, a fixed, message-free vocabulary — `op` (`billing_notify`), `event_type` (the Stripe event type), `org_id`. **Not gated on `BACKUP_SWEEP_ENABLED`** (D5a); with no `DR_ISSUES_PAT` (or an unbuildable object store) the site's rate-limited **ERROR** line is the residual | The dropped notification is **not recoverable from this incident**. Confirm the org's current tier, then re-fire it manually (`notify_billing_event(kind, {org_id, tier}, …)`); and investigate why the seam refused — a wedged best-effort call parking all `CONTROL_PLANE_TELEMETRY_WORKERS` slots. **Manual close:** close the GitHub issue **first**, then delete `ops/alerts/BILLING_NOTIFY_REFUSED/_.json` (that order matches `AlertStore.resolve_incident` — close, then delete-to-resolve). Deleting the object first leaves the issue open and re-arms a recurrence as a SECOND issue |
 | PROVIDER_BILLING_EXHAUSTED | #3873: a serving model lane's provider refused on its **OWN budget/limit** — HTTP 402, or an OpenRouter 403 carrying a key-limit body signature (`model_adapters.is_billing_exhausted`). This is the POST-HOC record of the beta's aggregate spend bound (the provider credit balance) being reached: `RotatingModel` cooled the lane and rotated and, before this kind existed, told no operator. **It carries NO threshold** — the trigger is the provider's own refusal, an observed event, never a policy line, and the trip is **advisory only** (it never refuses a request; the refusal already happened). Subject is the **serving leg's provider slug** (`deepseek-direct`/`openrouter`/`venice`), not the platform sentinel and not an org: the alert names the leg that ACTUALLY refused (a hop can reach a leg that was not the configured primary), and per-leg dedup keeps a second lane's exhaustion visible instead of swallowing it under the first's open incident. Detail is a fixed, message-free vocabulary — `provider`, `error_type`, `status`, `has_alternative` (`true` = more than one lane was configured, so this lane is rotated AWAY from and the call continues on the rotation path; `false` = the refusal was raised with no alternative configured, i.e. the cliff for that call. ⚠️ `true` does **not** mean the call ultimately succeeded — every other lane can still refuse, which is the all-lanes-down shape). Filed through the un-gated `operator_alert` seam (D5a); with no `DR_ISSUES_PAT` the WARNING log is the residual | Confirm the provider's balance and top up — see **Cohort spend cap ↔ provider credit balance** below. The incident records that the cliff ARRIVED; it is not a warning ahead of it, and nothing here sets the cap. **Manual close only:** close the GitHub issue **first**, then delete `ops/alerts/PROVIDER_BILLING_EXHAUSTED/{provider}.json` (that order matches `AlertStore.resolve_incident` — close, then delete-to-resolve); deleting the object first leaves the issue open and re-arms a recurrence as a SECOND issue |
 
+### Diagnostic blocks on `/status` — read-only, NOT incident kinds
+
+Two blocks on `GET /v1/internal/backups/status` exist so that in-process
+counters have a reader in production. **Neither is an incident kind** and the
+driver's classifier must not start treating either as one: a non-zero count is
+a signal to look, not a condition with a resolution path, so there is nothing
+for `file_alert`/`resolve_global` to own.
+
+- **`.analytics`** — the #3944 heartbeat (documented in the
+  `ANALYTICS_SINK_DEGRADED` row above). Its `.outcomes` sub-map is the #3820
+  per-outcome analytics-write counter (`supabase`/`fallback`/`unconfigured`/
+  `dropped`), read without a scrape.
+- **`.telemetry`** — the **#4095** production reader for #3821's
+  allowlist-drop counter. #3821 made an allowlist-dropped telemetry key
+  *never forwarded, always counted, warned once per site, raised only in strict
+  mode*, but the counter (`hosted_api._TELEMETRY_DROP_COUNTS`) was
+  process-local and read **only by `tests/test_telemetry_registration.py`** —
+  so the "always counts" guarantee was observable in tests and nowhere else,
+  which is #3677's loss class one layer up. The block is:
+
+  | Field | Meaning |
+  |---|---|
+  | `total` | number of DROPS since process start |
+  | `sites` | that total split by drop site (`<where>\|<subject>`, both code literals) |
+  | `markers` | distinct bounded key-fingerprints RETAINED |
+  | `marker_cap` | the cap they fold into (`hosted_api._TELEMETRY_DROP_MAX_MARKERS`); `markers > marker_cap` means at least one folded into the shared overflow entry, i.e. the count is a floor |
+
+      curl -s -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
+        -m 20 $API/v1/internal/backups/status | jq .telemetry
+
+  ⛔ **The block never carries the dropped key NAMES.** They are
+  caller-supplied (the PATCH front door derives them from a request body), so
+  the block is a count channel only — the same bound
+  `_analytics_incident_detail` holds. The **`WARNING` line is where the names
+  are legible**, once per `(site, fingerprint)` per process; read the app log
+  for the key names and this block for whether/how much is dropping.
+
+  The same drops are also published through a second counter,
+  `monitoring.metrics()["telemetry_drops"]` (backed by
+  `monitoring.TELEMETRY_DROP_COUNT` — a distinct object from the
+  `hosted_api._TELEMETRY_DROP_COUNTS` above, but counting the same events; the
+  monitoring leg is best-effort, so a metrics failure can only undercount it).
+  That is the surface the hosted app actually serves, since it has no `/metrics`
+  route (the MCP `tortoise_health` tool and `monitoring.serve_health` both
+  render it; `tortoise_telemetry_drops_total` is the Prometheus series wherever
+  a scrape exists).
+
+  **Residual (accepted, stated):** every leg of this counter is per-process —
+  it resets on deploy/restart, and there is no durable (AlertStore/R2) record.
+  #4095 closed the *reader* gap (the count is observable in production while
+  the process lives, which is the half that was missing); durability across
+  restarts was deliberately NOT taken, because a drop is a diagnostic to act
+  on, not a condition that has to outlive the machine that observed it.
+
+**Why the `WARNING` is drained (issue #4095 scope Q7 — measured, not assumed).**
+The warning is emitted on `logging.getLogger("tortoise.hosted_api")` (the
+module's own `_logger`). Nothing in the serving path configures logging: no
+`dictConfig`/`basicConfig` in `hosted_api`/`monitoring`/`mcp_server`, no
+`--log-config` in `Dockerfile.hosted`'s uvicorn command, no logging env in
+`fly.toml`. uvicorn therefore applies its default config
+(`disable_existing_loggers: False`), which configures only `uvicorn*` loggers
+and leaves the root logger with **no handlers** — so the record propagates to
+root and Python's last-resort handler (`logging.lastResort`, level `WARNING`)
+writes it to **stderr**, which is what Fly's machine log collector ships. The
+WARN is drained, and the *logger name is not the discriminator*: nothing
+configures `tortoise.api` either, and `tortoise.hosted_api` is the module's
+**primary** logger (dominant over the inline `tortoise.api` calls), so no
+rename is warranted. Consequence worth knowing, and tracked as **#8253**: with no
+handler configured, `INFO`/`DEBUG` records from this module never reach stderr
+at all (`lastResort` handles `WARNING` and above) — a `WARNING` is the reliable
+channel; do not move an operator-facing signal to `.info()` until that issue is
+fixed.
+
 ### How incidents CLOSE
 
 Every kind must have a resolution path, or it is alert rot — an alert that can

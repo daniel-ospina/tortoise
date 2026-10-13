@@ -2445,6 +2445,30 @@ def connector_by_org(cp, org_id: str) -> list[dict]:
     )
 
 
+def connector_by_org_source(cp, org_id: str, source_type: str) -> dict | None:
+    """Read THE connector for ``(org_id, source_type)`` — at most one row.
+
+    The migration declares ``idx_connectors_org_source`` UNIQUE on
+    ``(org_id, source_type)``, so this pair names exactly one connector — the
+    identity an OAuth completion uses to ROTATE a credential in place rather
+    than insert a second row (which the index rejects as a 23505 → HTTP 409).
+    Returns None when the org has no connector for that source yet, i.e. the
+    create path.
+
+    Filters on BOTH terms, like every helper here: the service-role key
+    bypasses RLS, so the WHERE clause is the tenancy boundary. The explicit
+    ``select`` keeps ``credential_enc`` out of the returned row — the projection
+    callers get never carries a ciphertext.
+    """
+    rows = cp.query(
+        "connectors",
+        select=_CONNECTOR_PUBLIC_SELECT,
+        filters=[("org_id", "eq", org_id),
+                 ("source_type", "eq", source_type)],
+    )
+    return rows[0] if rows else None
+
+
 def connector_by_id(cp, org_id: str, connector_id: str) -> dict | None:
     """Read a single connector, scoped to its owning org.
 

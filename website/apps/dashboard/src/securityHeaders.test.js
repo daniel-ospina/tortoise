@@ -226,10 +226,27 @@ const POLICY_NAMES = new Set([...CSP_CONSTANTS, 'strictCspWithNonce'])
 //
 // Cloudflare Web Analytics is on for this zone, so the edge injects an SRI-pinned
 // `https://static.cloudflareinsights.com/beacon.min.js/<version>` tag into HTML
-// responses whose REQUEST carries `Accept: text/html` (not a User-Agent test), and
-// the beacon reports to `https://cloudflareinsights.com/cdn-cgi/rum`.
+// responses whose REQUEST carries `Accept: text/html` (not a User-Agent test).
+//
+// Its RUM payload goes to THIS ORIGIN, not to a third party (#4706). Under
+// automatic injection the tag carries `data-cf-beacon.version`, and both of the
+// beacon's send sites fall back to the RELATIVE `/cdn-cgi/rum?…` in exactly that
+// case: `j = window.__cfBeacon.send?.to ?? (window.__cfBeacon.version === undefined
+// ? 'https://cloudflareinsights.com/cdn-cgi/rum' : null)` feeds the sender as its
+// URL override, and `null` means the relative default. The absolute host is the
+// MANUAL-embed path only (a snippet with no `version`) — Cloudflare's FAQ says the
+// same: "For automatic injection, this will be the same domain, so ensure your
+// `connect-src` includes `'self'`." Measured in a real browser on all eight
+// deployed surfaces: every RUM POST → `https://<host>/cdn-cgi/rum` (HTTP 204) and
+// ZERO requests to `cloudflareinsights.com` — with the origin removed from
+// `connect-src`, and without a single CSP refusal.
+//
+// So the two halves assert OPPOSITE things: `script-src` MUST name the script
+// origin (dropping it blocks the tag — silent analytics loss plus a console error,
+// the regression that shipped), and `connect-src` MUST NOT name the third-party
+// RUM host (re-adding it is a widening, not a fix).
 const BEACON_SCRIPT_ORIGIN = 'https://static.cloudflareinsights.com'
-const BEACON_RUM_ORIGIN = 'https://cloudflareinsights.com'
+const BEACON_MANUAL_RUM_ORIGIN = 'https://cloudflareinsights.com'
 
 // ── the consent-gated ad-tag origin (#7633) ─────────────────────────────────
 //
@@ -282,15 +299,15 @@ function scriptSrcTokens(value) {
  */
 const PINNED_POLICIES = {
   'marketing.RELAXED_CSP':
-    "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com https://static.ads-twitter.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com https://static.ads-twitter.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
   'dashboard.RELAXED_CSP':
-    "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com https://static.ads-twitter.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com https://static.ads-twitter.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
   'dashboard.STRICT_CSP':
-    "default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    "default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
   'dashboard.ADMIN_CSP':
-    "default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://*.supabase.co wss://*.supabase.co; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    "default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
   'dashboard.strictCspWithNonce':
-    "default-src 'self'; script-src 'nonce-TESTNONCE' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    "default-src 'self'; script-src 'nonce-TESTNONCE' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
 }
 
 /**
@@ -323,8 +340,11 @@ function policyProblems(name, value) {
   if (!tokens(scriptSrc).includes(BEACON_SCRIPT_ORIGIN)) {
     wrong.push(`${name}: script-src omits ${BEACON_SCRIPT_ORIGIN}`)
   }
-  if (!tokens(connectSrc).includes(BEACON_RUM_ORIGIN)) {
-    wrong.push(`${name}: connect-src omits ${BEACON_RUM_ORIGIN} (the RUM endpoint)`)
+  if (tokens(connectSrc).includes(BEACON_MANUAL_RUM_ORIGIN)) {
+    wrong.push(
+      `${name}: connect-src names ${BEACON_MANUAL_RUM_ORIGIN} — that is the MANUAL-embed ` +
+        `RUM endpoint; automatic injection POSTs to this origin's own /cdn-cgi/rum (#4706)`,
+    )
   }
   // A nonce policy is exempt from nothing here: the edge tag carries no nonce, so
   // a nonce-only `script-src` blocks it. Host sources ARE honoured alongside a
@@ -1441,8 +1461,10 @@ test('every `_headers` file that ships is audited (the set is derived, not liste
 //
 // This test is NOT that check. It pins ORIGIN PRESENCE across every policy — it
 // is about the policy's CONTENT, never about the tag being reachable (a unit
-// test cannot reach the edge): remove either origin and this fails, which is the
-// regression that shipped. The edge-observing detector is
+// test cannot reach the edge): drop the SCRIPT origin and this fails, which is
+// the regression that shipped; name the third-party RUM host in `connect-src` and
+// this fails too, because automatic injection never uses it (#4706). The
+// edge-observing detector is
 // `tests/e2e/audit_prod_csp.py`, a browser audit of the DEPLOYED surfaces run
 // manually (`ALLOW_PROD=1 .venv/bin/python tests/e2e/audit_prod_csp.py`) —
 // nothing runs it in CI yet (#4762), so a NEW platform-injected origin is still
@@ -1516,7 +1538,7 @@ test('every policy allows the platform-injected Cloudflare beacon', () => {
   assert.deepEqual(
     wrong,
     [],
-    `policies that would block the edge-injected beacon:\n  ${wrong.join('\n  ')}\n` +
+    `policies that would block the edge-injected beacon, or widen the RUM half:\n  ${wrong.join('\n  ')}\n` +
       `(if Cloudflare Web Analytics was turned OFF per #4706, flip this expectation ` +
       `— do not re-add the origins)`,
   )

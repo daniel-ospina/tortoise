@@ -349,7 +349,7 @@ CITES: dict[str, tuple[str, str]] = {
                         "`recall_subgraph`, `retrieval_legs`, `volunteer_context`, "
                         "`session_context`, `get_confidence`, `calibrate_summary`, "
                         "`calibration_passed`, `get_provenance_chain`, `provenance`, "
-                        "`belief_timeline`, `restore_point_at` |"),
+                        "`belief_timeline`, `get_historical_knowledge` |"),
     "r4": (BETA, "| narrow readers (`get_session`, `get_events`, `get_owned_entities`, "
                  "`get_provenance_chain`, …) | ~8 | → `get_entity`, except where a "
                  "genuinely different shape is returned. |"),
@@ -595,7 +595,7 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     # R1 — the one member the beta doc's collapse row does not name.
     "tortoise_fts_query": ("search_knowledge", "r1_canon"),
     # R3 — three members leave the group default.
-    "restore_point_at": ("get_historical_knowledge", "r3_restore"),
+    "get_historical_knowledge": ("get_historical_knowledge", "r3_restore"),
     "recall_subgraph": (DISCARDED, "r3_drop_subgraph"),
     "provenance": ("check_confidence", "r3_context"),
     "belief_timeline": ("check_confidence", "r3_context"),
@@ -732,7 +732,7 @@ TENSIONS: list[tuple[str, str, str]] = [
     # (method, the destination the OTHER doc implies, citation showing it)
     ("get_owned_entities", "`explore_connections`", "t_r5"),
     ("get_provenance_chain", "`check_confidence`", "t_r3"),
-    ("restore_point_at", "`check_confidence`", "t_r3"),
+    ("get_historical_knowledge", "`check_confidence`", "t_r3"),
     ("list_sources", "`graph_overview`", "t_r6"),
     ("test_guard", "`graph_overview`", "t_r6"),
     ("graph_set_recording", "kept, inside the control-plane block", "t_n2"),
@@ -748,7 +748,7 @@ TENSION_CITES: dict[str, tuple[str, str]] = {
                     "`recall_subgraph`, `retrieval_legs`, `volunteer_context`, "
                     "`session_context`, `get_confidence`, `calibrate_summary`, "
                     "`calibration_passed`, `get_provenance_chain`, `provenance`, "
-                    "`belief_timeline`, `restore_point_at` |"),
+                    "`belief_timeline`, `get_historical_knowledge` |"),
     "t_r5": (CANON, "| R5 | `explore_connections` | #5 | `expand_relationships`, "
                     "`traverse`, `get_owned_entities`, `get_org_structure` |"),
     "t_r6": (CANON, "| R6 | `graph_overview` | #6 | `status`, `taxonomy`, "

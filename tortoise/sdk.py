@@ -4266,7 +4266,7 @@ def _refuse_inverted_point_window(g, props: dict, *,
     decision point. None of those writers read the OPPOSITE bound, so a caller
     (or the miner's session date, read against a stored end) could persist
     ``validTo < validFrom`` directly — bypassing the refusal #4021 added inside
-    ``supersede_point``. ``restore_point_at``'s ``_covers`` then covers NO
+    ``supersede_point``. ``get_historical_knowledge``'s ``_covers`` then covers NO
     instant and the point vanishes from every temporal query while every read
     reports honest absence.
 
@@ -4378,7 +4378,7 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     #4021 — the supersession stamped ``old.validTo`` from the SUCCESSOR's
     window start and never read the predecessor's own ``validFrom``, so a
     successor dated earlier than its predecessor persisted
-    ``validTo < validFrom``.  ``restore_point_at``'s ``_covers``
+    ``validTo < validFrom``.  ``get_historical_knowledge``'s ``_covers``
     (``sdk.py``) then rejects an inverted window for EVERY query instant, so
     the predecessor became unreachable from every read surface with no error
     anywhere — a silent, permanent loss of the old fact.
@@ -5636,7 +5636,7 @@ class TortoiseSDK:
         # #5359: the validity window is a CLOSED interval. A caller-supplied
         # inverted pair (`validTo < validFrom`) used to persist verbatim, cover
         # NO instant, and make the point unreachable from every temporal query
-        # (`restore_point_at`) while every read reported honest absence —
+        # (`get_historical_knowledge`) while every read reported honest absence —
         # bypassing the refusal #4021 put inside `supersede_point`. Delegate
         # the predicate to the ONE HOME (`commit_schema.
         # validate_validity_window`, shared with `invalidate_point`'s #5358
@@ -8162,7 +8162,7 @@ class TortoiseSDK:
                     # emits only the `when` spelling) — map it here, or every
                     # capture Point is born undated and a downstream undated
                     # supersession double-covers its predecessor
-                    # (`restore_point_at` → ambiguous). Absent `when` stays
+                    # (`get_historical_knowledge` → ambiguous). Absent `when` stays
                     # absent — never a fabricated now. Deliberately a
                     # create-only dict: folding `validFrom` into the RESPONSE
                     # `props` would change the documented
@@ -9226,7 +9226,7 @@ class TortoiseSDK:
         an independent fact and never reads the point's window START, so a
         future-dated predecessor (``validFrom > now`` — reachable,
         ``create_point`` / ``update_point`` accept a caller ``validFrom``)
-        would persist ``validTo < validFrom``; ``restore_point_at``'s
+        would persist ``validTo < validFrom``; ``get_historical_knowledge``'s
         ``_covers`` then covers NO instant and the point silently disappears
         from every temporal query while the system reports honest absence
         (#4021's sibling, separate root).
@@ -9318,7 +9318,7 @@ class TortoiseSDK:
         - the predecessor's ``validFrom`` is AFTER ``now`` → ValueError
           (#5358). The stamp block writes ``validTo = now`` unconditionally,
           so a future-dated predecessor would persist an INVERTED window
-          (``validTo < validFrom``); ``restore_point_at``'s ``_covers`` then
+          (``validTo < validFrom``); ``get_historical_knowledge``'s ``_covers`` then
           covers no instant and the point silently vanishes from every
           temporal query. Fail-closed refusal BEFORE any mutation (no partial
           write, no journal event), naming ``retract_point`` — the
@@ -9454,7 +9454,7 @@ class TortoiseSDK:
         The kwarg is a CLAIM about the successor's window start, so when the
         successor carries a stored ``validFrom`` the two must be parseable
         timestamps naming the SAME instant (compared by instant via
-        ``_created_sort_key`` — the measure ``restore_point_at``'s ``_covers``
+        ``_created_sort_key`` — the measure ``get_historical_knowledge``'s ``_covers``
         uses). A disagreement raises ``ValueError`` BEFORE any mutation: a
         predecessor ``validTo`` that disagrees either leaves a GAP (a query
         instant covered by neither window) or an OVERLAP (two covering
@@ -9525,11 +9525,11 @@ class TortoiseSDK:
         # PRECONDITION on the kwarg, now stated in that row too: trusting it
         # verbatim broke chain contiguity silently in BOTH directions — an
         # EARLIER kwarg left a GAP (a query instant covered by neither
-        # window, so `restore_point_at` reports honest absence for a period
+        # window, so `get_historical_knowledge` reports honest absence for a period
         # that was in fact covered) and a LATER kwarg left an OVERLAP (two
         # covering candidates ⇒ every instant inside it reads `ambiguous`).
         # The successor's STORED validFrom is the value every read path
-        # computes its window start from (`restore_point_at` → `_covers`), so
+        # computes its window start from (`get_historical_knowledge` → `_covers`), so
         # a disagreeing kwarg can only ever make the chain wrong. Refuse it
         # BEFORE any mutation rather than pick a winner: picking the store
         # would invert the documented order, picking the kwarg re-creates the
@@ -20487,7 +20487,7 @@ class TortoiseSDK:
     # (bounded BFS — a pathological/cyclic chain can't loop forever).
     _RESTORE_CHAIN_GUARD = 32
 
-    def restore_point_at(self, point_id: str, at_date: str) -> dict:
+    def get_historical_knowledge(self, point_id: str, at_date: str) -> dict:
         """Point-in-time restore: what was true at ``at_date`` (E2E-9, #1538).
 
         V3 mechanism: walk the CORRECTS chain from the given (current/live)
@@ -20528,7 +20528,7 @@ class TortoiseSDK:
 
         at_date = str(at_date or "").strip()
         if not at_date:
-            raise ValueError("restore_point_at: at_date must be non-empty")
+            raise ValueError("get_historical_knowledge: at_date must be non-empty")
         proj = self._get_proj()
 
         # Walk the CORRECTS chain: (new)-[:CORRECTS]->(old) — outgoing
