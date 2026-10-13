@@ -80,6 +80,29 @@ The memory eval (LongMemEval, `tools/longmem_eval/`) reader consumes ONLY hit `c
 | D13 | Peer EP | Peer state (α/β → variance/contested, status, createdAt) derived **in the Q2 query**, not via a second `annotate_ep_batch` over peers — keeps EP cost bounded by Q2 rows |
 | D14 | Expand surface | New `tortoise_expand_relationships` MCP tool + SDK method (single-point unbounded payload) — scoped into this issue |
 
+### D15 — decoration failure must be LABELLED, not silently empty (#6971, added 2026-10-12)
+
+> **Not part of the 2026-08-17 owner session** — recorded here because the
+> degradation behaviour is part of this surface's locked design, and #6971 was
+> blocked precisely on the fact that nothing recorded which of the two honest
+> options was wanted. This row resolves it; it does not amend D1–D14.
+
+| # | Question | Decision |
+|---|---|---|
+| D15 | What does an all-empty `relationships` list mean when the decoration query RAISED? | **Neither silent nor fatal: labelled.** `get_relationships_bounded` returns a `RelationshipDecoration` (a `dict` subclass carrying `decoration_error`), so it never changes the return contract and never raises — consistent with D1 (decoration is default-on and must never break retrieval). The search path relays that into the additive `SearchResult.relationships_unavailable` (D8 rule: emitted only when set), so a consumer can tell "no edges" from "the read failed". Returning the unlabelled all-empty seed is retired. |
+
+**Why not re-raise?** Raising would convert a decoration failure into a search
+failure — the wrong direction, and it violates D1. **Why not a new return
+shape (tuple/dataclass)?** ~25 direct callers and the SDK assembly read it as a
+mapping; a typed mapping buys the distinguishability at zero contract churn.
+**Why not `defaultdict`/`.get()` at the `point_ops[pid]` append?** That was
+explicitly ruled out on #6971: it converts a diagnosable crash into a
+permanently silent wrong answer. The cause that actually raised there (the
+`n.id IN $ids` predicate dropped by a following `MATCH`) is fixed at every
+site by #7155/#7050 and guarded by the static rail in
+`tests/test_relationships_bounded.py`; D15 governs what happens when a *future*
+exception reaches the `except`.
+
 ## Complexity
 
 - Standard (Architecture/Data). Low Ontology (payload fields only, no schema change), low UX/deps.

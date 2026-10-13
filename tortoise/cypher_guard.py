@@ -28,19 +28,58 @@ package every FalkorDB client is constructed through :func:`guarded_client`
 (the projection's embedded and Docker clients, the BGSAVE helper, the session
 indexer, the doctor probe), so every handle those clients yield — including the
 ``select_graph(...).query(...)`` sites and the SDK registry handles — is
-guarded. Code OUTSIDE the package that builds a raw vendor client is NOT
-covered. That set is ILLUSTRATIVE, not exhaustive — e.g. ``graph-scripts/*.py``,
+guarded. That construction set is no longer a convention: #6882 pins it with an
+AST inventory (a revert to a raw ``FalkorDB(...)`` fails a test) and a runtime
+marker assertion on a real embedded projection. Code OUTSIDE the package that
+builds a raw vendor client is NOT covered. That set is ILLUSTRATIVE, not
+exhaustive — e.g. ``graph-scripts/*.py``,
 ``apps/graph-viz/server/main.py``, ``docs/runbook/m2-d3-gold-rank-docker.py``
 (``db.select_graph(name).delete()``) and ``tests/`` all construct a vendor
 client directly, and any other raw construction is equally uncovered; a guard
 there would need the same :func:`guarded_client` call.
 
-There is deliberately NO ``__getattr__`` escape hatch for query entry points on
-the guarded graph. An un-overridden ``ro_query`` / ``explain`` / ``profile`` is
-exactly how the operator would escape — the failure mode the previous
-call-site-only guard had. ``execute_command`` is a special case (the vendor
-binds it as an INSTANCE attribute, so a class-level override is shadowed); it is
-intercepted explicitly — see :func:`_guarded_execute_command`.
+**THE INVARIANT, stated once — every Cypher-bearing command entry point
+reachable from a client this package built, through a channel the guard can
+follow, refuses ``=~`` before dispatch.** There is deliberately NO
+``__getattr__`` escape hatch for query entry points on the guarded graph. An
+un-overridden ``ro_query`` / ``explain`` / ``profile`` is exactly how the
+operator would escape — the failure mode the previous call-site-only guard had.
+Three kinds of channel carry a command, and each is guarded by the same
+refusal:
+
+* the HANDLE's query verbs (the subclass above) and its ``execute_command``;
+* the CLIENT's own ``execute_command`` — a special case, because the vendor binds
+  it as an INSTANCE attribute and a class-level override is shadowed
+  (:func:`_guarded_execute_command` rebinds it);
+* the CONNECTION's command entries (``client.connection.execute_command``, and
+  the ``_execute_command`` dispatcher behind it) — the same shadowing one level
+  down, closed by :func:`_guard_connection` (#6882).
+
+**Why the guard cannot follow a mint (#6882 review).** The guard closes those
+three channels by mutating an object IN PLACE, so it cannot follow a vendor
+method that MINTS a new object from the shared pool: on the pinned ``redis``
+7.4.1 ``Redis.client()`` returns
+``self.__class__(connection_pool=…, single_connection_client=True)``, and every
+other minting path listed below constructs a fresh object the same way. None of
+those objects passes through a guarded channel, so each is a documented
+EXCLUSION, NOT a covered path, and it is left unguarded deliberately: the
+in-place design has no handle on the new object at mint time, and closing it
+would mean patching the vendor's own minting methods with wrappers that change
+the identity of returned types the guard does not subclass, for a path nothing
+in-package reaches (``grep -rn`` for ``.client()`` / ``.pubsub()`` /
+``.monitor()`` / ``.pipeline()`` / ``.transaction()`` under ``tortoise/`` → no
+hits — the same standard the #6882 review applied to the raw-client exclusion).
+A future in-package caller must NOT treat a minted object as guarded.
+
+The exclusions are DERIVED from that invariant rather than kept as a separate
+list, and they are stated ONCE, here: a channel that is not reachable from an
+object this package built (a raw client built outside it), or one the guard
+cannot follow to the object it creates, is outside its domain. The second kind
+is generic — ANY vendor method that MINTS a ``Redis`` / ``Pipeline`` /
+``PubSub`` / ``Monitor`` / ``Connection`` the guard has no handle on — and the
+concrete minting paths reachable from a guarded connection are examples, not the
+rule: ``client()``, ``pubsub()``, ``monitor()``, ``pipeline()``,
+``transaction()``, ``connection_pool.get_connection()``.
 
 **The second invariant (#4647/#7174) — the store's numeric domain.** FalkorDB
 stores an integer as INT64 and a number as a double, so a param outside those
@@ -98,6 +137,15 @@ _GUARDED_GRAPH_MARKER = "_tortoise_cypher_guarded_graph"
 # consumers stop guessing at identity.
 _GUARDED_GRAPH_BASE_MARKER = "_tortoise_cypher_unguarded_base"
 _GUARDED_CLIENT_MARKER = "_tortoise_cypher_guarded_client"
+
+#: #6882: marker for a guarded COMMAND CHANNEL (a client's or a connection's
+#: ``execute_command``). Carried on the wrapper's CLASS dict, never on a function
+#: instance: :func:`_carries_marker` reads ``vars()`` of the class MRO, so a marker
+#: set on a closure is invisible to it — and reading one with a bare ``getattr``
+#: would let a permissive double (a ``MagicMock`` answers EVERY name) claim to be
+#: guarded and silently skip the guard. That is the round-2 P1 class this module
+#: already paid for.
+_GUARDED_CHANNEL_MARKER = "_tortoise_cypher_guarded_channel"
 
 #: The Redis commands that carry a Cypher statement on a graph handle. Used by
 #: the ``execute_command`` interception — the vendor binds
@@ -340,14 +388,100 @@ def _guard_execute_command(args) -> None:
             _guard_unsupported_cypher(statement)
 
 
-def _guarded_execute_command(raw):
-    """Wrap a bound ``execute_command`` with :func:`_guard_execute_command`."""
+class _GuardedExecuteCommand:
+    """Callable refusing an unsupported Cypher operator on a raw command channel.
 
-    def _execute_command(*args, **kwargs):
+    The wrapper is a CLASS instance, not a closure, for one reason: its
+    idempotence marker must be readable through :func:`_carries_marker`, which
+    reads ``vars()`` of the object's class MRO and is therefore unforgeable. A
+    marker set on a function instance is invisible there (so the check would
+    silently never fire), and reading it with a bare ``getattr`` would let a
+    permissive object — a ``MagicMock`` answers every name — forge
+    "already guarded" and skip the guard entirely.
+    """
+
+    __slots__ = ("__weakref__", "_raw")
+
+    def __init__(self, raw):
+        self._raw = raw
+
+    def __call__(self, *args, **kwargs):
         _guard_execute_command(args)
-        return raw(*args, **kwargs)
+        return self._raw(*args, **kwargs)
 
-    return _execute_command
+
+setattr(_GuardedExecuteCommand, _GUARDED_CHANNEL_MARKER, True)
+
+
+def _guarded_execute_command(raw):
+    """Wrap a bound ``execute_command`` with :func:`_guard_execute_command`.
+
+    Idempotent: an already-guarded channel — or ``None`` — is returned
+    unchanged, so a client and its connection (or two clients sharing one
+    connection) cannot stack wrappers. The test is :func:`_carries_marker`, the
+    module's unforgeable MRO read — see :class:`_GuardedExecuteCommand`.
+    """
+    if raw is None or _carries_marker(raw, _GUARDED_CHANNEL_MARKER):
+        return raw
+    return _GuardedExecuteCommand(raw)
+
+
+#: The command-entry attributes a client connection exposes. BOTH are bound when
+#: present. On the pinned ``redis`` 7.4.1 ``Redis.execute_command`` is only a
+#: façade — ``return self._execute_command(*args, **options)`` — so binding the
+#: private dispatcher is what actually closes the public verb; binding the public
+#: name as well is strictly stronger (a subclass that overrode it WITHOUT
+#: delegating would otherwise escape) and costs one extra scan per command.
+_CONNECTION_COMMAND_ATTRS = ("execute_command", "_execute_command")
+
+
+def _guard_connection(conn) -> bool:
+    """Guard a client's raw command channel IN PLACE. True when anything wrapped.
+
+    ``falkordb.FalkorDB.__init__`` binds ``self.connection`` as an INSTANCE
+    attribute and its methods read it, so a caller holding that object
+    (``proj.db.connection``, ``graph.client.connection``, or the factory path's
+    ``_GuardedClientProxy.__getattr__("connection")``) could put ``GRAPH.QUERY``
+    Cypher on the wire unrefused. A class-level override cannot close this — the
+    instance attribute shadows it.
+
+    **The object is never replaced**, only its command-entry attributes are
+    rebound. Identity and type are load-bearing: an in-package consumer asserts
+    ``isinstance(client.connection, redis.Redis)`` and the vendor's own internals
+    (``info()``, ``close()``, ``connection_pool``) read the same object. Every
+    in-package holder — ``backup``'s BGSAVE, ``graph_delete_guard``'s Lua lock,
+    ``fork_slot``, ``hosted_backup``, the projection's pool/info probes —
+    therefore sees the guarded verb with no change to what it reads.
+
+    **NOT covered, deliberately** — the exclusions this invariant does not reach:
+    ``pipeline()`` / ``transaction()`` (a separate ``Pipeline`` object that
+    buffers commands and flushes them through the Connection layer, not through
+    here); any deeper raw access (``connection_pool.get_connection()``); a raw
+    vendor client the package did not build; a test double; and the objects the
+    vendor MINTS from this connection (``client()``, ``pubsub()``, ``monitor()``)
+    — minting constructs a NEW object this in-place mutation has no handle on
+    (the module docstring states this one exclusion rule and its full list).
+
+    Binding BOTH ``_CONNECTION_COMMAND_ATTRS`` is what keeps this narrow: a
+    connection subclass whose public ``execute_command`` does NOT delegate to
+    ``_execute_command`` has that override rebound too (both names are wrapped),
+    so it does not escape. The real residual is a connection whose Cypher entry
+    point lives under a DIFFERENT attribute name entirely — a name this list
+    does not bind.
+    """
+    if conn is None:
+        return False
+    guarded = False
+    for attr in _CONNECTION_COMMAND_ATTRS:
+        raw = getattr(conn, attr, None)
+        if raw is None:
+            continue
+        wrapped = _guarded_execute_command(raw)
+        if wrapped is raw:
+            continue
+        setattr(conn, attr, wrapped)
+        guarded = True
+    return guarded
 
 
 class _UnsupportedOperatorGuardedQueries:
@@ -484,6 +618,11 @@ class _GuardedClientProxy:
         raw = getattr(client, "execute_command", None)
         if raw is not None:
             self.execute_command = _guarded_execute_command(raw)
+        # #6882: the proxied client's connection is the same second channel.
+        # Mutated IN PLACE — the proxy itself is untouched, so ``__slots__`` is
+        # unchanged — which makes ``__getattr__("connection")`` return a
+        # guarded channel instead of the raw one.
+        _guard_connection(getattr(client, "connection", None))
 
     def select_graph(self, graph_id):
         return _guard_handle(self._client.select_graph(graph_id))
@@ -563,6 +702,12 @@ def _guard_handle(handle):
       proxy, because the vendor ``(client, name)`` rebuild contract does not
       apply and forcing it is the round-2 P1 ``AttributeError``.
     """
+    if isinstance(handle, _GuardedHandleProxy):
+        # #6882: the proxy shape is the one case the `type(handle) is graph_cls`
+        # test below cannot see, so it used to wrap a SECOND proxy — breaking
+        # the "already-guarded → returned unchanged" contract and minting a
+        # bogus ``Guarded_GuardedHandleProxy`` into the guarded-class cache.
+        return handle
     graph_cls = guarded_graph_class(type(handle))
     if type(handle) is graph_cls:
         return handle
@@ -652,6 +797,12 @@ def guarded_client_class(base_client):
             raw = getattr(self, "execute_command", None)
             if raw is not None:
                 self.execute_command = _guarded_execute_command(raw)
+            # #6882: the client's CONNECTION is a SECOND command channel and it
+            # was raw — ``proj.db.connection.execute_command("GRAPH.QUERY", …)``
+            # (and ``graph.client.connection.…``) reached the wire unrefused.
+            # Guarded IN PLACE so the object, its type and every forwarded
+            # attribute survive; no-ops on a duck-typed base with no connection.
+            _guard_connection(getattr(self, "connection", None))
 
         def select_graph(self, graph_id):
             return _guard_handle(super().select_graph(graph_id))

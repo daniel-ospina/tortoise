@@ -49,8 +49,18 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: E402, RUF100
+import redis  # noqa: E402, RUF100
 
-from tortoise.cypher_guard import guarded_client, guarded_client_class  # noqa: E402, RUF100
+from tortoise.cypher_guard import (  # noqa: E402, RUF100
+    _GUARDED_CHANNEL_MARKER,
+    _GUARDED_GRAPH_CLASSES,
+    _carries_marker,
+    _guard_connection,
+    _guard_handle,
+    _GuardedHandleProxy,
+    guarded_client,
+    guarded_client_class,
+)
 from tortoise.exceptions import UnsupportedCypherOperatorError  # noqa: E402, RUF100
 from tortoise.projection import (  # noqa: E402, RUF100
     FalkorProjection,
@@ -735,3 +745,159 @@ def test_the_proxied_client_command_channel_is_guarded_too():
     assert stub.calls == [], "the proxied client channel forwarded the operator"
     client.execute_command("GRAPH.DELETE", "g")
     assert stub.calls == [("GRAPH.DELETE", "g")]
+
+
+# ── #6882: the client's own CONNECTION is a second command channel ───────────
+
+class _RecordingRedis(redis.Redis):
+    """A REAL ``redis.Redis`` whose dispatcher records instead of dialling.
+
+    Deliberately a real subclass, not a plain spy object: the design under test
+    keeps the connection OBJECT (identity and type are load-bearing — an
+    in-package consumer asserts ``isinstance(client.connection, redis.Redis)``),
+    so a fake connection would make that half of the contract untestable.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(host="localhost", port=1, socket_timeout=1)
+        self.sent: list[tuple] = []
+
+    def _execute_command(self, *args, **options):
+        self.sent.append(args)
+        return [[], [], []]
+
+
+class _VendorLikeClientWithConnection:
+    """Mirrors ``falkordb.FalkorDB``: binds ``connection``/``execute_command``
+    as INSTANCE attributes (that is what makes a class-level override a no-op).
+
+    ``_VendorClientWithRealGraph`` above cannot be reused for the connection
+    routes: it hands the vendor ``Graph`` the WIRE as its client, and the wire has
+    no ``.connection`` — so ``handle.client.connection`` would raise
+    ``AttributeError`` instead of exercising the guard. Here the graph gets the
+    CLIENT itself, which is what the vendor does.
+    """
+
+    def __init__(self, conn) -> None:
+        self.connection = conn
+        self.execute_command = conn.execute_command
+
+    def select_graph(self, graph_id):
+        from falkordb import Graph as VendorGraph
+
+        return VendorGraph(self, graph_id)
+
+
+def _guarded_with_connection():
+    conn = _RecordingRedis()
+    return guarded_client(_VendorLikeClientWithConnection, conn), conn
+
+
+def test_the_client_connection_channel_is_guarded():
+    """Falsifier (#6882): ``.connection`` is not an unguarded Cypher channel.
+
+    Four routes reached the wire before the fix: ``client.connection``,
+    ``client.connection._execute_command`` (the REAL dispatcher behind
+    ``redis.Redis.execute_command``, which is only a facade), a handle's
+    ``graph.client.connection``, and the factory path's
+    ``_GuardedClientProxy.__getattr__("connection")``. Value that makes this
+    fail: ``LEGACY_SHAPE_CHECK`` — a real ``=~`` OPERATOR.
+    """
+    # (a) the client's connection — the public verb
+    client, conn = _guarded_with_connection()
+    assert client.connection is conn, "the connection object was REPLACED"
+    assert type(client.connection) is _RecordingRedis
+    assert isinstance(client.connection, redis.Redis)
+    with pytest.raises(UnsupportedCypherOperatorError) as exc:
+        client.connection.execute_command("GRAPH.QUERY", "g", LEGACY_SHAPE_CHECK)
+    assert exc.value.operator == "=~"
+    assert conn.sent == [], "the unsupported statement reached the connection"
+
+    # (b) the REAL dispatcher behind the public facade
+    with pytest.raises(UnsupportedCypherOperatorError):
+        client.connection._execute_command("GRAPH.QUERY", "g", LEGACY_SHAPE_CHECK)
+    assert conn.sent == [], "the private dispatcher forwarded the operator"
+
+    # (c) a handle's client connection
+    g = client.select_graph("g")
+    with pytest.raises(UnsupportedCypherOperatorError):
+        g.client.connection.execute_command("GRAPH.QUERY", "g", LEGACY_SHAPE_CHECK)
+    assert conn.sent == [], "the handle's client connection forwarded it"
+
+    # (d) the factory path (`_GuardedClientProxy.__getattr__("connection")`)
+    conn2 = _RecordingRedis()
+    proxied = guarded_client(lambda: _VendorLikeClientWithConnection(conn2))
+    with pytest.raises(UnsupportedCypherOperatorError):
+        proxied.connection.execute_command("GRAPH.QUERY", "g", LEGACY_SHAPE_CHECK)
+    assert conn2.sent == [], "the proxied client's connection forwarded it"
+
+    # (T4) the bytes payload is scanned on this channel too, not skipped
+    conn3 = _RecordingRedis()
+    client3 = guarded_client(_VendorLikeClientWithConnection, conn3)
+    with pytest.raises(UnsupportedCypherOperatorError):
+        client3.connection.execute_command(
+            b"GRAPH.QUERY", b"g", LEGACY_SHAPE_CHECK.encode())
+    assert conn3.sent == [], "the bytes payload reached the connection"
+
+    # (T5) anti-over-fix: a non-query command is forwarded untouched
+    client3.connection.execute_command("GRAPH.DELETE", "g")
+    assert conn3.sent == [("GRAPH.DELETE", "g")]
+
+
+def test_re_guarding_a_command_channel_is_idempotent_and_unforgeable():
+    """Falsifier (#6882): the channel marker is MRO-read and cannot be forged.
+
+    ``_guarded_execute_command`` returned a CLOSURE, so an "already guarded"
+    marker set on it was invisible to :func:`_carries_marker`, which reads
+    ``vars()`` of the class MRO — an idempotence check that never fires. Reading
+    it with a bare ``getattr`` instead would let a permissive double (a
+    ``MagicMock`` answers EVERY name) claim to be guarded and silently skip the
+    guard. The wrapper is a class instance now; both halves are pinned here.
+    """
+    client, conn = _guarded_with_connection()
+    first = client.connection.execute_command
+    assert callable(first)
+    assert _carries_marker(first, _GUARDED_CHANNEL_MARKER), (
+        "the wrapper's marker is not readable through _carries_marker")
+
+    # Re-guarding the SAME connection (two clients sharing one) must not stack.
+    assert _guard_connection(conn) is False, "re-guarding layered a wrapper"
+    assert conn.execute_command is first
+
+    # A permissive double cannot forge it: the marker lives on a CLASS dict.
+    from unittest import mock
+    assert not _carries_marker(
+        mock.MagicMock().execute_command, _GUARDED_CHANNEL_MARKER)
+    # …and a real permissive object handed in as a connection is still guarded.
+    m = mock.MagicMock()
+    assert _guard_connection(m) is True
+    with pytest.raises(UnsupportedCypherOperatorError):
+        m.execute_command("GRAPH.QUERY", "g", LEGACY_SHAPE_CHECK)
+
+
+def test_guard_handle_is_idempotent_for_the_proxy_shape():
+    """Falsifier (#6882): re-guarding a proxy returns THE SAME proxy.
+
+    ``_guard_handle``'s docstring promises "already-guarded → returned
+    unchanged"; for the vendor-subclass shape it holds, but for the proxy shape
+    it wrapped a second ``_GuardedHandleProxy`` — and minted a bogus
+    ``Guarded_GuardedHandleProxy`` into the guarded-class cache on the way.
+    """
+
+    class _StubHandle:
+        def query(self, q, params=None, timeout=None):
+            return []
+
+    class _StubClient:
+        def select_graph(self, graph_id):
+            return _StubHandle()
+
+    proxy = guarded_client(lambda: _StubClient()).select_graph("g")
+    assert isinstance(proxy, _GuardedHandleProxy)
+    before = set(_GUARDED_GRAPH_CLASSES)
+    again = _guard_handle(proxy)
+    assert again is proxy, "re-guarding wrapped a second proxy"
+    assert set(_GUARDED_GRAPH_CLASSES) == before, (
+        "a bogus guarded subclass of the proxy class was minted")
+    with pytest.raises(UnsupportedCypherOperatorError):
+        again.query(LEGACY_SHAPE_CHECK)

@@ -376,24 +376,48 @@ def test_an_absent_read_bound_parks_the_caller_in_recv():
 # 4. The systemic half — no product client may skip the bound
 # ═══════════════════════════════════════════════════════════════════════════
 
+#: The ONE declaration of which callables are client constructions. The #3065
+#: read-bound scan and the #6882 guard-seam scan both derive from it, so a name
+#: added for one verdict cannot drift out of the other.
+_GUARD_SEAM = "guarded_client"
+_FALKORDB_CLIENT_NAMES = frozenset({"FalkorDB", _GUARD_SEAM})
+
 #: Class/function names that reach the socket. Kept in one place so the
 #: predicate, the alias scan and the negative controls cannot drift apart.
-_CLIENT_NAMES = {"FalkorDB", "guarded_client", "Redis", "StrictRedis", "from_url"}
+_CLIENT_NAMES = _FALKORDB_CLIENT_NAMES | {"Redis", "StrictRedis", "from_url"}
 
 #: Modules whose ``from … import Redis as R`` makes a construction take a name
-#: the predicate would otherwise never see.
-_CLIENT_MODULES = {"redis", "falkordb"}
+#: the predicate would otherwise never see. ``tortoise`` is included because it is
+#: the real home of the guard seam (``from tortoise.cypher_guard import
+#: guarded_client as G``) — without it that alias is unresolvable and the control
+#: for it passes vacuously.
+_CLIENT_MODULES = {"redis", "falkordb", "tortoise"}
 
 
-def _client_aliases(tree: ast.AST) -> set[str]:
-    """Local names that resolve to a client class through an ``as`` import.
+#: The production constructors that MUST route through the #3595 guard seam
+#: (#6882). Pinned explicitly: a new guarded site, or a revert to a raw
+#: ``FalkorDB(...)``, changes this map or adds an offender.
+_EXPECTED_GUARD_SEAM_SITES = {
+    "tortoise/__main__.py": 1,             # the doctor graph probe
+    "tortoise/backup.py": 1,               # BGSAVE
+    "tortoise/projection/__init__.py": 2,  # embedded + server branches
+    "tortoise/session_indexer.py": 1,      # graph-entity keyword lookup
+}
+
+
+def _client_aliases(tree: ast.AST) -> dict[str, str]:
+    """Local name → the client name it aliases through an ``as`` import.
 
     A name-based predicate is blind to ``from redis import Redis as R`` — so
     ``R(host=…)`` reached the socket and matched nothing, neither offender nor
-    inventory. MEASURED on this branch. The alias set is collected per module
+    inventory. MEASURED on this branch. The alias map is collected per module
     and threaded into the predicate so an import cannot hide a client.
+
+    A MAP, not a set: the guard-seam verdict (#6882) must know WHICH name an
+    alias resolves to (``guarded_client`` or a raw ``FalkorDB``), and a bare set
+    cannot answer that.
     """
-    aliases: set[str] = set()
+    aliases: dict[str, str] = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.ImportFrom):
             continue
@@ -401,11 +425,30 @@ def _client_aliases(tree: ast.AST) -> set[str]:
             continue
         for a in node.names:
             if a.name in _CLIENT_NAMES and a.asname:
-                aliases.add(a.asname)
+                aliases[a.asname] = a.name
     return aliases
 
 
-def _constructs_a_client(node: ast.Call, aliases: set[str] | None = None) -> bool:
+def _client_verb(node: ast.Call, aliases: dict[str, str] | None = None) -> str | None:
+    """The recognised client name *node* constructs, else ``None``.
+
+    The ONE predicate behind both systemic guards: it resolves attribute forms
+    (``falkordb.FalkorDB``), plain names, and ``as`` aliases, so
+    :func:`_constructs_a_client` (has a read bound) and the guard-seam scan
+    (#6882: did NOT skip the guard seam) can never disagree about what counts as
+    a construction.
+    """
+    func = node.func
+    if isinstance(func, ast.Name):
+        if aliases and func.id in aliases:
+            return aliases[func.id]
+        return func.id if func.id in _CLIENT_NAMES else None
+    if isinstance(func, ast.Attribute):
+        return func.attr if func.attr in _CLIENT_NAMES else None
+    return None
+
+
+def _constructs_a_client(node: ast.Call, aliases: dict[str, str] | None = None) -> bool:
     """True for a raw client construction, whatever its class is called.
 
     Three class shapes reach the same socket: the falkordb wrapper
@@ -423,12 +466,7 @@ def _constructs_a_client(node: ast.Call, aliases: set[str] | None = None) -> boo
     runtime — is NOT counted, and is what the `_EXPECTED_SITES` inventory's
     explicit-edit requirement is there to make someone look at.
     """
-    func = node.func
-    if isinstance(func, ast.Name):
-        return func.id in _CLIENT_NAMES or bool(aliases and func.id in aliases)
-    if isinstance(func, ast.Attribute):
-        return func.attr in _CLIENT_NAMES
-    return False
+    return _client_verb(node, aliases) is not None
 
 
 def _carries_a_read_bound(node: ast.Call) -> bool:
@@ -494,6 +532,62 @@ def test_every_product_client_is_constructed_with_a_read_bound():
         f"found={found} expected={_EXPECTED_SITES}")
 
 
+def test_every_product_falkordb_client_goes_through_the_guard_seam():
+    """#6882: a raw ``FalkorDB(...)`` in the package reds — the wiring is pinned.
+
+    The defect this prevents is MEASURED, not hypothetical: reverting
+    ``guarded_client(FalkorDB, …)`` to a raw ``FalkorDB(…)`` at BOTH projection
+    sites left the whole #3595 guard suite green (34 tests collected, 0 red),
+    silently unguarding ``proj.db.select_graph(...)`` — the dominant path (SDK
+    registry handles, ``hosted_api``, ``backup_sweep``, ``session_indexer``, the
+    doctor probe). The read-bound scan above cannot catch it:
+    :func:`_constructs_a_client` treats ``guarded_client(…)`` and ``FalkorDB(…)``
+    as the SAME construction (both must carry a bound), so the seam itself was
+    never asserted.
+    """
+    seam: dict[str, int] = {}
+    raw: list[str] = []
+    for path in sorted(PRODUCT_PKG.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        rel = str(path.relative_to(REPO_ROOT))
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        aliases = _client_aliases(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            verb = _client_verb(node, aliases)
+            if verb not in _FALKORDB_CLIENT_NAMES:
+                continue
+            if verb == _GUARD_SEAM:
+                seam[rel] = seam.get(rel, 0) + 1
+            else:
+                raw.append(f"{rel}:{node.lineno}")
+
+    assert not raw, (
+        "FalkorDB client(s) constructed WITHOUT the #3595 guard seam — a raw "
+        "FalkorDB(...) unguards every handle it yields (proj.db.select_graph, "
+        "hosted_api, backup_sweep, session_indexer, the doctor probe) while the "
+        "guard suite stays green. Build it with `guarded_client(FalkorDB, …)` "
+        f"from tortoise.cypher_guard: {raw}")
+
+    # Anti-vacuity + explicit inventory: a scan that found nothing would pass
+    # the assert above while guarding nothing, and a NEW seam site must be a
+    # deliberate inventory edit rather than a silent addition.
+    assert seam == _EXPECTED_GUARD_SEAM_SITES, (
+        "the guard-seam inventory changed — a new construction must be listed "
+        f"(and routed through the seam): found={seam} "
+        f"expected={_EXPECTED_GUARD_SEAM_SITES}")
+
+    # Parity pin against the #3065 inventory: every seam site is also a
+    # recognised construction site, so one edit cannot satisfy one scan while
+    # silently skipping the other.
+    for rel, count in _EXPECTED_GUARD_SEAM_SITES.items():
+        assert _EXPECTED_SITES.get(rel, 0) >= count, (
+            f"{rel} carries a guard-seam construction but is not counted in "
+            "_EXPECTED_SITES — the two inventories have drifted")
+
+
 def test_the_guard_itself_reads_the_shapes_it_claims_to():
     """Negative controls for the AST guard, asserted directly.
 
@@ -520,10 +614,26 @@ def test_the_guard_itself_reads_the_shapes_it_claims_to():
     # …and an `as` alias is the same blind spot wearing a different name.
     assert not _constructs_a_client(_only_call("R(host='h', port=1)"))
     assert _constructs_a_client(
-        _only_call("R(host='h', port=1)"), {"R"})
-    assert _client_aliases(ast.parse("from redis import Redis as R")) == {"R"}
-    assert _client_aliases(ast.parse("import redis")) == set()
-    assert _client_aliases(ast.parse("from something_else import Redis as R")) == set()
+        _only_call("R(host='h', port=1)"), {"R": "Redis"})
+    assert _client_aliases(ast.parse("from redis import Redis as R")) == {"R": "Redis"}
+    assert _client_aliases(ast.parse("import redis")) == {}
+    assert _client_aliases(ast.parse("from something_else import Redis as R")) == {}
+
+    # The verdict predicate behind BOTH systemic guards (#6882).
+    assert _client_verb(_only_call("FalkorDB(host='h')")) == "FalkorDB"
+    assert _client_verb(
+        _only_call("guarded_client(FalkorDB, host='h')")) == _GUARD_SEAM
+    assert _client_verb(_only_call("falkordb.FalkorDB(host='h')")) == "FalkorDB"
+    assert _client_verb(_only_call("some_other(host='h')")) is None
+    # An `as` alias resolves to the name it aliases — including the seam's real
+    # home module, whose exclusion would make this control vacuous.
+    assert _client_verb(
+        _only_call("F(host='h')"),
+        _client_aliases(ast.parse("from falkordb import FalkorDB as F"))) == "FalkorDB"
+    assert _client_verb(
+        _only_call("G(host='h')"),
+        _client_aliases(ast.parse(
+            "from tortoise.cypher_guard import guarded_client as G"))) == _GUARD_SEAM
 
     assert not _carries_a_read_bound(_only_call("guarded_client(FalkorDB, host='h')"))
     assert not _carries_a_read_bound(_only_call("redis.Redis(host='h', port=1)"))
