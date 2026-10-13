@@ -2549,21 +2549,28 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
         cypher = (
             "MATCH (n:Point) "
             "WHERE n.id IN $ids "
-            # #6871: `impl_count`/`nand_count` are INCOMING EVIDENCE counts, and
-            # an operator's typed edges are its input set — idx 0 is the
-            # operator's SOURCE, idx >= 1 its targets. Unguarded, the source's
-            # own idx=0 edge counted as evidence pointing AT it, so a source
-            # with nothing supporting it reported impl_count=1 and a diluted
-            # `contention` (nand/(impl+nand)) on the wire.
-            # The clause MIRRORS why._CONFLICTS_CYPHER: an operator-mediated
-            # edge obeys the role index, while an operator-LESS direct edge
-            # (create_direct_edge writes it with NO idx, so it can never carry
-            # one) is evidence by definition and must keep counting.
+            # #6871: `impl_count` is an INCOMING EVIDENCE count, and an
+            # operator's typed edges are its input set — idx 0 is the
+            # operator's SOURCE, idx >= 1 its targets. IMPL pairs are ALWAYS
+            # source -> target (`ep.py::_update_nary_factor` takes the
+            # `input_ids[0]` arm unconditionally for IMPL), so an idx=0 edge is
+            # the operator's own input and never evidence pointing AT it.
+            # Unguarded, a source with nothing supporting it reported
+            # impl_count=1 and a diluted `contention` (nand/(impl+nand)) on the
+            # wire. The clause MIRRORS why._CONFLICTS_CYPHER: an
+            # operator-mediated edge obeys the role index, while an
+            # operator-LESS direct edge (create_direct_edge writes it with NO
+            # idx, so it can never carry one) is evidence by definition and must
+            # keep counting.
+            #
+            # ⛔ NAND is deliberately NOT guarded here: its pairs depend on the
+            # operator's `direction` (`-` = no pairs, directed = source ->
+            # targets, mutual — the `create_operator` DEFAULT — = all pairs),
+            # which this count cannot express. Filed as its own root: #8460.
             "OPTIONAL MATCH (n)<-[r:IMPL]-(c:Point) "
             "WHERE c.is_operator = false OR c.is_operator IS NULL OR r.idx > 0 "
             "WITH n, count(r) AS impl_count "
-            "OPTIONAL MATCH (n)<-[r2:NAND]-(c2:Point) "
-            "WHERE c2.is_operator = false OR c2.is_operator IS NULL OR r2.idx > 0 "
+            "OPTIONAL MATCH (n)<-[r2:NAND]-(:Point) "
             "WITH n, impl_count, count(r2) AS nand_count "
             "RETURN n.id, impl_count, nand_count, "
             "  CASE WHEN impl_count + nand_count > 0 "

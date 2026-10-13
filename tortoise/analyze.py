@@ -21,22 +21,9 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["disagree", "conflict", "oppose", "contradict", "tension", "contested"],
         "description": "Find NAND conflicts between high-confidence claims",
         "subgraph_vars": ["a", "b"],
-        # #6871: a NAND conflict is ALL-PAIRS when the operator is MUTUAL and
-        # source-vs-target only when it is DIRECTED. `ep.py::_update_nary_factor`
-        # splits exactly there: `NAND and not mutual` pairs the source with each
-        # target, the `else` arm pairs every combination — and `create_operator`
-        # DEFAULTS to `bidirectional`, i.e. mutual. So a fan-out's co-targets
-        # really are mutually exclusive under the default, and an identity-only
-        # read was right for them; what it got wrong was a DIRECTED write, where
-        # it made the read symmetric and served the victim as the attacker's own
-        # counter. Guard = direction-aware, with `a.id < b.id` so each pair is
-        # emitted ONCE (`_format_pairs` prints `a` then `b` in a fixed order and
-        # does not dedupe, and a symmetric arm matched every pair twice).
         "cypher": """
-            MATCH (a:Point)<-[r_in:NAND]-(op:Point {op_type:\"NAND\"})-[r_out:NAND]->(b:Point)
-            WHERE a.id < b.id
-              AND (coalesce(op.direction, 'bidirectional') IN ['<->', 'bidirectional']
-                   OR (r_in.idx = 0 AND r_out.idx >= 1))
+            MATCH (a:Point)<-[:NAND]-(op:Point {op_type:\"NAND\"})-[:NAND]->(b:Point)
+            WHERE a.id <> b.id
               AND a.is_operator = false
               AND b.is_operator = false
               AND coalesce(a.confidence, 0.5) > 0.45
@@ -75,18 +62,9 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["counter", "against", "objection", "contradicts", "opposes", "attack"],
         "description": "Find claims that contradict a target via NAND edges",
         "subgraph_vars": ["opponent"],
-        # #6871: direction-aware, like `disagreement` above. A MUTUAL NAND (the
-        # `create_operator` default) makes every member conflict with every other,
-        # so naming any peer is correct; a DIRECTED one attacks source -> targets,
-        # so the counter of a target is the operator's idx=0 endpoint and the
-        # attacker itself has none. Identity-only made the directed case
-        # symmetric — `tortoise_analyze` returned the victim as the attacker's
-        # own counter-argument.
         "cypher": """
-            MATCH (target:Point)<-[r_in:NAND]-(op:Point {op_type:\"NAND\"})-[r_out:NAND]->(opponent:Point)
-            WHERE (coalesce(op.direction, 'bidirectional') IN ['<->', 'bidirectional']
-                   OR (r_in.idx >= 1 AND r_out.idx = 0))
-              AND target.id <> opponent.id
+            MATCH (target:Point)<-[:NAND]-(op:Point {op_type:\"NAND\"})-[:NAND]->(opponent:Point)
+            WHERE target.id <> opponent.id
               AND target.content CONTAINS $entity
               AND opponent.is_operator = false
             RETURN opponent.id, opponent.content, coalesce(opponent.confidence,0.5) as conf

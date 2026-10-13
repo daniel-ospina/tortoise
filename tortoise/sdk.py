@@ -10772,24 +10772,9 @@ class TortoiseSDK:
                 if other_id == pid:
                     continue
                 nand = proj.g.query(
-                    # #6871: direction-aware. A MUTUAL NAND (the create_operator
-                    # default) makes every member conflict with every other, so
-                    # two co-targets ARE linked; a DIRECTED one attacks source
-                    # -> targets, where two co-targets are not. Identity-only
-                    # linked the directed case too — a fabricated link in a
-                    # temporal chain. NOT reachable by D12, which decides where
-                    # the CAP lives inside the shared relationships reader
-                    # (docs/scoping/2026-08-17-1353-relationships-decoration-
-                    # scoping.md): this read neither calls that reader nor feeds
-                    # topic_summarization's disputed-pair detection.
-                    "MATCH (op:Point {is_operator:true})-[r1:NAND]->"
+                    "MATCH (op:Point {is_operator:true})-[:NAND]->"
                     "(:Point {id:$a}), "
-                    "(op)-[r2:NAND]->(:Point {id:$b}) "
-                    "WHERE coalesce(op.direction, 'bidirectional') "
-                    "        IN ['<->', 'bidirectional'] "
-                    "   OR (r1.idx = 0 AND r2.idx >= 1) "
-                    "   OR (r1.idx >= 1 AND r2.idx = 0) "
-                    "RETURN count(op)",
+                    "(op)-[:NAND]->(:Point {id:$b}) RETURN count(op)",
                     params={"a": pid, "b": other_id},
                 ).result_set
                 if nand and nand[0][0] > 0:
@@ -21951,18 +21936,9 @@ class TortoiseSDK:
         """
         if not point_ids:
             return {}
-        # #6871: the operator-mediated half is direction-aware. A MUTUAL NAND
-        # (the `create_operator` default) makes every member conflict with every
-        # other; a DIRECTED one attacks source -> targets, where the operator's
-        # idx=0 endpoint — the attacker — is not contested by its own operator.
-        # Direct operator-less NAND edges carry no idx and stay counter-evidence.
         rows = self._get_proj().g.query(
             "MATCH (c:Point)-[r:NAND]->(n:Point) "
             "WHERE n.id IN $ids "
-            "  AND (c.is_operator = false OR c.is_operator IS NULL "
-            "       OR coalesce(c.direction, 'bidirectional') "
-            "          IN ['<->', 'bidirectional'] "
-            "       OR r.idx > 0) "
             "RETURN n.id, c.id, coalesce(c.label, c.content, ''), "
             "  coalesce(c.is_operator, false), coalesce(c.op_type, '')",
             params={"ids": point_ids},
