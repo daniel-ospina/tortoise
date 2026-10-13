@@ -80,7 +80,7 @@ def _journal_path_for(namespace: str | None,
                       graph_name: str | None) -> str | None:
     """The per-graph JSONL journal path for an MCP-lane SDK (`#7951` P0).
 
-    Delegates to ``hosted_api._resolve_event_log_path`` — the ONE derivation
+    Delegates to ``config._resolve_event_log_path`` — the ONE derivation
     of namespace/graph_name → ``<base>/<graph>/events.jsonl`` (#4240) — so an
     MCP-lane SDK can never key its journal to a graph the SDK does not open.
     Inventing a second derivation here is exactly the #4240 review's
@@ -95,12 +95,18 @@ def _journal_path_for(namespace: str | None,
     truth store for its cache to be ahead of) — not that the gate was
     forgotten.
 
-    Function-level import: ``hosted_api`` imports ``mcp_server``, which
-    imports this module, so a module-level import would close the cycle.
+    ⛔ The derivation lives in ``tortoise.config`` (no FastAPI import), NOT in
+    ``hosted_api``. Importing ``hosted_api`` here put the whole hosted app in
+    ``sys.modules`` on EVERY stdio/self-host MCP process — and that module's
+    *presence* is the runtime deployment discriminator the self-host branches
+    read (``mcp_server.tortoise_pack_install``'s HOSTED-only stub,
+    ``operator_alert.alert_store``'s light leg, the fast-path invariant at the
+    top of ``mcp_server``). The import also cost ~1 s on a lane whose result is
+    usually ``None``. Re-exported from ``hosted_api`` for its own callers, so
+    there is still exactly ONE derivation (#7951 review P1).
     """
-    from tortoise import hosted_api as _ha
-    return _ha._resolve_event_log_path(namespace=namespace,
-                                       graph_name=graph_name)
+    from tortoise.config import _resolve_event_log_path
+    return _resolve_event_log_path(namespace=namespace, graph_name=graph_name)
 
 
 def _get_org_sdk() -> TortoiseSDK:

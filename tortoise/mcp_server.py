@@ -952,17 +952,6 @@ def _get_sdk():
         return _sdk
 
     _db_uri = os.environ.get("TORTOISE_DB_URI", "")
-    # #7951: the base/stdio lane is JOURNAL-LESS by construction, so §17.1's
-    # single-writer guard is correctly NOT armed here. Its journal would be
-    # derived from `namespace=None, graph_name=None`, and the ONE derivation
-    # (`hosted_api._resolve_event_log_path`) returns ``None`` for the unnamed
-    # default / registry graphs — the same boundary REST's default graph
-    # draws. Resolving it here bought nothing and pulled `hosted_api` (and the
-    # whole FastAPI app it builds) onto the tool fast path, which this module's
-    # stated invariant forbids (#3834); the import cost was paid on EVERY first
-    # tool call for a call that always returned ``None``. Arming is the
-    # ORG-SCOPED lane's job (`mcp_auth._get_org_sdk`, which passes a real
-    # per-graph journal) — not this base SDK's.
     if _db_uri.startswith(("docker://", "redis://", "rediss://")):
         from tortoise.projection import FalkorProjection  # noqa: I001
         import time as _time
@@ -983,10 +972,16 @@ def _get_sdk():
                 if attempt > 0:
                     _log.warning("Docker connection succeeded on attempt %d", attempt + 1)
                 _sdk = TortoiseSDK()
-                # The projection is assigned DIRECTLY, which bypasses
-                # ``TortoiseSDK._get_proj``. No journal is bound because this
-                # lane has none (see above): `_journal_backed` stays False and
-                # §17.1's guard is correctly a no-op here.
+                # #7951 review P1: NO journal is bound here. This lane passes
+                # ``namespace=None, graph_name=None``, and
+                # ``config._resolve_event_log_path`` returns ``None`` for the
+                # unnamed default graph by construction — so a bind here is a
+                # provable no-op that only bought an import of
+                # ``tortoise.hosted_api`` (and with it the loss of the
+                # self-host deployment discriminator, which reads that module's
+                # presence in ``sys.modules``). The guard is, and must remain,
+                # INERT on a journal-less lane: with no journal there is no
+                # truth store for the cache to be ahead of.
                 _sdk._proj = _proj
                 break
             except Exception as e:

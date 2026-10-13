@@ -6634,7 +6634,6 @@ class FalkorProjection(
     # journal (it cannot be: nothing turned ``True``), and no stub can flip the
     # refusal off on a projection whose journal really was bound.
     _journal_backed: bool = False
-    _journal_path: str | None = None
 
     def _bind_journal(self, journal_path: str | None) -> None:
         """Mark this projection as the derived cache of a journal (`#7951`).
@@ -6646,7 +6645,6 @@ class FalkorProjection(
         (``_live_write_scope`` / ``_replay_write_scope``).
         """
         self._journal_backed = bool(journal_path)
-        self._journal_path = journal_path
 
     # #7951 round 3: the replay anchors are CONTEXT-LOCAL (ContextVar), not
     # instance attributes. `rebuild_all` runs with them armed on its own
