@@ -1,8 +1,9 @@
 """A9 (epic #902, issue #1059) — EP selector direct-edge traversal.
 
 Plan §5.6 + E2E-14: ``_bfs_select_operators``/``_select_subgraph`` traverse
-operator-less direct edges DIRECTION-RESPECTING (NAND both ways always; IMPL
-both ways only when the edge's ``direction`` ≠ ``"unidirectional"``), the
+operator-less direct edges DIRECTION-RESPECTING (the four-value vocabulary
+``->`` / ``<-`` / ``<->`` / ``-``: an IMPL edge only where it flows; a NAND
+edge both ways for every flowing token, neither for ``-``), the
 selection set ALSO carries direct-edge factor anchors ((src, tgt, type),
 deduped), and the GATE-2 Q3 DERIVED-LIVENESS predicate applies to operator
 nodes (an operator participates in EP IFF ≥2 of its connected points are
@@ -13,8 +14,8 @@ Covers:
 - A9 units: direct-edge-only subgraph ⇒ zero operators + non-empty
   factor anchors (return contract); factor-anchor uniqueness (one anchor
   per (src,tgt,type) regardless of BFS discovery direction); direction-
-  respect (no back-traversal of a unidirectional IMPL edge; NAND always
-  both ways); cyclic selection terminates; derived-liveness 1-live/1-draft
+  respect (no back-traversal of a forward-only IMPL edge; a NAND edge both
+  ways except ``-``); cyclic selection terminates; derived-liveness 1-live/1-draft
   boundary (operator inert → promote second endpoint → active);
   pre-existing-path activation (a legacy-created direct edge is selected
   and computed by dream post-A9).

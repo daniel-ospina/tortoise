@@ -12210,9 +12210,10 @@ class TortoiseSDK:
     def _direction_from_semantics(semantics: str) -> str | None:
         """The model direction a Layer-2 semantics value records (#7852).
 
-        ``SEMANTICS_DIRECTIONS`` is the single source of truth, and its values
-        ARE the model's four-value vocabulary (`->` / `<-` / `<->` / `-`), so
-        this returns the recorded direction UNCHANGED — including `-` for the
+        ``SEMANTICS_DIRECTIONS`` is the single source of truth, and its values are
+        drawn from the model's four-value vocabulary (`->` / `<->` / `-` — no
+        ruled semantics produces `<-`), so this returns the recorded direction
+        UNCHANGED — including `-` for the
         neutral meanings (`related`, `transacts`), which must be stored as `-`
         rather than fall through to the mutual default: `-` means the
         connection exists and NO confidence transfers (owner ruling), and a

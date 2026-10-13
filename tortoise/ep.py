@@ -615,9 +615,10 @@ class TortoiseEP:
 
         # NAND uses the standard symmetric contradiction potential for the
         # target message. DIRECTION is enforced structurally by the
-        # back-message guard below: for explicitly-'unidirectional' operators
-        # the source/attacker receives NO factor message (the Dung-style
-        # directed attack an agent opts into). Default is bidirectional
+        # back-message guard below: for a forward-only direction (`->` /
+        # `unidirectional`) the source/attacker receives NO factor message (the
+        # Dung-style directed attack an agent opts into), and for `-` neither
+        # endpoint does. Default is bidirectional
         # (mutual contradiction) per product owner (#753).
         phi = phi_nand if op_type == "NAND" else phi_impl
         mom_a, mom_b = tilted_moments(
