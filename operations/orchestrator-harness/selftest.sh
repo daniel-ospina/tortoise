@@ -242,12 +242,16 @@ ck "the rendered plist PATH contains no */shims or */.pi/* segment" $rc
 # A limit documented in README §4 and rendered by install.sh must not be silently different in
 # orch-loop.sh — MAX_REVIEW was 2 in the loop and 4 everywhere else.
 rc=0
-for v in MAX_LOAD MAX_LANES MAX_REVIEW MERGE_PRIORITY_AT MAX_FIX MAX_FIX_TRIES MIN_SWAP_FREE BATCH CYC; do
-  a="$(grep -oE "^$v=\"\\\$\{$v:-[0-9]+\}\"" "$LOOP" | grep -oE '[0-9]+' | head -1)"
-  b="$(grep -oE "^$v=\"\\\$\{$v:-[0-9]+\}\"" "$INST" | grep -oE '[0-9]+' | head -1)"
-  [ -n "$a" ] && [ "$a" = "$b" ] || { echo "      $v: orch-loop=${a:-?} install=${b:-?}"; rc=1; }
+# Compare the whole default EXPRESSION, not just its digits. A default may be arithmetic (MAX_LOAD is
+# now $(( _NCPU * 10 ))), and the old digit-only regex matched neither file, so the -n guard reddened
+# the check the moment MAX_LOAD stopped being a literal. Comparing the expression also pins the FORM,
+# so the two files cannot drift to different arithmetic that happens to agree today.
+for v in MAX_LOAD MAX_LANES MAX_REVIEW MERGE_PRIORITY_AT MAX_FIX MAX_FIX_TRIES MIN_SWAP_FREE MIN_MEM_FREE_MB BATCH CYC; do
+  a="$(sed -n -E "s/^$v=\"\\\$\{$v:-([^\"]*)\}\".*/\1/p" "$LOOP" | head -1)"
+  b="$(sed -n -E "s/^$v=\"\\\$\{$v:-([^\"]*)\}\".*/\1/p" "$INST" | head -1)"
+  [ -n "$a" ] && [ "$a" = "$b" ] || { echo "      $v: orch-loop='${a:-?}' install='${b:-?}'"; rc=1; }
 done
-ck "orch-loop.sh defaults match install.sh for all 9 limits" $rc
+ck "orch-loop.sh defaults match install.sh for all 10 limits" $rc
 
 # ── 8) the dispatch gate consults load and names the binding gate ────────────────
 # MAX_LOAD was rendered into the plist and documented, but never compared to anything.

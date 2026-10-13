@@ -199,7 +199,8 @@ secret into a world-readable plist, and launchd inherits no shell environment �
 | `MERGE_PRIORITY_AT` | `10` | above this many open PRs, **merging takes priority**: dispatch of new lanes stops (unless none are running) and reviewer headroom rises to `MAX_REVIEW+2` |
 | `MAX_FIX` | `3` | concurrent `fix-<PR>` fixers |
 | `MAX_FIX_TRIES` | `3` | per-PR fixer attempts before it is left alone |
-| `MIN_SWAP_FREE` | `600` | MB; **the binding gate in practice** |
+| `MIN_SWAP_FREE` | `600` | MB; with `MAX_LOAD` raised this and `MIN_MEM_FREE_MB` are the binding gates in practice |
+| `MIN_MEM_FREE_MB` | `512` | MB of *available* memory (`free`+`inactive`); macOS shows pressure as compression with swap flat, so swap alone does not see it |
 | `BATCH` | `2` | issues dispatched per cycle |
 | `CYC` | `240` | seconds between cycles |
 | `STALE_MIN` | `40` | a worker whose log has not grown in this many minutes is presumed hung and its session is killed (§6) |
@@ -213,6 +214,12 @@ lane gate already respected `MAX_LOAD`; the merge sweep did not, so a fresh boot
 piled onto the spike. `can_spawn()` now guards all four spawn sites — conflict fixer, review-fix
 fixer, CI-red fixer, merge re-review — while the cheap actions (`gh pr merge`, `gh pr ready`,
 `gh run rerun`) stay ungated, so merges keep flowing during a spike and nothing is starved.
+
+⚠️ **`can_spawn()` tests load only.** The available-memory gate applies to *lane dispatch*, not to
+these four spawn sites — the two cover different populations. Raising `MAX_LOAD` therefore narrows
+the band in which the spawn sites hold back (`16`–`99` is now permitted, where `16` used to hold).
+Closing that needs `can_spawn()` to consult memory as well, which changes the one-line shape its
+self-test extracts from the shipped file; left as a named follow-up rather than half-done here.
 
 **Swap, not lanes, is what actually throttles this box.** Observed at 15 concurrent workers:
 `swap_free=588M` → dispatch correctly refused. Raising `MAX_LANES` alone buys nothing on 8 GB;
@@ -504,7 +511,7 @@ a symlink EPERM under launchd, and then probes each tool by executing it):
 
 ```bash
 OR="${OR:-daniel-ospina/tortoise}"
-REPO="${REPO:-/Users/home/eldato/tortoise}"
+REPO="${REPO:-/Users/danielospina/Documents/GitHub/tortoise}"
 O="${O:-$HOME/orchestrator}"
 ```
 
@@ -513,6 +520,14 @@ those copies **plus every §7.4 fix**. `install.sh` compares all 8 live scripts 
 copies at `$O` and warns loudly on drift, because the daemon executes `$O/<script>` — a fix that
 only lands in this directory is not in effect. If you are adopting this onto an existing box, sync
 them (`cp <harness>/*.sh $O/`) and restart the loop before trusting any §5 invariant.
+
+⛔ **Copying the scripts is not enough when a *limit* changed.** The launchd plist carries its own
+environment block, rendered by `install.sh` from these defaults, and that environment **overrides the
+script's own**. A job already loaded with `MAX_LOAD=16` keeps `16` no matter what `orch-loop.sh` now
+defaults to. `install.sh` overwrites the plist *file* but does not reload an already-loaded job, and
+`launchctl load -w` on a job that is already loaded does not reliably re-read it. So for a limits
+change: re-run `./install.sh`, then `launchctl unload -w <plist> && launchctl load -w <plist>` — or
+reboot, which is the only thing that reliably re-reads it — before trusting the new value.
 
 Everything else is still tortoise-shaped and must be changed on another target: the branch
 suffix (`tm`), `feat/<N>-tm` naming, `uv sync --extra embeddings --extra parity`, the

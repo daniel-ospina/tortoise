@@ -35,6 +35,9 @@ MAX_LANES="${MAX_LANES:-4}"
 MAX_REVIEW="${MAX_REVIEW:-4}"   # keep in sync with install.sh's default and README §4
 MERGE_PRIORITY_AT="${MERGE_PRIORITY_AT:-10}"   # above this many open PRs, drain before dispatching
 MIN_SWAP_FREE="${MIN_SWAP_FREE:-600}"
+# Available memory = free + inactive. macOS shows memory pressure as COMPRESSION with swap flat,
+# so a swap-only gate does not see it. See the gate chain below.
+MIN_MEM_FREE_MB="${MIN_MEM_FREE_MB:-512}"
 BATCH="${BATCH:-2}"
 CYC="${CYC:-240}"
 REQ="ai-review-gate python-ci-gate docs test-isolation license-surface legal-e2e pricing-artifact"
@@ -408,8 +411,12 @@ PY
   SWFREE="$(sysctl -n vm.swapusage 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="free"){print int($(i+2)); exit}}')"
   SWTOTAL="$(sysctl -n vm.swapusage 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="total"){print int($(i+2)); exit}}')"
   : "${SWFREE:=9999}"; : "${SWTOTAL:=0}"
-  echo "[cap] lanes=$LANES swap_free=${SWFREE}M swap_total=${SWTOTAL}M load=$L max_load=$MAX_LOAD" >> "$LOG"
-  # Three gates. swap_total=0 => swap uninitialised (fresh boot), NOT pressure — allow.
+  # Available memory = free + inactive (top's "unused" PhysMem is NOT it; that is a different figure).
+  MEMAVAIL_MB="$(vm_stat 2>/dev/null | awk '/Pages free/{gsub(/[.]/,"",$NF);f=$NF} /Pages inactive/{gsub(/[.]/,"",$NF);i=$NF} END{printf "%d",(f+i)*16384/1048576}')"
+  # A failed probe is UNKNOWN, not ample: we cannot see capacity, so we do not add work.
+  if [ -z "${MEMAVAIL_MB:-}" ]; then MEMAVAIL_MB=0; MEM_UNKNOWN=1; else MEM_UNKNOWN=0; fi
+  echo "[cap] load=$L/$MAX_LOAD lanes=$LANES/$MAX_LANES mem_avail=${MEMAVAIL_MB}M/${MIN_MEM_FREE_MB}M swap_free=${SWFREE}M/${MIN_SWAP_FREE}M" >> "$LOG"
+  # Four gates. swap_total=0 => swap uninitialised (fresh boot), NOT pressure — allow.
   # Name the binding gate: an earlier version logged "skipped (load=…)" while load was never
   # consulted, so a lanes-bound or swap-bound stall looked like a load stall.
   GATE_WHY="$(mp_reason "${OPEN_N:-0}" "$LANES")"
@@ -417,6 +424,8 @@ PY
   elif [ "$L" -ge "$MAX_LOAD" ]; then GATE_WHY="load=$L>=max_load=$MAX_LOAD"
   elif [ "$LANES" -ge "$MAX_LANES" ]; then GATE_WHY="lanes=$LANES>=max_lanes=$MAX_LANES"
   elif [ "$SWTOTAL" -ne 0 ] && [ "$SWFREE" -le "${MIN_SWAP_FREE:-600}" ]; then GATE_WHY="swap_free=${SWFREE}M<=min_swap_free=${MIN_SWAP_FREE:-600}M"
+  elif [ "$MEM_UNKNOWN" = "1" ]; then GATE_WHY="mem_probe_failed (capacity unknown -> do not add work)"
+  elif [ "$MEMAVAIL_MB" -le "$MIN_MEM_FREE_MB" ]; then GATE_WHY="mem_avail=${MEMAVAIL_MB}M<=min_mem_free_mb=${MIN_MEM_FREE_MB}M"
   fi
   if [ -z "$GATE_WHY" ]; then
     : > "$O/.batch"; K=0
