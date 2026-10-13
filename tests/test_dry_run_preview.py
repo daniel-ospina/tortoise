@@ -712,6 +712,42 @@ class TestBlastRadius:
             "the pre-wired idx-3 INPUT mirror must be classified "
             "already-present")
 
+        # (e) the idx-BEARING arm of the same classification: a same-idx
+        # pre-wire is already-present, while a different-idx pre-wire is
+        # correctly net-new — the rule is idx-keyed, not any-idx.
+        old5, new5 = _seed_point(sdk, "old5"), _seed_point(sdk, "new5")
+        op5 = sdk.create_operator("IMPL", src, [tgt])
+        sdk._get_proj().g.query(
+            "MATCH (o:Point {id:$o}), (op:Point {id:$op}) "
+            "CREATE (o)-[:INPUT {idx:0}]->(op)",
+            params={"o": old5, "op": op5["id"]},
+        )
+        sdk._get_proj().g.query(
+            "MATCH (o:Point {id:$o}), (n:Point {id:$n}) "
+            "MERGE (n)-[:INPUT {idx:0}]->(o)",
+            params={"o": op5["id"], "n": new5},
+        )
+        preview5 = _preview_supersede(sdk, old5, new5)
+        assert preview5["edges_already_present_at_new"] >= 1, (
+            "the same-idx INPUT pre-wire must be classified already-present")
+
+        old6, new6 = _seed_point(sdk, "old6"), _seed_point(sdk, "new6")
+        op6 = sdk.create_operator("IMPL", src, [tgt])
+        sdk._get_proj().g.query(
+            "MATCH (o:Point {id:$o}), (op:Point {id:$op}) "
+            "CREATE (o)-[:INPUT {idx:0}]->(op)",
+            params={"o": old6, "op": op6["id"]},
+        )
+        sdk._get_proj().g.query(
+            "MATCH (o:Point {id:$o}), (n:Point {id:$n}) "
+            "MERGE (n)-[:INPUT {idx:7}]->(o)",  # different idx → net-new
+            params={"o": op6["id"], "n": new6},
+        )
+        preview6 = _preview_supersede(sdk, old6, new6)
+        assert preview6["edges_created_at_new"] >= (
+            preview5["edges_created_at_new"] + 1
+        ), "a different-idx pre-wire must stay net-new (idx-keyed rule)"
+
     def test_supersede_preview_agrees_when_a_same_type_repoint_target_exists(
             self, sdk):
         """The SECOND precondition of the divergence: a direct IMPL/NAND

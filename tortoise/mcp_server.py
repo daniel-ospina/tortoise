@@ -5357,7 +5357,9 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
     sdk._assert_lifecycle_guard(new_id, method="supersession", role="target")
     proj = sdk._get_proj()
     from tortoise.security import validate_rel_type
-    created: list[dict] = []   # net-new edges at the successor (all MERGE legs)
+    created: list[dict] = []   # net-new 2a operator edges only (that leg is MERGE-backed;
+                              # 2a-INPUT net-new lives in `mirror_created`, the
+                              # 2a-DIRECT/2b legs in `merged` until split below)
     merged: list[tuple] = []   # (merge_key, edge) — MERGE-backed legs
     dropped: list[dict] = []
     kept: list[dict] = []
