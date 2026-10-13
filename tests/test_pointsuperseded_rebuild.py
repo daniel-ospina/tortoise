@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 import pytest
 
 from tortoise.log import EventLog
+from tortoise.projection import _replay_write_scope  # #7951 §17.1: replay folds need the scope
 from tortoise.sdk import TortoiseSDK
 
 
@@ -1168,8 +1169,10 @@ def test_apply_one_record_folds_a_terminalizer(sup):
     a = sdk.create_point("statement", "A", status="live")["id"]
     s = sdk.create_point("statement", "S", status="live")["id"]
     proj = sdk._get_proj()
-    proj.apply({"type": "PointSuperseded", "id": a, "new_id": s,
-                "ts": "2026-01-02T00:00:00+00:00"})
+    # #7951 §17.1: a hand-built journal record folded directly is a REPLAY.
+    with _replay_write_scope():
+        proj.apply({"type": "PointSuperseded", "id": a, "new_id": s,
+                    "ts": "2026-01-02T00:00:00+00:00"})
     post = _point_state(sdk, a)
     assert post["status"] == "superseded"
     assert post["outdated"] is True
@@ -1179,7 +1182,8 @@ def test_apply_one_record_folds_a_terminalizer(sup):
     # guard runs BEFORE the belief half on the one-record default.
     c = sdk.create_point("statement", "C", status="live")["id"]
     before = (sdk.get_point(c) or {}).get("confidence")
-    proj.apply({"type": "PointSuperseded", "id": c})
+    with _replay_write_scope():
+        proj.apply({"type": "PointSuperseded", "id": c})
     assert (sdk.get_point(c) or {}).get("confidence") == before
     assert sdk.get_point(c)["status"] == "live"
 

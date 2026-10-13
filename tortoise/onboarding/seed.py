@@ -135,8 +135,20 @@ def _run(handle: Any, cypher: str, params: dict[str, Any] | None = None):
     FalkorProjection surface (``.query(cypher, **params)``) and the raw
     graph surface (``.query(cypher, params=...)``). A cypher/DB error
     raises (never a TypeError), so the fallback only fires on a signature
-    mismatch."""
+    mismatch.
+
+    §17.1 (#7951): the public ``FalkorProjection.query`` lane refuses a
+    mutating statement on a journal-backed projection; this handle is
+    duck-typed and shared with the write-path callers of this module, so it
+    takes the same raw-handle lane ``onboarding.state._run`` does (see that
+    docstring for why: these are unjournaled live writes, class (a) of
+    #7951's work list, and the public lane refused them on the hosted graph).
+    Reads are unaffected either way; routing here keeps a future write added
+    to this primitive from silently refusing."""
     params = params or {}
+    raw = getattr(handle, "g", None)  # FalkorProjection -> its raw handle
+    if raw is not None and hasattr(raw, "query"):
+        return raw.query(cypher, params=params)
     try:
         return handle.query(cypher, **params)
     except TypeError:

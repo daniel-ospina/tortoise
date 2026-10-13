@@ -972,6 +972,16 @@ def _get_sdk():
                 if attempt > 0:
                     _log.warning("Docker connection succeeded on attempt %d", attempt + 1)
                 _sdk = TortoiseSDK()
+                # #7951 review P1: NO journal is bound here. This lane passes
+                # ``namespace=None, graph_name=None``, and
+                # ``config._resolve_event_log_path`` returns ``None`` for the
+                # unnamed default graph by construction — so a bind here is a
+                # provable no-op that only bought an import of
+                # ``tortoise.hosted_api`` (and with it the loss of the
+                # self-host deployment discriminator, which reads that module's
+                # presence in ``sys.modules``). The guard is, and must remain,
+                # INERT on a journal-less lane: with no journal there is no
+                # truth store for the cache to be ahead of.
                 _sdk._proj = _proj
                 break
             except Exception as e:
