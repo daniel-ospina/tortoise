@@ -804,6 +804,11 @@ ck "refresh-candidates.sh ranks the tiers P0=0 < P1=1 < P2=2 (a constant rank wo
 # place a partial revert restores it — outside the driven region: with the pre-fix line re-added
 # there this check reported 130 passed, 0 failed (reproduced 2026-10-13 against the head). Starting
 # after the loop's `done` covers every write the pool loop and the dedupe make to candidates.txt.
+# RESIDUAL — a boundary, not a claim of completeness: the driven region starts after the pool loop,
+# so code ABOVE it is not executed. The pool pipeline writes `$O/.pool`, never candidates.txt, and the
+# reaping pass above that writes dispatched.txt/checked.txt — so nothing above the loop can re-sort the
+# backlog today. A re-sort GATED on a value assigned above the loop would still be missed (verified).
+# Widening further means stubbing `gh` and driving the pool build too; this is the boundary drawn.
 if [ -s "$REFRESH" ]; then
   awk '/^done < /{f=1;next} f' "$REFRESH" > "$TMP/tail.sh"
   # Fail closed if the extraction found nothing, or lost the file it is supposed to exercise.
