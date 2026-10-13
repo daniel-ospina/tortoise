@@ -39,9 +39,10 @@ client directly, and any other raw construction is equally uncovered; a guard
 there would need the same :func:`guarded_client` call.
 
 **THE INVARIANT, stated once — every Cypher-bearing command entry point
-reachable from a client this package built refuses ``=~`` before dispatch.**
-There is deliberately NO ``__getattr__`` escape hatch for query entry points on
-the guarded graph. An un-overridden ``ro_query`` / ``explain`` / ``profile`` is
+reachable from a client this package built refuses ``=~`` before dispatch, with
+ONE documented exception: a client DERIVED from a guarded one.** There is
+deliberately NO ``__getattr__`` escape hatch for query entry points on the
+guarded graph. An un-overridden ``ro_query`` / ``explain`` / ``profile`` is
 exactly how the operator would escape — the failure mode the previous
 call-site-only guard had. Three kinds of channel carry a command, and each is
 guarded by the same refusal:
@@ -54,10 +55,28 @@ guarded by the same refusal:
   the ``_execute_command`` dispatcher behind it) — the same shadowing one level
   down, closed by :func:`_guard_connection` (#6882).
 
+**The derived-client exception, stated explicitly (#6882 review).** The guard
+closes those three channels by mutating an object IN PLACE, so it cannot follow
+a vendor method that MINTS a new object from the shared pool: on the pinned
+``redis`` 7.4.1 ``Redis.client()`` returns
+``self.__class__(connection_pool=…, single_connection_client=True)``, and
+``pubsub()`` / ``monitor()`` likewise construct fresh objects.
+``connection.client()`` therefore yields a raw ``redis.Redis`` whose
+``execute_command`` never passes through :func:`_guarded_execute_command` — a
+documented EXCLUSION, NOT a covered path.
+It is left unguarded deliberately: the in-place design has no handle on the new
+object at mint time, and closing it would mean patching the vendor's own minting
+methods with wrappers that change the identity of three different returned
+types, for a path nothing in-package reaches (``grep -rn`` for ``.client()`` /
+``.pubsub()`` / ``.monitor()`` under ``tortoise/`` → no hits — the same standard
+the #6882 review applied to the raw-client exclusion). A future in-package
+caller must NOT treat ``client()`` / ``pubsub()`` / ``monitor()`` as guarded.
+
 The exclusions are DERIVED from that invariant rather than kept as a separate
 list: a channel that is not reachable from an object this package built (a raw
-client built outside it), or that bypasses the command entries altogether
-(``pipeline()``, ``connection_pool.get_connection()``), is outside its domain.
+client built outside it), or one the guard cannot follow to the object it
+creates (``pipeline()``, ``connection_pool.get_connection()``, the
+derived-client mints above), is outside its domain.
 
 **The second invariant (#4647/#7174) — the store's numeric domain.** FalkorDB
 stores an integer as INT64 and a number as a double, so a param outside those
@@ -435,9 +454,17 @@ def _guard_connection(conn) -> bool:
     ``pipeline()`` (a separate ``Pipeline`` object that flushes on the Connection
     layer, not through here); any deeper raw access
     (``connection_pool.get_connection()``); a raw vendor client the package did
-    not build; a test double. It also cannot cover a connection subclass whose
-    public ``execute_command`` does not delegate to ``_execute_command`` — on the
-    pinned ``redis`` 7.4.1 it does.
+    not build; a test double; and the objects the vendor MINTS from this
+    connection (``client()``, ``pubsub()``, ``monitor()``) — minting constructs a
+    NEW object this in-place mutation has no handle on (see the module
+    docstring's derived-client exception).
+
+    Binding BOTH ``_CONNECTION_COMMAND_ATTRS`` is what keeps this narrow: a
+    connection subclass whose public ``execute_command`` does NOT delegate to
+    ``_execute_command`` has that override rebound too (both names are wrapped),
+    so it does not escape. The real residual is a connection whose Cypher entry
+    point lives under a DIFFERENT attribute name entirely — a name this list
+    does not bind.
     """
     if conn is None:
         return False
