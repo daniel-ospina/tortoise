@@ -3153,6 +3153,30 @@ def _coerce_props(props: dict) -> dict:
     return props
 
 
+def _item_dedup_key(item: dict) -> str | None:
+    """The effective dedup ``key`` of an ingest bundle item — the SAME value
+    ``create_point`` sees after ``_coerce_props`` flattens the item (#6110,
+    #8400).
+
+    ``_coerce_props`` gives explicit top-level kwargs precedence over nested
+    ``props`` on collision, and that precedence is by PRESENCE, not by
+    truthiness: a top-level ``key`` whose value is ``None`` still SHADOWS a
+    nested ``props["key"]``. A reader that instead "fell back when the
+    top-level value was None" would consult a key the writer never uses, so
+    the ingest counter/guard would predict a fold for a write that mints —
+    #2892's counter/writer parity broken in the opposite direction (#8400).
+
+    A blank or non-string key is treated as absent (the historic
+    content-only path), exactly as ``_resolve_dedup_hit`` treats it.
+    """
+    if "key" in item:
+        val = item.get("key")
+    else:
+        nested = item.get("props")
+        val = nested.get("key") if isinstance(nested, dict) else None
+    return val if isinstance(val, str) and val.strip() else None
+
+
 # ── ULID validation (Issue #52) ──
 # Canonical format (from tortoise/ids.py): <timestamp-hex>-<uuid12>
 _ULID_RE = re.compile(r"^[0-9a-f]+-[0-9a-f]{12}$")
@@ -5673,7 +5697,14 @@ class TortoiseSDK:
         # backstop).
         """Create a new Point node. Raises ValueError if kind is invalid.
 
-        Set dedup=True for idempotent creation (matches by content hash).
+        Set dedup=True for idempotent creation. The dedup identity is
+        ``(pointKind, content_hash)`` and — when a ``key`` is supplied —
+        ``(pointKind, key)`` as well: a re-run under the same key FOLDS onto
+        the point already holding it (within that pointKind) instead of
+        minting a second point that shares the key (#6110). A key is therefore
+        unique PER-KIND, never globally, and is never silently reassigned: a
+        content-dedup hit on a point that already holds a DIFFERENT key keeps
+        that key and warns.
 
         LIVE is the default (#1088): a point created WITHOUT an explicit
         ``status`` is live — not draft — whatever its kind. Draft is opt-in:
@@ -5898,9 +5929,70 @@ class TortoiseSDK:
             # this lookup, the v2 capture seam, and ``_content_exists`` can
             # never drift apart again — the fork is exactly what let the
             # fallback go missing from ``_content_exists``.
-            existing_id = self._find_point_by_content(content, pointKind=kind)
+            #
+            # #6110: a caller-supplied ``key`` is an IDENTITY, not a label. The
+            # shared resolver treats a point already holding that ``key``
+            # (within this pointKind) as the dedup hit WHATEVER its content, so
+            # a re-run under the same key FOLDS instead of silently minting a
+            # second point that shares the key. The writer and the ingest dedup
+            # counter both call `_resolve_dedup_hit`, so a key-bearing item
+            # cannot report a miss the writer takes as a hit.
+            _supplied_key = props.get("key")
+            _has_key = (isinstance(_supplied_key, str)
+                        and bool(_supplied_key.strip()))
+            existing_id, _key_hits = self._resolve_dedup_hit(
+                content, pointKind=kind,
+                key=_supplied_key if _has_key else None)
+            if _key_hits and len(_key_hits) > 1:
+                # A graph written before #6110 can already hold several points
+                # under one key. Fold onto the first (deterministic query
+                # order) but SAY SO — a silent fold is exactly how the
+                # duplicated-key state stayed invisible.
+                _logger.warning(
+                    "create_point: %d points already share key %r (kind=%r): "
+                    "%r — a pre-existing duplicate the write path cannot "
+                    "repair; returning %s. Re-key the extras or delete them "
+                    "(#6110)",
+                    len(_key_hits), _supplied_key, kind, _key_hits, _key_hits[0])
             if existing_id:
                 pid = existing_id
+                if _has_key:
+                    # One read serves BOTH #6110 audits below.
+                    _existing = self.get_point(pid)
+                    if _key_hits:
+                        # The KEY resolved the dedup. If the content differs, the
+                        # incoming content is NOT stored (the key is the
+                        # identity, and content is first-writer-wins, like the
+                        # calibration baseline, #7980) — say so, or the
+                        # collision stays silent and the caller believes their
+                        # content landed.
+                        if _existing.get("content") != content:
+                            _logger.warning(
+                                "create_point: key %r is already held by point "
+                                "%s with DIFFERENT content — folding onto it "
+                                "and keeping the existing content. The key is "
+                                "the identity; pass a fresh key with "
+                                "dedup=False to mint a second point (#6110)",
+                                _supplied_key, pid)
+                    else:
+                        # The hit came from CONTENT, not from the key: never
+                        # silently REASSIGN an existing point's key. A key
+                        # already held by a point is that point's identity —
+                        # the same first-writer-wins posture the calibration
+                        # baseline carries (#7980). Overwriting it would make
+                        # `query(key=…)` return a point its original owner named
+                        # and lose the first key.
+                        _existing_key = _existing.get("key")
+                        if (isinstance(_existing_key, str) and _existing_key
+                                and _existing_key != _supplied_key):
+                            props.pop("key", None)
+                            _logger.warning(
+                                "create_point: key %r not applied — content "
+                                "matched point %s, which already holds key %r. "
+                                "A dedup hit never reassigns an existing key; "
+                                "pass a fresh key with dedup=False, or update "
+                                "the point explicitly (#6110)",
+                                _supplied_key, pid, _existing_key)
                 # Existing point already stores content_hash — don't re-write it
                 # (would make the `if props:` guard always truthy and bump
                 # updatedAt on every dedup hit, #80 review).
@@ -12749,7 +12841,8 @@ class TortoiseSDK:
                 out[event_id] = entry
         return out
 
-    def _find_terminal_dedup_hit(self, content: str, kind: str) -> str | None:
+    def _find_terminal_dedup_hit(self, content: str, kind: str,
+                                 key: str | None = None) -> str | None:
         """Read-only NFC-keyed dedup MATCH (mirrors create_point's dedup key)
         restricted to TERMINAL hits — the Phase-1 mechanism behind the
         bundle-local-refs-resolving-to-terminal-points guard (cycle-17/18).
@@ -12807,8 +12900,33 @@ class TortoiseSDK:
         both, Phase-1 passed the bundle, and Phase-2 ``_check_endpoint_race``
         raised mid-write on a partially-mutated graph, leaving an orphan.
         Composing the predicate here rather than re-listing it is the point:
-        the fork is what let the three sites disagree (#2062/#2971/#2422)."""
+        the fork is what let the three sites disagree (#2062/#2971/#2422).
+
+        #8400: when the item carries a ``key``, that IDENTITY resolves FIRST —
+        the order ``create_point``'s ``_resolve_dedup_hit`` uses — so the guard
+        and the writer resolve the SAME node for a key-bearing item. A point
+        already holding the key IS the dedup hit whatever its content, so on a
+        key HIT the content queries below MUST NOT run (the writer never
+        reaches them); on a key MISS the historic content path runs unchanged.
+        The key leg mirrors the A10 fallback's conservative posture: a graph
+        written before #6110 can already hold several points under one key and
+        the writer's pick among them carries no ORDER BY, so the guard rejects
+        when ANY key holder is terminal rather than betting on which one the
+        writer folds onto."""
         proj = self._get_proj()
+        if isinstance(key, str) and key.strip():
+            # #8400: key-first, exactly as the writer resolves. A key HIT is
+            # the dedup resolution (whatever the content), so return from here
+            # — a fall-through to the content path could reject a bundle whose
+            # writer would legally fold onto a LIVE key holder.
+            key_hits = self._find_points_by_key(key, pointKind=kind)
+            if key_hits:
+                rows = proj.g.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids AND "
+                    f"{_terminal_expression('n')} RETURN n.id LIMIT 1",
+                    params={"ids": key_hits},
+                ).result_set
+                return rows[0][0] if rows else None
         base_clauses, base_params = self._dedup_match_clauses(point_kind=kind)
         status_clauses = (_terminal_expression("n"),)
         rows = proj.g.query(
@@ -12966,7 +13084,14 @@ class TortoiseSDK:
                     # already reported (check 1), skip the dedup-hit scan.
                     continue
                 kind = item.get("kind") or "statement"
-                hit = self._find_terminal_dedup_hit(content, kind)
+                # #8400: pass the item's effective key with `_coerce_props`'
+                # precedence (top-level wins by PRESENCE, not truthiness), so
+                # the guard resolves exactly the point the writer folds onto —
+                # otherwise a key-bearing bundle-local ref slips past this
+                # Phase-1 gate and becomes a Phase-2 raise on an already
+                # partially-mutated graph.
+                hit = self._find_terminal_dedup_hit(
+                    content, kind, key=_item_dedup_key(item))
                 if hit:
                     violations.append({
                         "section": "connections", "index": i,
@@ -13501,7 +13626,18 @@ class TortoiseSDK:
             # hash-less fallback (the fallback main also carried inline here) and
             # carries the same non-operator predicate the writer uses, so the
             # counter matches the writer exactly.
-            existed = self._find_point_by_content(content, pointKind=kind)
+            #
+            # #6110: the resolution is `_resolve_dedup_hit` (key identity
+            # included), the SAME helper the writer calls — otherwise a
+            # key-bearing item would report a content miss that the writer
+            # takes as a key hit, and the counter would say "created" for a
+            # fold. #8400: the key is read with `_coerce_props`' EXACT
+            # precedence through `_item_dedup_key` — a top-level `key: None`
+            # SHADOWS a nested `props["key"]` (presence wins, not truthiness),
+            # so the counter cannot consult a key the writer never uses and
+            # report a fold for a write that mints.
+            existed, _ = self._resolve_dedup_hit(
+                content, pointKind=kind, key=_item_dedup_key(item))
             # #1088 / #2199: decide the status on the WRITE COPY only — never
             # on `item` itself. An explicit per-item status (top-level or
             # nested props) ALWAYS wins: the branches below fill only items
@@ -18184,6 +18320,71 @@ class TortoiseSDK:
                     "predicate is the whole point of #2949")
         clauses.extend(extra_clauses)
         return clauses, params
+
+    def _find_points_by_key(self, key: str,
+                            pointKind: str | None = None,
+                            exclude_id: str | None = None) -> list[str]:
+        """Resolve the Point id(s) holding ``key`` — the key-identity path
+        (#6110). Returns EVERY match, not just the first.
+
+        Why every match: a graph written before #6110 could already hold
+        several points under one ``key`` (the write path treated ``key`` as a
+        label and minted a sibling whenever the content differed). The write
+        path warns when it sees more than one here, so a pre-existing
+        collision is surfaced instead of being folded onto silently. Returning
+        the list (rather than a single id) is what makes that warning possible
+        without a second query.
+
+        ``pointKind`` scopes the match, exactly as the content identity does:
+        the same key string may name a DISTINCT point in a different kind
+        (#6110 — key is unique per pointKind, not globally). The WHERE clause
+        is the shared ``_dedup_match_clauses`` non-operator predicate, so this
+        path can never resolve a dedup onto an operator node (#2949).
+        """
+        clauses, params = self._dedup_match_clauses(
+            point_kind=pointKind, exclude_id=exclude_id)
+        clauses.append("n.key = $key")
+        params["key"] = key
+        rows = self._get_proj().g.query(
+            f"MATCH (n:Point) WHERE {' AND '.join(clauses)} RETURN n.id",
+            params=params,
+        ).result_set
+        return [r[0] for r in rows]
+
+    def _resolve_dedup_hit(self, content: str, *,
+                           pointKind: str | None = None,
+                           key: str | None = None,
+                           exclude_id: str | None = None
+                           ) -> tuple[str | None, list[str]]:
+        """The ONE dedup resolution every site shares (#2892, #6110).
+
+        Returns ``(point_id_or_None, key_hits)``. ``key_hits`` is the
+        (possibly empty) list of points holding ``key`` within ``pointKind`` —
+        every match, so the WRITER can warn when a pre-#6110 graph already
+        holds several points under one key. Callers that need only the id (the
+        ingest dedup counter) ignore the second element.
+
+        A caller-supplied ``key`` is an IDENTITY, not a label: a point already
+        holding it (within ``pointKind``) IS the dedup hit, whatever its
+        content. Only on a key MISS does the content-hash path run — so a
+        re-run under the same key folds instead of minting a second point that
+        shares the key (#6110). Scoping is per-``pointKind``, mirroring the
+        content identity (``content_hash`` + ``pointKind``): the same key
+        string may name a distinct point in a different kind. A blank or
+        non-string key is treated as absent (the historic content-only path).
+
+        The writer (``create_point``) and the ingest dedup COUNTER
+        (``ingest_bundle``) both call this, so the counter can never predict a
+        hit the writer does not take — or miss a hit the writer does take —
+        for a key-bearing item.
+        """
+        if isinstance(key, str) and key.strip():
+            hits = self._find_points_by_key(key, pointKind=pointKind,
+                                            exclude_id=exclude_id)
+            if hits:
+                return hits[0], hits
+        return self._find_point_by_content(content, pointKind=pointKind,
+                                           exclude_id=exclude_id), []
 
     def _find_point_by_content(self, content: str,
                                pointKind: str | None = None,

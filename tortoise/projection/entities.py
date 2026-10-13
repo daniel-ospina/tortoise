@@ -1374,6 +1374,15 @@ class _EntityHandlers:
         # keeps the replay open-set passthrough from logging a FALSE
         # `"Point prop %r is not declared"` drift warning on every rebuild.
         "goalState",
+        # #6110/#8400: the per-kind dedup IDENTITY supplied to
+        # `create_point(key=…)`. It rides the `PointAdded` snapshot and is
+        # restored through this same open-set passthrough — declaring it keeps
+        # the shared live+replay writer from logging a FALSE `"Point prop %r
+        # is not declared"` drift warning for a documented identity prop (and
+        # removes the one-warning-per-keyed-point rebuild noise the #6110
+        # review measured). Declaration is warning-suppression only: the
+        # passthrough persists `key` either way.
+        "key",
         # #398 (owner ruling 2026-10-12): the author's declared credibility
         # WORD, persisted by `create_point(credibility=…)` as a validated
         # LABEL (it no longer sets the claim's strength). `_apply_source_
