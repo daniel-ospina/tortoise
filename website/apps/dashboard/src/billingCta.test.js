@@ -21,8 +21,10 @@ import {
   CHECKOUT_NOT_OFFERED_REASON,
   CHECKOUT_UNAVAILABLE_REASON,
   COMPARE_PLANS_URL,
+  HEADER_UPGRADE_TIER,
   capNoticeUpgrade,
   checkoutCtaFor,
+  headerUpgradeCta,
   nextUpgradeTier,
 } from './billingCta.js'
 import { nextUpgradePlan } from './nodeUsage.js'
@@ -243,4 +245,70 @@ test('#4386 (wiring backstop): the lock line renders the honest control, and the
   assert.match(head, /setError\(CHECKOUT_UNAVAILABLE_REASON\)/,
     'the would-be no-op must surface the honest reason')
   assert.match(head, /if \(checkoutPending\) return/, 'the double-click guard must survive')
+})
+
+// ── #4773: the header control's tier→price mapping ────────────────────────
+// The defect: the header gated on the SINGULAR `team.checkout_price_id` — the
+// server's current default, which is pro TODAY — while naming a tier in its
+// label. The P2 from the #4639 review cycle: the moment that default is any
+// other tier (or the header grows a per-tier control), the label and the price
+// id disagree and checkout opens for a price the control never advertised.
+// These tests pin the MAPPING (tier → that tier's own price id), not merely
+// the presence of one id — that is what makes the disagreement impossible.
+test('#4773: the header control resolves its own tier\'s price id, not the singular default', () => {
+  const ids = { solo: 'price_solo', pro: 'price_pro', team: 'price_team' }
+  // The advertised tier IS the resolved tier, and the price is THAT tier's id.
+  const cta = headerUpgradeCta({ tier: 'free', checkout_price_id: ids.pro, checkout_price_ids: ids })
+  assert.equal(cta.tier, HEADER_UPGRADE_TIER)
+  assert.equal(cta.priceId, ids.pro, 'the price id must be the advertised tier\'s own')
+  // The exact P2 scenario: the server's default has DRIFTED to another tier.
+  // A control wired to the singular field would open team's checkout under a
+  // label naming pro; the per-tier resolution must ignore the singular field
+  // entirely.
+  const drifted = headerUpgradeCta({ tier: 'free', checkout_price_id: ids.team, checkout_price_ids: ids })
+  assert.equal(drifted.priceId, ids.pro,
+    'a drifted singular default must never reach checkout')
+  assert.notEqual(drifted.priceId, ids.team)
+  // The mapping is per tier, not "the first id that exists": a catalog that
+  // sells solo/team but NOT pro yields no header control (never solo's or
+  // team's id under a pro promise).
+  assert.equal(headerUpgradeCta({ tier: 'free', checkout_price_ids: { solo: 'p_solo', team: 'p_team' } }).priceId, '')
+  assert.equal(headerUpgradeCta({ tier: 'anon', checkout_price_ids: { team: 'p_team' } }).priceId, '')
+})
+
+test('#4773: no price for the target tier → no control (never a dead click)', () => {
+  for (const team of [
+    { tier: 'free', checkout_price_ids: {} },
+    { tier: 'free' },
+    { tier: 'free', checkout_price_ids: { solo: 'p_solo' } },
+    { tier: 'anon' },
+    null,
+  ]) {
+    const cta = headerUpgradeCta(team)
+    assert.equal(cta.priceId, '', `no resolvable id for ${JSON.stringify(team)}`)
+    assert.equal(cta.tier, HEADER_UPGRADE_TIER,
+      'the advertised tier is still stated, even when unobtainable')
+  }
+})
+
+test('#4773 (wiring backstop): the header reads the per-tier resolution and names the advertised tier', () => {
+  const code = stripComments(readFileSync(join(here, 'main.jsx'), 'utf8'))
+  const start = code.indexOf('<header className="dash-header">')
+  assert.notEqual(start, -1, 'the dashboard header must exist')
+  const header = code.slice(start, code.indexOf('</header>', start))
+  // The singular field must not decide the header's control any more: only the
+  // per-tier map (whose ids are the `checkout_price_ids` plural — the negative
+  // lookahead keeps that spelling from satisfying the ban).
+  assert.doesNotMatch(header, /checkout_price_id(?!s)/,
+    'the header control must not gate on the singular checkout_price_id')
+  assert.match(code, /const headerUpgrade = headerUpgradeCta\(team\)/,
+    'the header target must come from the pure per-tier resolution')
+  assert.match(header, /headerUpgradeEligible\(team\)/,
+    '#4639 suppression must still gate the header control')
+  assert.match(header, /headerUpgrade\.priceId \?/,
+    'the control must gate on the RESOLVED price id')
+  assert.match(header, /onClick=\{\(\) => upgradeToPrice\(headerUpgrade\.priceId\)\}/,
+    'checkout must be opened with the resolved id, never the raw field')
+  assert.match(header, /Upgrade to \$\{TIER_LABELS\[headerUpgrade\.tier\]/,
+    'the label must name the RESOLVED tier — the acceptance criterion\'s "tier it advertises"')
 })
