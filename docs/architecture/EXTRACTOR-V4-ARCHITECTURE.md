@@ -13,7 +13,7 @@ aboutObjects: EXTRACTOR-V4-ARCHITECTURE.md, extractor pipeline, S2.2 VET, entity
 
 **Status:** design in progress, 2026-09-23. **Home:** `#4894` (write-path redesign). **Predecessor:** `#1509` (extractor v3, approved 2026-08-20, never built).
 
-**⚠️ Code citations — revision pin.** Every `file.py:NNNN` reference here is pinned to commit **`c79ba1cf2`** — **except where a passage names a later pin.** ⚠️ **Every citation added to this document on 2026-10-13 is pinned to `4c801fb18`**: the §S4 drift marker, §7's `value_gate` lines, and the §4.3 G1 row's `docs_miner.py` / `packs/_template/manifest.yaml` lines. Those are **not verifiable at the older pin** — `tortoise/docs_miner.py` does not exist at `c79ba1cf2`, and `packs/_template/manifest.yaml` was only 190 lines there (so a `:260` citation is out of range). Line numbers drift as the code moves; **the symbol name is authoritative and the line number is a convenience.** Verify against the symbol, not the number.
+**⚠️ Code citations — revision pin.** Every `file.py:NNNN` reference here is pinned to commit **`c79ba1cf2`** — **except where a passage names a later pin.** ⚠️ **Every citation added to this document on 2026-10-13 is pinned to `4c801fb18`**: the §S4 drift marker (and its §7 `value_gate` lines), the **§S2.2 "the pack stops being prose" paragraph's `packs/_template/manifest.yaml` line (at `:506`)**, and the **§4.3 G1 row's `docs_miner.py` line**. Those are **not verifiable at the older pin** — `tortoise/docs_miner.py` does not exist at `c79ba1cf2`, and `packs/_template/manifest.yaml` was only 190 lines there (so a `:260` citation is out of range). Line numbers drift as the code moves; **the symbol name is authoritative and the line number is a convenience.** Verify against the symbol, not the number.
 **Related:** `docs/architecture/STORAGE-ARCHITECTURE.md` · `#1026` (pack slots) · `#2281` (ask/answer over distilled knowledge) · `#2730` (entity attachment) · `#4333` (volume/economics) · `#4240` (edge durability) · `#4911` (secret redaction) · `#4899` (the gate). **Full issue map: §15.**
 
 ---
@@ -556,9 +556,12 @@ This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 > `run_s4` on the strength of this document alone.**
 >
 > **On the step *names*:** the code's own stages are **S1–S5** (`[S1] STORY SUMMARY` … `[S5] EMBED`, module
-> docstring `:10-29`), with `S2.2 VET` present in the production path (`:7331`). **`S0`, `S2.3` and `S6` have
-> no code counterpart** — those three are v4 design names (`S2.3` appears **0 times** in `extractor_v2.py`;
-> the only living `S2.3` string in `tortoise/` is `vet_gate.py`'s docstring quoting this document). ⚠️ **An earlier version of this marker claimed
+> docstring `:10-29`), with `S2.2 VET` present in the production path (`:7331`). **`S0` and `S6` have no code
+> counterpart** — those two are v4 design names. ⚠️ **`S2.3` DOES have one; it is DISABLED, not absent:** the
+> classify pass is `kind_classifier.classify_items` (`kind_classifier.py:189`), wired at
+> `extractor_v2.py:7356-7358` / `:7487`, gated by `TORTOISE_CLASSIFY_LATER` — **unset today = "the LEGACY
+> pipeline"**. ⚠️ **An earlier version of this marker said `S2.3` had no code counterpart because the
+> *string* `S2.3` is absent from `extractor_v2.py`. The string is absent; the mechanism is not.** ⚠️ **An earlier version of this marker claimed
 > `S3` and `S5` were absent from the code as well; that was wrong** — `S3` and `S5` appear 51 and 22 times
 > in `extractor_v2.py`, including as production stage comments.
 >
@@ -731,14 +734,14 @@ S6  COMMIT
 
 ### 4.3 ⚠️ What the steps above do NOT yet cover (review-provided, all unaddressed)
 
-**The step list is the SHAPE, not a complete specification.** Five gaps were identified by review and are recorded here rather than silently implied by the diagram. **None is a decision; all must be closed before implementation.** ✅ **All five are now filed** — the issue reference is in each row (revalidated 2026-10-13; G3 and G4 had no tracker entry before that, and are `#8495` / `#8496`).
+**The step list is the SHAPE, not a complete specification.** Five gaps were identified by review and are recorded here rather than silently implied by the diagram. **These are gaps to close, not designs already settled — but two of the filed issues ask the *owner* for a ruling** (`#5333` for G5's deletion/relocation half; `#8496` for G4's immutability-vs-redaction reconciliation), **so closing them means obtaining a decision, not drafting a design.** ✅ **All five are now filed** — the issue reference is in each row (revalidated 2026-10-13; G3 and G4 had no tracker entry before that, and are `#8495` / `#8496`).
 
 | # | the gap | why it matters |
 |---|---|---|
 | **G1** → `#5064` (open remainder; `#5007` CLOSED `COMPLETED` via PR `#5108` — the schema + passthrough **shipped**, but **`extractor_v2.py` emits no `span_start`** (the repo's *document* extractor does — `docs_miner.py:373`)) · `#4894` (narrative) | **No step PERSISTS the narrative or the raw-fact span.** S6 is *"write entities + connections + metadata/lifecycle"*. §4.0 has no persistence purpose beyond S6. | ⛔ **D1 and §2.4 are not implementable from the steps as written.** If the narrative and the span are not written by a named step, they are not written. **Needs an explicit persistence step (or an explicit S6 sub-job).** |
 | **G2** → `#5008` | **No EMBEDDING-DECISION step.** `STORAGE-ARCHITECTURE.md` §12.2a **decides** the `EMBED` gate exists (*"a row can be worth KEEPING but not worth EMBEDDING"*, *"the lever is what gets an embedding"*) — **and this document never mentions it.** S2.3's kNN path **silently assumes every candidate is embedded.** | ⛔ **The two documents would ship contradictory designs.** The `EMBED` gate and the `KEEP` gate **share one rule set and enforce at TWO points** (§12.2a) — so the second enforcement point needs a home in this step list. |
 | **G3** → `#8495` | **No per-step FAILURE POLICY.** Only S2.2 (*"fail-open — keep"*) and S2.3 (*"never raises"*) state one. | **The S3 failure is the dangerous one: the natural fail-open marks candidates `new` — MANUFACTURING DUPLICATES, the exact failure S3 exists to prevent.** Also: partial S6 has no transaction/retry boundary vs `#4240` / `#4716` (both CLOSED `COMPLETED` — the step-level policy was never written, whatever those fixes landed); and **re-narrate has no tie-break** for a worse second narrative. |
-| **G4** → `#8496` | ⛔ **`#4911` (no secret redaction) + an append-only immutable raw layer = IMMORTAL SECRETS.** | **`#4911` is listed in §15 as an unrelated capture-path issue. It is not unrelated** — §2.4.2 makes the raw layer **append-only by design**, so **a secret captured once is a secret retained forever.** Redaction must be designed *with* the layer, or the layer's immutability becomes a liability. |
+| **G4** → `#8496` | ⛔ **`#4911` (no secret redaction) + an append-only immutable raw layer = IMMORTAL SECRETS.** | ⚠️ **Earlier revisions listed `#4911` in §15 as an *unrelated* capture-path issue; as of 2026-10-13 §15 links them explicitly (`#4911` → "its *v4 raw-layer* consequence is `#8496`"). The two are not unrelated** — §2.4.2 makes the raw layer **append-only by design**, so **a secret captured once is a secret retained forever.** Redaction must be designed *with* the layer, or the layer's immutability becomes a liability. |
 | **G5** → `#5333` · `#5059` · `#8500` (the S4 clause) | **No migration or backfill for the ~25k existing nodes.** | No backfill, no re-extraction path, and **no decision on the ~4,900 `the <X>` Objects.** Also unaddressed: **what happens to the live S4 `merge_embed_lists` when S4 leaves the step list** — the code and the design must not disagree. |
 
 **⚠️ And G2 is where the two documents bind:** `STORAGE-ARCHITECTURE.md` §12.2a's decided rule (*one rule set, two enforcement points*) **requires a step to hold the second point.** Until G2 is closed, **the storage doc's central lever has no implementation site.**
@@ -1206,7 +1209,7 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 
 | section | issue(s) | what the issue takes from here |
 |---|---|---|
-| §1 the mechanism (`^the <X>`, 62.3% of Objects) | **`#4899`** (CLOSED `COMPLETED`) · `#4894` | the **mechanical DISCARD outcome on E7** — `tortoise/value_gate.py`, no LLM, **flag-gated OFF by default** |
+| §1 the mechanism (`^the <X>`, 62.3% of Objects) | **`#4899`** (CLOSED `COMPLETED`) · `#4894` | ⚠️ **`#4899` is the *identifier-only* DISCARD** (`^#\d{3,}$`-style), shipped in `tortoise/value_gate.py` and **OFF by default**. **It deliberately does NOT cover `the <X>` definite descriptions** — `value_gate.py`'s docstring: *"a definite description is left to the arbiter, and is reported, not dropped"* — so the 62.3% `the <X>` class belongs to the **adversarial (S2.2)** half, not this one |
 | §1 v2 → v3 → v4 | `#1509` (epic) · `#4894` | **v3 increases volume; v4 must land with or before v3's E2/E3** — and v3's **E4 has already landed** (`merge_embed_lists`, `extractor_v2.py:4845`), so its premise is stale |
 | §2 three tiers | `#2281` | the **narrative is the ingest-time-distilled layer** with raw-turn fallback |
 | §2 narrative placement (D1) | `#4894` | narrative = `Source` metadata, **not** a `Document` node |
