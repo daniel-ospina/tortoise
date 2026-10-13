@@ -1718,3 +1718,124 @@ def test_terminalizer_successor_field_is_type_scoped_on_every_engine(sup):
             assert {e[0] for e in got} <= allowed, (
                 f"shape {i}: {name} minted a phantom CORRECTS from a field its "
                 f"own fold arm ignores: {got} (allowed {allowed})")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# #6111 (issue comment) — the PROMOTE-MATERIALIZED target arm
+#
+# The successor-last parity test above materializes its target with
+# ``PointAdded``/``OperatorAdded``. An independent reviewer measured the
+# promote-materialized target — a node whose only durable record is a
+# ``PointPromoted``/``OperatorPromoted`` snapshot — as the SAME root cause and
+# asked for a row per engine here. The CORRECTS edge half is still the subject:
+# the terminalizer's status/validity/belief already agreed, only the edge was
+# lost on the apply() arm.
+# ══════════════════════════════════════════════════════════════════════
+
+def test_promote_materialized_target_successor_later_folds_on_every_engine(
+        sup):
+    """#6111: ``[Promoted b, terminalize b→s, PointAdded s]`` must keep the
+    CORRECTS edge ``s→b`` on ``rebuild_all``, ``rebuild(EventLog)`` AND
+    ``recover_from_log`` — asserted against ``rebuild_all``'s reference value,
+    never a single engine's, with a guard that the edge was not dropped on
+    EVERY engine (which must not pass as "parity").
+
+    Also pins ``consistency._fold_journal`` — the reference fold behind
+    ``check_consistency`` — on the SAME journals, so a healthy promote-target
+    replay cannot be reported as ``divergence="content"``."""
+    from tortoise.consistency import _fold_journal, recover_from_log
+
+    _, events, sdk = sup
+    ts = "2026-01-01T00:00:00+00:00"
+    proj = sdk._get_proj()
+
+    def _promoted(pid, op):
+        point = {"id": pid, "label": "operator" if op else "statement",
+                 "content": pid, "status": "live", "confidence": 0.9}
+        if op:
+            point["operator"] = {"op_type": "IMPL"}
+        return {"event_id": sdk.ulid(), "ts": ts,
+                "initiated_by": "raw-producer", "projection_version": 2,
+                "type": "OperatorPromoted" if op else "PointPromoted",
+                "point": point}
+
+    def _added(pid):
+        return {"event_id": sdk.ulid(), "ts": ts,
+                "initiated_by": "raw-producer", "projection_version": 2,
+                "type": "PointAdded",
+                "point": {"id": pid, "label": "statement", "content": pid,
+                          "status": "live", "confidence": 0.9}}
+
+    def _supersede(a, b):
+        return {"event_id": sdk.ulid(), "ts": ts,
+                "initiated_by": "raw-producer", "projection_version": 2,
+                "type": "PointSuperseded", "id": a, "new_id": b,
+                "valid_to": ts, "expired_at": ts}
+
+    def _invalidate(a, x):
+        return {"event_id": sdk.ulid(), "ts": ts,
+                "initiated_by": "raw-producer", "projection_version": 2,
+                "type": "PointInvalidated", "id": a, "corrected_by": x,
+                "valid_to": ts, "expired_at": ts}
+
+    # (label, promote snapshot, terminalizer, successor, expected status)
+    shapes = {
+        "pointpromoted-supersede": (_promoted("b", False), _supersede("b", "c"),
+                                    "c", "superseded"),
+        "pointpromoted-invalidate": (_promoted("b", False),
+                                     _invalidate("b", "x"), "x", "live"),
+        "operatorpromoted-supersede": (_promoted("b", True),
+                                       _supersede("b", "c"), "c",
+                                       "superseded"),
+        "operatorpromoted-invalidate": (_promoted("b", True),
+                                        _invalidate("b", "x"), "x", "live"),
+    }
+    for name, (promote, term, successor, expected_status) in shapes.items():
+        records = [promote, term, _added(successor)]
+        synth_dir = events.parent / f"synth-promote-{name}"
+        synth_dir.mkdir()
+        _synthesize_journal(synth_dir / "events.jsonl", records)
+
+        def _observable(successor=successor):
+            p = sdk.get_point("b") or {}
+            return (p.get("status"), p.get("outdated"), p.get("validTo"),
+                    p.get("expiredAt"), _corr(proj, "b", successor))
+
+        # rebuild_all (after-creations sweep) — the reference value. Wipe the
+        # graph first: rebuild_all snapshots GRAPH-ONLY nodes and injects them
+        # as synthetic PointAdded (#548), which is not this journal.
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj.rebuild_all(str(synth_dir), confirm_destructive=True)
+        via_all = _observable()
+
+        # rebuild(EventLog) — the chronological apply() arm.
+        _apply_replay(sdk, synth_dir)
+        via_apply = _observable()
+
+        # recover_from_log — the DB-loss engine, sharing the same plan.
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        assert recover_from_log(str(synth_dir), proj)["recovered"]
+        via_recover = _observable()
+
+        assert via_all[0] == expected_status, (
+            f"{name}: terminalizer did not fold the status: {via_all}")
+        assert via_all[4] == 1, (
+            f"{name}: the CORRECTS edge was dropped on every engine: {via_all}")
+        assert via_apply == via_all, (
+            f"{name}: rebuild(EventLog) != rebuild_all — "
+            f"{via_apply} != {via_all}")
+        assert via_recover == via_all, (
+            f"{name}: recover_from_log != rebuild_all — "
+            f"{via_recover} != {via_all}")
+
+        # #6111 acceptance: consistency._fold_journal agrees on the shape.
+        folded = _fold_journal([dict(r) for r in records])
+        b_fold = folded.get("b") or {}
+        assert (b_fold.get("status"), b_fold.get("outdated")) == (
+            via_all[0], via_all[1]), (
+            f"{name}: _fold_journal disagrees with the replayed graph on "
+            f"status/outdated — {b_fold} vs {via_all}")
+        assert (b_fold.get("validTo"), b_fold.get("expiredAt")) == (
+            via_all[2], via_all[3]), (
+            f"{name}: _fold_journal diverges on the window stamps — "
+            f"{b_fold} vs {via_all}")

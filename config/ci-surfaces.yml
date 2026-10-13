@@ -979,6 +979,15 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #5142: the ONTOLOGY record of the D10 code half — the `format` markers vs
+  # `_SOURCE_HANDLED`, the deferred document/corpus-source node collapse, and
+  # the document `:Source` scoping. Half its subject is `tortoise/projection/
+  # entities.py` (an `entities.py`-only change falls through to `core`), so
+  # without this entry the doc↔code pins would not run on the change that can
+  # break them. Also registered in `tier1` (same #2881 precedent as
+  # `test_durability_posture.py`), because a docs-only `docs/ONTOLOGY.md`
+  # wording edit is what this guard is FOR.
+  - test_5142_ontology_record.py
   - test_2294_ask_degradation_gate.py
   - test_5051_capture_receipt_key_registry.py
   - test_5089_operator_prop_parity.py
@@ -1904,6 +1913,20 @@ surfaces:
   - test_extractor_reliability.py
   - test_extractor_embed_coerce_5060.py  # #5060: execute_embed must not raise on a non-string name/content (whole-session payload loss)
   - test_extractor_v2.py
+  # #5092: the guard for the extractor-v4 design's two step lists. Registered `core`
+  # (where the extractor's other guards live — `test_v4_declared_mechanisms.py`,
+  # `test_vet_gate_5005.py`, `test_salience_labels_4917.py`) AND in `tier1`, because
+  # this guard's ONLY subject is a DOC (`docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`)
+  # and `docs/` is in NON_PYTHON_PREFIXES: a docs-only diff takes `select()`'s early
+  # return and runs the tier-1 smoke set only. `core` is the classification home
+  # (`--integrity` reads it there) and the lane for a code diff that falls through to
+  # `core`; `tier1` is what makes the guard run on the doc-only diff that can break it.
+  # ⚠️ Named limit, not hidden: a diff that changes the doc AND a file selecting a
+  # NON-core named surface (`api`/`ep`/`sdk`/…) drops the doc path and does not run this
+  # guard — the #1349/#3332 silent-drop class the CORE_ALSO comments describe. It is not
+  # closed here because the doc's subject code (`tortoise/extractor_v2.py`) matches no
+  # named surface either, so `core` is already its lane.
+  - test_extractor_v4_step_list_consistency.py
   - test_falkordb_compat.py
   # #7076: the degraded-fallback snapshot's OWN guard. test_fallback_snapshot.py
   # was registered only under `api`, while the module it guards
@@ -3000,6 +3023,7 @@ surfaces:
   - test_reader_prerendered.py  # #3011: pre-rendered-evidence reader seam — byte-identical to the hit-list lane (hermetic)
   - test_reader_abstention_calibration.py
   - test_reader_4107_advice_shape.py  # #4107: hermetic characterisation drift pin (detector→None, advice-clause tension)
+  - test_reader_4837_advice_battery.py  # #4837: hermetic pre-registration + decision-rule pin for the advice battery (`tortoise/reader.py` selects sdk)
   - test_coverage_loop.py  # #2567 (docker-lane leg, mirrors test_retrieval.py)
   - test_coverage_loop_rules.py  # #2567 (hermetic rules leg)
   - test_session_reinjection_rules.py  # #2517 (hermetic rules leg, mirrors test_retrieval.py)
@@ -3191,6 +3215,7 @@ tier1:
 - test_crypto.py
 - test_decide.py
 - test_durability_posture.py  # #2881: durability authority + scoped source-of-truth gate
+- test_5142_ontology_record.py  # #5142: docs/ONTOLOGY.md §4.4/§4.6 record vs the code (format/`_SOURCE_HANDLED`, the deferred node collapse + its `OVERRIDES:`, the document `:Source` scoping) — dual-registered with `core`
 - test_ep_draft_filter.py
 - test_ep_operatorless.py
 - test_event_store.py
@@ -3217,6 +3242,9 @@ tier1:
 - test_w4_why_enrichment.py
 - test_weights.py
 - test_writer_inventory.py
+# #5092: the extractor-v4 design's step-list guard is a fast, no-DB file scan, so a
+# docs-only PR runs it here — the same placement as `test_retention_promise.py` above.
+- test_extractor_v4_step_list_consistency.py
 slow_files:
 - test_3311_multilabel_status_vocab.py
 - test_about_edges.py
@@ -4169,6 +4197,7 @@ durations:
   test_embeddings.py: 0.5
   test_extractor.py: 0.5
   test_extractor_doc.py: 0.5
+  test_extractor_v4_step_list_consistency.py: 0.1  # #5092: two fenced blocks + one paragraph read; measured 0.01s of test body (session setup excluded)
   test_file_indexer.py: 0.7
   test_open_kinds.py: 0.3
   test_postmerge_verdict.py: 0.4
@@ -4503,6 +4532,7 @@ durations:
   test_oauth_redemption_state.py: 3.2  # unmeasured
   test_3036_oauth_retention.py: 0.2  # unmeasured
   test_reader_4107_advice_shape.py: 1.4  # unmeasured
+  test_reader_4837_advice_battery.py: 2.6  # #4837: hermetic (no DB, no reader call) — 23 tests, measured 2.6s on this host
   test_fanout_cap.py: 0.2  # unmeasured
   test_never_across_fold_5080.py: 2.0  # unmeasured
   test_operator_alert.py: 2.0

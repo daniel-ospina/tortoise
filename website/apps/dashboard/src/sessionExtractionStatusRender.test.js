@@ -20,8 +20,13 @@
 //      same object, so an expanded row cannot contradict the row that opened it.
 //
 // WHAT IT IS NOT. A source-extraction guard cannot see CSS or a DOM-level edit
-// (the residual stated in jsxSourceProbe.js), and the durable fix for that class
-// is the DOM-level dashboard suite filed as #4915.
+// (the residual stated in jsxSourceProbe.js). #4915 built the DOM-level lane
+// that closes this class for a component that can be imported and rendered
+// (`npm run test:dom`; see harnessDisclosureDom.test.jsx) — this file is still a
+// source guard because its two render sites live inside main.jsx, which a test
+// cannot import (it mounts the whole application at module scope). Porting a
+// site to the DOM lane is therefore a REFACTOR (extract the unit), not a
+// rewrite of the assertions here.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -48,7 +53,11 @@ test('#3520: the comment strip kept the file it is scanning', () => {
   for (const marker of [
     /setWelcomeOrgName/,
     /revokeKey/,
-    /harness-status-head/,
+    // #4915: this marker was `/harness-status-head/` — the per-harness status
+    // rows moved to `harnessStatusCard.jsx` (mounted by MemorySources here), so
+    // the sentinel follows the mount. It still sits at the same point in the
+    // file, which is what a coverage sentinel is for.
+    /HarnessStatusCard/,
     /captured-sessions/,
     /createRoot\(\s*document\s*\.\s*getElementById\(\s*['"]root['"]\s*\)/,
   ]) {

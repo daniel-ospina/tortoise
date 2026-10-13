@@ -17,8 +17,10 @@ What this file pins, and why each is load-bearing:
 - **Report-not-delete**: every record carries a rule id, a reason, a
   counterfactual, a ``from_state``/``to_state`` and ``destructive=False``.
 - **Bounded and idempotent** — a pure function, proved by re-running over the
-  same census (identical :func:`plan_fingerprint`) and over a census whose rows
-  already carry ``backfill_applied`` (empty actionable set).
+  same census (identical :func:`plan_fingerprint`) and by applying the plan's
+  **own** ``to_state`` back onto the rows (so the marker the rule reads is the
+  marker a rung writes): the applied rungs advance nothing on the re-run, while
+  a ``MERGE_CANDIDATE`` stays a recorded candidate until ``#5006`` applies it.
 - **The census is read-only** — the guard is executed against every mutation
   verb, not asserted in prose.
 - **Each rule's authority is declared somewhere real** — a drift pin tying
@@ -482,6 +484,79 @@ def test_replanning_an_applied_census_produces_an_empty_actionable_set() -> None
         assert after["records"][rid]["disposition"] == dd.KEEP
 
 
+def test_applying_the_plans_own_to_state_makes_the_second_run_a_no_op() -> None:
+    """Idempotence through the module's **own** contract, not a hand-built row.
+
+    An applier is told to write ``to_state``. If a rung's ``to_state`` omits the
+    marker the idempotence rule reads, applying the plan changes nothing on the
+    next run and every count of "what remains" is wrong — so this applies
+    ``to_state`` **verbatim** rather than hand-writing ``backfill_applied``.
+    """
+    rows = [
+        _row("the staging-only constraint", 0),          # RECLASSIFY
+        _row("the plan doc", 0), _row("plan doc", 2),   # RESOLVE (article)
+        _row("the T2 guard", 0), _row("the T2 Guard", 0),  # MERGE_CANDIDATE
+        _row("the unreadable one", "many"),             # REPORT
+        _row("config/ci-surfaces.yml", 5),              # KEEP
+    ]
+    before = _plan(rows)
+    applied_rungs = {dd.RESOLVE, dd.RECLASSIFY}
+    assert {
+        r["disposition"] for r in before["records"].values()
+    } >= applied_rungs | {dd.MERGE_CANDIDATE, dd.REPORT}, before["stats"]
+
+    applied = []
+    for row in rows:
+        to_state = before["records"][f"o-{row['name']}"]["to_state"]
+        applied.append({**row, **to_state} if isinstance(to_state, dict) else row)
+
+    after = _plan(applied)
+    # The rungs the plan describes an application for are now no-ops...
+    assert after["stats"]["by_disposition"][dd.RESOLVE] == 0, after["stats"]
+    assert after["stats"]["by_disposition"][dd.RECLASSIFY] == 0, after["stats"]
+    assert after["stats"]["actionable"] < before["stats"]["actionable"]
+    for rid, record in before["records"].items():
+        if record["disposition"] in applied_rungs:
+            assert after["records"][rid]["rule_id"] == dd.RULE_ALREADY_APPLIED
+            assert after["records"][rid]["disposition"] == dd.KEEP
+    # ...and the one rung that describes NO application of its own stays a
+    # recorded candidate: #5006 applies merges, so `applied` is deliberate.
+    merges = [
+        r for r in after["records"].values()
+        if before["records"][r["id"]]["disposition"] == dd.MERGE_CANDIDATE
+    ]
+    assert merges
+    assert all(r["disposition"] == dd.MERGE_CANDIDATE for r in merges)
+
+    # A third run over the same state is stable — applying is monotone.
+    assert _plan(applied)["stats"]["actionable"] == after["stats"]["actionable"]
+
+
+def test_every_applied_rung_records_the_marker_the_idempotence_rule_reads() -> None:
+    """The writer and the reader of the applied marker agree on one spelling.
+
+    A rung that describes an application but omits :data:`dd.APPLIED_MARKER`
+    makes its own rows permanently actionable — the rule would decide on the
+    marker's absence rather than on the row's state.
+    """
+    plan = _plan([
+        _row("the staging-only constraint", 0),
+        _row("the plan doc", 0), _row("plan doc", 2),
+        _row("the T2 guard", 0), _row("the T2 Guard", 0),
+    ])
+    seen: set[str] = set()
+    for record in plan["records"].values():
+        to_state = record["to_state"]
+        seen.add(record["disposition"])
+        if record["disposition"] in {dd.RESOLVE, dd.RECLASSIFY}:
+            assert isinstance(to_state, dict), record
+            assert to_state.get(dd.APPLIED_MARKER) is True, record
+        if record["disposition"] == dd.MERGE_CANDIDATE:
+            assert to_state["applied"] is False, record
+            assert to_state.get(dd.APPLIED_MARKER) is not True, record
+    assert seen >= {dd.RESOLVE, dd.RECLASSIFY, dd.MERGE_CANDIDATE}, seen
+
+
 def test_bounded_one_disposition_per_row() -> None:
     rows = [_row(f"the unused {i}", 0) for i in range(500)]
     plan = _plan(rows)
@@ -503,6 +578,35 @@ def test_the_census_query_has_no_mutating_verb() -> None:
 def test_the_read_only_guard_rejects_every_mutation_verb(verb: str) -> None:
     with pytest.raises(dd.ReadOnlyViolation):
         dd.assert_read_only(f"MATCH (o:Object) {verb} o.name = 'x' RETURN o")
+
+
+def test_the_census_query_projects_the_marker_the_idempotence_rule_reads() -> None:
+    """A marker the census does not return is a marker the planner cannot see.
+
+    ``RULE_ALREADY_APPLIED`` reads :data:`dd.APPLIED_MARKER`. If
+    :data:`dd.CENSUS_QUERY` does not project it, the rule is **unreachable
+    through the module's own read path** — a rule reading a column the census
+    never returns can never fire, and every applied row would be re-planned on
+    every run. Pinned on the query text *and* executed through ``census_rows``.
+    """
+    for field in (dd.APPLIED_MARKER, dd.APPLIED_CLASS):
+        assert f" AS {field}" in dd.CENSUS_QUERY, field
+
+    def run(query: str, params: dict):
+        dd.assert_read_only(query)          # the executor itself re-checks
+        return [{
+            "id": "o-applied", "name": "the plan doc", "ref_count": 0,
+            "ref_edges": [], "status": None, "object_kind": None,
+            dd.APPLIED_MARKER: True, dd.APPLIED_CLASS: "definite_description",
+        }]
+
+    rows, warnings = dd.census_rows(run)
+    assert warnings == []
+    plan = _plan(rows)
+    record = plan["records"]["o-applied"]
+    assert record["rule_id"] == dd.RULE_ALREADY_APPLIED
+    assert record["disposition"] == dd.KEEP
+    assert plan["stats"]["actionable"] == 0, plan["stats"]
 
 
 def test_census_rows_passes_only_the_read_only_query_and_reports_a_cap() -> None:

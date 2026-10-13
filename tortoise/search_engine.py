@@ -279,10 +279,29 @@ def ep_baseline_cypher(alias: str) -> str:
     return f"coalesce({alias}.baseline_set, false)"
 
 
+def ep_prior_only_cypher(alias: str) -> str:
+    """Cypher boolean: ``alias`` is PRIOR-ONLY — the ``'baseline'`` state of
+    :func:`ep_measurement_state` (#3415).
+
+    The third predicate of the three-state vocabulary: a declared #2199
+    baseline with NO EP measurement. NOT the same as "unmeasured" — an
+    unmeasured claim carries no persisted prior at all (Beta(1,1) neutral),
+    while a prior-only claim's confidence_mean IS the declared PRIOR mean.
+
+    Kept textually in step with the Python twin: for every combination of
+    (posterior_alpha, ep_alpha, baseline_set) this helper is true iff
+    ``ep_measurement_state(...) == 'baseline'`` — including the rows where
+    ``baseline_set`` is true and ``ep_alpha`` is NULL (the twin calls those
+    prior-only too, since ``baseline_set`` alone disqualifies "measured").
+    """
+    return (f"({alias}.posterior_alpha IS NULL "
+            f"AND coalesce({alias}.baseline_set, false))")
+
+
 def ep_measurement_state(*, posterior_alpha, ep_alpha,
                          baseline_set: bool) -> str:
-    """Python twin of :func:`ep_measured_cypher`: 'measured' | 'baseline' |
-    'unmeasured' (#3276).
+    """Python twin of :func:`ep_measured_cypher` / :func:`ep_prior_only_cypher`:
+    'measured' | 'baseline' | 'unmeasured' (#3276).
 
     Pure measurement predicate — it does NOT know about the #2490 terminal
     override, which each read surface applies on top (a terminal claim is

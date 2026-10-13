@@ -15104,8 +15104,11 @@ class TortoiseSDK:
             variance_threshold: posterior variance above which a claim is
                 contested (default 0.04 — same signal as search_engine's
                 has_ep-guarded contested flag; deliberately NOT
-                TortoiseEP.get_contested_claims, which flags unmeasured
-                uniform priors — an unmeasured claim is not contested).
+                TortoiseEP.get_contested_claims, which ALSO flags unmeasured
+                uniform priors — an unmeasured claim is not contested. #3415:
+                a declared #2199 baseline prior is prior-only and is no
+                longer flagged there either — the two scans agree on every
+                state except the unmeasured (Beta(1,1)) listing).
             add_limit: max suggestions (default 20).
             prune_limit: max flagged entries (default 50).
             similarity_fn: injectable pairwise-similarity function for
@@ -15608,10 +15611,15 @@ class TortoiseSDK:
         # #2490: terminal claims are EXCLUDED from the variance scan — they
         # decay to vacuity (v=1/12 > threshold) at the terminalizing write and
         # must surface as "stale" (above), never "contested". Deliberate
-        # asymmetry vs get_contested_claims: THIS scan also requires stored EP
-        # params (unmeasured == not contested) while get_contested_claims
-        # coalesces to Beta(1,1) and lists an unmeasured LIVE claim as
-        # contested (its :169-pin). Do not "harmonize" the two.
+        # asymmetry vs get_contested_claims: THIS scan requires stored EP
+        # params for ALL rows (unmeasured == not contested), while
+        # get_contested_claims coalesces to Beta(1,1) and lists an unmeasured
+        # LIVE claim as contested (its :169-pin). Do not "harmonize" the two.
+        # #3415: the ONE state both scans now agree on is the declared
+        # prior-only baseline — get_contested_claims applies
+        # ``ep_prior_only_cypher`` so a #2199 baseline cannot read contested
+        # there either; only the genuinely UNMEASURED (no persisted prior)
+        # listing remains get_contested_claims' deliberate divergence.
         contested: dict[str, dict] = {}
         rows = proj.g.query(
             "MATCH (n:Point) "

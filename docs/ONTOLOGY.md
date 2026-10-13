@@ -4,7 +4,7 @@ type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-10-12
+updated: 2026-10-13
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
@@ -32,6 +32,34 @@ doc_status: live
 > **⭐ If this document and the code disagree, THIS DOCUMENT IS RIGHT and the code
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in the changelog.
+>
+> **Changelog v3.25 (2026-10-13 — issue #5142 — the D10 code half's ONTOLOGY record: the `format` markers, the deferred node collapse, and the document `:Source` scoping):**
+>
+> **A record correction, not a model change** — no decision, vocabulary or semantics
+> moves. What was missing was the *record* of facts already landed or already decided,
+> found by the code review of PR #5127. Three gaps close here:
+>
+> - **§4.6/§4.7: the two `format` markers moved ⚠️ → ✅, and the `_SOURCE_HANDLED |=
+>   format` fact, had no entry.** PR #5127 — the D10 code half, `294d5847e`, merged
+>   2026-09-25 — flipped §4.6's field row and §4.7's matrix row because `format` moved
+>   into `_SOURCE_HANDLED` (`tortoise/projection/entities.py`), and it touched no
+>   changelog line: the document then asserted a landed code state with nothing saying
+>   when or why it landed. Recorded here. ⚠️ **Read the rows' *"since D10 (v3.15)"* as
+>   the MODEL's version, not the code's**: v3.15 is where §4.4 declares *a document is a
+>   `:Source`*; the code half that flipped the markers is PR #5127.
+> - **§4.4: the deferred node collapse is now stated, beside "a document is a
+>   `:Source`", with its `OVERRIDES:` line.** D10 keeps **two** `:Source` nodes per
+>   document — the document node (`url = <doc id>`) and the corpus `#205` provenance
+>   Source (`url = source_url`) — and the **collapse is deliberately deferred**. The
+>   reasoning lived only in `_upsert_document`'s docstring and the epic's test-design
+>   doc, so §4.4 read as an invitation to merge the two nodes; the **`OVERRIDES:` line is
+>   posted on #5013** and carried at §4.4.
+> - **§4.6: the document `:Source` scoping is now stated at the row a reader trusts.**
+>   §4.6 marks `sourceKind`/`contentHash`/`version` REQUIRED ✅, but a document `:Source`
+>   is written by a different path (`_upsert_document`) and supplies a different set. Two
+>   of the three are written (**`contentHash` + `version`**, PR #5592 / `700960943`) and
+>   **`sourceKind` is the one still missing** — a work item (**#5082**), named at §4.6
+>   rather than left as a quiet absence under the global "code may lag" caveat.
 >
 > **Changelog v3.23 (2026-10-10 — issues #7813 + #7853 — confidence propagates across all four epistemic labels):**
 >
@@ -453,7 +481,14 @@ doc_status: live
 >   (`validFrom` on the node; `validFrom` + `previousValidTo` on the
 >   `SourceVersioned` record), and what stays open is the node's
 >   `validTo`/`expiredAt` (**#3590** S2, the removal-field decision); and
->   `#5038` (the version model).
+>   `#5038` (the version model). **The D10 code half's own residuals are named and
+>   open:** `#5082` (the document `:Source` carries no `sourceKind`, while §4.6 marks
+>   it REQUIRED — scoped at §4.6), `#5121` (the MCP surface still describes a
+>   `:Document` graph node; needs a surface-manifest re-cut), `#5126`
+>   (`graph-scripts/backfill_embeddings.py` still targets the retired `:Document`
+>   label and reads the retired `content` — a silent no-op), and `#5140` (the ten
+>   residuals outside the declared B1–B6 threat surface, including three reproduced
+>   P1s).
 >
 > **Changelog v3.14 (2026-09-20, issue #4369 — the "claim" gloss is declared):**
 >
@@ -1091,6 +1126,23 @@ A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, rea
 
 **A source's fields and its versioning rules are in §4.6.** This section states only what is specific to a document.
 
+**A document is a `:Source` — and it stays TWO nodes (`#5142`).** D10 preserves node
+TOPOLOGY: the document node (`url = <document id>`) remains **distinct** from the corpus
+`#205` provenance Source (`url = source_url`). **The collapse is deliberately DEFERRED, not
+done** — merging the two turns the `(corpus Source)-[:references]->(document Source)` edge
+into a dropped self-loop, and the index-completeness gate's `edge` clause then reports every
+doc unit **incomplete forever**. Read *"a document is a `:Source`"* as **a label and a field
+model**, never as an invitation to merge the two nodes. The reasoning is pinned in
+`tortoise/projection/entities.py::_upsert_document` and in the epic's test-design doc
+(`docs/epics/2026-09-24-5088-d10-fold/01-test-design.md`, the *Idempotency* clause).
+
+> **OVERRIDES:** the common *"one node per source"* default — collapsing a document and
+> its provenance source onto a single node — **the document node and the corpus source stay
+> two `:Source` nodes**, because the collapse drops the `references` edge as a self-loop and
+> leaves every doc unit permanently incomplete for the index-completeness gate. A deliberate,
+> **deferred** decision (#5013 §4.4 · #5088 · `OVERRIDES:` posted on #5013), not an accident
+> of history.
+
 **`documentKind` — the genre axis.** When `sourceKind: document`, `documentKind` names the **genre** of the document. The core vocabulary and the pack extension point are in **§5** (single home).
 
 **`documentKind` is not `sourceKind`.** `sourceKind` answers *what kind of source this is* (`document`, `conversation`, `github_issue`, `agentSession` — the full vocabulary is in §5); `documentKind` answers *what genre of document it is*. Different questions — **neither absorbs the other**.
@@ -1144,7 +1196,7 @@ A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, rea
 | `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | ⚠️ | **The CURRENT version's valid-time window** — when the content held in the world (declared §4.7, #3642). **`validFrom` is written since #3644**: `_upsert_source` sets it to the version's OBSERVATION instant (the same instant `create_source` mints for `updatedAt`, one clock read, carried on the record) through the same hash-diff gate as `version`/`updatedAt` — a create, a stub completion, or a real transition, never a no-op re-check. A version has no content-side date of its own (a version *is* "the content as read at an instant"), which is why the observation instant is definitional here and not the borrowed write clock §4.1/#3654 forbids for a Point; a caller-asserted start (a known publication date) is a separate additive input, deliberately not accepted yet. Coverage is the `create_source`/`_upsert_source` path only — a stub minted by `_link_source` writes none, and **absent means an open/unbounded start** (the replay never stamps one: `$vf` is recorded, never `coalesce($vf, $now)`). **Two further `:Source` writers move the version anchor without moving the window** — `_upsert_document` (the `DocumentCreated` fold) and `_materialize_session_source` (the capture path) — so a source this path stamped can be left with a **present-but-stale** start (tracked on **#3644**, pinned by `test_pinned_gap__*`). **`validTo` is written as a JOURNAL fact, not a node property**: the node holds the CURRENT version, whose window is open (absent IS the open end — Cypher cannot write NULL), so the prior version's close lives on the `SourceVersioned` record as `previousValidTo`, equal to that record's `validFrom` by construction (§4.6's "closes the old one in the same act"). A `:Source` REMOVAL sets the node's `validTo`; no such path exists yet (#3590 S2). A prior version's window is a journal record — see *Versioning* |
 | `expiredAt` | ISO8601 | — | — | ❌ | Transaction-time expiry — when our record of this version stopped being current (declared §4.7, #3642). Still unwritten: no `:Source` removal path exists, and the removal field's meaning is exactly the decision **#3590** S2 owns (the same one that leaves Point's `expiredAt` unable to distinguish *replaced* from *withdrawn*). A version transition does NOT set it — `validTo`/`previousValidTo` is the window fact |
 | `documentKind` | string | — | `bibo:Document` subclasses | ⚠️ | **Genre**, when `sourceKind: document` — the core vocabulary is in **§5**. Distinct from `sourceKind` (§4.4) |
-| `format` | string | — | `dc:format` | ✅ | Storage format (markdown, jsonl, yaml, cypher). In `_SOURCE_HANDLED` since D10 (v3.15) |
+| `format` | string | — | `dc:format` | ✅ | Storage format (markdown, jsonl, yaml, cypher). In `_SOURCE_HANDLED` since D10 — **the model version is v3.15 (§4.4), the code half that moved it is PR #5127** (`#5142`) |
 | `externalId` | string | — | `dc:identifier` (external) | ⚠️ | System-of-record ID (Slack ts, GitHub issue #) |
 | `sourceDate` | ISO8601 | — | `dc:date` | ⚠️ | Evidence-age clock for recency decay (falls back to `ingestedAt` — the pipeline-arrival proxy, #398) |
 | `provenance_spans` | JSON | — | — | ❌ | Window spans derived from the capture path's `provenance_refs` (plan-defined, #909 §4.3 #6; written by the capture path, slice 5+) |
@@ -1161,6 +1213,16 @@ A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, rea
 | `reliability` | float 0..1 | — | — | ⚠️ | DERIVED query-time projection (mean of the modulated Beta prior) — documented cache, never authoritative (v3.2, #398) |
 | `reliabilityComponents` | JSON | — | — | ⚠️ | Cache metadata: tier, decay, factor, assessment_count, derivation time (#398) |
 | `reliability_derived_at` | ISO8601 | — | — | ⚠️ | Cache freshness stamp (#398) |
+
+> **⚠️ Document `:Source` scoping — which §4.6 REQUIRED fields a document actually supplies (`#5082`, recorded `#5142`).** §4.4 says a document is a `:Source`, but a document `:Source` is written by a **different path** (`tortoise/projection/entities.py::_upsert_document`, the `DocumentCreated` fold) from the provenance `:Source` (`_upsert_source`/`create_source`), and it does **not** supply the same REQUIRED set. Measured on `main`:
+>
+> | REQUIRED field | on a document `:Source` |
+> |---|---|
+> | `sourceKind` | ❌ **not written.** `_upsert_document` sets none, so a document node carries `sourceKind = NULL`; its genre rides `documentKind`, which is a **different axis** (§4.4). **Open: #5082** — the ruling is between scoping §4.6 to provenance Sources and adding the write; until it lands, the three index `_required_sweep` harnesses and `list_sources()` are scoped to provenance Sources for exactly this reason |
+> | `contentHash` | ✅ **written since PR #5592** (`#5422`, `700960943`) — through a preserve/replace gate: an absent or empty (`''`) hash preserves the stored one, an empty stored hash is completed, and a differing hash **replaces it on the SAME node** (never a second `:Source`) |
+> | `version` | ✅ **written by the same clause**, advancing with the hash exactly as §4.6 specifies ("1 at creation, +1 on each content-hash change"), so the pair §4.6 calls a version anchor can no longer be half-written |
+>
+> So **`sourceKind` is the one field that is a declared-but-unwritten gap** — a **work item (#5082)**, not a licence to read §4.4 as *"a document is a `:Source` that carries no `sourceKind`"*, and not a licence to close it by collapsing the two nodes (§4.4's `OVERRIDES`).
 
 **Versioning.** Identity is `url`; `contentHash` identifies a **version** of that identity. A re-fetched source whose content differs is a **new version, never an edit** — so **identity is stable and version is per-read**, and the two are never conflated.
 
@@ -1273,7 +1335,7 @@ authoritative for the temporal slots. Event's transaction-time start is
 | responsibility | authoredBy | — | edge (§3.5) | — | — |
 | ownership | — | — | edge (§3.5) | — | — |
 | management | — | — | edge (§3.5) | — | — |
-| format | — | — | — | format | **✅ `format` belongs here** — moved into `_SOURCE_HANDLED` by D10 (v3.15) |
+| format | — | — | — | format | **✅ `format` belongs here** — moved into `_SOURCE_HANDLED` by D10 (the model version is v3.15, §4.4; the code half that moved it is PR #5127 — `#5142`) |
 | aboutEdges | ✅ | — | ✅ | ✅ | — |
 | occurrence date | `when` (→ `validFrom`, §4.7) | — | — | — | — |
 | is_episodic | ❌ | — | — | ❌ | ❌ |
