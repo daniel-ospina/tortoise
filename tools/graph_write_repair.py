@@ -309,12 +309,28 @@ def repair(db, name: str, verbose: bool = True) -> tuple[bool, str]:
             # Re-read immediately before the irreversible step: the section may have outlived
             # the lock's TTL, and a second run's stale clone must not overwrite a graph the
             # fleet has written to since.
+            #
+            # ⛔ PRESENCE FIRST -- BEFORE THE READ, AND THE CLONE IS RETAINED WHEN THE SOURCE
+            # IS GONE. `fingerprint()` READS, and a read on an ABSENT graph AUTO-CREATES an
+            # empty one (the module's own premise, and the hazard `tortoise/hosted_backup.py`
+            # documents). Ordering the read first is therefore not merely useless -- it is
+            # DESTRUCTIVE: the read materialises the absent graph, `now_fp` becomes (0, 0),
+            # that differs from `(before_nodes, before_edges)`, and `drop_clone` then DELETES
+            # THE CLONE -- leaving an empty graph and NO COPY ANYWHERE. Measured: 1500 nodes
+            # before, 0 after, clone gone. That directly contradicts the rule the COPY step
+            # already states ("RETAIN the clone: it may be the only copy").
+            # The source can genuinely vanish in this window: the graph-delete lock's TTL is
+            # NOT renewed, this section contains a full `GRAPH.COPY`, and the container is
+            # `restartpolicy=always`.
+            if not graph_exists(db, name):
+                return False, (f"the source {name!r} disappeared during the repair -- clone "
+                               f"{scratch} RETAINED (it may be the only copy)")
             now_fp = fingerprint(db.select_graph(name))
             # ANY change is staleness, not just a node LOSS: a concurrent ADDITION passes a
             # `< before_nodes` test, the older clone is then swapped in, and the write that
             # landed between COPY and RENAME is silently discarded -- the post-swap
             # `after >= before` check cannot see it.
-            if now_fp != (before_nodes, before_edges) or not graph_exists(db, name):
+            if now_fp != (before_nodes, before_edges):
                 drop_clone("source changed under us")
                 return False, (f"the source changed during the repair ({now_fp} vs "
                                f"{(before_nodes, before_edges)}) - refusing to swap over it")

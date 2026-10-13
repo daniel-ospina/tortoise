@@ -107,13 +107,17 @@ class _FakeGraph:
 
 class _FakeDb:
     def __init__(self, graphs: dict, *, copy_drops_edges: bool = False,
-                 copy_bumps_source: int = 0) -> None:
+                 copy_bumps_source: int = 0, copy_drops_source: bool = False) -> None:
         self.graphs = graphs
         self.commands: list[tuple] = []
         self._copy_drops_edges = copy_drops_edges
         #: Nodes added to the SOURCE right after GRAPH.COPY, simulating a concurrent
         #: fleet write landing between the copy and the pre-RENAME re-read.
         self._copy_bumps_source = copy_bumps_source
+        #: Delete the SOURCE right after GRAPH.COPY, simulating the source vanishing
+        #: inside the critical section (the lock's TTL is NOT renewed, and the
+        #: container is `restartpolicy=always`).
+        self._copy_drops_source = copy_drops_source
         # `repair()` reaches GRAPH.COPY/RENAME through `db.connection`.
         self.connection = self
 
@@ -137,6 +141,8 @@ class _FakeDb:
             )
             if self._copy_bumps_source:
                 self.graphs[src].nodes += self._copy_bumps_source
+            if self._copy_drops_source:
+                del self.graphs[src]
         elif cmd == "RENAME":
             src, dst = args
             self.graphs[dst] = self.graphs.pop(src)
@@ -491,6 +497,29 @@ def test_repair_refuses_an_absent_graph_and_creates_nothing(monkeypatch, fake_lo
     assert ok is False
     assert "ABSENT inside the repair" in msg
     assert db.commands == [], db.commands
+
+
+def test_repair_retains_the_clone_when_the_source_vanishes_before_the_swap(monkeypatch, fake_lock):
+    """A source that disappears mid-repair must NOT cost us the last copy.
+
+    The lock's TTL is not renewed and the container is `restartpolicy=always`, so the
+    source CAN vanish between the COPY and the pre-RENAME guard. If the guard reads
+    first, that read AUTO-CREATES an empty graph, `now_fp` becomes (0, 0), the
+    comparison trips, and `drop_clone` deletes the ONLY copy -- an empty `tortoise`
+    and no fallback anywhere.
+
+    Mutation: move the presence check AFTER `fingerprint()` -> `drop_clone` runs, the
+    clone is gone, and this test goes RED on the RETAINED assertion.
+    """
+    db = _FakeDb({"tortoise": _defect_state(nodes=BIG)}, copy_drops_source=True)
+    ok, msg = gwr.repair(db, "tortoise")
+    assert ok is False
+    assert "RETAINED" in msg, msg
+    assert "RENAME" not in [c[0] for c in db.commands], db.commands
+    # The clone -- the only surviving copy -- must still be there.
+    retained = [k for k in db.graphs if k.startswith("__gwr_")]
+    assert retained, f"the clone was DELETED; remaining graphs: {sorted(db.graphs)}"
+    assert db.graphs[retained[0]].nodes == BIG
 
 
 # ── the installer: CLI contract, escaping, lint-before-move, load verification ──
