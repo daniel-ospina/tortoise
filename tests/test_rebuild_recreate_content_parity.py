@@ -32,11 +32,17 @@ The embedding derivation is **pinned** for this module (#5049 rule 3, the
 #4512 member): the property under test is which content the stored vector was
 derived FROM, not the numeric output of the 90 MB model, so the model is
 replaced by a deterministic content-addressed function. Without the pin the
-verdict was a function of whether ``EmbeddingModel.get()`` returned the model
-or the TF-IDF cooldown fallback at that instant — the two derivations of the
-same content are then not comparable at all (384-dim model output vs a
-variable-width TF-IDF vector), which is how unrelated PRs went red by shard
-composition. See ``_pinned_embedding`` / ``_assert_parity``.
+verdict was a function of ambient embedder state: the store-write seam
+(``compute_embedding`` → ``compute_embeddings``) reads ``EmbeddingModel.get()``
+per call and returns **no vector at all** when the model is absent, still
+loading, or in its 60 s negative-cache cooldown — the two sides of
+``_assert_parity`` are then ``(None, vector)``, caught by its
+``(is None) == (is None)`` leg. The TF-IDF fallback is NOT on this path: it
+lives in ``_encode``, whose callers are all search/matching, and ``_encode`` is
+imported nowhere in the projection/rebuild path, so a pair could never have
+been 384-dim model output vs a variable-width TF-IDF vector. See
+``_pinned_embedding`` / ``_assert_parity`` and
+``test_write_seam_returns_no_vector_when_the_model_is_unavailable``.
 
 Run (unique graph — a shared DB lets a concurrent lane wipe ours, #4026):
   TORTOISE_DB_URI='docker://:falkordb@localhost:6380/tortoise_test_b5_4042' \\
@@ -85,7 +91,9 @@ def _pinned_embedding(monkeypatch):
     installed encoder double intercepts — #4194/#4280), so patching those two
     removes the ambient embedder from every write path this file drives. A
     verdict can no longer be produced by the model being warm, cold, or in
-    60 s cooldown at the moment of a given call (#4512 / #5049 rule 3).
+    60 s cooldown at the moment of a given call — with the pin the seam always
+    yields a vector, so ``_assert_parity`` compares two derivations rather than
+    a vector against ``None`` (#4512 / #5049 rule 3).
     """
     monkeypatch.setattr(embeddings, "compute_embedding",
                         _pinned_embedding_vector)
@@ -565,13 +573,40 @@ def test_pinned_derivation_is_content_addressed(_pinned_embedding):
     assert embeddings.compute_embeddings(["REEMITTED"]) == [same_a]
 
 
+def test_write_seam_returns_no_vector_when_the_model_is_unavailable(
+        monkeypatch):
+    """The corrected #4512 mechanism, pinned on the real write seam.
+
+    The ambient leg is model ABSENCE — absent, still loading, or in the 60 s
+    negative cache — and on the store-write seam that yields **no vector at
+    all**, never a TF-IDF vector of a different width. ``_encode``'s
+    ``TfidfVectorizer`` fallback belongs to the search/matching path and is
+    imported nowhere in the rebuild path, so the pre-pin parity pair could
+    never have been 384-dim model output vs variable-width TF-IDF; it was
+    ``(None, vector)``, caught by ``_assert_parity``'s
+    ``(is None) == (is None)`` leg. If a fallback is ever routed through this
+    seam, this reds — the claim the module docstring now makes is load-bearing.
+    """
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        classmethod(lambda cls, *a, **k: None))
+    assert embeddings.compute_embedding("hello world") is None
+    assert embeddings.compute_embeddings(["hello world"]) == [None]
+    # The store's own width guard must pass the absence through, not widen it.
+    assert embeddings.encode_for_store(
+        "hello world", EMBEDDING_DIM) is None
+    assert embeddings.encode_batch_for_store(
+        ["hello world"], EMBEDDING_DIM) == [None]
+
+
 class _FlippingModel:
     """An ambient embedder whose output changes on every call.
 
-    The measured #4512 signature in miniature: whether a derivation read the
-    model or the TF-IDF cooldown fallback decided its value. ``encode`` returns
-    a different constant per call, so a parity comparison that read it would
-    compare 1.0s against 2.0s.
+    The #4512 ``==`` signature in miniature — the numeric-drift leg. ``encode``
+    returns a different constant per call, so a parity comparison that read it
+    would compare 1.0s against 2.0s. (The other ambient leg is model absence —
+    absent, loading, or in the 60 s negative cache — where the write seam
+    returns no vector at all and ``_assert_parity``'s ``(is None) == (is None)``
+    leg fires; a TF-IDF fallback is not reachable from this seam.)
     """
 
     def __init__(self) -> None:
