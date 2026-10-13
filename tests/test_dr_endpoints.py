@@ -653,7 +653,9 @@ class TestDrSweep:
         The sweep runs hourly and most runs emit nothing; an unconditional
         warning filled the log with "no alert channel" about runs that never
         needed one. A run with nothing to file and nothing to resolve must stay
-        silent (the drill's equivalent warning is conditional the same way).
+        silent. (The monthly drill warns unconditionally instead — see
+        `backups_drill_scheduled` — because its pre-flight warning is the point
+        and a monthly cadence cannot flood.)
         """
         import logging
 
@@ -1186,56 +1188,14 @@ class TestDrRebaseline:
         assert r.json()["status"] == "rebaselined"
         assert json.loads(mem_storage.download("ops/teams/team_x/state.json"))["node_count"] == 3
 
-    def test_rebaseline_resolves_through_the_alert_only_channel_with_the_sweep_off(
-            self, client, mem_storage, monkeypatch):
-        """#4778 / #4777 (D5a): the re-baseline resolves with backups DISABLED.
-
-        The raw chain passed `_backup_config_safe()` — None whenever
-        `BACKUP_SWEEP_ENABLED` is off (the production default) — into a
-        constructor that dereferences it, so a sweep-disabled re-baseline raised
-        AFTER the recovery writes and BEFORE both resolves: the operator got a
-        500 for a write that had already happened, and the incidents stayed
-        open with nothing left to close them.
-
-        The `_backup_config_safe` stub IS the test: it states the deployment
-        posture (no sweep), so this is RED on the raw chain and green only once
-        the endpoint resolves through the ALERT-only seam.
-        """
-        _seed_team("team_x", nodes=3)
-        fake = _FakeAlerts()
-        monkeypatch.setattr(ha_mod, "_backup_config_safe", lambda: None)
-        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: fake)
-
-        r = client.post(
-            "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
-            json={"org_id": "team_x"},
-        )
-        assert r.status_code == 200, r.text
-        assert r.json()["status"] == "rebaselined"
-        assert _has_resolve(fake.calls, "DATA_LOSS_CANDIDATE", "team_x")
-        assert _has_resolve(fake.calls, "SIZE_GUARD_ABORT", "team_x")
-        assert "incidents_unresolved" not in r.json()
-
-    def test_rebaseline_names_every_kind_when_no_alert_channel_exists(
-            self, client, mem_storage, monkeypatch):
-        """#4778: a MISSING channel is REPORTED, never swallowed.
-
-        `_incident_alert_store` ANSWERS None where the raw constructor RAISED.
-        The state write has already succeeded by then, so the request must still
-        be a 200 — with BOTH kinds named as unresolved, so the operator is never
-        told an incident closed when no channel could be reached.
-        """
-        _seed_team("team_x", nodes=3)
-        monkeypatch.setattr(ha_mod, "_backup_config_safe", lambda: None)
-        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: None)
-
-        r = client.post(
-            "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
-            json={"org_id": "team_x"},
-        )
-        assert r.status_code == 200, r.text
-        assert r.json()["incidents_unresolved"] == [
-            "DATA_LOSS_CANDIDATE/team_x", "SIZE_GUARD_ABORT/team_x"]
+    # NOTE (#4778 review P3): two tests formerly here — one stubbing
+    # `_backup_config_safe` + `_incident_alert_store` to assert the resolve, one
+    # asserting the unresolved list — were removed because BOTH pass on the PR
+    # base: #4778's only change to `backups_rebaseline` is a comment, since the
+    # endpoint already resolved through `_incident_alert_store()` via #4777 (so
+    # the `_backup_config_safe` stub was inert). The second also duplicated
+    # `test_rebaseline_reports_incidents_it_cannot_resolve_without_a_channel`.
+    # #4777's behaviour stays pinned by the tests below.
 
     # ── #4777: the re-baseline resolve must not be SWEEP-gated ────────────────
 
@@ -1474,7 +1434,11 @@ def test_the_runbook_documents_both_producers_of_incidents_unresolved():
     doc = (root / "docs/ops/registry-backup-dr.md").read_text(encoding="utf-8")
     # The one Markdown paragraph that documents the field.
     start = doc.index("so their responses carry")
-    para = doc[start:doc.index("\n\n", start)]
+    # The runbook is hard-wrapped (~80 cols), so a remedy phrase can SPAN a line
+    # break: the rewrite for #4778 moved "re-run" to the end of its line and
+    # silently broke this assertion on unchanged wording. Normalise whitespace
+    # before matching phrases so a re-wrap cannot read as a missing remedy.
+    para = " ".join(doc[start:doc.index("\n\n", start)].split())
 
     assert "no alert channel" in para, (
         "the runbook must name the second `incidents_unresolved` producer — the "

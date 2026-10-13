@@ -32997,8 +32997,10 @@ async def backups_sweep(request: Request):
             # #4778 review P3: warn only when this run actually NEEDED the
             # channel (something to file or something to resolve). The sweep is
             # called hourly and most runs emit nothing, so the unconditional
-            # warning flooded the log with "no alert channel" about clean runs
-            # — the drill's equivalent warning is conditional the same way.
+            # warning flooded the log with "no alert channel" about clean runs.
+            # (The monthly drill warns unconditionally instead — see
+            # `backups_drill_scheduled` — because its pre-flight warning is the
+            # point and a monthly cadence cannot flood.)
             if alerts_failed or candidates:
                 _logger.warning(
                     "backup sweep has no alert channel: %d incident(s) could "
