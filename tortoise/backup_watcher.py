@@ -34,7 +34,7 @@ from collections.abc import Mapping, MappingView
 from datetime import datetime, timezone
 from typing import Any, Callable  # noqa: UP035
 
-from .alert_store import AlertStore, CloseCooldown
+from .alert_store import AlertStore, CloseCooldown, ResolveOutcome
 from .incident_kinds import (
     KIND_BACKUP_SET_MISSING,
     KIND_DRIVER_DOWN,
@@ -860,6 +860,12 @@ class BackupWatcher:
         `CloseCooldown` is logged at INFO without a traceback: it means "still
         open, backing off" rather than "something broke".
 
+        #3146: for a resolve leg "SUCCEEDED" means the incident is no longer
+        owed — a resolve left ON RECORD by the recovery window
+        (``SKIPPED_WINDOW``) or by the authority/freshness refusal is reported as
+        NOT successful, so the shrunken-universe callers keep the subject
+        pending rather than retiring it while the incident is still open.
+
         The heartbeat written just after this block is the watcher's own liveness
         evidence, so no leg may ever escape into `poll()` — an escaped exception
         is what fabricated the false WATCHER_DOWN this change removes.
@@ -871,6 +877,20 @@ class BackupWatcher:
             # watchdogs surface a crash, a green-but-deaf alerter does not.
             raise ValueError(f"unknown alert leg op: {op!r}")
         try:
+            if op == "resolve_incident":
+                # #3146: a resolve that did NOT clear the incident must report
+                # FAILURE, or a caller iterating a shrunken universe retires the
+                # subject on it. The two ways a resolve leaves an incident ON
+                # RECORD — the recovery window is unsatisfied
+                # (SKIPPED_WINDOW) and the authority/freshness refusal
+                # (SKIPPED_FRESH) — therefore return False, exactly like a
+                # raising close: the subject stays PENDING and is retried next
+                # poll. RESOLVED and ABSENT both mean "nothing is owed", so
+                # they return True (ABSENT is the ordinary "was not open" case,
+                # not a failure).
+                outcome = self._alerts.resolve_incident_state(kind, subject)
+                return outcome not in (
+                    ResolveOutcome.SKIPPED_FRESH, ResolveOutcome.SKIPPED_WINDOW)
             getattr(self._alerts, op)(kind, subject)
             return True
         except CloseCooldown as cool:

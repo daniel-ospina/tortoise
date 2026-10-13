@@ -29215,6 +29215,10 @@ def _analytics_note_success() -> str:
       cleared the episode latch here, so the fresh incident was never resolved
       by this process and the following episode was absorbed into it (cycle-7
       P1).
+    * ``SKIPPED_WINDOW`` — #3146: an incident IS open and the recovery window
+      is not yet satisfied, so it was deliberately left alone. Same handling as
+      ``SKIPPED_FRESH`` (stay pending; unknown is not resolved). The analytics
+      kind declares no window, so this value cannot arise for it today.
     * a raise, or no usable store — the truth is unknown → also stay pending.
       When an incident is already on record the attempt re-arms the window
       (bounded reads); from the process-start UNKNOWN state nothing is armed,
@@ -29301,11 +29305,19 @@ def _analytics_note_success() -> str:
                 if outcome is ResolveOutcome.RESOLVED:
                     _logger.info("analytics sink recovered — %s resolved",
                                  _ANALYTICS_INCIDENT_KIND)
-                elif outcome is ResolveOutcome.SKIPPED_FRESH:
+                elif outcome in (ResolveOutcome.SKIPPED_FRESH,
+                                 ResolveOutcome.SKIPPED_WINDOW):
+                    # #3146: SKIPPED_WINDOW (the recovery window is not yet
+                    # satisfied) leaves the incident open for the same reason
+                    # SKIPPED_FRESH does — it is a kept-open verdict, not a
+                    # resolved one. This kind declares no window, so the value
+                    # cannot arise today; handling it keeps the gate correct
+                    # for any future declaration without a silent gap.
                     _logger.info(
-                        "analytics sink resolve skipped a FRESH %s — it "
-                        "stays open, keeping the resolve pending",
-                        _ANALYTICS_INCIDENT_KIND)
+                        "analytics sink resolve kept %s open (%s) — it "
+                        "stays pending",
+                        _ANALYTICS_INCIDENT_KIND, outcome.value,
+                    )
         except Exception as e:  # best-effort, never raises
             _logger.warning("analytics sink resolve failed: %s", e)
         # The CLEAR is applied only if the fact is not STALE. `armed_at_decision`
@@ -29362,7 +29374,8 @@ def _analytics_note_success() -> str:
                 # (`_analytics_note_degradation`): an uncertainty must not
                 # silence a real episode, so that state retries on the next
                 # delivered write instead.
-                if (outcome is ResolveOutcome.SKIPPED_FRESH
+                if (outcome in (ResolveOutcome.SKIPPED_FRESH,
+                                ResolveOutcome.SKIPPED_WINDOW)
                         or _ANALYTICS_RESOLVE_NOT_BEFORE is not None):
                     _ANALYTICS_RESOLVE_NOT_BEFORE = (
                         time.monotonic() + _ANALYTICS_RESOLVE_BACKOFF_S)

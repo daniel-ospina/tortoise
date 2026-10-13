@@ -11,6 +11,24 @@ from tortoise.alert_store import AlertStore
 from tortoise.hosted_backup import MemoryStorage
 
 
+@pytest.fixture(autouse=True)
+def _pre_3146_window(monkeypatch):
+    """Pin the recovery window to 1 for the LIFECYCLE tests in this module.
+
+    #3146 made recovery a hysteresis condition, so a window-declared kind
+    (``STALE``, ``R2_DOWN``, ...) now needs N consecutive healthy observations
+    to clear. The tests here exercise the resolve MECHANICS — close, delete,
+    telegram, cooldown, aliases, authority — not the window, and they would
+    otherwise have to call ``resolve_incident`` twice to reach the path they
+    assert on. ``ALERT_RECOVERY_STREAK=1`` is the config contract's own "clear
+    now" lever, so pinning it here keeps each test asserting exactly one
+    behaviour (the resolve mechanism) while the window gets its own dedicated
+    tests below (``test_recovery_window_*``), which delete this override and
+    exercise the DECLARED default.
+    """
+    monkeypatch.setenv("ALERT_RECOVERY_STREAK", "1")
+
+
 class _FakeChannels:
     def __init__(self):
         self.issues: dict[int, str] = {}      # number -> title
@@ -1579,3 +1597,109 @@ def test_body_preserves_backup_key_but_scrubs_a_credential():
     assert key in body
     assert _TOKEN_3293 not in body
     assert "[REDACTED:github_token]" in body
+
+
+# ── #3146: recovery hysteresis (the store's own window) ─────────────────────
+# These delete the module's ``ALERT_RECOVERY_STREAK=1`` pin (the config's own
+# "clear now" lever) so the DECLARED per-kind window is what runs.
+
+
+def _sentinel(storage, kind, org=""):
+    from tortoise.alert_store import DEDUP_PREFIX, PLATFORM_ALIASES
+
+    key = f"{DEDUP_PREFIX}{kind}/{org or PLATFORM_ALIASES[0]}.json"
+    try:
+        raw = storage.download(key)
+    except KeyError:
+        return None
+    return json.loads(raw) if raw else None
+
+
+def test_recovery_window_needs_consecutive_healthy_observations(monkeypatch):
+    """#3146 acceptance, store side: ONE healthy poll must not clear an incident.
+
+    ``STALE`` is in the threshold-driven DR plane (window 2), so the first
+    healthy observation counts and the second closes — and the counter rides on
+    the incident's own sentinel so it dies with the incident.
+    """
+    from tortoise.alert_store import ResolveOutcome
+
+    monkeypatch.delenv("ALERT_RECOVERY_STREAK", raising=False)
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    assert store.open_incident("STALE", "team_x") is True
+    filed = list(ch.issues)[0]  # noqa: RUF015
+
+    assert store.resolve_incident_state("STALE", "team_x") is ResolveOutcome.SKIPPED_WINDOW
+    assert ch.closed == [], "one healthy observation must not close the issue"
+    assert len(ch.telegram) == 1, "no 'resolved' push before the window is met"
+    assert _sentinel(storage, "STALE", "team_x")["healthy_streak"] == 1
+
+    assert store.resolve_incident_state("STALE", "team_x") is ResolveOutcome.RESOLVED
+    assert ch.closed == [filed]
+    assert len(ch.telegram) == 2
+    assert _sentinel(storage, "STALE", "team_x") is None, "delete-to-resolve"
+
+
+def test_recovery_window_resets_when_the_condition_is_still_unhealthy(monkeypatch):
+    """An unhealthy observation RESETS the count: alternating readings never clear.
+
+    This is the flap the window exists to suppress. Without the reset at the
+    dedup path, healthy-run-1 + unhealthy + healthy-run-2 would accumulate to 2
+    and clear on readings that were never consecutive.
+    """
+    from tortoise.alert_store import ResolveOutcome
+
+    monkeypatch.delenv("ALERT_RECOVERY_STREAK", raising=False)
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+
+    for _ in range(3):
+        store.open_incident("STALE", "team_x")          # condition still true
+        assert store.resolve_incident_state("STALE", "team_x") is ResolveOutcome.SKIPPED_WINDOW
+        assert _sentinel(storage, "STALE", "team_x")["healthy_streak"] == 1, (
+            "the count must restart at 1 on every healthy observation")
+    assert ch.closed == [], "a flapping condition must never clear"
+    assert len(ch.issues) == 1, "and it must never file a second issue"
+
+    # Two consecutive healthy observations (no open in between) DO clear.
+    assert store.resolve_incident_state("STALE", "team_x") is ResolveOutcome.RESOLVED
+    assert len(ch.closed) == 1
+
+
+def test_recovery_window_is_not_applied_outside_the_dr_plane(monkeypatch):
+    """A human-triggered resolve clears on the first observation (window 1).
+
+    ``DATA_LOSS_CANDIDATE`` is resolved by the operator re-baselining; a window
+    would make them do it twice, which is why the boundary excludes it and why
+    the field default (1) is what applies when no override is configured.
+    """
+    from tortoise.alert_store import ResolveOutcome
+
+    monkeypatch.delenv("ALERT_RECOVERY_STREAK", raising=False)
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    store.open_incident("DATA_LOSS_CANDIDATE", "team_x")
+    assert store.resolve_incident_state(
+        "DATA_LOSS_CANDIDATE", "team_x") is ResolveOutcome.RESOLVED
+    assert len(ch.closed) == 1
+
+
+def test_recovery_window_honours_the_per_kind_override(monkeypatch):
+    """``ALERT_RECOVERY_STREAKS`` sets one kind's window without touching others."""
+    from tortoise.alert_store import ResolveOutcome
+
+    monkeypatch.delenv("ALERT_RECOVERY_STREAK", raising=False)
+    monkeypatch.setenv("ALERT_RECOVERY_STREAKS", "STALE=3")
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    store.open_incident("STALE", "team_x")
+    for expected in (1, 2):
+        assert store.resolve_incident_state(
+            "STALE", "team_x") is ResolveOutcome.SKIPPED_WINDOW
+        assert _sentinel(storage, "STALE", "team_x")["healthy_streak"] == expected
+    assert store.resolve_incident_state("STALE", "team_x") is ResolveOutcome.RESOLVED

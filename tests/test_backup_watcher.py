@@ -7,6 +7,8 @@ import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from tortoise.alert_store import AlertStore, CloseCooldown
 from tortoise.backup_watcher import (
     HEARTBEAT_KEY,
@@ -16,6 +18,23 @@ from tortoise.backup_watcher import (
 from tortoise.hosted_backup import MemoryStorage
 
 FIXED = datetime(2026, 8, 8, 12, 0, 0, tzinfo=timezone.utc)  # noqa: UP017
+
+
+@pytest.fixture(autouse=True)
+def _pre_3146_window(monkeypatch):
+    """Pin the recovery window to 1 for the ORCHESTRATION tests in this module.
+
+    #3146 made recovery a hysteresis condition, so a window-declared DR kind
+    needs N consecutive healthy observations before ``resolve_incident`` clears
+    it. These tests exercise the watcher's poll/shrink/grace ORCHESTRATION —
+    which subjects it opens and closes, and how failures are carried pending —
+    not the window itself, so ``ALERT_RECOVERY_STREAK=1`` (the config's own
+    "clear now" lever) keeps each asserting one behaviour. The window's own
+    effect on this loop is pinned by ``test_recovery_window_*`` below (and by
+    the dedicated store tests in ``test_alert_store.py``), which delete this
+    override and exercise the DECLARED default.
+    """
+    monkeypatch.setenv("ALERT_RECOVERY_STREAK", "1")
 
 
 def _ts(hours_ago: float) -> datetime:
@@ -1603,7 +1622,10 @@ def test_vanished_graph_resolution_failure_is_contained():
     def _boom(kind, team_id=""):
         raise RuntimeError("alert store down")
 
-    w._alerts.resolve_incident = _boom  # type: ignore[method-assign]
+    # #3146: `_alert_leg` reads the TRI-STATE fact so a window-skipped resolve is
+    # not mistaken for success, so these containment tests patch
+    # `resolve_incident_state` — the method the leg actually reaches.
+    w._alerts.resolve_incident_state = _boom  # type: ignore[method-assign]
     w.poll()
 
     assert json.loads(storage.download(HEARTBEAT_KEY))["last_poll_at"]
@@ -1617,7 +1639,7 @@ def test_vanished_graph_resolution_failure_is_contained():
         attempts["n"] += 1
         raise RuntimeError("alert store still down")
 
-    w._alerts.resolve_incident = _count  # type: ignore[method-assign]
+    w._alerts.resolve_incident_state = _count  # type: ignore[method-assign]
     w.poll()
     assert attempts["n"] > 0, "the pending key must be retried on the next poll"
 
@@ -1755,7 +1777,7 @@ def test_a_failed_team_resolve_is_carried_pending_and_retried():
         attempts["n"] += 1
         raise RuntimeError("github 403")
 
-    w._alerts.resolve_incident = _flaky  # type: ignore[method-assign]
+    w._alerts.resolve_incident_state = _flaky  # type: ignore[method-assign]
 
     w.poll()
     first = attempts["n"]
@@ -1769,7 +1791,7 @@ def test_a_failed_team_resolve_is_carried_pending_and_retried():
     assert "team_a" in w._pending_team_resolves
 
     # Recovery: the resolves succeed and the team leaves the pending set.
-    w._alerts.resolve_incident = lambda kind, team_id="": True  # type: ignore[method-assign]
+    w._alerts.resolve_incident_state = lambda kind, team_id="": True  # type: ignore[method-assign]
     w.poll()
     assert "team_a" not in w._pending_team_resolves
 
@@ -1882,7 +1904,7 @@ def test_close_cooldown_on_the_vanished_graph_leg_is_a_logged_backoff(caplog):
     def _cooling(kind, team_id=""):
         raise CloseCooldown("still open, backing off")
 
-    w._alerts.resolve_incident = _cooling  # type: ignore[method-assign]
+    w._alerts.resolve_incident_state = _cooling  # type: ignore[method-assign]
     with caplog.at_level(logging.INFO, logger="tortoise.backup_watcher"):
         w.poll()
 
@@ -1892,3 +1914,65 @@ def test_close_cooldown_on_the_vanished_graph_leg_is_a_logged_backoff(caplog):
         r for r in caplog.records if r.levelno >= logging.ERROR and r.exc_info
     ], "a cooldown is a backoff, not a crash"
     assert json.loads(storage.download(HEARTBEAT_KEY))["last_poll_at"]
+
+
+# ── #3146: the recovery window through the watcher's resolve legs ───────────
+
+
+def test_alert_leg_reports_a_kept_open_resolve_as_not_cleared():
+    """#3146: a resolve that left the incident ON RECORD is NOT a success.
+
+    The shrunken-universe callers (vanished graphs, departed orgs) retire a
+    subject when the leg returns True, so a window-skipped resolve must return
+    False — exactly like a raising close — or the incident is orphaned the
+    moment the subject leaves the surface (the #3030 class). ``SKIPPED_FRESH``
+    (the authority/freshness refusal) is the same fact and gets the same answer;
+    ``RESOLVED`` and ``ABSENT`` mean nothing is owed.
+    """
+    from tortoise.alert_store import ResolveOutcome
+
+    ch = _Channels()
+    w = _watcher(MemoryStorage(), ch)
+
+    class _FakeStore:
+        def __init__(self, outcome):
+            self.outcome = outcome
+
+        def resolve_incident_state(self, kind, subject=""):
+            return self.outcome
+
+    for outcome, expected in (
+        (ResolveOutcome.SKIPPED_WINDOW, False),
+        (ResolveOutcome.SKIPPED_FRESH, False),
+        (ResolveOutcome.RESOLVED, True),
+        (ResolveOutcome.ABSENT, True),
+    ):
+        w._alerts = _FakeStore(outcome)
+        assert w._alert_leg("resolve_incident", "STALE", "team_a") is expected, outcome
+
+
+def test_recovery_window_keeps_a_vanished_graph_pending(monkeypatch):
+    """#3146 acceptance, watcher side: two polls to close a real recovery.
+
+    A graph that left the surface is resolved through the SAME window as any
+    other healthy reading, and the failed (window-skipped) poll keeps the key
+    in ``_last_graph_keys`` so the next poll re-includes it — otherwise the
+    incident is orphaned, since the graph no longer appears anywhere else.
+    """
+    monkeypatch.delenv("ALERT_RECOVERY_STREAK", raising=False)
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 0.5)   # fresh → the poll itself is healthy
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    assert w._alerts.open_incident("STALE", "team_a:vanished") is True
+    w._last_graph_keys = {"team_a:vanished"}
+
+    w.poll()
+    assert "team_a:vanished" in w._last_graph_keys, (
+        "a window-skipped resolve must keep the key pending for the next poll")
+    assert ch.issues, "the incident must still be open after one healthy poll"
+
+    w.poll()
+    assert "team_a:vanished" not in w._last_graph_keys
+    assert ch.issues == {}, "the second consecutive healthy poll closes it"
