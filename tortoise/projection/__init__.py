@@ -3075,6 +3075,23 @@ _POINT_RANGE_INDEX_PROPS: tuple[str, ...] = (
     "id",
     "pointKind",
     "content_hash",
+    # #6110/#8400: `key` is the per-kind dedup IDENTITY supplied to
+    # `create_point(key=…)`. `_resolve_dedup_hit` tries the key leg FIRST, so
+    # this index is on the hot path of every key-bearing write. Without it the
+    # leg is a label scan filtered by the low-cardinality `pointKind` index —
+    # measured on embedded FalkorDB at 60k Points: 8.11 ms/op vs 0.20 ms/op
+    # once this index exists, i.e. the key leg ran ~40x slower than the
+    # index-backed content-hash lookup it precedes (#8400 review P2).
+    #
+    # ⛔ NOT the kind-field index the #522 policy declined. That decision is a
+    # measured 3.15x write slowdown for `status`/`op_type` — low-cardinality
+    # props stamped on EVERY Point write. `key` is a high-cardinality IDENTITY,
+    # sparse (only key-bearing writes carry it), a peer of the already-indexed
+    # `content_hash`. The index is declared here AND in
+    # `_REQUIRED_RANGE_INDEXES` below, so a pre-#8400 graph reports
+    # not-current and takes the one-time sweep that creates it (#4465) rather
+    # than skipping the DDL forever.
+    "key",
 )
 
 _RANGE_INDEX_LABEL_PROPS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -12433,6 +12450,11 @@ class FalkorProjection(
         ("Point", "id", "RANGE"),
         ("Point", "pointKind", "RANGE"),
         ("Point", "content_hash", "RANGE"),
+        # #8400: the #6110 key identity's index must be REQUIRED, not merely
+        # created — otherwise a pre-#8400 graph reads current and the sweep
+        # that creates it is skipped forever (#4465), silently leaving the
+        # keyed-write hot path on the unindexed label scan this index removes.
+        ("Point", "key", "RANGE"),
         ("Point", "lastDreamedAt", "RANGE"),
         ("Subject", "id", "RANGE"),
         ("Subject", "name", "RANGE"),

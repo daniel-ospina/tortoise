@@ -31,7 +31,7 @@ EXPECTED_RANGE_EMBEDDED = {
     # — and the copy destination cannot rebuild it (a fresh CREATE on a copy
     # is corrupt too). The full label scan is correct on both. See
     # _ensure_indexes.
-    "Point": ["id", "pointKind", "content_hash"],
+    "Point": ["id", "pointKind", "content_hash", "key"],
     # D10 (#5026): the :Document label is retired — a document is a :Source
     # (its range key is url, below) and no :Document index is created.
     "Subject": ["id", "name"],
@@ -46,8 +46,12 @@ EXPECTED_RANGE_EMBEDDED = {
 
 # ── Epic #1647 T8 (D5/D6): docker sibling expectations ────────────────────
 # D5 (research-brief §2.1): the RANGE sets are IDENTICAL on both engines —
-# point_props (id, pointKind, content_hash) is not mode-split (verified
-# _ensure_indexes L1214-1224). #3154: is_operator is deliberately ABSENT from
+# point_props (id, pointKind, content_hash, key) is not mode-split (verified
+# _ensure_indexes L1214-1224). #8400/#6110: `key` joined the set because the
+# key-first dedup leg runs on every key-bearing write; it is a sparse
+# high-cardinality IDENTITY (a peer of `content_hash`), NOT one of the
+# low-cardinality status/op_type kind-fields #522 declined.
+# #3154: is_operator is deliberately ABSENT from
 # the D5 range set on BOTH lanes — NO engine gets a boolean index (#522
 # embedded, #3154 docker/server GRAPH.COPY).
 EXPECTED_RANGE_DOCKER = {k: list(v) for k, v in EXPECTED_RANGE_EMBEDDED.items()}
