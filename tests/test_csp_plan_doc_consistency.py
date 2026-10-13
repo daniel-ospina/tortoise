@@ -44,14 +44,6 @@ What these guards do NOT promise, named rather than hidden:
    no glob support, so the entry names the file, never `docs/` (which is in
    `NON_PYTHON_PREFIXES` and is not itself a pattern); a stale copy in another doc, an
    issue body, or a PR description is still invisible here.
-
-Two further guards, added for the #8367 review, cover that PR's own two doc-claim defects:
-the `## Residuals` bullet that claimed the array-of-pairs `HeadersInit` shape is invisible
-to the stamp scan (`countStamps`/`stampNames` model it since gap 5), and the indirection
-clause that named a *double-quoted* computed callee (`h["set"](…)`) as the spelling that
-evades the readers (it is READ — `nameOf` has a `StringLiteral` branch; the *template*
-spelling is the one that evades).
-
 5. The indirection guard reads the SPELLING the doc names in its `an indirect callee <x>`
    slot. A double-quoted computed key written anywhere else, or a correct spelling named
    beside a wrong one, is not caught; the reader-side truth stays the JS reader's own
@@ -61,6 +53,13 @@ spelling is the one that evades).
    `superseded` / `2026-10-13` / `fourth`), the same shape as rule 2's RUM-origin net: a
    bullet that asserts the array-of-pairs shape is invisible cannot red if it also carries
    a marker word. The precise closure evidence is the 2026-10-13 addendum's mutation table.
+
+Two further guards, added for the #8367 review, cover that PR's own two doc-claim defects:
+the `## Residuals` bullet that claimed the array-of-pairs `HeadersInit` shape is invisible
+to the stamp scan (`countStamps`/`stampNames` model it since gap 5), and the indirection
+clause that named a *double-quoted* computed callee (`h["set"](…)`) as the spelling that
+evades the readers (it is READ — `nameOf` has a `StringLiteral` branch; the *template*
+spelling is the one that evades).
 """
 from __future__ import annotations
 
