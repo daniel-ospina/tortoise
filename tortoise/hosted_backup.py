@@ -77,6 +77,9 @@ from tortoise.fork_slot import (
     is_fork_refusal,
     recover_fork_slot,
 )
+from tortoise.index_catalogue import (  # #3154/#3441: the ONE presence check
+    index_catalogue_has_field,
+)
 from tortoise.vector_write import (  # #4520: the ONE clear-then-set vector seam
     clear_then_set_prefix,
     set_embedding_clause,
@@ -1754,22 +1757,16 @@ def _audit_copied_boolean_indexes(
         the two known boolean-index forms), so the re-check would report
         "still present" and raise — the same post-swap user-visible failure
         as the count race this function replaced (#3154 review P2).
+
+        #3441: the match itself is the ONE shared definition
+        (``tortoise.index_catalogue``), imported here instead of restated, so
+        this site and ``projection._ensure_indexes``' embedded repair sweep
+        cannot drift apart — restating it is how the repair sweep kept the
+        substring form after this site was fixed.
         """
-        rows = g.query("CALL db.indexes()").result_set
-        for row in rows:
-            if not row or row[0] != "Point":
-                continue
-            fields = row[1]
-            if isinstance(fields, str):
-                # Defensive: a stringified field list is tokenised, not
-                # substring-matched, so `is_operator_flag` cannot match.
-                fields = [
-                    f.strip().strip("[]'\"")
-                    for f in fields.strip("[]").split(",")
-                ]
-            if any(str(f) == "is_operator" for f in (fields or ())):
-                return True
-        return False
+        return index_catalogue_has_field(
+            g.query("CALL db.indexes()").result_set, "is_operator",
+            label="Point")
 
     def _probe() -> tuple[int, int]:
         """Diagnostic only — NEVER gates the repair. Two separate count()

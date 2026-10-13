@@ -45,7 +45,7 @@ import ipaddress
 import json
 import logging
 import os
-import re  # noqa: F401
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import NoReturn
@@ -2874,6 +2874,9 @@ def consent_page_html(*, client_name: str, scope: str | None,
     inline consent logic. Attacker-controlled values (state / scope /
     resource / client_name) are JSON-escaped for the <script> context, so a
     ``</script>`` payload cannot break out of the block (PR #1264 review P1).
+    Placeholder substitution is a SINGLE pass, so a param value that *contains*
+    a placeholder token is inserted verbatim rather than re-expanded (#6001 —
+    see the comment at the substitution site for the failure it prevents).
     """
     safe_params = {
         k: (v if isinstance(v, str) else "")
@@ -2881,10 +2884,32 @@ def consent_page_html(*, client_name: str, scope: str | None,
     }
     safe_params["client_name"] = client_name
     nonce = secrets.token_urlsafe(16)
-    html = _CONSENT_HTML.replace("__PARAMS__", _json_for_script(safe_params)) \
-        .replace("__SUPABASE_URL__", _json_for_script(supabase_url.rstrip("/"))) \
-        .replace("__SUPABASE_ANON_KEY__", _json_for_script(supabase_anon_key)) \
-        .replace("__NONCE__", nonce)
+    # Substitution is a SINGLE pass (#6001). A chain of ``str.replace()`` calls
+    # rescans what it has already inserted: injecting ``_json_for_script(params)``
+    # while later passes still ran meant a param VALUE carrying a literal
+    # placeholder token was itself substituted — inside the JSON string literal
+    # meant to hold it. The injected text is raw JSON, so its own quotes closed
+    # that literal early and the whole inline block became a SyntaxError (no
+    # PARAMS, no storage adapter, no handlers, an inert Authorize button). Both
+    # vectors are reachable without a crafted link: ``client_name`` is DCR/CIMD
+    # client-controlled and ``state`` is never shape-validated. ``re.sub`` with a
+    # FUNCTION replacement visits the template exactly once and never rescans
+    # what it produced; the function form also keeps re's backslash processing
+    # off the replacement text (an escaped value's literal ``\\u003c`` would
+    # otherwise be read as an escape sequence). The pattern is derived from the
+    # mapping's own keys, so a placeholder added to ``_CONSENT_HTML`` has exactly
+    # one place to be declared.
+    mapping = {
+        "__PARAMS__": _json_for_script(safe_params),
+        "__SUPABASE_URL__": _json_for_script(supabase_url.rstrip("/")),
+        "__SUPABASE_ANON_KEY__": _json_for_script(supabase_anon_key),
+        "__NONCE__": nonce,
+    }
+    html = re.sub(
+        "|".join(re.escape(tok) for tok in mapping),
+        lambda m: mapping[m.group(0)],
+        _CONSENT_HTML,
+    )
     return html, nonce
 
 

@@ -41,7 +41,7 @@ test('legacy wizard labels still exist in source (archived-not-deleted)', () => 
   }
 })
 
-test('live wizard renders WIZARD_STEPS (the 4 human steps), not legacy labels', () => {
+test('live wizard renders WIZARD_STEPS (the 5 human steps), not legacy labels', () => {
   assert.ok(src.includes('WIZARD_STEPS.map'), 'live wizard maps WIZARD_STEPS')
   // #2912: the stage label moved from an in-card `.wizard-title` to the page
   // <h1> (the header now names the STAGE, not the org's set-up status). The

@@ -115,11 +115,16 @@ _READY_PROBE_TIMEOUT_S = 6.0
 #: and 1.2 — the floor cannot be honoured and the bound tightens to just under
 #: the outer bound, which is the direction that keeps the invariant.
 #:
-#: The floor is a heuristic, not a guarantee: it sits above the HOST connect
-#: default (2.0s, ``projection._DB_CONNECT_TIMEOUT_DEFAULT``) so an ordinary
-#: connect is not aborted before it starts, but the EMBEDDED UDS lane does not
-#: pass ``socket_connect_timeout`` and keeps redis-py's own 5s default, which is
-#: ABOVE this floor — so on that lane an unusually slow connect can be aborted.
+#: The floor is a heuristic, not a guarantee: it sits above BOTH lanes' connect
+#: default (2.0s, ``projection._DB_CONNECT_TIMEOUT_DEFAULT`` — since #3421 the
+#: embedded UDS lane takes that same default; before it, that lane carried NO
+#: bound of ours, so the "redis-py 5s default" this note used to name was not
+#: even the shape of it: it was ``sock.settimeout(None)``), so an ordinary
+#: connect is not aborted before it starts. An operator who RAISES
+#: ``TORTOISE_FALKORDB_CONNECT_TIMEOUT_S`` above this floor can still have a
+#: slow connect aborted here — this bound does not read that knob, the same
+#: "not mutually consistent" residual ``monitoring.PROBE_SDK_ACQUISITION_BUDGET``
+#: records for its own budget.
 #: The ordering is asserted by
 #: ``test_ready_probe_inner_bound_is_strictly_below_the_outer_bound``.
 #:
@@ -196,9 +201,10 @@ def _ready_probe_inner_bound_s() -> float:
 # leg, is charged to the outer budget, and is not covered by the inner one.)
 # Two things remain true and are NOT fixed by that: the client's own socket
 # thread inside the abandoned leg lives until ITS timeout, and the UNDERLYING
-# connect/read defaults are the FalkorDB client's (2.0s connect on the host lane
-# — ``projection._DB_CONNECT_TIMEOUT_DEFAULT``; the embedded UDS lane does not
-# pass ``socket_connect_timeout`` and keeps redis-py's own 5s). Exercised by
+# connect/read defaults are the FalkorDB client's — 2.0s connect on BOTH lanes
+# since #3421 (``projection._DB_CONNECT_TIMEOUT_DEFAULT``; before it, the
+# embedded UDS lane had no connect bound of ours at all — the client ran
+# ``sock.settimeout(None)``, unbounded, whatever this note said). Exercised by
 # test_liveness_answers_while_readiness_workers_are_parked.
 #
 # Because its workers can still park for the length of that allowance, this pool

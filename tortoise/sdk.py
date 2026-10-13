@@ -5162,42 +5162,14 @@ class TortoiseSDK:
     def _sync_tags(self, proj: FalkorProjection, pid: str, tags) -> None:
         """Reconcile TAGGED edges for a point against a tags value (#485).
 
-        Idempotent: MERGE creates any missing :Tag nodes + TAGGED edges, and
-        edges to tags no longer in the list are deleted. Only list values are
-        synced — matching create_point's behavior, a non-list tag value is
-        stored as a plain property but gets no edges (and leaves existing
-        edges untouched).
+        DELEGATES to the projection's own `_sync_tags` (#2897): live and
+        replay must run the SAME routine, or the two drift into exactly the
+        raw-list/replayed-edge disagreement this issue is about. The
+        projection is the owner of the write; this method is kept as the SDK
+        entry point so the existing call sites (and their
+        `_graph_write_with_retry` wrapping) are unchanged.
         """
-        if not isinstance(tags, list):
-            return
-        for tag in tags:
-            proj.g.query(
-                "MATCH (p:Point {id:$pid}) "
-                "MERGE (t:Tag {name:$tag}) "
-                "MERGE (p)-[:TAGGED]->(t)",
-                params={"pid": pid, "tag": tag},
-            )
-        # Delete edges to tags no longer in the list (diff via graph read to
-        # avoid list-parameter IN-clause portability concerns on FalkorDB).
-        stale = proj.g.query(
-            "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) RETURN t.name",
-            params={"pid": pid},
-        ).result_set
-        removed = 0
-        for row in stale:
-            if row[0] not in tags:
-                proj.g.query(
-                    "MATCH (p:Point {id:$pid})-[r:TAGGED]->(t:Tag {name:$tag}) "
-                    "DELETE r",
-                    params={"pid": pid, "tag": row[0]},
-                )
-                removed += 1
-        # GC orphaned :Tag nodes when the sync actually removed edges — tag
-        # removal can leave a Tag with no TAGGED referrers (#485). Skipped on
-        # create_point (no stale edges there), so new-point creation never pays
-        # the scan.
-        if removed:
-            proj.g.query("MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t")
+        proj._sync_tags(pid, tags)
 
     # ── Events: cursor-based poll (Task 5) ────────────────────────────
 
@@ -6201,7 +6173,7 @@ class TortoiseSDK:
         # cannot duplicate anything — the abort means the statement did not
         # land, exactly the contract `retryable_aborted_write` is built on.
         tags = props.get("tags") or []
-        if isinstance(tags, list):
+        if isinstance(tags, (list, tuple)):
             self._graph_write_with_retry(
                 lambda: self._sync_tags(proj, pid, tags),
                 what="create_point TAGGED edges",
