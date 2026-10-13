@@ -1159,6 +1159,77 @@ def test_failed_decoration_is_labelled_not_silently_empty():
     )
 
 
+class _PartialFillGraph:
+    """``graph`` stand-in that raises while assembling the SECOND point.
+
+    The fill loop assigns ``rels[pid] = entries`` point-by-point INSIDE the
+    ``try``, so a raise while assembling the second point leaves the first
+    point already filled. The raise here is the real, unguarded confidence
+    division (``round(alpha / (alpha + beta), 4)``) for a persisted
+    ``(0.0, 0.0)`` posterior with ``has_ep=True``: ``tortoise/ep.py`` guards
+    that pair twice (#330) and ``_write_node`` persists it, so the input class
+    occurs.
+    """
+
+    class _Result:
+        def __init__(self, rows):
+            self.result_set = rows
+
+    def __init__(self):
+        self.support_rows_served = 0
+
+    def query(self, cypher, **kwargs):
+        params = kwargs.get("params") or {}
+        if "OPTIONAL MATCH (n)-[r:CORRECTS]" in cypher:
+            return self._Result([])  # Q1b: no CORRECTS edges
+        if "ids" in params:
+            # Q1a: one operator per requested point.
+            return self._Result([
+                ("P1", "IMPL", 0, "op1", "IMPL", "supports", None),
+                ("P2", "IMPL", 0, "op2", "IMPL", "supports", None),
+            ])
+        if "raw_cap" in params:
+            return self._Result([])  # Q2-crit: no critical-class peers
+        if "per_op" in params:
+            # Q2-support: P1's peer is healthy, P2's is the degenerate pair.
+            self.support_rows_served += 2
+            return self._Result([
+                ("op1", "IMPL", 0, "A", "statement", "", 1.0, 1.0, True, None, False),
+                ("op2", "IMPL", 0, "B", "statement", "", 0.0, 0.0, True, None, False),
+            ])
+        if "m.id" in cypher:
+            return self._Result([])  # Q2b: no mitigations
+        return self._Result([])  # Q2f: no family counts
+
+
+def test_partially_filled_decoration_is_reset_to_the_all_empty_seed():
+    """#6971: the marker must never be stamped on a hit that HAS entries.
+
+    ``RELATIONSHIPS_UNAVAILABLE`` asserts the hit's ``relationships`` is empty
+    *because the read failed*, so the mapped decoration has to BE all-empty.
+    Before the fix the raise left points assembled before it FILLED while the
+    SDK stamped every hit with that "is empty" message — a self-contradicting
+    payload that costs a marker-trusting consumer real edges.
+    """
+    graph = _PartialFillGraph()
+    out = get_relationships_bounded(graph, ["P1", "P2"])
+    # Non-vacuity: the stub must actually have served P1 a real peer row and
+    # reached the except path, or the assertion below proves nothing.
+    assert graph.support_rows_served == 2, (
+        "the stub did not reach the endpoint expansion — the partial-fill "
+        "path was never exercised"
+    )
+    assert out.decoration_error != "", (
+        "expected the degenerate-posterior division to reach the except path, "
+        "got a clean decoration"
+    )
+    assert "ZeroDivisionError" in out.decoration_error, out.decoration_error
+    assert out == {"P1": [], "P2": []}, (
+        "a failed decoration must be all-empty for EVERY requested point — "
+        "the relayed marker asserts exactly that (#6971)"
+    )
+
+
 def test_failed_decoration_is_still_a_plain_dict_to_consumers():
     """The typed result must not change the return CONTRACT.
 

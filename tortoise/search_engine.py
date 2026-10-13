@@ -2830,11 +2830,13 @@ def get_relationships_bounded(
     needs full NAND completeness for disputed-pair detection.
 
     Returns a ``RelationshipDecoration`` mapping (requested id → entries).
-    #6971: when the query body raises, the mapping is still all-empty — so a
-    consumer that ignores the extra attribute stays safe — but
-    ``.decoration_error`` is non-empty and the caller MUST NOT present the
-    emptiness as "no relationships". The search assembly labels the batch
-    through ``SearchResult.relationships_unavailable``.
+    #6971: when the query body raises, the mapping is RESET to the all-empty
+    seed — so a consumer that ignores the extra attribute stays safe, and the
+    marker's claim ("'relationships' is empty because the edges could not be
+    read") is TRUE for every requested point — but ``.decoration_error`` is
+    non-empty and the caller MUST NOT present the emptiness as "no
+    relationships". The search assembly labels the batch through
+    ``SearchResult.relationships_unavailable``.
     """
     if not point_ids:
         return RelationshipDecoration()
@@ -3150,12 +3152,23 @@ def get_relationships_bounded(
 
             rels[pid] = entries
     except Exception as exc:
-        # #6971: the seed-and-fill dict is all-empty here, and before this it
-        # was returned as if it were a real (empty) decoration. Record WHY on
-        # the result so the caller can label the batch instead of asserting
-        # "no relationships". Decoration failure must not break retrieval
-        # (D1), so the exception is still absorbed — it is just no longer
-        # indistinguishable from a genuinely sparse point.
+        # #6971: before this the seed (which the fill loop below mutates in
+        # place, ``rels[pid] = entries``) was returned as if it were a real
+        # (empty) decoration. Record WHY on the result so the caller can label
+        # the batch instead of asserting "no relationships". Decoration
+        # failure must not break retrieval (D1), so the exception is still
+        # absorbed — it is just no longer indistinguishable from a genuinely
+        # sparse point.
+        #
+        # The fill loop assigns point-by-point INSIDE this ``try``, so an
+        # exception raised while assembling one point leaves every point
+        # BEFORE it filled. Returning that partial mapping would make the
+        # relayed marker assert "'relationships' is empty because the edges
+        # could not be read" on hits that carry real entries — the payload
+        # contradicting itself. Reset to the all-empty seed the marker's
+        # wording (and D15) describes: "the read failed" replaces the whole
+        # batch, it never leaves a half-decorated one.
+        rels = RelationshipDecoration({pid: [] for pid in point_ids})
         rels.decoration_error = f"{type(exc).__name__}: {exc}"
         logger.warning("Bounded relationship query failed", exc_info=True)
 
