@@ -62,7 +62,7 @@ Usage:
     uv run python tools/graph_write_repair.py --check    # report only; never repairs
     uv run python tools/graph_write_repair.py --graph X  # a different graph
 
-Exit codes: 0 healthy or repaired | 2 cannot connect or state UNKNOWN | 3 broken and NOT repaired
+Exit codes: 0 healthy or repaired | 2 cannot connect or state UNKNOWN | 3 broken/absent NOT repaired
 """
 
 from __future__ import annotations
@@ -120,6 +120,20 @@ def edge_count(graph) -> int:
 
 def fingerprint(graph) -> tuple[int, int]:
     return (node_count(graph), edge_count(graph))
+
+
+def counts(msg: str) -> None:
+    """Print a COUNT unconditionally -- ``--quiet`` suppresses NARRATION, not numbers.
+
+    The scheduled job is armed with ``--quiet`` (see the installer's ``ProgramArguments``),
+    so its log is the only artifact an unattended repair produces. `say()` is gated by
+    ``verbose``, and routing the counts through it is what made the ``--quiet`` help text
+    false: the log showed the post-repair count with no pre-repair baseline to compare it
+    against, so it could not answer the one question it exists for -- "did the repair
+    preserve the data?". Counts therefore bypass `say()`. Pinned by
+    tests/test_graph_write_repair.py::test_quiet_repair_still_logs_before_and_after_counts.
+    """
+    print(msg, flush=True)
 
 
 def is_defect(db, name: str, exc: BaseException) -> bool:
@@ -228,7 +242,7 @@ def repair(db, name: str, verbose: bool = True) -> tuple[bool, str]:
                                f"create or repair it")
 
             before_nodes, before_edges = fingerprint(db.select_graph(name))
-            say(f"  fingerprint before repair: {before_nodes} nodes / {before_edges} edges")
+            counts(f"  fingerprint before repair: {before_nodes} nodes / {before_edges} edges")
             if before_nodes < MIN_NODES:
                 return False, (f"refusing to repair a graph of {before_nodes} nodes "
                                f"(< MIN_NODES={MIN_NODES}) -- this is not the shared graph, "
@@ -289,7 +303,7 @@ def repair(db, name: str, verbose: bool = True) -> tuple[bool, str]:
     except Exception as exc:
         return False, (f"the repair ran but the post-repair count could not be read ({exc}) "
                        f"- the outcome is NOT verified")
-    say(f"  node count after repair: {after}")
+    counts(f"  node count after repair: {after}")
     # Only a LOSS is a failure. A gain is a concurrent fleet write landing on a now-healthy
     # graph, which is the outcome we wanted.
     if after < before_nodes:
@@ -350,7 +364,16 @@ def main() -> int:
             print(f"graph '{args.graph}': HEALTHY - {detail} (counts unreadable: {exc})")
         return 0
 
-    if kind in ("unknown", "absent"):
+    if kind == "absent":
+        # UNREACHABLE in the ordinary case: main established presence above and returned 3
+        # there. Handled EXPLICITLY because the graph can be deleted in the window between
+        # the two reads -- folding it into the "unknown -> 2" arm made a SECOND absent path
+        # whose exit code disagreed with the presence check's.
+        print(f"⛔ graph '{args.graph}' is ABSENT on re-read ({detail}) -- it was deleted "
+              f"during the probe; not a repair case.", file=sys.stderr)
+        return 3
+
+    if kind == "unknown":
         print(f"⚠  graph '{args.graph}': state UNKNOWN - {detail}\n"
               f"   Not repairing. Only the specific reload defect authorises a repair; "
               f"anything else is an unestablished read.", file=sys.stderr)

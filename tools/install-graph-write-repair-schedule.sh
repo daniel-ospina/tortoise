@@ -171,7 +171,7 @@ render_plist() {
   <key>StandardErrorPath</key><string>$(xml_escape "$LOG_DIR/error.log")</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin</string>
+    <key>PATH</key><string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$(xml_escape "$HOME/.local/bin")</string>
     <key>HOME</key><string>$(xml_escape "$HOME")</string>
   </dict>
   <key>ProcessType</key><string>Background</string>

@@ -1935,6 +1935,14 @@ surfaces:
   - test_gate_b_tooling.py
   - test_graph_delete_guard.py       # #2961: race-safe GRAPH.DELETE guard + poisoned-AOF detection (hermetic, no DB)
   - test_graph_diagnostics.py
+  # PR #8427 review Finding 4: the tool that repairs the un-writable `tortoise`
+  # graph -- and the launchd installer that arms it -- had NO test, so the ONE
+  # property the change exists for (only the exact reload defect authorises a
+  # repair; BusyLoadingError/connection failures are UNKNOWN -> exit 2; absent ->
+  # exit 3) was pinned by nothing. Registered on `core` (the surface
+  # `tools/graph_write_repair.py` + the installer select via CORE_ALSO in
+  # tools/ci_selection.py), hermetic: a fake graph server, no URI, no network.
+  - test_graph_write_repair.py
   - test_guard.py
   - test_hard_reject.py
   - test_helpers.py

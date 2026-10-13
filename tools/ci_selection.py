@@ -881,6 +881,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # as tools/queue_resweep.py above. Pinned by
              # tests/test_ci_selection.py::test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1.
              "tools/install-queue-reconcile-schedule.sh",
+             # PR #8427 review Finding 4: tools/graph_write_repair.py and its
+             # launchd installer own tests/test_graph_write_repair.py (registered
+             # `core`) -- the probe classification that authorises a repair, the
+             # `--quiet` count contract, and the installer's XML escaping /
+             # interval validation / lint-before-move / load verification.
+             # `tools/` is swallowed by NON_PYTHON_PREFIXES and no SOURCE_PATTERNS
+             # entry matches either path, so a tool-only or INSTALLER-only change
+             # selected NO surface and fell back to tier-1 smoke: the guard would
+             # never run on the very change that can weaken it. Same
+             # #1349/#3332/#3616 silent-drop class as the queue-reconcile installer
+             # entry above. Pinned by
+             # tests/test_ci_selection.py::test_graph_write_repair_tool_change_selects_core_not_tier1.
+             "tools/graph_write_repair.py",
+             "tools/install-graph-write-repair-schedule.sh",
              # #3036: oauth.py is pinned by BOTH api-registered tests
              # (test_oauth_mcp.py, test_oauth_token_fault.py, ...) and core
              # (test_control_plane_offload_3498.py), so the SOURCE_PATTERNS
