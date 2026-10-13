@@ -1320,11 +1320,16 @@ def test_restoration_exemption_boundary():
 #     scanned `tests/**` only, so it was blind to its own
 #     `tools/longmem_eval/run.py` fix site: a `tools/longmem_eval/`-only PR
 #     selects the `eval` surface and never runs a `core`-only registration.
-#     The guard file is therefore registered on BOTH `core` and `eval`
+#     The guard file is therefore registered on `core`, `eval` AND
+#     `onboarding`
 #     (`test_empty_default_uri_census_is_registered_on_every_surface_it_covers`
-#     is the ratchet). `tools/**` OUTSIDE `longmem_eval/` is not covered —
-#     those paths select `api`/`sdk`/`onboarding`, so widening the roots means
-#     widening the registration in the same change.
+#     is the ratchet). `onboarding` is needed because `tests/**` is NOT all
+#     `core`: `tests/_html_links.py` is an EXACT `SOURCE_PATTERNS["onboarding"]`
+#     entry, and a SOURCE_PATTERNS match REPLACES the `core` fallback in
+#     `select()` — so a `tests/_html_links.py`-only change selects `onboarding`
+#     and would otherwise skip a census that scans the file. `tools/**` OUTSIDE
+#     `longmem_eval/` is not covered — those paths select `api`/`sdk`/`onboarding`,
+#     so widening the roots means widening the registration in the same change.
 #   * READ spellings only (`get` / `getenv`). The WRITE form
 #     `os.environ.setdefault("TORTOISE_DB_URI", v)` — a no-op for the same
 #     set-but-empty shape, and the cause of a real #2815 regression — is a
@@ -1340,8 +1345,11 @@ _URI_ENV = "TORTOISE_DB_URI"
 _EMPTY_DEFAULT_MARKER = "empty-uri-default-ok:"
 _EMPTY_DEFAULT_REASON_MIN = 10
 
-#: The roots the census covers. `tests/**` selects `core`; `tools/longmem_eval/`
-#: is a `SOURCE_PATTERNS["eval"]` entry.
+#: The roots the census covers. `tools/longmem_eval/` is a
+#: `SOURCE_PATTERNS["eval"]` entry and most of `tests/**` selects `core` —
+#: EXCEPT `tests/_html_links.py`, an exact `SOURCE_PATTERNS["onboarding"]`
+#: entry whose match REPLACES the `core` fallback, which is why the guard is
+#: registered on `onboarding` too.
 _CENSUS_ROOTS = ("tests", "tools/longmem_eval")
 
 
@@ -1406,21 +1414,46 @@ def _statically_empty_default(node) -> bool:
 
 
 def _or_repaired_call_ids(tree: ast.Module) -> set[int]:
-    """``id()``s of calls whose result is repaired by an ``or`` fallback.
+    """``id()``s of calls whose own result the enclosing ``or`` repairs.
 
-    In ``a or b`` a falsy ``a`` falls through to ``b``, so a call appearing in
-    any operand BUT the last is safe: ``os.environ.get(K, D) or D`` IS the
-    honoring read. The LAST operand is not repaired — ``X or os.environ.get(
-    K, D)`` still hands the empty value on.
+    In ``a or b`` a falsy ``a`` falls through to ``b``, so the empty value a
+    call hands on is repaired **only when that value is what makes the operand
+    falsy**. The operand must therefore *be* the call, or reach it through a
+    chain that carries the call's value outward unchanged:
+
+    * ``os.environ.get(K, D) or D`` — the operand IS the call (honoring read);
+    * ``os.environ.get(K, D).strip() or D`` — a method called on the result
+      (:attr:`ast.Attribute` receiver via :attr:`ast.Call.func`).
+
+    A call nested as an ARGUMENT (``_norm(call)``) or inside a CONTAINER
+    (``{"u": call}``, ``(call,)``, ``[call]``) is NOT repaired: the wrapper's
+    truthiness, not the call's, decides whether the fallback is reached — a
+    dict / 1-tuple / list is truthy by construction, so the default is dead
+    and the fallback unreachable. Walking every descendant of the operand (the
+    pre-review shape) exempted exactly those.
+
+    The LAST operand is never repaired — ``X or os.environ.get(K, D)`` still
+    hands the empty value on.
     """
     repaired: set[int] = set()
     for node in ast.walk(tree):
         if not (isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or)):
             continue
         for operand in node.values[:-1]:
-            for sub in ast.walk(operand):
-                if isinstance(sub, ast.Call):
-                    repaired.add(id(sub))
+            # Follow the receiver chain only: `x.attr` (Attribute.value) and a
+            # method call on x (Call.func). A node of any other kind ends the
+            # walk without exempting anything nested below it.
+            current = operand
+            while isinstance(current, (ast.Attribute, ast.Call)):
+                if isinstance(current, ast.Call):
+                    repaired.add(id(current))
+                    if not isinstance(current.func, ast.Attribute):
+                        # `_norm(call)`: the call is the WRAPPER, and the get()
+                        # it encloses is an ARGUMENT — not reached.
+                        break
+                    current = current.func.value
+                else:
+                    current = current.value
     return repaired
 
 
@@ -1581,6 +1614,24 @@ def test_empty_default_uri_reads_flags_the_class():
          'or "docker://y"', False),
         ('q = (os.environ.get("TORTOISE_DB_URI", "docker://x").strip() or "y")',
          False),
+        # A call nested in a truthy-by-construction CONTAINER is NOT repaired:
+        # the wrapper is what the `or` inspects, so the default is dead.
+        ('q1 = {"u": os.environ.get("TORTOISE_DB_URI", "docker://x")} or {}',
+         True),
+        ('q2 = (os.environ.get("TORTOISE_DB_URI", "docker://x"),) or ("y",)',
+         True),
+        ('q3 = [os.environ.get("TORTOISE_DB_URI", "docker://x")] or ["y"]',
+         True),
+        # ... nor is a call passed as an ARGUMENT to an arbitrary wrapper:
+        # `_norm("")` need not be falsy, so the fallback need not be reached.
+        ('q4 = _norm(os.environ.get("TORTOISE_DB_URI", "docker://x")) or "y"',
+         True),
+        # ... while a RECEIVER chain that carries the value outward stays
+        # repaired (`call.strip()` on "" is "", so the `or` fires).
+        ('q5 = os.environ.get("TORTOISE_DB_URI", "docker://x").strip() or "y"',
+         False),
+        ('q6 = [_norm(os.environ.get("TORTOISE_DB_URI", "docker://x"))] or []',
+         True),
         ('r = os.environ.get("OTHER_VAR", "docker://x")', False),
         # Boundary: a presence-based read yields "" for a set-but-empty
         # variable, so its fallback is never reached either — but nothing is
@@ -1612,9 +1663,16 @@ def test_empty_default_uri_census_is_registered_on_every_surface_it_covers():
 
     The #2840 census scanned `tests/**` and was registered in `core` alone, so
     its own `tools/longmem_eval/run.py` fix site selected `eval` and never ran
-    it (the #2938/#4367 silent-drop class). This pins the property rather than
-    the declaration: for a representative file from each census root, the PR
-    selection must actually put THIS file in the run set.
+    it (the #2938/#4367 silent-drop class). This pins the property, not the
+    declaration: it enumerates EVERY `*.py` under the census roots and requires
+    that a PR changing that file alone actually puts this guard in the run set
+    (directly, or via a `full` selection, which runs everything).
+
+    Sampling a representative file per root (the pre-review shape) is exactly
+    how `tests/_html_links.py` stayed uncovered: it is an EXACT
+    `SOURCE_PATTERNS["onboarding"]` entry, so a change to it selects
+    `onboarding` and REPLACES the `core` fallback — one arm per ROOT was not
+    the complete set.
     """
     import sys
 
@@ -1627,9 +1685,27 @@ def test_empty_default_uri_census_is_registered_on_every_surface_it_covers():
         "every surface they select (`_CENSUS_ROOTS`)")
     manifest = load_manifest()
     guard = Path(__file__).name
-    for covered in ("tests/test_coverage_loop.py", "tools/longmem_eval/run.py"):
-        selection = select([covered], "pull_request", manifest)
-        assert guard in selection["test_files"], (
-            f"a {covered}-only PR selects {selection['surfaces']} and does NOT "
-            f"run {guard} — the census would be blind to a dead-default read "
-            "it covers (#3094)")
+    covered = [
+        path.relative_to(_REPO_ROOT).as_posix()
+        for root in _CENSUS_ROOTS
+        for path in sorted((_REPO_ROOT / root).rglob("*.py"))
+    ]
+    # A collapsed enumeration would make the loop below vacuous — the failure
+    # mode a green ratchet can hide.
+    assert len(covered) > 100, (
+        f"the census roots enumerated only {len(covered)} file(s) — a green "
+        "run here would prove nothing")
+    # Named so the onboarding-SOURCE_PATTERNS regression stays diagnosable: a
+    # per-root sample of two files never reached it.
+    assert "tests/_html_links.py" in covered
+    blind = []
+    for path in covered:
+        selection = select([path], "pull_request", manifest)
+        if selection.get("full"):
+            continue
+        if guard not in (selection.get("test_files") or []):
+            blind.append(f"{path} -> {selection['surfaces']}")
+    assert not blind, (
+        f"{len(blind)} census-covered file(s) do NOT run {guard} on a change "
+        "to them — the census would be blind to a dead-default read it covers "
+        "(#3094):\n  " + "\n  ".join(blind))
