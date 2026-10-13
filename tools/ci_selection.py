@@ -233,6 +233,17 @@ SHARED_MODULES = (
     # select `core` only, and a break it induced in an api/eval/ep test would
     # never run on the PR that made it (#1349/#3332/#3910 under-selection class).
     "tests/_signal_hygiene.py",
+    # #7357: the canonical-store guard (`tests/_canonical_store_guard.py`) is
+    # imported at conftest MODULE level and REFUSES THE SESSION for any surface
+    # whose `TORTOISE_DB_URI` targets the fleet's map instance (loopback
+    # port 16379). Same class as `_verdict.py` / `_signal_hygiene.py` above and
+    # enforced by
+    # `tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`:
+    # not a `test_*.py` file, so the manifest never classifies it — without this
+    # entry a change to the guard would select `core` only, and a break it
+    # induced in an api/eval/ep session would never run on the PR that made it
+    # (#1349/#3332/#3910 under-selection class).
+    "tests/_canonical_store_guard.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",

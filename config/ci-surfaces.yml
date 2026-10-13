@@ -2356,6 +2356,11 @@ surfaces:
   - test_trash_lock.py             # #2470 restore lock timeout (fake CP)
   - test_trash_grace.py            # #2465 trash recovery-window grace (supabase lane, fake CP)
   - test_tripwire.py
+  # #7357: the session-start CANONICAL-STORE guard (tests/_canonical_store_guard.py
+  # + the conftest import-time call). Refuses a session whose TORTOISE_DB_URI
+  # targets the fleet's map instance (loopback 16379); the guard module is in
+  # SHARED_MODULES, so a change to it forces the full matrix.
+  - test_canonical_store_guard.py
   - test_unjournaled_mutation_class.py
   # #3311: the multi-label (`:Point:Object`) status write — vocabulary validation
   # plus a replayable journal line on the generic entity surface. Same
