@@ -225,10 +225,10 @@ second one is the invariant:
 
    "Consumes nothing" needs two things the gate alone cannot provide, because the controller books a
    fixer attempt when it **creates the session** (`orch-loop.sh`) — *upstream* of the gate:
-   * `fix-one.sh` **refunds** that attempt on a refusal. It is the only party that knows no agent
+   - `fix-one.sh` **refunds** that attempt on a refusal. It is the only party that knows no agent
      ran, so it rewinds `fixcount-<PR>`; without the refund, three refusals reach `MAX_FIX_TRIES`
      and park a PR that never had a single fixer run.
-   * the controller no longer deletes `needsfix-<PR>-<head>` at dispatch. `fix-one.sh` consumes it
+   - the controller no longer deletes `needsfix-<PR>-<head>` at dispatch. `fix-one.sh` consumes it
      only once the agent has **actually started**, so a refusal leaves the reviewer's findings
      intact and the next cycle re-dispatches instead of spending a full fresh-context re-review on
      a head nobody fixed.
