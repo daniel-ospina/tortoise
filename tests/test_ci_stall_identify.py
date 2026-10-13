@@ -13,10 +13,11 @@ is cancelled when pytest-timeout ends the item) and reproduce the stall: a test
 that holds the GIL continuously still gets a named frame.
 
 #5035 adds the other half, and it is the half that was missing. A dump is not a
-kill: ``faulthandler_timeout`` writes a frame and lets the item run on. Every
-``--timeout`` in this repo used to live on a CI command line, so a ``pytest`` a
-human or an agent ran by hand armed NO killer at all — which is how this stayed
-alive for two days:
+kill: ``faulthandler_timeout`` writes a frame and lets the item run on. The only
+pytest-timeout budget configured for a repo-wide run was the flag each CI leg
+passes (a test-local subprocess argv, e.g. ``tests/test_tripwire.py``, is not a
+config default), so a ``pytest`` a human or an agent ran by hand armed NO killer
+at all — which is how this stayed alive for two days:
 
     pid 64502  ppid 1  elapsed 01-19:48:27  cputime 3124:47 (~1.19 cores avg)
     python -m pytest tests/test_cohort_cost_cap.py -q -p no:cacheprovider
@@ -81,8 +82,14 @@ def test_faulthandler_timeout_is_armed_below_the_per_test_budget():
     ]
     # #5035: the config's own budget is a REAL budget now — a bare run (no
     # --timeout flag) resolves to it — so the dump timer must precede it too.
-    if ini.get("timeout") is not None:
-        budgets.append(int(float(ini["timeout"])))
+    # Appended unconditionally: an ABSENT key must fail here as loudly as a
+    # too-large one, or deleting `timeout` would leave this test green and the
+    # dump timer unbounded-relative instead of dump-before-kill.
+    assert ini.get("timeout") is not None, (
+        "no `timeout` in [tool.pytest.ini_options] (#5035): the dump timer has "
+        "no kill to precede, so a stall dumps a frame and runs on"
+    )
+    budgets.append(int(float(ini["timeout"])))
     assert budgets, "no workflow arms pytest-timeout (`--timeout=`)"
     assert 0 < float(configured) < min(budgets), (
         f"faulthandler_timeout={configured} must fire before pytest-timeout's "
@@ -137,15 +144,62 @@ def test_a_stall_dumps_its_own_frame(tmp_path):
     )
 
 
+def _main_gate_budget() -> int:
+    """The main CI gate's per-test budget: the MODE of ``python-ci.yml``'s flags.
+
+    The MODE, not the ``min`` of every workflow. Two one-sided pins were tried
+    and both were wrong: ``>= min(all workflows)`` rested on the false premise
+    that every CI leg passes ``--timeout`` (several do not), and
+    ``<= min(all workflows)`` would accept a default TIGHTER than every leg, so
+    ``timeout = 290`` would pass and kill tests the main gate runs at 300.
+    Taking the main workflow's mode keeps the reference on the gate that matters
+    and stops a single special-purpose leg (``--timeout=120``) from silently
+    retightening every bare local run.
+
+    ``most_common`` has no defined tie-break, so a tie is a LOUD failure rather
+    than an order-dependent pin: ``Counter([600, 600, 300, 300]).most_common(1)``
+    returns whichever value appeared first.
+    """
+    main_text = (
+        (WORKFLOWS_DIR / "python-ci.yml")
+        .read_text(encoding="utf-8")
+        .replace("\\\n", " ")
+    )
+    budgets = [
+        int(m)
+        for line in main_text.splitlines()
+        if not line.lstrip().startswith("#") and "pytest" in line
+        for m in re.findall(r"--timeout[= ](\d+)", line)
+    ]
+    assert budgets, "the main CI gate arms no pytest-timeout (`--timeout=`)"
+    counts = Counter(budgets).most_common()
+    assert counts[0][1] >= 2, (
+        f"python-ci.yml has no repeated budget to pin against ({dict(Counter(budgets))}): "
+        "the main gate's budget must be a value it actually passes on more than one leg"
+    )
+    if len(counts) > 1:
+        assert counts[0][1] > counts[1][1], (
+            f"python-ci.yml's `--timeout` values tie at the top ({dict(Counter(budgets))}) "
+            "— most_common would then pick by line order, so which value is pinned 'the "
+            "main gate's budget' would depend on a reordering. Make the majority unambiguous."
+        )
+    return counts[0][0]
+
+
 def test_the_config_arms_a_terminating_timeout_without_a_cli_flag(pytestconfig):
-    """The config alone must arm a per-test KILLER (#5035).
+    """The config KEY must be present, above the dump, and equal to CI's budget.
 
     ``pytestconfig.getini`` is the resolver's own view of
     ``[tool.pytest.ini_options]`` — not a re-read of the file — so this REDs the
     moment the key goes away. pytest-timeout registers the ini option with an
-    EMPTY default and resolves CLI flag -> ``PYTEST_TIMEOUT`` env -> this value
-    (``pytest_timeout._get_timeout``), so an unset key means a bare ``pytest``
-    has no bound at all; that is the incident's exact command.
+    EMPTY default and resolves CLI flag (including one injected by ``addopts``)
+    -> ``PYTEST_TIMEOUT`` env -> this value
+    (``pytest_timeout.get_env_settings``), so an unset key means a bare
+    ``pytest`` has no bound at all; that is the incident's exact command.
+
+    This test pins the KEY. The RESOLVED bound — which a higher-priority source
+    can defeat while this reads 300 — is pinned by
+    ``test_the_resolved_bound_from_the_repo_config_is_the_ci_budget``.
 
     Mutation that makes this RED: delete ``timeout = 300`` from
     ``[tool.pytest.ini_options]``. ``getini("timeout")`` then returns ``""`` and
@@ -165,60 +219,101 @@ def test_the_config_arms_a_terminating_timeout_without_a_cli_flag(pytestconfig):
         f"timeout={budget} must exceed faulthandler_timeout={dump_at}, or the "
         "item ends (and the dump timer is cancelled) before the frame is written"
     )
-    text = "\n".join(
-        path.read_text(encoding="utf-8").replace("\\\n", " ")
-        for path in sorted(WORKFLOWS_DIR.glob("*.yml"))
-    )
-    ci_budgets = [
-        int(m)
-        for line in text.splitlines()
-        if not line.lstrip().startswith("#") and "pytest" in line
-        for m in re.findall(r"--timeout[= ](\d+)", line)
-    ]
-    assert ci_budgets, "no workflow arms pytest-timeout (`--timeout=`)"
-    # The pin is an EQUALITY against the MAIN GATE's budget, which is two-sided
-    # on purpose. A one-sided `>= min(ci_budgets)` passed on the false premise
-    # that "every CI leg passes --timeout" (it does not — `.github/workflows/ci.yml`
-    # e2e legs, `blog-write-e2e.yml`, `deploy-pages.yml` and `evals-on-demand.yml`
-    # pass none), and a one-sided `<= min(ci_budgets)` would accept a default
-    # TIGHTER than every leg — `timeout = 290` would pass and kill tests CI runs
-    # at 300, which is the failure this file's own rejected-alternatives row
-    # names. Taking the MODE (not the min) of `python-ci.yml` keeps the reference
-    # on the main gate: a single special-purpose leg adding `--timeout=120`
-    # cannot silently retighten every bare run, and a real move of the main
-    # gate's budget still REDs here.
-    main_text = (WORKFLOWS_DIR / "python-ci.yml").read_text(encoding="utf-8")
-    main_budgets = [
-        int(m)
-        for line in main_text.replace("\\\n", " ").splitlines()
-        if not line.lstrip().startswith("#") and "pytest" in line
-        for m in re.findall(r"--timeout[= ](\d+)", line)
-    ]
-    assert main_budgets, "the main CI gate arms no pytest-timeout (`--timeout=`)"
-    reference, seen = Counter(main_budgets).most_common(1)[0]
-    assert seen >= 2, (
-        f"python-ci.yml has no repeated budget to pin against ({dict(Counter(main_budgets))}): "
-        "the main gate's budget must be a value it actually passes on more than one leg"
-    )
+    reference = _main_gate_budget()
     assert budget == reference, (
         f"the config default timeout={budget} must equal the main gate's budget "
-        f"{reference} (passed {seen}x in python-ci.yml). Looser hands the legs that "
-        f"declare no `--timeout` a weaker bound than their peers; tighter kills, on "
-        f"a bare local run, tests the main gate runs at {reference}s"
+        f"{reference}. Looser hands the legs that declare no `--timeout` a weaker "
+        f"bound than their peers; tighter kills, on a bare local run, tests the "
+        f"main gate runs at {reference}s"
     )
     # A fat-finger guard, not a policy: an hour is still ~44x under the 43h48m
     # this issue exists for, and no test here needs more than that unmarked.
     assert budget <= 3600, f"timeout={budget} is too loose to be a default guard"
 
 
-def test_a_bare_run_kills_a_hung_item_with_no_timeout_flag(tmp_path):
-    """#5035: the ini source kills a hung item with no ``--timeout`` flag present.
+def test_the_resolved_bound_from_the_repo_config_is_the_ci_budget(tmp_path):
+    """Round-1 review finding: the KEY is not the GUARD, so pin the RESOLVED value.
 
-    ``-o timeout=2`` writes the SAME ini value the pyproject key fills, so this
-    exercises the branch a bare invocation takes: no CLI flag, no
-    ``PYTEST_TIMEOUT``. A ``timeout`` key pytest-timeout never resolves would
-    leave the item running, so the child is given a 2s budget inside an outer
-    60s guard and the assertion is on the KILL, not on a stack dump.
+    A config source with HIGHER priority than the ini value disarms the guard
+    without touching ``[tool.pytest.ini_options]``: ``addopts = "--timeout=0"``
+    injects a CLI flag, and ``get_env_settings`` consults the CLI value FIRST —
+    so ``getini("timeout")`` still reads 300 while a bare run resolves to 0.0 and
+    arms nothing. That is the incident's shape with every other test in this
+    file green.
+
+    The probe runs under the REPO config (``-c pyproject.toml``) with
+    ``PYTEST_TIMEOUT`` and ``PYTEST_ADDOPTS`` cleared, so it measures what a bare
+    ``pytest`` in this checkout actually gets.
+
+    Mutation that makes this RED: add ``addopts = "--timeout=0"`` to
+    ``[tool.pytest.ini_options]`` (verified: the probe resolves 0.0 and fails),
+    or reduce the value below the CI reference.
+    """
+    reference = _main_gate_budget()
+    (tmp_path / "test_probe.py").write_text(
+        "import pytest_timeout\n"
+        "\n"
+        "\n"
+        "def test_probe(pytestconfig):\n"
+        "    resolved = pytest_timeout.get_env_settings(pytestconfig).timeout\n"
+        "    assert resolved is not None and float(resolved) > 0, (\n"
+        "        'a bare run resolves NO per-test bound (resolved=%r)' % (resolved,)\n"
+        "    )\n"
+        "    print('RESOLVED=%r' % (float(resolved),))\n",
+        encoding="utf-8",
+    )
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("PYTEST_TIMEOUT", "PYTEST_ADDOPTS")
+    }
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-s",
+            "-p",
+            "no:cacheprovider",
+            "-c",
+            str(PYPROJECT),
+            str(tmp_path / "test_probe.py"),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+    )
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 0, (
+        "the REPO config resolves no terminating per-test bound for a bare run "
+        f"(the incident's shape):\n{output}"
+    )
+    assert f"RESOLVED={float(reference)}" in output, (
+        f"a bare run under the repo config resolved a bound other than the main "
+        f"gate's {float(reference)}:\n{output}"
+    )
+
+
+def test_the_ini_source_kills_a_hung_item_with_no_timeout_flag(tmp_path):
+    """#5035: pytest-timeout's INI source kills a hung item with no flag present.
+
+    Scope, deliberately narrow (round-1 review): ``-o timeout=2`` writes the same
+    INI value the pyproject key fills, and the child runs in ``tmp_path`` so it
+    never loads the repo config. This therefore pins the RESOLUTION BRANCH — an
+    ini-sourced ``timeout`` with no CLI flag and no ``PYTEST_TIMEOUT`` actually
+    ends a hung item — not the repo's value. The repo's value is pinned by
+    ``test_the_config_arms_a_terminating_timeout_without_a_cli_flag`` and its
+    resolution by ``test_the_resolved_bound_from_the_repo_config_is_the_ci_budget``.
+
+    A ``timeout`` key pytest-timeout never resolves would leave the item running,
+    so the child is given a 2s budget inside an outer 60s guard and the assertion
+    is on the KILL, not on a stack dump.
+
+    Mutation that makes this RED: remove ``-o timeout=2`` — the hung item then
+    runs on and the 60s outer guard fires.
     """
     (tmp_path / "test_hang.py").write_text(
         "import time\n\n\ndef test_hang():\n    time.sleep(600)\n", encoding="utf-8"
