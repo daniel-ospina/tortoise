@@ -367,16 +367,32 @@ const MD_HOUSE_ANSWER_RE =
   /^\s*(?:(\\?\*\\?\*|__)\s*quick answer\s*\1\s*:|(\\?\*\\?\*|__)\s*quick answer\s*:\s*\2\s*|quick answer\s*:)\s*/i;
 
 /**
+ * A fenced-code delimiter line. ONE definition, used by every body scan below
+ * (`renderMarkdown`, `hasPublishedH2`, `extractFaq`, `extractVideo`): when two of
+ * them keep their own fence rule the embed, the structured data and the table of
+ * contents disagree about what is code. Measured on a 1–3 space indented fence
+ * (valid CommonMark — the shape a list item produces): `renderMarkdown` emitted a
+ * live iframe while `extractVideo` skipped it, so the page shipped a video with
+ * no `VideoObject` (#8379 finding 4).
+ *
+ * Up to three spaces of indent, per CommonMark; four or more is an indented code
+ * block, where a ``` is literal.
+ */
+function isFenceLine(line: string): boolean {
+  return /^ {0,3}```/.test(line);
+}
+
+/**
  * Whether the body publishes at least one `##` heading. The generated nav is
  * H2-only, so this decides whether a house-style marker has a replacement at
  * all — without one the marker and its list must stay ordinary content rather
- * than be deleted in exchange for nothing. Fenced code blocks are skipped,
- * matching the main scan.
+ * than be deleted in exchange for nothing. Fenced code blocks are skipped via
+ * the SAME predicate `renderMarkdown` uses, so this cannot disagree with it.
  */
 function hasPublishedH2(lines: string[]): boolean {
   let inFence = false;
   for (const line of lines) {
-    if (/^```/.test(line)) {
+    if (isFenceLine(line)) {
       inFence = !inFence;
       continue;
     }
@@ -519,11 +535,11 @@ export function renderMarkdown(markdown: string): string {
     }
 
     // Fenced code block
-    if (/^```/.test(line)) {
-      const lang = line.slice(3).trim();
+    if (isFenceLine(line)) {
+      const lang = line.trim().slice(3).trim();
       const buf: string[] = [];
       i++;
-      while (i < lines.length && !/^```/.test(lines[i])) {
+      while (i < lines.length && !isFenceLine(lines[i])) {
         buf.push(lines[i]);
         i++;
       }
@@ -728,7 +744,7 @@ export function extractFaq(markdown: string): FaqEntry[] {
   while (i < lines.length) {
     const line = lines[i];
 
-    if (/^```/.test(line)) {
+    if (isFenceLine(line)) {
       inFence = !inFence;
       // Keep the fence markers so markdownToText renders the block as code
       // (otherwise a `#` inside the snippet would parse as a heading).
@@ -831,15 +847,20 @@ const MD_VIDEO_RE = /^\\?\[\\?\[\s*video\s*:\s*(.*)$/i;
 /**
  * The video references in an article body — the renderer's promotion of the
  * `[[video: …]]` convention (#7751). Pure, so the structured data it feeds is
- * testable without a runtime, and so `articleJsonLd` can build `VideoObject`
- * from the SAME parse that emitted the embed: one source, never two.
+ * testable without a runtime.
+ *
+ * It scans with the SAME fence predicate `renderMarkdown` uses (`isFenceLine`),
+ * so the markers it returns are exactly the ones that became an embed: a marker
+ * the renderer left as code is not here, and a marker it embedded is (#8379
+ * finding 4 — the two used to hold different fence rules and disagreed on a
+ * 1–3 space indented fence).
  */
 export function extractVideo(markdown: string): VideoRef[] {
   const found: VideoRef[] = [];
   let inFence = false;
   for (const raw of markdown.split(/\r?\n/)) {
     const line = raw.trim();
-    if (/^```/.test(line)) {
+    if (isFenceLine(raw)) {
       inFence = !inFence;
       continue;
     }
@@ -859,17 +880,28 @@ function faqPageJsonLdFor(post: BlogPost): unknown | null {
 }
 
 /**
- * `VideoObject` for an article that embeds a video, or `null` when it has none.
+ * `VideoObject` for every video an article embeds, or `null` when it embeds
+ * none. A body may carry MORE THAN ONE marker (each one renders its own iframe),
+ * so this returns one node per DISTINCT video rather than silently keeping the
+ * first — previously `const [video] = extractVideo(...)` dropped every video
+ * after the first while the page still embedded it (#8379 finding 4).
  *
- * The video is a ranking surface of its own (#7751), so this is emitted
+ * The video is a ranking surface of its own (#7751), so these are emitted
  * ALONGSIDE `BlogPosting`/`BreadcrumbList`/`FAQPage` rather than replacing
- * anything. `post.published_at`/title/excerpt stand in for the video's own
+ * anything. `post.published_at`/title/excerpt stand in for a video's own
  * metadata when the marker does not carry it, which is correct for the intended
  * shape: an interview published with its article.
  */
-function videoObjectJsonLdFor(post: BlogPost, url: string): unknown | null {
-  const [video] = extractVideo(post.body);
-  return video ? videoObjectJsonLd(video, post, url) : null;
+function videoObjectsJsonLdFor(post: BlogPost, url: string): unknown[] | null {
+  const nodes: unknown[] = [];
+  const seen = new Set<string>();
+  for (const video of extractVideo(post.body)) {
+    // Two markers for one video embed it twice; the schema should not duplicate.
+    if (seen.has(video.embedUrl)) continue;
+    seen.add(video.embedUrl);
+    nodes.push(videoObjectJsonLd(video, post, url));
+  }
+  return nodes.length ? nodes : null;
 }
 
 /**
@@ -882,18 +914,22 @@ const ARTICLE_SCHEMA_BUILDERS: ReadonlyArray<(post: BlogPost, url: string) => un
   blogPostingJsonLd,
   breadcrumbJsonLd,
   faqPageJsonLdFor,
-  videoObjectJsonLdFor,
+  videoObjectsJsonLdFor,
 ];
 
 /**
  * The JSON-LD array for an article, composed from `ARTICLE_SCHEMA_BUILDERS`.
  * Pure, so the wiring is testable without a Cloudflare runtime; a builder that
- * returns `null` (currently only the FAQ node) is omitted.
+ * returns `null` is omitted, and a builder may return an ARRAY of nodes (one
+ * video marker per iframe, many markers per body), which is flattened so the
+ * result is always a flat list of schema nodes.
  */
 export function articleJsonLd(post: BlogPost, url: string): unknown[] {
-  return ARTICLE_SCHEMA_BUILDERS
-    .map((build) => build(post, url))
-    .filter((node) => node !== null && node !== undefined);
+  return ARTICLE_SCHEMA_BUILDERS.flatMap((build) => {
+    const node = build(post, url);
+    if (node === null || node === undefined) return [];
+    return Array.isArray(node) ? node : [node];
+  });
 }
 
 // ── HTML shell ─────────────────────────────────────────────────────────────

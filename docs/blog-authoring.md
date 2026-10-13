@@ -4,8 +4,10 @@ The blog renderer accepts a **fixed markdown subset** — it escapes raw HTML by
 unsupported construct publishes as literal text rather than being silently interpreted. This page is
 the contract: what the body may contain, and what each construct renders as.
 
-> Verified against `website/functions/blog/_lib.ts` at `9b9c2c7be`. If a construct is missing from this
-> page, assume it is **not** supported rather than assuming it works.
+> Verified against `website/functions/blog/_lib.ts`, which is the source of truth. If a construct is
+> missing from this page, assume it is **not** supported rather than assuming it works. The page's own
+> section structure is guarded by `tests/test_blog_authoring_doc.py` (rendered with a real CommonMark
+> parser — markdownlint cannot see an unterminated fence).
 
 ---
 
@@ -35,7 +37,8 @@ Write the marker on its own line:
 
 ```text
 [[toc]]
-```text
+```
+
 It is replaced with a linked table of contents built from the article's `##` headings **after**
 parsing — so the links can never drift from the headings they name.
 
@@ -47,7 +50,8 @@ no need to convert it:
 
 1. First section
 2. Second section
-```text
+```
+
 The generated version replaces the paragraph *and* the list. If there is no `##` heading to link to,
 your hand-written list is left alone (content is never deleted to make room for an empty replacement).
 
@@ -62,7 +66,8 @@ GitHub-style alerts, as a blockquote whose first line is the marker:
 > beyond what is immediately available in its current context.
 
 > [!WARNING] Self-hosting requires a FalkorDB sidecar.
-```text
+```
+
 Supported: `[!ANSWER]`, `[!KEY]` / `[!TAKEAWAY]` / `[!TAKEAWAYS]`, `[!NOTE]`, `[!TIP]`,
 `[!IMPORTANT]`, `[!WARNING]`.
 
@@ -75,7 +80,8 @@ A blockquote whose first line is `**Quick answer:** …` renders as the answer b
 ```text
 > **Quick answer:** Agent memory is any system that lets an agent retain and use
 > information beyond what is immediately available in its current context.
-```text
+```
+
 This is what the article templates already produce. **The quick answer belongs in the first ~150
 words**, before the first `##`.
 
@@ -90,7 +96,8 @@ colon. `> Quick answers are short.` is an ordinary blockquote — only `Quick an
 > [!KEY]
 > - One per line.
 > - Five to seven of them.
-```text
+```
+
 ---
 
 ## FAQ section
@@ -108,7 +115,8 @@ Any system that lets an agent retain and use information beyond its current cont
 ### Is Tortoise open source?
 
 Tortoise is BSL 1.1 — free below $5M revenue.
-```text
+```
+
 The page then emits `FAQPage` structured data built from exactly those pairs, so the questions are
 worth writing as real search queries.
 
@@ -124,7 +132,8 @@ Write the marker on its own line, with the video's URL:
 
 ```text
 [[video: https://www.youtube.com/watch?v=VIDEOID]]
-```text
+```
+
 That renders the embed **and** emits `VideoObject` structured data. YouTube and Vimeo are supported
 (`youtu.be/ID`, `/watch?v=ID`, `/embed/ID`, `/shorts/ID`, `vimeo.com/ID`).
 
@@ -133,16 +142,23 @@ fields are recognised **by shape**, so they may appear in any order:
 
 ```text
 [[video: https://youtu.be/VIDEOID | The 2026 interview | PT42M10S | 2026-10-14]]
-```text
+```
+
 Anything the marker does not supply falls back to the post's own metadata — its title, its
 `meta_description`, and its publish date. For a companion interview published with its article those
 fallbacks are correct, which is why the bare form is the normal one.
 
 Two notes on the structured data:
 
-- `thumbnailUrl` is **derived automatically for YouTube** (and so is the privacy-preserving
-  `youtube-nocookie.com` embed). For Vimeo it is not derivable without an API call, so no thumbnail
-  is emitted rather than a URL that would 404.
+- `thumbnailUrl` is **derived automatically for YouTube** from `hqdefault.jpg` — the poster every
+  uploaded video has. `maxresdefault.jpg` is deliberately not used: it 404s for any video without an
+  HD source, and `thumbnailUrl` is a required field for a video rich result. The
+  `youtube-nocookie.com` embed is privacy-preserving. For Vimeo no thumbnail is derivable without an
+  API call, so none is emitted rather than a URL that would 404 — the same rule.
+- **Each marker gets its own embed and its own `VideoObject`.** Two markers on one page describe two
+  videos; the same video written twice embeds twice but is described once. The embed and the
+  structured data share the same rule for what counts as code, so a marker the renderer treats as
+  code is not described either.
 - A marker the renderer does not recognise is left as **ordinary text** — it never becomes a broken
   iframe.
 

@@ -30,7 +30,6 @@ export interface VideoRef {
 
 // YouTube ids are 11 chars of [A-Za-z0-9_-]. Vimeo ids are digits.
 const YOUTUBE_ID_RE = /^[A-Za-z0-9_-]{11}$/;
-const VIMEO_ID_RE = /^[0-9]{6,12}$/;
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ISO_DURATION_RE = /^PT(\d+H)?(\d+M)?(\d+S)?$/;
 
@@ -76,24 +75,38 @@ export function parseVideoUrl(raw: string): { provider: VideoProvider; id: strin
   return null;
 }
 
+/**
+ * The embed host for each provider. Exhaustive by construction: adding a
+ * `VideoProvider` forces a key here, so the origin a page will be served with
+ * is a runtime value — `tests/test_blog_markdown.mjs` asserts every one of them
+ * is admitted by the served `RELAXED_CSP` `frame-src` (#8379 finding 1).
+ */
+export const VIDEO_EMBED_ORIGINS: Readonly<Record<VideoProvider, string>> = {
+  youtube: "https://www.youtube-nocookie.com",
+  vimeo: "https://player.vimeo.com",
+};
+
 /** The privacy-preserving embed URL for a parsed reference. */
 export function embedUrlFor(provider: VideoProvider, id: string): string {
   return provider === "youtube"
     // youtube-nocookie: no tracking cookies until playback.
-    ? `https://www.youtube-nocookie.com/embed/${id}`
-    : `https://player.vimeo.com/video/${id}`;
+    ? `${VIDEO_EMBED_ORIGINS.youtube}/embed/${id}`
+    : `${VIDEO_EMBED_ORIGINS.vimeo}/video/${id}`;
 }
 
 /**
  * The poster image, where it is derivable without an API call.
  *
- * YouTube exposes a stable per-id thumbnail host. Vimeo does NOT — its poster
- * requires an oEmbed/API request, and inventing a third-party proxy for it
- * would add an external dependency to a page render. So Vimeo returns null and
- * the caller omits `thumbnailUrl` (see `videoObjectJsonLd`).
+ * ONE rule for both providers: emit a thumbnail only when the URL is guaranteed
+ * to resolve. YouTube's `hqdefault.jpg` (480x360) is generated for EVERY
+ * uploaded video — including the 240p/SD-only ones; `maxresdefault.jpg` is not,
+ * and 404s exactly there (measured on `jNQXAC9IVRw`, "Me at the zoo"). Since
+ * `thumbnailUrl` is a REQUIRED field for a video rich result, a 404 on it is
+ * worse than omitting it — which is the same reason Vimeo returns null, whose
+ * poster needs an oEmbed/API call we do not make at render time.
  */
 export function thumbnailUrlFor(provider: VideoProvider, id: string): string | null {
-  return provider === "youtube" ? `https://i.ytimg.com/vi/${id}/maxresdefault.jpg` : null;
+  return provider === "youtube" ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : null;
 }
 
 function normaliseDate(s: string): string | null {
@@ -152,11 +165,6 @@ export function parseVideoMarker(payload: string): VideoRef | null {
   };
 }
 
-/** True when a marker payload produced a usable reference. */
-export function isVideoRef(v: VideoRef | null): v is VideoRef {
-  return v !== null;
-}
-
 export interface VideoPostLike {
   title: string;
   body: string;
@@ -172,10 +180,11 @@ export interface VideoPostLike {
  * the intended shape — an interview published WITH its article — the article's
  * title and date ARE the video's. An explicit `title`/date in the marker wins.
  *
- * `thumbnailUrl` is REQUIRED by Google for a video rich result and is only
- * derivable for YouTube here, so a Vimeo reference emits the node WITHOUT it:
- * the schema stays valid and useful to other consumers, and we do not fabricate
- * a URL that would 404.
+ * `thumbnailUrl` is REQUIRED by Google for a video rich result and is emitted
+ * only when `thumbnailUrlFor` is sure the URL resolves (see that function for the
+ * one rule), so a Vimeo reference emits the node WITHOUT it: the schema stays
+ * valid and useful to other consumers, and we do not fabricate a URL that would
+ * 404.
  */
 export function videoObjectJsonLd(video: VideoRef, post: VideoPostLike, url: string): Record<string, unknown> {
   const node: Record<string, unknown> = {

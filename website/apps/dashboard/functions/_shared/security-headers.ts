@@ -117,7 +117,11 @@ export const RELAXED_CSP = csp(
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
   "connect-src 'self' https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com",
-  "frame-src https://challenges.cloudflare.com",
+  // #7751: the marketing project's blog renders video embeds; this value must
+  // stay byte-identical to `website/functions/_shared/security-headers.ts`
+  // (`src/securityHeaders.test.js` §4), so the two embed origins move together.
+  // See the marketing copy for why `frame-src` is the load-bearing directive.
+  "frame-src https://challenges.cloudflare.com https://www.youtube-nocookie.com https://player.vimeo.com",
   "object-src 'none'",
   "base-uri 'none'",
   "frame-ancestors 'none'",

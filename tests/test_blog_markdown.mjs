@@ -15,6 +15,10 @@
 //   node --experimental-strip-types tests/test_blog_markdown.mjs
 
 import { renderMarkdown, extractFaq, faqPageJsonLd, articleJsonLd, jsonLd, extractVideo, validHref } from "../website/functions/blog/_lib.ts";
+import { VIDEO_EMBED_ORIGINS } from "../website/functions/blog/_shared/video.ts";
+// The marketing project's policy — the one `blog/_lib.ts` `ok()` stamps on every
+// article response, so it is the policy that decides whether the embed displays.
+import { RELAXED_CSP } from "../website/functions/_shared/security-headers.ts";
 
 let failures = 0;
 const ok = (msg) => console.log(`  ✓ ${msg}`);
@@ -888,6 +892,15 @@ console.log("video embed marker + VideoObject structured data (#7751)");
     "Vimeo embed URL is constructed",
   );
   assertEq(vimeo[0]?.thumbnailUrl, null, "Vimeo has no derivable thumbnail (not fabricated)");
+  assertEq(
+    extractVideo(`[[video: ${YT}]]`)[0]?.thumbnailUrl,
+    "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+    "YouTube thumbnail is hqdefault, the poster every uploaded video has",
+  );
+  assert(
+    !extractVideo(`[[video: ${YT}]]`)[0]?.thumbnailUrl.includes("maxresdefault"),
+    "never maxresdefault — it 404s for SD-only videos, and thumbnailUrl is required",
+  );
 
   // Optional metadata, recognised by SHAPE so the common case needs no ceremony.
   const withMeta = extractVideo(`[[video: ${YT} | My interview | PT12M34S | 2026-10-10]]`);
@@ -907,6 +920,20 @@ console.log("video embed marker + VideoObject structured data (#7751)");
     "a marker inside a fenced code block is not an embed",
   );
   assertEq(extractVideo("no marker here").length, 0, "a body with no marker yields no video");
+
+  // ── the embed and the structured data cannot disagree about what is code ──
+  // (#8379 finding 4: `renderMarkdown` opened a fence on the RAW line while
+  // `extractVideo` opened it on the TRIMMED line, so a 1–3 space indented fence
+  // — valid CommonMark, the shape a list item produces — rendered a live iframe
+  // with NO VideoObject. Each body below asserts the two agree, which is the
+  // property the old suite never checked.)
+  const indented = "   ```\n[[video: " + YT + "]]\n   ```";
+  assertEq(
+    (renderMarkdown(indented).match(/<iframe/g) || []).length,
+    0,
+    "a 1–3 space indented fence renders as code, not as an embed",
+  );
+  assertEq(extractVideo(indented).length, 0, "...and its marker is not a video ref either");
 
   // The structured data joins the existing builders rather than replacing them.
   const post = {
@@ -935,10 +962,49 @@ console.log("video embed marker + VideoObject structured data (#7751)");
   assertEq(video.uploadDate, "2026-10-12T00:00:00Z", "uploadDate falls back to published_at");
   assertEq(video.embedUrl, "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ", "embedUrl is the constructed one");
   assertEq(
-    Array.isArray(video.thumbnailUrl) && video.thumbnailUrl[0].includes("i.ytimg.com"),
+    Array.isArray(video.thumbnailUrl) && video.thumbnailUrl[0] === "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
     true,
-    "thumbnailUrl is derived for YouTube",
+    "thumbnailUrl is derived for YouTube (hqdefault, the guaranteed poster)",
   );
+
+  // ── the embed and the structured data cannot disagree about what is code ──
+  // (#8379 finding 4: `renderMarkdown` opened a fence on the RAW line while
+  // `extractVideo` opened it on the TRIMMED line, so a 1–3 space indented fence
+  // — valid CommonMark, the shape a list item produces — rendered a live iframe
+  // with NO VideoObject. Each body below asserts the two agree, which is the
+  // property the old suite never checked.)
+  for (const body of [`[[video: ${YT}]]`, "```\n[[video: " + YT + "]]\n```", indented]) {
+    const embeds = (renderMarkdown(body).match(/<iframe/g) || []).length;
+    const refs = extractVideo(body).length;
+    assertEq(refs, embeds, `embed count and extracted-ref count agree for: ${JSON.stringify(body)}`);
+    const videoNodes = articleJsonLd({ ...post, body }, "https://x/blog/a").filter(
+      (n) => n["@type"] === "VideoObject",
+    );
+    assertEq(
+      videoNodes.length,
+      embeds,
+      `one VideoObject per rendered embed for: ${JSON.stringify(body)}`,
+    );
+  }
+
+  // Two markers render two iframes, so BOTH videos need structured data — the
+  // old code took only `[video]` (the first) and silently dropped the rest.
+  const twoVideos = articleJsonLd(
+    { ...post, body: `[[video: ${YT}]]\n\n[[video: https://vimeo.com/123456789]]` },
+    "https://x/blog/a",
+  ).filter((n) => n["@type"] === "VideoObject");
+  assertEq(twoVideos.length, 2, "one VideoObject per embedded video, not one for the body");
+  assertEq(
+    twoVideos.map((n) => n.embedUrl).join(" "),
+    "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ https://player.vimeo.com/video/123456789",
+    "both videos are described, in embed order",
+  );
+  // The same video twice embeds twice but is described ONCE (no duplicate node).
+  const sameTwice = articleJsonLd(
+    { ...post, body: `[[video: ${YT}]]\n\n[[video: ${YT}]]` },
+    "https://x/blog/a",
+  ).filter((n) => n["@type"] === "VideoObject");
+  assertEq(sameTwice.length, 1, "a repeated marker does not duplicate its VideoObject");
 
   // No video → no node. Absence must not be invented.
   const noVideo = articleJsonLd({ ...post, body: "Just prose." }, "https://x/blog/a");
@@ -955,6 +1021,29 @@ console.log("video embed marker + VideoObject structured data (#7751)");
   );
   const rendered = hostileTitle.map(jsonLd).join("");
   assertEq(rendered.includes("</script><script>alert(1)"), false, "a hostile title cannot close the script tag");
+}
+
+// ── the served CSP must admit every embed origin the renderer can emit ─────
+// (#8379 finding 1: a restrictive `frame-src` — not `default-src` — governs the
+// iframe, so an embed origin missing here is CSP-BLOCKED on the live article
+// while every string-level assertion stays green. The origins come from the
+// renderer itself, so a new provider reddens this until the policy admits it.)
+console.log("");
+console.log("every embed origin the renderer can emit is admitted by the served CSP");
+{
+  const frameSrc = RELAXED_CSP.split("; ").find(
+    (d) => d === "frame-src" || d.startsWith("frame-src "),
+  );
+  assert(frameSrc !== undefined, "RELAXED_CSP declares a frame-src directive (not just default-src)");
+  const admitted = new Set(frameSrc.replace(/^frame-src\s*/, "").split(/\s+/).filter(Boolean));
+  const origins = Object.values(VIDEO_EMBED_ORIGINS);
+  assert(origins.length >= 2, "the renderer advertises its embed origins at runtime");
+  for (const origin of origins) {
+    assert(
+      admitted.has(origin),
+      `${origin} is admitted by RELAXED_CSP frame-src — otherwise the embed is CSP-blocked`,
+    );
+  }
 }
 
 // ── #8313: relative links, without weakening the scheme rejection ──────────
