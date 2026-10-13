@@ -129,6 +129,14 @@ def _doc_text(name: str) -> str:
 # ─────────────────────────────────────────────────────────────────────
 VOCAB_PATH = ROOT / "config" / "disposition-vocabulary.yml"
 
+# The axis blocks the legend renders, in render order. `render()` iterates this tuple and
+# `_load_vocabulary()` requires every name in it, so the guard covers exactly the blocks
+# the legend reads BY NAME — adding a name here renders it AND validates it, in one edit.
+# `STAKED_AXES` (below) cannot serve: those are the *disposition* axes
+# (`lifecycle`/`visibility`/`delete`), and `basis` is deliberately excluded there because
+# a row never leaves it unstated, yet the legend still renders a `Basis` row (#4722).
+LEGEND_AXES = ("lifecycle", "visibility", "basis")
+
 
 def _load_vocabulary() -> dict:
     """The declared vocabulary, read from its one authoritative home."""
@@ -169,6 +177,37 @@ def _load_vocabulary() -> dict:
                 f"{VOCAB_PATH.name} declares no `{name}` values — every "
                 "values-carrying block (each axis, and `delete_instruction`) must "
                 "carry a non-empty `values` mapping"
+            )
+    # The loop above covers every block the file DECLARES. It cannot cover a block
+    # `render()` reads BY NAME and the file omits, and render names four of them:
+    # `LEGEND_AXES` plus `delete_instruction`. A vocabulary declaring fewer axes than the
+    # legend renders (`axes: {}` included) passed the loop and then died as a bare
+    # `KeyError: 'lifecycle'` in `render()`/`AXIS_VALUES` — the same fail-silently-then-
+    # crash shape the loop was added to remove, one level up. `question` was unvalidated
+    # for the same reason — render reads it beside `values` — so a question-less block
+    # passed the guard and died as `KeyError: 'question'`. Requiring the names render
+    # reads makes the guard's coverage a function of the renderer, not of the file it is
+    # checking (#4722). `axes: {}` is refused separately, mirroring `dispositions`, so an
+    # empty axes table names its own defect rather than reporting one missing axis.
+    if not doc["axes"]:
+        raise SystemExit(
+            f"{VOCAB_PATH.name} declares no axes — the legend renders "
+            + ", ".join(f"`{a}`" for a in LEGEND_AXES)
+            + ", and an empty axes table cannot render"
+        )
+    named = {"delete_instruction": doc["delete_instruction"]}
+    for axis in LEGEND_AXES:
+        if axis not in doc["axes"]:
+            raise SystemExit(
+                f"{VOCAB_PATH.name} declares no `{axis}` axis — the legend renders it "
+                "and `AXIS_VALUES`/`VOCAB` read it by name"
+            )
+        named[axis] = doc["axes"][axis]
+    for name, spec in named.items():
+        if not isinstance(spec, dict) or not spec.get("question"):
+            raise SystemExit(
+                f"{VOCAB_PATH.name} declares no `{name}` question — the legend renders "
+                "a Question cell from every block it reads by name"
             )
     # `dispositions` is the combinations table, not a values block. Empty is not benign:
     # every row would fall through to the implicit UNCHANGED/RENAMED pair in
@@ -1629,12 +1668,11 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         "",
         "| Axis | Question | Values |",
         "|---|---|---|",
-        f"| `Lifecycle` | {VOCAB['axes']['lifecycle']['question']} | "
-        + ", ".join(f"`{v}`" for v in AXIS_VALUES["lifecycle"]) + " |",
-        f"| `Visibility` | {VOCAB['axes']['visibility']['question']} | "
-        + ", ".join(f"`{v}`" for v in AXIS_VALUES["visibility"]) + " |",
-        f"| `Basis` | {VOCAB['axes']['basis']['question']} | "
-        + ", ".join(f"`{v}`" for v in AXIS_VALUES["basis"]) + " |",
+        *(
+            f"| `{axis.capitalize()}` | {VOCAB['axes'][axis]['question']} | "
+            + ", ".join(f"`{v}`" for v in AXIS_VALUES[axis]) + " |"
+            for axis in LEGEND_AXES
+        ),
         f"| `Delete` | {VOCAB['delete_instruction']['question']} | "
         + ", ".join(f"`{v}`" for v in DELETE_VALUES) + " |",
         "",

@@ -611,8 +611,12 @@ def test_every_declared_axis_without_values_fails_loud(
     [
         pytest.param("values-empty", id="axis-values-empty"),
         pytest.param("axes-not-a-mapping", id="axes-not-a-mapping"),
+        pytest.param("axes-empty", id="axes-empty"),
+        pytest.param("axis-missing", id="axis-missing"),
         pytest.param("axis-spec-not-a-mapping", id="axis-spec-not-a-mapping"),
+        pytest.param("axis-question-missing", id="axis-question-missing"),
         pytest.param("delete-values-missing", id="delete-instruction-values-missing"),
+        pytest.param("delete-question-missing", id="delete-instruction-question-missing"),
         pytest.param("dispositions-empty", id="dispositions-empty"),
     ],
 )
@@ -629,16 +633,31 @@ def test_a_structurally_malformed_vocabulary_fails_loud(
     `AXIS_VALUES`, with the identical hole — and an empty `dispositions`, where every row
     would silently fall through to the implicit UNCHANGED/RENAMED pair in `_disposition`
     and the `—` caveat would render an empty list of unstaked axes.
+
+    Four more cover the blocks `render()` reads BY NAME rather than iterating: an empty
+    `axes` table, an axis the legend renders but the file omits, and a missing `question`
+    on an axis and on `delete_instruction` (render reads both `values` and `question`).
+    Before the fix each of these returned CLEANLY from `_load_vocabulary()` and died as
+    `KeyError: 'lifecycle'` / `'basis'` / `'question'` in `render()` — the identical
+    fail-silently-then-crash shape, one level up from the reported defect.
     """
     doc = _vocabulary_doc()
     if broken == "values-empty":
         doc["axes"]["basis"]["values"] = {}
     elif broken == "axes-not-a-mapping":
         doc["axes"] = list(doc["axes"])
+    elif broken == "axes-empty":
+        doc["axes"] = {}
+    elif broken == "axis-missing":
+        del doc["axes"]["basis"]
     elif broken == "axis-spec-not-a-mapping":
         doc["axes"]["basis"] = "stated"
+    elif broken == "axis-question-missing":
+        del doc["axes"]["basis"]["question"]
     elif broken == "delete-values-missing":
         del doc["delete_instruction"]["values"]
+    elif broken == "delete-question-missing":
+        del doc["delete_instruction"]["question"]
     elif broken == "dispositions-empty":
         doc["dispositions"] = {}
     else:  # pragma: no cover — a param added without a mutation
@@ -647,6 +666,33 @@ def test_a_structurally_malformed_vocabulary_fails_loud(
     with pytest.raises(SystemExit) as excinfo:
         generator_module._load_vocabulary()
     assert str(excinfo.value), "the guard exited without a message"
+
+
+def test_every_legend_axis_the_render_reads_is_required(
+    generator_module, monkeypatch, tmp_path: Path
+) -> None:
+    """A legend axis the FILE omits must raise the guard, for every name render reads.
+
+    `LEGEND_AXES` is the tuple `render()` iterates and `_load_vocabulary()` requires, so
+    looping over the module's own tuple keeps the test in step with the renderer: a name
+    added to the legend is checked here without editing this test. The reported defect's
+    shape was a guard that skipped a block the module then reads; the previous guard
+    iterated the file's axes, so removing one was invisible to it until `render()` died
+    as a bare `KeyError`. Reproduced pre-fix: `_load_vocabulary()` returned CLEANLY for
+    `axes` with any legend axis deleted.
+    """
+    assert generator_module.LEGEND_AXES, "the renderer names no axes to check"
+    for axis in generator_module.LEGEND_AXES:
+        doc = _vocabulary_doc()
+        del doc["axes"][axis]
+        monkeypatch.setattr(
+            generator_module, "VOCAB_PATH", _write_vocabulary(tmp_path, doc)
+        )
+        with pytest.raises(SystemExit) as excinfo:
+            generator_module._load_vocabulary()
+        assert axis in str(excinfo.value), (
+            f"the guard did not name the deleted legend axis `{axis}`: {excinfo.value}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────
