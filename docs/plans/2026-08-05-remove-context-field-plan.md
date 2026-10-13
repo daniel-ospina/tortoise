@@ -503,6 +503,37 @@ Add Task: `--context` flag on query-visions/write-claim/write-point + `query_dom
 
 decide.py (18), audit_graph_deep.py (16), audit_graph.py (15), auto_discovery_cycle*.py (8+), fix_670*.py, add_convergence_evidence.py, smoke_test.py, file_pricing_decision.py, cost_control_cycle*.py. Add Task 2.15: audit all; migrate active scripts (decide.py, audit_graph*.py) to anchors/pointKind; mark historical one-shot scripts frozen (already ran; context dependency inert).
 
+> **OVERRIDES:** the industry default of deleting or relocating a stale one-shot script — §8.6 rules the `graph-scripts/` one-shots **kept and frozen in the live tree**, because `graph-scripts/decide_licensing.py:2-10` records them as provenance/audit artifacts ("Kept for provenance/audit"). *(In force; the freeze's premise is reopened at §8.6.1 — the *ruling* is not changed by this amendment.)*
+
+#### 8.6.1 REOPENED (2026-10-13): the premise "context dependency inert" is false (#4812)
+
+**This subsection records a reopen; it does not decide it.** The freeze ruling above is unchanged and in force. Repair, migration, or relocation of any frozen script is **withheld pending the owner's ruling on [#4812](https://github.com/daniel-ospina/tortoise/issues/4812)**, and **no `graph-scripts/` file is touched by this amendment** — every figure below is a count, not a fix.
+
+**Provenance correction to #4812.** The premise was not "already false on the day it was written"; it was **falsified by this plan's own Phase 2 commit, 9 hours after the plan landed**. `efcbb2c58` (2026-08-06 07:55:50 -05:00) is the commit that added this plan file (its first appearance — §8.6 was not edited later). `5e77101ea` — *"feat: #49 Phase 2 — context removal tooling + read-path sweep + #99 guard restoration (#155)"* — landed the same day at 16:42:01 -05:00 and is **not** an ancestor of the plan-commit. That one commit is what made the dependency non-inert:
+
+- it changed the **arity** of both EventAPI writes — `add_point(content, context, provenance)` → `add_point(content, provenance)` and `add_operator(op_type, inputs, context, provenance)` → `add_operator(op_type, inputs, provenance)` (`tortoise/api.py`). The frozen scripts still call the 3- and 4-positional forms, which the *old* signature accepted and the new one rejects;
+- it landed the `create_point` `context` guard (`tortoise/sdk.py:5706-5711`; `update_point` at `:8880-8885`). `_sanitize_props` (`tortoise/sdk.py:2855`) does **not** strip `context` — it only handles `_RESERVED_ACTOR_PROPS`, `sourcePath`, `id` and `contains_session` — so the guard fires rather than being absorbed by `**props`.
+
+So the parenthetical's two clauses fail in opposite directions: nothing about these files is *inert* (the failure is real), and the failure is not a `context`-only story (the arity class is larger than the kwarg class by 398:2).
+
+**Re-measured baseline** (stdlib `ast`, `graph-scripts/*.py`, at this commit — reproduces #4812's and #4730's independently-measured numbers exactly):
+
+| class | count | scope |
+|---|---|---|
+| `a-arity` — fatal positional `EventAPI.add_point`/`add_operator` | **398** (225 × `add_point` w/ 3 positional, 173 × `add_operator` w/ 4) | **18 files**; a separate AST pass shows **17 of the 18 contain zero `ast.Try`** (`smoke_test.py` is the only one with any, 4) → module-level calls crash loudly with a non-zero exit |
+| `b-removed-kwarg` — `create_point(..., context=...)` | **2** | `file_pricing_decision.py:110`, `decide_licensing.py:150` |
+| `c-operator-order` — `create_operator(src, op_type, tgt)` vs `create_operator(op_type, source_id, target_ids)` | **1** | `file_pricing_decision.py:155` |
+| `e-false-completion` — unconditional `Done … filed` behind a blind `except Exception` | **2** | `file_pricing_decision.py:178`, `decide_licensing.py:188` (both exit 0) |
+
+Not in the class, recorded so the counts are not over-read: `decide.py:291` also prints `Done … filed to context='{ctx}'`, but `decide.py` **was** swept (`302d4d4ce`, #1643) and does create points — its line is a stale *message*, not a false success. `cost_control_cycle4.py:52` and `parity_sample.py:370` match `context=` as string/read text, not as a write kwarg. `smoke_test.py:62` carries `SET n.context=$x` — a **write** that would re-introduce the removed property; tracked separately as #4811.
+
+**Two further departures from §8.6 carried in the tree, neither previously stated anywhere:**
+
+1. §8.6 named `audit_graph*.py` as **active** scripts *to migrate to anchors/pointKind*. They were instead marked `HISTORICAL ONE-SHOT` by `e2e7c3b7a` (2026-08-07, PR #504) — one day later — a reclassification from "migrate" to "frozen" that no record explains. (`decide.py`, the other named active script, *was* migrated.)
+2. §8.6 never names 5 of the 18 fatal files — `auto_discovery_all.py`, `bp_approach_cycle1.py`, `bp_approach_cycle3.py`, `bp_approach_cycle4.py`, `bp_pros_cons_cycle5.py` — nor `decide_licensing.py`. The sweep's scope was therefore narrower than its own file list implies.
+
+**What is owed here, and by whom.** The three questions are the owner's, and they are enumerated in #4812 (re-scope "frozen" = *do-not-run* vs *do-not-migrate*; dispose of the class; authorise or refuse the write repair). The detector and counted baseline for this class are `#4730`'s scope (scoped and measured there, **not yet landed** — `tools/graph_scripts_guard.py` does not exist in the tree), and it deliberately leaves `graph-scripts/` unrepaired for the same reason. Until a ruling lands, these scripts are **counted, visible** baseline debt: a gate over them may say "no new debt", never "class fixed".
+
 ### 8.7 FIXED (P1): create_point dedup logic breaks between phases
 
 `sdk.py:205-218` dedup matches `content_hash AND context` — after P1 stops writing context, new points match `context IS NULL` while old points have context values → dedup misses, duplicates created. Fix: P1 removes the context branch from dedup (match content_hash alone) — dedup becomes phase-independent.

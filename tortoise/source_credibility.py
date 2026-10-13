@@ -43,6 +43,65 @@ TIER_PRIORS: dict[str, tuple[float, float]] = {
 TIER_ORDER: dict[str, int] = {t: i for i, t in enumerate(["T0", "T1", "T2", "T3", "T4"])}
 _TIER_FORM = frozenset(TIER_PRIORS)
 
+# ── Author-as-source weight (#398, owner ruling 2026-10-12) ──────────────────
+# An authored, unsourced assertion is ONE evidence body at the WEAKEST
+# REGISTERED WEIGHT — the same whoever wrote it. The declared credibility word
+# is a validated LABEL: it does not set the claim's strength and it does not
+# vary the weight by author. The word is still a source (it enters the same
+# aggregate as every other source), but every authored word weighs the same.
+#
+# ``AUTHOR_ASSERTION_WEAK_PC`` is that one weight. It equals ``pc_base("T4")``
+# (the weakest rung of the existing T0-T4 ladder) — a REAL, non-zero body:
+# neutral is NOT acceptable, because ``aggregate_prior`` skips non-tier kinds
+# and a claim whose only evidence is an assertion would sit permanently at
+# alpha=1, beta=1 (ignorance) however well reasoned (#398).
+#
+# An ``agentSession`` source follows the same value: weak when the session
+# ORIGINATES the claim, and ZERO when it merely CARRIES a source already
+# attached to the same claim (provenance, not evidence) — detected through the
+# existing ``Source -> Source`` ``references`` relation (Ontology §3.4), never a
+# new mechanism or relation.
+AUTHOR_ASSERTION_WEAK_PC: float = 0.1  # == pc_base("T4"); pinned by test
+
+
+def author_support_pc(value) -> float | None:
+    """The author's declared word as a supporter pseudo-count (#398).
+
+    ``value`` is the ladder word / T0-T4 form / numeric alias the author typed.
+    It is VALIDATED here (None for a value outside the ladder, so the caller
+    can fail loud) but it does NOT select a weight: every authored assertion is
+    one body at ``AUTHOR_ASSERTION_WEAK_PC``, identical for a person and for an
+    agent (#398 owner ruling 2026-10-12).
+    """
+    if canonical_tier(value) is None:
+        return None
+    return AUTHOR_ASSERTION_WEAK_PC
+
+
+def session_support_pc(*, carries_attached_source: bool) -> float:
+    """An ``agentSession`` source's supporter weight (#398 carrier ruling).
+
+    Weak when the session ORIGINATES the claim; ZERO when it merely CARRIES an
+    already-attached source — the session is then provenance, not evidence, and
+    must not double-count the body of evidence it delivered (the KNOWN RESIDUAL
+    recorded on ``aggregate_prior``).
+    """
+    return 0.0 if carries_attached_source else AUTHOR_ASSERTION_WEAK_PC
+
+
+def weak_support_pc(n_bodies: int) -> float:
+    """Log-scaled supporter pseudo-count for N weak evidence bodies (#398).
+
+    A single weak body contributes exactly ``AUTHOR_ASSERTION_WEAK_PC``; N
+    bodies grow as ``log2(N+1)`` — the SAME anti-Sybil law as a tier, so a flood
+    of weak (agent-session / authored-assertion) bodies grows sub-linearly and
+    cannot outrank real evidence the way a flat sum would. 1000 weak bodies →
+    ``log2(1001) * 0.1 ≈ 0.997``, still below one T3 source (pc 1.0).
+    """
+    if n_bodies <= 0:
+        return 0.0
+    return AUTHOR_ASSERTION_WEAK_PC * math.log2(n_bodies + 1.0)
+
 # Legacy credibility aliases → canonical tier (create_point's credibility kwarg
 # vocabulary; kept for create_source backward compat, #398).
 TIER_ALIASES: dict = {
@@ -164,6 +223,16 @@ def resolve_tier(
     Precedence: explicit ``credibilityTier`` (must be a valid T0-T4 form) >
     ``sourceKind`` tier-form (T0-T4) > registry default > None (neutral).
     Malformed values ("T9", "t1", "T1 ") resolve to None — never crash.
+
+    ⛔ ``agentSession`` is NOT resolved here, by design: an agent session is a
+    SESSION source whose weight depends on whether it ORIGINATES the claim
+    (weak) or merely CARRIES an attached source (zero), never on a tier
+    (#398 owner ruling 2026-10-12). Its kind is registered NEUTRAL in
+    ``SOURCE_KIND_DEFAULTS``, and the belief path routes it to the carrier
+    rule BEFORE calling this function — so an explicit ``credibilityTier``
+    cannot promote an agent's own assertion to a strong body (#6151 review
+    P3-3). Callers that need a tier for a session must not use this as a
+    loophole.
     """
     for candidate in (credibility_tier, source_kind):
         if candidate in _TIER_FORM:
@@ -218,6 +287,7 @@ def aggregate_prior(
     *,
     recency_decay: float = 0.95,
     now: datetime | None = None,
+    extra_support_pc: float = 0.0,
 ) -> tuple[float, float]:
     """Aggregate source evidence into a Beta prior (alpha, beta).
 
@@ -237,17 +307,41 @@ def aggregate_prior(
 
     KNOWN RESIDUAL — a bound, not a claim of completeness. A session `:Source`
     (`session:<id>`) and the documents that session `references` have DIFFERENT
-    S0a identities by design, so a claim extracted from both still counts the
-    same body of evidence twice. That mechanism is reachable today (Ontology
-    §3.4: `Source -> Source`) and is NOT closed by identity collapse; closing it
-    needs an explicit model of when two sources are one evidence body, which is a
-    design decision, not a canonicalisation. Do not read this guard as having
-    settled that case.
+    S0a identities by design, so identity collapse alone cannot merge them. The
+    caller now closes the case it can see: `_apply_source_inheritance`'s CARRIER
+    RULE treats a session that `references` a source already attached to the
+    SAME claim as PROVENANCE (zero weight) — the explicit model of "one evidence
+    body" this paragraph used to say was missing (#6151). What is still NOT
+    modelled is a session that delivers a source NOT attached to the same claim
+    (it is then evidence, not provenance) and a delivery not expressed through
+    the `references` relation. Those remain open; do not read the carrier rule
+    as having settled every delivery shape.
 
     Pinned formula (scoping resolution B, plan Task 1):
         pc_t = log2(N_t + 1) * decay_t * (sum_{i in t} base_pc(tier_i) * factor_i) / N_t
     where ``decay_t`` keys on the TIER's MOST-RECENT source (T0 exempt), and
     ``factor_i`` is the caller-provided per-source weight (assessment factor).
+
+    #6151 / #398 DIFFERENCE SHAPE, SUPPORT-ONLY INPUT. The return is the
+    subjective-logic pair ``(1 + max(net, 0), 1 + max(-net, 0))`` where
+    ``net = support - dissent``. Support is ``total_pc`` (the tier sources)
+    plus ``extra_support_pc`` — a non-tier supporter such as an authored
+    assertion or an originating ``agentSession`` (#398). An authored assertion
+    is ONE body at ``AUTHOR_ASSERTION_WEAK_PC``, the same whoever wrote it (the
+    declared word is a validated LABEL, not a strength — owner ruling
+    2026-10-12). Dissent is a SOURCE-LEVEL signal (one source contradicting
+    another), and **no such signal exists in the data today**: the only
+    ``Source -> Source`` relation in Ontology §3.4 is ``references`` (delivery),
+    so no caller supplies one and ``net == total_pc + extra_support_pc >= 0`` —
+    the positive-only prior. The shape is kept so that adding a dissent signal
+    later is a CALLER change, not a second aggregation function.
+
+    ⛔ This function does NOT read a NAND edge, and an EP contradiction is
+    NEVER folded in here. Doing so double-counts EP's own factor
+    (``phi_nand = exp(-w*ca*cb)``) and is the rejected alternative —
+    ``docs/scoping-398-source-credibility.md`` → ``## Rejected Alternatives``:
+    "NAND-negative-pc in inheritance (double-counts EP factor): contradiction
+    is EP's domain." Contradiction stays EP's domain.
 
     Properties:
       - N=1 degenerates to base_pc * decay (matches #122 formula → recency tests green)
@@ -282,7 +376,12 @@ def aggregate_prior(
         mean_weight = sum(w for w, _pc in entries) / n
         total_pc += math.log2(n + 1.0) * decay_t * mean_weight * pc_base(tier)
 
-    return (1.0 + total_pc, 1.0)
+    # Supporters aggregate into one positive side; the difference shape is
+    # applied so a future source-level dissent input subtracts, but today the
+    # SDK supplies no dissent (see the docstring) and ``net`` is the support
+    # aggregate alone.
+    net = total_pc + float(extra_support_pc)
+    return (1.0 + max(net, 0.0), 1.0 + max(-net, 0.0))
 
 
 def assessment_factor(

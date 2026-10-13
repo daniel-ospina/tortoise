@@ -234,6 +234,7 @@ jobs:
                          # matches the website/ prefix, but the harness itself
                          # needs a path entry or a test-only PR would not run it.
                          "tests/test_blog_markdown.mjs",
+                         "docs/blog-authoring.md",
                          # #8293: the SEO keyword + agent-limiter harness. Same
                          # reason as #4481 above — its subjects live under
                          # website/ but a harness-only PR still needs this entry
@@ -1499,6 +1500,15 @@ jobs:
     needs: changes
     if: needs.changes.outputs.website == 'true'  # #2149: website/ (minus dashboard app) + welcome/edge-fn tests
     runs-on: ubuntu-latest
+    # #8379 (finding 2): the `website` gate above also names
+    # `docs/blog-authoring.md`. The doc is an INPUT to the
+    # `tests/test_blog_markdown.mjs` step below — the harness reads it and
+    # executes every documented `[[video: …]]` example through the real
+    # renderer. Without that path entry a docs-only edit to the authoring
+    # contract ran the CommonMark/heading guard but NOT the leg that executes
+    # the examples, so a placeholder id that embeds nothing shipped green. The
+    # rationale lives HERE, not inside the gate script: that `run:` scalar is
+    # within ~100 bytes of GitHub's 21000-byte expression cap (#6253).
     # Mocked welcome-page suite (#541) — secret-free per-PR coverage against
     # the LIVE page (Supabase calls mocked via Playwright routes). The #801
     # live signup smoke self-skips without SUPABASE secrets and runs in
@@ -1637,6 +1647,8 @@ jobs:
       - name: Run tenant-provision CORS runtime harness (#1110)
         run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
       - name: Run blog SSR markdown renderer harness (#4481)
+        # Also executes every documented example in docs/blog-authoring.md
+        # (#8379 finding 2) — a docs-only edit must reach this step.
         run: node --experimental-strip-types tests/test_blog_markdown.mjs
       - name: Run blog SEO meta + agent-limiter harness (#8293)
         run: node --experimental-strip-types tests/test_blog_seo_meta.mjs

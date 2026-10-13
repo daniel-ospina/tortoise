@@ -14,7 +14,13 @@
 // Run (Node >= 22.6):
 //   node --experimental-strip-types tests/test_blog_markdown.mjs
 
-import { renderMarkdown, extractFaq, faqPageJsonLd, articleJsonLd, jsonLd } from "../website/functions/blog/_lib.ts";
+import { readFileSync } from "node:fs";
+
+import { renderMarkdown, extractFaq, faqPageJsonLd, articleJsonLd, jsonLd, extractVideo, validHref } from "../website/functions/blog/_lib.ts";
+import { VIDEO_EMBED_ORIGINS } from "../website/functions/blog/_shared/video.ts";
+// The marketing project's policy — the one `blog/_lib.ts` `ok()` stamps on every
+// article response, so it is the policy that decides whether the embed displays.
+import { RELAXED_CSP } from "../website/functions/_shared/security-headers.ts";
 
 let failures = 0;
 const ok = (msg) => console.log(`  ✓ ${msg}`);
@@ -827,6 +833,370 @@ console.log("house-style answer box");
     renderMarkdown("> [!ANSWER] Explicit marker.").includes('class="callout callout-answer"'),
     "the explicit [!ANSWER] marker still works (no regression)",
   );
+}
+
+// ── #7751: video embed + VideoObject ───────────────────────────────────────
+console.log("");
+console.log("video embed marker + VideoObject structured data (#7751)");
+{
+  const YT = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+
+  // The marker renders an iframe and never leaks as literal text.
+  const out = renderMarkdown(`Before.\n\n[[video: ${YT}]]\n\nAfter.`);
+  assert(out.includes("<iframe"), "the video marker renders an iframe");
+  assert(out.includes("video-embed"), "the embed is wrapped for responsive layout");
+  assert(
+    out.includes("https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"),
+    "the src is the privacy-preserving constructed embed URL",
+  );
+  assert(!out.includes("[[video"), "the marker text is not left in the output");
+  assert(out.includes("Before.") && out.includes("After."), "surrounding prose survives");
+
+  // Escaped brackets, as TipTap writes them.
+  const escaped = renderMarkdown(`\\[\\[video: ${YT}\\]\\]`);
+  assert(escaped.includes("<iframe"), "TipTap-escaped brackets are recognised too");
+
+  // ⛔ THE SECURITY PROPERTY: the src is CONSTRUCTED from a validated id, so an
+  // author cannot point the iframe at another origin, whatever they type.
+  for (const hostile of [
+    "[[video: javascript:alert(1)]]",
+    "[[video: https://evil.example.com/watch?v=dQw4w9WgXcQ]]",
+    "[[video: https://www.youtube.com/watch?v=<script>]]",
+    "[[video: data:text/html,<script>alert(1)</script>]]",
+    "[[video: //evil.example.com/embed/x]]",
+  ]) {
+    const h = renderMarkdown(hostile);
+    assert(!h.includes("<iframe"), `no iframe for a rejected payload: ${hostile}`);
+    // The rejected marker falls through as ORDINARY TEXT (like an unknown
+    // `[!X]` alert), so the URL string legitimately appears as visible prose.
+    // What must never happen is an iframe POINTING somewhere off-site — so the
+    // assertion is on the src, not on the presence of the text.
+    const src = /<iframe[^>]*src="([^"]*)"/.exec(h);
+    assert(src === null, `no off-site iframe src for: ${hostile}`);
+  }
+
+  // Providers: every accepted YouTube shape, plus Vimeo.
+  for (const [url, id] of [
+    ["https://youtu.be/dQw4w9WgXcQ", "dQw4w9WgXcQ"],
+    ["https://www.youtube.com/embed/dQw4w9WgXcQ", "dQw4w9WgXcQ"],
+    ["https://www.youtube.com/shorts/dQw4w9WgXcQ", "dQw4w9WgXcQ"],
+    ["https://m.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"],
+  ]) {
+    const refs = extractVideo(`[[video: ${url}]]`);
+    assertEq(refs.length, 1, `recognised: ${url}`);
+    assertEq(refs[0]?.id, id, `id extracted from ${url}`);
+  }
+  const vimeo = extractVideo("[[video: https://vimeo.com/123456789]]");
+  assertEq(vimeo[0]?.provider, "vimeo", "Vimeo is recognised");
+  assertEq(
+    vimeo[0]?.embedUrl,
+    "https://player.vimeo.com/video/123456789",
+    "Vimeo embed URL is constructed",
+  );
+  assertEq(vimeo[0]?.thumbnailUrl, null, "Vimeo has no derivable thumbnail (not fabricated)");
+  assertEq(
+    extractVideo(`[[video: ${YT}]]`)[0]?.thumbnailUrl,
+    "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+    "YouTube thumbnail is hqdefault, the poster every uploaded video has",
+  );
+  assert(
+    !extractVideo(`[[video: ${YT}]]`)[0]?.thumbnailUrl.includes("maxresdefault"),
+    "never maxresdefault — it 404s for SD-only videos, and thumbnailUrl is required",
+  );
+
+  // Optional metadata, recognised by SHAPE so the common case needs no ceremony.
+  const withMeta = extractVideo(`[[video: ${YT} | My interview | PT12M34S | 2026-10-10]]`);
+  assertEq(withMeta[0]?.title, "My interview", "an explicit video title is picked up");
+  assertEq(withMeta[0]?.duration, "PT12M34S", "the ISO duration is picked up");
+  assertEq(withMeta[0]?.uploadDate, "2026-10-10", "the upload date is picked up");
+  // Out of order, and a non-ISO duration is not mistaken for one.
+  const shuffled = extractVideo(`[[video: ${YT} | 2026-10-10 | 12 minutes]]`);
+  assertEq(shuffled[0]?.uploadDate, "2026-10-10", "fields are order-independent");
+  assertEq(shuffled[0]?.title, "12 minutes", "a non-ISO duration is treated as the title");
+  assertEq(shuffled[0]?.duration, null, "a non-ISO duration is not accepted");
+
+  // A marker inside a FENCE is code, not an embed.
+  assertEq(
+    extractVideo("```\n[[video: " + YT + "]]\n```").length,
+    0,
+    "a marker inside a fenced code block is not an embed",
+  );
+  assertEq(extractVideo("no marker here").length, 0, "a body with no marker yields no video");
+
+  // ── the embed and the structured data cannot disagree about what is code ──
+  // (#8379 finding 4: `renderMarkdown` opened a fence on the RAW line while
+  // `extractVideo` opened it on the TRIMMED line, so a 1–3 space indented fence
+  // — valid CommonMark, the shape a list item produces — rendered a live iframe
+  // with NO VideoObject. Each body below asserts the two agree, which is the
+  // property the old suite never checked.)
+  const indented = "   ```\n[[video: " + YT + "]]\n   ```";
+  assertEq(
+    (renderMarkdown(indented).match(/<iframe/g) || []).length,
+    0,
+    "a 1–3 space indented fence renders as code, not as an embed",
+  );
+  assertEq(extractVideo(indented).length, 0, "...and its marker is not a video ref either");
+
+  // The structured data joins the existing builders rather than replacing them.
+  const post = {
+    id: "1",
+    slug: "a-post",
+    title: "The State of Agentic Memory",
+    body: `[[video: ${YT}]]\n\nProse.`,
+    excerpt: "An excerpt.",
+    cover_image_url: null,
+    tags: ["agent-memory"],
+    author: null,
+    meta_title: null,
+    meta_description: "A description.",
+    published_at: "2026-10-12T00:00:00Z",
+    updated_at: "2026-10-12T00:00:00Z",
+  };
+  const nodes = articleJsonLd(post, "https://tortoise.premiselabs.co/blog/a-post");
+  const types = nodes.map((n) => n["@type"]);
+  assertEq(types.includes("VideoObject"), true, "VideoObject is emitted for an article with a video");
+  assertEq(types.includes("BlogPosting"), true, "BlogPosting is still emitted alongside it");
+  assertEq(types.includes("BreadcrumbList"), true, "BreadcrumbList is still emitted");
+
+  const video = nodes.find((n) => n["@type"] === "VideoObject");
+  assertEq(video.name, post.title, "name falls back to the article title");
+  assertEq(video.description, "A description.", "description falls back to meta_description");
+  assertEq(video.uploadDate, "2026-10-12T00:00:00Z", "uploadDate falls back to published_at");
+  assertEq(video.embedUrl, "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ", "embedUrl is the constructed one");
+  assertEq(
+    Array.isArray(video.thumbnailUrl) && video.thumbnailUrl[0] === "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+    true,
+    "thumbnailUrl is derived for YouTube (hqdefault, the guaranteed poster)",
+  );
+
+  // ⛔ #8379 finding 1: the marker's URL and title are AUTHOR text, and TipTap
+  // escapes the characters that would re-parse as markup — `_` (a legal
+  // YouTube id character), `*`, `~`, `[`. Every other author-facing text path in
+  // `_lib.ts` unescapes; the marker did not, so an escaped title reached the
+  // iframe `title` and `VideoObject.name` with its backslashes intact, and an id
+  // containing `_` was not recognised at all. This is the shape the blog-admin
+  // serializer actually writes (`\[\[video: … \]\]`, `abc\_def\_gh1`).
+  const escapedMarker =
+    "\\[\\[video: https://youtu.be/abc\\_def\\_gh1 | Episode 2: \\*the\\* finale | PT12M34S\\]\\]";
+  const escRef = extractVideo(escapedMarker);
+  assertEq(escRef.length, 1, "an escaped marker whose id contains `_` is still recognised");
+  assertEq(escRef[0]?.id, "abc_def_gh1", "the escaped underscore in the id is undone");
+  assertEq(escRef[0]?.title, "Episode 2: *the* finale", "the escaped title is unescaped");
+  assertEq(
+    escRef[0]?.duration,
+    "PT12M34S",
+    "the duration is still recognised beside an escaped title",
+  );
+  const escHtml = renderMarkdown(escapedMarker);
+  assert(escHtml.includes("<iframe"), "the escaped marker embeds");
+  assert(
+    escHtml.includes('title="Episode 2: *the* finale"'),
+    "the iframe title is the author's title, not its escaped form",
+  );
+  assert(!escHtml.includes("\\*the\\*"), "no escape backslash leaks into the iframe title");
+  const escVideo = articleJsonLd(
+    { ...post, body: `${escapedMarker}\n\nProse.` },
+    "https://x/blog/a",
+  ).find((n) => n["@type"] === "VideoObject");
+  assertEq(
+    escVideo?.name,
+    "Episode 2: *the* finale",
+    "VideoObject.name is the unescaped title, not the editor's escaped form",
+  );
+
+  // ── the embed and the structured data cannot disagree about what is code ──
+  // (#8379 finding 4: `renderMarkdown` opened a fence on the RAW line while
+  // `extractVideo` opened it on the TRIMMED line, so a 1–3 space indented fence
+  // — valid CommonMark, the shape a list item produces — rendered a live iframe
+  // with NO VideoObject. Each body below asserts the two agree, which is the
+  // property the old suite never checked.)
+  for (const body of [`[[video: ${YT}]]`, "```\n[[video: " + YT + "]]\n```", indented]) {
+    const embeds = (renderMarkdown(body).match(/<iframe/g) || []).length;
+    const refs = extractVideo(body).length;
+    assertEq(refs, embeds, `embed count and extracted-ref count agree for: ${JSON.stringify(body)}`);
+    const videoNodes = articleJsonLd({ ...post, body }, "https://x/blog/a").filter(
+      (n) => n["@type"] === "VideoObject",
+    );
+    assertEq(
+      videoNodes.length,
+      embeds,
+      `one VideoObject per rendered embed for: ${JSON.stringify(body)}`,
+    );
+  }
+
+  // Two markers render two iframes, so BOTH videos need structured data — the
+  // old code took only `[video]` (the first) and silently dropped the rest.
+  const twoVideos = articleJsonLd(
+    { ...post, body: `[[video: ${YT}]]\n\n[[video: https://vimeo.com/123456789]]` },
+    "https://x/blog/a",
+  ).filter((n) => n["@type"] === "VideoObject");
+  assertEq(twoVideos.length, 2, "one VideoObject per embedded video, not one for the body");
+  assertEq(
+    twoVideos.map((n) => n.embedUrl).join(" "),
+    "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ https://player.vimeo.com/video/123456789",
+    "both videos are described, in embed order",
+  );
+  // The same video twice embeds twice but is described ONCE (no duplicate node).
+  const sameTwice = articleJsonLd(
+    { ...post, body: `[[video: ${YT}]]\n\n[[video: ${YT}]]` },
+    "https://x/blog/a",
+  ).filter((n) => n["@type"] === "VideoObject");
+  assertEq(sameTwice.length, 1, "a repeated marker does not duplicate its VideoObject");
+
+  // No video → no node. Absence must not be invented.
+  const noVideo = articleJsonLd({ ...post, body: "Just prose." }, "https://x/blog/a");
+  assertEq(
+    noVideo.some((n) => n["@type"] === "VideoObject"),
+    false,
+    "an article with no video emits no VideoObject",
+  );
+
+  // The schema cannot break out of its <script>.
+  const hostileTitle = articleJsonLd(
+    { ...post, title: "Bad </script><script>alert(1)</script>" },
+    "https://x/blog/a",
+  );
+  const rendered = hostileTitle.map(jsonLd).join("");
+  assertEq(rendered.includes("</script><script>alert(1)"), false, "a hostile title cannot close the script tag");
+}
+
+// ── the served CSP must admit every embed origin the renderer can emit ─────
+// (#8379 finding 1: a restrictive `frame-src` — not `default-src` — governs the
+// iframe, so an embed origin missing here is CSP-BLOCKED on the live article
+// while every string-level assertion stays green. The origins come from the
+// renderer itself, so a new provider reddens this until the policy admits it.)
+console.log("");
+console.log("every embed origin the renderer can emit is admitted by the served CSP");
+{
+  const frameSrc = RELAXED_CSP.split("; ").find(
+    (d) => d === "frame-src" || d.startsWith("frame-src "),
+  );
+  assert(frameSrc !== undefined, "RELAXED_CSP declares a frame-src directive (not just default-src)");
+  const admitted = new Set(frameSrc.replace(/^frame-src\s*/, "").split(/\s+/).filter(Boolean));
+  const origins = Object.values(VIDEO_EMBED_ORIGINS);
+  assert(origins.length >= 2, "the renderer advertises its embed origins at runtime");
+  for (const origin of origins) {
+    assert(
+      admitted.has(origin),
+      `${origin} is admitted by RELAXED_CSP frame-src — otherwise the embed is CSP-blocked`,
+    );
+  }
+}
+
+// ── #8313: relative links, without weakening the scheme rejection ──────────
+console.log("");
+console.log("relative + internal links resolve; non-http schemes stay rejected (#8313)");
+{
+  const hrefOf = (md) => (/<a href="([^"]*)"/.exec(renderMarkdown(md)) ?? [])[1];
+
+  // The defect: every relative reference became a literal "#" — silently. The
+  // stored markdown was correct, so it was invisible in the CMS.
+  assertEq(hrefOf("[x](#a-heading)"), "#a-heading", "an in-page anchor keeps its fragment");
+  assertEq(hrefOf("[x](/blog/other)"), "/blog/other", "an absolute-path internal link resolves");
+  assertEq(
+    hrefOf("[x](/blog/state-of-agentic-memory-2026-transcript)"),
+    "/blog/state-of-agentic-memory-2026-transcript",
+    "the transcript link that #7751's convention depends on resolves",
+  );
+  assertEq(hrefOf("[x](relative/page)"), "relative/page", "a bare relative path resolves");
+
+  // An internal link must NOT be treated as external (it was, on every link).
+  assertEq(
+    renderMarkdown("[x](/blog/other)").includes("target=\"_blank\""),
+    false,
+    "an internal link does not open a new tab",
+  );
+  assertEq(
+    renderMarkdown("[x](https://example.com/a)").includes("target=\"_blank\""),
+    true,
+    "an external link still opens a new tab",
+  );
+  assertEq(
+    renderMarkdown("[x](https://example.com/a)").includes("rel=\"noopener\""),
+    true,
+    "an external link still carries rel=noopener",
+  );
+
+  // ⛔ NON-NEGOTIABLE: the fix must NOT be a fail-open. The scheme check that
+  // made this defect also blocked these, and it has to keep blocking them.
+  for (const bad of [
+    "javascript:alert(1)",
+    "JaVaScRiPt:alert(1)",
+    "vbscript:msgbox(1)",
+    "data:text/html,<script>alert(1)</script>",
+    "//evil.example.com/x",
+    "file:///etc/passwd",
+    // Backslashes are path separators to WHATWG URL parsing for special
+    // schemes, so these resolve off-origin exactly like `//evil.example.com/x`
+    // while failing a literal `startsWith("//")` (#8379 finding 1).
+    "\\/\\/evil.example.com/x",
+    "\\\\evil.example.com/x",
+  ]) {
+    assertEq(hrefOf(`[x](${bad})`), "#", `still rejected: ${bad}`);
+  }
+
+  // A backslash spelling of an ABSOLUTE https link is the same link to a
+  // browser (WHATWG URL treats `\` as `/` for special schemes), so it is
+  // rejected outright rather than normalised — and a rejected reference must
+  // never be presented as an external link.
+  const backslashedAbsolute = renderMarkdown("[x](https:\\/\\/example.com/a)");
+  assertEq(
+    /<a href="([^"]*)"/.exec(backslashedAbsolute)?.[1],
+    "#",
+    "a backslash-escaped absolute href is rejected, not normalised",
+  );
+  assert(
+    backslashedAbsolute.includes('target="_blank"') === false,
+    "a rejected backslash reference does not get the external shape",
+  );
+  // …and the predicate rejects both protocol-relative backslash spellings.
+  assertEq(validHref("\\/\\/evil.example.com/x"), false, "validHref rejects `\\/\\/host`");
+  assertEq(validHref("\\\\evil.example.com/x"), false, "validHref rejects `\\\\host`");
+  // Control characters cannot be smuggled into an href. Asserted on the
+  // predicate directly: a NUL is stripped by `escapeHtml` before the link regex
+  // runs, so there is no anchor to inspect at all — the property is that the
+  // href is never ACCEPTED, not that it is replaced with "#".
+  assertEq(validHref("/blog/a\u0000b"), false, "a NUL byte in an href is rejected");
+  assertEq(validHref("/blog/a b"), false, "a space in an href is rejected");
+  assertEq(validHref("/blog/a\nb"), false, "a newline in an href is rejected");
+  assertEq(validHref(""), false, "an empty href is rejected");
+}
+
+// ── The authoring contract's own examples render as documented (#8379) ─────
+// docs/blog-authoring.md makes a promise per example, and the renderer makes
+// those promises executable. A placeholder id that is not a real provider id,
+// or a heading rule the renderer does not implement, is a defect in the
+// contract even when every other assertion in this suite passes.
+console.log("");
+console.log("docs/blog-authoring.md examples render as the page claims");
+{
+  const doc = readFileSync(new URL("../docs/blog-authoring.md", import.meta.url), "utf8");
+  const blocks = [...doc.matchAll(/^```[^\n]*\n([\s\S]*?)^```\s*$/gm)].map((m) => m[1].trim());
+  const videoExamples = blocks.filter((b) => b.includes("[[video:"));
+
+  assert(videoExamples.length >= 2, "the contract documents at least two video examples");
+  for (const example of videoExamples) {
+    const firstLine = example.split("\n")[0];
+    const html = renderMarkdown(example);
+    assert(html.includes("<iframe"), `the documented video example embeds: ${firstLine}`);
+    assert(
+      !html.includes("[[video"),
+      `the documented video example's marker is consumed, not published as text: ${firstLine}`,
+    );
+    assert(
+      extractVideo(example).length >= 1,
+      `the documented video example yields a VideoObject source: ${firstLine}`,
+    );
+  }
+
+  // The Basics table's heading row (`##`–`####` → `<h2>`–`<h4>`; the post title
+  // supplies the page's <h1>). The page previously claimed `#`–`####` →
+  // `<h1>`–`<h4>`, which the renderer falsifies (a lone `#` is not a heading)
+  // and which contradicted the page's own anchors paragraph.
+  assert(/`##`–`####` headings/.test(doc), "the Basics table documents `##`–`####`, not `#`–`####`");
+  assert(renderMarkdown("## Two").includes('<h2 id="two">Two</h2>'), "`##` renders an <h2>");
+  assert(renderMarkdown("#### Four").includes('<h4 id="four">Four</h4>'), "`####` renders an <h4>");
+  assert(!renderMarkdown("# One").includes("<h1"), "a lone `#` is not a heading");
 }
 
 console.log("");

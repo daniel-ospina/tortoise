@@ -2746,6 +2746,7 @@ quadrature = [
 ]
 test = [
     { name = "cryptography" },
+    { name = "markdown-it-py" },
     { name = "playwright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -2757,6 +2758,7 @@ test = [
 [package.dev-dependencies]
 dev = [
     { name = "jax" },
+    { name = "markdown-it-py" },
     { name = "playwright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -2781,6 +2783,7 @@ requires-dist = [
     { name = "httpcore", specifier = ">=1.0.9" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jax", marker = "extra == 'quadrature'", specifier = ">=0.4" },
+    { name = "markdown-it-py", marker = "extra == 'test'", specifier = ">=4" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "playwright", marker = "extra == 'test'", specifier = ">=1.40" },
     { name = "posthog", specifier = ">=3.0" },
@@ -2806,6 +2809,7 @@ provides-extras = ["embeddings", "quadrature", "postgres", "backups", "parity", 
 [package.metadata.requires-dev]
 dev = [
     { name = "jax", specifier = ">=0.4" },
+    { name = "markdown-it-py", specifier = ">=4" },
     { name = "playwright", specifier = ">=1.40" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-asyncio" },
