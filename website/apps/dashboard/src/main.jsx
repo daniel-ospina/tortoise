@@ -14,7 +14,7 @@ import { errorMessage, headerUpgradeEligible, nudgeRoute, shouldNudgeUpgrade } f
 // card, the usage bar, and the at/near-limit nudge). Pure, node --test
 // unit-tested (nodeUsage.test.js).
 import { nextUpgradePlan, nodeBarColor, nodeNudge, nodeUsage, nodeUsageText } from './nodeUsage.js'
-import { CANONICAL_MCP_URL, CAPTURE_OPT_IN_LINE, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_REQUIRES_OPT_IN, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, analyticsHarnessOf, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
+import { CANONICAL_MCP_URL, CAPTURE_OPT_IN_LINE, HARNESS_CAPTURE_REQUIRES_OPT_IN, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, analyticsHarnessOf, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #4880/#4365: the wizard's agent-facing copy is a RENDERED value the guards
 // assert — main.jsx is JSX and cannot be imported by `node --test`, so parsing
 // it as source is the mechanism that produced five false greens.
@@ -23,7 +23,11 @@ import { WIZARD_CAPTIONS, wizardPromptText, wizardWorkflowsText } from './wizard
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
 // removed with the consent gate (default-ON, ToS-covered).
-import { captureStatusForHarness, captureClaimForHarness, captureStatusLabelForHarness, harnessAttributionForHarness, captureErrorForHarness } from './captureStatus.js'
+import { captureClaimForHarness, captureStatusLabelForHarness } from './captureStatus.js'
+// #4915: the per-harness status rows are their own module so the DOM lane
+// (harnessDisclosureDom.test.jsx) can render them; main.jsx cannot be imported
+// by a test (it mounts the whole application at module scope).
+import { HarnessStatusCard } from './harnessStatusCard.jsx'
 import { setupGuide } from './setupGuide.js'
 // #2005 (W9): the resume/entry-step derivation shared by the wizard's re-entry
 // doors — ONE function so the Setup pill, the re-entry card and the Settings
@@ -11256,11 +11260,10 @@ function MemorySources(props) {
   const docsLabel = docsIndexedLabel(state, now)
   const githubLastIndexed = formatRelativeTime(state.github_indexed_at, now)
 
-  const status = (h) => captureStatusForHarness(state, h)
-  const lastError = (h) => captureErrorForHarness(state, h)
-  // #3700: the per-row harness attribution — rendered beside the harness name.
-  // Never inside the `role="alert"` failure sentence (see captureStatus.js).
-  const harnessAttribution = (h) => harnessAttributionForHarness(state, h)
+  // #4915: `status` / `lastError` / `harnessAttribution` moved into
+  // `HarnessStatusCard` with the rows that read them: the derivations are only
+  // ever consumed by a row, and keeping them here would have left three local
+  // bindings that nothing in this component calls.
 
   // #3513: the grid's data. The shipped group is ordered by the explicit
   // `order` prop; the coming-soon group is bounded (COMING_SOON_VISIBLE_LIMIT)
@@ -11587,65 +11590,11 @@ function MemorySources(props) {
               : '.'}
           </p>
           {memoryErrors.sessions && <p className="error" role="alert">{memoryErrors.sessions}</p>}
-          <div className="harness-statuses">
-            {HARNESS_ORDER.map((h) => {
-              const st = status(h)
-              const supported = !!HARNESS_CAPTURE_SUPPORT[h]
-              const isCurrent = wizardHarness && h === wizardHarness
-              // #2912 (review cycle 4 P2): a `wizardHarness === 'codexDesktop'`
-              // alias used to live here, aliasing the Codex Desktop surface onto
-              // the 'codex' row. It was unreachable, and it stays so:
-              // HARNESS_ORDER has no codexDesktop row, so none of this
-              // component's THREE call sites can hand it that value — Settings
-              // passes null on purpose, the Data-sources wizard mount passes the
-              // connect-step pick (`harnessPickEstablished ? wizardHarness :
-              // null`), and the LEGACY_WIZARD_ARCHIVED rollback block is fed
-              // solely by HARNESS_ORDER leaves. If a surface leaf ever reaches
-              // this row, wire the alias through a unit-tested helper instead of
-              // a source-grep tripwire.
-              return (
-                <div key={h} className={`harness-status status-${st}${isCurrent ? ' current' : ''}`}>
-                  {/* review P2-5: the polite live region is scoped to the HEAD
-                      — the harness name, its disclosure and the state word — so
-                      it still does not announce the whole multi-line snippet
-                      below. That is a deliberate OVERRIDE of P2-5 (PR #1830),
-                      which moved the region OFF the container and ONTO the
-                      state pill: its hazard was the multi-line snippet, and the
-                      #3700 disclosure must be announced with the state it
-                      qualifies. Moving the region to the head keeps the snippet
-                      out while covering the name and the disclosure.
-                      review P2-3: unsupported harnesses render the REASON,
-                      with no pill and no failure line (an unsupported harness
-                      has no install path, so a per-harness claim would
-                      contradict the reason). That guard is what
-                      `harnessAttributionForHarness` mirrors, so an unsupported
-                      row makes no per-harness claim and needs no disclosure.
-                      #3700: the row NAMES a harness whose value is a caller
-                      declaration, so the disclosure (`harnessAttribution`) sits
-                      in the same group as the name — one flex item, so
-                      `space-between` separates the name group from the pill —
-                      and the state word stays plain; the attribution is what
-                      keeps the row from reading as a server-observed harness. */}
-                  <div className="harness-status-head" aria-live="polite">
-                    <span className="harness-status-name" id={`harness-note-${h}`}>
-                      <strong>{HARNESS_NAMES[h]}</strong>
-                      {harnessAttribution(h) && (
-                        <span className="dim small">· {harnessAttribution(h)}</span>
-                      )}
-                    </span>
-                    {supported && <span className="capture-state">{captureStatusLabelForHarness(state, h)}</span>}
-                  </div>
-                  {!supported && <p className="dim small">{HARNESS_CAPTURE_REASON[h]}</p>}
-                  {supported && st === 'install-pending' && sessionsOn && (
-                    <pre className="snippet">{HARNESS_CAPTURE_INSTALL[h]}</pre>
-                  )}
-                  {/* #3700: the alert's description is the row's name group
-                      (name + disclosure). */}
-                  {supported && lastError(h) && <p className="error small" role="alert" aria-describedby={`harness-note-${h}`}>{lastError(h)}</p>}
-                </div>
-              )
-            })}
-          </div>
+          {/* #4915: the rows live in their own module so the DOM lane can
+              render them. The markup this component produces is the block that
+              used to sit inline here — byte-identical output, one import.
+              See `harnessStatusCard.jsx` for why the extraction exists. */}
+          <HarnessStatusCard state={state} sessionsOn={sessionsOn} wizardHarness={wizardHarness} />
         </div>
       </div>
 
