@@ -1115,3 +1115,87 @@ def test_no_query_loses_its_id_predicate():
         "points' rows (#6976) — add the `WITH <var>` between the predicate and "
         "the next clause: " + ", ".join(offenders)
     )
+
+
+# ── #6971: a FAILED decoration must not read as "no relationships" ──────
+#
+# The original silent wrong answer had two layers, and they must not be
+# conflated:
+#
+#   1. THE CAUSE (settled, and already fixed on main) — #6976/#7155. A
+#      following `MATCH` dropped the `n.id IN $ids` predicate, so Q1a returned
+#      10000 rows spanning 2643 ids that were never requested and the first
+#      foreign `pid` raised `KeyError` at the `point_ops[pid].append` line.
+#      Reproduced independently on the canonical 6.0.1 instance (graph module
+#      60001, :16379) with one requested id: unbarred 10000 rows / 2643
+#      distinct ids / NOT the requested one; `WITH n` 8 rows / 1 id. The
+#      `WITH n` barrier is on main and the static rail above is its guard.
+#   2. THE DEGRADATION (this section) — `except Exception: return rels`
+#      returned the all-empty seed as if it were a real decoration. The
+#      trigger is gone, but ANY future exception in that body re-created the
+#      same false PASS, so the shape is pinned here with a stubbed graph:
+#      no engine version can make these tests pass vacuously.
+
+
+class _RaisingGraph:
+    """``graph`` stand-in whose ``query`` always raises — the except path."""
+
+    def __init__(self, exc=None):
+        self.exc = exc or RuntimeError("simulated decoration failure")
+
+    def query(self, cypher, **kwargs):
+        raise self.exc
+
+
+def test_failed_decoration_is_labelled_not_silently_empty():
+    """#6971 — the all-empty seed is TYPED, and still never raises (D1)."""
+    out = get_relationships_bounded(_RaisingGraph(), ["p1"])
+    # Retrieval safety: a decoration failure must not propagate into search.
+    assert out == {"p1": []}
+    assert getattr(out, "decoration_error", "") == (
+        "RuntimeError: simulated decoration failure"), (
+        "an all-empty decoration that came from a RAISED query must be "
+        "distinguishable from a genuinely sparse point (#6971)"
+    )
+
+
+def test_failed_decoration_is_still_a_plain_dict_to_consumers():
+    """The typed result must not change the return CONTRACT.
+
+    The SDK and every direct caller read it as a mapping (``.get``, ``set()``,
+    equality). Keeping that true is why a typed mapping was chosen over
+    re-raising or a new return shape. The no-ids early return is pinned too —
+    it must not crash a caller that then reads ``decoration_error``.
+    """
+    out = get_relationships_bounded(_RaisingGraph(), ["p1"])
+    assert isinstance(out, dict)
+    assert set(out) == {"p1"}
+    assert out.get("absent", []) == []
+    assert get_relationships_bounded(_RaisingGraph(), []) == {}
+    assert getattr(get_relationships_bounded(_RaisingGraph(), []),
+                   "decoration_error", "") == ""
+
+
+def test_successful_decoration_records_no_error(sdk):
+    """Contrast: a real, successful decoration carries an empty error."""
+    p = _point(sdk, content="lonely but healthy claim")
+    out = get_relationships_bounded(_graph(sdk), [p["id"]])
+    assert out == {p["id"]: []}
+    assert out.decoration_error == "", (
+        "only a RAISED query may set decoration_error — an empty-but-read "
+        "decoration is not a failure"
+    )
+
+
+def test_searchresult_relationships_marker_is_additive():
+    """The wire marker is emitted only when set (the #1353 D8 additive rule)."""
+    from tortoise.search_engine import RELATIONSHIPS_UNAVAILABLE
+    plain = SearchResult(id="p1", content="c", point_kind="statement")
+    assert "relationships_unavailable" not in plain.to_dict()
+    marked = SearchResult(
+        id="p1", content="c", point_kind="statement",
+        relationships_unavailable=RELATIONSHIPS_UNAVAILABLE)
+    d = marked.to_dict()
+    assert d["relationships_unavailable"] == RELATIONSHIPS_UNAVAILABLE
+    # The marker never fabricates structure.
+    assert d["relationships"] == []
