@@ -33440,7 +33440,21 @@ async def backups_rebaseline(request: Request):
     if graph_id == "default":
         _write_json(storage, f"ops/teams/{org_id}/state.json", state)
     subject = f"{org_id}:{graph_id}" if graph_id != "default" else org_id
-    alerts = _alert_store_from(_backup_config_safe())
+    # #4777: the ALERT-only seam, NEVER the sweep-gated chain. Re-baseline is
+    # precisely the operator action that clears an incident FILED WHILE THE SWEEP
+    # WAS ENABLED, so the channel must survive the sweep being switched off (the
+    # production default) — the sweep switch decides whether backups RUN, never
+    # whether an incident is VISIBLE (#3820 D5a).
+    #
+    # `_alert_store_from(_backup_config_safe())` was gated on `BACKUP_SWEEP_ENABLED`
+    # and dereferenced the `None` config, so with the sweep off it raised
+    # `AttributeError` at this line: AFTER `_write_json` succeeded, BEFORE either
+    # resolve — a 500 for a re-baseline that HAD been persisted, whose only
+    # missing step (the resolve of DATA_LOSS_CANDIDATE + SIZE_GUARD_ABORT, kinds
+    # NOTHING else clears) was silently skipped. `_incident_alert_store` reads the
+    # alert credentials ungated and returns `None` — it cannot raise — when no
+    # channel can be built.
+    alerts = _incident_alert_store()
     # #3718 round-3 review P2: both resolves are blocking NETWORK round
     # trips — a storage read plus a GitHub issue close / Telegram push — the
     # same offload `backups_sweep` already gives `alerts.open_incident`.
@@ -33457,6 +33471,20 @@ async def backups_rebaseline(request: Request):
     # than implying a poll will retry (cycle-3 review P1). The outcome is reported
     # per kind so the operator can re-run re-baseline after GitHub recovers.
     def _resolve_incidents() -> list[str]:
+        if alerts is None:
+            # No channel can be built (no DR_ISSUES_PAT, or an unusable object
+            # store), so NOTHING can clear these two kinds — they are resolved
+            # here and nowhere else. Report them instead of letting the response
+            # read as a re-baseline that closed incidents it never touched; the
+            # state write DID succeed, which is why this is not a 5xx.
+            _logger.warning(
+                "no alert channel on re-baseline of %s — DATA_LOSS_CANDIDATE and "
+                "SIZE_GUARD_ABORT cannot be resolved by this call (check "
+                "DR_ISSUES_PAT and the R2_* credentials); the re-baseline write "
+                "itself succeeded", subject,
+            )
+            return [f"{kind}/{subject}"
+                    for kind in ("DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT")]
         failed: list[str] = []
         for kind in ("DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT"):
             try:
@@ -33876,16 +33904,24 @@ def _billing_error_to_http(exc: Exception) -> HTTPException:
     """Map billing exceptions to HTTP responses — degrade, never crash.
 
     BillingConfigError (missing STRIPE_* env, lazy by design) → 503;
-    BillingError (bad input like an unknown price id) → 400;
-    StripeAPIError (upstream failure) → 502.
+    StripeAPIError (upstream failure) → 502;
+    BillingError (bad input like an unknown price id) → 400.
+
+    Order is load-bearing (subclass-first): ``BillingConfigError`` and
+    ``StripeAPIError`` BOTH subclass ``BillingError``, so the base branch must
+    come last. Before #4725 the ``BillingError`` branch sat above the
+    ``StripeAPIError`` branch, which made the 502 leg unreachable dead code —
+    every Stripe outage (network failure, rotated key, any 5xx from
+    ``api.stripe.com``) answered 400, blaming the caller for an upstream
+    failure. Pinned by tests/test_billing.py::TestBillingErrorToHttpMapping.
     """
     from tortoise.billing import BillingConfigError, BillingError, StripeAPIError
     if isinstance(exc, BillingConfigError):
         return HTTPException(status_code=503, detail=str(exc))
-    if isinstance(exc, BillingError):
-        return HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, StripeAPIError):
         return HTTPException(status_code=502, detail=str(exc))
+    if isinstance(exc, BillingError):
+        return HTTPException(status_code=400, detail=str(exc))
     return HTTPException(status_code=502, detail=str(exc))
 
 
@@ -33927,6 +33963,9 @@ def _billing_customer_email(sdk: TortoiseSDK | None, org: dict) -> str:
        (``_billing_email_like``) because ``created_by`` may be a user UUID or
        ``"api"`` rather than an address (#4504 review) — a non-email creator
        id must fall through, not be posted to Stripe as the customer email.
+       The control-plane twin of the "key used for THIS request" link is the
+       ``created_by`` already on the resolved org dict (#4727) — see the
+       inline note below.
     3. The VERIFIED session user's email (#4504) — OAuth/session users whose
        org carries no ``Team.email`` and whose keys carry no usable
        ``created_by`` (a dashboard/provisioned org) were refused a checkout
@@ -33953,6 +33992,23 @@ def _billing_customer_email(sdk: TortoiseSDK | None, org: dict) -> str:
     # the t.email that read returns, so this is a selfhost no-op.
     if _billing_email_like(org.get("email")):
         return org["email"].strip()
+    # #4727: the control-plane twin of step 2's "key used for THIS request"
+    # link. The two registry reads below never run in Supabase mode
+    # (``sdk is None``), so a provision-path org whose ``organizations.email``
+    # is NULL had NO creator-email link there — a tt_ key with no session
+    # email got the terminal 400 even though ``resolve_api_key`` already puts
+    # the key's creator on the resolved org dict as ``"created_by"`` (the
+    # same field the registry org dict carries — #1748 parity). Precedence is
+    # deliberately the registry chain's: before the session fallback (3),
+    # after ``Org.email`` (1). Shape-gated for the #4504 reason — a
+    # dashboard-minted key's ``created_by`` is a user UUID and a
+    # bootstrap/legacy key's is the literal ``"api"``; neither is an address
+    # and neither may be posted to Stripe. The ``sdk is None`` guard scopes
+    # this strictly to the lane that has no registry read, so registry
+    # behavior is byte-identical (where the same value is read off the
+    # ``APIKey`` node at step 2 anyway).
+    if sdk is None and _billing_email_like(org.get("created_by")):
+        return org["created_by"].strip()
     if sdk is not None:
         key_id = org.get("key_id")
         if key_id:

@@ -957,7 +957,14 @@ def test_legacy_single_field_point_index_is_upgraded_with_flat_data(graph_factor
         "CREATE (n:Point {id:'legacy-flat', pointKind:'core:fact', "
         "content:'legacy flat row', content_hash:'hlf', "
         "search_keys:'fastest 5k'})")
-    g.query("CALL db.idx.fulltext.createNodeIndex('Point', 'content')")
+    # #H05 / #6380: build the legacy single-field index with the same DDL-first
+    # form production uses. The historical procedure ALONE
+    # (``CALL db.idx.fulltext.createNodeIndex('Point', 'content')``) is REJECTED
+    # by FalkorDB 6.x ("Received 2 arguments ... expected at most 1"), and this
+    # line does not suppress — so on that engine the test ERRORED here and the
+    # #5444 pin could not run at all (measured 2026-10-12 on
+    # falkordb/falkordb:latest, graph module ver 60002).
+    proj._create_fulltext_index("Point", ["content"])
 
     assert proj._schema_is_current() is False, (
         "a single-field Point FTS index is not the required schema")

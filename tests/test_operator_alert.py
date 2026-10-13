@@ -853,7 +853,13 @@ def test_on_record_predicate_has_one_source(monkeypatch):
 #: ``_incident_alert_store`` instead. Counted by AST call node, so a docstring
 #: mention (``hosted_api._incident_alert_store``'s seam map has one) is not
 #: mistaken for a call site.
-_DECLARED_RAW_BUILDER_SITES = {"hosted_api.py": 4, "notify.py": 2}
+#:
+#: #4777 removed one: ``backups_rebaseline`` built its channel from
+#: ``_backup_config_safe()``, so with the sweep OFF (the production default) the
+#: config was ``None``, the constructor dereferenced it, and the endpoint 500ed
+#: AFTER persisting the re-baseline — with BOTH incident resolves skipped. Its
+#: resolve leg is not sweep-gated, so that was never a legitimate residual.
+_DECLARED_RAW_BUILDER_SITES = {"hosted_api.py": 3, "notify.py": 2}
 
 
 def _raw_builder_call_sites() -> dict[str, int]:
