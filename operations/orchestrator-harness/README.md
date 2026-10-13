@@ -189,7 +189,7 @@ pins; the live total is printed by `./selftest.sh` rather than quoted here.
 secret into a world-readable plist, and launchd inherits no shell environment — so an env-only
 `AI_REVIEW_GATE_KEY` is reported as insufficient, not as "present". The box cannot merge without it.
 
-### Tuning (8 GB / 8-core box — the values that were actually used)
+### Tuning (10-core / 32 GB box — the values that were actually used)
 
 | Var | Value | Why |
 |---|---|---|
@@ -345,12 +345,14 @@ is re-dispatched on the next sweep, with `claim_live()` freeing the dead owner's
 
 ```text
 [scope] open=24 -> BROAD (help drain all)
-[cap] load=7/100 lanes=4/4 mem_avail=11761M/512M swap_free=588M/600M   ← every gate names its own ceiling
+[cap] load=7/100 lanes=4/4 mem_avail=11761M/512M swap_free=588M/600M   ← every gate names its ceiling
 [dispatch] load=7 lanes=4 -> 4429 4489
 [refresh] +#4508 CLEAN -> backlog
 #8219 FAILED:ai-review-gate          ← per-PR verdict for the required checks
 #8192 fixer attempt 1                ← routed to a fixer, not a re-record
-[dispatch] skipped (load=7>=max_load=100)   ← and WHY, naming the binding gate
+...
+[cap] load=104/100 lanes=4/4 mem_avail=11890M/512M swap_free=588M/600M
+[dispatch] skipped (load=104>=max_load=100)   ← and WHY, naming the binding gate
 ```
 
 ---

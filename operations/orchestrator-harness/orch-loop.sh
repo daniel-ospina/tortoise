@@ -57,6 +57,11 @@ safe_ref() {
   git -C "$REPO" check-ref-format --branch "$1" >/dev/null 2>&1
 }
 is_num() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+# A non-numeric threshold makes `[ -le ]` ERROR -- which returns false, and a false test in the gate
+# chain OPENS the gate. So a typo in the plist env (MIN_MEM_FREE_MB=abc) would silently remove the very
+# back-pressure these gates exist to apply. Coerce to the documented default instead of failing open.
+is_num "${MIN_SWAP_FREE:-600}"   || MIN_SWAP_FREE=600
+is_num "${MIN_MEM_FREE_MB:-512}" || MIN_MEM_FREE_MB=512
 # $O is operator config, not attacker input, but a quote or metacharacter here would break every
 # spawn (the tmux command string is executed via sh -c). Fail loudly instead of failing mysteriously.
 case "$O" in
