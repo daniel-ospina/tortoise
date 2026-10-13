@@ -9266,11 +9266,14 @@ class TortoiseSDK:
         # `update_point(content=…)` re-encodes the embedding (#4208) and the
         # merge below would store it as a plain Cypher `List` — no `vecf32`,
         # no clear. `typeof` then flips `Vectorf32` → `List` on ONE content
-        # edit, and `search_engine`'s per-row dense leg
-        # (`vec.euclideanDistance(n.embedding, …)`) raises
-        # "Type mismatch: expected Null or VectorF32 but was List" for the
-        # WHOLE `MATCH` — so one edited Point degrades the entire Point dense
-        # leg to FTS-only recall. That is the #4521 class on the LIVE path
+        # edit: a bare `List` node is not in the HNSW index at all, so it is
+        # silently MISSING from the index-served Point dense leg (#8429) — the
+        # write seam exists so a server-owned vector is always the typed,
+        # indexable shape. (#8316 has since normalised a right-width `List` at
+        # the READ boundary, so the "expected Null or VectorF32 but was List"
+        # abort this comment used to cite no longer happens for the right-width
+        # case; a wrong-width or non-numeric value still aborts the MATCH —
+        # #8430.) That is the #4521 class on the LIVE path
         # (#4521 / PR #7740 fixed only the replay's `_revise_point`). The
         # derived vector is SERVER-owned, so it is cast and CLEARED first,
         # exactly like `_revise_point`: `vecf32()` alone is not enough,

@@ -6,13 +6,13 @@ THE DEFECT
 new content (#4208) and then writes it through the bare ``SET n += $props``
 merge. A Python float list is a plain Cypher ``List`` — no ``vecf32`` cast and
 no clear — so ``typeof(n.embedding)`` flips ``Vectorf32`` -> ``List`` in ONE
-content edit. ``search_engine``'s per-row dense leg
-(``vec.euclideanDistance(n.embedding, ...)``) then raises::
-
-    Type mismatch: expected Null or VectorF32 but was List
-
-for the WHOLE ``MATCH``, so ONE edited Point degrades the entire Point dense leg
-to FTS-only recall. This is #4521's class, but on the **LIVE** path —
+content edit. A bare ``List`` node is not in the HNSW index at all, so it is
+silently missing from the index-served Point dense leg (#8429) — the reason the
+write seam keeps server-owned vectors typed. (#8316 has since normalised a
+right-width ``List`` at the READ boundary, so the abort this file was originally
+named for no longer happens for a right-width stored value; a wrong-width or
+non-numeric one still aborts the MATCH — #8430.) This is #4521's class, but on
+the **LIVE** path —
 ``update_point`` is the writer behind the MCP ``tortoise_update`` tool and the
 hosted update route — where #4521 / PR #7740 fixed only the REPLAY's
 ``_revise_point``.
@@ -20,26 +20,28 @@ hosted update route — where #4521 / PR #7740 fixed only the REPLAY's
 WHY THE VECTORS ARE SMALL-DELTA
 -------------------------------
 The fix needs BOTH halves of the shared clear-then-set seam
-(``tortoise/vector_write.py``): the ``vecf32()`` cast (a plain list is
-unreadable by the dense leg) AND the clear (a small-Delta ``vecf32`` OVERWRITE
-is silently DISCARDED by the embedded engine — #4520's own, previously-fixed
-defect). The embedder here returns a nearby vector for the edited text (every
-component moves by 0.01), which is what real embedder output does. A synthetic
-one-hot probe (Delta = 1.0) LANDS even on the broken engine and hides BOTH
-halves — that is the trap recorded on #4520. The value assertion below is
+(``tortoise/vector_write.py``): the ``vecf32()`` cast (a plain list is not the
+typed, HNSW-indexable shape — #8429; since #8316 the READ normalises a
+right-width ``List``, so the read no longer raises on it) AND the clear (a
+small-Delta ``vecf32`` OVERWRITE is silently DISCARDED by the embedded engine —
+#4520's own, previously-fixed defect). The embedder here returns a nearby vector
+for the edited text (every component moves by 0.01), which is what real embedder
+output does. A synthetic one-hot probe (Delta = 1.0) LANDS even on the broken
+engine and hides BOTH halves — that is the trap recorded on #4520. The value assertion below is
 therefore load-bearing: a ``vecf32``-only fix satisfies the ``typeof`` and
 dense-read assertions while leaving the PRE-edit vector stored.
 
 RED before / GREEN after
 ------------------------
 ``test_content_edit_leaves_a_readable_typed_vector`` fails on the pre-fix tree
-(``typeof`` reads ``List`` and the dense leg raises) and passes once the derived
-embedding is routed through the seam.
+(``typeof`` reads ``List`` and, before #8316, the dense leg raised on it) and
+passes once the derived embedding is routed through the seam.
 
 *Mutations that re-redden it* (each must be reverted to pass):
 
 * restore the bare ``SET n += $props`` for the derived embedding — ``typeof``
-  flips to ``List`` again and the dense read raises; or
+  flips to ``List`` again, so the vector is no longer the typed shape the HNSW
+  index cohort (and the write seam's contract) requires (#8429); or
 * drop the clear guard and keep only ``vecf32()`` — the small-Delta overwrite is
   silently DISCARDED and the stored value stays the PRE-edit vector.
 
@@ -120,7 +122,14 @@ def _stored(sdk: TortoiseSDK, pid: str) -> list[float] | None:
 
 
 def _dense_distance(sdk: TortoiseSDK, pid: str, query: list[float]):
-    """The dense leg's own per-row expression — this is what RAISES on a List."""
+    """A hand-rolled probe STRICTER than the dense leg.
+
+    It reads the raw ``n.embedding`` rather than the read seam
+    (``stored_embedding_vector_expr``), so — unlike the real dense leg since
+    #8316 — it still raises on a bare ``List``. Deliberate: this file guards the
+    WRITE shape, so its probe must not inherit the read side's tolerance
+    (the shape guard is the ``typeof`` assertion below).
+    """
     return sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) WITH vecf32($q) AS _qv, n "
         "RETURN vec.euclideanDistance(n.embedding, _qv)",
@@ -130,7 +139,9 @@ def _dense_distance(sdk: TortoiseSDK, pid: str, query: list[float]):
 # ── acceptance: a content edit must leave a readable, TYPED, FRESH vector ────
 
 def test_content_edit_leaves_a_readable_typed_vector(tmp_path):
-    """RED before: ``typeof`` flips to ``List`` and the dense read raises."""
+    """RED before: ``typeof`` flips to ``List`` (before #8316 the dense read
+    raised on it too; the surviving consequence is #8429 — the node leaves the
+    typed, HNSW-indexable shape)."""
     before, after = _nearby_vectors()
     assert max(abs(a - b) for a, b in zip(before, after, strict=True)) < 1.0, (
         "premise: the vectors must be small-Delta (a one-hot probe hides the "
@@ -149,18 +160,25 @@ def test_content_edit_leaves_a_readable_typed_vector(tmp_path):
             # (1) the type must not flip to a plain Cypher List
             assert _typeof(sdk, pid) == "Vectorf32", (
                 "ONE content edit stored the re-derived embedding as a plain "
-                "`List` — the dense leg raises 'Type mismatch: expected Null "
-                "or VectorF32 but was List' for the WHOLE MATCH (#4520 "
-                "residual, the #4521 class on the live path)")
+                "`List` — the vector is no longer the typed shape the HNSW "
+                "index cohort requires (#8429); since #8316 the READ only "
+                "normalises a right-width List (a wrong width still aborts "
+                "the MATCH — #8430) (#4520 residual, the #4521 class on the "
+                "live path)")
 
-            # (2) the dense read must not raise, and must see the Point
+            # (2) the write shape is probed by `_dense_distance` — a RAW
+            #     `n.embedding` expression, deliberately STRICTER than the real
+            #     dense leg, so it still raises on a bare `List` (that is the
+            #     pre-#8316 abort this file exists to prevent). The
+            #     `run_vector_query` half below stopped discriminating the write
+            #     shape once #8316 taught the read to normalise a right-width
+            #     `List`; it stays as the read-side regression guard.
             _dense_distance(sdk, pid, after)
             from tortoise.search_engine import run_vector_query
             hits = [row[0] for row in run_vector_query(
                 sdk._get_proj().g, after, is_embedded=True)]
             assert pid in hits, (
-                "the edited Point fell out of the dense leg — a plain-list "
-                "embedding poisons the whole vector query (#4520 residual)")
+                "the edited Point fell out of the dense leg (#4520 residual)")
 
             # (3) the small-Delta overwrite must LAND — this is the CLEAR half
             #     of the seam, and the reason a one-hot probe is forbidden

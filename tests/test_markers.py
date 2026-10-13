@@ -725,6 +725,18 @@ def test_no_redirect_stems_registry_exact():
         # registered with the PR — this pin reding on the addition is the pin
         # working as designed, so the stem is DECLARED here rather than exempted.
         "test_direction_storage_7852",
+        # #8316: the VERBATIM (caller-supplied) embedding read seam. The module
+        # carries module-level `embedded_only` AND drives a real embedded store,
+        # so the exemption's load-bearing reason is the SKIP *and* the REDIRECT:
+        # a URI-set lane would either skip every case, or — for the cases that
+        # construct `TortoiseSDK(<tmpfile>)` — connect the construction to the
+        # server, where the plain-`List` stored shape and the read seam that
+        # tolerates it would certify nothing. The third leg of the three-way
+        # mirror: config/ci-surfaces.yml:carve_out and TEST_NO_REDIRECT_STEMS
+        # were registered with the PR — this pin reding on the addition is the
+        # pin working as designed, so the stem is DECLARED here rather than
+        # exempted.
+        "test_verbatim_embedding_read_8316",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

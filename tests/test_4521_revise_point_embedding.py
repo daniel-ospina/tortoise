@@ -6,11 +6,19 @@ Point embedding writer casts. ``_revise_point`` is reached by ``apply()`` and by
 ``rebuild_all`` pass-1b, so a ``PointRevised`` that is the LAST writer left the
 node's ``embedding`` as a Cypher ``List``.
 
-**Why that is worse than one bad node.** ``tortoise/search_engine.py`` runs
-``vec.euclideanDistance(n.embedding, _qv)`` per row. A ``List`` raises
-``Type mismatch: expected Null or Vectorf32 but was List``, and that aborts the
-WHOLE query — so one mis-typed node degraded the entire Point dense leg to
-FTS-only recall for that graph, not just its own row. This is the "#244 poison"
+**Why the write seam still matters.** A ``List`` is no longer the abort this file
+was named for: #8316 normalises a right-width ``List`` at the READ boundary
+(``stored_embedding_vector_expr``), so the ``Type mismatch: expected Null or
+VectorF32 but was List`` abort the REAL dense leg
+(``search_engine.run_vector_query``) used to make no longer happens for a
+right-width stored value (a wrong WIDTH still aborts the MATCH — #8430). The raw
+probe in this file is deliberately STRICTER — it reads ``n.embedding`` rather
+than the seam — and still raises on a bare ``List``. What survives is that a
+bare ``List`` node is not in the HNSW index at all, so it is silently missing
+from the index-served Point leg (#8429): the write seam keeps server-owned
+vectors the typed, indexable shape. One mis-typed node used to degrade the
+entire Point dense leg to FTS-only recall for that graph, not just its own row.
+This is the "#244 poison"
 the Event path already fixed; the Point path was never aligned.
 
 **Both writers, one clause.** ``apply()`` and ``rebuild_all`` reach the field
@@ -97,9 +105,13 @@ def _assert_revised_vector(proj, path: str) -> None:
         "nothing at all (a different failure than the list-shape one)")
     assert kind == "Vectorf32", (
         f"{path}: _revise_point left the embedding as {kind!r}, not Vectorf32. "
-        "Every other Point embedding writer casts with vecf32(); a plain List "
-        "makes vec.euclideanDistance raise, which aborts the WHOLE dense leg "
-        "for the graph, not just this node (#4521).")
+        "Every other Point embedding writer casts with vecf32(): a bare List "
+        "node is not in the HNSW index at all, so it is silently missing from "
+        "the index-served dense leg (#8429) — the write seam keeps "
+        "server-owned vectors the typed shape. (#8316 normalises a right-width "
+        "List at the READ boundary, so the abort this file was named for no "
+        "longer happens for a right-width value; a wrong width still aborts "
+        "the MATCH — #8430.) (#4521).")
 
     # VALUE, not just shape (#4520: an overwrite can be silently DISCARDED,
     # leaving typeof correct and the vector from the previous write).
@@ -110,7 +122,9 @@ def _assert_revised_vector(proj, path: str) -> None:
         f"{path}: the stored embedding is still the PRE-write vector — the "
         "vecf32 overwrite was silently discarded (#4520).")
 
-    # The CONSEQUENCE: the query the search engine's per-row dense leg makes.
+    # The CONSEQUENCE, via a hand-rolled probe STRICTER than the dense leg: it
+    # reads the raw ``n.embedding`` rather than the read seam, so (unlike the
+    # real dense leg since #8316) it still raises on a bare ``List``.
     try:
         dist = proj.g.query(
             "MATCH (n:Point {id:$id}) "

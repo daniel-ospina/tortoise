@@ -3856,9 +3856,15 @@ class _EntityHandlers:
         # NULL).
         embedding = inner.get("embedding")
         if embedding is None and inner.get("eventKind") != "meeting":
-            # Stored vecf32 (#244): vec.euclideanDistance rejects plain-list
-            # vectors — a single List-typed embedding poisons brute-force vector
-            # search for the whole Event label. Align with the Point pattern.
+            # Stored vecf32 (#244): the QUERY param must be cast (a plain-list
+            # param is rejected there), and the STORED side goes through the
+            # typed write seam so every server-owned vector has the shape every
+            # other writer produces. Event has NO vector index — the only vector
+            # index is on Point (#8429 is Point-scoped) — so the Event dense leg
+            # is always the brute-force scan, where #8316 normalises a
+            # right-width stored List at the READ boundary (a wrong width or a
+            # non-numeric value still aborts the MATCH — #8430). Align with the
+            # Point pattern.
             event_content = " ".join(filter(None, [
                 inner.get("subject", ""),
                 inner.get("eventKind", ""),

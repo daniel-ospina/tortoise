@@ -1605,8 +1605,9 @@ surfaces:
   # session fixture unless `TORTOISE_TEST_CARVE_OUT=1`.
   - test_3817_tags_rebuild_durability.py
   - test_vecf32_overwrite_seams_4524.py  # #4524: the remaining embedded-engine vecf32 overwrite seams (Subject/Object/Document/Event) — one mutation-proven read-back guard per seam; runs in the carve-out lane (carve_out + embedded_only)
-  - test_4521_revise_point_embedding.py  # #4521: `_revise_point` must write `vecf32($embedding)`, not a plain List — one List makes vec.euclideanDistance raise per row and aborts the whole Point dense leg (embedded_only + carve_out)
-  - test_update_point_derived_embedding_4520.py  # #4520 residual: `update_point(content=…)`'s DERIVED embedding must go through the clear-then-set seam, not the bare `+=` merge (a plain List makes vec.euclideanDistance raise per row and aborts the whole Point dense leg); the caller-supplied branch stays verbatim (PR #3018) — embedded_only + carve_out
+  - test_4521_revise_point_embedding.py  # #4521: `_revise_point` must write `vecf32($embedding)`, not a plain List — a bare List node is not in the HNSW index at all (#8429), so the write seam keeps it the typed shape; the READ boundary now normalises a right-width List (#8316), so only a wrong WIDTH still aborts the MATCH (#8430) (embedded_only + carve_out)
+  - test_update_point_derived_embedding_4520.py  # #4520 residual: `update_point(content=…)`'s DERIVED embedding must go through the clear-then-set seam, not the bare `+=` merge (a bare List node is not in the HNSW index — #8429 — and a small-Δ `vecf32` overwrite is silently discarded on the embedded engine); the caller-supplied branch stays verbatim (PR #3018), and the read boundary normalises a right-width List (#8316) — embedded_only + carve_out
+  - test_verbatim_embedding_read_8316.py  # #8316: a caller-supplied embedding stays VERBATIM (PR #3018) but the dense READ must normalise the plain-List shape at its own boundary — one verbatim node otherwise aborts the whole MATCH and degrades every node to FTS-only recall (embedded_only + carve_out)
   # #5004: the journal must carry a Point's embedding (the design's largest
   # cost lever) and a replay must restore it VERBATIM rather than re-encode
   # under whatever embedder is configured. `tortoise/projection/entities.py`
@@ -3510,6 +3511,13 @@ carve_out:
 # unexecuted gate on main (the same #4047 shape as the #4521/#4524 entries
 # above).
 - test_update_point_derived_embedding_4520.py
+# #8316: the module-level `embedded_only` guard for the VERBATIM (caller-supplied)
+# embedding's dense read. The stored plain-List shape and the read seam that
+# tolerates it are asserted on a real embedded store, so a URI-set selection
+# would redirect the construction and certify nothing — and without this
+# registration it would collect and SKIP every case via the marker hook, a
+# permanently green and permanently unexecuted gate on main (the #4047 shape).
+- test_verbatim_embedding_read_8316.py
 # #5148: `test_sdk_emit_event_survives_unreachable_seam` is `embedded_only`, so
 # without this registration every URI-set lane collects the file and SKIPS that
 # case via the marker hook — the SDK guard would be a permanently green and

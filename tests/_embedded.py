@@ -419,6 +419,14 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # list in config/ci-surfaces.yml (the two are one set in two homes;
     # tests/test_ci_selection.py pins the equality).
     "test_update_point_derived_embedding_4520",
+    # #8316: the module-level `embedded_only` guard for the VERBATIM
+    # (caller-supplied) embedding's dense read asserts the EMBEDDED store's
+    # plain-`List` shape and the read seam that tolerates it, so it must
+    # construct a real embedded store — a redirected construction would run
+    # against the server and certify nothing. Registered with the carve_out
+    # list in config/ci-surfaces.yml (the two are one set in two homes;
+    # tests/test_ci_selection.py pins the equality).
+    "test_verbatim_embedding_read_8316",
     # #5148: `test_sdk_emit_event_survives_unreachable_seam` is `embedded_only`
     # (it constructs a real embedded store), so it is a permanently green,
     # permanently unexecuted gate on main unless this stem is routed to the
