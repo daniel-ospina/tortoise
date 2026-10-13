@@ -425,7 +425,11 @@ def is_default_direction(value: str | None) -> bool:
     meaning outranks a non-declaration, never a value the caller differentiated.
     """
     canonical = canonical_direction(value)
-    return canonical is None or canonical == "<->"
+    # `value is None` is the ONE "no direction was supplied" case; any other
+    # token the vocabulary does not recognise must NOT read as default —
+    # otherwise a caller's typo (`sideways`) would be silently overwritten by a
+    # declared `semantics` before validation could refuse it.
+    return value is None or canonical == "<->"
 
 
 def direction_spellings(value: str | None) -> frozenset[str]:

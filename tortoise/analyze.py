@@ -559,8 +559,10 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
                     "AND a.op_type IS NULL "
                     "AND (b.is_operator IS NULL OR b.is_operator = false) "
                     "AND b.op_type IS NULL "
-                    "AND coalesce(r.direction, 'bidirectional') IN "
-                    "['bidirectional', '<->', '->', 'unidirectional'] "
+                    "AND (type(r) = 'NAND' "
+                    "     AND coalesce(r.direction, 'bidirectional') <> '-' "
+                    "     OR coalesce(r.direction, 'bidirectional') IN "
+                    "        ['bidirectional', '<->', '->', 'unidirectional']) "
                     "RETURN DISTINCT b.id, a.id, type(r)",
                     params={"frontier": frontier_list},
                 ).result_set

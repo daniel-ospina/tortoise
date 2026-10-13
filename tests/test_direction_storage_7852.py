@@ -39,6 +39,7 @@ from tortoise.live import (
     canonical_direction,
     direction_flows,
     direction_spellings,
+    is_default_direction,
 )
 from tortoise.sdk import TortoiseSDK
 
@@ -190,12 +191,27 @@ def test_direct_edge_direction_round_trips(sdk, value):
 
 
 def test_out_of_vocabulary_direction_is_refused(sdk):
-    """A typo is refused by name, not silently persisted or defaulted."""
+    """A typo is refused by name, not silently persisted or defaulted —
+    including when a valid `semantics` is supplied (the meaning must not
+    launder an unrecognised direction into the vocabulary)."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
     with pytest.raises(ValueError, match="direction must be one of"):
         sdk.create_operator("IMPL", a["id"], [b["id"]], direction="sideways")
     with pytest.raises(ValueError, match="direction must be one of"):
         sdk.create_direct_edge("IMPL", a["id"], b["id"], direction="sideways")
+    with pytest.raises(ValueError, match="direction must be one of"):
+        sdk.create_operator("IMPL", a["id"], [b["id"]],
+                            direction="sideways", semantics="addresses")
+
+
+def test_is_default_direction_only_true_for_absent_or_mutual():
+    """`is_default_direction` gates the semantics override, so an
+    UNRECOGNISED token must NOT read as default — otherwise a declared
+    meaning would silently overwrite the caller's typo."""
+    for value in (None, "bidirectional", "<->"):
+        assert is_default_direction(value) is True, value
+    for value in ("sideways", "->", "unidirectional", "<-", "-"):
+        assert is_default_direction(value) is False, value
 
 
 def test_defaults_are_unchanged(sdk):

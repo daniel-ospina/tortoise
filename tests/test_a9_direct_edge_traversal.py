@@ -225,6 +225,23 @@ def test_a9_nand_negative_direction_traversed_neither_way_7852():
         sdk.close()
 
 
+def test_a9_nand_backward_direction_walked_both_ways_7852():
+    """#7852: NAND is a symmetric constraint, so it keeps its always-both
+    behaviour for EVERY flowing token — a `<-` NAND direct edge is selected
+    from BOTH endpoints (only `-` is excluded)."""
+    sdk = _fresh_sdk()
+    try:
+        src = _live(sdk, "Source")
+        tgt = _live(sdk, "Target")
+        sdk.create_direct_edge("NAND", src["id"], tgt["id"], direction="<-")
+        _, anchors_s = _select(sdk._get_proj(), [src["id"]], max_hops=1)
+        assert (src["id"], tgt["id"], "NAND") in anchors_s, anchors_s
+        _, anchors_t = _select(sdk._get_proj(), [tgt["id"]], max_hops=1)
+        assert (src["id"], tgt["id"], "NAND") in anchors_t, anchors_t
+    finally:
+        sdk.close()
+
+
 def test_a9_cyclic_selection_terminates():
     """A direct-edge 3-cycle selects every edge's anchor and terminates
     (no infinite expansion on the cycle)."""

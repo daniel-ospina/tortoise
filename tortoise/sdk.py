@@ -16133,8 +16133,10 @@ class TortoiseSDK:
         else:
             dir_scope = (
                 "AND ((a.id IN $ids AND "
+                "((type(r) = 'NAND' AND "
+                "coalesce(r.direction, 'bidirectional') <> '-') OR "
                 "coalesce(r.direction, 'bidirectional') IN "
-                "['bidirectional', '<->', '->', 'unidirectional']) "
+                "['bidirectional', '<->', '->', 'unidirectional'])) "
                 "OR (b.id IN $ids AND "
                 "((type(r) = 'NAND' AND "
                 "coalesce(r.direction, 'bidirectional') <> '-') OR "
