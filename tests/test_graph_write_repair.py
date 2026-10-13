@@ -81,8 +81,20 @@ class _FakeGraph:
 
     def query(self, cypher: str, params=None):
         st = self._db.graphs.get(self.name)
-        if st is None:  # a Cypher read on a missing graph auto-creates in FalkorDB;
-            raise RuntimeError(f"graph {self.name!r} does not exist")  # the fake must not
+        if st is None:
+            # A Cypher READ on a missing graph AUTO-CREATES an empty one in FalkorDB --
+            # measured live: `MATCH (n) RETURN count(n)` against an absent key returns
+            # [[0]] AND the key then appears in GRAPH.LIST. The fake must reproduce that
+            # rather than raise: raising makes the `drop_clone` path unreachable, so a
+            # test aimed at the DATA LOSS would redden on a message string instead of on
+            # the loss itself (#8451 review, P2). Matches the engine's observed semantics.
+            head = cypher.strip().upper()
+            if head.startswith("MATCH") or "COUNT(" in head:
+                self._db.graphs[self.name] = _GraphState(nodes=0, edges=0, writable=True)
+                if "COUNT(R)" in head:
+                    return _Row(0)
+                return _Row(0)
+            raise RuntimeError(f"graph {self.name!r} does not exist")
         head = cypher.strip().upper()
         if "DB.INDEXES()" in head:
             # #3154 audit: an empty catalogue == no boolean is_operator index.
@@ -107,7 +119,8 @@ class _FakeGraph:
 
 class _FakeDb:
     def __init__(self, graphs: dict, *, copy_drops_edges: bool = False,
-                 copy_bumps_source: int = 0, copy_drops_source: bool = False) -> None:
+                 copy_bumps_source: int = 0, copy_drops_source: bool = False,
+                 copy_empties_source: bool = False) -> None:
         self.graphs = graphs
         self.commands: list[tuple] = []
         self._copy_drops_edges = copy_drops_edges
@@ -118,6 +131,10 @@ class _FakeDb:
         #: inside the critical section (the lock's TTL is NOT renewed, and the
         #: container is `restartpolicy=always`).
         self._copy_drops_source = copy_drops_source
+        #: EMPTY the source right after GRAPH.COPY -- the source is present but has lost
+        #: everything. This is the losing direction the presence check alone cannot see:
+        #: presence is genuinely TRUE, and the read still yields (0, 0).
+        self._copy_empties_source = copy_empties_source
         # `repair()` reaches GRAPH.COPY/RENAME through `db.connection`.
         self.connection = self
 
@@ -141,6 +158,9 @@ class _FakeDb:
             )
             if self._copy_bumps_source:
                 self.graphs[src].nodes += self._copy_bumps_source
+            if self._copy_empties_source:
+                self.graphs[src].nodes = 0
+                self.graphs[src].edges = 0
             if self._copy_drops_source:
                 del self.graphs[src]
         elif cmd == "RENAME":
@@ -520,6 +540,28 @@ def test_repair_retains_the_clone_when_the_source_vanishes_before_the_swap(monke
     retained = [k for k in db.graphs if k.startswith("__gwr_")]
     assert retained, f"the clone was DELETED; remaining graphs: {sorted(db.graphs)}"
     assert db.graphs[retained[0]].nodes == BIG
+
+
+def test_repair_retains_the_clone_when_the_source_is_emptied_before_the_swap(monkeypatch, fake_lock):
+    """A source that LOST data is not a stale clone -- the clone must be retained.
+
+    The presence check alone cannot close this: the source is genuinely PRESENT, so
+    `graph_exists` passes, and the read still yields (0, 0). The distinction that
+    matters is DIRECTION -- a source that GAINED makes the clone stale (drop is
+    correct); a source that LOST nodes or edges may mean the clone is all that is
+    left (retain it).
+
+    Mutation: drop the `< before_nodes or < before_edges` direction test and call
+    `drop_clone` on ANY mismatch -> the clone is deleted and this goes RED.
+    """
+    db = _FakeDb({"tortoise": _defect_state(nodes=BIG)}, copy_empties_source=True)
+    ok, msg = gwr.repair(db, "tortoise")
+    assert ok is False
+    assert "LOST data" in msg, msg
+    assert "RENAME" not in [c[0] for c in db.commands], db.commands
+    retained = [k for k in db.graphs if k.startswith("__gwr_")]
+    assert retained, f"the clone was DELETED; remaining graphs: {sorted(db.graphs)}"
+    assert db.graphs[retained[0]].nodes == BIG, "the clone lost the data it was holding"
 
 
 # ── the installer: CLI contract, escaping, lint-before-move, load verification ──

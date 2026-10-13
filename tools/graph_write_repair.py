@@ -326,12 +326,28 @@ def repair(db, name: str, verbose: bool = True) -> tuple[bool, str]:
                 return False, (f"the source {name!r} disappeared during the repair -- clone "
                                f"{scratch} RETAINED (it may be the only copy)")
             now_fp = fingerprint(db.select_graph(name))
-            # ANY change is staleness, not just a node LOSS: a concurrent ADDITION passes a
+            # ANY GAIN is staleness, not just a node LOSS: a concurrent ADDITION passes a
             # `< before_nodes` test, the older clone is then swapped in, and the write that
             # landed between COPY and RENAME is silently discarded -- the post-swap
             # `after >= before` check cannot see it.
+            #
+            # ⛔ BUT A LOSS IS NOT STALENESS -- IT IS THE CASE WHERE THE CLONE MAY BE THE
+            # ONLY COPY, SO IT MUST BE RETAINED. The presence check above is not sufficient
+            # on its own: `fingerprint()` READS, and a read auto-creates, so the destructive
+            # path survives it in two ways. (1) TOCTOU -- the source can be deleted between
+            # the presence check and this read, and the read then materialises an empty
+            # graph. (2) PRESENT BUT EMPTIED -- presence is genuinely true and the read
+            # still yields (0, 0). Both reached the old `drop_clone` and deleted the only
+            # surviving copy.
+            # The distinction that matters is DIRECTION: a source that GAINED makes the
+            # clone stale (dropping it is correct); a source that LOST nodes or edges, or
+            # that reads empty, may mean the clone is all that is left -- retain it.
             if now_fp != (before_nodes, before_edges):
-                drop_clone("source changed under us")
+                if now_fp[0] < before_nodes or now_fp[1] < before_edges:
+                    return False, (f"the source LOST data during the repair ({now_fp} vs "
+                                   f"{(before_nodes, before_edges)}) -- clone {scratch} "
+                                   f"RETAINED (it may be the only copy)")
+                drop_clone("source grew under us")
                 return False, (f"the source changed during the repair ({now_fp} vs "
                                f"{(before_nodes, before_edges)}) - refusing to swap over it")
 
