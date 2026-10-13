@@ -430,10 +430,20 @@ def test_origin_only_proxy_routes_allow_an_absent_origin(stack, method, path):
 # which is the exact shape of the #4104 defect: the guard was added to the
 # session-gated mutations in review, and nothing mechanical would have noticed a
 # route left out — or a route that quietly LOSES its guard in a later refactor.
-# The scan derives the guarded-route set FROM THE SOURCE and asserts it EQUALS
-# the set the cases here exercise, in BOTH directions.
+# The scan derives the guarded-route set FROM THE SOURCE, and three assertions
+# together make it EQUAL the set the cases here exercise, in BOTH directions:
+#   source == GUARDED_ROUTE_PATTERNS          (test_every_guarded_route_...)
+#   case paths ⊆ GUARDED_ROUTE_PATTERNS       (test_each_case_path_lands_...)
+#   GUARDED_ROUTE_PATTERNS ⊆ case paths       (test_every_declared_guarded_pattern_...)
+# Each is needed. With only the first two, a pattern that is declared and scanned
+# but exercised by ZERO cases stays green — delete the case, keep the constant,
+# and nothing reddens.
 FUNCTIONS_DIR = REPO_ROOT / "website" / "apps" / "dashboard" / "functions"
-_GUARD_CALL_RE = re.compile(r"guardStateChangingRequest|guardOrigin")
+# A CALL site, not a mention: the `import { guardOrigin } from "..."` line also
+# contains the identifier, so a bare-name regex counts a route whose CALL was
+# removed as still guarded. Requiring the opening paren is what makes the scan
+# measure the guard actually running.
+_GUARD_CALL_RE = re.compile(r"\bguard(?:StateChangingRequest|Origin)\s*\(")
 
 #: The route PATTERN each guarded source file serves. A `[[path]]` catch-all
 #: becomes `/*`.
@@ -470,14 +480,44 @@ def _guarded_route_patterns_from_source() -> set[str]:
     return found
 
 
+def test_the_guard_scan_matches_call_sites_not_mentions() -> None:
+    """`_GUARD_CALL_RE` must measure the guard RUNNING, not an import.
+
+    Dropping `guardOrigin(request, env)` while leaving
+    `import { guardOrigin } from "../../_shared/auth/csrf"` in place is
+    precisely the refactor this scan exists to catch. A mention-matching regex
+    counts that route as guarded and the parity test stays green — which is why
+    the author's mutation check produced 10 failures where 12 were available.
+    These two assertions lock the call-site semantics in. Pure source-level: no
+    wrangler stack is needed.
+    """
+    assert _GUARD_CALL_RE.search(
+        'import { guardOrigin } from "../../_shared/auth/csrf";'
+    ) is None, "an import alone must not count as a guard call site"
+    assert _GUARD_CALL_RE.search(
+        'import { guardStateChangingRequest } from "../_shared/auth/csrf";'
+    ) is None, "an import alone must not count as a guard call site"
+    assert _GUARD_CALL_RE.search("const csrf = guardOrigin(request, env);"), (
+        "a real guardOrigin(...) call must be detected"
+    )
+    assert _GUARD_CALL_RE.search(
+        "const csrf = guardStateChangingRequest(ctx.request, ctx.env);"
+    ), "a real guardStateChangingRequest(...) call must be detected"
+
+
 def test_every_guarded_route_is_exercised_by_a_case_here() -> None:
-    """Parity, both directions — a guarded route with no case fails, and so
-    does a case whose route no longer carries a guard."""
+    """The source side of the parity — this is `source == GUARDED_ROUTE_PATTERNS`.
+
+    It is not on its own the bidirectional claim: it says nothing about the case
+    set, which the two tests below pin (`case paths ⊆ patterns` and
+    `patterns ⊆ case paths`). Together the three hold source == declared ==
+    exercised.
+    """
     found = _guarded_route_patterns_from_source()
     assert found == GUARDED_ROUTE_PATTERNS, (
-        "the source's guarded-route set and the routes the cases here exercise "
-        "have drifted. A route that adds a CSRF guard without a case, or one "
-        "that LOSES its guard, must be reconciled deliberately (#3529 class 3).\n"
+        "the source's guarded-route set and the declared registry "
+        "have drifted. A route that adds a CSRF guard, or one that LOSES its "
+        "guard, must be reconciled deliberately (#3529 class 3).\n"
         f"  in source but not declared: {sorted(found - GUARDED_ROUTE_PATTERNS)}\n"
         f"  declared but not in source: {sorted(GUARDED_ROUTE_PATTERNS - found)}"
     )
@@ -492,16 +532,42 @@ def test_the_guarded_route_scan_is_not_vacuous() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "path",
-    sorted({p for _, p, _ in GUARDED_ROUTES} | {p for _, p in ORIGIN_ONLY_ROUTES}),
-)
+def _case_paths() -> set[str]:
+    """Every route path a behavioural case in this module exercises."""
+    return {p for _, p, _ in GUARDED_ROUTES} | {p for _, p in ORIGIN_ONLY_ROUTES}
+
+
+def _pattern_matches(pattern: str, path: str) -> bool:
+    """A case path lands on a declared pattern (`/*` covers the subtree)."""
+    return path == pattern or (pattern.endswith("/*") and path.startswith(pattern[:-1]))
+
+
+@pytest.mark.parametrize("path", sorted(_case_paths()))
 def test_each_case_path_lands_on_a_declared_guarded_pattern(path: str) -> None:
-    """The cases and the parity registry are one set, not two lists."""
+    """Direction 1 — every case path matches a declared guarded pattern."""
     assert any(
-        path == pattern or (pattern.endswith("/*") and path.startswith(pattern[:-1]))
-        for pattern in GUARDED_ROUTE_PATTERNS
+        _pattern_matches(pattern, path) for pattern in GUARDED_ROUTE_PATTERNS
     ), f"{path} is exercised by a case but matches no declared guarded pattern"
+
+
+@pytest.mark.parametrize("pattern", sorted(GUARDED_ROUTE_PATTERNS))
+def test_every_declared_guarded_pattern_is_exercised_by_a_case(pattern: str) -> None:
+    """Direction 2 — every declared pattern is matched by at least one case.
+
+    Without this, the parity is one-directional: delete
+    `("POST", "/api/session", None)` from `GUARDED_ROUTES` (leaving the source
+    untouched) and the source scan still equals the registry, every remaining
+    case path still lands on a declared pattern, and every structural test stays
+    green — while `/api/session`'s guard call site is exercised by zero cases.
+    That is the #4104 shape arrived at from the side direction 1 does not see.
+    """
+    assert any(
+        _pattern_matches(pattern, path) for path in _case_paths()
+    ), (
+        f"{pattern} is declared guarded and found in the route source, but no "
+        f"behavioural case exercises it — a guard with no case can be dropped "
+        f"silently (#3529 class 3). Case paths present: {sorted(_case_paths())}"
+    )
 
 
 if __name__ == "__main__":
