@@ -5378,7 +5378,7 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
 
     # Pre-existing operator edges/INPUT mirrors at the successor, keyed on the
     # operator's LOGICAL id — the writer's 2a/2a-INPUT MERGEs are per-operator
-    # (`(op)-[:type {idx}]->(new)` / `(new)-[:INPUT {idx}]->(op)`), so one
+    # (the typed edge, idx-keyed, plus the reverse INPUT mirror), so one
     # operator's existing edge must not mark another operator's as present.
     # `idx` rides the key (the writer's MERGE pattern carries it), so the two
     # edges `create_operator(op, old, [old])` mints (idx 0 and idx 1) stay
