@@ -33,15 +33,17 @@ This module is the single place that expresses the invariant, so a new writer
 cannot silently re-inherit the defect — which has already landed three separate
 times (#4457 ``_upsert_point_props``, #4524 the Subject/Object/Document/Event
 seams, #4521 ``_revise_point``) because each writer re-spelled the clause
-locally. **Every #4520 writer that OVERWRITES an existing vector goes through
-one of the helpers below** — the issue's own sites plus the further overwrite
-writers this change found (``graph-scripts/backfill_embeddings.py``'s
-``_backfill_graph``, ``tortoise/hosted_backup.py``'s restore, the snapshot
-derived-restore path in ``projection/__init__.py``,
-``battery/runner/setup.py``, ``tools/ask_spotcheck.py``). The claim is narrowed
-to OVERWRITES on purpose — the defect is a small-Δ overwrite being silently
-dropped, and two kinds of write are not overwrites, so they are deliberately
-OUT of this seam's scope and must NOT be routed into it:
+locally. **Every #4520 writer this seam MIGRATED that OVERWRITES an existing
+vector goes through one of the helpers below** — the issue's own sites plus the
+further overwrite writers this change found
+(``graph-scripts/backfill_embeddings.py``'s ``_backfill_graph``,
+``tortoise/hosted_backup.py``'s restore, the snapshot derived-restore path in
+``projection/__init__.py``, ``battery/runner/setup.py``,
+``tools/ask_spotcheck.py``, and the DERIVED branch of
+``TortoiseSDK.update_point``). The claim is narrowed to OVERWRITES on purpose —
+the defect is a small-Δ overwrite being silently dropped, and two kinds of
+write are not overwrites, so they are deliberately OUT of this seam's scope and
+must NOT be routed into it:
 
 * **Δ = 0 self-recast** — ``SET x.embedding = vecf32(x.embedding)`` reads and
   rewrites the SAME property, so no value is replaced and none can be dropped.
@@ -55,26 +57,34 @@ OUT of this seam's scope and must NOT be routed into it:
   LANDS) does not govern it. Writers that ALSO overwrite still route their
   non-null branch through these helpers.
 
-⚠️ **A KNOWN REMAINING GAP (reported on #4520, NOT closed here):**
-``TortoiseSDK.update_point`` and the ``update_entity`` Point branch write props
-with a bare ``SET n += $props`` — no ``vecf32``, no clear — so an embedding
-reaches the store as a plain Cypher ``List``. Two branches, with different
-routes to the fix:
+⚠️ **One branch is CLOSED, and one is deliberately OPEN (both reported on
+#4520):** the CALLER-supplied branch of ``TortoiseSDK.update_point`` and the
+``update_entity`` Point branch write props with a bare ``SET n += $props`` — no
+``vecf32``, no clear — so an embedding reaches the store as a plain Cypher
+``List``. Two branches, with different dispositions:
 
-* **Derived** — ``update_point(content=…)`` re-encodes the content and the bare
-  SET stores the new embedding as a ``List``. Measured: ``create_point`` stores
-  ``Vectorf32``, the content edit flips ``typeof`` to ``List``, and the failure
-  surfaces on the next dense READ, where ``vec.euclideanDistance`` raises
-  ``Type mismatch: expected Null or VectorF32 but was List`` — so ONE content
-  edit degrades the whole Point dense leg. This branch is FIXABLE with
-  ``vecf32``/the seam exactly as ``_revise_point`` now is.
-* **Caller-supplied** — the verbatim ``embedding`` prop (and ``update_entity``)
-  pass the caller's vector through; that branch's write-verbatim #5046
-  semantics must be preserved when it is migrated.
-
-Both are the #4521 class (a plain-list write, not the small-Δ overwrite this
-seam fixes), so they need their own scoped change; they must NOT be assumed
-covered by this seam until their writers are migrated too.
+* **Derived — CLOSED.** ``update_point(content=…)`` re-encodes the content
+  (#4208) and the bare SET used to store the new embedding as a ``List``.
+  Measured: ``create_point`` stores ``Vectorf32``, the content edit flips
+  ``typeof`` to ``List``, and the failure surfaces on the next dense READ,
+  where ``vec.euclideanDistance`` raises ``Type mismatch: expected Null or
+  VectorF32 but was List`` — so ONE content edit degraded the whole Point dense
+  leg to FTS-only. The DERIVED vector is now routed through this seam: the
+  ``embedding`` key is stripped from the verbatim merge and written with
+  :func:`clear_then_set_prefix` + :func:`set_embedding_clause`
+  (``preserve_on_null=False``), exactly as ``_revise_point`` is, while every
+  other key keeps the caller-supplied-patch ``SET n += $props`` semantics. Both
+  halves are required: the ``vecf32()`` cast fixes the type, and the clear
+  lands the small-Δ overwrite the embedded engine would otherwise DISCARD.
+* **Caller-supplied — deliberately OPEN.** The verbatim ``embedding`` prop
+  (``update_point`` with an explicit vector, and the ``update_entity`` Point
+  branch, which never derives) still passes the caller's vector through RAW.
+  That is a **recorded decision** (PR #3018's TYPE CHANGE GUARD: a
+  caller-owned float64 list must not be silently narrowed through ``vecf32``),
+  not an oversight — reversing it is the #5046/#5048 reopen, never a quiet
+  re-route through :func:`set_embedding_clause`. It is the #4521 class (a
+  plain-list write, not the small-Δ overwrite this seam fixes), so it must NOT
+  be assumed covered by this seam.
 
 Two shapes, one invariant
 -------------------------

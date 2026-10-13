@@ -53,6 +53,7 @@ from tortoise.pack_state import (
     _KIND_PROP_KEYS,
     graph_installed_namespaces,
     graph_kind_namespaces,
+    kind_namespace_is_approved,
 )
 from tortoise.sdk import TortoiseSDK
 from tortoise.value_extractor import compile_value_brief
@@ -709,6 +710,46 @@ class TestGraphInstalledNamespaces:
         assert "orphan-ops:contract" not in build_master_list(sdk=sdk)["pack_kinds"]
         _seed_install(sdk, "orphan-ops", source="custom")
         assert "orphan-ops:contract" in build_master_list(sdk=sdk)["pack_kinds"]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# D2. The write-door input constraint (#5475)
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestKindNamespaceIsApproved:
+    """#5475: the pure closure test the write doors apply to a kind spelling.
+
+    ``graph_kind_namespaces`` mines ``ns`` prefixes out of the graph's data,
+    so an unvalidated ``ns:kind`` write widens the set that gates it. The
+    constraint is that a write may only name a namespace the set ALREADY
+    holds — a write can never ADD one.
+    """
+
+    def test_unapproved_namespace_is_refused(self):
+        assert not kind_namespace_is_approved("marketing:x", frozenset({"dev"}))
+
+    def test_approved_namespace_is_admitted(self):
+        assert kind_namespace_is_approved("marketing:x",
+                                          frozenset({"dev", "marketing"}))
+
+    def test_bare_kind_is_admitted(self):
+        """A bare kind names no pack and cannot widen the set."""
+        assert kind_namespace_is_approved("project", frozenset({"dev"}))
+
+    def test_empty_namespace_is_admitted(self):
+        """``':kind'`` contributes nothing to ``graph_kind_namespaces``."""
+        assert kind_namespace_is_approved(":kind", frozenset({"dev"}))
+
+    def test_none_gate_is_the_catalog_union(self):
+        """No ``:PackInstall`` records ⇒ the approval set IS the union."""
+        assert kind_namespace_is_approved("marketing:x", None)
+
+    def test_comparison_is_raw_not_case_folded(self):
+        """#5339 review (P2): every other gate seam compares RAW. Case-folding
+        here would make the door WIDER than the prompt and the commit gate."""
+        assert not kind_namespace_is_approved("Dev:x", frozenset({"dev"}))
+        assert not kind_namespace_is_approved("dev:x", frozenset({"Dev"}))
+        assert kind_namespace_is_approved("Dev:x", frozenset({"Dev"}))
 
 
 # ══════════════════════════════════════════════════════════════════════════

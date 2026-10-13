@@ -2206,17 +2206,26 @@ def tortoise_update_point(id: str, props: Any) -> dict:
     return _safe(_quota_gated(_get_org_sdk().update_point, "points"), id, **(props or {}))
 
 def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
-                              direction: str = "bidirectional") -> dict:
+                              direction: str = "bidirectional",
+                              semantics: str | None = None) -> dict:
     """Create an operator connecting Points.
     
     op_type: 'IMPL' (A supports B), 'NAND' (A contradicts B),
              'composedOf'/'decomposesInto'/'contains'/'wraps' → stored as hasPart edge.
     source_id: source/parent Point ID.
     target_ids: target/child Point IDs (1 for IMPL/NAND, N for part/whole).
+    semantics: Layer-2 meaning — the closed vocabulary ('addresses',
+      'supports', 'refutes', 'mutuallyExclusive', 'hasPart', 'related', …).
+      Supplying it RESOLVES the direction: a one-way meaning records
+      'unidirectional' (addresses / supports / refutes), a mutual one
+      'bidirectional' (hasPart / mutuallyExclusive / mutuallySupportive).
+      The basis used is recorded on the operator as 'direction_basis'. An
+      unknown word warns and the write proceeds (warn-not-block). This is the
+      write half of the three-layer relation model (#7852, owner-approved).
     direction: 'bidirectional' (default) or 'unidirectional' — EP propagation
       direction. Default is mutual (both directions); pass 'unidirectional'
       for a directed attack (attacker's truth penalizes the target, no
-      back-pressure).
+      back-pressure). An explicitly different value outranks `semantics`.
 
     → See /skill:tortoise-graph-reasoning for proper usage:
       annotation, mitigation, NAND constraints, veracity vs implication.
@@ -2228,7 +2237,7 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
         return {"error": f"create_operator target_ids exceed the cap ({MAX_OPERATOR_TARGETS})",
                 "code": ERR_QUOTA}
     return _safe(_quota_gated(_get_org_sdk().create_operator, "points", abuse_weight=1), op_type, source_id, target_ids,
-                 direction=direction)
+                 direction=direction, semantics=semantics)
 
 
 def tortoise_annotate_operator(id: str, bias: float, precision: float,
@@ -3703,7 +3712,7 @@ _ONBOARDING_STATE_TTL = 60.0
 # #3916: the two documented decide protocols file the SAME node (the option
 # set) under two different labels, so the `decide-completed` observation must
 # accept BOTH or it reports "not decided" for a decision that WAS recorded:
-#   * `tortoise/onboarding/SKILL.md` §6 — the generic MCP-tool protocol — files
+#   * `tortoise/onboarding/SKILL.md` §7 — the generic MCP-tool protocol — files
 #     one `decision` point per option; that is also the kind
 #     `tortoise_file_decision` commits the chosen option as (sdk.file_decision),
 #     and the label the #3784 observation originally keyed on;
@@ -4011,7 +4020,7 @@ def _maybe_onboarding_auto_complete(*,
       ``tortoise_file_decision`` succeeded, or ``tortoise_create_point``
       PERSISTED a pointKind in ``DECISION_SHAPED_POINT_KINDS`` (``decision``
       or ``option``). BOTH documented decide protocols are observed: the
-      generic MCP-tool protocol (``tortoise/onboarding/SKILL.md`` §6) files
+      generic MCP-tool protocol (``tortoise/onboarding/SKILL.md`` §7) files
       one ``decision`` point per option, and the ``tortoise-decide`` skill
       files each option as ``option`` — the same node under two labels
       (#3916). A plain point write (e.g. the setup prompt's ``statement``)

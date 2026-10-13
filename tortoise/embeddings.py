@@ -391,6 +391,30 @@ class EmbeddingModel:
         )
 
     @classmethod
+    def absent_reason(cls) -> str:
+        """The leg-trace reason for a ``None`` returned by :meth:`get` (#5275).
+
+        ``get()`` returns ``None`` from several origins and records WHY in
+        ``_last_failure_kind`` — the outer and in-lock negative caches, the
+        transient load failure, and a not-installed environment. The read path
+        used to stamp every origin with the single ``no_embedder`` term (the
+        *designed-absence* reason), so a **present-but-broken** embedder
+        (``load_failed`` / ``load_timeout``) was indistinguishable from one the
+        environment never had — the conflation the adjacent R3 (#1542) D4
+        comment forbids.
+
+        Only a failure this process actually observed is attributed: with no
+        recorded load attempt (``_last_failed_at`` unset) the process has no
+        attributable failure to report and the term stays ``no_embedder``.
+        ``not_installed`` also keeps ``no_embedder`` — that IS the designed
+        absence the term names.
+        """
+        if cls._last_failed_at is None:
+            return "no_embedder"
+        kind = cls._last_failure_kind
+        return "no_embedder" if not kind or kind == "not_installed" else kind
+
+    @classmethod
     def get(cls, load_timeout: float | None = None) -> "EmbeddingModel | None":  # noqa: UP037
         """Get or create the singleton. Returns None if model unavailable.
 

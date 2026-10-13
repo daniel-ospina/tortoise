@@ -439,6 +439,31 @@ def test_the_degraded_fallback_guard_runs_for_its_own_source():
     )
 
 
+def test_the_cross_surface_grid_guard_runs_for_each_side_of_its_declaration():
+    """#3513 review P1: the grid inventory test asserts BOTH directions of ONE
+    declaration — the JS grid's tile keys ↔ ``tortoise/demand.py`` ↔
+    ``config/connector_manifest.yaml``. It was registered only under
+    ``onboarding``, so the two BACKEND sources (which match no named surface and
+    select the ``core`` fallback) never ran it: a connector added to the manifest
+    with no grid tile and no mapping was green on its own PR and surfaced as an
+    unrelated red in the next dashboard PR (#1349/#7076 class).
+
+    Pinned as BEHAVIOUR, not as a YAML string: every side of the declaration
+    must select the file that asserts it.
+    """
+    for source in (
+        "website/apps/dashboard/src/integrationsGrid.js",
+        "tortoise/demand.py",
+        "config/connector_manifest.yaml",
+    ):
+        sel = _sel([source])
+        assert "test_integrations_grid_inventory.py" in sel["test_files"], (
+            f"{source} selects {sel['surfaces']} but does NOT run the guard that "
+            "asserts the tile declaration it moves (#3513 review P1) — a drift "
+            "introduced on this side of the cross-surface pair would be silent"
+        )
+
+
 def test_every_named_guard_runs_for_its_own_source():
     """The reverse of `test_every_source_pattern_is_selectable`: path -> selected.
 
@@ -876,6 +901,32 @@ def test_the_consent_bridge_guard_runs_on_its_docs_records_too():
             "tests/test_oauth_consent_bridge.py, so its record guard cannot fire "
             "on the change it pins (#3524)"
         )
+
+
+def test_the_csp_plan_doc_guard_runs_on_its_plan_doc_too():
+    """#8334 review (P2, Finding 1): the doc guard's own subject must select it.
+
+    `test_csp_plan_doc_consistency.py` guards
+    `docs/plans/2026-09-22-3525-csp-no-store.md` — the artifact a lane reads before
+    touching the CSP. `docs/` is in NON_PYTHON_PREFIXES and is not itself a
+    SOURCE_PATTERNS pattern, so without the concrete `docs/plans/...` entry a
+    docs-only edit selects NO surface (`surfaces=[]`) and the guard never sees the
+    doc it guards — while the `config/ci-surfaces.yml` registration comment claimed
+    the coverage existed. Same silent-drop class as the #3524 docs records above.
+    """
+    root = Path(__file__).resolve().parents[1]
+    changed = "docs/plans/2026-09-22-3525-csp-no-store.md"
+    assert (root / changed).exists(), f"guarded plan doc is gone: {changed}"
+    r = _sel([changed])
+    assert r["full"] is False
+    assert "onboarding" in r["surfaces"], (
+        f"{changed} selects {r['surfaces']} — a docs-only edit to the plan doc runs "
+        "the guard nowhere"
+    )
+    assert "test_csp_plan_doc_consistency.py" in r["test_files"], (
+        f"a docs-only edit to {changed} does not run "
+        "tests/test_csp_plan_doc_consistency.py, so its doc guard cannot fire (#8334)"
+    )
 
 
 def test_session_import_change_selects_the_window_guard():
@@ -3050,12 +3101,14 @@ def test_pmv_job_carries_uri_manifest_guard():
 
 def test_live_required_job_runs_only_declared_live_tests():
     """cycle-8 P2-12: test-concurrency-falkor runs EXACTLY the declared
-    live-test pair — tests/test_event_store.py::test_seq_is_monotonic_under_concurrency_live_falkor
+    live-test set — as of #5379 that is THREE tests:
+    tests/test_event_store.py::test_seq_is_monotonic_under_concurrency_live_falkor,
+    tests/test_event_store.py::test_next_seq_ceiling_is_atomic_across_workers_live_falkor
     and tests/test_embedded_concurrency.py::test_concurrent_writers_live_falkor_no_lost_writes.
-    A third live test added to the job without extending this pin reds (the
+    A further live test added to the job without extending this pin reds (the
     audit's executable form — the old audit named two test files but grepped
     only test_embedded_concurrency, so a new live test in test_event_store
-    was invisible)."""
+    was invisible; #5379 added the third through this pin)."""
     wf = _load_python_ci()
     job = wf["jobs"]["test-concurrency-falkor"]
     steps = job["steps"]
@@ -3064,6 +3117,7 @@ def test_live_required_job_runs_only_declared_live_tests():
     nodeids = _re.findall(r"tests/[A-Za-z0-9_/.]+\.py::[A-Za-z0-9_]+", run["run"])
     declared = {
         "tests/test_event_store.py::test_seq_is_monotonic_under_concurrency_live_falkor",
+        "tests/test_event_store.py::test_next_seq_ceiling_is_atomic_across_workers_live_falkor",
         "tests/test_embedded_concurrency.py::test_concurrent_writers_live_falkor_no_lost_writes",
     }
     assert set(nodeids) == declared, (
@@ -3072,9 +3126,10 @@ def test_live_required_job_runs_only_declared_live_tests():
         "test-prefixed job URI, epic #1647 cycle-8 P2-12)"
     )
     # The job-level URI stays the NON-test-prefixed path — inert because
-    # both live tests pass explicit test-prefixed graph names and never
+    # all three live tests pass explicit test-prefixed graph names and never
     # bulk-wipe the URI default (verified test_embedded_concurrency
-    # L111-153 + test_event_store L165-185). If a future test adds a
+    # L111-153 + test_event_store L165-185 and the #5379 ceiling test's
+    # `test_seq_ceiling_tortoise`). If a future test adds a
     # path=/URI-default DETACH, the job URI must gain the P1-2 test-prefixed
     # path.
     assert "TORTOISE_DB_URI" not in job.get("env", {}), \
@@ -3082,6 +3137,15 @@ def test_live_required_job_runs_only_declared_live_tests():
     provision = next(s for s in steps
                      if str(s.get("uses", "")).endswith("falkordb-provision"))
     assert provision["with"]["uri_graph"] == "tortoise"
+    # The skip-fail guard must name EVERY declared live test, or a new test
+    # can skip while the regex stays green (the exact gap #5379 fixed).
+    guard_lines = [ln for ln in run["run"].splitlines() if "SKIPPED" in ln]
+    assert guard_lines, "the job must carry a skip-fail guard"
+    guard_text = "\n".join(guard_lines)
+    for nodeid in declared:
+        assert nodeid.split("::", 1)[1] in guard_text, (
+            f"the skip-fail guard must name {nodeid} — a live test missing from "
+            f"the regex can SKIP while the job stays green (vacuity)")
 
 
 def test_test_slow_job_carries_junitxml_manifest_guard():

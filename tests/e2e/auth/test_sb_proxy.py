@@ -605,3 +605,67 @@ def test_unknown_handle_is_401(stack):
     assert status == 401, f"an unknown handle must be 401, got {status} {body}"
     assert json.loads(body)["error"] == "not_signed_in", body
     assert not _seen("blog_posts", "storage"), "a dead handle reached the upstream"
+
+
+# ---------------------------------------------------------------------------
+# #3529 class 3 — "a data proxy, NEVER a token endpoint"
+# ---------------------------------------------------------------------------
+#: Supabase's credential-minting endpoints. The console never needs them: the
+#: BFF mints and refreshes every token server-side. If one of these were ever
+#: allowed through, the browser could trade the HttpOnly session it cannot read
+#: for a JS-readable token through the one origin it CAN reach — the exact defect
+#: #3501 exists to remove. The allowlist is therefore load-bearing, and until
+#: #3529 nothing asserted it refused THIS class of path specifically.
+TOKEN_ENDPOINTS = (
+    "/api/sb/auth/v1/token",
+    "/api/sb/auth/v1/token?grant_type=refresh_token",
+    "/api/sb/auth/v1/otp",
+    "/api/sb/auth/v1/verify",
+    "/api/sb/auth/v1/user",
+    "/api/sb/auth/v1/admin/users",
+)
+
+
+@pytest.mark.parametrize("path", TOKEN_ENDPOINTS)
+def test_the_proxy_is_not_a_token_endpoint(stack, path):
+    """A token endpoint is refused by the allowlist, before the upstream is asked.
+
+    The refusal is observed at the upstream mock, not inferred from the status:
+    a route that answered 403 AFTER forwarding would still have handed the
+    credential to a path the console never needs.
+    """
+    _reset()
+    status, body, _ = _req(
+        path, method="POST", cookie=f"__Host-session={HANDLE}", data=b"{}"
+    )
+    assert status == 403, f"{path} must be refused, got {status} {body}"
+    assert json.loads(body)["error"] == "path_not_allowed", body
+    assert not _state()["seen"], (
+        f"a non-allowlisted token path reached the upstream: {_state()['seen']}"
+    )
+
+
+def test_a_proxied_response_never_carries_the_minted_credential(stack):
+    """The browser holds no credential, and the proxy is not the way to get one.
+
+    The token is minted server-side and attached UPSTREAM; the response the
+    browser receives must carry neither it, nor the refresh token, nor the
+    session handle — in the body or in any header. `/api/v1` has the equivalent
+    assertion (`test_proxy.py::test_credential_never_reaches_the_browser`); this
+    is its sibling on the console's Token Handler, and it is the property that
+    makes "data proxy" true rather than aspirational (#3529).
+    """
+    _reset()
+    status, body, headers = _req(
+        "/api/sb/rest/v1/blog_posts?select=*", cookie=f"__Host-session={HANDLE}"
+    )
+    assert status == 200, f"a legitimate read must succeed, got {status} {body}"
+
+    # Serialize the WHOLE response — body plus every header — so a leak in a
+    # field nobody thought to check cannot pass a field-by-field assertion.
+    wire = body + json.dumps(headers)
+    assert ACCESS not in wire, "the minted access token was returned to the browser"
+    assert "mock-refresh" not in wire, "the refresh token was returned to the browser"
+    assert HANDLE not in wire, "the session handle was reflected to the browser"
+    assert "__Host-session" not in wire, "the session cookie name was reflected to the browser"
+    assert "Set-Cookie" not in headers, f"the proxy set a cookie: {headers.get('Set-Cookie')!r}"

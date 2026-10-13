@@ -1,0 +1,424 @@
+{
+ "report": "docs/epics/2026-08-11-epic900-index-workflow/t11-live-corpus-smoke.md",
+ "issue": 1037,
+ "epic": 900,
+ "run_date_utc": "2026-10-11",
+ "conditions": {
+  "host": "macOS 26.6.2, 8 CPU, load 18.64/22.43/23.00 (fleet busy: 14 concurrent pytest processes)",
+  "engine_image": "falkordb/falkordb-server:v4.20.6",
+  "engine_graph_module_ver": 42006,
+  "lane_container": "fdb-lane-26ecf23efd (tools/test_lane.py, private, pinned via TORTOISE_TEST_LANE_IMAGE)",
+  "mode": {
+   "TORTOISE_INDEX_NO_NETWORK": "1",
+   "extract_metadata": false
+  },
+  "corpus_source": "~/.tortoise/docs/conversations",
+  "corpus_frozen_dir": "/tmp/t11-live/corpus-frozen",
+  "corpus_frozen_at_utc": "2026-10-11T07:10:58Z",
+  "corpus_file_count": 5411,
+  "corpus_manifest_sha1": "e8cb42169900323d909767bac34ba04c8ab04ea5",
+  "command": ".venv/bin/python -m tortoise index directory /tmp/t11-live/corpus-frozen --corpus-name <graph>",
+  "checkpoint_queries": "tests/test_index_directory.py:785 (_required_sweep, D10-aware) + _hash_pair_sweep + per-eventId uniqueness"
+ },
+ "legs": {
+  "A-clean-double-index": {
+   "graph": "t11_clean",
+   "runs": {
+    "1-cold": {
+     "directory": "/private/tmp/t11-live/corpus-frozen",
+     "corpus_name": "t11_clean",
+     "file_count": 5411,
+     "indexed": 5411,
+     "updated": 0,
+     "skipped": 0,
+     "failed": 0,
+     "aborted": 0,
+     "ignored": 0,
+     "errors": [],
+     "by_kind": {
+      "document": 3040,
+      "agentSession": 2371
+     },
+     "aborted_reason": null
+    },
+    "2-drain": {
+     "directory": "/private/tmp/t11-live/corpus-frozen",
+     "corpus_name": "t11_clean",
+     "file_count": 5411,
+     "indexed": 0,
+     "updated": 0,
+     "skipped": 5411,
+     "failed": 0,
+     "aborted": 0,
+     "ignored": 0,
+     "errors": [],
+     "by_kind": {
+      "document": 3040,
+      "agentSession": 2371
+     },
+     "aborted_reason": null
+    }
+   },
+   "checkpoints": {
+    "pre": {
+     "agent_session_events": 0,
+     "corpus": "/tmp/t11-live/corpus-frozen",
+     "corpus_sources": 0,
+     "document_sources": 0,
+     "duplicate_urls": 0,
+     "edges": 0,
+     "event_id_forks": 0,
+     "event_ids_distinct": 0,
+     "events": 0,
+     "hash_pair_sweep": 0,
+     "health": {
+      "duplicates": 6,
+      "file_count": 5411,
+      "indexed_events": 0,
+      "matched": 0,
+      "stale": 0,
+      "unindexed": 5404,
+      "up_to_date": 0
+     },
+     "health_unindexed_sample": [
+      "/tmp/t11-live/corpus-frozen/2026-07-23-01bbe5ce.md",
+      "/tmp/t11-live/corpus-frozen/2026-07-23-020dea8b.md",
+      "/tmp/t11-live/corpus-frozen/2026-07-23-0751215b.md"
+     ],
+     "label": "pre",
+     "nodes": 1,
+     "required_sweep": 0,
+     "required_sweep_pred10_raw": 0,
+     "source_urls_distinct": 0,
+     "sources": 0,
+     "uri": "docker://:@127.0.0.1:16390/t11_clean"
+    },
+    "post-run-1": {
+     "agent_session_events": 2364,
+     "corpus": "/tmp/t11-live/corpus-frozen",
+     "corpus_sources": 5411,
+     "document_sources": 3040,
+     "duplicate_urls": 0,
+     "edges": 5610,
+     "event_id_forks": 0,
+     "event_ids_distinct": 2364,
+     "events": 2364,
+     "hash_pair_sweep": 0,
+     "health": {
+      "duplicates": 6,
+      "file_count": 5411,
+      "indexed_events": 2364,
+      "matched": 2364,
+      "stale": 0,
+      "unindexed": 3040,
+      "up_to_date": 2364
+     },
+     "health_unindexed_sample": [
+      "/tmp/t11-live/corpus-frozen/2026-07-23-01bbe5ce.md",
+      "/tmp/t11-live/corpus-frozen/2026-07-23-08b95c46.md",
+      "/tmp/t11-live/corpus-frozen/2026-07-23-258fdd9c.md"
+     ],
+     "label": "post-run-1",
+     "nodes": 10934,
+     "required_sweep": 0,
+     "required_sweep_pred10_raw": 3040,
+     "source_urls_distinct": 8451,
+     "sources": 8451,
+     "uri": "docker://:@127.0.0.1:16390/t11_clean"
+    },
+    "post-run-2": {
+     "agent_session_events": 2364,
+     "corpus": "/tmp/t11-live/corpus-frozen",
+     "corpus_sources": 5411,
+     "document_sources": 3040,
+     "duplicate_urls": 0,
+     "edges": 5610,
+     "event_id_forks": 0,
+     "event_ids_distinct": 2364,
+     "events": 2364,
+     "hash_pair_sweep": 0,
+     "health": {
+      "duplicates": 6,
+      "file_count": 5411,
+      "indexed_events": 2364,
+      "matched": 2364,
+      "stale": 0,
+      "unindexed": 3040,
+      "up_to_date": 2364
+     },
+     "health_unindexed_sample": [
+      "/tmp/t11-live/corpus-frozen/2026-07-23-01bbe5ce.md",
+      "/tmp/t11-live/corpus-frozen/2026-07-23-08b95c46.md",
+      "/tmp/t11-live/corpus-frozen/2026-07-23-258fdd9c.md"
+     ],
+     "label": "post-run-2",
+     "nodes": 10934,
+     "required_sweep": 0,
+     "required_sweep_pred10_raw": 3040,
+     "source_urls_distinct": 8451,
+     "sources": 8451,
+     "uri": "docker://:@127.0.0.1:16390/t11_clean"
+    }
+   },
+   "durations_s": {
+    "1-cold": 315,
+    "2-drain": 174
+   },
+   "note": "cold run with ZERO per-file failures -> run-2 zero new nodes/edges proven by query"
+  },
+  "B-convergence-loop": {
+   "graph": "t11_smoke",
+   "runs": {
+    "1-cold": {
+     "directory": "/private/tmp/t11-live/corpus-frozen",
+     "corpus_name": "t11_smoke",
+     "file_count": 5411,
+     "indexed": 5410,
+     "updated": 0,
+     "skipped": 0,
+     "failed": 1,
+     "aborted": 0,
+     "ignored": 0,
+     "errors": [
+      {
+       "file": "2026-07-30-15715f36.md",
+       "error": "db write failure (db): Query timed out",
+       "retryable": true,
+       "cause": "db"
+      }
+     ],
+     "by_kind": {
+      "document": 3040,
+      "agentSession": 2371
+     },
+     "aborted_reason": null
+    },
+    "2-drain": {
+     "directory": "/private/tmp/t11-live/corpus-frozen",
+     "corpus_name": "t11_smoke",
+     "file_count": 5411,
+     "indexed": 0,
+     "updated": 1,
+     "skipped": 5410,
+     "failed": 0,
+     "aborted": 0,
+     "ignored": 0,
+     "errors": [],
+     "by_kind": {
+      "document": 3040,
+      "agentSession": 2371
+     },
+     "aborted_reason": null
+    },
+    "3-stability": {
+     "directory": "/private/tmp/t11-live/corpus-frozen",
+     "corpus_name": "t11_smoke",
+     "file_count": 5411,
+     "indexed": 0,
+     "updated": 0,
+     "skipped": 5411,
+     "failed": 0,
+     "aborted": 0,
+     "ignored": 0,
+     "errors": [],
+     "by_kind": {
+      "document": 3040,
+      "agentSession": 2371
+     },
+     "aborted_reason": null
+    },
+    "4-repair": {
+     "directory": "/private/tmp/t11-live/corpus-frozen",
+     "corpus_name": "t11_smoke",
+     "file_count": 5411,
+     "indexed": 0,
+     "updated": 0,
+     "skipped": 5411,
+     "failed": 0,
+     "aborted": 0,
+     "ignored": 0,
+     "errors": [],
+     "by_kind": {
+      "document": 3040,
+      "agentSession": 2371
+     },
+     "aborted_reason": null
+    }
+   },
+   "checkpoints": {
+    "pre": {
+     "agent_session_events": 0,
+     "corpus": "/tmp/t11-live/corpus-frozen",
+     "corpus_sources": 0,
+     "document_sources": 0,
+     "duplicate_urls": 0,
+     "edges": 0,
+     "event_id_forks": 0,
+     "event_ids_distinct": 0,
+     "events": 0,
+     "hash_pair_sweep": 0,
+     "health": {
+      "duplicates": 6,
+      "file_count": 5411,
+      "indexed_events": 0,
+      "matched": 0,
+      "stale": 0,
+      "unindexed": 5404,
+      "up_to_date": 0
+     },
+     "health_unindexed_sample": [
+      "/tmp/t11-live/corpus-frozen/2026-07-23-01bbe5ce.md",
+      "/tmp/t11-live/corpus-frozen/2026-07-23-020dea8b.md",
+      "/tmp/t11-live/corpus-frozen/2026-07-23-0751215b.md"
+     ],
+     "label": "pre",
+     "nodes": 1,
+     "required_sweep": 0,
+     "required_sweep_pred10_raw": 0,
+     "source_urls_distinct": 0,
+     "sources": 0,
+     "uri": "docker://:@127.0.0.1:16390/t11_smoke"
+    },
+    "post-run-1": {
+     "agent_session_events": 2364,
+     "corpus": "/tmp/t11-live/corpus-frozen",
+     "corpus_sources": 5411,
+     "document_sources": 3039,
+     "duplicate_urls": 0,
+     "edges": 5609,
+     "event_id_forks": 0,
+     "event_ids_distinct": 2364,
+     "events": 2364,
+     "hash_pair_sweep": 0,
+     "health": {
+      "duplicates": 6,
+      "file_count": 5411,
+      "indexed_events": 2364,
+      "matched": 2364,
+      "stale": 0,
+      "unindexed": 3040,
+      "up_to_date": 2364
+     },
+     "health_unindexed_sample": [
+      "/tmp/t11-live/corpus-frozen/2026-07-23-01bbe5ce.md",
+      "/tmp/t11-live/corpus-frozen/2026-07-23-08b95c46.md",
+      "/tmp/t11-live/corpus-frozen/2026-07-23-258fdd9c.md"
+     ],
+     "label": "post-run-1",
+     "nodes": 10933,
+     "required_sweep": 0,
+     "required_sweep_pred10_raw": 3039,
+     "source_urls_distinct": 8450,
+     "sources": 8450,
+     "uri": "docker://:@127.0.0.1:16390/t11_smoke"
+    },
+    "post-run-2": {
+     "agent_session_events": 2364,
+     "corpus": "/tmp/t11-live/corpus-frozen",
+     "corpus_sources": 5411,
+     "document_sources": 3040,
+     "duplicate_urls": 0,
+     "edges": 5610,
+     "event_id_forks": 0,
+     "event_ids_distinct": 2364,
+     "events": 2364,
+     "hash_pair_sweep": 0,
+     "health": {
+      "duplicates": 6,
+      "file_count": 5411,
+      "indexed_events": 2364,
+      "matched": 2364,
+      "stale": 0,
+      "unindexed": 3040,
+      "up_to_date": 2364
+     },
+     "health_unindexed_sample": [
+      "/tmp/t11-live/corpus-frozen/2026-07-23-01bbe5ce.md",
+      "/tmp/t11-live/corpus-frozen/2026-07-23-08b95c46.md",
+      "/tmp/t11-live/corpus-frozen/2026-07-23-258fdd9c.md"
+     ],
+     "label": "post-run-2",
+     "nodes": 10934,
+     "required_sweep": 0,
+     "required_sweep_pred10_raw": 3040,
+     "source_urls_distinct": 8451,
+     "sources": 8451,
+     "uri": "docker://:@127.0.0.1:16390/t11_smoke"
+    },
+    "post-run-3": {
+     "agent_session_events": 2364,
+     "corpus": "/tmp/t11-live/corpus-frozen",
+     "corpus_sources": 5411,
+     "document_sources": 3040,
+     "duplicate_urls": 0,
+     "edges": 5610,
+     "event_id_forks": 0,
+     "event_ids_distinct": 2364,
+     "events": 2364,
+     "hash_pair_sweep": 0,
+     "health": {
+      "duplicates": 6,
+      "file_count": 5411,
+      "indexed_events": 2364,
+      "matched": 2364,
+      "stale": 0,
+      "unindexed": 3040,
+      "up_to_date": 2364
+     },
+     "health_unindexed_sample": [
+      "/tmp/t11-live/corpus-frozen/2026-07-23-01bbe5ce.md",
+      "/tmp/t11-live/corpus-frozen/2026-07-23-08b95c46.md",
+      "/tmp/t11-live/corpus-frozen/2026-07-23-258fdd9c.md"
+     ],
+     "label": "post-run-3",
+     "nodes": 10934,
+     "required_sweep": 0,
+     "required_sweep_pred10_raw": 3040,
+     "source_urls_distinct": 8451,
+     "sources": 8451,
+     "uri": "docker://:@127.0.0.1:16390/t11_smoke"
+    },
+    "post-run-4": {
+     "agent_session_events": 2364,
+     "corpus": "/tmp/t11-live/corpus-frozen",
+     "corpus_sources": 5411,
+     "document_sources": 3040,
+     "duplicate_urls": 0,
+     "edges": 5610,
+     "event_id_forks": 0,
+     "event_ids_distinct": 2364,
+     "events": 2364,
+     "hash_pair_sweep": 0,
+     "health": {
+      "duplicates": 6,
+      "file_count": 5411,
+      "indexed_events": 2364,
+      "matched": 2364,
+      "stale": 0,
+      "unindexed": 3040,
+      "up_to_date": 2364
+     },
+     "health_unindexed_sample": [
+      "/tmp/t11-live/corpus-frozen/2026-07-23-01bbe5ce.md",
+      "/tmp/t11-live/corpus-frozen/2026-07-23-08b95c46.md",
+      "/tmp/t11-live/corpus-frozen/2026-07-23-258fdd9c.md"
+     ],
+     "label": "post-run-4",
+     "nodes": 10934,
+     "required_sweep": 0,
+     "required_sweep_pred10_raw": 3040,
+     "source_urls_distinct": 8451,
+     "sources": 8451,
+     "uri": "docker://:@127.0.0.1:16390/t11_smoke"
+    }
+   },
+   "durations_s": {
+    "1-cold": 435,
+    "2-drain": 225,
+    "3-stability": 126,
+    "4-repair": 143
+   },
+   "note": "cold run carried 1 transient retryable db timeout; repaired by the drain; next two runs delta-zero"
+  }
+ }
+}

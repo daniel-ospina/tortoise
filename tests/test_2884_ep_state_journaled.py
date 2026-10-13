@@ -510,11 +510,17 @@ def test_f4_update_point_belief_props_folded_on_replay(journaled):
 
 
 def test_f5_belief_emitter_writes_a_replayable_record(tmp_path):
-    """The ingest seam's emitter writes a `ConfidenceChanged` record the
-    replay fold reads, and ignores any other type.
+    """The ingest seam's emitter writes BOTH belief write-back families the
+    replay fold reads — `ConfidenceChanged` and (#5380) `EdgeMessageChanged`
+    — and ignores any other type.
 
     #2884 A6: the record now rides `EventAPI.emit_belief` — the ONE ingest
     envelope — instead of a hand-built third shape.
+
+    Non-vacuity (#5380): `TortoiseEP` routes its edge-message emits through
+    this same callable, so before the fix the second assertion failed — the
+    ingest/upgrade EP lane wrote the four edge slots live and journaled none
+    of them.
     """
     from tortoise.api import EventAPI
     from tortoise.ingest import _belief_emitter
@@ -525,14 +531,21 @@ def test_f5_belief_emitter_writes_a_replayable_record(tmp_path):
     emit = _belief_emitter(api)
     emit("ConfidenceChanged", id="p", confidence=0.5,
          posterior_alpha=1.0, posterior_beta=1.0)
+    emit("EdgeMessageChanged", op="set", id="p->q:IMPL", src="p", tgt="q",
+         rel="IMPL", msg_alpha=0.25, msg_beta=0.75)
     emit("NotBelief", id="q")                       # ignored by this seam
     recs = [json.loads(line)
             for line in (tmp_path / "events.jsonl").read_text().splitlines()
             if line.strip()]
-    assert len(recs) == 1, recs
-    assert recs[0]["type"] == "ConfidenceChanged"
+    assert [r["type"] for r in recs] == [
+        "ConfidenceChanged", "EdgeMessageChanged"], recs
     assert recs[0]["id"] == "p"
     assert recs[0]["initiated_by"] == "extractor"
+    # The edge record carries the committed slots on its top-level keys, the
+    # shape the projection fold's `set` arm reads.
+    assert recs[1]["op"] == "set"
+    assert recs[1]["msg_alpha"] == 0.25
+    assert recs[1]["msg_beta"] == 0.75
     pts = fold([
         {"type": "PointAdded", "point": {"id": "p", "content": "x"}},
         recs[0],
@@ -593,6 +606,22 @@ def test_f5_run_ep_propagation_journals_through_the_threaded_api(journaled):
                     "lastDreamedAt")), r
     assert any("posterior_alpha" in r and "posterior_beta" in r
                for r in changed), changed
+
+    # #5380: the SAME seam must carry the edge-message arm. The EP pass above
+    # wrote all four edge slots live; before the fix the allow-list dropped
+    # every `EdgeMessageChanged`, so this lane's journal recorded none and a
+    # rebuild of it lost the edge-level belief state (the P1 this pins).
+    edge_records = [r for r in recs
+                    if r.get("type") == "EdgeMessageChanged"]
+    assert edge_records, (
+        "the ingest EP lane journaled NO EdgeMessageChanged record — the "
+        "edge-message write-backs it committed live are not durable; a "
+        "rebuild of this journal returns a half-restored graph (#5380)")
+    assert any(r.get("op") == "set" and r.get("msg_alpha") is not None
+               and r.get("rel") in ("IMPL", "NAND")
+               for r in edge_records), (
+        f"the ingest EP lane journaled no forward committed message write: "
+        f"{edge_records}")
 
 
 # ── A2: the promote arm's belief props are written AND replayed ───

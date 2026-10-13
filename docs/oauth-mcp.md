@@ -155,9 +155,10 @@ and `oauth_refresh_tokens` until commit, so reads of the token tables block too.
 returned — and **delivery is gated on winning that write**. Every **settle** is a
 CAS on the claim identity (`redemption_state='claimed'` plus `id`, and
 `redemption_id` when the settling view carries it), so only one of *{the owning
-request, a reconciler that took the claim over}* can settle a claim. (The
-`claimed → unclaimed` re-arm is a separate CAS on `code_hash`+`used_at`, made
-in-process by the request that still owns its claim.) `burned` is
+request, a reconciler that took the claim over}* can settle a claim. (There is no
+in-process re-arm to describe: #3025 moved the claim and the mint into ONE
+transaction, so a failure before it commits leaves the code **unclaimed**
+outright — see below.) `burned` is
 written where the residue is terminal: a pre-mint signal (bad PKCE,
 client/redirect/resource mismatch, suspended org, or an expired code), or a
 reconcile past the grace that ATTEMPTED to revoke a live orphan family (the
@@ -196,9 +197,16 @@ linked to it stays live until the retention sweep reaches its TTL.
 **There is no cross-request re-arm.** An earlier revision re-armed a stale
 no-family claim; that mints **two live families for one single-use code** when the
 stalled owner is not in fact dead (the mutating grant is awaited with no
-wall-clock bound, so no grace window proves otherwise). The verified-clean failure
-re-arms **in process only**, via `_restore_code`, where the observation and the
-write are the same request.
+wall-clock bound, so no grace window proves otherwise).
+
+**And as of #3025 there is no in-process re-arm either** — the `redemption_state`
+CAS moved from a separate `used_at` PATCH into `redeem_oauth_code`, which claims
+the code and inserts the pair in ONE transaction. So a failure before that
+transaction commits leaves the code **unclaimed** — the pre-call row, not a state
+anything has to undo — and a retry simply succeeds. `_restore_code` and the
+`claimed → unclaimed` CAS are deleted with the window they compensated for; what
+survives is the `claimed` window created by a *committed-then-undelivered* mint,
+which the reconciler (above) resolves.
 
 Minted rows carry `code_id` (the authorizing `oauth_codes.id`) on both the
 access and refresh tables, and **rotation inherits it**, so "did this code

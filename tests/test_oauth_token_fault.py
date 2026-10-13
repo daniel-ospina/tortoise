@@ -252,34 +252,16 @@ def test_consume_state_unknown_on_raise_and_never_writes():
     assert cp.tables == before              # read-only: no clobber of a concurrent claim
 
 
-def test_restore_code_cas_match_miss_expiry_and_raise():
-    cp = FakeControlPlane()
-    _seed_code(cp, "c", used_at="T1")
-    assert oauth._restore_code(cp, "c", "T1") is True
-    assert cp.tables["oauth_codes"][0]["used_at"] is None
-    cp = FakeControlPlane()
-    _seed_code(cp, "c", used_at="T1")
-    assert oauth._restore_code(cp, "c", "T2") is False                       # CAS miss
-    cp = FakeControlPlane()
-    _seed_code(cp, "c", used_at="T1", expires_in=-10)
-    assert oauth._restore_code(cp, "c", "T1") is False                       # over TTL
-    cp = FakeControlPlane()
-    _seed_code(cp, "c", used_at="T1")
-    cp.fail_query(table="oauth_codes", method="PATCH", select=["used_at", "expires_at"],
-                  times=1, exc=RuntimeError("down"))
-    assert oauth._restore_code(cp, "c", "T1") is False                       # raise → terminal
-
-
 def test_rollback_minted_zero_rows_is_success_not_failure():
     """A never-inserted row must NOT be reported as a failed rollback."""
     cp = FakeControlPlane()
     oauth._rollback_minted(cp, [("oauth_refresh_tokens", "never-existed")], "now",
                            capture=False)                      # must not raise
-    assert oauth._mint_observably_clean(cp, [("oauth_refresh_tokens", "never-existed")]) is True
 
 
 def test_expiry_forms_agree_and_the_iso_encoders_are_offset_form(monkeypatch):
-    """Pin the FORMAT invariant (the fake's `gt` is a lexical compare), not an
+    """Pin the FORMAT invariant (the fake's `gt` is a lexical compare, and
+    `_observe_code`'s expiry check is a `_parse_ts` semantic compare), not an
     absolute timestamp: a hardcoded literal cannot separate the two suffix forms
     because the date/time prefix decides the comparison first. Freeze the clock and
     build a definitely-future instant in both forms."""
@@ -290,11 +272,11 @@ def test_expiry_forms_agree_and_the_iso_encoders_are_offset_form(monkeypatch):
     results = []
     for rendered in forms:
         cp = FakeControlPlane()
-        _seed_code(cp, "c", used_at="T1")
+        _seed_code(cp, "c")
         cp.tables["oauth_codes"][0]["expires_at"] = rendered
-        results.append((oauth._restore_code(cp, "c", "T1"), oauth._consume_state(cp, "c")))
-    assert results[0][0] is True and results[1][0] is True      # future in BOTH forms
-    assert results[0][1] == results[1][1] == "unconsumed"       # lexical and semantic agree
+        results.append(oauth._observe_code(cp, "c")["state"])
+    # lexical (the fake's CAS `gt`) and semantic (`_parse_ts`) agree on both forms
+    assert results[0] == results[1] == "unclaimed"
 
 
 @pytest.fixture
@@ -326,25 +308,27 @@ def capture_server():
 
 
 def test_real_seam_encodes_the_cas_dialect(capture_server):
-    """Drive the REAL SupabaseControlPlane and assert the dialect the CAS relies on.
-    No live PostgREST is needed."""
+    """Drive the REAL SupabaseControlPlane and assert the dialect the SETTLE CAS
+    relies on (#3027's delivery gate — the one PostgREST CAS left in this path, now
+    that the claim itself is SQL inside `redeem_oauth_code`). No live PostgREST is
+    needed."""
     cp = SupabaseControlPlane(url=f"http://127.0.0.1:{capture_server.server_port}",
                               service_key="svc")
-    captured = "2026-01-01T00:00:00+00:00"
-    capture_server.respond = (200, json.dumps(
-        [{"used_at": None, "expires_at": "2099-01-01T00:00:00+00:00"}]).encode())
-    assert oauth._restore_code(cp, "c", captured) is True        # representation non-empty → True
+    capture_server.respond = (200, json.dumps([{"id": 7}]).encode())
+    assert oauth._settle_redemption(
+        cp, {"id": 7, "redemption_state": oauth.REDEMPTION_CLAIMED,
+             "redemption_id": "rid-1"}, oauth.REDEMPTION_MINTED) is True
     cmd, path, headers, _ = capture_server.seen[-1]
     assert cmd == "PATCH"
-    assert "code_hash=eq." in path and "used_at=eq." in path and "expires_at=gt." in path
-    assert "used_at=eq.2026-01-01T00%3A00%3A00%2B00%3A00" in path   # ':'→%3A, '+'→%2B
+    assert "id=eq.7" in path and "redemption_state=eq.claimed" in path
+    assert "redemption_id=eq.rid-1" in path
     assert headers["Prefer"] == "return=representation"
     assert "Content-Profile" not in headers      # pins that no schema profile is switched
 
-    capture_server.respond = (200, json.dumps([{"used_at": None,
-                                                "expires_at": "2099-01-01T00:00:00+00:00"}]).encode())
-    oauth._consume_code(cp, "c")
-    assert "used_at=is.null" in capture_server.seen[-1][1]
+    capture_server.respond = (200, json.dumps(
+        [{"used_at": None, "expires_at": "2099-01-01T00:00:00+00:00"}]).encode())
+    assert oauth._consume_state(cp, "c") == "unconsumed"
+    assert "code_hash=eq." in capture_server.seen[-1][1]
 
 
 @pytest.mark.parametrize("status,payload,expected", [
@@ -358,7 +342,6 @@ def test_real_seam_maps_status_and_unparseable_body(capture_server, status, payl
                               service_key="svc")
     capture_server.respond = (status, payload)
     assert oauth._consume_state(cp, "c") == expected
-    assert oauth._restore_code(cp, "c", "T1") is False
 
 
 def test_empty_body_patch_reads_as_zero_rows(capture_server):
@@ -387,203 +370,267 @@ def test_empty_body_patch_reads_as_zero_rows(capture_server):
                     json_body={"used_at": "T"}) == []   # ← indistinct from the above
 
 
-# ── Task 3: `_issue_tokens` — 3-lane taxonomy, structural no-leak guarantee ──
+# ── Task 3: the mint RPCs — ONE transaction, so there is nothing to unwind ──
+#
+# #3025 deleted `_issue_tokens`'s 3-lane taxonomy (rollback / observe / re-arm)
+# together with the window it compensated for: the claim and the two token INSERTs
+# are now one Postgres function. What is left to pin is that `oauth.py` ROUTES
+# through it, that a lost claim writes NOTHING, and that a raise from inside the
+# emulated transaction rolls the whole thing back — the property the real SQL is
+# built on and the fake must reproduce or every case below is a false negative.
 
-def _mint(cp, **over):
-    return oauth._issue_tokens(cp, client_id="c1", user_id="u1", org_id="t1",
-                               scope="mcp", resource=None, **over)
-
-
-def test_refresh_insert_failure_rolls_back_and_observes():
+def test_redeem_code_rpc_claims_and_mints_in_one_call():
     cp = FakeControlPlane()
-    cp.fail_query(table="oauth_refresh_tokens", method="POST")
-    with pytest.raises(oauth.OAuthMintAborted) as ei:
-        _mint(cp)
-    assert ei.value.recovered is True       # never inserted → nothing to revoke → clean
-    assert _live(cp, "oauth_refresh_tokens") == [] and _live(cp, "oauth_access_tokens") == []
+    _seed_code(cp, "rpc-code")
+    observed = oauth._observe_code(cp, "rpc-code")
+    out = oauth._redeem_code_rpc(cp, observed=observed, code="rpc-code",
+                                 scope="mcp")
+    assert out["_status"] == "minted"
+    assert [fn for fn, _ in cp.rpc_calls] == ["redeem_oauth_code"]
+    row = cp.tables["oauth_codes"][0]
+    assert row["used_at"] is not None and row["redemption_state"] == "claimed"
+    assert row["redemption_id"] == out["_redemption_id"]
+    refresh = cp.tables["oauth_refresh_tokens"][0]
+    access = cp.tables["oauth_access_tokens"][0]
+    assert refresh["id"] == out["_refresh_id"] and access["id"] == out["_access_id"]
+    assert refresh["code_id"] == row["id"] and access["code_id"] == row["id"]
+    assert access["refresh_token_id"] == refresh["id"]
 
 
-def test_access_insert_failure_removes_the_live_orphan():
+def test_redeem_code_rpc_lost_claim_writes_nothing():
+    """A replay (or a concurrent winner) returns `not_claimable` — and the row is
+    untouched. The claim CAS is inside the transaction, so there is no window in
+    which a token row could exist without one."""
     cp = FakeControlPlane()
-    cp.fail_query(table="oauth_access_tokens", method="POST")
-    with pytest.raises(oauth.OAuthMintAborted) as ei:
-        _mint(cp)
-    assert ei.value.recovered is True
-    assert _live(cp, "oauth_refresh_tokens") == []      # TODAY this is the live orphan (matrix row 5)
+    _seed_code(cp, "rpc-replay")
+    observed = oauth._observe_code(cp, "rpc-replay")
+    assert oauth._redeem_code_rpc(cp, observed=observed, code="rpc-replay",
+                                  scope="mcp")["_status"] == "minted"
+    before = copy.deepcopy(cp.tables)
+    again = oauth._redeem_code_rpc(cp, observed=observed, code="rpc-replay",
+                                   scope="mcp")
+    assert again["_status"] == "not_claimable"
+    assert cp.tables == before
 
 
-@pytest.mark.parametrize("table", ["oauth_refresh_tokens", "oauth_access_tokens"])
-def test_mint_write_that_committed_then_lost_its_response_is_rolled_back(table):
+def test_redeem_code_rpc_burn_records_the_terminal_state_and_mints_nothing():
+    """The refusal path: the CALLER validated and refused the code, so the
+    function claims it and records `claimed -> burned` (#3027) — in the same
+    transaction, with no token row."""
     cp = FakeControlPlane()
-    cp.fail_query(table=table, method="POST", after_mutation=True, times=1)
-    with pytest.raises(oauth.OAuthMintAborted) as ei:
-        _mint(cp)
-    assert ei.value.recovered is True
-    assert _live(cp, table) == []           # a live orphan here would be a #3036-class leak
+    _seed_code(cp, "rpc-burn")
+    observed = oauth._observe_code(cp, "rpc-burn")
+    out = oauth._redeem_code_rpc(cp, observed=observed, code="rpc-burn",
+                                 scope="", burn=True)
+    assert out["_status"] == "burned"
+    row = cp.tables["oauth_codes"][0]
+    assert row["used_at"] is not None
+    assert row["redemption_state"] == "burned"
+    assert row["redemption_note"] == "terminal"
+    assert cp.tables.get("oauth_refresh_tokens", []) == []
+    assert cp.tables.get("oauth_access_tokens", []) == []
 
 
-def test_double_fault_reports_recovered_false():
+def test_redeem_code_rpc_mid_function_failure_rolls_the_whole_thing_back():
+    """THE property the transaction exists for, asserted at the seam the unit
+    tests drive: the refresh INSERT succeeds, the access INSERT fails, and the
+    refresh row is GONE and `used_at` is NULL. A fake that applied writes
+    incrementally would make every caller-side abort test vacuous."""
     cp = FakeControlPlane()
-    cp.fail_query(table="oauth_access_tokens", method="POST")
-    cp.fail_query(table="oauth_refresh_tokens", method="PATCH", times=1)   # the rollback
-    with pytest.raises(oauth.OAuthMintAborted) as ei:
-        _mint(cp)
-    assert ei.value.recovered is False
+    _seed_code(cp, "rpc-atomic")
+    observed = oauth._observe_code(cp, "rpc-atomic")
+    cp.fail_query(table="oauth_access_tokens", method="POST", times=1)
+    with pytest.raises(RuntimeError):
+        oauth._redeem_code_rpc(cp, observed=observed, code="rpc-atomic", scope="mcp")
+    assert cp.tables.get("oauth_refresh_tokens", []) == []    # the insert was undone
+    assert cp.tables["oauth_codes"][0]["used_at"] is None
+    assert cp.tables["oauth_codes"][0]["redemption_state"] == "unclaimed"
 
 
-def test_observation_read_failure_is_terminal_never_fail_open():
+def test_rotate_refresh_rpc_rotates_and_revokes_the_previous_access_row():
     cp = FakeControlPlane()
-    cp.fail_query(table="oauth_access_tokens", method="POST")                 # trigger
-    cp.fail_query(table="oauth_access_tokens", method="GET", select=["id"])   # observation
-    with pytest.raises(oauth.OAuthMintAborted) as ei:
-        _mint(cp)
-    assert ei.value.recovered is False
+    rid, _ = _seed_refresh_token(cp, "rt-rpc")
+    prev_access = _seed_access_token(cp, refresh_id=rid)
+    prev = cp.tables["oauth_refresh_tokens"][0]
+    out = oauth._rotate_refresh_rpc(cp, prev=prev)
+    assert out and out["refresh_token"] and out["access_token"]
+    assert [fn for fn, _ in cp.rpc_calls] == ["rotate_oauth_refresh"]
+    assert prev["revoked_at"] is not None
+    new = [t for t in cp.tables["oauth_refresh_tokens"] if t["id"] != rid]
+    assert len(new) == 1 and new[0]["rotated_from"] == rid
+    assert new[0]["revoked_at"] is None
+    old_access = next(t for t in cp.tables["oauth_access_tokens"]
+                      if t["id"] == prev_access)
+    assert old_access["revoked_at"] is not None
+    assert len(_live(cp, "oauth_access_tokens")) == 1     # only the new one is live
 
 
-def test_prev_refresh_observed_revoked_is_recovered_false():
+def test_rotate_refresh_rpc_loser_writes_nothing():
+    """A concurrent rotator won the CAS: the loser gets None and leaves NO orphan
+    pair — the pair is inserted only after the claim wins, inside the transaction."""
     cp = FakeControlPlane()
-    _seed_refresh_token(cp)
-    cp.fail_query(table="oauth_access_tokens", method="POST")       # trigger after the claim
-    cp.tables["oauth_refresh_tokens"][0]["revoked_at"] = "T"        # claim landed
-    with pytest.raises(oauth.OAuthMintAborted) as ei:
-        _mint(cp, prev_refresh=cp.tables["oauth_refresh_tokens"][0])
-    assert ei.value.recovered is False
+    _seed_refresh_token(cp, "rt-loser")
+    prev = cp.tables["oauth_refresh_tokens"][0]
+    assert oauth._rotate_refresh_rpc(cp, prev=prev) is not None
+    before = copy.deepcopy(cp.tables)
+    assert oauth._rotate_refresh_rpc(cp, prev=prev) is None
+    assert cp.tables == before
 
 
-def test_prev_refresh_observation_failure_is_recovered_false():
-    """`_prev_refresh_unclaimed` must fail CLOSED: an unreadable observation is not
-    evidence that the grant is intact, so `recovered` goes False (terminal), never a
-    retryable 503 on an unobserved rotation claim."""
+def test_the_mint_rpcs_are_read_through_rpc_value_not_rpc():
+    """TRANSPORT-SHAPE guard (the #3025 P0).
+
+    `cp.rpc` sends `Prefer: return=minimal`, and PostgREST does NOT echo a
+    VOLATILE SECURITY DEFINER function's body under it — measured in production
+    twice in this repo (`resolve_signup_token`: "in production the echo is ALWAYS
+    empty … the token path 422'd in prod while passing against the fake's
+    bare-string rpc"; and `metering_increment`). Both mint RPCs return a jsonb
+    envelope the caller must READ, so both must go through `cp.rpc_value`
+    (`representation=True`).
+
+    The first draft used `cp.rpc` and passed the entire suite, because the double
+    echoed the body anyway. Two things close that: the double now models the
+    transport (`FakeControlPlane.rpc` returns the body only when
+    `representation=True`), which is why the happy-path tests above would fail on
+    a revert — and this test names the requirement, so a reviewer sees WHY.
+    """
     cp = FakeControlPlane()
-    _seed_refresh_token(cp)
-    cp.fail_query(table="oauth_access_tokens", method="POST")                        # trigger
-    cp.fail_query(table="oauth_refresh_tokens", method="GET", select=["revoked_at"])
-    with pytest.raises(oauth.OAuthMintAborted) as ei:
-        _mint(cp, prev_refresh=cp.tables["oauth_refresh_tokens"][0])
-    assert ei.value.recovered is False
+    seen: list[tuple[str, bool]] = []
+
+    def _spy(fn, body=None, *, representation=False):
+        seen.append((fn, representation))
+        return cp._rpc_dispatch(fn, body)
+
+    cp.rpc = _spy  # type: ignore[method-assign]
+    _seed_refresh_token(cp, "rt-rpcvalue")
+    prev = cp.tables["oauth_refresh_tokens"][0]
+    assert oauth._rotate_refresh_rpc(cp, prev=prev) is not None
+    assert seen == [("rotate_oauth_refresh", True)], seen
+
+    seen.clear()
+    exchange_cp = FakeControlPlane()
+    _seed_base_tables(exchange_cp)
+    exchange_cp.rpc = _spy  # type: ignore[method-assign]
+    code = "rpcvalue-code"
+    verifier = _seed_code(exchange_cp, code)
+    observed = oauth._observe_code(exchange_cp, code)
+    oauth._redeem_code_rpc(exchange_cp, observed=observed, code=code, scope="mcp")
+    assert seen == [("redeem_oauth_code", True)], seen
+    assert verifier  # the seeded verifier is irrelevant to the shape under test
 
 
-def test_loser_both_rollbacks_fail_capture_once(monkeypatch):
-    """I4: the lane-1 loser holds TWO minted rows; both rollback PATCHes failing in one
-    outage must still emit exactly ONE Sentry capture (the second row is log-only)."""
-    calls = []
-    monkeypatch.setattr("tortoise.sentry.capture_exception", lambda exc, **kw: calls.append(exc))
+def test_an_unreadable_mint_envelope_is_not_collapsed_to_not_claimable():
+    """An UNREADABLE envelope must not be read as `not_claimable` (the #3025 P1).
+
+    `not_claimable` is a POSITIVE assertion that the function wrote nothing, and
+    a `None`/non-dict result cannot support it: the transaction may have
+    committed and only the response been lost. The repo's precedent for exactly
+    this envelope is `session_key_mint` (`supabase_control.py`: "the mint may
+    ALREADY have committed"), which probes instead of asserting. So the two must
+    be distinguished: a parsed `not_claimable` returns `None`, anything else
+    raises and leaves the caller's READ-ONLY probe to decide.
+
+    Both RPCs are pinned: the guard is symmetric (`_rotate_refresh_rpc` returns
+    None / raises RuntimeError; `_redeem_code_rpc` returns a status dict /
+    raises RuntimeError) — and both are asserted on a NON-dict envelope as well
+    as on `None`, so a bare scalar body cannot slip through as an unknown status.
+    """
+    for unreadable in (None, "minted", ["minted"]):
+        cp = FakeControlPlane()
+        _seed_refresh_token(cp, "rt-unreadable")
+        prev = cp.tables["oauth_refresh_tokens"][0]
+        cp.rpc_value = lambda fn, body=None, _r=unreadable: _r  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="unreadable envelope"):
+            oauth._rotate_refresh_rpc(cp, prev=prev)
+        latest = cp.tables["oauth_refresh_tokens"][-1]
+        assert latest["id"] == prev["id"], (
+            "the presented row is untouched — the raise reports UNKNOWN, not a rotation")
+
     cp = FakeControlPlane()
-    row_id, _ = _seed_refresh_token(cp, "old-2rows")
-    cp.query("oauth_refresh_tokens", method="PATCH", select=["id"],
-             filters=[("id", "eq", row_id)], json_body={"revoked_at": "T"})   # pre-claim → loser
-    def sel_less(t, m, sel, f):
-        return m == "PATCH" and not sel
-
-    cp.fail_query(table="oauth_refresh_tokens", method="PATCH", match=sel_less)
-    cp.fail_query(table="oauth_access_tokens", method="PATCH", match=sel_less)
-    with pytest.raises(oauth.OAuthError) as ei:
-        _mint(cp, prev_refresh={"id": row_id})
-    assert ei.value.status == 400 and ei.value.error == "invalid_grant"
-    assert len(calls) == 1
+    _seed_base_tables(cp)
+    code = "unreadable-code"
+    _seed_code(cp, code)
+    observed = oauth._observe_code(cp, code)
+    for unreadable in (None, "minted", ["minted"]):
+        cp.rpc_value = lambda fn, body=None, _r=unreadable: _r  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="unreadable envelope"):
+            oauth._redeem_code_rpc(cp, observed=observed, code=code, scope="mcp")
+    assert cp.tables["oauth_codes"][0]["used_at"] is None
 
 
-def test_loser_rollback_failure_still_raises_invalid_grant(caplog, monkeypatch):
-    """Pin lane 1's rollback-failure path. The fault MATCHES BY SHAPE (select-less
-    PATCH), never by a hand-written filter literal — and the autouse `_no_silent_faults`
-    guard fails this test if the injector never fires."""
-    calls = []
-    monkeypatch.setattr("tortoise.sentry.capture_exception", lambda exc, **kw: calls.append(exc))
+def test_rotate_refresh_rpc_mid_function_failure_does_not_revoke_the_presented_token():
+    """The atomicity drill for the rotation: the revoke of the NEW pair's sibling
+    fails, so the presented token must be left UNREVOKED and no new row may
+    survive — the client's retry then simply succeeds."""
     cp = FakeControlPlane()
-    row_id, _ = _seed_refresh_token(cp, "old")
-    cp.query("oauth_refresh_tokens", method="PATCH", select=["id"],
-             filters=[("id", "eq", row_id)], json_body={"revoked_at": "T"})   # pre-claim → loser
-    # Match the ROLLBACK by its select-less shape; a bare match would be taken by the
-    # claim PATCH (select=["id"]) and land in lane 2 instead.
-    cp.fail_query(table="oauth_refresh_tokens", method="PATCH",
-                  match=lambda t, m, sel, f: m == "PATCH" and not sel, times=1)
-    with caplog.at_level(logging.WARNING, logger="tortoise.oauth"), \
-         pytest.raises(oauth.OAuthError) as ei:
-        _mint(cp, prev_refresh={"id": row_id})
-    assert ei.value.status == 400 and ei.value.error == "invalid_grant"   # NOT OAuthMintAborted
-    assert len(calls) == 1 and "loser rollback" in caplog.text   # lane 1 captured exactly once
+    _seed_refresh_token(cp, "rt-atomic")
+    prev = cp.tables["oauth_refresh_tokens"][0]
+    cp.fail_query(table="oauth_access_tokens", method="POST", times=1)
+    with pytest.raises(RuntimeError):
+        oauth._rotate_refresh_rpc(cp, prev=prev)
+    assert prev["revoked_at"] is None
+    assert len(cp.tables["oauth_refresh_tokens"]) == 1
+    assert cp.tables.get("oauth_access_tokens", []) == []
+
+# ── Task 4: `exchange_auth_code` — the RPC seam + read-only classification ──
+#
+# #3025 replaced the claim PATCH with `redeem_oauth_code`. Two failure shapes now
+# exist at that seam and they must not be conflated:
+#   * the call RAISED (nothing committed, or the response was lost) — the
+#     RETRYABILITY of the answer is decided by a READ-ONLY probe, never by the
+#     exception itself;
+#   * the call RETURNED `not_claimable` — a replay or a lost race, always terminal.
+
+def _fail_redeem(cp, **kw):
+    """Fault the mint RPC at the SEAM. `after_commit=False` = the call never ran;
+    `after_commit=True` = it committed and the response was lost."""
+    cp.fail_rpc("redeem_oauth_code", **kw)
 
 
-def test_prev_access_revoke_failure_does_not_fail_a_delivered_pair(caplog):
-    cp = FakeControlPlane()
-    rid, _ = _seed_refresh_token(cp, "acc-parent")
-    acc = _seed_access_token(cp, refresh_id=rid)
-    cp.fail_query(table="oauth_access_tokens", method="PATCH",
-                  match=lambda t, m, sel, f: m == "PATCH" and not sel, times=1)   # lane 3
-    with caplog.at_level(logging.WARNING, logger="tortoise.oauth"):
-        out = _mint(cp, prev_access_id=acc)
-    assert out["access_token"] and out["refresh_token"]          # delivered
-    assert "prev-access revoke failed" in caplog.text            # the fault DID fire
-
-
-@pytest.mark.parametrize("second_fault", ["none", "one_rollback", "both_rollbacks"])
-def test_one_capture_per_abort(monkeypatch, second_fault):
-    calls = []
-    monkeypatch.setattr("tortoise.sentry.capture_exception",
-                        lambda exc, **kw: calls.append(exc))
-    cp = FakeControlPlane()
-    cp.fail_query(table="oauth_access_tokens", method="POST", times=1)          # trigger
-    if second_fault in ("one_rollback", "both_rollbacks"):
-        cp.fail_query(table="oauth_refresh_tokens", method="PATCH",
-                      match=lambda t, m, sel, f: m == "PATCH" and not sel, times=1)
-    if second_fault == "both_rollbacks":
-        cp.fail_query(table="oauth_access_tokens", method="PATCH",
-                      match=lambda t, m, sel, f: m == "PATCH" and not sel, times=1)
-    with pytest.raises(oauth.OAuthMintAborted):
-        _mint(cp)
-    assert len(calls) == 1          # counts, not presence — the panic case would be 3
-
-
-# ── Task 4: `exchange_auth_code` — consumed + attempted_consume ─────────────
-
-def _fail_consume(cp, **kw):
-    """The atomic-claim PATCH: matched by SHAPE (a PATCH whose select includes
-    code_challenge), never by a hand-written 11-column list — the exact drift three
-    review cycles flagged. `_restore_code`'s PATCH has a different 2-column select and
-    is never caught by this predicate."""
-    cp.fail_query(table="oauth_codes", method="PATCH",
-                  match=lambda t, m, sel, f: m == "PATCH" and bool(sel) and "code_challenge" in sel,
-                  **kw)
-
-
-def test_consume_patch_failure_uncommitted_is_retryable(fault_client):
+def test_redeem_rpc_raise_pre_commit_is_503_and_the_retry_works(fault_client):
     tc, cp = fault_client
     v = _seed_code(cp, "c1", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
-    _fail_consume(cp)                                # shape-matched, see the rule above
+    _fail_redeem(cp, after_commit=False)
     r1 = _post_code(tc, cp, "c1", v)
     assert r1.status_code == 503 and r1.json()["error"] == "temporarily_unavailable"
     assert cp.tables["oauth_codes"][0]["used_at"] is None       # observed unconsumed
     assert _post_code(tc, cp, "c1", v).status_code == 200       # retry works
 
 
-def test_consume_patch_failure_committed_is_terminal_not_retryable(fault_client):
+def test_redeem_rpc_committed_then_lost_response_is_terminal_not_retryable(fault_client):
+    """The transaction committed and the response never arrived. The probe finds the
+    code consumed, so the answer is TERMINAL — the residue is `claimed`, which is
+    the reconciler's to resolve, and a retry must not be invited."""
     tc, cp = fault_client
     v = _seed_code(cp, "c2", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
-    _fail_consume(cp, after_mutation=True)
+    _fail_redeem(cp, after_commit=True)
     r = _post_code(tc, cp, "c2", v)
     assert r.status_code == 400 and r.json()["error"] == "invalid_grant"   # NOT 503
 
 
-def test_consume_state_unknown_is_terminal(fault_client):
+def test_unobservable_consume_probe_is_terminal(fault_client):
     tc, cp = fault_client
     v = _seed_code(cp, "c3", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
-    _fail_consume(cp)                                                     # the claim PATCH
+    _fail_redeem(cp, after_commit=False)                                 # the call never ran
     cp.fail_query(table="oauth_codes", method="GET",
-                  select=["used_at", "expires_at"], times=1)              # the observation
+                  select=["used_at", "expires_at"], times=1)             # the probe
     assert _post_code(tc, cp, "c3", v).json()["error"] == "invalid_grant"
 
 
 def test_client_auth_failure_during_outage_is_503_not_invalid_grant(fault_client):
     tc, cp = fault_client
     v = _seed_code(cp, "c4", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
-    cp.fail_query(table="oauth_clients", method="GET", times=1)     # pure read, pre-consume
+    cp.fail_query(table="oauth_clients", method="GET", times=1)     # pure read, pre-claim
     r = _post_code(tc, cp, "c4", v)
     assert r.status_code == 503
     assert cp.tables["oauth_codes"][0]["used_at"] is None            # grant NOT burned
 
 
-def test_post_consume_team_read_failure_restores_the_code_and_retry_succeeds(fault_client):
-    """matrix row 3 — TODAY: 500, used_at stays set, retry → 400."""
+def test_pre_claim_org_read_failure_writes_nothing_and_the_retry_succeeds(fault_client):
+    """The org-usable read now happens BEFORE the claim (it used to follow it), so a
+    control-plane failure there cannot leave a claimed code behind — there is no
+    re-arm step because there is nothing to re-arm.
+    """
     tc, cp = fault_client
     v = _seed_code(cp, "c5", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
     # Scope the fault to the PRODUCTION call shape. A table-wide
@@ -604,55 +651,37 @@ def test_post_consume_team_read_failure_restores_the_code_and_retry_succeeds(fau
 
 
 @pytest.mark.parametrize("table", ["oauth_refresh_tokens", "oauth_access_tokens"])
-def test_mint_abort_recovered_true_is_503_and_the_code_redeems_on_retry(fault_client, table):
+def test_failure_inside_the_mint_transaction_is_503_and_the_code_redeems_on_retry(
+        fault_client, table):
+    """A fault INSIDE the emulated transaction: the function rolls back, so the probe
+    finds the code unconsumed and the answer is a retryable 503. The fake's rollback
+    is what makes this a real assertion rather than a tautology — see
+    `test_redeem_code_rpc_mid_function_failure_rolls_the_whole_thing_back`."""
     tc, cp = fault_client
     v = _seed_code(cp, f"m-{table}", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
     cp.fail_query(table=table, method="POST", times=1)
     r1 = _post_code(tc, cp, f"m-{table}", v)
     assert r1.status_code == 503 and r1.json()["error"] == "temporarily_unavailable"
+    assert cp.tables["oauth_codes"][0]["used_at"] is None       # the rollback held
     assert _live(cp, "oauth_refresh_tokens") == [] and _live(cp, "oauth_access_tokens") == []
     assert _post_code(tc, cp, f"m-{table}", v).status_code == 200
 
 
-def test_mint_abort_recovered_false_is_terminal_invalid_grant(fault_client):
-    tc, cp = fault_client
-    v = _seed_code(cp, "m-f", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
-    cp.fail_query(table="oauth_access_tokens", method="POST", times=1)
-    cp.fail_query(table="oauth_refresh_tokens", method="PATCH", times=1)
-    r = _post_code(tc, cp, "m-f", v)
-    assert r.status_code == 400 and r.json()["error"] == "invalid_grant"
-    assert cp.tables["oauth_codes"][0]["used_at"] is not None
-
-
-def test_mint_abort_with_restore_raise_is_terminal_and_leaves_used_at_set(fault_client):
-    tc, cp = fault_client
-    v = _seed_code(cp, "m-cas", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
-    cp.fail_query(table="oauth_access_tokens", method="POST", times=1)      # recovered=True
-    cp.fail_query(table="oauth_codes", method="PATCH",
-                  select=["used_at", "expires_at"], times=1)                # restore RAISES
-    r = _post_code(tc, cp, "m-cas", v)
-    assert r.status_code == 400 and cp.tables["oauth_codes"][0]["used_at"] is not None
-
-
-def test_mint_abort_with_unobservable_restore_is_terminal(monkeypatch, fault_client):
-    """A restore that matched ZERO rows (a genuine CAS miss — the value another worker
-    wrote is no longer ours) is unobservable: `_restore_code` returns False and the
-    endpoint must go terminal, leaving `used_at` set. The raise case above and the
-    CAS-miss unit test in Task 2 cover the other halves."""
-    tc, cp = fault_client
-    v = _seed_code(cp, "m-casmiss", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
-    cp.fail_query(table="oauth_access_tokens", method="POST", times=1)      # abort, recovered=True
-    monkeypatch.setattr("tortoise.oauth._restore_code", lambda *a, **k: False)   # CAS miss → False
-    r = _post_code(tc, cp, "m-casmiss", v)
-    assert r.status_code == 400 and r.json()["error"] == "invalid_grant"
-    assert cp.tables["oauth_codes"][0]["used_at"] is not None
-
-
-def test_bad_pkce_never_re_arms_the_code(fault_client):
+def test_bad_pkce_burns_the_code_and_mints_nothing(fault_client):
+    """A validation failure after the claim is recorded as the terminal
+    `claimed -> burned` outcome (#3027) INSIDE the same transaction as the claim —
+    and no token row is written. The old shape reached this state with a second,
+    independent PATCH after the claim; #3025 makes it one statement pair.
+    """
     tc, cp = fault_client
     _seed_code(cp, "p1", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
     r = _post_code(tc, cp, "p1", verifier="wrong-verifier-wrong-verifier-wrong-verifier")
-    assert r.status_code == 400 and cp.tables["oauth_codes"][0]["used_at"] is not None
+    assert r.status_code == 400 and r.json()["error"] == "invalid_grant"
+    row = cp.tables["oauth_codes"][0]
+    assert row["used_at"] is not None and row["redemption_state"] == "burned"
+    assert cp.tables.get("oauth_refresh_tokens", []) == []
+    assert cp.tables.get("oauth_access_tokens", []) == []
+
 
 
 # ── Task 5: `refresh_grant` — wrap the pre-mint reads, map the abort, unmask ──
@@ -677,12 +706,10 @@ def test_bad_pkce_never_re_arms_the_code(fault_client):
     # _assert_org_usable; the boot sweep's org readers use other select shapes.
     ("organizations", ["suspended_at", "tier"], None),
     ("org_memberships", None, None),     # membership_for_user_org — S4 call site #4
-    # `prev_access` and the retention sweep BOTH GET oauth_access_tokens with
-    # select=["id"]; only the filter separates them, so this arm needs a shape
-    # predicate, not a select literal.
-    ("oauth_access_tokens", None,
-     lambda t, m, sel, f: m == "GET" and list(sel or []) == ["id"]
-     and any(c == "refresh_token_id" for c, _, _ in (f or []))),
+    # NOTE: there is deliberately NO `oauth_access_tokens` arm here. #3025 removed
+    # `refresh_grant`'s `prev_access` SELECT — the rotation RPC revokes the previous
+    # family's access rows by `refresh_token_id` inside its own transaction, so the
+    # read no longer exists to fail.
 ])
 def test_refresh_pre_mint_read_failure_is_503_not_500(fault_client, table, select, match):
     tc, cp = fault_client
@@ -714,65 +741,227 @@ def test_refresh_suspension_family_revoke_failure_still_returns_403(fault_client
     assert _post_refresh(tc, cp, rt).status_code == 403
 
 
-def test_refresh_mint_abort_recovered_true_is_503_and_retry_succeeds(fault_client):
+def test_failure_inside_the_rotation_is_503_and_the_retry_succeeds(fault_client):
+    """A fault inside the rotation transaction rolls it back, so the presented token
+    is still unrevoked and the retry simply works."""
     tc, cp = fault_client
     _rid, rt = _seed_refresh_token(cp, "rt-ok")
-    cp.fail_query(table="oauth_access_tokens", method="POST", times=1)      # mint abort
+    cp.fail_query(table="oauth_access_tokens", method="POST", times=1)
     r1 = _post_refresh(tc, cp, rt)
     assert r1.status_code == 503 and r1.json()["error"] == "temporarily_unavailable"
-    r2 = _post_refresh(tc, cp, rt)                                          # retry
+    assert cp.tables["oauth_refresh_tokens"][0]["revoked_at"] is None
+    assert len(cp.tables["oauth_refresh_tokens"]) == 1          # no orphan pair
+    r2 = _post_refresh(tc, cp, rt)                              # retry
     assert r2.status_code == 200 and "refresh_token" in r2.json()
 
 
-def test_refresh_mint_abort_recovered_false_is_terminal_invalid_grant(fault_client):
+def test_rotation_rpc_raise_pre_commit_is_503_and_retry_succeeds(fault_client):
+    """The rotation call never ran. The presented token is still unrevoked, the
+    READ-ONLY probe sees exactly that, and the answer is retryable rather than
+    terminal — the probe, not the exception, decides."""
     tc, cp = fault_client
-    _rid, rt = _seed_refresh_token(cp, "rt-bad")
-    cp.fail_query(table="oauth_access_tokens", method="POST", times=1)
-    cp.fail_query(table="oauth_refresh_tokens", method="PATCH",
-                  match=lambda t, m, sel, f: m == "PATCH" and not sel, times=1)   # rollback fails
-    r = _post_refresh(tc, cp, rt)
-    assert r.status_code == 400 and r.json()["error"] == "invalid_grant"
-
-
-def test_refresh_claim_raise_pre_commit_is_503_and_retry_succeeds(fault_client):
-    """matrix row 6 — the claim PATCH raises pre-commit. Both minted rows exist and the OLD
-    token is still unrevoked, so `recovered` depends on `_prev_refresh_unclaimed`."""
-    tc, cp = fault_client
-    rid, rt = _seed_refresh_token(cp, "rt-6")
-    cp.fail_query(table="oauth_refresh_tokens", method="PATCH", select=["id"], times=1)
+    _, rt = _seed_refresh_token(cp, "rt-6")
+    cp.fail_rpc("rotate_oauth_refresh", after_commit=False)
     r1 = _post_refresh(tc, cp, rt)
     assert r1.status_code == 503 and r1.json()["error"] == "temporarily_unavailable"
-    # every MINTED refresh row is revoked (the seeded previous one must stay live)
-    minted = [r for r in cp.tables["oauth_refresh_tokens"] if r["id"] != rid]
-    assert minted and all(r["revoked_at"] is not None for r in minted)
-    assert _post_refresh(tc, cp, rt).status_code == 200       # the old token still works
+    assert cp.tables["oauth_refresh_tokens"][0]["revoked_at"] is None
+    assert len(cp.tables["oauth_refresh_tokens"]) == 1          # nothing was minted
+    assert _post_refresh(tc, cp, rt).status_code == 200         # the old token still works
 
 
-def test_refresh_claim_committed_then_lost_response_is_terminal_and_no_live_family(fault_client):
-    """The ambiguous-claim lockout shape (a): the claim landed, our rollback un-revokes
-    the new pair, `_prev_refresh_unclaimed` sees revoked_at set → recovered=False."""
+def test_rotation_committed_then_lost_response_is_terminal(fault_client):
+    """The rotation transaction COMMITTED and its response was lost: the presented
+    token is revoked and a live pair exists that the client never saw. Only a
+    re-authorization recovers, so the answer is TERMINAL.
+
+    The live-but-undelivered pair is deliberately NOT cleaned up: #3025's own
+    Out-of-scope paragraph puts response-delivery loss on a redemption/idempotency
+    state, and the rotation carries no such state (that is the code grant's). A
+    retry fails on the revoked token, so inviting one would be the untruthful
+    signal #2863 removed.
+    """
     tc, cp = fault_client
     _rid, rt = _seed_refresh_token(cp, "rt-amb")
-    cp.fail_query(table="oauth_refresh_tokens", method="PATCH", select=["id"],
-                  times=1, after_mutation=True)              # claim commits, response lost
+    cp.fail_rpc("rotate_oauth_refresh", after_commit=True)
     r = _post_refresh(tc, cp, rt)
     assert r.status_code == 400 and r.json()["error"] == "invalid_grant"
+    assert cp.tables["oauth_refresh_tokens"][0]["revoked_at"] is not None
+    assert len(_live(cp, "oauth_refresh_tokens")) == 1      # the undelivered new pair
 
 
-def test_row7_prev_access_revoke_failure_delivers_a_USABLE_pair(fault_client, caplog):
-    """The fix's headline (matrix row 7): the client must receive a pair it can use."""
+def test_prev_access_revoke_failure_aborts_the_rotation_and_the_retry_succeeds(
+        fault_client):
+    """#3025 folds the previous access-row revoke INTO the rotation transaction (it
+    used to be a best-effort trailing write), so a failure there now aborts the
+    whole rotation instead of leaving a live-but-undelivered pair beside a
+    rotated-away grant. The client's retry simply succeeds — the same
+    user-visible promise the old "lane 3" test made ("the client must receive a
+    pair it can use"), reached by a strictly safer route."""
     tc, cp = fault_client
     rid, rt = _seed_refresh_token(cp, "rt-7")
-    _seed_access_token(cp, refresh_id=rid)                     # the row lane 3 will revoke
+    _seed_access_token(cp, refresh_id=rid)          # the row the rotation will revoke
     cp.fail_query(table="oauth_access_tokens", method="PATCH",
-                  match=lambda t, m, sel, f: m == "PATCH" and not sel, times=1)   # lane 3 only
-    with caplog.at_level(logging.WARNING, logger="tortoise.oauth"):
-        r1 = _post_refresh(tc, cp, rt)
-    assert r1.status_code == 200 and "refresh_token" in r1.json()
-    assert _live(cp, "oauth_access_tokens")                    # a NEW live pair exists
-    r2 = _post_refresh(tc, cp, r1.json()["refresh_token"])      # the delivered pair ROTATES
-    assert r2.status_code == 200
-    assert "prev-access revoke failed" in caplog.text
+                  match=lambda t, m, sel, f: m == "PATCH" and not sel, times=1)
+    r1 = _post_refresh(tc, cp, rt)
+    assert r1.status_code == 503 and r1.json()["error"] == "temporarily_unavailable"
+    assert cp.tables["oauth_refresh_tokens"][0]["revoked_at"] is None   # rolled back
+    assert len(_live(cp, "oauth_access_tokens")) == 1     # the old access row is intact
+    r2 = _post_refresh(tc, cp, rt)                         # the retry ROTATES
+    assert r2.status_code == 200 and "refresh_token" in r2.json()
+    assert len(_live(cp, "oauth_access_tokens")) == 1     # only the new pair is live
+
+
+def test_the_retryability_probe_fails_closed_when_it_cannot_read(fault_client):
+    """The probe that decides retryable-503 vs terminal-400 is FAIL-CLOSED.
+
+    `_prev_refresh_unclaimed` is the only thing standing between a failed rotation
+    and the untruthful retry signal #2863 removed: an unrevoked row means the whole
+    transaction rolled back (a retry is safe); a row it cannot READ is NOT evidence
+    of that, so it must NOT be advertised as retryable. Pinning this arm matters
+    because the deleted `test_prev_refresh_observation_failure_is_recovered_false`
+    covered the same rule for #2863's observation and nothing replaced it: flipping
+    the `except` to a fail-open `return True` leaves every OAuth test green
+    (measured by mutation during test review).
+    """
+    tc, cp = fault_client
+    _, rt = _seed_refresh_token(cp, "rt-probe-blind")
+    cp.fail_rpc("rotate_oauth_refresh", after_commit=False)
+    # The mint fails BEFORE dispatch (nothing ran), and then the PROBE read fails
+    # too — so the retryability of a state nobody could observe must be refused.
+    # Matched by shape, not by a hand-written select literal.
+    cp.fail_query(table="oauth_refresh_tokens", method="GET",
+                  match=lambda t, m, sel, f: m == "GET" and sel == ["revoked_at"],
+                  times=1)
+    r = _post_refresh(tc, cp, rt)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_grant", r.text
+    assert cp.tables["oauth_refresh_tokens"][0]["revoked_at"] is None
+
+
+def test_a_concurrent_rotator_loser_answers_a_terminal_400_at_the_endpoint(
+        monkeypatch, fault_client):
+    """A rotation whose CAS matched zero rows must reach the boundary as a TERMINAL
+    400 — not a 500 and not a 503.
+
+    The wrapper-level race is pinned by `test_rotation_race_single_winner`, which
+    calls `_rotate_refresh_rpc` DIRECTLY — so a regression that let `None` fall
+    through `refresh_grant`'s `if out is None:` would change the user-visible answer
+    (500 → the connector retries a dead grant; 503 → it stampedes) with no test
+    noticing. This arm drives it through /oauth/token.
+    """
+    tc, cp = fault_client
+    _, rt = _seed_refresh_token(cp, "rt-loser-endpoint")
+    monkeypatch.setattr(oauth, "_rotate_refresh_rpc", lambda _cp, *, prev: None)
+    r = _post_refresh(tc, cp, rt)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_grant", r.text
+    # The loser's transaction wrote NOTHING: the presented row is untouched and
+    # there is no second family.
+    assert len(cp.tables["oauth_refresh_tokens"]) == 1
+    assert cp.tables["oauth_refresh_tokens"][0]["revoked_at"] is None
+
+
+def test_a_lost_claim_race_is_retried_exactly_once(monkeypatch, fault_client):
+    """`not_claimable` while the row is STILL `unclaimed` means the claim was lost
+    to a request that has not settled — the grant is retried ONCE against the fresh
+    row rather than answered terminally.
+
+    Both halves are pinned: the retry HAPPENS (otherwise a benign race becomes a
+    spurious invalid_grant), and it happens EXACTLY once (an unbounded retry loop
+    here is a mint loop against a degraded control plane). Untested before this
+    arm — the test-review pass confirmed no test entered the `continue`.
+    """
+    tc, cp = fault_client
+    verifier = _seed_code(cp, "lost-claim")
+    real = oauth._redeem_code_rpc
+    calls = []
+
+    def _once(inner, **kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            return {"_status": "not_claimable", "_redemption_id": "stolen"}
+        return real(inner, **kw)
+
+    monkeypatch.setattr(oauth, "_redeem_code_rpc", _once)
+    r = _post_code(tc, cp, "lost-claim", verifier)
+    assert r.status_code == 200 and "access_token" in r.json(), r.text
+    assert len(calls) == 2, calls
+
+
+def test_a_failed_refusal_burn_is_log_only_and_still_answers_the_oauth_error(
+        monkeypatch, fault_client):
+    """A control-plane failure while RECORDING a refusal must not turn a coherent
+    OAuth error into a 500 — and, per the `_log_and_capture` owner table, is
+    log-only: it must NOT page Sentry and must not consume the request's one
+    capture budget.
+
+    The code simply stays `unclaimed`, so a corrected retry still succeeds — which
+    the second request asserts.
+    """
+    calls = []
+    monkeypatch.setattr("tortoise.sentry.capture_exception",
+                        lambda exc, **kw: calls.append(kw))
+    tc, cp = fault_client
+    verifier = _seed_code(cp, "burn-fails")
+    cp.fail_rpc("redeem_oauth_code", after_commit=False)
+    r = _post_code(tc, cp, "burn-fails", "v" * 60)      # wrong PKCE → refusal
+    assert r.status_code == 400 and r.json()["error"] == "invalid_grant", r.text
+    assert calls == [], calls
+    row = cp.tables["oauth_codes"][0]
+    assert row["used_at"] is None and row["redemption_state"] == "unclaimed", row
+    # The burn never landed, so the CORRECT verifier still redeems.
+    r2 = _post_code(tc, cp, "burn-fails", verifier)
+    assert r2.status_code == 200 and "access_token" in r2.json(), r2.text
+
+
+def test_the_refresh_mint_failure_path_captures_exactly_once(monkeypatch, fault_client):
+    """The I4 invariant at the capture site #3025 INTRODUCES.
+
+    `refresh_grant`'s mint handler owns the capture that `_issue_tokens` lane 2
+    owned before this change (`where="refresh_grant mint"`). The parametrized
+    test above cannot reach it — it faults the PRE-mint reads — so without this
+    arm the invariant is unpinned at exactly the site the change moved it, which
+    is the same class PR #3097 review cycle 1 finding #5 fixed for the older
+    arms. The `where` tag is asserted for that same reason: a bare count of 1
+    would also hold if the capture came from the global unhandled-exception
+    handler (which tags method/path) instead.
+    """
+    calls = []
+
+    def _cap(exc, **kw):
+        calls.append(kw)
+
+    monkeypatch.setattr("tortoise.sentry.capture_exception", _cap)
+    tc, cp = fault_client
+    _, rt = _seed_refresh_token(cp, "cap-mint-rt")
+    cp.fail_rpc("rotate_oauth_refresh", after_commit=False)
+    r = _post_refresh(tc, cp, rt)
+    assert r.status_code == 503 and r.json()["error"] == "temporarily_unavailable"
+    assert len(calls) == 1, calls
+    assert calls[0].get("tags", {}).get("where") == "refresh_grant mint", calls[0]
+
+
+def test_an_invalid_resource_burns_the_code_like_every_other_refusal(fault_client):
+    """`parse_resource`'s 400 is a TERMINAL refusal like the rest, and it is raised
+    AFTER the code is claimed, so it must BURN.
+
+    The pre-#3025 code burned every non-retryable `OAuthError` raised after the
+    claim (`if consumed and not isinstance(exc, OAuthTemporarilyUnavailable)`).
+    In the #3025 shape the refusal is recorded in the same transaction as the
+    claim, so if `parse_resource` were left OUTSIDE the collector the burn would
+    depend on WHICH helper raised — the sibling `resource-mismatch` burning while
+    `invalid_resource` left the row `unclaimed`. Both branches are pinned here.
+    """
+    tc, cp = fault_client
+    verifier = _seed_code(cp, "bad-resource")
+    r = _post_code(tc, cp, "bad-resource", verifier, resource="not-a-valid-resource-uri")
+    assert r.status_code == 400 and r.json()["error"] == "invalid_resource", r.text
+    row = cp.tables["oauth_codes"][0]
+    assert row["redemption_state"] == "burned", row
+    assert row["redemption_note"] == "terminal", row
+    assert _live(cp, "oauth_access_tokens") == []
+    assert _live(cp, "oauth_refresh_tokens") == []
+    # And the burn is terminal: the same code cannot be exchanged afterwards.
+    r2 = _post_code(tc, cp, "bad-resource", verifier, resource=None)
+    assert r2.status_code == 400 and r2.json()["error"] == "invalid_grant", r2.text
 
 
 @pytest.mark.parametrize("table", ["oauth_clients", "organizations"])
@@ -880,45 +1069,60 @@ def test_transient_503_conventions_agree_on_status():
         "error_description": "Temporary control-plane failure — retry."}
 
 
-# ── Control-plane round-trip envelope (#2848) ───────────────────────────────
+# ── Control-plane round-trip envelope (#2848, re-measured for #3025) ────────
 #
 # #3669 made the token grants loop-SAFE (the whole grant is offloaded as a unit).
-# It did not make them FAST: both grants are still a SERIES of PostgREST round
-# trips, so a control plane that is slow-but-alive MULTIPLIES into request
-# latency and can cross the OAuth budget without anything being "down".
+# It did not make them FAST: both grants are still a SERIES of round-trips, so a
+# control plane that is slow-but-alive MULTIPLIES into request latency and can
+# cross the OAuth budget without anything being "down".
 #
-# PINNED HERE (all MEASURED; each test asserts its exact sequence):
+# PINNED HERE (all MEASURED; each test asserts its exact sequence). The #3025
+# column is the point of this block: moving the claim + the two token INSERTs
+# into ONE RPC did not just make the mint atomic, it REMOVED round-trips — the
+# code grant falls 6 -> 5 and the refresh grant 9 -> 5, because the sequence of
+# PostgREST writes is now a single function call.
 #
-#   authorization_code, registry client ........ 6 round-trips  (10 s budget)
-#   authorization_code, mint ABORT ............. 10 round-trips (10 s budget)
-#   authorization_code, LOST-DELIVERY SETTLE ... 11 round-trips (10 s budget)
-#   refresh_token .............................. 9 round-trips  (30 s budget)
-#   refresh_token, mint ABORT .................. 12 round-trips (30 s budget)
+#   authorization_code, registry client ........  6 ->  5  (10 s budget)
+#   authorization_code, mint ABORT ............. 10 ->  5  (10 s budget)
+#   authorization_code, LOST-DELIVERY SETTLE ... 11 ->  7  (10 s budget)
+#   refresh_token ..............................  9 ->  5  (30 s budget)
+#   refresh_token, mint ABORT .................. 12 ->  6  (30 s budget)
 #
-# These are NOT claimed to be every series the endpoint can produce. The FAILURE
-# rows are all longer than the success rows, and longer than the naive "abort"
-# intuition: unwinding a half-minted pair costs extra round-trips, and the
-# lost-delivery path additionally pays a settle PATCH that never succeeds — so the
-# worst case on the code grant is reached exactly when the control plane is
-# already slow. Two different outcomes ride on those lengths (the mint-abort
-# answers a RETRYABLE 503; the lost-settle a terminal "re-run authorization"),
-# which is why the count and the outcome are pinned separately.
+# ⛔ The code grant's failure paths are NO LONGER longer than its success path —
+# the old property ("unwinding a half-minted pair costs extra round-trips, so the
+# worst case lands exactly when the control plane is already slow") is GONE BY
+# CONSTRUCTION, not by mistake. There is nothing to unwind: a failure inside the
+# mint rolls the transaction back, so the code grant's only extra cost is the
+# READ-ONLY retryability probe.
+#
+# The refresh abort is the one exception, and it is +1 rather than +0: the
+# `_prev_refresh_unclaimed` classification probe runs AFTER the poisoned-scope
+# branch in `refresh_grant` (that branch raises terminal `invalid_grant` itself,
+# so it never reaches the probe), which means the mint's own try/except pays one
+# extra READ. The code grant's probe is the LAST call of its series and does not
+# extend it. A failure path that is longer than the success path by exactly one
+# bounded read is not the pre-#3025 hazard — the hazard was unbounded
+# compensation against a degraded control plane. The one remaining LONGER path
+# is the LOST-DELIVERY SETTLE (7), which pays the settle PATCH plus the two
+# compensating revokes — and it is TERMINAL, so it cannot be retried into a
+# stampede.
 #
 # METHOD NOTE — a shape MEASURED and deliberately NOT pinned, recorded so the
 # next lane does not re-derive it:
 #
-#   * A CIMD client's ("Claude connector") token exchange is ALSO 6. A CIMD row
-#     cannot reach /oauth/token for the first time: both doors that mint a code
+#   * A CIMD client's ("Claude connector") token exchange is the same shape. A CIMD
+#     row cannot reach /oauth/token for the first time: both doors that mint a code
 #     (GET /oauth/authorize, POST /oauth/consent) call `resolve_client`, which is
 #     what provisions the row. Measured in the production order —
-#     `validate_authorize_params` (3 round-trips) then `exchange_auth_code` (6).
-#     The 8 you get by calling `exchange_auth_code` with a hand-seeded code is an
+#     `validate_authorize_params` then `exchange_auth_code`. The extra round-trip
+#     you get by calling `exchange_auth_code` with a hand-seeded code is an
 #     ARTIFACT of skipping that prerequisite, not a shape the token budget sees;
 #     the provisioning cost is real but is paid on the authorize/consent doors,
 #     which are not on the token budget.
 #
 # These tests pin the serial COUNT and the additivity, and deliberately assert no
 # wall-clock SLI, which would be a load-dependent flake rather than a contract.
+
 
 
 class _RoundTripCounter:
@@ -945,7 +1149,10 @@ class _RoundTripCounter:
         self.calls: list[str] = []
 
     def _trip(self, op, fn, *a, **k):
-        table = a[0] if a and isinstance(a[0], str) else (k.get("fn") or "?")
+        # The kwarg spelling counts as much as the positional one: a refactor to
+        # `cp.query(table=...)` must not record `query:?` (PR #7565 review).
+        table = a[0] if a and isinstance(a[0], str) else (
+            k.get("table") or k.get("fn") or "?")
         method = k.get("method") or ""
         self.calls.append(f"{op}:{table}{':' + method if method else ''}")
         if self.per_call_s:
@@ -962,6 +1169,11 @@ class _RoundTripCounter:
         return self._trip("rpc_value", self._inner.rpc_value, *a, **k)
 
     def __getattr__(self, name):
+        # Never proxy dunders or the wrapped plane's own private state: a proxy
+        # that forwards `__deepcopy__`/`__getstate__`/`_inner` silently changes
+        # how the object is copied or pickled (PR #7565 review).
+        if name.startswith("__") or name.startswith("_"):
+            raise AttributeError(name)
         return getattr(self._inner, name)
 
 
@@ -990,23 +1202,21 @@ def _assert_serial_additivity(counter, t0, elapsed):
 
 
 def test_authorization_code_exchange_is_a_serial_series_of_round_trips():
-    """The authorization-code exchange makes SIX serial PostgREST round-trips
-    (MEASURED), which is what makes Anthropic's 10 s token budget a function of
-    the control plane's per-call latency rather than of our own code.
+    """The authorization-code exchange makes FIVE serial round-trips (MEASURED),
+    down from six: #3025 replaced the claim PATCH + two token INSERTs with ONE
+    `redeem_oauth_code` call, so the write sequence is no longer a series at all.
 
-    #3669 offloaded the grant as a unit, which protects the event LOOP. It does
-    not reduce latency: these calls are in SERIES, so a control plane that is
-    slow-but-alive (this issue's observation #2: 12-25 s on adjacent endpoints)
-    multiplies into the request. At ~1.7 s per round-trip, six in series is
-    already past the 10 s budget with nothing actually "down".
+    Series: client auth read, the code read (validation + classification), the
+    org-usable read, the mint RPC, the #3027 delivery settle.
 
+    The remaining arm is per-call latency, so this still bounds Anthropic's 10 s
+    token budget as a function of the control plane rather than of our code.
     Measured by calling ``exchange_auth_code`` DIRECTLY rather than through the
     endpoint, deliberately: the app shares ONE control-plane client with
-    background maintenance (the retention sweep reaches ``account_deletions``),
-    so a wall-clock delay in an endpoint-level test lets that work interleave
-    and the counter then reports calls that are not this request's (observed:
-    11 vs 6). A direct call has no event loop, so the series is exactly the
-    exchange's own.
+    background maintenance (the retention sweep reaches ``account_deletions``), so
+    a wall-clock delay in an endpoint-level test lets that work interleave and the
+    counter then reports calls that are not this request's. A direct call has no
+    event loop, so the series is exactly the exchange's own.
     """
     cp = FakeControlPlane()
     _seed_base_tables(cp)
@@ -1015,12 +1225,11 @@ def test_authorization_code_exchange_is_a_serial_series_of_round_trips():
 
     # THE SERIES — each entry is one serial round-trip on the request's path.
     assert counter.calls == [
-        "query:oauth_clients",         # _verify_client_auth
-        "query:oauth_codes:PATCH",     # the atomic claim (consume)
-        "query:organizations",         # _assert_org_usable
-        "query:oauth_refresh_tokens:POST",   # _issue_tokens (1 of 2)
-        "query:oauth_access_tokens:POST",    # _issue_tokens (2 of 2)
-        "query:oauth_codes:PATCH",     # the settle
+        "query:oauth_clients",            # _verify_client_auth
+        "query:oauth_codes",              # _observe_code (validate + classify)
+        "query:organizations",            # _assert_org_usable
+        "rpc_value:redeem_oauth_code",          # claim + BOTH inserts, one transaction
+        "query:oauth_codes:PATCH",        # _settle_redemption (the delivery gate)
     ], counter.calls
 
     counter.per_call_s = 0.05
@@ -1029,31 +1238,24 @@ def test_authorization_code_exchange_is_a_serial_series_of_round_trips():
     _exchange_auth_code(counter, cp, "series-code-2")
     elapsed = time.perf_counter() - t0
     assert counter.calls == [
-        "query:oauth_clients", "query:oauth_codes:PATCH", "query:organizations",
-        "query:oauth_refresh_tokens:POST", "query:oauth_access_tokens:POST",
-        "query:oauth_codes:PATCH",
+        "query:oauth_clients", "query:oauth_codes", "query:organizations",
+        "rpc_value:redeem_oauth_code", "query:oauth_codes:PATCH",
     ], counter.calls
     _assert_serial_additivity(counter, t0, elapsed)
 
 
-def test_refresh_grant_is_a_longer_serial_series_of_round_trips():
-    """The REFRESH grant is the LONGER series on the same endpoint — MEASURED
-    here as NINE serial round-trips — and it is the one no test pinned at all.
+def test_refresh_grant_is_now_the_SHORTEST_serial_series():
+    """The refresh grant makes FIVE serial round-trips — down from NINE. #3025 did
+    two things here: the claim + both INSERTs + the previous-access revoke became
+    one `rotate_oauth_refresh` call, and the `prev_access` SELECT disappeared
+    entirely (the RPC revokes by `refresh_token_id`, so the caller no longer has to
+    read the rows first).
 
-    It is on Anthropic's 30 s budget rather than the 10 s the code grant gets,
-    which is the only reason a series this long is tolerable; at the issue's
-    observed per-call latency it is still the closer of the two to its edge.
-    Pinned so that a round-trip ADDED here (a quota or membership read, say) is
-    visible, which is the same silent-regression failure the code-grant leg
-    exists for.
+    Series: client auth, the presented token's row, the org-usable read, the
+    membership read, the rotation RPC.
 
-    The sibling access row MATTERS and is seeded deliberately: ``_issue_tokens``
-    always mints refresh+access as a pair, so any refresh token this AS issued
-    has a live sibling with ``refresh_token_id == refresh_id``. That is what makes
-    ``refresh_grant``'s ``prev_access`` lookup non-empty, which is what adds the
-    final ``oauth_access_tokens:PATCH``. Seeding the refresh row alone yields 8
-    and leaves that round-trip unpinned (verified by mutation: deleting the
-    prev-access revoke still passed at 8).
+    Pinned so that a round-trip ADDED here (a quota read, say) is visible — the
+    same silent-regression failure the code-grant leg exists for.
     """
     cp = FakeControlPlane()
     _seed_base_tables(cp)
@@ -1066,19 +1268,15 @@ def test_refresh_grant_is_a_longer_serial_series_of_round_trips():
                   "client_id": _CLIENT_ID}, "https://tortoise.example")
     assert out.get("access_token"), out
 
-    n = len(counter.calls)
     assert counter.calls == [
-        "query:oauth_clients",              # _verify_client_auth
-        "query:oauth_refresh_tokens",       # the presented token's row
-        "query:organizations",              # org still usable
-        "query:org_memberships",            # membership not lapsed
-        "query:oauth_access_tokens",        # the family it belongs to
-        "query:oauth_refresh_tokens:POST",  # mint the rotated refresh token
-        "query:oauth_access_tokens:POST",   # mint the new access token
-        "query:oauth_refresh_tokens:PATCH",  # revoke the presented token
-        "query:oauth_access_tokens:PATCH",  # revoke the sibling access token
+        "query:oauth_clients",           # _verify_client_auth
+        "query:oauth_refresh_tokens",    # the presented token's row
+        "query:organizations",           # org still usable
+        "query:org_memberships",         # membership not lapsed
+        "rpc_value:rotate_oauth_refresh",      # claim + mint + revoke, one transaction
     ], counter.calls
 
+    n = len(counter.calls)
     counter.per_call_s = 0.05
     counter.calls.clear()
     rid2, legacy = _seed_refresh_token(cp, "series-rt-2")
@@ -1094,11 +1292,11 @@ def test_refresh_grant_is_a_longer_serial_series_of_round_trips():
 
 
 def _fail_access_token_mint(cp):
-    """Make the access-token INSERT raise: the mint-abort path.
+    """Make the access-token INSERT raise: a failure INSIDE the mint transaction.
 
-    Patches the instance rather than using ``fail_query`` deliberately — this
-    test wants the fault, not the ``_FAULT_CPS`` accounting the other tests in
-    this file are built around.
+    Patches the instance rather than using ``fail_query`` deliberately — this test
+    wants the fault to persist, not the ``_FAULT_CPS`` accounting the other tests
+    in this file are built around. The emulated RPC rolls the whole thing back.
     """
     original = cp.query
 
@@ -1110,20 +1308,22 @@ def _fail_access_token_mint(cp):
     cp.query = _q
 
 
-def test_abort_path_is_longer_than_the_success_series_on_both_grants():
-    """The series that fires under a DEGRADED control plane is LONGER than the
-    success series — MEASURED as 10 for the code grant (against 6 on success) and
-    12 for refresh (against 9) — and both answer a RETRYABLE 503.
+def test_abort_series_is_bounded_on_both_grants():
+    """A mint failure is no longer UNBOUNDED — and on the code grant it is no
+    longer longer than the success path at all (MEASURED 5 vs 5); that is the
+    #3025 change: a failure inside the transaction ROLLS BACK, so there is no
+    half-minted pair to unwind and no extra PATCHes to pay for.
 
-    This is the opposite of the intuition the success legs invite: the abort path
-    does strictly MORE work (``_rollback_minted`` / ``_mint_observably_clean`` to
-    unwind the half-minted pair, plus ``_restore_code`` on the code grant) at
-    exactly the moment the control plane is already slow — and then tells the
-    client to retry the whole exchange. A bound sized from 6 or 9 would be a bound
-    for the healthy path only.
+    The old shape was the opposite and was pinned deliberately (10 and 12): the
+    unwinding cost landed exactly when the control plane was already slow.
 
-    NOT the maximum on this grant: the LOST-DELIVERY settle path measured 11 (see
-    the file header).
+    The refresh grant pays exactly ONE extra read (6 vs 5) — the
+    `_prev_refresh_unclaimed` probe that classifies the error as retryable or
+    terminal. That is bounded and READ-ONLY, which is the property that matters;
+    the pin below is written so an extra round-trip cannot hide behind it.
+
+    Both grants still answer a RETRYABLE 503 (the transaction rolled back, so the
+    retry is safe).
     """
     # ── authorization_code ──
     cp = FakeControlPlane()
@@ -1140,16 +1340,11 @@ def test_abort_path_is_longer_than_the_success_series_on_both_grants():
             "https://tortoise.example")
 
     assert counter.calls == [
-        "query:oauth_clients",               # _verify_client_auth
-        "query:oauth_codes:PATCH",           # the atomic claim
-        "query:organizations",               # _assert_org_usable
-        "query:oauth_refresh_tokens:POST",   # mint 1 of 2 ...
-        "query:oauth_access_tokens:POST",    # ... mint 2 of 2 FAILS
-        "query:oauth_refresh_tokens:PATCH",  # rollback: revoke the minted refresh
-        "query:oauth_access_tokens:PATCH",   # rollback: revoke any access row
-        "query:oauth_refresh_tokens",        # rollback: re-read to confirm
-        "query:oauth_access_tokens",         # rollback: re-read to confirm
-        "query:oauth_codes:PATCH",           # _restore_code (a retry can work)
+        "query:oauth_clients",           # _verify_client_auth
+        "query:oauth_codes",             # _observe_code
+        "query:organizations",           # _assert_org_usable
+        "rpc_value:redeem_oauth_code",         # the mint — FAILS inside, rolls back
+        "query:oauth_codes",             # _consume_state: the READ-ONLY retry probe
     ], counter.calls
 
     # ── refresh_token ──
@@ -1170,33 +1365,28 @@ def test_abort_path_is_longer_than_the_success_series_on_both_grants():
         "query:oauth_refresh_tokens",
         "query:organizations",
         "query:org_memberships",
-        "query:oauth_access_tokens",
-        "query:oauth_refresh_tokens:POST",
-        "query:oauth_access_tokens:POST",    # FAILS
-        "query:oauth_refresh_tokens:PATCH",
-        "query:oauth_access_tokens:PATCH",
-        "query:oauth_refresh_tokens",
-        "query:oauth_access_tokens",
-        "query:oauth_refresh_tokens",
+        "rpc_value:rotate_oauth_refresh",      # the rotation — FAILS inside, rolls back
+        "query:oauth_refresh_tokens",    # _prev_refresh_unclaimed: the retry probe
     ], counter2.calls
 
-    assert len(counter.calls) == 10 and len(counter2.calls) == 12, (
+    assert len(counter.calls) == 5 and len(counter2.calls) == 6, (
         f"the abort series changed shape: {len(counter.calls)} / {len(counter2.calls)}")
+    assert counter2.calls[-1] == "query:oauth_refresh_tokens", (
+        "the refresh abort's +1 must be the READ-ONLY retryability probe, not a "
+        f"write: {counter2.calls[-1]!r}")
 
 
-def test_lost_settle_makes_the_longest_code_grant_series(monkeypatch):
-    """The code grant's LONGEST series — MEASURED as 11 — is the LOST-DELIVERY
-    SETTLE, and it is longer than the pinned mint-abort series because it pays the
-    settle PATCH that the abort path never reaches.
+def test_lost_settle_is_still_the_longest_code_grant_series(monkeypatch):
+    """The code grant's LONGEST series is still the LOST-DELIVERY SETTLE, MEASURED
+    as 7 (down from 11): the five-call success series, then two revokes to
+    compensate the pair.
 
-    When ``_issue_tokens`` SUCCEEDS but ``_settle_redemption`` loses its CAS
-    (#3027's reconciler race — a concurrent attempt taking the claim), the request
-    has already minted the pair, so it must roll the pair back AND still record the
-    outcome: 6 round-trips INCLUDING the lost settle, then 4 to compensate the
-    pair, then 1 ``_restore_code`` to leave a retry possible. This is the shape the
-    degraded control plane produces, not a contrived race: the claim grace is 60 s,
-    and at the per-call latency #2848 observed (12-25 s) six serial calls already
-    exceed it, so losing the settle is the EXPECTED outcome.
+    When the mint RPC SUCCEEDS but ``_settle_redemption`` loses its CAS (#3027's
+    reconciler race — a concurrent attempt taking the claim), the request has
+    already minted the pair, so it must revoke it and still record the outcome.
+    This is the shape a degraded control plane produces, not a contrived race: the
+    claim grace is 60 s, and at the per-call latency #2848 observed six serial
+    calls already exceed it.
 
     The OUTCOME is pinned, not just the count, and the assertion is written to
     distinguish the two: ``OAuthTemporarilyUnavailable`` SUBCLASSES ``OAuthError``
@@ -1205,8 +1395,8 @@ def test_lost_settle_makes_the_longest_code_grant_series(monkeypatch):
     authorization rather than retry — which is the difference between a connector
     re-authorizing and a connector stampeding a degraded control plane.
 
-    The loss is forced by running the REAL settle (so its PATCH is counted, which
-    is the whole point) and then reporting the CAS as lost.
+    ⛔ The lost-delivery pair is deliberately NOT cleaned up here — the reconciler
+    owns it, and a transaction cannot fix a lost response (#3025's Out-of-scope).
     """
     cp = FakeControlPlane()
     _seed_base_tables(cp)
@@ -1236,17 +1426,13 @@ def test_lost_settle_makes_the_longest_code_grant_series(monkeypatch):
         f"the lost-settle path must be terminal, not retryable; got {type(ei.value).__name__}")
 
     assert counter.calls == [
-        "query:oauth_clients",               # _verify_client_auth
-        "query:oauth_codes:PATCH",           # the atomic claim
-        "query:organizations",               # _assert_org_usable
-        "query:oauth_refresh_tokens:POST",   # mint 1 of 2
-        "query:oauth_access_tokens:POST",    # mint 2 of 2
-        "query:oauth_codes:PATCH",           # the settle — LOST, and paid anyway
+        "query:oauth_clients",           # _verify_client_auth
+        "query:oauth_codes",             # _observe_code
+        "query:organizations",           # _assert_org_usable
+        "rpc_value:redeem_oauth_code",         # claim + BOTH inserts
+        "query:oauth_codes:PATCH",       # _settle_redemption — LOST, and paid anyway
         "query:oauth_refresh_tokens:PATCH",  # compensate the pair
         "query:oauth_access_tokens:PATCH",
-        "query:oauth_refresh_tokens",        # observe the compensation
-        "query:oauth_access_tokens",
-        "query:oauth_codes:PATCH",           # _restore_code
     ], counter.calls
-    assert len(counter.calls) == 11, (
+    assert len(counter.calls) == 7, (
         f"the lost-settle series changed shape: {len(counter.calls)}")

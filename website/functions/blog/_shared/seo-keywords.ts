@@ -1,262 +1,120 @@
-// Tortoise blog SEO keyword map — single source of truth for the AI SEO
-// generator (#1861) and future content-pipeline automation.
+// Tortoise blog SEO keyword CONSUMER — the stable import surface.
 //
-// Port of ElDato `supabase/functions/_shared/seo-keywords.ts` (methodology only —
-// keywords are Tortoise-domain-specific, see issue #1862).
-//
-// Contract (issue #1862 + #1861 scoping):
-//   - Keys = the starter tag taxonomy (12 tags, documented in
-//     docs/research/2026-08-28-tortoise-blog-keywords/research.md §1).
-//   - Values = ACTIONABLE keyword arrays only. Tiers, volumes, difficulty and
-//     source confidence live in the master doc — do NOT duplicate them here
-//     (single source of truth for generation).
-//   - Tags are free-form text[] on blog_posts (≤10 per post, no migration) —
-//     this module defines the canonical starter vocabulary the generator keys on.
-//   - Content-driven fallback: the generator's buildPrompt falls back to
-//     content-derived keywords when a post's tags have no entry here.
-//   - English-only v1 (blog epic deferred i18n).
+// SPLIT (#8293): the keyword DATA lives in `keywords.ts`; this module is the
+// code that reads it. Import from HERE (`keywordsFor` / `primaryKeyword` /
+// `ensureKeyword`), never from `keywords.ts` directly — that is what makes a
+// keyword-research pass a data-only change. Mirrors the split
+// `daniel-ospina/DMeer` ships, so both blogs stay structurally identical.
 //
 // Usage in a Pages Function (import path is depth-dependent — this module lives
 // at blog/_shared/):
 //   import { keywordsFor } from "./_shared/seo-keywords.ts";   // consumer at blog/ root
 //   import { keywordsFor } from "../_shared/seo-keywords.ts";  // consumer in blog/api/
 //   const kw = [...new Set(tags.flatMap((t) => keywordsFor(t)))];
-//   // ^ dedupe: protects against accidental cross-tag duplicates when a post
-//   // carries multiple tags from this vocabulary. (The §4.4/§4.5 orientation
-//   // mirror pair are DISTINCT strings — Set does not collapse them; each tag
-//   // intentionally emits its own orientation.) Content fallback when [].
-//
-// ZERO-DEPENDENCY (plain TS, no imports) — the _shared/ layout is an intentional
-// port of the ElDato `supabase/functions/_shared/` convention (the repo's own
-// convention is underscore-prefixed helper FILES at the function-dir root, e.g.
-// blog/_lib.ts). No bundling; underscore-prefixed paths are not routed.
 
-// Starter tag taxonomy — the documented 12-tag vocabulary (research.md §1). The
-// narrow key type makes a typo'd tag a compile error instead of a silent
-// content-fallback; runtime free-form tags still fall through to the fallback.
-type TagName =
-  | "agent-memory"
-  | "epistemic-memory"
-  | "knowledge-graph"
-  | "semantic-memory"
-  | "episodic-memory"
-  | "mcp"
-  | "self-hosting"
-  | "retrieval"
-  | "belief-propagation"
-  | "sessions"
-  | "memory-systems"
-  | "provenance";
+export { TAG_KEYWORDS } from "./keywords.ts";
+export type { TagKeywords, TagName } from "./keywords.ts";
 
-export type TagKeywords = Partial<Record<TagName, string[]>>;
-
-export const TAG_KEYWORDS: TagKeywords = {
-  // Umbrella category: memory systems for AI agents across sessions.
-  "agent-memory": [
-    "long-term memory for ai agents",
-    "what is agent memory",
-    "ai agent memory",
-    "memory for llm agents",
-    "llm agent memory",
-    "how to build agent memory",
-    "agent memory architecture",
-    "rag vs agent memory",
-    "agent memory framework",
-    "open source agent memory",
-    "agent memory benchmark",
-    "agent memory comparison",
-    "persistent memory for agents",
-    "memory for autonomous agents",
-    "ai memory system",
-    "agents forget context",
-    // value-prop layer (§4.13): the conceded pain + outcome language
-    "context rot",
-    "context rot ai agents",
-    "memory drift",
-    "ai agent memory drift",
-    "why ai agents forget",
-    "why do agents forget",
-    "agent gets dumber over time",
-    "ai agents get worse over time",
-    "agent autonomy",
-    "autonomous agent memory",
-    "increase agent autonomy",
-    "smarter ai agents",
-    "make ai agents smarter",
-    "improve agent performance with memory",
-    "self-evolving agents",
-    "self-improving agents",
-  ],
-
-  // Tortoise core differentiator: memory as BELIEF — claims, evidence,
-  // confidence, contradiction. Strategic tier (category creation): near-zero
-  // current volume, near-zero competition, high intent.
-  "epistemic-memory": [
-    "epistemic memory",
-    "epistemic memory ai",
-    "epistemic memory vs semantic memory",
-    "what is epistemic memory",
-    "belief graph",
-    "belief graph database",
-    "knowledge graph with confidence",
-    "memory that tracks belief",
-    "agent memory with confidence",
-    "epistemic knowledge graph",
-    "claims and evidence memory",
-    // value-prop layer (§4.13): the learning/stays-current promise
-    "stale ai memory",
-    "summarization drift",
-    "memory that learns",
-    "self-evolving agent memory",
-    "self-correcting memory",
-    "agents learn from experience",
-    "agent improves over time",
-    "continual learning agents",
-  ],
-
-  // Graph-structured memory: knowledge graphs, graph DBs, GraphRAG, graph vs vector.
-  "knowledge-graph": [
-    "knowledge graph for ai agents",
-    "knowledge graph rag",
-    "graph rag",
-    "graphrag vs rag",
-    "knowledge graph vs vector database",
-    "graph database vs vector database",
-    "graph based agent memory",
-    "knowledge graph memory",
-    "graph memory for agents",
-    "temporal knowledge graph",
-    "knowledge graph for llms",
-    "graph database for agent memory",
-    "knowledge graph tutorial",
-    "multi-hop reasoning",
-  ],
-
-  // Fact/concept memory (Tulving's semantic system).
-  "semantic-memory": [
-    "semantic memory ai",
-    "semantic memory vs episodic memory",
-    "semantic memory for agents",
-    "semantic memory llm",
-    "what is semantic memory",
-    "fact memory ai",
-    "knowledge base for agents",
-    "semantic knowledge graph",
-  ],
-
-  // Event/timeline memory (Tulving's episodic system) — sessions, occurrences.
-  "episodic-memory": [
-    "episodic memory ai",
-    "episodic memory vs semantic memory",
-    "episodic memory for agents",
-    "event log for agents",
-    "what is episodic memory",
-    "session memory ai",
-    "conversation history for agents",
-  ],
-
-  // Model Context Protocol — servers, memory servers, tool integration.
-  // Head MCP terms skipped (protocol-owned SERP); intersection terms only.
-  "mcp": [
-    "mcp memory server",
-    "mcp server for agents",
-    "mcp knowledge graph",
-    "mcp server memory",
-    "mcp memory",
-    "mcp vs api",
-    "how to build an mcp server",
-    "mcp server tutorial",
-  ],
-
-  // Running Tortoise on your own infra — Docker, FalkorDB, privacy/compliance.
-  "self-hosting": [
-    "self-hosted agent memory",
-    "self-hosted ai memory",
-    "falkordb",
-    "falkordb vs neo4j",
-    "what is falkordb",
-    "run ai memory locally",
-    "local llm memory",
-    "docker agent memory",
-    "self-hosted rag",
-  ],
-
-  // Getting memory back — hybrid search, RAG, vector search, multi-hop.
-  "retrieval": [
-    "hybrid search",
-    "vector search vs hybrid search",
-    "hybrid retrieval",
-    "reciprocal rank fusion",
-    "semantic search for agents",
-    "multi-hop retrieval",
-    "context engineering",
-    "retrieval for llm agents",
-    "vector database for agents",
-    "agent context retrieval",
-    "why agents hallucinate",
-  ],
-
-  // The engine: EP (expectation propagation), confidence, uncertainty.
-  "belief-propagation": [
-    "belief propagation",
-    "expectation propagation",
-    "belief propagation graph",
-    "confidence score ai",
-    "uncertainty in knowledge graphs",
-    "probabilistic knowledge graph",
-    "evidence propagation",
-    "belief propagation for agents",
-    "expectation propagation agents",
-    "confidence propagation",
-  ],
-
-  // How memory gets written — session capture, conversation indexing, mining.
-  "sessions": [
-    "session capture ai",
-    "conversation mining",
-    "agent session logging",
-    "mine conversations for insights",
-    "episodic memory capture",
-    "meeting memory ai",
-  ],
-
-  // Landscape/comparison content — Mem0 vs Graphiti vs Letta vs Cognee vs Tortoise.
-  "memory-systems": [
-    "mem0 vs letta",
-    "mem0 vs zep",
-    "mem0 vs graphiti",
-    "letta vs zep",
-    "zep vs graphiti",
-    "cognee vs mem0",
-    "letta vs mem0",
-    "agent memory tools",
-    "best agent memory",
-    "agent memory platforms",
-    "open source agent memory comparison",
-    "memory layer for agents",
-  ],
-
-  // Where memory came from — source attribution, auditability, trust.
-  "provenance": [
-    "ai provenance",
-    "provenance for ai agents",
-    "source attribution ai",
-    "traceable ai memory",
-    "auditable ai memory",
-    "where did the ai get that",
-    "agent memory audit trail",
-    "ai memory privacy",
-    "data provenance ai",
-    "trust in ai agents",
-    "explainable ai memory",
-  ],
-};
+import { TAG_KEYWORDS } from "./keywords.ts";
 
 // Consumer entry point for free-form tags. blog_posts tags are free-form
-// text[] (≤10 per post, no migration), so lookups must tolerate any string:
+// text[] (<=10 per post, no migration), so lookups must tolerate any string:
 // unknown tags fall through to the content-derived fallback at runtime ([]).
-// TagName-keyed direct lookups stay narrow so a typo'd starter tag remains a
-// compile error (see TAG_KEYWORDS above).
 export function keywordsFor(tag: string): string[] {
-  return TAG_KEYWORDS[tag as keyof typeof TAG_KEYWORDS] ?? [];
+  return TAG_KEYWORDS[tag.toLowerCase().trim() as keyof typeof TAG_KEYWORDS] ?? [];
+}
+
+/**
+ * THE primary keyword for a post: the first entry of the first tag that has a
+ * keyword list. Deterministic, so the same post always yields the same primary
+ * and the meta check below is reproducible.
+ *
+ * Best practice is ONE main keyword per article, not nine (#8293): a single
+ * primary that must appear in the title and description, plus variants used
+ * naturally in the body. Returns null when no tag maps — the caller then falls
+ * back to content-derived terms and skips the check.
+ */
+export function primaryKeyword(tags: string[]): string | null {
+  for (const tag of tags) {
+    const first = keywordsFor(tag)[0];
+    if (first) return first;
+  }
+  return null;
+}
+
+/**
+ * THE primary keyword for a request, given what the CALLER supplied and what
+ * the MODEL generated (#8320).
+ *
+ * The caller's tags win when present — they are an explicit statement of
+ * intent. When the caller supplied none (the pipeline's normal shape: title +
+ * body), the model's own generated tags are used instead, because otherwise the
+ * primary keyword is null for every such call: the prompt has nothing to ask
+ * for, the repair has nothing to enforce, and `keyword_ok` would report success
+ * while checking nothing.
+ *
+ * Kept as a named function rather than inlined in the handler so the ordering
+ * it encodes is testable without driving the whole HTTP handler.
+ */
+export function resolvePrimaryKeyword(suppliedTags: string[], generatedTags: string[]): string | null {
+  return primaryKeyword(suppliedTags.length > 0 ? suppliedTags : generatedTags);
+}
+
+/** Normalize for a contains-check: lowercase, punctuation -> spaces. */
+export function normalizeForMatch(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+/** True when `text` already carries `keyword` (word-boundary, case-insensitive). */
+export function containsKeyword(text: string, keyword: string): boolean {
+  if (!keyword) return true;
+  const needle = normalizeForMatch(keyword);
+  // A keyword that normalises to nothing (punctuation only) carries no term.
+  if (!needle) return true;
+  // WORD-BOUNDARY, not substring (#8293). Normalisation maps every
+  // non-alphanumeric run to a single space, and `needle` is therefore
+  // [a-z0-9 ] only — no regex metacharacters — so matching on `\b` is exact:
+  // "agent memory" matches "agent-memory systems", but NOT "agents memory"
+  // or "xagent memory". The claim is "verbatim", so the check must be too.
+  return new RegExp(`\\b${needle}\\b`).test(normalizeForMatch(text));
+}
+
+/**
+ * Return `text` with `keyword` guaranteed to be present.
+ *
+ * VERIFY, DON'T HOPE (#8293): the generator's prompt already asks for the
+ * keyword, but a prompt is a request, not a guarantee — the previous behaviour
+ * passed keywords to the model as "suggested ... to weave in" and never checked
+ * the result. This repairs deterministically instead: if the keyword is absent
+ * it is FRONT-LOADED (search engines weight the start of a title, and a
+ * description is ad copy that earns the click), then trimmed to `max` at a word
+ * boundary.
+ *
+ * If the keyword itself is longer than `max`, the keyword alone is returned —
+ * a truncated keyword is worse than an over-long field, and the caller's own
+ * length constraint decides what to do with it.
+ *
+ * Contract boundary: this guarantees the result is within `max` **for an input
+ * that already is**. Truncating an over-limit input is the length contract's job
+ * (seo-constraints.ts); doing it here would silently mask a field that is too
+ * long for a reason that has nothing to do with the keyword.
+ */
+export function ensureKeyword(text: string, keyword: string | null, max: number): string {
+  if (!keyword) return text;
+  if (containsKeyword(text, keyword)) return text;
+  // Nothing to prefix: the keyword IS the field, with no dangling separator.
+  if (!text.trim()) return keyword;
+  if (keyword.length >= max) return keyword;
+  const candidate = `${keyword}: ${text}`.replace(/\s+/g, " ").trim();
+  if (candidate.length <= max) return candidate;
+  const room = max - 2; // for ": " plus an ellipsis-free cut
+  const cut = candidate.slice(0, room);
+  const atWord = cut.slice(0, cut.lastIndexOf(" "));
+  // The strip class includes `|` (#8293): the brand suffix (" | Tortoise") that
+  // `constraints.metaTitle` appends is introduced by `|`, so a cut that lands
+  // inside the suffix used to survive as a dangling " |" — a broken title the
+  // caller then stored verbatim. Every separator the code itself can emit is
+  // stripped, not just the ones the old class happened to list.
+  const trimmed = (atWord.length >= keyword.length ? atWord : cut).replace(/[\s:,|\-]+$/, "");
+  return containsKeyword(trimmed, keyword) ? trimmed : keyword;
 }

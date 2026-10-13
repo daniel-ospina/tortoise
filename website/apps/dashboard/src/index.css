@@ -974,6 +974,97 @@ input::placeholder, textarea::placeholder {
    (off → install-pending → waiting → active). #1927: the .reask-pane block
    was removed with the consent gate. */
 .memory-sources { display: flex; flex-direction: column; gap: 6px; }
+/* #3513 (epic #1714 R1): the integration tile grid. Built on the two primitives
+   that already existed — `.plans-grid`'s auto-fit skeleton and
+   `.harness-surface`'s button-tile interaction. A coming-soon tile is at FULL
+   CONTRAST with a badge and NEVER opacity-muted or disabled: a faded tile
+   reads as disabled and would suppress the click that IS the demand signal. */
+.integrations-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+}
+.integration-tile {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  height: 100%;
+  padding: 14px;
+  border: 1px solid var(--border, #1e293b);
+  border-radius: 10px;
+  background: var(--surface, #0d1a2d);
+  color: var(--text, #e2e8f0);
+  text-align: left;
+  cursor: pointer;
+}
+.integration-tile:hover { background: rgba(6, 182, 212, 0.06); border-color: var(--accent, #06b6d4); }
+/* the whole tile is a button, so focus must be VISIBLE (a11y) */
+.integration-tile:focus-visible { outline: 2px solid var(--accent, #06b6d4); outline-offset: 2px; }
+.integration-tile.active { border-color: var(--accent, #06b6d4); background: rgba(6, 182, 212, 0.10); }
+/* full contrast — deliberately NO opacity rule for .coming-soon. The badge,
+   not a dim, is what communicates the state. */
+.integration-tile.coming-soon { border-style: dashed; }
+.integration-mark {
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 15px;
+  background: rgba(6, 182, 212, 0.12);
+  color: var(--accent, #06b6d4);
+}
+.integration-tile-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.integration-name { font-weight: 600; font-size: 14px; }
+.integration-desc { font-size: 12.5px; color: var(--text-dim); line-height: 1.4; }
+.integration-badge {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border, #1e293b);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.integration-tile.coming-soon .integration-badge { color: #facc15; border-color: rgba(196, 167, 60, 0.5); }
+.integration-panel { margin-top: 4px; }
+/* #3513 (review P1): `hidden={openTile !== …}` on a `.toggle-row` panel is
+   INERT without this — `.toggle-row` sets `display: flex` at author origin,
+   which outranks the UA sheet's `[hidden] { display: none }`. Without an
+   explicit author hide rule all four detail panels stay visible and the
+   "one panel at a time" contract never takes effect. (0,2,0) beats
+   `.toggle-row`'s (0,1,0). */
+.integration-panel[hidden] { display: none; }
+.integration-disclosure { margin: 8px 0 0; }
+.integration-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 40;
+}
+.integration-modal {
+  max-width: 460px;
+  width: 100%;
+  background: var(--surface, #0d1a2d);
+  border: 1px solid var(--border, #1e293b);
+  border-radius: 12px;
+  padding: 20px;
+}
+.integration-modal h3 { margin: 0 0 8px; font-size: 16px; }
+.integration-modal p { margin: 0 0 8px; font-size: 13px; line-height: 1.5; }
+.data-sources { display: flex; flex-direction: column; gap: 12px; }
 .harness-statuses { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .harness-status {
   border: 1px solid var(--border, #1e293b);

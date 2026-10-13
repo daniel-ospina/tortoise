@@ -34,6 +34,19 @@ Supported stores:
     — the shape Cursor's ``Tgd``/``ECf`` emit (verified against the installed
     bundle, Cursor 3.20.21).  The optional ``metadata`` header and the
     ``turn_ended`` markers carry no ``role`` and are skipped.
+  - ``openclaw``: the Tortoise OpenClaw plugin's capture spool
+    (``$OPENCLAW_STATE_DIR/tortoise/turns/<session>.jsonl``, default
+    ``~/.openclaw/tortoise/turns/``) — ONE FILE PER SESSION, because
+    ``sessions import`` files one session per file (it hashes the file for its
+    idempotency key).  Records are
+    ``{"session_key": …, "session_id": …, "agent_id": …, "ts": ISO-8601,
+    "role": "user"|"assistant", "text": …}`` — one record per turn, written
+    by ``tortoise/openclaw-plugin/index.mjs`` from OpenClaw's ``llm_output``
+    hook (``event.prompt`` + ``event.assistantTexts``).  A DEDICATED branch:
+    OpenClaw keeps no stable per-session JSONL file of its own (its runtime
+    transcript is SQLite under
+    ``~/.openclaw/agents/<agentId>/agent/openclaw-agent.sqlite``), so there is
+    nothing for the codex/claude walkers to read (#2120).
 """
 from __future__ import annotations
 
@@ -218,11 +231,66 @@ def parse_cursor(path: str | Path) -> list[dict]:
     return _walk_codex_records(Path(path), role_key="cursor")
 
 
+def parse_openclaw(path: str | Path) -> list[dict]:
+    """Parse a Tortoise OpenClaw capture spool into conversation turns.
+
+    #2120: OpenClaw's runtime transcript is SQLite and carries no documented
+    file contract, so the plugin writes this spool instead — the ingestion
+    half of the seam then rides the ONE existing import pipeline (consent,
+    receipts, provenance, REPHRASE dedup) rather than a second capture path.
+
+    The plugin writes ONE FILE PER SESSION (``sessions import`` files one
+    session per file, so a shared spool would file every session as a single
+    merged conversation).  This parser still GROUPS by
+    ``session_key``/``session_id`` in first-seen order and orders each group by
+    its own ``ts`` — stable, so a re-parse is byte-identical, and a merged or
+    appended file degrades honestly instead of interleaving two sessions'
+    turns.  Records with no keepable role, or no ``text``, are skipped; a
+    malformed line never aborts the file.
+    """
+    groups: dict[str, list[tuple[str, str, str]]] = {}
+    order: list[str] = []
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        _logger.warning("openclaw spool unreadable: %s", path)
+        return []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        role = record.get("role")
+        body = record.get("text")
+        if role not in _KEEP_ROLES or not isinstance(body, str):
+            continue
+        content = body.strip()
+        if not content:
+            continue
+        key = str(record.get("session_key") or record.get("session_id") or "")
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        stamp = record.get("ts") if isinstance(record.get("ts"), str) else ""
+        groups[key].append((stamp, role, content))
+    turns: list[dict] = []
+    for key in order:
+        for _stamp, role, content in sorted(groups[key], key=lambda row: row[0]):
+            turns.append({"role": role, "content": content})
+    return turns
+
+
 PARSERS: dict[str, Callable[[str | Path], list[dict]]] = {
     "codex": parse_codex,
     "claude-desktop": parse_claude_desktop,
     "cursor": parse_cursor,
     "pi": parse_pi,
+    "openclaw": parse_openclaw,
 }
 
 

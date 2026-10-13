@@ -117,6 +117,7 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     loop_heartbeat_info,
     loop_heartbeat_task,
     record_analytics_outcome,  # #3820 analytics-sink outcome counter
+    record_telemetry_drop,  # #4095 allowlist-drop counter (the /metrics seam)
     run_control_plane_call,
     run_on_daemon_worker,
     start_health_listener,
@@ -134,6 +135,9 @@ from tortoise.projection import (
 )
 from tortoise.quota import with_limit_contact  # #5425 refusal seam
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
+from tortoise.retrieval_metering import (  # #4489: pure-ASGI retrieval-work flusher
+    RetrievalMeteringMiddleware as _RetrievalMeteringMiddleware,
+)
 from tortoise.sdk import (
     _CAPTURE_EXTRACTION_DISABLED_MODE,  # #4258: extraction-turned-off receipt mode
     _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING,  # #4258: its M2-replay sibling (never the keyless one)
@@ -2201,8 +2205,27 @@ async def _lifespan(app):
                         return None
 
                 from tortoise.alert_store import WRITER_WATCHER
+                # #4778: the ALERT-only policy seam, not the sweep-gated raw
+                # chain. `cfg` is non-None here (the branch above requires it),
+                # so this builds the SAME store
+                # `_alert_store_from(cfg, writer=WRITER_WATCHER)` built — the
+                # difference is that the channel now comes from the ONE declared
+                # builder, so the D5a class of raw sites is REMOVED rather than
+                # merely enumerated by a guard.
+                watcher_alerts = _incident_alert_store(writer=WRITER_WATCHER)
+                if watcher_alerts is None:
+                    # Reachable only where the raw constructor RAISED (an
+                    # unusable object store): `incident_alert_store` answers
+                    # None instead. Re-raising keeps #2922's contract — the
+                    # enclosing handler logs loudly and records
+                    # `_WATCHER_START_ERROR`, so a watcher with no channel is
+                    # never a silent "all clear".
+                    raise RuntimeError(
+                        "backup watcher alert channel unavailable (no "
+                        "DR_ISSUES_PAT, or the object store cannot be built)"
+                    )
                 watcher = BackupWatcher(
-                    _backup_storage(), _alert_store_from(cfg, writer=WRITER_WATCHER),
+                    _backup_storage(), watcher_alerts,
                     org_provider=_sweep_orgs,
                     eligible_provider=_eligible_orgs if cfg.org_sweep_enabled else None,
                     graph_provider=_graph_provider,
@@ -3688,6 +3711,15 @@ class InFlightMiddleware:
             workload_exit()
 
 
+# #4489: the RETRIEVAL boundary, at the same seat as the compute/egress/embed
+# wrappers — INSIDE ``InFlightMiddleware`` and ``WaitBoundMiddleware`` (both
+# registered after this line, and ``add_middleware`` inserts at index 0), so a
+# request the transport bound refuses is not credited with retrieval work.
+# Unlike the embed boundary it arms EVERY method, because a read is a GET.
+# ``test_retrieval_metering.py::TestMiddleware::
+# test_the_middleware_is_actually_installed_on_the_app`` is the guard that
+# this line is the only thing making the hosted read lane measurable.
+app.add_middleware(_RetrievalMeteringMiddleware)
 app.add_middleware(_EmbedMeteringMiddleware)
 app.add_middleware(InFlightMiddleware)
 
@@ -6841,6 +6873,20 @@ class OrgInfoResponse(BaseModel):
     #: Sticky: TRUE once two different encoder identities were seen in the
     #: window. A figure that silently averaged two models would be unusable.
     embed_identity_mixed: bool = False
+    # #4489: per-org RETRIEVAL workload for the current period. WORKLOAD, not a
+    # price — nothing here can bill, cap or throttle (the issue's explicit
+    # out-of-scope list). Additive + defaulted, so every existing consumer is
+    # unaffected; a fresh org reads zeros (the ledger row is created by
+    # whichever lane writes first). The per-leg counters are the recorded
+    # vocabulary (fts / vector / structural); ``retrieval_leg_runs`` may exceed
+    # their sum, because a leg outside the vocabulary advances the total only.
+    retrieval_queries: int = 0
+    retrieval_leg_runs: int = 0
+    retrieval_leg_degraded: int = 0
+    retrieval_wall_ms: float = 0.0
+    retrieval_leg_fts: int = 0
+    retrieval_leg_vector: int = 0
+    retrieval_leg_structural: int = 0
 
 
 # ── Billing: Checkout + Portal request/response models (#310, Task 5) ───────
@@ -6983,12 +7029,14 @@ DEFAULT_ONBOARDING_STATE = {
     "session_capture_receipt_codex": None,
     "session_capture_receipt_cursor": None,
     "session_capture_receipt_pi": None,
+    "session_capture_receipt_openclaw": None,
     "session_capture_last_error_claude": None,
     "session_capture_last_error_claude-desktop": None,
     "session_capture_last_error_claude-web": None,
     "session_capture_last_error_codex": None,
     "session_capture_last_error_cursor": None,
     "session_capture_last_error_pi": None,
+    "session_capture_last_error_openclaw": None,
     "install_probe_claude": None,
     "install_probe_pi": None,
     # #1893: persisted GitHub source-scope keys (written by the dashboard's
@@ -8326,6 +8374,53 @@ async def _check_invite_accept_rate_limit(request: Request, token: str) -> None:
 
 # ── Endpoints ─────────────────────────────────────────────────────
 
+async def _require_approved_kind(sdk: TortoiseSDK, kind: str, *, door: str) -> None:
+    """#5475: refuse a NAMESPACED kind the graph's approval set does not hold.
+
+    ``pack_state.graph_kind_namespaces`` mines ``ns`` prefixes out of the
+    graph's data into the graph's APPROVAL set, so a write door that persists
+    an unvalidated ``ns:kind`` value WIDENS the set that is supposed to gate
+    it — ``objectKind=marketing:contentBrief`` on a ``dev``-only graph made
+    the whole ``marketing`` pack writable. This is the input constraint:
+    compare the namespace against the resolved set (records ∪ data) BEFORE
+    the write and 422 a namespace it does not hold.
+
+    REJECT, never silently normalise: it is the fail-closed direction, it is
+    the same 422 the sibling ``/v1/points`` ``kind`` validator returns for a
+    kind outside the vocabulary, and the import door already rejects unknown
+    namespaced vocabulary (``_check_foreign_kinds``). A silent coerce would
+    also leave the write metered and audited under a kind it does not carry.
+
+    A bare kind, an empty namespace, and a ``None`` gate (a graph with no
+    ``:PackInstall`` records — the catalog-union back-compat of #2714
+    indicator 3) are all admitted by ``kind_namespace_is_approved``, so this
+    is not a blanket ban on writes.
+
+    The gate read is a WHOLE-GRAPH scan (``graph_installed_namespaces`` is
+    O(nodes) and documented to run per call) and this handler is ``async`` —
+    the read rides the #3498 graph pool, exactly as the #5163 commit door
+    does, rather than parking the event loop.
+    """
+    from tortoise.pack_state import (
+        graph_installed_namespaces,
+        kind_namespace_is_approved,
+    )
+    approved = await _graph_offload(
+        lambda: graph_installed_namespaces(sdk), op=f"{door}.kind_gate")
+    if not kind_namespace_is_approved(kind, approved):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error_code": "KIND_NAMESPACE_NOT_INSTALLED",
+                "message": (
+                    f"{kind!r} names a pack namespace this graph has not "
+                    "installed; write a kind from an installed pack, or "
+                    "install that pack first"),
+                "kind": kind,
+                "installed_namespaces": sorted(approved),
+            })
+
+
 class CreateObjectRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     objectKind: str = Field(default="other")
@@ -8349,6 +8444,8 @@ async def create_object(body: CreateObjectRequest, request: Request,
     await _graph_offload(lambda: _check_org_limit(org, "points"),
                          op="check_org_limit.points")
     sdk = await _data_sdk_offloaded(org)
+    # #5475: the kind must not widen the graph's own approval set.
+    await _require_approved_kind(sdk, body.objectKind, door="create_object")
     try:
         props = {}
         if body.status:
@@ -8399,6 +8496,8 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
     await _graph_offload(lambda: _check_org_limit(org, "points"),
                          op="check_org_limit.points")
     sdk = await _data_sdk_offloaded(org)
+    # #5475: the same input constraint as /v1/objects, on the subject door.
+    await _require_approved_kind(sdk, body.subjectKind, door="create_subject")
     try:
         # #3718: sync FalkorDB I/O — off-loaded off the event loop (see
         # create_object above for the pattern and rationale).
@@ -8974,25 +9073,31 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
             max_nodes = None
 
     # Metering: write-op usage for the current billing period (#681), ask usage
-    # (#1987 Task 6) and embedding-encode workload (#4488). All three are
-    # SYNCHRONOUS ledger/control-plane reads, and each was previously run
-    # straight on the event loop. #4488 added the third, which is the clearest
-    # possible reason to move the GROUP off the loop rather than add another
-    # blocking hop to a route that is also under a 10s transport bound
-    # (`mcp_auth.py`). ONE offloaded hop for all three — the figures then come
-    # from the same moment, and the route does strictly less blocking work than
-    # before this PR rather than more. Found in review.
+    # (#1987 Task 6), embedding-encode workload (#4488) and retrieval workload
+    # (#4489). All four are SYNCHRONOUS ledger/control-plane reads, and each was
+    # previously run straight on the event loop. #4488 added the third and #4489
+    # the fourth, which is the clearest possible reason to move the GROUP off
+    # the loop rather than add another blocking hop to a route that is also
+    # under a 10s transport bound (`mcp_auth.py`). ONE offloaded hop for all
+    # four — the figures then come from the same moment, and the route does
+    # strictly less blocking work than before this PR rather than more.
     #
-    # All three degrade internally to a zero view (never raising), so the
+    # All four degrade internally to a zero view (never raising), so the
     # best-effort contract is unchanged by where they run.
-    from tortoise.metering import get_ask_usage, get_current_usage, get_embedding_usage
+    from tortoise.metering import (
+        get_ask_usage,
+        get_current_usage,
+        get_embedding_usage,
+        get_retrieval_usage,
+    )
 
     def _read_usage():
         oid = org["org_id"]
         return (get_current_usage(oid), get_ask_usage(oid),
-                get_embedding_usage(oid))
+                get_embedding_usage(oid), get_retrieval_usage(oid))
 
-    usage, ask_usage, embed_usage = await asyncio.to_thread(_read_usage)
+    usage, ask_usage, embed_usage, retrieval_usage = await asyncio.to_thread(
+        _read_usage)
 
     return OrgInfoResponse(
         org_id=org["org_id"],
@@ -9044,6 +9149,19 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
         embed_revision=embed_usage.get("embed_revision"),
         embed_identity_mixed=bool(
             embed_usage.get("embed_identity_mixed", False)),
+        # #4489: retrieval workload for the current period, read from the SAME
+        # ledger row as the write-ops figure — that is what makes #4489
+        # indicator 3 (a read-heavy org vs a write-heavy one) one response away.
+        # The read degrades to the zero view on failure (never 500).
+        retrieval_queries=retrieval_usage.get("retrieval_queries", 0),
+        retrieval_leg_runs=retrieval_usage.get("retrieval_leg_runs", 0),
+        retrieval_leg_degraded=retrieval_usage.get(
+            "retrieval_leg_degraded", 0),
+        retrieval_wall_ms=retrieval_usage.get("retrieval_wall_ms", 0.0),
+        retrieval_leg_fts=retrieval_usage.get("retrieval_leg_fts", 0),
+        retrieval_leg_vector=retrieval_usage.get("retrieval_leg_vector", 0),
+        retrieval_leg_structural=retrieval_usage.get(
+            "retrieval_leg_structural", 0),
         # #1082 (PR1): anon flag drives the dashboard claim card — the shared
         # is_anon_org predicate (Supabase mode only; registry = False).
         anon=_org_is_anon(org["org_id"]),
@@ -10199,7 +10317,27 @@ def _seed_demo_graph(org_id: str) -> dict:
     (sentinel). #2360: NEVER called on the fresh-org provisioning path —
     fresh orgs get the REAL starter seed (/internal/starter-seed) instead.
     Every Point written here is excluded from org.point_count, so opt-in
-    sample content is never counted as the user's own filings."""
+    sample content is never counted as the user's own filings.
+
+    #2897: each of the THREE TAG-BEARING layers (semantic, epistemic,
+    procedural — the episodic layer carries none) writes its Point with the
+    `tags` PROPERTY beside the `:Tag`/`TAGGED` MERGE loop. The edge half is
+    snapshot-derivable from that property (`_upsert_point_edges` pass 2 reads
+    the node's own final value), so a seeder that wrote only the edge left its
+    tags with nothing for a rebuild to re-derive. This is the one tag producer
+    OUTSIDE the SDK↔projection `_sync_tags` pair, and its edges are still
+    hand-rolled MERGEs rather than routed through that routine — the property
+    is what makes them durable, and this duplication is why the "ONE routine
+    for BOTH writers" claim is scoped to the SDK and the projection rather than
+    to every producer.
+
+    ⚠️ NOT RETROACTIVE: the sentinel short-circuit above returns before any
+    write, so a graph seeded BEFORE this landed keeps its edge-only tags and
+    still loses them to the #548 snapshot on the next `rebuild_all`. Blast
+    radius is opt-in sample content (excluded from `org.point_count`), not user
+    filings; deleting the sentinel and re-seeding, or a one-shot backfill of
+    `tags` from the existing `TAGGED` edges, closes it per graph.
+    """
     sdk = _make_sdk(namespace=org_id)
     proj = sdk._get_proj()
     now = datetime.now(UTC).isoformat()
@@ -10217,8 +10355,10 @@ def _seed_demo_graph(org_id: str) -> dict:
         proj.g.query(
             "MERGE (p:Point {id:$id}) "
             "SET p.content=$c, p.pointKind=$k, p.is_operator=false, "
-            "p.status='live', p.createdAt=$now, p.updatedAt=$now",
-            params={"id": pid, "c": content, "k": kind, "now": now},
+            "p.status='live', p.createdAt=$now, p.updatedAt=$now, "
+            "p.tags=$tags",
+            params={"id": pid, "c": content, "k": kind, "now": now,
+                    "tags": tags},
         )
         for tag in tags:
             proj.g.query(
@@ -10255,8 +10395,10 @@ def _seed_demo_graph(org_id: str) -> dict:
         proj.g.query(
             "MERGE (p:Point {id:$id}) "
             "SET p.content=$c, p.pointKind=$k, p.is_operator=false, "
-            "p.status='live', p.confidence=$conf, p.createdAt=$now, p.updatedAt=$now",
-            params={"id": pid, "c": content, "k": kind, "conf": confidence, "now": now},
+            "p.status='live', p.confidence=$conf, p.createdAt=$now, "
+            "p.updatedAt=$now, p.tags=$tags",
+            params={"id": pid, "c": content, "k": kind, "conf": confidence,
+                    "now": now, "tags": tags},
         )
         for tag in tags:
             proj.g.query(
@@ -10272,8 +10414,10 @@ def _seed_demo_graph(org_id: str) -> dict:
         proj.g.query(
             "MERGE (p:Point {id:$id}) "
             "SET p.content=$c, p.pointKind=$k, p.is_operator=false, "
-            "p.status='live', p.createdAt=$now, p.updatedAt=$now",
-            params={"id": pid, "c": content, "k": kind, "now": now},
+            "p.status='live', p.createdAt=$now, p.updatedAt=$now, "
+            "p.tags=$tags",
+            params={"id": pid, "c": content, "k": kind, "now": now,
+                    "tags": tags},
         )
         for tag in tags:
             proj.g.query(
@@ -11997,6 +12141,11 @@ async def toggle_api_key_enabled(
 # must not confuse the off-switch).
 _SESSION_HARNESS_VALUES = frozenset({
     "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
+    # #2120: the OpenClaw seam. Without this member a
+    # `tortoise sessions import --harness openclaw` POST is refused 422 and
+    # OpenClaw sessions can never carry a capture receipt — the ingestion half
+    # of the two-way seam would be unreachable however correctly it parsed.
+    "openclaw",
 })
 
 # #3516 §B / #3515 piece 8: which producer captured a session — 'hook' (the
@@ -13720,9 +13869,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # written (idempotent keyed-MERGE step edge; FWW — a later capture is a
     # 200 no-op) and the response marks first_capture=true so the calling
     # in-conversation agent fires the ONE-line announcement whose COPY
-    # CONTRACT lives in tortoise/onboarding/SKILL.md §7 (W2 owns the copy;
+    # CONTRACT lives in tortoise/onboarding/SKILL.md §8 (W2 owns the copy;
     # #3517: the wording itself is RENDERED from
-    # tortoise/config/capture_disclosure.json — the §7 section names the render
+    # tortoise/config/capture_disclosure.json — the §8 section names the render
     # rather than repeating it, so the copy has exactly one home.
     # W6 owns the trigger — never duplicate the wording here). capture-
     # disclosed is a NODE CHECKPOINT, never a card-counted step (state.py
@@ -14070,7 +14219,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # matched), byte-parity with the SDK receipt.
             "capture_redactions": _capture_redactions,
             # #2002 (W6): first_capture=true exactly once per org — the
-            # trigger for the in-conversation announcement (SKILL.md §7 copy
+            # trigger for the in-conversation announcement (SKILL.md §8 copy
             # contract; the wording renders from
             # tortoise/config/capture_disclosure.json — #3517).
             "first_capture": bool(first_capture)}
@@ -25493,12 +25642,14 @@ _ONBOARDING_DEFAULT_STATE = {
     "session_capture_receipt_codex": None,
     "session_capture_receipt_cursor": None,
     "session_capture_receipt_pi": None,
+    "session_capture_receipt_openclaw": None,
     "session_capture_last_error_claude": None,
     "session_capture_last_error_claude-desktop": None,
     "session_capture_last_error_claude-web": None,
     "session_capture_last_error_codex": None,
     "session_capture_last_error_cursor": None,
     "session_capture_last_error_pi": None,
+    "session_capture_last_error_openclaw": None,
     "install_probe_claude": None,          # Task 14: harness + timestamp, no content
     "install_probe_pi": None,
     # #1893: persisted GitHub source-scope keys (dashboard scope selectors
@@ -26646,12 +26797,20 @@ class OnboardingStatePatchRequest(BaseModel):
     session_capture_receipt_codex: str | None = None
     session_capture_receipt_cursor: str | None = None
     session_capture_receipt_pi: str | None = None
+    # #2120: the OpenClaw seam. A harness added to _SESSION_HARNESS_VALUES mints
+    # a receipt/last-error member of _CAPTURE_SERVER_OWNED_KEYS, so the field
+    # must exist here too: without it the key is server-owned but carries no
+    # PATCH field, and its 403 refusal cannot be exercised at all (the hole
+    # tests/test_onboarding_endpoints.py::test_capture_verification_keys_not_client_writable
+    # closes — it caught exactly this omission when openclaw was added).
+    session_capture_receipt_openclaw: str | None = None
     session_capture_last_error_claude: str | None = None
     session_capture_last_error_claude_desktop: str | None = None
     session_capture_last_error_claude_web: str | None = None
     session_capture_last_error_codex: str | None = None
     session_capture_last_error_cursor: str | None = None
     session_capture_last_error_pi: str | None = None
+    session_capture_last_error_openclaw: str | None = None
     install_probe_claude: str | None = None
     install_probe_pi: str | None = None
     # #1726 (Slice 1): docs staged + ingested — server-written; registered so
@@ -28185,7 +28344,12 @@ def _report_unregistered(where: str, subject: str,
     Contract (issue #3821), in order:
 
     1. ALWAYS counts — the bounded key fingerprint is incremented before any
-       escalation, so the drop is visible even when strict mode raises.
+       escalation, so the drop is visible even when strict mode raises. Since
+       #4095 the same drop is ALSO counted on the monitoring seam
+       (``monitoring.record_telemetry_drop``), which is the leg that is
+       published in production (``metrics()`` and the internal ``/status``
+       block); the process-local counter below remains the bounded
+       warn-dedup/fingerprint structure, and it is lost on every deploy.
     2. Reports AT MOST ONCE per ``(where, subject, key-fingerprint)`` per
        process — the OTel bound, so an emit site in a hot loop cannot flood
        the log.
@@ -28232,6 +28396,15 @@ def _report_unregistered(where: str, subject: str,
                   and len(reported) < _TELEMETRY_DROP_MAX_PER_SITE)
         if report:
             reported.add(fingerprint)
+    # #4095: contract point 1 has a SECOND leg. The in-process counter above
+    # is process-local and lost on every deploy, and until now it had no
+    # reader outside the test suite — so for the week-1 cohort the whole
+    # motivation of #3821 rode on the single WARN below. Count the SAME drop
+    # on the monitoring seam, which IS published (`metrics()` for the hosted
+    # app, `/metrics` wherever a scrape exists) and read by the internal
+    # `/status` block. Placed before the warn and before the strict-mode
+    # raise so "always counts" holds on every path, exactly as it does above.
+    _telemetry_count_drop(_telemetry_drop_site_label(where, subject))
     if report:
         _logger.warning(
             "unregistered telemetry key(s) dropped at %s (subject=%s): %s — "
@@ -28240,6 +28413,79 @@ def _report_unregistered(where: str, subject: str,
             where, subject, list(fingerprint))
     if _telemetry_strict():
         raise UnregisteredTelemetryKey(where, subject, set(unknown))
+
+
+def _telemetry_drop_site_label(where: str, subject: str) -> str:
+    """The ONE rendering of a drop site (#4095).
+
+    The Prometheus child label and the internal ``/status`` block key are both
+    produced here, so the two published surfaces cannot describe the same drop
+    differently.
+
+    The rendering is LOSSY in principle, deliberately: both parts are already
+    truncated by ``_report_unregistered``, and a part that itself contained the
+    separator would make two sites share one key — a merged ROW in the operator
+    read (``total`` is unaffected, and the metric's cardinality is bounded
+    independently by ``monitoring._admit_telemetry_drop_site``). Both parts are
+    code literals at every call site today, so there is nothing to disambiguate
+    and the separator is not escaped: the rendering exists to be read by a human
+    running ``jq .telemetry``, not to round-trip.
+    """
+    return f"{where}|{subject}"
+
+
+def _telemetry_count_drop(site: str) -> None:
+    """Count one drop on the monitoring seam; never raises (#4095).
+
+    The counter leg must not be able to escape ``_report_unregistered``: that
+    function's contract is that it raises EXACTLY ONE exception, and only in
+    strict mode (``UnregisteredTelemetryKey``). A raise from the metrics
+    library would otherwise surface as an opaque 500 on the telemetry emit
+    path — the same P2-3 defect #3820's ``_analytics_count_outcome`` closes for
+    the analytics outcome counter.
+    """
+    try:
+        record_telemetry_drop(site)
+    except Exception as e:
+        _logger.warning("telemetry drop counter failed (%s): %s", site, e)
+
+
+def _telemetry_drop_block() -> dict:
+    """The #4095 production read of the allowlist-drop counter.
+
+    Published on the INTERNAL ``/v1/internal/backups/status`` endpoint — the
+    surface the hourly DR driver and an operator already curl, and the one
+    served whatever else on the machine is unhealthy — so the "always counts"
+    guarantee of ``_report_unregistered`` is observable in production instead
+    of only in the test suite.
+
+    ``total`` is the number of DROPS; ``sites`` is that total split by drop
+    site; ``markers`` is the number of distinct bounded key-fingerprints
+    RETAINED and ``marker_cap`` the cap they fold into. The bounded structures
+    hold at most their cap PLUS one shared overflow entry, so
+    ``markers > marker_cap`` means at least one marker was folded into that
+    shared entry — i.e. the per-site split is complete but the marker count is
+    a floor, not a total.
+
+    ⛔ NEVER carries the dropped key NAMES. ``_ALLOWED_ANALYTICS_PROPS``
+    contains user-derived keys and the PATCH front door derives its keys from a
+    request body, so key names are caller-supplied text — the same reason
+    ``_analytics_incident_detail`` publishes counts and reason codes only. The
+    WARN line is where the names are legible (once per site); this block is the
+    channel that says WHETHER and HOW MUCH is dropping, which is the half that
+    was missing.
+    """
+    with _TELEMETRY_DROP_LOCK:
+        by_site: Counter[str] = Counter()
+        for (where, subject, _fingerprint), count in _TELEMETRY_DROP_COUNTS.items():
+            by_site[_telemetry_drop_site_label(where, subject)] += count
+        markers = len(_TELEMETRY_DROP_COUNTS)
+    return {
+        "total": sum(by_site.values()),
+        "sites": dict(by_site),
+        "markers": markers,
+        "marker_cap": _TELEMETRY_DROP_MAX_MARKERS,
+    }
 
 
 _ANALYTICS_FALLBACK_PATH = None
@@ -29656,7 +29902,7 @@ _GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 _GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 _GITHUB_API = "https://api.github.com"
 _GITHUB_STATE_TTL_S = 600  # 10 min
-_GITHUB_STATES = {}  # state -> {org_id, org, created_at}
+_GITHUB_STATES = {}  # state -> {org_id, org, created_at}[, connector_source_type]
 # NOTE (P1): in-memory — single-worker only (hosted_api runs 1 uvicorn worker
 # on Fly, consistent with the auth cache, rate limiter, and _INDEX_JOBS).
 # Multi-worker would need a shared store (Redis/FalkorDB) for CSRF state.
@@ -29871,6 +30117,112 @@ async def github_connect(body: GitHubConnectRequest | None = None,
     return {"auth_url": auth_url, "state": state}
 
 
+async def _upsert_oauth_connector(org_id: str, source_type: str,
+                                  access_token: str) -> None:
+    """Leave ONE connector row behind for a completed OAuth flow (#4685).
+
+    ``POST /v1/connectors/{source_type}/auth`` promises a connector; the
+    callback that completes it is therefore the thing that must create the row.
+    Before #4685 the flow stored the token on the ORG and left
+    ``GET /v1/connectors`` empty — a flow that claimed a row it never wrote.
+
+    Semantics (settled, not invented here): the migration's
+    ``idx_connectors_org_source`` is UNIQUE on ``(org_id, source_type)``, so a
+    connector is per ORG+SOURCE — not per sync and not per OAuth attempt. A
+    repeat OAuth for the same source ROTATES the credential in place and keeps
+    the existing row's ``config`` (the user's repo scope); it never inserts a
+    second row, which the unique index would reject as a 23505 → HTTP 409.
+
+    The credential is stored in the ``connectors`` format the migration
+    declares (a JSON-dumped object, encrypted): ``{access_token,
+    token_type}``. GitHub OAuth-app tokens do not expire and carry no refresh
+    token, so the other fields the column comment names
+    (``refresh_token``/``expires_at``/``scopes``) have no value here. This is a
+    SECOND ciphertext of the same secret, deliberately:
+    ``organizations.github_token_enc`` is the org-wide connect token the
+    onboarding/indexing path reads, ``connectors.credential_enc`` is the
+    registry the sync engine reads, and one must not require re-deriving the
+    other.
+
+    Self-host has no connector store (every ``/v1/connectors`` sibling answers
+    501 there), so the write is Supabase-only: the self-host flow completes
+    without a row, matching its siblings instead of writing a row nothing can
+    read back.
+
+    A failure PROPAGATES. The row IS this flow's contract, so swallowing the
+    error would re-create the false promise the fix removes — the client would
+    land on ``github=connected`` with ``GET /v1/connectors`` still empty. This
+    matches the neighbouring writes (``store_github_credentials``,
+    ``_update_onboarding_state``), which also raise after the CSRF state has
+    been consumed.
+    """
+    from tortoise.crypto import encrypt_token
+    from tortoise.supabase_control import (
+        connector_by_org_source as _sb_conn_by_source,
+    )
+    from tortoise.supabase_control import (
+        connector_create as _sb_conn_create,
+    )
+    from tortoise.supabase_control import (
+        connector_update as _sb_conn_update,
+    )
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if not is_supabase_enabled():
+        return
+    credential_enc = encrypt_token(_json.dumps(
+        {"access_token": access_token, "token_type": "bearer"}))
+    cp = get_control_plane()
+
+    def _rotate(existing: dict) -> None:
+        connector_id = existing.get("id")
+        if not connector_id:
+            # ``_CONNECTOR_PUBLIC_SELECT`` includes ``id``; a row without one
+            # is a store fault, and addressing it (``id=eq.None``) would 400.
+            raise RuntimeError(
+                f"connector_by_org_source returned a {source_type} connector "
+                "without an id — cannot rotate its credential")
+        if not _sb_conn_update(cp, org_id, connector_id,
+                               credential_enc=credential_enc):
+            raise RuntimeError(
+                f"connector_update matched no {source_type} connector for a "
+                "completed OAuth")
+
+    def _upsert() -> None:
+        # ONE thread hop for the read+write pair — the seam blocks on HTTP
+        # (see _cp_offload). Read-then-write (never insert-then-catch-409 as the
+        # PRIMARY path) so the unique index is a backstop, not the control flow.
+        existing = _sb_conn_by_source(cp, org_id, source_type)
+        if existing is None:
+            try:
+                created = _sb_conn_create(
+                    cp, org_id=org_id, source_type=source_type,
+                    credential_enc=credential_enc)
+            except RuntimeError as e:
+                # A CONCURRENT completion of the same org+source won the
+                # insert: ``idx_connectors_org_source`` answered 23505 →
+                # PostgREST 409 (the marker ``create_connector`` maps too).
+                # The winner's row already keeps this flow's promise, so
+                # converge on it — a 500 on a second, legitimate completion
+                # would be the false failure this whole path exists to avoid.
+                if "HTTP 409" not in str(e):
+                    raise
+                existing = _sb_conn_by_source(cp, org_id, source_type)
+                if existing is None:
+                    raise  # not the race it looked like: no row to converge on
+            else:
+                if created is None:
+                    raise RuntimeError(
+                        f"connector_create left no {source_type} connector "
+                        "for a completed OAuth")
+                return
+        _rotate(existing)
+
+    await _cp_offload(_upsert, op="connector_upsert")
+
+
 @app.get("/v1/onboarding/github/callback")
 async def github_callback(code: str | None = None, state: str | None = None,
                           error: str | None = None):
@@ -29878,6 +30230,12 @@ async def github_callback(code: str | None = None, state: str | None = None,
 
     `error` is the standard OAuth denial query param. (Note: tests must use
     follow_redirects=False — the 302 target is the external welcome page.)
+
+    The callback is SHARED by two entry points, and the CSRF state is what
+    tells them apart: ``POST /v1/onboarding/github/connect`` mints a state
+    that stores the token on the org, while ``POST
+    /v1/connectors/github/auth`` adds ``connector_source_type`` so this
+    completion ALSO leaves the connector row that flow promises (#4685).
     """
     # #1135: welcome page lives on the static-Pages host — derive from the
     # same env-driven base as the email links (EMAIL_LINK_BASE_URL), never a
@@ -29954,6 +30312,13 @@ async def github_callback(code: str | None = None, state: str | None = None,
             "MATCH (t:Team {id: $id}) SET t.github_token_enc = $tok, t.github_org = $org",
             params={"id": org_id, "tok": encrypted, "org": org},
         )
+    # #4685: consume the connector intent the flow recorded in its CSRF state.
+    # Only the connector entry point sets it, so onboarding's behaviour (token
+    # on the org, no connector row) is unchanged — see _upsert_oauth_connector.
+    connector_source_type = st.get("connector_source_type")
+    if connector_source_type:
+        await _upsert_oauth_connector(
+            org_id, connector_source_type, access_token)
     _update_onboarding_state(org_id, github_connected=True)
     # Auto-index after connect (Task 5, amend 11): background first-run
     # (ONE repo — bounded, P2-4). The job is created under the org's
@@ -30426,6 +30791,11 @@ async def connector_auth(
     """Initiate OAuth for a connector source type. Returns the authorize URL.
 
     Dispatches to the correct OAuth flow based on source_type.
+
+    Completing the flow leaves EXACTLY ONE connector row for this org+source
+    (#4685): the GitHub callback this shares with onboarding creates it, and a
+    repeat OAuth rotates that row's credential in place rather than adding a
+    second one. See ``_upsert_oauth_connector``.
     """
     org_id = org["org_id"]
     if source_type == "github":
@@ -30443,6 +30813,13 @@ async def connector_auth(
             "org_id": org_id,
             "org": None,
             "created_at": __import__("time").time(),
+            # #4685: the ONE difference from the onboarding flow — the
+            # callback must leave a connector row behind. A source type, not a
+            # boolean: it names the connector the completion is for, so a
+            # future source arm does not need a second flag. The GitHub
+            # callback is the only consumer today because this is the only arm
+            # that mints a state.
+            "connector_source_type": "github",
         }
         callback = _os.environ.get(
             "GITHUB_CALLBACK_URL",
@@ -32674,20 +33051,53 @@ async def backups_sweep(request: Request):
         except RuntimeError as e:
             raise HTTPException(status_code=503, detail=f"Sweep failed: {e}")  # noqa: B904
 
-        alerts = _alert_store_from(cfg)
+        # #4778: the ALERT-only policy seam. `cfg` is non-None here (the handler
+        # 503s otherwise), so this is the store the raw chain built — but the
+        # channel now comes from the ONE declared builder, and that builder
+        # ANSWERS None instead of raising when no channel can exist, which both
+        # loops below REPORT rather than swallow.
+        alerts = _incident_alert_store()
+        # #4778 review P3: the resolution candidates are needed by BOTH the
+        # no-channel decision below AND the resolve loop, so compute them once,
+        # here — `sweep_resolutions` reads only `status`/`results`/`incidents`,
+        # not `alerts_failed`, so hoisting it changes no outcome.
+        from tortoise.backup_sweep import sweep_resolutions
+
+        candidates = sweep_resolutions(result)
         alerts_failed = []
-        for inc in result.get("incidents", []):
-            try:
-                # #2313: graph-scoped incidents (custom graphs) route under
-                # the "{org}:{gid}" subject — coherent with the watcher and
-                # re-baseline. Default/org incidents keep the bare org.
-                await asyncio.to_thread(
-                    alerts.open_incident, inc["kind"],
-                    _incident_subject(inc), inc.get("detail")
+        if alerts is None:
+            # No channel (no `DR_ISSUES_PAT`, or an unusable object store):
+            # every incident this run emitted is UNSENT, and the response must
+            # say so — a sweep whose incidents vanished silently reads as a
+            # clean sweep.
+            alerts_failed = [inc.get("kind") for inc in result.get("incidents", [])]
+            # #4778 review P3: warn only when this run actually NEEDED the
+            # channel (something to file or something to resolve). The sweep is
+            # called hourly and most runs emit nothing, so the unconditional
+            # warning flooded the log with "no alert channel" about clean runs.
+            # (The monthly drill warns unconditionally instead — see
+            # `backups_drill_scheduled` — because its pre-flight warning is the
+            # point and a monthly cadence cannot flood.)
+            if alerts_failed or candidates:
+                _logger.warning(
+                    "backup sweep has no alert channel: %d incident(s) could "
+                    "not be filed and %d resolve candidate(s) could not be "
+                    "cleared (DR_ISSUES_PAT unset, or the object store is "
+                    "unusable)", len(alerts_failed), len(candidates),
                 )
-            except Exception as e:  # incident-filing must never fail the run (review P3)
-                _logger.warning("incident routing failed for %s: %s", inc.get("kind"), e)
-                alerts_failed.append(inc.get("kind"))
+        else:
+            for inc in result.get("incidents", []):
+                try:
+                    # #2313: graph-scoped incidents (custom graphs) route under
+                    # the "{org}:{gid}" subject — coherent with the watcher and
+                    # re-baseline. Default/org incidents keep the bare org.
+                    await asyncio.to_thread(
+                        alerts.open_incident, inc["kind"],
+                        _incident_subject(inc), inc.get("detail")
+                    )
+                except Exception as e:  # incident-filing must never fail the run (review P3)
+                    _logger.warning("incident routing failed for %s: %s", inc.get("kind"), e)
+                    alerts_failed.append(inc.get("kind"))
         if alerts_failed:
             result["alerts_failed"] = alerts_failed
 
@@ -32702,13 +33112,17 @@ async def backups_sweep(request: Request):
         # one LIST per kind, never an R2 GET per graph, so an hourly sweep over a
         # few thousand graphs does not serialise thousands of reads while holding
         # the sweep lock (nor does a listing failure close anything).
-        from tortoise.backup_sweep import sweep_resolutions
-
-        candidates = sweep_resolutions(result)
+        # (`candidates` is computed above, next to the no-channel decision.)
         resolved: list[str] = []
         failed: list[str] = []
         open_cache: dict[str, set[str]] = {}
         for kind, subject in candidates:
+            if alerts is None:
+                # #4778: no channel — the resolve cannot be attempted, and the
+                # run must not read as clean (the same contract the failed-close
+                # branch below enforces for a raised close).
+                failed.append(f"{kind}/{subject}" if subject else kind)
+                continue
             try:
                 if kind not in open_cache:
                     # strict: a failed LIST must not be indistinguishable from
@@ -32886,7 +33300,11 @@ async def backups_status(request: Request):
                 # R2 misconfig must not blind the sink-absence check (the
                 # driver would read an absent block as "unknown" and stay
                 # silent).
-                "analytics": _analytics_heartbeat_block()}
+                # #4095: same rule for the telemetry-drop block — it is
+                # in-process state, and an unusable object store must not hide
+                # the "always counts" guarantee of `_report_unregistered`.
+                "analytics": _analytics_heartbeat_block(),
+                "telemetry": _telemetry_drop_block()}
     lock_block = _lock_status_block(cfg)
     watcher = _WATCHER
     now = datetime.now(UTC)
@@ -32994,6 +33412,11 @@ async def backups_status(request: Request):
         # a sink that silently STOPPED emitting. Published here, never through
         # the sink, so the sink cannot silence its own alarm.
         "analytics": _analytics_heartbeat_block(),
+        # #4095: the production reader for #3821's allowlist-drop counter. It
+        # rides the SAME internal endpoint the driver and an operator already
+        # read, so a drop is observable without a scrape (the hosted app serves
+        # no `/metrics`) and without waiting for a test run.
+        "telemetry": _telemetry_drop_block(),
     }
 
 @app.post("/v1/internal/driver/heartbeat")
@@ -33124,7 +33547,21 @@ async def backups_rebaseline(request: Request):
     if graph_id == "default":
         _write_json(storage, f"ops/teams/{org_id}/state.json", state)
     subject = f"{org_id}:{graph_id}" if graph_id != "default" else org_id
-    alerts = _alert_store_from(_backup_config_safe())
+    # #4778/#4777: the ALERT-only policy seam, NEVER the sweep-gated chain.
+    # Re-baseline is precisely the operator action that clears an incident FILED
+    # WHILE THE SWEEP WAS ENABLED, so the channel must survive the sweep being
+    # switched off (the production default) — the sweep switch decides whether
+    # backups RUN, never whether an incident is VISIBLE (#3820 D5a).
+    #
+    # `_alert_store_from(_backup_config_safe())` was gated on `BACKUP_SWEEP_ENABLED`
+    # and dereferenced the `None` config, so with the sweep off it raised
+    # `AttributeError` at this line: AFTER `_write_json` succeeded, BEFORE either
+    # resolve — a 500 for a re-baseline that HAD been persisted, whose only
+    # missing step (the resolve of DATA_LOSS_CANDIDATE + SIZE_GUARD_ABORT, kinds
+    # NOTHING else clears) was silently skipped. `_incident_alert_store` reads the
+    # alert credentials ungated and returns `None` — it cannot raise — when no
+    # channel can be built, which `_resolve_incidents` reports below.
+    alerts = _incident_alert_store()
     # #3718 round-3 review P2: both resolves are blocking NETWORK round
     # trips — a storage read plus a GitHub issue close / Telegram push — the
     # same offload `backups_sweep` already gives `alerts.open_incident`.
@@ -33141,6 +33578,21 @@ async def backups_rebaseline(request: Request):
     # than implying a poll will retry (cycle-3 review P1). The outcome is reported
     # per kind so the operator can re-run re-baseline after GitHub recovers.
     def _resolve_incidents() -> list[str]:
+        if alerts is None:
+            # #4778: no channel can be built (no DR_ISSUES_PAT, or an unusable
+            # object store). NOTHING can clear these two kinds — they are
+            # resolved here and nowhere else — so report them per kind rather
+            # than letting the response read as a re-baseline that closed
+            # incidents it never touched; the state write DID succeed, which is
+            # why this is not a 5xx.
+            _logger.warning(
+                "no alert channel on re-baseline of %s — DATA_LOSS_CANDIDATE and "
+                "SIZE_GUARD_ABORT cannot be resolved by this call (check "
+                "DR_ISSUES_PAT and the R2_* credentials); the re-baseline write "
+                "itself succeeded", subject,
+            )
+            return [f"{kind}/{subject}"
+                    for kind in ("DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT")]
         failed: list[str] = []
         for kind in ("DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT"):
             try:
@@ -33442,27 +33894,47 @@ async def backups_drill_scheduled(request: Request):
     # the registry namespace (see _control_plane_source's docstring).
     _data_sdk, db = await asyncio.to_thread(_data_plane_db)
     storage = _backup_storage()
-    alerts = _alert_store_from(cfg)
+    # #4778: the ALERT-only policy seam (`cfg` is non-None here — the handler
+    # 503s otherwise — so this is the store the raw chain built). It ANSWERS
+    # None when no channel can exist, and a scheduled drill whose
+    # RESTORE_DRILL_FAILED could not be filed is exactly the silence D5a
+    # forbids — so every use below is guarded, and every skip is logged rather
+    # than degrading into an AttributeError caught by the wrong handler.
+    alerts = _incident_alert_store()
+    if alerts is None:
+        _logger.warning(
+            "scheduled drill is running WITHOUT an alert channel "
+            "(DR_ISSUES_PAT unset, or the object store is unusable) — a "
+            "RESTORE_DRILL_FAILED this run would be UNSENT and any open "
+            "incident stays OPEN"
+        )
     try:
         result = await asyncio.to_thread(
             _scheduled_drill, cfg=cfg, registry=registry, db=db, storage=storage,
         )
     except ValueError as e:
-        try:
-            await asyncio.to_thread(
-                alerts.open_incident, _DRILL_FAILED_KIND, "global",
-                # #3293: an exception MESSAGE is app-controlled text and this
-                # detail is published verbatim into a PUBLIC issue body
-                # (``alert_store._body``). ``error_type`` is the bounded half
-                # the other operator incidents already carry
-                # (``operator_alert.alert_abuse_fault``); the message goes
-                # through the publication scrubber before it joins it.
-                {"error_type": type(e).__name__,
-                 "error": redact_for_publication(str(e)),
-                 "source": "drill-scheduled"},
+        if alerts is None:
+            _logger.error(
+                "RESTORE_DRILL_FAILED NOT FILED (no alert channel) — the "
+                "scheduled drill was rejected: %s",
+                redact_for_publication(str(e)),
             )
-        except Exception:
-            _logger.warning("RESTORE_DRILL_FAILED open failed (ValueError path)", exc_info=True)
+        else:
+            try:
+                await asyncio.to_thread(
+                    alerts.open_incident, _DRILL_FAILED_KIND, "global",
+                    # #3293: an exception MESSAGE is app-controlled text and this
+                    # detail is published verbatim into a PUBLIC issue body
+                    # (``alert_store._body``). ``error_type`` is the bounded half
+                    # the other operator incidents already carry
+                    # (``operator_alert.alert_abuse_fault``); the message goes
+                    # through the publication scrubber before it joins it.
+                    {"error_type": type(e).__name__,
+                     "error": redact_for_publication(str(e)),
+                     "source": "drill-scheduled"},
+                )
+            except Exception:
+                _logger.warning("RESTORE_DRILL_FAILED open failed (ValueError path)", exc_info=True)
         # #3293 review: the response body is echoed verbatim into a PUBLIC
         # Actions log by the drill drivers (``registry-drill*.sh``), so the
         # raw exception is a publication sink too — scrub it here, not only in
@@ -33473,18 +33945,24 @@ async def backups_drill_scheduled(request: Request):
             detail=f"Drill rejected: {redact_for_publication(str(e))}",
         ) from e
     except RuntimeError as e:
-        try:
-            await asyncio.to_thread(
-                alerts.open_incident, _DRILL_FAILED_KIND, "global",
-                # #3293: see the ValueError path above — same public sink, same
-                # scrub. This is the path a STORAGE error takes, i.e. the one
-                # most likely to echo a signed URL or endpoint in its message.
-                {"error_type": type(e).__name__,
-                 "error": redact_for_publication(str(e)),
-                 "source": "drill-scheduled"},
+        if alerts is None:
+            _logger.error(
+                "RESTORE_DRILL_FAILED NOT FILED (no alert channel) — the "
+                "scheduled drill failed: %s", redact_for_publication(str(e)),
             )
-        except Exception:
-            _logger.warning("RESTORE_DRILL_FAILED open failed (RuntimeError path)", exc_info=True)
+        else:
+            try:
+                await asyncio.to_thread(
+                    alerts.open_incident, _DRILL_FAILED_KIND, "global",
+                    # #3293: see the ValueError path above — same public sink, same
+                    # scrub. This is the path a STORAGE error takes, i.e. the one
+                    # most likely to echo a signed URL or endpoint in its message.
+                    {"error_type": type(e).__name__,
+                     "error": redact_for_publication(str(e)),
+                     "source": "drill-scheduled"},
+                )
+            except Exception:
+                _logger.warning("RESTORE_DRILL_FAILED open failed (RuntimeError path)", exc_info=True)
         # #3293 review: see the ValueError path above — same public-Actions-log
         # sink, same boundary scrub.
         raise HTTPException(
@@ -33494,29 +33972,39 @@ async def backups_drill_scheduled(request: Request):
     if result.get("status") == "drill_ok" and not result.get("within_rto", True):
         # Restore succeeded but missed the committed RTO — incident-worthy
         # (restore speed is a target, not an accident).
-        try:
-            await asyncio.to_thread(
-                alerts.open_incident, _DRILL_FAILED_KIND, "global",
-                {
-                    "error": "restore exceeded the committed RTO",
-                    "duration_s": result.get("duration_s"),
-                    "rto_s": result.get("rto_s"),
-                    "org_id": (result.get("record") or {}).get("org_id"),
-                    "backup_key": (result.get("record") or {}).get("backup_key"),
-                    # #4233: if either GRAPH.COPY (pre-restore safety copy or
-                    # swap) outlived the restore's read bound, name it — that
-                    # is the attributable cause.
-                    "copy_read_bound_overrun": result.get(
-                        "copy_read_bound_overrun"),
-                },
+        if alerts is None:
+            _logger.error(
+                "RESTORE_DRILL_FAILED NOT FILED (no alert channel) — the "
+                "restore exceeded the committed RTO"
             )
-        except Exception:
-            _logger.warning("RESTORE_DRILL_FAILED open failed (RTO-breach path)", exc_info=True)
+        else:
+            try:
+                await asyncio.to_thread(
+                    alerts.open_incident, _DRILL_FAILED_KIND, "global",
+                    {
+                        "error": "restore exceeded the committed RTO",
+                        "duration_s": result.get("duration_s"),
+                        "rto_s": result.get("rto_s"),
+                        "org_id": (result.get("record") or {}).get("org_id"),
+                        "backup_key": (result.get("record") or {}).get("backup_key"),
+                        # #4233: if either GRAPH.COPY (pre-restore safety copy or
+                        # swap) outlived the restore's read bound, name it — that
+                        # is the attributable cause.
+                        "copy_read_bound_overrun": result.get(
+                            "copy_read_bound_overrun"),
+                    },
+                )
+            except Exception:
+                _logger.warning("RESTORE_DRILL_FAILED open failed (RTO-breach path)", exc_info=True)
     else:
         # success (or no eligible archive) closes any open incident. A failed
         # close has NO retry until the next monthly drill, so report it in the
         # response (final-cycle review P2 — the runbook claimed this field).
         try:
+            if alerts is None:
+                # #4778: no channel — the incident cannot be closed, and the run
+                # must REPORT it rather than return a `drill_ok` implying it was.
+                raise RuntimeError("no alert channel")
             await asyncio.to_thread(
                 alerts.resolve_incident, _DRILL_FAILED_KIND, "global"
             )
@@ -33560,16 +34048,24 @@ def _billing_error_to_http(exc: Exception) -> HTTPException:
     """Map billing exceptions to HTTP responses — degrade, never crash.
 
     BillingConfigError (missing STRIPE_* env, lazy by design) → 503;
-    BillingError (bad input like an unknown price id) → 400;
-    StripeAPIError (upstream failure) → 502.
+    StripeAPIError (upstream failure) → 502;
+    BillingError (bad input like an unknown price id) → 400.
+
+    Order is load-bearing (subclass-first): ``BillingConfigError`` and
+    ``StripeAPIError`` BOTH subclass ``BillingError``, so the base branch must
+    come last. Before #4725 the ``BillingError`` branch sat above the
+    ``StripeAPIError`` branch, which made the 502 leg unreachable dead code —
+    every Stripe outage (network failure, rotated key, any 5xx from
+    ``api.stripe.com``) answered 400, blaming the caller for an upstream
+    failure. Pinned by tests/test_billing.py::TestBillingErrorToHttpMapping.
     """
     from tortoise.billing import BillingConfigError, BillingError, StripeAPIError
     if isinstance(exc, BillingConfigError):
         return HTTPException(status_code=503, detail=str(exc))
-    if isinstance(exc, BillingError):
-        return HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, StripeAPIError):
         return HTTPException(status_code=502, detail=str(exc))
+    if isinstance(exc, BillingError):
+        return HTTPException(status_code=400, detail=str(exc))
     return HTTPException(status_code=502, detail=str(exc))
 
 
@@ -33611,6 +34107,9 @@ def _billing_customer_email(sdk: TortoiseSDK | None, org: dict) -> str:
        (``_billing_email_like``) because ``created_by`` may be a user UUID or
        ``"api"`` rather than an address (#4504 review) — a non-email creator
        id must fall through, not be posted to Stripe as the customer email.
+       The control-plane twin of the "key used for THIS request" link is the
+       ``created_by`` already on the resolved org dict (#4727) — see the
+       inline note below.
     3. The VERIFIED session user's email (#4504) — OAuth/session users whose
        org carries no ``Team.email`` and whose keys carry no usable
        ``created_by`` (a dashboard/provisioned org) were refused a checkout
@@ -33637,6 +34136,23 @@ def _billing_customer_email(sdk: TortoiseSDK | None, org: dict) -> str:
     # the t.email that read returns, so this is a selfhost no-op.
     if _billing_email_like(org.get("email")):
         return org["email"].strip()
+    # #4727: the control-plane twin of step 2's "key used for THIS request"
+    # link. The two registry reads below never run in Supabase mode
+    # (``sdk is None``), so a provision-path org whose ``organizations.email``
+    # is NULL had NO creator-email link there — a tt_ key with no session
+    # email got the terminal 400 even though ``resolve_api_key`` already puts
+    # the key's creator on the resolved org dict as ``"created_by"`` (the
+    # same field the registry org dict carries — #1748 parity). Precedence is
+    # deliberately the registry chain's: before the session fallback (3),
+    # after ``Org.email`` (1). Shape-gated for the #4504 reason — a
+    # dashboard-minted key's ``created_by`` is a user UUID and a
+    # bootstrap/legacy key's is the literal ``"api"``; neither is an address
+    # and neither may be posted to Stripe. The ``sdk is None`` guard scopes
+    # this strictly to the lane that has no registry read, so registry
+    # behavior is byte-identical (where the same value is read off the
+    # ``APIKey`` node at step 2 anyway).
+    if sdk is None and _billing_email_like(org.get("created_by")):
+        return org["created_by"].strip()
     if sdk is not None:
         key_id = org.get("key_id")
         if key_id:
@@ -35656,6 +36172,38 @@ def _demand_store_rows(org_id: str | None) -> tuple[list[dict] | None, str]:
     return rows, "local_jsonl"
 
 
+async def _demand_store_rows_off_loop(
+        org_id: str | None) -> tuple[list[dict] | None, str]:
+    """#3514 review P2: the demand READ half, off the event loop.
+
+    ``_demand_store_rows`` is a synchronous ``httpx.Client.get`` (a 5 s timeout)
+    plus an unbounded local JSONL read, and ``hosted_api`` runs a SINGLE uvicorn
+    worker — so calling it inline from an ``async def`` handler stalled EVERY
+    concurrent request, not just the one clicking (re-measured on this tree: a
+    1.00 s read produced a 1.00 s loop gap, 0.05 s when the loop is free). It
+    was the only analytics HTTP call in this module not offloaded; the write
+    path already goes through ``_cp_offload``.
+
+    ``best_effort=True`` because the read must not ADD a failure mode: the
+    helper itself never raises (it returns ``(None, "unavailable")``), so only
+    an OFFLOAD failure remains — a missed wait bound or a saturated telemetry
+    pool — and that degrades to the SAME established polarity, which both read
+    routes already map to a 503. The seam never manufactures the fail-closed
+    ``control_plane_unavailable`` body (whose copy is sign-in specific and would
+    mislead a demand reader).
+
+    ``OFFLOAD_REFUSED`` (#4456) is a distinct non-``None`` sentinel for a
+    submission the pool genuinely refused, so it is NOT unpacked as a result
+    tuple: anything that is not a ``(rows, source)`` tuple is unavailable.
+    """
+    result = await _cp_offload(
+        lambda: _demand_store_rows(org_id),
+        op="data_source_demand_read", best_effort=True)
+    if isinstance(result, tuple):
+        return result
+    return None, "unavailable"
+
+
 def _demand_aggregate(rows: list[dict]) -> tuple[list[dict], bool]:
     """Per-integration demand: distinct orgs × clicks, deduped per (key, team).
 
@@ -35784,7 +36332,7 @@ async def record_data_source_demand(
     idem_key = f"{org_key}:{integration_key}:{idem}" if idem else ""
     if idem_key and not _demand.DEMAND_MARKERS.claim(
             _demand.MARK_RECORD, idem_key, _demand.DEMAND_IDEMPOTENCY_WINDOW_S):
-        rows, source = _demand_store_rows(org_id)
+        rows, source = await _demand_store_rows_off_loop(org_id)
         return {"ok": True, "integration_key": integration_key,
                 "replayed": True, "org_key": org_key,
                 "click_count": _demand_click_count(rows, integration_key),
@@ -35811,7 +36359,7 @@ async def record_data_source_demand(
                             org_key=org_key),
         org_key=org_key, integration_key=integration_key)
 
-    rows, source = _demand_store_rows(org_id)
+    rows, source = await _demand_store_rows_off_loop(org_id)
     return {"ok": True, "integration_key": integration_key,
             "replayed": False, "org_key": org_key,
             "click_count": _demand_click_count(rows, integration_key),
@@ -35841,7 +36389,7 @@ async def read_data_source_demand(
     records" holds by construction rather than by a client-supplied argument.
     """
     _reject_graph_bound_org_surface(org, "data-source demand")
-    rows, source = _demand_store_rows(org["org_id"])
+    rows, source = await _demand_store_rows_off_loop(org["org_id"])
     if rows is None:
         # Unreadable is a 503, never an empty list: "no demand" and "the store
         # could not be read" must not render the same way.
@@ -35866,7 +36414,7 @@ async def operator_data_source_demand(request: Request):
     ``_check_internal`` and not on the tenant surface.
     """
     _check_internal(request)
-    rows, source = _demand_store_rows(None)
+    rows, source = await _demand_store_rows_off_loop(None)
     if rows is None:
         raise HTTPException(
             status_code=503,

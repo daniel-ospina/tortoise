@@ -31,6 +31,7 @@ Runnable with the docker lane:
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 from uuid import uuid4
@@ -2039,3 +2040,102 @@ class TestSharedTerminalizerClassifier:
         gated = hard_deleted_pairs(events)
         assert _hard_deleted_any(gated, "Object", "x") is True
         assert _hard_deleted_any(gated, "Point", "x") is False
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# #5380 — the edge-message fold's misses are RECORDED, not only warned
+#
+# R8 requires every fold miss to enter the run-scoped non-folded set. The
+# `EdgeMessageChanged` arm warned and recorded NOTHING, so a `set` miss (the
+# edge the record names was never re-created) vanished into a log line, and an
+# unrecognised `clear` scope was a SILENT no-op that resurrected the seeds the
+# live graph dropped (#330/#1242) — the exact divergence the clear leg was
+# added to prevent. Both shapes are EXEMPT (a plain direct edge is
+# legitimately absent after a replay — A10 #1048 — and a future producer's
+# fourth scope must not make a recovery run un-runnable), but an exemption
+# still REQUIRES the record: that is the whole point of EXEMPT_SHAPES.
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_edge_message_set_miss_is_recorded_as_non_folded(tmp_path, caplog):
+    """A `set` whose edge is absent is a RECORDED non-folded event.
+
+    Pre-fix it was only warned. The run boundary's own exempt report is the
+    observable proof the record exists — the shape name appears nowhere else.
+    """
+    events = tmp_path / "events"
+    events.mkdir()
+    _raw(events, type="EdgeMessageChanged", id="ghost->missing:IMPL",
+         op="set", src="ghost", tgt="missing", rel="IMPL",
+         msg_alpha=0.5, msg_beta=0.5)
+    proj = _fresh(tmp_path, "em-miss")
+    try:
+        with caplog.at_level(logging.WARNING):
+            proj.rebuild_all(str(events), confirm_destructive=True)
+    finally:
+        proj.close()
+    joined = "\n".join(r.getMessage() for r in caplog.records)
+    assert "edge-message-miss" in joined, (
+        "the EdgeMessageChanged `set` miss was NOT recorded as a non-folded "
+        f"event — R8 requires a structured entry, not only a warning:\n{joined}")
+
+
+def test_edge_message_unknown_clear_scope_is_recorded_and_exempt(tmp_path):
+    """An unrecognised `clear` scope is a recorded, EXEMPT non-folded event.
+
+    Exempt because refusing would make a recovery run un-runnable for a
+    journal a future producer could legitimately extend; recorded because a
+    silent no-op resurrects the seeds the live clear dropped (#330).
+    """
+    proj = _fresh(tmp_path, "em-scope")
+    try:
+        with collect_non_folded() as nf:
+            n = proj._fold_edge_message_changed(
+                {"type": "EdgeMessageChanged", "op": "clear",
+                 "scope": "not-a-scope", "event_id": "e-em-scope"})
+        assert n == 0
+        assert [e.shape for e in nf] == ["edge-message-unreplayed"], (
+            "an unrecognised clear scope returned 0 INDISTINGUISHABLY from a "
+            f"legitimate empty drop — no non-folded record: {nf}")
+        assert refused_events(nf) == [], (
+            "the shape must be EXEMPT — refusing a clear record blocks "
+            "recovery")
+    finally:
+        proj.close()
+
+
+def test_edge_message_clear_with_no_usable_point_ids_is_recorded(tmp_path):
+    """A known scope with no usable `point_ids` is the same silent no-op."""
+    proj = _fresh(tmp_path, "em-ids")
+    try:
+        with collect_non_folded() as nf:
+            n = proj._fold_edge_message_changed(
+                {"type": "EdgeMessageChanged", "op": "clear",
+                 "scope": "touching", "point_ids": ["", None, 7],
+                 "event_id": "e-em-ids"})
+        assert n == 0
+        assert [e.shape for e in nf] == ["edge-message-unreplayed"], nf
+        assert refused_events(nf) == [], nf
+    finally:
+        proj.close()
+
+
+def test_edge_message_known_scope_with_ids_still_folds(tmp_path):
+    """GUARD: the new recording must NOT fire on a legitimate `clear`.
+
+    Without this, a mutation that recorded every clear (or inverted the scope
+    check) would pass the tests above while breaking recovery.
+    """
+    proj = _fresh(tmp_path, "em-ok")
+    try:
+        proj.g.query("CREATE (:Point {id:'a'})-[:IMPL]->(:Point {id:'b'})")
+        proj.g.query("MATCH ()-[r:IMPL]->() SET r.msg_alpha=0.5")
+        with collect_non_folded() as nf:
+            n = proj._fold_edge_message_changed(
+                {"type": "EdgeMessageChanged", "op": "clear",
+                 "scope": "touching", "point_ids": ["a"],
+                 "event_id": "e-em-ok"})
+        assert n == 1, n
+        assert [e.shape for e in nf] == [], nf
+    finally:
+        proj.close()

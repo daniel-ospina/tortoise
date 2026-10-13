@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.23"
+title: "Tortoise — Canonical Ontology v3.24"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-10-11
+updated: 2026-10-12
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.23
+# Tortoise — Canonical Ontology v3.24
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -149,6 +149,21 @@ doc_status: live
 >   safety net. Under `promotion_policy='gated'` ingest still writes every
 >   point — goal included — as `draft`.
 >
+> **Changelog v3.24 (2026-10-12 — issue #7852 W1 — the Layer-2 `semantics` reaches the write path):**
+> `create_operator` (SDK) and `tortoise_create_operator` (MCP) accept an additive, defaulted
+> `semantics` input — the closed Layer-2 vocabulary. A declared meaning RESOLVES the direction (a
+> one-way meaning records `unidirectional`, a mutual one `bidirectional`); the basis the resolution
+> used is recorded on the operator as `direction_basis` — `explicit` (the caller stated a non-default
+> direction), `semantics` (the declared Layer-2 meaning resolved it — the token names the LAYER that
+> produced the value, never the Layer-3 `label` predicate, which is a different input), or `default`
+> (nothing declared). The endpoint-kind step is a
+> separate scoped change. An out-of-vocabulary word warns and the write proceeds — never refuses —
+> and a retired word resolves to its canonical replacement. This is the chain step that had no way
+> to run, so the direction no longer always falls through to the per-op_type default. The four-value
+> **storage** vocabulary is unchanged (see *Transition state*): the model's `-` maps to no runtime
+> value, and `<-` is deliberately left unmapped rather than recorded as the opposite (`unidirectional`
+> is source→target only).
+>
 > **Changelog v3.22 (2026-10-11 — issue #7852 — the Layer-2 semantics vocabulary is closed, and validated):**
 > §8 now states the semantics vocabulary as **the** canonical table — one list, with each value's
 > recorded direction and its meaning — and the registry checks a pack's `relations[].semantics`
@@ -170,7 +185,10 @@ doc_status: live
 > ⚠ **Transition state.** The four-value vocabulary is the model; **the shipped code still accepts only
 > `bidirectional` / `unidirectional`** (`create_operator`, `create_direct_edge`, the ingest contract and
 > EP compare the two names). Until that lands (#7852), **code and payload examples below keep the
-> accepted names** — the model tables state the target.
+> accepted names** — the model tables state the target. **The write path now reads the semantics**:
+> `create_operator` / `tortoise_create_operator` accept `semantics` and resolve the recorded direction
+> from it (recording the basis in `direction_basis`), mapping the model's direction onto the two values
+> the runtime stores (#7852 W1). The four-value **storage** migration remains open.
 >
 > **Changelog v3.20 (2026-09-29 — issue #5566 — the EP affected-set traversal is factor-bearing-only):**
 >
@@ -740,7 +758,7 @@ Each layer answers a different question. All four are live mechanisms.
 > - **Case 2 — substantive correction:** the new point exists *because* a refutation landed. The refuting NAND must **not** re-attach to the successor (it motivated the change); belief recomputes structurally with the refutation gone.
 > Deterministic policy is safe only for content-independent edges (identity edges like `aboutObject` when the target is unchanged; merges carry everything). Semantic edges (IMPL/NAND) route to a carry / drop / **pend** triage with the rationale stored per edge; pended edges are non-voting placeholders surfaced by the ask lane only when an answer depends on them. A refutation that motivated a correction never re-attaches; a refutation that still applies is kept. *Implementation status:* `supersede_point` currently performs the legacy universal transfer (all operator + structural edges); the per-edge triage decomposes under #2421.
 >
-> **Direction flag (code note):** direction is recorded on the operator Point (or on the edge when no operator is present) — four values: `->`, `<-`, `<->`, `-`. It comes from the connection's semantics; the recorded value is authoritative — **the semantics set it at declaration time; today's shipped code does not read the semantics — `create_direct_edge` and the ingest path key off `op_type`, while `create_operator` still takes its `bidirectional` default (#7813)** (see the *Transition state* note in the changelog). Pre-migration operators lacking the property are read as `<->` (legacy semantics preserved).
+> **Direction flag (code note):** direction is recorded on the operator Point (or on the edge when no operator is present) — four values: `->`, `<-`, `<->`, `-`. It comes from the connection's semantics; the recorded value is authoritative — **the semantics set it at declaration time; `create_operator` / `tortoise_create_operator` now accept `semantics` and resolve the direction from it, recording the basis as `direction_basis` (#7852 W1), while `create_direct_edge` and the ingest path still key off `op_type` (#7813)** (see the *Transition state* note in the changelog). Pre-migration operators lacking the property are read as `<->` (legacy semantics preserved).
 >
 > **Edge properties (IMPL/NAND — EP message state, epic 903):** these are **graph-persisted** belief-propagation messages written by `TortoiseEP._flush_cache` and read back by `_load_cache` (warm-start seed, 903-C4). They are load-bearing graph state — documented here so they are not treated as throwaway cache:
 >
@@ -770,7 +788,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 | `aboutDocument` | Event → **Source** | unidirectional | many→many | `schema:about` (typed) | What document this Event is about. **⚠️ It is a distinct predicate from `aboutSource` and must not be merged with it:** `aboutDocument` is in the snapshot-derivable set (`DERIVABLE_STRUCTURAL_RELS`) and is therefore **rebuilt at the old point** by `rebuild_all` pass-2b, whereas `aboutSource` is deliberately excluded and never resurrects — merging them would silently delete that rebuild guarantee (the `#2489` replay rules are in §3.1) |
 | `aboutSource` | Point/Event → Source | unidirectional | many→many | `schema:about` (typed) | What Source this describes (e.g., an evaluation of a source). Creatable via `create_edge` (#391); may coexist with `extractedFrom` when the claim's text was also retrieved from that source. **⚠️ NOT snapshot-derivable by design — it gets no replay descriptor** |
 | `aboutAction` | Point → Point (legacy) | unidirectional | many→many | `schema:about` (typed) | Legacy predicate retained for pre-v3.0 Action edges (Action entity dissolved in v3.0). No automatic producer — creatable only via explicit `create_edge` (#391); endpoints are whatever the resolver finds |
-| `TAGGED` | Point → Tag | unidirectional | many→many | `schema:keywords` | Free-form label on a Point. Tags are `:Tag` nodes (Object subclass, `objectKind: tag`) shared across Points via MERGE. Created by hosted-api point ingestion (hosted_api.py:695-787). ⚠️ **Write-only today — no tag-filter query surfaced yet** (see follow-up). |
+| `TAGGED` | Point → Tag | unidirectional | many→many | `schema:keywords` | Free-form label on a Point. Tags are `:Tag` nodes (Object subclass, `objectKind: tag`) shared across Points via MERGE. **A user-authored Tag is first-class DATA, not a derived label** — #3856 (OD-4) settled that by what a Tag *is* (*"shared, MERGEd, first-class nodes are data"*, so *"the owner is not asked"*), which makes it durable Point content: tags survive `rebuild_all` (#2897, objective 6 "props, **tags** and EP state survive"). **Shape:** the Point's own `tags` property is the source and the `:Tag`/`TAGGED` half is **snapshot-derivable** from it (the `#2489` split, like `extractedFrom`). A LIST of names drives the edge half and is the supported form; a truthy non-list (a scalar) is stored verbatim and gets no edges, and a value the store cannot hold degrades to NO property (#7369). ⚠️ A truthy non-list (`tags` a number/string/map) leaves any EXISTING `TAGGED` edges in place — live keeps a membership whose property no longer lists it — while **`rebuild_all`** derives none from it and therefore drops that edge — ⚠️ and `rebuild(EventLog)` KEEPS it (it replays record-by-record through `apply`, so the creation's list-sync runs before the edit and no later sweep revisits it), so **live and `rebuild(EventLog)`** then hold an edge the property no longer lists; the difference is filed as **#8333** (with the one-line fix, in `_sync_tags`, that closes it). **Replay:** `_upsert_point_props` writes the property, `_upsert_point_edges` pass 2 re-derives the edges from the node's own final value, and `_revise_point` folds a tag edit *and* its explicit clear. **Live:** the SDK's `create_point`/`update_point` and that replay fold share ONE routine, `projection/edges.py::_sync_tags`. Producers: the SDK write path, hosted-api point ingestion (`hosted_api.py`), and the demo seeder (`_seed_demo_graph`) — ⚠️ the seeder is the one producer that still hand-rolls its `MERGE` loop instead of calling `_sync_tags` (the property it now writes is what makes its tags durable), and its fix is NOT retroactive for graphs seeded before #2897. Readable by tag via `TortoiseSDK.query_points_by_tag` / the MCP `tortoise_query(tag=…)` surface. ⚠️ Doc-vs-code gap, filed as **#8325**: the node is created as `MERGE (t:Tag {name:$tag})`, so it carries **no** `:Object` label and **no** `objectKind` — the Object-subclass characterisation above is the intended model, not the implemented one. |
 
 > **Legacy:** `aboutEntities` property → per-type `about*` edges. `_create_about_edges()` auto-detects Subject/Object from the legacy property. `schema:about` is polymorphic; we split per-type for graph performance.
 >
@@ -1001,7 +1019,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `quote` | string ≤200 | — | — | ⚠️ | Provenance quote — the source text this claim was drawn from; payload-level metadata today (SDK extraction path / EventAPI `provenance()` payloads — extractor.py, api.py), stored Point property per #909 §4.3 #11 (secret-scanned) |
 | `when` | ISO date ≤40 | — | `prov:atTime` | ⚠️ | Occurrence-time anchor — the conversation date a state-change/decision/date-bearing fact is "as of"; "" = undated (registered #1533 E1; written by extractor_v2 S5 from the session-date-anchored prompts; absent on timeless durable beliefs) |
 | `authoredBy` | SubjectID | — | `dc:creator` | ✅ | Who created the claim |
-| `validFrom` | ISO8601 | — | `prov:generatedAtTime` | ⚠️ | Valid-time **start** — populated by the date-carrying write paths only (the hosted commit path sets it from the payload `when`; mining W-4 from the session date). Mining W-4's undated leg (`ConversationMiner._temporal_wire`, #3654) writes **no** `validFrom` — **absent ⇒ open/unbounded start** (`restore_point_at`), never a start synthesized from the write wall clock. The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp. §4.7 |
+| `validFrom` | ISO8601 | — | `prov:generatedAtTime` | ⚠️ | Valid-time **start** — populated by the date-carrying write paths only (the hosted commit path sets it from the payload `when`; mining W-4 from the session date). Mining W-4's undated leg (`ConversationMiner._temporal_wire`, #3654) writes **no** `validFrom` — **absent ⇒ open/unbounded start** (`get_historical_knowledge`), never a start synthesized from the write wall clock. The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp. §4.7 |
 | `validTo` | ISO8601 | — | `prov:invalidatedAtTime` | ✅ | Valid-time **end** — `supersede_point` stamps the successor's `validFrom` **when it carries one**; an undated successor falls back to its `createdAt`, then to `now` (monotone — never a gap), so the windows are exactly contiguous **only for a dated successor**. `invalidate_point` instead stamps `validTo = now` (no successor ⇒ no contiguity), and refuses with `ValueError` when a stored `validFrom` is after `now` — `retract_point` is the window-agnostic route (#5358). A `valid_from` **kwarg** is refused when it disagrees with a successor that **carries** a stored `validFrom` (same instant required, else `ValueError` before any write — §4.7). A successor whose resolved start is **parseable** and sorts **strictly before the predecessor's own parseable `validFrom`** is refused outright (`ValueError`, same measure, before any write — an inverted window is satisfiable by no query instant) (#4021). A bound that is present but **unorderable** on EITHER side is not compared: it names no instant, so a refusal would rest on a lexicographic accident rather than a comparison (`_assert_window_start_not_inverted` makes the same choice for `invalidate_point`), and the orderability residual is closed on the write path (#5360) — an unorderable resolved bound is normalised to an orderable instant rather than persisted, with ONE deliberate exemption: a NUMERIC `valid_from` kwarg, which is `str()`-ed and left unorderable, so `_covers` still cannot order that window end. §4.7 |
 | `expiredAt` | ISO8601 | — | — | ✅ | Transaction-time expiry — **when our record stopped being current** (termination), not *why* it did. Written by both `supersede_point` (replaced by a successor) and `invalidate_point` (withdrawn) — **the timestamp alone cannot tell the two apart**. Supersession is a separate fact: Points carry it as `status='superseded'` (Point has no `supersededAt`); the `outdated` flag + `CORRECTS` edge are shared with `invalidate_point` and do **not** distinguish the two. See §4.7. |
 | `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | ✅ | Timestamps |
@@ -1160,7 +1178,7 @@ window, independent of when Tortoise learned it. Canonical pair:
 
 | Slot | Canonical name | Standard | Notes |
 |------|----------------|----------|-------|
-| start | `validFrom` | `prov:generatedAtTime` | Populated by the date-carrying write paths — the hosted commit path sets it from the payload `when`, mining W-4 from the session frontmatter date (§4.1). An undated session stamps **no** `validFrom` at all (`ConversationMiner._temporal_wire`, #3654), so an **absent** `validFrom` means an **open/unbounded start** (`restore_point_at`) — the write wall clock is never borrowed as a start. `create_point`'s base CREATE map seeds no `validFrom`; caller props — including `validFrom` — are appended to it, so `create_point` itself never **synthesizes** a clock-stamped start either. The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp |
+| start | `validFrom` | `prov:generatedAtTime` | Populated by the date-carrying write paths — the hosted commit path sets it from the payload `when`, mining W-4 from the session frontmatter date (§4.1). An undated session stamps **no** `validFrom` at all (`ConversationMiner._temporal_wire`, #3654), so an **absent** `validFrom` means an **open/unbounded start** (`get_historical_knowledge`) — the write wall clock is never borrowed as a start. `create_point`'s base CREATE map seeds no `validFrom`; caller props — including `validFrom` — are appended to it, so `create_point` itself never **synthesizes** a clock-stamped start either. The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp |
 | end | `validTo` | `prov:invalidatedAtTime` | On **supersession** set to the successor's `validFrom` **when the successor carries one** — the **contiguous Graphiti (Zep) window intent: the old fact stops being true when the new one starts being true** (`supersede_point`, E6 #1538). An **undated** successor (absent `validFrom` ⇒ open start, row above) falls back to its `createdAt`, then to `now` — so the old `validTo` lands on the successor's `createdAt` and the windows **overlap** rather than being exactly contiguous. Exact contiguity requires a successor `validFrom` (`valid_from` kwarg → successor `validFrom` → successor `createdAt` → `now`). The kwarg is a **claim**, not an unconditional override: when the successor carries a stored `validFrom` the two must be **parseable** timestamps naming the **same instant** (compared by instant via `_created_sort_key`, the measure `_covers` uses), else `supersede_point` raises `ValueError` **before any mutation** — a disagreeing kwarg would otherwise gap or overlap the chain (#3980). The kwarg is the sole source for an undated successor **unless it names no instant** — a STRING kwarg that is unparseable falls through to the successor's `createdAt`, and that fallback itself requires an orderable value and otherwise lands on `now` (#5360). **The resolved end is additionally checked against the PREDECESSOR's own `validFrom`**: when BOTH order to an instant and the end is strictly earlier ⇒ `ValueError` before any mutation (#4021), because an inverted window (`validTo < validFrom`) is satisfied by **no** query instant, so the predecessor would be silently unreachable from every read surface — equality (a zero-length predecessor window) remains legal. An **unorderable** bound on either side is NOT compared even so: it names no instant, so a refusal would rest on a lexicographic accident rather than a comparison (and a point whose window is already unorderable is not newly hidden by the write) — the orderability residual is closed on the write path (#5360), except the deliberately-exempt NUMERIC `valid_from` kwarg (whose `str()` form `_covers` still cannot order). `invalidate_point` instead stamps `validTo = now` (no successor ⇒ no contiguity), and refuses with `ValueError` when a stored `validFrom` is after `now` — `retract_point` is the window-agnostic route (#5358) |
 
 > **Point's `when` is not a second valid-time slot.** `when` (§4.1) is the
@@ -1535,9 +1553,12 @@ and carry confidence as an edge attribute.
   edge. EP reads the operator node first, falls back to the edge.
 - **Direction comes from semantics.** Each semantics value carries a direction, and the authoring
   path resolves and records it — a caller supplies the meaning and need not state a direction. The
-  recorded direction is authoritative. *(Model: today's shipped code does not read the semantics — the
-  direct-edge and ingest paths resolve by `op_type`, and `create_operator` takes its `bidirectional`
-  default (#7813). See the *Transition state* note.)*
+  recorded direction is authoritative. *(Model: `create_operator` / `tortoise_create_operator`
+  accept `semantics` and resolve the direction from it, recording the basis on the operator as
+  `direction_basis` — `explicit` / `semantics` / `default` (#7852 W1). The remaining gap is the
+  four-value **storage** vocabulary: the runtime still records only `bidirectional` /
+  `unidirectional`, and the direct-edge and ingest paths still resolve by `op_type` (#7813). See the
+  *Transition state* note.)*
 - `-` means the connection exists and **no confidence transfers along it**.
 - **Lazy promotion:** a plain edge gains an operator only when mitigation
   becomes needed.
@@ -1722,8 +1743,9 @@ adds `decay_clause('n')` to `_fold_point_invalidated`'s SET when it lands.
 Direction-aware EP (§3.1, #86) is the prerequisite that makes reverse
 traversal well-defined: `_affected_claims` follows the recorded direction
 (`->`, `<-`, `<->` or `-`), which the connection's semantics determines *(today's shipped
-code does not read the semantics — it resolves by `op_type`, or takes `create_operator`'s default
-(#7813). See the *Transition state* note.)*
+code reads the semantics on the operator write path — `create_operator` / `tortoise_create_operator`
+resolve it and record `direction_basis` (#7852 W1), while `create_direct_edge` and the ingest path
+still resolve by `op_type` (#7813). See the *Transition state* note.)*
 
 ---
 

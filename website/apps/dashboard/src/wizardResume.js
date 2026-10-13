@@ -52,13 +52,15 @@
 import { setupGuide } from './setupGuide.js'
 import { forkStepState } from './wizardFlow.js'
 
-// The wizard's 4 human steps (wizardFlow.js WIZARD_STEPS): org-create, fork,
-// connect, done. Named here so the derivation reads as the step machine rather
-// than as magic integers.
+// The wizard's human steps (wizardFlow.js WIZARD_STEPS): org-create, fork,
+// connect, data-sources, done. Named here so the derivation reads as the step
+// machine rather than as magic integers. #3513 inserted data-sources at index 3
+// and moved done to index 4.
 export const RESUME_STEP_ORG_CREATE = 0
 export const RESUME_STEP_FORK = 1
 export const RESUME_STEP_CONNECT = 2
-export const RESUME_STEP_DONE = 3
+export const RESUME_STEP_DATA_SOURCES = 3
+export const RESUME_STEP_DONE = 4
 
 /**
  * The wizard step a re-entry door must open at for `state`.
@@ -67,7 +69,7 @@ export const RESUME_STEP_DONE = 3
  *   (GET /v1/onboarding/state — jsonb operational keys + graph FLOW keys).
  * @param {{hasOrg?: boolean}} [opts] `hasOrg` is the caller's client fact
  *   (main.jsx `welcomeHasOrg`): does the account hold an Organization?
- * @returns {number} 0..3, always a real step (never null/NaN) so the caller can
+ * @returns {number} 0..4, always a real step (never null/NaN) so the caller can
  *   set `wizardStep` unconditionally.
  */
 export function resumeStep(state, { hasOrg = false } = {}) {
@@ -99,6 +101,14 @@ export function resumeStep(state, { hasOrg = false } = {}) {
   // steps beyond it (first-points-filed, decide-completed) have no wizard
   // step of their own — the done screen reports the state and the Setup guide
   // carries the open row — so they must NOT send the user back to connect.
+  //
+  // #3513: a connected Organization resumes at DONE, not at DATA_SOURCES. The
+  // data-sources step is a forward-flow step with no server-completion edge of
+  // its own (its per-source flags are independently settable and an unset one
+  // is not "unfinished"), so there is no fact a door could key on — inventing
+  // one would be a second representation of the flow DM-1 bans. Re-entering a
+  // connected org at done is the existing, honest behaviour; the grid stays
+  // reachable from Settings → Memory sources at any time.
   const connected = g.rows.some((r) => r.id === 'harness-connected' && r.done)
   return connected ? RESUME_STEP_DONE : RESUME_STEP_CONNECT
 }

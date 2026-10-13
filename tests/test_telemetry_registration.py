@@ -32,6 +32,7 @@ import pytest
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
 from tortoise import hosted_api as ha
+from tortoise import monitoring
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _HOSTED_API = _REPO_ROOT / "tortoise" / "hosted_api.py"
@@ -48,13 +49,20 @@ def _clean_telemetry_state(monkeypatch):
 
     The counter is process-global by design (monotonic in production), so a
     test must reset it — that is a test-hygiene concern, not a code smell.
+
+    #4095: the monitoring seam's site ADMISSION registry is process-global too
+    (it is the bounded-cardinality cap), so it is reset for the same reason —
+    without it the bounded-label test would inherit the sites an earlier test
+    admitted and fold immediately.
     """
     monkeypatch.delenv(ha._TELEMETRY_STRICT_ENV, raising=False)
     ha._TELEMETRY_DROP_COUNTS.clear()
     ha._TELEMETRY_DROP_REPORTED.clear()
+    monitoring._TELEMETRY_DROP_SITES.clear()
     yield
     ha._TELEMETRY_DROP_COUNTS.clear()
     ha._TELEMETRY_DROP_REPORTED.clear()
+    monitoring._TELEMETRY_DROP_SITES.clear()
 
 
 @pytest.fixture
@@ -301,6 +309,143 @@ def test_drop_state_is_bounded_across_distinct_sites(caplog):
     assert ha._TELEMETRY_DROP_COUNTS[
         ("post_cap_site", "subject", ("fresh_key",))] == 1
     assert any("fresh_key" in rec.getMessage() for rec in _warnings(caplog))
+
+
+# ── #4095: the drop counter's PRODUCTION reader ─────────────────────────────
+#
+# #3821 shipped the log + in-process counter and declared the durable-exposure
+# gap as a follow-up. The counter is process-local and lost on every deploy, and
+# until now it was read only by THIS file — so the "always counts" guarantee was
+# observable in tests and nowhere else (#3677's "signal with no channel", the
+# D5a lesson from #3997). These tests pin the reader, not the writer.
+
+
+def _no_sdk(monkeypatch):
+    """``metrics()`` must not probe a graph here — this file is about counters."""
+    monkeypatch.setattr(monitoring, "_sdk", None)
+
+
+def test_a_drop_is_counted_on_the_monitoring_seam(monkeypatch):
+    """#4095 gap 1: the drop must reach the seam the FLEET serves.
+
+    ``monitoring.metrics()`` is what ``mcp_server.tortoise_health`` returns (the
+    hosted app exposes no ``/metrics`` route), so this is the production read
+    the issue asks for — asserted through ``metrics()`` and not only through the
+    helper, because a helper nothing publishes would be the same defect one
+    layer up (#7924's audit-drop fix is the precedent).
+    """
+    _no_sdk(monkeypatch)
+    site = "prod_reader_site|subject"
+    before = monitoring.telemetry_drop_counts().get(site, 0)
+
+    ha._report_unregistered("prod_reader_site", "subject", {"k"})
+
+    assert monitoring.telemetry_drop_counts()[site] == before + 1
+    assert monitoring.metrics()["telemetry_drops"].get(site) == before + 1
+
+
+def test_an_unknown_event_never_reaches_the_metric():
+    """The negative half: a fully-registered event must leave the seam at
+    zero. Without it the counter is unreadable — "something dropped" would be
+    indistinguishable from "the metric is always 1" (the #3821 contract's own
+    wording)."""
+    before = sum(monitoring.telemetry_drop_counts().values())
+    ha._report_unregistered("no_drop_site", "subject", set())
+    ha._report_unregistered("no_drop_site", "subject", None)
+    assert sum(monitoring.telemetry_drop_counts().values()) == before
+    assert ha._telemetry_drop_block()["total"] == 0
+
+
+def test_strict_mode_still_counts_on_both_legs(monkeypatch):
+    """Contract point 1 under the mode that RAISES: the drop must be counted
+    before the escalation on the monitoring leg too, or the strict-mode deploy
+    (the one that most wants the count) is the one that loses it."""
+    monkeypatch.setenv(ha._TELEMETRY_STRICT_ENV, "1")
+
+    with pytest.raises(ha.UnregisteredTelemetryKey):
+        ha._report_unregistered("strict_site", "subject", {"k"})
+
+    assert ha._TELEMETRY_DROP_COUNTS[
+        ("strict_site", "subject", ("k",))] == 1
+    assert monitoring.telemetry_drop_counts()["strict_site|subject"] >= 1
+
+
+def test_a_metrics_library_failure_cannot_escape_the_reporter(monkeypatch):
+    """The new leg must not widen ``_report_unregistered``'s raise contract: it
+    raises EXACTLY ONE exception, and only in strict mode. A metrics-library
+    raise would otherwise surface as an opaque 500 on the telemetry emit path
+    (#3820's P2-3, the same defect one counter over)."""
+    def _boom(_site):
+        raise RuntimeError("metrics library down")
+
+    monkeypatch.setattr(ha, "record_telemetry_drop", _boom)
+
+    ha._report_unregistered("metrics_boom", "subject", {"k"})  # must not raise
+
+    # The in-process counter is incremented BEFORE the failing leg, so the
+    # drop is still counted — a monitoring outage must not lose the fact.
+    assert ha._TELEMETRY_DROP_COUNTS[
+        ("metrics_boom", "subject", ("k",))] == 1
+
+
+def test_the_status_block_splits_the_total_by_site_and_counts_markers(monkeypatch):
+    """The /status shape: DROPS (total) + where they came from (sites) +
+    whether the bounded marker set folded (markers vs marker_cap).
+
+    Two distinct keys at ONE site must read as total=2, sites={site: 2},
+    markers=2 — the fingerprint dimension is the bounded part, and a block that
+    reported markers as the drop count would under-report a hot drop.
+    """
+    _no_sdk(monkeypatch)
+    ha._report_unregistered("shape_site", "subject", {"k1", "k2"})
+    ha._report_unregistered("shape_site", "subject", {"k1"})
+
+    block = ha._telemetry_drop_block()
+
+    assert block["total"] == 2
+    assert block["sites"] == {"shape_site|subject": 2}
+    assert block["markers"] == 2
+    assert block["marker_cap"] == ha._TELEMETRY_DROP_MAX_MARKERS
+
+
+def test_the_status_block_never_carries_the_dropped_key_names(monkeypatch):
+    """⛔ PII/injection bound, the same one ``_analytics_incident_detail``
+    holds: the key names are CALLER-SUPPLIED (the PATCH front door derives them
+    from a request body). The block is a count channel; the WARN line, emitted
+    once per site, is the channel where a name is legible.
+    """
+    _no_sdk(monkeypatch)
+    secret = "what-is-the-best-restaurant-in-Madrid"
+    ha._report_unregistered("pii_site", "subject", {secret})
+
+    rendered = json.dumps(ha._telemetry_drop_block())
+
+    assert secret not in rendered, "the block leaked a caller-supplied key name"
+    assert "pii_site|subject" in rendered, "the site itself must still be named"
+
+
+def test_the_metric_label_space_is_bounded_by_its_own_writer(monkeypatch):
+    """Bounded cardinality is owned by the WRITER, not trusted from the caller:
+    past the cap every further site folds into one shared child, so a
+    request-derived site label cannot grow the Prometheus child set (a
+    scrape-cost bug) or the /status body without bound."""
+    monkeypatch.setattr(monitoring, "TELEMETRY_DROP_MAX_SITES", 2)
+    # A DELTA, not an absolute: the Prometheus counter is process-global and
+    # monotonic, so every earlier test in this process that folded a site has
+    # already contributed to the shared child.
+    folded_before = monitoring.telemetry_drop_counts().get(
+        monitoring.TELEMETRY_DROP_OTHER, 0)
+    for label in ("cap_site_a_4095", "cap_site_b_4095", "cap_site_c_4095"):
+        monitoring.record_telemetry_drop(label)
+
+    counts = monitoring.telemetry_drop_counts()
+
+    assert counts.get("cap_site_a_4095") == 1
+    assert counts.get("cap_site_b_4095") == 1
+    assert "cap_site_c_4095" not in counts, "the cap admitted a third site"
+    assert counts.get(monitoring.TELEMETRY_DROP_OTHER) == folded_before + 1
+    # A folded drop is still COUNTED (never silently dropped on the seam).
+    assert sum(counts.values()) >= 3
 
 
 def test_one_site_cannot_silence_another_sites_warning(caplog):

@@ -614,15 +614,15 @@ class TestRelationWriteVerdict:
         """
         from tortoise.pack_registry import relation_write_verdict
         from tortoise.projection.edges import (
+            _VALID_EDGE_PREDICATES,
             STRUCTURAL_REL_LABELS,
             STRUCTURAL_WRITE_PREDICATES,
-            _VALID_EDGE_PREDICATES,
         )
 
         # The union is exactly the writers' structural vocabulary.
-        assert STRUCTURAL_WRITE_PREDICATES == (
+        assert (
             _VALID_EDGE_PREDICATES | set(STRUCTURAL_REL_LABELS)
-        )
+        ) == STRUCTURAL_WRITE_PREDICATES
         # ... and every member answers `writable` / `structural`.
         for predicate in sorted(STRUCTURAL_WRITE_PREDICATES):
             verdict, paths = relation_write_verdict({"predicate": predicate})

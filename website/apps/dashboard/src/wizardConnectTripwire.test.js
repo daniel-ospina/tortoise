@@ -518,7 +518,7 @@ test('#2912: the org eyebrow renders only when an org exists AND its name is kno
     'the head lede goes through wizardStepSub on the same derived flags as the <h1>')
   assert.match(head, /if \(headSub === null\) return null/,
     'a null lede suppresses the <p class="welcome-lede"> entirely')
-  assert.doesNotMatch(head, /wizardStep === 3 && effectivelyPaused\) return null/,
+  assert.doesNotMatch(head, /wizardStep === 4 && effectivelyPaused\) return null/,
     'the lede guard must not key on the local paused flag alone')
 })
 
@@ -768,7 +768,8 @@ test('#3428/#2937 (cycle 8 item 4, M4): completed_steps is never written client-
 
 test('#3428: the done screen is gated on the SERVER-observed connection, not a click', () => {
   const src = stripBlockAndWholeLineComments(mainJsx)
-  const i = src.indexOf('{wizardStep === 3 && (')
+  // #3513: `done` moved to index 4 (the Data-sources step took index 3).
+  const i = src.indexOf('{wizardStep === 4 && (')
   assert.ok(i > -1, 'the done step renders')
   // review cycle 1 (P2-4): assert the end marker before slicing. The file's own
   // contract is that a lost marker fails loudly instead of silently widening the
@@ -821,7 +822,8 @@ test('#3428: the done screen is gated on the SERVER-observed connection, not a c
 })
 
 test('#3428/#2937: the done step names a harness ONLY when the connect step offered the picker', () => {
-  // review cycle 3 (P1-A): the 'unsure' fork answer advances to step 3 without
+  // review cycle 3 (P1-A): the 'unsure' fork answer advances to the done step
+  // (index 4 since #3513) without
   // ever rendering step 2's chooser, and the capped owner/admin re-entry
   // replaces the chooser with the mint-cap remedy — yet `wizardHarness` keeps
   // its untouched 'claude' default on BOTH. Naming Claude there would be the
@@ -838,11 +840,12 @@ test('#3428/#2937: the done step names a harness ONLY when the connect step offe
   assert.match(src, /const doneCaptureClaim = harnessPickEstablished \? harnessCaptureClaim : 'none'/,
     'the capture sentence is silenced (never asserted) without a pick')
   // the path this gate exists for: 'unsure' never establishes a fork — it
-  // advances straight to step 3, which is why step 2's chooser never renders.
+  // advances straight to the DONE step (index 4 since #3513), which is why
+  // step 2's chooser never renders.
   const forkFn = src.slice(src.indexOf('async function handleWizardFork('),
                            src.indexOf('setWizardForkChosen(forkId)'))
-  assert.match(forkFn, /if \(forkId === 'unsure'\)[\s\S]{0,400}?setWizardStep\(3\)/,
-    "the 'unsure' answer reaches step 3 without setting a fork")
+  assert.match(forkFn, /if \(forkId === 'unsure'\)[\s\S]{0,400}?setWizardStep\(4\)/,
+    "the 'unsure' answer reaches the done step without setting a fork")
   // review cycle 4 (item 2): the negative below used to run over `forkFn`, whose
   // slice ENDS at the first `setWizardForkChosen(forkId)` — so the negated token
   // could not be inside it by construction and the assertion could never fail.
@@ -911,7 +914,8 @@ test('#3428/#2937: the build-fork done body names no harness and asserts nothing
   // pins the leaf's SHAPE (no harness, no filing assertion), never the false
   // claim that the REST route files nothing.
   const src = stripBlockAndWholeLineComments(mainJsx)
-  const i = src.indexOf('{wizardStep === 3 && (')
+  // #3513: `done` moved to index 4 (the Data-sources step took index 3).
+  const i = src.indexOf('{wizardStep === 4 && (')
   assert.ok(i > -1, 'the done step renders')
   const end = src.indexOf('Go to dashboard', i)
   assert.notEqual(end, -1,
@@ -959,8 +963,8 @@ test('#3428/#2937: the step-3 refresh runs while the not-connected promise can s
   const poll = slice('const wizardConnectPollRef = React.useRef(null)',
                      '// #2361 review-r3 (P2-2)', 'wizard connect poll')
   assert.match(poll,
-    /if \(!\(welcomeMode && authed\) \|\| wizardStep !== 3 \|\| serverHarnessConnected\) return/,
-    'the poll runs only on step 3 with no observed connection')
+    /if \(!\(welcomeMode && authed\) \|\| wizardStep !== 4 \|\| serverHarnessConnected\) return/,
+    'the poll runs only on the done step (now index 4) with no observed connection')
   assert.match(poll, /setInterval\(/, 'it refreshes on an interval')
   assert.match(poll, /setInterval\(wizardConnectTick, 4000\)/, 'the pinned interval is 4 s')
   assert.match(poll, /clearInterval\(wizardConnectPollRef\.current\)/,
@@ -1256,7 +1260,8 @@ test('#3428/#2937 (cycle 8 item 9): the not-connected bodies pin their substanti
   // are the substantive clauses — the ones whose removal would change the
   // meaning, not the wording.
   const src = stripBlockAndWholeLineComments(mainJsx)
-  const i = src.indexOf('{wizardStep === 3 && (')
+  // #3513: `done` moved to index 4 (the Data-sources step took index 3).
+  const i = src.indexOf('{wizardStep === 4 && (')
   assert.ok(i > -1, 'the done step renders')
   const end = src.indexOf('Go to dashboard', i)
   assert.notEqual(end, -1,
@@ -1288,17 +1293,17 @@ test('#3428/#2937 (cycle 8 item 9): the not-connected bodies pin their substanti
     'the trailing clause must not presuppose nothing has been filed')
 })
 
-test('#3428/#2937 (cycle 8 item 5): the stall flag is cleared when step 3 is LEFT, not only on re-entry', () => {
+test('#3428/#2937 (cycle 8 item 5): the stall flag is cleared when the done step is LEFT, not only on re-entry', () => {
   // The flag was reset only inside the poll effect's setup, which early-returns
-  // when `wizardStep !== 3` — so leaving step 3 after a stall kept it set and
+  // when `wizardStep !== 4` — so leaving the done step after a stall kept it set and
   // re-entering committed one paint frame with the live region already holding
   // the message (not announced) and the body rendering the softened clause the
   // poll was about to retract. MUTATION: dropping this effect (leaving only the
   // in-effect reset) fails here.
   const src = stripBlockAndWholeLineComments(mainJsx)
   assert.match(src,
-    /React\.useEffect\(\(\) => \{\s*if \(wizardStep !== 3\) setWizardConnectPollStalled\(false\)\s*\}, \[wizardStep\]\)/,
-    'leaving step 3 clears the stall flag so re-entry cannot paint a withdrawn promise')
+    /React\.useEffect\(\(\) => \{\s*if \(wizardStep !== 4\) setWizardConnectPollStalled\(false\)\s*\}, \[wizardStep\]\)/,
+    'leaving the done step clears the stall flag so re-entry cannot paint a withdrawn promise')
 })
 
 test('#2912: the build-fork blocks own their rhythm (no inline margins stacking on the gap)', () => {

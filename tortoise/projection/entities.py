@@ -22,12 +22,24 @@ from datetime import datetime, timezone
 from tortoise.ids import content_hash as _content_hash
 from tortoise.live import (
     decay_clause,  # #2490: rebuild folds decay terminal posteriors
+    epistemic_disjunction,  # #5380: the target-position widening
     epistemic_label_queries,  # #7853: id-anchored reads sweep labels, one query per label
 )
+
+# The store's NUMERIC domain (INT64 / non-finite reject) — a leaf module, so
+# this cannot cycle. `_annotator_value_ok` answers the shape + `#7369`
+# parameter-parse half; the numeric axis is added to BOTH questions (write and
+# comparison — `_store_holds_prop_value`), because a value the domain alters or
+# refuses is not held as stated: FalkorDB 4.16–4.20 CLAMPS an int outside INT64
+# while FalkorDB 6.x REFUSES it at parameter parse, so writing it would abort a
+# replay after the wipe on 6.x and comparing it would report a divergence no
+# journal value can explain.
+from tortoise.numeric_domain import numeric_alteration_reason
 
 # #7719: the SHARED terminalizer-miss classifier and the non-folded recorder.
 # ``nonfolded`` is a stdlib-only leaf module, so this import cannot cycle.
 from tortoise.projection.nonfolded import (
+    SHAPE_EDGE_MESSAGE_UNREPLAYED,
     classify_terminalizer_miss,
     record_non_folded,
 )
@@ -183,6 +195,118 @@ def _is_persistable_prop_value(value, _depth: int = 0) -> bool:
     return False
 
 
+def _store_holds_prop_value(value) -> bool:
+    """True when the store holds ``value`` EXACTLY as the payload states it.
+
+    ⛔ This is the bar for BOTH questions the `tags` fix asks — *does the writer
+    put the property on the node?* (``_stated_tags``, ``_revise_point``) and
+    *may the journal's value be compared against the node's?*
+    (``consistency._uncarried``) — because the OUTCOME for a value the numeric
+    domain refuses is NOT uniform across ENGINE VERSIONS (and a "lane" is not
+    an engine identity — ``FalkorProjection.__init__`` redirects a path-based
+    projection onto ``TORTOISE_DB_URI`` when that variable is set, so an
+    "embedded lane" run can be measuring docker): FalkorDB 4.16–4.20 — the
+    embedded ``falkordblite 0.10.0`` build and ``falkordb-server:v4.20.6`` —
+    CLAMP a Python ``int`` outside INT64 (the ``numeric_alteration_reason``
+    reason says "would be SILENTLY clamped"), while FalkorDB 6.x
+    (``falkordb-server:latest``) RAISES ``Failed to parse the value of parameter
+    'tags'`` (all measured — #8317 review round 5). Writing it would therefore
+    ABORT a ``rebuild_all`` after the wipe on a 6.x engine — the class the
+    content and dim
+    clauses above refuse to crash on (#325/#3689 review P1) — so a recovery fold
+    must contribute NO property for it and a comparison must not compare it.
+    "The store holds it exactly as stated" is the only bar safe everywhere,
+    which is why the WRITE question is answered here rather than by the
+    transport gate alone (#8317 review rounds 3-4).
+
+    On top of the shape allowlist ``_is_persistable_prop_value`` and the write
+    gate, the numeric domain is the second test — a value either gate would
+    ALTER (or refuse to parse) is carried in a different form than the journal
+    states (or not at all), so it must not be written or compared:
+
+      * the ``#7369`` transport gate nulls anything ``_value_ok`` refuses — a
+        non-finite float, a NUL/lone-surrogate string, a null inside an array,
+        a map/bytes/set;
+      * a 4.16–4.20 engine CLAMPS a Python ``int`` outside INT64 (``2**70``
+        reads back ``9223372036854775807``) while a 6.x engine refuses to parse
+        it (both measured — ``tortoise/numeric_domain.py``), so the journal's
+        value is not the graph's either way.
+
+    Callers — ``_stated_tags`` and ``_revise_point`` (the write decision) and
+    ``consistency._uncarried`` (the comparison decision) — i.e. the SAME bar for
+    both questions, for the engine-divergence reason stated above. Declaring
+    "the graph holds the journal's value" for something an engine alters
+    (4.16–4.20 clamps it; 6.x refuses it at parameter parse) contradicts the
+    graph that was just read — reproduced with a hand-written
+    ``PointAdded(tags=[nan])`` and with ``tags=[2**70]``.
+
+    ``_annotator_value_ok`` lives in the package ``__init__`` — this module is
+    imported BY that package, so the import is function-local; by the time any
+    replay calls this, the package is fully initialised.
+    """
+    from tortoise.projection import _annotator_value_ok
+    return (_annotator_value_ok(value)
+            and numeric_alteration_reason("tags", value) is None)
+
+
+def _stated_tags(payload) -> tuple[bool, object]:
+    """``(writes_property, value)`` for a payload's ``tags`` key (#2897).
+
+    The ONE rule for *"the payload states a ``tags`` value this writer must
+    apply"* to the Point create/upsert fold (``_upsert_point_props``) and the
+    pass-1b boundary report that reads its outcome — never re-spelled at either
+    site (#5048).
+
+    A value ``_store_holds_prop_value`` accepts is written VERBATIM (a
+    non-list scalar included — live stores one, and only the EDGE half is
+    list-only). ``None``/absent, and any value the transport gate refuses (a
+    map, a non-finite float, a NUL string) or the numeric domain would alter or
+    reject, states NO property. The predicate is the store-EXACTNESS gate the
+    comparison also uses, deliberately: a value whose fate is not uniform across
+    engine versions (4.16–4.20 CLAMP an over-range int; 6.x refuses it at
+    parameter parse) contributes no
+    property rather than aborting the rebuild after the wipe (#8317 review
+    rounds 3-4). The same gate answers ``_revise_point``'s property clause, so
+    the add and edit arms cannot disagree.
+
+    ⚠️ Three corrections to an earlier version of this paragraph, all MEASURED
+    on the embedded engine — the helper's ANSWERS were right, its reasoning was
+    not, and a wrong reason is what the next lane copies:
+
+      * a create here builds the node from a ``CREATE (n:Point {…})`` property
+        MAP; it is ``update_point`` whose write is ``SET n += $props`` (the
+        post-CREATE passthrough loop was removed in #2952). The rule is the same
+        either way — the payload's value IS the property — but do not attribute
+        the create path to ``SET``.
+      * ``SET n += {tags: null}`` does NOT "leave the node's own value alone":
+        it REMOVES the property. That is why ``None`` is a create-side no-op
+        (a fresh node has nothing to remove) while the EDIT path must spell the
+        clear explicitly — ``_revise_point`` emits ``n.tags = NULL``.
+      * a value the driver cannot send (a dict) is degraded to null by the
+        ``#7369`` guard BEFORE dispatch, so live ALSO ends with no property
+        (measured: ``update_point(tags={"a": 1})`` → ``'tags' IN keys(n)`` is
+        False). Answering ``(False, None)`` here therefore matches live on the
+        create path; the edit path's clear is ``_revise_point``'s, which spells
+        it explicitly for exactly this case.
+
+    A LIST-only reading was a live/replay divergence, not a safety property: a
+    scalar ``tags`` is stored live and the replayed node kept nothing — which
+    ``check_consistency`` then reported as a ``tags`` divergence (#8317 review
+    P1, reproduced).
+
+    Total, deliberately: this reads a possibly hand-edited journal line, and a
+    raise here would abort a replay whose wipe has already run — the recovery
+    path's own rule. A non-dict payload, a missing key, a ``None`` and a value
+    this store cannot persist all answer ``(False, None)``.
+    """
+    if not isinstance(payload, dict) or "tags" not in payload:
+        return False, None
+    value = payload.get("tags")
+    if value is None or not _store_holds_prop_value(value):
+        return False, None
+    return True, value
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
@@ -319,6 +443,47 @@ def _belief_prop_value_ok(key: str, value) -> bool:
     except UnicodeEncodeError:
         return False  # lone surrogate (driver rejects at encode)
     return True
+
+
+#: #5380: the four edge-resident EP message slots, paired by the direction
+#: each pair is written by. Read by the edge-message fold below. The producer
+#: constant ``TortoiseEP.EDGE_MESSAGE_SLOTS`` lives in ``tortoise/ep.py``,
+#: which this module cannot import (import cycle), and the census tool has a
+#: third copy in ``tools/edge_census.py`` — so this tuple and those two are
+#: pinned equal by ``tests/test_4503_edge_relationship_accounting.py``. That
+#: pin is the ONLY thing that reds when a fifth slot is added to one copy and
+#: not the others: the emit-site assertion compares the journaled RECORDS to
+#: ``EP_EDGE_SLOTS``, never to this fold's tuple.
+EDGE_MESSAGE_PROPS: tuple = ("msg_alpha", "msg_beta",
+                             "back_msg_alpha", "back_msg_beta")
+
+
+def _edge_message_value_ok(value) -> bool:
+    """True when ``value`` may be folded as an EP edge message slot.
+
+    Mirrors ``_belief_prop_value_ok``'s numeric branch EXACTLY, and for the
+    same reasons (#2884): ``None`` is VALID — it is the journaled CLEAR, which
+    the live ``SET r.x = null`` also performs — while ``bool`` and a
+    non-finite float are refused, because the driver persists them verbatim
+    and the next EP run's ``float(rows[0][0])`` read then raises, bricking the
+    EP lane until a hand repair. A non-numeric (str/list) value is refused for
+    the same reason. A corrupt line degrades to a DROPPED slot, never an
+    aborted recovery pass AFTER the wipe.
+
+    The numeric branch is TOTAL: an ``int`` no double can hold returns
+    ``False``, never raises (``json.loads`` parses an integer literal of ANY
+    magnitude as an arbitrary-precision ``int``; ``math.isfinite`` coerces to a
+    C double), which is the exact abort-after-the-wipe failure the guard in
+    ``_belief_prop_value_ok`` documents.
+    """
+    if value is None:
+        return True
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 # #388: connector sourceKinds eligible for choke-point Source materialization in
@@ -1111,9 +1276,27 @@ class _EntityHandlers:
         "embedding_preserved",
         # A10 operator-scoped replay extension
         "direction", "label",
+        # #7852 W1: the basis the direction chain used. Written by
+        # `create_operator` beside `direction`; handled here (its own clause
+        # below) so replay restores it instead of the open passthrough, exactly
+        # as `direction` is.
+        "direction_basis",
         # structural / edge-carried — never node props via passthrough
         "operator", "provenance", "about_entities", "aboutEntities",
         "extractedFrom", "is_episodic", "_nid", "_graph_id",
+        # #2897 (OD-4 disposition #3856: ADOPT — a Tag is first-class data by
+        # construction: a SHARED, MERGEd node is data. The ontology specifies
+        # an `:Object` subclass while the code creates a bare `:Tag`; that
+        # doc-vs-code gap is filed as #8325, and the durability argument rests
+        # on "shared and MERGEd", not on the label). Its own clause
+        # (`_upsert_point_props`) owns the raw-list node property; pass 2
+        # (`_upsert_point_edges` → `_sync_tags`) reconciles the `:Tag`/`TAGGED`
+        # half from the NODE'S FINAL value — never from this payload, which
+        # holds only the creation list and would resurrect a removed tag (the
+        # `#3299`/`#2488` class) — the `extractedFrom` split (#2489). Handled
+        # also keeps the undeclared-list drop report from firing for a prop the
+        # fold restores.
+        "tags",
         # #5256: a DECLARED node property (own conditional clause below), the
         # extractedFrom READ-VERSION transit. It rides on the NODE because
         # `extractedFrom` is a replay-derived projection (the `#4042` recreate
@@ -1161,12 +1344,11 @@ class _EntityHandlers:
     # BEFORE they can reach the extras dict the drift warning inspects.
     # `search_keys` is the case that does NOT reach that policy: its list form
     # is flattened to the canonical graph STRING by `_upsert_point_props`
-    # before the list rule can be consulted (#8006). `tags` is the case the
-    # NOTE describes: it is DENIED on replay (its raw-list half-restore is
-    # refused — #2897) and the drop is reported by the undeclared-list warning
-    # below, NOT suppressed here.
+    # before the list rule can be consulted (#8006). (`tags` was the other
+    # case this NOTE described until #2897 landed: it is replayed now, so it
+    # is in `_POINT_HANDLED` and needs no entry here.)
     _POINT_DECLARED_PROPS: frozenset = frozenset({
-        "quote", "when", "search_keys", "speaker", "source_turn_id", "tags",
+        "quote", "when", "search_keys", "speaker", "source_turn_id",
         # E4 (#5007): the verbatim span POINTER — offsets into the Source's raw
         # text, declared so the replay open-set passthrough does not log a
         # FALSE undeclared-prop drift warning on every rebuild.
@@ -1214,14 +1396,12 @@ class _EntityHandlers:
     # key is declared here. Arrays are not fulltext-indexed and the canonical
     # form is the declared `flatten=list` STRING (`search_keys` -> space-joined
     # by `flatten_search_keys_prop`, applied on the SHARED Point writer so all
-    # three doors agree — #8006); `tags` is owned by its own `_sync_tags`
-    # path and its TAGGED-edge replay is out of scope (#2897), so a raw-list
-    # half-restore is refused. NOTE the live/rebuild boundary this creates:
-    # `sdk.create_point` still writes raw lists directly (`SET n += $props`),
-    # so a live `n.tags` exists while replay drops it — the pre-existing #2897
-    # gap (the drop is now REPORTED, not silent). Empty pre-D1: no list prop
-    # passes through the generic Point filter today. Replaced by contract.py's
-    # declared set in D1.
+    # three doors agree — #8006); `tags` (the one such prop in practice) is
+    # reconciled by its own clause plus the pass-2 edge sync, which reads the
+    # NODE's final value rather than the payload (#2897), so it never reaches
+    # the generic filter. Empty
+    # pre-D1: no other list prop passes through the generic Point filter today.
+    # Replaced by contract.py's declared set in D1.
     # ⛔ NOT the fix for `search_keys`: populating this set stores an ARRAY,
     # which the FTS index cannot match — it re-mints #5482. `search_keys` is
     # populated as a flattened STRING instead (module-level
@@ -1580,6 +1760,13 @@ class _EntityHandlers:
         if op:
             set_clauses.append("n.direction=$dir")
             params["dir"] = p.get("direction")
+            # #7852 W1: `direction_basis` rides the same operator-scoped
+            # extension — written only when the payload carries it, so a legacy
+            # or foreign record leaves the property absent (never a fabricated
+            # 'default').
+            if p.get("direction_basis") is not None:
+                set_clauses.append("n.direction_basis=$dbasis")
+                params["dbasis"] = p["direction_basis"]
             if p.get("label") is not None:
                 set_clauses.append("n.label=$label")
                 params["label"] = p["label"]
@@ -1599,6 +1786,18 @@ class _EntityHandlers:
         if p.get("is_episodic") is not None:
             set_clauses.append("n.is_episodic=$episodic")
             params["episodic"] = bool(p["is_episodic"])
+        # #2897 (OD-4 disposition #3856 — ADOPT): re-apply the `tags` PROPERTY
+        # half from the payload. The `PointAdded` snapshot already carries it
+        # (`get_point` returns raw `properties(n)`); the fold simply never wrote
+        # it, so a rebuilt graph answered no tag query. The `:Tag`/`TAGGED` half
+        # is reconciled in pass 2 (`_upsert_point_edges`), and `tags` is in
+        # `_POINT_HANDLED`, so the open-set passthrough does not also write it.
+        # PRESENCE-based (`_stated_tags`) — the live writer's own rule, so a
+        # scalar value is restored rather than silently dropped (#8317 P1).
+        wrote_tags, tags_value = _stated_tags(p)
+        if wrote_tags:
+            set_clauses.append("n.tags=$tags")
+            params["tags"] = tags_value
         # Phase 2 #49: context removed — never written
         # #4457/#4520: the shared clear-then-set seam (`tortoise/vector_write.py`)
         # clears the property FIRST, in the same atomic query, so the
@@ -1673,9 +1872,14 @@ class _EntityHandlers:
             logger.warning(
                 "Point prop %r dropped — deny-listed (recompute/EP-owned, "
                 "#2795); not restorable from the payload", key)
-        # (b) a policy-denied list is also reported: the live SDK writer
-        # still stores raw lists (e.g. `tags`), but replay refuses them, so the
-        # drop MUST be visible (#2795 indicator 4 / D7; `tags` -> #2897).
+        # (b) a policy-denied list is also reported: the live SDK writer stores
+        # raw lists, but replay refuses an UNDECLARED one, so the drop MUST be
+        # visible (#2795 indicator 4 / D7). `tags` was this branch's exemplar
+        # until #2897 landed — it is `_POINT_HANDLED` now and replayed by its
+        # own clause, so a `custom_list`-shaped prop is what the branch
+        # actually covers. The message below ("not restorable from the
+        # payload") carries the same stale attribution class for a key the
+        # journal DOES carry; #8018 owns that wording.
         # #2958 review: tuples count as arrays here too (engine parity).
         for key, val in p.items():
             if not (isinstance(val, (list, tuple)) and val):
@@ -1690,6 +1894,13 @@ class _EntityHandlers:
         # the docstring). `embedding`/`point_content_hash` are exactly the
         # values the `CASE`/`coalesce` clauses above gate on, plus the open-set
         # key set the passthrough ACTUALLY persisted (#5048).
+        # #2897: `tags` rides the same report even though its own clause — not
+        # the passthrough — wrote it. The pass-1b tag boundary reads the
+        # WRITER'S OUTCOME rather than re-spelling its condition (the same rule
+        # `mitigation_strength` follows, #5048); the drift warning above has
+        # already run, so adding it here cannot produce a false "not declared".
+        if wrote_tags:
+            extras["tags"] = tags_value
         return (embedding is not None, point_content_hash is not None,
                 frozenset(extras))
 
@@ -1756,6 +1967,28 @@ class _EntityHandlers:
         if about and isinstance(about, list):
             for entity_name in about:
                 self._create_about_edges(p["id"], str(entity_name))
+        # #2897 (OD-4 disposition #3856 — ADOPT): the `:Tag`/`TAGGED` half — a
+        # SNAPSHOT-DERIVABLE edge of exactly the kind #2489 established for
+        # `extractedFrom`/`about*`: the point property determines the edge, so
+        # it is never journaled separately and live/replay share ONE
+        # reconciliation routine (the projection's `_sync_tags`; the SDK live
+        # path delegates to it).
+        # The value is read from the NODE, not from `p`: pass 1 has already
+        # folded every `PointRevised` (including a tag EDIT and its explicit
+        # clear), so the node holds the journal's FINAL tag value — while the
+        # `PointAdded` payload this pass iterates holds only the point's
+        # CREATION list. Syncing from the payload would resurrect a tag the
+        # journal removed (the #3299/#2488 class;
+        # `test_a_removed_tag_is_not_resurrected`). One indexed read per point,
+        # and idempotent when the same id is added more than once.
+        # The `isinstance(..., list)` test is `_sync_tags`' own list-only rule
+        # (the live rule too), so a payload that stated a scalar `tags` restores
+        # the PROPERTY without inventing edges on either path.
+        _tag_row = self.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.tags", params={"id": p["id"]},
+        ).result_set
+        if _tag_row and isinstance(_tag_row[0][0], list):
+            self._sync_tags(p["id"], _tag_row[0][0])
         if p.get("operator"):
             self._create_edges(p)
 
@@ -2904,6 +3137,155 @@ class _EntityHandlers:
             if r.result_set:
                 matched += len(r.result_set)
         return matched
+
+    def _fold_edge_message_changed(self, ev: dict) -> int:
+        """#5380: fold a journaled EP edge-message write-back or invalidation.
+
+        The EDGE half of ``_fold_confidence_changed``. Before this, the four
+        edge-resident message slots (``msg_alpha``/``msg_beta``,
+        ``back_msg_alpha``/``back_msg_beta``) were written by every EP run and
+        journaled NOWHERE — so a JSONL wipe+rebuild discarded the entire
+        edge-level belief state while the #2884 node half was restored, leaving
+        a graph that was only half restored and a next EP run warm-starting
+        from a different state than the graph it replaced.
+
+        ``op`` discriminates the two legs (the ``EntityMutated`` precedent):
+
+        * ``set`` — ONE edge's committed slot pair. ``src``/``tgt``/``rel``
+          identify the edge (an edge has no node id of its own; the flat
+          composite is the ``DirectEdgeCreated`` convention). Presence-
+          conditional, like the node fold: only the keys the record carries
+          are written, and ``None`` is the journaled CLEAR.
+
+        * ``clear`` — the committed effect of one live
+          ``invalidate_messages`` / ``invalidate_factor_messages`` call, as a
+          BULK record. ``scope`` names the live query replayed here verbatim
+          (``all`` / ``touching`` / ``operator-neighbourhood``), so a replay
+          re-derives the same edge set from the graph the journal just built
+          rather than from an enumerated id list the record would have to
+          carry. Without this leg the ``set`` leg would RESURRECT seeds the
+          live graph dropped on a prior/topology change (#1242's stale-seed
+          class), i.e. the fix would trade a loss for a divergence.
+
+        Returns the matched-edge count for ``set`` (0 = no such edge) and the
+        dropped-edge count for ``clear``. A ``set`` miss is NOT a refusal: a
+        plain direct edge is legitimately absent after a rebuild (A10 #1048 —
+        ``DirectEdgeCreated`` replay is deferred and unimplemented, so the
+        EDGE itself is lost, which the callers report and the fold cannot
+        change), and a hard-deleted edge is gone live too.
+
+        #5380 R8: a miss is still a non-folded event and is RECORDED, never
+        silently dropped. The ``set`` miss is recorded by its two callers
+        (they own ``seq``); a ``clear`` the fold cannot map to a live query is
+        recorded here, at the fall-through. Both shapes are EXEMPT
+        (``edge-message-miss`` / ``edge-message-unreplayed``) with their
+        degraded guarantees written down in ``nonfolded.EXEMPT_SHAPES``.
+        """
+        from tortoise.projection import _writable_id
+        op = ev.get("op")
+        if op == "set":
+            src, tgt, rel = ev.get("src"), ev.get("tgt"), ev.get("rel")
+            # The relation type is INTERPOLATED into the query (Cypher cannot
+            # parameterize a relationship type), so it is gated to the closed
+            # set the live writers use — a hand-edited record must not inject.
+            if rel not in ("IMPL", "NAND"):
+                return 0
+            if not (_writable_id(src) and _writable_id(tgt)):
+                return 0
+            set_parts: list[str] = []
+            params: dict = {"src": src, "tgt": tgt}
+            for key in EDGE_MESSAGE_PROPS:
+                if key not in ev:
+                    continue
+                value = ev[key]
+                if not _edge_message_value_ok(value):
+                    continue
+                set_parts.append(f"r.{key} = ${key}")
+                params[key] = value
+            if not set_parts:
+                return 0
+            # Source label SWEEP, target widened — the same index-preserving
+            # shape ``ep._write_back_message`` and ``_flush_cache`` use
+            # (#7853/#7902): the source keeps its ``(label, id)`` anchor and
+            # the target position takes the disjunction, so a non-Point edge
+            # endpoint still folds.
+            matched = 0
+            for _q in epistemic_label_queries(
+                    "MATCH (o:{label} {id:$src})-[r:" + rel + "]->(c) "
+                    f"WHERE {epistemic_disjunction('c')} AND c.id = $tgt "
+                    "SET " + ", ".join(set_parts) + " RETURN c.id"):
+                r = self.g.query(_q, params=params)
+                if r.result_set:
+                    matched += len(r.result_set)
+            return matched
+
+        if op == "clear":
+            scope = ev.get("scope")
+            if scope == "all":
+                rows = self.g.query(
+                    "MATCH ()-[r:IMPL|NAND]->() "
+                    "REMOVE r.msg_alpha, r.msg_beta, "
+                    "       r.back_msg_alpha, r.back_msg_beta "
+                    "RETURN count(r)").result_set
+                return int(rows[0][0]) if rows else 0
+            # #5380 (R8): an unrecognised ``scope``, or a known scope with no
+            # usable ``point_ids``, falls through every arm below and would
+            # otherwise return 0 INDISTINGUISHABLY from a legitimate empty
+            # drop — a silent no-op that resurrects the seeds the live graph
+            # dropped (#1242/#330). Recorded (and exempt) rather than refused:
+            # a future producer's fourth scope must not make a recovery run
+            # un-runnable. The `set` arm's callers record their own miss.
+            if scope not in ("touching", "operator-neighbourhood"):
+                record_non_folded(
+                    SHAPE_EDGE_MESSAGE_UNREPLAYED,
+                    event_id=ev.get("event_id"),
+                    event_type="EdgeMessageChanged",
+                    op=op, detail=f"unrecognised clear scope {scope!r}",
+                )
+                logger.warning(
+                    "EdgeMessageChanged: unrecognised clear scope %r — the "
+                    "invalidation was NOT replayed (#5380)", scope)
+                return 0
+            point_ids = ev.get("point_ids")
+            ids = ([p for p in point_ids if _writable_id(p)]
+                   if isinstance(point_ids, list) else [])
+            if not ids:
+                record_non_folded(
+                    SHAPE_EDGE_MESSAGE_UNREPLAYED,
+                    event_id=ev.get("event_id"),
+                    event_type="EdgeMessageChanged",
+                    op=op,
+                    detail=(f"clear scope {scope!r} carries no usable "
+                            "point_ids"),
+                )
+                logger.warning(
+                    "EdgeMessageChanged: clear scope %r carries no usable "
+                    "point_ids — the invalidation was NOT replayed (#5380)",
+                    scope)
+                return 0
+            if scope == "touching":
+                rows = self.g.query(
+                    "MATCH (p)-[r:IMPL|NAND]-() "
+                    f"WHERE {epistemic_disjunction('p')} AND p.id IN $ids "
+                    "REMOVE r.msg_alpha, r.msg_beta, "
+                    "       r.back_msg_alpha, r.back_msg_beta "
+                    "RETURN count(DISTINCT r)",
+                    params={"ids": ids}).result_set
+                return int(rows[0][0]) if rows else 0
+            if scope == "operator-neighbourhood":
+                rows = self.g.query(
+                    "MATCH (op:Point)-[conn:IMPL|NAND]->(p) "
+                    f"WHERE {epistemic_disjunction('p')} AND p.id IN $ids "
+                    "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
+                    "WITH DISTINCT op "
+                    "MATCH (op)-[r:IMPL|NAND]->(x) "
+                    f"WHERE {epistemic_disjunction('x')} "
+                    "REMOVE r.msg_alpha, r.msg_beta, "
+                    "       r.back_msg_alpha, r.back_msg_beta "
+                    "RETURN count(DISTINCT r)",
+                    params={"ids": ids}).result_set
+                return int(rows[0][0]) if rows else 0
+        return 0
 
     # ── Entity nodes ───────────────────────────────────────────────
 

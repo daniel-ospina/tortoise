@@ -1114,6 +1114,131 @@ class TestBillingSupabaseStore:
         assert r.status_code == 200, r.text
         assert created == ["org@example.com"]
 
+    def test_checkout_uses_the_key_creators_email_in_supabase_mode(
+            self, monkeypatch, sb):
+        """#4727: the control-plane twin of the ``APIKey.created_by`` link.
+
+        A provision-path Supabase org carries no ``organizations.email``; the
+        Edge Function recorded the creator on the ``api_keys`` row, and
+        ``resolve_api_key`` already puts it on the resolved org dict. Pre-fix
+        the ENTIRE ``created_by`` family was registry-only (``sdk is None`` in
+        this lane), so a tt_ key with no session email fell to the terminal
+        400 with the address sitting on the org dict.
+
+        Mutation that makes this fail: delete the ``sdk is None`` branch — the
+        chain reaches the 400 and ``create_customer`` is never called.
+        Reachable in the fixture: the override org dict below has an explicit
+        ``email: None`` plus a real ``created_by`` address.
+        """
+        tc, fake = sb
+        import tortoise.hosted_api as ha
+        fake.tables["organizations"][0]["email"] = None
+        org = {"org_id": self.ORG_ID, "tier": "solo", "email": None,
+               "created_by": "owner@example.com"}
+        ha.app.dependency_overrides[ha.get_current_org_session] = (
+            lambda: dict(org))
+        created: list[str] = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: created.append(e) or "cus_kc_1")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: "https://checkout.stripe.com/pay/kc1")
+
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 200, r.text
+        assert created == ["owner@example.com"]
+        row = fake.tables["organizations"][0]
+        assert row["stripe_customer_id"] == "cus_kc_1"
+        assert row["customer_email"] == "owner@example.com"
+
+    @pytest.mark.parametrize("creator", [
+        "11111111-1111-1111-1111-111111111111",  # dashboard-minted key (#1511)
+        "api",                                    # legacy/bootstrap key
+        "not-an-address",                         # no ``@``
+    ])
+    def test_checkout_never_posts_a_non_email_key_creator(
+            self, monkeypatch, sb, creator):
+        """#4504 shape gate, control-plane twin: an ``api_keys.created_by``
+        that is a user UUID / the literal ``"api"`` / an ``@``-less token is
+        NOT an address — it must fall THROUGH to the 400, never be posted to
+        Stripe as the customer email (a UUID or garbage there 502s or binds a
+        junk address).
+
+        Mutation that makes this fail: drop ``_billing_email_like`` from the
+        twin — the creator id is then handed to ``create_customer``.
+        """
+        tc, fake = sb
+        import tortoise.hosted_api as ha
+        org = {"org_id": self.ORG_ID, "tier": "solo",
+               "email": None, "created_by": creator}
+        ha.app.dependency_overrides[ha.get_current_org_session] = (
+            lambda: dict(org))
+        called: list[str] = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: called.append(e) or "cus_x")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: called.append("list") or [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: called.append("session") or "u")
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 400, r.text
+        assert "No customer email" in r.json()["detail"]
+        assert called == [], "a non-email creator id must not reach Stripe"
+        assert fake.tables["organizations"][0]["customer_email"] is None
+
+    def test_key_creator_email_beats_the_session_email(self, monkeypatch, sb):
+        """#4727 precedence PARITY with the registry lane: ``APIKey.created_by``
+        resolves before the #4504 session fallback, so the control-plane twin
+        must sit in the same slot (after ``org.email``, before the session
+        email).
+
+        Mutation that makes this fail: move the twin AFTER the session block —
+        the clicking member's address then wins over the provisioner's.
+        """
+        tc, _fake = sb
+        import tortoise.hosted_api as ha
+        org = {"org_id": self.ORG_ID, "tier": "solo", "email": None,
+               "created_by": "provisioner@example.com",
+               "session_user_email": "member@example.com"}
+        ha.app.dependency_overrides[ha.get_current_org_session] = (
+            lambda: dict(org))
+        created: list[str] = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: created.append(e) or "cus_kc_2")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: "https://checkout.stripe.com/pay/kc2")
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 200, r.text
+        assert created == ["provisioner@example.com"]
+
+    def test_org_email_still_beats_the_key_creator_email(self, monkeypatch, sb):
+        """#4727 is ADDITIVE: the twin is inserted after the ``org.email``
+        step, so the authoritative row's address keeps its precedence.
+
+        Mutation that makes this fail: place the twin BEFORE the
+        ``org[\"email\"]`` read.
+        """
+        tc, _fake = sb
+        import tortoise.hosted_api as ha
+        org = {"org_id": self.ORG_ID, "tier": "solo",
+               "email": "org@example.com",
+               "created_by": "provisioner@example.com"}
+        ha.app.dependency_overrides[ha.get_current_org_session] = (
+            lambda: dict(org))
+        created: list[str] = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: created.append(e) or "cus_kc_3")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: "https://checkout.stripe.com/pay/kc3")
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 200, r.text
+        assert created == ["org@example.com"]
+
     def test_checkout_409_when_row_already_active(self, monkeypatch, sb):
         """The stored-mirror guard reads subscription_status from the row and
         rejects BEFORE any Stripe call."""
@@ -1266,6 +1391,108 @@ class TestBillingSupabaseStore:
                 AssertionError("must not reach Stripe for an absent org")))
         with pytest.raises(BillingError, match="not found"):
             billing.reconcile_org(None, "org_missing_4726")
+
+
+class TestBillingSupabaseKeyAuthCreatorEmail:
+    """#4727, driven across the REAL key-auth seam — no dependency override.
+
+    The tests above inject the resolved org dict, so they pin the chain's
+    DECISION but not the premise the fix rests on: that ``resolve_api_key``
+    really carries ``api_keys.created_by`` onto the org dict that
+    ``_billing_checkout_sync`` receives. This class runs the actual
+    ``Authorization: Bearer tt_...`` lane end to end against the
+    FakeControlPlane (resolve_api_key → get_current_org →
+    get_current_org_session → checkout → Stripe), so a future change to the
+    resolution seam reds here instead of silently re-opening the 400.
+    """
+
+    ORG_ID = "org-keycreator-4727"
+    KEY = "tt_keycreator4727token"
+
+    @pytest.fixture
+    def env(self, monkeypatch, tmp_path):
+        import tortoise.hosted_api as ha
+        import tortoise.supabase_control as sc
+        from tests._http_fixtures import patched_tortoise_sdk
+        from tests.fake_control_plane import FakeControlPlane
+        from tortoise.auth import lookup_hash
+
+        monkeypatch.setenv("SUPABASE_URL", "https://kc4727.test.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-kc-4727")
+        # PIN the lane: an ambient TORTOISE_CONTROL_PLANE=registry would flip
+        # these to selfhost (registry SDK) and test the wrong chain.
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+        monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+        monkeypatch.setenv("STRIPE_PRICE_IDS", json.dumps(VALID_CATALOG))
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+        fake = FakeControlPlane({
+            "organizations": [{
+                # The provision-path org: NO email on the authoritative row.
+                "id": self.ORG_ID, "name": "kc-4727", "tier": "solo",
+                "email": None, "graph_name": f"org_{self.ORG_ID}",
+                "stripe_customer_id": None, "subscription_status": None,
+                "customer_email": None,
+                "suspended_at": None, "flagged_at": None,
+                "max_users": 1, "max_graphs": 1, "ops_allowance": 10000,
+                "graph_size_cap": 100000,
+            }],
+            "api_keys": [{
+                "id": "key-kc-4727", "org_id": self.ORG_ID,
+                "lookup_hash": lookup_hash(self.KEY),
+                "key_prefix": self.KEY[:10], "created_via": "provisioned",
+                "created_by": "provisioner@example.com",
+                "created_at": "2026-08-01T00:00:00+00:00",
+                "expires_at": None, "revoked_at": None, "enabled": True,
+            }],
+        })
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        from fastapi.testclient import TestClient
+        with patched_tortoise_sdk(str(tmp_path / "kc4727.db")):
+            yield TestClient(ha.app), fake
+
+    def _stub_stripe(self, monkeypatch, cid: str = "cus_kc_e2e"):
+        created: list[str] = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: created.append(e) or cid)
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, c: [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: "https://checkout.stripe.com/pay/kc-e2e")
+        return created
+
+    def test_provision_path_key_auth_reaches_stripe_with_the_creator_email(
+            self, monkeypatch, env):
+        """The issue's exact scenario: Supabase org with ``email`` NULL, a
+        ``tt_`` key whose ``created_by`` is a real address, no session email →
+        200 with that address on the Stripe customer (pre-fix: 400).
+        """
+        tc, fake = env
+        created = self._stub_stripe(monkeypatch)
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"},
+                    headers={"Authorization": f"Bearer {self.KEY}"})
+        assert r.status_code == 200, r.text
+        assert created == ["provisioner@example.com"]
+        row = fake.tables["organizations"][0]
+        assert row["stripe_customer_id"] == "cus_kc_e2e"
+        assert row["customer_email"] == "provisioner@example.com"
+
+    def test_a_uuid_creator_through_the_real_seam_still_400s(
+            self, monkeypatch, env):
+        """Same real lane, a dashboard-minted key (``created_by`` = user
+        UUID): the shape gate must hold end to end — 400, no Stripe call, and
+        no registry SDK constructed (#878).
+        """
+        tc, fake = env
+        fake.tables["api_keys"][0]["created_by"] = (
+            "22222222-2222-2222-2222-222222222222")
+        called = self._stub_stripe(monkeypatch)
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"},
+                    headers={"Authorization": f"Bearer {self.KEY}"})
+        assert r.status_code == 400, r.text
+        assert "No customer email" in r.json()["detail"]
+        assert called == []
+        assert fake.tables["organizations"][0]["customer_email"] is None
 
 
 class TestWebhook:
@@ -1973,3 +2200,100 @@ class TestTeamInfoBillingSurface:
         assert body["nodes_used"] is None
         assert body["max_nodes"] == 10000
         assert body["tier"] == "free"
+
+
+class TestBillingErrorToHttpMapping:
+    """#4725 — ``_billing_error_to_http`` must be SUBCLASS-FIRST.
+
+    ``StripeAPIError(BillingError)`` and ``BillingConfigError(BillingError)``
+    both subclass the base, so a base branch placed above a subclass branch
+    silently swallows it. Before the fix, the ``BillingError`` branch (400)
+    ran before the ``StripeAPIError`` branch (502), so every Stripe outage —
+    network failure, rotated key, any 5xx from api.stripe.com — answered
+    ``400 Bad Request``, blaming the caller for an upstream failure, and the
+    502 branch was unreachable dead code.
+    """
+
+    def test_each_billing_exception_maps_to_its_documented_status(self):
+        """Pin all three documented mappings (503/502/400)."""
+        from tortoise.hosted_api import _billing_error_to_http
+
+        cases = [
+            (BillingConfigError("STRIPE_PRICE_IDS is not set"), 503),
+            (billing.StripeAPIError("stripe POST customers -> 500"), 502),
+            (BillingError("unknown price id"), 400),
+        ]
+        for exc, expected in cases:
+            got = _billing_error_to_http(exc).status_code
+            assert got == expected, f"{type(exc).__name__} -> {got}, want {expected}"
+
+    def test_stripe_api_error_is_never_reported_as_a_caller_error(self):
+        """The regression itself: an upstream failure is 502, not 400.
+
+        Asserted as an explicit ``!= 400`` as well, so the failure message
+        names the defect (blaming the caller) instead of only the number.
+        """
+        from tortoise.hosted_api import _billing_error_to_http
+
+        resp = _billing_error_to_http(billing.StripeAPIError("stripe GET subscriptions -> 503"))
+        assert resp.status_code != 400, "upstream Stripe failure blamed on the caller"
+        assert resp.status_code == 502
+
+    def test_subclass_relationship_that_makes_the_order_load_bearing(self):
+        """Document WHY the order matters.
+
+        If StripeAPIError ever stops subclassing BillingError, the ordering
+        rationale in ``_billing_error_to_http`` needs revisiting — this test
+        is the tripwire that says so, rather than pinning it silently.
+        """
+        assert issubclass(billing.StripeAPIError, BillingError)
+        assert issubclass(BillingConfigError, BillingError)
+        assert not issubclass(BillingConfigError, billing.StripeAPIError)
+        assert not issubclass(billing.StripeAPIError, BillingConfigError)
+
+    def test_unrelated_exception_still_falls_back_to_502(self):
+        """The catch-all (call sites pass anything from ``except Exception``)
+        must stay 502 — a reorder that made 400 the catch-all would silently
+        re-blame the caller for every unknown failure."""
+        from tortoise.hosted_api import _billing_error_to_http
+
+        assert _billing_error_to_http(RuntimeError("boom")).status_code == 502
+
+    def test_checkout_stripe_outage_answers_502(self, monkeypatch, billing_client):
+        """End-to-end symptom: a Stripe outage during checkout is an upstream
+        failure (502), and the caller's request was fine.
+
+        This is the shape the #4640 review missed — a stubbed 400 assertion
+        passed against the broken path because the real call's StripeAPIError
+        was mapped to 400.
+        """
+        def _outage(*a, **kw):
+            raise billing.StripeAPIError("stripe POST customers failed: connect timeout")
+
+        monkeypatch.setattr(billing.StripeClient, "create_customer", _outage)
+        r = billing_client["client"].post(
+            "/v1/billing/checkout",
+            json={"price_id": "price_200proMM"},
+            headers=billing_client["headers"],
+        )
+        assert r.status_code == 502, r.text
+        assert "connect timeout" in r.json()["detail"]
+
+    def test_portal_stripe_outage_answers_502(self, monkeypatch, billing_client):
+        """Same mapping on the portal leg — every call site routes through the
+        one helper, so the fix must hold for all of them, not just checkout."""
+        sdk = billing_client["sdk"]
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_portal1'",
+            params={"id": billing_client["org_id"]},
+        )
+
+        def _outage(*a, **kw):
+            raise billing.StripeAPIError("stripe POST billing_portal/sessions -> 502")
+
+        monkeypatch.setattr(billing.StripeClient, "create_portal_session", _outage)
+        r = billing_client["client"].post(
+            "/v1/billing/portal",
+            headers=billing_client["headers"],
+        )
+        assert r.status_code == 502, r.text

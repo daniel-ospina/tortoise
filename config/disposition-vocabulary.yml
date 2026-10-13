@@ -74,8 +74,12 @@ delete_instruction:
 #   target: self  → the method is already on the target surface under its own name
 #   target: named → the row's destination is a target method name (lifecycle deprecated)
 #   target: none  → no destination; the axes + delete instruction carry the disposition
-# A row whose basis is `unbacked`/`contested` states no destination at all, so its
-# lifecycle/visibility/delete are left unstaked (`null`) rather than guessed.
+# A row whose basis is `unbacked`/`contested` states no destination at all, so the axes
+# it does not state are left unstaked (`null`) rather than guessed: `unbacked` leaves
+# lifecycle/visibility/delete null, while `contested` keeps `delete: retain` — an open
+# finding is retained, not deleted — and leaves only lifecycle/visibility null. THAT
+# distinction is what the generated legend's `—` caveat is built from; it is not
+# restated there, or here, as a list that can drift (#4722).
 dispositions:
   UNCHANGED:  {target: self,  lifecycle: stable,     visibility: public,   delete: retain}
   RENAMED:    {target: named, lifecycle: deprecated, visibility: public,   delete: retain}

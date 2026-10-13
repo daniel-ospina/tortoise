@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 import tempfile
+from collections import Counter
 from typing import ClassVar
 from uuid import uuid4
 
@@ -105,6 +107,23 @@ def _clean_team_graphs(monkeypatch):
 def dr_env(monkeypatch):
     for k, v in GOOD_ENV.items():
         monkeypatch.setenv(k, v)
+    monkeypatch.setenv("FASTAPI_INTERNAL_KEY", _INTERNAL_KEY)
+    yield
+
+
+@pytest.fixture
+def sweep_off_env(monkeypatch):
+    """#4777: the PRODUCTION default posture — the sweep is OFF.
+
+    ``dr_env`` turns the sweep ON, which is exactly why the sweep-off path in
+    ``backups_rebaseline`` went untested. The ALERT credentials stay present on
+    purpose: an incident filed while the sweep was enabled must remain
+    RESOLVABLE after it is disabled (#3820 D5a) — the sweep switch decides
+    whether backups RUN, never whether an incident is VISIBLE.
+    """
+    for k, v in GOOD_ENV.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("BACKUP_SWEEP_ENABLED", "false")
     monkeypatch.setenv("FASTAPI_INTERNAL_KEY", _INTERNAL_KEY)
     yield
 
@@ -261,6 +280,57 @@ class TestDrStatus:
         body = r.json()
         assert body["enabled"] is True
         assert "watcher" in body and "driver" in body
+
+    def test_status_publishes_the_telemetry_drop_block(self, client, mem_storage,
+                                                       monkeypatch):
+        """#4095: the NORMAL return — the body the hourly driver and an operator
+        actually read — must carry the allowlist-drop block.
+
+        #3821 counted allowlist-dropped telemetry keys but the counter had no
+        reader outside the test suite and is lost on every deploy, so the
+        "always counts" guarantee was unobservable in production. This asserts
+        the VALUE (a named site, a total), not just the key's presence: the
+        endpoint builds the block unconditionally, so `"telemetry" in body`
+        would also pass on a permanently-empty report.
+        """
+        monkeypatch.setattr(ha_mod, "_TELEMETRY_DROP_COUNTS", Counter())
+        monkeypatch.setattr(ha_mod, "_TELEMETRY_DROP_REPORTED", {})
+        ha_mod._report_unregistered("status_site", "subject", {"k"})
+
+        r = client.get("/v1/internal/backups/status", headers=INTERNAL_HEADERS)
+
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "watcher" in body, "this test must exercise the NORMAL return"
+        assert body["telemetry"]["sites"]["status_site|subject"] == 1
+        assert body["telemetry"]["total"] == 1
+        assert body["telemetry"]["markers"] == 1
+
+    def test_status_publishes_the_telemetry_drop_block_on_the_degraded_path(
+            self, client, monkeypatch):
+        """The storage-error EARLY return must carry it too — the drop counter
+        is in-process state, and an unusable object store must not hide it.
+
+        The PATH is asserted, not just the key: without `_backup_storage()` the
+        handler early-returns a body with no ``watcher``, so asserting only
+        presence would silently stop being evidence for this clause (the #3944
+        analytics block is held to the same two-path rule).
+        """
+        def _no_storage():
+            raise RuntimeError("no R2 credentials")
+
+        monkeypatch.setattr(ha_mod, "_backup_storage", _no_storage)
+        monkeypatch.setattr(ha_mod, "_TELEMETRY_DROP_COUNTS", Counter())
+        monkeypatch.setattr(ha_mod, "_TELEMETRY_DROP_REPORTED", {})
+        ha_mod._report_unregistered("degraded_site", "subject", {"k"})
+
+        r = client.get("/v1/internal/backups/status", headers=INTERNAL_HEADERS)
+
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["storage_error"], "this test must exercise the degraded return"
+        assert "watcher" not in body
+        assert body["telemetry"]["sites"]["degraded_site|subject"] == 1
 
     def test_status_surfaces_last_sweep_rollup(self, client, dr_env, mem_storage):
         """#2372: /status surfaces the sweep's per-graph roll-up (totals,
@@ -465,7 +535,7 @@ class TestDrSweep:
             "P0_GUARD_FAIL": {"team_x", "team_x:gone"},
             "SWEEP_NO_COVERAGE": {"_"},
         })
-        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: fake)
 
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
@@ -492,7 +562,7 @@ class TestDrSweep:
             open_subjects={"ENUM_DELTA": {"_"}, "P0_GUARD_FAIL": {"team_x"}},
             fail_resolve_kinds={"ENUM_DELTA"},
         )
-        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: fake)
 
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
@@ -507,7 +577,7 @@ class TestDrSweep:
         is what the first version of this branch did."""
         _seed_team("team_x", nodes=2)
         fake = _FakeAlerts(open_subjects={"ENUM_DELTA": {"global"}})
-        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: fake)
 
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
@@ -522,11 +592,112 @@ class TestDrSweep:
         _seed_team("team_x", nodes=2)
         fake = _FakeAlerts(open_subjects={"ENUM_DELTA": {"_"}},
                            fail_listing_kinds={"ENUM_DELTA"})
-        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: fake)
 
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
         assert r.json().get("incidents_unresolved") == ["ENUM_DELTA"]
+
+    def test_sweep_reports_an_incident_it_could_not_file_with_no_alert_channel(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """#4778: an incident the sweep EMITTED but could not file is reported.
+
+        `_incident_alert_store` answers None where the raw constructor raised,
+        and the sweep's own incidents must not vanish silently — a run whose
+        incidents were never sent must not read as a clean sweep. The sweep
+        function is stubbed so the EMISSION is deterministic; the real shapes
+        that emit each kind are pinned in tests/test_backup_sweep.py.
+        """
+        from tortoise import backup_sweep
+
+        monkeypatch.setattr(
+            backup_sweep, "run_backup_sweep",
+            lambda **kw: {"status": "backed_up", "teams_backed_up": 0,
+                          "incidents": [{"kind": "ENUM_DELTA", "org_id": "",
+                                         "detail": {"observed": 0}}]})
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: None)
+
+        r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["alerts_failed"] == ["ENUM_DELTA"], _sweep_diagnosis(body)
+
+    def test_sweep_names_unresolved_candidates_when_no_alert_channel_exists(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """#4778: with no channel the resolve leg cannot run — and says so.
+
+        A passed-over resolve would make a sweep whose incidents stayed OPEN
+        read as a clean run, which is the same silence as an unfiled incident.
+        """
+        from tortoise import backup_sweep
+
+        monkeypatch.setattr(
+            backup_sweep, "run_backup_sweep",
+            lambda **kw: {"status": "backed_up", "teams_backed_up": 1,
+                          "results": {"team_x": {"status": "backed_up",
+                                                 "graphs": {}}},
+                          "incidents": []})
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: None)
+
+        r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "alerts_failed" not in body
+        assert sorted(body["incidents_unresolved"]) == sorted(
+            backup_sweep.SWEEP_RESOLVABLE_GLOBAL_KINDS)
+
+    def test_sweep_does_not_warn_about_a_missing_channel_on_a_clean_run(
+            self, client, dr_env, mem_storage, monkeypatch, caplog):
+        """#4778 review P3: the no-channel WARNING is conditional on real work.
+
+        The sweep runs hourly and most runs emit nothing; an unconditional
+        warning filled the log with "no alert channel" about runs that never
+        needed one. A run with nothing to file and nothing to resolve must stay
+        silent. (The monthly drill warns unconditionally instead — see
+        `backups_drill_scheduled` — because its pre-flight warning is the point
+        and a monthly cadence cannot flood.)
+        """
+        import logging
+
+        from tortoise import backup_sweep
+
+        monkeypatch.setattr(
+            backup_sweep, "run_backup_sweep",
+            lambda **kw: {"status": "backed_up", "teams_backed_up": 0,
+                          "incidents": []})
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: None)
+
+        with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+            r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        # The premise, asserted: this run has NOTHING for the channel to do.
+        assert backup_sweep.sweep_resolutions(r.json()) == []
+        assert r.json().get("incidents_unresolved") is None
+        assert "no alert channel" not in caplog.text, caplog.text
+
+    def test_sweep_warns_about_a_missing_channel_when_it_had_an_incident(
+            self, client, dr_env, mem_storage, monkeypatch, caplog):
+        """Positive control for the conditional warning above.
+
+        Without this, "no warning" would also pass if the warning were simply
+        deleted. A run that DID emit an incident still warns.
+        """
+        import logging
+
+        from tortoise import backup_sweep
+
+        monkeypatch.setattr(
+            backup_sweep, "run_backup_sweep",
+            lambda **kw: {"status": "backed_up", "teams_backed_up": 0,
+                          "incidents": [{"kind": "ENUM_DELTA", "org_id": "",
+                                         "detail": {"observed": 0}}]})
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: None)
+
+        with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+            r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        assert r.json()["alerts_failed"] == ["ENUM_DELTA"]
+        assert "no alert channel" in caplog.text, caplog.text
 
     def test_sweep_backs_up_seeded_team(self, client, dr_env, mem_storage):
         _seed_team("team_x", nodes=2)
@@ -998,11 +1169,16 @@ class TestDrRebaseline:
         """Cycle-2 review P2: `resolve_incident` RAISES on a failed close, and the
         state write has already succeeded by then — a raise out of the endpoint
         would 500 a request whose effect was persisted, inviting the operator to
-        retry a write that already happened."""
+        retry a write that already happened.
+
+        #4777: the seam patched here is ``_incident_alert_store`` (the ALERT-only
+        builder the endpoint now calls); the raw ``_alert_store_from`` chain it
+        used to call is sweep-gated and crashes in the posture below.
+        """
         _seed_team("team_x", nodes=3)
         fake = _FakeAlerts(open_subjects={"DATA_LOSS_CANDIDATE": {"team_x"}},
                            fail_resolve_kinds={"DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT"})
-        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: fake)
 
         r = client.post(
             "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
@@ -1010,6 +1186,99 @@ class TestDrRebaseline:
         )
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "rebaselined"
+        assert json.loads(mem_storage.download("ops/teams/team_x/state.json"))["node_count"] == 3
+
+    # NOTE (#4778 review P3): two tests formerly here — one stubbing
+    # `_backup_config_safe` + `_incident_alert_store` to assert the resolve, one
+    # asserting the unresolved list — were removed because BOTH pass on the PR
+    # base: #4778's only change to `backups_rebaseline` is a comment, since the
+    # endpoint already resolved through `_incident_alert_store()` via #4777 (so
+    # the `_backup_config_safe` stub was inert). The second also duplicated
+    # `test_rebaseline_reports_incidents_it_cannot_resolve_without_a_channel`.
+    # #4777's behaviour stays pinned by the tests below.
+
+    # ── #4777: the re-baseline resolve must not be SWEEP-gated ────────────────
+
+    def test_rebaseline_resolves_on_the_alert_seam_with_the_sweep_off(
+            self, client, sweep_off_env, mem_storage, monkeypatch):
+        """#4777 — with the sweep OFF, re-baseline still resolves BOTH kinds.
+
+        The reachable posture is a LINGERING incident, not a fresh one: the
+        watcher does not start when the config is ``None``, and ``run_backup_sweep``
+        — the only ``DATA_LOSS_CANDIDATE`` producer — 503s without the sweep, so
+        nothing FIRES here. What breaks is the RESOLVE of an incident opened
+        while the sweep was enabled: this endpoint is the only surface that
+        clears these two kinds, so a sweep-gated channel strands it OPEN forever.
+
+        RED (pre-fix): ``alerts = _alert_store_from(_backup_config_safe())`` —
+        ``_backup_config_safe()`` is ``None`` here and ``alert_store_from``
+        dereferences ``cfg.gh_repo``, so the endpoint raised ``AttributeError``
+        AFTER ``_write_json`` and BEFORE either resolve (a 500 for a re-baseline
+        that HAD been persisted).
+        """
+        _seed_team("team_x", nodes=3)
+        fake = _FakeAlerts()
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: fake)
+
+        r = client.post(
+            "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
+            json={"org_id": "team_x"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "rebaselined"
+        # Same identity as the app's own (not the watcher's). Both kinds are
+        # WRITER_UNSPECIFIED, so either would be authorized — pinning the call
+        # shape keeps that explicit rather than incidental.
+        assert ("resolve", "DATA_LOSS_CANDIDATE", "team_x") in fake.calls
+        assert ("resolve", "SIZE_GUARD_ABORT", "team_x") in fake.calls
+        assert "incidents_unresolved" not in r.json(), r.text
+        assert json.loads(mem_storage.download("ops/teams/team_x/state.json"))["node_count"] == 3
+
+    def test_rebaseline_with_the_sweep_off_builds_the_real_channel(
+            self, client, sweep_off_env, mem_storage):
+        """#4777 — no patch: the SWEEP-OFF posture itself must yield a channel.
+
+        The test above stubs the seam, so it cannot see whether the REAL builder
+        survives a disabled sweep. It can: ``_incident_alert_store`` falls back
+        to ``load_alert_config``, which reads ``DR_ISSUES_PAT``/``R2_*`` UNGATED,
+        and returns ``None`` — never raises — when there is no channel.
+
+        RED (pre-fix): 500 with ``AttributeError: 'NoneType' object has no
+        attribute 'gh_repo'``.
+        """
+        _seed_team("team_x", nodes=3)
+        r = client.post(
+            "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
+            json={"org_id": "team_x"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "rebaselined"
+        # The MemoryStorage dedup surface is empty, so both resolves are ABSENT —
+        # a clean end to end with a REAL AlertStore and no network.
+        assert "incidents_unresolved" not in r.json(), r.text
+        assert json.loads(mem_storage.download("ops/teams/team_x/state.json"))["node_count"] == 3
+
+    def test_rebaseline_reports_incidents_it_cannot_resolve_without_a_channel(
+            self, client, sweep_off_env, mem_storage, monkeypatch):
+        """#4777 — no channel must be REPORTED, never read as "resolved".
+
+        ``_incident_alert_store`` returns ``None`` when no channel can be built
+        (no ``DR_ISSUES_PAT``, or an unusable object store). Nothing can clear
+        these two kinds — they are resolved HERE and nowhere else — so a response
+        that simply said "rebaselined" would imply a close that never happened.
+        The state write still succeeds and is still reported.
+        """
+        _seed_team("team_x", nodes=3)
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: None)
+
+        r = client.post(
+            "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
+            json={"org_id": "team_x"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "rebaselined"
+        assert r.json()["incidents_unresolved"] == [
+            "DATA_LOSS_CANDIDATE/team_x", "SIZE_GUARD_ABORT/team_x"], r.text
         assert json.loads(mem_storage.download("ops/teams/team_x/state.json"))["node_count"] == 3
 
     def test_rebaseline_excludes_projection_bookkeeping_marker(
@@ -1138,6 +1407,58 @@ class TestDrRebaseline:
         assert len(g.query(
             "MATCH (n) RETURN labels(n), properties(n)").result_set) == 7
         assert hb.count_data_nodes(db, "org_settle_source") == 6
+
+
+def test_the_runbook_documents_both_producers_of_incidents_unresolved():
+    """#4777 review (P2 doc-drift): the field has TWO producers, OPPOSITE remedies.
+
+    ``incidents_unresolved`` appears (a) when a close FAILED — remedy: re-run
+    once GitHub recovers — and (b) on re-baseline, when no alert channel can be
+    built at all (the seam returns ``None``: no ``DR_ISSUES_PAT``, or an unusable
+    ``R2_*`` store) — remedy: fix the channel credentials, because a re-run
+    returns the identical field forever. The runbook is the field's declared home
+    (it was introduced there in the same change, #3405), so it must name both
+    causes; an operator who reads (b) as (a) retries a request that cannot
+    succeed.
+
+    The code half is asserted against the source so the doc claim keeps a
+    referent: removing the no-channel branch makes this test fail rather than
+    leave the runbook describing a producer that no longer exists.
+
+    RED (pre-fix): the paragraph documents only the failed-close cause and states
+    the retry remedy unconditionally.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    doc = (root / "docs/ops/registry-backup-dr.md").read_text(encoding="utf-8")
+    # The one Markdown paragraph that documents the field.
+    start = doc.index("so their responses carry")
+    # The runbook is hard-wrapped (~80 cols), so a remedy phrase can SPAN a line
+    # break: the rewrite for #4778 moved "re-run" to the end of its line and
+    # silently broke this assertion on unchanged wording. Normalise whitespace
+    # before matching phrases so a re-wrap cannot read as a missing remedy.
+    para = " ".join(doc[start:doc.index("\n\n", start)].split())
+
+    assert "no alert channel" in para, (
+        "the runbook must name the second `incidents_unresolved` producer — the "
+        "alert-channel seam returning None (no DR_ISSUES_PAT / unusable R2_* "
+        "store) — or an operator re-runs a request that cannot succeed")
+    assert "DR_ISSUES_PAT" in para and "R2_*" in para, (
+        "the no-channel case must name the credentials to fix: " + para)
+    assert "fix the channel credentials" in para, (
+        "the no-channel remedy (fix the credentials) must be stated, not the "
+        "retry remedy that cannot work: " + para)
+    # …while the retry remedy must survive for the cause where it IS correct.
+    assert "re-run the action once GitHub" in para, (
+        "the failed-close remedy must stay documented: " + para)
+
+    # Code half: the branch the doc now describes really exists, so the pair
+    # (producer, documentation) cannot drift apart silently.
+    src = (root / "tortoise/hosted_api.py").read_text(encoding="utf-8")
+    assert "if alerts is None:" in src, (
+        "the no-channel branch the runbook documents is gone from hosted_api")
+
 
 class TestDrDrill:
     def test_drill_requires_params(self, client, dr_env, mem_storage):
@@ -1730,10 +2051,49 @@ class TestDrDrillScheduled:
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 503  # fail-closed when the sweep is disabled
 
+    def test_no_candidates_names_the_unresolved_incident_with_no_alert_channel(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """#4778: with no channel the drill cannot CLOSE the incident — it says so.
+
+        `_incident_alert_store` answers None where the raw constructor raised.
+        A benign `no_candidates` run resolves any open RESTORE_DRILL_FAILED, so
+        a silent skip here would leave an incident open while the run read clean.
+        """
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: None)
+        r = client.post("/v1/internal/backups/drill-scheduled",
+                        headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "no_candidates"
+        assert body["incidents_unresolved"] == [
+            f"{ha_mod._DRILL_FAILED_KIND}/global"]
+
+    def test_a_failed_drill_with_no_alert_channel_is_LOUD(
+            self, client, dr_env, mem_storage, monkeypatch, caplog):
+        """#4778: a failed drill that could not file its incident is not silent.
+
+        The whole point of D5a is that a RESTORE_DRILL_FAILED must be VISIBLE.
+        With no channel it cannot be filed at all, so the run must say so in the
+        log — an incident-shaped silence is exactly the failure this class of
+        bug produced.
+        """
+        _seed_team("team_x", nodes=2)
+        key = _default_drill_key(client, mem_storage)
+        mem_storage.upload(key, b"corrupt-blob")  # sha256 mismatch
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: None)
+
+        with caplog.at_level(logging.ERROR):
+            r = client.post("/v1/internal/backups/drill-scheduled",
+                            headers=INTERNAL_HEADERS)
+
+        assert r.status_code == 409, r.text
+        assert any("RESTORE_DRILL_FAILED NOT FILED" in rec.message
+                   for rec in caplog.records), [r.message for r in caplog.records]
+
     def test_no_candidates_records_and_resolves(self, client, dr_env,
                                                 mem_storage, monkeypatch):
         fake = _FakeAlerts()
-        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: fake)
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
@@ -1755,7 +2115,7 @@ class TestDrDrillScheduled:
         second = _default_drill_key(client, mem_storage)         # T2 (now)
         assert first != second
         fake = _FakeAlerts()
-        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: fake)
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
@@ -1799,7 +2159,7 @@ class TestDrDrillScheduled:
         _backdate_archive(mem_storage, dead_key, "2020-01-01T00:00:00+00:00")
         reg.query("MATCH (g:Graph {id:'g_dead'}) SET g.status = 'deleted'")
         fake = _FakeAlerts()
-        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: fake)
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
@@ -1817,7 +2177,7 @@ class TestDrDrillScheduled:
         key = _default_drill_key(client, mem_storage)
         mem_storage.upload(key, b"corrupt-blob")  # sha256 mismatch
         fake = _FakeAlerts()
-        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: fake)
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 409, r.text
@@ -1848,7 +2208,7 @@ class TestDrDrillScheduled:
         (restore speed is a target, not an accident)."""
         monkeypatch.setattr(ha_mod, "_DRILL_RTO_S", 0.0)  # any duration breaches
         fake = _FakeAlerts()
-        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: fake)
         _seed_team("team_x", nodes=1)
         _default_drill_key(client, mem_storage)
         r = client.post("/v1/internal/backups/drill-scheduled",
@@ -1890,7 +2250,7 @@ class TestDrDrillScheduled:
 
         monkeypatch.setattr(hb, "_issue_graph_copy", copy_then_timeout)
         fake = _FakeAlerts()
-        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: fake)
         _seed_team("team_x", nodes=1)
         _default_drill_key(client, mem_storage)
         r = client.post("/v1/internal/backups/drill-scheduled",
@@ -1925,7 +2285,7 @@ class TestDrDrillScheduled:
 
         monkeypatch.setattr(ha_mod, "_scheduled_drill", boom)
         fake = _FakeAlerts()
-        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: fake)
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 503, r.text
@@ -1973,7 +2333,7 @@ class TestDrDrillScheduled:
             close_issue=ch.close_issue, search_open=ch.search_open,
             push_telegram=ch.push_telegram, repo="o/r", assignee="o",
         )
-        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: store)
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: store)
         monkeypatch.setattr(
             ha_mod, "_scheduled_drill",
             lambda **_kw: (_ for _ in ()).throw(
@@ -2004,7 +2364,7 @@ class TestDrDrillScheduled:
             raise RuntimeError(f"upload failed: {signed}; R2 key={token}")
 
         monkeypatch.setattr(ha_mod, "_scheduled_drill", boom)
-        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: _FakeAlerts())
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: _FakeAlerts())
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 503, r.text
@@ -2030,7 +2390,7 @@ class TestDrDrillScheduled:
                                         monkeypatch):
         _seed_team("team_x", nodes=1)
         _default_drill_key(client, mem_storage)
-        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: _FakeAlerts())
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: _FakeAlerts())
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.json()["status"] == "drill_ok"

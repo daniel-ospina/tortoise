@@ -315,6 +315,17 @@ class EmbedderUnavailableError(RuntimeError):
     runner-down or missing-extra run) or ``load_failed`` / ``load_timeout``
     (the environment had it and the load broke — a different thing to fix).
     ``model_unavailable`` is the fallback when no kind was recorded.
+
+    ⛔ Its guarantee is only as wide as the narrowest ``except`` between the
+    raise and the caller: #5275 found ``TortoiseSDK.tortoise_fts_query``
+    catching it in a blanket ``except Exception`` and converting it into the
+    designed-absence ``no_embedder`` degrade, so an ARMED process still got
+    keyword-only results with no signal. The read path now catches this class
+    BY NAME and re-raises it; ``fallback_tfidf`` does the same. Write paths
+    (``encode_for_store`` callers) and the cached-snapshot fallback tier
+    degrade on purpose and are enumerated in
+    ``tests/test_embedding_model_required.py``'s module docstring — the claim
+    is scoped to the READ path and to processes that armed the flag.
     """
 
     def __init__(self, *, failure_kind: str, model: str,
