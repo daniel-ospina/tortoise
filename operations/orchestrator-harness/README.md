@@ -378,6 +378,15 @@ is removed from `dispatched.txt` **and** `checked.txt` so the pre-flight re-queu
 self-test's checks pin exactly this decision table (`4114` reaped, `8888` kept for its PR, `9999`
 kept because it is closed, `7777` kept for its live lane).
 
+⛔ **A failed listing is not an empty one.** The reaper refuses the whole pass unless both
+`.open_iss` and `.pr_brs` are **present**; the capture deletes a list when `gh` fails, so "the read
+failed" (absent) is distinguishable from "the answer is none" (present but empty). Before the
+guard, a failed `gh pr list` left an empty `.pr_brs`, `has_pr` was false for every issue, and
+`dispatched.txt` was cleared — so `orch-loop.sh` re-spawned a lane for an issue that already had a
+PR (duplicate work against the shared queue, agent-infra#1705). The self-test's failure-path checks
+pin both halves (absent → nothing reaped and `checked.txt` untouched; empty-but-readable → still
+reaps), and the capture site is driven directly with a stub `gh`.
+
 ### 7.2 Draft PRs are invisible to the sweep — **FIXED in this PR**
 
 The selector was `select(.isDraft|not)` and nothing readied our own lanes' drafts, so a draft ran

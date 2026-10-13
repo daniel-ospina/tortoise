@@ -124,6 +124,46 @@ case "$kept" in *7777*) rc=0;; *) rc=1;; esac
 ck "shipped reaper: an issue with a live lane is kept" $rc
 case "$(tr '\n' ' ' < "$R/checked.txt")" in *4114*) rc=1;; *) rc=0;; esac
 ck "shipped reaper: the reaped entry is removed from checked.txt" $rc
+
+# ── 5a) a FAILED listing must not be read as "no PRs" ────────────────────────────────────────
+# The capture (line above the heredoc) DELETES the list when `gh` fails, and the guard at the top of
+# the extracted reaper refuses the pass when either list is ABSENT. These cases pin BOTH halves:
+# an ABSENT list = the read FAILED = reap NOTHING; a PRESENT but EMPTY list = a real answer = reap.
+# Pre-fix, an absent/empty `.pr_brs` made `has_pr` false for every issue and 8888 — which HAS a PR
+# in the populated control above — was un-blacklisted and re-dispatched. (agent-infra#1705)
+RF="$TMP/reap-failpr"; mkdir -p "$RF"
+printf '4114\n8888\n' > "$RF/dispatched.txt"
+printf '4114\n8888\n' > "$RF/checked.txt"
+printf '4114\n8888\n' > "$RF/.open_iss"
+# .pr_brs deliberately ABSENT: this is the shape the shipped capture leaves on a failed `gh pr list`
+( PATH="$R:$PATH" python3 "$R/reap.py" "$RF" ) > "$TMP/reap-failpr.out" 2>&1
+kept="$(tr '\n' ' ' < "$RF/dispatched.txt")"
+case "$kept" in *4114*8888*) rc=0;; *) rc=1; echo "      dispatched.txt: '$kept'";; esac
+ck "shipped reaper: an UNREADABLE PR listing reaps NOTHING (both entries kept)" $rc
+case "$(tr '\n' ' ' < "$RF/checked.txt")" in *4114*8888*) rc=0;; *) rc=1;; esac
+ck "shipped reaper: an UNREADABLE PR listing leaves checked.txt untouched" $rc
+grep -q 'SKIPPED' "$TMP/reap-failpr.out" && rc=0 || rc=1
+ck "shipped reaper: the skipped pass says so (an unreadable listing is not an empty one)" $rc
+# the same guard for the neighbouring `.open_iss` probe, which had the safe polarity by accident
+RO="$TMP/reap-failopen"; mkdir -p "$RO"
+printf '4114\n8888\n' > "$RO/dispatched.txt"
+printf '4114\n8888\n' > "$RO/checked.txt"
+printf 'feat/8888-tm\n' > "$RO/.pr_brs"
+( PATH="$R:$PATH" python3 "$R/reap.py" "$RO" ) > "$TMP/reap-failopen.out" 2>&1
+case "$(tr '\n' ' ' < "$RO/dispatched.txt")" in *4114*) rc=0;; *) rc=1;; esac
+ck "shipped reaper: an UNREADABLE open-issue listing reaps nothing either" $rc
+# a PRESENT but EMPTY list is a REAL answer and must still reap
+RE="$TMP/reap-emptypr"; mkdir -p "$RE"
+printf '4114\n7777\n' > "$RE/dispatched.txt"
+printf '4114\n7777\n' > "$RE/checked.txt"
+printf '4114\n' > "$RE/.open_iss"   # 7777 is not open -> kept
+: > "$RE/.pr_brs"                     # readable and empty: there are genuinely no PRs
+( PATH="$R:$PATH" python3 "$R/reap.py" "$RE" ) > "$TMP/reap-emptypr.out" 2>&1
+kept="$(tr '\n' ' ' < "$RE/dispatched.txt")"
+case "$kept" in *4114*) rc=1;; *) rc=0;; esac
+ck "shipped reaper: a genuinely EMPTY (readable) PR listing still reaps 4114" $rc
+case "$kept" in *7777*) rc=0;; *) rc=1;; esac
+ck "shipped reaper: the empty-listing pass still keeps a non-open issue (7777)" $rc
 fi
 unset -f tmux
 
@@ -196,6 +236,33 @@ PY
   O="$RC" LIMIT=5 SC="$RC/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/collide-2.out" 2>&1
   case "$(tr '\n' ' ' < "$RC/candidates.txt")" in *10*) rc=0;; *) rc=1;; esac
   ck "shipped refresh loop: the COLLISION is re-attempted and queued once it clears" $rc
+fi
+
+# ── 5e) the capture site itself: a failed `gh` leaves ABSENCE, not an empty file ──────────────
+# The reaper guard above is only sound if the capture never hands it an empty file for a FAILED
+# read. Extract the shipped capture block and drive it with a stub `gh`: on failure NOTHING must be
+# left behind (`rm -f`), and on success the (empty) file must be present — that difference is what
+# lets the reaper tell "the read failed" from "the answer is none". The pre-fix `|| : > "$O/.pr_brs"`
+# wrote an empty file in BOTH cases, which is the fail-open being fixed here. (agent-infra#1705)
+awk '/^if ! gh issue list --repo "\$OR"/{f=1} f{print} f&&/^fi$/{c++; if(c==2) exit}' "$REFRESH" > "$TMP/acq.sh"
+if need "$TMP/acq.sh" "the listing capture is extracted from the shipped refresh-candidates.sh"; then
+  A="$TMP/acq"; mkdir -p "$A/fail" "$A/ok"
+  cat > "$A/gh" <<'SH'
+#!/bin/bash
+case "${GH_MODE:-}" in
+  fail) echo 'gh: could not reach api.github.com' >&2; exit 1 ;;
+  ok)   exit 0 ;;
+esac
+SH
+  chmod +x "$A/gh"
+  ( PATH="$A:$PATH" GH_MODE=fail O="$A/fail" OR="acme/widget" bash "$TMP/acq.sh" ) > "$TMP/acq-fail.out" 2>&1
+  [ ! -e "$A/fail/.pr_brs" ] && rc=0 || rc=1
+  ck "shipped capture: a FAILED PR listing leaves NO .pr_brs (absence, not an empty answer)" $rc
+  [ ! -e "$A/fail/.open_iss" ] && rc=0 || rc=1
+  ck "shipped capture: a FAILED issue listing leaves NO .open_iss" $rc
+  ( PATH="$A:$PATH" GH_MODE=ok O="$A/ok" OR="acme/widget" bash "$TMP/acq.sh" ) > "$TMP/acq-ok.out" 2>&1
+  [ -e "$A/ok/.pr_brs" ] && [ ! -s "$A/ok/.pr_brs" ] && rc=0 || rc=1
+  ck "shipped capture: a SUCCESSFUL empty PR listing leaves an EMPTY .pr_brs (a real answer)" $rc
 fi
 
 # ── 6) install.sh renders correctly, including values sed would mangle ───────────
