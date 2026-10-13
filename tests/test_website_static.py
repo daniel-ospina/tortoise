@@ -20,10 +20,10 @@ Repo-local, zero network, stdlib only (the test_waitlist_form.py pattern):
    reference #pricing-grid / #pricing-usage-line / #selfhost-section /
    #btn-monthly / #btn-annual, and those element ids exist in the page; init
    wiring honors display.annual_default.
-5. Unshipped-capability claim pin (#3432): the `04 · Automate` beat's copy is
-   pinned (the beat advertised webhook delivery as available while
-   product/pricing.json marks it "planned" and no outbound webhook ships), and
-   the beat must carry a real anchor to the issue tracking the capability.
+5. Copy pin for the `04 · Automate` beat (#3432, #8466): the paragraph is
+   pinned so a paraphrase cannot slip past. The availability premise that used
+   to sit over it is retired — outbound webhook push shipped (#2081, PR #8104)
+   — see `TestAutomateBeatCopy`.
 
 Run:  TORTOISE_TEST_CARVE_OUT=1 python -m pytest tests/test_website_static.py -v
       (a URI-less run fails at session setup by construction — epic #1647 P4;
@@ -42,8 +42,6 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:  # tests/ and tools/ are not installed packages
     sys.path.insert(0, str(REPO_ROOT))
-
-from tests._html_links import extract_anchor_hrefs  # noqa: E402
 
 PRODUCT_HTML = REPO_ROOT / "website" / "product.html"
 PRICING_JSON = REPO_ROOT / "product" / "pricing.json"
@@ -618,115 +616,68 @@ def _automate_paragraph_markup() -> str:
     return match.group(0)
 
 
-class TestUnshippedCapabilityClaims:
-    """#3432: the `04 · Automate` beat advertised webhook delivery as available.
+class TestAutomateBeatCopy:
+    """#3432 / #8466: the `04 · Automate` beat's copy, and the facts behind it.
 
-    It read "Use webhooks to trigger workflows, update systems, or coordinate
-    agents…" — present tense — while every source of truth said otherwise:
-    `product/pricing.json` marks `features.webhooks` `"planned"` on pro/team and
-    `false` elsewhere, no outbound webhook exists in `tortoise/` (every hit is an
-    INBOUND receiver — `/webhooks/stripe`, the GitHub/Slack connector servers),
-    and `docs/plans/2026-08-08-432-subscriptions-plan.md` lists "webhook
-    delivery" as out of scope. #3909 tracks the capability and is explicitly
-    deferred, post-beta. Introduced by 8918a7fae (#665), so it was live for ~7
-    weeks with nothing able to catch it.
+    #3432 pinned this paragraph while the beat advertised webhook delivery in
+    the present tense and no outbound webhook existed anywhere in `tortoise/`
+    (every hit was an INBOUND receiver — `/webhooks/stripe`, the connector
+    servers). That is resolved: push delivery SHIPPED in PR #8104 (epic #2080
+    W4 phase 2) — `tortoise/webhook_delivery.py` (subscription registry,
+    dispatcher, retry/backoff, delivery receipts, HMAC signing) plus four
+    tenant REST routes declared in `config/rest-surface-inventory.yml`, drained
+    at the end of a tenant's dream cycle with `TORTOISE_WEBHOOK_DISPATCH` as
+    the kill switch. The `planned, not shipped — see #3909` hedge then became
+    the stale claim, so #8466 replaced the paragraph and retired the two
+    assertions whose subject the shipped capability removed:
 
-    A TRIPWIRE, NOT A BINDING — six things it does NOT promise, named rather
-    than hidden:
+    * the `pricing.json` premise test — its own docstring named the failure mode
+      that happened ("the premise reads a `pricing.json` flag, and such flags
+      LAG"). `product/pricing.json` still reads `features.webhooks: "planned"`
+      on pro/team while the delivery layer is on main, so that assertion was
+      green while reality moved. Flipping the flag is deliberately NOT part of
+      #8466: the file's own `_comment` records that these feature strings lag
+      by design pending a pure-doc follow-up, and `per_graph_keys` is in the
+      same state.
+    * the tracker-link test — the new copy makes no roadmap claim, so there is
+      no tracker to link.
 
-    1. The premise reads a `pricing.json` flag, and such flags LAG.
-       `features.export` still reads `"planned"` while
-       `tortoise/hosted_api.py` ships the export endpoint, so a release that
-       never moves the flag leaves this file green and the page stale.
-    2. It can therefore also RED for the wrong reason: a pure-doc realignment of
-       these schema strings (the follow-up `pricing.json`'s own `_comment`
-       describes), or a new unshipped sentinel, trips the premise although
-       nothing shipped. A new sentinel is a deliberate allow-list edit, not a
-       silence.
-    3. The copy pin is a hand-maintained SECOND COPY of a prose claim. An
-       availability sentence is not derivable today, so it is pinned rather
-       than left unguarded; the durable binding is #5063.
-    4. The scope is this beat's **static** markup in this one FILE. A claim added
-       to another beat, to another page, to whatever `_redirects` may serve at
-       `/product`, or injected at runtime by the page's own GSAP block is all
-       green here. Phrase search cannot establish a site-wide property — the
-       first sentence of this very beat was found by reading, not searching.
-    5. The route test proves a link EXISTS, not that it is reachable: the beat is
-       a `pointer-events: none` overlay until GSAP adds `.pe-on`, and it is
-       `opacity: 0` without JS. Pre-existing page architecture.
-    6. The heading `04 · Automate` is deliberately NOT pinned: it is a narrative
-       label, not an availability claim, and freezing it would make a
-       renumbering red a test whose message is about shipping status. What is
-       pinned is the paragraph.
+    STILL NOT SHIPPED, and why the copy omits it: a subscription filters the
+    durable `:GraphEvent` types (`webhook_delivery._validated_types` → the 11
+    `CLAIM_EVENT_TYPES` in `tortoise/shared_state/events.py`), i.e. LIFECYCLE
+    events. Nothing fires on an EP belief crossing a confidence threshold;
+    that trigger is #3909 (OPEN, `deferred`, `not-launch-relevant`) and §5.3 of
+    `docs/plans/2026-10-11-2081-webhook-delivery.md` says #3909 reuses this
+    layer rather than adding a second dispatcher.
 
-    The premise is an unshipped ALLOW-LIST rather than a boolean negation
-    because `pricing.json`'s own `_comment` describes the shipped transition as
-    `"planned"` → `"shipped"`, and `"shipped" is not True`.
+    What is left is a paraphrase guard, and it is deliberately weak: the pin is
+    a hand-maintained SECOND COPY of a prose claim (the durable binding is
+    #5063), and its scope is this beat's static markup in this one file — a
+    claim added to another beat, to another page, or injected at runtime by the
+    page's own GSAP block is green here. It is kept because this paragraph has
+    already carried a wrong availability claim in each direction: unshipped-but-
+    advertised before #3432, shipped-but-disclaimed after.
     """
 
-    # The paragraph's rendered text, exactly as #3432 leaves it (168 chars).
+    # The paragraph's rendered text (#8466).
     EXPECTED_PARAGRAPH_TEXT = (
-        "Poll claim events after a cursor to drive your own workflows, systems, "
-        "and agents as the graph changes. Webhook push delivery is planned, not "
-        "shipped — see issue #3909."
+        "Define lifecycle events to fire webhooks. Automate investment "
+        "decisions, agent actions, and more."
     )
-    TRACKER_URL = "https://github.com/daniel-ospina/tortoise/issues/3909"
-    UNSHIPPED_VALUES = (False, "planned")
-
-    def test_pricing_json_still_marks_webhooks_unshipped(self):
-        """Premise. Reds when webhooks leave the unshipped set, and en route.
-
-        Three branches when it fires: webhooks shipped (fix the page and this
-        class), the flag was realigned/newly sentineled while nothing shipped
-        (fix the flag, or widen the allow-list deliberately and say which
-        sentinel), or a tier lost/renamed the key.
-        """
-        tiers = json.loads(PRICING_JSON.read_text(encoding="utf-8"))["tiers"]
-        observed = {}
-        for tier, spec in tiers.items():
-            features = spec.get("features")
-            observed[tier] = (features.get("webhooks")
-                              if isinstance(features, dict) else features)
-        shipped = sorted(tier for tier, value in observed.items()
-                         if value not in self.UNSHIPPED_VALUES)
-        assert not shipped, (
-            f"product/pricing.json no longer marks webhooks unshipped for "
-            f"{ {t: observed[t] for t in shipped} }. If webhooks SHIPPED, the "
-            f"#3432 pin below is now WRONG — state availability in the beat and "
-            f"update EXPECTED_PARAGRAPH_TEXT. If the flag moved only to realign "
-            f"the pricing-schema strings, or a new unshipped sentinel was "
-            f"adopted, fix the flag — or widen the allow-list deliberately and "
-            f"name the sentinel. Do not widen it to silence this."
-        )
 
     def test_automate_beat_paragraph_is_pinned(self):
         """The paragraph is pinned so a paraphrase cannot slip past.
 
         A token check ("does 'webhook' appear, and is 'planned' somewhere in the
-        beat?") passes on `Use webhooks to trigger workflows… planned`, which is
+        beat?") passed on `Use webhooks to trigger workflows… planned`, which is
         still an availability claim. Equality does not.
         """
         assert _beat_text(_automate_paragraph_markup()) == self.EXPECTED_PARAGRAPH_TEXT, (
             "the 04 · Automate paragraph changed. Before updating this pin, "
             "answer: does the new copy state anything in the present tense that "
-            "the product does not do? The shipped surface is the PULL path "
-            "(GET /v1/events, sdk.poll_events, tortoise_events_poll); push "
-            "delivery is #3909 and is not shipped."
-        )
-
-    def test_automate_beat_links_the_capability_tracker(self):
-        """The roadmap claim must carry its route — text alone does not link.
-
-        Asserted on PARSED anchor hrefs, not a substring of the markup: a
-        substring check stays true when the URL is parked in an HTML comment, in
-        `data-href=`, or in `title="…"`. `extract_anchor_hrefs`
-        (tests/_html_links.py) returns only rendered anchors, and its own tests
-        pin all three of those rejections.
-        """
-        assert self.TRACKER_URL in extract_anchor_hrefs(_automate_beat_markup()), (
-            "the 04 · Automate beat no longer links the issue that tracks the "
-            "capability (#3909). The roadmap claim must be reachable — that is "
-            "the point of making it a claim a reader can check (#3432)."
+            "the product does not do? LIFECYCLE-event push delivery ships "
+            "(tortoise/webhook_delivery.py + /v1/context/subscriptions); a "
+            "CONFIDENCE-THRESHOLD trigger does not (#3909)."
         )
 
 

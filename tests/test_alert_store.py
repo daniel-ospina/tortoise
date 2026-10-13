@@ -618,6 +618,9 @@ def test_a_failed_close_is_not_retried_until_the_cooldown_expires():
 
 _CANONICAL_KEY = "ops/alerts/R2_DOWN/_.json"
 _DRIVER_KEY = "ops/alerts/R2_DOWN/global.json"  # legacy alias spelling
+# #3147: the driver-owned LISTING tier, used by the two-tier ownership tests.
+_UNLISTABLE_CANONICAL_KEY = "ops/alerts/R2_UNLISTABLE/_.json"
+_UNLISTABLE_ALIAS_KEY = "ops/alerts/R2_UNLISTABLE/global.json"
 
 
 def test_platform_incident_key_contract():
@@ -681,6 +684,22 @@ def test_real_subject_named_global_never_cross_adopts_a_platform_incident():
     assert list(ch2.issues.values()) == ["[DR] R2_DOWN — global"]
 
 
+def _sentinel(storage, kind, issue_number, writer=None, *, key="global"):
+    """Seed the R2 create-once object a writer's filing path writes for ``kind``.
+
+    Same shape as :func:`_driver_sentinel`, generalised to any kind so the #3147
+    two-tier ownership tests can seed `R2_UNLISTABLE` as well as `R2_DOWN`.
+    """
+    payload = {
+        "kind": kind,
+        "issue_number": issue_number,
+        "filed_at": "2026-09-10T00:00:00Z",
+    }
+    if writer is not None:
+        payload["writer"] = writer
+    storage.upload(f"ops/alerts/{kind}/{key}.json", json.dumps(payload).encode())
+
+
 def _driver_sentinel(storage, issue_number, writer=None):
     """Seed the R2 object the bash DR driver's `file_alert` writes.
 
@@ -689,14 +708,7 @@ def _driver_sentinel(storage, issue_number, writer=None):
     under the legacy `global` alias so the alias-consulting paths are the ones
     exercised.
     """
-    payload = {
-        "kind": "R2_DOWN",
-        "issue_number": issue_number,
-        "filed_at": "2026-09-10T00:00:00Z",
-    }
-    if writer is not None:
-        payload["writer"] = writer
-    storage.upload(_DRIVER_KEY, json.dumps(payload).encode())
+    _sentinel(storage, "R2_DOWN", issue_number, writer)
 
 
 class _RefilingStorage(MemoryStorage):
@@ -1003,35 +1015,76 @@ def test_become_filer_writes_the_canonical_key():
 
 
 def test_resolve_refuses_a_kind_owned_by_another_writer():
-    """#3127: the watcher cannot clear R2_DOWN — its probe covers the wrong thing.
+    """#3127/#3147: the watcher cannot clear R2_UNLISTABLE — its probe is wrong.
 
     A reachability check cannot distinguish "R2 unreachable" from "the key
-    cannot ListObjects", so the watcher's all-clear may be false. Pre-fix it
+    cannot ListObjects", so the watcher's all-clear of the LISTING tier would be
+    false. Pre-#3147 both tiers shared one `R2_DOWN` key; the split gives each
+    its own owner, and this pins the side the watcher must NOT clear. Pre-fix it
     deleted only its own spelling; once both writers shared one key it would
     close the driver's issue and the driver would re-file — one duplicate pair
     per hour, with a real storage fault recorded as resolved.
     """
     ch = _FakeChannels()
     storage = MemoryStorage()
-    _driver_sentinel(storage, 7, writer="driver")
-    ch.issues[7] = "[DR] R2_DOWN"
+    _sentinel(storage, "R2_UNLISTABLE", 7, writer="driver")
+    ch.issues[7] = "[DR] R2_UNLISTABLE"
     store = _store(ch, storage, writer="watcher")
 
-    assert store.resolve_incident("R2_DOWN") is False
+    assert store.resolve_incident("R2_UNLISTABLE") is False
     assert ch.closed == []
-    assert storage.download(_DRIVER_KEY), "the sentinel must survive the refusal"
+    assert storage.download(_UNLISTABLE_ALIAS_KEY), "the sentinel must survive the refusal"
 
 
 def test_resolve_allowed_for_the_declared_owner():
+    """#3147: the driver owns R2_UNLISTABLE and may clear it."""
     ch = _FakeChannels()
     storage = MemoryStorage()
-    _driver_sentinel(storage, 7, writer="driver")
+    _sentinel(storage, "R2_UNLISTABLE", 7, writer="driver")
     store = _store(ch, storage, writer="driver")
+
+    assert store.resolve_incident("R2_UNLISTABLE") is True
+    assert ch.closed == [7]
+    with pytest.raises(KeyError):
+        storage.download(_UNLISTABLE_ALIAS_KEY)
+
+
+def test_watcher_can_clear_the_reachability_tier_it_owns():
+    """#3147 indicator 2: the watcher legitimately clears the kind it evidences.
+
+    R2_DOWN's meaning narrowed to the reachability tier, whose owner is the
+    WATCHER — its own R2 read IS the reachability probe. Before the split this
+    resolve was refused (the driver owned the kind) and ADR-011 recorded the
+    resulting stranding as an accepted cost; the split removes the need for the
+    refusal. The other direction is pinned by
+    `test_resolve_refuses_a_kind_owned_by_another_writer`.
+    """
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    _sentinel(storage, "R2_DOWN", 7, writer="watcher")
+    store = _store(ch, storage, writer="watcher")
 
     assert store.resolve_incident("R2_DOWN") is True
     assert ch.closed == [7]
     with pytest.raises(KeyError):
         storage.download(_DRIVER_KEY)
+
+
+def test_driver_cannot_clear_the_reachability_tier_it_only_files():
+    """#3147 indicator 4: the driver FILED R2_DOWN but must not clear it.
+
+    The watcher owns the reachability tier, so the driver's passing preflight is
+    not the evidence that clears it — `resolve_global` refuses and leaves the
+    sentinel intact.
+    """
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    _sentinel(storage, "R2_DOWN", 7, writer="driver")
+    store = _store(ch, storage, writer="driver")
+
+    assert store.resolve_incident("R2_DOWN") is False
+    assert ch.closed == []
+    assert storage.download(_DRIVER_KEY), "the sentinel must survive the refusal"
 
 
 def test_resolve_refuses_even_a_sentinel_the_caller_itself_opened():
@@ -1041,18 +1094,18 @@ def test_resolve_refuses_even_a_sentinel_the_caller_itself_opened():
     found three ways the self-asserted filed-by note went wrong — stamped by an
     adopter, surviving a placeholder that was never filed, outliving the issue
     it described — each letting a non-owner clear a kind it has no evidence
-    about. The accepted cost: with the driver disabled, a watcher-filed R2_DOWN
-    stays open until a driver run clears it. That is correct — if the driver is
-    off, the evidence that storage recovered does not exist.
+    about. #3147 keeps the rule per TIER: a watcher-filed R2_UNLISTABLE stays
+    open until a driver run clears it — correct, because the watcher's probe does
+    not measure the pool the listing tier is about.
     """
     ch = _FakeChannels()
     storage = MemoryStorage()
-    _driver_sentinel(storage, 7, writer="watcher")
+    _sentinel(storage, "R2_UNLISTABLE", 7, writer="watcher")
     store = _store(ch, storage, writer="watcher")
 
-    assert store.resolve_incident("R2_DOWN") is False
+    assert store.resolve_incident("R2_UNLISTABLE") is False
     assert ch.closed == []
-    assert storage.download(_DRIVER_KEY), "the sentinel survives the refusal"
+    assert storage.download(_UNLISTABLE_ALIAS_KEY), "the sentinel survives the refusal"
 
 
 def test_owned_kind_still_resolves_for_its_owner():
@@ -1074,11 +1127,12 @@ def test_resolve_tolerates_a_corrupt_issue_number():
     ch = _FakeChannels()
     storage = MemoryStorage()
     storage.upload(
-        _DRIVER_KEY, json.dumps({"kind": "R2_DOWN", "issue_number": "abc"}).encode(),
+        _UNLISTABLE_ALIAS_KEY,
+        json.dumps({"kind": "R2_UNLISTABLE", "issue_number": "abc"}).encode(),
     )
     store = _store(ch, storage, writer="driver")
 
-    assert store.resolve_incident("R2_DOWN") is True  # must not raise
+    assert store.resolve_incident("R2_UNLISTABLE") is True  # must not raise
     assert ch.closed == []
 
 
@@ -1088,17 +1142,18 @@ def test_non_owner_that_adopts_an_issue_does_not_gain_authority():
     The watcher creates its own placeholder, then the GH-search fallback finds
     the DRIVER's already-filed open issue and adopts its number. Stamping the
     watcher as the sentinel's `writer` made the provenance carve-out pass, so
-    the watcher could close the driver's `R2_DOWN` on its weaker reachability
+    the watcher could close the driver's `R2_UNLISTABLE` on its weaker
+    reachability
     probe — the false recovery the guard exists to stop, one layer deeper. This
     reproduced against the previous commit.
     """
     ch = _FakeChannels()
     storage = MemoryStorage()
-    ch.issues[50] = "[DR] R2_DOWN"  # filed by the driver, still open
+    ch.issues[50] = "[DR] R2_UNLISTABLE"  # filed by the driver, still open
     store = _store(ch, storage, issue_open=lambda n: True, writer="watcher")
 
-    store.open_incident("R2_DOWN")
-    sentinel = json.loads(storage.download(_CANONICAL_KEY))
+    store.open_incident("R2_UNLISTABLE")
+    sentinel = json.loads(storage.download(_UNLISTABLE_CANONICAL_KEY))
     assert sentinel["issue_number"] == 50, "the driver's issue is adopted, not re-filed"
     assert len(ch.issues) == 1
     assert "writer" not in sentinel, "an adopter must not claim provenance"
@@ -1107,12 +1162,12 @@ def test_non_owner_that_adopts_an_issue_does_not_gain_authority():
     # second poll short-circuits on the ADOPTION path (the sentinel now names
     # the still-open issue #50), so it does not announce again.
     assert len(ch.telegram) == 1
-    store.open_incident("R2_DOWN")
+    store.open_incident("R2_UNLISTABLE")
     assert len(ch.telegram) == 1, "an already-open adopted incident is not re-announced"
 
-    # ...and the authority check falls through to KIND_OWNERS: R2_DOWN is the
-    # driver's, and the watcher cannot clear it.
-    assert store.resolve_incident("R2_DOWN") is False
+    # ...and the authority check falls through to KIND_OWNERS: R2_UNLISTABLE is
+    # the driver's, and the watcher cannot clear it.
+    assert store.resolve_incident("R2_UNLISTABLE") is False
     assert ch.closed == []
 
 
@@ -1335,18 +1390,18 @@ def test_skipped_fresh_does_not_assert_the_sentinel_is_live():
     ch = _FakeChannels()
     storage = MemoryStorage()
     # The driver's sentinel names issue 7 … which is already CLOSED.
-    _driver_sentinel(storage, 7, writer="driver")
-    ch.issues[7] = "[DR] R2_DOWN"
+    _sentinel(storage, "R2_UNLISTABLE", 7, writer="driver")
+    ch.issues[7] = "[DR] R2_UNLISTABLE"
     ch.closed.append(7)
-    # The watcher does not own R2_DOWN, so its resolve must refuse.
+    # The watcher does not own R2_UNLISTABLE, so its resolve must refuse.
     store = _store(ch, storage, writer="watcher",
                    issue_open=lambda n: n not in ch.closed)
 
-    assert store.resolve_incident_state("R2_DOWN") is ResolveOutcome.SKIPPED_FRESH
+    assert store.resolve_incident_state("R2_UNLISTABLE") is ResolveOutcome.SKIPPED_FRESH
     assert ch.closed == [7], (
         "the refusal must not close anything — the sentinel already names a "
         "closed issue and a refusal resolves nothing")
-    assert storage.download(_DRIVER_KEY), (
+    assert storage.download(_UNLISTABLE_ALIAS_KEY), (
         "the sentinel must survive the refusal — SKIPPED_FRESH left it untouched")
 
 

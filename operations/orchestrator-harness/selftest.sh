@@ -758,6 +758,25 @@ ck "the review-fix spawn carries the load gate" $rc
 grep -q 'gh pr merge "\$PR" --repo "\$OR" --squash >>"\$LOG"' "$LOOP" && rc=0 || rc=1
 ck "the cheap merge path stays ungated" $rc
 
+# ── refresh-candidates.sh: the pool is ordered by SEVERITY, not by issue number ─────
+# #8465: the pool was sorted `sort -n -u` over the NUMBERS ALONE — oldest first — so 238
+# pool-eligible P2-moderate sat ahead of 20 P0-blocker and the P0s were unreachable. Extract the
+# REAL pipeline from the shipped script and drive it with a fixture; re-implementing the sort here
+# would pass on the broken copy too. Verified non-vacuous: the pre-fix extraction yields `sort -n -u`,
+# whose output is `0 7951 1 8039 2 1120` and fails this assertion.
+POOL_SORT="$(grep -E '^\} \| sort ' "$REFRESH" | sed -e 's/^} | //' -e 's/ > "\$O\/\.pool"$//')"
+if [ -n "$POOL_SORT" ]; then
+  pool_got="$(printf '2 1120\n1 8039\n0 7951\n2 3147\n1 7936\n0 7846\n2 3329\n1 8039\n0 3846\n' \
+              | sh -c "$POOL_SORT" | tr '\n' ' ' | sed 's/ *$//')"
+  [ "$pool_got" = "3846 7846 7951 7936 8039 1120 3147 3329" ] && rc=0 || rc=1
+else rc=1; fi
+ck "refresh-candidates.sh orders the pool severity-first (P0<P1<P2), age second, dedup by number" $rc
+
+# The backlog file is consumed top-down, so its ORDER IS the priority — a numeric re-sort put any
+# appended P0 at the BACK (#8465). The shipped script must dedupe WITHOUT sorting.
+if [ -s "$REFRESH" ] && ! grep -qE '^sort -n -u -o "\$O/candidates\.txt"' "$REFRESH"; then rc=0; else rc=1; fi
+ck "refresh-candidates.sh dedupes the backlog without re-sorting it by issue number" $rc
+
 echo
 echo "==> $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
