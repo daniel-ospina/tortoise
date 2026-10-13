@@ -32980,6 +32980,13 @@ async def backups_sweep(request: Request):
         # ANSWERS None instead of raising when no channel can exist, which both
         # loops below REPORT rather than swallow.
         alerts = _incident_alert_store()
+        # #4778 review P3: the resolution candidates are needed by BOTH the
+        # no-channel decision below AND the resolve loop, so compute them once,
+        # here — `sweep_resolutions` reads only `status`/`results`/`incidents`,
+        # not `alerts_failed`, so hoisting it changes no outcome.
+        from tortoise.backup_sweep import sweep_resolutions
+
+        candidates = sweep_resolutions(result)
         alerts_failed = []
         if alerts is None:
             # No channel (no `DR_ISSUES_PAT`, or an unusable object store):
@@ -32987,10 +32994,18 @@ async def backups_sweep(request: Request):
             # say so — a sweep whose incidents vanished silently reads as a
             # clean sweep.
             alerts_failed = [inc.get("kind") for inc in result.get("incidents", [])]
-            _logger.warning(
-                "sweep incidents could not be filed: no alert channel "
-                "(DR_ISSUES_PAT unset, or the object store is unusable)"
-            )
+            # #4778 review P3: warn only when this run actually NEEDED the
+            # channel (something to file or something to resolve). The sweep is
+            # called hourly and most runs emit nothing, so the unconditional
+            # warning flooded the log with "no alert channel" about clean runs
+            # — the drill's equivalent warning is conditional the same way.
+            if alerts_failed or candidates:
+                _logger.warning(
+                    "backup sweep has no alert channel: %d incident(s) could "
+                    "not be filed and %d resolve candidate(s) could not be "
+                    "cleared (DR_ISSUES_PAT unset, or the object store is "
+                    "unusable)", len(alerts_failed), len(candidates),
+                )
         else:
             for inc in result.get("incidents", []):
                 try:
@@ -33018,9 +33033,7 @@ async def backups_sweep(request: Request):
         # one LIST per kind, never an R2 GET per graph, so an hourly sweep over a
         # few thousand graphs does not serialise thousands of reads while holding
         # the sweep lock (nor does a listing failure close anything).
-        from tortoise.backup_sweep import sweep_resolutions
-
-        candidates = sweep_resolutions(result)
+        # (`candidates` is computed above, next to the no-channel decision.)
         resolved: list[str] = []
         failed: list[str] = []
         open_cache: dict[str, set[str]] = {}

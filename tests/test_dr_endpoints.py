@@ -646,6 +646,57 @@ class TestDrSweep:
         assert sorted(body["incidents_unresolved"]) == sorted(
             backup_sweep.SWEEP_RESOLVABLE_GLOBAL_KINDS)
 
+    def test_sweep_does_not_warn_about_a_missing_channel_on_a_clean_run(
+            self, client, dr_env, mem_storage, monkeypatch, caplog):
+        """#4778 review P3: the no-channel WARNING is conditional on real work.
+
+        The sweep runs hourly and most runs emit nothing; an unconditional
+        warning filled the log with "no alert channel" about runs that never
+        needed one. A run with nothing to file and nothing to resolve must stay
+        silent (the drill's equivalent warning is conditional the same way).
+        """
+        import logging
+
+        from tortoise import backup_sweep
+
+        monkeypatch.setattr(
+            backup_sweep, "run_backup_sweep",
+            lambda **kw: {"status": "backed_up", "teams_backed_up": 0,
+                          "incidents": []})
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: None)
+
+        with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+            r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        # The premise, asserted: this run has NOTHING for the channel to do.
+        assert backup_sweep.sweep_resolutions(r.json()) == []
+        assert r.json().get("incidents_unresolved") is None
+        assert "no alert channel" not in caplog.text, caplog.text
+
+    def test_sweep_warns_about_a_missing_channel_when_it_had_an_incident(
+            self, client, dr_env, mem_storage, monkeypatch, caplog):
+        """Positive control for the conditional warning above.
+
+        Without this, "no warning" would also pass if the warning were simply
+        deleted. A run that DID emit an incident still warns.
+        """
+        import logging
+
+        from tortoise import backup_sweep
+
+        monkeypatch.setattr(
+            backup_sweep, "run_backup_sweep",
+            lambda **kw: {"status": "backed_up", "teams_backed_up": 0,
+                          "incidents": [{"kind": "ENUM_DELTA", "org_id": "",
+                                         "detail": {"observed": 0}}]})
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda *a, **k: None)
+
+        with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+            r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        assert r.json()["alerts_failed"] == ["ENUM_DELTA"]
+        assert "no alert channel" in caplog.text, caplog.text
+
     def test_sweep_backs_up_seeded_team(self, client, dr_env, mem_storage):
         _seed_team("team_x", nodes=2)
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)

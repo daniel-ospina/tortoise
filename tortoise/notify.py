@@ -98,9 +98,13 @@ def file_incident(kind: str, org_id: str = "", detail: dict | None = None) -> bo
     """File (or REUSE) an ops incident on the shared sink. NEVER raises.
 
     The swallow is the point: every caller is a FAILURE path that must still
-    complete (a best-effort send leg), so a dead alert channel — sink disabled,
-    R2/GitHub/Telegram down — degrades to the log line the caller already
-    wrote rather than propagating. Returns True only when THIS call was the
+    complete (a best-effort send leg), so a dead alert channel — no
+    ``DR_ISSUES_PAT``, an unusable object store, or R2/GitHub/Telegram down —
+    degrades to the log line the caller already wrote rather than propagating.
+    There is no sink-disable switch to list as a separate off state: after
+    #4778 the only "off" state is "no channel", described on
+    ``_incident_alert_store`` at the call site below. Returns True only when
+    THIS call was the
     filer; a dedup hit returns False, which is not an error.
 
     Dedup is ``AlertStore.open_incident``'s per-``(kind, org_id)`` create-once
