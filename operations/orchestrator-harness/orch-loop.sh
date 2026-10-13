@@ -412,9 +412,21 @@ PY
   SWTOTAL="$(sysctl -n vm.swapusage 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="total"){print int($(i+2)); exit}}')"
   : "${SWFREE:=9999}"; : "${SWTOTAL:=0}"
   # Available memory = free + inactive (top's "unused" PhysMem is NOT it; that is a different figure).
-  MEMAVAIL_MB="$(vm_stat 2>/dev/null | awk '/Pages free/{gsub(/[.]/,"",$NF);f=$NF} /Pages inactive/{gsub(/[.]/,"",$NF);i=$NF} END{printf "%d",(f+i)*16384/1048576}')"
-  # A failed probe is UNKNOWN, not ample: we cannot see capacity, so we do not add work.
-  if [ -z "${MEMAVAIL_MB:-}" ]; then MEMAVAIL_MB=0; MEM_UNKNOWN=1; else MEM_UNKNOWN=0; fi
+  # Derive the page size from vm_stat's own header rather than hardcoding it: 16 KiB is Apple
+  # silicon, but install.sh supports Intel Macs (it adds /usr/local/bin), where a hardcoded 16384
+  # over-reports available memory 4x -- the unsafe direction.
+  VMSTAT_OUT="$(vm_stat 2>/dev/null)"
+  if [ -z "$VMSTAT_OUT" ]; then
+    # The probe itself failed. UNKNOWN, not ample: we cannot see capacity, so we do not add work.
+    MEMAVAIL_MB=0; MEM_UNKNOWN=1
+  else
+    MEMAVAIL_MB="$(printf '%s\n' "$VMSTAT_OUT" | awk '
+      /page size of/ {ps=$8}
+      /Pages free/ {gsub(/[.]/,"",$3); f=$3}
+      /Pages inactive/ {gsub(/[.]/,"",$3); i=$3}
+      END {if (ps=="") ps=16384; printf "%d", (f+i)*ps/1048576}')"
+    MEM_UNKNOWN=0
+  fi
   echo "[cap] load=$L/$MAX_LOAD lanes=$LANES/$MAX_LANES mem_avail=${MEMAVAIL_MB}M/${MIN_MEM_FREE_MB}M swap_free=${SWFREE}M/${MIN_SWAP_FREE}M" >> "$LOG"
   # Four gates. swap_total=0 => swap uninitialised (fresh boot), NOT pressure — allow.
   # Name the binding gate: an earlier version logged "skipped (load=…)" while load was never
@@ -424,7 +436,10 @@ PY
   elif [ "$L" -ge "$MAX_LOAD" ]; then GATE_WHY="load=$L>=max_load=$MAX_LOAD"
   elif [ "$LANES" -ge "$MAX_LANES" ]; then GATE_WHY="lanes=$LANES>=max_lanes=$MAX_LANES"
   elif [ "$SWTOTAL" -ne 0 ] && [ "$SWFREE" -le "${MIN_SWAP_FREE:-600}" ]; then GATE_WHY="swap_free=${SWFREE}M<=min_swap_free=${MIN_SWAP_FREE:-600}M"
-  elif [ "$MEM_UNKNOWN" = "1" ]; then GATE_WHY="mem_probe_failed (capacity unknown -> do not add work)"
+  # "A failed probe is UNKNOWN, not ample" is only true if MEM_UNKNOWN can be SET, and awk's END
+  # block always prints (`printf "%d"` yields 0 for unset fields), so testing for an empty
+  # MEMAVAIL_MB could never be true. The vm_stat call is therefore tested on its own, above.
+  elif [ "${MEM_UNKNOWN:-0}" = "1" ]; then GATE_WHY="mem_probe_failed (capacity unknown -> do not add work)"
   elif [ "$MEMAVAIL_MB" -le "$MIN_MEM_FREE_MB" ]; then GATE_WHY="mem_avail=${MEMAVAIL_MB}M<=min_mem_free_mb=${MIN_MEM_FREE_MB}M"
   fi
   if [ -z "$GATE_WHY" ]; then

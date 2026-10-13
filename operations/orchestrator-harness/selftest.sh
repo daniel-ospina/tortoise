@@ -247,6 +247,12 @@ rc=0
 # the check the moment MAX_LOAD stopped being a literal. Comparing the expression also pins the FORM,
 # so the two files cannot drift to different arithmetic that happens to agree today.
 for v in MAX_LOAD MAX_LANES MAX_REVIEW MERGE_PRIORITY_AT MAX_FIX MAX_FIX_TRIES MIN_SWAP_FREE MIN_MEM_FREE_MB BATCH CYC; do
+  # Exactly ONE definition per file is part of the invariant: bash applies the LAST assignment, so a
+  # file that defines a limit twice -- correctly at first, differently later -- would otherwise pass on
+  # whichever one `head -1` happened to read. Compare the FULL list of definitions, and require one.
+  na="$(sed -n -E "s/^$v=\"\\\$\{$v:-([^\"]*)\}\".*/\1/p" "$LOOP" | wc -l | tr -d ' ')"
+  nb="$(sed -n -E "s/^$v=\"\\\$\{$v:-([^\"]*)\}\".*/\1/p" "$INST" | wc -l | tr -d ' ')"
+  [ "$na" = "1" ] && [ "$nb" = "1" ] || { echo "      $v: defined ${na}x in orch-loop, ${nb}x in install (must be exactly once)"; rc=1; continue; }
   a="$(sed -n -E "s/^$v=\"\\\$\{$v:-([^\"]*)\}\".*/\1/p" "$LOOP" | head -1)"
   b="$(sed -n -E "s/^$v=\"\\\$\{$v:-([^\"]*)\}\".*/\1/p" "$INST" | head -1)"
   [ -n "$a" ] && [ "$a" = "$b" ] || { echo "      $v: orch-loop='${a:-?}' install='${b:-?}'"; rc=1; }
