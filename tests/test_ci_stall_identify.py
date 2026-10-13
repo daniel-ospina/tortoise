@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -39,6 +40,7 @@ import tomllib
 from collections import Counter
 from pathlib import Path
 
+import pytest
 import pytest_timeout
 
 from tests._signal_hygiene import harness_alarm_remaining
@@ -368,7 +370,7 @@ def _bound_from_the_sanctioned_sources(pytestconfig) -> float:
     can overwrite: reading it back would make the check self-confirming.
     ``getini`` reflects ``-o`` overrides, so that form is covered too.
     """
-    args = list(pytestconfig.invocation_params.args)
+    args = _sanctioned_cli_args(pytestconfig)
     for i, arg in enumerate(args):
         if arg == "--timeout" and i + 1 < len(args):
             return float(args[i + 1])
@@ -383,6 +385,34 @@ def _bound_from_the_sanctioned_sources(pytestconfig) -> float:
         "PYTEST_TIMEOUT supplies one (#5035)"
     )
     return float(ini)
+
+
+def _sanctioned_cli_args(pytestconfig) -> list[str]:
+    """The argv a user actually passed: ``invocation_params`` plus ``PYTEST_ADDOPTS``.
+
+    ``invocation_params.args`` does NOT carry ``PYTEST_ADDOPTS`` while
+    ``config.getvalue`` does, so scanning it alone made an equivalent invocation
+    (``PYTEST_ADDOPTS='--timeout=7'``) read as a disagreement and false-red
+    (round-2 review, second pass).
+    """
+    extra = os.environ.get("PYTEST_ADDOPTS", "")
+    return list(pytestconfig.invocation_params.args) + shlex.split(extra)
+
+
+def _method_from_the_sanctioned_sources(pytestconfig) -> str:
+    """The method a user asked for: ``--timeout-method`` -> ini -> the default.
+
+    Same reasoning as :func:`_bound_from_the_sanctioned_sources`: a conftest can
+    move ``config.option.timeout_method``, so the guard must not read the value it
+    is checking from the thing being checked.
+    """
+    args = _sanctioned_cli_args(pytestconfig)
+    for i, arg in enumerate(args):
+        if arg == "--timeout-method" and i + 1 < len(args):
+            return args[i + 1]
+        if arg.startswith("--timeout-method="):
+            return arg.split("=", 1)[1]
+    return str(pytestconfig.getini("timeout_method") or "signal")
 
 
 def test_the_resolved_bound_matches_the_sanctioned_sources(pytestconfig):
@@ -419,7 +449,7 @@ def test_the_resolved_bound_matches_the_sanctioned_sources(pytestconfig):
     )
 
 
-def test_the_per_test_timer_is_actually_armed(pytestconfig):
+def test_the_per_test_timer_is_actually_armed(pytestconfig, request):
     """Round-2 review, third door: a SOURCE value is not an ARM.
 
     ``get_env_settings`` proves what pytest-timeout *would* use, not that
@@ -436,34 +466,60 @@ def test_the_per_test_timer_is_actually_armed(pytestconfig):
     without one, with all 15 tests of this file plus
     ``test_timeout_not_disarmable`` passing.
 
-    So this pins the MECHANISM rather than the number: the harness's own
-    ``ITIMER_REAL`` must actually be running while this item runs — the same read
-    the ``harness_sigalrm_integrity`` fixture uses — and the snapshot the runtest
-    protocol consumes must still be ``signal``/no-func_only. It is SKIPPED when
-    the run itself asks for no timer (``--timeout=0``, ``PYTEST_TIMEOUT=0``) or a
-    non-``signal`` method, because an unarmed ITIMER is then the request, not a
-    defect.
+    So this pins the MECHANISM rather than the number: the ITEM's own resolved
+    settings (``_get_item_settings`` — what the runtest protocol will actually arm
+    with, marker priority included) must be a positive bound, the ``signal``
+    method and no ``func_only`` exemption; AND the harness's own ``ITIMER_REAL``
+    must actually be running while this item runs — the same read the
+    ``harness_sigalrm_integrity`` fixture uses. It is SKIPPED when the run itself
+    asks for no timer (``--timeout=0``, ``PYTEST_TIMEOUT=0``) or a non-``signal``
+    method, because an unarmed ITIMER is then the request, not a defect.
+
+    Both halves are needed, and neither is a duplicate of the other:
+
+    * the per-ITEM settings catch a marker that outranks the config. A global
+      ``pytest.mark.timeout(func_only=True)`` added in
+      ``pytest_collection_modifyitems`` overrides ``_env_timeout_func_only`` at
+      arm time, so the protocol-level timer that covers fixtures is NEVER armed
+      while ``config._env_timeout_func_only`` still reads ``False`` and the
+      call-phase ITIMER below is armed and positive — every earlier check here
+      stayed green (round-2 review, second pass). The same marker silently makes
+      ``harness_sigalrm_integrity`` inert during setup, re-opening #7655.
+    * the ITIMER read catches a short-circuited firstresult
+      ``pytest_timeout_set_timer`` (the previous pass's door), which leaves the
+      resolved settings untouched.
+
+    The skip is on an EXACT ``0`` (and on an explicitly requested non-``signal``
+    method), not on ``<= 0``: a negative or unset bound is a defect, not an
+    opt-out, and ``os.environ['PYTEST_TIMEOUT'] = '-1'`` set from a conftest used
+    to satisfy a ``<= 0`` skip while arming nothing at all.
 
     Mutations that make this RED (verified): append a
     ``pytest_timeout_set_timer`` implementation returning ``True``, or a
-    ``pytest_collection_modifyitems`` adding ``pytest.mark.timeout(0)``, to
-    ``tests/conftest.py``.
+    ``pytest_collection_modifyitems`` adding ``pytest.mark.timeout(0)`` or
+    ``pytest.mark.timeout(func_only=True)``, to ``tests/conftest.py``.
     """
     expected = _bound_from_the_sanctioned_sources(pytestconfig)
-    settings = pytest_timeout.get_env_settings(pytestconfig)
-    if expected <= 0 or settings.method != "signal":
+    method = _method_from_the_sanctioned_sources(pytestconfig)
+    if expected == 0 or method != "signal" or pytestconfig.getini("timeout_func_only"):
         pytest.skip(
-            f"this run asks for no signal timer (bound={expected}, "
-            f"method={settings.method!r}): an unarmed ITIMER_REAL is the request"
+            f"this run asks for no signal timer (bound={expected}, method={method!r}, "
+            f"func_only={pytestconfig.getini('timeout_func_only')!r}): an unarmed "
+            "ITIMER_REAL is the request, not a defect"
         )
-    snapshot_method = getattr(pytestconfig, "_env_timeout_method", settings.method)
-    snapshot_func_only = getattr(pytestconfig, "_env_timeout_func_only", False)
-    assert snapshot_method == "signal" and snapshot_func_only is False, (
-        f"the runtest protocol will actually use method={snapshot_method!r}, "
-        f"func_only={snapshot_func_only!r} although the sanctioned sources say "
-        "`signal` with no func_only exemption: an in-process hook changed the "
-        "value that arms the item (`thread` starves on a GIL-holding stall — "
-        "#7649; func_only leaves fixtures unbounded)"
+    item_settings = pytest_timeout._get_item_settings(request.node)
+    assert item_settings.timeout is not None and float(item_settings.timeout) == expected, (
+        f"the per-item bound for this test is {item_settings.timeout!r}, but the "
+        f"sanctioned sources give {expected!r}: a MARKER (or an in-process hook) "
+        "overrode it, so an item in this checkout can run unbounded — the "
+        "incident's shape (#5035, 43h48m)"
+    )
+    assert item_settings.method == "signal" and item_settings.func_only is False, (
+        f"the per-item settings are method={item_settings.method!r}, "
+        f"func_only={item_settings.func_only!r} although the sanctioned sources say "
+        "`signal` with no func_only exemption: `thread` starves on a GIL-holding "
+        "stall (#7649), and func_only leaves SETUP/TEARDOWN unbounded while this "
+        "check's ITIMER read (call phase) stays green"
     )
     remaining = harness_alarm_remaining()
     assert remaining > 0, (
