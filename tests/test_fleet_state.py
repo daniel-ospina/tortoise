@@ -1269,6 +1269,105 @@ def test_github_provenance_tolerates_a_pre_provenance_cache() -> None:
         "measured": False, "error": "x"}
 
 
+# ---------------------------------------------------------------------------
+# the LANE ROSTER's provenance — a FAILED registry read is not an empty fleet
+# ---------------------------------------------------------------------------
+
+def test_load_registry_reports_an_unreadable_file_instead_of_an_empty_roster(tmp_path) -> None:
+    """The regression: `load_registry` swallowed the OSError into `[]`, so an
+    unreadable registry enumerated ZERO lanes and every consumer answered "no free
+    lane" / "no lane holds it" from a read that never happened."""
+    rows = fs.load_registry(tmp_path / "missing-dir" / "lane-registry.tsv")
+    assert list(rows) == []
+    assert rows.measured is False
+    assert rows.error, "a failed read must NAME its cause"
+    assert "lane-registry.tsv" in rows.error
+
+
+def test_load_registry_is_measured_for_a_readable_but_empty_registry(tmp_path) -> None:
+    """Control: an EMPTY registry is an ANSWER. Only a FAILED read is unmeasured —
+    over-refusing here would wedge the fleet on a legitimately empty file."""
+    p = tmp_path / "lane-registry.tsv"
+    p.write_text("# lane-registry.tsv — label<TAB>workspace-uuid\n\n")
+    rows = fs.load_registry(p)
+    assert list(rows) == []
+    assert rows.measured is True
+    assert rows.error == ""
+
+
+def test_load_registry_reads_real_rows(tmp_path) -> None:
+    p = tmp_path / "lane-registry.tsv"
+    p.write_text("# comment\nA\tWS-A\tlabel-a\nB\tWS-B\n")
+    rows = fs.load_registry(p)
+    assert list(rows) == [("A", "WS-A", "label-a"), ("B", "WS-B", "")]
+    assert rows.measured is True
+
+
+def test_registry_provenance_tolerates_a_pre_provenance_cache() -> None:
+    """Same tolerant reading as `github_provenance`: only an EXPLICIT failure makes
+    a reader refuse, so a legacy cache cannot wedge the fleet."""
+    assert fs.registry_provenance({}) == {"measured": True, "error": ""}
+    assert fs.registry_provenance({"reconciliation": {}}) == {"measured": True, "error": ""}
+    assert fs.registry_provenance(
+        {"reconciliation": {"registry_measured": False, "registry_error": "denied"}}
+    ) == {"measured": False, "error": "denied"}
+
+
+def test_build_state_records_the_registry_provenance(monkeypatch) -> None:
+    measured_now = _fleet_build(monkeypatch, registry=[], live={}, measured=True)
+    assert measured_now["reconciliation"]["registry_measured"] is True
+    assert measured_now["summary"]["registry_measured"] is True
+
+    _fleet_build(monkeypatch, registry=[], live={}, measured=True)  # re-arm the other sources
+    monkeypatch.setattr(
+        fs, "load_registry",
+        lambda: fs.RegistryRows(measured=False, error="PermissionError: denied"),
+    )
+    unread = fs.build_state(repo="o/r", repo_root="/tmp", orch_ws="", sample_s=0.0,
+                            do_pane=False)
+    assert unread["reconciliation"]["registry_measured"] is False
+    assert unread["reconciliation"]["registry_error"] == "PermissionError: denied"
+    assert fs.registry_provenance(unread) == {"measured": False, "error": "PermissionError: denied"}
+
+
+def _unread_registry_state(**extra):
+    """The board READ, the ROSTER not: a state whose `github_measured` is True and
+    whose `registry_measured` is False."""
+    st = _unread_state(**extra)
+    st["reconciliation"] = {
+        "workspaces_measured": True, "github_measured": True, "github_error": "",
+        "registry_measured": False,
+        "registry_error": "FileNotFoundError: lane-registry.tsv could not be read",
+    }
+    return st
+
+
+def test_free_refuses_when_the_registry_is_unreadable(monkeypatch, capsys) -> None:
+    """`free` is an INVITATION TO DISPATCH. An unreadable roster enumerates zero
+    lanes, so answering would report a fully-busy fleet from a read that failed."""
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: _unread_registry_state())
+    assert fs.cmd_free(argparse.Namespace(json=False)) == 2
+    cap = capsys.readouterr()
+    assert "UNREADABLE" in cap.err and "lane-registry" in cap.err
+    assert "no genuinely free lane" not in cap.out, "an empty roster is not an answer"
+
+
+def test_build_refuses_to_cache_a_state_with_an_unreadable_registry(tmp_path, monkeypatch,
+                                                                   capsys) -> None:
+    """A cached zero-lane state would be served as a FRESH fleet for the whole TTL."""
+    fake = _unread_registry_state(
+        generated_at=_stamp(0), lanes=[], terminal=[], orphans=[], violations=[],
+        conflict_claimants={}, summary={},
+    )
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: fake)
+    out = tmp_path / "fleet-state.json"
+    rc = fs.cmd_build(argparse.Namespace(out=str(out), state=str(out), json=False))
+    assert rc == 2, "an unread roster must not be reported as a successful build"
+    assert not out.exists(), "a failed read must never be written as fact"
+    err = capsys.readouterr().err
+    assert "NOT CACHED" in err and "lane registry" in err
+
+
 def test_cmd_build_refuses_to_cache_an_unread_board(tmp_path, monkeypatch, capsys) -> None:
     """#7957 H5: a failed read is never CACHED. Writing it would replace the last good
     state with an empty fleet and free every lane into capacity on the next read."""
