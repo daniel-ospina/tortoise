@@ -379,6 +379,93 @@ def test_the_mcp_lane_is_armed(tmp_path, monkeypatch):
         mcp_auth._current_org_id.reset(toks[0])
 
 
+# ── the §17.1 gate must not SILENTLY break the onboarding writers (P0) ────
+
+def test_onboarding_writes_are_not_refused_on_a_journal_backed_lane(
+        sdk_with_journal, monkeypatch):
+    """P0 regression: the raw-query gate silently killed the hosted
+    onboarding writers, so this pins that they still write.
+
+    `hosted_api._org_proj(org_id)` returns a JOURNAL-BACKED projection on the
+    hosted lane (`fly.toml` sets `TORTOISE_EVENT_LOG_BASE_DIR=/data/events`),
+    and every onboarding writer reached the graph through
+    `onboarding.state._run`, which tried the PUBLIC `FalkorProjection.query`
+    lane FIRST. Once the gate was armed that lane refused every `MERGE`/`SET`/
+    `REMOVE` with `DirectCacheWriteRefused`, and the callers are FAIL-OPEN
+    (`hosted_api._maybe_apply_completion` -> `except Exception: return False`,
+    `mcp_server._maybe_onboarding_auto_complete` -> `return`,
+    `supabase_control` logs "self-heals on first write" where the self-heal IS
+    the refused write), so orgs silently never reached `complete`, the fork
+    write and the completion gate stopped, and no counter fired.
+
+    The writers now take the SAME raw-handle lane the SDK's own live writes
+    use (`proj.g.query`), which #7951 records as the still-open residual. The
+    OTHER guards on that path are unchanged: the handle's #3595 operator and
+    #7174 numeric-domain refusals and its L2 bulk-wipe check all still run.
+
+    RED before the fix: the first `write_completed_step` raises
+    `DirectCacheWriteRefused`. MUTATION: revert `onboarding.state._run` to
+    `graph.query(...)` and this fails again.
+    """
+    from tortoise import hosted_api
+    from tortoise.onboarding import seed as _seed
+    from tortoise.onboarding import state as _os
+
+    monkeypatch.setattr(hosted_api, "_make_sdk",
+                        lambda **_kw: sdk_with_journal)
+    proj = hosted_api._org_proj("org7951")
+    assert proj._journal_backed is True, (
+        "the fixture did not arm §17.1 — the gate is inert and this pin would "
+        "be vacuous"
+    )
+
+    # The write set the hosted lane actually issues (state.py writers), in
+    # the order the endpoints issue them.
+    _os.ensure_onboarding_state_node(proj, "org7951")
+    _os.write_fork(proj, "org7951", _os.FORK_SELF)
+    _os.write_completed_step(proj, "org7951", "team-named")
+    _os.write_member_progress(proj, "org7951", "user-1", ["team-named"])
+    _os.write_status(proj, "org7951", _os.STATUS_COMPLETE)
+
+    assert _count(proj, "OnboardingState", "org_id", "org7951") == 1
+    node = _os.read_onboarding_node(proj, "org7951")
+    assert node is not None and node["status"] == _os.STATUS_COMPLETE
+    assert "team-named" in _os.completed_steps(proj, "org7951")
+    # The seed module's duck-typed primitive takes the same raw-handle lane.
+    assert _seed.find_subject_by_name(proj, "nobody-seeded-yet") is None
+
+
+def test_the_selfhost_onboarding_lane_writes_on_a_journal_backed_proj(
+        sdk_with_journal):
+    """The selfhost-HTTP lane is ARMED by this PR (`mcp_auth._get_org_sdk`
+    now binds the journal), so its one owned write point must keep working.
+
+    `selfhost.ensure_selfhost_onboarding(sdk)` reaches
+    `state.ensure_onboarding_state_node` on the same journal-backed
+    projection, from `ensure_selfhost_onboarding_once` — best-effort and
+    never-raise, so a refusal here is exactly as silent as the hosted one.
+
+    RED before the fix: the create-on-write MERGE raises
+    `DirectCacheWriteRefused`.
+    """
+    from tortoise.onboarding import selfhost
+    from tortoise.onboarding import state as _os
+
+    sdk = sdk_with_journal
+    proj = sdk._get_proj()
+    assert proj._journal_backed is True
+
+    selfhost.ensure_selfhost_onboarding(sdk)
+
+    org_id = selfhost.selfhost_org_id()
+    node = _os.read_onboarding_node(proj, org_id)
+    assert node is not None, (
+        "the selfhost onboarding node was not written — its one owned write "
+        "point was refused (the P0)"
+    )
+    assert node.get("fork") == _os.FORK_SELF
+
+
 # ── §17.1's ordering, seen from S9 (the engine stopped) ───────────────────
 
 def test_a_live_write_whose_fold_fails_is_already_in_the_journal(
