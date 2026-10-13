@@ -4899,7 +4899,7 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         capture_consent_enabled,
         record_capture_declined,
     )
-    from tortoise.capture_spool import flush_spool, read_spool_meta
+    from tortoise.capture_spool import _terminal_marker, flush_spool, read_spool_meta
     if not capture_consent_enabled():
         # Durable + one-time: a stale copied hook discards this stderr
         # (`2>/dev/null`), so the same notice is also written to
@@ -4938,8 +4938,8 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         if meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key"):
             print(f"Session {session_id} already filed — nothing to capture.")
             return 0
-        if meta.get("terminal_failure"):
-            tf = meta.get("terminal_failure") or {}
+        tf = _terminal_marker(meta)
+        if tf is not None:
             print(f"capture refused permanently (kept, not retried): session "
                   f"{session_id} — {tf.get('detail') or tf.get('reason') or ''}",
                   file=_sys.stderr)
@@ -4958,8 +4958,8 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         # capture is KEPT on disk but will NOT be retried, so the transient
         # "will retry" wording below would be a lie to the operator.
         _terminal_now = read_spool_meta(root, session_id) or {}
-        if _terminal_now.get("terminal_failure"):
-            tf = _terminal_now["terminal_failure"] or {}
+        tf = _terminal_marker(_terminal_now)
+        if tf is not None:
             print(f"capture refused permanently (kept, not retried): session "
                   f"{session_id} — {tf.get('detail') or tf.get('reason') or ''}",
                   file=_sys.stderr)
@@ -6622,6 +6622,7 @@ def _cmd_sessions_import(args) -> int:
                 RETRY_MAX_SECONDS,
                 Snapshot,
                 _backoff_ms,
+                _terminal_marker,
                 capture_key,
                 classify_failure,
                 read_spool_meta,
@@ -6668,7 +6669,7 @@ def _cmd_sessions_import(args) -> int:
             meta = read_spool_meta(root, session_id) or {}
             already_filed = bool(meta.get("filed_key")) and \
                 meta.get("filed_key") == capture_key(session_id, spool_turns)
-            if meta.get("terminal_failure"):
+            if _terminal_marker(meta) is not None:
                 # #7708: a previous permanent refusal is terminal and the entry
                 # is KEPT but never retried, so telling the operator to run a
                 # drain (the else-branch below) would send them in a circle.

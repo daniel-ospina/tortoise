@@ -556,6 +556,36 @@ def _entry_bytes(root: Path, session_id: str) -> int:
     return total
 
 
+def _orphan_paths(root: Path) -> list[Path]:
+    """Quarantined turn logs in the entries dir, OLDEST first.
+
+    ``_quarantine_log`` moves a corrupt-meta entry's transcript aside as
+    ``<key>.turns.jsonl.orphan[N]``. Nothing else reads that name, so without
+    this accounting the bytes are invisible to ``_entry_bytes`` and to the meta
+    scan: the spool could grow past ``max_total_bytes`` without bound the moment
+    a meta was quarantined (#8531 review). A rename preserves mtime, so an
+    orphan carries the age of the transcript it holds and oldest-first eviction
+    is deterministic.
+    """
+    d = _entries_dir(root)
+    try:
+        with os.scandir(d) as entries:
+            names = sorted(e.name for e in entries
+                           if ".turns.jsonl.orphan" in e.name)
+    except OSError:
+        return []
+    found: list[tuple[float, str, Path]] = []
+    for name in names:
+        path = d / name
+        if not path.is_file():
+            continue
+        try:
+            found.append((path.stat().st_mtime, name, path))
+        except OSError:
+            continue
+    return [path for _mtime, _name, path in sorted(found)]
+
+
 def _file_size(path: Path) -> int:
     try:
         return path.stat().st_size
@@ -762,6 +792,24 @@ def _quarantine_entry(root: Path, meta: dict, reason: str, detail: str,
     return record
 
 
+def _terminal_marker(meta: dict) -> dict | None:
+    """The entry's ``terminal_failure`` marker, or ``None`` — the ONE total read.
+
+    A truthy NON-dict value (a hand-edited / foreign / corrupt ``meta.json``:
+    ``1``, ``true``, ``"yes"``, ``[]``) is NOT a marker. Reading the field by
+    TRUTHINESS alone made such an entry append to ``summary.terminal`` on EVERY
+    drain — never retried, silent on every surface — while ``session capture``
+    raised ``AttributeError`` on ``marker.get(...)``; it was the one read field
+    in this module not made total (#8531 review). The safe reading of an
+    unusable marker is "not terminal, retry" (the ``_backoff_ms`` reading): the
+    entry stays filable, and a genuine refusal re-marks it with a real dict on
+    the next attempt. ``clear_terminal_failure`` clears any present value, so
+    ``--retry-terminal`` is still the supported exit for a junk marker.
+    """
+    marker = meta.get("terminal_failure")
+    return marker if isinstance(marker, dict) else None
+
+
 def clear_terminal_failure(root: Path, session_id: str) -> bool:
     """Clear ONE entry's ``terminal_failure`` marker so a drain retries it.
 
@@ -774,9 +822,13 @@ def clear_terminal_failure(root: Path, session_id: str) -> bool:
     marker is only meaningful together with "do not retry", and leaving the
     window in place would defer the very retry this exists to enable. Best-effort
     against a concurrent prune: returns False when there is no terminal entry.
+
+    Any PRESENT value is cleared — including a junk non-dict one, which
+    ``_terminal_marker`` reads as "not terminal" but which must not survive as a
+    confusing wart in the meta.
     """
     meta = read_spool_meta(root, session_id)
-    if meta is None or not meta.get("terminal_failure"):
+    if meta is None or "terminal_failure" not in meta:
         return False
     meta.pop("terminal_failure", None)
     meta["attempts"] = 0
@@ -1329,15 +1381,39 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
 
     Never evicts ``keep_session_id`` (the entry just written). One discard
     record per eviction, naming the ceiling.
+
+    A quarantined turn log (``_quarantine_log``) has no meta, so it is absent
+    from the meta scan and from ``_entry_bytes``: its bytes are counted HERE and
+    it is evicted (oldest first, by mtime) before any live entry. Without this,
+    the byte ceiling stopped applying the moment a meta was quarantined and the
+    spool could grow past it without bound — one full transcript per corrupt
+    meta, each up to ``max_entry_bytes`` (#8531 review). The eviction is a real
+    loss and is recorded like any other bound eviction.
     """
     discards: list[dict] = []
     metas, _ = list_spool_metas(root)
+    orphans = _orphan_paths(root)
     ranked = sorted(
         (m for m in metas if m.get("session_id") != keep_session_id),
         key=_age_key,
     )
     count = len(metas)
     total = sum(_entry_bytes(root, m["session_id"]) for m in metas)
+    total += sum(_file_size(path) for path in orphans)
+    # Quarantined logs go FIRST: they are already unreachable to every surface,
+    # while an entry can still be filed by the next drain.
+    for orphan in orphans:
+        if total <= bounds.max_total_bytes:
+            break
+        size = _file_size(orphan)
+        discards.append(record_discard(root, {
+            "session_id": f"orphan:{orphan.name}",
+            "reason": DISCARD_BYTES_EXCEEDED,
+            "detail": f"spool is {total} bytes > max_total_bytes={bounds.max_total_bytes}",
+        }))
+        with contextlib.suppress(OSError):
+            orphan.unlink()
+        total -= size
     for meta in ranked:
         if count <= bounds.max_entries and total <= bounds.max_total_bytes:
             break
@@ -1507,12 +1583,13 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
                       "by a drain",
         })
         return
-    if meta.get("terminal_failure"):
+    if _terminal_marker(meta) is not None:
         # A previous PERMANENT refusal (#7708). The entry is KEPT — terminal,
         # never destructive — and never retried. Counted separately so a spool
         # whose entries are all terminal still reports on every drain, rather
         # than reaching the silent steady state `held_by_backoff` was added to
-        # close (#4714).
+        # close (#4714). The read is TOTAL: a junk non-dict marker is read as
+        # "not terminal" so a corrupt value can never strand the entry (#8531).
         summary.terminal += 1
         return
     if (meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key")

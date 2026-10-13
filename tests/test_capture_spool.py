@@ -1025,9 +1025,16 @@ def test_a_filesystem_write_failure_is_discarded_with_a_reason(tmp_path, monkeyp
     assert read_discards(tmp_path)[-1]["reason"] == "spool_write_failed"
 
 
-def test_a_corrupt_meta_takes_its_orphaned_turn_log_with_it(tmp_path):
-    """MUTATION THAT REDS THIS: unlink only the meta → the orphaned turns.jsonl
-    stays on disk, invisible to the meta scan and never counted or pruned."""
+def test_a_corrupt_meta_quarantines_its_intact_turn_log(tmp_path):
+    """MUTATION THAT REDS THIS: restore the
+    `for orphan in (path, log): orphan.unlink()` loop → the intact transcript is
+    deleted with the corrupt meta, irrecoverably.
+
+    (`test_a_corrupt_meta_quarantines_an_intact_turn_log` pins the same keep
+    through `flush_spool`; this pins `list_spool_metas` directly. The `.orphan`
+    BYTE accounting is pinned by
+    `test_a_quarantined_orphan_is_counted_and_reaped_under_the_byte_ceiling`.)
+    """
     entries = tmp_path / "entries"
     entries.mkdir(parents=True)
     (entries / "dead.meta.json").write_text("{not json", encoding="utf-8")
@@ -1038,7 +1045,11 @@ def test_a_corrupt_meta_takes_its_orphaned_turn_log_with_it(tmp_path):
     assert metas == []
     assert len(discards) == 1
     assert discards[0]["reason"] == "corrupt_entry"
-    assert not (entries / "dead.turns.jsonl").exists(), "the orphan log is removed with its meta"
+    assert not (entries / "dead.turns.jsonl").exists(), \
+        "the live log path must be vacated"
+    assert (entries / "dead.turns.jsonl.orphan").read_text(encoding="utf-8") == "{}\n", \
+        "the intact transcript is QUARANTINED, not deleted"
+    assert not (entries / "dead.meta.json").exists(), "the corrupt meta is removed"
 
 
 def test_a_meta_without_a_usable_session_id_is_corrupt_not_a_crash(tmp_path):
@@ -2893,3 +2904,141 @@ def test_cli_drain_retry_terminal_is_the_supported_exit(tmp_path, monkeypatch, c
     err = capsys.readouterr().err
     assert "--retry-terminal" in err, (
         f"the remedy must be named in the operator output: {err}")
+
+
+# ── (21) #8531 review — the `.orphan` is inside the ceiling, and a corrupt
+#          `terminal_failure` marker never strands an entry ────────────────
+
+
+def test_a_quarantined_orphan_is_counted_and_reaped_under_the_byte_ceiling(tmp_path):
+    """A `.orphan` turn log has no meta, so it is invisible to the meta scan AND
+    to `_entry_bytes`: without explicit accounting it is never counted and never
+    pruned, and the spool grows past `max_total_bytes` without bound — one full
+    transcript per corrupt meta, each up to `max_entry_bytes` (#8531 review).
+
+    MUTATION THAT REDS THIS: drop the orphan branch from `prune_spool` → the
+    orphan survives every byte ceiling and no `spool_total_bytes_exceeded` line
+    names it.
+    """
+    from tortoise.capture_spool import (
+        _entry_bytes,
+        _log_path,
+        _meta_path,
+        list_spool_metas,
+        prune_spool,
+    )
+
+    sid = "8531-orphan-bounded"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    log = _log_path(tmp_path, sid)
+    log.write_bytes(b"z" * 4096)
+    _meta_path(tmp_path, sid).write_text("{not json", encoding="utf-8")
+
+    # The quarantine happens on the meta scan (both prune and drain run it).
+    metas, discards = list_spool_metas(tmp_path)
+    assert metas == [] and discards[0]["reason"] == "corrupt_entry"
+    orphan = log.with_name(log.name + ".orphan")
+    assert orphan.read_bytes() == b"z" * 4096, "the transcript is quarantined"
+
+    keep = "8531-orphan-keep"
+    write_spool_entry(tmp_path, _snapshot(keep))
+
+    # Under a generous ceiling the orphan is untouched (no over-eager delete)…
+    generous = Bounds(max_entries=1000, max_total_bytes=1 << 30, max_entry_bytes=1 << 20)
+    assert prune_spool(tmp_path, keep, generous) == []
+    assert orphan.exists(), "an orphan under the ceiling must survive"
+
+    # …but, with the orphan COUNTED in the total, a ceiling just over the live
+    # entry's own size must reap it and RECORD the loss (never a silent drop).
+    ceiling = _entry_bytes(tmp_path, keep) + 1024  # far below the 4096-byte orphan
+    out = prune_spool(tmp_path, keep, Bounds(
+        max_entries=1000, max_total_bytes=ceiling, max_entry_bytes=1 << 20))
+    assert not orphan.exists(), "the orphan must be reaped under the byte ceiling"
+    assert any(d["reason"] == "spool_total_bytes_exceeded"
+               and d["session_id"].startswith("orphan:") for d in out), out
+
+
+def test_a_non_dict_terminal_marker_does_not_strand_the_entry(tmp_path):
+    """The marker is read by SHAPE, not truthiness. A hand-edited / foreign /
+    corrupt `meta.json` can carry a truthy non-dict (`1`, `true`, `"yes"`,
+    `[]`) there; read by truthiness alone it made the entry terminal on EVERY
+    drain — never retried, silent except in `summary.terminal` (#8531 review).
+
+    MUTATION THAT REDS THIS: gate the terminal skip on `meta.get(...)`
+    truthiness → `summary.terminal == 1`, the POST is never attempted, and the
+    capture is stranded until its content changes.
+    """
+    from tortoise.capture_spool import _write_meta
+
+    sid = "8531-junk-marker"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    meta = read_spool_meta(tmp_path, sid)
+    meta["terminal_failure"] = 1
+    _write_meta(tmp_path, meta)
+
+    server = _Server()
+    summary = flush_spool(tmp_path, server.post, now=1000.0)
+    assert summary.terminal == 0, "a junk marker must not read as terminal"
+    assert summary.attempted == 1
+    assert sid in server.sessions, "a corrupt marker stranded the capture"
+    assert read_spool_turns(tmp_path, sid) == TURNS, "the turns survive verbatim"
+
+
+def test_retry_terminal_clears_a_junk_marker_too(tmp_path):
+    """`--retry-terminal` is the supported exit from a terminal entry; it must
+    leave no junk marker behind (a falsy non-dict is read as "not terminal",
+    but its `clear_terminal_failure` gate must not be the same truthiness read
+    that would answer False and keep it on disk forever).
+
+    MUTATION THAT REDS THIS: gate the clear on `not meta.get(...)` → a
+    `terminal_failure: 0` answers False and stays.
+    """
+    from tortoise.capture_spool import _write_meta, clear_terminal_failure
+
+    sid = "8531-junk-clear"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    meta = read_spool_meta(tmp_path, sid)
+    meta["terminal_failure"] = 0
+    _write_meta(tmp_path, meta)
+
+    assert clear_terminal_failure(tmp_path, sid) is True
+    assert "terminal_failure" not in read_spool_meta(tmp_path, sid)
+
+
+def test_cli_capture_does_not_raise_on_a_corrupt_terminal_marker(
+        tmp_path, monkeypatch, capsys):
+    """`session capture` must return an exit code, never a traceback, when the
+    entry's `terminal_failure` is a truthy non-dict: pre-fix the branch derived
+    `tf = meta.get(...) or {}` and `tf.get("detail")` raised `AttributeError`
+    out of `main()`, which has no blanket catch (#8531 review).
+
+    MUTATION THAT REDS THIS: restore the truthiness gate plus `or {}` → the
+    second call raises instead of returning.
+    """
+    import tortoise.__main__ as cli
+    from tortoise.capture_spool import _write_meta
+
+    _isolate(monkeypatch, tmp_path)
+    transcript = tmp_path / "t.claude.jsonl"
+    transcript.write_text("User: the only copy\nAssistant: yes\n", encoding="utf-8")
+    sid = "8531-cli-junk"
+    monkeypatch.setattr(
+        cli, "_session_post",
+        lambda k, u: (lambda payload: PostOutcome(
+            ok=False, status=422, detail="bad lane")))
+
+    assert cli.main(["session", "capture", "--file", str(transcript),
+                     "--session-id", sid, "--harness", "claude"]) == 0
+    root = tmp_path / "spool"
+    assert read_spool_meta(root, sid).get("terminal_failure")
+
+    # A hand-edit / foreign writer corrupts the marker, then the SAME bytes are
+    # captured again: the dedup early-return keeps the corrupt marker on the
+    # entry, so the `outcome is None` branch reads it.
+    meta = read_spool_meta(root, sid)
+    meta["terminal_failure"] = 1
+    _write_meta(root, meta)
+
+    assert cli.main(["session", "capture", "--file", str(transcript),
+                     "--session-id", sid, "--harness", "claude"]) == 0
+    assert "Traceback" not in capsys.readouterr().err

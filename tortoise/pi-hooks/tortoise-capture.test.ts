@@ -54,12 +54,14 @@ import {
   modelLabel,
   normaliseLane,
   postInstallProbe,
+  pruneSpool,
   quarantineEntry,
   readDiscards,
   readSpoolEntry,
   readSpoolTurns,
   resolveConfig,
   sourceName,
+  spoolEntryBytes,
   truncationMarker,
   writeSpoolEntry,
 } from "./tortoise-capture.ts";
@@ -1248,6 +1250,52 @@ test("the spool byte bound evicts with its own recorded reason", () => {
   assert.ok(readDiscards(spool).some((d) => d.reason === "spool_total_bytes_exceeded"));
 });
 
+test("#8531: a quarantined orphan is COUNTED under the byte ceiling, not invisible to it", () => {
+  // The `.orphan` turn log has no meta, so it is absent from the meta scan AND
+  // from `spoolEntryBytes`: without explicit accounting it is never counted and
+  // never pruned, and the spool grows past `maxTotalBytes` without bound — one
+  // full transcript per corrupt meta (#8531 review).
+  //
+  // MUTATION THAT REDS THIS: drop the orphan branch from `pruneSpool` → the
+  // orphan survives every byte ceiling and no `spool_total_bytes_exceeded` line
+  // names it.
+  const spool = tmpSpool();
+  const dir = join(spool, "entries");
+  const sid = "orphan-bounded";
+  writeSpoolEntry(spool, snapshot(sid));
+  const log = join(dir, `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(log, "z".repeat(4096));
+  writeFileSync(join(dir, `${entryKey(sid)}.meta.json`), "{not json");
+
+  const { metas } = listSpoolEntries(spool);
+  assert.equal(metas.length, 0, "the corrupt meta is quarantined, not listed");
+  const orphan = `${log}.orphan`;
+  assert.equal(readFileSync(orphan, "utf8").length, 4096, "the transcript is quarantined");
+
+  const keep = "orphan-keep";
+  writeSpoolEntry(spool, snapshot(keep));
+
+  // Generous ceiling: the orphan survives (no over-eager delete)…
+  assert.equal(
+    pruneSpool(spool, keep, { maxEntries: 1000, maxTotalBytes: 1 << 30, maxEntryBytes: 1 << 20 })
+      .length,
+    0,
+  );
+  assert.ok(existsSync(orphan), "an orphan under the ceiling must survive");
+
+  // …but, with the orphan COUNTED in the total, a ceiling just over the live
+  // entry's own size must reap it and RECORD the loss (never a silent drop).
+  const ceiling = spoolEntryBytes(spool, keep) + 1024;
+  pruneSpool(spool, keep, { maxEntries: 1000, maxTotalBytes: ceiling, maxEntryBytes: 1 << 20 });
+  assert.equal(existsSync(orphan), false, "the orphan must be reaped under the byte ceiling");
+  assert.ok(
+    readDiscards(spool).some(
+      (d) => d.reason === "spool_total_bytes_exceeded" && d.session_id.startsWith("orphan:"),
+    ),
+    "the eviction must be recorded",
+  );
+});
+
 // ── (4) Endpoint unreachable → retry with backoff, never a loss ────────────
 
 test("a network failure defers the entry (retry with backoff), it is never lost", async () => {
@@ -1347,6 +1395,29 @@ test("#7708: a 422 does not unlink the only copy of the transcript", async () =>
   const second = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 10 ** 12 });
   assert.equal(second.terminal, 1);
   assert.equal(calls.length, 1, "a terminal entry was re-POSTed");
+});
+
+test("#8531: a non-object terminal_failure marker does not strand the entry", async () => {
+  // The marker is read by SHAPE, not truthiness: a hand-edited / foreign /
+  // corrupt meta can carry `1`, `true`, `"yes"` or `[]`. Read by truthiness
+  // alone such an entry is counted terminal on EVERY flush — never retried,
+  // silent except in `summary.terminal` (#8531 review).
+  //
+  // MUTATION THAT REDS THIS: restore `if (meta.terminal_failure)` → terminal=1,
+  // zero calls, the capture stranded.
+  const spool = tmpSpool();
+  const sid = "junk-marker";
+  writeSpoolEntry(spool, snapshot(sid));
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
+  meta.terminal_failure = 1;
+  writeFileSync(metaPath, JSON.stringify(meta));
+
+  const { fetchImpl, calls } = statusFetch(200);
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1_000 });
+  assert.equal(summary.terminal, 0, "a junk marker must not read as terminal");
+  assert.equal(summary.attempted, 1);
+  assert.equal(calls.length, 1, "the entry must be retried, not stranded");
 });
 
 test("a quota-refused 402 defers the capture instead of destroying it (#4714)", async () => {
@@ -1869,6 +1940,45 @@ test("session_start never files the LIVE session (a /reload must not freeze it)"
   assert.equal(readSpoolEntry(spool, "sess-live")?.filed_key, undefined,
     "the live session must stay unfiled so a later opportunity can file it whole");
   assert.ok(readSpoolEntry(spool, "sess-live"), "its turns stay durable in the spool");
+});
+
+test("#8531: the terminal operator message names the supported retry verb", async () => {
+  // The Pi leg's only operator surface for a terminal entry must name the exit
+  // (`tortoise session drain --retry-terminal`), as the Python drain does —
+  // otherwise the message reports a dead end (#8531 review).
+  //
+  // MUTATION THAT REDS THIS: print `(kept, not retried)` alone → no line names
+  // the verb an operator has to run.
+  const spool = tmpSpool();
+  const sid = "terminal-msg";
+  writeSpoolEntry(spool, snapshot(sid));
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
+  meta.terminal_failure = { reason: "http_rejected", detail: "422", at: "now" };
+  writeFileSync(metaPath, JSON.stringify(meta));
+
+  const { fetchImpl } = statusFetch(200);
+  const pi = mockPi();
+  tortoiseCapture(pi as never, hermeticDeps(fetchImpl, spool));
+
+  const lines: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  };
+  try {
+    await pi.handlers.session_start(
+      undefined,
+      mockCtx({ entries: [], sessionId: "live" }) as never,
+    );
+    await settle();
+  } finally {
+    console.log = original;
+  }
+  assert.ok(
+    lines.some((line) => line.includes("terminal 1") && line.includes("--retry-terminal")),
+    `the terminal line must name the retry verb: ${JSON.stringify(lines)}`,
+  );
 });
 
 test("readSpoolTurns returns every stored role (the store is the record)", () => {

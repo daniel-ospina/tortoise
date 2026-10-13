@@ -973,6 +973,42 @@ function quarantineLog(log: string): void {
   }
 }
 
+/** Quarantined turn logs in the entries dir, OLDEST first (#8531 review).
+ *
+ *  `quarantineLog` moves a corrupt-meta entry's transcript aside as
+ *  `<key>.turns.jsonl.orphan[N]`. Nothing else reads that name, so without this
+ *  accounting the bytes are invisible to `spoolEntryBytes` and to the meta scan:
+ *  the spool could grow past `maxTotalBytes` without bound the moment a meta was
+ *  quarantined — one full transcript per corrupt meta. A rename preserves mtime,
+ *  so an orphan carries the age of the transcript it holds and oldest-first
+ *  eviction is deterministic. */
+function orphanPaths(dir: string): string[] {
+  const root = entriesDir(dir);
+  let names: string[];
+  try {
+    names = readdirSync(root);
+  } catch {
+    return [];
+  }
+  const found: { path: string; mtime: number; name: string }[] = [];
+  for (const name of names) {
+    if (!name.includes(".turns.jsonl.orphan")) continue;
+    const path = join(root, name);
+    try {
+      const st = statSync(path);
+      if (!st.isFile()) continue;
+      found.push({ path, mtime: st.mtimeMs, name });
+    } catch {
+      continue;
+    }
+  }
+  return found
+    .sort((a, b) =>
+      a.mtime !== b.mtime ? a.mtime - b.mtime : a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+    )
+    .map((entry) => entry.path);
+}
+
 /**
  * Record a discard — append to `discarded.jsonl` AND remove the entry files.
  * This is the "never a silent drop" contract: every removed/dropped entry has a
@@ -1330,6 +1366,13 @@ function compareAge(a: SpoolMeta, b: SpoolMeta): number {
  * Enforce the spool's COUNT and BYTE ceilings, evicting the oldest entries.
  * Excludes `keepSessionId` (the entry just written) so a write can never evict
  * itself. Returns one DiscardRecord per eviction, with the ceiling named.
+ *
+ * A quarantined turn log (`quarantineLog`) has no meta, so it is absent from the
+ * meta scan and from `spoolEntryBytes`: its bytes are counted HERE and it is
+ * evicted (oldest first, by mtime) before any live entry. Without this, the byte
+ * ceiling stopped applying the moment a meta was quarantined and the spool could
+ * grow past it without bound (#8531 review). The eviction is a real loss and is
+ * recorded like any other bound eviction.
  */
 export function pruneSpool(
   dir: string,
@@ -1338,13 +1381,35 @@ export function pruneSpool(
 ): DiscardRecord[] {
   const discards: DiscardRecord[] = [];
   const { metas } = listSpoolEntries(dir);
+  const orphans = orphanPaths(dir);
   const ranked = metas
     .filter((m) => m.session_id !== keepSessionId)
     .map((m) => ({ meta: m, bytes: spoolEntryBytes(dir, m.session_id) }))
     .sort((a, b) => compareAge(a.meta, b.meta));
 
   let count = metas.length;
-  let total = metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0);
+  let total =
+    metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) +
+    orphans.reduce((sum, path) => sum + fileSize(path), 0);
+  // Quarantined logs go FIRST: they are already unreachable to every surface,
+  // while an entry can still be filed by the next drain.
+  for (const orphan of orphans) {
+    if (total <= bounds.maxTotalBytes) break;
+    const size = fileSize(orphan);
+    discards.push(
+      recordDiscard(dir, {
+        session_id: `orphan:${basename(orphan)}`,
+        reason: DISCARD_BYTES_EXCEEDED,
+        detail: `spool is ${total} bytes > maxTotalBytes=${bounds.maxTotalBytes}`,
+      }),
+    );
+    try {
+      unlinkSync(orphan);
+    } catch {
+      // already gone
+    }
+    total -= size;
+  }
   for (const { meta, bytes } of ranked) {
     if (count <= bounds.maxEntries && total <= bounds.maxTotalBytes) break;
     const reason =
@@ -1463,6 +1528,22 @@ function writeMeta(dir: string, meta: SpoolMeta): void {
   }
 }
 
+/** The entry's `terminal_failure` marker, or `undefined` — the ONE total read.
+ *
+ *  A truthy NON-object value (a hand-edited / foreign / corrupt `meta.json`:
+ *  `1`, `true`, `"yes"`, `[]`) is NOT a marker. Reading the field by truthiness
+ *  alone made such an entry append to `summary.terminal` on EVERY flush — never
+ *  retried, silent on every surface (#8531 review). The safe reading of an
+ *  unusable marker is "not terminal, retry" (the `clampWindow` reading): the
+ *  entry stays filable, and a genuine refusal re-marks it on the next attempt.
+ *  `[]` is excluded explicitly — `typeof [] === "object"` and an empty array is
+ *  truthy, so a bare object check would still strand it. */
+function terminalMarker(meta: SpoolMeta): { reason?: string; detail?: string } | undefined {
+  const marker: unknown = meta.terminal_failure;
+  if (!marker || typeof marker !== "object" || Array.isArray(marker)) return undefined;
+  return marker as { reason?: string; detail?: string };
+}
+
 /**
  * Replay opportunity. For every spooled session whose content has not been
  * filed, attempt one POST. Transient failures back off; a permanent 4xx is
@@ -1513,11 +1594,13 @@ export async function flushSpool(
       summary.heldBack += 1;
       continue;
     }
-    if (meta.terminal_failure) {
+    if (terminalMarker(meta) !== undefined) {
       // A previous PERMANENT refusal (#7708). The entry is KEPT — terminal,
       // never destructive — and never retried. Counted separately so a spool
       // whose entries are all terminal still reports on every flush instead of
       // reaching the silent steady state `heldByBackoff` was added to close.
+      // The read is TOTAL: a junk non-object marker is read as "not terminal"
+      // so a corrupt value can never strand the entry (#8531 review).
       summary.terminal += 1;
       continue;
     }
@@ -1785,7 +1868,8 @@ function reportFlush(summary: FlushSummary, where: string): void {
       `spool flush (${where}): filed ${summary.filed}, deferred ${summary.deferred}, ` +
         `skipped ${summary.skipped} (${summary.heldByBackoff} waiting on backoff), ` +
         `held back ${summary.heldBack}, ` +
-        `terminal ${summary.terminal} (kept, not retried)`,
+        `terminal ${summary.terminal} (kept, not retried; re-file with ` +
+        `'tortoise session drain --retry-terminal')`,
     );
   }
   for (const d of summary.discarded) {
