@@ -12283,11 +12283,13 @@ class TortoiseSDK:
 
         Returns [{url, sourceKind, points}]. D10 (ONTOLOGY v3.15 §4.4): a
         run-endpoint `doc_<rel>` document is also a `:Source`, but it is NOT a
-        provenance source — it carries `documentKind` and NO `sourceKind`, so
-        including it would (a) add a `sourceKind=None` row to a
-        `sourceKind`-keyed vocabulary and (b) double-count every indexed file
-        (its corpus Source AND its document node). Filtering keeps the
-        pre-D10 observable row set byte-identical (see #5082).
+        provenance source — it carries `documentKind` (and, since #5082,
+        `sourceKind='document'`; the TYPE axis, §4.6), so including it would
+        (a) add a second `document` row to a `sourceKind`-keyed vocabulary and
+        (b) double-count every indexed file (its corpus Source AND its document
+        node). The `documentKind IS NULL` partition — not `sourceKind` — is what
+        separates the two, and #5082 does not remove the need for it; filtering
+        keeps the pre-D10 observable row set byte-identical.
         """
         proj = self._get_proj()
         rows = proj.g.query(

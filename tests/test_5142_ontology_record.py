@@ -17,8 +17,8 @@ marker the writer does not honour.
      for the index-completeness gate.
   3. **The document `:Source` scoping was unrecorded.** §4.6 marked
      `sourceKind`/`contentHash`/`version` REQUIRED ✅, while the document write
-     path supplies a different set — two written (`contentHash`/`version`,
-     PR #5592), one not (`sourceKind`, #5082).
+     path supplied a different set — `contentHash`/`version` (PR #5592) and
+     `sourceKind` (#5082, closed on the CREATE-only write).
 
 This module is the **anti-drift falsifier** for all three. It asserts the doc
 and the code together, so neither half can move alone:
@@ -29,10 +29,12 @@ and the code together, so neither half can move alone:
     record (so a re-attribution has to carry a changelog line);
   * §4.4 carries the deferral statement **and** its `OVERRIDES:` line naming
     the departed default;
-  * §4.6 carries the document-`:Source` scoping note naming `sourceKind` as
-    unwritten (#5082) and `contentHash`/`version` as written (#5422);
-  * `_upsert_document` writes `contentHash` **and** `version`, and writes **no**
-    `sourceKind` — so both halves of that note stay true in both directions.
+  * §4.6 carries the document-`:Source` scoping note recording `sourceKind`
+    as written since #5082 (CREATE-only) and `contentHash`/`version` as
+    written since #5422;
+  * `_upsert_document` writes `contentHash` **and** `version` **and**
+    `sourceKind='document'` (CREATE-only) — so the note stays true in both
+    directions.
 
 Hermetic: a file read plus one import of the handler class. No DB, no network,
 no browser.
@@ -180,20 +182,24 @@ def test_section_4_4_carries_the_overrides_line() -> None:
 
 def test_section_4_6_records_the_document_scoping() -> None:
     section = _section(_doc(), "### §4.6 Source")
-    # `sourceKind` is unwritten on a document :Source — the open work item.
     assert "Document `:Source` scoping" in section, (
-        "§4.6 marks REQUIRED fields that a document `:Source` does not supply; "
+        "§4.6 marks REQUIRED fields a document `:Source` supplies conditionally; "
         "the scoping note must state that at the row a reader trusts, instead of "
         "leaving it to the global 'code may lag' caveat (#5142)"
     )
     assert KIND_ISSUE in section, (
-        f"the scoping note must name the open issue for the missing "
-        f"`sourceKind` ({KIND_ISSUE}) — #5142"
+        f"the scoping note must name the issue that closed the missing "
+        f"`sourceKind` write ({KIND_ISSUE}) — #5142/#5082"
     )
-    assert "not written" in section, (
-        "the scoping note must say which of the three REQUIRED fields the "
-        "document path does NOT write — that is the one that is a work item "
-        "(#5142)"
+    assert "written since #5082" in section, (
+        "the scoping note must now record that `sourceKind` IS written on the "
+        "document path (#5082) — otherwise it overstates a closed gap the way "
+        "the pre-#5142 rows understated a landed one"
+    )
+    assert "CREATE ONLY" in section or "create-only" in section.lower(), (
+        "the note must record the `coalesce` create-only semantics — #398's "
+        "never-overwrite contract is what makes the write safe on a node an "
+        "authoritative writer already stamped (#5082)"
     )
     assert ANCHOR_PR in section or "#5422" in section, (
         f"the scoping note must record that `contentHash`/`version` ARE written "
@@ -202,13 +208,14 @@ def test_section_4_6_records_the_document_scoping() -> None:
     )
 
 
-def test_upsert_document_writes_the_anchor_pair_and_no_source_kind() -> None:
+def test_upsert_document_writes_the_source_kind_and_the_anchor_pair() -> None:
     """Both halves of the §4.6 note, true in both directions.
 
-    `contentHash`/`version` are written (the note's ✅ half); `sourceKind` is
-    not (the note's ❌ half, #5082). A change that adds the `sourceKind` write
-    must update the note and this test together — the note must never be
-    silently right or silently wrong.
+    `sourceKind='document'` IS written on CREATE only (#5082, implementing §4.6's
+    REQUIRED marking and #5013 Q2's *"a source is `sourceKind: document` and
+    carries a genre"*), and so are `contentHash`/`version` (#5422). A change
+    that removes either write must update the note and this test together — the
+    note must never be silently right or silently wrong.
     """
     import inspect
 
@@ -217,9 +224,12 @@ def test_upsert_document_writes_the_anchor_pair_and_no_source_kind() -> None:
     src = inspect.getsource(_EntityHandlers._upsert_document)
     assert "s.contentHash" in src, "the document path must write the version anchor (#5422)"
     assert "s.version" in src, "the anchor pair is never half-written (#5422)"
-    assert "s.sourceKind" not in src and "sourceKind=" not in src, (
-        "`_upsert_document` writes no `sourceKind` (that is the #5082 gap the "
-        "§4.6 scoping note records). If this write is added, #5082 is closed and "
-        "the §4.6 note — plus this test — must be updated in the same change "
-        "(#5142)"
+    assert "s.sourceKind" in src, (
+        "`_upsert_document` must write `sourceKind='document'` — §4.6 marks it "
+        "REQUIRED on every :Source and #5013 Q2 keeps the two axes (#5082)"
+    )
+    assert "coalesce(s.sourceKind, 'document')" in src, (
+        "the `sourceKind` write must be CREATE-ONLY (`coalesce`) — #398's "
+        "never-overwrite contract; a plain SET would clobber an authoritative "
+        "kind on a node the document fold merely MERGEs onto (#5082)"
     )

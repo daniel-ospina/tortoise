@@ -54,16 +54,18 @@ def _sdk(db: str | None = None) -> TortoiseSDK:
 def _required_sweep(g) -> int:
     """§7 harness pin: no ontology-REQUIRED violation on any Source.
 
-    D10 (#5026): a run-endpoint document Source carries ``documentKind`` +
-    ``url`` + ``ingestedAt`` but NO ``sourceKind``/``contentHash`` (its
-    version anchor lives on the corpus Source). The contentHash half is
-    therefore scoped to provenance Sources; ``url`` + ``ingestedAt`` hold for
-    EVERY Source. Whether a document Source should also carry sourceKind is
-    open in #5082 (plan-faithful today).
+    D10 (#5026) + #5082: every Source carries ``url`` + ``ingestedAt`` +
+    ``sourceKind``; a document Source additionally carries ``documentKind``
+    but NOT necessarily ``contentHash`` — the #5422 anchor is written on the
+    path that READS content (the extraction ingest), while the #900 index
+    path and ``--capture-metadata`` deliberately emit no hash. So the
+    ``contentHash`` clause is scoped to provenance Sources (``documentKind``
+    absent); the ``sourceKind`` clause holds for EVERY Source.
     """
     return g.query(
         "MATCH (s:Source) WHERE s.url IS NULL OR s.url='' OR "
-        "s.ingestedAt IS NULL OR (s.sourceKind IS NOT NULL AND "
+        "s.ingestedAt IS NULL OR s.sourceKind IS NULL OR "
+        "(s.documentKind IS NULL AND "
         "(s.contentHash IS NULL OR s.contentHash='')) "
         "RETURN count(s)").result_set[0][0]
 

@@ -3616,6 +3616,11 @@ class _EntityHandlers:
         `objectKind` are RETIRED and are never written (nor re-admissible via
         the open passthrough).
 
+        #5082: ``sourceKind`` is written ``'document'`` on CREATE ONLY
+        (``coalesce``), completing §4.6's REQUIRED field set for this node and
+        agreeing with the sibling ``_mint_source_stub`` default. It is the
+        TYPE axis; ``documentKind`` stays the GENRE axis (§4.4).
+
         #5422: ``contentHash`` is the node's **version anchor** on the
         extraction path (ONTOLOGY §4.6 — the hash identifies a version;
         identity is ``url``). It is written by the fixed clause above, gated
@@ -3692,6 +3697,23 @@ class _EntityHandlers:
             "MERGE (s:Source {url:$id}) " + clear_then_set_prefix("s") +
             "SET s.id=coalesce(s.id, $id), "
             "    s.title=coalesce($title, s.title), "
+            # #5082 (ONTOLOGY §4.6 + #5013 Q2): a document IS a `:Source`, and
+            # §4.6 marks `sourceKind` REQUIRED (✅) on every `:Source` — it is
+            # the TYPE axis, distinct from `documentKind`'s genre axis (§4.4:
+            # "`documentKind` is not `sourceKind` … neither absorbs the
+            # other"). This writer wrote none, so a document node carried
+            # `sourceKind = NULL` — a declared-but-unwritten REQUIRED field —
+            # while the sibling mint path `_mint_source_stub`
+            # (`projection/edges.py`) already defaults any non-`session:` url
+            # to exactly `'document'`: two writers of one node, disagreeing on
+            # a REQUIRED field. `'document'` is the registered §5 vocabulary
+            # term and `SOURCE_KIND_DEFAULTS` registers it NEUTRAL, so no
+            # credibility inheritance moves (#398).
+            # SET-ON-CREATE-ONLY via `coalesce`: #398's never-overwrite
+            # contract — a node that already carries an authoritative
+            # `sourceKind` (a stub, a connector Source, a session Source)
+            # keeps it, and a partial re-write cannot change it.
+            "    s.sourceKind=coalesce(s.sourceKind, 'document'), "
             # #5422: the document :Source's version anchor (ONTOLOGY §4.6 —
             # the hash names a version, identity is `url`). Gated so a write
             # that CARRIES no hash ($ch IS NULL) or an EMPTY one ($ch = '' —

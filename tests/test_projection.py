@@ -2049,6 +2049,57 @@ def test_minted_source_stub_does_not_clobber_the_document_anchor(live_proj):
     assert int(edge[0][0]) == 1, "extractedFrom edge not wired to the document Source"
 
 
+# ── #5082: the document :Source's TYPE axis (sourceKind) ───────────────────
+# §4.6 marks `sourceKind` REQUIRED on every `:Source`, and #5013 Q2 rules
+# that a document is `sourceKind: document` **and** carries a `documentKind`
+# genre (the two axes are different questions). `_upsert_document` wrote no
+# `sourceKind`, so a document node carried NULL until this write landed.
+
+def _doc_axes(proj, url: str):
+    rows = proj.g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.sourceKind, s.documentKind",
+        params={"u": url},
+    ).result_set
+    return list(rows[0]) if rows else None
+
+
+def test_document_source_carries_source_kind_document(live_proj):
+    """#5082 + ONTOLOGY §4.6 + #5013 Q2: a document `:Source` carries the TYPE
+    axis (`sourceKind='document'`) beside its GENRE axis (`documentKind`) —
+    before this it carried `sourceKind = NULL`, a declared-but-unwritten
+    REQUIRED field."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-sk1", "title": "V1",
+                "document_kind": "brief"})
+    assert _doc_axes(proj, "doc-sk1") == ["document", "brief"]
+
+
+def test_document_source_kind_is_create_only_398(live_proj):
+    """#398 never-overwrite: a `:Source` that already carries an authoritative
+    `sourceKind` keeps it when a document write MERGEs the same `url` — the
+    #5082 write is a `coalesce`, never a clobber."""
+    proj = live_proj
+    proj.apply({"type": "SourceCreated", "url": "doc-sk2",
+                "sourceKind": "agentSession", "title": "session"})
+    proj.apply({"type": "DocumentCreated", "id": "doc-sk2", "title": "V1",
+                "document_kind": "brief"})
+    assert _doc_axes(proj, "doc-sk2") == ["agentSession", "brief"]
+
+
+def test_document_source_kind_matches_the_stub_mint_default(live_proj):
+    """#5082: the two writers of a document `:Source` agree. `_mint_source_stub`
+    (`projection/edges.py`) already defaults a non-`session:` url to
+    `'document'`; a stub minted BEFORE the document fold must leave the fold
+    with nothing to change."""
+    proj = live_proj
+    prov = provenance("doc-sk3", [0, 10], "a claim", extracted_by="test@0")
+    _api(projection=proj)[0].add_point("a claim in the doc", prov,
+                                       extractedFrom="doc-sk3")
+    proj.apply({"type": "DocumentCreated", "id": "doc-sk3", "title": "V1",
+                "document_kind": "brief"})
+    assert _doc_axes(proj, "doc-sk3") == ["document", "brief"]
+
+
 def test_add_document_journals_the_anchor_and_replays_identically(live_proj):
     """#5422: the anchor rides the JOURNALED event, so replay reproduces it.
 

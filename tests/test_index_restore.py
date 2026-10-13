@@ -103,15 +103,19 @@ Doc body.
 def _required_sweep(g) -> int:
     """Durability sweep over ``:Source`` under the D10 model.
 
-    D10 (ONTOLOGY v3.15 §4.4): a document is a ``:Source`` carrying
-    ``documentKind`` and NEVER ``sourceKind``/``contentHash``, so the
-    ``contentHash`` completeness clause applies only to provenance Sources
-    (``sourceKind IS NOT NULL``). Every Source — provenance or document —
-    must still hold a non-empty url and an ingestedAt.
+    D10 (ONTOLOGY v3.15 §4.4) + #5082: a document is a ``:Source`` carrying
+    ``documentKind`` and ``sourceKind='document'`` (the TYPE axis, §4.6
+    REQUIRED on every ``:Source``). ``contentHash`` is NOT guaranteed on a
+    document node — the #5422 anchor is written on the path that READS
+    content, and the #900 index path emits no hash — so the ``contentHash``
+    completeness clause applies only to provenance Sources (``documentKind``
+    absent). Every Source — provenance or document — must still hold a
+    non-empty ``url``, an ``ingestedAt`` and a ``sourceKind``.
     """
     return g.query(
         "MATCH (s:Source) WHERE s.url IS NULL OR s.url='' OR s.ingestedAt IS NULL "
-        "OR (s.sourceKind IS NOT NULL AND (s.contentHash IS NULL "
+        "OR s.sourceKind IS NULL "
+        "OR (s.documentKind IS NULL AND (s.contentHash IS NULL "
         "    OR s.contentHash='')) "
         "RETURN count(s)").result_set[0][0]
 
