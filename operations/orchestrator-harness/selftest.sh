@@ -770,13 +770,19 @@ ck "the cheap merge path stays ungated" $rc
 # REAL pipeline from the shipped script and drive it with a fixture; re-implementing the sort here
 # would pass on the broken copy too. Verified non-vacuous: the pre-fix extraction yields `sort -n -u`,
 # whose output is `0 7951 1 8039 2 1120` and fails this assertion.
-POOL_SORT="$(grep -E '^\} \| sort ' "$REFRESH" | sed -e 's/^} | //' -e 's/ > "\$O\/\.pool"$//')"
-if [ -n "$POOL_SORT" ]; then
-  pool_got="$(printf '2 1120\n1 8039\n0 7951\n2 3147\n1 7936\n0 7846\n2 3329\n1 8039\n0 3846\n' \
-              | sh -c "$POOL_SORT" | tr '\n' ' ' | sed 's/ *$//')"
-  [ "$pool_got" = "3846 7846 7951 7936 8039 1120 3147 3329" ] && rc=0 || rc=1
+#
+# #8469: the producer writes TWO files from one sort — `.prio` (`<number>TAB<tier>`, the map
+# orch-loop.sh's P0 merge-priority override reads) and `.pool` (bare numbers, the contract the loop
+# below reads). The assertion therefore pins BOTH: a tier leaking back into `.pool` is a malformed
+# argument to the loop, and a missing `.prio` silently disables the P0 override — neither is visible
+# from the sort alone.
+POOL_SORT="$(grep -E '^\} \| sort ' "$REFRESH" | sed -e 's/^} | //' -e 's/ > "\$O\/\.prio"$//')"
+if [ -n "$POOL_SORT" ] && grep -q '^cut -f1 "\$O/\.prio" > "\$O/\.pool"$' "$REFRESH"; then
+  prio_got="$(printf '2 1120\n1 8039\n0 7951\n2 3147\n1 7936\n0 7846\n2 3329\n1 8039\n0 3846\n' \
+              | sh -c "$POOL_SORT" | tr '\t' ' ' | tr '\n' ' ' | sed 's/ *$//')"
+  [ "$prio_got" = "3846 0 7846 0 7951 0 7936 1 8039 1 1120 2 3147 2 3329 2" ] && rc=0 || rc=1
 else rc=1; fi
-ck "refresh-candidates.sh orders the pool severity-first (P0<P1<P2), age second, dedup by number" $rc
+ck "refresh-candidates.sh orders .prio severity-first (P0<P1<P2), age second, dedup by number, and derives a bare-number .pool" $rc
 
 # The backlog file is consumed top-down, so its ORDER IS the priority — a numeric re-sort put any
 # appended P0 at the BACK (#8465). The shipped script must dedupe WITHOUT sorting.

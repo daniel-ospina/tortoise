@@ -263,31 +263,68 @@ class LaneBriefHeredoc(unittest.TestCase):
 
 
 class RefreshPoolContract(unittest.TestCase):
-    """Producer and consumer of `.pool` must agree — a tier prefix in `.pool`
-    is a malformed argument to the loop, and the backlog then never refills.
+    """The shipped pool block and its two consumers must agree (#8469).
 
-    Extracts the shipped pool pipeline and the shipped loop, so neither side is
-    re-implemented here.
+    The producer derives TWO files from ONE sort: ``.prio`` (``<number>TAB<tier>``,
+    the map ``orch-loop.sh``'s P0 merge-priority override keys on) and ``.pool``
+    (bare numbers, what this file's loop reads). A tier in ``.pool`` is a
+    malformed argument to the loop (it reads the WHOLE line), so nothing is
+    pre-flighted and the backlog never refills; a missing ``.prio`` silently
+    disables the override. Both are invisible from the sort alone, so the
+    shipped block is EXECUTED and both artefacts asserted.
     """
 
-    def test_the_shipped_pool_is_bare_numbers_the_shipped_loop_can_read(self):
+    def test_the_shipped_pool_block_produces_both_artefacts_its_consumers_read(self):
         src = REFRESH.read_text()
-        pipe = re.search(r"^\} \| sort .* > \"\$O/\.pool\"\n", src, re.M)
-        self.assertIsNotNone(pipe, "refresh-candidates.sh no longer writes .pool")
-        pipeline = pipe.group(0).strip().removesuffix(' > "$O/.pool"').removeprefix("} | ")
-        # Feed the producer the fixture the three tier queries emit, then hand
-        # its output to the shipped loop.
+        block = re.search(r'^\{\n  gh issue list.*?^cut -f1 "\$O/\.prio" > "\$O/\.pool"\n',
+                          src, re.S | re.M)
+        self.assertIsNotNone(
+            block, "the shipped pool block no longer writes `.prio` then `cut`-derives `.pool`")
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
-            pool = subprocess.run(["sh", "-c", pipeline],
-                                  input="2 1120\n1 8039\n0 7951\n2 3147\n",
-                                  capture_output=True, text=True)
-            self.assertEqual(pool.returncode, 0, pool.stderr)
-            self.assertEqual(pool.stdout.split(), ["7951", "8039", "1120", "3147"])
-            for token in pool.stdout.split():
+            # The three tier queries return "<tier> <number>" (their --jq builds
+            # it); the stub prints exactly that, per label.
+            (tmp / "bin").mkdir()
+            gh = tmp / "bin" / "gh"
+            gh.write_text(
+                "#!/bin/bash\n"
+                "case \"$*\" in\n"
+                "  *--label[[:space:]]P0-blocker*) printf '0 7951\\n';;\n"
+                "  *--label[[:space:]]P1-severe*)  printf '1 8039\\n1 7936\\n';;\n"
+                "  *--label[[:space:]]P2-moderate*) printf '2 1120\\n2 3147\\n2 3329\\n';;\n"
+                "  *) exit 1;;\n"
+                "esac\n")
+            gh.chmod(0o755)
+            o = tmp / "o"
+            o.mkdir()
+            script = tmp / "pool.sh"
+            script.write_text(block.group(0))
+            env = dict(os.environ)
+            env["PATH"] = f"{tmp / 'bin'}{os.pathsep}{env.get('PATH', '')}"
+            env["O"] = str(o)
+            env["OR"] = "stub/stub"
+            p = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                               cwd=tmp, env=env)
+            self.assertEqual(p.returncode, 0, p.stderr)
+
+            # .prio = number<TAB>tier, severity-first, age second, dedupon NUMBER.
+            prio = (o / ".prio").read_text()
+            self.assertEqual(prio,
+                             "7951\t0\n7936\t1\n8039\t1\n1120\t2\n3147\t2\n3329\t2\n")
+            # .pool = the BARE numbers the loop reads, in the same order.
+            pool = (o / ".pool").read_text().split()
+            self.assertEqual(pool, ["7951", "7936", "8039", "1120", "3147", "3329"])
+            for token in pool:
                 self.assertRegex(token, r"^[0-9]+$",
                                  f".pool carries a non-number token {token!r}")
-            # And the shipped loop, driven with that pool, must mark candidates
+            # The override's own lookup, verbatim: head=7951 must resolve to tier 0.
+            head = pool[0]
+            tier = subprocess.run(
+                ["awk", "-F\\t", "-v", f"n={head}", "$1==n{print $2; exit}",
+                 str(o / ".prio")], capture_output=True, text=True).stdout.strip()
+            self.assertEqual(tier, "0", "orch-loop.sh's P0 override cannot read .prio")
+
+            # And the shipped loop, driven with that .pool, must mark candidates
             # checked. A malformed token enters the `*)` arm and marks NOTHING.
             loop = re.search(r"^n=0\n.*?^done < \"\$O/\.pool\"\n", src, re.S | re.M)
             self.assertIsNotNone(loop, "the refresh loop body moved")
@@ -301,21 +338,22 @@ class RefreshPoolContract(unittest.TestCase):
                             "case \"$2\" in *[!0-9]*|\"\") exit 3;; esac\n"
                             "echo 'VERDICT: CLEAN'\n")
             fake.chmod(0o755)
-            (rl / ".pool").write_text(pool.stdout)
+            (rl / ".pool").write_text((o / ".pool").read_text())
             for name in ("checked.txt", "candidates.txt", "dispatched.txt"):
                 (rl / name).write_text("")
-            script = tmp / "loop.sh"
-            script.write_text(loop.group(0))
-            env = dict(os.environ)
-            env.update(O=str(rl), LIMIT="3", SC=str(rl / "fakesc"))
-            p = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+            loop_script = tmp / "loop.sh"
+            loop_script.write_text(loop.group(0))
+            env["O"] = str(rl)
+            env["LIMIT"] = "3"
+            env["SC"] = str(rl / "fakesc")
+            p = subprocess.run(["bash", str(loop_script)], capture_output=True, text=True,
                                cwd=tmp, env=env)
             self.assertEqual(p.returncode, 0, p.stderr)
-            checked = (rl / "checked.txt").read_text().split()
-            self.assertEqual(checked, ["7951", "8039", "1120"],
+            self.assertEqual((rl / "checked.txt").read_text().split(),
+                             ["7951", "7936", "8039"],
                              "the shipped loop did not consume the shipped .pool")
             self.assertEqual((rl / "candidates.txt").read_text().split(),
-                             ["7951", "8039", "1120"])
+                             ["7951", "7936", "8039"])
 
 
 if __name__ == "__main__":

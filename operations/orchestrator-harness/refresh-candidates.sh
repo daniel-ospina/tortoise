@@ -90,6 +90,11 @@ touch "$O/checked.txt" "$O/candidates.txt"
 # and every worker the harness ran was a P2 (#8465). The tier is a RANK, not a label.
 # Dedupe on the NUMBER, keeping the lowest tier: the sort already put an issue's best tier first, so
 # `!seen[$2]++` drops the later, weaker duplicate rather than letting one issue occupy two slots.
+# `.prio` is `<number>TAB<tier>` — the map orch-loop.sh's P0 merge-priority override reads. `.pool`
+# is then the BARE NUMBERS that map is keyed by, which is the contract this file's loop reads.
+# ⛔ Two files from one sort on purpose: writing the tier INTO `.pool` made every line a malformed
+# argument to the loop (`read -r N` takes the WHOLE line), so nothing was ever pre-flighted or
+# queued and the backlog could never refill (#8469 review P1).
 {
   gh issue list --repo "$OR" --state open --limit 300 --label P0-blocker --json number,assignees,title \
     --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|lane|OWNER DECISION|decision|analysis|investigation)";"i")|not)|"0 \(.number)"' 2>/dev/null
@@ -97,7 +102,8 @@ touch "$O/checked.txt" "$O/candidates.txt"
     --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|OWNER DECISION)";"i")|not)|"1 \(.number)"' 2>/dev/null
   gh issue list --repo "$OR" --state open --limit 200 --label P2-moderate --json number,assignees,title \
     --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|OWNER DECISION)";"i")|not)|"2 \(.number)"' 2>/dev/null
-} | sort -k1,1n -k2,2n | awk '!seen[$2]++ {print $2}' > "$O/.pool"
+} | sort -k1,1n -k2,2n | awk '!seen[$2]++ {print $2"\t"$1}' > "$O/.prio"
+cut -f1 "$O/.prio" > "$O/.pool"
 
 n=0
 while read -r N; do
