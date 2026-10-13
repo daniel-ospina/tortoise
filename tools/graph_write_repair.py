@@ -83,7 +83,6 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     )
 
 import argparse
-import contextlib
 import os
 import uuid
 
@@ -253,49 +252,21 @@ def repair(db, name: str, verbose: bool = True) -> tuple[bool, str]:
         # sits at (0, 0). In the #3154 case that copy is data-complete and writable and only
         # its INDEX is corrupt -- the worst possible thing to destroy.
         # So the guard re-reads the source and retains on the same LOSS direction the
-        # pre-RENAME guard uses. A source that GAINED still means the clone is stale.
-        try:
-            if not graph_exists(db, name):
-                say(f"  note: RETAINED clone {scratch} ({reason}) -- the source is gone, so "
-                    f"this clone may be the only copy")
-                return
-            _now = fingerprint(db.select_graph(name))
-        except Exception as exc:  # a listing/read failure must not cost the last copy
-            say(f"  note: RETAINED clone {scratch} ({reason}) -- could not verify the "
-                f"source ({type(exc).__name__}: {exc}), so this clone may be the only copy")
-            return
-        # ⛔ AND THE YARDSTICK MUST BE THE CLONE, NOT `before_*`. On the incomplete-copy path
-        # `clone_fp != before` BY CONSTRUCTION, and `before_*` is the entry baseline -- so
-        # asking only whether the source lost relative to `before_*` misses the case that
-        # matters: the clone snapshotted a concurrent write which the source has since lost,
-        # leaving `clone_fp > before` and the source reading back at exactly `before`.
-        # Measured (review cycle 4, case 31): before=(1500,100), +5 landed before the COPY
-        # snapshot, the source lost them, and the clone holding the only copy of that delta
-        # was dropped. The baseline survived, so this is a delta loss rather than a wipe --
-        # but the data in that clone existed nowhere else.
-        # Retain unless the source DOMINATES the clone on BOTH axes. Named trade-off: this
-        # also retains a clone whose delta was a deliberate revert; retaining is the
-        # consistent choice under this module's own rule ("retain the clone: it may be the
-        # only copy"), and the alternative would have to be stated as a residual.
-        if (_now[0] < before_nodes or _now[1] < before_edges
-                or _now[0] < clone_fp[0] or _now[1] < clone_fp[1]):
-            say(f"  note: RETAINED clone {scratch} ({reason}) -- the source does not "
-                f"dominate it ({_now} vs clone {clone_fp}, baseline "
-                f"{(before_nodes, before_edges)}), so this clone may hold the only copy "
-                f"of that data")
-            return
-        # The scratch clone is the ONLY key this module deletes, it is run-unique (never the
-        # live graph), and this process's own `GRAPH.COPY` created it -- so it is dropped with
-        # a raw `GRAPH.DELETE` (`clone_db.delete()`), the same form `hosted_backup`'s restore
-        # cleanup uses for its own staging copies. `safe_graph_delete` is deliberately NOT
-        # used: it re-acquires the non-reentrant delete lock this run already holds on the
-        # failure paths, cannot acquire it, and refuses after its full wait -- the clone
-        # leaked and the run stalled while the caller believed it had cleaned up (measured by
-        # review: `inner safe_graph_delete returned=False`). A leaked clone is not worth
-        # failing the run over.
-        with contextlib.suppress(Exception):
-            clone_db.delete()
-        say(f"  note: dropped clone {scratch} ({reason})")
+        # ⛔ IT NEVER DELETES. A COUNT TEST CANNOT LICENSE A DELETE.
+        # Review cycle 5 reproduced the end of this road: the guard proved COUNT-DOMINATION,
+        # not CONTAINMENT. With the source churning net-zero -- losing node `n0` while gaining
+        # another -- `_now` dominated `before_*` AND the clone on every axis, so the clone
+        # holding the ONLY copy of `n0` was deleted, and `n0` then existed in no survivor.
+        # Count equality is not containment, and there is no cheap identity measure here, so
+        # no count test can ever be sound. That is why the previous three attempts each closed
+        # one case and left the next: every one of them tried to find a count predicate that
+        # licensed a delete.
+        # This module's own rule already says the answer -- "Never clean up a failed repair"
+        # and "RETAIN the clone: it may be the only copy". Every path that reaches this helper
+        # is a FAILED repair. So the clone is simply retained, which is the only choice that
+        # cannot destroy data.
+        say(f"  note: RETAINED clone {scratch} ({reason}) -- a failed repair is never cleaned "
+            f"up; this clone may be the only copy of data the source no longer has")
 
     try:
         with graph_delete_lock(db) as acquired:

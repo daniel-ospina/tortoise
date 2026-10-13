@@ -444,7 +444,11 @@ def test_a_clone_that_lost_edges_is_never_swapped_in(monkeypatch, capsys, fake_l
     assert gwr.main() == 3
     assert not [c for c in db.commands if c[0] == "RENAME"], db.commands
     assert db.graphs["tortoise"].edges == 42, "the source was modified"
-    assert _scratch_graphs(db) == [], "the incomplete clone was not dropped"
+    # ⛔ RETAINED, NOT DROPPED. Every path that reaches the clone helper is a FAILED repair,
+    # and a count test cannot license a delete (review cycle 5: a net-zero source churn
+    # passed every count test while the clone held the only copy of a lost node). The helper
+    # therefore never deletes -- see its docstring.
+    assert _scratch_graphs(db), "the failed repair's clone must be RETAINED, not dropped"
 
 
 def test_repair_runs_the_boolean_index_audit_on_the_clone(monkeypatch, fake_lock, capsys):
@@ -482,7 +486,8 @@ def test_repair_refuses_to_swap_when_the_boolean_index_audit_fails(monkeypatch, 
     _run_main(monkeypatch, db)
     assert gwr.main() == 3
     assert not [c for c in db.commands if c[0] == "RENAME"], db.commands
-    assert _scratch_graphs(db) == [], "the un-audited clone was not dropped"
+    # RETAINED, not dropped -- a failed repair is never cleaned up.
+    assert _scratch_graphs(db), "the un-audited clone must be RETAINED, not dropped"
 
 
 def test_repair_refuses_when_the_source_gained_a_node_after_the_copy(monkeypatch, capsys, fake_lock):
@@ -500,7 +505,8 @@ def test_repair_refuses_when_the_source_gained_a_node_after_the_copy(monkeypatch
     assert gwr.main() == 3
     assert not [c for c in db.commands if c[0] == "RENAME"], db.commands
     assert db.graphs["tortoise"].nodes == BIG + 1, "the concurrent write was overwritten"
-    assert _scratch_graphs(db) == [], "the stale clone was not dropped"
+    # RETAINED, not dropped -- a failed repair is never cleaned up.
+    assert _scratch_graphs(db), "the stale clone must be RETAINED, not dropped"
 
 
 def test_repair_refuses_a_graph_below_min_nodes(monkeypatch, capsys, fake_lock):
