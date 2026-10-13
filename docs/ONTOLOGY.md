@@ -1,5 +1,5 @@
 ---
-title: "Tortoise — Canonical Ontology v3.24"
+title: "Tortoise — Canonical Ontology v3.25"
 type: data
 domain: data
 status: live
@@ -11,7 +11,7 @@ aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.24
+# Tortoise — Canonical Ontology v3.25
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -176,7 +176,7 @@ doc_status: live
 > to run, so the direction no longer always falls through to the per-op_type default. The four-value
 > **storage** vocabulary was unchanged at this step (the model's `-` mapped to no runtime value and
 > `<-` was deliberately left unmapped rather than recorded as the opposite) — the migration landed in
-> **v3.25** below.
+> **v3.25** above.
 >
 > **Changelog v3.22 (2026-10-11 — issue #7852 — the Layer-2 semantics vocabulary is closed, and validated):**
 > §8 now states the semantics vocabulary as **the** canonical table — one list, with each value's
