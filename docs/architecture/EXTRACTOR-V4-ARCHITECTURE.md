@@ -719,7 +719,7 @@ S6  COMMIT
 
 **And the doc's "classify once" also fixes a double-classification**: today `:4803` and `:4888` both run, because the set is re-classified after S4's merge. **One pass, after the gate, on survivors.**
 
-#### ✅ Jev for classification is cheap, and the seam already exists
+#### ✅ Jev for classification is cheap — but ⚠️ the seam does NOT yet exist
 
 **Classification is exactly ONE question** — a `Choice` over the supplied kinds. Measured Jev cost: **$0.000144 at 1 question** (`$0.000194` at 2q, `$0.000243` at 3q) — **~4–7× cheaper than a frontier model**, not the vendor's claimed 40–400×.
 
@@ -734,7 +734,7 @@ S6  COMMIT
 
 ### 4.3 ⚠️ What the steps above do NOT yet cover (review-provided, all unaddressed)
 
-**The step list is the SHAPE, not a complete specification.** Five gaps were identified by review and are recorded here rather than silently implied by the diagram. **These are gaps to close, not designs already settled — but **two** of the filed issues ask the *owner* for a ruling** (`#5333` for G5's deletion/relocation half; **`#8500` for G5's S4 clause**, whose own body closes on *"Which is authoritative until the migration lands?"*), **and a third (`#8496`, G4's immutability-vs-redaction reconciliation) requires a stated design choice** — it asks for that choice and its reason to be *stated, not implied*, but requests no owner ruling. **So closing these means obtaining a decision, not drafting a design.** ✅ **All five are now filed** — the issue reference is in each row (revalidated 2026-10-13; G3 and G4 had no tracker entry before that, and are `#8495` / `#8496`).
+**The step list is the SHAPE, not a complete specification.** Five gaps were identified by review and are recorded here rather than silently implied by the diagram. **These are gaps to close, not designs already settled — but two of the filed issues ask the *owner* for a ruling** (`#5333` for G5's deletion/relocation half; **`#8500` for G5's S4 clause**, whose own body closes on *"Which is authoritative until the migration lands?"*), **and a third (`#8496`, G4's immutability-vs-redaction reconciliation) requires a stated design choice** — it asks for that choice and its reason to be *stated, not implied*, but requests no owner ruling. **So closing these means obtaining a decision, not drafting a design.** ✅ **All five are now filed** — the issue reference is in each row (revalidated 2026-10-13; G3 and G4 had no tracker entry before that, and are `#8495` / `#8496`).
 
 | # | the gap | why it matters |
 |---|---|---|
@@ -894,11 +894,11 @@ v3's **E2** requires state-value facts be preserved verbatim (*"personal best 5K
 
 **⇒ Any mechanical filter MUST carry this carve-out, or it will drop the facts users care about most.** See `STORAGE-ARCHITECTURE.md` §7 for the low-cost storage question.
 
-#### ⚠️ But the existing carve-out does NOT cover decision-relevant numbers — measured (`#2453`)
+#### ✅ The carve-out DID NOT cover decision-relevant numbers — measured, and FIXED (`#2453`, PR `#2456`)
 
-`#2453` root-caused this: the carve-out is scoped to **user-personal state** (personal bests, schedules, preferences) and **explicitly tells the mapper to DROP process metrics as "mechanics tokens"** — *"counts/logistics are ephemeral"*. **That policy is right for personalisation memory and starving for engineering-decision memory**: on a number-dense session (latencies, durations, counts) it drops exactly the values the decision turns on.
+`#2453` root-caused this: the carve-out is scoped to **user-personal state** (personal bests, schedules, preferences) and **explicitly tells the mapper to DROP process metrics as "mechanics tokens"** — *"counts/logistics are ephemeral"*. **That policy is right for personalisation memory and starving for engineering-decision memory**: on a number-dense session (latencies, durations, counts) it drops exactly the values the decision turns on. ⚠️ **That was the scope BEFORE the fix — as the table below records, `#2453` landed and `STATE_VALUE_CARVE_OUT` was extended to retain operational values, so the carve-out is no longer as described in this sentence.**
 
-**⇒ There are TWO value classes, and today's policy keeps one and discards the other:**
+**⇒ There are TWO value classes. ⚠️ At the time of measurement the policy kept one and discarded the other; the table below records that this was FIXED (commit `4a690d0be`, 2026-09-07, PR `#2456`):**
 
 | class | example | today | must be |
 |---|---|---|---|
@@ -931,7 +931,7 @@ v3's **E2** requires state-value facts be preserved verbatim (*"personal best 5K
 |---|---|
 | **`Projection`** — a **two-method** event-sourced Protocol (`apply`, `rebuild`) with `InMemoryProjection` as an existing second implementation | `tortoise/projection/__init__.py` |
 | **`classify_consolidation`** — pure, no LLM, no graph I/O, post-extraction/pre-write; emits `noops`/`deletions` on a channel not written to the graph | `tortoise/extractor_v2.py` (E7/`#1539`) |
-| **`KindClassifier`** — kNN top-5 → margin gate → `nearMisses` rerank (no LLM) → batched LLM for the low-margin tail → fail-open + census. **Jev replaces its LLM tail.** | `tortoise/kind_classifier.py` (`#1695`) |
+| **`KindClassifier`** — kNN top-5 → margin gate → `nearMisses` rerank (no LLM) → batched LLM for the low-margin tail → fail-open + census. ⚠️ **Jev does NOT slot into its LLM tail**: the tail is a **hardcoded prompt + a JSON parser** and `llm_tail` is a **boolean** (`kind_classifier.py:93`), so the swap needs **an adapter, a prompt, and a parser** (§4.2). | `tortoise/kind_classifier.py` (`#1695`) |
 | **S2/S4 merge** | `merge_embed_lists` (def `extractor_v2.py:2284`; **called at `:4845`** — ⚠️ an earlier draft cited `:4838`, which is `stage_stats`) |
 | **Pack enforcement machinery** — `chains` with `enforcement` levels, `nearMisses`, `subclassOf`, `equivalentTo`, `extraction.sourceTypes` | `packs/*/manifest.yaml`; 20+ files reference each |
 | **The narrative prompt slot** — S1's granularity rule is already injected | `_granularity_text()` |
@@ -1209,7 +1209,7 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 
 | section | issue(s) | what the issue takes from here |
 |---|---|---|
-| §1 the mechanism (`^the <X>`, 62.3% of Objects) | **`#4899`** (CLOSED `COMPLETED`) · `#4894` | ⚠️ **`#4899` is the *identifier-only* DISCARD** (`value_gate._REFERENCE` / `identifier_only()`), shipped in `tortoise/value_gate.py` and **OFF by default**. **It deliberately does NOT cover `the <X>` definite descriptions** — `value_gate.py`'s docstring: *"a definite description is left to the arbiter, and is reported, not dropped"* — so the 62.3% `the <X>` class belongs to the **adversarial (S2.2)** half, not this one |
+| §1 the mechanism — **two halves**: the `^the <X>` definite-description class (62.3% of Objects) **and** the `#\d{1,6}(?!\d)` *identifier* DISCARD | **`#4899`** (CLOSED `COMPLETED`) · `#4894` | ⚠️ **`#4899` is the *identifier-only* DISCARD** (`value_gate._REFERENCE` / `identifier_only()`), shipped in `tortoise/value_gate.py` and **OFF by default**. **It deliberately does NOT cover `the <X>` definite descriptions** — `value_gate.py`'s docstring: *"a definite description is left to the arbiter, and is reported, not dropped"* — **so the 62.3% `the <X>` class is owned by the `§4 S2.2 VET` row below, not by this one** |
 | §1 v2 → v3 → v4 | `#1509` (epic — ⚠️ **CLOSED `NOT_PLANNED`**, 2026-10-10) · `#4894` | **v3 increases volume; v4 must land with or before v3's E2/E3** — ⚠️ **but that ordering obligation is now VOID: the v3 epic is not planned**, so there is no v3 work left to land before. v3's **E4 has already landed** (`merge_embed_lists`, `extractor_v2.py:4845`), so its premise is stale regardless |
 | §2 three tiers | `#2281` | the **narrative is the ingest-time-distilled layer** with raw-turn fallback |
 | §2 narrative placement (D1) | `#4894` | narrative = `Source` metadata, **not** a `Document` node |
@@ -1320,7 +1320,7 @@ Each open decision was run through the mandated sequence: **contradiction test f
 | # | ✅ ANSWER | what changes in THIS document |
 |---|---|---|
 | **O1** | **The conflict was mine.** `#2826` **A2** (the real decision row) recommended the journal be authoritative; `#2881` reversed it by recommendation; the doc recorded the reversal and flagged *"the row is the owner's to answer."* **The two questions are different and both hold: DURABILITY = the store's backup; REBUILDABILITY = the journal.** | **No reopen.** The wording is scoped: *the journal is the derived layer's rebuild source; it is not a durability mechanism.* ⚠️ **`rebuild_all` already treats an incomplete log as the authority — that is a defect, and it gets its own issue.** |
-| **O2** | ⛔ **WITHDRAWN — the owner rejected the framing:** *"we're not optimising stupidly for a number… this is not a corporate OKR setting exercise. We need to balance multiple things at each step of the pipeline and on each architecture decision."* | **No volume target, no recall floor, no node budget anywhere in this document.** The objective is **great recall and reasoning at an affordable cost**; the method is **manual, step-by-step review** until a calibration set exists. **§4.2's objective is re-stated accordingly — see below.** |
+| **O2** | ⛔ **WITHDRAWN — the owner rejected the framing:** *"we're not optimising stupidly for a number… this is not a corporate OKR setting exercise. We need to balance multiple things at each step of the pipeline and on each architecture decision."* | **No volume target, no recall floor, no node budget anywhere in this document.** The objective is **great recall and reasoning at an affordable cost**; the method is **manual, step-by-step review** until a calibration set exists. ⚠️ **§4.2's original objective stands unchanged (`:176`/`:186`) — O2 withdrew the *volume-target* framing, not the objective.** An earlier version of this cell claimed it was *"re-stated accordingly — see below"*; nothing below restates it. |
 | **O3** | ✅ **ADOPTED — emit the DECLARED outcome word (`DISCARD`), matching the engine's existing classifier.** | S2.2's outputs use the declared vocabulary. |
 | **O4** | ✅ **Merge IS authorised — with Jev as arbiter over the claim plus narrative/raw data.** ⛔ **This supersedes the `OVERRIDES:` ruling on `#4899`** (*"never merging two claims into one"*). | ⚠️ **`FUSE` becomes an ADMISSIBLE action**, so §4.2's *"NEVER `FUSE`"* rule is replaced: **`KEEP` / `NOOP` / `DISCARD` / `MERGE`**, where MERGE is bounded (below). |
 | **O5** | ✅ **Neither — draft and iterate:** *"we draft something (a prompt, a step of the extraction workflow, etc) and run it and see the result then refine and run again, until good."* | **The working method for every step in §4.1: draft → run → look → refine → repeat.** Replaces the sample-vs-deterministic debate. |
