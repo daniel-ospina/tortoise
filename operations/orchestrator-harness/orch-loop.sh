@@ -87,7 +87,22 @@ if ! acq; then
   rm -f "$LOCKF"
   acq || { echo "[orch-loop] lock race — exiting"; exit 0; }
 fi
-trap 'rm -f "$LOCKF"' EXIT INT TERM
+# ⛔ THE SIGNAL HANDLERS ONLY TERMINATE — THE LOCK IS RELEASED BY THE `EXIT` TRAP ALONE.
+# Was `trap 'rm -f "$LOCKF"' EXIT INT TERM`, and for INT/TERM a handler that RETURNS does NOT
+# terminate: bash RESUMES the interrupted command loop, so the documented stop path
+# (`pkill -f orch-loop.sh`, README §6) deleted the lock while the controller kept sweeping,
+# reviewing and merging — the next start then passed acq() and two autonomous controllers ran one
+# PR queue, which §5.2/§5.3 promise cannot happen (agent-infra#1715).
+# Measured on /bin/bash 3.2.57 — the interpreter the rendered launchd plist invokes — with a stub
+# loop: the returning trap printed and left the loop alive with the lock already gone; `exit 143`
+# from a TERM handler terminated the shell (rc=143) AND still ran the EXIT trap; an UNTRAPPED TERM
+# also stopped the loop, but an untrapped INT is IGNORED outright (still alive after 3s), so INT is
+# trapped rather than dropped. Releasing from EXIT only makes "the lock is gone" and "the process
+# is gone" the same event; a signal arriving after the handler fired leaves the lock in place
+# (measured), which is fail-closed — `acq()` reclaims a dead pid.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'rm -f "$LOCKF"' EXIT
 
 # A worker whose log has not grown in this many minutes is hung. `pi -p` has no internal
 # timeout and a runaway child it spawns (a reviewer's `find /` ran for 8 hours on 2026-10-12)
@@ -476,5 +491,9 @@ PY
     fi
   fi
 
-  sleep "$CYC"
+  # `& wait`, not a bare sleep: bash runs a trap only AFTER the current foreground command
+  # completes, so `sleep 240` deferred the stop for up to a whole cycle — measured 5.07s of a 6s
+  # sleep, vs 0.09s with the background form. The lock is held either way, but "kill -TERM ends
+  # the process" (agent-infra#1715's indicator) is then true in ~0.1s, not in four minutes.
+  sleep "$CYC" & wait $!
 done

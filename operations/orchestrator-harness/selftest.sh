@@ -879,6 +879,124 @@ if [ -s "$REFRESH" ]; then
 else rc=1; fi
 ck "refresh-candidates.sh dedupes the backlog in place and nothing running it re-sorts it" $rc
 
+# ── 19) a TERM'd controller EXITS; the lock/claim is not released while it is still running ──
+# agent-infra#1715. The shipped trap was `trap 'rm -f "$LOCKF"' EXIT INT TERM`: for INT/TERM a
+# handler that RETURNS resumes the interrupted command loop, so the documented stop path
+# (`pkill -f orch-loop.sh`, README §6) deleted the lock while the controller kept sweeping,
+# reviewing and merging — and the next start passed acq(), giving two autonomous merge controllers
+# on one PR queue. Driven against the SHIPPED lock+trap block (extracted, not re-implemented) with a
+# stub loop, so it fails on the pre-fix copy. The invariant asserted is "the lock and the process
+# go away together": a released lock may only ever be observed as the process is leaving.
+sed -n '/^# single-instance lock/,/^trap .rm -f "\$LOCKF".*$/p' "$LOOP" > "$TMP/lockblock.sh"
+if need "$TMP/lockblock.sh" "the lock+trap block is extracted from the shipped orch-loop.sh"; then
+  LK="$TMP/LK"; mkdir -p "$LK/state"
+  { echo 'set -u'; echo "O='$LK'"; cat "$TMP/lockblock.sh"; echo 'while :; do sleep 0.2; done'; } > "$LK/drive.sh"
+  bash -n "$LK/drive.sh" && rc=0 || rc=1
+  ck "the lock-trap driver parses" $rc
+  rm -f "$LK/.orch.lock"
+  bash "$LK/drive.sh" & cpid=$!
+  i=0; while [ ! -f "$LK/.orch.lock" ] && [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done
+  [ -f "$LK/.orch.lock" ] && rc=0 || { rc=1; echo "      the stub controller never took the lock"; }
+  ck "the controller takes the single-instance lock" $rc
+  [ "$(cat "$LK/.orch.lock" 2>/dev/null)" = "$cpid" ] && rc=0 || rc=1
+  ck "the lock records the controller's pid" $rc
+
+  kill -TERM "$cpid" 2>/dev/null
+  released_while_alive=0; dead=0; i=0
+  while [ $i -lt 100 ]; do
+    if [ ! -f "$LK/.orch.lock" ]; then
+      # The lock is gone: the controller must be on its way out, not resuming the loop. Poll rather
+      # than sample once, so the few instructions between the EXIT trap's rm and the process dying
+      # are not read as the defect.
+      j=0; while [ $j -lt 10 ]; do kill -0 "$cpid" 2>/dev/null || { dead=1; break; }; sleep 0.1; j=$((j+1)); done
+      [ "$dead" = "1" ] || released_while_alive=1
+      break
+    fi
+    kill -0 "$cpid" 2>/dev/null || break
+    sleep 0.05; i=$((i+1))
+  done
+  [ "$released_while_alive" = "0" ] && rc=0 || rc=1
+  ck "a TERM releases the lock only as the controller exits, never while it keeps running" $rc
+  [ "$dead" = "1" ] && rc=0 || { rc=1; kill -9 "$cpid" 2>/dev/null; }
+  wait "$cpid" 2>/dev/null
+  ck "a TERM'd controller actually exits" $rc
+  [ -f "$LK/.orch.lock" ] && rc=1 || rc=0
+  ck "the exited controller released its lock via the EXIT trap" $rc
+
+  # The same defect on merge-one.sh's per-PR claim (§5.1b): a TERM must not free the claim while
+  # the worker keeps reviewing/merging, which let a second worker spawn for the same head.
+  sed -n '/^CLAIM="\$O\/state\/mergeclaim-\$PR.lock"/,/^trap .rm -f "\$CLAIM".*$/p' "$MERGE" > "$TMP/claimtrap.sh"
+  if need "$TMP/claimtrap.sh" "the claim+trap block is extracted from the shipped merge-one.sh"; then
+    { echo 'set -u'; echo "O='$LK'"; echo 'PR=9191'; echo "L='$LK/claim'"; cat "$TMP/claimtrap.sh"; echo 'while :; do sleep 0.2; done'; } > "$LK/mdrive.sh"
+    bash -n "$LK/mdrive.sh" && rc=0 || rc=1
+    ck "the claim-trap driver parses" $rc
+    rm -f "$LK/state/mergeclaim-9191.lock"
+    bash "$LK/mdrive.sh" & mpid=$!
+    i=0; while [ ! -f "$LK/state/mergeclaim-9191.lock" ] && [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done
+    [ -f "$LK/state/mergeclaim-9191.lock" ] && rc=0 || { rc=1; echo "      merge-one.sh never took the claim"; }
+    ck "the worker takes the per-PR claim" $rc
+    kill -TERM "$mpid" 2>/dev/null
+    m_rel=0; m_dead=0; i=0
+    while [ $i -lt 100 ]; do
+      if [ ! -f "$LK/state/mergeclaim-9191.lock" ]; then
+        j=0; while [ $j -lt 10 ]; do kill -0 "$mpid" 2>/dev/null || { m_dead=1; break; }; sleep 0.1; j=$((j+1)); done
+        [ "$m_dead" = "1" ] || m_rel=1
+        break
+      fi
+      kill -0 "$mpid" 2>/dev/null || break
+      sleep 0.05; i=$((i+1))
+    done
+    [ "$m_rel" = "0" ] && rc=0 || rc=1
+    ck "a TERM frees the per-PR claim only as the worker exits" $rc
+    [ "$m_dead" = "1" ] && rc=0 || { rc=1; kill -9 "$mpid" 2>/dev/null; }
+    wait "$mpid" 2>/dev/null
+    ck "a TERM'd merge-one.sh actually exits" $rc
+  fi
+
+  # The cycle sleep must be INTERRUPTIBLE: bash runs a trap only after the current foreground
+  # command completes, so a bare `sleep "$CYC"` deferred the stop for up to the whole cycle
+  # (measured 5.07s of a 6s sleep, vs 0.09s for `sleep … & wait $!`). Drive the SHIPPED line with
+  # CYC=8 and require the stop inside 4s, so a revert to the bare sleep fails here.
+  grep -m1 '^  sleep "\$CYC" & wait \$!$' "$LOOP" > "$TMP/cycsleep.sh"
+  if need "$TMP/cycsleep.sh" "the interruptible cycle sleep is extracted from the shipped orch-loop.sh"; then
+    { echo 'set -u'; echo "O='$LK'"; cat "$TMP/lockblock.sh"; echo 'CYC=8'; cat "$TMP/cycsleep.sh"; } > "$LK/cyc.sh"
+    bash -n "$LK/cyc.sh" && rc=0 || rc=1
+    ck "the cycle-sleep driver parses" $rc
+    # Non-vacuity: the driver must OWN the lock (a leftover lock would make it refuse the lock and
+    # exit immediately, so the "stopped inside 4s" check below would pass without ever sleeping).
+    rm -f "$LK/.orch.lock"
+    bash "$LK/cyc.sh" & ypid=$!
+    i=0; while [ ! -f "$LK/.orch.lock" ] && [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done
+    [ "$(cat "$LK/.orch.lock" 2>/dev/null)" = "$ypid" ] && rc=0 || { rc=1; echo "      lock='$(cat "$LK/.orch.lock" 2>/dev/null)' != driver pid $ypid"; }
+    ck "the cycle-sleep driver acquired the lock (it really is in the CYC sleep)" $rc
+    sleep 0.5
+    kill -0 "$ypid" 2>/dev/null && rc=0 || rc=1
+    ck "the cycle-sleep driver is still sleeping when TERM arrives" $rc
+    kill -TERM "$ypid" 2>/dev/null
+    ydead=0; i=0
+    while [ $i -lt 40 ]; do kill -0 "$ypid" 2>/dev/null || { ydead=1; break; }; sleep 0.1; i=$((i+1)); done
+    [ "$ydead" = "1" ] && rc=0 || { rc=1; kill -9 "$ypid" 2>/dev/null; }
+    wait "$ypid" 2>/dev/null
+    ck "the shipped cycle sleep is interrupted by TERM inside CYC (stopped <4s, not 8s)" $rc
+  fi
+
+  # Reclamation must be REAL, not silently skipped: a lock whose PID is dead is reclaimed by the
+  # next start (the SIGKILL/reboot path), while one held by a LIVE pid is refused. Without the
+  # negative control, "reclaimed" and "silently overwritten" would be the same test. Deliberately
+  # LAST in this section: the live-pid case intentionally leaves a lock in place.
+  { echo 'set -u'; echo "O='$LK'"; cat "$TMP/lockblock.sh"; echo 'echo ACQUIRED'; } > "$LK/acquire.sh"
+  bash -n "$LK/acquire.sh" && rc=0 || rc=1
+  ck "the stale-lock driver parses" $rc
+  printf '999999\n' > "$LK/.orch.lock"
+  out="$(bash "$LK/acquire.sh" 2>&1)"
+  case "$out" in *ACQUIRED*) rc=0;; *) rc=1; echo "      got '$out'";; esac
+  ck "a stale lock (dead pid) is reclaimed by the next start" $rc
+  printf '%s\n' "$$" > "$LK/.orch.lock"
+  out="$(bash "$LK/acquire.sh" 2>&1)"
+  case "$out" in *ACQUIRED*) rc=1; echo "      a live lock was stolen";; *) rc=0;; esac
+  ck "a lock held by a LIVE pid is NOT stolen (reclamation is not a silent overwrite)" $rc
+fi
+
 echo
 echo "==> $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
