@@ -35,9 +35,12 @@
 # Arming it unattended is safe because the tool:
 #   * REPAIRS ONLY WHAT IT JUST PROVED BROKEN — it writes a probe node first and repairs
 #     only if that write is refused, so a healthy graph is a cheap no-op;
-#   * KEEPS A FALLBACK UNTIL VERIFIED — `GRAPH.COPY` to a scratch clone, which it refuses
-#     to swap in unless the clone is complete AND writable, and which it retains if the
-#     post-repair verification fails;
+#   * KEEPS A FALLBACK AND NEVER DELETES IT — `GRAPH.COPY` to a scratch clone, which it
+#     refuses to swap in unless the clone is complete AND writable; on EVERY failure it
+#     parks that clone at one deterministic quarantine key per graph (`__gwr_q_<graph>`,
+#     replaced each run, so a standing failure cannot accumulate full-graph copies — except
+#     when the new clone is strictly smaller than the copy already retained, which is kept
+#     and the smaller clone preserved under its run-unique name instead);
 #   * VERIFIES BY WRITING AND READING BACK, never by a return value;
 #   * IS IDEMPOTENT — safe to re-run at any time.
 #
@@ -74,7 +77,7 @@ while [[ $# -gt 0 ]]; do
     --uninstall) UNINSTALL=1 ;;
     --status) STATUS=1 ;;
     --interval) INTERVAL="${2:?--interval needs a value}"; shift ;;
-    -h|--help) sed -n '2,55p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,61p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift

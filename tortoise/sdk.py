@@ -20111,6 +20111,7 @@ class TortoiseSDK:
             SearchResult, SearchScores,
             search_provenance_enabled,
             subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,
+            RELATIONSHIPS_UNAVAILABLE,
             filter_by_relationship, filter_by_traversal_predicate,
             expand_structural_hops,
             _recency_factors,
@@ -21004,7 +21005,18 @@ class TortoiseSDK:
         # 7.5. Fetch relationships for result Points (Point only) — bounded,
         #      state-centric decoration (#1353 D2/D3/D4; D12 keeps the shared
         #      unbounded get_relationships for topic_summarization).
+        #      #6971: ``point_relationships`` is a ``RelationshipDecoration``
+        #      whose ``decoration_error`` is set when the query body raised. Read
+        #      it BEFORE building hits: the all-empty seed is then LABELLED below
+        #      rather than read as "no relationships". ``getattr`` so a plain
+        #      dict from a stand-in still degrades to "no failure recorded".
         point_relationships = get_relationships_bounded(graph, result_ids) if entity_type == "point" else {}
+        decoration_failed = bool(getattr(point_relationships, "decoration_error", ""))
+        relationships_unavailable = (
+            f"{RELATIONSHIPS_UNAVAILABLE}; cause: "
+            f"{getattr(point_relationships, 'decoration_error', '')}"
+            if decoration_failed else ""
+        )
         # 7.6. Promoted epistemic state (status/superseded_by/supersedes/subject) — #1353 D8/D10
         point_state = fetch_point_epistemic_state(graph, result_ids) if entity_type == "point" else {}
 
@@ -21053,6 +21065,10 @@ class TortoiseSDK:
                 match_source=match_source,
                 ep=ep,
                 relationships=point_relationships.get(pid, []),
+                # #6971: the emptiness of ``relationships`` above is a FAILED
+                # read, not a sparse point — say so on every hit (the failure
+                # is a property of the batch decoration).
+                relationships_unavailable=relationships_unavailable,
                 status=point_state.get(pid, {}).get("status", "")
                 or pt.get("status", ""),
                 superseded_by=point_state.get(pid, {}).get("superseded_by")

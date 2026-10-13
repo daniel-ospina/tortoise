@@ -18,7 +18,7 @@ import { type Env, HSTS } from "../_lib.ts";
 import { requireAdmin } from "../_shared/admin-auth.ts";
 import { authenticate, rateLimited, type RateLimit } from "../_shared/agent-auth.ts";
 import { constraints } from "../_shared/seo-constraints.ts";
-import { META_TITLE_MAX, META_DESCRIPTION_MAX, TAG_LEN_MAX } from "../_shared/meta-contract.ts";
+import { META_TITLE_MAX, META_DESCRIPTION_MAX } from "../_shared/meta-contract.ts";
 import {
   TAG_KEYWORDS,
   keywordsFor,
@@ -377,30 +377,33 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   // 200 carrying a keyword-only title — the `generation_incomplete` 502 below
   // would stop firing for the meta fields. The repair exists to make a
   // *generated* title carry the keyword, not to invent one from nothing.
+  // ⛔ Hold the repair in its OWN variables. "Did the repair fire?" must be
+  // answered by comparing the repair's output to its input, NOT by re-enforcing
+  // and comparing the two ENFORCE passes — those are different questions, and
+  // conflating them produced a false `keyword_ok: false` (found by the verifier
+  // in round 10).
+  //
+  // `metaTitle` cannot be perfectly idempotent: truncation can EXPOSE a
+  // mid-title punctuation-led "Tortoise" ("… knowledge graphs — Tortoise
+  // explained" cut to "… knowledge graphs — Tortoise"), and a second pass has no
+  // way to tell that exposed tail from a brand suffix the model wrote, so it
+  // strips it. Re-enforcing therefore reported "the repair fired" for a request
+  // where it did not — for a title the model wrote itself, nothing truncated —
+  // and flipped a green verdict to `false`. The repair is now measured directly,
+  // so the verdict no longer depends on a property the length contract cannot
+  // hold in general.
+  const repairedTitle = enforced.meta_title
+    ? ensureKeyword(enforced.meta_title, primary, META_TITLE_MAX)
+    : "";
+  const repairedDescription = enforced.meta_description
+    ? ensureKeyword(enforced.meta_description, primary, META_DESCRIPTION_MAX)
+    : "";
+  const repairFired =
+    repairedTitle !== enforced.meta_title || repairedDescription !== enforced.meta_description;
   const repaired = constraints.enforce(
-    {
-      ...enforced,
-      meta_title: enforced.meta_title
-        ? ensureKeyword(enforced.meta_title, primary, META_TITLE_MAX)
-        : "",
-      meta_description: enforced.meta_description
-        ? ensureKeyword(enforced.meta_description, primary, META_DESCRIPTION_MAX)
-        : "",
-    },
+    { ...enforced, meta_title: repairedTitle, meta_description: repairedDescription },
     title,
   );
-
-  // ⛔ Does the response's field differ from the one `keyword_ok` below checks?
-  // `enforced` is the FIRST contract pass; the caller receives `repaired`, the
-  // SECOND. They agreed only because `metaTitle`/`metaDescription` happened to be
-  // idempotent — so a non-idempotent spelling meant the verdict described a field
-  // the caller never saw (measured 10.5% of green verdicts). `ensureKeyword`
-  // firing is the other way they differ, and that one is not a bug: a repaired
-  // field is by definition NOT the model's own text, which is the whole point of
-  // the verdict. Both are now explicit.
-  const repairFired =
-    repaired.meta_title !== enforced.meta_title ||
-    repaired.meta_description !== enforced.meta_description;
 
   // Reject rather than silently ship junk when generation produced nothing usable.
   if (!repaired.meta_title || !repaired.meta_description || !repaired.excerpt || repaired.tags.length === 0) {

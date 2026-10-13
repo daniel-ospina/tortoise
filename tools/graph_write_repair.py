@@ -33,14 +33,16 @@ The swap is a single atomic `RENAME`, which OVERWRITES in one step. That is the 
 the failure that destroyed this graph once already: `GRAPH.DELETE` + copy-back leaves a
 window in which a Cypher read on the missing graph AUTO-CREATES an empty one (so the
 copy-back then fails with `destination key already exists`), and the graph is left EMPTY.
-`RENAME` has no such window, so this module contains no `GRAPH.DELETE` of the live graph at
-all. The run-unique scratch clone is the ONLY key this module deletes, and it is dropped with
-a raw `GRAPH.DELETE` -- the same form `hosted_backup`'s restore cleanup uses for its own
-`GRAPH.COPY` staging copies. `graph_delete_guard.safe_graph_delete` is deliberately NOT used
-for it: that primitive re-acquires the non-reentrant delete lock this run already holds on
-its failure paths, cannot acquire it, and refuses after its full wait (the clone then leaks
-and the run stalls while the caller believes it cleaned up). Presence is always established
-with `graph_exists` -- never by querying a graph whose existence is assumed.
+`RENAME` has no such window, so this module contains no `GRAPH.DELETE` at all -- neither of
+the live graph nor of any clone. Every failed repair is dirty, and a failed repair is never
+cleaned up: the clone is parked at a DETERMINISTIC quarantine key (`__gwr_q_<graph>`, one per
+source, REPLACED in one atomic `RENAME` rather than accumulated) so a standing failure cannot
+leak one full-graph copy per scheduled run -- and a clone strictly smaller than the copy
+already retained never replaces it (`retain_clone`). `graph_delete_guard.safe_graph_delete` is
+deliberately NOT used because the module never deletes anything -- and a delete could not be
+justified anyway: the clone may be the ONLY copy of data the source no longer has. Presence
+is always established with `graph_exists` -- never by querying a graph whose existence is
+assumed.
 
 THE ROOT CAUSE, PINNED: A SAME-NAMED GRAPH IN ANOTHER LOGICAL DB (upstream #2782)
 --------------------------------------------------------------------------------
@@ -107,6 +109,23 @@ KNOWN RESIDUALS (declared, not hidden)
   global, irreversible operator action (the repo's `poisoned_aof_recovery_hint` sets the same
   boundary), and a duplicate that holds data is not ours to destroy sight-unseen. The tool
   prints the exact command and refuses to run it.
+* **The RDB-load cause is not pinned.** `GRAPH.COPY` producing a good graph localises it to
+  the reload path, but not further.
+* **A retained clone is a full second copy of the graph until a human clears it.** Bounded
+  by design to ONE per source (the deterministic `__gwr_q_<graph>` key, replaced on the next
+  failure), but it is still a full copy on a `maxmemory=0` container for as long as it is
+  retained. Clearing it (`GRAPH.DELETE __gwr_q_<graph>` once its data is confirmed redundant)
+  is an operator decision, never this tool's.
+  * **The one-per-source bound has a deliberate exception.** When this run's clone is
+    strictly smaller on BOTH counts than the copy already retained, the retained copy is
+    KEPT and the smaller clone is left at its run-unique `__gwr_<uuid>` name instead of
+    replacing it (`retain_clone`). A count is not containment, so neither copy is deleted;
+    in that case a source can briefly hold two `__gwr_*` keys, both operator-cleared.
+* **The pre-RENAME count gate is equality, not identity.** A concurrent churn that nets to
+  zero on BOTH counts is invisible to it, so the swap is licensed only while the source is
+  still REFUSING writes (the source is re-probed immediately before the swap). A net-zero
+  churn can therefore only be discarded while the source is unwritable -- the very state in
+  which the engine refuses every write, so no such churn can land.
 
 Usage:
     uv run python tools/graph_write_repair.py            # check, repair if broken
@@ -130,12 +149,15 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     )
 
 import argparse
-import contextlib
 import os
 import uuid
 
 DEFAULT_GRAPH = "tortoise"
 PROBE_LABEL = "GraphWriteRepairProbe"
+
+#: A failed repair parks its clone here -- one key per source graph, REPLACED each failure by
+#: an atomic `RENAME`, so retention is bounded by design (see `retain_clone`).
+QUARANTINE_PREFIX = "__gwr_q_"
 
 # The tool is local-only by construction (`connect()` pins it, #6666): every socket this
 # module opens -- the graph handle AND the per-DB collision scan -- must agree on the host.
@@ -282,6 +304,18 @@ def fingerprint(graph) -> tuple[int, int]:
     return (node_count(graph), edge_count(graph))
 
 
+def _strictly_dominates(a: tuple[int, int], b: tuple[int, int]) -> bool:
+    """True when ``a`` is at least as large as ``b`` on BOTH count axes, and larger on one.
+
+    Used by ``retain_clone`` to stop a lossier clone from overwriting a more complete
+    retained copy. It is deliberately a COUNT comparison and therefore NOT proof of
+    containment (see ``retain_clone``): it only decides which of the two copies is smaller,
+    never that the larger one holds everything the smaller one does -- which is why the
+    smaller copy is still preserved on disk rather than deleted.
+    """
+    return a[0] >= b[0] and a[1] >= b[1] and a != b
+
+
 def counts(msg: str) -> None:
     """Print a COUNT unconditionally -- ``--quiet`` suppresses NARRATION, not numbers.
 
@@ -334,6 +368,18 @@ def probe(db, name: str) -> tuple[str, str]:
     empty one -- and then reports a healthy zero-node graph. Presence is RE-CHECKED after the
     write, because the graph can be deleted between the two, in which case the write
     auto-creates an empty graph whose write is ACCEPTED and would read as healthy.
+
+    ⛔ AND A COUNT BELOW ``MIN_NODES`` IS NOT A VERDICT. The presence check and the count read
+    below are separate statements, so a graph deleted BETWEEN them is auto-created EMPTY by
+    the read -- making presence TRUE while the graph holds nothing. Every check after that
+    then passes: the CREATE is accepted, the post-write re-check sees the phantom this call
+    just made, and ``probe`` returns "ok" on an empty graph. On the clone path that empty
+    phantom is RENAMEd over the live graph (measured 1500 -> 0 in review cycle 5); on the
+    ``main()`` path the tool prints HEALTHY with exit 0 for a zero-node graph, and the
+    scheduled job keys on that exit code. Every graph this function is asked about holds at
+    least ``MIN_NODES`` -- the faulted live graph does, and so does a faithful clone of it --
+    so a count below the floor means the key was re-created, which is not a fact about the
+    graph that was verified.
     """
     from tortoise.graph_delete_guard import graph_exists
 
@@ -344,6 +390,20 @@ def probe(db, name: str) -> tuple[str, str]:
         before = node_count(graph)
     except Exception as exc:
         return "unknown", f"presence/count read failed: {type(exc).__name__}: {exc}"
+
+    # ⛔ REFUSE AN EMPTY RE-MATERIALISED GRAPH. See the docstring: a graph deleted between the
+    # presence check above and this read is auto-created EMPTY by the read, so presence comes
+    # back TRUE and every later check passes on a graph that holds nothing -- the empty
+    # phantom then gets swapped over the live graph on the clone path, or reported HEALTHY
+    # with exit 0 by `main()`. An auto-created graph holds ZERO nodes, so that is the exact
+    # signature, and it is the one to test: a small graph is still a real graph with real
+    # nodes, and `repair` applies its own MIN_NODES floor to decide whether it is the shared
+    # graph at all. This check answers a narrower question -- "is this the graph I verified, "
+    # or a key that was re-created after it vanished?"
+    if before == 0:
+        return "unknown", ("the graph holds 0 nodes -- a count this low means the key was "
+                            "re-created empty (a read on an absent graph auto-creates one), "
+                            "so this is NOT a verdict about the graph that was verified")
 
     # Scope the probe to THIS run: a bare `MATCH (t:Label) DELETE t` would destroy a node
     # left by an earlier failed cleanup, or any pre-existing node carrying the label.
@@ -376,7 +436,7 @@ def probe(db, name: str) -> tuple[str, str]:
 
 
 def repair(db, name: str, verbose: bool = True) -> tuple[bool, str]:
-    """COPY -> verify clone -> atomic RENAME. No GRAPH.DELETE of the live graph, ever."""
+    """COPY -> verify clone -> atomic RENAME. Deletes NOTHING; a failed repair retains it."""
     from tortoise.graph_delete_guard import graph_delete_lock, graph_exists
     from tortoise.hosted_backup import _audit_copied_boolean_indexes
 
@@ -384,24 +444,75 @@ def repair(db, name: str, verbose: bool = True) -> tuple[bool, str]:
         if verbose:
             print(msg, flush=True)
 
-    # A per-run scratch name: a FIXED name lets two runs (the timer and a hand-run) delete
-    # each other's clone.
+    # The run-unique scratch name exists so two concurrent runs (the timer and a hand-run)
+    # cannot clean up each other's clone DURING the repair.
     scratch = f"__gwr_{uuid.uuid4().hex[:12]}"
+    # The retained clone is parked at a DETERMINISTIC key, one per source graph. Retaining
+    # under the run-unique name is unbounded: the scheduled job retries every StartInterval,
+    # so a standing failure leaked one full copy of the graph per run (#8451 review, P2).
+    quarantine = f"{QUARANTINE_PREFIX}{name}"
     clone_db = db.select_graph(scratch)
 
-    def drop_clone(reason: str) -> None:
-        # The scratch clone is the ONLY key this module deletes, it is run-unique (never the
-        # live graph), and this process's own `GRAPH.COPY` created it -- so it is dropped with
-        # a raw `GRAPH.DELETE` (`clone_db.delete()`), the same form `hosted_backup`'s restore
-        # cleanup uses for its own staging copies. `safe_graph_delete` is deliberately NOT
-        # used: it re-acquires the non-reentrant delete lock this run already holds on the
-        # failure paths, cannot acquire it, and refuses after its full wait -- the clone
-        # leaked and the run stalled while the caller believed it had cleaned up (measured by
-        # review: `inner safe_graph_delete returned=False`). A leaked clone is not worth
-        # failing the run over.
-        with contextlib.suppress(Exception):
-            clone_db.delete()
-        say(f"  note: dropped clone {scratch} ({reason})")
+    def _graph_counts(gname: str) -> tuple[int, int] | None:
+        """(nodes, edges) of an EXISTING graph, or None when it is absent or unreadable.
+
+        Presence FIRST, always: `fingerprint()` READS, and a read on an absent graph
+        AUTO-CREATES an empty one, so this must never be called without the guard.
+        """
+        try:
+            if not graph_exists(db, gname):
+                return None
+            return fingerprint(db.select_graph(gname))
+        except Exception:
+            return None
+
+    def retain_clone(reason: str) -> str:
+        """Park this run's clone at the source's quarantine key. ⛔ NEVER DELETES.
+
+        Every call site is a FAILED repair, and a failed repair is never cleaned up: the
+        clone may be the only copy of data the source no longer has. Three review cycles
+        tried to find a count predicate that would license a delete and each closed one case
+        and left the next; cycle 5 reproduced the end of that road -- a source churning
+        NET-ZERO (losing node `n0` while gaining another) dominated the clone on every count
+        axis, so the count test deleted the clone holding the ONLY copy of `n0`. Count
+        equality is not containment and no count test can be sound, so the clone is retained
+        unconditionally.
+
+        ⛔ PARKED AT THE DETERMINISTIC KEY, NOT THE RUN-UNIQUE SCRATCH NAME. `RENAME`
+        REPLACES the previous retained copy in one atomic step, so a standing failure keeps
+        ONE clone per source instead of accumulating one per run. No delete is involved. If
+        the park itself fails the clone stays under its run-unique name -- reported, never
+        silent.
+
+        ⛔ BUT NEVER DOWNGRADE A MORE COMPLETE RETAINED COPY. The park is an unconditional
+        `RENAME`, so the NEWEST clone always wins -- and the "incomplete copy" call site
+        retains a clone that is KNOWN to be missing data relative to the source. A later,
+        lossier clone therefore destroyed an earlier, more complete retained copy while the
+        log still asserted the survivor "may be the only copy of data the source no longer
+        has". When the retained copy strictly dominates this run's clone on (nodes, edges),
+        the retained copy is KEPT and this run's clone is left at its run-unique scratch key
+        -- the smaller copy is PRESERVED, never deleted, because a count is not containment.
+        """
+        existing_fp = _graph_counts(quarantine)
+        this_fp = _graph_counts(scratch)
+        if (existing_fp is not None and this_fp is not None
+                and _strictly_dominates(existing_fp, this_fp)):
+            say(f"  note: KEPT the retained clone {quarantine} {existing_fp} -- this run's "
+                f"clone {scratch} {this_fp} is smaller; not downgrading it. Both are kept "
+                f"(the smaller copy is never deleted); an operator clears them.")
+            return quarantine
+
+        parked = True
+        try:
+            db.connection.execute_command("RENAME", scratch, quarantine)
+        except Exception as exc:
+            parked = False
+            say(f"  note: could not park the clone at {quarantine} ({exc}); it remains at "
+                f"{scratch} (unbounded until cleared)")
+        where = quarantine if parked else scratch
+        say(f"  note: RETAINED clone {where} ({reason}) -- a failed repair is never cleaned "
+            f"up; this clone may be the only copy of data the source no longer has")
+        return where
 
     try:
         with graph_delete_lock(db) as acquired:
@@ -434,15 +545,16 @@ def repair(db, name: str, verbose: bool = True) -> tuple[bool, str]:
             if clone_fp != (before_nodes, before_edges):
                 # A count cannot catch property/label/type loss, but node AND edge equality is
                 # the strongest check available cheaply, and RENAME is irreversible.
-                drop_clone("incomplete copy")
+                retain_clone("incomplete copy")
                 return False, (f"clone {clone_fp} != source {(before_nodes, before_edges)} "
-                               f"- refusing to swap")
+                               f"- refusing to swap; clone {quarantine} RETAINED")
 
             kind, detail = probe(db, scratch)
             if kind != "ok":
                 # RETAIN the clone: it may be the only copy. Never clean up a failed repair.
+                retain_clone(f"the clone is not usable ({kind})")
                 return False, (f"the clone is not usable ({kind}: {detail}) - refusing to "
-                               f"swap; clone {scratch} retained")
+                               f"swap; clone {quarantine} retained")
 
             # #3154: GRAPH.COPY is the CORRUPTING step for a boolean `is_operator` index -- it
             # can copy the index WITHOUT its `false` posting entries, after which
@@ -456,24 +568,96 @@ def repair(db, name: str, verbose: bool = True) -> tuple[bool, str]:
                 _audit_copied_boolean_indexes(
                     clone_db, graph_name=scratch, stage="graph-write-repair clone")
             except RuntimeError as exc:
-                drop_clone("clone carries an unrepairable boolean index (#3154)")
+                retain_clone("clone carries an unrepairable boolean index (#3154)")
                 return False, (f"the clone's #3154 boolean-index audit failed ({exc}) - "
-                               f"refusing to swap")
+                               f"refusing to swap; clone {quarantine} RETAINED")
 
             say("  [3/4] clone is complete (nodes AND edges), writable, and index-audited")
 
             # Re-read immediately before the irreversible step: the section may have outlived
             # the lock's TTL, and a second run's stale clone must not overwrite a graph the
             # fleet has written to since.
+            #
+            # ⛔ PRESENCE FIRST -- BEFORE THE READ, AND THE CLONE IS RETAINED WHEN THE SOURCE
+            # IS GONE. `fingerprint()` READS, and a read on an ABSENT graph AUTO-CREATES an
+            # empty one (the module's own premise, and the hazard `tortoise/hosted_backup.py`
+            # documents). Ordering the read first is therefore not merely useless -- it is
+            # DESTRUCTIVE: the read materialises the absent graph, `now_fp` becomes (0, 0),
+            # that differs from `(before_nodes, before_edges)`, and on `main` the old
+            # `drop_clone` then DELETED THE CLONE -- leaving an empty graph and NO COPY
+            # ANYWHERE. Measured: 1500 nodes
+            # before, 0 after, clone gone. That directly contradicts the rule the COPY step
+            # already states ("RETAIN the clone: it may be the only copy").
+            # The source can genuinely vanish in this window: the graph-delete lock's TTL is
+            # NOT renewed, this section contains a full `GRAPH.COPY`, and the container is
+            # `restartpolicy=always`.
+            if not graph_exists(db, name):
+                retain_clone("the source disappeared during the repair")
+                return False, (f"the source {name!r} disappeared during the repair -- clone "
+                               f"{quarantine} RETAINED (it may be the only copy)")
             now_fp = fingerprint(db.select_graph(name))
-            # ANY change is staleness, not just a node LOSS: a concurrent ADDITION passes a
-            # `< before_nodes` test, the older clone is then swapped in, and the write that
-            # landed between COPY and RENAME is silently discarded -- the post-swap
-            # `after >= before` check cannot see it.
-            if now_fp != (before_nodes, before_edges) or not graph_exists(db, name):
-                drop_clone("source changed under us")
+            # A source that GAINED makes the clone stale, and the swap is REFUSED: a
+            # concurrent ADDITION passes a `< before_nodes` test, the older clone is then
+            # swapped in, and the write that landed between COPY and RENAME is silently
+            # discarded -- the post-swap `after >= before` check cannot see it.
+            #
+            # ⛔ BUT A LOSS IS NOT STALENESS -- IT IS THE CASE WHERE THE CLONE MAY BE THE
+            # ONLY COPY, SO IT IS RETAINED. The presence check above is not sufficient
+            # on its own: `fingerprint()` READS, and a read auto-creates, so the destructive
+            # path survives it in two ways. (1) TOCTOU -- the source can be deleted between
+            # the presence check and this read, and the read then materialises an empty
+            # graph. (2) PRESENT BUT EMPTIED -- presence is genuinely true and the read
+            # still yields (0, 0). Both reached the old `drop_clone` and deleted the only
+            # surviving copy.
+            # The distinction that matters is DIRECTION: a source that GAINED makes the
+            # clone stale; a source that LOST nodes or edges, or that reads empty, may mean
+            # the clone is all that is left.
+            if now_fp != (before_nodes, before_edges):
+                if now_fp[0] < before_nodes or now_fp[1] < before_edges:
+                    retain_clone("the source lost data during the repair")
+                    return False, (f"the source LOST data during the repair ({now_fp} vs "
+                                   f"{(before_nodes, before_edges)}) -- clone {quarantine} "
+                                   f"RETAINED (it may be the only copy)")
+                retain_clone("source grew under us")
                 return False, (f"the source changed during the repair ({now_fp} vs "
-                               f"{(before_nodes, before_edges)}) - refusing to swap over it")
+                               f"{(before_nodes, before_edges)}) - refusing to swap over "
+                               f"it; clone {quarantine} RETAINED")
+
+            # ⛔ THE COUNT GATE IS EQUALITY, NOT IDENTITY -- SO RE-PROBE THE SOURCE.
+            # `now_fp == (before_nodes, before_edges)` cannot see a NET-ZERO churn: an
+            # operation that removes one node/edge and adds another (a supersede is exactly
+            # that shape) leaves both counts unchanged, the gate passes, and the older clone
+            # is RENAMEd in -- discarding the concurrent write while reporting success. The
+            # false negative only matters while the source ACCEPTS WRITES, because an
+            # unwritable source refuses every write and no churn can land. So the swap is
+            # licensed ONLY while the source is STILL refusing writes with the defect this
+            # repair targets; anything else (healthy, or state not established) retains the
+            # clone and refuses. An identity check over ~20k nodes is not cheap; re-using the
+            # probe's write test is the cheap sufficient one.
+            src_kind, src_detail = probe(db, name)
+            if src_kind != "defect":
+                retain_clone(f"the source is no longer refusing writes ({src_kind})")
+                return False, (f"the source {name!r} is no longer in the repair's defect "
+                               f"state ({src_kind}: {src_detail}) -- the clone may be stale "
+                               f"and concurrent writes may be landing; refusing to swap; "
+                               f"clone {quarantine} RETAINED")
+
+            # ⛔ RE-VERIFY THE CLONE IMMEDIATELY BEFORE THE SWAP. Everything checked about the
+            # clone happened earlier -- its copy, its fingerprint, its probe, its index audit
+            # -- and this is the last moment a check can still run BEFORE the irreversible
+            # step. The clone is STATIC after its audit (nothing writes to it), so this
+            # comparison is exact, not a heuristic: it is what stops an empty phantom from
+            # being swapped over the live graph when the clone was deleted and then
+            # auto-created empty by someone's read in the meantime.
+            if not graph_exists(db, scratch):
+                retain_clone("the clone vanished before the swap")
+                return False, (f"the clone {scratch} is GONE before the swap -- it was "
+                               f"deleted mid-run and any read of its key would auto-create "
+                               f"an EMPTY graph, which must never be swapped over {name!r}")
+            if fingerprint(db.select_graph(scratch)) != (before_nodes, before_edges):
+                retain_clone("the clone no longer matches the source snapshot")
+                return False, (f"the clone {scratch} no longer matches the "
+                               f"{(before_nodes, before_edges)} snapshot -- refusing the swap")
 
             # ATOMIC. `RENAME` overwrites in one step, so there is never a window in which
             # `name` is absent -- that window is what auto-created an empty graph and
@@ -483,10 +667,32 @@ def repair(db, name: str, verbose: bool = True) -> tuple[bool, str]:
                 db.connection.execute_command("RENAME", scratch, name)
             except Exception as exc:
                 present = graph_exists(db, name)
+                # ⛔ PARK THE CLONE HERE TOO. This is the one failure the scheduled job is
+                # GUARANTEED to retry (the probe still classes the graph as the defect), so
+                # leaving the clone under its run-unique name leaked a full copy per run
+                # and no `__gwr_q_*` ever appeared (#8451 review cycle 5, P2). The park is
+                # an atomic RENAME of a graph this run owns; if it fails, `retain_clone`
+                # reports the clone is still at `scratch`.
+                where = retain_clone("the swap RENAME failed")
                 return False, (f"RENAME failed: {exc}; source present={present}, "
-                               f"clone {scratch} retained as the fallback")
+                               f"clone {where} retained as the fallback")
     except Exception as exc:
-        return False, f"repair aborted: {type(exc).__name__}: {exc}"
+        # ⛔ THE OUTER FAILURE PATH RETAINS TOO. Anything raised around the lock (or inside
+        # it before the branches above) used to return with the clone still at its
+        # run-unique name, so a standing failure accumulated one full copy per run. Park it
+        # when a clone exists; if even this fails, the message still names where it was left.
+        where = None
+        try:
+            clone_present = graph_exists(db, scratch)
+        except Exception:
+            clone_present = False
+        if clone_present:
+            try:
+                where = retain_clone("the repair aborted")
+            except Exception:
+                where = scratch
+        tail = f"; clone {where} retained as the fallback" if where else ""
+        return False, f"repair aborted: {type(exc).__name__}: {exc}{tail}"
 
     # ⛔ NO COPY IS RETAINED AFTER A SUCCESSFUL SWAP: `RENAME` MOVES the clone, it does not
     # copy it. If the source still exists the swap did not happen, and that IS a failure.
