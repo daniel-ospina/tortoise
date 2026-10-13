@@ -13,7 +13,7 @@ aboutObjects: EXTRACTOR-V4-ARCHITECTURE.md, extractor pipeline, S2.2 VET, entity
 
 **Status:** design in progress, 2026-09-23. **Home:** `#4894` (write-path redesign). **Predecessor:** `#1509` (extractor v3, approved 2026-08-20, never built).
 
-**⚠️ Code citations — revision pin.** Every `file.py:NNNN` reference here is pinned to commit **`c79ba1cf2`**. Line numbers drift as the code moves; **the symbol name is authoritative and the line number is a convenience.** Verify against the symbol, not the number.
+**⚠️ Code citations — revision pin.** Every `file.py:NNNN` reference here is pinned to commit **`c79ba1cf2`** — **except where a passage names a later pin** (the §S4 drift marker pins to `4c801fb18`; the §7 `value_gate` citations are at HEAD, since their subject landed *after* `c79ba1cf2`). Line numbers drift as the code moves; **the symbol name is authoritative and the line number is a convenience.** Verify against the symbol, not the number.
 **Related:** `docs/architecture/STORAGE-ARCHITECTURE.md` · `#1026` (pack slots) · `#2281` (ask/answer over distilled knowledge) · `#2730` (entity attachment) · `#4333` (volume/economics) · `#4240` (edge durability) · `#4911` (secret redaction) · `#4899` (the gate). **Full issue map: §15.**
 
 ---
@@ -503,7 +503,7 @@ This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 2. **Atomicity:** is this ONE claim, or several fused together? *(Atomicity is a property of the item — this is where it belongs, not on the narrative.)*
 3. **Worth keeping — judged against THE PACK (`#1026`'s `valueGate`).** Not a generic value judgment: **is this durable, per the pack's own declaration?**
 
-> **This is where the pack stops being prose.** `packs/dev/manifest.yaml` already declares `memory_granularity` — *"Durable: problem-family reasoning … Ephemeral: issue/PR numbers, CI status, test counts, commit hashes, tool workarounds, sprint mechanics."* Today that string is **rendered into the S1 prompt and not enforced** (`_granularity_text()`). **S2.2 is the step where the declaration becomes a gate** — the missing `valueGate` slot of `#1026`, realised as an adversarial question. See `#4899`.
+> **This is where the pack stops being prose.** `packs/dev/manifest.yaml` already declares `memory_granularity` — *"Durable: problem-family reasoning … Ephemeral: issue/PR numbers, CI status, test counts, commit hashes, tool workarounds, sprint mechanics."* Today that string is **rendered into the S1 prompt and not enforced** (`_granularity_text()`). **S2.2 is the step where the declaration becomes a gate** — the `valueGate` slot `#1026` declared (⚠️ **nothing reads it yet** — `packs/_template/manifest.yaml:260`, and `tests/test_pack_extraction_slots_v31.py` pins only its shape), realised as an adversarial question. ⚠️ **The mechanical half SHIPPED:** `tortoise/value_gate.py` (`#4899` CLOSED `COMPLETED`) — but it is **OFF by default** (`TORTOISE_VALUE_GATE` unset ⇒ *"the predicate never runs"*) and **subordinate to VET**. So the open work is a **default and a subordination, not a missing slot**.
 
 #### Level 2 — per-batch: did this batch come out right? (a batch verdict, not a per-item one)
 
@@ -556,8 +556,9 @@ This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 > `run_s4` on the strength of this document alone.**
 >
 > **On the step *names*:** the code's own stages are **S1–S5** (`[S1] STORY SUMMARY` … `[S5] EMBED`, module
-> docstring `:10-29`), with `S2.2 VET` present in the production path (`:7331`). **Only `S0` and `S6` have
-> no code counterpart** — those two are v4 design names. ⚠️ **An earlier version of this marker claimed
+> docstring `:10-29`), with `S2.2 VET` present in the production path (`:7331`). **`S0`, `S2.3` and `S6` have
+> no code counterpart** — those three are v4 design names (`S2.3` appears **0 times** in `extractor_v2.py`;
+> the only living `S2.3` string in `tortoise/` is `vet_gate.py`'s docstring quoting this document). ⚠️ **An earlier version of this marker claimed
 > `S3` and `S5` were absent from the code as well; that was wrong** — `S3` and `S5` appear 51 and 22 times
 > in `extractor_v2.py`, including as production stage comments.
 >
@@ -945,7 +946,7 @@ v3's **E2** requires state-value facts be preserved verbatim (*"personal best 5K
 | **D5** | One adversarial reviewer — **one step, two questions, one artifact**: item validity **+ coverage**, both at **S2.2**. | **DECIDED** |
 | **D6** | **Two distinct connection sets** — within-batch and to-graph, both **proposed by the model** (*"LLM proposed good"*). | **DECIDED (confirmed)** |
 | **D7** | **Lifecycle = appended Events + folded status**, the PR *as* the Event. | **DECIDED** |
-| **D8** | **State values → structural storage**, testing whether embeddings can be skipped. ⚠️ **`#1534` CLOSED and `#2453` LANDED (`4a690d0be`) — the RETAIN half is done; the ENFORCEMENT half is `#4899`'s.** | **DECIDED (retain half landed)** |
+| **D8** | **State values → structural storage**, testing whether embeddings can be skipped. ⚠️ **`#1534` CLOSED and `#2453` LANDED (`4a690d0be`) — the RETAIN half is done. The ENFORCEMENT half LANDED TOO: `#4899` CLOSED `COMPLETED`, `tortoise/value_gate.py` ships — but it is OFF by default (`TORTOISE_VALUE_GATE`) and subordinate to VET.** | **DECIDED (retain half landed)** |
 | **D9** | **The lookup follows extraction.** **S3 owns it** — keyed on candidates, narrative as disambiguation context. **No pre-load, no S1.5.** ⚠️ **S3's scope overlaps `#2730`'s — reconcile before building.** | **DECIDED** |
 | **D10** ⭐ | **A document is a SOURCE, not a graph node.** `:Document` folds into `:Source`; content moves to raw storage; **liveness is a READ of its entities** (high confidence, not superseded, not NANDed). The entity layer becomes **uniform over documents, code and transcripts.** *"that's the reasoning/knowledge layer."* **⭐ The ontology half is LANDED: `ONTOLOGY.md` v3.15, PR #5022 (29 sites).** **⚠️ The code half has NOT landed, and it is bounded by `#2489`** (replay key `coalesce(title,name)` → `url`; rebuild does not repair pre-existing graphs). **Five consequences ruled 2026-09-24 — see the §S0 block above and `STORAGE §9.5`:** **Q1** `aboutDocument` kept, label retargeted only (**NOT** collapsed into `aboutSource` — that would delete a rebuild guarantee); **Q2** two axes kept (`sourceKind` + `documentKind`); **Q3** `doc_status` dropped, `format` moves, `content` leaves the graph; **Q4** the `documents` cap re-pointed at `:Source`; **Q5** fold + rekey + migrate — **free today, expires when the commit lane first runs**. | **DECIDED 2026-09-24** |
 | **D11** ⭐ | **Stay on hosted FalkorDB; optimisation deferred.** Revisit with users; price **self-hosting** first (SSPLv1 — same engine, no rewrite). | **DECIDED 2026-09-24** |
@@ -1205,14 +1206,14 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 
 | section | issue(s) | what the issue takes from here |
 |---|---|---|
-| §1 the mechanism (`^the <X>`, 62.3% of Objects) | **`#4899`** · `#4894` | the **mechanical DISCARD outcome on E7** — the `valueGate` slot, no LLM, flag-gated |
+| §1 the mechanism (`^the <X>`, 62.3% of Objects) | **`#4899`** (CLOSED `COMPLETED`) · `#4894` | the **mechanical DISCARD outcome on E7** — `tortoise/value_gate.py`, no LLM, **flag-gated OFF by default** |
 | §1 v2 → v3 → v4 | `#1509` (epic) · `#4894` | **v3 increases volume; v4 must land with or before v3's E2/E3** — and v3's **E4 has already landed** (`merge_embed_lists`, `extractor_v2.py:4845`), so its premise is stale |
 | §2 three tiers | `#2281` | the **narrative is the ingest-time-distilled layer** with raw-turn fallback |
 | §2 narrative placement (D1) | `#4894` | narrative = `Source` metadata, **not** a `Document` node |
 | §3 source-varying steps | `#2714` · `#1844` | source types declare a **field→type mapping** that configures S0/S1/S2/S5; structured sources are exact and cheap |
 | §4 S0–S6 | `#4894` · `#1509` | the step architecture itself |
 | §4 S3 RESOLVE (was S1.5) | `#4511` (**CLOSED** — now just a fixed bug, no longer a dependency) · `#2730` | **entity attachment** is the mechanism; the lookup is keyed on candidates and disambiguated by the narrative |
-| §4 S2.2 VET + §6 Jev | **`#1026`** (the `valueGate` slot) · `#4899` | Jev as the **decision-only** mechanism; measured **$0.000243/item at 3 questions**, **~4–7× cheaper than frontier, not 40–400×** |
+| §4 S2.2 VET + §6 Jev | **`#1026`** (CLOSED — the `valueGate` slot it declared) · `#4899` (CLOSED — the S2.2b predicate that ships) | Jev as the **decision-only** mechanism; measured **$0.000243/item at 3 questions**, **~4–7× cheaper than frontier, not 40–400×** |
 | §4 S3 MATCH | `#2730` | find **and attach** — Jev as a `Choice` over supplied candidates |
 | §4 S5 CONNECT + §5 lifecycle (D6/D7) | **`#2552`** · **`#4716`** (both CLOSED `COMPLETED`) | the measured **0/4** on the planted-operator corpus — operator edges **were not wired or persisted**, the mint bypassed E7, and endpoint refs were never remapped |
 | §5 lifecycle events | `#4240` (CLOSED `COMPLETED`) | lifecycle is **appended Events + folded status** — which is why the **then-missing** journal was a durability bug |
