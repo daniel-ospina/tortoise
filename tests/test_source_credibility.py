@@ -390,6 +390,51 @@ class TestBaselineProvenance:
         assert pt["ep_alpha"] == 9.0  # untouched (explicit)
         assert pt["ep_beta"] == 1.0
 
+    def test_legacy_pre_2199_token_rows_are_frozen_against_recompute(self, sdk):
+        """#6151 review round 6 P2 — the pre-#2199 token spellings are frozen.
+
+        `set_point_baseline` REFUSES to write 'explicit'/'inherited' (they were
+        renamed in #2199), but a graph the one-time rename migration has not
+        been run against still carries them — a state `calibrate_summary`
+        anticipates and reports with the fix path. The freeze predicate's old
+        allow-list (`bl_src in (set-by-author, system-default)`) matched neither
+        spelling, so a legacy `'explicit'` row — label-less and AUTHORED, the
+        exact #844 class this guard exists for — fell through to the recompute
+        and was silently overwritten (measured: 0.4/'explicit' -> 5.0/
+        'inherited-from-source'), while origin/main kept it. The polarity is now
+        "freeze everything that is not a derivation": a token that is not the
+        CURRENT `inherited-from-source` spelling — including an unrecognised
+        one — is frozen, so no legacy or future spelling can silently overwrite
+        a belief.
+
+        The re-baseline loop below is the NON-VACUITY control: the source edge is
+        live (the same row with `inherited-from-source` recomputes to 5.0), so
+        the freeze is the token class, not a dead edge.
+        """
+        url = "https://legacy-token.example"
+        sdk.create_source(url, "document", tier="T1", sourceDate=FRESH)
+        pid = sdk.create_point("statement", "legacy token row",
+                               extractedFrom=url)["id"]
+
+        def _recompute_with_token(token):
+            sdk._get_proj().g.query(
+                "MATCH (n:Point {id:$id}) SET n.ep_alpha=0.4, n.ep_beta=1.0, "
+                "n.baseline_set=true, n.baseline_source=$tok",
+                params={"id": pid, "tok": token},
+            )
+            sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+            return sdk.get_point(pid)
+
+        for legacy_token in ("explicit", "inherited", "banana"):
+            pt = _recompute_with_token(legacy_token)
+            assert pt["ep_alpha"] == pytest.approx(0.4), (legacy_token, pt)
+            assert pt["baseline_source"] == legacy_token, (legacy_token, pt)
+
+        # CONTROL — the derived spelling is NOT frozen and does recompute.
+        pt = _recompute_with_token("inherited-from-source")
+        assert pt["ep_alpha"] == pytest.approx(5.0), pt
+        assert pt["baseline_source"] == "inherited-from-source", pt
+
     def test_inherited_recomputes_when_source_ages(self, sdk):
         """Dynamic decay: aging the sourceDate lowers the inherited prior (interval=0)."""
         url = "https://aging.example"
@@ -530,8 +575,8 @@ class TestBaselineProvenance:
             "a rejected generic write must not have stored the label")
 
     def test_baseline_fields_are_not_generic_properties(self, sdk):
-        """#6151 review P3-2 / #7951 — the generic bag refuses the BASELINE
-        fields too, not only ``credibility``.
+        """#6151 review P3-2 / #7951 / round 6 P1 — the generic bag refuses the
+        BASELINE fields too, not only ``credibility``.
 
         ``ep_alpha``/``ep_beta``/``baseline_set``/``baseline_source`` belong to
         the dedicated writers (``set_point_baseline``, the inheritance
@@ -540,6 +585,14 @@ class TestBaselineProvenance:
         word-bearing ``set-by-author`` row left the label intact and wrote a
         "frozen" value the recompute then replaced (measured 0.4 -> 5.1), and
         ``baseline_source='system-default'`` forged the #2199 provision.
+
+        ROUND 6 P1: this reject is UNGATED (it used to sit behind
+        `reject_belief_props`, which `create_point` never passes). The create
+        map is built as `_create_map.update(_baseline_create_fields())` BEFORE
+        the caller's props loop, so a caller's `ep_alpha`/`baseline_source`
+        OVERRODE the writer's own baseline values at birth — measured as a
+        FROZEN 10.0 a real T1 source could never move. The `create_point`
+        cases below fail on the pre-fix code (they were accepted and stored).
         """
         p = sdk.create_point("statement", "no generic baseline")["id"]
         for key, val in (("ep_alpha", 0.4), ("ep_beta", 1.0),
@@ -547,14 +600,60 @@ class TestBaselineProvenance:
                          ("baseline_source", "set-by-author")):
             with pytest.raises(ValueError, match=key):
                 sdk.update_point(p, **{key: val})
+            # #6151 round 6 P1: the SAME keys are refused at birth, where the
+            # caller's value would beat `_baseline_create_fields`.
+            with pytest.raises(ValueError, match=key):
+                sdk.create_point("statement", f"forged {key} birth", **{key: val})
         with pytest.raises(ValueError, match="baseline_source"):
             sdk.update_entity(p, baseline_source="system-default")
         with pytest.raises(ValueError, match="ep_alpha"):
             sdk.create_entity("subject", "generic baseline", ep_alpha=0.4)
+        # The whole quartet at once (the measured forgery) and the forged
+        # #2199 provision token must both be refused before any write.
+        with pytest.raises(ValueError, match="baseline_set"):
+            sdk.create_point(
+                "statement", "forged strong birth", status="live",
+                ep_alpha=10.0, ep_beta=1.0, baseline_set=True,
+                baseline_source="set-by-author")
+        with pytest.raises(ValueError, match="baseline_source"):
+            sdk.create_point(
+                "statement", "forged sysdefault birth", status="live",
+                ep_alpha=3.0, ep_beta=1.0, baseline_set=True,
+                baseline_source="system-default")
+        # The reviewer's third probe: a WORD plus a forged strong prior — the
+        # ruling's own symptom (`credibility='T0'` on a mean-0.9091 prior)
+        # reappearing through a non-word key.
+        with pytest.raises(ValueError, match="ep_alpha"):
+            sdk.create_point(
+                "statement", "word and forged prior", status="live",
+                credibility="gold", ep_alpha=10.0, ep_beta=1.0)
         pt = sdk.get_point(p)
         assert pt.get("baseline_set") in (None, False), (
             "a rejected generic write must not have stored a baseline")
         assert pt.get("ep_alpha") is None, pt
+
+    def test_mcp_boundary_refuses_the_belief_quartet_at_birth(self):
+        """#6151 review round 6 P1 — the MCP prop boundary refuses the quartet.
+
+        `tortoise_create_point` does `merged = dict(props or {})` and splats it
+        into `sdk.create_point(**merged)`. The SDK reject is the fail-closed
+        backstop; `_SERVER_MANAGED_PROPS` is the boundary check IN FRONT of it,
+        matching the `embedding_*`/`rawState` pattern. `credibility` stays out
+        of the set — it is a documented `create_point`/`mitigate_operator`
+        input the SDK validates and accounts.
+        """
+        from tortoise import mcp_server
+        for key in ("ep_alpha", "ep_beta", "baseline_set", "baseline_source",
+                    "baseline_system_default"):
+            assert key in mcp_server._SERVER_MANAGED_PROPS, (
+                f"{key} left the MCP server-managed boundary")
+            assert mcp_server._reject_server_managed_props({key: 1}), (
+                f"{key} was not rejected at the MCP boundary")
+        assert "credibility" not in mcp_server._SERVER_MANAGED_PROPS, (
+            "credibility is a documented create_point/mitigate_operator input "
+            "and must stay accepted at the boundary")
+        assert not mcp_server._reject_server_managed_props(
+            {"credibility": "gold"}), "the word was refused at the boundary"
 
     def test_system_default_token_cannot_forge_the_2199_provision(self, sdk):
         """#6151 review P1(b) — the ``baseline_system_default`` marker is

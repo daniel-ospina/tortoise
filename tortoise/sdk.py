@@ -3019,28 +3019,46 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # provision (measured +2.0 unearned, 1.2 -> 3.2), and `ep_alpha=0.4` on a
     # word-bearing `set-by-author` row wrote a "frozen" value the recompute
     # then replaced (0.4 -> 5.1). Fail closed; #7951 owns the one chokepoint.
-    if reject_belief_props:
-        if "credibility" in props:
-            raise ValueError(
-                "'credibility' is not a generic property — it is a documented "
-                "input of create_point(credibility=…) and "
-                "mitigate_operator(credibility=…), which validate the ladder "
-                "word and record it as the authored-assertion label. Use one "
-                "of those, or set_point_baseline for an explicit belief "
-                "(#7951)."
-            )
-        _baseline_props = [k for k in
-                           ("ep_alpha", "ep_beta", "baseline_set",
-                            "baseline_source")
-                           if k in props]
-        if _baseline_props:
-            raise ValueError(
-                f"{_baseline_props} are baseline fields the dedicated writers "
-                "own (set_point_baseline for an explicit belief, the "
-                "source-inheritance recompute for a derived one) — they are "
-                "not generic properties. Use set_point_baseline(alpha, beta) "
-                "(#7951)."
-            )
+    #
+    # #6151 review P1 (round 6): the BASELINE quartet reject is UNGATED, not
+    # behind `reject_belief_props`. That flag is passed only by
+    # `update_point` / `_create_entity` / `_update_entity`, so
+    # `create_point`'s props bag still accepted them — and the create map is
+    # built as `_create_map.update(_baseline_create_fields())` BEFORE the
+    # caller's props loop (`for _key, _val in props.items()`), so a caller's
+    # `ep_alpha`/`ep_beta`/`baseline_source` OVERRODE the writer's own
+    # baseline values. Measured: `create_point("statement", "forged birth",
+    # ep_alpha=10.0, ep_beta=1.0, baseline_set=True,
+    # baseline_source="set-by-author")` persisted a FROZEN 10.0 a real T1
+    # source could never move, and the `system-default` spelling forged the
+    # #2199 provision at birth. Same server-managed class as
+    # `baseline_system_default` above: reject, never strip, because there is no
+    # legitimate caller intent. Safe to ungate — `create_point` writes its
+    # baseline fields into the create map AFTER this boundary, so no internal
+    # writer re-enters. `credibility` stays gated: it is a DOCUMENTED input of
+    # `create_point`/`mitigate_operator` (validated and accounted there), and
+    # `create_point` pops its nested spelling below.
+    if reject_belief_props and "credibility" in props:
+        raise ValueError(
+            "'credibility' is not a generic property — it is a documented "
+            "input of create_point(credibility=…) and "
+            "mitigate_operator(credibility=…), which validate the ladder "
+            "word and record it as the authored-assertion label. Use one "
+            "of those, or set_point_baseline for an explicit belief "
+            "(#7951)."
+        )
+    _baseline_props = [k for k in
+                       ("ep_alpha", "ep_beta", "baseline_set",
+                        "baseline_source")
+                       if k in props]
+    if _baseline_props:
+        raise ValueError(
+            f"{_baseline_props} are baseline fields the dedicated writers "
+            "own (set_point_baseline for an explicit belief, the "
+            "source-inheritance recompute for a derived one) — they are "
+            "not generic properties and cannot be set via create_point's "
+            "props. Use set_point_baseline(alpha, beta) (#7951)."
+        )
     # #2491: outdated is the terminalizing flag written ONLY by the lifecycle
     # writers via raw cypher (invalidate_point/supersede_point SET
     # n.outdated=true) after they journal + drop EP messages. Accepting it via
@@ -17804,9 +17822,28 @@ class TortoiseSDK:
             # assertion, never a re-opened explicit baseline. #7951 owns
             # the single write chokepoint.
             is_word_point = pid in author_word
+            # #6151 review round 6 P2: the polarity is “freeze everything that
+            # is NOT a derivation”. The old allow-list
+            # (`bl_src in (set-by-author, system-default)`) let an
+            # UNRECOGNISED token — including the pre-#2199 spellings
+            # `'explicit'` / `'inherited'` that the rename migration has not
+            # rewritten yet — fall through to the recompute. Measured: a legacy
+            # `'explicit'` row with `ep_alpha=0.4` was overwritten to `5.0` +
+            # `'inherited-from-source'`, the same #844 breach the write side
+            # refuses. `'explicit'` is the pre-rename spelling of the authored
+            # class and is frozen like it; `'inherited'` is frozen too
+            # (fail-safe) until
+            # graph-scripts/2199_baseline_source_rename.py rewrites it to the
+            # derived spelling, after which it recomputes normally. Freezing
+            # the unknown-token class by default means a token this code has
+            # never seen can never silently overwrite an author's belief.
+            # The ONE exception is unchanged and stays narrow: the #398
+            # `credibility` label on the CURRENT authored spelling, whose weak
+            # body must be displaceable by a real source.
             if (bl_src is None and bl_set) or (
-                bl_src in (BASELINE_SOURCE_SET_BY_AUTHOR, BASELINE_SOURCE_SYSTEM_DEFAULT)
-                and not (bl_src == BASELINE_SOURCE_SET_BY_AUTHOR and is_word_point)
+                bl_src not in (None, BASELINE_SOURCE_INHERITED)
+                and not (bl_src == BASELINE_SOURCE_SET_BY_AUTHOR
+                         and is_word_point)
             ):
                 continue
 
