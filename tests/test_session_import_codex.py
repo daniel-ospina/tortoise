@@ -134,6 +134,20 @@ def test_codex_parser_idempotent(codex_jsonl):
     assert parse_codex(codex_jsonl) == parse_codex(codex_jsonl)
 
 
+def test_string_content_is_trimmed_so_whitespace_is_not_a_turn(tmp_path):
+    """#2121: a STRING-shaped record whose content is whitespace-only is not
+    an utterance. The list branch trimmed each part, but the string branch
+    returned the raw value, so `{"content": "   "}` became a phantom turn
+    (the callers all skip on falsiness — `if not text`)."""
+    p = tmp_path / "ws.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in [
+        {"type": "user_message", "content": "   "},
+        {"type": "assistant_message", "content": "\n\t "},
+        {"type": "user_message", "content": "  real turn  "},
+    ]) + "\n", encoding="utf-8")
+    assert parse_codex(p) == [{"role": "user", "content": "real turn"}]
+
+
 def test_pi_parser_reads_real_pi_session_shape(pi_jsonl):
     """#3667: Pi's OWN record shape (type == "message" → message.role /
     message.content). The codex alias this replaced matched codex's `payload`

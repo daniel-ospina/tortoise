@@ -7030,6 +7030,7 @@ DEFAULT_ONBOARDING_STATE = {
     "session_capture_receipt_cursor": None,
     "session_capture_receipt_pi": None,
     "session_capture_receipt_openclaw": None,
+    "session_capture_receipt_hermes": None,
     "session_capture_last_error_claude": None,
     "session_capture_last_error_claude-desktop": None,
     "session_capture_last_error_claude-web": None,
@@ -7037,6 +7038,7 @@ DEFAULT_ONBOARDING_STATE = {
     "session_capture_last_error_cursor": None,
     "session_capture_last_error_pi": None,
     "session_capture_last_error_openclaw": None,
+    "session_capture_last_error_hermes": None,
     "install_probe_claude": None,
     "install_probe_pi": None,
     # #1893: persisted GitHub source-scope keys (written by the dashboard's
@@ -12146,6 +12148,16 @@ _SESSION_HARNESS_VALUES = frozenset({
     # OpenClaw sessions can never carry a capture receipt — the ingestion half
     # of the two-way seam would be unreachable however correctly it parsed.
     "openclaw",
+    # #2121: the Hermes seam, the same defect the OpenClaw member above closes.
+    # `sessions import --harness hermes` POSTs this value verbatim (only
+    # `desktop` is aliased), and a 422 at the Pydantic boundary is NOT in
+    # `capture_spool.classify_failure`'s transient family (402/408/425/429/5xx)
+    # — so the turns are neither stored NOR spooled, no receipt key exists, and
+    # the session is lost rather than deferred. The derived receipt/last-error
+    # keys for this member are registered in both onboarding-state dicts and the
+    # PATCH model (pinned by tests/test_5051_capture_receipt_key_registry.py
+    # and tests/test_onboarding_endpoints.py).
+    "hermes",
 })
 
 # #3516 §B / #3515 piece 8: which producer captured a session — 'hook' (the
@@ -25643,6 +25655,7 @@ _ONBOARDING_DEFAULT_STATE = {
     "session_capture_receipt_cursor": None,
     "session_capture_receipt_pi": None,
     "session_capture_receipt_openclaw": None,
+    "session_capture_receipt_hermes": None,
     "session_capture_last_error_claude": None,
     "session_capture_last_error_claude-desktop": None,
     "session_capture_last_error_claude-web": None,
@@ -25650,6 +25663,7 @@ _ONBOARDING_DEFAULT_STATE = {
     "session_capture_last_error_cursor": None,
     "session_capture_last_error_pi": None,
     "session_capture_last_error_openclaw": None,
+    "session_capture_last_error_hermes": None,
     "install_probe_claude": None,          # Task 14: harness + timestamp, no content
     "install_probe_pi": None,
     # #1893: persisted GitHub source-scope keys (dashboard scope selectors
@@ -26804,6 +26818,13 @@ class OnboardingStatePatchRequest(BaseModel):
     # tests/test_onboarding_endpoints.py::test_capture_verification_keys_not_client_writable
     # closes — it caught exactly this omission when openclaw was added).
     session_capture_receipt_openclaw: str | None = None
+    # #2121: the Hermes seam — same requirement as the OpenClaw field above: a
+    # member of _SESSION_HARNESS_VALUES derives a receipt/last-error pair of
+    # _CAPTURE_SERVER_OWNED_KEYS, and without a PATCH field its 403 refusal
+    # cannot be exercised at all (the hole
+    # tests/test_onboarding_endpoints.py::test_capture_verification_keys_not_client_writable
+    # closes).
+    session_capture_receipt_hermes: str | None = None
     session_capture_last_error_claude: str | None = None
     session_capture_last_error_claude_desktop: str | None = None
     session_capture_last_error_claude_web: str | None = None
@@ -26811,6 +26832,7 @@ class OnboardingStatePatchRequest(BaseModel):
     session_capture_last_error_cursor: str | None = None
     session_capture_last_error_pi: str | None = None
     session_capture_last_error_openclaw: str | None = None
+    session_capture_last_error_hermes: str | None = None
     install_probe_claude: str | None = None
     install_probe_pi: str | None = None
     # #1726 (Slice 1): docs staged + ingested — server-written; registered so

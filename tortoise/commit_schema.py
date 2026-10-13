@@ -625,7 +625,11 @@ class Operator(BaseModel):
     src: str
     dst: str
     op_type: Literal["IMPL", "NAND", "MITIGATES"]
-    direction: Literal["unidirectional", "bidirectional"] | None = None
+    # #7852: the Layer-1 direction vocabulary — the model's four values plus
+    # the two legacy aliases. Must stay equal to `live.ACCEPTED_DIRECTION_VALUES`;
+    # `tests/test_direction_storage_7852.py` pins the two sets, so widening one
+    # without the other reds instead of silently rejecting a valid token.
+    direction: Literal["unidirectional", "bidirectional", "->", "<-", "<->", "-"] | None = None
     target: OperatorTarget | None = None
     strength: float | None = Field(default=None, ge=0.10, le=0.50)
 
