@@ -179,6 +179,7 @@ Full split mechanics (build, version coupling, license boundary): [docs/client-s
 |---|---|---|
 | `TORTOISE_DB_URI` | — | Durable FalkorDB connection string — the recommended path (docker compose sidecar or managed Cloud); multi-writer safe |
 | `TORTOISE_DB_PATH` | `~/.tortoise/tortoise.db` | Embedded FalkorDBLite eval path — SINGLE-WRITER, eval only (concurrent writers lose data); AOF is **opt-in** (`TORTOISE_EMBEDDED_AOF=1`), **default off** since #915 — without it durability is up to the next snapshot/clean close, **not ≤1s** (#2879); delete the db + `<db>-appendonlydir` to reset |
+| `TORTOISE_EVENT_LOG_BASE_DIR` | `/data/events` when `/data` is a mount (compose sets it) | Per-graph JSONL **rebuild journal** (`<base>/<graph>/events.jsonl`) — the source `tortoise rebuild --dir` replays, so the derived graph is not the only copy. The daemon arms this automatically for a persistent `/data` volume and logs loudly instead of pretending to record when it cannot be written. **The journal is NOT the durability mechanism** — durability is the store's own persistence + an off-box copy ([docs/durability-posture.md](docs/durability-posture.md), #2881) |
 | `TORTOISE_API_KEY` | unset | Set → `auth_mode=static` (Bearer key); unset → `auth_mode=none` — ⚠️ a non-localhost bind with no key exposes an unauthenticated engine |
 | `TORTOISE_HOST` / `TORTOISE_PORT` | `127.0.0.1` / `8000` | Daemon bind |
 | `TORTOISE_RATE_LIMIT` | `100` | Requests per minute per IP (MCP SSE bursts ≈ 5–10 req/call) |

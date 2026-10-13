@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -139,6 +140,136 @@ def _resolve_event_log_path(*, namespace: str | None,
             f"(namespace={namespace!r}, graph_name={graph_name!r}) — it is not "
             "a valid graph name and could escape the journal base dir")
     return os.path.join(base, key, "events.jsonl")
+
+
+#: The self-hosted deployment's data root — the container path the image
+#: creates (`Dockerfile.selfhost`) and `docker-compose.yml` mounts a named
+#: volume on. The hosted lane has the same role for `/data` (the Fly volume).
+_SELFHOST_DATA_ROOT = "/data"
+
+#: Reasons already logged by :func:`ensure_selfhost_event_log`, so a per-request
+#: caller does not re-log the same refusal on every SDK construction.
+_SELFHOST_JOURNAL_SIGNALLED: set[str] = set()
+
+#: The arming VERDICT per data root, memoized for the process. The self-host
+#: doors call :func:`ensure_selfhost_event_log` lazily (per request) as well as
+#: at daemon start, and the answer cannot change within a process — an fd/ls
+#: probe on every request would be waste, and the second pass is also what made
+#: the probe RACY (two first requests both unlinking the fixed probe name).
+_SELFHOST_JOURNAL_ARMED: dict[str, str | None] = {}
+
+
+def _persistent_dir(path: str) -> bool:
+    """True when ``path`` is a MOUNT POINT — a dir that survives the container.
+
+    ``os.path.isdir`` alone is NOT the signal, and using it would reopen the
+    very defect #8497 closes: `Dockerfile.selfhost` creates ``/data`` at BUILD
+    time, so every container from that image has a writable ``/data`` on its
+    ephemeral layer. A journal armed there LOOKS like a record and dies with
+    the container — the "partial record" state, indistinguishable from a real
+    one. A mount point (a compose named volume, a bind mount, a Fly volume) is
+    the only shape that survives, so it is the gate.
+    """
+    try:
+        return os.path.ismount(path)
+    except OSError:  # pragma: no cover — ismount does not raise today
+        return False
+
+
+def ensure_selfhost_event_log(*, data_root: str | None = None) -> str | None:
+    """Arm the self-host deployment's per-graph JSONL journal (#8497).
+
+    Returns the journal base dir when one is armed, else ``None``.
+
+    WHY THIS EXISTS. The self-hosted instance is a SHIPPED deployment that
+    claims ``derived = replay(journal)`` exactly as the hosted lane does, but it
+    has no equivalent of the hosted ``entrypoint.sh``: nothing defaults
+    ``TORTOISE_EVENT_LOG_BASE_DIR``, so ``_resolve_event_log_path`` returns
+    ``None`` for every org graph, the SDK is built with no ``event_log_path``,
+    ``_journal_backed`` stays False and §17.1's single-writer guard is INERT on
+    a shipped deployment (`docs/architecture/STORAGE-ARCHITECTURE.md:365` — *"a
+    wiring gap, not a design gap"*). This closes the wiring gap with the SAME
+    single derivation #4240 built: it only SETS the env var, so every lane that
+    already calls ``_resolve_event_log_path`` (``mcp_auth._get_org_sdk`` for the
+    MCP door, ``selfhost_api._sdk`` for the REST door) gets a real journal and
+    the derivation stays in exactly one place.
+
+    ⚠️ The journal is the REBUILD source, never the durability mechanism
+    (``docs/durability-posture.md``; the ``#2881`` collision is CLOSED by
+    scoping, §14.1 O1). Arming it does not change the self-hosted durability
+    row: on-box AOF, no off-box copy (#2880).
+
+    HONEST DEGRADE — it never raises, never exits, and never writes to a
+    fallback location:
+      * an EXPLICIT ``TORTOISE_EVENT_LOG_BASE_DIR`` always wins (the operator's
+        choice, the pre-existing contract) and is returned unchanged — it is
+        still probed, so an unwritable one is a loud boot ERROR rather than a
+        surprise on the first write (the probe never overrides the value:
+        appends stay fail-soft, counted and receipt-disclosed);
+      * otherwise the default ``<data_root>/events`` is armed only when
+        ``data_root`` is a persistent mount (``_persistent_dir``);
+      * a default that cannot be created/probed writable leaves the env UNSET
+        and logs a loud ERROR — the instance is journal-less AND says so,
+        rather than pretending to record. A broken install must keep serving.
+    """
+    explicit = os.environ.get(_HOSTED_EVENT_LOG_ENV)
+    if explicit:
+        _probe_journal_dir(explicit)
+        return explicit
+    root = _SELFHOST_DATA_ROOT if data_root is None else data_root
+    if root in _SELFHOST_JOURNAL_ARMED:
+        return _SELFHOST_JOURNAL_ARMED[root]
+    if not _persistent_dir(root):
+        # No persistent volume → no default. This is the dev/CI/test and the
+        # ephemeral `docker run` shape: those lanes stay journal-less by design
+        # (the #4240 boundary the issue's OVERRIDES marker keeps for
+        # embedded/dev/CI), and nothing is logged on the common path. An
+        # operator who wants a journal off the default path sets the env var.
+        _SELFHOST_JOURNAL_ARMED[root] = None
+        return None
+    base = os.path.join(root, "events")
+    if not _probe_journal_dir(base):
+        _SELFHOST_JOURNAL_ARMED[root] = None
+        return None
+    os.environ[_HOSTED_EVENT_LOG_ENV] = base
+    _SELFHOST_JOURNAL_ARMED[root] = base
+    return base
+
+
+def _probe_journal_dir(base: str) -> bool:
+    """True when ``base`` can hold records: created, and provably writable.
+
+    The probe file is UNIQUE (``mkstemp``), not the hosted lane's fixed
+    ``.write-probe`` name: two self-host doors arming concurrently would
+    otherwise have one thread's ``unlink`` hit the other's already-removed
+    probe and read a writable journal as unwritable. The temp file is created
+    and removed inside ``base`` so the check is a real write on the real
+    filesystem — ``mkdir -p`` alone succeeds on an existing, unwritable dir.
+
+    Never raises: a failed probe is a REFUSAL (reported by the caller), and an
+    unwritable journal must degrade honestly rather than break the install.
+    """
+    try:
+        os.makedirs(base, exist_ok=True)
+        fd, probe = tempfile.mkstemp(dir=base, prefix=".write-probe-")
+        os.close(fd)
+        os.unlink(probe)
+    except OSError as exc:
+        reason = f"{base}:{type(exc).__name__}"
+        if reason not in _SELFHOST_JOURNAL_SIGNALLED:
+            _SELFHOST_JOURNAL_SIGNALLED.add(reason)
+            logger.error(
+                "self-host journal unavailable — cannot record under %s (%s). "
+                "The instance runs with NO journal: `derived = replay(journal)` "
+                "is false, `rebuild` has nothing to replay, and the §17.1 "
+                "single-writer guard has nothing to enforce. Fix the volume's "
+                "permissions (or point %s at a writable directory) — this is a "
+                "REBUILDABILITY loss, not a durability change (docs/durability-"
+                "posture.md).",
+                base, exc, _HOSTED_EVENT_LOG_ENV,
+            )
+        return False
+    return True
 
 
 def is_loopback_uri(uri: str | None) -> bool:

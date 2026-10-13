@@ -34,6 +34,20 @@ services:
       # ⚠️ Set a strong key before exposing beyond localhost (auth_mode=static);
       # unset + loopback bind → auth_mode=none (eval only).
       TORTOISE_API_KEY: ""
+      # #8497: the per-graph JSONL REBUILD journal. Without it the self-hosted
+      # deployment was journal-less by construction: the derived graph was the
+      # ONLY copy, `rebuild` had nothing to replay, and §17.1's single-writer
+      # guard was inert (`config.ensure_selfhost_event_log` also defaults this
+      # when /data is a mount; stating it here makes the deployment's config
+      # inspectable). The journal is the REBUILD source — NOT the durability
+      # mechanism: durability is the sidecar's AOF + volume
+      # (docs/durability-posture.md).
+      TORTOISE_EVENT_LOG_BASE_DIR: "/data/events"
+    volumes:
+      # #8497: the journal (and the embedded-eval DB, when that path is used)
+      # must outlive the container — /data is the persistent root the journal
+      # default is gated on.
+      - tortoise-data:/data
     depends_on:
       falkordb:
         condition: service_healthy
@@ -92,3 +106,4 @@ services:
 
 volumes:
   falkordb-data:
+  tortoise-data:

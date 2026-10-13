@@ -5,11 +5,12 @@ self-host daemon's REST router (auth_mode none + static).
 """
 from __future__ import annotations
 
+import logging
 import os
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
-import pytest  # noqa: F401
+import pytest
 
 
 def _client_for_env(monkeypatch, tmp_path, **env):
@@ -226,3 +227,234 @@ class TestStaticAuth:
             r = tc.post("/v1/points", json={"content": "authed", "kind": "statement"},
                         headers={"Authorization": "Bearer rest-secret"})
             assert r.status_code == 200, r.text
+
+
+class TestSelfHostJournal8497:
+    """#8497 — the self-host deployment must have a RECORD, not only a cache.
+
+    The defect (re-measured on the head): `config._resolve_event_log_path`
+    returns `None` unless `TORTOISE_EVENT_LOG_BASE_DIR` is set, nothing in the
+    self-host deployment set it, and **`selfhost_api._sdk` built every SDK with
+    no `event_log_path`** — so even setting the variable armed the MCP door
+    (`mcp_auth._get_org_sdk` already threads it) and left `/v1/*` writing an
+    UNRECORDED graph: `_journal_backed` False, §17.1 inert, `rebuild` with
+    nothing to replay. A partial journal looks like a record and is not one.
+
+    What each case pins (the value that makes it fail, and why it is reachable):
+
+    * ``test_default_arms_a_real_journal_when_the_data_root_is_a_mount`` — FAILS
+      on the pre-fix head with ``AttributeError`` (no arming seam existed at
+      all). Reachable: a mounted data root is the shape `Dockerfile.selfhost` +
+      `docker-compose.yml` produce.
+    * ``test_explicit_base_dir_wins_over_the_default`` — FAILS while the default
+      overrides an operator's own value.
+    * ``test_unwritable_default_refuses_loudly_and_arms_nothing`` — FAILS while
+      an unwritable default is silent (the state must be a loud refusal, never a
+      quiet durability-shaped claim). Reachable without root: a FILE where the
+      journal dir should be makes ``makedirs`` raise for any uid.
+    * ``test_no_persistent_mount_arms_nothing`` — FAILS while existence alone
+      (rather than a mount) gates the default; the image creates `/data` at
+      BUILD time, so an existence gate would arm an ephemeral journal that dies
+      with the container. Reachable: dev/CI/test lanes have no mount.
+    * ``test_rest_door_carries_the_journal_and_arms_the_guard`` — FAILS while
+      `_sdk()` omits ``event_log_path`` (the pre-fix state: a real REST write
+      lands no record and a direct fold folds instead of raising).
+    * ``test_every_selfhost_sdk_construction_carries_the_journal`` — the
+      inventory guard: the #8497 defect WAS one door silently omitting the
+      argument, so a new unarmed door must red.
+    """
+
+    def _mounted_data_root(self, tmp_path, monkeypatch, *, mounted=True) -> str:
+        """A data root whose ``_persistent_dir`` answer the test controls."""
+        from tortoise import config
+
+        root = tmp_path / "data"
+        root.mkdir()
+        monkeypatch.setattr(config, "_persistent_dir", lambda _p: mounted)
+        return str(root)
+
+    def test_persistent_dir_is_a_mount_not_a_directory(self, tmp_path):
+        """The gate itself — pinned on the REAL function, no monkeypatch.
+
+        Every arming case above fakes ``_persistent_dir``, so without this pin a
+        regression of its body from ``os.path.ismount`` to ``os.path.isdir``
+        leaves them all green while T5 returns: the self-host image creates
+        ``/data`` at BUILD time, so an existence gate arms a journal on the
+        container's ephemeral layer — a record that dies with the container and
+        is indistinguishable from a real one.
+        """
+        from tortoise import config
+
+        assert config._persistent_dir("/") is True, (
+            "`/` is a mount point on every POSIX platform — if this is False the "
+            "persistence gate is not asking about mounts at all")
+        assert config._persistent_dir(str(tmp_path)) is False, (
+            "a plain directory on the container's writable layer must NOT count "
+            "as persistent — an existence gate is the #8497 T5 defect")
+
+    def test_default_arms_a_real_journal_when_the_data_root_is_a_mount(
+            self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TORTOISE_EVENT_LOG_BASE_DIR", raising=False)
+        root = self._mounted_data_root(tmp_path, monkeypatch)
+
+        from tortoise import config
+
+        base = config.ensure_selfhost_event_log(data_root=root)
+        assert base == os.path.join(root, "events"), base
+        assert os.path.isdir(base)
+        assert os.environ["TORTOISE_EVENT_LOG_BASE_DIR"] == base
+        # The ONE derivation now resolves a real path for the self-host org
+        # graph — the property `rebuild` and §17.1 both depend on.
+        assert config._resolve_event_log_path(
+            namespace="selfhost", graph_name=None) == os.path.join(
+                base, "org_selfhost", "events.jsonl")
+
+    def test_explicit_base_dir_wins_over_the_default(self, tmp_path, monkeypatch):
+        explicit = tmp_path / "operator-chosen"
+        monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", str(explicit))
+        root = self._mounted_data_root(tmp_path, monkeypatch)
+
+        from tortoise import config
+
+        assert config.ensure_selfhost_event_log(data_root=root) == str(explicit)
+        # The operator's path is authoritative: the default was never created.
+        assert not (tmp_path / "data" / "events").exists()
+
+    def test_unwritable_default_refuses_loudly_and_arms_nothing(
+            self, tmp_path, monkeypatch, caplog):
+        monkeypatch.delenv("TORTOISE_EVENT_LOG_BASE_DIR", raising=False)
+        root = self._mounted_data_root(tmp_path, monkeypatch)
+        # A FILE where the journal directory must go: ``makedirs`` raises
+        # ``FileExistsError`` for any uid (no chmod/root dependency).
+        (tmp_path / "data" / "events").write_text("not a directory")
+
+        from tortoise import config
+
+        with caplog.at_level(logging.ERROR):
+            assert config.ensure_selfhost_event_log(data_root=root) is None
+        # Honest refusal: nothing is armed, so nothing can pretend to record.
+        assert "TORTOISE_EVENT_LOG_BASE_DIR" not in os.environ
+        assert config._resolve_event_log_path(
+            namespace="selfhost", graph_name=None) is None
+        assert any("journal unavailable" in r.message for r in caplog.records), (
+            "an unwritable self-host journal must be LOUD — a silent degrade "
+            "is the durability claim this issue closes (#8497)")
+
+    def test_no_persistent_mount_arms_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TORTOISE_EVENT_LOG_BASE_DIR", raising=False)
+        root = self._mounted_data_root(tmp_path, monkeypatch, mounted=False)
+
+        from tortoise import config
+
+        assert config.ensure_selfhost_event_log(data_root=root) is None
+        assert "TORTOISE_EVENT_LOG_BASE_DIR" not in os.environ
+        # No filesystem side effect at all on a non-persistent root.
+        assert not (tmp_path / "data" / "events").exists()
+
+    def test_rest_door_carries_the_journal_and_arms_the_guard(
+            self, monkeypatch, tmp_path):
+        events = tmp_path / "events"
+        tc = _client_for_env(
+            monkeypatch, tmp_path, TORTOISE_EVENT_LOG_BASE_DIR=str(events))
+        with tc:
+            r = tc.post("/v1/points",
+                        json={"content": "journaled via REST", "kind": "statement"})
+            assert r.status_code == 200, r.text
+
+            from tortoise import selfhost_api as _sha
+
+            sdk = _sha._sdk()
+            try:
+                expected = os.path.join(str(events), "org_selfhost", "events.jsonl")
+                assert sdk._event_log_path == expected, sdk._event_log_path
+                assert sdk._get_event_log() is not None
+                proj = sdk._get_proj()
+                assert proj._journal_backed is True, (
+                    "the REST door built a journal-less SDK — every write on "
+                    "/v1/* lands no record and §17.1 is inert (#8497)")
+                from tortoise.projection import DirectCacheWriteRefused
+
+                with pytest.raises(DirectCacheWriteRefused):
+                    proj.apply({"type": "PointAdded", "point": {"id": "x"}})
+            finally:
+                sdk.close()
+
+            # The record is REAL, not just configured: the POST above wrote it.
+            journal = events / "org_selfhost" / "events.jsonl"
+            assert journal.exists(), sorted(p.name for p in events.iterdir())
+            assert "PointAdded" in journal.read_text(encoding="utf-8")
+
+    def test_mcp_selfhost_lane_arms_the_journal(self, tmp_path, monkeypatch):
+        """The MCP door must arm the default itself.
+
+        `tortoise serve --http` is a documented self-host daemon that serves
+        `org_selfhost` through this door and never imports `tortoise.selfhost`
+        (the module that arms the docker daemon) — so without arming here that
+        daemon resolved a `None` journal and wrote an UNRECORDED graph, the same
+        #8497 defect on a third surface.
+        """
+        from types import SimpleNamespace
+
+        monkeypatch.delenv("TORTOISE_EVENT_LOG_BASE_DIR", raising=False)
+        root = self._mounted_data_root(tmp_path, monkeypatch)
+
+        from tortoise import config, mcp_auth
+
+        # The deployment default is resolved from this module global.
+        monkeypatch.setattr(config, "_SELFHOST_DATA_ROOT", root)
+        monkeypatch.setattr(mcp_auth, "TortoiseSDK",
+                            lambda **kwargs: SimpleNamespace(**kwargs))
+        import tortoise.onboarding.selfhost as _osh
+
+        monkeypatch.setattr(_osh, "ensure_selfhost_onboarding_once",
+                            lambda *a, **k: None)
+
+        token = mcp_auth._current_org_id.set(mcp_auth.SELFHOST_ORG_ID)
+        try:
+            sdk = mcp_auth._get_org_sdk()
+        finally:
+            mcp_auth._current_org_id.reset(token)
+
+        expected_base = os.path.join(root, "events")
+        assert os.environ["TORTOISE_EVENT_LOG_BASE_DIR"] == expected_base
+        assert sdk.event_log_path == os.path.join(
+            expected_base, "org_selfhost", "events.jsonl"), sdk.event_log_path
+
+    def test_every_selfhost_sdk_construction_carries_the_journal(self):
+        """The door inventory for the self-host surface.
+
+        #8497 existed because ONE door silently omitted ``event_log_path=``. A
+        behavioural test on ``_sdk()`` cannot see a construction added beside
+        it, so the inventory guard is what catches the NEXT one. Scope, stated
+        honestly: it matches the two node kinds the codebase uses
+        (``TortoiseSDK(...)`` and ``module.TortoiseSDK(...)``); an aliased import
+        (`from tortoise.sdk import TortoiseSDK as T`) would escape it — the
+        #7951 door-inventory pattern's declared escape surface.
+        """
+        import ast
+        import inspect
+
+        from tortoise import selfhost_api
+
+        tree = ast.parse(inspect.getsource(selfhost_api))
+
+        def _is_sdk_call(node: ast.AST) -> bool:
+            if not isinstance(node, ast.Call):
+                return False
+            func = node.func
+            if isinstance(func, ast.Name):
+                return func.id == "TortoiseSDK"
+            if isinstance(func, ast.Attribute):
+                return func.attr == "TortoiseSDK"
+            return False
+
+        calls = [node for node in ast.walk(tree) if _is_sdk_call(node)]
+        assert calls, "inventory guard lost its subject — no TortoiseSDK construction found"
+        unarmed = [
+            node.lineno for node in calls
+            if not any(kw.arg == "event_log_path" for kw in node.keywords)
+        ]
+        assert not unarmed, (
+            f"TortoiseSDK construction(s) at line(s) {unarmed} omit "
+            "event_log_path — that door writes an UNRECORDED graph, which is "
+            "the #8497 defect (a partial journal looks like a record)")

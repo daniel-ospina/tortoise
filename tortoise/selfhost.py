@@ -529,13 +529,20 @@ def _probe_sdk():
     """
     from tortoise.sdk import TortoiseSDK  # lazy — liveness stays cheap
 
+    # #8497: probe through the SAME journaled construction the doors use — a
+    # read-only probe on an UNARMED projection of the shared org_selfhost graph
+    # is the "same server, two guard states" divergence the REST anchor was
+    # armed to remove.
+    from tortoise.selfhost_api import selfhost_journal_path
+
     key = _probe_sdk_key()
     with _PROBE_SDK_LOCK:
         cached = _PROBE_SDK_CACHE.get("sdk")
         if cached is not None and _PROBE_SDK_CACHE.get("key") == key:
             return cached
         old = cached
-        sdk = TortoiseSDK(namespace="selfhost")
+        sdk = TortoiseSDK(namespace="selfhost",
+                          event_log_path=selfhost_journal_path())
         _PROBE_SDK_CACHE["sdk"] = sdk
         _PROBE_SDK_CACHE["key"] = key
         # #4608: a target change displaces ``old``; close it only when no probe
@@ -731,6 +738,28 @@ if not os.environ.get("TORTOISE_DB_URI"):
     print(f"tortoise selfhost: {EMBEDDED_EVAL_BANNER}", file=sys.stderr)
     _logger.warning(EMBEDDED_EVAL_BANNER)
 
+# #8497: arm the self-host deployment's per-graph JSONL REBUILD journal.
+#
+# Both self-host write doors derive it from TORTOISE_EVENT_LOG_BASE_DIR
+# (mcp_auth._get_org_sdk for the MCP door, selfhost_api._sdk for REST) — but
+# only the HOSTED lane's entrypoint.sh ever set that variable, so a shipped
+# self-hosted instance was journal-less by construction: no record, nothing for
+# `tortoise rebuild --dir` to replay, and §17.1's single-writer guard inert.
+# Arming here (module import = daemon start, the shape the hosted entrypoint
+# has) sets the deployment default from a PERSISTENT /data volume; it logs
+# loudly and stays journal-less rather than pretending to record when the
+# default cannot be written. The journal is the REBUILD source, never the
+# durability mechanism (docs/durability-posture.md).
+from tortoise.config import ensure_selfhost_event_log  # noqa: E402
+
+_selfhost_journal = ensure_selfhost_event_log()
+if _selfhost_journal:
+    _logger.info(
+        "selfhost journal armed: %s — derived = replay(journal) holds for the "
+        "org_selfhost graph; durability is unchanged (the store's backup authorises)",
+        _selfhost_journal,
+    )
+
 # #2203: this module is the daemon entry point for BOTH the docker image CMD
 # (`uvicorn tortoise.selfhost:app`) and `python -m tortoise.selfhost` — neither
 # funnels through tortoise.__main__.main(), so the daemon must install the
@@ -901,8 +930,10 @@ async def health_ready():
     # snapshot (#2988) and hands off to nothing at all.
     def _probe() -> None:
         from tortoise.sdk import TortoiseSDK  # lazy — liveness stays cheap
+        from tortoise.selfhost_api import selfhost_journal_path  # #8497 — same journal
 
-        sdk = TortoiseSDK(namespace="selfhost")
+        sdk = TortoiseSDK(namespace="selfhost",
+                          event_log_path=selfhost_journal_path())
         _run_bounded(sdk._get_proj, _ready_probe_inner_bound_s())
 
     try:
