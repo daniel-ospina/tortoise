@@ -37,10 +37,15 @@ verdict was a function of ambient embedder state: the store-write seam
 per call and returns **no vector at all** when the model is absent, still
 loading, or in its 60 s negative-cache cooldown — the two sides of
 ``_assert_parity`` are then ``(None, vector)``, caught by its
-``(is None) == (is None)`` leg. The TF-IDF fallback is NOT on this path: it
-lives in ``_encode``, whose callers are all search/matching, and ``_encode`` is
-imported nowhere in the projection/rebuild path, so a pair could never have
-been 384-dim model output vs a variable-width TF-IDF vector. See
+``(is None) == (is None)`` leg. The second leg is two vectors that differ — an
+encoder that changed between the two derivations (a swapped model instance), or
+the stale-vector defect this file exists to catch (a rebuild that stores the
+pre-supersession vector while the node's content is final, #4457/#4517). It is
+the ``==`` signature #4512 recorded. A merely cold/warm model is NOT this leg:
+cold returns ``None``, which is the first leg. The TF-IDF fallback is NOT on
+either path: it lives in ``_encode``, whose callers are all search/matching, and
+``_encode`` is imported nowhere in the projection/rebuild path, so a pair could
+never have been 384-dim model output vs a variable-width TF-IDF vector. See
 ``_pinned_embedding`` / ``_assert_parity`` and
 ``test_write_seam_returns_no_vector_when_the_model_is_unavailable``.
 
