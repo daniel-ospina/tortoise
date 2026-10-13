@@ -152,6 +152,50 @@ PY
   cands="$(tr '\n' ' ' < "$RL/candidates.txt")"
   case "$cands" in *10*20*30*) rc=0;; *) rc=1;; esac
   ck "shipped refresh loop: the pre-flighted CLEAN candidates reach the backlog" $rc
+
+  # ── 5c) a pre-flight that produced NO verdict must not blacklist the issue ───────────────────
+  # Same loop, but the stub python now fails the way a broken scout venv / API failure does: it
+  # exits non-zero and emits no `VERDICT` line. The pre-fix loop wrote checked.txt BEFORE reading
+  # the verdict, so the issue was consumed permanently and could never be re-attempted — and the
+  # §7.1 reaper walks dispatched.txt only, so nothing ever removed that entry. (agent-infra#1716)
+  RV="$TMP/verdict"; mkdir -p "$RV/fakesc/.venv/bin"
+  printf '10\n' > "$RV/.pool"
+  : > "$RV/checked.txt"; : > "$RV/candidates.txt"; : > "$RV/dispatched.txt"
+  cat > "$RV/fakesc/.venv/bin/python" <<'PY'
+#!/bin/bash
+# stand-in for a pre-flight that ERRORED: no VERDICT line, non-zero exit
+echo "boom: could not reach the graph" >&2
+exit 1
+PY
+  chmod +x "$RV/fakesc/.venv/bin/python"
+  O="$RV" LIMIT=5 SC="$RV/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/verdict.out" 2>&1
+  case "$(tr '\n' ' ' < "$RV/checked.txt")" in *10*) rc=1;; *) rc=0;; esac
+  ck "shipped refresh loop: an ERRORED pre-flight does NOT blacklist the issue" $rc
+  case "$(tr '\n' ' ' < "$RV/candidates.txt")" in *10*) rc=1;; *) rc=0;; esac
+  ck "shipped refresh loop: an ERRORED pre-flight queues nothing" $rc
+
+  # ── 5d) a COLLISION is transient and must be re-attempted, not recorded forever ──────────────
+  # The stub answers COLLISION on the first pass (a peer owns the issue) and CLEAN on the second
+  # (the colliding work has landed). The pre-fix loop recorded checked.txt before the verdict, so
+  # the issue was suppressed forever and the second pass never ran the pre-flight at all.
+  RC="$TMP/collide"; mkdir -p "$RC/fakesc/.venv/bin"
+  printf '10\n' > "$RC/.pool"
+  : > "$RC/checked.txt"; : > "$RC/candidates.txt"; : > "$RC/dispatched.txt"
+  cat > "$RC/fakesc/.venv/bin/python" <<'PY'
+#!/bin/bash
+# first pass: a peer's work is in flight; after it lands: CLEAN
+S="$(dirname "$0")/.pass"
+if [ -f "$S" ]; then echo "VERDICT: CLEAN"; else : > "$S"; echo "VERDICT: COLLISION"; fi
+PY
+  chmod +x "$RC/fakesc/.venv/bin/python"
+  O="$RC" LIMIT=5 SC="$RC/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/collide-1.out" 2>&1
+  case "$(tr '\n' ' ' < "$RC/checked.txt")" in *10*) rc=1;; *) rc=0;; esac
+  ck "shipped refresh loop: a COLLISION does not permanently blacklist the issue" $rc
+  case "$(tr '\n' ' ' < "$RC/candidates.txt")" in *10*) rc=1;; *) rc=0;; esac
+  ck "shipped refresh loop: a COLLISION is not queued" $rc
+  O="$RC" LIMIT=5 SC="$RC/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/collide-2.out" 2>&1
+  case "$(tr '\n' ' ' < "$RC/candidates.txt")" in *10*) rc=0;; *) rc=1;; esac
+  ck "shipped refresh loop: the COLLISION is re-attempted and queued once it clears" $rc
 fi
 
 # ── 6) install.sh renders correctly, including values sed would mangle ───────────

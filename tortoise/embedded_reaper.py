@@ -3038,6 +3038,14 @@ class _ReaperLock:
     def __init__(self, path: str = _LOCK_PATH):
         self.path = path
         self._fh = None
+        #: #4299: set by `_refuse()` to the fault reason, and cleared on every
+        #: `acquire()`. `None` after a failed acquire therefore means
+        #: CONTENTION (the flock is held by a live sweeper); non-`None` means
+        #: the lock could not be taken at all (foreign-owned dir, non-regular
+        #: path, write/flock fault). `main()` must not report the second as if
+        #: a holder existed — the first is a healthy overlap, the second is a
+        #: fault that skips sweeps until it is fixed (#4098 / #4299).
+        self.refusal: str | None = None
 
     def _close_fh_quietly(self) -> None:
         # #4098 review: `close()` can itself raise (EINTR/EIO, plausible
@@ -3052,6 +3060,8 @@ class _ReaperLock:
         self._fh = None
 
     def _refuse(self, reason: str, foreign_owned: bool = False) -> bool:
+        # #4299: record the fault so `main()` can tell it from contention.
+        self.refusal = reason
         # #4098 review: close FIRST — a refusal abandons an open fh (and, on
         # the write-failure path, a successfully-taken flock), so leaving it
         # to refcounting is a real fd-lifetime change. `_close_fh_quietly`
@@ -3084,6 +3094,21 @@ class _ReaperLock:
 
     def acquire(self) -> bool:
         import fcntl
+        self.refusal = None
+        # #4299: resolve the holder's start time BEFORE the flock is taken.
+        # The record must be rewritten in the microseconds AFTER `flock`
+        # returns: a `ps` call in that window (up to its 2s timeout, on a
+        # loaded box) would leave the PREVIOUS holder's record readable to a
+        # contender refused in the gap, which would then confidently name the
+        # wrong — still live — process as the holder. Resolving the start time
+        # here NARROWS that gap (from a `ps` call to the flock->truncate
+        # window the write site describes); it does not close it. An unreadable
+        # start degrades to the pid-only (unverifiable) form, never to a wrong
+        # pid.
+        try:
+            holder_start = _process_start_time(os.getpid())
+        except Exception:  # never fail the LOCK over a diagnostic (#4299)
+            holder_start = None
         # #4098 (CWE-377): the lock lives in the SHARED tempdir
         # (`<tempdir>/.tortoise`, 1777 on Linux), so its open is the same
         # symlink sink as the marker write — a plain `open(path, "a")`
@@ -3177,7 +3202,28 @@ class _ReaperLock:
         try:
             self._fh.seek(0)
             self._fh.truncate()
-            self._fh.write(str(os.getpid()))
+            # #4299: record the pid AND the holder's start time in ONE write,
+            # immediately after the flock, from the start time resolved BEFORE
+            # it — so a contender reading while this holder owns the lock never
+            # sees a MIXED record (a pid from one holder and a start from
+            # another), and a `ps` call can never land between the flock and
+            # the write.
+            # ⛔ What this does NOT provide — three windows a contender can
+            # read, in order, and only the last is this holder:
+            #   1. flock -> `truncate()` below: the PREVIOUS holder's COMPLETE
+            #      record. A contender refused here may name that (still live)
+            #      process — narrowed from a `ps` call, NOT closed.
+            #   2. `truncate()` -> the write landing: an EMPTY file, which
+            #      `_lock_record_read` reports as no record at all (the honest
+            #      `unknown` pole), never as a holder.
+            #   3. after the write: this holder's record.
+            # Closing window 1 needs the identity to come from the KERNEL
+            # rather than a file (the fd-table primitive deliberately deferred;
+            # #5044). Do not read this as "a contender can never name the
+            # previous holder".
+            # The start time is what makes a RECYCLED pid detectable — the
+            # #1642 FIX 5 pid-recycling-proof pattern.
+            self._fh.write(_lock_record_text(os.getpid(), holder_start))
             self._fh.flush()
         except OSError as exc:
             # A full/read-only tempfs (ENOSPC/EDQUOT/EIO) reaches here.
@@ -4118,12 +4164,33 @@ def main(argv: list[str] | None = None) -> int:
     full_scan = args.full_scan or _env_truthy(
         os.environ.get("TORTOISE_REAPER_FULL_SCAN"))
 
-    # Singleton lock: second concurrent instance exits 0 with message.
+    # Singleton lock.
     lock = _ReaperLock()
     if not lock.acquire():
-        logger.warning("reaper already running (PID %s)",
-                       _lock_holder_pid())
-        return 0
+        if lock.refusal is not None:
+            # #4299: NOT contention — `_refuse()` could not take the lock at
+            # all (foreign-owned lock dir, non-regular path, write/flock
+            # fault) and has ALREADY logged its own accurate reason. Do not
+            # claim a holder exists; the sweep did not run.
+            return _EXIT_REFUSED
+        # #4299. The lock IS held — `flock` is kernel-enforced, so a held lock
+        # proves a live holder and the lock itself can never be stale. The
+        # defect is that the refusal named the holder as "the reaper" whatever
+        # it was: a raw read of the mutable record file was printed as
+        # "already running (PID N)", so a pytest session holding the same
+        # lock (its suite-end sweep, #4473) read as a wedged reaper, and a
+        # record read in the pre-write window could name a pid that is not the
+        # holder at all. Name a VERIFIED holder instead.
+        verdict = _lock_holder_verdict()
+        logger.warning("reaper refused: %s — no sweep this fire",
+                       verdict.describe())
+        # #4299: exit 0 ONLY when another VERIFIED sweep holds the lock — then
+        # the drain is genuinely being served and this fire did its job by
+        # yielding. Every other contention (a live NON-reaper holds it, or the
+        # holder cannot be verified) means nothing swept, and a `return 0`
+        # there is the vacuous success the issue's own table cites as evidence
+        # the schedule "worked" while 1219 fires drained nothing.
+        return 0 if verdict.state == "live-reaper" else _EXIT_REFUSED
 
     def _alarm_handler(signum, frame):
         logger.error("reaper timeout (%ss) exceeded — aborting sweep", timeout)
@@ -4189,49 +4256,286 @@ def _env_truthy(raw: str | None) -> bool:
     return raw is not None and str(raw).strip().lower() in _ENV_TRUTHY
 
 
-def _lock_holder_pid() -> str:
-    # #4098: never read through a planted symlink at the lock path, and never
+# ── #4299: the lock's holder RECORD, and the verdict on it ────────────
+#
+# The singleton lock is a `flock(2)` (`_ReaperLock`): the kernel releases it
+# when the holder dies, so a HELD lock is itself proof of a live holder and the
+# lock can never go stale. The refusal's defect is that it never identified the
+# holder — it printed a raw read of the mutable `pid=` record file as "reaper
+# already running (PID N)", so ANY holder (a pytest session's suite-end sweep
+# takes the same lock, #4473) read as a reaper, and a record read in the
+# pre-write window could name a pid that is not the holder. The verdict below
+# replaces that raw read: a holder is named only when the pid is ALIVE and its
+# recorded start time MATCHES (pid recycling) — the #1642 FIX 5 pattern.
+_EXIT_REFUSED = 1
+_LOCK_START_TOLERANCE = 2.0   # seconds; `ps -o lstart=` has 1s resolution
+
+
+class LockHolder(NamedTuple):
+    """A validated verdict on the sweep lock's recorded holder (#4299).
+
+    `state` is one of:
+      * ``live-reaper``   — a verified live sweep holds the lock;
+      * ``live-other``    — a verified live NON-reaper holds it (the shape
+        #4473 measured: a pytest session holds the same singleton);
+      * ``stale-record``  — the record provably does not describe the holder
+        (dead pid, or a recycled pid whose start time differs);
+      * ``unknown``       — cannot be verified (no/malformed record, alive
+        pid with no readable start time).
+    ``reason`` is the evidence, for the log line; ``kind`` is what the
+    verified holder is (``reaper``, ``test session``, a command basename).
+
+    There is deliberately no ``stale-by-age`` state — see
+    `lock_holder_verdict`'s docstring for why an age bound cannot exist.
+    """
+
+    state: str
+    pid: int | None
+    kind: str
+    reason: str
+
+    @property
+    def verified(self) -> bool:
+        """True only when the record describes a LIVE, identity-matched pid."""
+        return self.state in ("live-reaper", "live-other")
+
+    def describe(self) -> str:
+        """One honest sentence for the refusal log (#4299).
+
+        A dead pid is NEVER named as the holder; the live case says what the
+        holder is, so an operator can tell a running sweep from a test session
+        instead of guessing "stale lock".
+
+        ⛔ PRECONDITION: the `flock` is HELD. This is a statement about the
+        REFUSAL PATH — the decision that runs after `_ReaperLock.acquire()`
+        returned False *on contention* — so the `stale-record` / `unknown`
+        branches may say "the sweep lock is HELD". A caller that has not
+        observed a held flock (e.g. a `_refuse()` fault, where no lock was
+        taken) must not use those branches' wording; `main()` keys on
+        `_ReaperLock.refusal` for exactly that reason.
+        """
+        if self.state == "live-reaper":
+            return (f"a sweep is already running (PID {self.pid}, "
+                    f"{self.kind}, verified live)")
+        if self.state == "live-other":
+            return (f"the sweep lock is held by a LIVE {self.kind} "
+                    f"(PID {self.pid}, verified live) — the lock is real, "
+                    f"not stale")
+        if self.state == "stale-record":
+            return (f"the sweep lock is HELD (kernel flock) but its holder "
+                    f"record is stale: {self.reason}")
+        return (f"the sweep lock is HELD (kernel flock) but its holder "
+                f"cannot be verified: {self.reason}")
+
+
+def _lock_record_text(pid: int, start: float | None) -> str:
+    """The lock record written by the holder (#4299).
+
+    ``pid=`` and, when the holder's start time is readable, ``start=``. The
+    caller writes this in ONE ``write()`` (see `_ReaperLock.acquire`).
+    """
+    if start is None:
+        return f"pid={pid}\n"
+    return f"pid={pid}\nstart={start!r}\n"
+
+
+def _parse_lock_record(text: str | None) -> tuple[int, float | None] | None:
+    """Parse a lock record into ``(pid, start_time)``, or None if it is not one.
+
+    The pre-#4299 form (a bare pid, or ``pid=`` with no ``start=`` line) still
+    parses, so an older reaper's record reads — but its ``start`` comes back
+    ``None`` and `lock_holder_verdict` then reports it as UNVERIFIABLE, never
+    as a verified holder: a pid-only record is indistinguishable from a fossil.
+
+    ⛔ DELIBERATE DIVERGENCE from `_owner_records`, which maps an
+    unparsable/non-finite STAMP to ``start = None`` and KEEPS the pid. Here a
+    ``start=`` that is PRESENT but cannot be read discards the whole record.
+    Reason: the lock record is written by THIS module in ONE write, so a record
+    whose ``start=`` does not parse was not written by this module — it is
+    corruption or a foreign writer — and naming a pid taken out of a record we
+    cannot attribute is exactly the "name a pid that is not the holder" defect
+    #4299 exists to remove. The pid-ONLY form is kept because a real older
+    reaper wrote it; a malformed ``start=`` has no such provenance.
+    """
+    if not text:
+        return None
+    fields: dict[str, str] = {}
+    for token in text.splitlines():
+        token = token.strip()
+        if not token:
+            continue
+        if "=" in token:
+            key, _, value = token.partition("=")
+            fields[key.strip()] = value.strip()
+        elif token.isdigit():  # legacy bare-pid record
+            fields.setdefault("pid", token)
+    pid_raw = fields.get("pid", "")
+    # Decimal ASCII digits only — two gates, because each catches a DIFFERENT
+    # set: `isdigit()` alone accepts non-decimal Unicode digits (`²`, `①`) that
+    # `int()` then REJECTS (the trap `_owner_records` documents from the
+    # #3599 review), while `int()` alone also accepts `+5` and `5_0`, forms no
+    # writer emits (found by review, cycle 2). The guarded `int()` stays as the
+    # totality backstop. This parser must be TOTAL: it runs in the REFUSAL path
+    # BEFORE `signal.alarm(timeout)` is armed, so a raise here turns a clean
+    # refusal into a traceback — the one outcome this whole change exists to
+    # remove (#4299 review, cycle 1).
+    if not pid_raw.isascii() or not pid_raw.isdigit():
+        return None
+    # ...where `isascii()` is LOAD-BEARING, not decoration: `isdigit()` is True
+    # for non-ASCII DECIMAL digits (`\u0665` Arabic-Indic, `\uff15` fullwidth)
+    # that `int()` happily parses, so dropping `isascii()` readmits a pid taken
+    # from a record this module did not write — the defect #4299 removes.
+    try:
+        pid = int(pid_raw)
+    except ValueError:
+        return None
+    if pid <= 0:
+        # `os.kill(0, 0)` targets the caller's own process group and SUCCEEDS,
+        # so a `pid=0` record would read as a live holder forever (#3599).
+        return None
+    start_raw = fields.get("start", "")
+    if not start_raw:
+        return pid, None
+    try:
+        start = float(start_raw)
+    except ValueError:
+        return None
+    if not math.isfinite(start):
+        return None
+    return pid, start
+
+
+def _holder_kind(command: str) -> str:
+    """What the verified holder IS, from its command line (#4299, #4473).
+
+    The refusal used to call every holder a "reaper". Naming it is what turns
+    a refusal into an actionable one: the dominant holder on a box running
+    suites is a pytest session, not a reaper (#4473).
+
+    The RUNNER signature is checked FIRST. A pytest invocation whose argv
+    merely MENTIONS `embedded_reaper` — a test-file path, a `-k` expression —
+    is still a test session; testing the module marker first would report that
+    live test session as a running sweep and, through `main()`, exit 0 on a
+    fire that swept nothing. The tests pin that ordering.
+    """
+    if "pytest" in command or "py.test" in command:
+        return "test session"
+    if "embedded_reaper" in command:
+        return "reaper"
+    stripped = command.strip()
+    if not stripped:
+        return "process"
+    return os.path.basename(stripped.split(maxsplit=1)[0]) or "process"
+
+
+def lock_holder_verdict(
+    record: str | None,
+    *,
+    is_alive,
+    start_time_of,
+    command_of,
+) -> LockHolder:
+    """Decide what the lock's holder record actually proves (#4299).
+
+    PURE by construction: every fact about the machine arrives through a
+    probe (``is_alive``, ``start_time_of``, ``command_of``), so the refusal
+    decision is exercised with fakes — never by killing a live process.
+
+    The record proves a live holder only when BOTH:
+      * it parses to a pid AND carries a ``start=`` line; and
+      * the pid is ALIVE and the live process's start time MATCHES the
+        recorded one (a recycled pid fails here).
+
+    ⛔ There is deliberately NO age bound on a record that matches. A held
+    flock already proves the holder is alive, and (pid, start) identifies it,
+    so an age clause can only ever fire on a LIVE, identity-matched holder —
+    reporting the true holder as "stale", which is the #4299 misdiagnosis
+    re-introduced. No safe bound exists either: `--timeout`/
+    `TORTOISE_REAPER_TIMEOUT` is unbounded (`_parse_timeout` accepts any
+    int >= 1) and the suite-end sweep runs past its own soft budget by design,
+    so any constant would eventually mislabel a legitimate long sweep (the
+    wedged-holder case is exactly when the operator most needs the true pid).
+
+    Anything else is reported as a stale or unverifiable record — the pid is
+    NOT presented as the holder.
+    """
+    parsed = _parse_lock_record(record)
+    if parsed is None:
+        return LockHolder("unknown", None, "unknown",
+                          "no holder record (empty or malformed)")
+    pid, start = parsed
+    if not is_alive(pid):
+        return LockHolder("stale-record", pid, "unknown",
+                          f"recorded holder PID {pid} is not alive")
+    if start is None:
+        return LockHolder(
+            "unknown", pid, "unknown",
+            f"PID {pid} is alive but the record carries no start time "
+            f"(written by an older reaper) so it cannot be verified as the "
+            f"holder")
+    live_start = start_time_of(pid)
+    if live_start is None:
+        return LockHolder(
+            "unknown", pid, "unknown",
+            f"PID {pid} is alive but its start time is unreadable, so the "
+            f"record cannot be verified")
+    if abs(live_start - start) > _LOCK_START_TOLERANCE:
+        return LockHolder(
+            "stale-record", pid, "unknown",
+            f"PID {pid} is alive but started at a different time — the "
+            f"number was recycled, so it is not the recorded holder")
+    kind = _holder_kind(command_of(pid) or "")
+    if kind == "reaper":
+        return LockHolder("live-reaper", pid, kind, "another sweep is running")
+    return LockHolder("live-other", pid, kind,
+                      f"held by a live {kind} (PID {pid})")
+
+
+def _lock_record_read() -> str | None:
+    """Safely read the lock record — ``None`` when it cannot be read (#4098).
+
+    #4098: never read through a planted symlink at the lock path, and never
     # BLOCK on one — this runs in main() BEFORE `signal.alarm(timeout)` is
     # armed, so `open(FIFO, O_RDONLY)` without O_NONBLOCK would hang reaper
-    # startup forever with the watchdog disabled. A non-regular path is
-    # "unknown": it can never be the lock this module wrote.
+    # startup forever with the watchdog disabled. A non-regular path is not the
+    # lock this module wrote.
     #
-    # #4098 review: `O_NOFOLLOW` alone protects only the BASENAME, so a
-    # planted symlink at the lock DIR would still redirect the read (log
-    # spoofing) and could serve an arbitrarily large file before the
-    # watchdog is armed. Anchor on the dir fd and address the lock RELATIVE
-    # to it, exactly like `_ReaperLock.acquire` — and cap the read, and
-    # require the dir to be ours (a foreign-owned dir's contents are
-    # attacker-authored).
+    # #4098 review: `O_NOFOLLOW` alone protects only the BASENAME, so a planted
+    # symlink at the lock DIR would still redirect the read (log spoofing) and
+    # could serve an arbitrarily large file before the watchdog is armed.
+    # Anchor on the dir fd and address the lock RELATIVE to it, exactly like
+    # `_ReaperLock.acquire` — and cap the read, and require the dir to be ours
+    # (a foreign-owned dir's contents are attacker-authored).
+    """
     lock_dir = os.path.dirname(_LOCK_PATH)
     try:
         dir_fd = os.open(lock_dir,
                          os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
-        return "unknown"
+        return None
     try:
         try:
             if os.fstat(dir_fd).st_uid != os.geteuid():
-                return "unknown"
+                return None
         except OSError:
-            return "unknown"
+            return None
         try:
             fd = os.open(os.path.basename(_LOCK_PATH),
                          os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600,
                          dir_fd=dir_fd)
         except OSError:
-            return "unknown"
+            return None
         try:
             try:
                 if not stat.S_ISREG(os.fstat(fd).st_mode):
-                    return "unknown"
+                    return None
             except OSError:
-                return "unknown"
+                return None
             try:
-                chunk = os.read(fd, 64)   # a pid, not a file
+                chunk = os.read(fd, 128)   # a pid + a start time, not a file
             except OSError:
-                return "unknown"
-            return chunk.decode("utf-8", "replace").strip() or "unknown"
+                return None
+            return chunk.decode("utf-8", "replace").strip() or None
         finally:
             try:  # noqa: SIM105
                 os.close(fd)
@@ -4242,6 +4546,29 @@ def _lock_holder_pid() -> str:
             os.close(dir_fd)
         except OSError:
             pass
+
+
+def _lock_holder_verdict() -> LockHolder:
+    """The real-probe verdict for the lock record on this machine (#4299)."""
+    return lock_holder_verdict(
+        _lock_record_read(),
+        is_alive=_pid_alive,
+        start_time_of=_process_start_time,
+        command_of=_cmdline,
+    )
+
+
+def _lock_holder_pid() -> str:
+    """The RAW recorded pid text, or ``"unknown"`` (#4098).
+
+    Diagnostic only: this is an unvalidated file read, so it must never be
+    presented as the holder — `_lock_holder_verdict()` is what `main()` uses
+    (#4299). Kept for the read-hardening tests and for callers that want the
+    raw text.
+    """
+    record = _lock_record_read()
+    parsed = _parse_lock_record(record)
+    return str(parsed[0]) if parsed else "unknown"
 
 
 if __name__ == "__main__":
