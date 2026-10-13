@@ -81,15 +81,23 @@ for f in "$O/.open_iss" "$O/.pr_brs"; do rm -f "$f"; done
 
 touch "$O/checked.txt" "$O/candidates.txt"
 
-# pool = open unassigned P1-severe ∪ P2-moderate, minus epics/owner-decisions
-{  
+# pool = open unassigned P0-blocker ∪ P1-severe ∪ P2-moderate, minus epics/owner-decisions
+#
+# ⛔ SEVERITY FIRST, AGE SECOND. Each tier emits "<tier> <number>" and the sort keys on the tier
+# before the number. A bare `sort -n` over the numbers ALONE ordered by ISSUE NUMBER — i.e. oldest
+# first — discarding the tier the three queries had just computed. Measured 2026-10-13: 238
+# pool-eligible P2-moderate sat ahead of 20 pool-eligible P0-blocker, so the P0s were unreachable
+# and every worker the harness ran was a P2 (#8465). The tier is a RANK, not a label.
+# Dedupe on the NUMBER, keeping the lowest tier: the sort already put an issue's best tier first, so
+# `!seen[$2]++` drops the later, weaker duplicate rather than letting one issue occupy two slots.
+{
   gh issue list --repo "$OR" --state open --limit 300 --label P0-blocker --json number,assignees,title \
-    --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|lane|OWNER DECISION|decision|analysis|investigation)";"i")|not)|.number' 2>/dev/null
+    --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|lane|OWNER DECISION|decision|analysis|investigation)";"i")|not)|"0 \(.number)"' 2>/dev/null
   gh issue list --repo "$OR" --state open --limit 200 --label P1-severe --json number,assignees,title \
-    --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|OWNER DECISION)";"i")|not)|.number' 2>/dev/null
+    --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|OWNER DECISION)";"i")|not)|"1 \(.number)"' 2>/dev/null
   gh issue list --repo "$OR" --state open --limit 200 --label P2-moderate --json number,assignees,title \
-    --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|OWNER DECISION)";"i")|not)|.number' 2>/dev/null
-} | sort -n -u > "$O/.pool"
+    --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|OWNER DECISION)";"i")|not)|"2 \(.number)"' 2>/dev/null
+} | sort -k1,1n -k2,2n | awk '!seen[$2]++ {print $2}' > "$O/.pool"
 
 n=0
 while read -r N; do
@@ -104,5 +112,25 @@ while read -r N; do
     echo "[refresh] +#$N CLEAN -> backlog"
   fi
 done < "$O/.pool"
-sort -n -u -o "$O/candidates.txt" "$O/candidates.txt"
+# Dedupe WITHOUT re-sorting. orch-loop.sh consumes this file top-down and dispatches the first
+# BATCH entries, so its ORDER IS the dispatch priority. `sort -n -u` re-ordered the ENTIRE backlog
+# by issue number, which is what put 238 P2s ahead of 20 P0s (#8465) — the same defect as the pool
+# sort above, and it reappeared here on every cycle.
+#
+# This file is FIFO. The pool above is severity-ordered when it is appended, but an entry added on a
+# LATER cycle joins at the BACK, behind whatever is already queued — so a P0 discovered while P2s sit
+# at the head waits for them instead of displacing them. That residual is deliberate and bounded: the
+# refresh only runs while the backlog is below 6 (orch-loop.sh) and BATCH is 2, so at most 5 entries
+# can be ahead of it. The TIME that costs is contingent, not a ceiling: 5 entries at 2 per cycle is 3
+# cycles only if the capacity gate is open each cycle — a load/lane/swap/memory gate that holds
+# dispatch delays it further. The ENTRY bound is what the refresh guarantees; do not read a wall-clock
+# ceiling into it. Carrying the tier through orch-loop.sh's reader would remove the residual at the
+# cost of a second ordering surface; not worth it for a bounded handful of entries.
+#
+# `mv` is atomic within the directory (rename(2)), so a concurrent reader sees the old file or the new
+# one, never a torn one; `&&` keeps a failed awk from truncating the live backlog. One deliberate
+# trade: `mv` swaps the inode, so the target's mode is replaced by the temp's umask-derived one,
+# whereas the old `sort -o` preserved it. The file holds only public issue numbers and its mode is
+# never set deliberately, so 644 is not a property anything depends on.
+awk '!seen[$0]++' "$O/candidates.txt" > "$O/.cand" && mv "$O/.cand" "$O/candidates.txt"
 echo "[refresh] checked $n; backlog now $(wc -l < "$O/candidates.txt" | tr -d ' ') issues"

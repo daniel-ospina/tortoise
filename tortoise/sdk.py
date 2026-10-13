@@ -104,6 +104,8 @@ from . import monitoring
 from .retrieval_metering import metered_query as _metered_query
 from . import file_indexer  # noqa: F401 — binds the classifier/identity module (§4.4); sourceKind registration is registry-owned (source_credibility.SOURCE_KIND_DEFAULTS)
 from .projection import FalkorProjection
+# #7951 §17.1: the single-writer scope the live doors open around their fold.
+from .projection import _live_write_scope
 from .projection.entities import (  # #3998: the declared :Source surface
     _SOURCE_NODE_PROP_NAMES,
     _SOURCE_SERVER_MANAGED_PROPS,
@@ -2670,8 +2672,7 @@ _GRAPH_EVENT_TYPES = frozenset({
 #   2. POST-APPLY-SNAPSHOT PAYLOAD (the one real apply-first). When the record
 #      cannot be constructed until the fold has produced it, there is no
 #      pre-fold record to append. The dominant case is `create_point`, whose
-#      `PointAdded` payload IS `get_point(pid)` — the applied node — and whose
-#      canonical id can be an apply result (dedup / name MERGE). Such a site
+#      `PointAdded` payload IS `get_point(pid)` — the applied node. Such a site
 #      applies first and inherits window (a); the window closes only at §17.1's
 #      one atomic write. A site that CAN form its record before the fold MUST
 #      NOT take this exception.
@@ -5115,6 +5116,19 @@ class TortoiseSDK:
                 self._proj = FalkorProjection.from_uri(self._db_uri, graph_name=graph_name)
             else:
                 self._proj = FalkorProjection(self._db_path, graph_name=graph_name)
+            # #7951 §17.1: this projection is the DERIVED CACHE OF A JOURNAL
+            # whenever one is configured, so it is under the single-writer
+            # guard — a fold or a mutating raw-query on it is refused unless a
+            # live door or a replay engine declared itself. Binding HERE arms
+            # every path that reaches the projection THROUGH `_get_proj`,
+            # without naming any of them. It does NOT reach a caller that
+            # assigns `_proj` directly and never calls this method: the
+            # docker-URI MCP lane at `mcp_server.py:985`
+            # (`_sdk._proj = _proj`) is journal-less by construction, so a bind
+            # there is a provable no-op (its own comment records this), and the
+            # `_projection_for(target)` assignments in `__main__.py` hand the
+            # SDK a projection that was never bound either.
+            self._proj._bind_journal(self._event_log_path)
             # (B) #2952: explicit embedder warm-up at ENGINE INIT —
             # best-effort, non-fatal, and non-blocking (daemon thread) so a
             # load failure surfaces ONCE here instead of masquerading as a
@@ -5685,7 +5699,13 @@ class TortoiseSDK:
                 # `_emit_event` already logged at ERROR and incremented
                 # `tortoise_journal_write_failures_total`.
                 return
-        proj.apply(event)
+        # #7951 §17.1: the fold runs inside the live-write scope. The append
+        # above has already COMMITTED, so the ordering contract is
+        # journal-then-cache by construction; a `proj.apply` reached from
+        # anywhere BUT these live doors (or a replay) is refused by
+        # `FalkorProjection.apply`.
+        with _live_write_scope("chokepoint"):
+            proj.apply(event)
 
     def create_point(self, kind: str, content: str, *, is_episodic: bool | None = None,
                       credibility: str | int | float | None = None,
@@ -24096,7 +24116,14 @@ class TortoiseSDK:
             from .ids import now_iso
             event["createdAt"] = now_iso()
         # Apply through projection (writes to FalkorDB)
-        apply_result = proj.apply(event)
+        # #7951 §17.1: the live-write scope. `_create_entity` is the recorded
+        # apply-first deviation (its Object/Subject/Event registration blocks
+        # fold before they journal — contract exception 2's neighbour), so it
+        # declares itself here rather than silently bypassing the gate. The
+        # deviation itself is unchanged and still recorded at the module-top
+        # contract.
+        with _live_write_scope("create_entity"):
+            apply_result = proj.apply(event)
         if label == "Event":
             # #2061: journal EventRecorded so SDK-created Events survive
             # rebuild_all (fold parity for Event-input operators).
@@ -26746,7 +26773,10 @@ class TortoiseSDK:
             # Append failed → not committed → do NOT fold. `_emit_event` has
             # already logged at ERROR and counted the failure.
             return
-        proj.apply(ev)
+        # #7951 §17.1: document writes are journal-first (`_emit_event` above),
+        # so the fold runs inside the live-write scope.
+        with _live_write_scope("doc_write"):
+            proj.apply(ev)
 
     def _embedding_repair_attempt(self, event_id, frontmatter, text, title,
                                   repair_backoff, marker) -> tuple:

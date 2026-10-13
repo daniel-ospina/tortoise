@@ -725,6 +725,18 @@ def test_no_redirect_stems_registry_exact():
         # registered with the PR — this pin reding on the addition is the pin
         # working as designed, so the stem is DECLARED here rather than exempted.
         "test_direction_storage_7852",
+        # #6871: the operator's INPUT set (`idx=0` source, `idx>=1` targets) and
+        # the canonical evidence read that never surfaces a point as its own
+        # supporter. The fixture builds `TortoiseSDK(<tmpfile>)` and the file
+        # carries NO module-level `embedded_only` marker, so the load-bearing
+        # reason it needs the exemption is the REDIRECT, not a skip: a URI-set
+        # lane would connect the construction to the server and the embedded
+        # read under test would certify a lane the file does not target. The
+        # third leg of the three-way mirror: config/ci-surfaces.yml:carve_out and
+        # TEST_NO_REDIRECT_STEMS were registered with the PR — this pin reding
+        # on the addition is the pin working as designed, so the stem is
+        # DECLARED here rather than exempted.
+        "test_6871_operator_input_set",
         # #8316: the VERBATIM (caller-supplied) embedding read seam. The module
         # carries module-level `embedded_only` AND drives a real embedded store,
         # so the exemption's load-bearing reason is the SKIP *and* the REDIRECT:

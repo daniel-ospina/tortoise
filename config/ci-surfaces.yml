@@ -85,6 +85,11 @@ surfaces:
   # addition candidate). `--integrity` also requires every test file to be
   # classified, which the `core` entry satisfies.
   - test_7951_write_doors.py
+  # #7951 (steps 1-3, the ENFORCEMENT): DUAL-REGISTERED with the same six
+  # surfaces as the door inventory above, for the same reason — the guard's
+  # subjects span `projection/` (core), `sdk.py`, `api.py` (api),
+  # `backup.py`/`consistency.py`/`mining.py` (core), and `__main__.py` (api).
+  - test_7951_enforce_atomic_write.py
   - test_7677_create_org_retry_idempotent.py  # #7677: wait-bound retry must not 409 on the caller's own org; owns to `api` (the change pins tortoise/hosted_api.py + tortoise/supabase_control.py create-org lanes)
   # #7968 / PR #8179 review P1: DUAL-REGISTERED with `core` below. The guard
   # pins `purge_org_control_plane` in `tortoise/supabase_control.py`, which IS a
@@ -1030,6 +1035,12 @@ surfaces:
   # → `"full": true` — so it needs no entry here.) `--integrity` also
   # requires every test file to be classified, which this entry satisfies.
   - test_7951_write_doors.py
+  # #7951 (steps 1-3, the ENFORCEMENT): the single-writer guard's own pins —
+  # a direct fold and a mutating raw-query are REFUSED on a journal-backed
+  # projection, the chokepoint/replay scopes still fold. `projection/` and
+  # `sdk.py` are this guard's subjects; an `sdk.py`-only change selects the
+  # full matrix, and a `projection/`-only change falls through to `core`.
+  - test_7951_enforce_atomic_write.py
   # #5141: `graph-scripts/backfill_references.py` matches no named surface and
   # falls through to `core`, so this arm is what runs the script's smoke test on
   # a graph-script-only diff. The pre-existing coverage could not see the
@@ -2608,6 +2619,7 @@ surfaces:
   # change could add an unclassified `.apply` door silently (the
   # #1349/#2938 silent-drop class; full rationale in the `api` entry).
   - test_7951_write_doors.py
+  - test_7951_enforce_atomic_write.py
   # #2884 D3: the EP/dream belief-state journal+replay guard. `tortoise/dream.py`
   # selects `ep`, so this registration is what runs the guard on a dream.py
   # change. Dual-registered under `core` (above) for its
@@ -2729,6 +2741,20 @@ surfaces:
   # `onboarding`-only change could add an unclassified `.apply` door silently
   # (the #1349/#2938 silent-drop class; full rationale in the `api` entry).
   - test_7951_write_doors.py
+  - test_7951_enforce_atomic_write.py
+  # #3094: DUAL-REGISTERED with `core`/`eval`. The empty-means-unset URI-read
+  # census (`test_no_empty_default_tortoise_db_uri_reads`) scans `tests/**`,
+  # and `tests/_html_links.py` is an EXACT SOURCE_PATTERNS entry of THIS
+  # surface — a SOURCE_PATTERNS match REPLACES the `core` fallback in
+  # `select()`, so a `tests/_html_links.py`-only change selects `onboarding`
+  # and would otherwise skip the census on a file the census scans (the
+  # #1349/#2938/#4367 silent-drop class). Measured:
+  # `select(["tests/_html_links.py"])` -> `surfaces=['onboarding']`, guard
+  # ABSENT from `test_files`. This is why one arm per census ROOT is NOT the
+  # complete set — the ratchet
+  # (`test_empty_default_uri_census_is_registered_on_every_surface_it_covers`)
+  # enumerates every in-scope file rather than sampling a representative pair.
+  - test_uri_env_mutations_declared.py
   # #1652: the served skill set's own guard. `website/apps/dashboard/public/
   # skills/` is a SOURCE_PATTERN for THIS surface (tools/ci_selection.py), and
   # the surface's existing tests pin the onboarding document + the installer's
@@ -2945,6 +2971,7 @@ surfaces:
   # `sdk`-only change could add an unclassified `.apply` door silently (the
   # #1349/#2938 silent-drop class; full rationale in the `api` entry).
   - test_7951_write_doors.py
+  - test_7951_enforce_atomic_write.py
   - test_5359_unchecked_window_writers.py
   - test_7108_operator_scope_predicate.py
   # #5346: a PAGED read must order by a TOTAL key, or its pages are not
@@ -3109,6 +3136,12 @@ surfaces:
   # other file this pins — is a SHARED_MODULE, so a sdk.py change runs it under
   # the full matrix regardless. See the `core` arm's entry for the same file.
   - test_references_boundary_5213.py
+  # #6871: the operator's INPUT set (idx=0 source, idx>=1 targets) — the
+  # source's typed edge IS the EP factor's source slot, and the canonical
+  # evidence read never surfaces a point as its own supporter. `sdk` owns it
+  # (`tortoise/sdk.py`, `tortoise/why.py`, `tortoise/ep.py`); embedded-only, so
+  # also in `carve_out` below.
+  - test_6871_operator_input_set.py
   classify:
   # Issue #1695 (extractor-v3 classify-later): the kind-classification and
   # chain-enforcement surface. Pure-logic files (stub encoders, golden
@@ -3133,6 +3166,7 @@ surfaces:
   # could add an unclassified `.apply` door silently (the #1349/#2938
   # silent-drop class; full rationale in the `api` entry).
   - test_7951_write_doors.py
+  - test_7951_enforce_atomic_write.py
   # #7809: DUAL-REGISTERED with `api`/`core` — this guard pins
   # `tortoise/embeddings.py::_embedder_warmup_enabled` (the flag resolution the
   # hosted lifespan now calls), and that module is an EXACT
@@ -3140,6 +3174,20 @@ surfaces:
   # `eval` and would otherwise skip the guard — the #1349/#2938 silent-drop
   # class (surface audit: `... <- tortoise/embeddings.py`, registered: core).
   - test_7809_hosted_prewarm_warmup_flag.py
+  # #3094: DUAL-REGISTERED with `core` (below) and `onboarding`. The
+  # empty-means-unset URI-read census
+  # (`test_no_empty_default_tortoise_db_uri_reads`) scans `tests/**` AND
+  # `tools/longmem_eval/**`, and `tools/longmem_eval/` is a SOURCE_PATTERNS
+  # entry of THIS surface — so a `tools/longmem_eval/run.py`-only change
+  # selects `eval`, REPLACING the `core` fallback, and without this arm the
+  # census would not run on exactly the change it covers. That was the closed
+  # #2840 census's defect: it scanned `tests/**` and was registered in `core`
+  # alone, so it was blind to its own `tools/longmem_eval/run.py` fix site (the
+  # #1349/#2938/#4367 silent-drop class). One arm per census ROOT is NOT the
+  # complete set: the `tests/` half is `core`'s only while no exact
+  # SOURCE_PATTERNS entry matches (see the `onboarding` arm for
+  # `tests/_html_links.py`, which does).
+  - test_uri_env_mutations_declared.py
   # #4097: registered in `core`/`sdk`/`api`/`ep`/`eval`/`onboarding` — the guard
   # scans all of `tortoise/**`, and this surface owns `tortoise/embeddings.py`
   # (a module #4097 migrated) and `tortoise/cross_lens.py`.
@@ -3492,6 +3540,10 @@ carve_out:
 # live graph, so a URI-set lane would redirect it. Also in the `sdk` surface
 # above, which is where a diff selects it.
 - test_direction_storage_7852.py
+# #6871: embedded-only — the fixture builds `TortoiseSDK(<tmpfile>)`, so a
+# URI-set lane would redirect it. Also in the `sdk` surface above, which is
+# where the diff selects it.
+- test_6871_operator_input_set.py
 - test_redis_guard.py
 # #4524: the vecf32 overwrite-seam guards. The defect is embedded-only (the
 # server lane lands the same write), so the module is module-level

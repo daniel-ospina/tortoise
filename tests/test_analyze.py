@@ -90,7 +90,12 @@ def test_with_projection(shared_proj):
         proj.g.query("CREATE (:Point {id:'c1', content:'AI strategy is working', confidence:0.85, is_operator:false})")
         proj.g.query("CREATE (:Point {id:'c2', content:'AI strategy needs revision', confidence:0.65, is_operator:false})")
         proj.g.query("CREATE (:Point {id:'op1', content:'NAND', op_type:'NAND', is_operator:true})")
-        proj.g.query("MATCH (a:Point {id:'c1'}), (op:Point {id:'op1'}), (b:Point {id:'c2'}) CREATE (a)<-[:NAND]-(op)-[:NAND]->(b)")
+        # #6871: a REAL operator edge carries its role index (`create_operator`
+        # writes idx 0 for the source and idx >= 1 for the targets), so the
+        # fixture is aligned to the real write shape. `disagreement` itself is a
+        # NAND read and is deliberately NOT role-guarded here — the NAND
+        # direction dependency is its own root, #8460.
+        proj.g.query("MATCH (a:Point {id:'c1'}), (op:Point {id:'op1'}), (b:Point {id:'c2'}) CREATE (a)<-[:NAND {idx:0}]-(op)-[:NAND {idx:1}]->(b)")
 
         result = analyze("where is the disagreement?", proj=proj)
         assert result["pattern"] == "disagreement"
@@ -149,11 +154,19 @@ def test_evidence_chain_end_to_end(shared_proj):
         # so the target content must contain that full phrase for the Cypher to match.
         proj.g.query("CREATE (:Point {id:'t1', content:'evidence ai strategy is working', confidence:0.9, is_operator:false})")
         proj.g.query("CREATE (:Point {id:'op1', content:'IMPL', op_type:'IMPL', is_operator:true})")
-        proj.g.query("MATCH (e:Point {id:'e1'}), (op:Point {id:'op1'}), (t:Point {id:'t1'}) CREATE (e)<-[:IMPL]-(op)-[:IMPL]->(t)")
+        # #6871: a REAL operator edge carries its role index (idx 0 = the
+        # operator's source, idx >= 1 = its targets). Without it the guarded
+        # template matched nothing, so this test passed vacuously on the
+        # "No evidence chain found." fallback.
+        proj.g.query("MATCH (e:Point {id:'e1'}), (op:Point {id:'op1'}), (t:Point {id:'t1'}) CREATE (e)<-[:IMPL {idx:0}]-(op)-[:IMPL {idx:1}]->(t)")
 
         result = analyze("show me the evidence chain for the AI strategy", proj=proj, use_llm=False)
         assert result["pattern"] == "evidence_chain"
         assert result["answer"] != ""  # must not raise IndexError
+        assert "sales data shows growth" in result["answer"], (
+            "the guarded template must actually resolve the chain — a bare "
+            "`!= ''` also accepts the 'No evidence chain found.' fallback"
+        )
     finally:
         pass  # shared session projection — fixture owns close
 
