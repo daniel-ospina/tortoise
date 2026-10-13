@@ -265,7 +265,7 @@ rc=0
 # either file actually uses agree", not "any conceivable bash file agrees".
 #
 # Only lines that assign a KNOWN limit var (or _NCPU, below) are evaluated -- never the whole script.
-_LIMITS="MAX_LOAD MAX_LANES MAX_REVIEW MERGE_PRIORITY_AT MAX_FIX MAX_FIX_TRIES MIN_SWAP_FREE MIN_MEM_FREE_MB BATCH CYC"
+_LIMITS="MAX_LOAD MAX_LANES MAX_REVIEW MERGE_PRIORITY_AT P0_BYPASS_MERGE_PRIORITY MAX_FIX MAX_FIX_TRIES MIN_SWAP_FREE MIN_MEM_FREE_MB BATCH CYC"
 # _NCPU is evaluated but not printed: MAX_LOAD is derived from it, so pinning it here (as an earlier
 # version did) would hide a divergence in the one input the derived ceiling depends on.
 _EVAL_VARS="$_LIMITS _NCPU"
@@ -294,7 +294,7 @@ else
   diff "$TMP/da.txt" "$TMP/db.txt" 2>/dev/null | sed 's/^/        /'
   rc=1
 fi
-ck "orch-loop.sh and install.sh resolve the same effective defaults for all 10 limits" $rc
+ck "orch-loop.sh and install.sh resolve the same effective defaults for all 11 limits" $rc
 
 # ── 8) the dispatch gate consults load and names the binding gate ────────────────
 # MAX_LOAD was rendered into the plist and documented, but never compared to anything.
@@ -312,8 +312,8 @@ grep -q 'resolving the conflict IS the task' "$HERE/fix-one.sh" && rc=0 || rc=1
 ck "the fixer prompt treats a conflict as the task" $rc
 # Drive the shipped rule rather than grepping for a comment: a regression that dropped the
 # 'lanes >= 1' exception or the headroom arithmetic must fail here.
-sed -n '/^mp_reason() {/,/^}/p;/^review_slots() {/,/^}/p' "$LOOP" > "$TMP/mp.sh"
-if need "$TMP/mp.sh" "mp_reason()/review_slots() are extracted from the shipped loop"; then
+sed -n '/^mp_reason() {/,/^}/p;/^review_slots() {/,/^}/p;/^p0_merge_priority_override() {/,/^}/p' "$LOOP" > "$TMP/mp.sh"
+if need "$TMP/mp.sh" "mp_reason()/review_slots()/p0_merge_priority_override() are extracted from the shipped loop"; then
   MERGE_PRIORITY_AT=10; MAX_REVIEW=4
   # shellcheck disable=SC1090
   . "$TMP/mp.sh"
@@ -327,6 +327,25 @@ if need "$TMP/mp.sh" "mp_reason()/review_slots() are extracted from the shipped 
   ck "shipped review_slots(): backlog raises reviewer headroom to MAX_REVIEW+2" $rc
   [ "$(review_slots 10)" = "4" ] && rc=0 || rc=1
   ck "shipped review_slots(): below the threshold, headroom is MAX_REVIEW" $rc
+  # BP0 (#8468): DRIVE the shipped override, not a grep for its text. Deleting the block, or
+  # changing its `-F'\t'` key, must fail here — a comment grep stayed green through both mutations.
+  _po="$TMP/p0"; mkdir -p "$_po"
+  O="$_po"; LOG="$TMP/p0.log"; : > "$LOG"
+  _why="merge-priority (19 open PRs)"
+  printf '7951\n' > "$_po/candidates.txt"; printf '7951\t0\n' > "$_po/.prio"
+  [ -z "$(p0_merge_priority_override "$_why" 19)" ] && rc=0 || rc=1
+  ck "shipped p0 override: a tier-0 backlog head clears the merge-priority gate" $rc
+  grep -q 'OVERRIDDEN for a P0-blocker' "$LOG" && rc=0 || rc=1
+  ck "shipped p0 override: the override is logged" $rc
+  printf '8039\t1\n' > "$_po/.prio"
+  [ "$(p0_merge_priority_override "$_why" 19)" = "$_why" ] && rc=0 || rc=1
+  ck "shipped p0 override: a tier-1 head leaves the gate closed" $rc
+  printf '7951\t0\n' > "$_po/.prio"
+  [ "$(P0_BYPASS_MERGE_PRIORITY=0 p0_merge_priority_override "$_why" 19)" = "$_why" ] && rc=0 || rc=1
+  ck "shipped p0 override: P0_BYPASS_MERGE_PRIORITY=0 restores the gate" $rc
+  rm -f "$_po/.prio"
+  [ "$(p0_merge_priority_override "$_why" 19)" = "$_why" ] && rc=0 || rc=1
+  ck "shipped p0 override: a missing .prio suppresses the override (fail-safe)" $rc
 fi
 grep -qE 'case "\$\{PR_ST:-\}" in MERGED\|CLOSED\)' "$LOOP" && rc=0 || rc=1
 ck "sweep skips CLOSED as well as MERGED" $rc

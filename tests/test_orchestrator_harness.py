@@ -22,6 +22,15 @@ Findings covered (all reproduced by the reviewer at the pre-fix head):
 * ``merged-not-closed.sh --label`` / ``--repo`` with no value dereferenced an
   unset positional under ``set -u`` and exited 1 — a code the header promises
   never to emit ("2 when a surface could not be queried — never 1").
+* ``refresh-candidates.sh`` marked an issue checked even when the pre-flight
+  emitted NO verdict, blacklisting it forever (``checked.txt=63`` vs
+  ``candidates.txt=9`` live). Only a real ``CLEAN``/``COLLISION`` marks it now;
+  the no-verdict arm must leave it for the next pass.
+* ``orch-loop.sh``'s P0 merge-priority override (BP0, default-ON
+  ``P0_BYPASS_MERGE_PRIORITY=1``) clears only the merge-priority gate when a
+  ``P0-blocker`` is at the head of the backlog. A grep for its text stayed green
+  when the block was deleted or its tab key changed, so the shipped FUNCTION is
+  executed here.
 
 Run under pytest:  python3 -m pytest tests/test_orchestrator_harness.py -q
 Run standalone:    python3 tests/test_orchestrator_harness.py
@@ -42,6 +51,18 @@ HARNESS = ROOT / "operations" / "orchestrator-harness"
 LANE = HARNESS / "lane.sh"
 MNC = HARNESS / "merged-not-closed.sh"
 REFRESH = HARNESS / "refresh-candidates.sh"
+LOOP = HARNESS / "orch-loop.sh"
+
+
+def _extract_function(path: Path, name: str) -> str:
+    """Return the shipped ``name() { ... }`` block, verbatim, or fail loudly.
+
+    Drives the SHIPPED function — never a re-implementation of its logic, which
+    would pass on the broken copy too.
+    """
+    m = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", path.read_text(), re.S | re.M)
+    assert m, f"{path.name} no longer defines {name}()"
+    return m.group(0)
 
 # The enumeration fixture. The pull-request row is filtered, so the issue
 # universe is TOTAL - len(PRS); the hits live at the OLD (tail) end so a
@@ -316,12 +337,24 @@ class RefreshPoolContract(unittest.TestCase):
             for token in pool:
                 self.assertRegex(token, r"^[0-9]+$",
                                  f".pool carries a non-number token {token!r}")
-            # The override's own lookup, verbatim: head=7951 must resolve to tier 0.
-            head = pool[0]
-            tier = subprocess.run(
-                ["awk", "-F\\t", "-v", f"n={head}", "$1==n{print $2; exit}",
-                 str(o / ".prio")], capture_output=True, text=True).stdout.strip()
-            self.assertEqual(tier, "0", "orch-loop.sh's P0 override cannot read .prio")
+            # The shipped CONSUMER of that `.prio` — not a copy of its awk. Extract
+            # orch-loop.sh's override and call it with the producer's real output: a
+            # re-implementation here would stay green if the shipped lookup broke.
+            # `candidates.txt` is what the override reads its head from.
+            (o / "candidates.txt").write_text((o / ".pool").read_text())
+            fn = _extract_function(LOOP, "p0_merge_priority_override")
+            ovlog = tmp / "orch.log"
+            drive = tmp / "override.sh"
+            drive.write_text(fn + "\n" + 'p0_merge_priority_override "$1" "$2"\n')
+            ov_env = dict(env)
+            ov_env["LOG"] = str(ovlog)
+            r = subprocess.run(["bash", str(drive), "merge-priority (19 open PRs)", "19"],
+                               capture_output=True, text=True, env=ov_env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(
+                r.stdout, "",
+                "orch-loop.sh's P0 override did not clear the gate for a tier-0 head")
+            self.assertIn("OVERRIDDEN for a P0-blocker", ovlog.read_text())
 
             # And the shipped loop, driven with that .pool, must mark candidates
             # checked. A malformed token enters the `*)` arm and marks NOTHING.
@@ -353,6 +386,119 @@ class RefreshPoolContract(unittest.TestCase):
                              "the shipped loop did not consume the shipped .pool")
             self.assertEqual((rl / "candidates.txt").read_text().split(),
                              ["7951", "7936", "8039"])
+
+    def test_a_pre_flight_with_no_verdict_is_not_marked_checked(self):
+        """A pre-flight that ERRORED is not a verdict (#8469 §2).
+
+        The fix's whole substance: `checked.txt` is written only in the CLEAN/
+        COLLISION arms. With the pre-fix unconditional write, issue 10 (no VERDICT
+        line) is blacklisted forever and never re-flighted; here it must stay for the
+        next pass while the later CLEAN candidate is still queued. The existing
+        fixtures all print `VERDICT: CLEAN`, so neither suite took this arm.
+        """
+        src = REFRESH.read_text()
+        loop = re.search(r'^n=0\n.*?^done < "\$O/\.pool"\n', src, re.S | re.M)
+        self.assertIsNotNone(loop, "the refresh loop body moved")
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            rl = tmp / "rl"
+            (rl / "fakesc" / ".venv" / "bin").mkdir(parents=True)
+            fake = rl / "fakesc" / ".venv" / "bin" / "python"
+            # Issue 10: the pre-flight ERRORS and emits NO `VERDICT` line.
+            # Issue 20: a real CLEAN verdict in the same pass.
+            fake.write_text("#!/bin/bash\n"
+                            "case \"$2\" in\n"
+                            "  10) echo 'boom: TypeError' >&2; exit 1;;\n"
+                            "  *[!0-9]*|\"\") exit 3;;\n"
+                            "esac\n"
+                            "echo 'VERDICT: CLEAN'\n")
+            fake.chmod(0o755)
+            (rl / ".pool").write_text("10\n20\n")
+            for name in ("checked.txt", "candidates.txt", "dispatched.txt"):
+                (rl / name).write_text("")
+            loop_script = tmp / "loop.sh"
+            loop_script.write_text(loop.group(0))
+            env = dict(os.environ)
+            env.update(O=str(rl), LIMIT="3", SC=str(rl / "fakesc"))
+            p = subprocess.run(["bash", str(loop_script)], capture_output=True, text=True,
+                               cwd=tmp, env=env)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            checked = (rl / "checked.txt").read_text().split()
+            candidates = (rl / "candidates.txt").read_text().split()
+            self.assertNotIn("10", checked,
+                             "a pre-flight that emitted NO verdict was marked checked")
+            self.assertNotIn("10", candidates)
+            self.assertIn("20", checked, "the later CLEAN candidate was not queued")
+            self.assertIn("20", candidates)
+            self.assertIn("?#10 no verdict", p.stdout + p.stderr)
+
+
+class MergePriorityOverride(unittest.TestCase):
+    """`orch-loop.sh`'s P0 merge-priority override is executed, not grepped.
+
+    It clears ONLY the merge-priority reason when a `P0-blocker` is at the head of
+    the backlog, and it is default-ON (`P0_BYPASS_MERGE_PRIORITY=1`). A regression
+    that deletes the block or changes its tab key silently restores the old gate,
+    and a grep for the block's text stays green through both mutations — so every
+    assertion drives the shipped function.
+    """
+
+    WHY = "merge-priority (19 open PRs)"
+
+    def _run(self, tmp: Path, head: str, prio: str | None,
+             bypass: str | None = None):
+        fn = _extract_function(LOOP, "p0_merge_priority_override")
+        o = tmp / "o"
+        o.mkdir(exist_ok=True)
+        (o / "candidates.txt").write_text(head + "\n")
+        if prio is not None:
+            (o / ".prio").write_text(prio)
+        log = tmp / "orch.log"
+        log.write_text("")
+        script = tmp / "drive.sh"
+        script.write_text(fn + "\n" + 'p0_merge_priority_override "$1" "$2"\n')
+        env = dict(os.environ)
+        env.update(O=str(o), LOG=str(log))
+        if bypass is not None:
+            env["P0_BYPASS_MERGE_PRIORITY"] = bypass
+        p = subprocess.run(["bash", str(script), self.WHY, "19"],
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout, log.read_text()
+
+    def test_a_p0_backlog_head_clears_the_merge_priority_gate(self):
+        with tempfile.TemporaryDirectory() as td:
+            out, log = self._run(Path(td), "7951", "7951\t0\n")
+            self.assertEqual(out, "")
+            self.assertIn("OVERRIDDEN for a P0-blocker", log)
+            self.assertIn("7951", log)
+
+    def test_a_non_p0_backlog_head_leaves_the_gate_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            out, log = self._run(Path(td), "8039", "8039\t1\n")
+            self.assertEqual(out, self.WHY)
+            self.assertNotIn("OVERRIDDEN", log)
+
+    def test_the_kill_switch_restores_the_unconditional_gate(self):
+        with tempfile.TemporaryDirectory() as td:
+            out, log = self._run(Path(td), "7951", "7951\t0\n", bypass="0")
+            self.assertEqual(out, self.WHY)
+            self.assertNotIn("OVERRIDDEN", log)
+
+    def test_a_missing_prio_map_suppresses_the_override(self):
+        # Fail-safe: an absent/partial .prio must never invent a P0.
+        with tempfile.TemporaryDirectory() as td:
+            out, log = self._run(Path(td), "7951", None)
+            self.assertEqual(out, self.WHY)
+            self.assertNotIn("OVERRIDDEN", log)
+
+    def test_the_lookup_is_tab_keyed_like_the_producer(self):
+        # A space-separated .prio (the `-F' '` mutation) must NOT match: the shipped
+        # producer writes `<number>TAB<tier>`.
+        with tempfile.TemporaryDirectory() as td:
+            out, log = self._run(Path(td), "7951", "7951 0\n")
+            self.assertEqual(out, self.WHY)
+            self.assertNotIn("OVERRIDDEN", log)
 
 
 if __name__ == "__main__":
