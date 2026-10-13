@@ -77,7 +77,7 @@ import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName, reveal
 import { allowanceLine, upgradeNoticeFrom, rotateCapNoticeFrom, existingKeyNoteFrom, capRevokeFirstClause } from './keyAllowance.js'
 // #4335: the billing CTA's honest-unavailable derivation — one pure source so
 // the three render sites cannot drift (see billingCta.js).
-import { COMPARE_PLANS_URL, CHECKOUT_UNAVAILABLE_REASON, checkoutCtaFor, capNoticeUpgrade } from './billingCta.js'
+import { COMPARE_PLANS_URL, CHECKOUT_UNAVAILABLE_REASON, checkoutCtaFor, capNoticeUpgrade, headerUpgradeCta } from './billingCta.js'
 import {
   canManageGraphKeys,
   deleteTypedMatches,
@@ -3142,14 +3142,22 @@ function claimIntentInFlight() {
   const graphUpgradePriceId = graphUpgrade
     ? (team?.checkout_price_ids?.[graphUpgrade.tier] || '')
     : ''
+  // #4773: the header control's OWN target — the tier it advertises resolved to
+  // that tier's price id from the server's per-tier map. Deliberately NOT
+  // `team.checkout_price_id`: that singular field is merely the server's
+  // current default, so a control wired to it opens whatever price the server
+  // happens to send while its label names another tier (the P2 from #4639).
+  const headerUpgrade = headerUpgradeCta(team)
   // `hasUpgrade` keeps the nudge copy honest: no "upgrade for a higher
   // allowance" promise when no plan above the current one is purchasable
   // (top tier, or an empty catalog).
   const nodeHint = nodeNudge(team, Boolean(nodeNext))
 
-  // #1623: parameterized upgrade — the header Upgrade button uses the
-  // server-resolved default (team.checkout_price_id); the Billing page and
-  // welcome plan step pass a per-tier price id from team.checkout_price_ids.
+  // #1623: parameterized upgrade — the Billing page, the welcome plan step,
+  // the node nudge and (since #4773) the header all pass a per-tier price id
+  // from team.checkout_price_ids. The only caller left on the server's
+  // singular default is the error banner's generic "Upgrade plan" nudge
+  // (`upgrade()` below), whose copy names no tier.
   async function upgradeToPrice(priceId) {
     // #4386: a missing price id is NOT a silent no-op. Every render site
     // disables/skips the control when no checkout is possible, so this branch
@@ -9626,11 +9634,17 @@ function claimIntentInFlight() {
             marketing pricing page (a link there is a dead end, and it was the
             upsell the owner hit on Solo). A paid tier shows its name only.
             The redundant header plan-management button (#1290) is REMOVED —
-            the Billing tab owns that. An absent checkout price id shows the
-            plain badge rather than a dead control. */}
-        {team && headerUpgradeEligible(team) && team.checkout_price_id ? (
-          <button className="tier-badge" onClick={upgrade} disabled={checkoutPending}>
-            {checkoutPending ? 'Opening checkout…' : `${TIER_LABELS[team.tier] || team.tier || 'free'} tier · Upgrade`}
+            the Billing tab owns that.
+            #4773: the control's tier and its price id come from ONE
+            resolution (`headerUpgradeCta`) — the advertised tier's own id in
+            the server's per-tier map — so the label can never name a tier
+            other than the one checkout will be opened for. The tier is named
+            in the label for exactly that reason, and a deployment that does
+            not sell it (a partial catalog, #2789) shows the plain badge
+            rather than a dead control. */}
+        {team && headerUpgradeEligible(team) && headerUpgrade.priceId ? (
+          <button className="tier-badge" onClick={() => upgradeToPrice(headerUpgrade.priceId)} disabled={checkoutPending}>
+            {checkoutPending ? 'Opening checkout…' : `Upgrade to ${TIER_LABELS[headerUpgrade.tier] || headerUpgrade.tier}`}
           </button>
         ) : team ? (
           <span className={`tier-badge${team.tier === 'team' ? ' tier-team' : ''}`}>
