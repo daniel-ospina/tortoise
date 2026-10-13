@@ -1,4 +1,4 @@
-"""#5361 — ``restore_point_at`` must not report an INVERTED window as absence.
+"""#5361 — ``get_historical_knowledge`` must not report an INVERTED window as absence.
 
 The audit half of #5361 surfaces how many Points carry a window whose END
 precedes its START. This half is the READ path: when such a Point sits on the
@@ -91,7 +91,7 @@ def test_inverted_window_is_flagged_not_dressed_as_absence(sdk):
     offered as innocent context.
     """
     pid = _plant(sdk, valid_from="2030-06-01", valid_to="2020-06-01")
-    out = sdk.restore_point_at(pid, "2025-01-01")
+    out = sdk.get_historical_knowledge(pid, "2025-01-01")
     assert out["found"] is False
     assert out.get("malformed") is True, out
     assert out.get("malformed_ids") == [pid], out
@@ -107,7 +107,7 @@ def test_forward_window_is_not_flagged(sdk):
     that flagged every non-covering window would fail here.
     """
     pid = _plant(sdk, valid_from="2020-06-01", valid_to="2030-06-01")
-    out = sdk.restore_point_at(pid, "2035-01-01")
+    out = sdk.get_historical_knowledge(pid, "2035-01-01")
     assert out["found"] is False
     assert out.get("malformed") is not True, out
     assert out["nearest"]["malformed"] is False, out["nearest"]
@@ -126,7 +126,7 @@ def test_nearest_malformed_is_always_present_and_false(sdk):
     the presence the manifest claims.
     """
     pid = _plant(sdk, valid_from="2020-06-01", valid_to="2030-06-01")
-    out = sdk.restore_point_at(pid, "2035-01-01")
+    out = sdk.get_historical_knowledge(pid, "2035-01-01")
     assert out["found"] is False
     assert "nearest" in out and out["nearest"] is not None, out
     assert "malformed" in out["nearest"], (
@@ -147,11 +147,11 @@ def test_open_ended_window_is_not_flagged(sdk):
     ``test_falsey_but_present_bound_is_epoch_not_absence``.)
     """
     only_start = _plant(sdk, valid_from="2020-06-01")
-    out = sdk.restore_point_at(only_start, "2010-01-01")
+    out = sdk.get_historical_knowledge(only_start, "2010-01-01")
     assert out["found"] is False and "malformed" not in out, out
 
     only_end = _plant(sdk, valid_to="2030-06-01")
-    out = sdk.restore_point_at(only_end, "2035-01-01")
+    out = sdk.get_historical_knowledge(only_end, "2035-01-01")
     assert out["found"] is False and "malformed" not in out, out
 
 
@@ -167,7 +167,7 @@ def test_falsey_but_present_bound_is_epoch_not_absence(sdk):
     None`` vs truthiness distinction this pins.
     """
     pid = _plant(sdk, valid_from="2030-01-01", valid_to=0)
-    out = sdk.restore_point_at(pid, "2020-01-01")
+    out = sdk.get_historical_knowledge(pid, "2020-01-01")
     assert out["found"] is False
     assert out.get("malformed") is True, out
     assert out.get("malformed_ids") == [pid], out
@@ -183,7 +183,7 @@ def test_unparseable_bound_is_not_flagged(sdk):
     check that ignored parseability would flag it.
     """
     pid = _plant(sdk, valid_from="zzz", valid_to="2026-01-01")
-    out = sdk.restore_point_at(pid, "2025-01-01")
+    out = sdk.get_historical_knowledge(pid, "2025-01-01")
     assert out["found"] is False
     assert "malformed" not in out, out
 
@@ -196,7 +196,7 @@ def test_zero_length_window_is_not_flagged(sdk):
     ``k_to == k_from`` and the strict comparison never fires.
     """
     pid = _plant(sdk, valid_from="2026-06-15", valid_to="2026-06-15")
-    out = sdk.restore_point_at(pid, "2026-06-16")
+    out = sdk.get_historical_knowledge(pid, "2026-06-16")
     assert out["found"] is False and "malformed" not in out, out
 
 
@@ -211,7 +211,7 @@ def test_covering_window_reply_is_unchanged(sdk):
     the absence branch precisely so this reply does not change shape.
     """
     pid = _plant(sdk, valid_from="2020-06-01", valid_to="2030-06-01")
-    out = sdk.restore_point_at(pid, "2025-01-01")
+    out = sdk.get_historical_knowledge(pid, "2025-01-01")
     assert out["found"] is True, out
     assert out["valid_point"]["id"] == pid
     assert "malformed" not in out, out
@@ -232,7 +232,7 @@ def test_malformed_window_beside_a_valid_one_names_only_the_bad_id(sdk):
     _q(sdk, "MATCH (a:Point {id:$a}), (b:Point {id:$b}) MERGE (a)-[:CORRECTS]->(b)",
        params={"a": new, "b": old})
 
-    out = sdk.restore_point_at(new, "2025-01-01")
+    out = sdk.get_historical_knowledge(new, "2025-01-01")
     assert out["found"] is False, out
     assert out.get("malformed") is True, out
     assert out.get("malformed_ids") == [new], out

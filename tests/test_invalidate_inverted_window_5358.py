@@ -8,7 +8,7 @@ fact (``now``) without reading the point's window START::
 
 For a **future-dated** predecessor (``validFrom > now`` — reachable, because
 ``create_point`` / ``update_point`` accept a caller ``validFrom``) that persists
-``validTo < validFrom``; ``restore_point_at``'s ``_covers`` then covers NO
+``validTo < validFrom``; ``get_historical_knowledge``'s ``_covers`` then covers NO
 instant, so the point silently disappears from every temporal query while the
 system reports honest absence.  Same defect class as #4021 (superseded
 predecessor window), different root — hence its own guard.
@@ -22,7 +22,7 @@ with) and its PRESENCE predicate (``is not None``, never truthiness; the
 falsey-but-present truthiness bug is #3985).  A refusal fires only on a
 *decidable* inversion: an unparseable stored start is not compared.
 
-Every test asserts the read-path OUTCOME via ``restore_point_at``; props are
+Every test asserts the read-path OUTCOME via ``get_historical_knowledge``; props are
 asserted ADDITIONALLY as corroboration — byte-identical pre/post props for the
 refusal, and the stamped window/flag for the success cases — never as the sole
 evidence of an outcome.
@@ -136,7 +136,7 @@ def test_future_dated_predecessor_refused_without_mutation(sdk):
     # (c) …and the point is still READABLE through the read path: an instant
     #     inside its open-ended window resolves to it — the exact property the
     #     inversion would have destroyed.
-    out = sdk.restore_point_at(
+    out = sdk.get_historical_knowledge(
         old["id"], (future + _dt.timedelta(days=15)).isoformat())
     assert out["found"] is True
     assert out["valid_point"]["id"] == old["id"]
@@ -150,7 +150,7 @@ def test_normal_dated_predecessor_still_invalidates_and_stays_readable(sdk):
     This is the half that catches an OVER-fix: a guard that refuses all
     invalidation (or stamps the wrong window) would pass the refusal test
     alone.  The resulting ``[validFrom, now]`` window must still resolve
-    through ``restore_point_at`` for an instant strictly before ``now``.
+    through ``get_historical_knowledge`` for an instant strictly before ``now``.
     """
     from tortoise.search_engine import _created_sort_key
 
@@ -169,7 +169,7 @@ def test_normal_dated_predecessor_still_invalidates_and_stays_readable(sdk):
     # the window is NOT inverted
     assert _created_sort_key(op["validTo"]) >= _created_sort_key(op["validFrom"])
     # …and it is readable strictly BEFORE now: the point did not vanish.
-    out = sdk.restore_point_at(
+    out = sdk.get_historical_knowledge(
         old["id"], (now - _dt.timedelta(days=1)).replace(
             microsecond=0).isoformat())
     assert out["found"] is True
@@ -208,7 +208,7 @@ def test_valid_from_equal_to_now_is_not_an_inversion(sdk, monkeypatch):
     assert op["validFrom"] == stamp
     assert op["validTo"] == stamp
     # a zero-length window covers its own instant
-    out = sdk.restore_point_at(old["id"], stamp)
+    out = sdk.get_historical_knowledge(old["id"], stamp)
     assert out["found"] is True
     assert out["valid_point"]["id"] == old["id"]
 
@@ -231,14 +231,14 @@ def test_unparseable_valid_from_does_not_refuse(sdk):
 
     # the documented outcome IS honest absence, before and after the write —
     # the write cannot newly hide the point from any PARSEABLE query instant
-    assert sdk.restore_point_at(old["id"], now_iso)["found"] is False
+    assert sdk.get_historical_knowledge(old["id"], now_iso)["found"] is False
 
     res = sdk.invalidate_point(old["id"], repl["id"])
     assert res["invalidated"] is True
     op = _props(sdk, old["id"])
     assert op["outdated"] is True
     assert op["validTo"] == op["expiredAt"]
-    assert sdk.restore_point_at(old["id"], now_iso)["found"] is False
+    assert sdk.get_historical_knowledge(old["id"], now_iso)["found"] is False
 
 
 def test_falsey_but_present_valid_from_is_a_real_past_start(sdk):
@@ -256,7 +256,7 @@ def test_falsey_but_present_valid_from_is_a_real_past_start(sdk):
     old = _make_point(sdk, content="epoch-zero", validFrom=0)
     repl = _make_point(sdk, content="replacement")
 
-    assert sdk.restore_point_at(old["id"], now_iso)["found"] is True
+    assert sdk.get_historical_knowledge(old["id"], now_iso)["found"] is True
 
     res = sdk.invalidate_point(old["id"], repl["id"])
     assert res["invalidated"] is True
@@ -264,7 +264,7 @@ def test_falsey_but_present_valid_from_is_a_real_past_start(sdk):
     assert op["validFrom"] == 0
     assert op["outdated"] is True
     # the closed window still resolves at an instant before the write's now
-    after = sdk.restore_point_at(old["id"], now_iso)
+    after = sdk.get_historical_knowledge(old["id"], now_iso)
     assert after["found"] is True
     assert after["valid_point"]["id"] == old["id"]
 
@@ -293,7 +293,7 @@ def test_retract_point_is_the_window_agnostic_route_after_refusal(sdk):
     assert op["status"] == "retracted"
     assert "validTo" not in op
     assert "expiredAt" not in op
-    out = sdk.restore_point_at(
+    out = sdk.get_historical_knowledge(
         old["id"], (future + _dt.timedelta(days=15)).isoformat())
     assert out["found"] is True
     assert out["valid_point"]["id"] == old["id"]
@@ -337,7 +337,7 @@ def test_duplicate_id_group_refuses_when_ANY_node_is_future_dated(sdk):
         assert vt is None, f"a duplicate-id node was stamped validTo={vt!r}"
     # both windows stay open-ended, so the future instant resolves — the
     # inversion would have made it unreachable
-    out = sdk.restore_point_at(
+    out = sdk.get_historical_knowledge(
         "dup5358", (future + _dt.timedelta(days=15)).isoformat())
     assert out["found"] is True
     # NOTE: which duplicate is row[0] is server-unspecified, so this black-box

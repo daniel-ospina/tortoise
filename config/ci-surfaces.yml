@@ -1142,7 +1142,7 @@ surfaces:
   # #5361: both halves of the inverted-validity-window guard. Registered under
   # `core` ALONE, which is the surface that actually selects them: the audit half
   # guards tortoise/audit.py (no SOURCE_PATTERNS entry → `core` fallback) and the
-  # read-path half tests TortoiseSDK.restore_point_at; both halves' measure is
+  # read-path half tests TortoiseSDK.get_historical_knowledge; both halves' measure is
   # `_created_sort_key` in tortoise/search_engine.py, also `core`. The registration
   # is load-bearing rather than cosmetic: without it the files are ABSENT from the
   # run set selected by `--changed-files "tortoise/audit.py"` (surfaces ['core'],

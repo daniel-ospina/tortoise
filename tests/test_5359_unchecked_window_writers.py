@@ -5,7 +5,7 @@ props, and ``mining._temporal_wire`` stamps ``validFrom`` on a draft decision
 point. None of those writers read the OPPOSITE bound, so a caller (or the
 miner's session date against a stored end) could persist ``validTo <
 validFrom`` directly — bypassing the refusal #4021 added inside
-``supersede_point``. ``restore_point_at``'s ``_covers`` then covers NO instant
+``supersede_point``. ``get_historical_knowledge``'s ``_covers`` then covers NO instant
 and the point disappears from every temporal query while every read reports
 honest absence.
 
@@ -280,13 +280,13 @@ def test_legacy_inverted_window_stays_readable_and_repairable(sdk):
         aggravation) reds. Without the #5359 fix the aggravation write is
         allowed and the raise never fires, so the test is non-vacuous.
     (2) *Does the fixture reach it?*  Yes — the legacy node is written raw,
-        read through the real ``restore_point_at``, then moved through the real
+        read through the real ``get_historical_knowledge``, then moved through the real
         ``update_point``.
     """
     pid = "pt_vw5359_legacy"
     _raw_point(sdk, pid, vf=LATE, vt=EARLY)
 
-    read = sdk.restore_point_at(pid, MID)
+    read = sdk.get_historical_knowledge(pid, MID)
     assert read["found"] is False
     assert read.get("malformed") is True
     assert read.get("malformed_ids") == [pid]
