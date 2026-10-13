@@ -22,6 +22,46 @@ import { rateLimited, __resetRateLimits } from "../website/functions/blog/_share
 import { constraints } from "../website/functions/blog/_shared/seo-constraints.ts";
 
 let failures = 0;
+
+// ⛔ THE round-4 invariant, asserted where it is OBSERVABLE.
+//
+// A generic loop ("keyword_ok true ⟹ the title is not prefixed") is NOT usable:
+// a model may legitimately write a title that itself begins "Keyword: Subtitle",
+// and `ensureKeyword` produces the same shape, so the two are indistinguishable
+// from the response alone. What IS decidable is the invariant PER CASE, because
+// whether the repair fired is known by construction from the mock's input:
+//
+//   • repair fired  → `keyword_ok` MUST be false, and the title must carry the
+//     `${keyword}: ` prefix — the shape #8445 exists to remove. Reporting `true`
+//     here is the round-4 P1: a green verdict on a title the repair rebuilt.
+//   • repair silent → `keyword_ok` MUST be true, and the title must contain the
+//     keyword because the MODEL put it there.
+//
+// ⛔ Two ways this guard was already wrong, both worth naming:
+//   1. A `/^[a-z0-9 ]+: /` regex silently ignores hyphens, so for the hyphenated
+//      primary "long-term memory for ai agents" a prefixed title could never
+//      match and the guard could not fail. Derive the predicate from the
+//      response's OWN keyword instead of a character class.
+//   2. Even a correct predicate is unassertable as an implication over ALL
+//      cases (above), so it is asserted per case with the expectation written
+//      out, and the detector's reachability is asserted on the fired cases.
+const assertRepairOutcome = (label, probe, fired) => {
+  const kw = probe.body.primary_keyword;
+  const prefixed = typeof kw === "string" && kw.length > 0 &&
+    probe.body.meta_title.toLowerCase().startsWith(`${kw.toLowerCase()}: `);
+  if (fired) {
+    assert(prefixed, `[${label}] the case really exercised the repair — title is prefixed (got ${JSON.stringify(probe.body.meta_title)})`);
+    assertEq(probe.body.keyword_ok, false, `[${label}] a title the repair rebuilt MUST NOT carry a green verdict`);
+  } else {
+    assert(!prefixed || probe.body.keyword_ok === true, `[${label}] sanity`);
+    assertEq(probe.body.keyword_ok, true, `[${label}] the repair stayed silent, so the verdict is true`);
+    assert(
+      probe.body.meta_title.toLowerCase().includes(String(kw).toLowerCase()),
+      `[${label}] ...and the keyword is in the title because the MODEL put it there`,
+    );
+  }
+};
+
 const ok = (msg) => console.log(`  ✓ ${msg}`);
 const fail = (msg) => { failures += 1; console.error(`  ✗ ${msg}`); };
 const assert = (cond, msg) => { if (cond) ok(msg); else fail(msg); };
@@ -497,6 +537,14 @@ console.log("generate-seo with NO request tags — the keyword check must not be
     primaryKeyword(["agent-memory"]),
     "...the keyword itself is still resolved from the model's tags",
   );
+  // The same invariant as the later block, over these cases: a green verdict
+  // never accompanies a title the repair prefixed. This is the negative control
+  // for the round-4 P1, where computing the verdict on the model's discarded raw
+  // output produced exactly that pair.
+  assertRepairOutcome("noTags", noTags, true);
+  assertRepairOutcome("repairedCase", repairedCase, true);
+  assertRepairOutcome("titleOnly", titleOnly, true);
+  assertRepairOutcome("modelPlaced", modelPlaced, false);
 
   // No tag maps to the vocabulary at all → nothing was verified. That is
   // `null` (unknown), never `true` (success).
@@ -708,13 +756,18 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     "...so the tag-derived fallback keyword appears NOWHERE: one article, one primary keyword",
   );
 
-  // 2d. ⛔ `chosenUsed` and `keyword_ok` must read the SAME artifact — the
-  //     model's RAW output — or the endpoint can honour a claim and deny it in
-  //     one response. Here the model places the keyword past the field cap, so
-  //     the length contract truncates it away: the model DID its job, and the
-  //     verdict must say so, even though the returned title needed the repair.
-  //     Reporting the contract's truncation as a generation failure was the
-  //     defect (#8446 review, P2).
+  // 2d. ⛔ The invariant that matters: `keyword_ok: true` must NEVER accompany a
+  //     returned title that the repair prefixed — that is #8445's indicator 1,
+  //     and the whole reason this field exists. Here the model places the
+  //     keyword but the title is over the 60-char cap, so the length contract
+  //     truncates it away and the repair re-front-loads it.
+  //
+  //     The verdict is FALSE, conservatively: the returned field needed help.
+  //     Computing it on the model's discarded raw output instead made this case
+  //     return `keyword_ok: true` next to a colon-prefixed title (~7.5% of
+  //     randomised tagless requests), and THIS ASSERTION previously pinned that
+  //     broken pair as the expected contract (#8446 review, round 4). A
+  //     needless regeneration is cheap; publishing a broken title is not.
   const overBudget = await drive({
     primaryKeyword: "epistemic memory",
     metaTitle: "A practical guide to graph memory for teams building agents with epistemic memory",
@@ -727,13 +780,19 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   );
   assertEq(
     overBudget.body.keyword_ok,
-    true,
-    "...and the verdict AGREES: the model put it there, even though truncation removed it",
+    false,
+    "...but the verdict is conservatively FALSE, because the returned title needed the repair",
   );
   assert(
     overBudget.body.meta_title.startsWith("epistemic memory: "),
-    `...the returned title still carries it via the repair (got ${JSON.stringify(overBudget.body.meta_title)})`,
+    `...the returned title is indeed repaired/truncated (got ${JSON.stringify(overBudget.body.meta_title)})`,
   );
+  // The general invariant, asserted directly rather than case by case: a green
+  // verdict can never sit next to a prefixed title.
+  assertRepairOutcome("fluent", fluent, false);
+  assertRepairOutcome("descriptionOnly", descriptionOnly, true);
+  assertRepairOutcome("overBudget", overBudget, true);
+  assertRepairOutcome("claimsUnused", claimsUnused, true);
 
   // 3. ⛔ The model must not be able to introduce a keyword the research never
   //    produced. An unknown choice falls back to the tag-derived keyword.

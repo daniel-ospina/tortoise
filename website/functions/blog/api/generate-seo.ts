@@ -306,6 +306,14 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   // reporting `keyword_ok: true` (#8446 review, P1). Presence in either
   // generated field counts as "used", so a keyword the model placed in one field
   // never becomes a SECOND keyword through a different fallback.
+  // The model's choice is honoured when its own generated text uses it. This is
+  // an OR over the two fields, deliberately, and is NOT the same predicate as
+  // `keyword_ok` below (which ANDs them): the model placing the keyword in only
+  // one field still used it, and treating that as "unused" would fall back to a
+  // DIFFERENT keyword and repair the title with it — two keywords in one post,
+  // one of them unverified (#8445's fix direction). The two fields therefore
+  // differ exactly when the model filled one field and not the other, which is
+  // intended and tested; do not "fix" one to match the other.
   const rawTitle = typeof result.json.meta_title === "string" ? result.json.meta_title : "";
   const rawDescription = typeof result.json.meta_description === "string" ? result.json.meta_description : "";
   const chosen = typeof result.json.primary_keyword === "string" ? result.json.primary_keyword.trim() : "";
@@ -348,34 +356,42 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   return json(
     {
       ...repaired,
-      // ⛔ `keyword_ok` answers ONE question: did the MODEL put the keyword in
-      // the fields it was asked to fill? It is computed on the model's RAW
-      // generated text — the SAME artifact `chosenUsed` uses, so the two can
-      // never disagree about whether the model used the keyword (#8446 review).
+      // ⛔ `keyword_ok` reports ONE thing, conservatively: the keyword is in the
+      // fields the caller RECEIVES **as the model wrote them** — i.e. the repair
+      // did NOT have to fire. Computed on `enforced.*` (post length-contract,
+      // pre-repair), so it is true only when the returned meta is clean.
       //
-      // Two wrong artifacts, both tried:
+      // Two other artifacts were tried and both were wrong:
       //   • `repaired.*` — a TAUTOLOGY. `ensureKeyword` guarantees its result
       //     contains the keyword, so the answer was always `true` whenever
-      //     `primary` was non-null and the `false` branch was unreachable.
-      //   • `enforced.*` — the model's text AFTER the length contract truncated
-      //     it. A model that places the keyword in an over-budget title has done
-      //     its job, but a keyword falling outside the cut made the verdict say
-      //     it had not — while `chosenUsed` said the opposite in the SAME
-      //     response. The length contract is a SEPARATE signal; reporting it
-      //     here conflated "generation fell short" with "the title was too long".
+      //     `primary` was non-null and `false` was unreachable.
+      //   • the model's RAW fields — it let `keyword_ok: true` coexist with
+      //     exactly the defect #8445 exists to remove. A title over the 60-char
+      //     cap whose keyword falls outside the cut is truncated, then the
+      //     repair re-front-loads it:
       //
-      // So: `true` = the model placed it unaided (issue #8445 indicator 2:
-      // "`keyword_ok` is `true` because the model put the keyword there");
-      // `false` = it did not, and the repair is the only reason the returned
-      // field carries it — the repair remains a backstop, not a mechanism.
-      // `null` = no primary keyword could be derived, so nothing was verified
-      // (never a positive claim).
+      //       keyword_ok: true
+      //       meta_title: "epistemic memory: A practical guide to graph memory for"
+      //
+      //     Measured at a ~7.5% rate on randomised tagless input. A consumer
+      //     gating on `keyword_ok` (the field #8293 tells callers to read) would
+      //     PUBLISH that. Verifying the model's discarded output instead of the
+      //     artifact the caller receives is the same proxy-for-artifact mistake
+      //     this PR keeps finding.
+      //
+      // So: `true` = the model placed it unaided AND the length contract did not
+      // remove it, so the returned title reads fluently around it (indicator 1).
+      // `false` = the repair had to fire — the model omitted it, or the title was
+      // too long — and the returned field needed help. Conservative by design:
+      // a needless regeneration is cheap, publishing a colon-prefixed title is
+      // not. `null` = no primary keyword could be derived, so nothing was
+      // verified (never a positive claim).
       primary_keyword: primary,
       keyword_ok:
         primary === null
           ? null
-          : containsKeyword(rawTitle, primary) &&
-            containsKeyword(rawDescription, primary),
+          : containsKeyword(enforced.meta_title, primary) &&
+            containsKeyword(enforced.meta_description, primary),
       provider: result.provider,
       input_tokens: result.inputTokens,
       output_tokens: result.outputTokens,
