@@ -3,7 +3,7 @@
 # to ~/orchestrator/candidates.txt (the dispatch backlog). Skips anything already checked.
 set -u
 OR="${OR:-daniel-ospina/tortoise}"
-REPO="${REPO:-/Users/home/eldato/tortoise}"
+REPO="${REPO:-/Users/danielospina/Documents/GitHub/tortoise}"
 SC="$REPO/.worktrees/dispatch-scout"
 O="${O:-$HOME/orchestrator}"
 export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH

@@ -385,3 +385,169 @@ def test_supersede_window_stamps_additive(sdk):
     assert expired_at, "expiredAt must be stamped"
     # window end == successor's validFrom (absent) → createdAt fallback
     assert valid_to == claim_b["createdAt"]
+
+
+# ── #6180: the operator's reverse INPUT mirror travels with its support ──
+
+def test_supersede_transfers_operator_input_mirror(sdk):
+    """#6180: `(support)-[:INPUT {idx:0}]->(operator)` IS the support source
+    why.py reads (`_SUPPORT_OP_CYPHER`). Leaving it on the superseded source
+    emptied the replacement's support chain and let the dead point keep
+    exerting influence through the operator — both must be gone."""
+    from tortoise.why import assemble_why_blocks
+
+    old = _make_point(sdk, content="Old supported source")
+    target = _make_point(sdk, content="Target claim")
+    sdk.create_operator("IMPL", old["id"], [target["id"]])
+    new = _make_point(sdk, content="New supported source")
+    proj = sdk._get_proj()
+
+    pre = assemble_why_blocks(proj, [target["id"]])[target["id"]]["support_chain"]
+    assert pre, "precondition: the support chain resolves before the supersede"
+
+    sdk.supersede_point(old["id"], new["id"])
+
+    old_in = proj.g.query(
+        "MATCH (old:Point {id:$o})-[r:INPUT]->(:Point {is_operator:true}) "
+        "RETURN count(r)", params={"o": old["id"]}).result_set[0][0]
+    assert old_in == 0, "the dead point must not keep the operator's INPUT"
+    new_in = [r[0] for r in proj.g.query(
+        "MATCH (new:Point {id:$n})-[r:INPUT]->(:Point {is_operator:true}) "
+        "RETURN r.idx", params={"n": new["id"]}).result_set]
+    assert new_in == [0], f"the successor must carry the idx-0 mirror, got {new_in}"
+
+    post = assemble_why_blocks(proj, [target["id"]])[target["id"]]["support_chain"]
+    assert post, "the successor's support chain must resolve after the supersede"
+    assert new["id"] in {s["point_id"] for s in post}, (
+        f"the chain must resolve THROUGH the successor, got {post}")
+
+
+def test_supersede_transfers_target_input_mirror(sdk):
+    """#6180: every INPUT edge whose source is the superseded point follows —
+    including the operator's idx>0 target mirror, so no dead-incident INPUT
+    edge is left behind."""
+    claim = _make_point(sdk, content="Claim A")
+    evidence = _make_point(sdk, kind="evidence", content="Evidence")
+    sdk.create_operator("IMPL", evidence["id"], [claim["id"]])
+    new = _make_point(sdk, content="Claim B")
+    sdk.supersede_point(claim["id"], new["id"])
+    proj = sdk._get_proj()
+
+    old_in = proj.g.query(
+        "MATCH (old:Point {id:$o})-[r:INPUT]->() RETURN count(r)",
+        params={"o": claim["id"]}).result_set[0][0]
+    assert old_in == 0
+    new_idx = [r[0] for r in proj.g.query(
+        "MATCH (new:Point {id:$n})-[r:INPUT]->() RETURN r.idx",
+        params={"n": new["id"]}).result_set]
+    assert new_idx == [1], f"the successor must carry the idx-1 mirror, got {new_idx}"
+
+
+def test_supersede_keeps_alreadydecided_input_mirror(sdk):
+    """#1080 carve-out reaches the INPUT leg too: an alreadyDecided operator is
+    deliberately kept on the dead prior, so its INPUT mirror stays there.
+
+    The plain operator (`op_move`) is a CONTROL: its mirror must MOVE. Without
+    it these assertions also hold on the pre-fix code (which never touched the
+    INPUT leg at all), so the control is what makes the test discriminate the
+    #6180 fix instead of pinning an invariant every implementation satisfies.
+    """
+    old = _make_point(sdk, content="Old decision")
+    target = _make_point(sdk, content="Target")
+    op_keep = sdk.create_operator("IMPL", old["id"], [target["id"]],
+                                  label="alreadyDecided")
+    control_target = _make_point(sdk, content="Control target")
+    op_move = sdk.create_operator("IMPL", old["id"], [control_target["id"]])
+    new = _make_point(sdk, content="New decision")
+    sdk.supersede_point(old["id"], new["id"])
+    proj = sdk._get_proj()
+
+    kept = {r[0] for r in proj.g.query(
+        "MATCH (old:Point {id:$o})-[:INPUT]->(op:Point {is_operator:true}) "
+        "RETURN op.id", params={"o": old["id"]}).result_set}
+    assert kept == {op_keep["id"]}, (
+        f"only the alreadyDecided operator keeps its mirror, got {kept}")
+    moved = {r[0] for r in proj.g.query(
+        "MATCH (new:Point {id:$n})-[:INPUT]->(op:Point {is_operator:true}) "
+        "RETURN op.id", params={"n": new["id"]}).result_set}
+    assert moved == {op_move["id"]}, (
+        f"the control operator's mirror must move to the successor, got {moved}")
+
+
+def test_supersede_mitigation_point_without_idx(sdk):
+    """#6180 P1 regression: `mitigate_operator` writes `(m)-[:IMPL]->(op)` and
+    `(op)-[:mitigated_by]->(m)` with NO idx, so the transfer receives
+    `idx=None`. It MUST NOT issue `MERGE … {idx:null}` (FalkorDB: "Cannot merge
+    node using null property value") and must still remove the old idx-less
+    edge. The pre-fix CREATE left that edge stranded on the dead point; a naive
+    CREATE→MERGE turns it into a hard failure on every mitigation point (and a
+    journaled `PointSuperseded` then wedges `rebuild_all`).
+    """
+    source = _make_point(sdk, content="source")
+    target = _make_point(sdk, content="target")
+    op = sdk.create_operator("IMPL", source["id"], [target["id"]])
+    mit = sdk.mitigate_operator(op["id"], "no control group", 0.3)
+    new = _make_point(sdk, content="new mitigation context")
+    proj = sdk._get_proj()
+
+    pre = proj.g.query(
+        "MATCH (op:Point {id:$op})-[r:mitigated_by]->(m:Point {id:$m}) "
+        "RETURN r.idx", params={"op": op["id"], "m": mit["id"]}).result_set
+    assert pre and pre[0][0] is None, (
+        f"precondition: the edge is idx-less, got {pre}")
+
+    sdk.supersede_point(mit["id"], new["id"])  # must not raise
+
+    moved = proj.g.query(
+        "MATCH (op:Point {id:$op})-[r:mitigated_by]->(m:Point {id:$m}) "
+        "RETURN count(r)",
+        params={"op": op["id"], "m": new["id"]}).result_set[0][0]
+    assert moved == 1, "the idx-less edge must transfer to the successor"
+    left = proj.g.query(
+        "MATCH (op:Point {id:$op})-[r:mitigated_by]->(m:Point {id:$m}) "
+        "RETURN count(r)",
+        params={"op": op["id"], "m": mit["id"]}).result_set[0][0]
+    assert left == 0, "the idx-less edge must be removed from the superseded point"
+
+
+def test_supersede_does_not_duplicate_a_prewired_operator_edge(sdk):
+    """#6180 complementary case: when the successor already carries the shared
+    operator edge (the successor-first write pattern), the transfer must MERGE
+    — a CREATE doubles the edge and inflates the operator's evidence weight
+    while passing every "is the edge there?" check."""
+    target = _make_point(sdk, content="target")
+    old = _make_point(sdk, content="old")
+    new = _make_point(sdk, content="new")
+    op = sdk.create_operator("IMPL", old["id"], [target["id"]])
+    proj = sdk._get_proj()
+    # Caller pre-wires the shared edge onto the successor — and the shared
+    # INPUT mirror — before the supersede.
+    proj.g.query(
+        "MATCH (op:Point {id:$op}), (new:Point {id:$new}) "
+        "CREATE (op)-[:IMPL {idx:0}]->(new)",
+        params={"op": op["id"], "new": new["id"]},
+    )
+    # ... and the shared INPUT mirror, so `mirror == 1` below genuinely tests
+    # the MERGE collapse (a CREATE-based mirror leg would double it).
+    proj.g.query(
+        "MATCH (op:Point {id:$op}), (new:Point {id:$new}) "
+        "CREATE (new)-[:INPUT {idx:0}]->(op)",
+        params={"op": op["id"], "new": new["id"]},
+    )
+
+    sdk.supersede_point(old["id"], new["id"])
+
+    typed = proj.g.query(
+        "MATCH (op:Point {id:$op})-[r:IMPL {idx:0}]->(new:Point {id:$new}) "
+        "RETURN count(r)", params={"op": op["id"], "new": new["id"]},
+    ).result_set[0][0]
+    assert typed == 1, f"the transfer must not double the pre-wired edge ({typed})"
+    mirror = proj.g.query(
+        "MATCH (new:Point {id:$new})-[ri:INPUT {idx:0}]->(op:Point {id:$op}) "
+        "RETURN count(ri)", params={"op": op["id"], "new": new["id"]},
+    ).result_set[0][0]
+    assert mirror == 1, f"exactly one INPUT mirror, got {mirror}"
+    # old is fully free of both halves
+    assert proj.g.query(
+        "MATCH (old:Point {id:$o})-[:INPUT]->(:Point {is_operator:true}) "
+        "RETURN count(*)", params={"o": old["id"]}).result_set[0][0] == 0

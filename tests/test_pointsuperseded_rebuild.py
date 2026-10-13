@@ -5,7 +5,8 @@ Point side had NO PointSuperseded branch in the projection rebuild chain at
 all — a superseded Point resurrected as live after rebuild_all, lost its
 validTo/expiredAt/outdated stamps + CORRECTS edge, and re-materialized its
 transferred operator/direct edges at the OLD point (live supersede's
-transfer is CREATE+DELETE graph mutation only; operator.inputs is never
+transfer is MERGE+DELETE — idx-keyed at the typed leg, and the reverse
+INPUT mirror re-points too (#6180); operator.inputs is never
 updated and DirectEdgeRepoint descriptors had no replay consumer).
 
 Fix shape (mirrors #2164): pass-1b deferred-trailing-sweep fold
@@ -1839,3 +1840,121 @@ def test_promote_materialized_target_successor_later_folds_on_every_engine(
             via_all[2], via_all[3]), (
             f"{name}: _fold_journal diverges on the window stamps — "
             f"{b_fold} vs {via_all}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# #6180: the operator's reverse INPUT mirror follows on rebuild too — the
+# successor's why/support chain must resolve live AND post-rebuild
+# ═══════════════════════════════════════════════════════════════════════
+
+def _input_edges(proj, pid: str) -> set:
+    """`(pid)-[:INPUT {idx}]->(operator)` rows — the operator's support
+    mirror whose source is `pid`."""
+    return {tuple(r) for r in proj.g.query(
+        "MATCH (p:Point {id:$id})-[r:INPUT]->(op:Point {is_operator:true}) "
+        "RETURN r.idx, op.id",
+        params={"id": pid}).result_set}
+
+
+def test_operator_input_mirror_repoints_on_rebuild(sup):
+    """#6180: live supersede moves the INPUT mirror to the successor; pass-2
+    resurrects it at OLD from the operator snapshot (whose `inputs` still name
+    OLD), so pass-2b must move it back — else live and rebuilt diverge and the
+    successor's support chain is empty post-rebuild."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A source", status="live")["id"]
+    t = sdk.create_point("statement", "target", status="live")["id"]
+    sdk.create_operator("IMPL", a, [t])
+    succ = sdk.create_point("statement", "A'", status="live")["id"]
+    sdk.supersede_point(a, succ)
+    proj = sdk._get_proj()
+    pre_old = _input_edges(proj, a)
+    pre_new = _input_edges(proj, succ)
+    assert not pre_old and pre_new, f"live: old={pre_old} new={pre_new}"
+
+    _rebuild(sdk, events)
+
+    assert not _input_edges(proj, a), "INPUT mirror stranded on the superseded A"
+    assert _input_edges(proj, succ) == pre_new, (
+        f"INPUT mirror drifted: {_input_edges(proj, succ)} != {pre_new}")
+
+
+def test_operator_input_mirror_follows_a_chain(sup):
+    """A→B→C: the INPUT mirror lands on the FINAL live successor after
+    rebuild, never on the intermediate terminal B."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A", status="live")["id"]
+    t = sdk.create_point("statement", "t", status="live")["id"]
+    sdk.create_operator("IMPL", a, [t])
+    b = sdk.create_point("statement", "B", status="live")["id"]
+    c = sdk.create_point("statement", "C", status="live")["id"]
+    sdk.supersede_point(a, b)
+    sdk.supersede_point(b, c)
+    proj = sdk._get_proj()
+    pre_c = _input_edges(proj, c)
+    assert pre_c, "live: the mirror must end on C"
+
+    _rebuild(sdk, events)
+
+    assert not _input_edges(proj, a), "mirror stranded on A"
+    assert not _input_edges(proj, b), "mirror stranded on intermediate B"
+    assert _input_edges(proj, c) == pre_c
+
+
+def test_alreadydecided_input_mirror_stays_on_rebuild(sup):
+    """#1080 carve-out parity: an alreadyDecided operator's INPUT mirror stays
+    on the superseded prior live AND post-rebuild."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A", status="live")["id"]
+    t = sdk.create_point("statement", "t", status="live")["id"]
+    sdk.create_operator("IMPL", a, [t], label="alreadyDecided")
+    succ = sdk.create_point("statement", "A'", status="live")["id"]
+    sdk.supersede_point(a, succ)
+    proj = sdk._get_proj()
+    pre = _input_edges(proj, a)
+    assert pre
+    _rebuild(sdk, events)
+    assert _input_edges(proj, a) == pre
+    assert not _input_edges(proj, succ)
+
+
+def test_idxless_mitigation_edge_survives_rebuild(sup):
+    """#6180 P1 parity: `mitigate_operator` writes the operator→mitigation
+    `mitigated_by` edge with NO idx. The live transfer must not raise on
+    `MERGE … {idx:null}`, and `rebuild_all` must not raise either — the
+    `PointSuperseded` fold is journaled BEFORE the transfers, so a raise here
+    wedges every later rebuild of the journal (the disaster-recovery path).
+
+    Scope: this asserts the `mitigated_by` transfer and that rebuild does not
+    raise. It does NOT assert full live==rebuilt parity for a mitigation — the
+    pre-existing #5048 `IMPL`/`INPUT` fold divergence (projection/edges.py's
+    `_create_edges` mints an `(op)-[:INPUT]->(m)` back-link that the
+    filter-less pass-2b typed collector then repoints) also applies here. That
+    divergence was previously UNOBSERVABLE because `rebuild_all` raised on
+    `MERGE {idx:null}` before this fix; it is recorded on #5048, not treated as
+    new here."""
+    _, events, sdk = sup
+    s = sdk.create_point("statement", "s", status="live")["id"]
+    t = sdk.create_point("statement", "t", status="live")["id"]
+    op = sdk.create_operator("IMPL", s, [t])
+    mit = sdk.mitigate_operator(op["id"], "no control", 0.3)
+    succ = sdk.create_point("statement", "new context", status="live")["id"]
+    sdk.supersede_point(mit["id"], succ)
+    proj = sdk._get_proj()
+
+    def _mitigated_by(pid):
+        return {tuple(r) for r in proj.g.query(
+            "MATCH (op:Point {id:$op})-[r:mitigated_by]->(m:Point {id:$m}) "
+            "RETURN r.idx, m.id",
+            params={"op": op["id"], "m": pid}).result_set}
+
+    pre = _mitigated_by(succ)
+    assert pre == {(None, succ)}, f"live: idx-less edge must be on succ, got {pre}"
+    assert _mitigated_by(mit["id"]) == set(), "live: edge must leave the prior"
+
+    _rebuild(sdk, events)  # must not raise (the disaster-recovery path)
+
+    assert _mitigated_by(succ) == pre, (
+        f"rebuilt edge drifted: {_mitigated_by(succ)} != {pre}")
+    assert _mitigated_by(mit["id"]) == set(), (
+        "rebuilt: idx-less edge stranded on the superseded prior")

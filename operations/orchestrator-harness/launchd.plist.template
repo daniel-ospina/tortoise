@@ -57,6 +57,8 @@
     <string>__MAX_FIX_TRIES__</string>
     <key>MIN_SWAP_FREE</key>
     <string>__MIN_SWAP_FREE__</string>
+    <key>MIN_MEM_FREE_MB</key>
+    <string>__MIN_MEM_FREE_MB__</string>
     <key>BATCH</key>
     <string>__BATCH__</string>
     <key>CYC</key>

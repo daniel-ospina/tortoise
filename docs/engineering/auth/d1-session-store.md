@@ -147,8 +147,13 @@ Two conditional updates carry the design; both are in the code today:
 | `getAccessTokenForSession` (token.ts) | `WHERE handle = ?1 AND revoked = 0 AND refresh_token = ?5` | CAS on the **old** refresh token: `0` means a concurrent request already rotated it → **re-read** the winner's token instead of clobbering it. Without that branch the loser overwrites the live session's token. |
 
 `refresh_token` does not appear in the revoke predicate: revocation is idempotent on `revoked`,
-and the rotation race is guarded where the rotation happens. (The re-read branch is
-regression-covered only by the code path itself — a test is tracked by **#5355**.)
+and the rotation race is guarded where the rotation happens. Two layers guard it: `token.ts`'s
+module-level `inFlightRefreshes` map shares ONE provider refresh among concurrent callers for the
+same handle (same-isolate single-flight), and the CAS above covers the cross-isolate write. #5355's
+**first arm** — a CAS that matches zero rows re-reading the winner's token — is covered by
+`tests/test_oauth_session_flow_properties.py::test_property_1_the_cas_serves_a_cross_isolate_loser_without_clobbering`.
+Its **second arm** — `fresh` absent or revoked, falling through to the token this request minted —
+still has no test.
 
 **Verified by execution, not asserted** — Gate 1b ran these on a real `wrangler pages dev` +
 `--d1`: `casRevokeChanges: 1`, then `casIdempotent: true` (retry → 0), `bulkRevokeChanges: 1`,
@@ -275,7 +280,11 @@ what "the largest table in the store" would otherwise have meant.
 - **Production D1 provisioning itself** — the database exists; the *invariant that read replication
   is off* is a dashboard setting nothing in-repo reads back (§3(a)).
 - **The ~1k qps bound has never been load-tested** against this store.
-- **#5355** — the concurrent-rotation CAS re-read has no test.
+- **#5355** — the concurrent-rotation CAS re-read. Its **first arm** (the CAS matched zero rows →
+  re-read the winner's token) is now covered by
+  `tests/test_oauth_session_flow_properties.py::test_property_1_the_cas_serves_a_cross_isolate_loser_without_clobbering`.
+  Its **second arm** — `fresh` absent or revoked, falling through to the token this request minted —
+  remains untested.
 - **#8032** — `sessions` and `email_flow_pending` had no expiry sweep (the rest of the #3647
   class). **CLOSED by §5a**, which also records why the `sessions` side needed a retention
   decision rather than a mechanical port.

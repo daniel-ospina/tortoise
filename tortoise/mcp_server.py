@@ -5284,7 +5284,15 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
     transfer_edges=False is the invalidate behaviour and reuses that preview.
     transfer_edges=True enumerates the edges the writer repoints, leg by leg:
       * 2a operator -> old, EXCEPT `alreadyDecided` (kept on the dead prior).
-        The writer uses CREATE here, so every row becomes its own edge;
+        The writer MERGEs (idx-keyed; an idx-less edge merges on the bare
+        pattern — #6180): a pre-existing edge at the successor is
+        a no-op rather than a second parallel edge, while the two rows
+        `create_operator(op, old, [old])` mints (idx 0 and idx 1) stay distinct;
+      * 2a-INPUT `(old)-[:INPUT]->(op)` mirrors, ALSO MERGE-backed (#6180). The
+        writer transfers each mirror with its operator's support source so the
+        successor's why/support chain resolves; they are removed from old and
+        created at the successor, but are NOT part of
+        `edges_transferred_from_old` (the writer's own counter excludes them);
       * 2a-DIRECT operator-less IMPL/NAND incident to old, excluding operator
         targets. The writer MERGEs, so rows to the same target collapse;
       * 2b the structural rels in `SUPERSEDE_STRUCTURAL_RELS` (imported from
@@ -5318,10 +5326,12 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
 
     Each condition has its own test. This
     value is the accurate one; the self-loop is reported under `edges_dropped`
-    with the reason "self-loop on the old node". It counts every row the write
-    removes from old, INCLUDING the delete-only rows (`edges_dropped`: a
-    self-loop, or a far endpoint that is the successor / not a Point) that the
-    writer also books as "transferred" while creating nothing.
+    with the reason "self-loop on the old node". It counts every PRIMARY row
+    the write removes from old, INCLUDING the delete-only rows (`edges_dropped`:
+    a self-loop, or a far endpoint that is the successor / not a Point) that the
+    writer also books as "transferred" while creating nothing. The 2a-INPUT
+    mirrors are removed from old but excluded from this count (and from
+    `edges_transferred`), because the writer's own counter excludes them.
     It is therefore NOT "the edges that arrive at the successor": those are
     `edges_created_at_new` + `edges_already_present_at_new`.
     `edges_remaining_at_old` is the complementary count — the edges incident to
@@ -5347,19 +5357,51 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
     sdk._assert_lifecycle_guard(new_id, method="supersession", role="target")
     proj = sdk._get_proj()
     from tortoise.security import validate_rel_type
-    created: list[dict] = []   # 2a operator edges — CREATE, never collapse
+    created: list[dict] = []   # net-new 2a operator edges only (that leg is MERGE-backed;
+                              # 2a-INPUT net-new lives in `mirror_created`, the
+                              # 2a-DIRECT/2b legs in `merged` until split below)
     merged: list[tuple] = []   # (merge_key, edge) — MERGE-backed legs
     dropped: list[dict] = []
     kept: list[dict] = []
+    # Edges already present at the successor — a MERGE on them is a no-op, so
+    # they are NOT net-new. `mirror_*` are the 2a-INPUT leg's (#6180); they
+    # are counted in `edges_created_at_new`/`edges` but NOT in
+    # `edges_transferred_from_old`, which mirrors the writer's own primary-edge
+    # counter (INPUT mirrors ride along uncounted — see sdk.supersede_point).
+    typed_present: list[dict] = []
+    mirror_created: list[dict] = []
+    mirror_present: list[dict] = []
     # INTERNAL ids of every edge the write removes from old (repointed OR
     # delete-only). Set-keyed so an edge matched by two passes is handled once;
     # `edges_remaining_at_old` is the incident count minus this set.
     handled_old_edge_ids: set = set()
 
+    # Pre-existing operator edges/INPUT mirrors at the successor, keyed on the
+    # operator's LOGICAL id — the writer's 2a/2a-INPUT MERGEs are per-operator
+    # (the typed edge, idx-keyed, plus the reverse INPUT mirror), so one
+    # operator's existing edge must not mark another operator's as present.
+    # `idx` rides the key (the writer's MERGE pattern carries it), so the two
+    # edges `create_operator(op, old, [old])` mints (idx 0 and idx 1) stay
+    # distinct.
+    pre_op_out = {(r[0], r[1], r[2]) for r in proj.g.query(
+        "MATCH (op:Point {is_operator:true})-[r]->(new:Point {id:$n}) "
+        "RETURN op.id, type(r), r.idx",
+        params={"n": new_id}).result_set}
+    pre_op_in = {(r[0], r[1]) for r in proj.g.query(
+        "MATCH (new:Point {id:$n})-[r:INPUT]->(op:Point {is_operator:true}) "
+        "RETURN op.id, r.idx",
+        params={"n": new_id}).result_set}
+    # #6180 null-idx class: the writer MERGEs an idx-less edge on the BARE
+    # pattern, which matches a same-type edge at ANY idx — so a null-idx row is
+    # "already present" when the successor carries that operator edge at all.
+    pre_op_out_any = {(a, b) for (a, b, _idx) in pre_op_out}
+    pre_op_in_any = {a for (a, _idx) in pre_op_in}
+
     # 2a — operator edges. The writer validates every relationship type BEFORE
     # any mutation (a raw/imported undeclared type is an injection primitive),
-    # so the preview validates too.
-    for op_id, rtype, _idx, op_label, op_rid in proj.g.query(
+    # so the preview validates too. The writer MERGEs (idx-keyed), so an edge
+    # the successor already carries is a no-op rather than a net-new one.
+    for op_id, rtype, idx, op_label, op_rid in proj.g.query(
         "MATCH (op:Point {is_operator:true})-[r]->(o:Point {id:$old}) "
         "RETURN op.id, type(r), r.idx, op.label, ID(r)",
         params={"old": old_id},
@@ -5369,8 +5411,36 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
             kept.append({"type": rtype, "from": op_id, "to": old_id,
                          "reason": "alreadyDecided stays on the superseded prior"})
         else:
-            created.append({"type": rtype, "from": op_id, "to": new_id})
+            edge = {"type": rtype, "from": op_id, "to": new_id}
+            present = ((op_id, rtype) in pre_op_out_any if idx is None
+                       else (op_id, rtype, idx) in pre_op_out)
+            (typed_present if present else created).append(edge)
             handled_old_edge_ids.add(op_rid)
+
+    # 2a-INPUT (#6180) — the writer transfers the operator's reverse INPUT
+    # mirror with its typed edge (`(support)-[:INPUT]->(operator)` is the
+    # support source why.py reads). MERGE, so a mirror already at the successor
+    # is a no-op. alreadyDecided operators keep their INPUT on the dead prior,
+    # mirroring 2a.
+    for op_id, idx, op_label, op_rid in proj.g.query(
+        "MATCH (o:Point {id:$old})-[r:INPUT]->(op:Point {is_operator:true}) "
+        "RETURN op.id, r.idx, op.label, ID(r)",
+        params={"old": old_id},
+    ).result_set:
+        if op_label == "alreadyDecided":
+            # #6180: the retained mirror must be VISIBLE in the kept set, like
+            # 2a's typed branch — the writer keeps it on the dead prior, and a
+            # caller enumerating edges + edges_kept_attached otherwise cannot
+            # see it at all (only edges_remaining_at_old reflects it).
+            kept.append({"type": "INPUT", "from": old_id, "to": op_id,
+                         "reason": "alreadyDecided keeps its INPUT on the "
+                                   "superseded prior"})
+            continue
+        edge = {"type": "INPUT", "from": new_id, "to": op_id}
+        present = (op_id in pre_op_in_any if idx is None
+                   else (op_id, idx) in pre_op_in)
+        (mirror_present if present else mirror_created).append(edge)
+        handled_old_edge_ids.add(op_rid)
 
     # #4021 parity — a window whose resolved END precedes the predecessor's own
     # validFrom is refused by the writer before it mutates anything, so the
@@ -5489,13 +5559,18 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
         seen.add(key)
         merged_final.append((key, edge))
     # A MERGE destination that already exists at the successor is a no-op.
-    created_edges: list[dict] = list(created)  # 2a operator CREATEs always create
-    already_present: list[dict] = []
+    created_edges: list[dict] = list(created) + mirror_created
+    already_present: list[dict] = list(typed_present) + mirror_present
     for (rtype, direction, t_internal), edge in merged_final:
         present = ((rtype, t_internal) in pre_out if direction == "out"
                    else (rtype, t_internal) in pre_in)
         (already_present if present else created_edges).append(edge)
-    removed_raw = len(created) + len(merged) + len(dropped)
+    # Primary-edge old-side count, mirroring the writer's own
+    # `edges_transferred`. The 2a-INPUT mirrors are removed from old (they ride
+    # `handled_old_edge_ids` below) but are NOT counted here — the writer does
+    # not count them either (see sdk.supersede_point).
+    removed_raw = (len(created) + len(typed_present)
+                   + len(merged) + len(dropped))
     # The writer's status write is a bare `MATCH (n:Point {id:$id}) SET …` — it
     # binds EVERY matching node (no cardinality guard), which is exactly what
     # `_preview_invalidate` already counts as `n_old`. Mirror it instead of

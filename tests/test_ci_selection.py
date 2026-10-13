@@ -1288,6 +1288,30 @@ def test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_graph_write_repair_tool_change_selects_core_not_tier1():
+    # PR #8427 review Finding 4: tools/graph_write_repair.py and its launchd
+    # installer (tools/install-graph-write-repair-schedule.sh) own
+    # tests/test_graph_write_repair.py (`core`): the probe classification that
+    # authorises a repair, the `--quiet` count contract, and the installer's
+    # escaping / interval validation / lint-before-move / load verification.
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and neither path matches a
+    # SOURCE_PATTERNS row, so without the CORE_ALSO entries an installer-only
+    # change came back with `changed == []` and took the docs-only early return:
+    # `select()` returned NO surface and the guard never ran on the file it
+    # guards (the #3261/#6138 silent-drop class).
+    #
+    # Mutation: remove either CORE_ALSO entry -> that path selects no surface, so
+    # the assertion below fails.
+    for path in ("tools/graph_write_repair.py",
+                 "tools/install-graph-write-repair-schedule.sh"):
+        r = _sel([path])
+        assert r["full"] is False, (path, r)
+        assert "core" in r["surfaces"], (path, r)
+        assert "test_graph_write_repair.py" in r["test_files"], (path, r)
+        assert set(r["test_files"]) != _tier1(), (path, r)
+
+
 def test_source_currency_tool_change_selects_core_not_tier1():
     # #5581: tools/source_currency.py owns tests/test_source_currency_5581.py
     # (`core`) — the §4.6 aggregate, the sourced disclosure, and the flag-gated

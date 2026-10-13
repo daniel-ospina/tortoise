@@ -18,6 +18,14 @@ from typing import Any, Literal
 
 from .env_truthy import is_truthy
 from .security import entity_label, validate_entity_type
+# #8316: the READ half of the stored-embedding shape seam. A caller-supplied
+# embedding is stored VERBATIM as a plain Cypher `List` (PR #3018's recorded
+# decision) and a read spelled `<alias>.embedding` makes
+# `vec.euclideanDistance` raise for the WHOLE `MATCH` — one such node degrades
+# the entire dense leg. Every dense read that can MEET a stored `List` must
+# normalise through this helper (the HNSW index arm cannot meet one: a `List`
+# node is not in the index at all — that cohort gap is #8429).
+from .vector_write import stored_embedding_vector_expr
 
 # #1391: terminal (no-longer-current) Point statuses EXCLUDED from every
 # default read surface (FTS/vector/structural/operator + sdk query paths).
@@ -1266,8 +1274,10 @@ def run_vector_query(
     raising — the exception-only catch never fires for the real empty case):
     {0-row result set with zero embedded points → ``no_embeddings``},
     {0-row result set with embedded points present → ``empty_results``},
-    {malformed plain-list embedding node (the vecf32 MATCH throws per-row)
-    or driver exception → ``query_failed``}. Default None = no trace.
+    {an embedding the distance expression cannot read — a non-numeric value, or
+    a width the query vector cannot pair with (a plain ``List`` of the RIGHT
+    width is normalised by ``vector_write.stored_embedding_vector_expr``, #8316)
+    — or a driver exception → ``query_failed``}. Default None = no trace.
 
     In Docker/server mode (is_embedded=False), uses the HNSW vector index
     via CALL db.idx.vector.queryNodes — with both known argument orders
@@ -1661,8 +1671,11 @@ def run_vector_query(
         # ("expected Null or Vectorf32 but was List") in embedded FalkorDBLite
         # and whenever the HNSW index is unavailable — wrap the param in
         # vecf32() so vector search actually runs. Stored embeddings must be
-        # vecf32-encoded too (a single plain-list node poisons the whole
-        # MATCH — see _upsert_event / session indexers).
+        # readable too (one unreadable node poisons the whole MATCH) — the
+        # STORED side is normalised by the shared read seam rather than assumed
+        # to be typed, because a caller-supplied embedding is stored VERBATIM
+        # as a plain `List` by a recorded decision (PR #3018) — see
+        # `stored_embedding_vector_expr` (#8316).
         # #689: retracted Points must not leak into vector results.
         # D10 (#5026): discriminate the document Source from the
         # corpus/provenance Source in the MATCH's WHERE — the brute-force
@@ -1682,7 +1695,7 @@ def run_vector_query(
             f"MATCH (n:{label}) "
             "WHERE n.embedding IS NOT NULL" + bf_status_clause +
             " WITH vecf32($query_vec) AS _qv, n "
-            "WITH n, vec.euclideanDistance(n.embedding, _qv) AS distance "
+            f"WITH n, vec.euclideanDistance({stored_embedding_vector_expr('n')}, _qv) AS distance "
             "WHERE distance IS NOT NULL "
             f"RETURN n.{id_field}, 1.0 / (1.0 + distance) AS score "
             # #3019: a distance tie (equal values, or repeated rows) must not fall

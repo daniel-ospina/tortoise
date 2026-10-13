@@ -233,6 +233,17 @@ SHARED_MODULES = (
     # select `core` only, and a break it induced in an api/eval/ep test would
     # never run on the PR that made it (#1349/#3332/#3910 under-selection class).
     "tests/_signal_hygiene.py",
+    # #7357: the canonical-store guard (`tests/_canonical_store_guard.py`) is
+    # imported at conftest MODULE level and REFUSES THE SESSION for any surface
+    # whose `TORTOISE_DB_URI` targets the fleet's map instance (loopback
+    # port 16379). Same class as `_verdict.py` / `_signal_hygiene.py` above and
+    # enforced by
+    # `tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`:
+    # not a `test_*.py` file, so the manifest never classifies it — without this
+    # entry a change to the guard would select `core` only, and a break it
+    # induced in an api/eval/ep session would never run on the PR that made it
+    # (#1349/#3332/#3910 under-selection class).
+    "tests/_canonical_store_guard.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",
@@ -888,6 +899,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # as tools/queue_resweep.py above. Pinned by
              # tests/test_ci_selection.py::test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1.
              "tools/install-queue-reconcile-schedule.sh",
+             # PR #8427 review Finding 4: tools/graph_write_repair.py and its
+             # launchd installer own tests/test_graph_write_repair.py (registered
+             # `core`) -- the probe classification that authorises a repair, the
+             # `--quiet` count contract, and the installer's XML escaping /
+             # interval validation / lint-before-move / load verification.
+             # `tools/` is swallowed by NON_PYTHON_PREFIXES and no SOURCE_PATTERNS
+             # entry matches either path, so a tool-only or INSTALLER-only change
+             # selected NO surface and fell back to tier-1 smoke: the guard would
+             # never run on the very change that can weaken it. Same
+             # #1349/#3332/#3616 silent-drop class as the queue-reconcile installer
+             # entry above. Pinned by
+             # tests/test_ci_selection.py::test_graph_write_repair_tool_change_selects_core_not_tier1.
+             "tools/graph_write_repair.py",
+             "tools/install-graph-write-repair-schedule.sh",
              # #3036: oauth.py is pinned by BOTH api-registered tests
              # (test_oauth_mcp.py, test_oauth_token_fault.py, ...) and core
              # (test_control_plane_offload_3498.py), so the SOURCE_PATTERNS
