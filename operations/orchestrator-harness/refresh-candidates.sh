@@ -105,12 +105,26 @@ while read -r N; do
   grep -qx "$N" "$O/checked.txt" 2>/dev/null && continue
   grep -qx "$N" "$O/dispatched.txt" 2>/dev/null && continue
   n=$((n+1)); [ "$n" -gt "$LIMIT" ] && break
-  echo "$N" >> "$O/checked.txt"
-  V="$("$SC/.venv/bin/python" tools/collision_preflight.py "$N" --repo . 2>&1 | grep -E '^VERDICT' | head -1 | sed -E 's/.*VERDICT: (CLEAN|COLLISION).*/\1/')"
-  if [ "$V" = "CLEAN" ]; then
-    echo "$N" >> "$O/candidates.txt"
-    echo "[refresh] +#$N CLEAN -> backlog"
-  fi
+  # ⛔ A pre-flight that ERRORED is not a verdict — and a COLLISION is not terminal. `echo "$N" >>
+  # checked.txt` used to run BEFORE the verdict was read, so a pre-flight that produced no VERDICT
+  # line (API failure, missing venv, timeout) blacklisted the issue forever, invisibly: checked.txt
+  # suppresses it, and the reaper above only walks dispatched.txt, so nothing ever removed the entry.
+  # A COLLISION was permanent the same way, though a collision is transient by nature (the colliding
+  # work lands). checked.txt is therefore written ONLY on the verdict that terminates the issue —
+  # CLEAN, which is queued. Everything else is left unchecked, so the next pass re-attempts it.
+  # (agent-infra#1716)
+  PRE="$("$SC/.venv/bin/python" tools/collision_preflight.py "$N" --repo . 2>&1)"
+  V="$(printf '%s\n' "$PRE" | grep -E '^VERDICT' | head -1 | sed -E 's/.*VERDICT: (CLEAN|COLLISION).*/\1/')"
+  case "$V" in
+    CLEAN)
+      echo "$N" >> "$O/checked.txt"
+      echo "$N" >> "$O/candidates.txt"
+      echo "[refresh] +#$N CLEAN -> backlog" ;;
+    COLLISION)
+      echo "[refresh] =#$N collision — a peer owns it, retried next pass" ;;
+    *)
+      echo "[refresh] ?#$N no verdict from the pre-flight — left unchecked for the next pass" ;;
+  esac
 done < "$O/.pool"
 # Dedupe WITHOUT re-sorting. orch-loop.sh consumes this file top-down and dispatches the first
 # BATCH entries, so its ORDER IS the dispatch priority. `sort -n -u` re-ordered the ENTIRE backlog
