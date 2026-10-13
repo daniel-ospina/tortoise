@@ -1904,6 +1904,20 @@ surfaces:
   - test_extractor_reliability.py
   - test_extractor_embed_coerce_5060.py  # #5060: execute_embed must not raise on a non-string name/content (whole-session payload loss)
   - test_extractor_v2.py
+  # #5092: the guard for the extractor-v4 design's two step lists. Registered `core`
+  # (where the extractor's other guards live — `test_v4_declared_mechanisms.py`,
+  # `test_vet_gate_5005.py`, `test_salience_labels_4917.py`) AND in `tier1`, because
+  # this guard's ONLY subject is a DOC (`docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`)
+  # and `docs/` is in NON_PYTHON_PREFIXES: a docs-only diff takes `select()`'s early
+  # return and runs the tier-1 smoke set only. `core` is the classification home
+  # (`--integrity` reads it there) and the lane for a code diff that falls through to
+  # `core`; `tier1` is what makes the guard run on the doc-only diff that can break it.
+  # ⚠️ Named limit, not hidden: a diff that changes the doc AND a file selecting a
+  # NON-core named surface (`api`/`ep`/`sdk`/…) drops the doc path and does not run this
+  # guard — the #1349/#3332 silent-drop class the CORE_ALSO comments describe. It is not
+  # closed here because the doc's subject code (`tortoise/extractor_v2.py`) matches no
+  # named surface either, so `core` is already its lane.
+  - test_extractor_v4_step_list_consistency.py
   - test_falkordb_compat.py
   # #7076: the degraded-fallback snapshot's OWN guard. test_fallback_snapshot.py
   # was registered only under `api`, while the module it guards
@@ -3218,6 +3232,9 @@ tier1:
 - test_w4_why_enrichment.py
 - test_weights.py
 - test_writer_inventory.py
+# #5092: the extractor-v4 design's step-list guard is a fast, no-DB file scan, so a
+# docs-only PR runs it here — the same placement as `test_retention_promise.py` above.
+- test_extractor_v4_step_list_consistency.py
 slow_files:
 - test_3311_multilabel_status_vocab.py
 - test_about_edges.py
@@ -4170,6 +4187,7 @@ durations:
   test_embeddings.py: 0.5
   test_extractor.py: 0.5
   test_extractor_doc.py: 0.5
+  test_extractor_v4_step_list_consistency.py: 0.1  # #5092: two fenced blocks + one paragraph read; measured 0.01s of test body (session setup excluded)
   test_file_indexer.py: 0.7
   test_open_kinds.py: 0.3
   test_postmerge_verdict.py: 0.4
