@@ -16130,7 +16130,13 @@ class TortoiseSDK:
         # lazy read path, break get_confidence). The directed match + count(r)
         # gives one row per factor.
         if window is None:
-            dir_scope = ""
+            # No window: a direct factor is eligible iff it flows AT ALL — the
+            # union of the two windowed clauses below is exactly `direction <> '-'`.
+            # Without this a `-` direct edge (no confidence transfers) inflates
+            # the probe and false-fires DreamNoOpError on a graph whose no-op is
+            # legitimate (the probe must agree with `_bfs_select_operators`,
+            # which never selects `-`).
+            dir_scope = "AND coalesce(r.direction, 'bidirectional') <> '-' "
         else:
             dir_scope = (
                 "AND ((a.id IN $ids AND "
