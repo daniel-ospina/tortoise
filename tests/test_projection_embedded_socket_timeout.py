@@ -2,11 +2,14 @@
 
 ``tortoise/projection`` wired ``_socket_timeouts()`` into the **host** branch
 but not the embedded one, so the embedded client was built with no socket
-timeout of OUR choosing. The bound that actually applied was redis-py's own
-implicit connection default (5s), and — worse — redis-py 8's client default
-retry policy is ``Retry(ExponentialWithJitterBackoff(), retries=10)``, which
-multiplies it. Measured against a SIGSTOPped embedded daemon, one
-``RETURN 1`` blocked for **~59s** before raising.
+timeout of OUR choosing. At that earlier pin the bound that actually applied
+was redis-py's then-current connection default (believed 5s — a dependency-era
+value, NOT a fact about the client this repo resolves today, where a bare
+``redislite.Redis`` measures ``socket_timeout is None``), and — worse —
+redis-py 8's client default retry policy is
+``Retry(ExponentialWithJitterBackoff(), retries=10)``, which multiplies it.
+Measured against a SIGSTOPped embedded daemon, one ``RETURN 1`` blocked for
+**~59s** before raising.
 
 That is the multiplier behind #3350: ``/health`` bounds its probe at
 ``monitoring.PROBE_TIMEOUT`` (1.5s), so the probe gives up long before the
@@ -55,6 +58,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise import monitoring  # noqa: E402, RUF100
 from tortoise.projection import (  # noqa: E402, RUF100
+    _DB_CONNECT_TIMEOUT_DEFAULT,
     _DB_SOCKET_TIMEOUT_DEFAULT,
     _EMBEDDED_RETRY_COUNT,
     FalkorProjection,
@@ -66,7 +70,8 @@ TIGHT_TIMEOUT_S = 0.5
 
 #: Upper bound on a wedged query with the fix, given ``TIGHT_TIMEOUT_S``:
 #: ``(1 + retries) * socket_timeout + backoff`` ≈ 2 * 0.5 + ≤1.0s. The
-#: pre-fix shape (env ignored → implicit 5s + 10 retries) measured ~59s, so
+#: pre-fix shape (env ignored → the then-current implicit 5s default + 10
+#: retries) measured ~59s, so
 #: this assertion is what makes the test a real regression guard rather than
 #: a restatement of the code.
 WEDGE_BOUND_S = 4.0
@@ -223,6 +228,52 @@ def test_embedded_pool_carries_the_connect_bound(monkeypatch):
             proj.close()
 
 
+def test_embedded_connect_knob_is_fail_closed(monkeypatch):
+    """#3421: this knob has NO ``none``/``off``/``0`` opt-out — it fails closed.
+
+    Corrects an earlier claim (PR body + the seam test's docstring) that the
+    embedded lane "keeps the documented ``none``/``off``/``0`` opt-out,
+    delivered as ``None``". It does not, and must not: the DECLARED contract
+    for ``TORTOISE_FALKORDB_CONNECT_TIMEOUT_S`` is the opposite one
+    (``.env.example``: "Non-positive/non-numeric values fall back to the
+    default rather than disabling the bound", pinned at the resolution level
+    by ``test_projection.py::test_socket_timeouts_reject_fail_open_values``).
+    The ``none``/``off``/``0`` opt-out belongs to the PER-LANE
+    ``TORTOISE_DB_SOCKET_CONNECT_TIMEOUT`` knob, which this lane does not
+    consult for connect at all.
+
+    Asserted on the POOL, not on ``_socket_timeouts()``: the resolution was
+    already covered; what #3421 changed — and what was silently invisible
+    before it — is whether the resolved value reaches this lane's connect leg.
+    Pre-fix every spelling below left the pool WITHOUT a
+    ``socket_connect_timeout`` key and the handed-out connection at ``None``,
+    so an operator could not even see (let alone change) the bound the
+    fail-closed contract promises here.
+    """
+    for spelling in ("none", "off", "0", "-1", "0.0", "banana"):
+        monkeypatch.setenv("TORTOISE_FALKORDB_CONNECT_TIMEOUT_S", spelling)
+        proj = FalkorProjection(path=_tmp(f"failclosed_{spelling.replace('.', '_')}.db"),
+                                graph_name="test_failclosed_3421",
+                                skip_health_check=True)
+        try:
+            pool = proj.db.client.connection_pool
+            bound = pool.connection_kwargs.get("socket_connect_timeout")
+            assert bound == _DB_CONNECT_TIMEOUT_DEFAULT, (
+                f"TORTOISE_FALKORDB_CONNECT_TIMEOUT_S={spelling!r} did not "
+                "resolve to the fail-closed default on the embedded lane's "
+                "pool (#3421)")
+            conn = pool.get_connection()
+            try:
+                assert conn.socket_connect_timeout == _DB_CONNECT_TIMEOUT_DEFAULT, (
+                    f"{spelling!r} left the connection the pool HANDS OUT "
+                    "unbounded — the knob is fail-closed, never an opt-out")
+            finally:
+                pool.release(conn)
+        finally:
+            with contextlib.suppress(Exception):
+                proj.close()
+
+
 def test_apply_embedded_connect_timeout_drops_pre_bound_connections():
     """The delivery seam's two writes, on a real (never-connected) pool.
 
@@ -230,9 +281,15 @@ def test_apply_embedded_connect_timeout_drops_pre_bound_connections():
     (what redislite's construction PING leaves behind) and this asserts the
     delivery replaces it rather than repairing it, because mutating
     ``connection_kwargs`` alone looks wired and is not — ``get_connection()``
-    hands a pooled connection back before making a new one. Also pins that the
-    documented ``none`` opt-out is delivered as ``None`` (block forever), not
-    silently replaced by the default.
+    hands a pooled connection back before making a new one.
+
+    Also pins that this helper is *not* a second resolution point: it writes
+    ``connect_to`` verbatim, so a literal ``None`` argument stays ``None``
+    instead of being coerced to the default. That is a property of the SEAM
+    only — no spelling of ``TORTOISE_FALKORDB_CONNECT_TIMEOUT_S`` reaches it
+    as ``None`` (``_socket_timeouts()`` maps every non-numeric/non-positive
+    value to the default), and the fail-closed contract as it lands on the
+    pool is pinned by ``test_embedded_connect_knob_is_fail_closed``.
     """
     from redis.connection import ConnectionPool, UnixDomainSocketConnection
 
@@ -259,7 +316,11 @@ def test_apply_embedded_connect_timeout_drops_pre_bound_connections():
         assert pool.make_connection().socket_connect_timeout == 1.5, (
             "a connection built after the delivery is still unbounded")
 
-        # Opt-out: absent means absent, never a fallback.
+        # Write-through, not resolution: the helper does not coerce `None` to
+        # the default. No env spelling reaches it as `None` — the fail-closed
+        # resolution is `_socket_timeouts()`'s job (see the docstring), and
+        # `test_embedded_connect_knob_is_fail_closed` pins what lands on a
+        # real pool.
         assert _apply_embedded_connect_timeout(client, None) is True
         assert pool.connection_kwargs["socket_connect_timeout"] is None
     finally:

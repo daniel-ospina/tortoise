@@ -401,6 +401,17 @@ def _apply_embedded_connect_timeout(db, connect_to: float | None) -> bool:
     construction in tests. A real client always has one, and the
     daemon-backed test asserts the bound on the connection the pool actually
     hands out, so a silent no-op here fails a test rather than shipping.
+
+    ``connect_to`` is the ALREADY-RESOLVED value: this seam writes it verbatim
+    (a literal ``None`` stays ``None``) and is deliberately not a second
+    resolution point. Its caller passes ``_socket_timeouts()[0]``, which is
+    fail-closed — every non-positive/non-numeric spelling of
+    ``TORTOISE_FALKORDB_CONNECT_TIMEOUT_S`` becomes the 2.0s default, never
+    ``None`` (see ``_socket_timeouts`` and
+    ``test_embedded_connect_knob_is_fail_closed``). So this lane is bounded by
+    default and has no opt-out; the ``none``/``off``/``0`` opt-out is the
+    per-lane ``TORTOISE_DB_SOCKET_CONNECT_TIMEOUT`` knob, which this lane does
+    not consult.
     """
     for holder in (getattr(db, "client", None),
                    getattr(db, "connection", None), db):
@@ -436,6 +447,14 @@ def _socket_timeouts() -> tuple[float, float]:
     embedded branch as the retry-bounded read kwarg plus a pool-level connect
     delivery (``_apply_embedded_connect_timeout``, #3421). Where a value lands
     per lane is the only asymmetry; neither lane silently ignores one.
+
+    These two knobs are FAIL-CLOSED BY DESIGN and have NO ``none``/``off``/``0``
+    opt-out: every such spelling is a fallback to the default above, which is
+    the contract ``.env.example`` declares for them ("Non-positive/non-numeric
+    values fall back to the default rather than disabling the bound"). The
+    ``none``/``off`` opt-out belongs to the PER-LANE ``TORTOISE_DB_SOCKET_*``
+    knobs (``_resolve_socket_timeout``), which the embedded lane does not
+    consult for connect — do not read a disabled bound into this pair.
     """
     def _one(name: str, default: float) -> float:
         raw = os.environ.get(name)
@@ -6635,8 +6654,12 @@ class FalkorProjection(
             ) if (path != ":memory:" and aof_enabled) else None
             # #3350: the embedded client was built with NO socket timeouts of
             # OUR choosing, so every blocking call on it was bounded only by
-            # redis-py's own implicit connection default (5s) — invisible to
-            # operators, and multiplied by the client's retry policy.
+            # redis-py's connection default as it stood then — believed 5s at
+            # that earlier pin (a dependency-era value, not a fact about the
+            # current client: a bare `redislite.Redis` measures
+            # `socket_timeout is None` on the pin this repo resolves today) —
+            # invisible to operators, and multiplied by the client's retry
+            # policy.
             # Measured against a SIGSTOPped embedded daemon: one `RETURN 1`
             # blocked ~59s, outliving the /health probe's 1.5s outer bound by
             # ~40x and parking the probe worker that whole time (#3350).
