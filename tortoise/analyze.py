@@ -544,7 +544,10 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
             # mirroring the operator-mediated dirs. NAND is ALWAYS both
             # (matching the operator BFS's NAND bidirectionality).
             # forward: (frontier) -[rel]-> (plain neighbor); every rel type
-            # traverses forward from the frontier point.
+            # traverses forward from the frontier point. #7852: only where the
+            # edge's direction actually flows forward (`->`/`<->` and their
+            # legacy aliases) — a backward-only `<-` edge is never walked the
+            # wrong way.
             if rel == "NAND" or direction in ("outgoing", "both"):
                 rows = proj.g.query(
                     f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
@@ -554,6 +557,8 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                     "AND a.op_type IS NULL "
                     "AND (b.is_operator IS NULL OR b.is_operator = false) "
                     "AND b.op_type IS NULL "
+                    "AND coalesce(r.direction, 'bidirectional') IN "
+                    "['bidirectional', '<->', '->', 'unidirectional'] "
                     "RETURN DISTINCT b.id, a.id, type(r)",
                     params={"frontier": frontier_list},
                 ).result_set
@@ -562,8 +567,8 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                         new_points.add(bid)
                     factor_anchors.add((aid, bid, rtype))
             # backward: (plain neighbor) -[rel]-> (frontier); NAND always;
-            # IMPL only when the edge is NOT unidirectional (never
-            # back-propagate into a unidirectional edge's source).
+            # IMPL only where the edge flows BACKWARD (`<-`/`<->` and their
+            # legacy aliases — never back-propagate into a forward-only edge).
             if rel == "NAND" or direction in ("incoming", "both"):
                 rows = proj.g.query(
                     f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
@@ -574,7 +579,8 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                     "AND (b.is_operator IS NULL OR b.is_operator = false) "
                     "AND b.op_type IS NULL "
                     "AND (type(r) = 'NAND' "
-                    "     OR coalesce(r.direction, 'bidirectional') <> 'unidirectional') "
+                    "     OR coalesce(r.direction, 'bidirectional') IN "
+                    "        ['bidirectional', '<->', '<-']) "
                     "RETURN DISTINCT a.id, b.id, type(r)",
                     params={"frontier": frontier_list},
                 ).result_set

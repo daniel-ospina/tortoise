@@ -17,6 +17,7 @@ from .live import (
     EPISTEMIC_LABELS,
     _live_only,
     _terminal_excluded,
+    direction_flows,
     epistemic_disjunction,
     epistemic_label_queries,
     TERMINAL_EXCLUDED_STATUSES,
@@ -184,7 +185,8 @@ class TortoiseEP:
             for _q in epistemic_label_queries(
                 "MATCH (a)-[r:IMPL|NAND]->(b:{label}) "
                 f"WHERE {epistemic_disjunction('a')} "
-                "AND coalesce(r.direction, 'bidirectional') = 'bidirectional' "
+                "AND coalesce(r.direction, 'bidirectional') IN "
+                "['bidirectional', '<->', '<-'] "
                 "AND (a.id IN $ids OR b.id IN $ids) "
                 "RETURN a.id, b.id, type(r), "
                 "       coalesce(r.back_msg_alpha,0.0), coalesce(r.back_msg_beta,0.0)"
@@ -630,10 +632,13 @@ class TortoiseEP:
         raw_eta_a = (new_eta_a[0] - cav_eta_a[0], new_eta_a[1] - cav_eta_a[1])
         raw_eta_b = (new_eta_b[0] - cav_eta_b[0], new_eta_b[1] - cav_eta_b[1])
 
-        # Determine if this operator is bidirectional.
-        # Direction is an explicit operator flag (ONTOLOGY v3.1 §3.1, §8).
-        # Default and missing → bidirectional.
-        bidirectional = (direction == "bidirectional")
+        # Determine how this operator flows (#7852). DIRECTION is the Layer-1
+        # four-value vocabulary with the two legacy aliases: `->` /
+        # `unidirectional` (source→target), `<-` (target→source), `<->` /
+        # `bidirectional` (both), `-` (neither — the connection exists and NO
+        # confidence transfers). `direction_flows` is the ONE normalizer, so
+        # the four model values cannot be misread as their opposite here.
+        fwd, bwd = direction_flows(direction)
 
         # Proportional boost: breaks EP fixed-point symmetry that forces
         # messages to near-zero for unevidenced targets. Fades as evidence
@@ -668,8 +673,14 @@ class TortoiseEP:
         damped_b = (max(min(damped_b[0], 1000), -1000),
                     max(min(damped_b[1], 1000), -1000))
 
-        self._write_message(op_id, id_b, *damped_b, op_type)
-        if bidirectional:
+        # Persist the message(s) the direction actually flows. The factor math
+        # above is direction-agnostic (the potential is symmetric); direction
+        # selects WHICH endpoint receives. `->` writes the target message;
+        # `<-` writes the SOURCE message (the reverse of the legacy default);
+        # `<->` both; `-` neither.
+        if fwd:
+            self._write_message(op_id, id_b, *damped_b, op_type)
+        if bwd:
             if direct:
                 self._write_back_message(id_a, id_b, *damped_a, op_type)
             else:
@@ -681,19 +692,30 @@ class TortoiseEP:
                             direction: str = "bidirectional") -> None:
         # input_ids are sorted by idx (source=0, targets=1..N).
         # IMPL: source→target pairs only (skip target↔target).
-        # NAND bidirectional (default): all pairwise combinations (mutual
+        # NAND mutual (default): all pairwise combinations (mutual
         # contradiction — at-most-one-true over all members).
-        # NAND unidirectional (agent-chosen directed attack): source→each-target
+        # NAND one-way (agent-chosen directed attack): source→each-target
         # attacks ONLY — target↔target pairwise edges would otherwise create
         # arbitrary directed attacks between targets (review P2, #795).
+        #
+        # #7852 — direction is the Layer-1 four-value vocabulary (with the two
+        # legacy aliases): `->`/`unidirectional` flows source→target, `<-`
+        # target→source, `<->`/`bidirectional` both, `-` NEITHER. `direction_flows`
+        # is the ONE normalizer; a `-` factor contributes nothing (never a
+        # silent mutual default).
         n = len(input_ids)
         if n < 2:
             return
+        fwd, bwd = direction_flows(direction)
+        mutual = fwd and bwd
+        if not (fwd or bwd):
+            # `-`: the connection exists and NO confidence transfers.
+            return
         if op_type == "IMPL":
             pairs = [(input_ids[0], input_ids[j]) for j in range(1, n)]
-        elif op_type == "NAND" and direction != "bidirectional":
-            # Directed NAND: the source attacks each target; targets do not
-            # attack each other.
+        elif op_type == "NAND" and not mutual:
+            # Directed NAND: the source (and, for `<-`, the receiving end)
+            # pairs with each target only; targets do not attack each other.
             pairs = [(input_ids[0], input_ids[j]) for j in range(1, n)]
         else:
             pairs = [(input_ids[i], input_ids[j])
@@ -720,7 +742,6 @@ class TortoiseEP:
         # pairs is O(arity) instead of O(|cache|).
         overlay_base = {k: v for k, v in saved.items()
                         if k[0] == op_id and k[2] == op_type}
-        bidirectional = (direction == "bidirectional")
         orig_damping = self.damping
         acc: dict[str, tuple[float, float]] = {c: (0.0, 0.0) for c in input_ids}
         touched: set[str] = set()
@@ -729,13 +750,16 @@ class TortoiseEP:
             for a, b in pairs:
                 self._msg_cache = dict(overlay_base)  # clean per-pair state
                 self._update_factor(op_id, op_type, [a, b], weight, label, direction)
-                # _update_factor writes the target's message always, and the
-                # source's only for bidirectional operators. Accumulate ONLY
-                # freshly written claims — never the pre-factor state (a stale
-                # source message must not be re-accumulated as if fresh, #326
-                # directed-path corruption).
+                # _update_factor persists the messages this direction flows:
+                # `a` (the pair's source slot) for backward flow, `b` (the
+                # target slot) for forward flow, both for mutual, neither for
+                # `-`. Accumulate ONLY freshly written claims — never the
+                # pre-factor state (a stale message must not be re-accumulated
+                # as if fresh, #326 directed-path corruption).
                 for c in (a, b):
-                    if c == a and not bidirectional:
+                    if c == a and not bwd:
+                        continue
+                    if c == b and not fwd:
                         continue
                     msg = self._msg_cache.get((op_id, c, op_type))
                     if msg is not None:
@@ -763,17 +787,20 @@ class TortoiseEP:
         # + each target), matching the binary factor's total at the same
         # weight. Star targets are diluted 1/(n-1) (evidence dilution across
         # siblings).
-        is_star = (op_type != "NAND") or not bidirectional
+        is_star = (op_type != "NAND") or not mutual
         scale = (1.0 / (n - 1)) if is_star else (2.0 / (n * (n - 1)))
         d = self.damping
         for c in input_ids:
             if c not in touched:
-                # Directed-star source: no message by design — clear any stale
-                # persisted source message so unidirectional semantics hold.
+                # An endpoint this direction does NOT reach gets no message by
+                # design — clear any stale persisted message so the direction
+                # holds. For a star, the non-receiving end is the source for
+                # `->` and every target for `<-`; for `-` nothing receives.
                 # Cache mode: only when a stale entry exists (don't create a
-                # zero entry for a never-messaged source). Graph mode: the
+                # zero entry for a never-messaged endpoint). Graph mode: the
                 # MATCH…SET is a no-op when no edge exists, so write always.
-                if not bidirectional and c == input_ids[0]:  # noqa: SIM102
+                receives = bwd if c == input_ids[0] else fwd
+                if not receives:  # noqa: SIM102
                     if cache is None or saved.get((op_id, c, op_type)) is not None:
                         self._write_message(op_id, c, 0.0, 0.0, op_type)
                 continue
@@ -827,7 +854,8 @@ class TortoiseEP:
                     f"MATCH (a:Point)-[r:{rel}]->(b) "
                     "WHERE a.id = $cid "
                     f"AND {epistemic_disjunction('b')} "
-                    "AND coalesce(r.direction, 'bidirectional') = 'bidirectional' "
+                    "AND coalesce(r.direction, 'bidirectional') IN "
+                    "['bidirectional', '<->', '<-'] "
                     "RETURN coalesce(r.back_msg_alpha,0.0), coalesce(r.back_msg_beta,0.0)",
                     params={"cid": claim_id},
                 ).result_set
@@ -1408,7 +1436,7 @@ class TortoiseEP:
             stripped = len(full_inputs) - len(input_ids)
             if stripped:
                 skip_reason = None
-                if (direction != "bidirectional"
+                if (not all(direction_flows(direction))
                         and op_idx_known[op_id]
                         and full_inputs
                         and not op_input_live[op_id][0]):

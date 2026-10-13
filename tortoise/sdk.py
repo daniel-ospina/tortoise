@@ -67,6 +67,10 @@ from .live import _live_only  # #6597 dream coverage closure mirrors EP liveness
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
 from .live import epistemic_label_queries  # #7853 epistemic-label id sweep
 from .live import epistemic_disjunction  # #7853 epistemic-label traversal clause
+from .live import ACCEPTED_DIRECTION_VALUES  # #7852 Layer-1 four-value direction set
+from .live import direction_flows  # #7852 (source→target, target→source) flows
+from .live import direction_spellings  # #7852 stored-token equivalence class
+from .live import is_default_direction  # #7852 "does not differentiate" default
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, resolve_document_target_id, resolve_entity_id)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
@@ -10851,16 +10855,23 @@ class TortoiseSDK:
             ``pack_registry.SEMANTICS_VALUES`` (``addresses``, ``supports``,
             ``refutes``, ``mutuallyExclusive``, ``hasPart``, ``related`` …).
             When supplied it RESOLVES the direction (the model's chain step 2):
-            a one-way meaning records ``unidirectional``, a mutual one
-            ``bidirectional``. The basis actually used is recorded on the node
-            as ``direction_basis`` (``explicit`` / ``semantics`` / ``default``).
-            An unknown word warns (warn-not-block, never refuses).
-          - direction: "bidirectional" (default) or "unidirectional" — explicit
-            flag controlling EP back-propagation (ONTOLOGY v3.1 §3.1, §8).
-            Default bidirectional (mutual) for all op types; pass
-            "unidirectional" for a directed attack (no back-pressure). A
-            NON-default explicit value outranks ``semantics``; the signature
-            default does not (it is the default, not a declaration).
+            the meaning's model direction is recorded verbatim — ``->`` for a
+            one-way meaning, ``<->`` for a mutual one, ``-`` for a neutral one
+            (``related`` / ``transacts``, which transfer NO confidence). The
+            basis actually used is recorded on the node as ``direction_basis``
+            (``explicit`` / ``semantics`` / ``default``). An unknown word warns
+            (warn-not-block, never refuses).
+          - direction: the Layer-1 direction recorded on the write (ONTOLOGY
+            §8) — the model's four values ``->`` (source→target), ``<-``
+            (target→source), ``<->`` (both ways) and ``-`` (none: the
+            connection exists and NO confidence transfers), plus the two
+            legacy aliases ``unidirectional`` (≡ ``->``) and ``bidirectional``
+            (≡ ``<->``), which stay accepted and readable. The value is stored
+            VERBATIM. Signature default ``bidirectional`` (mutual) for all op
+            types; pass ``unidirectional`` (or ``->``) for a directed attack
+            (no back-pressure). A NON-default explicit value outranks
+            ``semantics``; the signature default does not (it is the default,
+            not a declaration).
           - Operator carries the label, direction and direction_basis; IMPL/NAND
             edges carry confidence via EP.
           - promote_source: default True fills in a source point's NEVER-SET
@@ -10949,7 +10960,7 @@ class TortoiseSDK:
         # FALSE provenance and silently disable the semantics step below. A
         # declared semantics therefore outranks both, and never overrides a
         # direction the caller actually differentiated.
-        direction_basis = "explicit" if direction not in (None, "bidirectional") else "default"
+        direction_basis = "explicit" if not is_default_direction(direction) else "default"
         if semantics is not None:
             from tortoise.enforcement import emit_violation
             from tortoise.pack_registry import (
@@ -10987,33 +10998,16 @@ class TortoiseSDK:
                                detail=f"semantics={semantics} (out of vocabulary)")
             else:
                 derived = self._direction_from_semantics(semantics)
-                if derived is None:
-                    # `-` (e.g. `related`, `transacts`) means the connection
-                    # exists and NO confidence transfers. The shipped runtime
-                    # encodes only bidirectional/unidirectional (§8 Transition
-                    # state — the four-value migration is the separate change
-                    # named on #7852), so no direction can be derived. Say what
-                    # actually happens: the caller-supplied/signature default is
-                    # what gets recorded (naming the "op_type default" here
-                    # would be false for NAND, whose canonical default is
-                    # unidirectional but whose signature default is
-                    # bidirectional).
-                    warnings.append({
-                        "code": "undeclared_relation",
-                        "message": (
-                            f"semantics '{semantics}' carries no transferable "
-                            f"direction ('-') — no direction is derived from "
-                            f"it, so the caller-supplied/write-path default is "
-                            f"recorded (#7852)"
-                        ),
-                        "semantics": semantics,
-                    })
-                elif direction in (None, "bidirectional"):
+                if derived is not None and is_default_direction(direction):
                     # Chain step 2 — basis `semantics`: the direction was resolved
                     # from the Layer-2 meaning the caller declared, which is the
-                    # input actually read here. (Named for the layer that produced
-                    # it, not the Layer-3 `label` predicate, which is a different
-                    # input and does not touch direction.)
+                    # input actually read here. `is_default_direction` is what
+                    # makes an ABSENT direction (None), the signature default
+                    # (`bidirectional`) and its model spelling (`<->`) all
+                    # "not declared", so the meaning resolves them; an explicit
+                    # one-way value (`->` / `<-` / `unidirectional`) outranks it.
+                    # (The basis names the LAYER that produced the value, never
+                    # the Layer-3 `label` predicate — a different input.)
                     direction = derived
                     direction_basis = "semantics"
         # Direction default (CYCLE-25 per-op_type, ontology v3.6 #5):
@@ -11021,13 +11015,15 @@ class TortoiseSDK:
         # (unchanged), NAND → "unidirectional" (extraction default — ingest IS
         # the extraction path: new-claim-attacks-existing is the common case;
         # bidirectional NAND requires explicit mutual-restatement declaration).
-        # A caller may explicitly pass "unidirectional"/"bidirectional" to
-        # override.
+        # A caller may explicitly pass any ACCEPTED_DIRECTION_VALUES token
+        # (the model's `->` / `<-` / `<->` / `-`, or the legacy
+        # `unidirectional` / `bidirectional`) to override.
         if direction is None:
             direction = self._canonical_direction(op_type, None)
-        if direction not in ("bidirectional", "unidirectional"):
+        if direction not in ACCEPTED_DIRECTION_VALUES:
             raise ValueError(
-                f"direction must be 'bidirectional' or 'unidirectional', got {direction!r}"
+                f"direction must be one of "
+                f"{', '.join(sorted(ACCEPTED_DIRECTION_VALUES))}, got {direction!r}"
             )
         pid = ulid()
         inputs = [source_id] + list(target_ids)  # noqa: RUF005
@@ -11931,7 +11927,7 @@ class TortoiseSDK:
     # write guard cannot drift from what EP treats as dead — a flag-outdated
     # (outdated=true, status untouched) point must equally refuse new edges.
     _INGEST_TERMINAL_STATUSES = TERMINAL_EXCLUDED_STATUSES
-    _INGEST_DIRECTION_VALUES = frozenset(("bidirectional", "unidirectional"))
+    _INGEST_DIRECTION_VALUES = ACCEPTED_DIRECTION_VALUES
     _INGEST_LEGACY_WRITE_KINDS = frozenset((
         "decision", "vision", "strategy", "plan", "goal", "target",
         "humanApproval", "observation", "hypothesis",
@@ -12212,34 +12208,19 @@ class TortoiseSDK:
 
     @staticmethod
     def _direction_from_semantics(semantics: str) -> str | None:
-        """The runtime direction a Layer-2 semantics value records (#7852 W1).
+        """The model direction a Layer-2 semantics value records (#7852).
 
-        ``None`` when the value records no transferable direction — `-`
-        (`related`, `transacts`) or an unrecognised word. The vocabulary and
-        the per-value direction are the registry's single source of truth
-        (``pack_registry.SEMANTICS_DIRECTIONS``), so this cannot drift from the
-        validation that admits the word in the first place.
+        ``SEMANTICS_DIRECTIONS`` is the single source of truth, and its values
+        ARE the model's four-value vocabulary (`->` / `<-` / `<->` / `-`), so
+        this returns the recorded direction UNCHANGED — including `-` for the
+        neutral meanings (`related`, `transacts`), which must be stored as `-`
+        rather than fall through to the mutual default: `-` means the
+        connection exists and NO confidence transfers (owner ruling), and a
+        fall-through to `bidirectional` would propagate confidence along an
+        edge the model declares belief-free.
         """
         from tortoise.pack_registry import SEMANTICS_DIRECTIONS
-        model_direction = SEMANTICS_DIRECTIONS.get(semantics)
-        if model_direction is None:
-            return None
-        return TortoiseSDK._SEMANTICS_RUNTIME_DIRECTION.get(model_direction)
-
-    # The model's four-value direction (ONTOLOGY §8: `->` / `<-` / `<->` / `-`)
-    # mapped onto the runtime's two-value vocabulary, which is what the
-    # `direction` property stores today (the four-value migration is the
-    # separate scoped change named on #7852). `<-` is deliberately ABSENT: the
-    # runtime's `unidirectional` means source→target only (ep.py writes the
-    # target message and withholds the source back-message), so mapping
-    # target→source onto it would record the OPPOSITE direction. No ruled
-    # semantics value produces `<-`, and an unmapped value safely returns None
-    # (falls through with a warning) instead. `-` maps to nothing too — no
-    # confidence transfers.
-    _SEMANTICS_RUNTIME_DIRECTION: ClassVar[dict[str, str]] = {
-        "->": "unidirectional",
-        "<->": "bidirectional",
-    }
+        return SEMANTICS_DIRECTIONS.get(semantics)
 
     @staticmethod
     def _canonical_direction(op_type: str, direction: str | None) -> str | None:
@@ -12359,8 +12340,8 @@ class TortoiseSDK:
                 violations.append({
                     "section": "connections", "index": index,
                     "message": f"ingest: connections[{index}] direction must "
-                               f"be 'bidirectional' or 'unidirectional', got "
-                               f"{direction!r}",
+                               f"be one of {', '.join(sorted(self._INGEST_DIRECTION_VALUES))}, "
+                               f"got {direction!r}",
                 })
             if route == "operator":
                 # cycle-13 route scoping: create_operator accepts no
@@ -12764,8 +12745,8 @@ class TortoiseSDK:
         conflict on same-label pairs. Identical pairs are clean dedup.
         """
         op = ca["operator"]
-        if self._canonical_direction(op, ca.get("direction")) != \
-                self._canonical_direction(op, cb.get("direction")):
+        if direction_flows(self._canonical_direction(op, ca.get("direction"))) != \
+                direction_flows(self._canonical_direction(op, cb.get("direction"))):
             return True
         if ca.get("confidence") != cb.get("confidence"):
             return True
@@ -12830,7 +12811,9 @@ class TortoiseSDK:
                 if ca.get("from") == cb.get("to") and ca.get("to") == cb.get("from"):
                     da = self._canonical_direction(ca["operator"], ca.get("direction"))
                     db = self._canonical_direction(cb["operator"], cb.get("direction"))
-                    if da == "bidirectional" or db == "bidirectional":
+                    # #7852: `bidirectional` and its model spelling `<->` both
+                    # cover both directions — compare the FLOWS, not the name.
+                    if all(direction_flows(da)) or all(direction_flows(db)):
                         violations.append({
                             "section": "connections", "index": ib,
                             "message": f"ingest: connections[{ia}] and "
@@ -13875,13 +13858,16 @@ class TortoiseSDK:
             )
         # CYCLE-25: NAND extraction default — direction-absent NAND is
         # "unidirectional" (new-claim-attacks-existing); IMPL stays
-        # bidirectional. An explicit value is preserved verbatim.
+        # bidirectional. An explicit value is preserved verbatim — the model's
+        # four Layer-1 tokens (`->` / `<-` / `<->` / `-`) plus the two legacy
+        # aliases (#7852). The edge stores what the caller declared; every
+        # reader normalizes through `live.direction_flows`.
         if direction is None:
             direction = "unidirectional" if op_type == "NAND" else "bidirectional"
-        if direction not in ("bidirectional", "unidirectional"):
+        if direction not in ACCEPTED_DIRECTION_VALUES:
             raise ValueError(
-                f"create_direct_edge: direction must be 'bidirectional' or "
-                f"'unidirectional', got {direction!r}"
+                f"create_direct_edge: direction must be one of "
+                f"{', '.join(sorted(ACCEPTED_DIRECTION_VALUES))}, got {direction!r}"
             )
 
         # #4647: confidence/weight are narrowed through ``float()`` below, so an
@@ -14072,9 +14058,13 @@ class TortoiseSDK:
             # CYCLE-17/25: direction-absent canonicalizes per op_type (IMPL
             # → bidirectional, NAND → unidirectional) — NEVER `o.direction IS
             # NULL` (direction is always stored; a NULL clause matches
-            # NOTHING and recreates the exactly-once P1 on the default shape)
-            conds.append("o.direction = $direction")
-            params["direction"] = canonical_dir
+            # NOTHING and recreates the exactly-once P1 on the default shape).
+            # #7852: storage is VERBATIM, so one meaning may be spelled with
+            # the model token or its legacy alias — match the whole
+            # equivalence class, or a `->` operator is invisible to a
+            # `unidirectional` re-ingest (a silent duplicate).
+            conds.append("o.direction IN $directions")
+            params["directions"] = sorted(direction_spellings(canonical_dir))
         rows = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
             f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t) "
@@ -14119,7 +14109,7 @@ class TortoiseSDK:
         else:
             pcond.append("o.label IS NULL")
         if direction is not None or canonical_dir is not None:
-            pcond.append("o.direction = $direction")
+            pcond.append("o.direction IN $directions")
         prows = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
             f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t) "
@@ -16128,10 +16118,11 @@ class TortoiseSDK:
             params=params,
         ).result_set
         # Direction-aware, mirroring `_bfs_select_operators`'s direct-edge
-        # walk (analyze.py): forward from a window member (a.id IN $ids)
-        # ALWAYS; backward into a window member (b.id IN $ids) ONLY for NAND
-        # or a non-unidirectional IMPL edge. A pass over just the TARGET of a
-        # unidirectional direct IMPL edge legitimately selects nothing — a
+        # walk (analyze.py): forward flow from a window member (a.id IN $ids)
+        # and backward flow into a window member (b.id IN $ids) ONLY for NAND
+        # or a direction that flows backward. A pass over just the TARGET of a
+        # forward-only direct IMPL edge legitimately selects nothing; likewise
+        # a pass over just the SOURCE of a backward-only (`<-`) edge — a
         # direction-blind probe would false-fire the guard (and, via the
         # lazy read path, break get_confidence). The directed match + count(r)
         # gives one row per factor.
@@ -16139,9 +16130,13 @@ class TortoiseSDK:
             dir_scope = ""
         else:
             dir_scope = (
-                "AND (a.id IN $ids OR (b.id IN $ids AND "
+                "AND ((a.id IN $ids AND "
+                "coalesce(r.direction, 'bidirectional') IN "
+                "['bidirectional', '<->', '->', 'unidirectional']) "
+                "OR (b.id IN $ids AND "
                 "(type(r) = 'NAND' OR "
-                "coalesce(r.direction, 'bidirectional') <> 'unidirectional'))) "
+                "coalesce(r.direction, 'bidirectional') IN "
+                "['bidirectional', '<->', '<-']))) "
             )
         dir_rows = proj.g.query(
             "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "

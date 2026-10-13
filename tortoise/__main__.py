@@ -10910,10 +10910,15 @@ def main(argv: list[str] | None = None) -> int:
     dc.add_argument("--criteria", help="JSON dict of criteria")
     dc.add_argument("--findings", help="JSON dict of findings")
     dc.add_argument("--edges", help="JSON list of edges, e.g. '[\"crit:1\", \"IMPL\", \"opt:a\"]' or full edge dicts")
-    dc.add_argument("--direction", choices=["bidirectional", "unidirectional"], default=None,
+    from tortoise.live import ACCEPTED_DIRECTION_VALUES  # #7852 the shared direction vocabulary
+    dc.add_argument("--direction", choices=sorted(ACCEPTED_DIRECTION_VALUES), default=None,
                     help="Direction recorded on every operator this run wires (#7813): "
-                         "'bidirectional' (mutual, the default when omitted) or "
-                         "'unidirectional' (directed attack — no back-pressure).")
+                         "the Layer-1 four-value vocabulary (#7852) — '->' "
+                         "(source→target), '<-' (target→source), '<->' (both, "
+                         "the default when omitted) or '-' (none: no confidence "
+                         "transfers) — plus the legacy aliases 'bidirectional' "
+                         "(≡'<->') and 'unidirectional' (≡'->'). "
+                         "Use the --direction=VALUE form for the arrow tokens.")
     dc.add_argument("--context-free", action="store_true",
                     help="Deprecated no-op — context-free (explicit factors) is the only mode since #49 Phase 2",)
     dc.add_argument("--db", help=(
