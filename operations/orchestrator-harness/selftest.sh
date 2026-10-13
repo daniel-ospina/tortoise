@@ -75,7 +75,16 @@ ck "shipped classifier: gate FAILURE is reported failed" $rc
 # so an unrecognised or null conclusion reached `gh pr merge --auto` (fail OPEN), while CANCELLED —
 # non-red, a superseded run is normal — was named red and routed to the fixer. The rule is the one
 # admin-merge.sh and record-review.sh already implement, so these fixtures pin the shipped
-# classifier TO THAT RULE rather than to a copy of it. Every check below fails on the deny-list.
+# classifier TO THAT RULE rather than to a copy of it.
+#
+# What each check below is EVIDENCE FOR, stated rather than overclaimed: measured against the
+# pre-fix tree (this file dropped in beside the deny-list scripts), the polarity fixtures fail
+# there — EXCEPT those whose subject predates this change (red stays red, an empty surface is not
+# green) and the §3d shell checks, which guard the backtick hazard this change's own comment text
+# introduces (the deny-list base has no such comments, so they pass there by construction). Those
+# are regression guards, not evidence for the polarity; the fixtures that DO discriminate assert an
+# exact verdict, never "not GREEN" (an empty string from a crashed extractor satisfies any negative
+# assertion).
 full() { # full <required-name> <state|conclusion, or the literal null> -> a full required surface
   python3 - "$1" "$2" <<'PY'
 import json,sys
@@ -85,6 +94,14 @@ rows=[{"name":x,"state":"SUCCESS"} for x in ("ai-review-gate","python-ci-gate","
 for r in rows:
     if r["name"]==n: r["state"]=None if s=="null" else s
 print(json.dumps(rows))
+PY
+}
+allstates() { # allstates <state|conclusion> -> every required row carrying that same state
+  python3 - "$1" <<'PY'
+import json,sys
+s=sys.argv[1]
+print(json.dumps([{"name":x,"state":s} for x in ("ai-review-gate","python-ci-gate","docs",
+      "test-isolation","license-surface","legal-e2e","pricing-artifact")]))
 PY
 }
 # (a) THE FALSE-GREEN: a null conclusion is RED, never PENDING (PENDING arms auto-merge).
@@ -108,9 +125,24 @@ got="$(cl "$(full legal-e2e STALE)")"
 ck "shipped classifier: STALE does not block (non-red)" $rc
 # (e) …but they are NOT green either: a surface of nothing but cancelled/stale proves nothing,
 # so it must never read GREEN (a skipped/cancelled shard is not coverage — the rail's doctrine).
-got="$(cl '[{"name":"docs","state":"CANCELLED"},{"name":"legal-e2e","state":"STALE"}]')"
-[ "$got" != "GREEN" ] && rc=0 || { rc=1; echo "      got '$got'"; }
-ck "shipped classifier: an all-cancelled/stale surface is not GREEN" $rc
+# The FULL required surface, every row cancelled/stale INCLUDING the gate — the gate rule is what
+# refuses it, and asserting the EXACT verdict pins that. An inexact "!= GREEN" would pass on the
+# deny-list too (it reads every CANCELLED row as red, i.e. FAILED), so this fixture would prove
+# nothing about the polarity; the exact form discriminates.
+got="$(cl "$(allstates CANCELLED)")"
+[ "$got" = "FAILED:ai-review-gate" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: an all-cancelled surface cannot read GREEN (the gate refuses it)" $rc
+# STALE across the WHOLE surface, with the gate a real success: non-red rows must not force
+# PENDING. Exact verdict, so the deny-list (which names no STALE token at all and reads them as
+# neither ok nor bad) gives PENDING and fails here.
+got="$(cl "$(python3 - <<'PY'
+import json
+print(json.dumps([{"name":"ai-review-gate","state":"SUCCESS"}]+[{"name":x,"state":"STALE"} for x in
+      ("python-ci-gate","docs","test-isolation","license-surface","legal-e2e","pricing-artifact")]))
+PY
+)")"
+[ "$got" = "GREEN" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: STALE rows across the surface do not force PENDING (non-red)" $rc
 # (f) an EMPTY surface is not green — a missing check is not a green check (absence != green).
 got="$(cl '[]')"
 [ "$got" = "NOCHECKS" ] && rc=0 || { rc=1; echo "      got '$got'"; }
@@ -125,14 +157,27 @@ ck "shipped classifier: a red among several green is RED" $rc
 got="$(cl '[{"name":"ai-review-gate","state":"SUCCESS"},{"name":"docs","state":"FAILURE"},{"name":"python-ci-gate","state":"IN_PROGRESS"}]')"
 [ "$got" = "FAILED:docs" ] && rc=0 || { rc=1; echo "      got '$got'"; }
 ck "shipped classifier: a red is final — it is not masked by an in-flight check" $rc
-# (h) grouping is per (app, name): one app's result must not mask the other's.
-got="$(cl '[{"name":"ai-review-gate","state":"SUCCESS"},{"name":"docs","state":"NEUTRAL","workflow":"w1"},{"name":"docs","state":"FAILURE","workflow":"w2"}]')"
+# (h) grouping is per (app, name): one app's result must not mask the other's. The red row is
+# placed FIRST and a non-red row LAST, so the pre-fix per-name map (last write wins) reads NEUTRAL
+# and this fixture fails there — with the red last it would pass on the deny-list and prove nothing.
+got="$(cl '[{"name":"ai-review-gate","state":"SUCCESS"},{"name":"docs","state":"FAILURE","workflow":"w2"},{"name":"docs","state":"NEUTRAL","workflow":"w1"}]')"
 [ "$got" = "FAILED:docs" ] && rc=0 || { rc=1; echo "      got '$got'"; }
 ck "shipped classifier: a same-named check under two apps cannot mask a red" $rc
-# (i) the NEWEST attempt by id governs (the check-runs API shape).
+# (i) the NEWEST attempt by id governs (the check-runs API shape). Assert the EXACT verdict, never
+# a "not FAILED" match — an empty string from a crashed extractor satisfies that form (the pre-fix
+# classifier raises TypeError on this payload and prints nothing).
 got="$(cl '{"check_runs":[{"id":1,"name":"ai-review-gate","status":"completed","conclusion":"success","app":{"slug":"a"}},{"id":5,"name":"docs","status":"completed","conclusion":"failure","app":{"slug":"a"}},{"id":9,"name":"docs","status":"completed","conclusion":"success","app":{"slug":"a"}}]}')"
-case "$got" in FAILED:*) rc=1; echo "      got '$got'";; *) rc=0;; esac
+[ "$got" = "PENDING:python-ci-gate,test-isolation,license-surface,legal-e2e,pricing-artifact" ] && rc=0 || { rc=1; echo "      got '$got'"; }
 ck "shipped classifier: a newer passing attempt supersedes an older red" $rc
+# (i2) …and it is by ID, not by position: with the NEWEST attempt listed FIRST and the older red
+# LAST, "last row wins" would read the red. Pinned in both directions, so a regression to
+# last-wins cannot survive whichever order an API happens to return.
+got="$(cl '{"check_runs":[{"id":1,"name":"ai-review-gate","status":"completed","conclusion":"success","app":{"slug":"a"}},{"id":9,"name":"docs","status":"completed","conclusion":"success","app":{"slug":"a"}},{"id":5,"name":"docs","status":"completed","conclusion":"failure","app":{"slug":"a"}}]}')"
+[ "$got" = "PENDING:python-ci-gate,test-isolation,license-surface,legal-e2e,pricing-artifact" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: the newest attempt by id governs even when it is not the last row" $rc
+got="$(cl '{"check_runs":[{"id":1,"name":"ai-review-gate","status":"completed","conclusion":"success","app":{"slug":"a"}},{"id":12,"name":"docs","status":"completed","conclusion":"failure","app":{"slug":"a"}},{"id":9,"name":"docs","status":"completed","conclusion":"success","app":{"slug":"a"}}]}')"
+[ "$got" = "FAILED:docs" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+ck "shipped classifier: a newest-by-id red is not masked by a later-listed older green" $rc
 got="$(cl '{"check_runs":[{"id":1,"name":"ai-review-gate","status":"completed","conclusion":"success","app":{"slug":"a"}},{"id":9,"name":"docs","status":"completed","conclusion":"success","app":{"slug":"a"}},{"id":12,"name":"docs","status":"completed","conclusion":"failure","app":{"slug":"a"}}]}')"
 [ "$got" = "FAILED:docs" ] && rc=0 || { rc=1; echo "      got '$got'"; }
 ck "shipped classifier: a newer failing attempt supersedes an older green" $rc
