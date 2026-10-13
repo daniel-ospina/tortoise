@@ -135,11 +135,17 @@ unset -f tmux
 awk '/^n=0$/{f=1} f{print} /^done < /{f=0}' "$REFRESH" > "$TMP/refreshloop.sh"
 if need "$TMP/refreshloop.sh" "the refresh loop body is extracted from the shipped refresh-candidates.sh"; then
   RL="$TMP/refresh"; mkdir -p "$RL/fakesc/.venv/bin"
+  # The pool the SHIPPED producer writes: bare numbers, one per line (severity lives in the
+  # sort, not in the file). A tier prefix leaking back into `.pool` is a malformed argument
+  # to the loop below, so the stub FAILS on a non-numeric issue number instead of matching
+  # `*10*` inside `0 10` and letting a broken producer look green (#8469 review P2).
   printf '10\n20\n30\n40\n50\n' > "$RL/.pool"
   : > "$RL/checked.txt"; : > "$RL/candidates.txt"; : > "$RL/dispatched.txt"
   cat > "$RL/fakesc/.venv/bin/python" <<'PY'
 #!/bin/bash
-# stand-in for the scout's venv python: every candidate pre-flights CLEAN
+# stand-in for the scout's venv python: every candidate pre-flights CLEAN.
+# Argv is `collision_preflight.py <N> --repo .`, so the issue number is $2.
+case "$2" in *[!0-9]*|"") echo "MALFORMED_ARG $2" >&2; exit 3;; esac
 echo "VERDICT: CLEAN"
 PY
   chmod +x "$RL/fakesc/.venv/bin/python"

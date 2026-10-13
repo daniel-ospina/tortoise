@@ -1395,6 +1395,11 @@ surfaces:
   - test_collision_preflight.py
   - test_vector_write_seam_4520.py
   - test_who_is_on.py  # #4256: "who is on #N?" verb — local-only branches/worktrees included
+  # #8469 review: the orchestrator harness's shipped shell scripts. Hermetic (stub `gh`, temp
+  # dirs; no DB, no network), and the only guard on `merged-not-closed.sh`/`lane.sh`/
+  # `refresh-candidates.sh` — an `operations/**`-only diff selects no surface at all, so this
+  # file is what makes the PR's own change run a pytest leg (the #1349 silent-drop class).
+  - test_orchestrator_harness.py
   # #4290: the finding-provenance gate — a finding must name the tree it was
   # measured against, and a stale measurement fails (ancestry, not equality).
   # Hermetic (temp git repo; no DB), so it pins no api/engine surface: `core`

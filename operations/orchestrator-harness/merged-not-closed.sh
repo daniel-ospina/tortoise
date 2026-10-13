@@ -35,37 +35,52 @@ REPO="${REPO:-daniel-ospina/tortoise}"
 LABELS=(); JSON=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --repo)  REPO="$2"; shift 2 ;;
-    --label) LABELS+=("$2"); shift 2 ;;
+    --repo)
+      [ $# -ge 2 ] || { echo "merged-not-closed: --repo needs a value" >&2; exit 2; }
+      REPO="$2"; shift 2 ;;
+    --label)
+      [ $# -ge 2 ] || { echo "merged-not-closed: --label needs a value" >&2; exit 2; }
+      LABELS+=("$2"); shift 2 ;;
     --json)  JSON=1; shift ;;
-    -h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    # Stop at the first non-comment line rather than a hardcoded range: the header outgrew the
+    # old `2,40p` bound and `--help` printed the script's own code (#8469 review P2).
+    -h|--help) awk 'NR>1 && /^set -u$/{exit} NR>1{print}' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "merged-not-closed: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
 command -v gh >/dev/null 2>&1 || { echo "merged-not-closed: gh not on PATH" >&2; exit 2; }
 
-# The issue list is the universe. A failure here must NOT read as "empty".
-ISSUES=""
+# The issue list is the universe. A failure here must NOT read as "empty" — and it must not
+# read as COMPLETE when it is only the first page. `gh issue list --limit N` stops at N and
+# still exits 0, so the old `--limit 400` rendered 400 of ~1,020 open issues as though it were
+# the whole repo — and the truncation lands hardest on the long-stranded issues this tool
+# exists to find (#8469 review P1). `gh api --paginate` follows the Link header to exhaustion,
+# so the enumeration has no cap to hit.
+ISSUE_ARGS=(gh api --paginate --method GET "repos/$REPO/issues" -f state=open -f per_page=100)
+SEARCH_Q="repo:$REPO is:issue is:open"
 if [ "${#LABELS[@]}" -gt 0 ]; then
-  ARGS=(); for l in "${LABELS[@]}"; do ARGS+=(--label "$l"); done
-  ISSUES="$(gh issue list --repo "$REPO" --state open --limit 400 "${ARGS[@]}" \
-            --json number,title,labels 2>/dev/null)" || ISSUES=""
-else
-  ISSUES="$(gh issue list --repo "$REPO" --state open --limit 400 \
-            --json number,title,labels 2>/dev/null)" || ISSUES=""
+  ISSUE_ARGS+=(-f "labels=$(IFS=,; printf '%s' "${LABELS[*]}")")
+  for l in "${LABELS[@]}"; do SEARCH_Q+=" label:\"$l\""; done
 fi
+# The search surface's own total, taken BEFORE and AFTER the sweep. min(before, after) is the
+# floor the enumeration must reach: a shortfall means the sweep is PARTIAL and must never be
+# presented as a complete universe. Two reads (not one) so a new issue opening mid-sweep — or
+# one closing — cannot manufacture a false refusal.
+EXPECTED_BEFORE="$(gh api --method GET search/issues -f q="$SEARCH_Q" --jq .total_count 2>/dev/null)" || EXPECTED_BEFORE=""
+ISSUES="$("${ISSUE_ARGS[@]}" 2>/dev/null)" || ISSUES=""
 if [ -z "$ISSUES" ]; then
   echo "merged-not-closed: could not list issues for $REPO" >&2; exit 2
 fi
+EXPECTED_AFTER="$(gh api --method GET search/issues -f q="$SEARCH_Q" --jq .total_count 2>/dev/null)" || EXPECTED_AFTER=""
 
 TMP="$(mktemp)"; trap 'rm -f "$TMP"' EXIT
 printf '%s' "$ISSUES" > "$TMP"
-python3 - "$REPO" "$JSON" "$TMP" <<'PY'
+python3 - "$REPO" "$JSON" "$TMP" "$EXPECTED_BEFORE" "$EXPECTED_AFTER" <<'PY'
 import json, subprocess, sys
 
 repo, as_json, path = sys.argv[1], sys.argv[2] == "1", sys.argv[3]
-issues = json.load(open(path))
+exp_before, exp_after = sys.argv[4], sys.argv[5]
 
 
 def parse_pages(text):
@@ -81,6 +96,19 @@ def parse_pages(text):
         out.extend(obj if isinstance(obj, list) else [obj])
         i = end
     return out
+
+
+raw = parse_pages(open(path).read())
+# The `issues` endpoint returns pull requests too; this question is about ISSUES.
+issues = [it for it in raw if "pull_request" not in it]
+
+# Partial sweep -> refuse (2). The floor is min(before, after): a NEW issue opening mid-sweep
+# or one closing cannot make a complete enumeration look short, but a page cap can.
+floor = min((int(x) for x in (exp_before, exp_after) if x.isdigit()), default=None)
+if floor is not None and len(issues) < floor:
+    print(f"merged-not-closed: enumerated {len(issues)} of {floor} open issue(s) — the "
+          f"sweep is PARTIAL; refusing to present it as the whole universe", file=sys.stderr)
+    sys.exit(2)
 
 
 hits, failed = [], []

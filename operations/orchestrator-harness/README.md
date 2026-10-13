@@ -497,6 +497,7 @@ algorithmic advantage. The claim worth evaluating is *utilisation*, not *efficie
 | `merge-one.sh` | fresh review → signed record → wait green → merge; marks `needsfix-*` |
 | `fix-one.sh` | fixes a reviewer's findings, pushes, re-runs the merge chain |
 | `refresh-candidates.sh` | pre-flights issues (collision check) into the backlog |
+| `merged-not-closed.sh` | reports open issues that already have a MERGED PR (VERIFY-then-close; never auto-closes) |
 | `selftest.sh` | offline checks; each one drives the shipped code. Not part of the loop |
 
 **Manual utility:** `adopt-fix.sh` — run `fix-one.sh` against a specific PR by hand.
