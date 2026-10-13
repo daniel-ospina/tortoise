@@ -2549,9 +2549,17 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
         cypher = (
             "MATCH (n:Point) "
             "WHERE n.id IN $ids "
+            # #6871: `impl_count`/`nand_count` are INCOMING EVIDENCE counts, and
+            # an operator's typed edges are its input set — idx 0 is the
+            # operator's SOURCE, idx >= 1 its targets. Unguarded, the source's
+            # own idx=0 edge counted as evidence pointing AT it, so a source
+            # with nothing supporting it reported impl_count=1 and a diluted
+            # `contention` (nand/(impl+nand)) on the wire.
             "OPTIONAL MATCH (n)<-[r:IMPL]-(:Point) "
+            "WHERE coalesce(r.idx, 0) >= 1 "
             "WITH n, count(r) AS impl_count "
             "OPTIONAL MATCH (n)<-[r2:NAND]-(:Point) "
+            "WHERE coalesce(r2.idx, 0) >= 1 "
             "WITH n, impl_count, count(r2) AS nand_count "
             "RETURN n.id, impl_count, nand_count, "
             "  CASE WHEN impl_count + nand_count > 0 "

@@ -158,3 +158,62 @@ def test_canonical_evidence_read_never_reports_a_point_as_its_own_supporter(sdk)
             (blocks.get(claim) or {}).get("support_chain") or []] == [src], (
         "the claim's only supporter is the operator's idx=0 source"
     )
+
+
+def test_analyze_support_reads_are_idx_role_guarded(sdk):
+    """#6871 claim (2) on a PRODUCT surface.
+
+    The operator's typed edge set is its INPUT set (idx 0 = source, idx >= 1 =
+    targets), so a support read must treat idx=0 as the SUPPORTING side and
+    idx>=1 as the supported one. Pre-fix these two `tortoise_analyze` templates
+    guarded identity only (`target.id <> supporter.id`), which made the relation
+    symmetric — asking for the SOURCE's support returned its own target.
+
+    The queries below are the exact text `TEMPLATES[name]["cypher"]` hands the
+    projector, with the same params `classify()` supplies. Falsifier: drop the
+    `coalesce(r_out.idx, 0) >= 1` arm and the second assertion in each loop reds.
+    """
+    from tortoise.analyze import TEMPLATES
+
+    src = sdk.create_point("evidence", "SOURCEMARKER", status="live")["id"]
+    hyp = sdk.create_point("hypothesis", "HYPOMARKER", status="live")["id"]
+    sdk.create_operator("IMPL", src, [hyp])
+    proj = sdk._get_proj()
+
+    def _run(name: str, entity: str) -> list[str]:
+        return [r[0] for r in proj.g.query(
+            TEMPLATES[name]["cypher"],
+            params={"entity": entity, "limit": 20}).result_set]
+
+    for name in ("strongest_for", "evidence_chain"):
+        assert _run(name, "HYPOMARKER") == [src], (
+            f"{name} must serve the operator's idx=0 SOURCE as the support "
+            f"of its idx>=1 target"
+        )
+        assert _run(name, "SOURCEMARKER") == [], (
+            f"{name} served the SOURCE's own target as ITS support — the "
+            "#6871 idx-role inversion (the read is symmetric without the guard)"
+        )
+
+
+def test_annotate_ep_batch_does_not_count_the_sources_own_edge(sdk):
+    """#6871 on the wire: `impl_count` is an INCOMING-evidence count.
+
+    The source's idx=0 edge points AT the source, so unguarded it counted as
+    evidence supporting the source — inflating `impl_count` and diluting the
+    `contention` ratio (nand/(impl+nand)) that `SearchResult.to_dict()` puts on
+    the wire.
+    """
+    from tortoise.search_engine import annotate_ep_batch
+
+    src = sdk.create_point("evidence", "S: the source", status="live")["id"]
+    hyp = sdk.create_point("hypothesis", "H: the target", status="live")["id"]
+    sdk.create_operator("IMPL", src, [hyp])
+
+    out = annotate_ep_batch(sdk._get_proj().g, [src, hyp])
+    assert out[src].evidence.impl_count == 0, (
+        "the source counted its own idx=0 edge as incoming evidence"
+    )
+    assert out[hyp].evidence.impl_count == 1, (
+        "the target must still count the operator's idx>=1 edge as support"
+    )
