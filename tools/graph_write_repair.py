@@ -368,6 +368,18 @@ def probe(db, name: str) -> tuple[str, str]:
     empty one -- and then reports a healthy zero-node graph. Presence is RE-CHECKED after the
     write, because the graph can be deleted between the two, in which case the write
     auto-creates an empty graph whose write is ACCEPTED and would read as healthy.
+
+    ⛔ AND A COUNT BELOW ``MIN_NODES`` IS NOT A VERDICT. The presence check and the count read
+    below are separate statements, so a graph deleted BETWEEN them is auto-created EMPTY by
+    the read -- making presence TRUE while the graph holds nothing. Every check after that
+    then passes: the CREATE is accepted, the post-write re-check sees the phantom this call
+    just made, and ``probe`` returns "ok" on an empty graph. On the clone path that empty
+    phantom is RENAMEd over the live graph (measured 1500 -> 0 in review cycle 5); on the
+    ``main()`` path the tool prints HEALTHY with exit 0 for a zero-node graph, and the
+    scheduled job keys on that exit code. Every graph this function is asked about holds at
+    least ``MIN_NODES`` -- the faulted live graph does, and so does a faithful clone of it --
+    so a count below the floor means the key was re-created, which is not a fact about the
+    graph that was verified.
     """
     from tortoise.graph_delete_guard import graph_exists
 
@@ -378,6 +390,20 @@ def probe(db, name: str) -> tuple[str, str]:
         before = node_count(graph)
     except Exception as exc:
         return "unknown", f"presence/count read failed: {type(exc).__name__}: {exc}"
+
+    # ⛔ REFUSE AN EMPTY RE-MATERIALISED GRAPH. See the docstring: a graph deleted between the
+    # presence check above and this read is auto-created EMPTY by the read, so presence comes
+    # back TRUE and every later check passes on a graph that holds nothing -- the empty
+    # phantom then gets swapped over the live graph on the clone path, or reported HEALTHY
+    # with exit 0 by `main()`. An auto-created graph holds ZERO nodes, so that is the exact
+    # signature, and it is the one to test: a small graph is still a real graph with real
+    # nodes, and `repair` applies its own MIN_NODES floor to decide whether it is the shared
+    # graph at all. This check answers a narrower question -- "is this the graph I verified, "
+    # or a key that was re-created after it vanished?"
+    if before == 0:
+        return "unknown", ("the graph holds 0 nodes -- a count this low means the key was "
+                            "re-created empty (a read on an absent graph auto-creates one), "
+                            "so this is NOT a verdict about the graph that was verified")
 
     # Scope the probe to THIS run: a bare `MATCH (t:Label) DELETE t` would destroy a node
     # left by an earlier failed cleanup, or any pre-existing node carrying the label.
@@ -615,6 +641,23 @@ def repair(db, name: str, verbose: bool = True) -> tuple[bool, str]:
                                f"state ({src_kind}: {src_detail}) -- the clone may be stale "
                                f"and concurrent writes may be landing; refusing to swap; "
                                f"clone {quarantine} RETAINED")
+
+            # ⛔ RE-VERIFY THE CLONE IMMEDIATELY BEFORE THE SWAP. Everything checked about the
+            # clone happened earlier -- its copy, its fingerprint, its probe, its index audit
+            # -- and this is the last moment a check can still run BEFORE the irreversible
+            # step. The clone is STATIC after its audit (nothing writes to it), so this
+            # comparison is exact, not a heuristic: it is what stops an empty phantom from
+            # being swapped over the live graph when the clone was deleted and then
+            # auto-created empty by someone's read in the meantime.
+            if not graph_exists(db, scratch):
+                retain_clone("the clone vanished before the swap")
+                return False, (f"the clone {scratch} is GONE before the swap -- it was "
+                               f"deleted mid-run and any read of its key would auto-create "
+                               f"an EMPTY graph, which must never be swapped over {name!r}")
+            if fingerprint(db.select_graph(scratch)) != (before_nodes, before_edges):
+                retain_clone("the clone no longer matches the source snapshot")
+                return False, (f"the clone {scratch} no longer matches the "
+                               f"{(before_nodes, before_edges)} snapshot -- refusing the swap")
 
             # ATOMIC. `RENAME` overwrites in one step, so there is never a window in which
             # `name` is absent -- that window is what auto-created an empty graph and

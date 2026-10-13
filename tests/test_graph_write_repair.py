@@ -258,6 +258,100 @@ def test_probe_ok_and_the_probe_cleans_up_after_itself():
     assert db.graphs["g"].nodes == 5, "the probe left its node behind"
 
 
+def test_probe_refuses_an_empty_re_materialised_graph():
+    """A 0-node graph is NOT `ok` -- it is the signature of a key re-created by a read.
+
+    The presence check and the count read are separate statements, so a graph deleted between
+    them is auto-created EMPTY by the read: presence is TRUE, the CREATE is accepted, the
+    post-write re-check sees the phantom this call just made, and `probe` used to return "ok"
+    on a graph holding nothing. On the clone path that phantom was then RENAMEd over the live
+    graph (measured 1500 -> 0); on the `main()` path the tool printed HEALTHY with exit 0,
+    which the scheduled job keys on.
+
+    Mutation: remove the `before == 0` refusal -> this returns "ok" -> RED.
+    """
+    db = _FakeDb({"g": _GraphState(nodes=0, edges=0)})
+    kind, detail = gwr.probe(db, "g")
+    assert kind == "unknown", (kind, detail)
+    assert "0 nodes" in detail, detail
+    # The probe must not have left its own node behind in the phantom.
+    assert db.graphs["g"].nodes == 0, db.graphs["g"]
+
+
+def test_repair_refuses_the_swap_when_the_clone_vanishes_after_its_audit(monkeypatch, fake_lock):
+    """The clone is RE-VERIFIED immediately before the swap, and a gone clone refuses it.
+
+    Everything known about the clone was established earlier. This is the last moment a check
+    can run before the irreversible `RENAME`, and it is what stops an EMPTY PHANTOM being
+    swapped over the live graph when the clone was deleted and a read then auto-created its
+    key empty. The clone is static after its audit, so the comparison is exact.
+
+    The clone is deleted from inside the audit -- the statement immediately preceding the
+    guard -- so this drives the real window rather than a simulated one.
+
+    Mutation: remove the pre-swap re-verification -> the phantom IS renamed over the live
+    graph -> RED.
+    """
+    import tortoise.hosted_backup as hb
+
+    db = _FakeDb({"tortoise": _defect_state(edges=7)})
+    real = hb._audit_copied_boolean_indexes
+    seen = []
+
+    def _audit_then_vanish(*a, **k):
+        out = real(*a, **k)
+        seen.append(True)
+        for key in [g for g in db.graphs if g.startswith("__gwr_")]:
+            db.graphs.pop(key, None)
+        return out
+
+    monkeypatch.setattr(hb, "_audit_copied_boolean_indexes", _audit_then_vanish)
+    ok, msg = gwr.repair(db, "tortoise")
+    assert seen, "the audit did not run -- the test would not exercise the swap window"
+    assert ok is False, (ok, msg)
+    assert "GONE before the swap" in msg, msg
+    # The live graph must NOT have been overwritten by a phantom.
+    assert "RENAME" not in [c[0] for c in db.commands if len(c) > 2 and c[2] == "tortoise"], \
+        db.commands
+    assert db.graphs["tortoise"].nodes == BIG, "the live graph was clobbered"
+
+
+def test_repair_refuses_the_swap_when_the_clone_is_re_materialised_empty(monkeypatch, fake_lock):
+    """A clone that is PRESENT BUT EMPTY is refused -- the fingerprint half of the guard.
+
+    This is the scenario the guard's comment credits with catching, and the sibling test does
+    NOT reach it: deleting the clone outright trips the `graph_exists` half first. Here the
+    clone's key still EXISTS (so presence is true) but holds nothing -- exactly what an
+    auto-created phantom looks like after a read materialised a deleted key. Without the
+    fingerprint comparison the phantom would be RENAMEd over the live graph.
+
+    Mutation: delete the `fingerprint(...) != (before_nodes, before_edges)` refusal -> the
+    empty phantom IS swapped in -> RED.
+    """
+    import tortoise.hosted_backup as hb
+
+    db = _FakeDb({"tortoise": _defect_state(edges=7)})
+    real = hb._audit_copied_boolean_indexes
+    re_materialised = []
+
+    def _audit_then_emptied(*a, **k):
+        out = real(*a, **k)
+        for key in [g for g in db.graphs if g.startswith("__gwr_")]:
+            # The key survives; the CONTENT is gone -- a read materialised it empty.
+            db.graphs[key] = _GraphState(nodes=0, edges=0)
+            re_materialised.append(key)
+        return out
+
+    monkeypatch.setattr(hb, "_audit_copied_boolean_indexes", _audit_then_emptied)
+    ok, msg = gwr.repair(db, "tortoise")
+    assert re_materialised, "the clone was not re-materialised -- the guard was not driven"
+    assert ok is False, (ok, msg)
+    assert "no longer matches" in msg, msg
+    assert "RENAME" not in [c[0] for c in db.commands if len(c) > 2 and c[2] == "tortoise"], \
+        db.commands
+    assert db.graphs["tortoise"].nodes == BIG, "the live graph was clobbered by the phantom"
+
+
 def test_probe_absent_when_the_key_is_not_in_graph_list():
     """Presence is established with the key catalogue, never by querying an absent graph.
 
