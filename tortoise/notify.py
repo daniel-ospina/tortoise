@@ -35,6 +35,11 @@ import os
 from datetime import datetime, timezone
 
 import httpx
+from tortoise.incident_kinds import (
+    KIND_ABUSE_REVIEW_NEEDED,
+    KIND_ABUSE_SUSPENDED,
+    KIND_BILLING_SEND_FAILED,
+)
 from tortoise.telegram_push import send_message as telegram_send  # noqa: E402, RUF100
 
 logger = logging.getLogger(__name__)
@@ -43,13 +48,18 @@ RESEND_URL = "https://api.resend.com/emails"
 DEFAULT_FROM_ADDRESS = "noreply@premiselabs.co"  # single managed sender identity (#1136)
 
 # Kinds mirror the audit/analytics event names (billing_upgrade, billing_downgrade,
-# billing_payment_failed, billing_cancel).
+# billing_payment_failed, billing_cancel). ⛔ This is the NOTIFICATION-EVENT
+# vocabulary, not the incident-kind vocabulary: it names the business EVENT
+# whose delivery failed, while ``tortoise.incident_kinds`` names the incident
+# that a failed delivery FILES. The two overlap on exactly two members
+# (``abuse_review_needed`` / ``abuse_suspended``) and are otherwise disjoint on
+# purpose — see ``_BILLING_SEND_FAILED_KIND`` below.
 KINDS = {"billing_upgrade", "billing_downgrade", "billing_payment_failed", "billing_cancel",
          # #308: abuse prevention notifications
-         "abuse_flag", "abuse_suspended", "abuse_new_ip", "abuse_read_velocity",
+         "abuse_flag", KIND_ABUSE_SUSPENDED, "abuse_new_ip", "abuse_read_velocity",
          # #5425: the engine no longer auto-suspends; a persistent breach alerts
          # for HUMAN review instead.
-         "abuse_review_needed",
+         KIND_ABUSE_REVIEW_NEEDED,
          # #1081: R8 signup-velocity (anon signups per IP per window)
          "abuse_signup_velocity",
          # #1709: recovery-velocity (keyless recovery mints per IP per window)
@@ -58,7 +68,9 @@ KINDS = {"billing_upgrade", "billing_downgrade", "billing_payment_failed", "bill
 # Ops incident KINDs (the alert_store sink) — deliberately NOT members of KINDS.
 # KINDS names business EVENTS; these name a failed DELIVERY of one. Keeping them
 # separate stops an egress outage from being deduped against a billing event.
-_BILLING_SEND_FAILED_KIND = "BILLING_SEND_FAILED"
+# The VALUE comes from the one declaration site (#4780), because it is an R2
+# dedup key.
+_BILLING_SEND_FAILED_KIND = KIND_BILLING_SEND_FAILED
 
 _skip_logged: set[str] = set()
 
@@ -292,7 +304,7 @@ def notify_abuse(kind: str, org: dict, details: dict | None = None) -> None:
         except Exception as e:  # noqa: BLE001, RUF100
             logger.warning("abuse notify: telegram failed (%s)", redact_safe(e))
 
-    if kind in ("abuse_suspended", "abuse_review_needed"):
+    if kind in (KIND_ABUSE_SUSPENDED, KIND_ABUSE_REVIEW_NEEDED):
         # Ops incident alert (GH issue + Telegram) — best-effort: absence of the
         # ALERT channel or any failure degrades to the Telegram leg above
         # (there is no email leg since #3639).
@@ -319,7 +331,7 @@ def notify_abuse(kind: str, org: dict, details: dict | None = None) -> None:
                 # "Auto-suspended" misattributed an out-of-band decision and read
                 # as the very behaviour this change removed.
                 what = ("Suspended by an operator"
-                        if kind == "abuse_suspended"
+                        if kind == KIND_ABUSE_SUSPENDED
                         else "Human review needed — rate-limit, do not suspend")
                 store.open_incident(
                     kind, org.get("org_id") or "_",

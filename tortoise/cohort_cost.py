@@ -104,6 +104,10 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from tortoise.incident_kinds import (
+    KIND_COHORT_CAP_UNENFORCEABLE,
+    KIND_COHORT_COST_CAP,
+)
 from tortoise.quota import QuotaCheckError, QuotaExceededError, with_limit_contact
 
 _logger = logging.getLogger("tortoise.cohort_cost")
@@ -114,16 +118,16 @@ CAP_ENV = "TORTOISE_COHORT_COST_CAP_USD"
 SINCE_ENV = "TORTOISE_COHORT_COST_SINCE"
 
 # The AlertStore incident kind — deduped by AlertStore on (kind, subject), so
-# a cohort that keeps tripping opens ONE incident, not one per capture.
-INCIDENT_KIND = "COHORT_COST_CAP"
+# a cohort that keeps tripping opens ONE incident, not one per capture. The
+# VALUE is declared once in ``tortoise.incident_kinds`` (#4780).
+INCIDENT_KIND = KIND_COHORT_COST_CAP
 
 # The SEPARATE kind for a cap that could not be evaluated at all (#3981).
 # Deliberately NOT a superstring of ``INCIDENT_KIND``: the R2-unreachable
 # adoption path resolves an existing incident by GitHub search on the org
 # suffix, so a name that contains the other would let the two be confused for
-# one another. Pinned to its runbook row by
-# ``tests/test_operator_alert.py::test_kind_constants_match_the_runbook``.
-UNENFORCEABLE_INCIDENT_KIND = "COHORT_CAP_UNENFORCEABLE"
+# one another. Pinned to its runbook row by ``tests/test_incident_kinds.py``.
+UNENFORCEABLE_INCIDENT_KIND = KIND_COHORT_CAP_UNENFORCEABLE
 
 # Bounds on the cohort we are willing to PRICE. Both control-plane reads are
 # server-side aggregates that return a SINGLE row — ``cohort_org_ids_since``

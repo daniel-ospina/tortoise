@@ -59,6 +59,14 @@ from .hosted_backup import (
     prune_backups,
     source_dialect,
 )
+from .incident_kinds import (
+    KIND_DATA_LOSS_CANDIDATE,
+    KIND_ENUM_DELTA,
+    KIND_GRAPH_NAME_RESOLUTION_FAIL,
+    KIND_NO_ELIGIBLE_TEAMS,
+    KIND_P0_GUARD_FAIL,
+    KIND_SIZE_GUARD_ABORT,
+)
 from .retention import RESTORE_WINDOW_DAYS  # #4179 single window authority
 
 # #2562 (re-audit P3): the sweep/purge per-org acquisitions are TIMED too
@@ -769,7 +777,7 @@ def _backup_graph(
     if count > config.size_guard_max_nodes:
         incidents.append(
             {
-                "kind": "SIZE_GUARD_ABORT",
+                "kind": KIND_SIZE_GUARD_ABORT,
                 "org_id": org_id,
                 "graph_id": graph_id,
                 "detail": {"count": count, "max": config.size_guard_max_nodes,
@@ -820,7 +828,7 @@ def _backup_graph(
             _delete_uploaded(storage, org_id, backup_id)
         incidents.append(
             {
-                "kind": "P0_GUARD_FAIL",
+                "kind": KIND_P0_GUARD_FAIL,
                 "org_id": org_id,
                 "graph_id": graph_id,
                 "detail": {
@@ -847,7 +855,7 @@ def _backup_graph(
             # A >0 → 0 transition is the #101-empty class: incident, not signal.
             incidents.append(
                 {
-                    "kind": "DATA_LOSS_CANDIDATE",
+                    "kind": KIND_DATA_LOSS_CANDIDATE,
                     "org_id": org_id,
                     "graph_id": graph_id,
                     "detail": {"previous": prev_node_count, "now": 0, "drop_pct": 100},
@@ -862,7 +870,7 @@ def _backup_graph(
         _delete_uploaded(storage, org_id, manifest.get("backup_id", ""))
         incidents.append(
             {
-                "kind": "DATA_LOSS_CANDIDATE",
+                "kind": KIND_DATA_LOSS_CANDIDATE,
                 "org_id": org_id,
                 "graph_id": graph_id,
                 "detail": {
@@ -885,7 +893,7 @@ def _backup_graph(
             _delete_uploaded(storage, org_id, manifest.get("backup_id", ""))
             incidents.append(
                 {
-                    "kind": "DATA_LOSS_CANDIDATE",
+                    "kind": KIND_DATA_LOSS_CANDIDATE,
                     "org_id": org_id,
                     "graph_id": graph_id,
                     "detail": {
@@ -1335,7 +1343,7 @@ def run_backup_sweep(
         if config.org_sweep_enabled:
             incidents.append(
                 {
-                    "kind": "NO_ELIGIBLE_TEAMS",
+                    "kind": KIND_NO_ELIGIBLE_TEAMS,
                     "org_id": "",
                     "detail": {"message": "team sweep enabled but 0 eligible (Pro) teams found"},
                 }
@@ -1358,7 +1366,7 @@ def run_backup_sweep(
                 # are empty before the flip.)
             incidents.append(
                 {
-                    "kind": "ENUM_DELTA",
+                    "kind": KIND_ENUM_DELTA,
                     "org_id": "",
                     "detail": {"previous": prev_team_count, "now": 0},
                 }
@@ -1410,7 +1418,7 @@ def run_backup_sweep(
     if resolution_failures and resolution_failures == len(org_ids):
         incidents.append(
             {
-                "kind": "GRAPH_NAME_RESOLUTION_FAIL",
+                "kind": KIND_GRAPH_NAME_RESOLUTION_FAIL,
                 "org_id": "",
                 "detail": {
                     "message": (
@@ -1508,9 +1516,9 @@ def run_backup_sweep(
 #: sweep is the authority on its own guards — a run that completed and did not
 #: emit a kind IS the "condition cleared" evidence (delete-to-resolve).
 SWEEP_RESOLVABLE_GLOBAL_KINDS = (
-    "ENUM_DELTA",
-    "NO_ELIGIBLE_TEAMS",
-    "GRAPH_NAME_RESOLUTION_FAIL",
+    KIND_ENUM_DELTA,
+    KIND_NO_ELIGIBLE_TEAMS,
+    KIND_GRAPH_NAME_RESOLUTION_FAIL,
 )
 
 
@@ -1593,8 +1601,8 @@ def sweep_resolutions(result: dict[str, Any]) -> list[tuple[str, str]]:
             if not (isinstance(gres, dict) and gres.get("p0_checked")):
                 continue
             subject = graph_subject(org_id, gid)
-            if ("P0_GUARD_FAIL", subject) not in emitted:
-                cleared.append(("P0_GUARD_FAIL", subject))
+            if (KIND_P0_GUARD_FAIL, subject) not in emitted:
+                cleared.append((KIND_P0_GUARD_FAIL, subject))
     return cleared
 
 

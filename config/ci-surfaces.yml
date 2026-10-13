@@ -302,6 +302,13 @@ surfaces:
   # holds two uniquely-hosted_api pins (test_alert_store_from_forwards_the_writer,
   # test_analytics_store_delegates_to_the_incident_seam).
   - test_operator_alert.py
+  # #4780: the incident-kind registry's generated checks read and pin the
+  # alert-plane emitters, including `tortoise/hosted_api.py` and
+  # `tortoise/email_notify.py` — both exact `api` SOURCE_PATTERNS whose match
+  # REPLACES the `core` fallback. Without this arm an `api`-file-only PR would
+  # never run the check that those files' kinds are declared and documented.
+  # Same silent-drop shape as the #3981 entry above.
+  - test_incident_kinds.py
   - test_onboarding_email_http.py
   # #2006 (W11): the onboarding funnel-event guard. Load-bearing HERE: four of
   # the five emission sites live in tortoise/hosted_api.py, which selects the
@@ -1970,6 +1977,16 @@ surfaces:
   - test_ingest_v2_parallel.py
   - test_ingest_validation.py
   - test_integration_search.py
+  # #4780: the incident-kind registry's generated checks — runbook ⇄ code set
+  # equality (both directions), the frozen string set, the emitted flag against a
+  # scan of the emitters, and the no-bare-literal rule. It reads
+  # `tortoise/incident_kinds.py` (no named surface → this `core` arm is the
+  # fallback) AND the alert-plane emitters, including `tortoise/hosted_api.py` and
+  # `tortoise/email_notify.py`, which are exact `api` SOURCE_PATTERNS — so the
+  # `api` arm below is load-bearing for an api-file-only diff (a named-surface
+  # match REPLACES the `core` fallback, #2938 convention). Registered in this
+  # position to keep the list's alphabetical grouping.
+  - test_incident_kinds.py
   - test_issue_insight.py
   - test_joint_index_ingest.py
   - test_judge_harness.py

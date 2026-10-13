@@ -104,6 +104,12 @@ from tortoise.hosted_backup import (
     prune_backups,
     restore_backup,
 )
+from tortoise.incident_kinds import (  # #4780: the one kind declaration site
+    KIND_ANALYTICS_SINK_DEGRADED,
+    KIND_DATA_LOSS_CANDIDATE,
+    KIND_RESTORE_DRILL_FAILED,
+    KIND_SIZE_GUARD_ABORT,
+)
 from tortoise.live import epistemic_disjunction  # #7902: the shared label set
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
@@ -28504,7 +28510,7 @@ _ANALYTICS_OUTCOMES = ("supabase", "fallback", "unconfigured", "dropped")
 # like DRIVER_DOWN / R2_DOWN — because the analytics sink is shared by every
 # org: a per-org subject would fan one degradation out into one issue per
 # tenant.
-_ANALYTICS_INCIDENT_KIND = "ANALYTICS_SINK_DEGRADED"
+_ANALYTICS_INCIDENT_KIND = KIND_ANALYTICS_SINK_DEGRADED
 
 # #3820 (D2/P2-1): a single 5s POST timeout must not open a GitHub issue,
 # but a persistent outage must be visible within seconds. The trigger is a
@@ -32807,7 +32813,7 @@ _DRILL_COOLDOWN_S = 3600
 # but too slowly) or the drill fails outright.
 _DRILL_RTO_S = 900.0
 _DRILL_RECORD_KEY = "ops/drills/last.json"
-_DRILL_FAILED_KIND = "RESTORE_DRILL_FAILED"
+_DRILL_FAILED_KIND = KIND_RESTORE_DRILL_FAILED
 _SWEEP_ORG_LOCKS: dict[str, threading.Lock] = {}
 _SWEEP_LOCKS_GUARD = threading.Lock()
 _SWEEP_INFLIGHT = asyncio.Lock()
@@ -33592,9 +33598,9 @@ async def backups_rebaseline(request: Request):
                 "itself succeeded", subject,
             )
             return [f"{kind}/{subject}"
-                    for kind in ("DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT")]
+                    for kind in (KIND_DATA_LOSS_CANDIDATE, KIND_SIZE_GUARD_ABORT)]
         failed: list[str] = []
-        for kind in ("DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT"):
+        for kind in (KIND_DATA_LOSS_CANDIDATE, KIND_SIZE_GUARD_ABORT):
             try:
                 alerts.resolve_incident(kind, subject)
             except Exception:
