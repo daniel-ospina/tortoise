@@ -878,6 +878,32 @@ def test_the_consent_bridge_guard_runs_on_its_docs_records_too():
         )
 
 
+def test_the_csp_plan_doc_guard_runs_on_its_plan_doc_too():
+    """#8334 review (P2, Finding 1): the doc guard's own subject must select it.
+
+    `test_csp_plan_doc_consistency.py` guards
+    `docs/plans/2026-09-22-3525-csp-no-store.md` — the artifact a lane reads before
+    touching the CSP. `docs/` is in NON_PYTHON_PREFIXES and is not itself a
+    SOURCE_PATTERNS pattern, so without the concrete `docs/plans/...` entry a
+    docs-only edit selects NO surface (`surfaces=[]`) and the guard never sees the
+    doc it guards — while the `config/ci-surfaces.yml` registration comment claimed
+    the coverage existed. Same silent-drop class as the #3524 docs records above.
+    """
+    root = Path(__file__).resolve().parents[1]
+    changed = "docs/plans/2026-09-22-3525-csp-no-store.md"
+    assert (root / changed).exists(), f"guarded plan doc is gone: {changed}"
+    r = _sel([changed])
+    assert r["full"] is False
+    assert "onboarding" in r["surfaces"], (
+        f"{changed} selects {r['surfaces']} — a docs-only edit to the plan doc runs "
+        "the guard nowhere"
+    )
+    assert "test_csp_plan_doc_consistency.py" in r["test_files"], (
+        f"a docs-only edit to {changed} does not run "
+        "tests/test_csp_plan_doc_consistency.py, so its doc guard cannot fire (#8334)"
+    )
+
+
 def test_session_import_change_selects_the_window_guard():
     """#3575 P1-A: `tortoise/session_import/` maps to no named surface, so a
     parsers.py change selects `core` via the fallback. The window guard must be

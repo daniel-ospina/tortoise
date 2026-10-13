@@ -38,11 +38,12 @@ What these guards do NOT promise, named rather than hidden:
 3. Only this ONE plan doc is read. A stale copy in another doc, an issue body, or a PR
    description is invisible here (#8334 itself is the evidence that prose outside a guard
    drifts).
-4. A DOCS-ONLY diff selects NO surface at all (#4454 — `docs/` is in `NON_PYTHON_PREFIXES`),
-   so a PR that edits only this plan doc does not run this guard. It runs on the next diff
-   that touches a policy module, the test file itself, or a full-matrix run — and the
-   code-side half of the same invariant (`securityHeaders.test.js` §4b) is what a re-added
-   origin actually reddens at merge time.
+4. The plan doc is registered by its CONCRETE path in `SOURCE_PATTERNS["onboarding"]`
+   (#8334 review, Finding 1), so a docs-only diff that edits THIS doc selects the
+   `onboarding` surface and runs this guard. `select()` matches with `startswith` and has
+   no glob support, so the entry names the file, never `docs/` (which is in
+   `NON_PYTHON_PREFIXES` and is not itself a pattern); a stale copy in another doc, an
+   issue body, or a PR description is still invisible here.
 """
 from __future__ import annotations
 
@@ -85,7 +86,24 @@ _REMOVAL_MARKERS = (
 )
 
 # The reversed mutation claim: a *dropped* RUM origin described as the mutant that fails.
-_DROPPED_RUM_MUTANT = re.compile(r"dropped[^.\n]{0,60}RUM origin", re.I)
+# POLARITY, not proximity (#8334 review, Finding 2): the dropped thing must BE the RUM
+# origin. The predecessor `dropped[^.\n]{0,60}RUM origin` measured proximity across any
+# 60 non-period characters and excluded newlines, so (a) joining the doc's CORRECT sentence
+# onto one line matched it — a semantics-neutral reflow made the guard red on right text —
+# and (b) a genuinely wrong claim wrapped between `dropped` and `RUM origin` did not match.
+# The optional filler words are the ones the claim itself uses; `re-added` is deliberately
+# absent, so the corrected sentence cannot match through it.
+_DROPPED_RUM_MUTANT = re.compile(
+    r"dropped\s+(?:(?:beacon|a|the|or)\s+)*(?:third-party\s+)?RUM\s+origin", re.I)
+
+
+def _calls_a_dropped_rum_origin_the_mutant(text: str) -> bool:
+    """True when `text` names a DROPPED RUM origin as an executed failing mutant.
+
+    All whitespace — including the line wrap a markdown reflow introduces — is collapsed
+    before matching, so the same sentence wrapped differently gets the same verdict.
+    """
+    return bool(_DROPPED_RUM_MUTANT.search(re.sub(r"\s+", " ", text)))
 
 
 def _connect_src_values(text: str) -> list[str]:
@@ -111,6 +129,51 @@ def _shipped_connect_src_hosts() -> set[str]:
     for module in SHIPPED_MODULES:
         hosts |= _connect_src_hosts(module.read_text(encoding="utf-8"))
     return hosts
+
+
+# A fenced-block directive in the doc: `name value;` (or a last line with no `;`).
+_DOC_DIRECTIVE = re.compile(r"^([a-z-]+)\s+([^;\n]+)", re.M)
+_DOC_FENCE = re.compile(r"```\n(.*?)```", re.S)
+# The `**`POLICY_NAME`**` bold label that introduces a fenced block.
+_BOLD_POLICY = re.compile(r"\*\*`(\w+)`\*\*")
+# A `export const NAME = csp(...)` binding and the string arguments it joins.
+_MODULE_CSP_BINDING = re.compile(r"export const (\w+) = csp\((.*?)\n\);", re.S)
+_MODULE_DIRECTIVE = re.compile(r'"([a-z-]+)\s+([^"]*)"')
+
+
+def _doc_policy_blocks(text: str) -> dict[str, dict[str, frozenset[str]]]:
+    """{policy name: {directive: token set}} for every fenced block in `text`.
+
+    A block is attributed to the nearest `**`POLICY_NAME`**` label before it. Directives
+    absent from a block are not invented — `ADMIN_CSP` is documented as a diff from
+    `STRICT_CSP`, so its block carries only the two directives that differ.
+    """
+    out: dict[str, dict[str, frozenset[str]]] = {}
+    for fence in _DOC_FENCE.finditer(text):
+        labels = _BOLD_POLICY.findall(text[: fence.start()])
+        if not labels:
+            continue
+        directives = {
+            name: frozenset(value.split())
+            for name, value in _DOC_DIRECTIVE.findall(fence.group(1))
+        }
+        if directives:
+            out[labels[-1]] = directives
+    return out
+
+
+def _module_policy_blocks(module: Path) -> dict[str, dict[str, frozenset[str]]]:
+    """{exported policy name: {directive: token set}} for every `csp(...)` const."""
+    out: dict[str, dict[str, frozenset[str]]] = {}
+    text = module.read_text(encoding="utf-8")
+    for name, body in _MODULE_CSP_BINDING.findall(text):
+        directives = {
+            directive: frozenset(value.split())
+            for directive, value in _MODULE_DIRECTIVE.findall(body)
+        }
+        if directives:
+            out[name] = directives
+    return out
 
 
 def _paragraphs_asserting_the_removed_origin(text: str) -> list[str]:
@@ -156,6 +219,47 @@ def test_shipped_strings_block_names_no_host_the_modules_dropped():
 
 
 # ---------------------------------------------------------------------------
+# 1b. Derived, whole-directive: a doc block must MATCH the policy it names, so a
+#     dropped (or added) source in ANY directive reddens — not only `connect-src`.
+# ---------------------------------------------------------------------------
+
+def test_every_doc_policy_block_agrees_with_the_shipped_policy_it_names():
+    """The doc's copyable blocks must match the module policy they name, directive for
+    directive (#8334 review, Finding 4).
+
+    Test 1 compares only `connect-src` HOST SETS, so a `script-src` that dropped a shipped
+    origin could not redden it. Measured at the PR head: the doc's `RELAXED_CSP` block was
+    missing `https://static.ads-twitter.com` — the #7633 consent-gated X tag both shipped
+    constants carry — so the banner's "a lane that copies these blocks copies the CURRENT
+    strings" was false, and a copying lane would have shipped the #7633 defect with every
+    gate green. Only the directives PRESENT in a doc block are compared (the `ADMIN_CSP`
+    block documents a diff; the nonce policy is prose, not a fence), so a deliberately
+    partial block stays legal while a silent omission inside it does not.
+    """
+    doc = PLAN_DOC.read_text(encoding="utf-8")
+    section = _policy_definitions_section(doc)
+    doc_blocks = _doc_policy_blocks(section)
+    assert set(doc_blocks) >= {"RELAXED_CSP", "STRICT_CSP", "ADMIN_CSP"}, (
+        f"parsed doc policy blocks: {sorted(doc_blocks)} — the `**`NAME`**` labels or the "
+        "fences were reflowed and this guard is reading nothing")
+    shipped_policies = _module_policy_blocks(SHIPPED_MODULES[0])
+    for name, directives in doc_blocks.items():
+        assert name in shipped_policies, (
+            f"the doc documents a policy `{name}` that `{SHIPPED_MODULES[0].name}` does not "
+            f"export (exports: {sorted(shipped_policies)})")
+        shipped = shipped_policies[name]
+        for directive, tokens in directives.items():
+            assert directive in shipped, (
+                f"`{name}` in the doc carries a `{directive}` directive the shipped policy "
+                "does not")
+            assert tokens == shipped[directive], (
+                f"`{name}.{directive}` in the plan doc differs from the shipped policy: "
+                f"doc-only={sorted(tokens - shipped[directive])} "
+                f"shipped-only={sorted(shipped[directive] - tokens)}. The doc labels this "
+                "section the actual strings the change ships and a lane copies from it.")
+
+
+# ---------------------------------------------------------------------------
 # 2. Prose: every remaining mention of the removed origin must declare it removed.
 # ---------------------------------------------------------------------------
 
@@ -176,7 +280,7 @@ def test_no_plan_doc_passage_asserts_the_removed_origin_as_current():
 
 def test_plan_doc_does_not_call_a_dropped_rum_origin_a_failing_mutant():
     doc = PLAN_DOC.read_text(encoding="utf-8")
-    match = _DROPPED_RUM_MUTANT.search(doc)
+    match = _DROPPED_RUM_MUTANT.search(re.sub(r"\s+", " ", doc))
     assert not match, (
         "the mutation-evidence list still names a DROPPED RUM origin as an executed failing "
         f"mutant: {match.group(0)!r}. Dropping it is the correct state (#4706); the mutant "
@@ -185,7 +289,7 @@ def test_plan_doc_does_not_call_a_dropped_rum_origin_a_failing_mutant():
 
 
 # ---------------------------------------------------------------------------
-# 4. Non-vacuity: the three helpers red on the pre-fix text, recorded verbatim.
+# 4. Non-vacuity: the helpers red on the pre-fix text, recorded verbatim.
 # ---------------------------------------------------------------------------
 
 # The pre-fix text at d413f2f91, copied from the doc as it stood (the commit this PR
@@ -218,6 +322,31 @@ form-action 'self'
 _PREFIX_MUTANT = """check class below has an EXECUTED failing mutant — a dropped beacon or RUM origin in any of
 the five policies, a look-alike hostname"""
 
+# The CORRECTED mutation sentence from the live doc, joined onto one line — the semantics-
+# neutral reflow that made the predecessor pattern match right text (false-positive control,
+# Finding 2).
+_CORRECTED_MUTANT_REFLOWED = (
+    "check class below has an EXECUTED failing mutant — a dropped beacon origin or a "
+    "**re-added** third-party RUM origin in any of the five policies, a look-alike hostname")
+
+# Genuinely wrong claims that WRAP between `dropped` and `RUM origin` — the false negatives
+# the predecessor pattern's `[^.\n]` character class admitted (Finding 2).
+_WRAPPED_BAD_MUTANT_CLAIMS = (
+    "check class below has an EXECUTED failing mutant — a dropped\nRUM origin in any of "
+    "the five policies, a look-alike hostname",
+    "check class below has an EXECUTED failing mutant — a dropped beacon or\nRUM origin in "
+    "any of the five policies, a look-alike hostname",
+)
+
+# The doc's `RELAXED_CSP` `script-src` VALUE at head 573659693 — verbatim, before Finding 4's
+# fix. Kept as a literal so the omission's non-vacuity stays provable after the doc is
+# corrected.
+_PREFIX_RELAXED_SCRIPT_SRC = (
+    "'self' 'unsafe-inline' https://static.cloudflareinsights.com "
+    "https://cdnjs.cloudflare.com https://us-assets.i.posthog.com "
+    "https://www.googletagmanager.com https://connect.facebook.net "
+    "https://challenges.cloudflare.com")
+
 
 def test_the_derived_host_set_check_reds_on_the_prefix_policy_block():
     section = _policy_definitions_section(_PREFIX_DOC_FRAGMENT)
@@ -237,5 +366,31 @@ def test_the_disclaimer_check_reds_on_the_prefix_passages():
 
 
 def test_the_polarity_check_reds_on_the_prefix_mutant_sentence():
-    assert _DROPPED_RUM_MUTANT.search(_PREFIX_MUTANT), (
+    assert _calls_a_dropped_rum_origin_the_mutant(_PREFIX_MUTANT), (
         "the recorded pre-fix mutant sentence must match — the pattern in test 3 has drifted")
+
+
+def test_the_polarity_check_ignores_the_corrected_sentence_reflowed():
+    assert not _calls_a_dropped_rum_origin_the_mutant(_CORRECTED_MUTANT_REFLOWED), (
+        "the guard matches the CORRECT sentence (\"...a dropped beacon origin or a "
+        "**re-added** third-party RUM origin...\") once it is joined onto one line — the "
+        "verdict is decided by a line wrap, not by the sentence's polarity")
+
+
+def test_the_polarity_check_reds_on_a_wrapped_wrong_claim():
+    for claim in _WRAPPED_BAD_MUTANT_CLAIMS:
+        assert _calls_a_dropped_rum_origin_the_mutant(claim), (
+            "a genuinely wrong claim that wraps between `dropped` and `RUM origin` evaded "
+            f"the guard: {claim!r}")
+
+
+def test_the_directive_comparison_reds_on_the_prefix_relaxed_script_src():
+    """Recorded pre-fix control: the head's `RELAXED_CSP` block omitted the shipped
+    `https://static.ads-twitter.com`, which is exactly what the 1b comparison reds on."""
+    shipped = _module_policy_blocks(SHIPPED_MODULES[0])["RELAXED_CSP"]["script-src"]
+    doc_tokens = frozenset(_PREFIX_RELAXED_SCRIPT_SRC.split())
+    assert doc_tokens != shipped, (
+        "the recorded pre-fix block must differ from the shipped policy")
+    assert "https://static.ads-twitter.com" in shipped - doc_tokens, (
+        "the recorded pre-fix block must be missing the shipped ads-twitter origin — if "
+        "not, the 1b comparison is not the check that catches this omission")

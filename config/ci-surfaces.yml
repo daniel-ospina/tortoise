@@ -2791,11 +2791,14 @@ surfaces:
   - test_website_static.py
   - test_website_docs_consistency.py  # #3332: checks each public page against its canonical source (status vocab, EP mechanism, ontology link)
   # #8334 review (P2): the #3525 CSP plan doc must not keep asserting the third-party RUM
-  # origin #4706 removed. Registered HERE because `docs/` and
-  # `website/apps/dashboard/functions/` are this surface's SOURCE_PATTERNS (a named-surface
-  # match replaces the `core` fallback), so a diff touching the doc or either
-  # `security-headers.ts` selects this arm. A `core`-only registration would leave the
-  # guard asleep exactly when the plan doc or a policy module moves.
+  # origin #4706 removed. Registered HERE because `website/apps/dashboard/functions/` is a
+  # SOURCE_PATTERN of this surface AND the doc itself is named as a CONCRETE path
+  # (`docs/plans/2026-09-22-3525-csp-no-store.md`) — `docs/` alone is NOT a pattern and is
+  # in NON_PYTHON_PREFIXES, so before that entry a docs-only diff selected NO surface at
+  # all (the #8334 Finding 1 review). A named-surface match replaces the `core` fallback,
+  # so a diff touching the doc or either `security-headers.ts` selects this arm. A
+  # `core`-only registration would leave the guard asleep exactly when the plan doc or a
+  # policy module moves.
   - test_csp_plan_doc_consistency.py
   sdk:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
@@ -4341,7 +4344,7 @@ durations:
   test_tmpdir_hygiene_4096.py: 9.2
   test_turn_embedding_write_path_4194.py: 1.4
   test_website_docs_consistency.py: 6.6
-  test_csp_plan_doc_consistency.py: 0.2  # pure static string/regex reads over one plan doc + two TS modules; measured 4.5s locally on this host, so 0.2 in pytest terms errs high on the conservative side
+  test_csp_plan_doc_consistency.py: 2.0  # unmeasured — new file; refresh from the first post-merge run via tools/ci_timing.py --refresh-durations
   test_install_reaper_schedule.py: 7.8  # unmeasured
   test_contact_form.py: 2.0  # unmeasured
   test_contact_rate_limit_behaviour.py: 2.0  # unmeasured
