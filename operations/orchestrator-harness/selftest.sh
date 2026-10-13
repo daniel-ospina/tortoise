@@ -901,6 +901,12 @@ ck "the cheap merge path stays ungated" $rc
 #
 # (a) One spawn site. A fourth launch path added tomorrow fails HERE, which is the point: the
 #     invariant is universal, not three fixes.
+#     ⚠️ BOUNDARY, recorded rather than silently assumed (review note on #1720): the pattern matches
+#     a COMMAND-position `pi` (`  pi …`, `  exec pi …`). A launch spelled `… "pi -p …"` inside a
+#     tmux string, `command pi`, or an absolute `…/pi` would evade it. No such site exists today
+#     (every `pi` occurrence in the shipped set was enumerated), and widening the pattern risks
+#     matching the prose/heredocs that merely mention `pi` — so the claim this check supports is
+#     "no file starts a line with `pi` except the helper", not "no conceivable launch can hide".
 spawn_files="$(grep -lE '^[[:space:]]*(exec +)?pi( |$)' "$HERE"/*.sh 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')"
 [ "$spawn_files" = "spawn-gate.sh " ] && rc=0 || { rc=1; echo "      pi is invoked by: ${spawn_files:-<none>}"; }
 ck "exactly one shipped file invokes pi — the shared gated helper spawn-gate.sh" $rc
