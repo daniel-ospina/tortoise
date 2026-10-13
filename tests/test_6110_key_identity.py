@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from tortoise.exceptions import BundleValidationError
 from tortoise.sdk import TortoiseSDK
 
 
@@ -269,6 +270,23 @@ class TestIngestCounterParity:
         assert res["deduped"]["points"] == 1
         assert res["ids"]["points"] == [first["id"]]
 
+    def test_top_level_none_key_shadows_nested_props_key(self, sdk):
+        """#8400 P2: ``_coerce_props`` gives the top-level ``key`` precedence
+        by PRESENCE, not truthiness — a top-level ``key: None`` SHADOWS
+        ``props["key"]``, so the writer mints a new point. The counter must
+        not consult the shadowed nested key and report a fold for a create."""
+        k = "#8400 shadowed nested key"
+        first = sdk.create_point("statement", "ORIGINAL", key=k, dedup=True)["id"]
+        res = sdk.ingest({"points": [
+            {"ref": "p1", "kind": "statement", "content": "RESTATED",
+             "key": None, "props": {"key": k}},
+        ]})
+        assert res["created"]["points"] == 1, (
+            "the shadowed nested key made the counter report a fold (#8400)"
+        )
+        assert res["deduped"]["points"] == 0
+        assert res["ids"]["points"] != [first]
+
     def test_ingest_keyless_content_dedup_unchanged(self, sdk):
         """Without a key the counter is exactly the old content path."""
         first = sdk.ingest({"points": [
@@ -280,3 +298,61 @@ class TestIngestCounterParity:
         assert first["created"]["points"] == 1
         assert second["created"]["points"] == 0
         assert second["deduped"]["points"] == 1
+
+
+class TestPhase1GuardSeesTheKeyIdentity:
+    """#8400 P1: the Phase-1 bundle-local guard must resolve a key-bearing ref
+    with the SAME key-first order the writer uses. Otherwise a ref whose key is
+    held by a TERMINAL point slips past Phase-1 and becomes a Phase-2 raise on
+    an already partially-mutated graph."""
+
+    def test_key_held_by_terminal_point_is_a_phase1_violation(self, sdk):
+        k = "#8400 terminal key holder"
+        terminal = sdk.create_point("statement", "ORIGINAL", key=k,
+                                    dedup=True)["id"]
+        sdk.retract_point(terminal)
+        other = sdk.create_point("statement", "LIVE")["id"]
+        before = sdk.get_point(terminal)
+
+        with pytest.raises(BundleValidationError, match="dedup hit"):
+            sdk.ingest({
+                "points": [{"ref": "p1", "kind": "statement",
+                            "content": "CHANGED", "key": k}],
+                "connections": [{"from": "p1", "to": other,
+                                 "operator": "IMPL"}],
+            })
+
+        after = sdk.get_point(terminal)
+        assert after.get("batch_id") is None, (
+            "Phase-1 must reject BEFORE any write — the terminal point was "
+            "mutated by the Phase-2 path (#8400)"
+        )
+        assert after.get("updatedAt") == before.get("updatedAt")
+
+    def test_key_held_by_live_point_folds_and_wires(self, sdk):
+        """The guard must NOT over-reject: a key holder that is still live is
+        a legal dedup hit — the writer folds onto it and the edge is wired."""
+        k = "#8400 live key holder"
+        holder = sdk.create_point("statement", "ORIGINAL", key=k,
+                                  dedup=True)["id"]
+        other = sdk.create_point("statement", "OTHER")["id"]
+        res = sdk.ingest({
+            "points": [{"ref": "p1", "kind": "statement",
+                        "content": "CHANGED", "key": k}],
+            "connections": [{"from": "p1", "to": other,
+                             "operator": "IMPL"}],
+        })
+        assert res["deduped"]["points"] == 1
+        assert res["created"]["points"] == 0
+        assert res["ids"]["points"] == [holder]
+
+
+def test_key_is_declared_for_point_replay():
+    """#8400 review observation: ``key`` rides the PointAdded snapshot and is
+    restored through the open-set passthrough, so it must be DECLARED —
+    otherwise the shared live+replay writer logs a false `"Point prop %r is
+    not declared"` drift warning for every keyed point on every rebuild.
+    Declaration is warning-suppression only (the passthrough persists the prop
+    either way), so this pins the declaration, not the persistence."""
+    from tortoise.projection.entities import _EntityHandlers
+    assert "key" in _EntityHandlers._POINT_DECLARED_PROPS

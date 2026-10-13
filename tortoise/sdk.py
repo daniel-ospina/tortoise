@@ -3065,6 +3065,30 @@ def _coerce_props(props: dict) -> dict:
     return props
 
 
+def _item_dedup_key(item: dict) -> str | None:
+    """The effective dedup ``key`` of an ingest bundle item — the SAME value
+    ``create_point`` sees after ``_coerce_props`` flattens the item (#6110,
+    #8400).
+
+    ``_coerce_props`` gives explicit top-level kwargs precedence over nested
+    ``props`` on collision, and that precedence is by PRESENCE, not by
+    truthiness: a top-level ``key`` whose value is ``None`` still SHADOWS a
+    nested ``props["key"]``. A reader that instead "fell back when the
+    top-level value was None" would consult a key the writer never uses, so
+    the ingest counter/guard would predict a fold for a write that mints —
+    #2892's counter/writer parity broken in the opposite direction (#8400).
+
+    A blank or non-string key is treated as absent (the historic
+    content-only path), exactly as ``_resolve_dedup_hit`` treats it.
+    """
+    if "key" in item:
+        val = item.get("key")
+    else:
+        nested = item.get("props")
+        val = nested.get("key") if isinstance(nested, dict) else None
+    return val if isinstance(val, str) and val.strip() else None
+
+
 # ── ULID validation (Issue #52) ──
 # Canonical format (from tortoise/ids.py): <timestamp-hex>-<uuid12>
 _ULID_RE = re.compile(r"^[0-9a-f]+-[0-9a-f]{12}$")
@@ -12534,7 +12558,8 @@ class TortoiseSDK:
                 out[event_id] = entry
         return out
 
-    def _find_terminal_dedup_hit(self, content: str, kind: str) -> str | None:
+    def _find_terminal_dedup_hit(self, content: str, kind: str,
+                                 key: str | None = None) -> str | None:
         """Read-only NFC-keyed dedup MATCH (mirrors create_point's dedup key)
         restricted to TERMINAL hits — the Phase-1 mechanism behind the
         bundle-local-refs-resolving-to-terminal-points guard (cycle-17/18).
@@ -12592,8 +12617,33 @@ class TortoiseSDK:
         both, Phase-1 passed the bundle, and Phase-2 ``_check_endpoint_race``
         raised mid-write on a partially-mutated graph, leaving an orphan.
         Composing the predicate here rather than re-listing it is the point:
-        the fork is what let the three sites disagree (#2062/#2971/#2422)."""
+        the fork is what let the three sites disagree (#2062/#2971/#2422).
+
+        #8400: when the item carries a ``key``, that IDENTITY resolves FIRST —
+        the order ``create_point``'s ``_resolve_dedup_hit`` uses — so the guard
+        and the writer resolve the SAME node for a key-bearing item. A point
+        already holding the key IS the dedup hit whatever its content, so on a
+        key HIT the content queries below MUST NOT run (the writer never
+        reaches them); on a key MISS the historic content path runs unchanged.
+        The key leg mirrors the A10 fallback's conservative posture: a graph
+        written before #6110 can already hold several points under one key and
+        the writer's pick among them carries no ORDER BY, so the guard rejects
+        when ANY key holder is terminal rather than betting on which one the
+        writer folds onto."""
         proj = self._get_proj()
+        if isinstance(key, str) and key.strip():
+            # #8400: key-first, exactly as the writer resolves. A key HIT is
+            # the dedup resolution (whatever the content), so return from here
+            # — a fall-through to the content path could reject a bundle whose
+            # writer would legally fold onto a LIVE key holder.
+            key_hits = self._find_points_by_key(key, pointKind=kind)
+            if key_hits:
+                rows = proj.g.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids AND "
+                    f"{_terminal_expression('n')} RETURN n.id LIMIT 1",
+                    params={"ids": key_hits},
+                ).result_set
+                return rows[0][0] if rows else None
         base_clauses, base_params = self._dedup_match_clauses(point_kind=kind)
         status_clauses = (_terminal_expression("n"),)
         rows = proj.g.query(
@@ -12751,7 +12801,14 @@ class TortoiseSDK:
                     # already reported (check 1), skip the dedup-hit scan.
                     continue
                 kind = item.get("kind") or "statement"
-                hit = self._find_terminal_dedup_hit(content, kind)
+                # #8400: pass the item's effective key with `_coerce_props`'
+                # precedence (top-level wins by PRESENCE, not truthiness), so
+                # the guard resolves exactly the point the writer folds onto —
+                # otherwise a key-bearing bundle-local ref slips past this
+                # Phase-1 gate and becomes a Phase-2 raise on an already
+                # partially-mutated graph.
+                hit = self._find_terminal_dedup_hit(
+                    content, kind, key=_item_dedup_key(item))
                 if hit:
                     violations.append({
                         "section": "connections", "index": i,
@@ -13291,15 +13348,13 @@ class TortoiseSDK:
             # included), the SAME helper the writer calls — otherwise a
             # key-bearing item would report a content miss that the writer
             # takes as a key hit, and the counter would say "created" for a
-            # fold. The key is read from the item and, for parity with
-            # `create_point`'s `_coerce_props` flatten, from a nested `props`
-            # dict too.
-            _item_key = item.get("key")
-            if _item_key is None and isinstance(item.get("props"), dict):
-                _item_key = item["props"].get("key")
+            # fold. #8400: the key is read with `_coerce_props`' EXACT
+            # precedence through `_item_dedup_key` — a top-level `key: None`
+            # SHADOWS a nested `props["key"]` (presence wins, not truthiness),
+            # so the counter cannot consult a key the writer never uses and
+            # report a fold for a write that mints.
             existed, _ = self._resolve_dedup_hit(
-                content, pointKind=kind,
-                key=_item_key if isinstance(_item_key, str) else None)
+                content, pointKind=kind, key=_item_dedup_key(item))
             # #1088 / #2199: decide the status on the WRITE COPY only — never
             # on `item` itself. An explicit per-item status (top-level or
             # nested props) ALWAYS wins: the branches below fill only items
