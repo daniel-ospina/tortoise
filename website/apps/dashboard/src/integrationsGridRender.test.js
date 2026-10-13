@@ -31,10 +31,18 @@ function dataSourcesBranch() {
   return src.slice(start, end)
 }
 
+// The live `done` branch, BOUNDED at the ARCHIVED rollback marker. An
+// unbounded slice to EOF also contains the dead legacy render, which carries a
+// byte-identical `← Back` button — so a live-handler assertion evaluated over it
+// is satisfied by dead code and cannot fail on the regression it names (review
+// P2). Refuse a slice to EOF, the wizardConnectTripwire.test.js pattern.
 function doneBranch() {
   const start = src.indexOf('{wizardStep === 4 && (')
   assert.ok(start > -1, 'the done step (wizardStep === 4) must render')
-  return src.slice(start)
+  const end = src.indexOf('⛔ ARCHIVED', start)
+  assert.ok(end > start,
+    'the ARCHIVED rollback marker must follow the live done branch — refusing a slice to EOF')
+  return src.slice(start, end)
 }
 
 test('#3513: the Data-sources step is index 3 and done is index 4', () => {
@@ -67,6 +75,10 @@ test('#3513: Continue AND Skip both reach done (index 4); Back lands on connect'
 
 test('#3513: the done step Back handler lands on the grid (index 3), not connect', () => {
   const branch = doneBranch()
+  // Non-vacuity: the dead ARCHIVED block below holds a byte-identical Back
+  // button, so the slice must exclude it — otherwise this assertion passes on
+  // the archived copy alone and the live handler is unpinned (review P2).
+  assert.doesNotMatch(branch, /⛔ ARCHIVED/, 'the done slice must exclude the dead rollback render')
   assert.match(branch, /onClick=\{\(\) => setWizardStep\(3\)\}>← Back<\/button>/,
     'Back from done must land on the Data-sources step so the renumber cannot re-fire the advance')
   assert.doesNotMatch(branch, /onClick=\{\(\) => setWizardStep\(2\)\}>← Back<\/button>/,
@@ -92,7 +104,9 @@ test('#3513: MemorySources renders the tile grid as the single source-list prese
   assert.match(src, /<ul className="integrations-grid" aria-label="Memory sources">/,
     'the grid is the list presentation')
   assert.match(src, /\{gridTiles\.map\(\(t\) => \{/, 'it maps the ordered tiles')
-  // the same component is mounted once per live surface, each with a surface prop
+  // the SAME component is mounted at all three sites (the two live mounts plus
+  // the dead ARCHIVED block); no mount carries a `surface` prop — it was dead
+  // and dropped, so the tests below assert its absence
   assert.equal((src.match(/<MemorySources/g) || []).length, 3,
     'Settings + wizard + the dead archived block')
 })

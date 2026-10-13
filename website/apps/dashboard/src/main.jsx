@@ -8028,11 +8028,13 @@ function claimIntentInFlight() {
         ? (connectGate.mode === 'existing' ? wizardExistingKeyAffordance : wizardNoKeyAffordance)
         : wizardPasteRow
 
-  // #3513: the MemorySources prop bundle is built ONCE and spread at THREE
-  // mounts (Settings → Memory sources, the wizard's Data-sources step, and the
-  // dead LEGACY_WIZARD_ARCHIVED rollback block), so they cannot drift into
-  // partially-installed states. The `order` prop is explicit (the pinned ship
-  // order) — the component must not rely on the inventory array literal's
+  // #3513: the MemorySources prop bundle is built ONCE and spread at the TWO
+  // LIVE mounts (Settings → Memory sources and the wizard's Data-sources step),
+  // so those cannot drift into partially-installed states. The dead
+  // LEGACY_WIZARD_ARCHIVED rollback block is NOT a spread site: it renders its
+  // own deliberate INLINE subset (it omits `onToggleCaptureExtract`), so the
+  // shared bundle does not cover it. The `order` prop is explicit (the pinned
+  // ship order) — the component must not rely on the inventory array literal's
   // incidental order.
   //
   // `wizardHarness: null` is the SETTINGS default: Settings never knows the
