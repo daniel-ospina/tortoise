@@ -44,6 +44,27 @@ What these guards do NOT promise, named rather than hidden:
    no glob support, so the entry names the file, never `docs/` (which is in
    `NON_PYTHON_PREFIXES` and is not itself a pattern); a stale copy in another doc, an
    issue body, or a PR description is still invisible here.
+5. The indirection guard reads the SPELLING the doc names in its `an indirect callee <x>`
+   slot. A double-quoted computed key written anywhere else, or a correct spelling named
+   beside a wrong one, is not caught; the reader-side truth stays the JS reader's own
+   `nameOf`/`headerCallMethod` (verified against `@babel/parser` when this guard was
+   written), not re-derived here.
+6. The shape-count guard is a bullet-level MARKER check (`attribution-only` /
+   `superseded` / `2026-10-13` / `fourth`), the same shape as rule 2's RUM-origin net: a
+   bullet that asserts the array-of-pairs shape is invisible cannot red if it also carries
+   a marker word. The precise closure evidence is the 2026-10-13 addendum's mutation table.
+
+Two further guards, added for the #8367 review, cover that PR's own two doc-claim defects:
+the `## Residuals` bullet that claimed the array-of-pairs `HeadersInit` shape is invisible
+to the stamp scan (`countStamps`/`stampNames` model it since gap 5), and the indirection
+clause that named a *double-quoted* computed callee (`h["set"](…)`) as the spelling that
+evades the readers (it is READ — `nameOf` has a `StringLiteral` branch; the *template*
+spelling is the one that evades).
+
+A later #8367 review added two more, on the same addendum: its "Baseline after the fix"
+claim pinned a whole-suite total that re-stales at every merge of `origin/main`, and
+`### Bounds that remain` did not name the gap-3 umbrella's ATTRIBUTION-ONLY bound (a stamp
+whose header NAME is an expression, in a file outside `HTML_SITES`). Both are guarded below.
 """
 from __future__ import annotations
 
@@ -394,3 +415,315 @@ def test_the_directive_comparison_reds_on_the_prefix_relaxed_script_src():
     assert "https://static.ads-twitter.com" in shipped - doc_tokens, (
         "the recorded pre-fix block must be missing the shipped ads-twitter origin — if "
         "not, the 1b comparison is not the check that catches this omission")
+
+
+# ---------------------------------------------------------------------------
+# 5. The doc's named indirection-evasion spelling must be one that EVADES.
+#
+# The `.set`/`.append`-through-an-indirection residual is real, but the doc named a
+# DOUBLE-quoted computed member call (`h["set"](…)`) as the spelling that evades the
+# DIRECT member-call readers. It does not: `headerCallMethod` returns
+# `nameOf(callee.property)`, and `nameOf` carries a `StringLiteral` branch, so
+# `h["set"](…)` is the same reader hit as `h.set(…)`. Measured with the reader file's own
+# helpers (`@babel/parser` + `nameOf`/`headerCallMethod` verbatim):
+#
+#     h["set"]("Content-Security-Policy", P)   -> [["set", "content-security-policy"]]  // READ
+#     h[`set`]("Content-Security-Policy", P)   -> []                                    // evades
+#
+# The spelling that DOES evade is the TEMPLATE one — `nameOf` has no `TemplateLiteral`
+# branch — which is what the reader's own docstring names (`securityHeaders.test.js`,
+# `headerCallMethod`) and what the clause said before this PR reworded it.
+# ---------------------------------------------------------------------------
+
+# The residual clause itself — substantive enough that losing it must red this guard (the
+# gap is real and must stay recorded), unlike losing the callee example solely.
+_INDIRECTION_RESIDUAL = re.compile(r"reached through an indirection")
+_INDIRECTION_CLAUSE = re.compile(r"an indirect callee\s+(?P<example>\S+)", re.I)
+# A computed member key written as a STRING LITERAL — read by the guard's `nameOf`.
+_DOUBLE_QUOTED_COMPUTED_KEY = re.compile(r'\[\s*"[A-Za-z_$][\w$]*"\s*\]')
+
+
+def _indirection_evasion_example(text: str) -> str | None:
+    """The callee spelling the doc names in its `an indirect callee <x>` slot, or None
+    when that slot (or the residual clause) is absent."""
+    match = _INDIRECTION_CLAUSE.search(re.sub(r"\s+", " ", text))
+    return match.group("example") if match else None
+
+
+def test_plan_doc_indirection_example_names_only_a_spelling_that_evades():
+    flat = re.sub(r"\s+", " ", PLAN_DOC.read_text(encoding="utf-8"))
+    assert _INDIRECTION_RESIDUAL.search(flat), (
+        "the doc no longer records the `.set`/`.append`-through-an-indirection residual "
+        "(`reached through an indirection … still evades the DIRECT member-call readers`) — "
+        "the true completeness gap is now silent and this guard is reading nothing")
+    example = _indirection_evasion_example(flat)
+    if example is None:
+        return  # no callee example named — nothing here can be wrong about one
+    assert not _DOUBLE_QUOTED_COMPUTED_KEY.search(example), (
+        f"the doc names {example!r} as an indirect callee that EVADES the readers, but a "
+        "double-quoted computed member key is READ (`headerCallMethod` → `nameOf`, whose "
+        "`StringLiteral` branch handles it) — `h[\"set\"](…)` is the same hit as "
+        "`h.set(…)`. Name the TEMPLATE spelling (the branch `nameOf` lacks), or drop the "
+        "example.")
+
+
+# ---------------------------------------------------------------------------
+# 6. The stamp-shape residual must not claim a shape the scan now models.
+#
+# Gap 5 (the 2026-10-13 addendum) added the array-of-pairs `HeadersInit` pair to
+# `countStamps` and `stampNames`, so the `## Residuals` bullet that called the scan "three
+# shapes" and said such a pair "is not seen by it" asserts a hole the guard closes — the
+# stale-record class the doc's own addenda resolve with an explicit supersede marker.
+# A bullet naming `array-of-pairs` that still carries an unseen-claim must therefore
+# declare the closure; the residual that legitimately remains is the narrower
+# `[[<unreadable name>, <policy>]]` pair the addendum's "Bounds that remain" names.
+# ---------------------------------------------------------------------------
+
+# One markdown bullet (a `- **…` item up to the next bullet or blank line), so a claim is
+# judged against its own bullet and not against a neighbouring residual.
+_BULLET = re.compile(r"^- \*\*.*?(?=\n- |\n\n|\Z)", re.M | re.S)
+_ARRAY_OF_PAIRS_SHAPE = re.compile(r"array[- ]of[- ]pairs", re.I)
+_UNSEEN_SHAPE_CLAIM = re.compile(
+    r"(?:is|are)\s+not\s+(?:seen|modelled|modeled|counted|attributed)"
+    r"|not\s+seen\s+by\s+it", re.I)
+# Deliberately precise: a bare "modelled"/"seen" would clear a claim that a shape is NOT
+# modelled. These tokens say the array-of-pairs shape itself is closed/superseded.
+_SHAPE_CLOSURE_MARKERS = (
+    "attribution-only",
+    "attribution only",
+    "superseded",
+    "supersedes",
+    "2026-10-13",
+    "fourth",
+    "now counted",
+    "now attributed",
+)
+
+
+def _bullets_claiming_the_array_of_pairs_shape_is_invisible(text: str) -> list[str]:
+    """Bullets naming the array-of-pairs `HeadersInit` shape as unseen, without declaring
+    it modelled/superseded."""
+    out = []
+    for bullet in _BULLET.findall(text):
+        if not _ARRAY_OF_PAIRS_SHAPE.search(bullet):
+            continue
+        if not _UNSEEN_SHAPE_CLAIM.search(bullet):
+            continue
+        if any(marker in bullet.lower() for marker in _SHAPE_CLOSURE_MARKERS):
+            continue
+        out.append(re.sub(r"\s+", " ", bullet).strip())
+    return out
+
+
+def test_no_plan_doc_bullet_claims_the_array_of_pairs_shape_is_invisible():
+    doc = PLAN_DOC.read_text(encoding="utf-8")
+    offenders = _bullets_claiming_the_array_of_pairs_shape_is_invisible(doc)
+    assert not offenders, (
+        "the #3525 plan doc still claims the array-of-pairs `HeadersInit` shape is not seen "
+        f"by the stamp scan: {offenders}. Gap 5 (the 2026-10-13 addendum) added that shape "
+        "to `countStamps`/`stampNames` and the reviewer mutation reds, so the passage "
+        "asserts a hole the guard closes. Strike the claim, or mark it superseded by the "
+        "addendum.")
+
+
+# ---------------------------------------------------------------------------
+# 4b. Non-vacuity for 5 and 6: the recorded pre-fix text reds, and a corrected
+#     "still not seen" residual does not (marker, not absence of the claim).
+# ---------------------------------------------------------------------------
+
+# The pre-fix `## Residuals` bullet at a34745afa5 — verbatim, before this fix.
+_PREFIX_THREE_SHAPES_BULLET = """- **The stamp scan models three shapes** — a `Content-Security-Policy` object property
+  (literal or computed key), a `headers.set/append` argument, and an
+  `h["Content-Security-Policy"] = …` assignment — so a second policy added as an
+  array-of-pairs `HeadersInit` (`new Headers([...headers, ["Content-Security-Policy", P]])`)
+  is not seen by it. A browser intersects the two policies, so that shape would narrow the
+  served policy with the guard green. Accepted as a textual-scan bound (verified by a
+  reviewer mutation), not a closure: the scan is a tripwire for the `_headers`/module drift
+  this change is about."""
+
+# The pre-fix indirection clause at a34745afa5 — verbatim. Its callee example was a
+# double-quoted computed member call, which the readers DO read.
+_PREFIX_INDIRECTION_CLAUSE = """a `.set`/`.append` reached through an indirection
+  (an indirect callee `h["set"](…)`, a destructured `const { set } = h`, or `.call`/`.apply`/`.bind`) —
+  including a `.bind`-ed
+  beacon-less CSP stamp merged into a served response, which was verified green — still evades
+  the DIRECT member-call readers"""
+
+
+def test_the_shape_count_guard_reds_on_the_prefix_three_shapes_bullet():
+    offenders = _bullets_claiming_the_array_of_pairs_shape_is_invisible(
+        _PREFIX_THREE_SHAPES_BULLET)
+    assert offenders, (
+        "the recorded pre-fix `three shapes` bullet must be flagged — the unseen-claim "
+        "pattern or the marker list has drifted and the guard in test 6 no longer bites")
+
+
+def test_the_shape_count_guard_clears_a_bullet_that_declares_the_closure():
+    """False-positive control: a corrected bullet still says the narrower residual "is not
+    seen", and must be cleared by its marker, not by the absence of the claim."""
+    corrected = (
+        "- **The stamp scan models four shapes** — the array-of-pairs `HeadersInit` pair is "
+        "the fourth (added by the 2026-10-13 addendum); what is not seen is an "
+        "`[[<unreadable name>, <policy>]]` pair.")
+    assert not _bullets_claiming_the_array_of_pairs_shape_is_invisible(corrected), (
+        "a bullet that declares the array-of-pairs closure must not be flagged — the guard "
+        "is red on right text")
+
+
+def test_the_indirection_example_guard_reds_on_the_prefix_clause():
+    example = _indirection_evasion_example(_PREFIX_INDIRECTION_CLAUSE)
+    assert example is not None, (
+        "the recorded pre-fix clause must still parse — the extraction pattern has drifted")
+    assert _DOUBLE_QUOTED_COMPUTED_KEY.search(example), (
+        "the recorded pre-fix clause must name a double-quoted computed callee — if not, "
+        "the guard in test 5 is not the check that catches this defect")
+
+
+# ---------------------------------------------------------------------------
+# 7. The addendum's baseline claim keeps the reproduce command, not a suite total.
+#
+# "Baseline after the fix: 18/18 … the whole dashboard suite 877/877" was measured at the
+# pre-merge head a34745afa5. The branch then merged origin/main (2fd5083bf) at an unchanged
+# tree, which added 3 tests to src/*.test.js: 877 → 880, while the guard's own 18 did not
+# move. A whole-suite total is the evidence class that re-stales; the COMMAND is the part the
+# next lane reproduces. This guard is the doc-side tripwire (#8367 review, Finding 1).
+# ---------------------------------------------------------------------------
+
+_BASELINE_CLAIM = re.compile(r"^Baseline after the fix:.*?(?=\n\n|\Z)", re.M | re.S)
+_DASHBOARD_SUITE_COMMAND = "npm run build && node --test src/*.test.js"
+# A whole-suite pass TOTAL ("dashboard suite 877/877") — digits joined by a slash, optionally
+# bolded. The guard's own `18/18` is not this shape (no suite/dashboard prefix) and must
+# survive: the mutation table's "1 fail, 17/18" columns are keyed to it.
+_DASHBOARD_SUITE_TOTAL = re.compile(
+    r"(?:dashboard|suite)[^.\n]{0,60}?\*{0,2}\d{2,4}\s*/\s*\d{2,4}\*{0,2}", re.I)
+
+
+def _baseline_claim(text: str) -> str:
+    match = _BASELINE_CLAIM.search(text)
+    assert match, (
+        "the addendum has no `Baseline after the fix:` claim — this guard's subject was "
+        "renamed or deleted, so it would pass vacuously (#8367 review)")
+    return match.group(0)
+
+
+def _pins_a_dashboard_suite_total(text: str) -> re.Match:
+    """The whole-suite total in `text`, or None. Whitespace is collapsed first so a
+    markdown reflow cannot hide the count."""
+    return _DASHBOARD_SUITE_TOTAL.search(re.sub(r"\s+", " ", text))
+
+
+def test_baseline_claim_keeps_the_command_and_pins_no_suite_total():
+    paragraph = _baseline_claim(PLAN_DOC.read_text(encoding="utf-8"))
+    assert _DASHBOARD_SUITE_COMMAND in paragraph, (
+        "the baseline claim no longer names the CI job's own command "
+        f"(`{_DASHBOARD_SUITE_COMMAND}`), so the next lane cannot reproduce it")
+    offender = _pins_a_dashboard_suite_total(paragraph)
+    assert not offender, (
+        "the baseline claim pins a whole-suite pass total "
+        f"({offender.group(0)!r}). That number re-stales at every merge of `origin/main` at "
+        "an unchanged tree (877 before the `2fd5083bf` merge, 880 after), which is exactly "
+        "what the #8367 review flagged. Keep the command; do not pin the count.")
+
+
+# The pre-fix baseline claim at 203a16812 — verbatim, before this fix.
+_PREFIX_BASELINE_CLAIM = (
+    "Baseline after the fix: **18/18** in `securityHeaders.test.js`; the whole dashboard suite\n"
+    "**877/877** (`npm run build && node --test src/*.test.js`).")
+
+
+def test_baseline_suite_total_guard_reds_on_the_prefix_claim():
+    assert _pins_a_dashboard_suite_total(_PREFIX_BASELINE_CLAIM), (
+        "the recorded pre-fix claim (`the whole dashboard suite **877/877**`) must match — "
+        "the pattern has drifted and the guard in section 7 is vacuous")
+
+
+def test_baseline_suite_total_guard_clears_the_corrected_claim():
+    assert not _pins_a_dashboard_suite_total(
+        _baseline_claim(PLAN_DOC.read_text(encoding="utf-8"))), (
+        "the corrected baseline claim still carries a suite total — the guard is red on "
+        "right text")
+
+
+# ---------------------------------------------------------------------------
+# 8. `### Bounds that remain` must name the gap-3 umbrella's attribution-only bound.
+#
+# The umbrella keys on `attributableStamps()` = `stampNames` minus the `(unreadable header
+# name)` sentinel, and `countStamps` runs only over `HTML_SITES`. So a stamp whose header
+# NAME is an expression (`h.set(HDR, …)`) in a file outside `HTML_SITES` is neither counted
+# nor classified — the same deliberate bound the array-of-pairs arm draws, and NOT named in
+# the bounds list, so gap 3 reads as though the umbrella covers every stamp shape. The code
+# arm is deliberately absent (a fail-closed arm would red the non-`HTML_SITES` files that
+# stamp no header), which is exactly why the BOUND has to be the recorded artifact.
+# ---------------------------------------------------------------------------
+
+_BOUNDS_SECTION = re.compile(r"^### Bounds that remain.*?(?=\n### |\n## |\Z)", re.M | re.S)
+_GAP3_UMBRELLA = re.compile(r"umbrella", re.I)
+_UNREADABLE_HEADER_NAME = re.compile(
+    r"unreadable[ -](?:header[ -])?name"
+    r"|header\s+name\s+is\s+an\s+expression"
+    r"|h\.set\(HDR", re.I)
+
+
+def _bounds_section(text: str) -> str:
+    match = _BOUNDS_SECTION.search(text)
+    assert match, (
+        "the plan doc has no `### Bounds that remain` section — this guard's subject was "
+        "renamed or deleted, so it would pass vacuously (#8367 review)")
+    return match.group(0)
+
+
+def _bounds_listing_the_gap3_umbrella(section: str) -> list[str]:
+    """Bullets that name the gap-3 umbrella bound AND the unreadable-header-name trigger."""
+    return [
+        bullet for bullet in _BULLET.findall(section)
+        if _GAP3_UMBRELLA.search(bullet) and _UNREADABLE_HEADER_NAME.search(bullet)
+    ]
+
+
+def test_bounds_section_names_the_gap3_umbrella_attribution_bound():
+    section = _bounds_section(PLAN_DOC.read_text(encoding="utf-8"))
+    bullets = _BULLET.findall(section)
+    assert len(bullets) >= 3, (
+        f"only {len(bullets)} bullets parsed out of `### Bounds that remain` — the section "
+        "was reflowed and this guard is reading nothing")
+    assert _bounds_listing_the_gap3_umbrella(section), (
+        "the `### Bounds that remain` list does not name the gap-3 umbrella's "
+        "ATTRIBUTION-ONLY bound: `countStamps` runs only over `HTML_SITES` and the umbrella "
+        "keys on `attributableStamps()`, so a stamp whose header NAME is an expression "
+        "(`h.set(HDR, …)`) in a file outside `HTML_SITES` is neither counted nor "
+        "classified. The bound is deliberate (a fail-closed arm would red the "
+        "non-`HTML_SITES` files that stamp no header), but unnamed it reads as though the "
+        "umbrella covers every stamp shape. Record it here the way the array-of-pairs bound "
+        "is recorded.")
+
+
+# The pre-fix `### Bounds that remain` bullets at 203a16812 — abbreviated, first lines
+# verbatim. None ties the umbrella to an unreadable header name; the array-of-pairs bullet
+# says "unreadable FIRST ELEMENT" (no `name`) and the section never says "umbrella".
+_PREFIX_BOUNDS_BULLETS = (
+    "- **The array-of-pairs arm is ATTRIBUTION-ONLY — there is no fail-closed arm for an "
+    "unreadable\n  first element.** Measured on this tree, the fail-closed form adds +3 to "
+    "`blog/_lib.ts`.\n"
+    "- **`metaCspValues` reads SOURCE `.html` files textually, `<meta>` tag by tag.** A "
+    "policy\n  assembled by concatenating fragments across tags is outside it.\n"
+    "- **The gated-surface bound is not yet equal to the source-scan bound.** A marketing\n"
+    "  `.html`-only diff does NOT currently select the `dashboard` gate.\n")
+
+# The bound as it reads once named (the corrected-bullet control).
+_NAMED_GAP3_UMBRELLA_BOUND = (
+    "- **The gap-3 umbrella is ATTRIBUTION-ONLY — a stamp whose header NAME is an "
+    "expression is neither counted nor classified outside `HTML_SITES`.** `countStamps` "
+    "still runs only over the six `HTML_SITES` files.\n")
+
+
+def test_the_gap3_umbrella_bound_guard_reds_on_the_prefix_bounds_list():
+    assert not _bounds_listing_the_gap3_umbrella(_PREFIX_BOUNDS_BULLETS), (
+        "the recorded pre-fix `Bounds that remain` list must NOT name the gap-3 umbrella "
+        "bound — if it does, the guard in section 8 is not the check that catches this "
+        "defect")
+
+
+def test_the_gap3_umbrella_bound_guard_clears_the_named_bound():
+    assert _bounds_listing_the_gap3_umbrella(_NAMED_GAP3_UMBRELLA_BOUND), (
+        "a bullet that names the gap-3 umbrella bound and its unreadable-header-name "
+        "trigger must clear — the guard is red on right text")
