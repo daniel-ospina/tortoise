@@ -979,6 +979,15 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #5142: the ONTOLOGY record of the D10 code half — the `format` markers vs
+  # `_SOURCE_HANDLED`, the deferred document/corpus-source node collapse, and
+  # the document `:Source` scoping. Half its subject is `tortoise/projection/
+  # entities.py` (an `entities.py`-only change falls through to `core`), so
+  # without this entry the doc↔code pins would not run on the change that can
+  # break them. Also registered in `tier1` (same #2881 precedent as
+  # `test_durability_posture.py`), because a docs-only `docs/ONTOLOGY.md`
+  # wording edit is what this guard is FOR.
+  - test_5142_ontology_record.py
   - test_2294_ask_degradation_gate.py
   - test_5051_capture_receipt_key_registry.py
   - test_5089_operator_prop_parity.py
@@ -1021,6 +1030,13 @@ surfaces:
   # → `"full": true` — so it needs no entry here.) `--integrity` also
   # requires every test file to be classified, which this entry satisfies.
   - test_7951_write_doors.py
+  # #5141: `graph-scripts/backfill_references.py` matches no named surface and
+  # falls through to `core`, so this arm is what runs the script's smoke test on
+  # a graph-script-only diff. The pre-existing coverage could not see the
+  # defect: `test_references_edge.py` inlines a MIRROR of the backfill loop, so
+  # the script's own query building (which raised `KeyError: 'id'` before it
+  # wrote anything) was never executed by a test.
+  - test_backfill_references_5141.py
   - test_cache_projection.py
   - test_cache_projection_live.py
   # #4197: the saved-backlog ledger (`tortoise/capture_backlog.py`) and its
@@ -3206,6 +3222,7 @@ tier1:
 - test_crypto.py
 - test_decide.py
 - test_durability_posture.py  # #2881: durability authority + scoped source-of-truth gate
+- test_5142_ontology_record.py  # #5142: docs/ONTOLOGY.md §4.4/§4.6 record vs the code (format/`_SOURCE_HANDLED`, the deferred node collapse + its `OVERRIDES:`, the document `:Source` scoping) — dual-registered with `core`
 - test_ep_draft_filter.py
 - test_ep_operatorless.py
 - test_event_store.py
