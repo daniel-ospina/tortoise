@@ -6379,22 +6379,40 @@ _2600_UUID_B = "22222222-2222-4222-8222-222222222222"
 # The retry below is the repo's OWN client contract for that refusal, not a
 # flake mask: the refusal body instructs the caller to wait for the advertised
 # delay and re-issue, and `tortoise/capture_spool.py::classify_failure`
-# classifies every 5xx and EVERY 409 as TRANSIENT because a capture is an
-# idempotent upsert on `session_id`. Only those two statuses are re-issued —
-# deliberately NOT every 5xx — so a genuine handler error still fails on the
-# first call. Applied per call-site rather than to the shared client fixture,
-# because (a) `test_capture_gate_409_when_recording_off` and
+# (capture_spool.py:304-313) calls a capture TRANSIENT because it is an
+# idempotent upsert on `session_id`. Of the statuses that classifier marks
+# TRANSIENT, the three refusals THIS route emits on the capture admission path
+# are re-issued:
+#   504  transport wait-bound breach      (Retry-After 10, mcp_auth.py:179)
+#   429  capture capacity saturated       (Retry-After 30, hosted_api.py:664)
+#   409  same-session-in-flight           (Retry-After 30, hosted_api.py:670)
+# The 429 shares that admission path with the 409 — both are raised by
+# `_reserve_capture_slot`, called from THIS route at hosted_api.py:12439 — and
+# the condition that drives it is the one documented above: a 504'd sibling
+# still completing server-side holds `_CAPTURE_IN_FLIGHT`, a process global the
+# suite's per-test reset does not cover (tests/_verdict.py PROCESS_GLOBALS), so
+# once abandoned siblings reach the cap the next capture answers 429.
+#
+# Deliberately NOT re-issued: every OTHER 5xx (a genuine handler error must
+# still fail on the first call), and the route's 402 quota refusal (gate 5,
+# hosted_api.py:12630). 402 is TRANSIENT to the durable spool for a different
+# purpose — a refused capture must not be destroyed (#4714) — but it is an
+# org-level condition a bounded in-test re-issue cannot clear, so the tests
+# that pin it must see it on the first call. Applied per call-site rather than
+# to the shared client fixture, because (a)
+# `test_capture_gate_409_when_recording_off` and
 # `test_capture_gate_boundary_422_before_409` deliberately assert a 409 on this
 # route and a blanket retry would mask it, and (b) a test that is SUPPOSED to
 # fail must not be handed four retries first. Bounded, and never a pass: the
 # LAST response is returned, so an exhausted retry still fails the caller's own
 # status assertion loudly. Pinned by `TestCaptureTransportRetry3246`.
-_CAPTURE_TRANSIENT_TRANSPORT = frozenset({504, 409})
+_CAPTURE_TRANSIENT_TRANSPORT = frozenset({504, 429, 409})
 
 #: Cap on the `Retry-After` the helper will honour. The advertised delay is the
 #: server's instruction (10 s on the wait-bound breach, 30 s on the in-flight
-#: 409); capping keeps a pathological run from parking the suite, and a re-issue
-#: that is too early merely earns another transient refusal.
+#: 409 and on the capacity 429); capping keeps a pathological run from parking
+#: the suite, and a re-issue that is too early merely earns another transient
+#: refusal.
 _CAPTURE_RETRY_AFTER_CAP_S = 15.0
 
 
@@ -6402,8 +6420,9 @@ def _post_capture_allowing_transport_retry(tc, *, headers, payload,
                                            attempts: int = 4,
                                            sleep=time.sleep):
     """POST /v1/sessions, re-issuing the request on a TRANSIENT transport
-    refusal (504 wait-bound breach / 409 same-session-in-flight — the latter is
-    the direct consequence of a 504'd sibling still completing server-side).
+    refusal (504 wait-bound breach / 429 capture capacity saturated / 409
+    same-session-in-flight — the last two are the direct consequence of a
+    504'd sibling still completing server-side and holding the admission slot).
 
     Returns the LAST response; a non-transient status (including the extractor
     failure shapes the other tests pin) is returned on the first call.
@@ -6457,9 +6476,38 @@ class TestCaptureTransportRetry3246:
         r = _post_capture_allowing_transport_retry(
             client, headers={}, payload={}, sleep=slept.append)
         assert r.status_code == 200
-        assert client.calls == 3, "both transient refusals must be re-issued"
+        assert client.calls == 3, "each transient refusal must be re-issued"
         # The ADVERTISED delay is honoured, and capped (10 is under the cap).
         assert slept == [10.0, 1.0], slept
+
+    def test_a_capacity_429_is_reissued_like_the_other_refusals(self):
+        # 429 is the third refusal this route emits on the capture admission
+        # path (`_reserve_capture_slot`, hosted_api.py:664) and is TRANSIENT in
+        # the cited contract. On the pre-fix set ({504, 409}) this returned the
+        # 429 on the first call (calls == 1) — the `assert 429 == 200` shape
+        # this helper exists to remove.
+        client = self._Client(self._Response(429, retry_after=30),
+                              self._Response(200))
+        slept: list[float] = []
+        r = _post_capture_allowing_transport_retry(
+            client, headers={}, payload={}, sleep=slept.append)
+        assert r.status_code == 200
+        assert client.calls == 2, "the capacity 429 must be re-issued"
+        # The advertised 30 s is honoured up to the cap, not for its full span.
+        assert slept == [_CAPTURE_RETRY_AFTER_CAP_S], slept
+
+    def test_a_quota_402_is_deliberately_not_reissued(self):
+        # 402 is TRANSIENT to the durable spool (#4714) but deliberately out of
+        # THIS bounded in-test retry: a quota refusal is an org-level condition
+        # a 15 s re-issue cannot clear, so a test pinning it must see it on the
+        # first call. Pins the exclusion so adding it is a visible choice.
+        client = self._Client(self._Response(402, retry_after=30))
+        slept: list[float] = []
+        r = _post_capture_allowing_transport_retry(
+            client, headers={}, payload={}, sleep=slept.append)
+        assert r.status_code == 402
+        assert client.calls == 1, "the quota 402 must not be retried"
+        assert slept == [], slept
 
     def test_a_nontransient_refusal_is_returned_without_retry(self):
         client = self._Client(self._Response(400))
