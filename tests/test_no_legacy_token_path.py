@@ -44,10 +44,64 @@ WEBSITE = REPO / "website"
 SKIP_DIRS = {"node_modules", "dist", ".git", "archive", ".worktrees", "vendor", ".wrangler"}
 
 # The legacy cross-subdomain bridge: a JS-readable, parent-domain cookie holding a session.
+#
+# #3748: the bridge's OTHER half is the localStorage fallback, and the cookie marker alone
+# cannot see it — `readValidSession()` fell back to Supabase's own per-project storage keys
+# (`sb-<ref>-auth-token`) in `localStorage` when the shared cookie was absent. That fallback
+# is what formed the loop: /auth resolved a valid legacy-only session from its own origin's
+# storage and forwarded, the destination could not see it and bounced back (#3748 measured
+# 91 full document loads in 5 s across two origins). Pin the reader, the key table and both
+# migration helpers — a revert of #4003/#3559 restores exactly these names.
 LEGACY_TOKEN_MARKERS = (
     "sb-tortoise-auth-token",
     "createTortoiseSupabaseClient",
+    "readValidSession",
+    "LEGACY_KEYS",
+    "migrateLegacySession",
+    "migrateLegacyKeysToCookie",
 )
+
+# #3748: the KEY-FORM of the same fallback, so a reintroduction that renames every symbol is
+# still caught. Supabase-js reads its session from `sb-<project-ref>-auth-token`; any browser
+# surface that reads, writes or deletes one is rebuilding the artifact the BFF removed.
+#
+# A CALL-ARGUMENT-ONLY regex was the first cut, and it did NOT gate the vector it named (#8493
+# review: restoring the deleted bridge passed it, and so did a renamed-symbol fixture). The
+# historical fallback never passes a literal — it resolves the key through a VARIABLE
+# (`window.localStorage.getItem(LEGACY_KEYS[i])`, `…getItem(legacyKey)`), with the literals
+# sitting in a key TABLE, or it assembles the key (`'sb-' + ref + '-auth-token'`). So an
+# offender is a file in which a storage access CO-OCCURS with a key it could be reading.
+_LEGACY_STORAGE_KEY_IN_CALL = re.compile(
+    r"(?:localStorage|sessionStorage)\s*\.\s*(?:getItem|setItem|removeItem)"
+    r"\s*\(\s*['\"]sb-[\w.-]*-auth-token",
+)
+_LEGACY_STORAGE_KEY_LITERAL = re.compile(r"['\"]sb-[\w.-]*-auth-token['\"]")
+_LEGACY_STORAGE_KEY_ASSEMBLY = re.compile(r"['\"]sb-['\"][^\n]{0,120}?['\"]-auth-token['\"]")
+_LEGACY_STORAGE_ACCESS = re.compile(
+    r"(?:localStorage|sessionStorage)\s*\.\s*(?:getItem|setItem|removeItem)\s*\("
+)
+
+
+def _legacy_session_storage_offenders(text: str) -> list[tuple[int, str]]:
+    """`(line, snippet)` for every legacy session-storage reference in one file's CODE.
+
+    Two forms, because the vector's key is not always a quoted call argument:
+
+      1. a Supabase key written straight into a `(local|session)Storage` call; and
+      2. a file that NAMES such a key — a literal in a key table, or an assembly
+         (`'sb-' + ref + '-auth-token'`) — AND performs a storage access, whatever argument
+         it passes. This is the historical shape: the call passes a VARIABLE, so form 1
+         alone misses it, and it is the only form left standing when every symbol is renamed.
+    """
+    hits: list[tuple[int, str]] = []
+    for m in _LEGACY_STORAGE_KEY_IN_CALL.finditer(text):
+        hits.append((text.count("\n", 0, m.start()) + 1, m.group(0)))
+    if _LEGACY_STORAGE_ACCESS.search(text):
+        for pat in (_LEGACY_STORAGE_KEY_LITERAL, _LEGACY_STORAGE_KEY_ASSEMBLY):
+            for m in pat.finditer(text):
+                hits.append((text.count("\n", 0, m.start()) + 1, m.group(0)))
+    return sorted(set(hits))
+
 
 # Browser surfaces that are MIGRATED (or must be). These are the files the BFF owns.
 #
@@ -182,7 +236,9 @@ def test_no_legacy_js_readable_token_anywhere(sources):
     """(A) The legacy JS-readable session cookie must be gone from every browser surface.
 
     It is parent-domain and non-HttpOnly by construction — the exact artifact §1 exists to
-    remove. A single surviving reference re-opens the cross-subdomain bridge.
+    remove. A single surviving reference re-opens the cross-subdomain bridge. Since #3748
+    the markers also cover the bridge's localStorage FALLBACK (the reader, the key table
+    and the migration helpers), which the cookie marker alone could not see.
     """
     offenders = []
     for p in sources:
@@ -197,6 +253,86 @@ def test_no_legacy_js_readable_token_anywhere(sources):
         + "\n".join(offenders)
         + "\n\nUnder the BFF nothing writes this token, so every consumer of it is broken."
     )
+
+
+def test_no_browser_surface_touches_a_legacy_session_storage_key(sources):
+    """(A/#3748) No browser surface may read/write a Supabase session key in web storage.
+
+    The cookie marker above names the BRIDGE's cookie; this names the other half — the
+    origin-scoped `sb-<ref>-auth-token` key `readValidSession()` fell back to. It is a
+    KEY-FORM check rather than a symbol check, so a reintroduction that renames
+    `LEGACY_KEYS`/`readValidSession` is still caught: the fallback cannot name Supabase's
+    storage key without this reddening. The key is matched BOTH as a literal call argument
+    and, because the real vector passed a VARIABLE, as a key table/assembly co-occurring
+    with a storage access (`_legacy_session_storage_offenders`).
+
+    What formed the loop (#3748): an unauthenticated /auth read a valid legacy-only
+    session from its OWN origin's storage and forwarded, while the destination origin
+    (same cookie, no such key) saw nothing and bounced back — 91 full document loads in
+    5 s. The bridge is deleted (#3559) and the /auth head gate now asks the server
+    (`/api/session`); this pins the fallback's return.
+    """
+    # NON-VACUITY: a broken detector would pass this test no matter what the sources hold.
+    # The VARIABLE-key fixture is the one that matters — the literal-only assertion that
+    # stood here first was satisfied while the bridge it named passed (#8493 review); the
+    # full falsifiability matrix is pinned in the dedicated test below.
+    assert _legacy_session_storage_offenders(_VARIABLE_KEY_FIXTURE), (
+        "the legacy-storage-key detector does not match the variable-key form — gate is dead"
+    )
+    assert _legacy_session_storage_offenders("localStorage.getItem('sb-abc-auth-token')"), (
+        "the legacy-storage-key detector does not match its own canonical literal form"
+    )
+
+    offenders = []
+    for p in sources:
+        for line, snippet in _legacy_session_storage_offenders(_code(p)):
+            rel = p.relative_to(REPO)
+            offenders.append(f"  {rel}:{line} {snippet!r}")
+    assert not offenders, (
+        "a browser surface touches a legacy Supabase session storage key:\n"
+        + "\n".join(offenders)
+        + "\n\nThat key is origin-scoped, so a surface that honours it can forward a visitor "
+        "the destination origin cannot see — the #3748 loop. Under the BFF the only "
+        "credential is the host-only HttpOnly `__Host-session`; nothing in the browser may "
+        "read or mirror a session."
+    )
+
+
+# The vector's REAL shape, reconstructed from the deleted bridge (#3559): the literals live
+# in a key table and the storage call passes a VARIABLE, so nothing but a co-occurrence rule
+# can see it. Used by the scan test's non-vacuity assertion and by the falsifiability test
+# below, which is the fixture the first cut's literal-only assertion could not exercise.
+_VARIABLE_KEY_FIXTURE = (
+    "var SESSION_KEY_TABLE = ['sb-ybetwichurajbfswfeqa-auth-token', 'sb-127-auth-token'];\n"
+    "var legacyKey = SESSION_KEY_TABLE[i];\n"
+    "try { legacy = window.localStorage.getItem(legacyKey); } catch (e) {}\n"
+)
+
+
+def test_the_legacy_storage_key_detector_catches_the_variable_key_form():
+    """Falsifiability for the #3748 key-form gate (#8493 review).
+
+    The review's proof: restoring the deleted bridge, or adding a renamed-symbol fixture
+    that reads `localStorage.getItem(SESSION_KEY_TABLE[i])`, left BOTH the marker test and
+    the key-form test green — because the first cut only matched a quoted key as a CALL
+    ARGUMENT, and the vector never passes one. Pin the detector against that exact shape,
+    plus a negative control, so the widening cannot silently regress to the literal-only
+    form.
+    """
+    assert _legacy_session_storage_offenders(_VARIABLE_KEY_FIXTURE), (
+        "the detector misses the variable-key / key-table form — the exact #3748 vector, "
+        "and the one shape a renamed-symbol reintroduction leaves behind"
+    )
+    assert _legacy_session_storage_offenders(
+        "var k = 'sb-' + new URL(u).hostname.split('.')[0] + '-auth-token';"
+        " window.localStorage.removeItem(k);"
+    ), "the detector misses an assembled `'sb-' + ref + '-auth-token' key"
+    # NEGATIVE CONTROL: the detector is not "any storage use" — an ordinary non-session
+    # key stays green, so the gate keeps failing only on the legacy artifact.
+    assert not _legacy_session_storage_offenders(
+        "try { return localStorage.getItem('tt_recovery_dismissed') === '1' } "
+        "catch { return false }"
+    ), "the detector flags an ordinary non-session storage key"
 
 
 def test_migrated_surfaces_exist():

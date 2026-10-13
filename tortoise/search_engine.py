@@ -599,6 +599,15 @@ class SearchResult:
                          "session"] = "rrf"
     ep: EpBreakdown | None = None
     relationships: list[dict] = field(default_factory=list)  # SDK compat (sdk.py passes it; non-point = empty)
+    # #6971: the fail-loud counterpart to an all-empty ``relationships`` list.
+    # The bounded decoration seeds every requested point with ``[]`` and fills
+    # it afterwards; when the decoration query RAISES, the caller used to get
+    # that seeded dict back verbatim — so "this point has no IMPL/NAND edges"
+    # and "the edges could not be read" were the same wire shape. Set by the
+    # search path when ``RelationshipDecoration.decoration_error`` is non-empty
+    # (the unavailability is a property of the BATCH, so every hit carries it).
+    # Empty ⇒ absent from the wire (additive, byte-identical default).
+    relationships_unavailable: str = ""
     # #125 capture metadata (document entity_type) — optional, empty for non-docs
     topics: list = field(default_factory=list)
     summary: str = ""
@@ -705,6 +714,11 @@ class SearchResult:
         # set when the Subject layer's producer is missing entirely.
         if self.subject_unavailable:
             d["subject_unavailable"] = self.subject_unavailable
+        # #6971: the same contract for ``relationships`` — emitted only when
+        # the bounded decoration query actually raised, so the seed-and-fill
+        # all-empty shape can never again read as "genuinely no edges".
+        if self.relationships_unavailable:
+            d["relationships_unavailable"] = self.relationships_unavailable
         # A5 (#2070): additive evidence mark — emitted ONLY when known
         # (unmarked hits stay byte-identical on the wire).
         if self.has_answer:
@@ -2728,6 +2742,47 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
     return rels
 
 
+#: #6971 — the fail-loud reason a search hit's ``relationships`` list is empty
+#: because the DECORATION FAILED, not because the point is sparse.
+#:
+#: ``get_relationships_bounded`` seeds ``{pid: []}`` for every requested point
+#: and fills it afterwards. Before #6971 the ``except Exception`` returned that
+#: seed untouched, so a caller could not tell "this point has no IMPL/NAND
+#: edges" from "the decoration query raised" — a silent wrong answer
+#: (contradicting the point's own ``ep.evidence`` counts in the same payload),
+#: with only a ``logger.warning`` below the API surface. Decoration stays
+#: default-on and MUST NOT break retrieval (D1), so the failure is not raised —
+#: it is LABELLED, and the label rides the wire additively.
+RELATIONSHIPS_UNAVAILABLE = (
+    "the bounded relationship decoration query raised, so 'relationships' is "
+    "empty because the edges could not be read — NOT because this point has "
+    "none. Retrieval is otherwise intact. The failure and its traceback were "
+    "logged; re-read the point (or inspect the graph) to recover the "
+    "decoration."
+)
+
+
+class RelationshipDecoration(dict):
+    """``{point_id: [entry, …]}`` plus the decoration's own health (#6971).
+
+    A plain ``dict`` to every existing consumer — equality, ``.get``,
+    ``set(out)``, iteration and ``values()`` are unchanged, so the ~25 direct
+    callers and the SDK assembly need no rewriting. The one addition is
+    ``decoration_error``: ``""`` on success, and ``"<ExcType>: <message>"``
+    when the query body raised. This is what makes ``get_relationships_bounded``
+    distinguishable from an empty result without changing its return CONTRACT
+    (a mapping of requested id → entries), which is why a typed mapping was
+    chosen over re-raising: decoration is default-on (D1) and must never turn
+    a search into a failure, and it must never leave the caller guessing.
+
+    ``decoration_error`` is a CLASS attribute default, so a caller can read it
+    unconditionally (``getattr(rels, "decoration_error", "")`` also tolerates
+    a plain ``dict`` from a stand-in/monkeypatch, e.g. tests).
+    """
+
+    decoration_error: str = ""
+
+
 def get_relationships_bounded(
     graph,
     point_ids: list[str],
@@ -2773,11 +2828,21 @@ def get_relationships_bounded(
 
     get_relationships() is intentionally UNTOUCHED (D12) — topic_summarization
     needs full NAND completeness for disputed-pair detection.
+
+    Returns a ``RelationshipDecoration`` mapping (requested id → entries).
+    #6971: when the query body raises, the mapping is RESET to the all-empty
+    seed — so a consumer that ignores the extra attribute stays safe, and the
+    marker's claim ("'relationships' is empty because the edges could not be
+    read") is TRUE for every requested point — but ``.decoration_error`` is
+    non-empty and the caller MUST NOT present the emptiness as "no
+    relationships". The search assembly labels the batch through
+    ``SearchResult.relationships_unavailable``.
     """
     if not point_ids:
-        return {}
+        return RelationshipDecoration()
 
-    rels: dict[str, list[dict]] = {pid: [] for pid in point_ids}
+    rels: RelationshipDecoration = RelationshipDecoration(
+        {pid: [] for pid in point_ids})
 
     try:
         # Q1a: operator edges per point (bounded by point degree).
@@ -3086,7 +3151,25 @@ def get_relationships_bounded(
                         entries.append({"predicate": "", "mechanism": mech, "count": leftover})
 
             rels[pid] = entries
-    except Exception:
+    except Exception as exc:
+        # #6971: before this the seed (which the fill loop below mutates in
+        # place, ``rels[pid] = entries``) was returned as if it were a real
+        # (empty) decoration. Record WHY on the result so the caller can label
+        # the batch instead of asserting "no relationships". Decoration
+        # failure must not break retrieval (D1), so the exception is still
+        # absorbed — it is just no longer indistinguishable from a genuinely
+        # sparse point.
+        #
+        # The fill loop assigns point-by-point INSIDE this ``try``, so an
+        # exception raised while assembling one point leaves every point
+        # BEFORE it filled. Returning that partial mapping would make the
+        # relayed marker assert "'relationships' is empty because the edges
+        # could not be read" on hits that carry real entries — the payload
+        # contradicting itself. Reset to the all-empty seed the marker's
+        # wording (and D15) describes: "the read failed" replaces the whole
+        # batch, it never leaves a half-decorated one.
+        rels = RelationshipDecoration({pid: [] for pid in point_ids})
+        rels.decoration_error = f"{type(exc).__name__}: {exc}"
         logger.warning("Bounded relationship query failed", exc_info=True)
 
     return rels

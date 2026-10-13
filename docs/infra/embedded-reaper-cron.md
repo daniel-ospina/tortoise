@@ -135,7 +135,21 @@ rendered plist changes, which is why an upgrade off the old
   `--jobs` sets the parallel per-candidate CLIENT LIST probe pool. The
   condition under which a backlog drains is tracked separately (`#4487` /
   `#4500`).
-- Singleton lock (`<tempdir>/.tortoise-reaper-<uid>/.reaper.lock`) prevents cron/manual overlap.
+- Singleton lock (`<tempdir>/.tortoise-reaper-<uid>/.reaper.lock`), an exclusive
+  `flock`, prevents cron/manual overlap. The kernel releases it when its holder
+  dies, so it can never go **stale**: a `SIGKILL`ed sweep leaves no lock behind
+  (`tests/test_reaper.py::test_cli_singleton_lock_released_on_sigkill`). The
+  `pid=`/`start=` record written beside it is a *diagnostic*; the refusal
+  validates it (pid alive + start-time match — no age bound, because a held
+  flock already proves liveness and `(pid, start)` identifies the holder) and
+  names what actually holds it — a running sweep, or the pytest session whose
+  suite-end sweep took it (#4473) — instead of calling every holder a reaper
+  (#4299). Exit is 0 **only** when another verified sweep holds the lock (the
+  drain is being served and this fire correctly yielded); a live non-reaper
+  holder, an unverifiable holder, or a lock that could not be taken at all
+  (`_refuse`: foreign-owned dir, non-regular path, write/flock fault) exits
+  non-zero, so a fire that swept nothing no longer records as success in
+  `launchctl print` / the cron log.
 - Persisted 0-client confirmation state lives at `~/.tortoise/reaper-zero-client.json`
   by default. The path is resolved at CALL time from the ambient `$HOME`, and
   `TORTOISE_ZERO_CLIENT_STATE_PATH` overrides it (mirroring `TORTOISE_INDEX_LOCK_DIR`);

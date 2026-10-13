@@ -81,8 +81,18 @@ class _FakeGraph:
 
     def query(self, cypher: str, params=None):
         st = self._db.graphs.get(self.name)
-        if st is None:  # a Cypher read on a missing graph auto-creates in FalkorDB;
-            raise RuntimeError(f"graph {self.name!r} does not exist")  # the fake must not
+        if st is None:
+            # A Cypher READ on a missing graph AUTO-CREATES an empty one in FalkorDB --
+            # measured live: `MATCH (n) RETURN count(n)` against an absent key returns
+            # [[0]] AND the key then appears in GRAPH.LIST. The fake must reproduce that
+            # rather than raise: raising makes the pre-RENAME RETENTION path unreachable, so a
+            # test aimed at the DATA LOSS would redden on a message string instead of on
+            # the loss itself (#8451 review, P2). Matches the engine's observed semantics.
+            head = cypher.strip().upper()
+            if head.startswith("MATCH") or "COUNT(" in head:
+                self._db.graphs[self.name] = _GraphState(nodes=0, edges=0, writable=True)
+                return _Row(0)
+            raise RuntimeError(f"graph {self.name!r} does not exist")
         head = cypher.strip().upper()
         if "DB.INDEXES()" in head:
             # #3154 audit: an empty catalogue == no boolean is_operator index.
@@ -107,13 +117,42 @@ class _FakeGraph:
 
 class _FakeDb:
     def __init__(self, graphs: dict, *, copy_drops_edges: bool = False,
-                 copy_bumps_source: int = 0) -> None:
+                 copy_bumps_source: int = 0, copy_drops_source: bool = False,
+                 copy_empties_source: bool = False,
+                 copy_mixed: tuple[int, int] | None = None,
+                 copy_clone_ahead: int = 0,
+                 copy_makes_source_writable: bool = False,
+                 swap_rename_fails: bool = False) -> None:
         self.graphs = graphs
         self.commands: list[tuple] = []
         self._copy_drops_edges = copy_drops_edges
         #: Nodes added to the SOURCE right after GRAPH.COPY, simulating a concurrent
         #: fleet write landing between the copy and the pre-RENAME re-read.
         self._copy_bumps_source = copy_bumps_source
+        #: Delete the SOURCE right after GRAPH.COPY, simulating the source vanishing
+        #: inside the critical section (the lock's TTL is NOT renewed, and the
+        #: container is `restartpolicy=always`).
+        self._copy_drops_source = copy_drops_source
+        #: EMPTY the source right after GRAPH.COPY -- the source is present but has lost
+        #: everything. This is the losing direction the presence check alone cannot see:
+        #: presence is genuinely TRUE, and the read still yields (0, 0).
+        self._copy_empties_source = copy_empties_source
+        #: (nodes_delta, edges_delta) applied to the SOURCE right after GRAPH.COPY -- the
+        #: MIXED case, nodes UP while edges DOWN, which is a LOSS and must retain the clone
+        #: even though a node-count-only test would read it as a gain.
+        self._copy_mixed = copy_mixed
+        #: Build the CLONE ahead of the source by this many nodes, with the source left at its
+        #: entry baseline -- the case where the clone snapshotted a concurrent write that the
+        #: source has since lost, so the clone holds the only copy of that delta while the
+        #: source still reads at `before_*`.
+        self._copy_clone_ahead = copy_clone_ahead
+        #: Flip the SOURCE writable right after GRAPH.COPY -- the defect healed (a container
+        #: restart, or another repair) while this run was mid-flight, so the source is back
+        #: to accepting writes and competing fleet writes can land in the window.
+        self._copy_makes_source_writable = copy_makes_source_writable
+        #: Raise on a RENAME whose DESTINATION is the live source (the swap) while still
+        #: allowing a RENAME onto an `__gwr_*` quarantine key (the retain park).
+        self._swap_rename_fails = swap_rename_fails
         # `repair()` reaches GRAPH.COPY/RENAME through `db.connection`.
         self.connection = self
 
@@ -131,14 +170,27 @@ class _FakeDb:
             # A freshly copied graph is WRITABLE even when the source is broken (the
             # defect lives in the RDB reload path, not in GRAPH.COPY).
             self.graphs[dst] = _GraphState(
-                nodes=st.nodes,
+                nodes=st.nodes + self._copy_clone_ahead,
                 edges=0 if self._copy_drops_edges else st.edges,
                 writable=True,
             )
             if self._copy_bumps_source:
                 self.graphs[src].nodes += self._copy_bumps_source
+            if self._copy_empties_source:
+                self.graphs[src].nodes = 0
+                self.graphs[src].edges = 0
+            if self._copy_mixed is not None:
+                self.graphs[src].nodes += self._copy_mixed[0]
+                self.graphs[src].edges += self._copy_mixed[1]
+            if self._copy_makes_source_writable:
+                self.graphs[src].writable = True
+                self.graphs[src].error = None
+            if self._copy_drops_source:
+                del self.graphs[src]
         elif cmd == "RENAME":
             src, dst = args
+            if self._swap_rename_fails and not str(dst).startswith("__gwr_"):
+                raise redis_exc.ResponseError("RENAME refused by the engine")
             self.graphs[dst] = self.graphs.pop(src)
         else:
             raise AssertionError(f"unexpected command {cmd!r}")
@@ -168,6 +220,16 @@ def _scratch_graphs(db: _FakeDb) -> list[str]:
     return sorted(k for k in db.graphs if k.startswith("__gwr_"))
 
 
+def _swaps(db: _FakeDb, source: str = "tortoise") -> list[tuple]:
+    """RENAMEs that would overwrite the LIVE source.
+
+    A retain also RENAMEs -- it parks the clone at the deterministic quarantine key -- so
+    "did the swap happen?" must be asked of the DESTINATION, not merely of whether any
+    `RENAME` command ran.
+    """
+    return [c for c in db.commands if c[0] == "RENAME" and c[2] == source]
+
+
 @pytest.fixture(autouse=True)
 def _no_real_cross_db_sockets(monkeypatch):
     """Pin the collision scan's SOCKET boundary, so no test opens a real one.
@@ -183,7 +245,6 @@ def _no_real_cross_db_sockets(monkeypatch):
 
     monkeypatch.setattr(gwr, "_raw_client", lambda port, db: _EmptyKeyspaceClient())
 
-
 # ── probe classification: ok / defect / unknown / absent ────────────────────
 
 def test_probe_ok_and_the_probe_cleans_up_after_itself():
@@ -195,6 +256,100 @@ def test_probe_ok_and_the_probe_cleans_up_after_itself():
     kind, detail = gwr.probe(db, "g")
     assert (kind, detail) == ("ok", "writes accepted")
     assert db.graphs["g"].nodes == 5, "the probe left its node behind"
+
+
+def test_probe_refuses_an_empty_re_materialised_graph():
+    """A 0-node graph is NOT `ok` -- it is the signature of a key re-created by a read.
+
+    The presence check and the count read are separate statements, so a graph deleted between
+    them is auto-created EMPTY by the read: presence is TRUE, the CREATE is accepted, the
+    post-write re-check sees the phantom this call just made, and `probe` used to return "ok"
+    on a graph holding nothing. On the clone path that phantom was then RENAMEd over the live
+    graph (measured 1500 -> 0); on the `main()` path the tool printed HEALTHY with exit 0,
+    which the scheduled job keys on.
+
+    Mutation: remove the `before == 0` refusal -> this returns "ok" -> RED.
+    """
+    db = _FakeDb({"g": _GraphState(nodes=0, edges=0)})
+    kind, detail = gwr.probe(db, "g")
+    assert kind == "unknown", (kind, detail)
+    assert "0 nodes" in detail, detail
+    # The probe must not have left its own node behind in the phantom.
+    assert db.graphs["g"].nodes == 0, db.graphs["g"]
+
+
+def test_repair_refuses_the_swap_when_the_clone_vanishes_after_its_audit(monkeypatch, fake_lock):
+    """The clone is RE-VERIFIED immediately before the swap, and a gone clone refuses it.
+
+    Everything known about the clone was established earlier. This is the last moment a check
+    can run before the irreversible `RENAME`, and it is what stops an EMPTY PHANTOM being
+    swapped over the live graph when the clone was deleted and a read then auto-created its
+    key empty. The clone is static after its audit, so the comparison is exact.
+
+    The clone is deleted from inside the audit -- the statement immediately preceding the
+    guard -- so this drives the real window rather than a simulated one.
+
+    Mutation: remove the pre-swap re-verification -> the phantom IS renamed over the live
+    graph -> RED.
+    """
+    import tortoise.hosted_backup as hb
+
+    db = _FakeDb({"tortoise": _defect_state(edges=7)})
+    real = hb._audit_copied_boolean_indexes
+    seen = []
+
+    def _audit_then_vanish(*a, **k):
+        out = real(*a, **k)
+        seen.append(True)
+        for key in [g for g in db.graphs if g.startswith("__gwr_")]:
+            db.graphs.pop(key, None)
+        return out
+
+    monkeypatch.setattr(hb, "_audit_copied_boolean_indexes", _audit_then_vanish)
+    ok, msg = gwr.repair(db, "tortoise")
+    assert seen, "the audit did not run -- the test would not exercise the swap window"
+    assert ok is False, (ok, msg)
+    assert "GONE before the swap" in msg, msg
+    # The live graph must NOT have been overwritten by a phantom.
+    assert "RENAME" not in [c[0] for c in db.commands if len(c) > 2 and c[2] == "tortoise"], \
+        db.commands
+    assert db.graphs["tortoise"].nodes == BIG, "the live graph was clobbered"
+
+
+def test_repair_refuses_the_swap_when_the_clone_is_re_materialised_empty(monkeypatch, fake_lock):
+    """A clone that is PRESENT BUT EMPTY is refused -- the fingerprint half of the guard.
+
+    This is the scenario the guard's comment credits with catching, and the sibling test does
+    NOT reach it: deleting the clone outright trips the `graph_exists` half first. Here the
+    clone's key still EXISTS (so presence is true) but holds nothing -- exactly what an
+    auto-created phantom looks like after a read materialised a deleted key. Without the
+    fingerprint comparison the phantom would be RENAMEd over the live graph.
+
+    Mutation: delete the `fingerprint(...) != (before_nodes, before_edges)` refusal -> the
+    empty phantom IS swapped in -> RED.
+    """
+    import tortoise.hosted_backup as hb
+
+    db = _FakeDb({"tortoise": _defect_state(edges=7)})
+    real = hb._audit_copied_boolean_indexes
+    re_materialised = []
+
+    def _audit_then_emptied(*a, **k):
+        out = real(*a, **k)
+        for key in [g for g in db.graphs if g.startswith("__gwr_")]:
+            # The key survives; the CONTENT is gone -- a read materialised it empty.
+            db.graphs[key] = _GraphState(nodes=0, edges=0)
+            re_materialised.append(key)
+        return out
+
+    monkeypatch.setattr(hb, "_audit_copied_boolean_indexes", _audit_then_emptied)
+    ok, msg = gwr.repair(db, "tortoise")
+    assert re_materialised, "the clone was not re-materialised -- the guard was not driven"
+    assert ok is False, (ok, msg)
+    assert "no longer matches" in msg, msg
+    assert "RENAME" not in [c[0] for c in db.commands if len(c) > 2 and c[2] == "tortoise"], \
+        db.commands
+    assert db.graphs["tortoise"].nodes == BIG, "the live graph was clobbered by the phantom"
 
 
 def test_probe_absent_when_the_key_is_not_in_graph_list():
@@ -418,9 +573,13 @@ def test_a_clone_that_lost_edges_is_never_swapped_in(monkeypatch, capsys, fake_l
     db = _FakeDb({"tortoise": _defect_state(edges=42)}, copy_drops_edges=True)
     _run_main(monkeypatch, db)
     assert gwr.main() == 3
-    assert not [c for c in db.commands if c[0] == "RENAME"], db.commands
+    assert not _swaps(db), db.commands
     assert db.graphs["tortoise"].edges == 42, "the source was modified"
-    assert _scratch_graphs(db) == [], "the incomplete clone was not dropped"
+    # ⛔ RETAINED, NOT DROPPED. Every path that reaches the clone helper is a FAILED repair,
+    # and a count test cannot license a delete (review cycle 5: a net-zero source churn
+    # passed every count test while the clone held the only copy of a lost node). The helper
+    # therefore never deletes -- see its docstring.
+    assert _scratch_graphs(db), "the failed repair's clone must be RETAINED, not dropped"
 
 
 def test_repair_runs_the_boolean_index_audit_on_the_clone(monkeypatch, fake_lock, capsys):
@@ -457,8 +616,9 @@ def test_repair_refuses_to_swap_when_the_boolean_index_audit_fails(monkeypatch, 
     db = _FakeDb({"tortoise": _defect_state()})
     _run_main(monkeypatch, db)
     assert gwr.main() == 3
-    assert not [c for c in db.commands if c[0] == "RENAME"], db.commands
-    assert _scratch_graphs(db) == [], "the un-audited clone was not dropped"
+    assert not _swaps(db), db.commands
+    # RETAINED, not dropped -- a failed repair is never cleaned up.
+    assert _scratch_graphs(db), "the un-audited clone must be RETAINED, not dropped"
 
 
 def test_repair_refuses_when_the_source_gained_a_node_after_the_copy(monkeypatch, capsys, fake_lock):
@@ -474,9 +634,10 @@ def test_repair_refuses_when_the_source_gained_a_node_after_the_copy(monkeypatch
     db = _FakeDb({"tortoise": _defect_state()}, copy_bumps_source=1)
     _run_main(monkeypatch, db)
     assert gwr.main() == 3
-    assert not [c for c in db.commands if c[0] == "RENAME"], db.commands
+    assert not _swaps(db), db.commands
     assert db.graphs["tortoise"].nodes == BIG + 1, "the concurrent write was overwritten"
-    assert _scratch_graphs(db) == [], "the stale clone was not dropped"
+    # RETAINED, not dropped -- a failed repair is never cleaned up.
+    assert _scratch_graphs(db), "the stale clone must be RETAINED, not dropped"
 
 
 def test_repair_refuses_a_graph_below_min_nodes(monkeypatch, capsys, fake_lock):
@@ -507,6 +668,306 @@ def test_repair_refuses_an_absent_graph_and_creates_nothing(monkeypatch, fake_lo
     assert ok is False
     assert "ABSENT inside the repair" in msg
     assert db.commands == [], db.commands
+
+
+def test_repair_retains_the_clone_when_the_source_vanishes_before_the_swap(monkeypatch, fake_lock):
+    """A source that disappears mid-repair must NOT cost us the last copy.
+
+    The lock's TTL is not renewed and the container is `restartpolicy=always`, so the
+    source CAN vanish between the COPY and the pre-RENAME guard. If the guard reads
+    first, that read AUTO-CREATES an empty graph, `now_fp` becomes (0, 0), and the
+    comparison trips -- on `main` the old `drop_clone` then deleted the ONLY copy,
+    leaving an empty `tortoise` and no fallback anywhere. At this head the clone IS
+    retained on that path too, so the DIRECT presence check (not the clone's survival)
+    is what this test pins.
+
+    Mutation: move the presence check AFTER `fingerprint()` -> the read re-materialises
+    the absent source, the direction test reports a LOSS instead of a disappearance, and
+    this test goes RED on the `"disappeared" in msg` assertion.
+    """
+    db = _FakeDb({"tortoise": _defect_state(nodes=BIG)}, copy_drops_source=True)
+    ok, msg = gwr.repair(db, "tortoise")
+    assert ok is False
+    # ⛔ PIN THE PRESENCE CHECK ITSELF, not just "the clone survived". Removing the check at
+    # the top of the guard leaves this test GREEN otherwise, because the direction test
+    # further down also retains the clone on the auto-created (0, 0) read -- so a revert of
+    # the presence guard would ship with a green suite (#8451 review cycle 2, P2).
+    assert "disappeared" in msg, msg
+    assert "tortoise" not in db.graphs, (
+        "the absent source was re-materialised -- the presence check did not fire before "
+        "the read"
+    )
+    assert not _swaps(db), db.commands
+    # The clone -- the only surviving copy -- must still be there.
+    retained = [k for k in db.graphs if k.startswith("__gwr_")]
+    assert retained, f"the clone was DELETED; remaining graphs: {sorted(db.graphs)}"
+    assert db.graphs[retained[0]].nodes == BIG
+
+
+def test_repair_retains_the_clone_when_the_source_loses_edges_only(monkeypatch, fake_lock):
+    """The LOSS test must cover EDGES, not just nodes.
+
+    The mixed case -- nodes UP while edges DOWN -- is a LOSS, so the clone must be
+    retained even though a node-count-only comparison reads it as a gain and would
+    drop the last copy. Mutating `now_fp[1] < before_edges` away leaves the rest of
+    the suite green (#8451 review cycle 2, P2), so this case has to be pinned
+    explicitly.
+    """
+    db = _FakeDb({"tortoise": _defect_state(nodes=BIG, edges=100)}, copy_mixed=(50, -60))
+    ok, msg = gwr.repair(db, "tortoise")
+    assert ok is False
+    assert "LOST data" in msg, msg
+    assert not _swaps(db), db.commands
+    retained = [k for k in db.graphs if k.startswith("__gwr_")]
+    assert retained, f"the clone was DELETED; remaining graphs: {sorted(db.graphs)}"
+    assert db.graphs[retained[0]].nodes == BIG
+
+
+def test_retain_clone_never_deletes_the_last_copy_when_the_source_is_gone(monkeypatch, fake_lock):
+    """Every failure path that can run with the source gone must RETAIN the clone.
+
+    The incomplete-copy path and the #3154 boolean-index-audit path both reach retention
+    BEFORE the pre-RENAME presence check. When the source has vanished by then, the clone is
+    the ONLY surviving copy -- and the #3154 case is the worse one: the clone is
+    data-complete, writable and probe-passed, and only its INDEX is corrupt.
+
+    Mutation: make `retain_clone` DROP the clone (or park nothing) instead of RENAMEs-ing it
+    to the quarantine key -> each case below loses its only copy and goes RED on the
+    RETAINED assertion.
+    """
+    # (i) the copy is incomplete (edges dropped) AND the source vanished. The source MUST
+    # carry edges, or dropping them leaves `clone_fp == before` and the incomplete-copy
+    # branch is never taken -- the case then exercises no `retain_clone` call at all.
+    db = _FakeDb({"tortoise": _defect_state(nodes=BIG, edges=10)}, copy_drops_edges=True,
+                 copy_drops_source=True)
+    ok, msg = gwr.repair(db, "tortoise")
+    assert ok is False
+    assert msg, "the refusal must explain itself"
+    retained = [k for k in db.graphs if k.startswith("__gwr_")]
+    assert retained, f"the LAST COPY was deleted; remaining graphs: {sorted(db.graphs)}"
+    assert db.graphs[retained[0]].nodes == BIG
+    # ⛔ PIN THE PRESENCE GUARD ITSELF. Without this assertion the guard is
+    # green-without-fix: removing it leaves the suite passing, because the loss check
+    # below then reads the absent key, AUTO-CREATES it empty, and retains on (0, 0) --
+    # the same verdict reached by a different path. The guard's real contribution is that
+    # the absent source is NOT re-materialised, so assert that (#8451 review cycle 4, P2).
+    assert "tortoise" not in db.graphs, (
+        "the absent source was re-materialised by a read -- the presence guard did not fire"
+    )
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("boolean index survived the drop")
+
+    monkeypatch.setattr("tortoise.hosted_backup._audit_copied_boolean_indexes", _boom)
+    db2 = _FakeDb({"tortoise": _defect_state(nodes=BIG)}, copy_drops_source=True)
+    ok2, msg2 = gwr.repair(db2, "tortoise")
+    assert ok2 is False
+    assert "boolean-index audit failed" in msg2, msg2
+    retained2 = [k for k in db2.graphs if k.startswith("__gwr_")]
+    assert retained2, f"the LAST COPY was deleted; remaining graphs: {sorted(db2.graphs)}"
+    assert db2.graphs[retained2[0]].nodes == BIG, "the retained clone lost its data"
+
+    # (j) the source is PRESENT BUT EMPTIED -- presence is TRUE, so an absence-only
+    # guard would pass and the last DATA-BEARING copy used to be deleted. This is
+    # the case that defeated the first version of the guard.
+    db3 = _FakeDb({"tortoise": _defect_state(nodes=BIG)}, copy_drops_edges=True,
+                  copy_empties_source=True)
+    ok3, msg3 = gwr.repair(db3, "tortoise")
+    assert ok3 is False
+    assert msg3, "the refusal must explain itself"
+    retained3 = [k for k in db3.graphs if k.startswith("__gwr_")]
+    assert retained3, f"the LAST COPY was deleted; remaining graphs: {sorted(db3.graphs)}"
+    assert db3.graphs[retained3[0]].nodes == BIG, "the retained clone lost its data"
+
+    # (k) same, on the #3154 path: the clone is data-complete and only its INDEX is
+    # corrupt -- the worst possible copy to destroy.
+    db4 = _FakeDb({"tortoise": _defect_state(nodes=BIG)}, copy_empties_source=True)
+    ok4, msg4 = gwr.repair(db4, "tortoise")
+    assert ok4 is False
+    assert "boolean-index audit failed" in msg4, msg4
+    retained4 = [k for k in db4.graphs if k.startswith("__gwr_")]
+    assert retained4, f"the LAST COPY was deleted; remaining graphs: {sorted(db4.graphs)}"
+    assert db4.graphs[retained4[0]].nodes == BIG, "the retained clone lost its data"
+
+
+def test_a_retained_clone_keeps_the_delta_the_source_never_saw(monkeypatch, fake_lock):
+    """The retained copy keeps what the source no longer has.
+
+    The clone is built AHEAD of the source (`copy_clone_ahead=5`) while the copy drops edges,
+    so `clone_fp != before` and the repair retains the clone on the incomplete-copy path. A
+    retain that dropped the clone -- or parked some other graph -- would lose the only copy
+    of that 5-node delta.
+
+    Mutation: make `retain_clone` drop the clone instead of parking it -> the only copy of
+    the delta is gone and this goes RED.
+    """
+    db = _FakeDb({"tortoise": _defect_state(nodes=BIG, edges=100)}, copy_drops_edges=True,
+                 copy_clone_ahead=5)
+    ok, msg = gwr.repair(db, "tortoise")
+    assert ok is False
+    assert msg, "the refusal must explain itself"
+    retained = [k for k in db.graphs if k.startswith("__gwr_")]
+    assert retained, f"the ONLY copy of the delta was deleted; graphs: {sorted(db.graphs)}"
+    # The clone must still hold what the source no longer has.
+    assert db.graphs[retained[0]].nodes == BIG + 5, db.graphs[retained[0]]
+
+
+def test_repair_retains_the_clone_when_the_source_is_emptied_before_the_swap(monkeypatch, fake_lock):
+    """A source that LOST data is not a stale clone -- the clone must be retained.
+
+    The presence check alone cannot close this: the source is genuinely PRESENT, so
+    `graph_exists` passes, and the read still yields (0, 0). The distinction that
+    matters is DIRECTION -- a source that GAINED makes the clone stale (drop is
+    correct); a source that LOST nodes or edges may mean the clone is all that is
+    left (retain it).
+
+    Mutation: drop the `< before_nodes or < before_edges` direction test (treat ANY change
+    as stale) -> the verdict no longer says LOST data -> RED.
+    """
+    db = _FakeDb({"tortoise": _defect_state(nodes=BIG)}, copy_empties_source=True)
+    ok, msg = gwr.repair(db, "tortoise")
+    assert ok is False
+    assert "LOST data" in msg, msg
+    assert not _swaps(db), db.commands
+    retained = [k for k in db.graphs if k.startswith("__gwr_")]
+    assert retained, f"the clone was DELETED; remaining graphs: {sorted(db.graphs)}"
+    assert db.graphs[retained[0]].nodes == BIG, "the clone lost the data it was holding"
+
+
+def test_repair_refuses_a_net_zero_churn_once_the_source_accepts_writes(monkeypatch, fake_lock):
+    """The count gate is EQUALITY, not identity -- a net-zero churn is invisible to it.
+
+    A source that removes one node and adds another (a supersede is exactly that shape)
+    reads back at precisely the entry baseline, so `now_fp != before` is False, the gate
+    passes, and the older clone is RENAMEd in -- silently discarding the concurrent write
+    while reporting a repair. The false negative only matters while the source ACCEPTS
+    writes, so the swap is licensed only while the source is still REFUSING them; the source
+    is re-probed immediately before the irreversible step.
+
+    Mutation: drop the `src_kind != "defect"` re-probe -> the equal counts pass, the source
+    is overwritten and this goes RED on both the verdict and the swap assertion.
+    """
+    db = _FakeDb({"tortoise": _defect_state(nodes=BIG, edges=100)},
+                 copy_bumps_source=-1, copy_mixed=(1, 0),
+                 copy_makes_source_writable=True)
+    ok, msg = gwr.repair(db, "tortoise")
+    assert ok is False, msg
+    assert "defect state" in msg, msg
+    assert not _swaps(db), db.commands
+    assert db.graphs["tortoise"].nodes == BIG, "the concurrent write was overwritten"
+    assert _scratch_graphs(db), "the clone must be retained, not dropped"
+
+
+def test_a_standing_failure_retains_at_most_one_clone(monkeypatch, fake_lock):
+    """Retention is BOUNDED: one deterministic quarantine key, REPLACED each failure.
+
+    The scheduled job retries every StartInterval, and the reachable standing failure is
+    the #3154 boolean-index audit: if the clone keeps carrying an unrepairable index,
+    every retry retains ANOTHER full copy of the graph (#8451 review, P2). The clone is
+    parked at one key per source, so N failures keep ONE copy.
+
+    Mutation: retain under the run-unique `scratch` name (no park) -> three failures leave
+    three `__gwr_*` graphs and this goes RED on the exact-name assertion.
+    """
+    def _boom(*_a, **_k):
+        raise RuntimeError("boolean index survived the drop")
+
+    monkeypatch.setattr("tortoise.hosted_backup._audit_copied_boolean_indexes", _boom)
+    db = _FakeDb({"tortoise": _defect_state(nodes=BIG)})
+    for _ in range(3):
+        ok, msg = gwr.repair(db, "tortoise")
+        assert ok is False, msg
+    assert _scratch_graphs(db) == [gwr.QUARANTINE_PREFIX + "tortoise"], db.graphs
+    assert db.graphs[gwr.QUARANTINE_PREFIX + "tortoise"].nodes == BIG
+
+
+def test_a_failing_swap_rename_parks_the_clone_instead_of_accumulating(monkeypatch, fake_lock):
+    """The swap's OWN RENAME failing must park the clone too -- it is the retried path.
+
+    The deterministic quarantine key is what bounds retention when a standing failure keeps
+    the repair from succeeding. A failed swap `RENAME` is the one failure the scheduled job
+    is GUARANTEED to retry (the job runs every StartInterval and the probe still classes the
+    graph as the defect), so leaving the clone under its run-unique name leaked one full-graph
+    copy per run and no `__gwr_q_*` ever appeared (#8451 review cycle 5, P2).
+
+    Mutation: drop the `retain_clone(...)` call from the swap-RENAME failure branch -> three
+    failures leave three `__gwr_<uuid>` graphs and no quarantine key -> RED.
+    """
+    q = gwr.QUARANTINE_PREFIX + "tortoise"
+    db = _FakeDb({"tortoise": _defect_state(nodes=BIG)}, swap_rename_fails=True)
+    for _ in range(3):
+        ok, msg = gwr.repair(db, "tortoise")
+        assert ok is False, msg
+        assert "RENAME failed" in msg, msg
+        assert q in msg, f"the verdict must name the retained clone: {msg}"
+    assert _scratch_graphs(db) == [q], db.graphs
+    assert db.graphs[q].nodes == BIG
+
+
+def test_a_lossier_clone_never_downgrades_a_more_complete_retained_copy(monkeypatch, fake_lock):
+    """A known-incomplete clone must not replace a more complete retained copy.
+
+    Retention parks at one key per source, and the park is an unconditional `RENAME` -- so
+    the NEWEST clone always won, even from the "incomplete copy" branch, whose whole point
+    is that the clone is known to be MISSING data. A later, lossier clone therefore
+    destroyed an earlier, more complete retained copy while the log still asserted the
+    survivor "may be the only copy of data the source no longer has" (#8451 review cycle 5,
+    P2).
+
+    Mutation: park unconditionally (drop the dominance guard) -> the second run replaces
+    the (BIG, 100) retained copy with (BIG, 0) -> RED on the edges assertion.
+    """
+    def _boom(*_a, **_k):
+        raise RuntimeError("boolean index survived the drop")
+
+    monkeypatch.setattr("tortoise.hosted_backup._audit_copied_boolean_indexes", _boom)
+    q = gwr.QUARANTINE_PREFIX + "tortoise"
+    db = _FakeDb({"tortoise": _defect_state(nodes=BIG, edges=100)})
+
+    # run 1: the clone is complete (BIG, 100); the #3154 audit fails, so it is parked.
+    ok, msg = gwr.repair(db, "tortoise")
+    assert ok is False, msg
+    assert db.graphs[q].edges == 100, db.graphs[q]
+
+    # run 2: GRAPH.COPY now loses every edge, so this run's clone is KNOWN incomplete. It
+    # must not overwrite the more complete copy already retained.
+    db._copy_drops_edges = True
+    ok2, msg2 = gwr.repair(db, "tortoise")
+    assert ok2 is False, msg2
+    assert "RETAINED" in msg2, msg2
+    assert db.graphs[q].edges == 100, (
+        f"the retained copy was downgraded to {db.graphs[q]}")
+    assert db.graphs[q].nodes == BIG
+
+
+def test_an_unexpected_failure_still_parks_the_clone(monkeypatch, fake_lock):
+    """The outer failure path retains too -- an unexpected raise must not leak the clone.
+
+    Anything raised inside the repair AFTER `GRAPH.COPY` (before the swap) used to return
+    with the clone still at its run-unique name, so a standing failure accumulated a full
+    copy per scheduled run and no `__gwr_q_*` appeared (#8451 review cycle 5, P2).
+
+    Mutation: drop the `retain_clone(...)` call from the outer `except Exception` -> the
+    clone stays at `__gwr_<uuid>` and no quarantine key exists -> RED.
+    """
+    real_probe = gwr.probe
+
+    def _probe(db, name):
+        if str(name).startswith("__gwr_"):
+            raise RuntimeError("unexpected probe failure")
+        return real_probe(db, name)
+
+    monkeypatch.setattr(gwr, "probe", _probe)
+    q = gwr.QUARANTINE_PREFIX + "tortoise"
+    db = _FakeDb({"tortoise": _defect_state(nodes=BIG)})
+    ok, msg = gwr.repair(db, "tortoise")
+    assert ok is False, msg
+    assert "repair aborted" in msg, msg
+    assert q in msg, f"the verdict must name the retained clone: {msg}"
+    assert _scratch_graphs(db) == [q], db.graphs
+    assert db.graphs[q].nodes == BIG
+
+
 
 
 # ── the upstream collision: the same graph name in another logical DB (#2782) ──
