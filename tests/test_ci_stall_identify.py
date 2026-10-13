@@ -252,6 +252,7 @@ def test_the_config_arms_a_terminating_timeout_without_a_cli_flag(pytestconfig):
     ``[tool.pytest.ini_options]``. ``getini("timeout")`` then returns ``""`` and
     the first assertion fires.
     """
+    _require_pytest_timeout(pytestconfig)
     ini = pytestconfig.getini("timeout")
     assert ini not in ("", None), (
         "no `timeout` in [tool.pytest.ini_options] (#5035): a pytest run that "
@@ -365,6 +366,21 @@ def test_the_resolved_bound_from_the_repo_config_is_the_ci_budget(tmp_path):
     )
 
 
+def _require_pytest_timeout(pytestconfig) -> None:
+    """Fail with the reason, not with a bare ``ValueError``, when the plugin is gone.
+
+    ``-p no:timeout`` (or ``PYTEST_ADDOPTS='-p no:timeout'``) is the most direct
+    way to have no per-test killer at all, and ``getini("timeout")`` then raises
+    ``unknown configuration value: 'timeout'`` — a message that names neither the
+    flag nor #5035 (round-2 review, fifth pass).
+    """
+    assert pytestconfig.pluginmanager.hasplugin("timeout"), (
+        "pytest-timeout is not loaded (``-p no:timeout``), so this run has NO "
+        "per-test killer at all — the flag that removes the plugin also removes "
+        "the bound this config default exists to arm (#5035)"
+    )
+
+
 def _bound_from_the_sanctioned_sources(pytestconfig) -> float:
     """What pytest-timeout SHOULD resolve: CLI -> env -> ini, its own order.
 
@@ -374,6 +390,7 @@ def _bound_from_the_sanctioned_sources(pytestconfig) -> float:
     ``getini`` reflects ``-o`` overrides, so that form is covered too.
     """
     args = _sanctioned_cli_args(pytestconfig)
+    _require_pytest_timeout(pytestconfig)
     cli = _last_flag_value(args, "--timeout")
     if cli is not None:
         return float(cli)
@@ -397,7 +414,12 @@ def _sanctioned_cli_args(pytestconfig) -> list[str]:
     (round-2 review, second pass).
     """
     extra = os.environ.get("PYTEST_ADDOPTS", "")
-    return list(pytestconfig.invocation_params.args) + shlex.split(extra)
+    # ENV FIRST: pytest inserts PYTEST_ADDOPTS at the FRONT of argv
+    # (``args[:] = shlex.split(env_addopts) + args`` in ``_pytest/config``), so
+    # argv is the later source and wins a last-occurrence scan. Appending it
+    # instead made ``PYTEST_ADDOPTS='--timeout=100' pytest --timeout=300`` read
+    # 100 while the run resolved 300 — a false red (round-2 review, fifth pass).
+    return shlex.split(extra) + list(pytestconfig.invocation_params.args)
 
 
 def _last_flag_value(args: list[str], *names: str) -> str | None:
@@ -555,6 +577,26 @@ def test_the_per_test_timer_is_actually_armed(pytestconfig, request):
     optout = _explicit_optout(pytestconfig)
     if optout is not None:
         pytest.skip(f"this run asks for no signal timer: {optout}")
+    # STRUCTURAL, and first because it closes the whole family: the arming and
+    # cancel hooks are FIRSTRESULT, so a second implementation wins the call
+    # outright. One that short-circuits for a SUBSET of nodeids (everything
+    # except the guard's own file) leaves those items with ITIMER_REAL == 0.0
+    # while every resolved value — and the guard's own per-item read — still say
+    # 300 (round-2 review, fifth pass). Asserting the implementation SET closes
+    # that door and the unconditional form in one line, instead of adding another
+    # per-item reading to keep up with each new scope.
+    for hook_name in ("pytest_timeout_set_timer", "pytest_timeout_cancel_timer"):
+        plugins = [
+            getattr(impl, "plugin_name", "?")
+            for impl in getattr(pytestconfig.pluginmanager.hook, hook_name).get_hookimpls()
+        ]
+        assert plugins == ["timeout"], (
+            f"{hook_name} is implemented by {plugins}, not just pytest-timeout: "
+            "that hook is FIRSTRESULT, so the first non-None return wins and any "
+            "extra implementation can arm nothing (or cancel an armed timer) for "
+            "a subset of items while every resolved value still reads 300 — the "
+            "incident's shape, per-file (#5035)"
+        )
     # EVERY collected item, not just this one: the door closed in the previous
     # pass was a per-item marker, and a per-item exemption scoped to OTHER files
     # (`pytest_collection_modifyitems` marking everything except the guard's own
