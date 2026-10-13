@@ -93,7 +93,8 @@ The memory eval (LongMemEval, `tools/longmem_eval/`) reader consumes ONLY hit `c
 
 **Why not re-raise?** Raising would convert a decoration failure into a search
 failure — the wrong direction, and it violates D1. **Why not a new return
-shape (tuple/dataclass)?** ~25 direct callers and the SDK assembly read it as a
+shape (tuple/dataclass)?** The one production caller (the SDK search assembly)
+and the 25 test call sites in `tests/test_relationships_bounded.py` read it as a
 mapping; a typed mapping buys the distinguishability at zero contract churn.
 **Why not `defaultdict`/`.get()` at the `point_ops[pid]` append?** That was
 explicitly ruled out on #6971: it converts a diagnosable crash into a

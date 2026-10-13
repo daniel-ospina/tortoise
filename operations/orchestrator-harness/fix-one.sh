@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 # fix-one.sh <repo-path> <owner/repo> <pr> <branch>
-# fix-one.sh --argv <file>            (4 lines: repo, owner/repo, pr, branch)
+# fix-one.sh --argv <file>            (4 lines: repo, owner/repo, pr, branch; optional 5th: head)
+# The 5th --argv line is the head the controller booked this attempt against. It is READ ONLY FOR
+# THE FINDINGS MARKER: a manual (positional) run does not participate in the controller's
+# bookkeeping, so it neither refunds nor consumes anything.
 # Runs a fixer on the PR's worktree to address the reviewer's findings, pushes, then re-runs the merge chain.
 set -u
+HEAD=""       # the dispatched head, controller path only (see the argv contract above)
+CTRL=0         # 1 = dispatched by orch-loop.sh, so its attempt bookkeeping applies to us
 if [ "${1:-}" = "--argv" ]; then
   ARGV="${2:-}"
   [ -f "$ARGV" ] || { echo "[fix] missing argv file: $ARGV" >&2; exit 1; }
-  { read -r REPO; read -r OR; read -r PR; read -r BR; } < "$ARGV"
+  { read -r REPO; read -r OR; read -r PR; read -r BR; read -r HEAD; } < "$ARGV"
   rm -f "$ARGV"
+  CTRL=1
 else
   REPO="$1"; OR="$2"; PR="$3"; BR="$4"
 fi
@@ -83,14 +89,37 @@ Apply a fix for EVERY finding (P3 notes: address or record explicitly). Requirem
 FINAL MESSAGE (<=15 lines): which findings you fixed, files changed, exact test commands + pass/fail counts, and any finding you deliberately did not fix with the reason.
 EOF
 run_agent "${FIX_TIMEOUT:-2400}" "$L.log" "$L-fixer.txt" "fixer for PR #$PR"
-AGENT_RC=$?
-if [ "$AGENT_RC" = "$AGENT_LOAD_REFUSED" ]; then
+# ⛔ AGENT_STARTED (set by run_agent) is the authority, NOT the exit code: `pi` shares the 0–255
+# status namespace, so a pi that exited 75 for its own reason must not be read as a load refusal —
+# that would silently skip the merge-chain re-run below (#1720 advisory).
+if [ "$AGENT_STARTED" = "0" ]; then
   # Nothing was fixed, so re-running the merge chain would be a fresh-context review of an
   # unchanged head — pure cost on an already-overloaded box, and the re-review would be refused by
   # the same gate anyway. Exit and let the controller's next cycle re-dispatch.
   echo "[fix $PR] fixer NOT started (load gate) — merge chain NOT re-run" >> "$L.log"
+  if [ "$CTRL" = "1" ]; then
+    # ⛔ REFUND. The controller books this attempt when it CREATES the session (orch-loop.sh),
+    # which is UPSTREAM of the gate that lives in run_agent(); this worker is the only party that
+    # knows no agent ran. Without the refund, three refusals reach MAX_FIX_TRIES and the PR is
+    # PARKED "needs a human" having never had a single fixer run (agent-infra#1720). The findings
+    # marker needs no restore: the controller no longer deletes it at dispatch — this script
+    # consumes it below, only once an agent has started.
+    CF="$O/state/fixcount-$PR"
+    if [ -f "$CF" ]; then
+      N="$(cat "$CF" 2>/dev/null || echo 0)"
+      case "$N" in ''|*[!0-9]*) N=0 ;; esac
+      if [ "$N" -gt 0 ]; then
+        echo $((N - 1)) > "$CF"
+        echo "[fix $PR] load refusal is not an attempt — fixcount refunded $N -> $((N - 1))" >> "$L.log"
+      fi
+    fi
+  fi
   exit "$AGENT_LOAD_REFUSED"
 fi
+# An agent actually started, so the attempt is spent: consume the reviewer's findings marker for
+# the head this fixer was dispatched against. Done HERE rather than at dispatch so a load refusal
+# leaves the findings intact for the next cycle (#1720). Empty HEAD = manual run, no marker to own.
+[ -n "$HEAD" ] && rm -f "$O/state/needsfix-$PR-$HEAD"
 echo "[fix $PR] fixer done $(date) — re-running merge chain" >> "$L.log"
 # re-run the full chain at the new head
 bash "$O/merge-one.sh" "$REPO" "$OR" "$PR" "$BR" >> "$L.log" 2>&1

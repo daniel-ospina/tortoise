@@ -48,7 +48,15 @@ if ! claim; then
   rm -f "$CLAIM"
   claim || { echo "[merge $PR] claim race — exiting" >> "$L.log"; exit 0; }
 fi
-trap 'rm -f "$CLAIM"' EXIT INT TERM
+# ⛔ Same defect as orch-loop.sh, on the per-PR claim (§5.1b): a RETURNING INT/TERM handler
+# resumes the interrupted command loop, so a TERM removed the claim while this worker kept
+# reviewing and merging, and the controller could spawn a second worker for the same head. The
+# handlers TERMINATE; the claim is released by the EXIT trap alone. Measured on /bin/bash 3.2.57:
+# `exit 143` from a TERM handler still runs the EXIT trap (rc=143); an untrapped INT is ignored
+# outright (still alive after 3s), so INT is trapped rather than dropped. (agent-infra#1715)
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'rm -f "$CLAIM"' EXIT
 
 HEAD="$(gh pr view "$PR" --repo "$OR" --json headRefOid --jq .headRefOid 2>/dev/null)"
 echo "[merge $PR] start $(date) head=$HEAD branch=$BR" > "$L.log"
@@ -75,8 +83,10 @@ Your comment MUST state the outcome plainly and MUST NOT contain an unresolved a
 Do NOT modify code, commit, or merge.
 EOF
 run_agent "${REVIEW_TIMEOUT:-1800}" "$L.log" "$L-reviewer.txt" "reviewer for PR #$PR"
-AGENT_RC=$?
-if [ "$AGENT_RC" = "$AGENT_LOAD_REFUSED" ]; then
+# A gate refusal (AGENT_LOAD_REFUSED) means NO agent ran. AGENT_STARTED is authoritative rather than
+# the exit code, because `pi` shares the 0–255 status namespace: a pi that exited 75 itself must not
+# be read as a refusal (that would skip recording a real verdict). (#1720 advisory)
+if [ "$AGENT_STARTED" = "0" ]; then
   # A load refusal is NOT a verdict. Falling through would write `needsfix-<PR>-<head>`, which
   # authorises a fixer for a review that never happened, consumes a MAX_FIX_TRIES attempt and can
   # park the PR. Exit now; the claim is released by the EXIT trap and the controller's next cycle

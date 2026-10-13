@@ -41,10 +41,12 @@ chains; single-flash path; no max_tokens caps.
 
 Master-list note: the v2 master list (subjects/points/events/chains) lives
 here as ``build_master_list()`` — an overlay over the v1
-``compile_value_brief()`` (which stays the kinds+granularity contract for the
-v1 enforcer; adding non-kind sections to it would pollute
-``value_extractor._object_kind_vocab``). The expansion is delivered by this
-module per design doc §3.
+``compile_value_brief()``, which stays the kinds+granularity contract for the
+v1 enforcer. A non-kind section may ride that brief ONLY when it is declared in
+``value_extractor.RESERVED_BRIEF_KEYS``, which ``_object_kind_vocab`` skips:
+every brief key is otherwise read as an objectKind form, so an unreserved
+section silently widens the closed kind vocabulary (#4894). The expansion is
+delivered by this module per design doc §3.
 
 Builder capability catalog note (#2004 W8 / epic #1976 DM-5): this module is
 referenced in the builder capability catalog (onboarding) — catalog module
@@ -390,16 +392,76 @@ OPERATOR_SEMANTICS_RULE = (
 )
 
 
-def _s2s4_rules() -> str:
+def _s2s4_rules(master: dict | None = None) -> str:
     """The shared rule block inserted at the {anti_routine} slot of the S2
     and S4 mapping prompts: the anti-routine NOOP gate (#2424) paired with
     the value-fidelity rule (#2453) and the operator-structure rule (#2552).
     One source, all stages — S2 and S4 map with the SAME operator semantics
     (the #2424 residual clause-level strip and the operator rules live in
-    the shared blocks, so every mapping stage carries them)."""
-    return (ANTI_ROUTINE_EXCLUSION + "\n\n" + VALUE_FIDELITY_RULE
-            + "\n\n" + OPERATOR_SEMANTICS_RULE
-            + "\n\n" + SHORT_SESSION_FACT_RULE)
+    the shared blocks, so every mapping stage carries them).
+
+    #4894 / #1026: ``master`` carries the pack's DECLARED value-brief hints
+    (``extraction.valueGate`` / ``extraction.promptFragments``, compiled into
+    the brief's reserved ``pack_hints`` section). They ride THIS slot because
+    it is the slot that states the value policy — a pack's keep/drop hints and
+    instruction snippets are policy, not vocabulary, so they must sit where
+    the policy does and not in the master render. ``None``
+    (or a master whose packs declare nothing — every shipped pack today)
+    renders the pre-#4894 block byte-for-byte.
+    """
+    block = (ANTI_ROUTINE_EXCLUSION + "\n\n" + VALUE_FIDELITY_RULE
+             + "\n\n" + OPERATOR_SEMANTICS_RULE
+             + "\n\n" + SHORT_SESSION_FACT_RULE)
+    hints = _pack_hints_text(master)
+    return f"{block}\n\n{hints}" if hints else block
+
+
+def _pack_hints_text(master: dict | None) -> str:
+    """The pack-authored value-brief hints, as a prompt block (or "").
+
+    The consumer half of the #1026 extraction slots (#4894).
+    ``extraction.valueGate`` is the STRUCTURED form of what
+    ``ontology.memory_granularity`` states in prose, and
+    ``extraction.promptFragments`` are the pack's instruction snippets; both
+    are declared *for the value brief* and until now NOTHING read them, so a
+    pack author could declare either and see nothing happen — a declaration
+    that read exactly like a shipped mechanism.
+
+    ⛔ These are HINTS, never a mint-time drop rule (#1026's recorded ruling:
+    *"the pack declares which kinds its artefacts are; no name patterns;
+    nothing is dropped at mint"*). Nothing here removes an artefact, and
+    nothing here is parsed as a predicate — the mechanical, artefact-level
+    gate is ``tortoise/value_gate.py``, whose provenance is
+    ``memory_granularity``. This block only tells the mapper what a valuable
+    utterance looks like in the pack's domain.
+
+    Sorted by namespace so a compile-order change (the pack-manifest glob is
+    readdir-dependent) cannot reorder the prompt.
+    """
+    hints = (master or {}).get("pack_hints") or {}
+    if not isinstance(hints, dict):
+        return ""
+    lines: list[str] = []
+    for ns in sorted(hints):
+        h = hints.get(ns) or {}
+        if not isinstance(h, dict):
+            continue
+        keep = [str(x) for x in (h.get("keep") or [])]
+        drop = [str(x) for x in (h.get("drop") or [])]
+        frags = [str(x) for x in (h.get("fragments") or [])]
+        if keep:
+            lines.append(f"- {ns} — KEEP: " + "; ".join(keep))
+        if drop:
+            lines.append(f"- {ns} — DROP: " + "; ".join(drop))
+        for frag in frags:
+            lines.append(f"- {ns}: {frag}")
+    if not lines:
+        return ""
+    return (
+        "PACK VALUE HINTS (declared by the installed packs for their own "
+        "domain — these JUDGE utterances and never remove an artefact):\n"
+        + "\n".join(lines)
+    )
 
 
 CORE_OBJECT_KEYS = (
@@ -457,8 +519,13 @@ def _build_master_from_brief(brief: dict,
     and pack_kinds keeps the brief's insertion order (prompt-visible)."""
     objects = {k: _desc(brief, k) for k in CORE_OBJECT_KEYS}
     pack_kinds = {}
+    # #4894: the brief's RESERVED, non-kind sections are skipped by the SAME
+    # set ``value_extractor`` uses to keep them out of the objectKind
+    # vocabulary — the brief's own module owns the reservation, so a new
+    # non-kind section lands in one place and both readers follow it.
+    from tortoise.value_extractor import RESERVED_BRIEF_KEYS
     for k in brief:
-        if k == "memory_granularity":
+        if k in RESERVED_BRIEF_KEYS:
             continue
         if k in CORE_OBJECT_KEYS or k.startswith("core:"):
             objects.setdefault(k, _desc(brief, k))
@@ -473,6 +540,12 @@ def _build_master_from_brief(brief: dict,
         "chains": {name: {"path": list(c["path"]), "note": c["note"]}
                    for name, c in CHAINS.items()},
         "memory_granularity": dict(brief.get("memory_granularity", {})),
+        # #4894 / #1026: the packs' DECLARED value-brief hints (valueGate /
+        # promptFragments). Carried verbatim on the master so the S1/S2/S4
+        # render sites read one compiled source; empty for every pack that
+        # declares neither, which is every shipped pack today.
+        "pack_hints": {ns: dict(h) for ns, h in
+                       (brief.get("pack_hints") or {}).items()},
         # E2 (#1534): user-personal-state vocabulary — the Tier-A classification
         # hint criterion. NOT kinds (master_kind_forms' section tuple excludes
         # it); rendered into S2/S4 prompt context only.
@@ -957,7 +1030,11 @@ def _granularity_text(master: dict | None = None) -> str:
     g = master.get("memory_granularity", {})
     out = "\n".join(f"- {ns}: {txt}" for ns, txt in g.items())
     head = f"{out}\n{STATE_VALUE_CARVE_OUT}" if out else STATE_VALUE_CARVE_OUT
-    return head + "\n" + SHORT_SESSION_FACT_RULE
+    tail = head + "\n" + SHORT_SESSION_FACT_RULE
+    # #4894: the pack's declared value-brief hints ride the SAME slot as the
+    # prose granularity declaration they are the structured form of.
+    hints = _pack_hints_text(master)
+    return f"{tail}\n\n{hints}" if hints else tail
 
 
 # ── Session-date anchoring (E1, #1533) ────────────────────────────────────
@@ -1503,7 +1580,7 @@ def render_s2_prompt(master: dict | None = None, *,
                 master, story, core_only=core_only))
             .replace("{pack_namespaces}", pack_ns)
             .replace("{chains_text}", chains)
-            .replace("{anti_routine}", _s2s4_rules())
+            .replace("{anti_routine}", _s2s4_rules(master))
             .replace("{date_anchor}", _date_anchor(
                 session_date, include_emission_rules=True))
             .replace("{output_contract}", contract)
@@ -2606,7 +2683,7 @@ def render_s4_prompt(story: str, search: dict, embed_list: dict,
             .replace("{master_list}", _render_master(
                 master, story, core_only=core_only))
             .replace("{chains_text}", chains)
-            .replace("{anti_routine}", _s2s4_rules())
+            .replace("{anti_routine}", _s2s4_rules(master))
             .replace("{story}", story)
             .replace("{search_results}", _render_search_results(search))
             .replace("{embed_list_json}", json.dumps(embed_list, indent=1))

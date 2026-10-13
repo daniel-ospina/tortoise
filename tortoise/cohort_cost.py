@@ -87,13 +87,16 @@ cheap cohort.
 
 **It is not armed by default.** ``TORTOISE_COHORT_COST_CAP_USD`` unset means
 the gate is a no-op; the machinery ships enabled-off so arming is an explicit
-ops decision. ARM ORDER MATTERS — and BOTH levers are required: apply migration
-20260917000001 (the ``capture_cost_usd`` column and its increment RPC) BEFORE
-setting the cap, and set ``TORTOISE_COHORT_COST_SINCE`` WITH it. The cap alone
-is a fail-closed configuration error (an unscoped cap would apply to every
-org; a malformed ``since`` would select an empty cohort and disarm the cap),
-so setting one without the other 500s the admission block rather than arming
-something that bounds nothing.
+ops decision. ARM ORDER MATTERS — and BOTH migrations are required, IN ORDER:
+apply 20260917000001 (the ``capture_cost_usd`` column and its increment RPC),
+then 20260918000001 (``organizations.current_period_start`` /
+``current_period_end`` — the anchor read selects them for EVERY org, so the
+cap is unresolvable without this one) BEFORE setting the cap, and set
+``TORTOISE_COHORT_COST_SINCE`` WITH it. The cap alone is a fail-closed
+configuration error (an unscoped cap would apply to every org; a malformed
+``since`` would select an empty cohort and disarm the cap), so setting one
+without the other 500s the admission block rather than arming something that
+bounds nothing.
 """
 from __future__ import annotations
 
