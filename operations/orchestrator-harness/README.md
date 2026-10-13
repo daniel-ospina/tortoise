@@ -200,7 +200,7 @@ secret into a world-readable plist, and launchd inherits no shell environment �
 | `MAX_LOAD` | `cores*10` (100 on a 10-core box; sanity ceiling) | dispatch stops above this 1-min load |
 | `MAX_LANES` | `4` | concurrent implementation lanes |
 | `MAX_REVIEW` | `4` | concurrent `merge-<PR>` reviewers |
-| `MERGE_PRIORITY_AT` | `10` | above this many open PRs, **merging takes priority**: dispatch of new lanes stops (unless none are running) and reviewer headroom rises to `MAX_REVIEW+2` |
+| `MERGE_PRIORITY_AT` | `10` | above this many open PRs, **merging takes priority**: dispatch of new lanes stops (unless none are running, or a `P0-blocker` is at the backlog head — see `P0_BYPASS_MERGE_PRIORITY`) and reviewer headroom rises to `MAX_REVIEW+2` |
 | `P0_BYPASS_MERGE_PRIORITY` | `1` | when `1`, a `P0-blocker` at the **head of the backlog** is dispatched even above `MERGE_PRIORITY_AT` — only that gate is bypassed (load/lanes/swap/memory still bind); `0` restores the unconditional gate |
 | `MAX_FIX` | `3` | concurrent `fix-<PR>` fixers |
 | `MAX_FIX_TRIES` | `3` | per-PR fixer attempts before it is left alone |
