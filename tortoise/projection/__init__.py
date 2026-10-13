@@ -41,6 +41,10 @@ from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
     tolerates_altered_numbers,  # #7174/#5011: the replay/apply exemption
 )
 from tortoise.env_truthy import FALSY, env_flag  # #4097: the declared truthy contract
+from tortoise.index_catalogue import (  # #3154/#522/#3441: the ONE presence check
+    index_catalogue_has_field,
+    index_row_has_field,
+)
 from tortoise.vector_write import (  # #4520: the ONE clear-then-set vector seam
     clear_then_set_prefix,
     set_embedding_clause,
@@ -12327,7 +12331,7 @@ class FalkorProjection(
             # question, so it fails the probe rather than guessing.
             if not row or len(row) < 3 or not isinstance(row[2], dict):
                 return False
-            label, props, kinds = str(row[0]), row[1] or (), row[2]
+            label, kinds = str(row[0]), row[2]
             # #3154: a boolean is_operator index is never VALID — its presence
             # (single or composite, so either column can carry it) means the
             # purge below still has work to do. Match the property name
@@ -12338,11 +12342,13 @@ class FalkorProjection(
             # detector this purge feeds (``hosted_backup
             # ._audit_copied_boolean_indexes``) matches exactly for the same
             # reason; the DROP below only targets the two exact forms.
-            if any(str(p) == "is_operator" for p in props):
+            # #3441: the presence question itself is the ONE shared definition
+            # (``tortoise.index_catalogue``), so "exactly" cannot drift between
+            # the two sites — this row walk reads BOTH catalogue columns
+            # through it.
+            if index_row_has_field(row, "is_operator"):
                 return False
             for prop, prop_kinds in kinds.items():
-                if str(prop) == "is_operator":
-                    return False
                 for kind in prop_kinds or ():
                     present.add((label, str(prop), str(kind).upper()))
         required = set(self._REQUIRED_RANGE_INDEXES)
@@ -12771,11 +12777,16 @@ class FalkorProjection(
         if getattr(self, "_is_embedded", False):
             try:
                 _rows = self.g.query("CALL db.indexes()").result_set
-                _needs_repair = any(
-                    _row and _row[0] == "Point"
-                    and "is_operator" in str(_row[1])
-                    for _row in _rows
-                )
+                # #3441: the presence question is answered by the ONE shared
+                # definition (``tortoise.index_catalogue``) — an EXACT
+                # field-name match. The substring form this replaced
+                # (``"is_operator" in str(_row[1])``) also matched an unrelated
+                # indexed property such as ``is_operator_flag`` and fired this
+                # sweep for nothing: a bounded no-op, because none of the
+                # permutations below can name that property, but 260 wasted
+                # DROP attempts on every full sweep (measured).
+                _needs_repair = index_catalogue_has_field(
+                    _rows, "is_operator", label="Point")
                 if _needs_repair:
                     import itertools as _it
                     _fields = ("id", "pointKind", "content_hash",
