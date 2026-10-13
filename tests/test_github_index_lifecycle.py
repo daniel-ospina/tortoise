@@ -37,7 +37,7 @@ from tortoise.hosted_api import (
     _start_index_job,
     app,
 )
-from tortoise.indexer.github_indexer import GitHubFetchError, GitHubIndexer
+from tortoise.indexer.github_indexer import _INDEX_THREAD_PREFIX, GitHubFetchError, GitHubIndexer
 from tortoise.sdk import TortoiseSDK
 
 _GRAPH_SCRIPTS = str(Path(__file__).resolve().parent.parent / "graph-scripts")
@@ -716,10 +716,11 @@ def test_repoll_drains_and_clears_truncated_persisted(client, tmp_path,
     # #4709: EXPLICIT poll budget for this test's 500-item walk. The module's
     # 8 s default is sized for the small fixtures; this fixture is the one
     # heavyweight run (600 items, cap 500) and its walk is REAL work on the
-    # graph — measured on the docker lane at ~47 s for run 1 and ~10 s for the
-    # 100-item DRAIN re-poll. That budget was never exercised before #4709:
-    # with the walk ON the loop the POST itself was refused by the 10 s
-    # transport bound, so the test failed earlier (`KeyError: 'job_id'`).
+    # graph. On an IDLE lane the whole test still finishes inside that 8 s
+    # default (measured ~7-10 s end-to-end at both the PR base and the head),
+    # so the budget below is HEADROOM, not a fix: the same run has been
+    # measured at ~47 s under concurrent host/DB load, a saturation artifact of
+    # the box, not a property of the walk.
     _WALK_POLL_S = 300.0
     # run 1: cap 500 → truncated cursor persisted
     r = client.tc.post("/v1/index/github", json={"org": "acme"})
@@ -821,6 +822,13 @@ def test_projection_walk_runs_off_the_event_loop(client, tmp_path,
         f"the projection walk ran ON the event loop "
         f"({[t.name for t, o in walk_threads if o]}) — one walk freezes every "
         f"concurrent request on the single-worker app (#4709)")
+    assert all(wt.name.startswith(_INDEX_THREAD_PREFIX)
+               for wt, _ in walk_threads), (
+        f"the projection walk ran on a pool that is not the index job's own "
+        f"({[wt.name for wt, _ in walk_threads]}) — the pre-fix shape used "
+        f"`asyncio.to_thread`, i.e. the loop's SHARED default executor "
+        f"(`asyncio_*`), where a whole-job walk starves every other tenant "
+        f"of that pool (#4709)")
     assert all(wt not in loop_threads for wt, _ in walk_threads), (
         "the walk ran on the very thread that awaited `_get_client` — it was "
         "never handed to a worker (#4709)")
@@ -836,6 +844,58 @@ def test_projection_walk_runs_off_the_event_loop(client, tmp_path,
     body = _poll_until(client.tc, r.json()["job_id"], "completed")
     assert body["repos_processed"] == 1, body
     assert body["events_minted"] >= 3, body
+
+
+def test_index_onboarding_writes_run_on_the_dedicated_pool(client, tmp_path,
+                                                           monkeypatch):
+    """#4709 review P2: the ``_update_onboarding_state`` hand-offs ride the
+    index job's OWN pool, never the loop's SHARED default executor.
+
+    The pre-fix shape (``asyncio.to_thread``) submitted to the default pool,
+    whose threads are named ``asyncio_*``; the fix routes each write through
+    ``_run_off_loop(_INDEX_EXECUTOR, ...)``, whose threads carry the
+    ``tortoise-index`` prefix. A walk holds a default worker for a whole job,
+    so the writes competing for the same ``min(32, cpu+4)`` workers is exactly
+    the starvation #3060's doctrine excludes.
+
+    Only the happy-path sites run here (the backfill marker + the completion
+    persist, which short-circuits the ``finally`` persist); the AST pin
+    ``test_run_indexing_residual_is_named_head_on`` proves all THREE sites use
+    this one seam.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    _provision(client.db_path, org_id=client.org_id)
+    t = MockGitHubTransport(issues=[gh_issue(1)], repos=["acme/repo1"])
+
+    async def _fake_get_client(self):
+        if self._client is None:
+            self._client = httpx.AsyncClient(transport=t)
+        return self._client
+
+    monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
+
+    write_threads: list[str] = []
+    real_update = ha_mod._update_onboarding_state
+
+    def _recording_update(*args, **kwargs):
+        write_threads.append(threading.current_thread().name)
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(ha_mod, "_update_onboarding_state", _recording_update)
+
+    r = client.tc.post("/v1/index/github", json={"org": "acme"})
+    assert r.status_code == 200 and "job_id" in r.json(), r.text[:200]
+    _poll_until(client.tc, r.json()["job_id"], "completed")
+
+    assert len(write_threads) >= 2, (
+        f"expected the backfill-marker and completion-path persists through "
+        f"the off-loop seam; saw {write_threads} — this run proves nothing")
+    assert all(n.startswith(_INDEX_THREAD_PREFIX) for n in write_threads), (
+        f"an onboarding write rode a pool that is not the index job's own "
+        f"({write_threads}) — the pre-fix shape submitted to the loop's "
+        f"SHARED default executor (`asyncio_*`), which the walk starves "
+        f"(#4709)")
 
 
 # ── P2 (PR #1792): marker / 404 / quota-break honesty ────────────────

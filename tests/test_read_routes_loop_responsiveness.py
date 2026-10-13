@@ -480,6 +480,10 @@ _SDK_CONSTRUCTION_SEAMS = frozenset({"_make_sdk", "_data_sdk"})
 _OFFLOAD_BOUNDARY_CALLEES = frozenset({
     "to_thread", "_run_off_loop", "_submit_off_loop", "_run_dream_on_pool",
     "_run_with_close", "run_in_executor",
+    # #4709: the index job's OWN-pool hand-off (``github_indexer``). Same
+    # UNBOUNDED semantics as ``_run_off_loop``, but a dedicated pool instead
+    # of the loop's shared default executor.
+    "_run_index_off_loop",
     "_cp_offload", "_oauth_offload", "run_control_plane_call",
     "run_on_daemon_worker", "_graph_offload",
 })
@@ -493,9 +497,10 @@ _OFFLOAD_BOUNDARY_CALLEES = frozenset({
 #: reference — but its later onboarding WRITES still run through sync helpers
 #: the scan cannot see; those are part of the residual, not covered by this set.
 #: ⚠️ The same caveat is why ``_run_indexing`` is NOT here. #4709 took its
-#: WALK and its two ``_update_onboarding_state`` writes off the loop (the walk
+#: WALK and its three ``_update_onboarding_state`` writes off the loop (the walk
 #: inside ``index_repo`` via ``_project_items``, the writes via
-#: ``asyncio.to_thread`` + ``_echo=False``), but the ``_make_sdk`` construction
+#: ``_run_off_loop(_INDEX_EXECUTOR, ...)`` + ``_echo=False``), but the
+#: ``_make_sdk`` construction
 #: and the attach handed to ``backfill_legacy_closed`` still run in the body,
 #: and an attach that moved to a worker would resolve the embedded per-test
 #: store from a reused pool thread's STALE stem (tortoise#7500, the defect that
@@ -608,8 +613,9 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
 #: reverted for it. The attach can move only once #7500 lands.
 #: `_relink_sessions_after_index` (the completion relink pass) is the third
 #: inline graph site, same constraint — a sync helper that builds its own SDK.
-#: The WALK (now `index_repo._project_items`, another module) and the two
-#: `_update_onboarding_state` writes (now `asyncio.to_thread` + `_echo=False`)
+#: The WALK (now `index_repo._project_items`, another module) and all THREE
+#: `_update_onboarding_state` writes (now the index job's own pool —
+#: `_run_off_loop(_INDEX_EXECUTOR, ...)` — plus `_echo=False`)
 #: ARE off the loop as of #4709. `test_run_indexing_residual_is_named_head_on`
 #: pins exactly which calls may still sit inline here, so the walk or a write
 #: cannot silently come back.
@@ -1053,7 +1059,8 @@ INDEXER = (Path(__file__).resolve().parent.parent
 #: MUTATING region it abandons a mid-write worker and claims a retryable state
 #: it cannot observe (#2863) — the reason #4709 pins its walk and its
 #: onboarding writes to one of these.
-_UNBOUNDED_OFFLOAD_SEAMS = frozenset({"to_thread", "_run_off_loop"})
+_UNBOUNDED_OFFLOAD_SEAMS = frozenset({
+    "to_thread", "_run_off_loop", "_run_index_off_loop"})
 
 
 def _offload_boundaries(node, callable_name: str) -> list[str]:
@@ -1102,7 +1109,8 @@ def test_run_indexing_residual_is_named_head_on():
         node, frozenset({"_update_onboarding_state"})) == [], (
         "#4709 regressed: `_run_indexing` writes onboarding state INLINE — a "
         "mutating jsonb compare-and-set on the event loop (the leg #4625 "
-        "measured); off-load it with `asyncio.to_thread`")
+        "measured); off-load it on the index job's own pool "
+        "(`_run_off_loop(_INDEX_EXECUTOR, ...)`)")
     write_seams = _offload_boundaries(node, "_update_onboarding_state")
     assert len(write_seams) == 3, (
         f"#4709: expected THREE `_update_onboarding_state` hand-offs (backfill "
@@ -1196,12 +1204,14 @@ def test_index_repo_projection_walk_is_offloaded():
         "`async def` — handing an async def to a worker seam returns an "
         "un-awaited coroutine, so the walk would silently never run")
 
-    assert _offload_boundaries(index_repo, "_project_items") == ["to_thread"], (
-        "#4709 regressed: `_project_items` is not handed to the unbounded "
-        "`asyncio.to_thread` seam — the projection walk runs on the event "
-        "loop (the 600-item fixture cannot complete inside the 10 s "
-        "transport bound), or rides a BOUNDED seam that would abandon a "
-        "mid-write worker (#2863)")
+    assert _offload_boundaries(
+        index_repo, "_project_items") == ["_run_index_off_loop"], (
+        "#4709 regressed: `_project_items` is not handed to the index job's "
+        "own UNBOUNDED pool (`_run_index_off_loop`) — the projection walk runs "
+        "on the event loop (the 600-item fixture cannot complete inside the "
+        "10 s transport bound), rides a BOUNDED seam that would abandon a "
+        "mid-write worker (#2863), or is back on the SHARED default executor "
+        "(`asyncio.to_thread`), where it starves the pool's other tenants")
     assert _inline_calls_to(index_repo, frozenset({"_project_items"})) == [], (
         "#4709: `_project_items` is also INVOKED inline in `index_repo` — the "
         "walk would run twice, once on the loop")

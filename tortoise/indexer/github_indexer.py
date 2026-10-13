@@ -45,7 +45,10 @@ projection loop, which never yields).
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC
 from typing import Any
 
@@ -60,6 +63,58 @@ logger = logging.getLogger(__name__)
 _GITHUB_API = "https://api.github.com"
 _MAX_ITEMS_PER_RUN = 500
 _PAGE_SIZE = 100
+
+#: #4709: the index job's OWN worker pool for its long / stallable work — the
+#: per-repo projection walk (``_project_items``) here, and the onboarding-state
+#: writes that ``hosted_api._run_indexing`` used to run on the loop.
+#:
+#: Why a DEDICATED pool and not ``asyncio.to_thread``: that seam submits to the
+#: loop's SHARED default executor, where the auth middleware's abuse hooks
+#: (``_abuse_post_auth`` et al.) and ~160 other ``to_thread`` sites run. A walk
+#: holds a worker almost continuously for a whole job, and prod's 2 vCPU gives
+#: that pool ``min(32, cpu+4) == 6`` workers — so a multi-repo run starves
+#: every other tenant of the pool. The doctrine is the one stated at
+#: ``hosted_api._CAPTURE_EXECUTOR`` (#3060): long or stallable work gets its
+#: OWN pool, so it can only ever starve itself.
+#:
+#: The walk is the "long" class by measurement, not by assertion: a 500-item
+#: run was measured at ~47 s under concurrent host load (see the poll-budget
+#: note in ``tests/test_github_index_lifecycle.py``); an idle-lane fixture is
+#: seconds.
+#:
+#: Non-daemon threads and NO cancel-at-exit hook, deliberately: the walk
+#: MUTATES the graph and persists the cursor, and ``cancel_futures`` at
+#: interpreter exit could abandon a worker mid-write (#2863). Letting the pool
+#: drain at exit is the safe half of that trade.
+_INDEX_THREAD_PREFIX = "tortoise-index"
+_INDEX_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix=_INDEX_THREAD_PREFIX,
+)
+
+
+def _submit_index_off_loop(fn, /, *args, **kwargs):
+    """Submit the index job's blocking work to ``_INDEX_EXECUTOR`` (#4709).
+
+    Contextvars are preserved exactly as ``asyncio.to_thread`` preserves them
+    (a bare ``run_in_executor`` does NOT — cpython#78195): the caller's context
+    is copied in the CALLING thread and the worker runs under that copy. The
+    walk and the onboarding writes both read caller-context state.
+    """
+    ctx = contextvars.copy_context()
+    return _INDEX_EXECUTOR.submit(ctx.run, functools.partial(fn, *args, **kwargs))
+
+
+async def _run_index_off_loop(fn, /, *args, **kwargs):
+    """Await one ``_submit_index_off_loop`` hand-off.
+
+    Deliberately UNBOUNDED: callers must NOT wrap this in
+    ``asyncio.wait_for``. A bound cancels only the await, never the worker
+    (CPython #87185), so on a MUTATING region it would abandon a worker
+    mid-write and claim a retryable state it cannot observe (#2863).
+    """
+    return await asyncio.wrap_future(_submit_index_off_loop(fn, *args, **kwargs))
+
 
 # #3539 §D progress-beat granularity for the caller's liveness heartbeat.
 # The beat is the JOB's last sign of progress, so a long-but-live walk must
@@ -1151,18 +1206,22 @@ class GitHubIndexer:
         # serialized it), and a per-item hand-off would ADD interleaving points
         # between statements the original ran uninterleaved.
         #
-        # ``asyncio.to_thread`` carries NO BOUND: the wait cannot abandon the
-        # worker. A bounded ``wait_for`` cancels only the await, never the
-        # thread (CPython #87185), so it would abandon a worker MID-WRITE of the
-        # graph — the #2863 hazard #4625's bounded-mutation rule exists to
-        # prevent. This walk MUTATES (objects/events + the persisted cursor),
-        # so the decision is deliberately no bound.
+        # The seam is the index job's OWN pool (``_run_index_off_loop``), never
+        # ``asyncio.to_thread``: the latter is the loop's SHARED default
+        # executor, and a walk holds one of its few workers for the whole job.
+        #
+        # It carries NO BOUND: the wait cannot abandon the worker. A bounded
+        # ``wait_for`` cancels only the await, never the thread (CPython
+        # #87185), so it would abandon a worker MID-WRITE of the graph — the
+        # #2863 hazard #4625's bounded-mutation rule exists to prevent. This
+        # walk MUTATES (objects/events + the persisted cursor), so the decision
+        # is deliberately no bound.
         #
         # ``quota_check`` rides the SAME hand-off (it is re-checked per item);
         # its ``QuotaCheckError`` fail-closed re-raise and the
         # ``QuotaExceededError`` → ``quota_hit`` break keep their semantics — a
         # raise in the worker propagates out of the await unchanged.
-        await asyncio.to_thread(
+        await _run_index_off_loop(
             self._project_items, sdk, proj, repo, items, stats, cursor,
             quota_check, on_progress, total_estimate, cap_hit, walk_complete,
             boundary_stop, journal_ids)

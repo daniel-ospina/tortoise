@@ -30977,12 +30977,16 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
       mint) runs in ONE worker hand-off INSIDE ``index_repo``
       (``_project_items``). The 600-item fixture that could not complete
       within the 10 s transport bound now leaves the loop free.
-    * both ``_update_onboarding_state`` writes ride ``asyncio.to_thread`` with
-      ``_echo=False`` (their return is discarded — the write-only contract
-      #4625 added) and with NO BOUND: a bounded ``wait_for`` cancels only the
-      await, never the worker (CPython #87185), so it would abandon a worker
-      MID-WRITE — the #2863 hazard #4625's bounded-mutation rule names. That is
-      the explicit bound/no-bound decision this issue requires.
+    * all THREE ``_update_onboarding_state`` writes (the legacy-backfill
+      marker, the completion-path persist, the ``finally`` persist) ride the
+      index job's OWN pool (``_run_off_loop(_INDEX_EXECUTOR, ...)`` — NOT the
+      loop's shared default executor, whose few workers the walk would
+      otherwise hold against every other tenant) with ``_echo=False`` (their
+      return is discarded — the write-only contract #4625 added) and with NO
+      BOUND: a bounded ``wait_for`` cancels only the await, never the worker
+      (CPython #87185), so it would abandon a worker MID-WRITE — the #2863
+      hazard #4625's bounded-mutation rule names. That is the explicit
+      bound/no-bound decision this issue requires.
     * WHAT STAYS ON THE LOOP, and why it is not an omission: the
       ``_make_sdk`` construction and the single ``org_sdk._get_proj()`` attach
       handed to ``backfill_legacy_closed``; ``index_repo``'s own attach too
@@ -31006,7 +31010,7 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
     ``tests/test_read_routes_loop_responsiveness.py`` pins the exact remaining
     sites so this cannot drift back into a silent claim.
     """
-    from tortoise.indexer.github_indexer import GitHubFetchError, GitHubIndexer
+    from tortoise.indexer.github_indexer import _INDEX_EXECUTOR, GitHubFetchError, GitHubIndexer
     # P2: generation/owner token stamped at mint. A liveness-evicted entry
     # (presumed-dead, replaced by a newer run) must not let THIS run keep
     # writing status — it aborts silently at the next status-write or
@@ -31092,20 +31096,22 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
                 _logger.warning(
                     "legacy -closed backfill failed (team=%s): %s", org_id, e)
             else:
-                # #4709: the write is OFF the loop with NO BOUND — the bound
-                # decision #4625 requires, recorded here. This write MUTATES
-                # the jsonb state via a compare-and-set, and a bounded
-                # `wait_for` cancels only the await, never the worker thread
-                # (CPython #87185): it would abandon a worker MID-WRITE and
-                # claim a retryable state it cannot observe (#2863). So the
-                # answer is `asyncio.to_thread` (waits for completion).
+                # #4709: the write is OFF the loop, on the index job's OWN
+                # pool (``_INDEX_EXECUTOR`` — not the loop's shared default
+                # executor), with NO BOUND — the bound decision #4625 requires,
+                # recorded here. This write MUTATES the jsonb state via a
+                # compare-and-set, and a bounded `wait_for` cancels only the
+                # await, never the worker thread (CPython #87185): it would
+                # abandon a worker MID-WRITE and claim a retryable state it
+                # cannot observe (#2863). So the answer is an unbounded
+                # `_run_off_loop` hand-off (waits for completion).
                 # `_echo=False`: the return is DISCARDED here, which is the
                 # documented WRITE-ONLY contract (#4625) — it skips
                 # `_get_onboarding_projection`'s blocking registry probes
                 # without changing what is written.
-                await asyncio.to_thread(
-                    _update_onboarding_state, org_id, _echo=False,
-                    github_legacy_backfill_done=True)
+                await _run_off_loop(
+                    _INDEX_EXECUTOR, _update_onboarding_state, org_id,
+                    _echo=False, github_legacy_backfill_done=True)
 
         # ── Cursor + repo scope (Tasks 2/4). First-run scope = ONE repo
         # regardless of org size (P2-4 pre-decided fallback) with the honest
@@ -31171,8 +31177,8 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
         # dashboard do) can observe the PREVIOUS cursor and re-walk the whole
         # backlog. `_index_state_updates` is the same computation the finally
         # used, so the fields persisted are byte-identical.
-        await asyncio.to_thread(
-            _update_onboarding_state, org_id, _echo=False,
+        await _run_off_loop(
+            _INDEX_EXECUTOR, _update_onboarding_state, org_id, _echo=False,
             **_index_state_updates(cursors, totals))
         persisted = True
         _job(status="completed", progress=100,
@@ -31211,7 +31217,8 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
         # processed): a 0-repo failure (resolve_repos 404, pre-walk raise)
         # leaves it untouched so the next run keeps the ONE-repo
         # bounded first-run pacing (P2, PR #1792).
-        # #4709: OFF the loop, NO BOUND and `_echo=False` — a mutating jsonb
+        # #4709: OFF the loop, on the index job's OWN pool
+        # (``_INDEX_EXECUTOR``), NO BOUND and `_echo=False` — a mutating jsonb
         # compare-and-set; a bound would abandon the worker mid-write
         # (#2863/#4625; a bounded `wait_for` cancels only the await, never the
         # worker — CPython #87185), and the return is DISCARDED so the
@@ -31219,9 +31226,9 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
         # `_get_onboarding_projection`'s blocking registry probes). Skipped on
         # the happy path — the completion path above already persisted.
         if not persisted:
-            await asyncio.to_thread(
-                _update_onboarding_state, org_id, _echo=False,
-                **_index_state_updates(cursors, totals))
+            await _run_off_loop(
+                _INDEX_EXECUTOR, _update_onboarding_state, org_id,
+                _echo=False, **_index_state_updates(cursors, totals))
         # Evict after an hour (T1-P14: eviction-expired polls render
         # honestly).
         import asyncio as _asyncio
