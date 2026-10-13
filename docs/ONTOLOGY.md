@@ -56,11 +56,13 @@ doc_status: live
 >   posted on #5013** and carried at §4.4.
 > - **§4.6: the document `:Source` scoping is now stated at the row a reader trusts.**
 >   §4.6 marks `sourceKind`/`contentHash`/`version` REQUIRED ✅, but a document `:Source`
->   is written by a different path (`_upsert_document`) and supplies them conditionally.
+>   is written by different paths (`_upsert_document` for the `DocumentCreated` fold, plus
+>   the `objectType='Document'` event branch and the hosted `/v1/sessions` transcript MERGE)
+>   and supplies them conditionally.
 >   `contentHash` + `version` are written on the path that READS content (PR #5592 /
->   `700960943`), and **`sourceKind='document'` since #5082** (CREATE-only, #398) — so the
->   note records which field is conditional on the read path instead of leaving the
->   absence quiet under the global "code may lag" caveat.
+>   `700960943`), and **`sourceKind='document'` since #5082** (all three writers, CREATE-only,
+>   #398) — so the note records which field is conditional on the read path instead of
+>   leaving the absence quiet under the global "code may lag" caveat.
 >
 > **Changelog v3.23 (2026-10-10 — issues #7813 + #7853 — confidence propagates across all four epistemic labels):**
 >
@@ -1220,7 +1222,7 @@ model**, never as an invitation to merge the two nodes. The reasoning is pinned 
 >
 > | REQUIRED field | on a document `:Source` |
 > |---|---|
-> | `sourceKind` | ✅ **written since #5082** — `_upsert_document` sets `'document'` on **CREATE ONLY** (`coalesce`, #398's never-overwrite contract), so a document node carries the **TYPE** axis beside its `documentKind` **GENRE** axis (§4.4 — different questions, neither absorbs the other). The value is the registered §5 term and is **NEUTRAL** in `SOURCE_KIND_DEFAULTS`, so no credibility inheritance moves (#398); it agrees with `_mint_source_stub`'s own non-`session:` default (`projection/edges.py`). `list_sources()` still filters on `documentKind` — a document node is not a *provenance* source |
+> | `sourceKind` | ✅ **written since #5082 by every writer that creates a document `:Source`** — each stamps `'document'` on **CREATE ONLY** (`coalesce`, #398's never-overwrite contract): the `DocumentCreated` fold (`entities.py::_upsert_document`), the `objectType='Document'` event branch (`entities.py::_event_plain_merge`), and the hosted `/v1/sessions` transcript MERGE (`hosted_api.py::_execute_commit_writes`). A document node therefore carries the **TYPE** axis beside its `documentKind` **GENRE** axis (§4.4 — different questions, neither absorbs the other). The value is the registered §5 term and is **NEUTRAL** in `SOURCE_KIND_DEFAULTS`, so no credibility inheritance moves (#398); it agrees with `_mint_source_stub`'s own non-`session:` default (`projection/edges.py`). `list_sources()` still filters on `documentKind` — a document node is not a *provenance* source |
 > | `contentHash` | ⚠️ **written on the path that READS content.** Since PR #5592 (`#5422`, `700960943`) the extraction-ingest path writes it through a preserve/replace gate: an absent or empty (`''`) hash preserves the stored one, an empty stored hash is completed, and a differing hash **replaces it on the SAME node** (never a second `:Source`). The `#900` index path (`_doc_write`) and `--capture-metadata` deliberately emit none (no content read — the latter skips extraction by design), so a document node can sit with `contentHash = NULL` until extraction; the `_required_sweep` harnesses scope the `contentHash` clause to provenance Sources for exactly this reason |
 > | `version` | ✅ **written by the same clause**, advancing with the hash exactly as §4.6 specifies ("1 at creation, +1 on each content-hash change"), so the pair §4.6 calls a version anchor can no longer be half-written |
 >

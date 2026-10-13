@@ -34,7 +34,12 @@ and the code together, so neither half can move alone:
     written since #5422;
   * `_upsert_document` writes `contentHash` **and** `version` **and**
     `sourceKind='document'` (CREATE-only) — so the note stays true in both
-    directions.
+    directions;
+  * **every** writer that can create a document `:Source`
+    (`_upsert_document`, `_event_plain_merge`'s `objectType='Document'` branch,
+    and `hosted_api._execute_commit_writes`' `/v1/sessions` transcript MERGE)
+    stamps the same CREATE-only `sourceKind='document'` — the note's claim is
+    universal, so one writer dropping it must not pass silently (#8525).
 
 Hermetic: a file read plus one import of the handler class. No DB, no network,
 no browser.
@@ -233,3 +238,32 @@ def test_upsert_document_writes_the_source_kind_and_the_anchor_pair() -> None:
         "never-overwrite contract; a plain SET would clobber an authoritative "
         "kind on a node the document fold merely MERGEs onto (#5082)"
     )
+
+
+def test_every_document_source_writer_stamps_source_kind() -> None:
+    """The §4.6 note and the four `_required_sweep` harnesses now assert
+    `sourceKind` on **every** `:Source` — a universal. Three paths can create a
+    document `:Source`; the PR #8525 review found two of them still writing
+    `sourceKind = NULL` while the doc and the sweeps claimed otherwise. Pin all
+    three writers here so a future removal of any one of them cannot leave the
+    doc and the sweeps as a false green.
+    """
+    import inspect
+
+    from tortoise.hosted_api import _execute_commit_writes
+    from tortoise.projection.entities import _EntityHandlers
+
+    write = "coalesce(s.sourceKind, 'document')"
+    writers = {
+        "_upsert_document (DocumentCreated fold)": _EntityHandlers._upsert_document,
+        "_event_plain_merge (objectType='Document' branch)": _EntityHandlers._event_plain_merge,
+        "_execute_commit_writes (/v1/sessions transcript MERGE)": _execute_commit_writes,
+    }
+    for name, fn in writers.items():
+        src = inspect.getsource(fn)
+        assert write in src, (
+            f"{name} must stamp `sourceKind='document'` on the document :Source "
+            f"— §4.6 marks it REQUIRED on every :Source, the four "
+            f"_required_sweep harnesses assert it on every :Source, and #5082 "
+            f"is only closed if all three writers agree (#8525 review)"
+        )

@@ -3974,9 +3974,18 @@ class _EntityHandlers:
             from tortoise.security import validate_document_id
             validate_document_id(str(obj))
             # D10 (ONTOLOGY §4.4): a document is a :Source keyed by url.
+            # #5082 (second writer): the SAME document `:Source` shape the
+            # `DocumentCreated` fold writes — §4.6 marks `sourceKind` REQUIRED
+            # on every `:Source`, and #5013 Q2 keeps the TYPE axis here while
+            # the genre rides `documentKind` (the two are different questions,
+            # §4.4). It is ON CREATE ONLY with the same `coalesce` semantics as
+            # `_upsert_document` (#398's never-overwrite contract), so a node an
+            # authoritative writer already stamped (a `_mint_source_stub` stub,
+            # a connector/session Source) keeps its kind.
             self.g.query(
                 "MERGE (s:Source {url:$id}) "
                 "ON CREATE SET s.id=$id, s.title=$id, "
+                "              s.sourceKind=coalesce(s.sourceKind, 'document'), "
                 "              s.documentKind='transcript'",
                 params={"id": obj},
             )

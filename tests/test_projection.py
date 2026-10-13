@@ -2172,21 +2172,44 @@ def test_upsert_event_uses_dict_kind(live_proj):
 
 
 def test_upsert_event_produces_document(live_proj):
-    """#125: objectType='Document' → produces→real Document node, no Object clone."""
+    """#125: objectType='Document' → produces→real Document node, no Object clone.
+
+    #5082: the minted document `:Source` must carry the **TYPE** axis
+    (`sourceKind='document'`) beside its genre — §4.6 marks `sourceKind`
+    REQUIRED on every `:Source`, and pre-fix this writer created the node with
+    `sourceKind = NULL` (the gap the four `_required_sweep` harnesses pin).
+    """
     proj = live_proj
     proj.apply({"type": "EventRecorded", "event": {
         "id": "evt-2", "eventKind": "sessionCaptured",
         "subject": "agent-pi", "object": "doc-1", "objectType": "Document",
         "uses": [{"name": "tortoise-capture", "kind": "skill"}]}})
     rows = proj.g.query(
-        "MATCH (e:Event {eventId:'evt-2'})-[:produces]->(d:Source) RETURN d.id"
+        "MATCH (e:Event {eventId:'evt-2'})-[:produces]->(d:Source) "
+        "RETURN d.id, d.sourceKind, d.documentKind"
     ).result_set
     assert rows and rows[0][0] == "doc-1", rows
+    assert list(rows[0][1:]) == ["document", "transcript"], rows
     # No Object clone
     rows2 = proj.g.query(
         "MATCH (e:Event {eventId:'evt-2'})-[:produces]->(o:Object) RETURN count(o)"
     ).result_set
     assert rows2[0][0] == 0, rows2
+
+
+def test_upsert_event_document_source_kind_is_create_only_398(live_proj):
+    """#398 never-overwrite: the event-document write MERGEs an existing
+    `:Source` that an authoritative writer already stamped — the `coalesce`
+    must leave that kind alone (#5082). A plain `SET` mutation is caught here."""
+    proj = live_proj
+    proj.g.query(
+        "MERGE (s:Source {url:'doc-sk-evt2'}) "
+        "SET s.sourceKind='agentSession', s.documentKind='transcript'")
+    proj.apply({"type": "EventRecorded", "event": {
+        "id": "evt-sk-2", "eventKind": "sessionCaptured",
+        "subject": "agent-pi", "object": "doc-sk-evt2",
+        "objectType": "Document"}})
+    assert _doc_axes(proj, "doc-sk-evt2") == ["agentSession", "transcript"]
 
 
 def test_upsert_event_legacy_string_uses_still_works(live_proj):
