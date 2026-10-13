@@ -2156,6 +2156,7 @@ surfaces:
   - test_ops_safety.py
   - test_orient_direct_consolidation.py
   - test_p1_differentiators.py
+  - test_pack_brief_hints_4894.py  # #4894 / #1026: the pack extraction VALUE-BRIEF slots (extraction.valueGate / promptFragments) get their consumer — carried by compile_value_brief into the reserved `pack_hints` section and rendered into the S1/S2/S4 value-brief slot; pins the byte-identity of the default path (no shipped pack declares either) and the reservation (a section key is never an objectKind, a pack is never named after one). Selected by a tortoise/value_extractor.py / extractor_v2.py change (the default `core` surface).
   - test_pack_cli.py
   - test_pack_content_v3.py
   - test_pack_extraction_slots_v31.py  # #1026 Stage 2: manifest v3.1 extraction behaviour slots (entityCues resolution, refused entityPatterns) — registered late; its absence reddened manifest-integrity on main from #5647 (9c4788400-era) until this line
@@ -2945,6 +2946,15 @@ surfaces:
   - test_welcome_url_consolidation.py
   - test_website_static.py
   - test_website_docs_consistency.py  # #3332: checks each public page against its canonical source (status vocab, EP mechanism, ontology link)
+  # #3329: the public capacity page. Registered HERE because `website/self-hosted.html`
+  # is a SOURCE_PATTERN of this surface, and `docs/capacity.md` is added as a CONCRETE
+  # path below — `docs/` alone is NOT a pattern and is in NON_PYTHON_PREFIXES, so
+  # without that entry a page-only diff selected NO surface and this guard would be
+  # asleep on the one change it exists to catch (the same #8334/#3524 silent-drop class
+  # the entry above names). The published write-concurrency figure is DERIVED from
+  # `tests/test_embedded_concurrency.py`'s own coverage, not restated — that figure was
+  # stale by 2-vs-5 for two months with nothing to detect it.
+  - test_capacity_page.py
   # #8379 (finding 2): the authoring contract renders as a real document, not as one
   # giant code block. Registered HERE because `website/functions/blog/` is a SOURCE_PATTERN
   # of this surface AND the doc itself is a CONCRETE path (`docs/blog-authoring.md`) —
@@ -4025,6 +4035,9 @@ durations:
   test_epic903_freshness.py: 3.8
   test_onboarding_integration.py: 4.5
   test_pack_cli.py: 4.5
+  # #4894: new file — carries the flat default until tools/ci_timing.py
+  # --refresh-durations collects it (a local reading does not model CI).
+  test_pack_brief_hints_4894.py: 12.0
   test_capabilities_endpoint.py: 6.2
   test_longmem_reader_pinning.py: 6.8
   test_recall_state.py: 3.8

@@ -124,6 +124,46 @@ case "$kept" in *7777*) rc=0;; *) rc=1;; esac
 ck "shipped reaper: an issue with a live lane is kept" $rc
 case "$(tr '\n' ' ' < "$R/checked.txt")" in *4114*) rc=1;; *) rc=0;; esac
 ck "shipped reaper: the reaped entry is removed from checked.txt" $rc
+
+# ── 5a) a FAILED listing must not be read as "no PRs" ────────────────────────────────────────
+# The capture (line above the heredoc) DELETES the list when `gh` fails, and the guard at the top of
+# the extracted reaper refuses the pass when either list is ABSENT. These cases pin BOTH halves:
+# an ABSENT list = the read FAILED = reap NOTHING; a PRESENT but EMPTY list = a real answer = reap.
+# Pre-fix, an absent/empty `.pr_brs` made `has_pr` false for every issue and 8888 — which HAS a PR
+# in the populated control above — was un-blacklisted and re-dispatched. (agent-infra#1705)
+RF="$TMP/reap-failpr"; mkdir -p "$RF"
+printf '4114\n8888\n' > "$RF/dispatched.txt"
+printf '4114\n8888\n' > "$RF/checked.txt"
+printf '4114\n8888\n' > "$RF/.open_iss"
+# .pr_brs deliberately ABSENT: this is the shape the shipped capture leaves on a failed `gh pr list`
+( PATH="$R:$PATH" python3 "$R/reap.py" "$RF" ) > "$TMP/reap-failpr.out" 2>&1
+kept="$(tr '\n' ' ' < "$RF/dispatched.txt")"
+case "$kept" in *4114*8888*) rc=0;; *) rc=1; echo "      dispatched.txt: '$kept'";; esac
+ck "shipped reaper: an UNREADABLE PR listing reaps NOTHING (both entries kept)" $rc
+case "$(tr '\n' ' ' < "$RF/checked.txt")" in *4114*8888*) rc=0;; *) rc=1;; esac
+ck "shipped reaper: an UNREADABLE PR listing leaves checked.txt untouched" $rc
+grep -q 'SKIPPED' "$TMP/reap-failpr.out" && rc=0 || rc=1
+ck "shipped reaper: the skipped pass says so (an unreadable listing is not an empty one)" $rc
+# the same guard for the neighbouring `.open_iss` probe, which had the safe polarity by accident
+RO="$TMP/reap-failopen"; mkdir -p "$RO"
+printf '4114\n8888\n' > "$RO/dispatched.txt"
+printf '4114\n8888\n' > "$RO/checked.txt"
+printf 'feat/8888-tm\n' > "$RO/.pr_brs"
+( PATH="$R:$PATH" python3 "$R/reap.py" "$RO" ) > "$TMP/reap-failopen.out" 2>&1
+case "$(tr '\n' ' ' < "$RO/dispatched.txt")" in *4114*) rc=0;; *) rc=1;; esac
+ck "shipped reaper: an UNREADABLE open-issue listing reaps nothing either" $rc
+# a PRESENT but EMPTY list is a REAL answer and must still reap
+RE="$TMP/reap-emptypr"; mkdir -p "$RE"
+printf '4114\n7777\n' > "$RE/dispatched.txt"
+printf '4114\n7777\n' > "$RE/checked.txt"
+printf '4114\n' > "$RE/.open_iss"   # 7777 is not open -> kept
+: > "$RE/.pr_brs"                     # readable and empty: there are genuinely no PRs
+( PATH="$R:$PATH" python3 "$R/reap.py" "$RE" ) > "$TMP/reap-emptypr.out" 2>&1
+kept="$(tr '\n' ' ' < "$RE/dispatched.txt")"
+case "$kept" in *4114*) rc=1;; *) rc=0;; esac
+ck "shipped reaper: a genuinely EMPTY (readable) PR listing still reaps 4114" $rc
+case "$kept" in *7777*) rc=0;; *) rc=1;; esac
+ck "shipped reaper: the empty-listing pass still keeps a non-open issue (7777)" $rc
 fi
 unset -f tmux
 
@@ -196,6 +236,33 @@ PY
   O="$RC" LIMIT=5 SC="$RC/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/collide-2.out" 2>&1
   case "$(tr '\n' ' ' < "$RC/candidates.txt")" in *10*) rc=0;; *) rc=1;; esac
   ck "shipped refresh loop: the COLLISION is re-attempted and queued once it clears" $rc
+fi
+
+# ── 5e) the capture site itself: a failed `gh` leaves ABSENCE, not an empty file ──────────────
+# The reaper guard above is only sound if the capture never hands it an empty file for a FAILED
+# read. Extract the shipped capture block and drive it with a stub `gh`: on failure NOTHING must be
+# left behind (`rm -f`), and on success the (empty) file must be present — that difference is what
+# lets the reaper tell "the read failed" from "the answer is none". The pre-fix `|| : > "$O/.pr_brs"`
+# wrote an empty file in BOTH cases, which is the fail-open being fixed here. (agent-infra#1705)
+awk '/^if ! gh issue list --repo "\$OR"/{f=1} f{print} f&&/^fi$/{c++; if(c==2) exit}' "$REFRESH" > "$TMP/acq.sh"
+if need "$TMP/acq.sh" "the listing capture is extracted from the shipped refresh-candidates.sh"; then
+  A="$TMP/acq"; mkdir -p "$A/fail" "$A/ok"
+  cat > "$A/gh" <<'SH'
+#!/bin/bash
+case "${GH_MODE:-}" in
+  fail) echo 'gh: could not reach api.github.com' >&2; exit 1 ;;
+  ok)   exit 0 ;;
+esac
+SH
+  chmod +x "$A/gh"
+  ( PATH="$A:$PATH" GH_MODE=fail O="$A/fail" OR="acme/widget" bash "$TMP/acq.sh" ) > "$TMP/acq-fail.out" 2>&1
+  [ ! -e "$A/fail/.pr_brs" ] && rc=0 || rc=1
+  ck "shipped capture: a FAILED PR listing leaves NO .pr_brs (absence, not an empty answer)" $rc
+  [ ! -e "$A/fail/.open_iss" ] && rc=0 || rc=1
+  ck "shipped capture: a FAILED issue listing leaves NO .open_iss" $rc
+  ( PATH="$A:$PATH" GH_MODE=ok O="$A/ok" OR="acme/widget" bash "$TMP/acq.sh" ) > "$TMP/acq-ok.out" 2>&1
+  [ -e "$A/ok/.pr_brs" ] && [ ! -s "$A/ok/.pr_brs" ] && rc=0 || rc=1
+  ck "shipped capture: a SUCCESSFUL empty PR listing leaves an EMPTY .pr_brs (a real answer)" $rc
 fi
 
 # ── 6) install.sh renders correctly, including values sed would mangle ───────────
@@ -508,8 +575,13 @@ ck "the fixer is given the failing CI log" $rc
 # 2026-10-12 while the caps (which count SESSIONS) reported the slot as busy.
 grep -q '^  reap_stale_workers$' "$LOOP" && rc=0 || rc=1
 ck "the reaper runs every cycle" $rc
-sed -n '/^reap_stale_workers() {/,/^}/p' "$LOOP" > "$TMP/reapw.sh"
-if need "$TMP/reapw.sh" "reap_stale_workers() is extracted from the shipped loop"; then
+sed -n '/^reap_stale_workers() {/,/^}/p' "$LOOP" > "$TMP/reapw-body.sh"
+# The reaper now delegates the mtime probe to the shipped portable helper (#1702), so its unit is
+# the helper PLUS the reaper. Extracting the reaper alone leaves file_mtime_epoch undefined and the
+# reaper silently skips every session (`command not found` -> the `|| continue` guard) — which is
+# exactly what this check caught when the helper was introduced.
+{ grep -m1 '^is_num() {' "$LOOP"; sed -n '/^file_mtime_epoch() {/,/^}/p' "$LOOP"; cat "$TMP/reapw-body.sh"; } > "$TMP/reapw.sh"
+if need "$TMP/reapw.sh" "reap_stale_workers() and its file_mtime_epoch() helper are extracted from the shipped loop"; then
   mkdir -p "$TMP/RW/logs"
   : > "$TMP/RW/logs/merge-999.log"; touch -t 202601010000 "$TMP/RW/logs/merge-999.log"
   : > "$TMP/RW/fresh.log"
@@ -879,7 +951,191 @@ if [ -s "$REFRESH" ]; then
 else rc=1; fi
 ck "refresh-candidates.sh dedupes the backlog in place and nothing running it re-sorts it" $rc
 
-# ── 19) a TERM'd controller EXITS; the lock/claim is not released while it is still running ──
+# ── 19) the harness runs on Linux as well as macOS (#1702) ──────────────────────
+# The shipped cell controller (cloud-cell-supervisor.sh) starts THIS loop on a Linux cell, and every
+# capacity probe it used was macOS-only. Reproduced on GNU coreutils 9.7 (debian:stable-slim):
+# `stat -f '%m' F` prints the FILESYSTEM LISTING on stdout and exits 1, so the `|| echo` fallback
+# APPENDED, the arithmetic failed, `age` was never assigned, and set -u turned the following test
+# into `age: unbound variable` — the controller died one cycle after its first dispatch, on every
+# cell. The Linux branch of each replacement is driven below, with the GNU shapes stubbed.
+# Verified the hard way: dropped into the PRE-FIX tree, these checks FAIL (reproduced against the
+# pre-fix orch-loop.sh: file_mtime_epoch extraction empty and the GNU-shape reaper drive aborts).
+# Called for by the issue's own verification table: a stub `stat` that reproduces the GNU shapes. It
+# is created UNCONDITIONALLY so the reaper drive below really is driven by GNU semantics even when
+# the helper is absent (otherwise the stub would be missing, the real BSD stat would answer, and the
+# drive would pass on the broken copy — verified by running it against the pre-fix tree).
+mkdir -p "$TMP/gnubin"
+cat > "$TMP/gnubin/stat" <<'SH'
+#!/bin/bash
+# GNU coreutils shape, emulated on ANY host:
+#   -c '%Y' <file>  -> succeeds, printing the epoch (real GNU behaviour)
+#   -f '%m' <file>  -> prints the FILESYSTEM LISTING on stdout and exits 1 (real GNU behaviour)
+# The -c branch MUST NOT delegate to the ambient /usr/bin/stat. Doing so emulates "GNU success" with
+# a BSD binary on a mac and with a GNU one on Linux — either way the drive tests the HOST, not the
+# GNU shape, and on Linux the branch returned GNU's listing/failure so the reaper skipped every
+# session and the drive below reaped nothing (the four §19 checks false-redded the fixed tree).
+# `date -r <file> +%s` is the portable way to ask any host for a file's epoch mtime.
+if [ "${1:-}" = "-c" ]; then date -r "${3:-}" +%s; exit $?; fi
+if [ "${1:-}" = "-f" ]; then echo "/dev/disk1 234881024 1234 5678 9% /"; exit 1; fi
+exit 1
+SH
+chmod +x "$TMP/gnubin/stat"
+sed -n '/^file_mtime_epoch() {/,/^}/p' "$LOOP" > "$TMP/mtime-body.sh"
+# `need` on the helper ALONE: if it is absent (the pre-fix tree) the whole block is skipped, rather
+# than every check inside passing vacuously off `command not found` (which really does return rc!=0).
+if need "$TMP/mtime-body.sh" "file_mtime_epoch() is extracted from the shipped loop"; then
+  { grep -m1 '^is_num() {' "$LOOP"; cat "$TMP/mtime-body.sh"; } > "$TMP/mtime.sh"
+  : > "$TMP/mt.log"; touch -t 202601010000 "$TMP/mt.log"
+  # The expected epoch is the FILE's, asked of the host portably. `/usr/bin/stat -f '%m'` is BSD-only:
+  # on GNU coreutils it prints the filesystem listing to stdout and exits 1, so `want` became a
+  # listing and the comparisons below failed against a CORRECT helper. `date -r <file> +%s` works on
+  # both (GNU and BSD date accept a reference file), so this check no longer assumes the host's shape.
+  want="$(date -r "$TMP/mt.log" +%s)"
+  got="$(bash -c ". '$TMP/mtime.sh'; file_mtime_epoch '$TMP/mt.log'")"
+  [ "$got" = "$want" ] && rc=0 || { rc=1; echo "      host got '$got' want '$want'"; }
+  ck "file_mtime_epoch(): the host's real stat path returns the file's epoch mtime" $rc
+  got="$(PATH="$TMP/gnubin:$PATH" bash -c ". '$TMP/mtime.sh'; file_mtime_epoch '$TMP/mt.log'")"
+  [ "$got" = "$want" ] && rc=0 || { rc=1; echo "      gnu got '$(printf '%s' "$got" | tr '\n' '|')'"; }
+  ck "file_mtime_epoch(): the GNU shape (stat -f prints a listing) still yields ONE numeric epoch" $rc
+  # Both shapes fail -> non-zero rc with NO guessed age. The reaper then SKIPS the session; it must
+  # not fall back to `date +%s` (age 0 is a guess that reads as a healthy worker either way).
+  got="$(PATH="$TMP/gnubin:$PATH" bash -c ". '$TMP/mtime.sh'; file_mtime_epoch '$TMP/absent.log' && echo ZERO || echo NONZERO")"
+  [ "$got" = "NONZERO" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "file_mtime_epoch(): an unreadable file fails to a non-zero rc instead of guessing an age" $rc
+fi
+# The reaper driven with the GNU stat shape: the pre-fix copy ABORTS here (`age: unbound variable`,
+# rc 1) and kills nothing. Assert rc=0 AND the kill decision — stale reaped, fresh spared — so a
+# "fix" that simply stopped reaping cannot pass this.
+{ grep -m1 '^is_num() {' "$LOOP"; sed -n '/^file_mtime_epoch() {/,/^}/p' "$LOOP"; sed -n '/^reap_stale_workers() {/,/^}/p' "$LOOP"; } > "$TMP/reapw-gnu.sh"
+if need "$TMP/reapw-gnu.sh" "the reaper and its stat helper are extracted for the GNU-shape drive"; then
+  mkdir -p "$TMP/RG/logs"
+  : > "$TMP/RG/logs/merge-999.log"; touch -t 202601010000 "$TMP/RG/logs/merge-999.log"
+  : > "$TMP/RG/logs/merge-100.log"
+  cat > "$TMP/rg.sh" <<SH
+set -u
+PATH="$TMP/gnubin:\$PATH"
+LOG="$TMP/RG/rw.log"; O="$TMP/RG"; STALE_MIN=1; KILLED=""
+tmux() { case "\${1:-}" in
+  ls) printf 'merge-999\nmerge-100\n' ;;
+  list-panes) echo 4242 ;;
+  kill-session) KILLED="\$KILLED \$3" ;;
+esac; }
+kill() { :; }
+. "$TMP/reapw-gnu.sh"
+reap_stale_workers; rc=\$?
+echo "rc=\$rc killed=\$KILLED"
+SH
+  out="$(bash "$TMP/rg.sh" 2>&1)"
+  case "$out" in *"rc=0"*) rc=0;; *) rc=1; echo "      got: $out";; esac
+  ck "shipped reaper, GNU stat shape: the cycle COMPLETES (rc 0) with no arithmetic abort" $rc
+  case "$out" in *"merge-999"*) rc=0;; *) rc=1;; esac
+  ck "shipped reaper, GNU stat shape: the stale session is reaped" $rc
+  # ⛔ NOT a bare "does not contain merge-100": that is trivially true when the reaper ABORTS, so it
+  # PASSED on the pre-fix code (verified against origin/main's orch-loop.sh). Assert the POSITIVE in
+  # the same check — the run completed (rc 0) AND the killed set is EXACTLY the stale session — so a
+  # crash and an over-reaching reaper both fail here. The stub records `$3` of `kill-session -t
+  # "=$s"`, i.e. the exact-match token `=merge-999`; `grep -o` + stripping keeps the comparison exact
+  # rather than a substring match that `=merge-999 =merge-100" would also satisfy.
+  case "$out" in *"rc=0"*) rc=0;; *) rc=1; echo "      not rc=0: $out";; esac
+  killed_list="$(printf '%s\n' "$out" | grep -o 'killed=.*' | sed 's/^killed= *//')"
+  [ "$killed_list" = "=merge-999" ] || { rc=1; echo "      killed exactly: '$killed_list'"; }
+  ck "shipped reaper, GNU stat shape: completes (rc 0) and reaps exactly the stale session" $rc
+  grep -q 'reap-worker' "$TMP/RG/rw.log" 2>/dev/null && rc=0 || rc=1
+  ck "shipped reaper, GNU stat shape: the kill is logged" $rc
+fi
+sed -n '/^load1() {/,/^}/p' "$LOOP" > "$TMP/load1.sh"
+if need "$TMP/load1.sh" "load1() is extracted from the shipped loop"; then
+  printf '7.42 1.10 0.95 2/345 999\n' > "$TMP/loadavg"
+  got="$(bash -c ". '$TMP/load1.sh'; load1 '$TMP/loadavg'")"
+  [ "$got" = "7" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "shipped load1(): the Linux (/proc/loadavg) path reads FIELD 1 as the 1-min load" $rc
+  # macOS prints '{ 1.70 1.90 2.00 }', so there the 1-min load is field 2. Pin the FIELD, not only
+  # the path: one awk shared by both platforms would pass a path-only check and still read 5-min.
+  got="$(bash -c "sysctl() { echo '{ 3.30 4.40 5.50 }'; }; . '$TMP/load1.sh'; load1 '$TMP/absent-loadavg'")"
+  [ "$got" = "3" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "shipped load1(): the macOS (sysctl vm.loadavg) path reads the 1-min field, not the 5-min" $rc
+fi
+sed -n '/^swap_usage_mb() {/,/^}/p' "$LOOP" > "$TMP/swap.sh"
+if need "$TMP/swap.sh" "swap_usage_mb() is extracted from the shipped loop"; then
+  printf 'MemTotal:       16000000 kB\nSwapTotal:       2048000 kB\nSwapFree:        1024000 kB\n' > "$TMP/meminfo"
+  got="$(bash -c ". '$TMP/swap.sh'; swap_usage_mb '$TMP/meminfo'")"
+  [ "$got" = "1000 2000" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "shipped swap_usage_mb(): the Linux (/proc/meminfo) path converts kB to MB as <free> <total>" $rc
+  # 'we could not read it' must stay distinguishable from 'no swap configured' (total 0, the allow).
+  # BOTH probes are stubbed to fail: with only the meminfo path unavailable the function correctly
+  # falls back to sysctl, which is not the state under test here.
+  got="$(bash -c "sysctl() { :; }; . '$TMP/swap.sh'; swap_usage_mb '$TMP/absent-meminfo' && echo OK || echo NONZERO")"
+  [ "$got" = "NONZERO" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "shipped swap_usage_mb(): an unreadable probe returns non-zero, not a false '0 0'" $rc
+  got="$(bash -c "sysctl() { echo 'total = 2048.00M  used = 1.00M  free = 2047.00M'; }; . '$TMP/swap.sh'; swap_usage_mb '$TMP/absent-meminfo'")"
+  [ "$got" = "2047 2048" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "shipped swap_usage_mb(): the macOS (sysctl vm.swapusage) path still yields <free> <total> MB" $rc
+fi
+# Available memory is the FIFTH macOS-only probe and the only one that fails CLOSED: before #1702 a
+# cell reported no vm_stat, so MEM_UNKNOWN was set every cycle and `mem_probe_failed` bound the gate
+# FOREVER when load/lanes/swap were healthy — the controller ran, logged, and never dispatched a
+# lane. That is the false green #1702 removes, so the Linux path is driven explicitly here.
+sed -n '/^mem_avail_mb() {/,/^}/p' "$LOOP" > "$TMP/mem.sh"
+if need "$TMP/mem.sh" "mem_avail_mb() is extracted from the shipped loop"; then
+  { grep -m1 '^is_num() {' "$LOOP"; cat "$TMP/mem.sh"; } > "$TMP/memfull.sh"
+  # MemAvailable 6144000 kB = 6000 MB; MemFree+Cached = 2048000+4096000 = 6144000 kB too, so one
+  # expectation separates "read MemAvailable" from "read MemFree+Cached".
+  printf 'MemTotal:       16000000 kB\nMemFree:         2048000 kB\nCached:          4096000 kB\nMemAvailable:    6144000 kB\n' > "$TMP/meminfo2"
+  got="$(bash -c ". '$TMP/memfull.sh'; mem_avail_mb '$TMP/meminfo2'")"
+  [ "$got" = "6000" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "shipped mem_avail_mb(): the Linux (/proc/meminfo MemAvailable) path yields available MB" $rc
+  # Pre-3.14 kernels have no MemAvailable; MemFree+Cached is the documented fallback.
+  printf 'MemTotal:       16000000 kB\nMemFree:         2048000 kB\nCached:          4096000 kB\n' > "$TMP/meminfo3"
+  got="$(bash -c ". '$TMP/memfull.sh'; mem_avail_mb '$TMP/meminfo3'")"
+  [ "$got" = "6000" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "shipped mem_avail_mb(): falls back to MemFree+Cached when MemAvailable is absent" $rc
+  # macOS path kept: (1000 free + 2000 inactive) * 16384 B / 1 MiB = 46 (truncated).
+  got="$(bash -c "vm_stat() { printf 'Mach Virtual Memory Statistics: (page size of 16384 bytes)\\nPages free: 1000.\\nPages inactive: 2000.\\n'; }; . '$TMP/memfull.sh'; mem_avail_mb '$TMP/absent-meminfo'")"
+  [ "$got" = "46" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "shipped mem_avail_mb(): the macOS (vm_stat free+inactive) path still yields available MB" $rc
+  # UNKNOWN must stay distinguishable from "0 MB available": the gate fails CLOSED on the former.
+  got="$(bash -c "vm_stat() { :; }; . '$TMP/memfull.sh'; mem_avail_mb '$TMP/absent-meminfo' && echo OK || echo NONZERO")"
+  [ "$got" = "NONZERO" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "shipped mem_avail_mb(): an unreadable probe returns non-zero (UNKNOWN), not a false 0" $rc
+fi
+# The regression guard that does not depend on any single spelling of the call site: a macOS-only
+# kernel probe anywhere OUTSIDE the portable helpers is the bug, still shipped. `vm_stat` is included
+# because it is the probe whose Linux absence was the LAST false green (the guard previously scoped
+# only load/swap/mtime and so could not see it). `res_line` is exempt: it is a log-only measurement
+# (`res_line` is called under "MEASURE every resource; decide nothing from it"), its memory field
+# degrades to `?` off macOS, and it cannot gate dispatch — the gate's available-memory figure is
+# mem_avail_mb(), whose call site is asserted separately below.
+outside="$(awk '
+  /^[[:space:]]*#/ {next}
+  /^file_mtime_epoch\(\) \{|^load1\(\) \{|^swap_usage_mb\(\) \{|^mem_avail_mb\(\) \{|^res_line\(\) \{/ {h=1}
+  h && /^\}/ {h=0; next}
+  h {next}
+  /sysctl -n (vm\.loadavg|vm\.swapusage)|stat -f .%m.|vm_stat/ {print FNR": "$0}
+' "$LOOP")"
+[ -z "$outside" ] && rc=0 || { rc=1; echo "      outside the helpers: $outside"; }
+ck "no call site uses a macOS-only load/swap/mtime/memory probe outside the portable helpers" $rc
+grep -q 'if _sw="$(swap_usage_mb)"; then SWFREE=' "$LOOP" && rc=0 || rc=1
+ck "the dispatch gate reads swap through swap_usage_mb()" $rc
+grep -q 'if MEMAVAIL_MB="$(mem_avail_mb)"; then' "$LOOP" && rc=0 || rc=1
+ck "the dispatch gate reads available memory through mem_avail_mb() (not a bare vm_stat)" $rc
+grep -q 'm="$(file_mtime_epoch "$f")" || continue' "$LOOP" && rc=0 || rc=1
+ck "the reaper reads the log mtime through file_mtime_epoch() and skips on unknown" $rc
+# install.sh renders MAX_LOAD into the plist from its OWN _NCPU and section 7 compares the two
+# files' effective defaults — a divergence there would only surface ON a Linux host, so pin it here.
+grep -q 'nproc 2>/dev/null' "$INST" && rc=0 || rc=1
+ck "install.sh derives _NCPU portably too (its MAX_LOAD must match the loop's on any host)" $rc
+# ⛔ ORDER, not presence: the `_NCPU` coercion was added in the input-validation block, ~30 lines
+# AFTER `MAX_LOAD="${MAX_LOAD:-$(( _NCPU * 10 ))}"` — its only read. A guard that runs after the
+# arithmetic cannot protect it ("dead-guard"), so the property to pin is that the coercion line
+# PRECEDES the MAX_LOAD line. Both are asserted line-ordered; the check fails on the pre-fix file.
+_ncpu_guard_line="$(grep -n 'is_num "${_NCPU:-}"' "$LOOP" | head -1 | cut -d: -f1)"
+_maxload_line="$(grep -n '^MAX_LOAD="' "$LOOP" | head -1 | cut -d: -f1)"
+[ -n "$_ncpu_guard_line" ] && [ -n "$_maxload_line" ] && [ "$_ncpu_guard_line" -lt "$_maxload_line" ] && rc=0 || rc=1
+ck "orch-loop.sh coerces _NCPU BEFORE MAX_LOAD reads it (guard is not guard-after-use)" $rc
+grep -q 'is_num "${MAX_LOAD:-}"' "$LOOP" && rc=0 || rc=1
+ck "orch-loop.sh coerces a non-numeric MAX_LOAD instead of letting the load gate fail OPEN" $rc
+
+# ── 20) a TERM'd controller EXITS; the lock/claim is not released while it is still running ──
 # agent-infra#1715. The shipped trap was `trap 'rm -f "$LOCKF"' EXIT INT TERM`: for INT/TERM a
 # handler that RETURNS resumes the interrupted command loop, so the documented stop path
 # (`pkill -f orch-loop.sh`, README §6) deleted the lock while the controller kept sweeping,
