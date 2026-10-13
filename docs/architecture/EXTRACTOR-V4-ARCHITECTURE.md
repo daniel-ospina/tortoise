@@ -1209,7 +1209,7 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 
 | section | issue(s) | what the issue takes from here |
 |---|---|---|
-| §1 the mechanism (`^the <X>`, 62.3% of Objects) | **`#4899`** (CLOSED `COMPLETED`) · `#4894` | ⚠️ **`#4899` is the *identifier-only* DISCARD** (`^#\d{3,}$`-style), shipped in `tortoise/value_gate.py` and **OFF by default**. **It deliberately does NOT cover `the <X>` definite descriptions** — `value_gate.py`'s docstring: *"a definite description is left to the arbiter, and is reported, not dropped"* — so the 62.3% `the <X>` class belongs to the **adversarial (S2.2)** half, not this one |
+| §1 the mechanism (`^the <X>`, 62.3% of Objects) | **`#4899`** (CLOSED `COMPLETED`) · `#4894` | ⚠️ **`#4899` is the *identifier-only* DISCARD** (`value_gate._REFERENCE` / `identifier_only()`), shipped in `tortoise/value_gate.py` and **OFF by default**. **It deliberately does NOT cover `the <X>` definite descriptions** — `value_gate.py`'s docstring: *"a definite description is left to the arbiter, and is reported, not dropped"* — so the 62.3% `the <X>` class belongs to the **adversarial (S2.2)** half, not this one |
 | §1 v2 → v3 → v4 | `#1509` (epic) · `#4894` | **v3 increases volume; v4 must land with or before v3's E2/E3** — and v3's **E4 has already landed** (`merge_embed_lists`, `extractor_v2.py:4845`), so its premise is stale |
 | §2 three tiers | `#2281` | the **narrative is the ingest-time-distilled layer** with raw-turn fallback |
 | §2 narrative placement (D1) | `#4894` | narrative = `Source` metadata, **not** a `Document` node |
