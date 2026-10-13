@@ -536,9 +536,11 @@ console.log("generate-seo handler — one brand suffix, no dangling separator, n
     // proves nothing about it, so the shape is asserted explicitly above — and
     // the limit is stated here rather than hidden behind an absolute claim.
     assertEq(nonIdempotent, 0, "metaTitle is idempotent across a 3,000-title suffix-bearing corpus");
-    // The mid-title shape IS divergent (the documented limit). Assert it is
-    // actually exercised, so this corpus cannot silently stop covering it.
-    assert(midTitleDivergent > 0, `the mid-title "Tortoise" shape is exercised (${midTitleDivergent} divergent)`);
+    // ⛔ The mid-title shape is now CANONICALISED, not divergent — stripping after
+    // truncating handles the tail the pre-truncation strip cannot see. Assert it is
+    // covered, so the corpus cannot silently stop generating it.
+    assertEq(midTitleDivergent, 0,
+      `the mid-title "Tortoise" shape is covered and canonicalised (${midTitleDivergent} divergent)`);
     // ⛔ Cap BOUNDARIES. The `!truncated` clause in `keyword_ok` is load-bearing
     // and only tested in the interior; an off-by-one at the cap would be invisible.
     assert(
@@ -853,14 +855,29 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   // keywords" over a list that is not the validator's domain — the exact round-7
   // defect (a 59-of-147 seed). Assert the SET, not a sample of it.
   {
-    const seeded = allKeywords().filter((k) => seenPrompt.includes(k));
-    const missing = allKeywords().filter((k) => !seenPrompt.includes(k));
-    assertEq(seeded.length, allKeywords().length,
-      `the tagless prompt seeds the WHOLE vocabulary, not a sample (${seeded.length}/${allKeywords().length})`);
-    // `assertEq` compares with `===`, so compare the LENGTH, not the array
-    // (two empty arrays are never `===`).
+    // ⛔ PARSE the seeded list; do NOT substring-match it. 18 of the 147 keywords
+    // are substrings of another (`graph rag` ⊂ `knowledge graph rag`, `falkordb` ⊂
+    // `falkordb vs neo4j`, …), so `seenPrompt.includes(k)` counted a DROPPED
+    // keyword as seeded. A regression narrowing the seed survived the whole suite
+    // while the prompt still claimed "choose exactly ONE of these researched
+    // keywords". The candidates are emitted as `Candidates: a, b, c`, so split
+    // that line and compare SETS.
+    const line = /Candidates: ([^\n]*)/.exec(seenPrompt)?.[1] ?? "";
+    assert(line.length > 0, "the tagless prompt emits a `Candidates:` line");
+    const seeded = line.split(", ").map((k) => k.trim()).filter(Boolean);
+    const want = allKeywords();
+    assertEq(seeded.length, want.length,
+      `the tagless prompt seeds the WHOLE vocabulary, not a sample (${seeded.length}/${want.length})`);
+    const missing = want.filter((k) => !seeded.includes(k));
     assertEq(missing.length, 0,
-      `...and every researched keyword is reachable by the model (missing ${JSON.stringify(missing.slice(0, 3))})`);
+      `...every researched keyword is seeded (missing ${JSON.stringify(missing.slice(0, 3))})`);
+    const extra = seeded.filter((k) => !want.includes(k));
+    assertEq(extra.length, 0,
+      `...and nothing outside the vocabulary is offered (extra ${JSON.stringify(extra.slice(0, 3))})`);
+    // The substring trap itself, asserted: dropping a keyword that is a substring
+    // of another must be DETECTED. (`graph rag` ⊂ `knowledge graph rag`.)
+    assert(want.includes("graph rag") && want.some((k) => k !== "graph rag" && k.includes("graph rag")),
+      "the vocabulary really does contain substring-overlapping keywords (so the test above is not vacuous)");
   }
   assert(
     /choose exactly ONE/i.test(seenPrompt),
@@ -898,8 +915,15 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
       /tags: 3-5 relevant terms from this vocabulary/i.test(seenPrompt),
       "the SYSTEM prompt names the tag vocabulary the fallback keyword depends on",
     );
-    for (const tag of ["agent-memory", "epistemic-memory", "knowledge-graph", "retrieval"]) {
-      assert(seenPrompt.includes(tag), `the SYSTEM prompt names the \`${tag}\` tag`);
+    // ⛔ Match the VOCABULARY SENTENCE specifically. A bare `includes(tag)` is
+    // satisfied by the user prompt's candidate list — which contains "hybrid
+    // retrieval", "multi-hop retrieval", … — so `retrieval` could be deleted from
+    // the vocabulary sentence with the suite green (the same mistake this block
+    // diagnoses for the required-keys regex).
+    const vocab = /tags: 3-5 relevant terms from this vocabulary[^.]*\./i.exec(seenPrompt)?.[0] ?? "";
+    assert(vocab.length > 0, "the SYSTEM prompt states the tag-vocabulary instruction");
+    for (const tag of ["agent-memory", "epistemic-memory", "knowledge-graph", "retrieval", "provenance", "sessions"]) {
+      assert(vocab.includes(tag), `the SYSTEM prompt's VOCABULARY sentence names \`${tag}\``);
     }
   }
 
@@ -1277,60 +1301,83 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     assertEq(suffixOnly.body.error, "generation_incomplete", "...as an incomplete generation");
   }
 
-  // ⛔ ROUND-10 (verifier): `metaTitle` is NOT idempotent when TRUNCATION EXPOSES a
-  // mid-title punctuation-led "Tortoise" — a second pass strips that exposed tail
-  // as if it were a brand suffix. Asserted here as the DOCUMENTED behaviour, not
-  // as a defect: `generate-seo.ts` no longer derives `repairFired` from a second
-  // enforce pass, so the divergence cannot reach the verdict.
+  // ⛔ ROUND-11 (review of #8481): three more clauses with no fixture.
   //
-  // ⚠️ The verifier reported this as a false `keyword_ok: false`. Measured: it is
-  // NOT reachable — divergence needs the raw title to EXCEED the cap, which
-  // already sets `titleTruncated` and forces `keyword_ok: false` for the honest
-  // reason. 200,000 randomised titles: 8,272 divergent, **0 of them under the
-  // cap**. The clause below pins both halves so a future change to the truncation
-  // flags cannot silently resurrect it.
-  for (const [t, p1, p2] of [
-    ["Epistemic confidence in knowledge graphs —  Tortoise explained",
-     "Epistemic confidence in knowledge graphs —  Tortoise",
-     "Epistemic confidence in knowledge graphs | Tortoise"],
-    ["Why retrieval matters for autonomous systems -  Tortoise for teams",
-     "Why retrieval matters for autonomous systems -  Tortoise",
-     "Why retrieval matters for autonomous systems | Tortoise"],
+  // (a) the empty-after-strip guard's VARIABLE. `if (!fitted)` vs `if (!stripped)`
+  //     were indistinguishable — the `" | Tortoise"` fixture strips to "" under
+  //     both. A raw of `"|"` leaves `stripped = "|"` (truthy) while `fitted = ""`,
+  //     so the wrong variable returns `" | Tortoise"` and the handler answers 200
+  //     with a SUFFIX-ONLY title instead of the honest 502.
+  // (b) the DESCRIPTION empty-field ternary. The `incomplete` fixture empties both
+  //     fields, so the title's emptiness masks the description's — dropping the
+  //     description half answered 200 with `meta_description` = the bare keyword,
+  //     the #8293 "the repair must not invent a keyword-only field" defect.
+  // (c) the suffix boundary at exactly the cap (asserted above).
+  for (const [label, metaTitle] of [
+    ["a bare separator", "|"],
+    ["a bare em-dash", "—"],
+    ["a bare period", ".."],
+    ["only whitespace and punctuation", " - "],
   ]) {
-    assertEq(constraints.metaTitle(t), p1, `pass 1 strips the model's own suffix then truncates: ${JSON.stringify(p1.slice(0, 30))}…`);
-    assertEq(constraints.metaTitle(p1), p2, "...and pass 2 strips the tail TRUNCATION exposed — hence non-idempotent");
-    assert(t.trim().length > META_TITLE_MAX, "...which only happens when the raw title EXCEEDS the cap");
+    __resetRateLimits();
+    const suffixOnly = await drive({ metaTitle });
+    assertEq(suffixOnly.status, 502,
+      `${label} as the whole title is refused, not published as a suffix-only title`);
+    assertEq(suffixOnly.body.error, "generation_incomplete", "...as an incomplete generation");
   }
   {
     __resetRateLimits();
-    const exposed = await drive({
+    const emptyDesc = await drive({
       primaryKeyword: "long-term memory for ai agents",
-      metaTitle: "Long-term memory for AI agents: epistemic confidence in knowledge graphs —  Tortoise explained",
-      metaDescription: "A description that names no keyword at all.",
+      metaTitle: "Long-term memory for ai agents",
+      metaDescription: "",
     });
-    assertLive(exposed, "exposedProse");
-    assertEq(
-      exposed.body.keyword_ok,
-      false,
-      "an over-cap title is honestly not green — the reason is the CAP, not a phantom repair",
-    );
-    // ⛔ The keyword is in the TITLE, so the repair does NOT fire — that isolates
-    // the cap as the ONLY reason for `false`, which is what this fixture is for.
-    assert(
-      !exposed.body.meta_title.startsWith("long-term memory for ai agents: "),
-      "...and it was NOT repair-prefixed, so the cap is the only reason for `false`",
-    );
-    assert(
-      exposed.body.meta_title.toLowerCase().includes("long-term memory for ai agents"),
-      "...the keyword is the model's own placement, carried into the returned title",
-    );
-    // The keyword IS present and the contract normalised it — the verdict is
-    // false ONLY because the cap cut the title, which is the honest reason.
-    assert(
-      exposed.body.meta_title.includes("long-term memory for ai agents") ||
-        exposed.body.meta_description.includes("long-term memory for ai agents"),
-      "...the keyword is still carried, so `false` does not mean 'keyword missing'",
-    );
+    assertEq(emptyDesc.status, 502,
+      "an EMPTY description is refused even when the title is fine — the repair must not invent a keyword-only field");
+    assertEq(emptyDesc.body.error, "generation_incomplete", "...as an incomplete generation");
+  }
+
+  // ⛔ The two strips fix OPPOSITE halves of the same problem, and the round-10
+  // attempt did only one of each in turn:
+  //   · stripping only AFTER truncating SPLITS the suffix — `"a"×58 + "|Tortoise"`
+  //     comes back as `"a"×58 + "|T"`, and the fragment cannot be matched back;
+  //   · stripping only BEFORE truncating EXPOSES a mid-title punctuation-led
+  //     "Tortoise" as a brand-looking tail — "… knowledge graphs —  Tortoise
+  //     explained" cuts to "… knowledge graphs —  Tortoise" and the canonical
+  //     suffix is never appended.
+  // Doing both leaves a result ending in neither, which is also what restores full
+  // idempotence. Each half gets its own assertion, so removing either strip fails.
+  for (const [label, raw, expected] of [
+    ["split suffix", `${"a".repeat(58)}|Tortoise`, "a".repeat(58)],
+    ["split suffix, tighter cut", `${"a".repeat(52)}|Tortoise`, "a".repeat(52)],
+    ["truncation exposes a mid-title Tortoise",
+     "Epistemic confidence in knowledge graphs —  Tortoise explained",
+     "Epistemic confidence in knowledge graphs | Tortoise"],
+    ["…and again", "Why retrieval matters for autonomous systems -  Tortoise for teams",
+     "Why retrieval matters for autonomous systems | Tortoise"],
+  ]) {
+    const out = constraints.metaTitle(raw);
+    assertEq(out, expected, `${label}: canonical, no split fragment and no dangling tail`);
+    assertEq(constraints.metaTitle(out), out, `...and idempotent (${label})`);
+    assert(out.length <= META_TITLE_MAX, `...and within the cap (${label})`);
+  }
+  // The no-trailing-separator property, since a dangling "—" before the suffix is
+  // exactly what a mis-ordered strip leaves behind.
+  for (const sep of ["|", "—", "–", "-", "·", ":", ",", ";", ".", "!", "?"]) {
+    const out = constraints.metaTitle(`Long-term memory for AI agents ${sep}`);
+    assertEq(out, "Long-term memory for AI agents | Tortoise",
+      `a raw title ending in ${JSON.stringify(sep)} normalises to one canonical suffix`);
+  }
+  // ⛔ The SUFFIX BOUNDARY at exactly the cap: 49 chars of base + 11 of suffix = 60,
+  // which must still GET the suffix. Asserting only `length <= 60` passed under both
+  // `<=` and `<`, so `<` silently DROPPED the brand from a title that fits.
+  {
+    const base49 = "b".repeat(49);
+    const out = constraints.metaTitle(base49);
+    assertEq(out.length, META_TITLE_MAX, "a base that exactly fills the cap with the suffix still gets it");
+    assertEq(out, `${base49} | Tortoise`, "...and the suffix is present, not silently dropped");
+    const base50 = "c".repeat(50);
+    assertEq(constraints.metaTitle(base50), base50, "one char over: the prefix is kept, the suffix dropped");
   }
 
   // ⛔ P1-1 (round 9): the TITLE branch of `chosenUsed`'s OR was untested.

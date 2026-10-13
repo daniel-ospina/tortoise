@@ -405,8 +405,6 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     title,
   );
 
-  // ⛔ Does the response's field differ from the one `keyword_ok` below checks?
-  // `enforced` is the FIRST contract pass; the caller receives `repaired`, the
   // Reject rather than silently ship junk when generation produced nothing usable.
   if (!repaired.meta_title || !repaired.meta_description || !repaired.excerpt || repaired.tags.length === 0) {
     return json({ error: "generation_incomplete", message: "generated fields incomplete after constraints" }, 502);

@@ -115,12 +115,28 @@ export const constraints: Constraints = {
     // already fits, so only the post-truncate strip covers the common short-title
     // case; a second copy on `stripped` was redundant (deleting it left the suite
     // green, which is how the duplication was found in round 10).
+    // ⛔ STRIP — TRUNCATE — STRIP AGAIN. Both strips are load-bearing and they
+    // fix OPPOSITE halves of the same problem:
+    //   · before truncating, so a cut can never SPLIT the suffix (a fragment like
+    //     `"a"×58 + "|T"` cannot be matched back);
+    //   · after truncating, so a cut can never EXPOSE a mid-title punctuation-led
+    //     "Tortoise" as a brand-looking tail ("… knowledge graphs —  Tortoise
+    //     explained" cut to "… knowledge graphs —  Tortoise").
+    // Doing only the first leaked that exposed tail; doing only the second leaked
+    // the split fragment. Together they leave a result that ends in neither, which
+    // is also what makes the function fully idempotent again — a second pass finds
+    // no trailing suffix to remove.
     const stripped = raw
       .trim()
       .replace(BRAND_SUFFIX_TAIL_RE, "")
       .trim();
+    // The trailing-separator class is the SAME `[\p{P}\p{S}]` class as the suffix
+    // strip, not an enumerated list. An enumerated list is exactly how the suffix
+    // strip failed three rounds running; this one had the same hole (`·`, `©`, `•`,
+    // `)` left a dangling separator before the suffix) and no fixture fed it.
     const fitted = truncateAtWord(stripped, META_TITLE_MAX)
-      .replace(/[\s,.;:!?|—–-]+$/, "")
+      .replace(BRAND_SUFFIX_TAIL_RE, "")
+      .replace(/[\p{P}\p{S}\s]+$/u, "")
       .trim();
     if (!fitted) return "";
     // Brand suffix when it fits — meta_title is the FINAL title (SSR renders the
