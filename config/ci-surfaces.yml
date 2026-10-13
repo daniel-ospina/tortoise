@@ -2486,6 +2486,12 @@ surfaces:
   # restore assertion bound must stay BELOW the client socket timeout so
   # "overran its bound" and "the socket timed out" remain distinguishable.
   - test_7846_restore_doc_and_bounds.py
+  # #5275: the ARMED fail-loud contract must survive the READ path.
+  # `tortoise/search_engine.py` (the `fallback_tfidf` sink) selects `core`,
+  # so this is the surface that runs the guard on that diff; `tortoise/sdk.py`
+  # is a SHARED_MODULE (full matrix), so the registration is what pins the file
+  # to a surface at all — without it `--integrity` reds on an unclassified file.
+  - test_5275_required_read_path.py
   ep:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
@@ -3551,6 +3557,14 @@ durations:
   # red `test_duration_coverage_guard_boundary_and_realistic` (the #4348 one-file trap).
   # Refresh from the first post-merge main run that includes it.
   test_read_status.py: 2.0
+  # #5275: unmeasured at PR time (a file ADDED by a PR cannot appear in a
+  # junit artifact, so it has no measured duration — the #4348/#2876 trap).
+  # 20.0 is the local `TORTOISE_TEST_CARVE_OUT=1` reading on this host
+  # (9 tests, 18.4s; three embedded-SDK constructions dominate) rounded up,
+  # the conservative side for a shard-balance veto. Refresh from the first
+  # post-merge run that includes it. Do NOT drop the row without re-deriving
+  # the coverage floor at that head.
+  test_5275_required_read_path.py: 20.0
   test_shared_state_concurrency.py: 0.2
   test_shared_state_events.py: 0.2
   test_shared_state_events_claim.py: 0.1
