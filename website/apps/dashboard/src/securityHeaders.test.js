@@ -44,8 +44,9 @@
 //     the files allowed to name it without being writers are the three
 //     hop-by-hop STRIP-LIST proxies, and their exemption is pinned (below);
 //   - the CSP stamp scan counts AST SHAPE — an object property, a
-//     `headers.set/append` argument, or a member assignment — so a stamp-shaped
-//     string, regex or template cannot inflate the count;
+//     `headers.set/append` argument, a member assignment, or a pair in an
+//     array-of-pairs `HeadersInit` — so a stamp-shaped string, regex or template
+//     cannot inflate the count;
 //   - the two audited writers are exempt from the umbrella, and their exemption
 //     is paid for structurally: a cookie write inside a function that builds a
 //     `Response` must pair it with `no-store` (so a new cacheable helper fails
@@ -139,10 +140,27 @@ const HTML_SITE_POLICY = {
 const STRICT_PATHS = ['/', '/team', '/team/', '/index.html']
 
 /**
+ * The `_redirects` DESTINATIONS that serve the app document — a 200-rewrite to
+ * one of these answers the request with the SPA itself, so its SOURCE path must
+ * be pinned to `STRICT_CSP`.
+ *
+ * Three spellings, because the destination is a fact about the SERVED document
+ * rather than about one way of writing it: `/` is what `_redirects` uses today,
+ * `/index.html` names the same asset, and `index.html` is the slash-less variant
+ * Pages also resolves. The cross-check used to require the destination to be `/`
+ * EXACTLY, so an `X /index.html 200` rewrite was dropped BEFORE the pin check and
+ * served the session-bearing app under the relaxed policy with the suite green
+ * (#4768 gap 4). `STRICT_PATHS` above is what the source path is then held to.
+ */
+const APP_DOCUMENT_DESTINATIONS = new Set(['/', '/index.html', 'index.html'])
+
+/**
  * The CSP stamp scan reads AST SHAPE (see `stampCount`), not text: a stamp is an
  * object property `"Content-Security-Policy": <const>`, a
- * `headers.set/append("Content-Security-Policy", <const>)` call, or an
- * `h["Content-Security-Policy"] = <const>` assignment. A whole-file
+ * `headers.set/append("Content-Security-Policy", <const>)` call, an
+ * `h["Content-Security-Policy"] = <const>` assignment, or a pair in an
+ * array-of-pairs `HeadersInit` (`new Headers([["Content-Security-Policy",
+ * <const>]])`). A whole-file
  * regex was tried first and rejected — it counted a stamp-shaped string or regex
  * as a stamp, so a file with zero live stamps could pass.
  *
@@ -529,11 +547,12 @@ function functionNodes(ast) {
  * STRING or REGEX as a stamp, so a file with zero live stamps could pass
  * (review deleted a file's only stamp and added
  * `const NOTE = 'x "Content-Security-Policy": RELAXED_CSP'`). Counting only the
- * three shapes that actually stamp a header — an object property
+ * four shapes that actually stamp a header — an object property
  * `"Content-Security-Policy": <const>`, a `headers.set/append("Content-Security-Policy", <const>)`
- * call, and an `h["Content-Security-Policy"] = <const>` assignment — cannot be
+ * call, an `h["Content-Security-Policy"] = <const>` assignment, and a pair in an
+ * array-of-pairs `HeadersInit` — cannot be
  * inflated by any string, template or regex, because text is
- * not a property, an argument or an assignment target. A header name BUILT as an expression (a variable,
+ * not a property, an argument, an assignment target or a pair. A header name BUILT as an expression (a variable,
  * a concat, a computed key) counts as an UNATTRIBUTABLE stamp — fail-closed, and
  * the surplus above the expected count names the file.
  */
@@ -565,6 +584,31 @@ function countStamps(ast) {
       const name = cspHeaderName(node.left.property)
       if (name === 'content-security-policy' && isCspValue(node.right)) count += 1
       else if (name === null && node.left.computed) count += 1
+    }
+    // A FOURTH stamp shape: a pair in an array-of-pairs `HeadersInit` —
+    // `new Headers([["Content-Security-Policy", RELAXED_CSP]])`. Modelled in BOTH
+    // scans because `nonLiteralContentTypes` already models it for `Content-Type`,
+    // and a browser INTERSECTS two CSPs, so a pair carrying a beacon-less policy
+    // narrows the served policy exactly as a second `.set` does. Without this arm
+    // the shape is invisible: the count stays at the pinned value and every
+    // name/entitlement assertion stays green while the header is narrowed (#4768
+    // gap 5 — verified green before this arm existed).
+    //
+    // ATTRIBUTION ONLY — deliberately NO fail-closed arm for an unreadable first
+    // element, unlike the three shapes above. A 2-element array does not, on its
+    // own, signal a headers pair: `Object.entries()` pairs, `[key, value]` tuples
+    // and `.map()` callbacks all present that shape, and failing closed on them
+    // reds files that stamp no header at all (measured on this tree: the
+    // fail-closed form adds +3 to `blog/_lib.ts` and +1 to `auth/confirm.ts`).
+    // `nonLiteralContentTypes` draws the same bound for `Content-Type`. The bound
+    // is named in the plan doc's `## Residuals` and pinned by the reader test.
+    if (node.type === 'ArrayExpression' && node.elements?.length === 2) {
+      if (
+        cspHeaderName(node.elements[0]) === 'content-security-policy' &&
+        isCspValue(node.elements[1])
+      ) {
+        count += 1
+      }
     }
   })
   return count
@@ -729,12 +773,34 @@ function stampNames(ast) {
         names.push('(unreadable header name)')
       }
     }
+    // The FOURTH stamp shape, kept in step with `countStamps` (the two must not
+    // disagree about what a stamp is): a pair in an array-of-pairs `HeadersInit`.
+    // ATTRIBUTION ONLY — see the bound recorded in `countStamps`.
+    if (node.type === 'ArrayExpression' && node.elements?.length === 2) {
+      if (cspHeaderName(node.elements[0]) === 'content-security-policy') record(node.elements[1])
+    }
   })
   return names
 }
 
 function stampConstants(relPath) {
   return stampNames(parseSource(readFileSync(join(repoRoot, relPath), 'utf8'), relPath))
+}
+
+/**
+ * The ATTRIBUTABLE CSP stamps in a file: every name `stampNames` reports except
+ * the fail-closed sentinel.
+ *
+ * The distinction is what makes the classification umbrella below precise.
+ * `(unreadable header name)` is the guard's DELIBERATE over-capture —
+ * `map.set(k, v)` and a computed member assignment are recorded as if they might
+ * stamp a header — so keying the umbrella on the raw stamp names would red ~a
+ * dozen files that stamp no header at all. An entry that is NOT the sentinel can
+ * only come from an arm that matched the LITERAL header name, which is what makes
+ * it evidence that the file stamps a CSP.
+ */
+function attributableStamps(relPath) {
+  return stampConstants(relPath).filter((name) => name !== '(unreadable header name)')
 }
 
 /**
@@ -994,6 +1060,60 @@ function headersFiles() {
     .filter((f) => basename(f) === '_headers')
     .map((f) => relative(repoRoot, f))
     .sort()
+}
+
+/**
+ * Every `.html` file that ships under `website/` — DERIVED, not a literal list,
+ * for the same reason the `_headers` set and the `functions/` roots are: the file
+ * that can carry a `<meta http-equiv="Content-Security-Policy">` is exactly the
+ * file this guard must not be unable to see.
+ *
+ * `walk()` skips `node_modules` and `dist`, so this is the SOURCE html — a built
+ * copy under `dist/` is generated from one of these and would otherwise be read a
+ * second time.
+ */
+function htmlFiles() {
+  return walk(websiteRoot)
+    .filter((f) => f.endsWith('.html'))
+    .map((f) => relative(repoRoot, f))
+    .sort()
+}
+
+/** A `<meta …>` tag, matched so a quoted `>` inside an attribute cannot end it. */
+const META_TAG = /<meta\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi
+
+/** The value of one attribute in a tag, or `null` when the attribute is absent. */
+function tagAttribute(tag, name) {
+  const m = new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>]+))`, 'i').exec(tag)
+  return m ? (m[1] ?? m[2] ?? m[3] ?? '') : null
+}
+
+/**
+ * The `<meta http-equiv="Content-Security-Policy">` CONTENT values in an HTML
+ * file, in file order.
+ *
+ * A meta CSP is a SECOND policy, and CSP §3.1 enforces every delivered policy
+ * independently — the browser INTERSECTS them. So a meta policy that does not
+ * name the edge-injected beacon's script origin narrows the `_headers` policy
+ * (usually to nothing) and blocks the tag: the #4638 regression arriving from a
+ * file no earlier check ever opened, because the guard's file universe was the
+ * two `functions/` trees' JS/TS sources plus the two `_headers` and never an
+ * `.html` document at all (#4768 gap 2 — verified green before this check).
+ *
+ * A missing `content` attribute is reported as an empty value rather than
+ * skipped: an `http-equiv` naming the CSP is a decision about this surface either
+ * way, and fail-closed is the direction that gets it read.
+ */
+function metaCspValues(relPath) {
+  const source = readFileSync(join(repoRoot, relPath), 'utf8')
+  const out = []
+  for (const tag of source.match(META_TAG) ?? []) {
+    const equiv = tagAttribute(tag, 'http-equiv')
+    if (equiv !== null && equiv.trim().toLowerCase() === 'content-security-policy') {
+      out.push(tagAttribute(tag, 'content') ?? '')
+    }
+  }
+  return out
 }
 
 /**
@@ -1446,6 +1566,70 @@ test('every `_headers` file that ships is audited (the set is derived, not liste
   )
 })
 
+// ── 4a-ter. the DOCUMENT cannot carry its own policy unseen ─────────────────
+//
+// §4 proves the `_headers` copies agree with the constants. That is only half the
+// delivered policy: an HTML document can also carry a
+// `<meta http-equiv="Content-Security-Policy">`, and CSP §3.1 enforces every
+// delivered policy independently — the browser INTERSECTS them. So a meta policy
+// that omits the beacon's script origin narrows the header policy and blocks the
+// edge-injected tag, and no check above could see it: the guard's file universe
+// was `functions/**/*.{ts,tsx,js,jsx,mjs}` plus the two `_headers`, and it never
+// opened an `.html` document (#4768 gap 2 — verified green before this check).
+//
+test('no served document or Function narrows the policy with a `<meta>` CSP', () => {
+  const documents = htmlFiles()
+  // Positive control FIRST: a walk that silently returned nothing would make every
+  // assertion below vacuous, which is the "empty pass" the sibling guards refuse.
+  assert.ok(
+    documents.length >= 15,
+    `expected the shipped HTML documents, found ${documents.length} — the walk is broken, ` +
+      `so the assertions below would pass vacuously`,
+  )
+
+  // The allow-list is EMPTY: the fail-closed default. A page carrying a meta policy
+  // is a surface whose EFFECTIVE policy is no longer the one this suite pins, so
+  // allowing one is a decision that has to be made deliberately — and the beacon
+  // origins have to be present in BOTH copies, because the browser reads both.
+  const META_CSP_DOCUMENTS = new Map([
+    // none
+  ])
+  const carrying = documents.filter((rel) => metaCspValues(rel).length > 0)
+  assert.deepEqual(
+    carrying.filter((rel) => !META_CSP_DOCUMENTS.has(rel)),
+    [],
+    'these HTML documents carry a `<meta http-equiv="Content-Security-Policy">` — a browser ' +
+      'INTERSECTS it with the `_headers` policy, so an origin missing here blocks the beacon ' +
+      'even though §4 proves the header correct. Audit it (beacon origins in ' +
+      'script-src/connect-src) and add it to META_CSP_DOCUMENTS, or remove the tag',
+  )
+  assert.deepEqual(
+    [...META_CSP_DOCUMENTS.keys()].filter((rel) => !carrying.includes(rel)).sort(),
+    [],
+    'these META_CSP_DOCUMENTS entries no longer carry a meta CSP — drop the stale exemption',
+  )
+
+  // The same umbrella over the Functions, because a meta policy ASSEMBLED in code
+  // has no `.html` file to read: naming `http-equiv` at all is the decision to
+  // build a second policy into a document, and the document walk above cannot see
+  // it. Today no Function names it.
+  const NON_META_CSP_FILES = new Map([
+    // none
+  ])
+  const building = functionFiles().filter((rel) => /http-equiv/i.test(commentStripped(rel)))
+  assert.deepEqual(
+    building.filter((rel) => !NON_META_CSP_FILES.has(rel)).sort(),
+    [],
+    'these Functions name `http-equiv` — a meta CSP assembled in code is invisible to the ' +
+      'document walk above, so name the file (with why its meta tag is not a policy) or drop it',
+  )
+  assert.deepEqual(
+    [...NON_META_CSP_FILES.keys()].filter((rel) => !building.includes(rel)).sort(),
+    [],
+    'these NON_META_CSP_FILES entries no longer name `http-equiv` — drop the stale exemption',
+  )
+})
+
 // ── 4b. every policy admits the PLATFORM-INJECTED beacon ──────────────────
 //
 // Cloudflare Web Analytics is on for this zone, so the EDGE injects
@@ -1633,7 +1817,7 @@ test('every HTML-producing Function stamps the CSP on each HTML-producing path',
   assert.deepEqual(
     wrong,
     [],
-    'an HTML-producing path lost its Content-Security-Policy stamp (a stamp must be an object property, a headers.set/append argument, or a member assignment — a header name built as an expression is not counted)',
+    'an HTML-producing path lost its Content-Security-Policy stamp (a stamp must be an object property, a headers.set/append argument, a member assignment, or a pair in an array-of-pairs HeadersInit — a header name built as an expression is not counted)',
   )
 })
 
@@ -1754,18 +1938,67 @@ test('every file that emits or serves HTML is in the guarded site list', () => {
   )
 })
 
+test('every file that stamps a Content-Security-Policy is classified', () => {
+  // `stampCount` above runs ONLY over `HTML_SITES` — a hand-written list. So the
+  // window it opens (the stamp COUNT, the policy CONSTANT it must equal, and the
+  // import provenance of that constant) is opened on six files and nothing else: a
+  // `headers.set("Content-Security-Policy", …)` added to any other Function — a
+  // new HTML producer, or a header set on a non-HTML response in a file nobody
+  // classified — ships with no count, no constant check and no entitlement check
+  // (#4768 gap 3 — verified green before this umbrella).
+  //
+  // This is the umbrella that makes the list a DECISION rather than a copy of the
+  // tree: any file with an ATTRIBUTABLE stamp must be in `HTML_SITES`, or named
+  // here with the reason its stamp is not an HTML surface. It mirrors the
+  // cookie-writer umbrella in §2 — and, like it, the exemptions are pinned in BOTH
+  // directions so a stale entry cannot read as coverage.
+  //
+  // ATTRIBUTABLE only, not the raw count: the fail-closed arms are a deliberate
+  // over-capture (`map.set(k, v)`, `out[i] = html`), and keying here on those
+  // would red ~a dozen files that stamp no header at all.
+  const guarded = new Set(HTML_SITES.map(([rel]) => rel))
+  const NON_HTML_CSP_STAMP_FILES = new Map([
+    // none: a Function that stamps a literal CSP header is an HTML producer until
+    // someone says otherwise, so `HTML_SITES` — with its count and its policy
+    // constant — is where it belongs.
+  ])
+  const stamping = functionFiles().filter((rel) => attributableStamps(rel).length > 0)
+  // Positive control: if the scan stopped resolving stamps, every filter below
+  // would be empty and the umbrella a no-op.
+  assert.ok(
+    stamping.length >= HTML_SITES.length,
+    `expected the guarded sites to stamp a CSP, found ${stamping.length} — the scan is broken`,
+  )
+  assert.deepEqual(
+    stamping.filter((rel) => !guarded.has(rel) && !NON_HTML_CSP_STAMP_FILES.has(rel)).sort(),
+    [],
+    'these files stamp a Content-Security-Policy but are not in HTML_SITES — a stamp is the ' +
+      'surplus this whole suite is about, so classify it: if the file answers with HTML, add ' +
+      'it to HTML_SITES with its count and its policy constant; if it stamps a non-HTML ' +
+      'response, name it in NON_HTML_CSP_STAMP_FILES with that reason',
+  )
+  assert.deepEqual(
+    [...NON_HTML_CSP_STAMP_FILES.keys()].filter((rel) => !stamping.includes(rel)).sort(),
+    [],
+    'these NON_HTML_CSP_STAMP_FILES entries no longer stamp a CSP — drop the stale exemption',
+  )
+})
+
 test('the strict path set covers every 200-rewrite that serves the app document', () => {
   // `public/_redirects` decides which request paths answer with the SPA
   // document, and those paths must carry STRICT_CSP. The four-path literal in
   // `_headers` and the rewrite table here are two statements of one fact, so a
-  // new `X / 200` rewrite must fail this test (otherwise it silently serves the
-  // session-bearing app under the relaxed policy).
+  // new `X / 200` — or `X /index.html 200`, which serves the same document under a
+  // second spelling — rewrite must fail this test (otherwise it silently serves
+  // the session-bearing app under the relaxed policy).
   const rewrites = readFileSync(join(repoRoot, 'website/apps/dashboard/public/_redirects'), 'utf8')
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith('#'))
     .map((l) => l.split(/\s+/))
-    .filter((cols) => cols.length >= 3 && cols[2] === '200' && cols[1] === '/')
+    .filter(
+      (cols) => cols.length >= 3 && cols[2] === '200' && APP_DOCUMENT_DESTINATIONS.has(cols[1]),
+    )
     .map((cols) => cols[0])
   assert.ok(rewrites.length > 0, 'expected the app-document 200-rewrites in public/_redirects')
   const unpinned = rewrites.filter((p) => !STRICT_PATHS.includes(p))
@@ -1909,4 +2142,42 @@ test('the stamp readers fail closed on an unreadable header name, whatever the v
     'a literal CSP object property still counts',
   )
   assert.deepEqual(names('const h = {"Content-Security-Policy": RELAXED_CSP}'), ['RELAXED_CSP'])
+
+  // The FOURTH shape: a pair in an array-of-pairs `HeadersInit`. Pinned in BOTH
+  // scans — a shape one of them models and the other does not lets the count and
+  // the names disagree about what a stamp is, which is how a beacon-less pair
+  // slips past the entitlement check while the count still matches.
+  assert.equal(
+    count('const h = new Headers([["Content-Security-Policy", "default-src \'none\'"]])'),
+    0,
+    'a CSP pair whose VALUE is a literal is not a policy binding — the count is not where it bites',
+  )
+  assert.deepEqual(
+    names('const h = new Headers([["Content-Security-Policy", "default-src \'none\'"]])'),
+    ['"default-src \'none\'"'],
+    'a CSP pair with a literal value is ATTRIBUTED, so the entitlement check can red it',
+  )
+  assert.equal(
+    count('const h = new Headers([["Content-Security-Policy", RELAXED_CSP]])'),
+    1,
+    'a CSP pair carrying a policy constant counts',
+  )
+  assert.deepEqual(
+    names('const h = new Headers([["Content-Security-Policy", RELAXED_CSP]])'),
+    ['RELAXED_CSP'],
+    'a CSP pair carrying a policy constant is attributed to it',
+  )
+  // The bound, pinned: an UNREADABLE first element is NOT modelled in this shape.
+  // A 2-element array is not evidence of a headers pair on its own (see the
+  // residual note in `countStamps`), so this arm is attribution-only BY DESIGN —
+  // asserted here so a future widening or narrowing is a deliberate edit.
+  assert.equal(count('const p = [HDR_VAR, "x"]'), 0, 'an unreadable pair element is not modelled')
+  assert.deepEqual(
+    names('const p = [HDR_VAR, "x"]'),
+    [],
+    'an unreadable pair element is not attributed',
+  )
+  // ...and a pair for a header that is not the CSP is not a stamp at all.
+  assert.equal(count('const p = [["Content-Type", mime]]'), 0, 'a non-CSP pair is not a stamp')
+  assert.deepEqual(names('const p = [["Content-Type", mime]]'), [], 'a non-CSP pair is not attributed')
 })

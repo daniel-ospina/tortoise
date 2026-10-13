@@ -804,7 +804,16 @@ failed **pending** across polls, for teams and graphs alike, so a transient clos
 failure cannot orphan an incident. **Two app-side paths have no automatic retry**
 — re-baseline and the monthly drill — so their responses carry
 `incidents_unresolved` when a close failed: re-run the action once GitHub
-recovers, or close the issue by hand. Nothing pages a human about a close failure
+recovers, or close the issue by hand. ⚠️ **Re-baseline carries the field for a
+SECOND reason, with the OPPOSITE remedy:** when no alert channel can be built at
+all — `DR_ISSUES_PAT` unset, or the `R2_*` store unusable — the app's
+alert-channel seam (`_incident_alert_store()`) returns `None` instead of raising,
+so BOTH `DATA_LOSS_CANDIDATE` and `SIZE_GUARD_ABORT` are reported unresolved
+even though **no close was attempted**, and the app logs `no alert channel on
+re-baseline of …`. Re-running returns the identical field forever, so read that
+log line first and **fix the channel credentials** (`DR_ISSUES_PAT`, the `R2_*`
+pair); only the failed-close cause is retryable. Nothing pages a human about a
+close failure
 (no `ALERTER_DOWN` writer yet — #3412; the cooldown also means the retry is quiet,
 so watch the logs/`incidents_unresolved`). The driver's `gh_close` mirrors the
 ordering — a non-2xx PATCH keeps the dedup object and marks the run red, so the
