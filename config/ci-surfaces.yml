@@ -2486,6 +2486,17 @@ surfaces:
   # restore assertion bound must stay BELOW the client socket timeout so
   # "overran its bound" and "the socket timed out" remain distinguishable.
   - test_7846_restore_doc_and_bounds.py
+  # #3513 (epic #1714 R1): the integration grid's tile inventory is ONE
+  # declaration asserted across the surfaces that must agree (the JS grid ↔
+  # `tortoise/demand.py::DEMAND_DECLARED_TILES` ↔ every
+  # `config/connector_manifest.yaml` connector). DUAL-registered with
+  # `onboarding` for the JS direction: a `website/apps/dashboard/src/` diff
+  # selects `onboarding`, while BOTH backend sources of that declaration match
+  # NO named surface and fall through to THIS `core` fallback — so without this
+  # arm a manifest/declared-tile addition that grows the inventory with no grid
+  # tile is green in its own PR and surfaces as an unrelated red in the next
+  # dashboard PR (#1349/#7076 class). Text-only: no docker, no node, no network.
+  - test_integrations_grid_inventory.py
   ep:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of

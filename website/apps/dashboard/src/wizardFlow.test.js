@@ -253,6 +253,18 @@ test('#2912 (PR-gate UX): the done-step sub does not repeat the card body verbat
     'the Settings pointer belongs to the card body only')
 })
 
+test('#2912/#3513 (PR-gate UX): the data-sources sub does not restate its card body', () => {
+  // The Data-sources body (main.jsx) says "Choose what Tortoise should remember.
+  // Everything here is optional and can be changed any time from Settings →
+  // Memory sources." The header sub must state something else — the guided
+  // action belongs in exactly one of the two.
+  const sub = WIZARD_STEPS[3].sub
+  for (const restated of [/choose/i, /pick/i, /optional/i, /change/i, /any time/i, /Settings/]) {
+    assert.ok(!restated.test(sub),
+      `the data-sources lede restates the card body: ${sub}`)
+  }
+})
+
 // ── #3725: the header lede is a pure decision, executed here ─────────────────
 // The defect this file pins is a HEADING-vs-BODY contradiction:
 //   <h1>You're all set</h1>

@@ -13772,9 +13772,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # written (idempotent keyed-MERGE step edge; FWW — a later capture is a
     # 200 no-op) and the response marks first_capture=true so the calling
     # in-conversation agent fires the ONE-line announcement whose COPY
-    # CONTRACT lives in tortoise/onboarding/SKILL.md §7 (W2 owns the copy;
+    # CONTRACT lives in tortoise/onboarding/SKILL.md §8 (W2 owns the copy;
     # #3517: the wording itself is RENDERED from
-    # tortoise/config/capture_disclosure.json — the §7 section names the render
+    # tortoise/config/capture_disclosure.json — the §8 section names the render
     # rather than repeating it, so the copy has exactly one home.
     # W6 owns the trigger — never duplicate the wording here). capture-
     # disclosed is a NODE CHECKPOINT, never a card-counted step (state.py
@@ -14122,7 +14122,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # matched), byte-parity with the SDK receipt.
             "capture_redactions": _capture_redactions,
             # #2002 (W6): first_capture=true exactly once per org — the
-            # trigger for the in-conversation announcement (SKILL.md §7 copy
+            # trigger for the in-conversation announcement (SKILL.md §8 copy
             # contract; the wording renders from
             # tortoise/config/capture_disclosure.json — #3517).
             "first_capture": bool(first_capture)}

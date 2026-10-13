@@ -58,8 +58,12 @@ export const WIZARD_STEPS = Object.freeze([
     id: 'data-sources',
     // #3513: the step ASKS what to remember, so the label says that. "Data
     // sources" is the epic's slice name and is the id, not the user copy.
+    // #3513 review P2 (the #2912 class): the card body already instructs
+    // ("Choose what Tortoise should remember. Everything here is optional …"),
+    // so this header sub DESCRIBES the substrate instead of repeating the
+    // instruction — one viewport must not state the guided action twice.
     label: 'Choose your memory sources',
-    sub: 'Pick what Tortoise remembers — you can change this any time.',
+    sub: "Each source below becomes part of your Organization's memory.",
   },
   {
     id: 'done',

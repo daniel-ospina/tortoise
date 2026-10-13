@@ -684,7 +684,7 @@ connect** — turning issues off never disconnects GitHub for documents (the
 - **Ask, then honour the answer.** A "no" writes nothing (a source absent from
   the projection is off, not enabled); a "yes" writes the per-source enable
   intent through the same tool surface the hosted wizard uses
-  (`tortoise_session_capture` / the onboarding-state path) — one state path,
+  (`tortoise_onboarding_session_recording` / the onboarding-state path) — one state path,
   never a second copy of the flag.
 - **An unbuilt integration is never faked.** Anything not in the inventory
   above is **coming soon**: say so plainly, honour a "yes" as interest rather

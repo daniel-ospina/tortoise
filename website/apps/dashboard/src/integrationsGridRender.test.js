@@ -45,11 +45,16 @@ test('#3513: the Data-sources step is index 3 and done is index 4', () => {
 
 test('#3513: the step renders the grid through the ONE shared component', () => {
   const branch = dataSourcesBranch()
-  assert.match(branch, /<MemorySources \{\.\.\.memorySourcesProps\} order=\{DATA_SOURCES_ORDER\} \/>/,
+  assert.match(branch, /<MemorySources\s*\{\.\.\.memorySourcesProps\}\s*order=\{DATA_SOURCES_ORDER\}/,
     'the wizard mount must pass the explicit order')
-  // review P2: no `surface` prop — the component never read it, so both mounts
-  // render byte-identical output and the prop only LOOKED load-bearing.
+  // review P2: no `surface` prop — the component never read it, so it was
+  // dropped rather than left looking load-bearing.
   assert.doesNotMatch(branch, /surface=/, 'the wizard mount must not pass a dead surface prop')
+  // review P2: the wizard is the ONE mount that knows the connect-step pick, so
+  // it must pass it — null when no pick was established, so the 'claude' default
+  // is never presented as a user choice.
+  assert.match(branch, /wizardHarness=\{harnessPickEstablished \? wizardHarness : null\}/,
+    "the wizard mount must mark the user's own harness row current")
 })
 
 test('#3513: Continue AND Skip both reach done (index 4); Back lands on connect', () => {
@@ -138,6 +143,19 @@ test('#3513: the grid order is a prop, never the array literal', () => {
     'the dead surface prop must not be re-added to any mount')
   // the order itself is the pinned ship order, declared once in the module
   assert.deepEqual([...DATA_SOURCES_ORDER], ['agent_sessions', 'github_issues', 'github_documents'])
+})
+
+test('#3513 review P2: the logo branch renders the descriptor it is handed, never a bare "?"', () => {
+  // `tileMark` returns `{ kind: 'logo', src }` when a tile declares a logo, and
+  // integrationsGrid.test.js pins that contract. The render used to print a
+  // literal '?' and discard `src`, so the first brand kit to land would show an
+  // unexplained question mark where the mark belongs.
+  const start = src.indexOf("mark.kind === 'logo'")
+  assert.ok(start > -1, 'the tile mark must branch on the logo descriptor')
+  const mark = src.slice(start, src.indexOf('integration-tile-body', start))
+  assert.match(mark, /<img className="integration-mark" src=\{mark\.src\}/,
+    'the logo branch must render mark.src')
+  assert.doesNotMatch(mark, /'\?'/, "no literal '?' may replace the logo")
 })
 
 test('#3513: a collapsed integration panel is ACTUALLY hidden (the [hidden] attribute must win over .toggle-row)', () => {

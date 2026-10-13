@@ -416,8 +416,9 @@ def _expect_left_wizard(page: Page) -> None:
 
 def test_first_timer_wizard_human_steps(page: Page) -> None:
     """#1997 (W1) + #2323 (Option B): a returning-style session (team
-    exists, empty graph) walks the NEW 4 HUMAN steps (epic plan P1):
-    org-create/join → fork card → connect-consent → done.
+    exists, empty graph) walks the NEW 5 HUMAN steps (epic plan P1, #3513
+    inserted data-sources at index 3):
+    org-create/join → fork card → connect-consent → data-sources → done.
     The org-create step is a READ-ONLY summary for accounts that already
     hold an org — it NEVER mints a second org (cap['org_create'] stays
     empty). The done step exits WITHOUT patching onboarding_complete
@@ -605,11 +606,18 @@ def test_coming_soon_modal_dialog_contract_and_skip_reaches_done(page: Page) -> 
     expect(page.locator("#integration-modal-title")).to_have_text("Not available yet")
     # initial focus moved INTO the dialog (the Close button autofocuses)
     assert page.evaluate("() => document.activeElement && document.activeElement.textContent.trim()") == "Close"
-    # Escape closes and returns focus to the invoking tile
+    # Escape closes and returns focus to the invoking tile. The restore is
+    # DEFERRED one animation frame (main.jsx closeComingSoon →
+    # requestAnimationFrame → dialogFocus.restoreFocus), so an instantaneous
+    # read samples <body> in the tick React detaches the focused Close button
+    # (this is exactly how the spec redded dashboard-e2e on the first head).
+    # The deferral is intentional and pinned by integrationsGridRender.test.js;
+    # this side waits for it.
     page.keyboard.press("Escape")
     expect(dialog).to_have_count(0)
-    assert page.evaluate("() => document.activeElement && document.activeElement.dataset.integrationKey") is not None, \
-        "closing must return focus to the tile that opened the dialog, never <body>"
+    _wait_until(lambda: page.evaluate(
+        "() => document.activeElement && document.activeElement.dataset.integrationKey") is not None,
+        message="focus returned to the tile that opened the dialog, never <body>")
     # Skip reaches done
     page.get_by_role("button", name="Skip", exact=True).click()
     expect(page.locator("div.done")).to_be_visible(timeout=10_000)

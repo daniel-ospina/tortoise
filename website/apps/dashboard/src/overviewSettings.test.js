@@ -63,7 +63,7 @@ test('DE2E-2/#3513: MemorySources is the SINGLE source-list presentation — Set
   // competing toggle list) is the single presentation at both. The archived
   // block stays dead. (review P2: the `surface` prop these assertions used to
   // pin was never read by the component — it was dropped, so it is not pinned.)
-  assert.equal((src.match(/<MemorySources \{\.\.\.memorySourcesProps\}/g) || []).length, 2,
+  assert.equal((src.match(/<MemorySources\s*\{\.\.\.memorySourcesProps\}/g) || []).length, 2,
     'exactly two live mounts, both spreading the shared prop bundle')
   for (const pos of sites) {
     // never inside the populated-Overview branch (between overview and settings)

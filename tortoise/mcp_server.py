@@ -3712,7 +3712,7 @@ _ONBOARDING_STATE_TTL = 60.0
 # #3916: the two documented decide protocols file the SAME node (the option
 # set) under two different labels, so the `decide-completed` observation must
 # accept BOTH or it reports "not decided" for a decision that WAS recorded:
-#   * `tortoise/onboarding/SKILL.md` §6 — the generic MCP-tool protocol — files
+#   * `tortoise/onboarding/SKILL.md` §7 — the generic MCP-tool protocol — files
 #     one `decision` point per option; that is also the kind
 #     `tortoise_file_decision` commits the chosen option as (sdk.file_decision),
 #     and the label the #3784 observation originally keyed on;
@@ -4020,7 +4020,7 @@ def _maybe_onboarding_auto_complete(*,
       ``tortoise_file_decision`` succeeded, or ``tortoise_create_point``
       PERSISTED a pointKind in ``DECISION_SHAPED_POINT_KINDS`` (``decision``
       or ``option``). BOTH documented decide protocols are observed: the
-      generic MCP-tool protocol (``tortoise/onboarding/SKILL.md`` §6) files
+      generic MCP-tool protocol (``tortoise/onboarding/SKILL.md`` §7) files
       one ``decision`` point per option, and the ``tortoise-decide`` skill
       files each option as ``option`` — the same node under two labels
       (#3916). A plain point write (e.g. the setup prompt's ``statement``)

@@ -439,6 +439,31 @@ def test_the_degraded_fallback_guard_runs_for_its_own_source():
     )
 
 
+def test_the_cross_surface_grid_guard_runs_for_each_side_of_its_declaration():
+    """#3513 review P1: the grid inventory test asserts BOTH directions of ONE
+    declaration — the JS grid's tile keys ↔ ``tortoise/demand.py`` ↔
+    ``config/connector_manifest.yaml``. It was registered only under
+    ``onboarding``, so the two BACKEND sources (which match no named surface and
+    select the ``core`` fallback) never ran it: a connector added to the manifest
+    with no grid tile and no mapping was green on its own PR and surfaced as an
+    unrelated red in the next dashboard PR (#1349/#7076 class).
+
+    Pinned as BEHAVIOUR, not as a YAML string: every side of the declaration
+    must select the file that asserts it.
+    """
+    for source in (
+        "website/apps/dashboard/src/integrationsGrid.js",
+        "tortoise/demand.py",
+        "config/connector_manifest.yaml",
+    ):
+        sel = _sel([source])
+        assert "test_integrations_grid_inventory.py" in sel["test_files"], (
+            f"{source} selects {sel['surfaces']} but does NOT run the guard that "
+            "asserts the tile declaration it moves (#3513 review P1) — a drift "
+            "introduced on this side of the cross-surface pair would be silent"
+        )
+
+
 def test_every_named_guard_runs_for_its_own_source():
     """The reverse of `test_every_source_pattern_is_selectable`: path -> selected.
 

@@ -1910,8 +1910,8 @@ function claimIntentInFlight() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wizardStep, welcomeMode, authed, serverHarnessConnected])
   // #3428/#2937 (lane B3, review cycle 8 item 5): the stall flag was reset ONLY
-  // inside the poll effect's setup, which early-returns when `wizardStep !== 3`.
-  // Leaving step 3 after a stall therefore kept the flag set, and re-entering
+  // inside the poll effect's setup, which early-returns when `wizardStep !== 4`.
+  // Leaving step 4 after a stall therefore kept the flag set, and re-entering
   // committed ONE paint frame with the live region already containing the
   // message (not announced — the a11y reason the region is mounted up front)
   // and the body rendering the softened clause the poll was about to retract.
@@ -8028,15 +8028,23 @@ function claimIntentInFlight() {
         ? (connectGate.mode === 'existing' ? wizardExistingKeyAffordance : wizardNoKeyAffordance)
         : wizardPasteRow
 
-  // #3513: the MemorySources prop bundle is built ONCE and spread at both
-  // mounts (the wizard's Data-sources step and Settings → Memory sources), so
-  // the two cannot drift into two partially-installed states. The `order` prop
-  // is explicit (the pinned ship order) — the component must not rely on the
-  // inventory array literal's incidental order.
+  // #3513: the MemorySources prop bundle is built ONCE and spread at THREE
+  // mounts (Settings → Memory sources, the wizard's Data-sources step, and the
+  // dead LEGACY_WIZARD_ARCHIVED rollback block), so they cannot drift into
+  // partially-installed states. The `order` prop is explicit (the pinned ship
+  // order) — the component must not rely on the inventory array literal's
+  // incidental order.
+  //
+  // `wizardHarness: null` is the SETTINGS default: Settings never knows the
+  // user's harness, so no row is marked "current" there. The wizard mount
+  // OVERRIDES it with the connect-step pick (`harnessPickEstablished ?
+  // wizardHarness : null`) — the wizard is the one mount that knows it, and
+  // only when a pick was actually established (a skipped connect step and the
+  // 'claude' default are never presented as a user choice).
   const memorySourcesProps = {
     state: onboarding,
     loading: onboardingLoading,
-    wizardHarness: null,  // Settings never knows the user's harness — no spurious "current" highlight
+    wizardHarness: null,  // Settings default; the wizard mount overrides it
     github: wizardGithub,
     issuesWantOn,
     docsWantOn,
@@ -8135,8 +8143,8 @@ function claimIntentInFlight() {
                   {(() => {
                     // Step 0 on an org-holding account is a read-only summary
                     // whose body already says "You're set up in <org>…" — a
-                    // second line here would repeat it. Same for step 3 without
-                    // an observed connection: its <h1> already names the state
+                    // second line here would repeat it. Same for step 4 (done)
+                    // without an observed connection: its <h1> already names the state
                     // (wizardStageLabel's paused / not-connected arms) and
                     // the body carries the recovery (PR-gate UX: the old paused
                     // lede restated both). Review cycle 1 P1-1: keying this on
@@ -8801,7 +8809,11 @@ function claimIntentInFlight() {
                         Choose what Tortoise should remember. Everything here is optional and can be
                         changed any time from Settings → Memory sources.
                       </p>
-                      <MemorySources {...memorySourcesProps} order={DATA_SOURCES_ORDER} />
+                      <MemorySources
+                        {...memorySourcesProps}
+                        order={DATA_SOURCES_ORDER}
+                        wizardHarness={harnessPickEstablished ? wizardHarness : null}
+                      />
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
                         <div className="wizard-nav-actions">
@@ -11273,9 +11285,14 @@ function MemorySources(props) {
                 aria-controls={isComingSoon ? undefined : `integration-panel-${t.source}`}
                 onClick={(e) => (isComingSoon ? openComingSoon(t.key, e.currentTarget) : setOpenTile(t.source))}
               >
-                {/* the fixed-size logo slot: a monogram today (no logo assets
-                    exist in the repo), never a broken <img>. */}
-                <span className="integration-mark" aria-hidden="true">{mark.kind === 'logo' ? '?' : mark.text}</span>
+                {/* the fixed-size logo slot: a REAL logo when a brand kit
+                    lands (tileMark returns the descriptor only when the tile
+                    declares one), the monogram otherwise — never a broken
+                    <img>, and never the literal '?' the logo branch used to
+                    print while discarding the descriptor (review P2). */}
+                {mark.kind === 'logo'
+                  ? <img className="integration-mark" src={mark.src} alt="" aria-hidden="true" />
+                  : <span className="integration-mark" aria-hidden="true">{mark.text}</span>}
                 <span className="integration-tile-body">
                   <span className="integration-name">{t.name}</span>
                   <span className="integration-desc">{t.description}</span>
@@ -11561,13 +11578,15 @@ function MemorySources(props) {
               const isCurrent = wizardHarness && h === wizardHarness
               // #2912 (review cycle 4 P2): a `wizardHarness === 'codexDesktop'`
               // alias used to live here, aliasing the Codex Desktop surface onto
-              // the 'codex' row. It was unreachable: HARNESS_ORDER has no
-              // codexDesktop row, the Settings call site passes
-              // `wizardHarness: null` on purpose, and the only other call site is
-              // the LEGACY_WIZARD_ARCHIVED rollback block, which is fed solely by
-              // HARNESS_ORDER leaves. If a surface leaf ever reaches this row,
-              // wire the alias through a unit-tested helper instead of a
-              // source-grep tripwire.
+              // the 'codex' row. It was unreachable, and it stays so:
+              // HARNESS_ORDER has no codexDesktop row, so none of this
+              // component's THREE call sites can hand it that value — Settings
+              // passes null on purpose, the Data-sources wizard mount passes the
+              // connect-step pick (`harnessPickEstablished ? wizardHarness :
+              // null`), and the LEGACY_WIZARD_ARCHIVED rollback block is fed
+              // solely by HARNESS_ORDER leaves. If a surface leaf ever reaches
+              // this row, wire the alias through a unit-tested helper instead of
+              // a source-grep tripwire.
               return (
                 <div key={h} className={`harness-status status-${st}${isCurrent ? ' current' : ''}`}>
                   {/* review P2-5: the polite live region is scoped to the HEAD
