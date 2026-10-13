@@ -40,7 +40,7 @@ variant ran the same call shape, so a variant difference is a prompt difference)
 
 ## 1. What #4107 left open, and what this decides
 
-#4107 characterised ONE advice-shaped L1 failure, `d6233ab6` ("…would it be a
+Issue #4107 characterised ONE advice-shaped L1 failure, `d6233ab6` ("…would it be a
 good idea to attend my high school reunion?"): the answer-bearing turn is
 rendered in the reader's context (16 verbatim gold words) and the pinned reader
 abstains anyway, because the universal `_ABSTRACTION_FRAGMENT` holds a

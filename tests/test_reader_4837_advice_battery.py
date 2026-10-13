@@ -43,6 +43,7 @@ sys.path.insert(0, str(REPO))
 BATTERY_PY = REPO / "docs" / "runbook" / "4837_advice_battery.py"
 DIAGNOSTIC_PY = REPO / "docs" / "runbook" / "4107_preference_abstention_diagnostic.py"
 RECEIPT_4107 = REPO / "docs" / "runbook" / "4107-preference-abstention.json"
+RECEIPT_4837 = REPO / "docs" / "runbook" / "4837-advice-battery-receipt.json"
 
 
 def _load(path: Path, name: str):
@@ -190,6 +191,34 @@ def test_battery_candidate_matches_the_4107_receipt(battery):
         hashlib.sha256(shipped.encode()).hexdigest()
     assert variant["with_advice_sentence"]["system_prompt_sha256"] == \
         hashlib.sha256((shipped + battery.ADVICE_SENTENCE).encode()).hexdigest()
+
+
+def test_replay_variant_schema_matches_the_committed_receipt(battery):
+    """The instrument must emit EXACTLY the variant schema of the committed
+    receipt (#8407 review). ``_run_item`` used to write ``abstained_strict``
+    on every replayed variant, but no variant in the committed receipt carries
+    it — the field is recomputed by ``--relabel``, never recorded. A
+    record-time field here means the instrument and the central evidence
+    artifact disagree on schema, and ``--replay`` would not reproduce the
+    committed receipt. Non-vacuous: re-adding ``abstained_strict`` (or any
+    other record-time key) to :func:`variant_record` fails both assertions."""
+    record = battery.variant_record(
+        answer="Yes — it sounds like a good idea.",
+        spec={"system": "SYS", "gate_fires": False},
+        shipped="SYS", span="", reader_calls=1, escalated=False,
+    )
+    assert "abstained_strict" not in record, (
+        "the instrument writes abstained_strict at record time; the committed "
+        "measurement cannot have come from this revision")
+    receipt = json.loads(RECEIPT_4837.read_text())
+    variant_key_sets = {
+        frozenset(v)
+        for item in receipt["items"]
+        for v in item["replay"]["variants"].values()
+    }
+    assert variant_key_sets == {frozenset(record)}, (
+        "the committed receipt's variant schema differs from the instrument's "
+        f"— receipt {variant_key_sets}, instrument {frozenset(record)}")
 
 
 # ── 5. V3 is gate-scoped ───────────────────────────────────────────────────

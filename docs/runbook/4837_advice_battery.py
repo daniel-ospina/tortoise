@@ -256,6 +256,34 @@ def variants_for(question: str, shipped_system: str) -> dict[str, dict]:
     }
 
 
+def variant_record(*, answer: str, spec: dict, shipped: str, span: str,
+                   reader_calls: int, escalated: bool) -> dict:
+    """The per-variant receipt row. PURE, so the committed receipt's schema is
+    pinned hermetically.
+
+    ⛔ ``abstained_strict`` is deliberately NOT written here. The
+    pre-registered metric is the PRODUCT label (``abstained``); the strict
+    vocabulary exists only for the ``--relabel`` sensitivity readout, where
+    :func:`relabel` recomputes it from the answer. A record-time
+    ``abstained_strict`` made the committed instrument and the committed
+    receipt disagree on schema (#8407 review).
+    """
+    from tortoise.reader import _looks_abstained
+
+    return {
+        "answer": answer,
+        "abstained": _looks_abstained(answer),
+        "system_prompt_sha256": hashlib.sha256(spec["system"].encode()).hexdigest(),
+        "gate_fires": spec["gate_fires"],
+        "fragment_emitted": spec["system"] != shipped,
+        "reader_calls": reader_calls,
+        "escalated": escalated,
+        "shared_span_with_evidence": span,
+        "shared_span_words": len(span.split()) if span else 0,
+        "grounded": bool(span),
+    }
+
+
 def _hid(h: dict) -> str:
     return str(h.get("id") or h.get("point_id") or h.get("pointId") or h.get("node_id") or "")
 
@@ -296,7 +324,8 @@ class _SpyReader:
 def load_battery() -> list[dict]:
     """The battery fixture, SHA-asserted, plus the D3 ``_abs`` questions read
     from the frozen instrument fixture (never copied)."""
-    raw = open(FIXTURE_PATH, "rb").read()
+    with open(FIXTURE_PATH, "rb") as fh:
+        raw = fh.read()
     actual = hashlib.sha256(raw).hexdigest()
     if actual != FIXTURE_SHA256:
         raise SystemExit(
@@ -327,7 +356,7 @@ def load_battery() -> list[dict]:
 
 
 def _run_item(sdk, al, item: dict, *, replay: bool) -> dict:
-    from tortoise.reader import _looks_abstained, build_reader_user_message, system_prompt_for
+    from tortoise.reader import build_reader_user_message, system_prompt_for
 
     _seed_memory(sdk, item)
     qdate = _to_iso_date(item.get("question_date") or "")
@@ -409,19 +438,9 @@ def _run_item(sdk, al, item: dict, *, replay: bool) -> dict:
                 escalated = any(c["explicit_max_tokens"] for c in spy.calls)
                 any_escalated = any_escalated or escalated
                 span = asr.longest_common_span(evidence, ans)
-                variants[name] = {
-                    "answer": ans,
-                    "abstained": _looks_abstained(ans),
-                    "abstained_strict": strict_abstention_label(ans),
-                    "system_prompt_sha256": hashlib.sha256(spec["system"].encode()).hexdigest(),
-                    "gate_fires": spec["gate_fires"],
-                    "fragment_emitted": spec["system"] != shipped,
-                    "reader_calls": len(spy.calls),
-                    "escalated": escalated,
-                    "shared_span_with_evidence": span,
-                    "shared_span_words": len(span.split()) if span else 0,
-                    "grounded": bool(span),
-                }
+                variants[name] = variant_record(
+                    answer=ans, spec=spec, shipped=shipped, span=span,
+                    reader_calls=len(spy.calls), escalated=escalated)
         finally:
             decr = getattr(model, "decr_inflight", None)
             if decr is not None:
@@ -589,7 +608,8 @@ def relabel(receipt_path: str) -> dict:
     does NOT change the recorded verdict — the receipt's own ``decision``
     block is the pre-registered result.
     """
-    data = json.loads(open(receipt_path).read())
+    with open(receipt_path) as fh:
+        data = json.loads(fh.read())
     items = data["items"]
     for row in items:
         for variant in row.get("replay", {}).get("variants", {}).values():
