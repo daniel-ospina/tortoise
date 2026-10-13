@@ -403,6 +403,38 @@ class TestSelfHostJournal8497:
         assert config.ensure_selfhost_event_log() == other
         assert probes == [explicit, other]
 
+    def test_the_default_arm_probe_runs_once_per_root_not_per_request(
+            self, monkeypatch, tmp_path):
+        """The DEFAULT arm hands its value to the explicit-probe memo.
+
+        Arming writes ``TORTOISE_EVENT_LOG_BASE_DIR`` itself, so from the
+        SECOND call onward the function takes the EXPLICIT branch with the value
+        it just wrote. If the memo does not learn that value, the per-request
+        caller re-probes the very directory the arm already probed — the default
+        deployment keeps paying the ``makedirs`` + ``mkstemp`` + ``unlink`` the
+        #8526 review P2 measured ("default-arm call + 4 repeats -> 5 probes").
+        """
+        from tortoise import config
+
+        monkeypatch.delenv("TORTOISE_EVENT_LOG_BASE_DIR", raising=False)
+        root = self._mounted_data_root(tmp_path, monkeypatch)
+        probes: list[str] = []
+        real = config._probe_journal_dir
+
+        def _spy(base: str) -> bool:
+            probes.append(base)
+            return real(base)
+
+        monkeypatch.setattr(config, "_probe_journal_dir", _spy)
+        armed = config.ensure_selfhost_event_log(data_root=root)
+        assert armed == os.path.join(root, "events"), armed
+        assert [config.ensure_selfhost_event_log(data_root=root)
+                for _ in range(3)] == [armed] * 3
+        assert probes == [armed], (
+            "the default arm re-probed the directory it had itself armed — the "
+            "explicit-probe memo did not learn the value the arm wrote "
+            "(#8526 review P2)")
+
     def test_unwritable_default_refuses_loudly_and_arms_nothing(
             self, tmp_path, monkeypatch, caplog):
         monkeypatch.delenv("TORTOISE_EVENT_LOG_BASE_DIR", raising=False)

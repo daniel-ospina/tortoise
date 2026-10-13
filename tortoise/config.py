@@ -315,6 +315,11 @@ def ensure_selfhost_event_log(*, data_root: str | None = None) -> str | None:
         _SELFHOST_JOURNAL_ARMED[root] = None
         return None
     os.environ[_HOSTED_EVENT_LOG_ENV] = base
+    # Register the value the DEFAULT arm just wrote: it is now the env var, so
+    # every later call takes the EXPLICIT branch, and without this the arm would
+    # re-probe the very directory it just probed once (#8526 review P2 —
+    # `_SELFHOST_JOURNAL_PROBED` is keyed by value for exactly this hand-off).
+    _SELFHOST_JOURNAL_PROBED.add(base)
     _SELFHOST_JOURNAL_ARMED[root] = base
     return base
 
