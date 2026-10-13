@@ -5,7 +5,8 @@ Point side had NO PointSuperseded branch in the projection rebuild chain at
 all — a superseded Point resurrected as live after rebuild_all, lost its
 validTo/expiredAt/outdated stamps + CORRECTS edge, and re-materialized its
 transferred operator/direct edges at the OLD point (live supersede's
-transfer is CREATE+DELETE graph mutation only; operator.inputs is never
+transfer is MERGE+DELETE — idx-keyed at the typed leg, and the reverse
+INPUT mirror re-points too (#6180); operator.inputs is never
 updated and DirectEdgeRepoint descriptors had no replay consumer).
 
 Fix shape (mirrors #2164): pass-1b deferred-trailing-sweep fold
@@ -1915,3 +1916,36 @@ def test_alreadydecided_input_mirror_stays_on_rebuild(sup):
     _rebuild(sdk, events)
     assert _input_edges(proj, a) == pre
     assert not _input_edges(proj, succ)
+
+
+def test_idxless_mitigation_edge_survives_rebuild(sup):
+    """#6180 P1 parity: `mitigate_operator` writes the operator→mitigation
+    `mitigated_by` edge with NO idx. The live transfer must not raise on
+    `MERGE … {idx:null}`, and `rebuild_all` must not raise either — the
+    `PointSuperseded` fold is journaled BEFORE the transfers, so a raise here
+    wedges every later rebuild of the journal (the disaster-recovery path)."""
+    _, events, sdk = sup
+    s = sdk.create_point("statement", "s", status="live")["id"]
+    t = sdk.create_point("statement", "t", status="live")["id"]
+    op = sdk.create_operator("IMPL", s, [t])
+    mit = sdk.mitigate_operator(op["id"], "no control", 0.3)
+    succ = sdk.create_point("statement", "new context", status="live")["id"]
+    sdk.supersede_point(mit["id"], succ)
+    proj = sdk._get_proj()
+
+    def _mitigated_by(pid):
+        return {tuple(r) for r in proj.g.query(
+            "MATCH (op:Point {id:$op})-[r:mitigated_by]->(m:Point {id:$m}) "
+            "RETURN r.idx, m.id",
+            params={"op": op["id"], "m": pid}).result_set}
+
+    pre = _mitigated_by(succ)
+    assert pre == {(None, succ)}, f"live: idx-less edge must be on succ, got {pre}"
+    assert _mitigated_by(mit["id"]) == set(), "live: edge must leave the prior"
+
+    _rebuild(sdk, events)  # must not raise (the disaster-recovery path)
+
+    assert _mitigated_by(succ) == pre, (
+        f"rebuilt edge drifted: {_mitigated_by(succ)} != {pre}")
+    assert _mitigated_by(mit["id"]) == set(), (
+        "rebuilt: idx-less edge stranded on the superseded prior")

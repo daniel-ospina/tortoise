@@ -5284,7 +5284,8 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
     transfer_edges=False is the invalidate behaviour and reuses that preview.
     transfer_edges=True enumerates the edges the writer repoints, leg by leg:
       * 2a operator -> old, EXCEPT `alreadyDecided` (kept on the dead prior).
-        The writer MERGEs (idx-keyed): a pre-existing edge at the successor is
+        The writer MERGEs (idx-keyed; an idx-less edge merges on the bare
+        pattern — #6180): a pre-existing edge at the successor is
         a no-op rather than a second parallel edge, while the two rows
         `create_operator(op, old, [old])` mints (idx 0 and idx 1) stay distinct;
       * 2a-INPUT `(old)-[:INPUT]->(op)` mirrors, ALSO MERGE-backed (#6180). The
@@ -5388,6 +5389,11 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
         "MATCH (new:Point {id:$n})-[r:INPUT]->(op:Point {is_operator:true}) "
         "RETURN op.id, r.idx",
         params={"n": new_id}).result_set}
+    # #6180 null-idx class: the writer MERGEs an idx-less edge on the BARE
+    # pattern, which matches a same-type edge at ANY idx — so a null-idx row is
+    # "already present" when the successor carries that operator edge at all.
+    pre_op_out_any = {(a, b) for (a, b, _idx) in pre_op_out}
+    pre_op_in_any = {a for (a, _idx) in pre_op_in}
 
     # 2a — operator edges. The writer validates every relationship type BEFORE
     # any mutation (a raw/imported undeclared type is an injection primitive),
@@ -5404,8 +5410,9 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
                          "reason": "alreadyDecided stays on the superseded prior"})
         else:
             edge = {"type": rtype, "from": op_id, "to": new_id}
-            (typed_present if (op_id, rtype, idx) in pre_op_out
-             else created).append(edge)
+            present = ((op_id, rtype) in pre_op_out_any if idx is None
+                       else (op_id, rtype, idx) in pre_op_out)
+            (typed_present if present else created).append(edge)
             handled_old_edge_ids.add(op_rid)
 
     # 2a-INPUT (#6180) — the writer transfers the operator's reverse INPUT
@@ -5419,10 +5426,18 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
         params={"old": old_id},
     ).result_set:
         if op_label == "alreadyDecided":
+            # #6180: the retained mirror must be VISIBLE in the kept set, like
+            # 2a's typed branch — the writer keeps it on the dead prior, and a
+            # caller enumerating edges + edges_kept_attached otherwise cannot
+            # see it at all (only edges_remaining_at_old reflects it).
+            kept.append({"type": "INPUT", "from": old_id, "to": op_id,
+                         "reason": "alreadyDecided keeps its INPUT on the "
+                                   "superseded prior"})
             continue
         edge = {"type": "INPUT", "from": new_id, "to": op_id}
-        (mirror_present if (op_id, idx) in pre_op_in
-         else mirror_created).append(edge)
+        present = (op_id in pre_op_in_any if idx is None
+                   else (op_id, idx) in pre_op_in)
+        (mirror_present if present else mirror_created).append(edge)
         handled_old_edge_ids.add(op_rid)
 
     # #4021 parity — a window whose resolved END precedes the predecessor's own

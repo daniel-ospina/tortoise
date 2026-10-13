@@ -9830,7 +9830,7 @@ class TortoiseSDK:
         #    a failure leaves the graph untouched.
         edges_result = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[r]->(old:Point {id:$old_id}) "
-            "RETURN op.id, type(r), r.idx, op.label",
+            "RETURN op.id, type(r), r.idx, op.label, ID(r)",
             params={"old_id": old_id},
         )
         from .security import validate_rel_type
@@ -10007,6 +10007,7 @@ class TortoiseSDK:
         for row in edges_result.result_set:
             op_id, edge_type, idx = row[0], row[1], row[2]
             op_label = row[3] if len(row) > 3 else None
+            rid = row[4] if len(row) > 4 else None
             if op_label == "alreadyDecided":
                 # #1080 review: dedup context edges must NOT be re-pointed at
                 # the replacement — an alreadyDecided IMPL on the superseded
@@ -10020,22 +10021,42 @@ class TortoiseSDK:
             # Create new edge: operator → new point (same idx preserves
             # source/target position). #6180: MERGE, not CREATE — a caller
             # that pre-wired the shared edge onto the successor (the
-            # documented successor-first write pattern) otherwise gets a
-            # SECOND parallel edge here, inflating the operator's evidence
+            # successor-first write ordering the #6180 report reproduces) got
+            # a SECOND parallel edge here, inflating the operator's evidence
             # weight while passing every "is the edge there?" check. idx
             # rides the MERGE pattern, so the two edges
             # create_operator(op, old, [old]) mints (idx 0 and idx 1) stay
             # distinct and both transfer.
+            #
+            # #6180 null-idx leg: an operator edge may carry NO idx at all —
+            # `mitigate_operator` writes `(m)-[:IMPL]->(op)` and
+            # `(op)-[:mitigated_by]->(m)` with no idx property, so `r.idx` is
+            # null here. `MERGE … {idx:null}` is REFUSED by FalkorDB ("Cannot
+            # merge node using null property value") and a `{idx:null}` MATCH
+            # never matches, so the null class must merge on the bare pattern
+            # (type + endpoints), exactly as the 2a-DIRECT leg below does.
+            if idx is None:
+                proj.g.query(
+                    f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$new_id}}) "
+                    f"MERGE (op)-[:{edge_type}]->(new)",
+                    params={"op_id": op_id, "new_id": new_id},
+                )
+            else:
+                proj.g.query(
+                    f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$new_id}}) "
+                    f"MERGE (op)-[:{edge_type} {{idx:$idx}}]->(new)",
+                    params={"op_id": op_id, "new_id": new_id, "idx": idx},
+                )
+            # Delete the old edge by IDENTITY, never by an `{idx:$idx}` pattern:
+            # at idx null such a pattern matches nothing (the edge would be
+            # stranded), and even at a known idx the identity is the precise
+            # key. The 2a-INPUT leg and the rebuild replay already delete by
+            # `ID(r)`; 2a now matches them.
             proj.g.query(
-                f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$new_id}}) "
-                f"MERGE (op)-[:{edge_type} {{idx:$idx}}]->(new)",
-                params={"op_id": op_id, "new_id": new_id, "idx": idx},
-            )
-            # Delete old edge (match by idx for precision)
-            proj.g.query(
-                f"MATCH (op:Point {{id:$op_id}})-[r:{edge_type} {{idx:$idx}}]->(old:Point {{id:$old_id}}) "
-                f"DELETE r",
-                params={"op_id": op_id, "idx": idx, "old_id": old_id},
+                f"MATCH (op:Point {{id:$op_id}})-[r:{edge_type}]->"
+                f"(old:Point {{id:$old_id}}) "
+                f"WHERE ID(r) = $rid DELETE r",
+                params={"op_id": op_id, "old_id": old_id, "rid": rid},
             )
             transferred += 1
 
@@ -10050,11 +10071,21 @@ class TortoiseSDK:
             op_label = row[3] if len(row) > 3 else None
             if op_label == "alreadyDecided":
                 continue
-            proj.g.query(
-                "MATCH (new:Point {id:$new_id}), (op:Point {id:$op_id}) "
-                "MERGE (new)-[:INPUT {idx:$idx}]->(op)",
-                params={"new_id": new_id, "op_id": op_id, "idx": idx},
-            )
+            # #6180 null-idx leg: the mirror may carry no idx (see 2a) — merge
+            # on the bare pattern then, because `{idx:null}` is refused by
+            # MERGE and never matched by MATCH.
+            if idx is None:
+                proj.g.query(
+                    "MATCH (new:Point {id:$new_id}), (op:Point {id:$op_id}) "
+                    "MERGE (new)-[:INPUT]->(op)",
+                    params={"new_id": new_id, "op_id": op_id},
+                )
+            else:
+                proj.g.query(
+                    "MATCH (new:Point {id:$new_id}), (op:Point {id:$op_id}) "
+                    "MERGE (new)-[:INPUT {idx:$idx}]->(op)",
+                    params={"new_id": new_id, "op_id": op_id, "idx": idx},
+                )
             proj.g.query(
                 "MATCH (old:Point {id:$old_id})-[ri:INPUT]->"
                 "(op:Point {id:$op_id}) "

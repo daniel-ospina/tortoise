@@ -445,22 +445,69 @@ def test_supersede_transfers_target_input_mirror(sdk):
 
 def test_supersede_keeps_alreadydecided_input_mirror(sdk):
     """#1080 carve-out reaches the INPUT leg too: an alreadyDecided operator is
-    deliberately kept on the dead prior, so its INPUT mirror stays there."""
+    deliberately kept on the dead prior, so its INPUT mirror stays there.
+
+    The plain operator (`op_move`) is a CONTROL: its mirror must MOVE. Without
+    it these assertions also hold on the pre-fix code (which never touched the
+    INPUT leg at all), so the control is what makes the test discriminate the
+    #6180 fix instead of pinning an invariant every implementation satisfies.
+    """
     old = _make_point(sdk, content="Old decision")
     target = _make_point(sdk, content="Target")
-    sdk.create_operator("IMPL", old["id"], [target["id"]], label="alreadyDecided")
+    op_keep = sdk.create_operator("IMPL", old["id"], [target["id"]],
+                                  label="alreadyDecided")
+    control_target = _make_point(sdk, content="Control target")
+    op_move = sdk.create_operator("IMPL", old["id"], [control_target["id"]])
     new = _make_point(sdk, content="New decision")
     sdk.supersede_point(old["id"], new["id"])
     proj = sdk._get_proj()
 
-    kept = proj.g.query(
-        "MATCH (old:Point {id:$o})-[r:INPUT]->(op:Point {is_operator:true}) "
-        "RETURN count(r)", params={"o": old["id"]}).result_set[0][0]
-    assert kept == 1, "alreadyDecided keeps its INPUT on the superseded prior"
+    kept = {r[0] for r in proj.g.query(
+        "MATCH (old:Point {id:$o})-[:INPUT]->(op:Point {is_operator:true}) "
+        "RETURN op.id", params={"o": old["id"]}).result_set}
+    assert kept == {op_keep["id"]}, (
+        f"only the alreadyDecided operator keeps its mirror, got {kept}")
+    moved = {r[0] for r in proj.g.query(
+        "MATCH (new:Point {id:$n})-[:INPUT]->(op:Point {is_operator:true}) "
+        "RETURN op.id", params={"n": new["id"]}).result_set}
+    assert moved == {op_move["id"]}, (
+        f"the control operator's mirror must move to the successor, got {moved}")
+
+
+def test_supersede_mitigation_point_without_idx(sdk):
+    """#6180 P1 regression: `mitigate_operator` writes `(m)-[:IMPL]->(op)` and
+    `(op)-[:mitigated_by]->(m)` with NO idx, so the transfer receives
+    `idx=None`. It MUST NOT issue `MERGE … {idx:null}` (FalkorDB: "Cannot merge
+    node using null property value") and must still remove the old idx-less
+    edge. The pre-fix CREATE left that edge stranded on the dead point; a naive
+    CREATE→MERGE turns it into a hard failure on every mitigation point (and a
+    journaled `PointSuperseded` then wedges `rebuild_all`).
+    """
+    source = _make_point(sdk, content="source")
+    target = _make_point(sdk, content="target")
+    op = sdk.create_operator("IMPL", source["id"], [target["id"]])
+    mit = sdk.mitigate_operator(op["id"], "no control group", 0.3)
+    new = _make_point(sdk, content="new mitigation context")
+    proj = sdk._get_proj()
+
+    pre = proj.g.query(
+        "MATCH (op:Point {id:$op})-[r:mitigated_by]->(m:Point {id:$m}) "
+        "RETURN r.idx", params={"op": op["id"], "m": mit["id"]}).result_set
+    assert pre and pre[0][0] is None, (
+        f"precondition: the edge is idx-less, got {pre}")
+
+    sdk.supersede_point(mit["id"], new["id"])  # must not raise
+
     moved = proj.g.query(
-        "MATCH (new:Point {id:$n})-[r:INPUT]->() RETURN count(r)",
-        params={"n": new["id"]}).result_set[0][0]
-    assert moved == 0
+        "MATCH (op:Point {id:$op})-[r:mitigated_by]->(m:Point {id:$m}) "
+        "RETURN count(r)",
+        params={"op": op["id"], "m": new["id"]}).result_set[0][0]
+    assert moved == 1, "the idx-less edge must transfer to the successor"
+    left = proj.g.query(
+        "MATCH (op:Point {id:$op})-[r:mitigated_by]->(m:Point {id:$m}) "
+        "RETURN count(r)",
+        params={"op": op["id"], "m": mit["id"]}).result_set[0][0]
+    assert left == 0, "the idx-less edge must be removed from the superseded point"
 
 
 def test_supersede_does_not_duplicate_a_prewired_operator_edge(sdk):

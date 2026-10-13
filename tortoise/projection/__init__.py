@@ -11208,7 +11208,9 @@ class FalkorProjection(
         # DirectEdgeRepoint descriptor replay — AFTER pass-2 rebuilt operator
         # edges from operator PointAdded snapshots whose stored
         # operator.inputs STILL NAME THE OLD point (live supersede's transfer
-        # is CREATE+DELETE graph mutation only — operator.inputs is never
+        # is MERGE+DELETE graph mutation only — idx-keyed at the typed leg,
+        # and it re-points the reverse INPUT mirror too (#6180) — so
+        # operator.inputs is never
         # updated and no operator snapshot is re-emitted), so every
         # transferred operator edge re-materialized at the OLD point (the
         # edge-topology half of the #2423 resurrection).
@@ -11350,16 +11352,26 @@ class FalkorProjection(
                     # successor that already carries the shared edge collapses
                     # onto it instead of doubling (idx rides the pattern, so
                     # parallel same-type legs at different idx stay distinct).
+                    # #6180 null-idx leg: an idx-less edge (mitigate_operator)
+                    # cannot ride an `{idx:null}` pattern — MERGE refuses a null
+                    # property and MATCH never matches it — so merge on the
+                    # bare pattern, exactly as live's 2a does.
+                    if idx is None:
+                        self.g.query(
+                            f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$nid}}) "
+                            f"MERGE (op)-[:{rtype}]->(new)",
+                            params={"op_id": op_id, "nid": nid},
+                        )
+                    else:
+                        self.g.query(
+                            f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$nid}}) "
+                            f"MERGE (op)-[:{rtype} {{idx:$idx}}]->(new)",
+                            params={"op_id": op_id, "nid": nid, "idx": idx},
+                        )
                     self.g.query(
-                        f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$nid}}) "
-                        f"MERGE (op)-[:{rtype} {{idx:$idx}}]->(new)",
-                        params={"op_id": op_id, "nid": nid, "idx": idx},
-                    )
-                    self.g.query(
-                        f"MATCH (op:Point {{id:$op_id}})-[r:{rtype} {{idx:$idx}}]->"
+                        f"MATCH (op:Point {{id:$op_id}})-[r:{rtype}]->"
                         f"(old:Point {{id:$oid}}) WHERE ID(r)=$rid DELETE r",
-                        params={"op_id": op_id, "oid": oid, "idx": idx,
-                                "rid": rid},
+                        params={"op_id": op_id, "oid": oid, "rid": rid},
                     )
                 input_seen: set[tuple] = set()
                 for (op_id, idx, rid, oid, nid, op_label) in input_repoints:
@@ -11369,11 +11381,20 @@ class FalkorProjection(
                     if key in input_seen:
                         continue
                     input_seen.add(key)
-                    self.g.query(
-                        "MATCH (new:Point {id:$nid}), (op:Point {id:$op_id}) "
-                        "MERGE (new)-[:INPUT {idx:$idx}]->(op)",
-                        params={"nid": nid, "op_id": op_id, "idx": idx},
-                    )
+                    # #6180 null-idx leg (mirror live's 2a-INPUT): merge on the
+                    # bare pattern when the mirror carries no idx.
+                    if idx is None:
+                        self.g.query(
+                            "MATCH (new:Point {id:$nid}), (op:Point {id:$op_id}) "
+                            "MERGE (new)-[:INPUT]->(op)",
+                            params={"nid": nid, "op_id": op_id},
+                        )
+                    else:
+                        self.g.query(
+                            "MATCH (new:Point {id:$nid}), (op:Point {id:$op_id}) "
+                            "MERGE (new)-[:INPUT {idx:$idx}]->(op)",
+                            params={"nid": nid, "op_id": op_id, "idx": idx},
+                        )
                     self.g.query(
                         "MATCH (old:Point {id:$oid})-[ri:INPUT]->"
                         "(op:Point {id:$op_id}) "
