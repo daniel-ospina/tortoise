@@ -60,6 +60,10 @@ is enforced by `src/lib/markdown.test.ts` (vitest + jsdom), which builds the
 SAME extension set as the editor (`buildEditorExtensions`). `html: false` keeps
 raw HTML out of the body (E2E-5 asserts DB body stays clean markdown).
 
+**What you may write in a body** — the subset the SSR renderer accepts, the
+`[[toc]]` / `[[video: …]]` markers, the transcript convention and the reciprocal
+internal link — is the authoring contract: [`docs/blog-authoring.md`](../../../docs/blog-authoring.md).
+
 ## ElDato port
 
 Editor UX ported from the ElDato repo (private checkout), attribution comments

@@ -277,22 +277,36 @@ class TestCrossSurfaceHonesty:
     def test_prior_only_low_credibility_not_contested_in_review_prune(self):
         """#3276 review fix: `_review_prune`'s variance scan must use the same
         measured predicate. A prior-only decision with a LOW-credibility author
-        baseline (Beta(2,1), variance 0.0556 > the 0.04 threshold) used to read
+        baseline whose variance exceeds the 0.04 threshold used to read
         `contested` on review_connections while annotate_ep_batch read it
-        unmeasured — a fresh #2206-class disagreement."""
+        unmeasured — a fresh #2206-class disagreement.
+
+        CHANGED (#398 owner ruling 2026-10-12): the declared word is a validated
+        LABEL and ONE weak evidence body, not the ladder prior it names. A
+        BORN-LIVE decide part therefore starts at the #2199 system default
+        Beta(3,1) PLUS the weak body (Beta(3.1,1), variance 0.03616) — BELOW
+        this test's 0.04 threshold, so the assertion no longer exercised its
+        subject. The test's intent is a *weak* prior that is not contested, so
+        it takes the documented route (the same one used in
+        ``test_battery_ep_outcome.py::test_contested_non_decisive_even_when_
+        converged``): pass an EXPLICIT ``status="live"`` so the born-live
+        #2199 default is NOT granted and the word is the weak body ALONE —
+        Beta(1.1,1), variance 0.08046 > 0.04 (measured). The point is still a
+        prior-only decision (unmeasured, set-by-author baseline)."""
         sdk = _fresh_sdk()
         try:
             src = sdk.create_point(
                 "statement", "Quokka prune source zzqx", status="live")["id"]
             pid = sdk.create_point(
                 "decision", "Quokka prioronly lowcred zzqx",
-                credibility="low")["id"]
+                credibility="low", status="live")["id"]
             sdk.create_operator("IMPL", src, [pid], direction="unidirectional")
 
             ep = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
             assert ep.measured is False and ep.baseline is True, ep
             # The low-credibility prior's variance is above the threshold, but
-            # an unmeasured claim is never contested.
+            # an unmeasured claim is never contested. (Explicit status ⇒ no
+            # #2199 default ⇒ the weak body alone, Beta(1.1,1), var 0.08046.)
             assert ep.variance > 0.04 and ep.contested is False, ep
 
             out = sdk.review_connections(mode="prune", scope=None, prune_limit=50)
