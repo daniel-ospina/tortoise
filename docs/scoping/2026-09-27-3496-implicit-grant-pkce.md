@@ -588,9 +588,10 @@ line-number parenthetical rather than correcting it). Add `tests/test_no_legacy_
     `const inner = new URL(new URL(assignUrl).searchParams.get("redirect_to"))` ⇒ origin+path equal
     the page origin + `/oauth/authorize`, and **none** of `code`/`error`/`error_code`/
     `error_description`/`error_uri`/`sb_flow_id`/`flow_id`/`type` is present. After Step 6 the
-    `history.replaceState` argument is likewise transient-free. `redirectBack`'s target equals the
-    server-supplied `PARAMS.redirect_uri` verbatim plus encoded params — never a
-    `window.location.search`-derived value. **Paired control:** with the strip control removed, the
+    `history.replaceState` argument is likewise transient-free. `redirectBack`'s target is the
+    **server-supplied** return address — `PARAMS.redirect_uri` verbatim when #3496 shipped, and
+    since **#3443** the `redirect_target` the server rebuilds from the validated registered URI —
+    plus encoded params, and never a `window.location.search`-derived value. **Paired control:** with the strip control removed, the
     inner target **does** carry `code` (mirroring inv 1 and inv 9's paired controls). The strip uses
     `URLSearchParams.delete` (not a string replace) so an encoded transient (`%63ode=STALE`) is
     removed; unknown params are preserved (an **allowlist** of the authorize params the page needs —
