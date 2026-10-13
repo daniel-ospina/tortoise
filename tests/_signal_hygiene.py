@@ -27,7 +27,8 @@ This module makes the takeover loud and immediate instead of silent:
   block and restores the harness handler + timer afterwards.
 * Calls made by ``pytest_timeout`` itself are allowed: its ``cancel()`` zeroes
   ``ITIMER_REAL`` when a test fails or enters pdb, and a run that arms no timer
-  (``--timeout=0``, or ``PYTEST_TIMEOUT=0``) is untouched. ``#5035`` put
+  (``--timeout=0``, or ``PYTEST_TIMEOUT=0``; the #5035 guard accepts
+  only the command-line form as an opt-out, since any conftest can set the env) is untouched. ``#5035`` put
   ``timeout = 300`` in ``pyproject.toml``, so a BARE local run now arms it
   exactly as CI always did.
 * ``--timeout-func-only`` runs are **not** covered: pytest-timeout arms its
@@ -230,7 +231,8 @@ def harness_sigalrm_integrity(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]
     """Refuse any in-process attempt to take pytest-timeout's SIGALRM/ITIMER_REAL.
 
     Enforced only while the harness has a timer armed, so a run that arms none
-    (``--timeout=0``, or ``PYTEST_TIMEOUT=0``) is unaffected. ``#5035`` put
+    (``--timeout=0``, or ``PYTEST_TIMEOUT=0``; the #5035 guard accepts
+  only the command-line form as an opt-out, since any conftest can set the env) is unaffected. ``#5035`` put
     ``timeout = 300`` in ``pyproject.toml``, so a bare local run now arms the
     timer — this fixture is ACTIVE locally for the same reason it was always
     active in CI, and a local ``signal.alarm()`` that used to slip past now

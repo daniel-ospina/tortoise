@@ -327,8 +327,10 @@ disable_error_code = [
 # `pytest.mark.timeout(600)`. Every other file's TOTAL is ≤235s, so no unmarked
 # item can reach 300s. A leg that needs a longer single item must SAY so —
 # `--timeout=N` in the workflow or `@pytest.mark.timeout(N)` on the test — and
-# `--timeout=0` / `PYTEST_TIMEOUT=0` is the explicit opt-out for a deliberate
-# unbounded run.
+# `--timeout=0` is the explicit opt-out for a deliberate unbounded run. Do NOT
+# reach for the `PYTEST_TIMEOUT=0` env form for that: it is process-global, so a
+# conftest setting it at import time disarms every run invisibly, and
+# `tests/test_ci_stall_identify.py` deliberately does not accept it as an opt-out.
 #
 # Resolution order is CLI flag -> `addopts`/other CLI injections -> `PYTEST_TIMEOUT`
 # env -> this ini value (`pytest_timeout.py::get_env_settings`), so this is the
