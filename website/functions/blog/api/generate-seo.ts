@@ -348,27 +348,34 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   return json(
     {
       ...repaired,
-      // ⛔ `keyword_ok` answers ONE question: did the MODEL put the keyword
-      // there? It is computed on the ENFORCED fields BEFORE the repair below
-      // runs (#8446 review, P2). Computed after it, the value is a TAUTOLOGY —
-      // `ensureKeyword` guarantees its result contains the keyword, so the
-      // answer was always `true` whenever `primary` was non-null and the
-      // `false` branch was unreachable. (Issue #8445 indicator 2 asks for
-      // exactly this reading: "`keyword_ok` is `true` because the model put
-      // the keyword there, and the repair remains only a backstop".)
+      // ⛔ `keyword_ok` answers ONE question: did the MODEL put the keyword in
+      // the fields it was asked to fill? It is computed on the model's RAW
+      // generated text — the SAME artifact `chosenUsed` uses, so the two can
+      // never disagree about whether the model used the keyword (#8446 review).
       //
-      // So: `true` = the model placed it unaided; `false` = the repair had to
-      // fire, i.e. generation fell short of what the prompt asked for. The
-      // repair still runs either way — it is the #8293 guarantee that the
-      // stored field carries the keyword — but it no longer reports itself as
-      // the model's work. `null` = no primary keyword could be derived, so
-      // nothing was verified (never a positive claim).
+      // Two wrong artifacts, both tried:
+      //   • `repaired.*` — a TAUTOLOGY. `ensureKeyword` guarantees its result
+      //     contains the keyword, so the answer was always `true` whenever
+      //     `primary` was non-null and the `false` branch was unreachable.
+      //   • `enforced.*` — the model's text AFTER the length contract truncated
+      //     it. A model that places the keyword in an over-budget title has done
+      //     its job, but a keyword falling outside the cut made the verdict say
+      //     it had not — while `chosenUsed` said the opposite in the SAME
+      //     response. The length contract is a SEPARATE signal; reporting it
+      //     here conflated "generation fell short" with "the title was too long".
+      //
+      // So: `true` = the model placed it unaided (issue #8445 indicator 2:
+      // "`keyword_ok` is `true` because the model put the keyword there");
+      // `false` = it did not, and the repair is the only reason the returned
+      // field carries it — the repair remains a backstop, not a mechanism.
+      // `null` = no primary keyword could be derived, so nothing was verified
+      // (never a positive claim).
       primary_keyword: primary,
       keyword_ok:
         primary === null
           ? null
-          : containsKeyword(enforced.meta_title, primary) &&
-            containsKeyword(enforced.meta_description, primary),
+          : containsKeyword(rawTitle, primary) &&
+            containsKeyword(rawDescription, primary),
       provider: result.provider,
       input_tokens: result.inputTokens,
       output_tokens: result.outputTokens,

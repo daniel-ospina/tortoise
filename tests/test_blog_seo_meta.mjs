@@ -118,12 +118,23 @@ console.log("allKeywords — the prompt's candidate list is the whole vocabulary
 {
   const all = allKeywords();
   assert(all.length > 60, `the default is the WHOLE vocabulary, not a capped slice (got ${all.length})`);
-  assertEq(new Set(all.map(normalizeForMatch)).size, all.length, "no duplicates by normalised form");
-  assert(all.every((k) => isKnownKeyword(k)), "every seeded candidate passes the validator");
-  assert(
-    all.every((k) => normalizeForMatch(k) !== ""),
-    "...and none of them normalises to empty",
+  // ⛔ These must measure the VOCABULARY, not `allKeywords()`'s own output.
+  // `allKeywords` already dedupes on `normalizeForMatch` and skips
+  // empty-normalising terms, so asserting those properties of ITS result
+  // compares it against itself and passes whatever the data contains — the
+  // exact class of non-falsifiable guard this block was written to catch, left
+  // behind in the block itself (caught in review). Read the DATA.
+  const vocab = Object.values(TAG_KEYWORDS).flat();
+  assertEq(
+    new Set(vocab.map(normalizeForMatch)).size,
+    vocab.length,
+    "the VOCABULARY DATA itself carries no duplicate normalised forms",
   );
+  assert(
+    vocab.every((k) => normalizeForMatch(k) !== ""),
+    "...and no term in the DATA normalises to empty",
+  );
+  assert(all.every((k) => isKnownKeyword(k)), "every seeded candidate passes the validator");
   // Seed and validator must agree in the other direction too: every keyword
   // reachable through a tag is offered. A narrower seed makes the prompt state
   // "choose exactly ONE of these" about a list that is missing the right answer.
@@ -467,6 +478,25 @@ console.log("generate-seo with NO request tags — the keyword check must not be
     true,
     "...and when the MODEL places the same keyword, the verdict is true — so it distinguishes the two",
   );
+  // ⛔ The DESC conjunct is load-bearing and was untested: every `true` case in
+  // this suite had the keyword in BOTH fields, so dropping the description half
+  // was a no-op (0 failures — caught in review). This case has it in the title
+  // only, which is what tells "the model filled both fields it was asked for"
+  // apart from "it filled one".
+  const titleOnly = await driveNoTags({
+    metaTitle: "Long-Term Memory for AI Agents: Recall vs Learning | Tortoise",
+    metaDescription: "A description about confidence tracking that names no keyword at all.",
+  });
+  assertEq(
+    titleOnly.body.keyword_ok,
+    false,
+    "the keyword is in the title but NOT the description, so the verdict is false",
+  );
+  assertEq(
+    titleOnly.body.primary_keyword,
+    primaryKeyword(["agent-memory"]),
+    "...the keyword itself is still resolved from the model's tags",
+  );
 
   // No tag maps to the vocabulary at all → nothing was verified. That is
   // `null` (unknown), never `true` (success).
@@ -676,6 +706,33 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   assert(
     !descriptionOnly.body.meta_title.includes(String(primaryKeyword(["agent-memory"]))),
     "...so the tag-derived fallback keyword appears NOWHERE: one article, one primary keyword",
+  );
+
+  // 2d. ⛔ `chosenUsed` and `keyword_ok` must read the SAME artifact — the
+  //     model's RAW output — or the endpoint can honour a claim and deny it in
+  //     one response. Here the model places the keyword past the field cap, so
+  //     the length contract truncates it away: the model DID its job, and the
+  //     verdict must say so, even though the returned title needed the repair.
+  //     Reporting the contract's truncation as a generation failure was the
+  //     defect (#8446 review, P2).
+  const overBudget = await drive({
+    primaryKeyword: "epistemic memory",
+    metaTitle: "A practical guide to graph memory for teams building agents with epistemic memory",
+    metaDescription: "A description placing the term epistemic memory deliberately at the very end again.",
+  });
+  assertEq(
+    overBudget.body.primary_keyword,
+    "epistemic memory",
+    "the model placed the keyword, so its claim is honoured...",
+  );
+  assertEq(
+    overBudget.body.keyword_ok,
+    true,
+    "...and the verdict AGREES: the model put it there, even though truncation removed it",
+  );
+  assert(
+    overBudget.body.meta_title.startsWith("epistemic memory: "),
+    `...the returned title still carries it via the repair (got ${JSON.stringify(overBudget.body.meta_title)})`,
   );
 
   // 3. ⛔ The model must not be able to introduce a keyword the research never
