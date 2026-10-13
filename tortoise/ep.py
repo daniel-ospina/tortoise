@@ -1551,9 +1551,12 @@ class TortoiseEP:
         # ``sdk._review_prune``). Applying the 0.04 posterior bar to a prior
         # width listed the same node as contested here while those four read
         # it unmeasured — the residual #2206/#3276-class disagreement THIS
-        # gate closes (a T3/T4 author baseline, e.g. ``credibility='low'``
-        # Beta(2,1) v=0.0556, used to surface; the system default Beta(3,1)
-        # v=0.0375 stays under the bar either way).
+        # gate closes (an explicitly declared prior wider than the bar, e.g.
+        # ``set_point_baseline(2, 1)`` Beta(2,1) v=0.0556, used to surface;
+        # the system default Beta(3,1) v=0.0375 stays under the bar either
+        # way — and since #6151 an authored word is one weak body on top of
+        # that default, so ``credibility='low'`` is now Beta(3.1,1)
+        # v=0.03616, also under the bar).
         #
         # Deliberately STILL NO measured gate: a genuinely UNMEASURED live
         # claim (no persisted prior at all -> coalesce to Beta(1,1), v=1/12)

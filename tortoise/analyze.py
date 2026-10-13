@@ -90,7 +90,11 @@ TEMPLATES: dict[str, dict] = {
         # ranking. The reported `conf`, however, must be the canonical belief
         # mean every other surface reads (#2206); `coalesce(c.confidence,0.5)`
         # reported 0.5 for a prior-only 0.75 claim — the residual #2206-class
-        # divergence this fixes (#3415).
+        # divergence this fixes (#3415). The belief expression coerces with
+        # toFloat: FalkorDB `/` is INTEGER division when both operands are ints
+        # (unlike Python), so a prior persisted as ints (set_point_baseline(2,1),
+        # or the legacy 49705bf6e tier_map) truncated 2/3 → 0 — worse than the
+        # neutral fallback it replaced. Mirrors annotate_ep_batch's guard.
         "cypher": f"""
             MATCH (c:Point)
             WHERE c.is_operator = false
@@ -102,7 +106,8 @@ TEMPLATES: dict[str, dict] = {
                ((a + b)^2 * (a + b + 1)) as variance
             RETURN c.id, c.content,
                    coalesce(c.confidence,
-                            CASE WHEN a + b > 0 THEN a / (a + b) ELSE 0.5 END)
+                            CASE WHEN a + b > 0
+                                 THEN toFloat(a) / (a + b) ELSE 0.5 END)
                      as conf,
                    variance
             ORDER BY variance DESC LIMIT $limit
@@ -131,7 +136,9 @@ TEMPLATES: dict[str, dict] = {
         # most_uncertain — the shared live.py terminal predicate). #3415: the
         # reported conf is the canonical belief mean (posterior→prior
         # coalesce, #2206), never the neutral 0.5 — a prior-only 0.75 claim
-        # used to print conf=0.50 beside its own α=3/β=1 columns.
+        # used to print conf=0.50 beside its own α=3/β=1 columns. toFloat on
+        # the numerator mirrors annotate_ep_batch: FalkorDB integer division
+        # would truncate an int prior mean (2/3 → 0) — see most_uncertain.
         "cypher": f"""
             MATCH (c:Point)
             WHERE c.content CONTAINS $entity
@@ -141,7 +148,8 @@ TEMPLATES: dict[str, dict] = {
                  coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
             RETURN c.id, c.content,
                    coalesce(c.confidence,
-                            CASE WHEN a + b > 0 THEN a / (a + b) ELSE 0.5 END)
+                            CASE WHEN a + b > 0
+                                 THEN toFloat(a) / (a + b) ELSE 0.5 END)
                      as conf,
                    a, b, c.createdAt
             ORDER BY c.createdAt DESC LIMIT $limit

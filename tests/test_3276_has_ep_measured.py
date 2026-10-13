@@ -418,6 +418,15 @@ class TestContestedClaimsMeasurementState:
             pid = sdk.create_point(
                 "decision", "Quokka prioronly lowcred contested zzqx",
                 credibility="low")["id"]
+            # #6151 (now an ancestor via main): the authored word is ONE weak
+            # body (AUTHOR_ASSERTION_WEAK_PC = 0.1) on top of the #2199
+            # default, so credibility='low' alone is Beta(3.1, 1) v=0.03616 —
+            # UNDER the 0.04 bar, so no longer the discriminating shape this
+            # test exists for. Widen the DECLARED prior explicitly to
+            # Beta(2,1) v=0.0556 (> 0.04) so the exclusion under test is the
+            # #3415 prior-only gate, not the variance bar (pre-#3415 this
+            # listed as contested).
+            sdk.set_point_baseline(pid, 2, 1)
             ep = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
             assert ep.measured is False and ep.baseline is True, ep
             # The discriminating shape: the DECLARED prior's variance clears

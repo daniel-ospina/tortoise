@@ -402,3 +402,63 @@ class TestAnalyzePriorOnlyParity:
             assert "conf=0.75" in res["answer"], res["answer"]
         finally:
             sdk.close()
+
+    def test_most_uncertain_reports_float_div_for_integer_baseline(self):
+        """FalkorDB ``/`` is INTEGER division when both operands are ints
+        (unlike Python's ``/``), so a prior persisted as ints — e.g.
+        ``set_point_baseline(2, 1)``, or the legacy ``tier_map`` written by
+        commit 49705bf6e — must not truncate to ``conf: 0.00`` on analyze.
+        The belief expression coerces with ``toFloat`` exactly as
+        ``annotate_ep_batch`` does for its contention ratio. Pre-fix
+        ``a / (a + b)`` reported 0 beside α=2/β=1; the parity oracle
+        (annotate_ep_batch, Python float division) says 0.6667."""
+        sdk = _fresh_sdk()
+        try:
+            pid = _make_point(sdk, "Quokka integerprior weakest zzqx")["id"]
+            sdk.set_point_baseline(pid, 2, 1)  # ints — no float cast
+            proj = sdk._get_proj()
+            stored = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.ep_alpha, n.ep_beta, "
+                "n.posterior_alpha, n.confidence",
+                params={"id": pid},
+            ).result_set[0]
+            assert int(stored[0]) == 2 and int(stored[1]) == 1, stored
+            assert stored[2] is None and stored[3] is None, stored
+            # Parity oracle — Python float division, never truncating.
+            expected = annotate_ep_batch(proj.g, [pid])[pid].confidence_mean
+            assert expected == pytest.approx(2 / 3, abs=1e-4), expected
+
+            from tortoise.analyze import analyze
+            res = analyze("weakest", proj=proj,
+                          entity_subgraph_ids={pid}, use_llm=False)
+            assert res["pattern"] == "most_uncertain", res
+            rows = [r for r in res["raw"] if r[0] == pid]
+            assert rows, f"claim missing from most_uncertain raw: {res['raw']}"
+            got = float(rows[0][2])
+            # THE regression: integer division truncated 2/3 to 0.
+            assert got != 0.0, rows[0]
+            assert got == pytest.approx(expected, abs=1e-4), rows[0]
+        finally:
+            sdk.close()
+
+    def test_trends_reports_float_div_for_integer_baseline(self):
+        """The identical integer-division defect in ``trends`` (see
+        test_most_uncertain_reports_float_div_for_integer_baseline)."""
+        sdk = _fresh_sdk()
+        try:
+            pid = _make_point(sdk, "Quokka integerprior timeline zzqx")["id"]
+            sdk.set_point_baseline(pid, 2, 1)
+            proj = sdk._get_proj()
+            expected = annotate_ep_batch(proj.g, [pid])[pid].confidence_mean
+            assert expected == pytest.approx(2 / 3, abs=1e-4), expected
+            from tortoise.analyze import analyze
+            res = analyze("how has integerprior changed", proj=proj,
+                          entity_subgraph_ids={pid}, use_llm=False)
+            assert res["pattern"] == "trends", res
+            rows = [r for r in res["raw"] if r[0] == pid]
+            assert rows, f"claim missing from trends raw: {res['raw']}"
+            got = float(rows[0][2])
+            assert got != 0.0, rows[0]
+            assert got == pytest.approx(expected, abs=1e-4), rows[0]
+        finally:
+            sdk.close()
