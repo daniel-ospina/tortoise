@@ -101,7 +101,9 @@ So restoring tags on replay is the **implementation** of D2 / #3856 / objective
   (``tags=None``) then skips BOTH halves, pass 1a's creation list survives on
   the node and pass 2 resurrects the tag; ``test_a_cleared_tag_is_not_
   resurrected`` fails. This is the mutation the suite most needs to be able to catch:
-  it is the one a live graph actually produced.
+  re-gating the fold on the payload's key presence makes it fail, and the clear
+  form is the pinned live idiom
+  (``tests/test_sdk.py::test_update_none_clears_tags``).
 * **Write only a list in ``_upsert_point_props``** — a scalar ``tags`` the live
   writer stored is dropped on replay and ``check_consistency`` reports a
   ``tags`` divergence on a graph the live path wrote:
