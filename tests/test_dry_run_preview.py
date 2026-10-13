@@ -354,17 +354,47 @@ class TestBlastRadius:
         assert preview["edges_created_at_new"] == real["edges_transferred"]
 
     def test_supersede_preview_keeps_parallel_operator_edges(self, sdk):
-        """The 2a operator leg uses CREATE, NOT MERGE: `create_operator(op,
-        old, [old])` mints two IMPL edges (idx 0 and idx 1), and the writer
-        creates TWO edges at the successor. The dedup must not collapse this
-        leg — that would under-report the blast radius."""
+        """The 2a operator leg MERGEs idx-keyed: `create_operator(op, old,
+        [old])` mints two IMPL edges (idx 0 and idx 1), and the writer creates
+        TWO typed edges at the successor — the dedup must not collapse this
+        leg (that would under-report the blast radius). #6180: each typed
+        edge's reverse INPUT mirror transfers too, so the successor gains 4
+        edges while the writer's primary `edges_transferred` counter stays 2."""
         old, new = _seed_point(sdk, "old"), _seed_point(sdk, "new")
-        sdk.create_operator("IMPL", old, [old])
+        op = sdk.create_operator("IMPL", old, [old])
         from tortoise.mcp_server import _preview_supersede
         preview = _preview_supersede(sdk, old, new)
-        assert preview["edges_created_at_new"] == 2, preview
+        assert preview["edges_created_at_new"] == 4, preview
+        assert preview["edges_transferred_from_old"] == 2, preview
         real = sdk.supersede(old, new)
         assert real["edges_transferred"] == 2
+        typed = [e for e in preview["edges"]
+                 if e["type"] == "IMPL" and e["from"] == op["id"]]
+        mirrors = [e for e in preview["edges"]
+                   if e["type"] == "INPUT" and e["to"] == op["id"]]
+        assert len(typed) == 2, typed
+        assert len(mirrors) == 2, mirrors
+
+    def test_supersede_preview_excludes_a_prewired_operator_edge(self, sdk):
+        """#6180 complementary case: the 2a operator leg MERGEs, so an edge the
+        successor already carries is a no-op, not a net-new one — the preview
+        must agree with the writer (a CREATE here doubled the edge)."""
+        old, new = _seed_point(sdk, "old"), _seed_point(sdk, "new")
+        t = _seed_point(sdk, "t")
+        op = sdk.create_operator("IMPL", old, [t])
+        sdk._get_proj().g.query(
+            "MATCH (op:Point {id:$op}), (new:Point {id:$new}) "
+            "CREATE (op)-[:IMPL {idx:0}]->(new)",
+            params={"op": op["id"], "new": new},
+        )
+        from tortoise.mcp_server import _preview_supersede
+        before = _edge_keys_at(sdk, new)
+        preview = _preview_supersede(sdk, old, new)
+        real = sdk.supersede(old, new)
+        net_new = _edge_keys_at(sdk, new) - before
+        assert preview["edges_created_at_new"] == len(net_new), (
+            preview, real, net_new)
+        assert preview["edges_already_present_at_new"] >= 1, preview
 
     def test_delete_entity_preview_dedups_a_multi_label_node(self, mcp, sdk):
         """A `:Point:Object` node is deleted ONCE (the writer's first

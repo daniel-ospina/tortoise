@@ -9785,11 +9785,18 @@ class TortoiseSDK:
         ``_supersede_window_end``. See docs/ONTOLOGY.md §4.7 (``validTo``).
 
         Transfers all edges from the old point to the new point:
-          - Operator edges (IMPL, NAND, hasPart) with idx
+          - Operator edges (IMPL, NAND, hasPart) with idx, AND their reverse
+            ``(support)-[:INPUT]->(operator)`` mirrors (#6180 — the mirror IS
+            the operator's support source, so it must travel with its typed
+            edge; see the 2a / 2a-INPUT blocks).
           - Plain structural edges (aboutSubject, aboutObject, aboutAction,
             aboutEvent, aboutPoint, aboutDocument, extractedFrom, etc.)
-        Preserves edge type and idx (source vs target position).
-        Leaves the old point outdated with only the CORRECTS edge from the new point.
+        Preserves edge type and idx (source vs target position). Every
+        transfer MERGEs, so an edge the successor already carries (a caller
+        wired the successor first) collapses onto the existing one instead of
+        doubling. Leaves the old point outdated with only the CORRECTS edge
+        from the new point. ``edges_transferred`` counts the PRIMARY edges
+        (operator/direct/structural); the INPUT mirrors ride along uncounted.
         """
         from datetime import datetime, timezone
         proj = self._get_proj()
@@ -9977,6 +9984,25 @@ class TortoiseSDK:
 
         # 2a. Transfer operator edges (IMPL, NAND, hasPart) — preserve provenance
 
+        # #6180: collect the INPUT mirrors BEFORE any mutation, beside the
+        # typed edges (the #329 collect-then-mutate discipline).
+        # ``(support)-[:INPUT {idx}]->(operator)`` is the operator's SUPPORT
+        # SOURCE: why.py::_SUPPORT_OP_CYPHER reads
+        # ``(sup)-[INPUT {idx:0}]->(op)-[:IMPL]->(n)`` and EP's factor
+        # extraction reads the same INPUTs. Leaving the mirror on the dead
+        # point had both effects the issue reports — the replacement's
+        # why/support chain went empty, and the superseded point kept
+        # exerting influence through the operator. Driven by the INPUT edges
+        # themselves (not by the typed-edge loop) so an operator whose
+        # op_type carries no typed edge still transfers its support source,
+        # and the rebuild pass-2b leg can mirror this query exactly.
+        input_rows = proj.g.query(
+            "MATCH (old:Point {id:$old_id})-[ri:INPUT]->"
+            "(op:Point {is_operator:true}) "
+            "RETURN op.id, ri.idx, ID(ri), op.label",
+            params={"old_id": old_id},
+        ).result_set
+
         transferred = 0
         for row in edges_result.result_set:
             op_id, edge_type, idx = row[0], row[1], row[2]
@@ -9991,10 +10017,18 @@ class TortoiseSDK:
                     op_id, old_id,
                 )
                 continue
-            # Create new edge: operator → new point (same idx preserves source/target position)
+            # Create new edge: operator → new point (same idx preserves
+            # source/target position). #6180: MERGE, not CREATE — a caller
+            # that pre-wired the shared edge onto the successor (the
+            # documented successor-first write pattern) otherwise gets a
+            # SECOND parallel edge here, inflating the operator's evidence
+            # weight while passing every "is the edge there?" check. idx
+            # rides the MERGE pattern, so the two edges
+            # create_operator(op, old, [old]) mints (idx 0 and idx 1) stay
+            # distinct and both transfer.
             proj.g.query(
                 f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$new_id}}) "
-                f"CREATE (op)-[:{edge_type} {{idx:$idx}}]->(new)",
+                f"MERGE (op)-[:{edge_type} {{idx:$idx}}]->(new)",
                 params={"op_id": op_id, "new_id": new_id, "idx": idx},
             )
             # Delete old edge (match by idx for precision)
@@ -10004,6 +10038,29 @@ class TortoiseSDK:
                 params={"op_id": op_id, "idx": idx, "old_id": old_id},
             )
             transferred += 1
+
+        # 2a-INPUT (#6180): the operator's reverse INPUT mirror follows its
+        # support source onto the successor. MERGE, like 2a — a successor
+        # that already carries the mirror must not get a second one. The
+        # alreadyDecided carve-out mirrors 2a: an operator deliberately kept
+        # attached to the dead prior keeps its INPUT there too.
+        for row in input_rows:
+            op_id, idx = row[0], row[1]
+            rid = row[2]
+            op_label = row[3] if len(row) > 3 else None
+            if op_label == "alreadyDecided":
+                continue
+            proj.g.query(
+                "MATCH (new:Point {id:$new_id}), (op:Point {id:$op_id}) "
+                "MERGE (new)-[:INPUT {idx:$idx}]->(op)",
+                params={"new_id": new_id, "op_id": op_id, "idx": idx},
+            )
+            proj.g.query(
+                "MATCH (old:Point {id:$old_id})-[ri:INPUT]->"
+                "(op:Point {id:$op_id}) "
+                "WHERE ID(ri) = $rid DELETE ri",
+                params={"old_id": old_id, "op_id": op_id, "rid": rid},
+            )
 
         # 2a-DIRECT (epic #902 §8 / plan §5.3 review fix): transfer
         # OPERATOR-LESS direct IMPL/NAND edges incident to the superseded

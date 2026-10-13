@@ -1839,3 +1839,79 @@ def test_promote_materialized_target_successor_later_folds_on_every_engine(
             via_all[2], via_all[3]), (
             f"{name}: _fold_journal diverges on the window stamps — "
             f"{b_fold} vs {via_all}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# #6180: the operator's reverse INPUT mirror follows on rebuild too — the
+# successor's why/support chain must resolve live AND post-rebuild
+# ═══════════════════════════════════════════════════════════════════════
+
+def _input_edges(proj, pid: str) -> set:
+    """`(pid)-[:INPUT {idx}]->(operator)` rows — the operator's support
+    mirror whose source is `pid`."""
+    return {tuple(r) for r in proj.g.query(
+        "MATCH (p:Point {id:$id})-[r:INPUT]->(op:Point {is_operator:true}) "
+        "RETURN r.idx, op.id",
+        params={"id": pid}).result_set}
+
+
+def test_operator_input_mirror_repoints_on_rebuild(sup):
+    """#6180: live supersede moves the INPUT mirror to the successor; pass-2
+    resurrects it at OLD from the operator snapshot (whose `inputs` still name
+    OLD), so pass-2b must move it back — else live and rebuilt diverge and the
+    successor's support chain is empty post-rebuild."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A source", status="live")["id"]
+    t = sdk.create_point("statement", "target", status="live")["id"]
+    sdk.create_operator("IMPL", a, [t])
+    succ = sdk.create_point("statement", "A'", status="live")["id"]
+    sdk.supersede_point(a, succ)
+    proj = sdk._get_proj()
+    pre_old = _input_edges(proj, a)
+    pre_new = _input_edges(proj, succ)
+    assert not pre_old and pre_new, f"live: old={pre_old} new={pre_new}"
+
+    _rebuild(sdk, events)
+
+    assert not _input_edges(proj, a), "INPUT mirror stranded on the superseded A"
+    assert _input_edges(proj, succ) == pre_new, (
+        f"INPUT mirror drifted: {_input_edges(proj, succ)} != {pre_new}")
+
+
+def test_operator_input_mirror_follows_a_chain(sup):
+    """A→B→C: the INPUT mirror lands on the FINAL live successor after
+    rebuild, never on the intermediate terminal B."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A", status="live")["id"]
+    t = sdk.create_point("statement", "t", status="live")["id"]
+    sdk.create_operator("IMPL", a, [t])
+    b = sdk.create_point("statement", "B", status="live")["id"]
+    c = sdk.create_point("statement", "C", status="live")["id"]
+    sdk.supersede_point(a, b)
+    sdk.supersede_point(b, c)
+    proj = sdk._get_proj()
+    pre_c = _input_edges(proj, c)
+    assert pre_c, "live: the mirror must end on C"
+
+    _rebuild(sdk, events)
+
+    assert not _input_edges(proj, a), "mirror stranded on A"
+    assert not _input_edges(proj, b), "mirror stranded on intermediate B"
+    assert _input_edges(proj, c) == pre_c
+
+
+def test_alreadydecided_input_mirror_stays_on_rebuild(sup):
+    """#1080 carve-out parity: an alreadyDecided operator's INPUT mirror stays
+    on the superseded prior live AND post-rebuild."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A", status="live")["id"]
+    t = sdk.create_point("statement", "t", status="live")["id"]
+    sdk.create_operator("IMPL", a, [t], label="alreadyDecided")
+    succ = sdk.create_point("statement", "A'", status="live")["id"]
+    sdk.supersede_point(a, succ)
+    proj = sdk._get_proj()
+    pre = _input_edges(proj, a)
+    assert pre
+    _rebuild(sdk, events)
+    assert _input_edges(proj, a) == pre
+    assert not _input_edges(proj, succ)
