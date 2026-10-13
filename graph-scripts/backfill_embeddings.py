@@ -597,8 +597,10 @@ def _repair_legacy_event_embeddings(g, *, dry_run: bool, limit: int) -> int:
     ("expected Null or Vectorf32 but was List") — one legacy node poisoned
     Event vector search. The read boundary now normalises a right-width
     numeric `List` (#8316), so this repair serves SHAPE CONSISTENCY — every
-    stored embedding typed like the other writers produce (the typed shape the
-    Point index cohort requires, #8429). A wrong-width or non-numeric `List`
+    stored Event embedding typed the way this repo's own writers produce them
+    (the typed shape the Point index cohort requires, #8429; a verbatim
+    caller-supplied Point embedding is deliberately a plain `List` — PR
+    #3018 — and is not this repair's business). A wrong-width or non-numeric `List`
     still aborts a read (#8430), and the two halves differ HERE: `vecf32()`
     DOES retype a wrong-width numeric `List`, so it lands in the `rewritten`
     count without curing the dimension mismatch, while a non-numeric `List`

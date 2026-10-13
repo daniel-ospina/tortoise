@@ -464,7 +464,7 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
             f"    {sk_sets}"
             "    t.content_hash=$ch, "
             # The product's own vector, vecf32-wrapped so the stored shape
-            # matches every other writer's (a bare List node is absent from the
+            # matches every other server-owned writer's (a bare List node is absent from the
             # Point index cohort, #8429; the read boundary normalises a
             # right-width List since #8316, and a wrong width or a non-numeric
             # value still aborts one — #8430),

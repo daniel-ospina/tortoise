@@ -71,9 +71,11 @@ must NOT be routed into it:
   :func:`clear_then_set_prefix` + :func:`set_embedding_clause`
   (``preserve_on_null=False``), exactly as ``_revise_point`` is, while every
   other key keeps the caller-supplied-patch ``SET n += $props`` semantics. Both
-  halves are required: the ``vecf32()`` cast keeps a server-owned value the
-  typed shape every other writer produces — a bare ``List`` node is absent from
-  the Point HNSW index cohort (#8429) — and the clear lands the small-Δ
+  halves are required: the ``vecf32()`` cast keeps a server-owned value in the
+  typed shape every other SERVER-OWNED writer produces (the caller-supplied
+  branch below deliberately stores a plain ``List`` — PR #3018) — a bare
+  ``List`` node is absent from the Point HNSW index cohort (#8429) — and the
+  clear lands the small-Δ
   overwrite the embedded engine would otherwise DISCARD. (Before #8316 that
   flip also made the next dense READ raise ``Type mismatch: expected Null or
   Vectorf32 but was List``; the read boundary now normalises a right-width

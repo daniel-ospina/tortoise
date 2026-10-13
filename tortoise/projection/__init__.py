@@ -13739,8 +13739,8 @@ class FalkorProjection(
                     params["embedding"] = emb  # None = wipe stale embedding for empty content
                 except Exception:
                     params["embedding"] = None  # wipe stale embedding on failure (#19)
-                # #4521: cast with `vecf32()` like every other Point embedding
-                # writer, so a server-owned vector is always the typed shape —
+                # #4521: cast with `vecf32()` like every other server-owned Point
+                # embedding writer, so a server-owned vector is always the typed shape —
                 # a bare `List` node is absent from the Point HNSW index at all
                 # (#8429). Before #8316 the flip to `List` also aborted the
                 # whole dense READ (`Type mismatch: expected Null or Vectorf32
