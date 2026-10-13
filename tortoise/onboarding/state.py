@@ -14,13 +14,6 @@ The module is graph-agnostic: every writer/reader takes a ``graph`` handle
 with a ``.query(cypher, **params)`` surface (FalkorProjection) returning a
 result with ``.result_set`` and ``.stats``. Importable without hosted_api
 (no circular import).
-
-#7951 §17.1: onboarding FLOW state is OPERATIONAL state, not a projection of
-the event journal, so ``_run`` writes it straight at the graph handle
-(``FalkorProjection.g``) rather than through the public raw-query lane
-(``FalkorProjection.query``), which the single-writer guard closes on a
-journal-backed projection. The handle is the lane the SDK's own live writes
-use, and the residual §17.1 records as still-open.
 """
 from __future__ import annotations
 
@@ -375,25 +368,33 @@ def _org_lock(org_id: str) -> threading.Lock:
 
 
 def _run(graph: Any, cypher: str, params: dict[str, Any] | None = None):
-    """Run a query on the injected graph handle.
+    """Run a query on the injected graph handle — tolerant of both the
+    FalkorProjection surface (``.query(cypher, **params)``) and the raw
+    graph surface (``.query(cypher, params=...)``). A cypher/DB error
+    raises a ResponseError (never a TypeError), so the fallback only fires
+    on a signature mismatch.
 
-    #7951 §17.1: prefer the projection's own graph handle (``graph.g``) when
-    one is present. ``FalkorProjection.query`` is the public raw-query lane,
-    which the single-writer guard CLOSES on a journal-backed projection (the
-    production hosted lane); onboarding FLOW state is operational state, not a
-    projection of the event journal, so it must not travel that lane. The
-    handle (``proj.g.query``) is the same lane the SDK's own live writes use
-    and is the residual §17.1 records as still-open.
-
-    Falls back to the duck-typed surfaces when there is no ``.g`` (a raw
-    graph): the ``.query(cypher, **params)`` keyword form, then the
-    ``.query(cypher, params=...)`` form. A cypher/DB error raises a
-    ResponseError (never a TypeError), so the fallback only fires on a
-    signature mismatch."""
+    §17.1 (#7951): a *journal-backed* projection refuses a mutating statement
+    on the PUBLIC ``FalkorProjection.query`` lane (``DirectCacheWriteRefused``).
+    The onboarding writers are the plain **unjournaled live writes** #7951's
+    work list records as class (a) — the remaining work, not an enforcing
+    increment — so they must reach the cache the way the SDK's OWN live writes
+    do: through the raw graph handle (``proj.g.query``), which #7951 records as
+    the still-open residual (that handle is *also* the SDK's live write path —
+    ``create_point``/``update_point`` — so a blanket refusal there would break
+    the product, not a violation of it). Taking the public lane here refused
+    EVERY onboarding write on the hosted lane, and the callers are fail-open
+    (``hosted_api._maybe_apply_completion`` -> ``except Exception: return
+    False``, ``mcp_server._maybe_onboarding_auto_complete`` -> ``return``, and
+    ``selfhost.ensure_selfhost_onboarding_once`` is best-effort), so the
+    regression was SILENT — orgs never reached ``complete``. Routing through
+    the raw handle keeps every other guard on this path (the guarded handle's
+    own #3595 operator and #7174 numeric-domain refusals and its L2 bulk-wipe
+    check all still run)."""
     params = params or {}
-    inner = getattr(graph, "g", None)
-    if inner is not None:
-        return inner.query(cypher, params=params)
+    raw = getattr(graph, "g", None)  # FalkorProjection -> its raw handle
+    if raw is not None and hasattr(raw, "query"):
+        return raw.query(cypher, params=params)
     try:
         return graph.query(cypher, **params)
     except TypeError:
