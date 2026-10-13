@@ -33901,6 +33901,9 @@ def _billing_customer_email(sdk: TortoiseSDK | None, org: dict) -> str:
        (``_billing_email_like``) because ``created_by`` may be a user UUID or
        ``"api"`` rather than an address (#4504 review) — a non-email creator
        id must fall through, not be posted to Stripe as the customer email.
+       The control-plane twin of the "key used for THIS request" link is the
+       ``created_by`` already on the resolved org dict (#4727) — see the
+       inline note below.
     3. The VERIFIED session user's email (#4504) — OAuth/session users whose
        org carries no ``Team.email`` and whose keys carry no usable
        ``created_by`` (a dashboard/provisioned org) were refused a checkout
@@ -33927,6 +33930,23 @@ def _billing_customer_email(sdk: TortoiseSDK | None, org: dict) -> str:
     # the t.email that read returns, so this is a selfhost no-op.
     if _billing_email_like(org.get("email")):
         return org["email"].strip()
+    # #4727: the control-plane twin of step 2's "key used for THIS request"
+    # link. The two registry reads below never run in Supabase mode
+    # (``sdk is None``), so a provision-path org whose ``organizations.email``
+    # is NULL had NO creator-email link there — a tt_ key with no session
+    # email got the terminal 400 even though ``resolve_api_key`` already puts
+    # the key's creator on the resolved org dict as ``"created_by"`` (the
+    # same field the registry org dict carries — #1748 parity). Precedence is
+    # deliberately the registry chain's: before the session fallback (3),
+    # after ``Org.email`` (1). Shape-gated for the #4504 reason — a
+    # dashboard-minted key's ``created_by`` is a user UUID and a
+    # bootstrap/legacy key's is the literal ``"api"``; neither is an address
+    # and neither may be posted to Stripe. The ``sdk is None`` guard scopes
+    # this strictly to the lane that has no registry read, so registry
+    # behavior is byte-identical (where the same value is read off the
+    # ``APIKey`` node at step 2 anyway).
+    if sdk is None and _billing_email_like(org.get("created_by")):
+        return org["created_by"].strip()
     if sdk is not None:
         key_id = org.get("key_id")
         if key_id:
