@@ -78,10 +78,20 @@ export function validUrl(u: string): boolean {
  * Anything carrying a scheme must still be http(s), which is what stops
  * `javascript:` and `data:`. Protocol-relative (`//host`) is rejected because it
  * inherits the page scheme and points off-origin, which is not "relative" here.
+ *
+ * Backslashes are path separators to WHATWG URL parsing for special schemes, so
+ * a backslash-escaped `//host` resolves off-origin exactly like `//host` while
+ * failing a literal `startsWith("//")`. A raw backslash has no place in a URL
+ * (a real one is percent-encoded), so the whole class is rejected — fail-closed,
+ * and it cannot be mislabelled as same-origin (#8379 finding 1).
  */
 export function validHref(href: string): boolean {
   const h = href.trim();
   if (!h) return false;
+  // Reject backslashes BEFORE anything else: `\/\/host` and `\\host` are the
+  // same off-origin reference as `//host` to a browser, and a backslash-prefixed
+  // form passes the literal `startsWith("//")` test below.
+  if (h.includes("\\")) return false;
   // Protocol-relative: off-origin, and not what an author means by "relative".
   if (h.startsWith("//")) return false;
   // Carries a scheme? Then it must be http(s) — the original security property.
@@ -193,11 +203,16 @@ function inline(text: string): string {
       out += `<img src="${safeSrc}" alt="${escapeHtml(unescapeMd(m[5] ?? ""))}">`;
     } else if (m[7] !== undefined) {
       const href = m[9] ?? "";
-      const safeHref = validHref(href) ? escapeHtml(href) : "#";
+      // Validate first, then emit only what was validated. A backslash form of
+      // `//host` is the same off-origin reference to a browser, so it is
+      // REJECTED by `validHref` — and a rejected reference never gets the
+      // external shape, whatever it looks like (#8379 finding 1).
+      const accepted = validHref(href);
+      const safeHref = accepted ? escapeHtml(href.trim()) : "#";
       // An INTERNAL link (relative/fragment) opens in the same tab and needs no
       // `noopener`; an off-site absolute link keeps the hard-won `_blank` +
       // `noopener`. Previously every link was treated as external (#8313).
-      const external = /^https?:\/\//i.test(href.trim());
+      const external = accepted && /^https?:\/\//i.test(href.trim());
       out += external
         ? `<a href="${safeHref}" target="_blank" rel="noopener">${escapeHtml(unescapeMd(m[8] ?? ""))}</a>`
         : `<a href="${safeHref}">${escapeHtml(unescapeMd(m[8] ?? ""))}</a>`;

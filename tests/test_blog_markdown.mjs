@@ -14,6 +14,8 @@
 // Run (Node >= 22.6):
 //   node --experimental-strip-types tests/test_blog_markdown.mjs
 
+import { readFileSync } from "node:fs";
+
 import { renderMarkdown, extractFaq, faqPageJsonLd, articleJsonLd, jsonLd, extractVideo, validHref } from "../website/functions/blog/_lib.ts";
 import { VIDEO_EMBED_ORIGINS } from "../website/functions/blog/_shared/video.ts";
 // The marketing project's policy — the one `blog/_lib.ts` `ok()` stamps on every
@@ -1089,9 +1091,32 @@ console.log("relative + internal links resolve; non-http schemes stay rejected (
     "data:text/html,<script>alert(1)</script>",
     "//evil.example.com/x",
     "file:///etc/passwd",
+    // Backslashes are path separators to WHATWG URL parsing for special
+    // schemes, so these resolve off-origin exactly like `//evil.example.com/x`
+    // while failing a literal `startsWith("//")` (#8379 finding 1).
+    "\\/\\/evil.example.com/x",
+    "\\\\evil.example.com/x",
   ]) {
     assertEq(hrefOf(`[x](${bad})`), "#", `still rejected: ${bad}`);
   }
+
+  // A backslash spelling of an ABSOLUTE https link is the same link to a
+  // browser (WHATWG URL treats `\` as `/` for special schemes), so it is
+  // rejected outright rather than normalised — and a rejected reference must
+  // never be presented as an external link.
+  const backslashedAbsolute = renderMarkdown("[x](https:\\/\\/example.com/a)");
+  assertEq(
+    /<a href="([^"]*)"/.exec(backslashedAbsolute)?.[1],
+    "#",
+    "a backslash-escaped absolute href is rejected, not normalised",
+  );
+  assert(
+    backslashedAbsolute.includes('target="_blank"') === false,
+    "a rejected backslash reference does not get the external shape",
+  );
+  // …and the predicate rejects both protocol-relative backslash spellings.
+  assertEq(validHref("\\/\\/evil.example.com/x"), false, "validHref rejects `\\/\\/host`");
+  assertEq(validHref("\\\\evil.example.com/x"), false, "validHref rejects `\\\\host`");
   // Control characters cannot be smuggled into an href. Asserted on the
   // predicate directly: a NUL is stripped by `escapeHtml` before the link regex
   // runs, so there is no anchor to inspect at all — the property is that the
@@ -1100,6 +1125,43 @@ console.log("relative + internal links resolve; non-http schemes stay rejected (
   assertEq(validHref("/blog/a b"), false, "a space in an href is rejected");
   assertEq(validHref("/blog/a\nb"), false, "a newline in an href is rejected");
   assertEq(validHref(""), false, "an empty href is rejected");
+}
+
+// ── The authoring contract's own examples render as documented (#8379) ─────
+// docs/blog-authoring.md makes a promise per example, and the renderer makes
+// those promises executable. A placeholder id that is not a real provider id,
+// or a heading rule the renderer does not implement, is a defect in the
+// contract even when every other assertion in this suite passes.
+console.log("");
+console.log("docs/blog-authoring.md examples render as the page claims");
+{
+  const doc = readFileSync(new URL("../docs/blog-authoring.md", import.meta.url), "utf8");
+  const blocks = [...doc.matchAll(/^```[^\n]*\n([\s\S]*?)^```\s*$/gm)].map((m) => m[1].trim());
+  const videoExamples = blocks.filter((b) => b.includes("[[video:"));
+
+  assert(videoExamples.length >= 2, "the contract documents at least two video examples");
+  for (const example of videoExamples) {
+    const firstLine = example.split("\n")[0];
+    const html = renderMarkdown(example);
+    assert(html.includes("<iframe"), `the documented video example embeds: ${firstLine}`);
+    assert(
+      !html.includes("[[video"),
+      `the documented video example's marker is consumed, not published as text: ${firstLine}`,
+    );
+    assert(
+      extractVideo(example).length >= 1,
+      `the documented video example yields a VideoObject source: ${firstLine}`,
+    );
+  }
+
+  // The Basics table's heading row (`##`–`####` → `<h2>`–`<h4>`; the post title
+  // supplies the page's <h1>). The page previously claimed `#`–`####` →
+  // `<h1>`–`<h4>`, which the renderer falsifies (a lone `#` is not a heading)
+  // and which contradicted the page's own anchors paragraph.
+  assert(/`##`–`####` headings/.test(doc), "the Basics table documents `##`–`####`, not `#`–`####`");
+  assert(renderMarkdown("## Two").includes('<h2 id="two">Two</h2>'), "`##` renders an <h2>");
+  assert(renderMarkdown("#### Four").includes('<h4 id="four">Four</h4>'), "`####` renders an <h4>");
+  assert(!renderMarkdown("# One").includes("<h1"), "a lone `#` is not a heading");
 }
 
 console.log("");

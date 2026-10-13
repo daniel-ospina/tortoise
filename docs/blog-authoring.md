@@ -15,7 +15,7 @@ the contract: what the body may contain, and what each construct renders as.
 
 | You write | You get |
 |---|---|
-| `#`–`####` headings | `<h1>`–`<h4>` — **`##` and `###` are the ones to use** in a post body |
+| `##`–`####` headings | `<h2>`–`<h4>` — the post title supplies the page's `<h1>` |
 | `**bold**`, `*italic*`, `` `code` `` | the obvious tags |
 | `[text](https://example.com)` | an external link, `target="_blank"` + `rel="noopener"` |
 | `[text](/blog/other-post)` or `[text](#a-heading)` | an **internal** link — same tab, no `target` |
@@ -131,17 +131,21 @@ read by Bing and by AI answer engines — but do not expect a Google SERP featur
 Write the marker on its own line, with the video's URL:
 
 ```text
-[[video: https://www.youtube.com/watch?v=VIDEOID]]
+[[video: https://www.youtube.com/watch?v=dQw4w9WgXcQ]]
 ```
 
 That renders the embed **and** emits `VideoObject` structured data. YouTube and Vimeo are supported
 (`youtu.be/ID`, `/watch?v=ID`, `/embed/ID`, `/shorts/ID`, `vimeo.com/ID`).
 
+⚠️ **The id has to be the real one, in the shape the provider uses** — a YouTube id is exactly **11
+characters** from `[A-Za-z0-9_-]` and a Vimeo id is **6–12 digits**. `dQw4w9WgXcQ` above is a real id; a
+shorter placeholder such as `VIDEOID` is not recognised, and the marker publishes as ordinary text.
+
 Optional fields, after `|` — a title, an ISO-8601 duration, and a `YYYY-MM-DD` date. The two typed
 fields are recognised **by shape**, so they may appear in any order:
 
 ```text
-[[video: https://youtu.be/VIDEOID | The 2026 interview | PT42M10S | 2026-10-14]]
+[[video: https://youtu.be/dQw4w9WgXcQ | The 2026 interview | PT42M10S | 2026-10-14]]
 ```
 
 Anything the marker does not supply falls back to the post's own metadata — its title, its
@@ -185,6 +189,7 @@ transcript separately rather than pasting it into the article.
 ## What is *not* supported
 
 - Raw HTML — escaped, publishes as text.
+- Single-`#` headings — the post title is the page's `<h1>`, and a lone `#` publishes as literal text.
 - Footers/footnote syntax, definition lists, `<details>`.
 - Autolinked bare URLs — link them explicitly.
 - Anything requiring a custom `id`: heading anchors are generated from heading text.
