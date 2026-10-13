@@ -117,6 +117,7 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     loop_heartbeat_info,
     loop_heartbeat_task,
     record_analytics_outcome,  # #3820 analytics-sink outcome counter
+    record_telemetry_drop,  # #4095 allowlist-drop counter (the /metrics seam)
     run_control_plane_call,
     run_on_daemon_worker,
     start_health_listener,
@@ -28247,7 +28248,12 @@ def _report_unregistered(where: str, subject: str,
     Contract (issue #3821), in order:
 
     1. ALWAYS counts — the bounded key fingerprint is incremented before any
-       escalation, so the drop is visible even when strict mode raises.
+       escalation, so the drop is visible even when strict mode raises. Since
+       #4095 the same drop is ALSO counted on the monitoring seam
+       (``monitoring.record_telemetry_drop``), which is the leg that is
+       published in production (``metrics()`` and the internal ``/status``
+       block); the process-local counter below remains the bounded
+       warn-dedup/fingerprint structure, and it is lost on every deploy.
     2. Reports AT MOST ONCE per ``(where, subject, key-fingerprint)`` per
        process — the OTel bound, so an emit site in a hot loop cannot flood
        the log.
@@ -28294,6 +28300,15 @@ def _report_unregistered(where: str, subject: str,
                   and len(reported) < _TELEMETRY_DROP_MAX_PER_SITE)
         if report:
             reported.add(fingerprint)
+    # #4095: contract point 1 has a SECOND leg. The in-process counter above
+    # is process-local and lost on every deploy, and until now it had no
+    # reader outside the test suite — so for the week-1 cohort the whole
+    # motivation of #3821 rode on the single WARN below. Count the SAME drop
+    # on the monitoring seam, which IS published (`metrics()` for the hosted
+    # app, `/metrics` wherever a scrape exists) and read by the internal
+    # `/status` block. Placed before the warn and before the strict-mode
+    # raise so "always counts" holds on every path, exactly as it does above.
+    _telemetry_count_drop(_telemetry_drop_site_label(where, subject))
     if report:
         _logger.warning(
             "unregistered telemetry key(s) dropped at %s (subject=%s): %s — "
@@ -28302,6 +28317,79 @@ def _report_unregistered(where: str, subject: str,
             where, subject, list(fingerprint))
     if _telemetry_strict():
         raise UnregisteredTelemetryKey(where, subject, set(unknown))
+
+
+def _telemetry_drop_site_label(where: str, subject: str) -> str:
+    """The ONE rendering of a drop site (#4095).
+
+    The Prometheus child label and the internal ``/status`` block key are both
+    produced here, so the two published surfaces cannot describe the same drop
+    differently.
+
+    The rendering is LOSSY in principle, deliberately: both parts are already
+    truncated by ``_report_unregistered``, and a part that itself contained the
+    separator would make two sites share one key — a merged ROW in the operator
+    read (``total`` is unaffected, and the metric's cardinality is bounded
+    independently by ``monitoring._admit_telemetry_drop_site``). Both parts are
+    code literals at every call site today, so there is nothing to disambiguate
+    and the separator is not escaped: the rendering exists to be read by a human
+    running ``jq .telemetry``, not to round-trip.
+    """
+    return f"{where}|{subject}"
+
+
+def _telemetry_count_drop(site: str) -> None:
+    """Count one drop on the monitoring seam; never raises (#4095).
+
+    The counter leg must not be able to escape ``_report_unregistered``: that
+    function's contract is that it raises EXACTLY ONE exception, and only in
+    strict mode (``UnregisteredTelemetryKey``). A raise from the metrics
+    library would otherwise surface as an opaque 500 on the telemetry emit
+    path — the same P2-3 defect #3820's ``_analytics_count_outcome`` closes for
+    the analytics outcome counter.
+    """
+    try:
+        record_telemetry_drop(site)
+    except Exception as e:
+        _logger.warning("telemetry drop counter failed (%s): %s", site, e)
+
+
+def _telemetry_drop_block() -> dict:
+    """The #4095 production read of the allowlist-drop counter.
+
+    Published on the INTERNAL ``/v1/internal/backups/status`` endpoint — the
+    surface the hourly DR driver and an operator already curl, and the one
+    served whatever else on the machine is unhealthy — so the "always counts"
+    guarantee of ``_report_unregistered`` is observable in production instead
+    of only in the test suite.
+
+    ``total`` is the number of DROPS; ``sites`` is that total split by drop
+    site; ``markers`` is the number of distinct bounded key-fingerprints
+    RETAINED and ``marker_cap`` the cap they fold into. The bounded structures
+    hold at most their cap PLUS one shared overflow entry, so
+    ``markers > marker_cap`` means at least one marker was folded into that
+    shared entry — i.e. the per-site split is complete but the marker count is
+    a floor, not a total.
+
+    ⛔ NEVER carries the dropped key NAMES. ``_ALLOWED_ANALYTICS_PROPS``
+    contains user-derived keys and the PATCH front door derives its keys from a
+    request body, so key names are caller-supplied text — the same reason
+    ``_analytics_incident_detail`` publishes counts and reason codes only. The
+    WARN line is where the names are legible (once per site); this block is the
+    channel that says WHETHER and HOW MUCH is dropping, which is the half that
+    was missing.
+    """
+    with _TELEMETRY_DROP_LOCK:
+        by_site: Counter[str] = Counter()
+        for (where, subject, _fingerprint), count in _TELEMETRY_DROP_COUNTS.items():
+            by_site[_telemetry_drop_site_label(where, subject)] += count
+        markers = len(_TELEMETRY_DROP_COUNTS)
+    return {
+        "total": sum(by_site.values()),
+        "sites": dict(by_site),
+        "markers": markers,
+        "marker_cap": _TELEMETRY_DROP_MAX_MARKERS,
+    }
 
 
 _ANALYTICS_FALLBACK_PATH = None
@@ -32948,7 +33036,11 @@ async def backups_status(request: Request):
                 # R2 misconfig must not blind the sink-absence check (the
                 # driver would read an absent block as "unknown" and stay
                 # silent).
-                "analytics": _analytics_heartbeat_block()}
+                # #4095: same rule for the telemetry-drop block — it is
+                # in-process state, and an unusable object store must not hide
+                # the "always counts" guarantee of `_report_unregistered`.
+                "analytics": _analytics_heartbeat_block(),
+                "telemetry": _telemetry_drop_block()}
     lock_block = _lock_status_block(cfg)
     watcher = _WATCHER
     now = datetime.now(UTC)
@@ -33056,6 +33148,11 @@ async def backups_status(request: Request):
         # a sink that silently STOPPED emitting. Published here, never through
         # the sink, so the sink cannot silence its own alarm.
         "analytics": _analytics_heartbeat_block(),
+        # #4095: the production reader for #3821's allowlist-drop counter. It
+        # rides the SAME internal endpoint the driver and an operator already
+        # read, so a drop is observable without a scrape (the hosted app serves
+        # no `/metrics`) and without waiting for a test run.
+        "telemetry": _telemetry_drop_block(),
     }
 
 @app.post("/v1/internal/driver/heartbeat")
