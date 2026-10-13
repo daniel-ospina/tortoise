@@ -388,12 +388,14 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
         posteriors with green tests, §5.6 cycle-3).
 
     A9 traversal (epic #902 §5.6): the selector ALSO walks operator-less
-    direct edges — DIRECTION-RESPECTING: NAND edges traversed both
-directions ALWAYS; IMPL edges traversed both directions ONLY when the
-    edge's stored ``direction`` ≠ ``"unidirectional"`` (a unidirectional
-    direct IMPL edge must NOT back-propagate into its source — mirrors
-    §4.3's EP read coalesce(r.direction,'bidirectional') and the operator-
-    path selector's direction handling). The direct-edge traversal expands
+    direct edges — DIRECTION-RESPECTING (#7852): a direct edge is walked
+    forward only where its stored ``direction`` flows forward
+    (``->``/``<->`` and their legacy aliases) and backward only where it
+    flows backward (``<-``/``<->`` and their aliases); ``-`` (no confidence
+    transfers) is walked NEITHER way. The one historical exception is NAND:
+    it keeps its always-both legacy behaviour (never back-propagating into a
+    forward-only IMPL source is an IMPL rule), minus the new ``-``. The
+    direct-edge traversal expands
     the frontier like the operator BFS does, so mixed subgraphs select
     operators AND direct factors together; a direct-edge-only subgraph
     yields ZERO operator ids + non-empty factor anchors (the return
@@ -579,6 +581,7 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                     "AND (b.is_operator IS NULL OR b.is_operator = false) "
                     "AND b.op_type IS NULL "
                     "AND (type(r) = 'NAND' "
+                    "     AND coalesce(r.direction, 'bidirectional') <> '-' "
                     "     OR coalesce(r.direction, 'bidirectional') IN "
                     "        ['bidirectional', '<->', '<-']) "
                     "RETURN DISTINCT a.id, b.id, type(r)",

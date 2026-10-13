@@ -201,6 +201,30 @@ def test_a9_nand_always_bidirectional():
         sdk.close()
 
 
+def test_a9_nand_negative_direction_traversed_neither_way_7852():
+    """#7852: `-` means "the connection exists and NO confidence transfers".
+    The NAND always-both exception must not resurrect it — seeding from
+    EITHER endpoint of a `-` NAND direct edge discovers nothing. The
+    forward-flowing tokens keep NAND's legacy always-both behaviour."""
+    sdk = _fresh_sdk()
+    try:
+        src = _live(sdk, "Source")
+        tgt = _live(sdk, "Target")
+        sdk.create_direct_edge("NAND", src["id"], tgt["id"], direction="-")
+        _, anchors_s = _select(sdk._get_proj(), [src["id"]], max_hops=1)
+        assert anchors_s == set(), \
+            f"a `-` NAND edge must not traverse forward: {anchors_s}"
+        _, anchors_t = _select(sdk._get_proj(), [tgt["id"]], max_hops=1)
+        assert anchors_t == set(), \
+            f"a `-` NAND edge must not traverse backward: {anchors_t}"
+        # the model token `->` keeps NAND's legacy always-both behaviour
+        sdk.create_direct_edge("NAND", src["id"], tgt["id"], direction="->")
+        _, anchors_f = _select(sdk._get_proj(), [tgt["id"]], max_hops=1)
+        assert (src["id"], tgt["id"], "NAND") in anchors_f, anchors_f
+    finally:
+        sdk.close()
+
+
 def test_a9_cyclic_selection_terminates():
     """A direct-edge 3-cycle selects every edge's anchor and terminates
     (no infinite expansion on the cycle)."""

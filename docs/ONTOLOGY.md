@@ -774,7 +774,7 @@ Each layer answers a different question. All four are live mechanisms.
 > - **Case 2 — substantive correction:** the new point exists *because* a refutation landed. The refuting NAND must **not** re-attach to the successor (it motivated the change); belief recomputes structurally with the refutation gone.
 > Deterministic policy is safe only for content-independent edges (identity edges like `aboutObject` when the target is unchanged; merges carry everything). Semantic edges (IMPL/NAND) route to a carry / drop / **pend** triage with the rationale stored per edge; pended edges are non-voting placeholders surfaced by the ask lane only when an answer depends on them. A refutation that motivated a correction never re-attaches; a refutation that still applies is kept. *Implementation status:* `supersede_point` currently performs the legacy universal transfer (all operator + structural edges); the per-edge triage decomposes under #2421.
 >
-> **Direction flag (code note):** direction is recorded on the operator Point (or on the edge when no operator is present) — four values: `->`, `<-`, `<->`, `-`. It comes from the connection's semantics; the recorded value is authoritative — **the semantics set it at declaration time; `create_operator` / `tortoise_create_operator` accept `semantics` and record the meaning's model direction verbatim, recording the basis as `direction_basis` (#7852 W1), and the four-value vocabulary is stored and interpreted on every path — `create_direct_edge`, the ingest contract, EP and the analyze BFS (#7852 v3.25)** (see the *Transition state* note in the changelog). Pre-migration operators lacking the property are read as `<->` (legacy semantics preserved); the legacy tokens `bidirectional` / `unidirectional` remain valid aliases.
+> **Direction flag (code note):** direction is recorded on the operator Point (or on the edge when no operator is present) — four values: `->`, `<-`, `<->`, `-`. It comes from the connection's semantics; the recorded value is authoritative — **the semantics set it at declaration time; `create_operator` / `tortoise_create_operator` accept `semantics` and record the meaning's model direction verbatim, recording the basis as `direction_basis` (#7852 W1), and the four-value vocabulary is stored and interpreted on every path — `create_direct_edge`, the ingest contract, EP and the analyze BFS (#7852 v3.25)** (see the *Transition state* note in the changelog). Pre-migration operators lacking the property are read as `<->` (legacy semantics preserved); the legacy tokens `bidirectional` / `unidirectional` remain valid aliases. The direct-edge and ingest paths still *source* the direction from `op_type` rather than `semantics` (#7813) — a separate, still-open gap from this storage vocabulary.
 >
 > **Edge properties (IMPL/NAND — EP message state, epic 903):** these are **graph-persisted** belief-propagation messages written by `TortoiseEP._flush_cache` and read back by `_load_cache` (warm-start seed, 903-C4). They are load-bearing graph state — documented here so they are not treated as throwaway cache:
 >
@@ -1574,7 +1574,9 @@ and carry confidence as an edge attribute.
   operator as `direction_basis` — `explicit` / `semantics` / `default` (#7852 W1). The four-value
   vocabulary is stored and interpreted on every path — `create_direct_edge`, the ingest contract,
   EP and the analyze BFS (#7852 v3.25); the legacy `bidirectional` / `unidirectional` tokens remain
-  accepted and readable aliases. See the *Transition state* note.)*
+  accepted and readable aliases. The direct-edge and ingest paths still *source* the direction from
+  `op_type` rather than `semantics` (#7813) — a separate, still-open gap from this storage
+  vocabulary. See the *Transition state* note.)*
 - `-` means the connection exists and **no confidence transfers along it**.
 - **Lazy promotion:** a plain edge gains an operator only when mitigation
   becomes needed.
@@ -1761,7 +1763,8 @@ traversal well-defined: `_affected_claims` follows the recorded direction
 (`->`, `<-`, `<->` or `-`), which the connection's semantics determines *(today's shipped
 code reads the semantics on the operator write path — `create_operator` / `tortoise_create_operator`
 resolve it and record `direction_basis` (#7852 W1), while `create_direct_edge` and the ingest path
-still resolve by `op_type` (#7813). See the *Transition state* note.)*
+still resolve by `op_type` (#7813). See the *Transition state* note — it covers the v3.25
+**storage** transition; the #7813 direction-*sourcing* gap is separate and still open.)*
 
 ---
 

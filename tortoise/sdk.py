@@ -16119,8 +16119,10 @@ class TortoiseSDK:
         ).result_set
         # Direction-aware, mirroring `_bfs_select_operators`'s direct-edge
         # walk (analyze.py): forward flow from a window member (a.id IN $ids)
-        # and backward flow into a window member (b.id IN $ids) ONLY for NAND
-        # or a direction that flows backward. A pass over just the TARGET of a
+        # and backward flow into a window member (b.id IN $ids) for a
+        # direction that flows backward, or for NAND minus the new `-` (no
+        # confidence transfers) — NAND keeps its always-both legacy behaviour.
+        # A pass over just the TARGET of a
         # forward-only direct IMPL edge legitimately selects nothing; likewise
         # a pass over just the SOURCE of a backward-only (`<-`) edge — a
         # direction-blind probe would false-fire the guard (and, via the
@@ -16134,7 +16136,8 @@ class TortoiseSDK:
                 "coalesce(r.direction, 'bidirectional') IN "
                 "['bidirectional', '<->', '->', 'unidirectional']) "
                 "OR (b.id IN $ids AND "
-                "(type(r) = 'NAND' OR "
+                "((type(r) = 'NAND' AND "
+                "coalesce(r.direction, 'bidirectional') <> '-') OR "
                 "coalesce(r.direction, 'bidirectional') IN "
                 "['bidirectional', '<->', '<-']))) "
             )
