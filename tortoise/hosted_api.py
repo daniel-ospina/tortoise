@@ -33484,7 +33484,21 @@ async def backups_rebaseline(request: Request):
     if graph_id == "default":
         _write_json(storage, f"ops/teams/{org_id}/state.json", state)
     subject = f"{org_id}:{graph_id}" if graph_id != "default" else org_id
-    alerts = _alert_store_from(_backup_config_safe())
+    # #4777: the ALERT-only seam, NEVER the sweep-gated chain. Re-baseline is
+    # precisely the operator action that clears an incident FILED WHILE THE SWEEP
+    # WAS ENABLED, so the channel must survive the sweep being switched off (the
+    # production default) — the sweep switch decides whether backups RUN, never
+    # whether an incident is VISIBLE (#3820 D5a).
+    #
+    # `_alert_store_from(_backup_config_safe())` was gated on `BACKUP_SWEEP_ENABLED`
+    # and dereferenced the `None` config, so with the sweep off it raised
+    # `AttributeError` at this line: AFTER `_write_json` succeeded, BEFORE either
+    # resolve — a 500 for a re-baseline that HAD been persisted, whose only
+    # missing step (the resolve of DATA_LOSS_CANDIDATE + SIZE_GUARD_ABORT, kinds
+    # NOTHING else clears) was silently skipped. `_incident_alert_store` reads the
+    # alert credentials ungated and returns `None` — it cannot raise — when no
+    # channel can be built.
+    alerts = _incident_alert_store()
     # #3718 round-3 review P2: both resolves are blocking NETWORK round
     # trips — a storage read plus a GitHub issue close / Telegram push — the
     # same offload `backups_sweep` already gives `alerts.open_incident`.
@@ -33501,6 +33515,20 @@ async def backups_rebaseline(request: Request):
     # than implying a poll will retry (cycle-3 review P1). The outcome is reported
     # per kind so the operator can re-run re-baseline after GitHub recovers.
     def _resolve_incidents() -> list[str]:
+        if alerts is None:
+            # No channel can be built (no DR_ISSUES_PAT, or an unusable object
+            # store), so NOTHING can clear these two kinds — they are resolved
+            # here and nowhere else. Report them instead of letting the response
+            # read as a re-baseline that closed incidents it never touched; the
+            # state write DID succeed, which is why this is not a 5xx.
+            _logger.warning(
+                "no alert channel on re-baseline of %s — DATA_LOSS_CANDIDATE and "
+                "SIZE_GUARD_ABORT cannot be resolved by this call (check "
+                "DR_ISSUES_PAT and the R2_* credentials); the re-baseline write "
+                "itself succeeded", subject,
+            )
+            return [f"{kind}/{subject}"
+                    for kind in ("DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT")]
         failed: list[str] = []
         for kind in ("DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT"):
             try:

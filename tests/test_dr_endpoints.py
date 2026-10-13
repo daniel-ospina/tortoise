@@ -111,6 +111,23 @@ def dr_env(monkeypatch):
 
 
 @pytest.fixture
+def sweep_off_env(monkeypatch):
+    """#4777: the PRODUCTION default posture — the sweep is OFF.
+
+    ``dr_env`` turns the sweep ON, which is exactly why the sweep-off path in
+    ``backups_rebaseline`` went untested. The ALERT credentials stay present on
+    purpose: an incident filed while the sweep was enabled must remain
+    RESOLVABLE after it is disabled (#3820 D5a) — the sweep switch decides
+    whether backups RUN, never whether an incident is VISIBLE.
+    """
+    for k, v in GOOD_ENV.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("BACKUP_SWEEP_ENABLED", "false")
+    monkeypatch.setenv("FASTAPI_INTERNAL_KEY", _INTERNAL_KEY)
+    yield
+
+
+@pytest.fixture
 def mem_storage(monkeypatch):
     store = MemoryStorage()
     monkeypatch.setattr(ha_mod, "_backup_storage", lambda: store)
@@ -1050,11 +1067,16 @@ class TestDrRebaseline:
         """Cycle-2 review P2: `resolve_incident` RAISES on a failed close, and the
         state write has already succeeded by then — a raise out of the endpoint
         would 500 a request whose effect was persisted, inviting the operator to
-        retry a write that already happened."""
+        retry a write that already happened.
+
+        #4777: the seam patched here is ``_incident_alert_store`` (the ALERT-only
+        builder the endpoint now calls); the raw ``_alert_store_from`` chain it
+        used to call is sweep-gated and crashes in the posture below.
+        """
         _seed_team("team_x", nodes=3)
         fake = _FakeAlerts(open_subjects={"DATA_LOSS_CANDIDATE": {"team_x"}},
                            fail_resolve_kinds={"DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT"})
-        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda: fake)
 
         r = client.post(
             "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
@@ -1062,6 +1084,90 @@ class TestDrRebaseline:
         )
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "rebaselined"
+        assert json.loads(mem_storage.download("ops/teams/team_x/state.json"))["node_count"] == 3
+
+    # ── #4777: the re-baseline resolve must not be SWEEP-gated ────────────────
+
+    def test_rebaseline_resolves_on_the_alert_seam_with_the_sweep_off(
+            self, client, sweep_off_env, mem_storage, monkeypatch):
+        """#4777 — with the sweep OFF, re-baseline still resolves BOTH kinds.
+
+        The reachable posture is a LINGERING incident, not a fresh one: the
+        watcher does not start when the config is ``None``, and ``run_backup_sweep``
+        — the only ``DATA_LOSS_CANDIDATE`` producer — 503s without the sweep, so
+        nothing FIRES here. What breaks is the RESOLVE of an incident opened
+        while the sweep was enabled: this endpoint is the only surface that
+        clears these two kinds, so a sweep-gated channel strands it OPEN forever.
+
+        RED (pre-fix): ``alerts = _alert_store_from(_backup_config_safe())`` —
+        ``_backup_config_safe()`` is ``None`` here and ``alert_store_from``
+        dereferences ``cfg.gh_repo``, so the endpoint raised ``AttributeError``
+        AFTER ``_write_json`` and BEFORE either resolve (a 500 for a re-baseline
+        that HAD been persisted).
+        """
+        _seed_team("team_x", nodes=3)
+        fake = _FakeAlerts()
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda: fake)
+
+        r = client.post(
+            "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
+            json={"org_id": "team_x"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "rebaselined"
+        # Same identity as the app's own (not the watcher's). Both kinds are
+        # WRITER_UNSPECIFIED, so either would be authorized — pinning the call
+        # shape keeps that explicit rather than incidental.
+        assert ("resolve", "DATA_LOSS_CANDIDATE", "team_x") in fake.calls
+        assert ("resolve", "SIZE_GUARD_ABORT", "team_x") in fake.calls
+        assert "incidents_unresolved" not in r.json(), r.text
+        assert json.loads(mem_storage.download("ops/teams/team_x/state.json"))["node_count"] == 3
+
+    def test_rebaseline_with_the_sweep_off_builds_the_real_channel(
+            self, client, sweep_off_env, mem_storage):
+        """#4777 — no patch: the SWEEP-OFF posture itself must yield a channel.
+
+        The test above stubs the seam, so it cannot see whether the REAL builder
+        survives a disabled sweep. It can: ``_incident_alert_store`` falls back
+        to ``load_alert_config``, which reads ``DR_ISSUES_PAT``/``R2_*`` UNGATED,
+        and returns ``None`` — never raises — when there is no channel.
+
+        RED (pre-fix): 500 with ``AttributeError: 'NoneType' object has no
+        attribute 'gh_repo'``.
+        """
+        _seed_team("team_x", nodes=3)
+        r = client.post(
+            "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
+            json={"org_id": "team_x"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "rebaselined"
+        # The MemoryStorage dedup surface is empty, so both resolves are ABSENT —
+        # a clean end to end with a REAL AlertStore and no network.
+        assert "incidents_unresolved" not in r.json(), r.text
+        assert json.loads(mem_storage.download("ops/teams/team_x/state.json"))["node_count"] == 3
+
+    def test_rebaseline_reports_incidents_it_cannot_resolve_without_a_channel(
+            self, client, sweep_off_env, mem_storage, monkeypatch):
+        """#4777 — no channel must be REPORTED, never read as "resolved".
+
+        ``_incident_alert_store`` returns ``None`` when no channel can be built
+        (no ``DR_ISSUES_PAT``, or an unusable object store). Nothing can clear
+        these two kinds — they are resolved HERE and nowhere else — so a response
+        that simply said "rebaselined" would imply a close that never happened.
+        The state write still succeeds and is still reported.
+        """
+        _seed_team("team_x", nodes=3)
+        monkeypatch.setattr(ha_mod, "_incident_alert_store", lambda: None)
+
+        r = client.post(
+            "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
+            json={"org_id": "team_x"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "rebaselined"
+        assert r.json()["incidents_unresolved"] == [
+            "DATA_LOSS_CANDIDATE/team_x", "SIZE_GUARD_ABORT/team_x"], r.text
         assert json.loads(mem_storage.download("ops/teams/team_x/state.json"))["node_count"] == 3
 
     def test_rebaseline_excludes_projection_bookkeeping_marker(
@@ -1190,6 +1296,54 @@ class TestDrRebaseline:
         assert len(g.query(
             "MATCH (n) RETURN labels(n), properties(n)").result_set) == 7
         assert hb.count_data_nodes(db, "org_settle_source") == 6
+
+
+def test_the_runbook_documents_both_producers_of_incidents_unresolved():
+    """#4777 review (P2 doc-drift): the field has TWO producers, OPPOSITE remedies.
+
+    ``incidents_unresolved`` appears (a) when a close FAILED — remedy: re-run
+    once GitHub recovers — and (b) on re-baseline, when no alert channel can be
+    built at all (the seam returns ``None``: no ``DR_ISSUES_PAT``, or an unusable
+    ``R2_*`` store) — remedy: fix the channel credentials, because a re-run
+    returns the identical field forever. The runbook is the field's declared home
+    (it was introduced there in the same change, #3405), so it must name both
+    causes; an operator who reads (b) as (a) retries a request that cannot
+    succeed.
+
+    The code half is asserted against the source so the doc claim keeps a
+    referent: removing the no-channel branch makes this test fail rather than
+    leave the runbook describing a producer that no longer exists.
+
+    RED (pre-fix): the paragraph documents only the failed-close cause and states
+    the retry remedy unconditionally.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    doc = (root / "docs/ops/registry-backup-dr.md").read_text(encoding="utf-8")
+    # The one Markdown paragraph that documents the field.
+    start = doc.index("so their responses carry")
+    para = doc[start:doc.index("\n\n", start)]
+
+    assert "no alert channel" in para, (
+        "the runbook must name the second `incidents_unresolved` producer — the "
+        "alert-channel seam returning None (no DR_ISSUES_PAT / unusable R2_* "
+        "store) — or an operator re-runs a request that cannot succeed")
+    assert "DR_ISSUES_PAT" in para and "R2_*" in para, (
+        "the no-channel case must name the credentials to fix: " + para)
+    assert "fix the channel credentials" in para, (
+        "the no-channel remedy (fix the credentials) must be stated, not the "
+        "retry remedy that cannot work: " + para)
+    # …while the retry remedy must survive for the cause where it IS correct.
+    assert "re-run the action once GitHub" in para, (
+        "the failed-close remedy must stay documented: " + para)
+
+    # Code half: the branch the doc now describes really exists, so the pair
+    # (producer, documentation) cannot drift apart silently.
+    src = (root / "tortoise/hosted_api.py").read_text(encoding="utf-8")
+    assert "if alerts is None:" in src, (
+        "the no-channel branch the runbook documents is gone from hosted_api")
+
 
 class TestDrDrill:
     def test_drill_requires_params(self, client, dr_env, mem_storage):
