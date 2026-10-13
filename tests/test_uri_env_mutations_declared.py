@@ -1350,6 +1350,22 @@ _EMPTY_DEFAULT_REASON_MIN = 10
 #: EXCEPT `tests/_html_links.py`, an exact `SOURCE_PATTERNS["onboarding"]`
 #: entry whose match REPLACES the `core` fallback, which is why the guard is
 #: registered on `onboarding` too.
+#:
+#: NOT COVERED, ON PURPOSE: `graph-scripts/`. Measured 2026-10-13 at
+#: `e797cbd41`: 14 reads of this exact class live there (`decide_licensing.py:43`
+#: raises `ValueError: Unsupported scheme` AT IMPORT under
+#: `TORTOISE_DB_URI=""`; `decide.py:147`, `parity_sample.py:267`,
+#: `pre_migration_snapshot.py:261`, `context_removal_audit.py:143` and the
+#: `--uri` argparse defaults of the backfill/fix scripts are the rest — the
+#: counted baseline is #8520).
+#:
+#: Do NOT widen this tuple to reach them. Adding `graph-scripts` would red the
+#: census on 14 files the tree rules **kept and frozen**
+#: (`docs/plans/2026-08-05-remove-context-field-plan.md` §8.6, `OVERRIDES:`),
+#: whose repair §8.6.1 withholds "pending the owner's ruling on #4812" — a gate
+#: over them "may say 'no new debt', never 'class fixed'", and #4730 is that
+#: gate's designated home. The boundary is a decision with a reason, not an
+#: oversight: leave it until #4812 rules.
 _CENSUS_ROOTS = ("tests", "tools/longmem_eval")
 
 

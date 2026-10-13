@@ -146,7 +146,7 @@ tortoise index directory ~/notes --db docker://:falkordb@localhost:6379/tortoise
 
 | Var | Default | Precedence / notes |
 |-----|---------|--------------------|
-| `TORTOISE_DB_URI` | (unset → embedded) | Docker URI for the durable multi-writer graph; concurrent writers verified at 2 processes |
+| `TORTOISE_DB_URI` | (unset → embedded) | Docker URI for the durable multi-writer graph; concurrent writers verified at 5 processes |
 | `TORTOISE_INGEST_BASE_DIR` | (unset → no sandbox) | SECURITY sandbox: corpus dirs + progress files + resolved symlink targets must stay under it. Not the corpus selector. A typo here = pre-walk error |
 | `TORTOISE_SESSION_CORPUS` | `~/.tortoise/docs/conversations` | The session-end hook's sweep-corpus selector (passed positionally). ⚠️ The base-dir-vs-corpus confusion: setting this to the real corpus while the DB points at a test graph sweeps the whole corpus into the wrong DB |
 | `TORTOISE_MAX_FILE_MB` | `50` | Two-layer size guard (float MB); at/over the limit → rejected before any read |
@@ -411,9 +411,15 @@ your active packs.
 - **One graph + N corpora**: give each corpus a unique `corpus_name`
   (same-basename corpora collide on the urls).
 - **Concurrent writers**: `bolt://` (docker) — design-supported via
-  MERGE-keyed writes; **integration-tested to 2 concurrent writers**. Two
-  embedded DBs never sync (no replication exists); NFS/shared-volume
-  multi-writer is untested.
+  MERGE-keyed writes; **integration-tested to 5 concurrent writers**
+  (`tests/test_embedded_concurrency.py::test_concurrent_writers_live_falkor_no_lost_writes`,
+  five writer processes on one graph, no lost writes). That is verified
+  coverage, not a supported ceiling. Two embedded DBs never sync (no
+  replication exists); NFS/shared-volume multi-writer is untested.
+
+  Measured capacity per deployment mode — concurrency, rate limits,
+  graph-size caps, retrieval latency, storage footprint, belief-propagation
+  cost — with every number's source: [docs/capacity.md](capacity.md).
 
 ## 5. Connect your agent (MCP)
 

@@ -230,12 +230,24 @@ extraction:
 #                      ⚠️ NOTE — per-kind surface forms ALREADY have a home the
 #                      classifier reads: `ontology.kindDefs.<kind>.synonyms`
 #                      and `.examples`, which compile_kind_index_spec renders
-#                      into the classification surface. Nothing reads
-#                      `entityCues` yet. Until a consumer migrates, declaring
-#                      this block ALONE does not reach the classifier — put the
-#                      forms in kindDefs.synonyms/examples.
+#                      into the classification surface.
+#                      ⛔ `entityCues` deliberately has NO consumer (#4894)
+#                      and is NOT waiting for one: per-kind forms already have
+#                      a READ home above, so rendering this block as well would
+#                      create the second source of truth for one value that
+#                      #4894's own review warns about. Declaring `entityCues`
+#                      alone does not reach the classifier — put the forms in
+#                      kindDefs.synonyms/examples. (The slot is kept — #1026's
+#                      ruling — so a manifest declaring it still validates and
+#                      round-trips rather than being refused as unknown.)
 #   relationTemplates: pack-typical edge shapes, so the extractor recognizes
 #                      the domain's IMPL/NAND phrasings.
+#                      ⛔ Deliberately NO consumer (#4894), for the same
+#                      reason: a predicate + mechanism pair is ALREADY declared
+#                      and READ in `ontology.relations` (whose write-path
+#                      verdict is enforced — #2766), so a second declared
+#                      spelling of the same pair would be a second source of
+#                      truth. It validates and round-trips; it does not render.
 #                        predicate:        the domain verb
 #                        mechanism:        IMPL | NAND — the same pair
 #                                          `ontology.relations` accepts.
@@ -249,19 +261,24 @@ extraction:
 #                      looks like in this domain. It judges utterances and never
 #                      removes an artefact.
 #                      ⚠️ This is the STRUCTURED form of a decision the pack may
-#                      already declare as `ontology.memory_granularity`, and
-#                      **memory_granularity is the one that is actually read**:
-#                      extractor_v2 renders it into the S1 prompt. Note
-#                      value_gate.py itself reads NO pack manifest — it is a
-#                      stdlib-only leaf whose identifier rules keep their policy
-#                      provenance declared elsewhere: issue/PR numbers and commit
-#                      hashes by the dev pack's memory_granularity, paths and ids
-#                      by extractor_v2's landed #2453 clause. Nothing reads
-#                      `valueGate` yet, so declaring this block ALONE changes
-#                      nothing — set memory_granularity as well.
+#                      already declare as `ontology.memory_granularity`
+#                      (the same policy in prose). Both are READ (§ #4894):
+#                      extractor_v2 renders `memory_granularity` into the S1
+#                      prompt and these hints into the S1/S2/S4 value-brief
+#                      slot (`_granularity_text` / `_s2s4_rules` via the brief's
+#                      reserved `pack_hints` section), so keep/drop reach the
+#                      mapper. That is their ONLY consumer by design — nothing
+#                      turns a hint into a rule (see the ⛔ above). Note
+#                      value_gate.py reads NO pack manifest — it is a
+#                      stdlib-only leaf whose identifier
+#                      rules keep their policy provenance declared elsewhere:
+#                      issue/PR numbers and commit hashes by the dev pack's
+#                      memory_granularity, paths and ids by extractor_v2's
+#                      landed #2453 clause — so a hint can never remove an
+#                      artefact at mint, and does not need to.
 #   promptFragments:   ["..."] — pack-authored instruction snippets DECLARED
-#                      for the value brief. NOTE: no consumer reads the v3.1
-#                      slots yet — they validate and normalize, nothing more.
+#                      for the value brief, and rendered there (§ #4894) into
+#                      the same S1/S2/S4 slot as the `valueGate` hints.
 #                      Capped on BOTH words and characters: ~120 words / 480
 #                      chars each, ~600 words / 2400 chars in total. The word
 #                      count is a proxy, not a tokenizer, which is why the

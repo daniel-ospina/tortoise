@@ -1502,7 +1502,11 @@ class PackRegistry:
         # valueGate: this pack's keep/drop HINTS for the value brief — what a
         # valuable utterance looks like in this domain. It is NOT a mint-time
         # drop rule: no hint can remove an artefact, only inform the
-        # utterance-level value gate.
+        # utterance-level value gate. CONSUMED (§ #4894):
+        # ``compile_value_brief`` carries it into the brief's reserved
+        # ``pack_hints`` section and extractor_v2 renders it into the S1/S2/S4
+        # value-brief slot. It stays a hint — the mechanical, artefact-level
+        # predicate is ``tortoise/value_gate.py``, and no hint becomes a rule.
         value_gate = extraction.get("valueGate")
         if value_gate is not None and not isinstance(value_gate, dict):
             errors.append("extraction.valueGate must be a map")
@@ -1521,9 +1525,10 @@ class PackRegistry:
                     )
 
         # promptFragments: pack-authored instruction snippets declared for the
-        # value brief. Capped on BOTH words and characters so a pack cannot
-        # inflate every brief it activates — and cannot evade the word cap by
-        # shipping one whitespace-free blob.
+        # value brief. CONSUMED (§ #4894) into the same S1/S2/S4 slot as the
+        # `valueGate` hints. Capped on BOTH words and characters so a pack
+        # cannot inflate every brief it activates — and cannot evade the word
+        # cap by shipping one whitespace-free blob.
         fragments = extraction.get("promptFragments")
         if fragments is not None and not isinstance(fragments, list):
             errors.append("extraction.promptFragments must be a list")
