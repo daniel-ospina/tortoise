@@ -39,7 +39,12 @@ autouse fixture:
   call sites in `tests/test_reaper.py` run through a `_reaper_main()` helper
   wrapping this block.
 
-Run with no `--timeout` armed, the fixture is inert.
+The fixture is inert only when no timer is armed — i.e. `--timeout=0` or
+`PYTEST_TIMEOUT=0`. Since `#5035` set `timeout = 300` in
+`[tool.pytest.ini_options]`, a **bare local run arms the timer** exactly as CI
+always did, so the guard is ACTIVE on a local run too: a test making an
+unsanctioned in-process `signal.alarm()` call now fails locally instead of
+passing merely because no run had a budget.
 
 ## Stated residuals
 

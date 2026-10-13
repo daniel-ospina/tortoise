@@ -73,7 +73,7 @@ backups = ["boto3>=1.34", "cryptography>=42"]
 # nothing extra. Optional on purpose: without it the parity cell reports
 # not-measured instead of failing (fail-closed, never a default number).
 parity = ["pyarrow>=17"]
-test = ["pytest>=8", "pytest-timeout", "pytest-asyncio>=0.23", "pytest-xdist>=3.6", "playwright>=1.40", "pytest-playwright>=0.9", "cryptography>=42", "markdown-it-py>=4"]  # cryptography: hosted E2E JWKS/ES256 session mint (#303, #1460). markdown-it-py: tests/test_blog_authoring_doc.py imports it directly (a real CommonMark parser); it was only transitive via fastmcp -> rich, so a rich bump could drop the new guard's import (#8379 finding 3).
+test = ["pytest>=8", "pytest-timeout>=2.4.0", "pytest-asyncio>=0.23", "pytest-xdist>=3.6", "playwright>=1.40", "pytest-playwright>=0.9", "cryptography>=42", "markdown-it-py>=4"]  # cryptography: hosted E2E JWKS/ES256 session mint (#303, #1460). markdown-it-py: tests/test_blog_authoring_doc.py imports it directly (a real CommonMark parser); it was only transitive via fastmcp -> rich, so a rich bump could drop the new guard's import (#8379 finding 3). pytest-timeout floor (#5035): matches the dev group and uv.lock — every CI leg installs through this extra, and tests/test_ci_stall_identify.py asserts pytest-timeout's own failure string, so an unpinned resolution could drift it.
 
 # Canonical dev/test tooling (#492, #493) — installed via `uv sync --group dev`.
 # The `test` extra above is the CI/live E2E path (pip install -e '.[test]').
@@ -282,17 +282,73 @@ disable_error_code = [
 ]
 
 [tool.pytest.ini_options]
+# #5035: the per-test budget belongs HERE, not on the CI command line. Before
+# this line existed the only pytest-timeout budget configured for a REPO-WIDE
+# run was the flag each CI leg passes (a test-local subprocess argv —
+# `tests/test_tripwire.py` passes its own `--timeout=300` to a child — is not a
+# config default), so a `pytest` a human or an agent ran by hand — which is
+# exactly the command in the incident — armed NOTHING: it could not be killed,
+# and the 43h48m run below was the result. (The host has no `timeout`/`gtimeout`
+# binary either — verified absent from PATH, /opt/homebrew/bin and
+# /usr/local/bin — so the shell convention the issue cites could not have bounded
+# it.)
+#
+#   pid 64502, ppid 1, elapsed 01-19:48:27, cputime 3124:47 (~1.19 cores avg)
+#   /Users/danielospina/Documents/GitHub/tortoise/.venv/bin/python -m pytest \
+#       tests/test_cohort_cost_cap.py -q -p no:cacheprovider
+#
+# 300 is the budget the docker/PR CI legs already pass, and it is deliberately
+# no LOOSER than that (see the test): where a leg needs more it declares more,
+# and pytest-timeout gives an item's own `@pytest.mark.timeout(N)` marker
+# priority over this value (`_get_item_settings`), so every existing 600/900/
+# 1800s eval mark keeps its budget. `timeout_method` stays the default `signal`
+# and `timeout_func_only` stays false — both PINNED by
+# `tests/test_ci_stall_identify.py` (the only method that reaches a GIL-holding
+# stall is `signal`; `thread` starves on the GIL — #7649).
+#
+# ⚠️ This is NOT a no-op on every leg: CI invocations that pass no `--timeout`
+# and run a selection gain a bound here — that is the same defect this issue
+# documents, on a runner instead of on this box. They are `.github/workflows/
+# ci.yml`'s e2e legs (`test_welcome_page.py`, `test_no_legacy_token_path.py`,
+# `tests/e2e/auth/`, the auth-clickthrough pair, the legal+signup pair, the
+# keys/graphs pair, `tests/e2e/hosted/`), `welcome-e2e-monitor.yml`,
+# `python-ci.yml`'s carve-out shard, `deploy-pages.yml`'s legal leg, and
+# `evals-on-demand.yml` (whose lane is exactly one file,
+# `tests/eval/retrieval/test_integration.py`, which declares
+# `pytest.mark.timeout(600)`). This change also adds `pytest-timeout` to the two
+# blog e2e install lines (`blog-write-e2e.yml`, `deploy-pages.yml`): they install
+# pytest by hand (`pip install pytest requests playwright pytest-playwright`) and
+# would otherwise leave this key INERT —
+# `PytestConfigWarning: Unknown config option: timeout` — i.e. still unbounded.
+#
+# The bound is not tight for any of them. `config/ci-surfaces.yml` records a
+# per-file duration for 848 files and the only one above 250s is
+# `eval/retrieval/test_integration.py` (1523s) — and it carries
+# `pytest.mark.timeout(600)`. Every other file's TOTAL is ≤235s, so no unmarked
+# item can reach 300s. A leg that needs a longer single item must SAY so —
+# `--timeout=N` in the workflow or `@pytest.mark.timeout(N)` on the test — and
+# `--timeout=0` / `PYTEST_TIMEOUT=0` is the explicit opt-out for a deliberate
+# unbounded run.
+#
+# Resolution order is CLI flag -> `addopts`/other CLI injections -> `PYTEST_TIMEOUT`
+# env -> this ini value (`pytest_timeout.py::get_env_settings`), so this is the
+# lowest-priority source: it only fills the hole a bare invocation leaves.
+# The invariant (this key set, above `faulthandler_timeout`, and EQUAL to the main
+# gate's `python-ci.yml` budget — the mode, which must repeat at least twice),
+# the resolved value under a real config load, and a live reproduction are pinned
+# by tests/test_ci_stall_identify.py.
+timeout = 300
 # #7649/#7655/#3719: make a stalled test dump its own frame. The cheap per-test
-# guard (`--timeout=300`, pytest-timeout's default `signal` method) fires on
+# guard above (pytest-timeout's default `signal` method) fires on
 # SIGALRM, dumps every thread EXCEPT the stuck one, and is silently disarmed by
 # any in-process `signal.alarm()` (shared ITIMER_REAL, #7655). This built-in
 # pytest knob arms a thread-based faulthandler watchdog per item: it needs no
 # signal and no ITIMER, so it survives both the GIL-holding C stall (#7649) and
 # the alarm collision (#7655), and it names the stuck thread. It MUST fire
-# strictly before `--timeout` — `_pytest/faulthandler` cancels the timer in a
-# `finally` when the item ends, so `faulthandler_timeout >= --timeout` is a
-# silent no-op. 280 sits 20s under the `--timeout=300` the CI pytest legs
-# pass; a per-item `@pytest.mark.timeout(N)` override can raise an item's
+# strictly before `timeout` — `_pytest/faulthandler` cancels the timer in a
+# `finally` when the item ends, so `faulthandler_timeout >= timeout` is a
+# silent no-op. 280 sits 20s under the 300 above; a per-item
+# `@pytest.mark.timeout(N)` override can raise an item's
 # budget above it, in which case the watchdog dumps a healthy item's stack
 # (a log line, never a failure — `faulthandler_exit_on_timeout` defaults false).
 # The invariant + reproducer are pinned by tests/test_ci_stall_identify.py.
