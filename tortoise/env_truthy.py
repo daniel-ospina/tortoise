@@ -18,12 +18,16 @@ to exist:
 
 Stdlib-only by design — no imports from ``tortoise`` — so any module may import
 these helpers without creating an import cycle (the ``tortoise/security.py`` /
-``tortoise/transport.py`` precedent). This does NOT make an import of this module
-cheap for a *standalone* consumer: importing any ``tortoise.<sub>`` runs
-``tortoise/__init__.py``, which imports redislite unconditionally.
-``tortoise/embedded_reaper.py`` therefore mirrors ``TRUTHY`` instead of delegating,
-and ``tests/test_env_truthy.py`` pins both the mirror and the reaper's standalone
-import purity.
+``tortoise/transport.py`` precedent). This does NOT make an import of this
+module cheap for a *standalone* consumer: importing any ``tortoise.<sub>`` runs
+``tortoise/__init__.py``, whose ``FalkorDB`` re-export is deferred (PEP 562
+``__getattr__``, #5386) but whose package import still carries side effects
+(atexit registration, fork-safety arming) and needs ``tortoise`` importable in
+the first place — which it is not for the Hermes plugin, loaded by the HOST
+interpreter from a copied-out directory. ``tortoise/embedded_reaper.py`` and
+``tortoise/hermes-plugin/__init__.py`` therefore mirror ``TRUTHY`` instead of
+delegating, and ``tests/test_env_truthy.py`` pins both the mirrors and the
+standalone import purity.
 
 Two shapes, deliberately distinct:
 

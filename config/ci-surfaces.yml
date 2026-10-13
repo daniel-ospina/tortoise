@@ -743,6 +743,14 @@ surfaces:
   - test_selfhost_volunteer_context.py # volunteer §3.2 selfhost transport (embedded)
   - test_volunteer_reflex_harness_seam.py  # W3 reflex graded seam (volunteer.decide)
   - test_platform_seams.py            # epic #2080 end-state seams wave-1: per-turn volunteer CLI + install + shipped hook (embedded, lane-agnostic)
+  # #2121: the Hermes seam — `tortoise install hermes` writes the pre_llm_call
+  # directory plugin, and `sessions import --harness hermes` reads
+  # $HERMES_HOME/state.db. Dual-registered exactly like test_platform_seams.py:
+  # tortoise/__main__.py (the CLI half) is an `api`-classified source, while
+  # tortoise/hermes-plugin/ and tortoise/session_import/ named-surface-match
+  # NOTHING and fall back to `core` (see the test_session_import_codex.py
+  # note below for the same #2938/#1349 silent-drop class).
+  - test_hermes_seam.py
   - test_write_ahead_mint.py
   # #3808: the CLI half of the capture install (`tortoise install <harness>`
   # in tortoise/__main__.py, an api-classified source) — dual-registered so a
@@ -2391,6 +2399,14 @@ surfaces:
   # W2-b (#2098): BPRE write-path gate — core fallback catches engine
   # code with no surface mapping (tortoise/session_import/ parsers etc.).
   - eval/write_path/test_write_path_benchmark.py
+  # #2121: the Hermes seam — the shipped plugin template
+  # (tortoise/hermes-plugin/) and the session-store parser
+  # (tortoise/session_import/parsers.py) name no SOURCE_PATTERNS surface, so a
+  # plugin/parser-only PR selects `core` via the `tortoise/` fallback and this
+  # is the arm that runs the guard. Dual-registered with `api` (the CLI half:
+  # `install hermes` + `sessions import --harness hermes`), the same
+  # #2938/#1349 silent-drop class that test_session_import_codex.py documents.
+  - test_hermes_seam.py
   # #3575 P1-B: this pins tortoise/pi-hooks/tortoise-capture.ts — the artifact
   # HARNESS_INSTALL.pi installs. `tortoise/pi-hooks/` matches no SOURCE_PATTERNS
   # entry, so a change to the extension selects `core` via the `tortoise/`

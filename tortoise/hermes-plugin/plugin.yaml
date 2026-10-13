@@ -1,0 +1,11 @@
+# tortoise-hermes-plugin — the Hermes half of the volunteering-memory seam
+# (issue #2121, epic #2080). Installed by `tortoise install hermes`; the
+# ownership marker in this comment and in __init__.py is what that command's
+# idempotent update and its --uninstall key on — a plugin directory this
+# installer cannot prove it wrote is NEVER overwritten or deleted.
+name: tortoise-volunteer
+version: "0.1.0"
+description: "Per-turn volunteering memory for Hermes: runs the shared Tortoise reflex over the turn's user message and returns its why-context block to pre_llm_call, which Hermes injects into the current user message. Fail-open — nothing above the confidence gate injects nothing, and a reflex failure never breaks the turn."
+author: "Tortoise (premise-labs)"
+provides_hooks:
+  - pre_llm_call

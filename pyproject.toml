@@ -155,6 +155,11 @@ tortoise = ["config/routing.yaml", "../tests/sample_transcript.txt",
           # not found". Named exactly (not *.ts) so the behavioural test file is
           # NOT shipped to users.
           "pi-hooks/tortoise-capture.ts",
+          # #2121: the Hermes seam ships as a directory PLUGIN (`tortoise
+          # install hermes` copies plugin.yaml + __init__.py into
+          # <dir>/.hermes/plugins/tortoise-volunteer/), so a wheel without it
+          # fails the install with "shipped Hermes plugin not found".
+          "hermes-plugin/*.py", "hermes-plugin/*.yaml",
           # #2120: the OpenClaw seam is a plugin DIRECTORY — `tortoise install
           # openclaw` copies every file out of the PACKAGE (the entry, the
           # manifest that makes OpenClaw load it, and package.json), so a wheel
@@ -237,6 +242,15 @@ python_version = "3.12"
 # config so the caller's typecheck-command stays a bare `mypy tortoise/`.
 ignore_missing_imports = true
 check_untyped_defs = true
+# The Hermes plugin ships in a HYPHENATED directory: Hermes loads a plugin
+# DIRECTORY by path, so the directory name is the install contract, not an
+# import name. mypy walks `tortoise/` recursively and refuses a package dir
+# whose name is not a valid identifier (`hermes-plugin contains __init__.py
+# but is not a valid Python package name`); the plugin is loaded by the host
+# interpreter and never as `tortoise.<sub>`, so it is not part of the typed
+# package. Excluded at the config layer so the CI `mypy tortoise/` command
+# stays a bare invocation (#2121).
+exclude = ["tortoise/hermes-plugin/"]
 # Baseline (#1503): every error code present in the 406-error first pass is
 # disabled so the full typecheck runs green. Per-code counts + cleanup order
 # are documented in docs/lint-baseline-1503.md.
