@@ -3101,9 +3101,10 @@ class _ReaperLock:
         # loaded box) would leave the PREVIOUS holder's record readable to a
         # contender refused in the gap, which would then confidently name the
         # wrong — still live — process as the holder. Resolving the start time
-        # here NARROWS that window to the truncate+write below; it does not
-        # close it (see the write site). An unreadable start degrades to the
-        # pid-only (unverifiable) form, never to a wrong pid.
+        # here NARROWS that gap (from a `ps` call to the flock->truncate
+        # window the write site describes); it does not close it. An unreadable
+        # start degrades to the pid-only (unverifiable) form, never to a wrong
+        # pid.
         try:
             holder_start = _process_start_time(os.getpid())
         except Exception:  # never fail the LOCK over a diagnostic (#4299)
@@ -3202,17 +3203,24 @@ class _ReaperLock:
             self._fh.seek(0)
             self._fh.truncate()
             # #4299: record the pid AND the holder's start time in ONE write,
-            # immediately after the flock — so a contender that reads it while
-            # this holder owns the lock sees a WHOLE record, never a TORN or
-            # mixed one (the record is written from the pre-flock start time,
-            # so a `ps` call cannot land between the flock and the write).
-            # ⛔ What this does NOT provide: the truncate below happens AFTER
-            # the flock, so during the truncate+write a contender still reads
-            # the PREVIOUS holder's complete record and may name that (still
-            # live) process. The window is narrowed, never closed — closing it
-            # needs the identity to come from the kernel rather than a file
-            # (the fd-table primitive deliberately deferred; #5044). Do not
-            # read this as "a contender can never name the previous holder".
+            # immediately after the flock, from the start time resolved BEFORE
+            # it — so a contender reading while this holder owns the lock never
+            # sees a MIXED record (a pid from one holder and a start from
+            # another), and a `ps` call can never land between the flock and
+            # the write.
+            # ⛔ What this does NOT provide — three windows a contender can
+            # read, in order, and only the last is this holder:
+            #   1. flock -> `truncate()` below: the PREVIOUS holder's COMPLETE
+            #      record. A contender refused here may name that (still live)
+            #      process — narrowed from a `ps` call, NOT closed.
+            #   2. `truncate()` -> the write landing: an EMPTY file, which
+            #      `_lock_record_read` reports as no record at all (the honest
+            #      `unknown` pole), never as a holder.
+            #   3. after the write: this holder's record.
+            # Closing window 1 needs the identity to come from the KERNEL
+            # rather than a file (the fd-table primitive deliberately deferred;
+            # #5044). Do not read this as "a contender can never name the
+            # previous holder".
             # The start time is what makes a RECYCLED pid detectable — the
             # #1642 FIX 5 pid-recycling-proof pattern.
             self._fh.write(_lock_record_text(os.getpid(), holder_start))
@@ -4338,6 +4346,16 @@ def _parse_lock_record(text: str | None) -> tuple[int, float | None] | None:
     parses, so an older reaper's record reads — but its ``start`` comes back
     ``None`` and `lock_holder_verdict` then reports it as UNVERIFIABLE, never
     as a verified holder: a pid-only record is indistinguishable from a fossil.
+
+    ⛔ DELIBERATE DIVERGENCE from `_live_owner_counts`, which maps an
+    unparsable/non-finite STAMP to ``start = None`` and KEEPS the pid. Here a
+    ``start=`` that is PRESENT but cannot be read discards the whole record.
+    Reason: the lock record is written by THIS module in ONE write, so a record
+    whose ``start=`` does not parse was not written by this module — it is
+    corruption or a foreign writer — and naming a pid taken out of a record we
+    cannot attribute is exactly the "name a pid that is not the holder" defect
+    #4299 exists to remove. The pid-ONLY form is kept because a real older
+    reaper wrote it; a malformed ``start=`` has no such provenance.
     """
     if not text:
         return None
@@ -4352,13 +4370,17 @@ def _parse_lock_record(text: str | None) -> tuple[int, float | None] | None:
         elif token.isdigit():  # legacy bare-pid record
             fields.setdefault("pid", token)
     pid_raw = fields.get("pid", "")
-    # Parse the pid ONCE, guarded — `str.isdigit()` is True for non-decimal
-    # Unicode digits (`²`, `①`) that `int()` rejects, so `isdigit()` alone is
-    # not a safe gate before an `int()` call (the trap `_live_owner_counts`
-    # documents from the #3599 review). This parser must be TOTAL: it runs in
-    # the REFUSAL path BEFORE `signal.alarm(timeout)` is armed, so a raise here
-    # turns a clean refusal into a traceback — the one outcome this whole
-    # change exists to remove (#4299 review, cycle 1).
+    # Decimal ASCII digits only — two gates, because each catches a DIFFERENT
+    # set: `isdigit()` alone accepts non-decimal Unicode digits (`²`, `①`) that
+    # `int()` then REJECTS (the trap `_live_owner_counts` documents from the
+    # #3599 review), while `int()` alone also accepts `+5` and `5_0`, forms no
+    # writer emits (found by review, cycle 2). The guarded `int()` stays as the
+    # totality backstop. This parser must be TOTAL: it runs in the REFUSAL path
+    # BEFORE `signal.alarm(timeout)` is armed, so a raise here turns a clean
+    # refusal into a traceback — the one outcome this whole change exists to
+    # remove (#4299 review, cycle 1).
+    if not pid_raw.isascii() or not pid_raw.isdigit():
+        return None
     try:
         pid = int(pid_raw)
     except ValueError:

@@ -3208,13 +3208,128 @@ def test_lock_holder_verdict_rejects_an_unparsable_or_nonpositive_pid():
     refusal path. `pid<=0` is the sibling guard: `os.kill(0, 0)` succeeds
     against the caller's own process group (#3599), so `pid=0` can never be a
     holder.
+
+    Cycle 2 added the OTHER half of the gate: a guarded `int()` alone accepts
+    `+5` and `5_0`, forms no writer emits, so the pid must be ASCII DECIMAL
+    digits (`isascii() and isdigit()`), with the guarded `int()` kept as the
+    totality backstop.
     """
     import tortoise.embedded_reaper as er
     for record in ("pid=\u00b2\nstart=1.0\n", "\u00b2", "pid=\u2460\nstart=1.0\n",
-                   "pid=0\nstart=1.0\n", "pid=-1\nstart=1.0\n"):
+                   "pid=0\nstart=1.0\n", "pid=-1\nstart=1.0\n",
+                   "pid=+5\nstart=1.0\n", "pid=5_0\nstart=1.0\n",
+                   "pid=0x5\nstart=1.0\n"):
         assert er._parse_lock_record(record) is None, record
         v = _verdict(record, alive=[0, 1], starts={0: 1.0, 1: 1.0})
         assert v.state == "unknown" and not v.verified, record
+
+
+def test_lock_holder_verdict_is_total_for_a_pid_beyond_the_int_limit():
+    """#4299: the guarded `int()` is the backstop that keeps the parse TOTAL.
+
+    `isascii() and isdigit()` admit a pid of ANY length, and CPython's
+    int-string conversion RAISES above ~4300 digits — so the `try/except` is
+    load-bearing for totality, not decoration. (Cycle 3: reverting it reddens
+    THIS test while every other parser test stays green, and the ASCII gate in
+    front of it makes the older `isdigit()` mutation a no-op — the gate already
+    rejects every non-decimal digit.)
+
+    It cannot arrive through `_lock_record_read()` (which caps the read at 128
+    bytes), so this pins the contract for a direct call rather than an input
+    reachable in production. The assertion is the CONTRACT (never raise), not
+    the interpreter's limit: with `PYTHONINTMAXSTRDIGITS=0` a huge pid parses,
+    so demanding `None` would pin the environment instead of the behaviour.
+    """
+    import tortoise.embedded_reaper as er
+    parsed = er._parse_lock_record("pid=" + "1" * 4301 + "\nstart=1.0\n")
+    assert parsed is None or parsed[1] == 1.0, parsed
+
+
+def test_lock_holder_verdict_pins_the_start_tolerance_boundary():
+    """#4299 review, cycle 2: the 2s boundary itself is pinned.
+
+    Mutating `abs(live_start - start) > _LOCK_START_TOLERANCE` to `>=` left the
+    whole suite green (every other case differs by 0.0 / 0.5 / 500s), so which
+    side of the boundary counts as the holder was unpinned. The tolerance
+    exists because `ps -o lstart=` has 1s resolution, so two reads of the SAME
+    process can differ by up to that — a difference of exactly 2.0 must still
+    be the holder (`>` and not `>=`). The other side would report a LIVE
+    holder's record as "stale", which is the #4299 misdiagnosis re-introduced.
+    """
+    import tortoise.embedded_reaper as er
+    tol = er._LOCK_START_TOLERANCE
+    assert tol == 2.0, "the 2s tolerance is tied to `ps -o lstart=`'s 1s resolution"
+    for delta, state in ((0.0, "live-reaper"), (1.999, "live-reaper"),
+                         (tol, "live-reaper"), (tol + 0.001, "stale-record")):
+        v = _verdict("pid=7\nstart=1000.0\n", alive=[7],
+                     starts={7: 1000.0 + delta}, commands={7: _REAPER_CMD})
+        assert v.state == state, f"delta={delta} -> {v.state}, expected {state}"
+
+
+def test_the_verdict_uses_the_real_probes_it_is_wired_to(monkeypatch):
+    """#4299 review, cycle 2: `_lock_holder_verdict()`'s WIRING is pinned.
+
+    The pure decision is tested with fakes, but NOTHING asserted that the
+    production wrapper passes the REAL probes to it. Breaking the wiring
+    (`start_time_of=lambda pid: None`, i.e. it can never verify anything) left
+    the whole suite green, because every remaining real-probe test accepts the
+    honest `unknown` pole — so the VERIFIED path could silently stop
+    verifying. Pin the wiring where it cannot flake: the record, the live start
+    time, and the command line all come through the module's own seams, so no
+    real `ps` timeout decides the assertion.
+
+    This is also why the two CLI tests may stay classification-independent:
+    the verified pole is bound end to end of the DECISION here
+    (`_lock_record_read` -> `_process_start_time` -> `_cmdline` -> verdict),
+    while the holder KIND stays pinned by its explicit-argv unit test.
+    """
+    import tortoise.embedded_reaper as er
+    monkeypatch.setattr(er, "_lock_record_read",
+                        lambda: f"pid={os.getpid()}\nstart=4242.0\n")
+    monkeypatch.setattr(er, "_process_start_time", lambda pid: 4242.0)
+    monkeypatch.setattr(er, "_cmdline", lambda pid: _REAPER_CMD)
+    v = er._lock_holder_verdict()
+    assert v.state == "live-reaper" and v.verified, v.describe()
+    assert v.pid == os.getpid(), v.describe()
+    # The same wiring must report a NON-reaper holder as one...
+    monkeypatch.setattr(er, "_cmdline", lambda pid: _PYTEST_CMD)
+    assert er._lock_holder_verdict().state == "live-other"
+    # ...and a start time it cannot read as UNVERIFIABLE, never as the holder.
+    monkeypatch.setattr(er, "_process_start_time", lambda pid: None)
+    assert er._lock_holder_verdict().state == "unknown"
+    # A record it cannot read at all is the honest `unknown` pole too.
+    monkeypatch.setattr(er, "_lock_record_read", lambda: None)
+    assert er._lock_holder_verdict().state == "unknown"
+
+
+def test_a_start_time_probe_failure_never_fails_the_lock(tmp_path, monkeypatch):
+    """#4299 review, cycle 2: the DIAGNOSTIC probe must never break the LOCK.
+
+    `acquire()` wraps `_process_start_time` in `except Exception` ("never fail
+    the LOCK over a diagnostic") — a guard with NO test: replacing it with a
+    bare call left the suite green, so a `ps` failure would escape `acquire()`
+    (whose contract is return-False-never-raise) and take the reaper down
+    instead of degrading to the pid-only record.
+    """
+    import tortoise.embedded_reaper as er
+
+    def _boom(pid):
+        raise RuntimeError("ps blew up")
+
+    monkeypatch.setattr(er, "_process_start_time", _boom)
+    path = str(tmp_path / f".tortoise-reaper-{os.geteuid()}" / ".reaper.lock")
+    monkeypatch.setattr(er, "_LOCK_PATH", path)
+    lock = er._ReaperLock(path)
+    assert lock.acquire() is True, "a probe fault must not fail the lock"
+    try:
+        assert er._parse_lock_record(er._lock_record_read()) == (os.getpid(), None), (
+            "an unreadable start degrades to the pid-ONLY record, never to a "
+            "wrong pid")
+        # ...and that record is reported as UNVERIFIABLE, not as a holder.
+        # (No probe runs: the verdict returns at the `start is None` check.)
+        assert er._lock_holder_verdict().state == "unknown"
+    finally:
+        lock.release()
 
 
 def test_the_lock_resolves_the_start_time_before_taking_the_flock(
