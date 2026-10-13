@@ -1,11 +1,18 @@
-"""#7852 W1 — the Layer-2 `semantics` write path (owner-approved: "w1 yes approved").
+"""#7852 — the Layer-2 `semantics` write path, over the FOUR-VALUE direction storage.
 
 The three-layer relation model (ONTOLOGY §8) records a direction DERIVED FROM
-the relation's meaning. Before this change `create_operator` and
-`tortoise_create_operator` took no `semantics` at all, so the chain's step 2
-("the edge's declared meaning → the direction") could not fire and the
-direction always fell through to the per-op_type default — the shadowing #7813
-exists to remove.
+the relation's meaning. `create_operator` and `tortoise_create_operator` take a
+`semantics` input and resolve the direction from it, recording the basis as
+`direction_basis`.
+
+#7852 W1 landed the chain while the runtime could only STORE the two legacy
+tokens (`unidirectional` / `bidirectional`), so it mapped the model's `->` /
+`<->` down and left `-` unresolved (falling through to the mutual default).
+The four-value storage migration (this file's updated expectations) removes that
+interim map: the meaning's MODEL direction is now recorded verbatim — `->`,
+`<->`, and `-` for the neutral meanings — because `-` means the connection
+exists and NO confidence transfers, and a fall-through to `bidirectional` would
+propagate confidence along an edge the model declares belief-free.
 
 What this pins:
   * a declared `semantics` resolves the direction and records the basis
@@ -14,7 +21,8 @@ What this pins:
   * the historical default is UNCHANGED when no semantics is given
     (`"default"`, bidirectional for every op_type — the #7813 ruling);
   * an unknown semantics warns and never blocks; a retired one resolves to its
-    canonical replacement; a neutral one (`-`) carries no direction;
+    canonical replacement; a neutral one (`related` / `transacts`) records the
+    model's `-` (no transfer);
   * the MCP tool exposes the parameter; and the basis survives a journal
     rebuild (`derived = replay(journal)`).
 
@@ -56,16 +64,17 @@ def sdk(tmp_path):
 # ── the chain fires: meaning → direction ─────────────────────────────────
 
 @pytest.mark.parametrize("semantics,expected", [
-    ("addresses", "unidirectional"),
-    ("supports", "unidirectional"),
-    ("refutes", "unidirectional"),
-    ("hasPart", "bidirectional"),
-    ("mutuallyExclusive", "bidirectional"),
-    ("mutuallySupportive", "bidirectional"),
+    ("addresses", "->"),
+    ("supports", "->"),
+    ("refutes", "->"),
+    ("hasPart", "<->"),
+    ("mutuallyExclusive", "<->"),
+    ("mutuallySupportive", "<->"),
 ])
 def test_semantics_resolves_direction(sdk, semantics, expected):
     """A declared Layer-2 meaning records the direction it carries — the chain
-    step that had no way to run before this change."""
+    step that had no way to run before W1, now in the model's four-value
+    vocabulary (not the interim legacy pair)."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
     op = sdk.create_operator("NAND", a["id"], [b["id"]], semantics=semantics)
     direction, basis = _stored(sdk, op["id"])
@@ -91,10 +100,10 @@ def test_absent_direction_still_derives_from_semantics(sdk):
     it must not be recorded as basis `explicit`, and it must NOT suppress the
     semantics step (the P1 both reviewers found)."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
-    # absent + meaning -> the meaning resolves the direction
+    # absent + meaning -> the meaning resolves the direction (model token)
     op = sdk.create_operator("IMPL", a["id"], [b["id"]], direction=None,
                              semantics="addresses")
-    assert _stored(sdk, op["id"]) == ("unidirectional", "semantics")
+    assert _stored(sdk, op["id"]) == ("->", "semantics")
     # absent + no meaning -> canonicalize per op_type, basis `default`
     op2 = sdk.create_operator("NAND", a["id"], [b["id"]], direction=None)
     assert _stored(sdk, op2["id"]) == ("unidirectional", "default")
@@ -132,49 +141,43 @@ def test_retired_semantics_resolves_to_canonical(sdk):
     resolved to its canonical replacement, then resolves the direction."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
     op = sdk.create_operator("NAND", a["id"], [b["id"]], semantics="opposes")
-    assert _stored(sdk, op["id"]) == ("bidirectional", "semantics")
+    assert _stored(sdk, op["id"]) == ("<->", "semantics")
     warns = [w for w in op.get("warnings", []) if w.get("code") == "undeclared_relation"]
     assert warns and "mutuallyExclusive" in warns[0]["message"]
 
 
-def test_neutral_semantics_carries_no_direction(sdk):
+def test_neutral_semantics_records_no_transfer(sdk):
     """`related` is `-`: the connection exists and no confidence transfers, so
-    no direction is derived — the chain falls through and the warning says
-    what actually happens (the caller-supplied/default direction is recorded)."""
+    the meaning records the model's `-` — NOT the mutual default. Before the
+    four-value storage migration the runtime could not store `-` and a
+    fall-through to `bidirectional` would have propagated confidence along an
+    edge the model declares belief-free (the owner ruling)."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
     op = sdk.create_operator("IMPL", a["id"], [b["id"]], semantics="related")
-    assert _stored(sdk, op["id"]) == ("bidirectional", "default")
-    warns = [w for w in op.get("warnings", []) if w.get("code") == "undeclared_relation"]
-    assert warns and "no transferable direction" in warns[0]["message"]
+    assert _stored(sdk, op["id"]) == ("-", "semantics")
+    assert not [w for w in op.get("warnings", [])
+                if w.get("code") == "undeclared_relation"]
 
 
-def test_neutral_semantics_on_nand_does_not_claim_op_type_default(sdk):
-    """A neutral meaning on NAND keeps the signature default (bidirectional);
-    the warning must not claim the op_type default (which is unidirectional for
-    NAND) — it says the default is recorded, and that is what holds."""
+def test_neutral_semantics_is_op_type_independent(sdk):
+    """A neutral meaning records `-` regardless of op_type — it must never be
+    the op_type default (`unidirectional` for NAND) nor the signature default."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
     op = sdk.create_operator("NAND", a["id"], [b["id"]], semantics="related")
-    assert _stored(sdk, op["id"]) == ("bidirectional", "default")
-    warns = [w for w in op.get("warnings", []) if w.get("code") == "undeclared_relation"]
-    assert warns and "op_type default" not in warns[0]["message"]
+    assert _stored(sdk, op["id"]) == ("-", "semantics")
 
 
-def test_every_ruled_semantics_maps_or_is_neutral(sdk):
-    """Exhaustive over the closed vocabulary: each ruled value either resolves
-    to the runtime direction its model direction records (basis `semantics`) or is
-    the neutral `-` class (basis `default`). Derived FROM SEMANTICS_DIRECTIONS,
-    so a vocabulary addition that is not mapped — or is mapped wrongly — fails
-    here rather than passing a two-valued smoke assertion."""
+def test_every_ruled_semantics_records_its_model_direction(sdk):
+    """Exhaustive over the closed vocabulary: each ruled value records exactly
+    the direction `SEMANTICS_DIRECTIONS` states, in the model's four-value
+    form, with basis `semantics`. Derived FROM the registry, so a vocabulary
+    addition that is not mapped — or is mapped wrongly — fails here rather than
+    passing a two-valued smoke assertion."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
-    runtime = {"->": "unidirectional", "<->": "bidirectional"}
     for semantics in sorted(SEMANTICS_VALUES):
-        expected = runtime.get(SEMANTICS_DIRECTIONS[semantics])
         op = sdk.create_operator("IMPL", a["id"], [b["id"]], semantics=semantics)
-        got = _stored(sdk, op["id"])
-        if expected is None:
-            assert got == ("bidirectional", "default"), (semantics, got)
-        else:
-            assert got == (expected, "semantics"), (semantics, got)
+        assert _stored(sdk, op["id"]) == (SEMANTICS_DIRECTIONS[semantics],
+                                           "semantics"), semantics
 
 
 # ── the MCP surface exposes it ────────────────────────────────────────────
@@ -193,7 +196,7 @@ def test_mcp_tool_exposes_semantics(sdk, monkeypatch):
         res = mcp.tortoise_create_operator(
             "NAND", a["id"], [b["id"]], semantics="refutes")
         assert "error" not in res, res
-        assert _stored(sdk, res["id"]) == ("unidirectional", "semantics")
+        assert _stored(sdk, res["id"]) == ("->", "semantics")
     finally:
         _transport_mode.reset(tok_mode)
         _current_org_id.reset(tok_org)
@@ -212,7 +215,7 @@ def test_direction_basis_survives_rebuild(tmp_path):
         a, b = _point(sdk, "a"), _point(sdk, "b")
         op = sdk.create_operator("NAND", a["id"], [b["id"]], semantics="refutes")
         live = _stored(sdk, op["id"])
-        assert live == ("unidirectional", "semantics")
+        assert live == ("->", "semantics")
 
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         assert _stored(sdk, op["id"]) == live
