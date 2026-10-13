@@ -38,22 +38,29 @@ export const BRAND_SUFFIX = " | Tortoise";
 // punctuation-led spelling and its repetitions are treated as the brand suffix.
 // The `+` makes a repeated suffix ("… | Tortoise | Tortoise") collapse to one.
 //
-// ⛔ THE SUFFIX-ONLY CONTRACT, stated once (it is easy to mistake for a bug).
-// A title that is NOTHING BUT a brand tail — "| Tortoise", "— Tortoise",
-// "]Tortoise_" — returns "", and `generate-seo.ts` answers 502 because it has
-// nothing to repair. That is DELIBERATE and PRE-EXISTING: main and every earlier
-// head already returned "" for "| Tortoise" and "— Tortoise". What was NOT
-// consistent was the `_` spellings, which `\b` blocked, so they leaked through as
-// GARBAGE TITLES — "]Tortoise | Tortoise", "_TORTOISE | Tortoise" — and the
-// trailing-separator strip then emptied them on a SECOND pass. `(?![A-Za-z])`
-// below removes that inconsistency: every suffix-only spelling now takes the same
-// pre-existing path.
+// ⛔ THE SUFFIX-ONLY CONTRACT — a DELIBERATE BEHAVIOUR CHANGE, measured, not a
+// consistency cleanup. A title that is NOTHING BUT a brand tail returns "", and
+// `generate-seo.ts` answers 502 `generation_incomplete` (it repairs only a
+// TRUTHY meta_title, so an emptied one short-circuits).
+//
+//   input            parent 53a139f73   this head
+//   "| Tortoise"     ""  -> 502         ""  -> 502
+//   "]Tortoise_"     "]Tortoise | Tortoise" -> 200   "" -> 502
+//
+// So 502-on-suffix-only was ALREADY the contract for the non-`_` spellings, and
+// `\b` merely EXEMPTED the `_` ones — by emitting a garbage title, which the
+// keyword repair then overwrote into `"<keyword> | Tortoise"`. The change makes
+// every spelling take the 502 path. That is the intent: a model that produced no
+// usable title should be regenerated, not have the repair write one for it (which
+// is the #8293 "the repair must not invent a keyword-only field" shape the parent
+// was exhibiting here). Reversible — restoring recovery means teaching
+// `generate-seo.ts` to repair an EMPTIED title, a change with its own review.
 // ⛔ `metaTitle` is idempotent at THIS head: the post-truncate strip re-runs the
 // full suffix pattern, so a tail that truncation EXPOSES is removed in the same
 // pass and a second pass finds nothing. (`generate-seo.ts` does not depend on the
 // property either way — it measures whether the REPAIR fired directly.) Do not
 // reintroduce a second `enforce` pass as the source of `repairFired`.
-const BRAND_SUFFIX_TAIL_RE = /(?:\s*[\p{P}\p{S}]\s*Tortoise(?![A-Za-z])[\p{P}\p{S}\s]*)+$/iu;
+const BRAND_SUFFIX_TAIL_RE = /(?:\s*[\p{P}\p{S}]\s*Tortoise[\p{P}\p{S}\s]*)+$/iu;
 
 export interface SeoFields {
   slug: string;
@@ -105,9 +112,7 @@ export const constraints: Constraints = {
     // brand suffix.
     //
     // Stripping before appending removes the old `endsWith` shortcut's
-    // double-append for every spelling rather than the exact one — but see the
-    // note on `BRAND_SUFFIX_TAIL_RE`: idempotence holds for suffix-BEARING input,
-    // not universally, because truncation can create a brand-looking tail.
+    // double-append for every spelling rather than the exact one.
     // ⛔ STRIP FIRST, then truncate — the reverse order loses the suffix match.
     // `BRAND_SUFFIX_TAIL_RE` requires the COMPLETE word `Tortoise\b`, so if the
     // 60-char cut lands inside the suffix the fragment is left behind and neither

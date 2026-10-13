@@ -18,6 +18,7 @@ import {
   canonicalKeyword,
   allKeywords,
 } from "../website/functions/blog/_shared/seo-keywords.ts";
+import { readFileSync } from "node:fs";
 import { rateLimited, __resetRateLimits } from "../website/functions/blog/_shared/agent-auth.ts";
 import { constraints } from "../website/functions/blog/_shared/seo-constraints.ts";
 import {
@@ -1432,12 +1433,74 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   }
   // The no-trailing-separator property, since a dangling "—" before the suffix is
   // exactly what a mis-ordered strip leaves behind.
-  // ⛔ DERIVED from the class in seo-constraints.ts, not hand-written: `•`
-  // (`\u2022`) had no fixture, so deleting ONLY it left the suite green and the
-  // next "unused character" cleanup would have removed a real member silently.
-  const SEPARATOR_MEMBERS = [",", ".", ";", ":", "!", "?", "|", "·", "•", "—", "–", "-"];
-  assertEq(SEPARATOR_MEMBERS.length, 12,
-    "the derived separator set is the class's own members — a shortened list must not balance silently");
+  // ⛔ GENUINELY DERIVED from the class in seo-constraints.ts — the first version
+  // of this was a hand-written 12-element literal that OMITTED `\s`, so deleting
+  // `\s` from the class left the suite green while changing behaviour (`". ."`
+  // went from the honest 502 to a 200 with a dangling-separator title).
+  // Read the class STRAIGHT OUT OF THE SOURCE — the first version of this was a
+  // hand-written 12-element literal that OMITTED `\s`, so deleting `\s` from the
+  // class left the suite green while changing behaviour (`". ."` went from the
+  // honest 502 to a 200 carrying a dangling separator).
+  const sepSource = readFileSync(
+    new URL("../website/functions/blog/_shared/seo-constraints.ts", import.meta.url), "utf8");
+  const sepAll = [...sepSource.matchAll(/[.]replace\(\/\[([^\]\n]+)\]\+\$\//g)]
+    .map((m) => m[1])
+    // The file has TWO trailing-separator classes (`truncateAtWord`'s and this
+    // one). Select by a member unique to the one under test, not by order.
+    .find((c) => c.includes("u00b7"));
+  assert(sepAll, "the trailing-separator class is still where this fixture looks for it");
+  const SEPARATOR_MEMBERS = [...sepAll
+    .replace(/\\s/g, " ")
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))]
+    .filter((c) => c !== "");
+  assertEq(SEPARATOR_MEMBERS.length, 13,
+    `the class has 13 members incl. \\s (got ${SEPARATOR_MEMBERS.length}: ${JSON.stringify(SEPARATOR_MEMBERS)})`);
+  assert(SEPARATOR_MEMBERS.includes(" "), "the derived set carries the class's own \\s member");
+  // ⛔ Gaps found by the round-12/13 reviewer.
+  // (a) a suffix followed by whitespace then punctuation — the tail class's own
+  //     `\s` member. Dropping it double-suffixes: "x | Tortoise ." -> "x | Tortoise | Tortoise".
+  assertEq(constraints.metaTitle("x | Tortoise ."), "x | Tortoise",
+    "a suffix followed by space-punctuation collapses to one canonical suffix");
+  assertEq(constraints.metaTitle("x | Tortoise \u00b7"), "x | Tortoise",
+    "...including a middot after the space");
+  // (b) `truncateAtWord` is an EXPORTED method the suite never called directly —
+  //     both of its own strips were unobservable through `metaTitle`.
+  assertEq(constraints.truncateAtWord("a".repeat(40) + " b", 20), "a".repeat(20),
+    "truncateAtWord cuts at the word boundary and trims the dangling cut");
+  assertEq(constraints.truncateAtWord("a".repeat(30), 10), "a".repeat(10),
+    "truncateAtWord hard-cuts when there is NO space at all");
+  // (d) BOTH pre-strip trims removed together — alone each is redundant, but
+  //     together they matter: leading whitespace pushes the word boundary to
+  //     offset 1, the cut lands on `" "`, the strip empties it and the handler
+  //     502s a title that is entirely fine once trimmed.
+  {
+    const padded = `   ${"b".repeat(70)}`;
+    assertEq(constraints.metaTitle(padded), "b".repeat(60),
+      "leading whitespace on an over-cap title does not empty it");
+    __resetRateLimits();
+    const viaHandler = await drive({ metaTitle: padded });
+    assertEq(viaHandler.status, 200, "...and the handler still answers 200, not 502");
+  }
+  // (e) the word-boundary cut's OWN trailing strip — observable only through the
+  //     exported `truncateAtWord`, since `metaTitle` re-strips anyway.
+  assertEq(constraints.truncateAtWord(`${"a".repeat(10)}, ${"b".repeat(40)}`, 20), "a".repeat(10),
+    "truncateAtWord drops the dangling comma the cut exposes (word-boundary branch)");
+  // ...and the HARD-CUT branch has its own copy of that strip, reachable only when
+  // the first `max` characters contain NO space at all.
+  assertEq(constraints.truncateAtWord(`${"a".repeat(19)},${"b".repeat(50)}`, 20), "a".repeat(19),
+    "truncateAtWord drops a dangling separator on the hard-cut branch too");
+  // (f) `lastSpace > 0` vs `> 1`: a boundary at offset 1 must still be used. Under
+  //     `> 1` the hard cut wins and a 59-char mid-word title survives.
+  assertEq(constraints.metaTitle(`a ${"b".repeat(61)}`), "a | Tortoise",
+    "a word boundary at the SECOND character still cuts there");
+  // (c) a title that is ONLY whitespace+separator relies on the class's `\s`
+  //     member to empty; without it the handler published "… | Tortoise".
+  for (const only of [". .", "| .", ", —", "— ."]) {
+    __resetRateLimits();
+    const suffixOnly = await drive({ metaTitle: only });
+    assertEq(suffixOnly.status, 502,
+      `${JSON.stringify(only)} as the whole title is refused (needs the class's \\s member)`);
+  }
   for (const sep of SEPARATOR_MEMBERS) {
     const out = constraints.metaTitle(`Long-term memory for AI agents ${sep}`);
     assertEq(out, "Long-term memory for AI agents | Tortoise",
