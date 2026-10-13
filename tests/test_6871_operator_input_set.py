@@ -44,9 +44,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest  # noqa: E402
-from tortoise.sdk import TortoiseSDK  # noqa: E402
-from tortoise.why import assemble_why_blocks  # noqa: E402
+import pytest
+
+from tortoise.sdk import TortoiseSDK
+from tortoise.why import assemble_why_blocks
 
 
 @pytest.fixture()
