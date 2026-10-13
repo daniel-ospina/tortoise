@@ -465,7 +465,7 @@ class ConversationMiner:
             # ``startedAt`` survives the ``or``). Stamping it would write
             # ``validFrom=""`` — a bound ``_covers`` cannot order against any
             # PARSEABLE query instant, so the point is invisible to every
-            # normal ``restore_point_at`` query. Precisely: it is hidden from
+            # normal ``get_historical_knowledge`` query. Precisely: it is hidden from
             # parseable queries only — an unparseable ``at_date`` still matches
             # it by lexicographic accident, the same boundary ``sdk.py``
             # records on its read path. ``""`` is neither absent nor a start,
@@ -481,7 +481,7 @@ class ConversationMiner:
             # decided on `str(...).strip()`, so storing it unstripped would
             # write `" 2026-07-01"` — an unorderable bound `_covers` cannot
             # match against any parseable query instant, hiding the point from
-            # every normal `restore_point_at` query, i.e. the same harm as the
+            # every normal `get_historical_knowledge` query, i.e. the same harm as the
             # `""` case above. Whitespace carries no meaning around an ISO
             # instant.
             vf = str(session_date).strip()

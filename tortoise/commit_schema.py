@@ -442,7 +442,7 @@ def validate_validity_window(valid_from: object, valid_to: object) -> None:
     :func:`validate_span`: the span guard covers the integer character-offset
     axis, this one covers the temporal interval.
 
-    The predicate is the read path's own. ``restore_point_at``'s ``_covers``
+    The predicate is the read path's own. ``get_historical_knowledge``'s ``_covers``
     orders the two bounds with ``tortoise.search_engine._created_sort_key``
     and gates presence with ``is not None``; this guard uses the SAME measure
     and the SAME presence predicate, so its boundary IS the read path's. A

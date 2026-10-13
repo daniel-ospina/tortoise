@@ -29806,7 +29806,7 @@ _GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 _GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 _GITHUB_API = "https://api.github.com"
 _GITHUB_STATE_TTL_S = 600  # 10 min
-_GITHUB_STATES = {}  # state -> {org_id, org, created_at}
+_GITHUB_STATES = {}  # state -> {org_id, org, created_at}[, connector_source_type]
 # NOTE (P1): in-memory — single-worker only (hosted_api runs 1 uvicorn worker
 # on Fly, consistent with the auth cache, rate limiter, and _INDEX_JOBS).
 # Multi-worker would need a shared store (Redis/FalkorDB) for CSRF state.
@@ -30021,6 +30021,112 @@ async def github_connect(body: GitHubConnectRequest | None = None,
     return {"auth_url": auth_url, "state": state}
 
 
+async def _upsert_oauth_connector(org_id: str, source_type: str,
+                                  access_token: str) -> None:
+    """Leave ONE connector row behind for a completed OAuth flow (#4685).
+
+    ``POST /v1/connectors/{source_type}/auth`` promises a connector; the
+    callback that completes it is therefore the thing that must create the row.
+    Before #4685 the flow stored the token on the ORG and left
+    ``GET /v1/connectors`` empty — a flow that claimed a row it never wrote.
+
+    Semantics (settled, not invented here): the migration's
+    ``idx_connectors_org_source`` is UNIQUE on ``(org_id, source_type)``, so a
+    connector is per ORG+SOURCE — not per sync and not per OAuth attempt. A
+    repeat OAuth for the same source ROTATES the credential in place and keeps
+    the existing row's ``config`` (the user's repo scope); it never inserts a
+    second row, which the unique index would reject as a 23505 → HTTP 409.
+
+    The credential is stored in the ``connectors`` format the migration
+    declares (a JSON-dumped object, encrypted): ``{access_token,
+    token_type}``. GitHub OAuth-app tokens do not expire and carry no refresh
+    token, so the other fields the column comment names
+    (``refresh_token``/``expires_at``/``scopes``) have no value here. This is a
+    SECOND ciphertext of the same secret, deliberately:
+    ``organizations.github_token_enc`` is the org-wide connect token the
+    onboarding/indexing path reads, ``connectors.credential_enc`` is the
+    registry the sync engine reads, and one must not require re-deriving the
+    other.
+
+    Self-host has no connector store (every ``/v1/connectors`` sibling answers
+    501 there), so the write is Supabase-only: the self-host flow completes
+    without a row, matching its siblings instead of writing a row nothing can
+    read back.
+
+    A failure PROPAGATES. The row IS this flow's contract, so swallowing the
+    error would re-create the false promise the fix removes — the client would
+    land on ``github=connected`` with ``GET /v1/connectors`` still empty. This
+    matches the neighbouring writes (``store_github_credentials``,
+    ``_update_onboarding_state``), which also raise after the CSRF state has
+    been consumed.
+    """
+    from tortoise.crypto import encrypt_token
+    from tortoise.supabase_control import (
+        connector_by_org_source as _sb_conn_by_source,
+    )
+    from tortoise.supabase_control import (
+        connector_create as _sb_conn_create,
+    )
+    from tortoise.supabase_control import (
+        connector_update as _sb_conn_update,
+    )
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if not is_supabase_enabled():
+        return
+    credential_enc = encrypt_token(_json.dumps(
+        {"access_token": access_token, "token_type": "bearer"}))
+    cp = get_control_plane()
+
+    def _rotate(existing: dict) -> None:
+        connector_id = existing.get("id")
+        if not connector_id:
+            # ``_CONNECTOR_PUBLIC_SELECT`` includes ``id``; a row without one
+            # is a store fault, and addressing it (``id=eq.None``) would 400.
+            raise RuntimeError(
+                f"connector_by_org_source returned a {source_type} connector "
+                "without an id — cannot rotate its credential")
+        if not _sb_conn_update(cp, org_id, connector_id,
+                               credential_enc=credential_enc):
+            raise RuntimeError(
+                f"connector_update matched no {source_type} connector for a "
+                "completed OAuth")
+
+    def _upsert() -> None:
+        # ONE thread hop for the read+write pair — the seam blocks on HTTP
+        # (see _cp_offload). Read-then-write (never insert-then-catch-409 as the
+        # PRIMARY path) so the unique index is a backstop, not the control flow.
+        existing = _sb_conn_by_source(cp, org_id, source_type)
+        if existing is None:
+            try:
+                created = _sb_conn_create(
+                    cp, org_id=org_id, source_type=source_type,
+                    credential_enc=credential_enc)
+            except RuntimeError as e:
+                # A CONCURRENT completion of the same org+source won the
+                # insert: ``idx_connectors_org_source`` answered 23505 →
+                # PostgREST 409 (the marker ``create_connector`` maps too).
+                # The winner's row already keeps this flow's promise, so
+                # converge on it — a 500 on a second, legitimate completion
+                # would be the false failure this whole path exists to avoid.
+                if "HTTP 409" not in str(e):
+                    raise
+                existing = _sb_conn_by_source(cp, org_id, source_type)
+                if existing is None:
+                    raise  # not the race it looked like: no row to converge on
+            else:
+                if created is None:
+                    raise RuntimeError(
+                        f"connector_create left no {source_type} connector "
+                        "for a completed OAuth")
+                return
+        _rotate(existing)
+
+    await _cp_offload(_upsert, op="connector_upsert")
+
+
 @app.get("/v1/onboarding/github/callback")
 async def github_callback(code: str | None = None, state: str | None = None,
                           error: str | None = None):
@@ -30028,6 +30134,12 @@ async def github_callback(code: str | None = None, state: str | None = None,
 
     `error` is the standard OAuth denial query param. (Note: tests must use
     follow_redirects=False — the 302 target is the external welcome page.)
+
+    The callback is SHARED by two entry points, and the CSRF state is what
+    tells them apart: ``POST /v1/onboarding/github/connect`` mints a state
+    that stores the token on the org, while ``POST
+    /v1/connectors/github/auth`` adds ``connector_source_type`` so this
+    completion ALSO leaves the connector row that flow promises (#4685).
     """
     # #1135: welcome page lives on the static-Pages host — derive from the
     # same env-driven base as the email links (EMAIL_LINK_BASE_URL), never a
@@ -30104,6 +30216,13 @@ async def github_callback(code: str | None = None, state: str | None = None,
             "MATCH (t:Team {id: $id}) SET t.github_token_enc = $tok, t.github_org = $org",
             params={"id": org_id, "tok": encrypted, "org": org},
         )
+    # #4685: consume the connector intent the flow recorded in its CSRF state.
+    # Only the connector entry point sets it, so onboarding's behaviour (token
+    # on the org, no connector row) is unchanged — see _upsert_oauth_connector.
+    connector_source_type = st.get("connector_source_type")
+    if connector_source_type:
+        await _upsert_oauth_connector(
+            org_id, connector_source_type, access_token)
     _update_onboarding_state(org_id, github_connected=True)
     # Auto-index after connect (Task 5, amend 11): background first-run
     # (ONE repo — bounded, P2-4). The job is created under the org's
@@ -30576,6 +30695,11 @@ async def connector_auth(
     """Initiate OAuth for a connector source type. Returns the authorize URL.
 
     Dispatches to the correct OAuth flow based on source_type.
+
+    Completing the flow leaves EXACTLY ONE connector row for this org+source
+    (#4685): the GitHub callback this shares with onboarding creates it, and a
+    repeat OAuth rotates that row's credential in place rather than adding a
+    second one. See ``_upsert_oauth_connector``.
     """
     org_id = org["org_id"]
     if source_type == "github":
@@ -30593,6 +30717,13 @@ async def connector_auth(
             "org_id": org_id,
             "org": None,
             "created_at": __import__("time").time(),
+            # #4685: the ONE difference from the onboarding flow — the
+            # callback must leave a connector row behind. A source type, not a
+            # boolean: it names the connector the completion is for, so a
+            # future source arm does not need a second flag. The GitHub
+            # callback is the only consumer today because this is the only arm
+            # that mints a state.
+            "connector_source_type": "github",
         }
         callback = _os.environ.get(
             "GITHUB_CALLBACK_URL",

@@ -610,7 +610,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
 
     # ── 8. inverted_validity_window (high, #5361) ──────────────────
     # A Point whose persisted window END precedes its START (validTo <
-    # validFrom) is unreadable to temporal queries: restore_point_at's
+    # validFrom) is unreadable to temporal queries: get_historical_knowledge's
     # `_covers` requires validFrom <= t <= validTo, and no instant satisfies
     # both, so the point silently disappears — indistinguishable from honest
     # absence. HIGH because this is a real integrity failure, not a style
