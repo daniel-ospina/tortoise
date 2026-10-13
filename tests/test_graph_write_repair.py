@@ -168,6 +168,22 @@ def _scratch_graphs(db: _FakeDb) -> list[str]:
     return sorted(k for k in db.graphs if k.startswith("__gwr_"))
 
 
+@pytest.fixture(autouse=True)
+def _no_real_cross_db_sockets(monkeypatch):
+    """Pin the collision scan's SOCKET boundary, so no test opens a real one.
+
+    `main()` always checks for the upstream collision (FalkorDB/FalkorDB#2782), and that
+    check dials the host. Patching `_raw_client` -- the boundary, not the function under test
+    -- keeps every `main()` case hermetic (an empty keyspace == "scan ran, no duplicates")
+    while the collision tests below can still drive `cross_db_duplicates` itself.
+    """
+    class _EmptyKeyspaceClient:
+        def execute_command(self, cmd: str, *args):
+            return {} if cmd == "INFO" else 0
+
+    monkeypatch.setattr(gwr, "_raw_client", lambda port, db: _EmptyKeyspaceClient())
+
+
 # ── probe classification: ok / defect / unknown / absent ────────────────────
 
 def test_probe_ok_and_the_probe_cleans_up_after_itself():
@@ -491,6 +507,217 @@ def test_repair_refuses_an_absent_graph_and_creates_nothing(monkeypatch, fake_lo
     assert ok is False
     assert "ABSENT inside the repair" in msg
     assert db.commands == [], db.commands
+
+
+# ── the upstream collision: the same graph name in another logical DB (#2782) ──
+
+class _FakeRawClient:
+    """One logical DB of the collision scan: `INFO`/`EXISTS`/`TYPE` ONLY.
+
+    ⛔ ANY OTHER COMMAND FAILS THE TEST. A scan that issued a Cypher read
+    (`GRAPH.QUERY` / `GRAPH.RO_QUERY`) against the name in another DB would OPEN that graph,
+    which IS the registry displacement the scan exists to diagnose -- the probe would brick
+    the live graph it was checking. Making every other command an error is what pins that.
+    """
+
+    def __init__(self, host: _FakeRawHost, db_index: int) -> None:
+        self._host = host
+        self._db = db_index
+
+    def execute_command(self, cmd: str, *args):
+        self._host.issued.append((self._db, (cmd, *args)))
+        if cmd == "INFO":
+            if self._host.info_error is not None:
+                raise self._host.info_error
+            return {f"db{i}": {"keys": max(1, len(v))}
+                    for i, v in sorted(self._host.keyspace.items())}
+        if self._db in self._host.unreadable_dbs:
+            raise RuntimeError(f"db{self._db} is unreadable")
+        keys = self._host.keyspace.get(self._db, {})
+        if cmd == "EXISTS":
+            return 1 if args[0] in keys else 0
+        if cmd == "TYPE":
+            return keys[args[0]]
+        raise AssertionError(
+            f"the collision scan must not issue {cmd!r} -- a Cypher read against the name "
+            f"in another DB is itself the displacement (#2782)")
+
+
+class _FakeRawHost:
+    def __init__(self, keyspace: dict[int, dict[str, bytes]], *,
+                 info_error: BaseException | None = None,
+                 unreadable_dbs: set[int] | None = None) -> None:
+        self.keyspace = keyspace
+        self.info_error = info_error
+        self.unreadable_dbs = unreadable_dbs or set()
+        self.issued: list[tuple[int, tuple]] = []
+
+    def client(self, port: int, db_index: int) -> _FakeRawClient:
+        return _FakeRawClient(self, db_index)
+
+
+def test_cross_db_duplicates_finds_only_the_same_name_in_other_dbs(monkeypatch):
+    """The scan reports same-name keys in OTHER DBs, and nothing else.
+
+    Mutation: compare every key instead of `name`, or include the home DB -> the
+    expected set changes -> RED.
+    """
+    host = _FakeRawHost({
+        0: {"tortoise": b"graphdata", "other": b"graphdata"},
+        1: {"tortoise": b"graphdata"},
+        2: {"unrelated": b"graphdata"},
+        3: {"tortoise": b"graphdata"},
+    })
+    monkeypatch.setattr(gwr, "_raw_client", host.client)
+    assert gwr.cross_db_duplicates(16379, "tortoise") == [(1, b"graphdata"),
+                                                          (3, b"graphdata")]
+
+
+def test_cross_db_duplicates_never_issues_a_cypher_or_graph_command(monkeypatch):
+    """The scan is SIDE-EFFECT FREE: `INFO`/`EXISTS`/`TYPE`, and no graph query at all.
+
+    This is the safety property of the whole check, not a style preference: a Cypher read
+    against the duplicate OPENS that graph and displaces the live one -- a diagnostic that
+    would cause the defect. `_FakeRawClient` raises on any other command, so issuing one
+    fails here.
+
+    Mutation: probe the duplicate with `GRAPH.QUERY`/`GRAPH.RO_QUERY` (e.g. to report a node
+    count) -> the fake raises -> RED.
+    """
+    host = _FakeRawHost({0: {"tortoise": b"graphdata"}, 1: {"tortoise": b"graphdata"}})
+    monkeypatch.setattr(gwr, "_raw_client", host.client)
+    gwr.cross_db_duplicates(16379, "tortoise")
+    kinds = {cmd for _, (cmd, *_rest) in host.issued}
+    assert kinds == {"INFO", "EXISTS", "TYPE"}, host.issued
+
+
+def test_cross_db_duplicates_is_none_when_the_keyspace_scan_fails(monkeypatch):
+    """An unreadable server is `None` ("the check did not run"), never `[]` ("clean").
+
+    Mutation: return `[]` in the except arm -> a scan that could not run reports "no
+    collision" -> RED.
+    """
+    host = _FakeRawHost({0: {}}, info_error=RuntimeError("connection refused"))
+    monkeypatch.setattr(gwr, "_raw_client", host.client)
+    assert gwr.cross_db_duplicates(16379, "tortoise") is None
+
+
+def test_cross_db_duplicates_skips_an_unreadable_db_and_reports_the_rest(monkeypatch):
+    """One unreadable DB does not hide the collisions in the others.
+
+    Mutation: let the per-DB exception escape (or abort the loop) -> the db3 duplicate is
+    lost -> RED.
+    """
+    host = _FakeRawHost({
+        0: {"tortoise": b"graphdata"},
+        1: {"tortoise": b"graphdata"},
+        3: {"tortoise": b"graphdata"},
+    }, unreadable_dbs={1})
+    monkeypatch.setattr(gwr, "_raw_client", host.client)
+    assert gwr.cross_db_duplicates(16379, "tortoise") == [(3, b"graphdata")]
+
+
+def test_collision_message_names_the_upstream_and_the_loud_clear():
+    """The report is the artifact an operator reads: it names the upstream cause and the
+    exact DURABLE clear, and it is EMPTY when there is no collision.
+
+    Mutation: drop the upstream reference or the `DEL` recipe -> RED.
+    """
+    assert gwr.collision_message("tortoise", []) == ""
+    msg = gwr.collision_message("tortoise", [(1, b"graphdata"), (2, b"graphdata")])
+    assert "FalkorDB/FalkorDB#2782" in msg
+    assert "db1" in msg and "db2" in msg
+    assert "DEL tortoise" in msg
+    # It must say the write-lock is the SYMPTOM of the collision, not the other way round.
+    assert "CAUSE" in msg
+
+
+def test_main_reports_the_collision_even_when_the_graph_is_healthy(monkeypatch, capsys):
+    """A HEALTHY graph holding a collision is one restart from the defect, so it is reported.
+
+    Mutation: move the scan inside the unwritable branch -> a healthy-but-colliding graph
+    exits 0 silently -> RED.
+    """
+    db = _FakeDb({"tortoise": _GraphState(nodes=BIG, edges=9)})
+    _run_main(monkeypatch, db)
+    monkeypatch.setattr(gwr, "cross_db_duplicates",
+                        lambda *a, **k: [(1, b"graphdata")])
+    assert gwr.main() == 0
+    err = capsys.readouterr().err
+    assert "FalkorDB/FalkorDB#2782" in err
+    assert "WILL return" in err
+
+
+def test_main_names_the_collision_as_the_cause_when_the_graph_is_unwritable(
+        monkeypatch, capsys):
+    """On the defect path the collision is reported as the CAUSE and the clear is printed.
+
+    Mutation: report only the generic "reload defect" wording -> the operator is sent to look
+    at the RDB load path instead of the colliding key -> RED.
+    """
+    db = _FakeDb({"tortoise": _defect_state()})
+    _run_main(monkeypatch, db, "--check")
+    monkeypatch.setattr(gwr, "cross_db_duplicates",
+                        lambda *a, **k: [(1, b"graphdata"), (2, b"graphdata")])
+    assert gwr.main() == 3
+    err = capsys.readouterr().err
+    assert "FalkorDB/FalkorDB#2782" in err
+    assert "DURABLE CLEAR" in err
+
+
+def test_main_says_the_repair_is_temporary_while_a_collision_exists(
+        monkeypatch, capsys, fake_lock):
+    """A successful RENAME with a live collision must NOT claim the repair is durable.
+
+    Mutation: keep the old unconditional "recurs on the next container restart (upstream, RDB
+    load path)" note -> the cause and the fix are hidden from the operator -> RED.
+    """
+    db = _FakeDb({"tortoise": _defect_state()})
+    _run_main(monkeypatch, db)
+    monkeypatch.setattr(gwr, "cross_db_duplicates",
+                        lambda *a, **k: [(1, b"graphdata")])
+    assert gwr.main() == 0
+    captured = capsys.readouterr()
+    assert "TEMPORARY" in captured.err
+    assert "FalkorDB/FalkorDB#2782" in captured.err
+
+
+def test_main_keeps_the_generic_recurs_note_without_a_collision(
+        monkeypatch, capsys, fake_lock):
+    """With no collision the previously documented residual note is unchanged."""
+    db = _FakeDb({"tortoise": _defect_state()})
+    _run_main(monkeypatch, db)
+    assert gwr.main() == 0
+    assert "recurs on the next container restart" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("quiet", [False, True], ids=["loud", "quiet"])
+def test_main_says_so_when_the_collision_scan_could_not_run(
+        monkeypatch, capsys, quiet: bool):
+    """`None` must not read as "no collision": an unrun check is said out loud.
+
+    ⛔ INCLUDING UNDER `--quiet` -- that is the ONLY mode the launchd job runs in
+    (installer `ProgramArguments`: `<PY> <TOOL> --quiet`), so a note routed through
+    `say()` is invisible in exactly the log an unattended run produces, and an unrun
+    scan would be byte-identical to a clean one.
+
+    Mutation: treat `None` like `[]` -> the log claims a clean scan that never
+    happened -> RED. Mutation (the pre-fix shape): route the note through `say()`
+    -> it lands on stdout, not on the stderr this test reads -> BOTH parametrized
+    cases RED (measured: 2 failed). The pre-fix version of this test drove only the
+    loud path and asserted on stdout, so it PASSED against that source -- the
+    parametrization over `--quiet` is what turns the contract into a gate.
+    """
+    db = _FakeDb({"tortoise": _GraphState(nodes=BIG, edges=9)})
+    _run_main(monkeypatch, db, *(["--quiet"] if quiet else []))
+    monkeypatch.setattr(gwr, "cross_db_duplicates", lambda *a, **k: None)
+    assert gwr.main() == 0
+    captured = capsys.readouterr()
+    assert "could not scan other logical DBs" in captured.err
+    assert "did NOT run" in captured.err
+    # The note is a FACT about the graph, so it is not narration: nothing about it may
+    # ride on `--quiet`. It must not reappear on stdout, where `say()` would put it.
+    assert "could not scan other logical DBs" not in captured.out
 
 
 # ── the installer: CLI contract, escaping, lint-before-move, load verification ──

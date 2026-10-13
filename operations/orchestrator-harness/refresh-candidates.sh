@@ -81,15 +81,23 @@ for f in "$O/.open_iss" "$O/.pr_brs"; do rm -f "$f"; done
 
 touch "$O/checked.txt" "$O/candidates.txt"
 
-# pool = open unassigned P1-severe ∪ P2-moderate, minus epics/owner-decisions
-{  
+# pool = open unassigned P0-blocker ∪ P1-severe ∪ P2-moderate, minus epics/owner-decisions
+#
+# ⛔ SEVERITY FIRST, AGE SECOND. Each tier emits "<tier> <number>" and the sort keys on the tier
+# before the number. A bare `sort -n` over the numbers ALONE ordered by ISSUE NUMBER — i.e. oldest
+# first — discarding the tier the three queries had just computed. Measured 2026-10-13: 238
+# pool-eligible P2-moderate sat ahead of 20 pool-eligible P0-blocker, so the P0s were unreachable
+# and every worker the harness ran was a P2 (#8465). The tier is a RANK, not a label.
+# Dedupe on the NUMBER, keeping the lowest tier: the sort already put an issue's best tier first, so
+# `!seen[$2]++` drops the later, weaker duplicate rather than letting one issue occupy two slots.
+{
   gh issue list --repo "$OR" --state open --limit 300 --label P0-blocker --json number,assignees,title \
-    --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|lane|OWNER DECISION|decision|analysis|investigation)";"i")|not)|.number' 2>/dev/null
+    --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|lane|OWNER DECISION|decision|analysis|investigation)";"i")|not)|"0 \(.number)"' 2>/dev/null
   gh issue list --repo "$OR" --state open --limit 200 --label P1-severe --json number,assignees,title \
-    --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|OWNER DECISION)";"i")|not)|.number' 2>/dev/null
+    --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|OWNER DECISION)";"i")|not)|"1 \(.number)"' 2>/dev/null
   gh issue list --repo "$OR" --state open --limit 200 --label P2-moderate --json number,assignees,title \
-    --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|OWNER DECISION)";"i")|not)|.number' 2>/dev/null
-} | sort -n -u > "$O/.pool"
+    --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|OWNER DECISION)";"i")|not)|"2 \(.number)"' 2>/dev/null
+} | sort -k1,1n -k2,2n | awk '!seen[$2]++ {print $2}' > "$O/.pool"
 
 n=0
 while read -r N; do
@@ -104,5 +112,10 @@ while read -r N; do
     echo "[refresh] +#$N CLEAN -> backlog"
   fi
 done < "$O/.pool"
-sort -n -u -o "$O/candidates.txt" "$O/candidates.txt"
+# Dedupe WITHOUT re-sorting. orch-loop.sh consumes this file top-down and dispatches the first
+# BATCH entries, so its ORDER IS the dispatch priority. `sort -n -u` re-ordered the backlog by
+# issue number, pushing any P0 that had just been appended to the BACK — the same defect as the
+# pool sort above (#8465). `mv` is atomic within the directory, and `&&` keeps a failed awk from
+# truncating the live backlog.
+awk '!seen[$0]++' "$O/candidates.txt" > "$O/.cand" && mv "$O/.cand" "$O/candidates.txt"
 echo "[refresh] checked $n; backlog now $(wc -l < "$O/candidates.txt" | tr -d ' ') issues"

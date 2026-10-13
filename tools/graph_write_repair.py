@@ -42,6 +42,46 @@ its failure paths, cannot acquire it, and refuses after its full wait (the clone
 and the run stalls while the caller believes it cleaned up). Presence is always established
 with `graph_exists` -- never by querying a graph whose existence is assumed.
 
+THE ROOT CAUSE, PINNED: A SAME-NAMED GRAPH IN ANOTHER LOGICAL DB (upstream #2782)
+--------------------------------------------------------------------------------
+The defect is NOT an interrupted RESTORE, NOT the rebuild's wipe, and NOT memory. It is an
+UPSTREAM FalkorDB Rust-core defect, and it needs no corruption to trigger:
+
+    FalkorDB/FalkorDB#2782 -- "[Rust] Same graph name in two Redis databases ...
+    permanently write-locks the first graph (release)" (OPEN, unfixed by the maintainers)
+
+The Rust core's `GRAPH_REGISTRY` is keyed by graph NAME ONLY, with no Redis logical-database
+qualifier (`src/graph_core.rs`). Registering the name in a second DB therefore DISPLACES the
+first graph from the registry, `graph_is_registered` then returns false for it, and it is
+write-locked until its key is replaced. The engine reports that as the defect sentence above
+-- which is why the message misdescribes it: nothing was deleted, no race occurred.
+
+REPRODUCED HERE, 2026-10-13, on this container (`falkordb/falkordb:6.0.1`, `MODULE LIST`
+ver 60001) with a throwaway name -- never on `tortoise`:
+
+    SELECT 0; GRAPH.QUERY zz_probe "CREATE (n:T)"          -> Nodes created: 1
+    SELECT 1; GRAPH.QUERY zz_probe "CREATE (n:T)"          -> Nodes created: 1
+    SELECT 0; GRAPH.QUERY zz_probe "CREATE (n:T)"          -> graph was deleted or replaced... aborting
+    SELECT 0; GRAPH.QUERY zz_probe "MATCH (n) RETURN count(n)" -> 1   (reads still fine)
+    SELECT 1; DEL zz_probe ; SELECT 0; GRAPH.QUERY zz_probe "CREATE..." -> STILL aborts
+
+That last line matches the upstream report exactly: deleting the OTHER database's key does
+NOT heal the displaced graph. Only REPLACING the displaced key does -- which is precisely
+why `GRAPH.COPY` + `RENAME` (and the older COPY/DELETE/COPY) is the one thing that works.
+
+**This is why the defect recurs on every container restart, and it is measurable on this
+host.** The RDB holds the same graph name in MORE THAN ONE keyspace, so every reload
+re-registers the name repeatedly and whichever registration lands last wins:
+
+    INFO keyspace -> db0:keys=632, db1..db9:keys=1 each   (at measurement)
+    db0 tortoise = 20307 nodes (the real graph)   db1..db9 tortoise = 0 nodes (empty)
+
+`cross_db_duplicates()` below reports exactly this, and it is the durable half: with the
+colliding keys gone the reload can only register the real one. This check uses
+`INFO`/`EXISTS`/`TYPE` ONLY -- a Cypher read (`GRAPH.QUERY`/`GRAPH.RO_QUERY`) against the
+name in another DB OPENS that graph and is itself the displacement, so a probe that read
+the duplicate's node count would brick the live graph on the spot.
+
 REPAIR ONLY ON THE SPECIFIC DEFECT
 ----------------------------------
 The probe classifies the failure, and only the exact defect authorises a repair. This is
@@ -56,10 +96,17 @@ KNOWN RESIDUALS (declared, not hidden)
 * **The probe mutates.** Verifying that a graph accepts writes requires attempting a write,
   so `--check` writes one node and removes it. An earlier revision claimed "never mutate"
   and did; the claim is dropped rather than the behaviour dressed up.
-* **The defect is not fixed upstream.** It recurs on every container restart. This buys the
-  fleet working writes and names the bug; it does not prevent it.
-* **The RDB-load cause is not pinned.** `GRAPH.COPY` producing a good graph localises it to
-  the reload path, but not further.
+* **The defect is not fixed upstream.** It recurs on every container restart until the
+  colliding keys are gone (see the root-cause section). The `RENAME` repair buys the fleet
+  working writes; removing the duplicate keys is what makes it durable, and
+  `cross_db_duplicates()` now names both instead of leaving a bare "recurs" note.
+* **The root cause is pinned; the FIX is not ours.** Upstream FalkorDB/FalkorDB#2782 keys
+  `GRAPH_REGISTRY` by name only. Nothing in this repo can repair the registry; until the
+  maintainers key it by `(db_index, name)`, the collision must not be re-created.
+* **The duplicate keys are not removed for you.** Deleting a key in ANOTHER logical DB is a
+  global, irreversible operator action (the repo's `poisoned_aof_recovery_hint` sets the same
+  boundary), and a duplicate that holds data is not ours to destroy sight-unseen. The tool
+  prints the exact command and refuses to run it.
 
 Usage:
     uv run python tools/graph_write_repair.py            # check, repair if broken
@@ -90,10 +137,118 @@ import uuid
 DEFAULT_GRAPH = "tortoise"
 PROBE_LABEL = "GraphWriteRepairProbe"
 
+# The tool is local-only by construction (`connect()` pins it, #6666): every socket this
+# module opens -- the graph handle AND the per-DB collision scan -- must agree on the host.
+HOST = "127.0.0.1"
+
+#: The upstream defect that CAUSES this write-lock (see the module docstring): the Rust
+#: core's `GRAPH_REGISTRY` is keyed by graph name only, with no logical-DB qualifier, so a
+#: same-named graph in another DB displaces this one. OPEN and unfixed.
+COLLISION_UPSTREAM = "FalkorDB/FalkorDB#2782"
+
 # A swap below this many nodes is refused outright. The graph is the fleet's collective
 # memory (~20300 nodes); an EMPTIED graph must never be "repaired" into place. This is what
 # makes the `0 < 0` false-success impossible even if a presence check is somehow missed.
 MIN_NODES = 1000
+
+#: Bound on the per-DB scan. The server's `databases` setting is 16 by default; the scan
+#: iterates the DBs `INFO keyspace` actually names, so this is a runaway guard, not a
+#: functional limit.
+_MAX_DBS = 64
+
+
+def _raw_client(port: int, db_index: int):
+    """A client pinned to ONE logical DB, on a connection it HOLDS.
+
+    ⛔ ONE LEDGER PER DB, NOT ONE `SELECT` COMMAND. `falkordb`'s `execute_command` checks a
+    pooled connection out per call, so `SELECT 1` and the `EXISTS` that follows it would run
+    on DIFFERENT connections and the `EXISTS` would silently answer for db0 -- reporting "no
+    collision" on the very host that has one. A client constructed with `db=` owns its DB.
+    """
+    import redis
+
+    return redis.Redis(host=HOST, port=port, db=db_index,
+                       socket_connect_timeout=3, socket_timeout=3)
+
+
+def cross_db_duplicates(port: int, name: str, *, home_db: int = 0,
+                        ) -> list[tuple[int, bytes | str]] | None:
+    """Same-named keys in OTHER logical DBs -- the upstream cause of this write-lock.
+
+    Returns ``(db_index, key_type)`` for every DB (other than *home_db*) whose `INFO
+    keyspace` shows keys AND that holds a key called *name*, or ``None`` when the scan could
+    not be performed at all (unreachable server, unreadable directory). ``None`` is NOT "no
+    collision": the caller must say the check did not run rather than report clean.
+
+    ⛔ SIDE-EFFECT FREE BY CONSTRUCTION -- `INFO`/`EXISTS`/`TYPE` ONLY. A Cypher read against
+    *name* in another DB (`GRAPH.QUERY`/`GRAPH.RO_QUERY`) OPENS that graph, which IS the
+    registry displacement this function exists to find: a scan that read the duplicate's node
+    count would brick the live graph it was diagnosing. That is why no node count is
+    reported here -- the count is exactly the thing that cannot be read safely.
+    """
+    try:
+        home = _raw_client(port, home_db)
+        keyspace = home.execute_command("INFO", "keyspace")
+        # redis-py parses `INFO <section>` into a dict (`{'db0': {'keys': 632, ...}}`); a
+        # transport that does not strips it to text -- handle both rather than silently
+        # reporting "no collision" for every DB.
+        if isinstance(keyspace, dict):
+            db_names = list(keyspace)
+        else:
+            text = keyspace.decode() if isinstance(keyspace, bytes) else str(keyspace)
+            db_names = [line.split(":", 1)[0] for line in text.splitlines()
+                        if line.startswith("db")]
+    except Exception:
+        return None
+
+    duplicates: list[tuple[int, bytes | str]] = []
+    try:
+        for db_name in db_names[:_MAX_DBS]:
+            try:
+                index = int(str(db_name).removeprefix("db"))
+            except ValueError:
+                continue
+            if index == home_db:
+                continue
+            try:
+                client = _raw_client(port, index)
+                if client.execute_command("EXISTS", name):
+                    duplicates.append((index, client.execute_command("TYPE", name)))
+            except Exception:
+                # A single unreadable DB does not invalidate the others: report what was
+                # found and let the caller's wording stay a report, not a guarantee.
+                continue
+    except Exception:
+        return None
+    return duplicates
+
+
+def collision_message(name: str, duplicates: list[tuple[int, bytes | str]]) -> str:
+    """The loud, actionable report for a same-name collision (empty string if none).
+
+    Pure, so the wording -- the artifact an operator actually reads -- is pinned by a test.
+    """
+    if not duplicates:
+        return ""
+    dbs = ", ".join(
+        f"db{index} (type={kind.decode() if isinstance(kind, bytes) else kind})"
+        for index, kind in duplicates)
+    return (
+        f"\n⚠  SAME-NAME GRAPH IN OTHER LOGICAL DBs: {name!r} also exists in {dbs}.\n"
+        f"   This is the CAUSE of the write-lock, not a symptom: {COLLISION_UPSTREAM} --\n"
+        f"   the Rust core keys GRAPH_REGISTRY by graph NAME only, so the other DB's\n"
+        f"   registration displaces this graph. Each container restart re-registers the\n"
+        f"   name repeatedly, which is why the defect keeps coming back.\n"
+        f"   DURABLE CLEAR (operator action; this tool will not delete in another DB):\n"
+        f"       # after the live graph has been replaced (below) or a repair has landed,\n"
+        f"       for db in {' '.join(str(i) for i, _ in duplicates)}; do\n"
+        f"           redis-cli -p <port> -n $db DEL {name}      # ONLY if that key is a\n"
+        f"       done                                            # leftover, never real data\n"
+        f"       redis-cli -p <port> SAVE                       # persist the clean keyspace\n"
+        f"   Verify a duplicate holds nothing BEFORE deleting it: a Cypher read against it\n"
+        f"   opens it, so check it on a throwaway copy or accept that removing a NON-empty\n"
+        f"   duplicate destroys that data.\n"
+    )
 
 
 class Unreachable(RuntimeError):
@@ -107,8 +262,9 @@ class Defect(RuntimeError):
 def connect(port: int):
     import falkordb
 
-    # Pin 127.0.0.1, never `localhost` (#6666).
-    return falkordb.FalkorDB(host="127.0.0.1", port=port)
+    # Pin the loopback address, never `localhost` (#6666) -- the same HOST the per-DB scan
+    # dials, so a repair and its diagnosis cannot disagree about which server they mean.
+    return falkordb.FalkorDB(host=HOST, port=port)
 
 
 def node_count(graph) -> int:
@@ -374,14 +530,32 @@ def main() -> int:
         db = connect(args.port)
         from tortoise.graph_delete_guard import graph_exists
         if not graph_exists(db, args.graph):
-            print(f"⛔ graph '{args.graph}' is ABSENT on 127.0.0.1:{args.port} -- "
+            print(f"⛔ graph '{args.graph}' is ABSENT on {HOST}:{args.port} -- "
                   f"this is not a repair case (the defect leaves the key present and "
                   f"readable). Do not create it here: investigate why it is gone.",
                   file=sys.stderr)
             return 3
     except Exception as exc:
-        print(f"ERROR: cannot reach FalkorDB on 127.0.0.1:{args.port}: {exc}", file=sys.stderr)
+        print(f"ERROR: cannot reach FalkorDB on {HOST}:{args.port}: {exc}", file=sys.stderr)
         return 2
+
+    # ⛔ THE CAUSE IS CHECKED BEFORE THE SYMPTOM, AND REPORTED ON EVERY PATH -- including
+    # HEALTHY. A healthy graph that still holds a same-name key in another DB is one restart
+    # (or one Cypher read in that DB) away from the write-lock, because the collision IS the
+    # displacement mechanism (upstream #2782), and it is what makes the repair non-durable.
+    # Side-effect free: `INFO`/`EXISTS`/`TYPE` only (see `cross_db_duplicates`).
+    duplicates = cross_db_duplicates(args.port, args.graph)
+    collision = "" if duplicates is None else collision_message(args.graph, duplicates)
+    if duplicates is None:
+        # ⛔ OUTSIDE THE `--quiet` GATE, like the collision and the counts. "The scan did
+        # not run" is a FACT about the graph, not step narration: under the scheduled job's
+        # `--quiet` an unrun scan and a clean scan would otherwise produce byte-identical
+        # logs, and `None` is expressly NOT "no collision" (see `cross_db_duplicates`).
+        # The same claim/narration line the counts() docstring draws, one item over.
+        print(f"note: could not scan other logical DBs for the {COLLISION_UPSTREAM} "
+              f"collision - the collision check did NOT run", file=sys.stderr)
+    if collision:
+        print(collision, file=sys.stderr)
 
     say(f"graph '{args.graph}': probing the write path...")
     try:
@@ -400,6 +574,10 @@ def main() -> int:
             nodes, edges = fingerprint(db.select_graph(args.graph))
             print(f"graph '{args.graph}': HEALTHY - {detail} "
                   f"({nodes} nodes / {edges} edges)")
+            if collision:
+                print(f"   the graph writes, but the {COLLISION_UPSTREAM} collision above "
+                      f"means the defect WILL return; clear the duplicate keys.",
+                      file=sys.stderr)
         except Exception as exc:
             print(f"graph '{args.graph}': HEALTHY - {detail} (counts unreadable: {exc})")
         return 0
@@ -420,8 +598,9 @@ def main() -> int:
         return 2
 
     print(f"⚠  graph '{args.graph}' is UNWRITABLE: {detail}\n"
-          f"   Known FalkorDB 6.0.1 reload defect (see the docstring). READS work; the "
-          f"fleet cannot write.", file=sys.stderr)
+          f"   This is the #7762 write-lock: READS work and the fleet cannot write. Its "
+          f"cause is a same-name key in another logical DB ({COLLISION_UPSTREAM}), reported "
+          f"above when present (see the module docstring).", file=sys.stderr)
     if args.check:
         print("   --check given: not repairing.", file=sys.stderr)
         return 3
@@ -435,7 +614,14 @@ def main() -> int:
         return 3
     if ok:
         print(f"graph '{args.graph}': REPAIRED - {msg}")
-        print("note: this recurs on the next container restart (upstream, RDB load path).")
+        if collision:
+            print(
+                f"⚠  TEMPORARY: the {COLLISION_UPSTREAM} collision above will re-break this "
+                f"graph on the next container restart (the RDB re-registers the name in "
+                f"every DB it holds). Clear the duplicate keys to make the repair durable.",
+                file=sys.stderr)
+        else:
+            print("note: this recurs on the next container restart (upstream, RDB load path).")
         return 0
 
     print(f"⛔ REPAIR FAILED for graph '{args.graph}': {msg}", file=sys.stderr)
