@@ -33455,13 +33455,20 @@ async def backups_rebaseline(request: Request):
     if graph_id == "default":
         _write_json(storage, f"ops/teams/{org_id}/state.json", state)
     subject = f"{org_id}:{graph_id}" if graph_id != "default" else org_id
-    # #4778/#4777: the ALERT-only policy seam. The raw chain handed
-    # `_backup_config_safe()` — None whenever `BACKUP_SWEEP_ENABLED` is off (the
-    # production default) — to a constructor that dereferences it, so a
-    # sweep-disabled re-baseline raised AFTER the recovery writes above and
-    # BEFORE both resolves, stranding the incidents behind a 500. The seam is
-    # ungated on the sweep switch, and it ANSWERS None (instead of raising) when
-    # there is no channel at all — which `_resolve_incidents` now reports.
+    # #4778/#4777: the ALERT-only policy seam, NEVER the sweep-gated chain.
+    # Re-baseline is precisely the operator action that clears an incident FILED
+    # WHILE THE SWEEP WAS ENABLED, so the channel must survive the sweep being
+    # switched off (the production default) — the sweep switch decides whether
+    # backups RUN, never whether an incident is VISIBLE (#3820 D5a).
+    #
+    # `_alert_store_from(_backup_config_safe())` was gated on `BACKUP_SWEEP_ENABLED`
+    # and dereferenced the `None` config, so with the sweep off it raised
+    # `AttributeError` at this line: AFTER `_write_json` succeeded, BEFORE either
+    # resolve — a 500 for a re-baseline that HAD been persisted, whose only
+    # missing step (the resolve of DATA_LOSS_CANDIDATE + SIZE_GUARD_ABORT, kinds
+    # NOTHING else clears) was silently skipped. `_incident_alert_store` reads the
+    # alert credentials ungated and returns `None` — it cannot raise — when no
+    # channel can be built, which `_resolve_incidents` reports below.
     alerts = _incident_alert_store()
     # #3718 round-3 review P2: both resolves are blocking NETWORK round
     # trips — a storage read plus a GitHub issue close / Telegram push — the
@@ -33479,12 +33486,22 @@ async def backups_rebaseline(request: Request):
     # than implying a poll will retry (cycle-3 review P1). The outcome is reported
     # per kind so the operator can re-run re-baseline after GitHub recovers.
     def _resolve_incidents() -> list[str]:
-        failed: list[str] = []
         if alerts is None:
-            # #4778: no channel — nothing can be resolved. Report it per kind so
-            # the operator never reads a 200 as "the incident closed".
-            return [f"{k}/{subject}"
-                    for k in ("DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT")]
+            # #4778: no channel can be built (no DR_ISSUES_PAT, or an unusable
+            # object store). NOTHING can clear these two kinds — they are
+            # resolved here and nowhere else — so report them per kind rather
+            # than letting the response read as a re-baseline that closed
+            # incidents it never touched; the state write DID succeed, which is
+            # why this is not a 5xx.
+            _logger.warning(
+                "no alert channel on re-baseline of %s — DATA_LOSS_CANDIDATE and "
+                "SIZE_GUARD_ABORT cannot be resolved by this call (check "
+                "DR_ISSUES_PAT and the R2_* credentials); the re-baseline write "
+                "itself succeeded", subject,
+            )
+            return [f"{kind}/{subject}"
+                    for kind in ("DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT")]
+        failed: list[str] = []
         for kind in ("DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT"):
             try:
                 alerts.resolve_incident(kind, subject)
@@ -33939,16 +33956,24 @@ def _billing_error_to_http(exc: Exception) -> HTTPException:
     """Map billing exceptions to HTTP responses — degrade, never crash.
 
     BillingConfigError (missing STRIPE_* env, lazy by design) → 503;
-    BillingError (bad input like an unknown price id) → 400;
-    StripeAPIError (upstream failure) → 502.
+    StripeAPIError (upstream failure) → 502;
+    BillingError (bad input like an unknown price id) → 400.
+
+    Order is load-bearing (subclass-first): ``BillingConfigError`` and
+    ``StripeAPIError`` BOTH subclass ``BillingError``, so the base branch must
+    come last. Before #4725 the ``BillingError`` branch sat above the
+    ``StripeAPIError`` branch, which made the 502 leg unreachable dead code —
+    every Stripe outage (network failure, rotated key, any 5xx from
+    ``api.stripe.com``) answered 400, blaming the caller for an upstream
+    failure. Pinned by tests/test_billing.py::TestBillingErrorToHttpMapping.
     """
     from tortoise.billing import BillingConfigError, BillingError, StripeAPIError
     if isinstance(exc, BillingConfigError):
         return HTTPException(status_code=503, detail=str(exc))
-    if isinstance(exc, BillingError):
-        return HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, StripeAPIError):
         return HTTPException(status_code=502, detail=str(exc))
+    if isinstance(exc, BillingError):
+        return HTTPException(status_code=400, detail=str(exc))
     return HTTPException(status_code=502, detail=str(exc))
 
 

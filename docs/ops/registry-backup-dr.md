@@ -807,8 +807,13 @@ failure cannot orphan an incident. **Two app-side paths have no automatic retry*
 the action once GitHub recovers, or close the issue by hand. **(b) #4778 — no
 alert CHANNEL existed** (no `DR_ISSUES_PAT`, or an unbuildable object store), so
 the incident was never filed and **no close was even attempted**; the name means
-"not resolved", not "close failed". Fix the channel credentials first, then
-re-run the action to file and resolve it. Nothing pages a human about a close failure
+"not resolved", not "close failed". The app's alert-channel seam
+(`_incident_alert_store()`) returns `None` instead of raising in that posture, so
+BOTH `DATA_LOSS_CANDIDATE` and `SIZE_GUARD_ABORT` are reported unresolved and the
+app logs `no alert channel on re-baseline of …`. Re-running returns the identical
+field forever, so read that log line first and **fix the channel credentials**
+(`DR_ISSUES_PAT`, the `R2_*` pair); only the failed-close cause is retryable.
+Nothing pages a human about a close failure
 (no `ALERTER_DOWN` writer yet — #3412; the cooldown also means the retry is quiet,
 so watch the logs/`incidents_unresolved`). The driver's `gh_close` mirrors the
 ordering — a non-2xx PATCH keeps the dedup object and marks the run red, so the
