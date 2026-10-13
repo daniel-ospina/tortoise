@@ -26,6 +26,8 @@ import {
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import {
+  CAPTURE_LANES,
+  DISCARD_HTTP_REJECTED,
   HARNESS,
   MAX_ATTEMPTS,
   MAX_TURNS,
@@ -50,7 +52,9 @@ import {
   flushSpool,
   listSpoolEntries,
   modelLabel,
+  normaliseLane,
   postInstallProbe,
+  quarantineEntry,
   readDiscards,
   readSpoolEntry,
   readSpoolTurns,
@@ -1299,24 +1303,50 @@ test("backoff grows exponentially and is capped", () => {
 
 // ── (5) Permanent 4xx → discard WITH a reason, never retried ───────────────
 
-test("a permanent 4xx discards with a recorded reason and is never retried", async () => {
+test("a permanent 4xx is recorded terminal and KEEPS the transcript (never unlinked)", async () => {
   const spool = tmpSpool();
   writeSpoolEntry(spool, snapshot("sess-400"));
   const { fetchImpl, calls } = statusFetch(400, "bad payload");
 
-  // MUTATIONS THAT RED THIS:
-  //   * classify 400 as retryable → no discard, attempts=1, entry stays;
-  //   * discard WITHOUT recordDiscard → the ledger stays empty (silent drop).
+  // MUTATION THAT REDS THIS: route a permanent verdict to `discardEntry`
+  // (record + UNLINK) → `readSpoolEntry` is undefined and the only copy is
+  // GONE. `classifyFailure`'s verdict is deliberately unchanged (#7708).
   const first = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1_000 });
   assert.equal(first.discarded.length, 1);
-  assert.equal(first.discarded[0].reason, "permanent_http_400");
-  assert.equal(readSpoolEntry(spool, "sess-400"), undefined, "a permanent failure is not kept");
-  assert.equal(readDiscards(spool).length, 1, "the discard is observable on disk");
+  assert.equal(first.discarded[0].reason, DISCARD_HTTP_REJECTED);
+  const meta = readSpoolEntry(spool, "sess-400");
+  assert.ok(meta, "a permanent refusal must NOT unlink the transcript");
+  assert.ok(meta.terminal_failure, "the entry must be marked terminal");
+  assert.deepEqual(readSpoolTurns(spool, "sess-400"), SPOOL_TURNS,
+    "the turn log must survive verbatim");
+  assert.equal(readDiscards(spool).length, 1, "the refusal is observable on disk");
 
   // A later opportunity must NOT retry what was permanently rejected.
   const second = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 10 ** 12 });
   assert.equal(second.attempted, 0);
+  assert.equal(second.terminal, 1, "a terminal entry must be counted, not silently skipped");
   assert.equal(calls.length, 1, "exactly one POST, never a retry loop");
+  // ...and a byte-IDENTICAL re-snapshot must not resurrect the retry: the dedup
+  // early-return does not rebuild the meta, so the marker survives.
+  writeSpoolEntry(spool, snapshot("sess-400"));
+  assert.ok(readSpoolEntry(spool, "sess-400")?.terminal_failure,
+    "a byte-identical re-snapshot cleared the terminal marker");
+  const third = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 10 ** 13 });
+  assert.equal(third.attempted, 0);
+  assert.equal(calls.length, 1);
+});
+
+test("#7708: a 422 does not unlink the only copy of the transcript", async () => {
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-422"));
+  const { fetchImpl, calls } = statusFetch(422, 'invalid capture_lane "bogus"');
+  const first = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1_000 });
+  assert.equal(first.discarded.length, 1);
+  assert.equal(first.discarded[0].reason, DISCARD_HTTP_REJECTED);
+  assert.ok(readSpoolEntry(spool, "sess-422"), "a 422 UNLINKED the transcript");
+  const second = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 10 ** 12 });
+  assert.equal(second.terminal, 1);
+  assert.equal(calls.length, 1, "a terminal entry was re-POSTed");
 });
 
 test("a quota-refused 402 defers the capture instead of destroying it (#4714)", async () => {
@@ -2015,4 +2045,151 @@ test("an unreadable spool ROOT is RECORDED, not reported as an empty spool", asy
   } finally {
     chmodSync(spool, 0o700);
   }
+});
+
+// ── #7708: ONE lane normalisation, every site ─────────────────────────────
+//
+// Site map, one discriminating test each; REMOVING the normaliser at a site
+// reds that site's test:
+//   1 WRITE          writer drops / heals a lane
+//   2 DRAIN payload  buildCapturePayload
+//   3 SKIP clause    flushSpool skip
+//   4 SUCCESS CAS    flushSpool CAS
+//   5 post-POST      flushSpool transient already-filed check
+// The TS set is pinned to the server + Python sets by a Python node-driver
+// test (tests/test_capture_lane_3516.py).
+
+/** Write a `capture_lane` straight into the meta file (a crafted/foreign spool). */
+function craftLane(spool: string, sid: string, lane: unknown): void {
+  const crafted = readSpoolEntry(spool, sid)!;
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  writeFileSync(metaPath, `${JSON.stringify({ ...crafted, capture_lane: lane }, null, 2)}\n`);
+}
+
+test("the lane vocabulary is closed and normalises to undefined", () => {
+  assert.deepEqual([...CAPTURE_LANES].sort(), ["hook", "store_sync"]);
+  assert.equal(normaliseLane("hook"), "hook");
+  assert.equal(normaliseLane("store_sync"), "store_sync");
+  for (const bad of ["bogus", "recorder", "", "Hook", 0, false, null, undefined, [], ["hook"]]) {
+    assert.equal(normaliseLane(bad), undefined, String(bad));
+  }
+});
+
+test("#7708 site 1: the writer never stores an unrecognised lane", () => {
+  const spool = tmpSpool();
+  // MUTATION THAT REDS THIS: drop `normaliseLane` from the writer → "bogus" is
+  // stored and later posted verbatim (the 422 the issue is about).
+  writeSpoolEntry(spool, { ...snapshot("sess-bad-lane"), captureLane: "bogus" });
+  assert.equal(readSpoolEntry(spool, "sess-bad-lane")?.capture_lane, undefined,
+    "an unrecognised lane reached the stored meta");
+  // positive control: a recognised lane IS stored.
+  writeSpoolEntry(spool, { ...snapshot("sess-good-lane"), captureLane: "hook" });
+  assert.equal(readSpoolEntry(spool, "sess-good-lane")?.capture_lane, "hook");
+});
+
+test("#7708 site 1: a stored foreign lane is healed by a valid snapshot", () => {
+  const spool = tmpSpool();
+  const sid = "sess-heal";
+  const turns = [{ role: "user" as const, content: "same" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+  craftLane(spool, sid, "bogus");
+  // MUTATION THAT REDS THIS: resolve the RAW prior lane → it wins the truthy
+  // `||` and `laneUpgrade` stays false, so the dedup early-return strands the
+  // valid lane forever.
+  const res = writeSpoolEntry(spool, { ...snapshot(sid, turns), captureLane: "hook" });
+  assert.equal(res.written, true, "the dedup early-return stranded the valid lane");
+  assert.equal(readSpoolEntry(spool, sid)?.capture_lane, "hook");
+});
+
+test("#7708 site 2: the drain never puts an unrecognised lane on the wire", async () => {
+  const spool = tmpSpool();
+  const sid = "sess-bad-wire";
+  writeSpoolEntry(spool, snapshot(sid));
+  craftLane(spool, sid, "bogus");
+  const server = recordingServer();
+  // MUTATION THAT REDS THIS: drop `normaliseLane` from `buildCapturePayload`
+  // → the wire carries "bogus" and the server 422s.
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.equal(server.posts(), 1);
+  assert.equal(server.sessions.get(sid)?.capture_lane, undefined,
+    "an unrecognised lane reached the wire");
+});
+
+test("#7708 site 3: a filed entry with a falsy lane is skipped, not re-POSTed", async () => {
+  const spool = tmpSpool();
+  const sid = "sess-falsy-skip";
+  writeSpoolEntry(spool, snapshot(sid));
+  const server = recordingServer();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.equal(server.posts(), 1);
+  assert.ok(readSpoolEntry(spool, sid)?.filed_key);
+  craftLane(spool, sid, ""); // filed_lane stays absent (a lane-less filing)
+  // MUTATION THAT REDS THIS: raw `undefined === ""` is FALSE → the entry
+  // re-POSTs its whole transcript on EVERY flush (#4714).
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 2 });
+  assert.equal(summary.skipped, 1);
+  assert.equal(server.posts(), 1, "the entry was re-POSTed");
+});
+
+test("#7708 site 4: a falsy stored lane is stamped filed on the first drain", async () => {
+  const spool = tmpSpool();
+  const sid = "sess-falsy-cas";
+  writeSpoolEntry(spool, snapshot(sid));
+  craftLane(spool, sid, "");
+  const server = recordingServer();
+  // MUTATION THAT REDS THIS: raw `"" === undefined` is FALSE in the CAS →
+  // `filed_key` is never stamped and the entry re-POSTs every drain.
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.equal(server.posts(), 1);
+  assert.equal(server.sessions.get(sid)?.capture_lane, undefined);
+  assert.ok(readSpoolEntry(spool, sid)?.filed_key,
+    "the CAS did not stamp filed_key for a falsy lane (re-POST loop)");
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 2 });
+  assert.equal(summary.skipped, 1);
+  assert.equal(server.posts(), 1, "the entry was re-POSTed");
+});
+
+test("#7708 site 5: the transient already-filed check normalises the lane", async () => {
+  const spool = tmpSpool();
+  const sid = "sess-post-post";
+  writeSpoolEntry(spool, snapshot(sid));
+  craftLane(spool, sid, "");
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const current = readSpoolEntry(spool, sid)!;
+  // A concurrent flush files the exact content while our POST is in flight.
+  const concurrent = { ...current, filed_key: current.capture_key };
+  const fetchImpl = (async () => {
+    writeFileSync(metaPath, `${JSON.stringify(concurrent, null, 2)}\n`);
+    return { ok: false, status: 503, json: async () => ({}) };
+  }) as never;
+  // MUTATION THAT REDS THIS: the raw check (`undefined === ""`) is false → the
+  // backoff is re-armed (deferred) instead of skipping an already-filed entry.
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1 });
+  assert.equal(summary.skipped, 1);
+  assert.equal(summary.deferred, 0);
+});
+
+test("#7708: quarantineEntry records FIRST and keeps the entry (no unlink)", () => {
+  const spool = tmpSpool();
+  const sid = "sess-quarantine";
+  writeSpoolEntry(spool, snapshot(sid));
+  const order: string[] = [];
+  const meta = readSpoolEntry(spool, sid)!;
+  quarantineEntry(spool, meta, DISCARD_HTTP_REJECTED, "HTTP 422: bad lane", 1_000, {
+    record: (dir, rec) => {
+      order.push("record");
+      return { at: "", ...rec };
+    },
+    read: (dir, sessionId) => {
+      order.push("read");
+      return readSpoolEntry(dir, sessionId);
+    },
+    write: (dir, m) => {
+      order.push("write");
+      const p = join(dir, "entries", `${entryKey(m.session_id)}.meta.json`);
+      writeFileSync(p, `${JSON.stringify(m, null, 2)}\n`);
+    },
+  });
+  assert.deepEqual(order, ["record", "read", "write"], "record must precede the mark");
+  assert.ok(readSpoolEntry(spool, sid), "quarantine must keep the entry");
 });

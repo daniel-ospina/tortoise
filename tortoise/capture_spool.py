@@ -56,6 +56,7 @@ __all__ = [
     "DISCARD_CORRUPT",
     "DISCARD_COUNT_EXCEEDED",
     "DISCARD_ENTRY_TOO_LARGE",
+    "DISCARD_HTTP_REJECTED",
     "DISCARD_TRANSCRIPT_EMPTY",
     "PROBE_SESSION_ID_PREFIX",
     "Bounds",
@@ -107,19 +108,26 @@ DISCARD_SPOOL_UNREADABLE = "spool_unreadable"
 DISCARD_CORRUPT = "corrupt_entry"
 #: A filesystem error while writing the spool — recorded, never silent.
 DISCARD_WRITE_FAILED = "spool_write_failed"
+#: A PERMANENT HTTP refusal (4xx). The entry is RECORDED and KEPT (#7708): the
+#: turn log on disk is the only copy, and a permanent refusal is a *filing*
+#: failure, not a *capture* failure. The entry is marked terminal
+#: (``terminal_failure``) so the drain does not retry it — a terminal, recorded
+#: state, never a silent drop and never an unlink.
+DISCARD_HTTP_REJECTED = "http_rejected"
 
 #: Discard reasons where the entry is NOT removed — the capture is still on the
-#: spool and WILL be retried, so it is not a loss.
+#: spool, so it is not a loss.
 #:
 #: Everything else in the ledger reached it through ``_discard_entry``, which
 #: records and then UNLINKS the turn log + meta: a real loss.
 #:
 #: The distinction exists because a caller's exit code must answer "was anything
 #: LOST?" — never "is the ledger non-empty?". ``DISCARD_ENTRY_FAILED`` is an
-#: internal bug (an unexpected raise while filing), not a data loss; the entry is
-#: kept with a backoff, so treating it as a failure would report a capture as
-#: lost while it is still on disk and still queued (#3971).
-RETAINED_DISCARD_REASONS = frozenset({DISCARD_ENTRY_FAILED})
+#: internal bug (an unexpected raise while filing); ``DISCARD_HTTP_REJECTED`` is
+#: a permanent refusal. In BOTH cases the entry is kept (the former with a
+#: backoff, the latter marked terminal), so treating either as a failure would
+#: report a capture as lost while it is still on disk (#3971, #7708).
+RETAINED_DISCARD_REASONS = frozenset({DISCARD_ENTRY_FAILED, DISCARD_HTTP_REJECTED})
 
 
 def is_lost_discard(record: dict) -> bool:
@@ -201,6 +209,12 @@ class FlushSummary:
     # happened: a silent refusal would leave an operator wondering why a
     # spooled session never lands.
     probe_refusals: list[dict] = field(default_factory=list)
+    # Entries marked TERMINAL by a previous permanent refusal: KEPT on disk
+    # (never unlinked) but never retried. Counted separately so a spool where
+    # every entry is terminal still prints a line on every drain instead of
+    # reaching the silent steady state `held_by_backoff` was added to close
+    # (#4714); the data-loss consequence of deletion is what #7708 closes.
+    terminal: int = 0
     discarded: list[dict] = field(default_factory=list)
     outcomes: dict[str, PostOutcome] = field(default_factory=dict)
 
@@ -650,6 +664,45 @@ def _discard_entry(root: Path, meta: dict, reason: str, detail: str = "") -> dic
     return record
 
 
+def _quarantine_entry(root: Path, meta: dict, reason: str, detail: str,
+                      now_ms: float) -> dict:
+    """Record a TERMINAL HTTP refusal WITHOUT unlinking the entry (#7708).
+
+    A permanent 4xx is a *filing* failure, not a *capture* failure: the turn log
+    on disk is still the only copy, and deleting it turns one refused payload
+    into permanent data loss. The ledger record is written FIRST — the same
+    "never a silent drop" ordering as ``_discard_entry`` — and the entry is then
+    marked ``terminal_failure`` and KEPT. ``_flush_one`` skips a terminal entry,
+    so the drain reaches a final state without the amplification an unmarked
+    retry would re-open (#4714).
+
+    The marker is dropped when a later snapshot REBUILDS the meta (the content
+    genuinely changed, so a fresh, backoff-gated attempt is correct), so advance
+    the entry's window here too: otherwise the first drain after a content change
+    would re-POST a still-refused payload at turn cadence instead of on the
+    backoff clock.
+
+    The write is guarded on the re-read returning a meta: if a concurrent prune
+    removed the entry, resurrecting the meta alone would leave an orphan
+    terminal entry with no turn log.
+    """
+    record = record_discard(root, {
+        "session_id": meta["session_id"],
+        "capture_key": meta.get("capture_key"),
+        "reason": reason,
+        "detail": detail,
+    })
+    fresh = read_spool_meta(root, meta["session_id"])
+    if fresh is not None:
+        fresh["terminal_failure"] = {
+            "reason": reason, "detail": detail, "at": _now_iso(),
+        }
+        fresh["attempts"] = _attempts(fresh) + 1
+        fresh["next_attempt_at_ms"] = now_ms + backoff_delay(fresh["attempts"]) * 1000
+        _write_meta(root, fresh)
+    return record
+
+
 def list_spool_metas(root: Path) -> tuple[list[dict], list[dict]]:
     """All spool metas; malformed ones become ``corrupt_entry`` discards.
 
@@ -717,6 +770,31 @@ def list_spool_metas(root: Path) -> tuple[list[dict], list[dict]]:
 # would unlink the entry's turn log — the only copy. Normalising here makes that
 # refusal unreachable from either spool leg.
 CLIENT_CAPTURED_AT_SOURCES = frozenset({"cli_observed", "file_mtime", "unknown"})
+
+# #7708: the PRODUCER-lane vocabulary, a CLOSED set at the server
+# (`hosted_api._SESSION_CAPTURE_LANE_VALUES`). Mirrored here for the same reason
+# as the clock set above — the spool is the leg that can lose the conversation,
+# and an unrecognised lane reached the wire verbatim, drew a 422, and the drain
+# then UNLINKED the only copy. Distinct from the EXTRACTION lane
+# (`hosted_api._capture_lane()` returns m2/v2): same word, different meaning.
+CAPTURE_LANES = frozenset({"hook", "store_sync"})
+
+
+def _normalise_lane(value: object) -> str | None:
+    """The ONE lane normalisation, used by the writer and every comparison site.
+
+    Returns the value iff it is a recognised lane, else ``None`` ("no lane").
+    A non-string or an unrecognised token can therefore never be stored, posted,
+    or used as part of a filing identity — the server's 422 for a bad lane is
+    unreachable from either spool leg, and a stored falsy lane (``""``, ``0``,
+    ``False``, ``[]``, ...) normalises to the SAME ``None`` the payload drops,
+    so the skip clause and the compare-and-swap agree with the wire (without
+    this, ``"" == None`` is False on both and the entry re-POSTs its whole
+    transcript on every drain — the #4714 amplification loop).
+    """
+    if isinstance(value, str) and value in CAPTURE_LANES:
+        return value
+    return None
 
 
 def _finite_instant(value: object) -> float | None:
@@ -820,7 +898,16 @@ def write_spool_entry(
     # not content: a hook re-snapshot of byte-identical turns would otherwise
     # early-return here and the entry would stay lane-less forever, so a
     # genuinely live hook would read as "not confirmed" (#3516 §B review F6).
-    lane_upgrade = bool(snapshot.capture_lane) and not (prior or {}).get("capture_lane")
+    #
+    # #7708: BOTH operands are NORMALISED BEFORE the comparison. Reading the raw
+    # values would let a stored foreign lane ("bogus") count as "the entry has a
+    # lane", so a valid snapshot lane would neither win the resolution nor set
+    # `lane_upgrade` — and the byte-identical dedup early-return would then
+    # strand the valid lane forever (the hook-reads-not-live false negative
+    # #3516 exists to remove). One normaliser, used everywhere.
+    _prior_lane = _normalise_lane((prior or {}).get("capture_lane"))
+    _snap_lane = _normalise_lane(snapshot.capture_lane)
+    lane_upgrade = _snap_lane is not None and _prior_lane is None
     # #3516 §B: the SAME rule for the client stamp, and for the same reason —
     # the stamp is metadata, not content, so a hook re-snapshot of
     # byte-identical turns would otherwise early-return and the entry would stay
@@ -893,8 +980,11 @@ def write_spool_entry(
     # lane is monotone"), and it is the same first-writer-wins rule the SERVER
     # applies (`sdk._write_session_and_turns` coalesce) — the spool must not be
     # the odd leg out, because its lane is what gets delivered. The resolution
-    # is TRUTHY (`or`), matching the TypeScript leg byte-for-byte.
-    _lane = (prior or {}).get("capture_lane") or snapshot.capture_lane
+    # is TRUTHY (`or`), matching the TypeScript leg byte-for-byte — but it is
+    # applied to the NORMALISED operands computed above (#7708), so an
+    # unrecognised stored lane can never be written (or re-written) and a valid
+    # snapshot lane HEALS a pre-existing foreign one.
+    _lane = _prior_lane or _snap_lane
     if _lane:
         meta["capture_lane"] = _lane
     # #3516 §B / #3515 piece 12: the stamp and its clock resolve as a PAIR, so a
@@ -1135,8 +1225,9 @@ def flush_spool(
     """One replay opportunity.
 
     For every spooled session whose content has not been filed, attempt one
-    POST. Transient failures back off; permanent 4xx are discarded with a
-    reason; entries inside a backoff window are skipped (not lost).
+    POST. Transient failures back off; a permanent 4xx is recorded and the
+    entry is marked terminal and KEPT (never unlinked — #7708); entries inside a
+    backoff window are skipped (not lost).
 
     ``only_session_id`` files just that session; ``exclude_session_id`` drains
     OTHER sessions while a live one is still being captured.
@@ -1270,8 +1361,22 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
                       "by a drain",
         })
         return
+    if meta.get("terminal_failure"):
+        # A previous PERMANENT refusal (#7708). The entry is KEPT — terminal,
+        # never destructive — and never retried. Counted separately so a spool
+        # whose entries are all terminal still reports on every drain, rather
+        # than reaching the silent steady state `held_by_backoff` was added to
+        # close (#4714).
+        summary.terminal += 1
+        return
     if (meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key")
-            and meta.get("filed_lane") == meta.get("capture_lane")
+            # #7708: BOTH sides through ONE normaliser. A stored falsy lane
+            # (`""`/`0`/`false`/`[]`) normalises to the SAME `None` the payload
+            # drops, so the skip agrees with the wire; comparing the raw value
+            # made `"" != None` and the entry re-POSTed its whole transcript on
+            # EVERY drain, forever (#4714).
+            and _normalise_lane(meta.get("filed_lane"))
+            == _normalise_lane(meta.get("capture_lane"))
             # Compared against the SAME normalisation the payload uses: the wire
             # carries `_finite_instant(...)`, so comparing the RAW disk value here
             # can never match for a value the guards refuse — and since the drain
@@ -1322,8 +1427,14 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
     # #3516 §B: forward the producer lane ONLY when the spool entry carries one
     # (set-only-when-present). A pre-#3516 entry, or a backfill/import entry,
     # has no lane and must POST without the key rather than inventing one.
-    if meta.get("capture_lane"):
-        payload["capture_lane"] = meta["capture_lane"]
+    # #7708: NORMALISED at the wire. The drain forwards whatever is on disk, and
+    # the two legs share one directory — so a meta the OTHER leg (or a human)
+    # left with an unrecognised token would otherwise be posted verbatim, and the
+    # server's refusal is a 422. A stored falsy lane normalises to the same
+    # `None` the skip clause and the CAS below use, so all three agree.
+    _drain_lane = _normalise_lane(meta.get("capture_lane"))
+    if _drain_lane:
+        payload["capture_lane"] = _drain_lane
     # #3516 §B / #3515 piece 12: forward the client stamp ONLY when the entry
     # carries one (set-only-when-present, like the lane above). A pre-#3516
     # entry must POST without the keys rather than inventing an instant — a
@@ -1407,7 +1518,11 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         fresh = read_spool_meta(root, sid)
         if (fresh is not None
                 and content_digest(fresh_turns) == posted_digest
-                and fresh.get("capture_lane") == posted_lane
+                # #7708: normalised on BOTH sides, like the skip clause — the
+                # wire carried the NORMALISED lane (`posted_lane`), so a raw
+                # stored falsy/foreign value could never equal it and the CAS
+                # would never stamp `filed_key` (the re-POST loop).
+                and _normalise_lane(fresh.get("capture_lane")) == posted_lane
                 # Normalised on BOTH sides of the CAS, for the same reason as the
                 # skip clause above: `posted_stamp` is what the WIRE carried
                 # (normalised), so the raw disk value can never equal it.
@@ -1442,9 +1557,17 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         summary.filed += 1
         return
     if classify_failure(outcome.status, outcome.detail) == "permanent":
-        summary.discarded.append(_discard_entry(
-            root, meta, f"permanent_http_{outcome.status if outcome.status is not None else 'none'}",
-            outcome.detail or "permanent client error",
+        # TERMINAL, NEVER DESTRUCTIVE (#7708). A permanent refusal is a *filing*
+        # failure, not a *capture* failure: ``_quarantine_entry`` records the
+        # refusal and marks the entry terminal while KEEPING the turn log —
+        # ``_discard_entry`` here used to unlink the only copy. The
+        # ``classify_failure`` VERDICT is deliberately unchanged (the Python/Pi
+        # parity contract depends on it); what changed is its consequence.
+        summary.discarded.append(_quarantine_entry(
+            root, meta, DISCARD_HTTP_REJECTED,
+            f"HTTP {outcome.status if outcome.status is not None else 'none'}: "
+            f"{outcome.detail or 'permanent client error'}",
+            now_ms,
         ))
         return
     # Re-read before the backoff write-back for the same reason as the CAS

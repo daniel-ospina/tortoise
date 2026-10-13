@@ -4576,8 +4576,9 @@ def _session_post(api_key: str, api_url: str):
 
     Returns a ``handle(payload) -> PostOutcome`` so the spool never knows the
     transport: network/timeout failures come back with ``status=None`` (the
-    spool retries with backoff), HTTP errors keep their status (permanent 4xx
-    are discarded *with a reason*, not retried).
+    spool retries with backoff), HTTP errors keep their status (a permanent 4xx
+    is recorded and the entry is marked terminal and KEPT — never unlinked,
+    #7708).
     """
     import json as _json
     from http.client import HTTPException
@@ -4937,6 +4938,13 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         if meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key"):
             print(f"Session {session_id} already filed — nothing to capture.")
             return 0
+        if meta.get("terminal_failure"):
+            tf = meta.get("terminal_failure") or {}
+            print(f"capture refused permanently (kept, not retried): session "
+                  f"{session_id} — {tf.get('detail') or tf.get('reason') or ''}",
+                  file=_sys.stderr)
+            print(f"Spooled session: {session_id}")
+            return 0
         print(f"capture deferred: session {session_id} is spooled (backoff window) "
               "and will retry", file=_sys.stderr)
         print(f"Spooled session: {session_id}")
@@ -4944,6 +4952,17 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
     if not outcome.ok:
         if summary.lost:
             return 1
+        # A PERMANENT refusal (#7708) is terminal and non-destructive: the
+        # capture is KEPT on disk but will NOT be retried, so the transient
+        # "will retry" wording below would be a lie to the operator.
+        _terminal_now = read_spool_meta(root, session_id) or {}
+        if _terminal_now.get("terminal_failure"):
+            tf = _terminal_now["terminal_failure"] or {}
+            print(f"capture refused permanently (kept, not retried): session "
+                  f"{session_id} — {tf.get('detail') or tf.get('reason') or ''}",
+                  file=_sys.stderr)
+            print(f"Spooled session: {session_id}")
+            return 0
         # TRANSIENT (network / 5xx / retryable 4xx): the capture is DURABLE in
         # the spool — report the deferral honestly and exit 0 (the data is not
         # lost; the hook must never be blocked by a capture failure).
@@ -5211,13 +5230,14 @@ def _cmd_session_drain(api_key: str, api_url: str,
         print(f"spool refusal: {r['session_id']} — {r['detail']}",
               file=_sys.stderr)
     if summary.attempted or summary.discarded or summary.probe_refusals \
-            or summary.held_by_backoff:
+            or summary.held_by_backoff or summary.terminal:
         print(
             f"spool drain: filed {summary.filed}, deferred {summary.deferred}, "
             f"skipped {summary.skipped} "
             f"({summary.held_by_backoff} waiting on backoff), "
             f"held back {summary.held_back}, "
             f"probe refusals {len(summary.probe_refusals)}, "
+            f"terminal {summary.terminal} (kept, not retried), "
             f"discarded {len(summary.discarded)}",
             file=_sys.stderr,
         )
@@ -6626,7 +6646,15 @@ def _cmd_sessions_import(args) -> int:
             meta = read_spool_meta(root, session_id) or {}
             already_filed = bool(meta.get("filed_key")) and \
                 meta.get("filed_key") == capture_key(session_id, spool_turns)
-            if already_filed:
+            if meta.get("terminal_failure"):
+                # #7708: a previous permanent refusal is terminal and the entry
+                # is KEPT but never retried, so telling the operator to run a
+                # drain (the else-branch below) would send them in a circle.
+                print(f"Spooled session: {session_id} — a previous filing was "
+                      "refused permanently; the capture is kept and is NOT "
+                      "retried (running a drain will not file it).",
+                      file=_sys.stderr)
+            elif already_filed:
                 print(f"Session {session_id} is already filed; the spooled copy "
                       "is a no-op.", file=_sys.stderr)
             else:

@@ -247,24 +247,51 @@ def test_backoff_grows_and_is_capped():
     assert backoff_delay(100) <= 6 * 60 * 60
 
 
-# ── (5) Permanent 4xx → discard WITH a reason, never retried ───────────────
+# ── (5) Permanent 4xx → recorded, TERMINAL, and KEPT (never unlinked) ───────
 
 
-def test_a_permanent_4xx_discards_with_a_reason_and_is_never_retried(tmp_path):
-    """MUTATIONS THAT RED THIS: classify 400 as retryable (no discard, entry
-    stays); discard without `record_discard` (ledger stays empty)."""
+def test_a_permanent_4xx_is_terminal_and_keeps_the_transcript(tmp_path):
+    """#7708. MUTATIONS THAT RED THIS: route the permanent verdict back to
+    `_discard_entry` (records then UNLINKS — the only copy is gone); drop the
+    `terminal_failure` mark (the entry is re-POSTed every drain)."""
     root = tmp_path
     write_spool_entry(root, _snapshot("sess-400"))
     server = _Server(PostOutcome(ok=False, status=400, detail="bad payload"))
 
     first = flush_spool(root, server.post, now=1000.0)
     assert len(first.discarded) == 1
-    assert first.discarded[0]["reason"] == "permanent_http_400"
-    assert read_spool_meta(root, "sess-400") is None, "a permanent failure is not kept"
-    assert len(read_discards(root)) == 1, "the discard is observable on disk"
+    assert first.discarded[0]["reason"] == "http_rejected"
+    meta = read_spool_meta(root, "sess-400")
+    assert meta is not None, "a permanent 4xx must NOT unlink the transcript"
+    assert meta.get("terminal_failure"), meta
+    assert read_spool_turns(root, "sess-400") == TURNS, "the turns must survive"
+    assert first.lost == [], (
+        "a retained terminal refusal must not read as a loss (#3971 class)")
+    assert len(read_discards(root)) == 1, "the refusal is observable on disk"
 
     second = flush_spool(root, server.post, now=10**12)
-    assert second.attempted == 0, "a permanent rejection must never be retried"
+    assert second.attempted == 0, "a terminal rejection must never be retried"
+    assert second.terminal == 1, "a terminal entry must be counted, not silent"
+
+
+def test_a_422_does_not_unlink_the_only_copy(tmp_path):
+    """#7708: the exact status the unrecognised-lane defect produced. The entry
+    is retained and terminal — a lone bad metadata token can never destroy the
+    transcript."""
+    root = tmp_path
+    write_spool_entry(root, _snapshot("sess-422"))
+    posts: list[dict] = []
+
+    def refuse(payload):
+        posts.append(dict(payload))
+        return PostOutcome(
+            ok=False, status=422, detail='invalid capture_lane "bogus"')
+
+    first = flush_spool(root, refuse, now=1000.0)
+    assert [d["reason"] for d in first.discarded] == ["http_rejected"]
+    assert read_spool_meta(root, "sess-422") is not None, "a 422 unlinked the copy"
+    second = flush_spool(root, refuse, now=10**12)
+    assert second.terminal == 1 and len(posts) == 1
 
 
 def _node_that_can_strip_ts() -> str:
