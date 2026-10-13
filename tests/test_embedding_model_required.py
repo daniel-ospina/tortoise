@@ -1,9 +1,36 @@
 """#4861 — ``TORTOISE_EMBEDDING_MODEL_REQUIRED``, the fail-loud embedder contract.
 
-The invariant: **no green signal may be producible while the dense leg is
-absent.** This is its third surface — a lane that cannot run hybrid must not run
-(#2985), a read that could not run its vector leg must not be labelled hybrid
-(#2952), and a *process* that required the embedder must not be handed ``None``.
+The invariant: **a process that ARMED this flag is never handed a keyword-only
+result it cannot tell apart from a healthy one.** This is its third surface — a
+lane that cannot run hybrid must not run (#2985), a read that could not run its
+vector leg must not be labelled hybrid (#2952), and a *process* that required
+the embedder must not be handed ``None``.
+
+⛔ THE CLAIM IS SCOPED TO ARMED PROCESSES AND TO THE READ PATH. The blanket form
+("no green signal may be producible while the dense leg is absent") was FALSE:
+#5275 found the flag defeated at ``tortoise_fts_query``, and the product
+deliberately degrades elsewhere. The declared intentional degrades — NOT covered
+by the raise and NOT defects — are:
+
+* **Write paths** (``encode_for_store`` callers: ``tortoise/api.py``,
+  ``tortoise/sdk.py``, ``tortoise/projection/entities.py``, …). Point creation
+  must never depend on embeddings, so a write stores no vector and keeps going.
+* **The cached-snapshot fallback tier** (``tortoise/fallback_snapshot.py``),
+  which exists to serve a keyword-only result when the primary legs fail. It
+  keeps its documented degrade: a text query classifies to the vector strategy,
+  so an ARMED process raises at the read path's step 2 and never reaches it.
+* **``fallback_tfidf``'s in-memory scorer** — same tier, but #5275 makes the
+  function itself PROPAGATE the named refusal when it is armed, because its rows
+  ARE a read result and ``[]`` is the quietest possible outcome. The scorer's
+  own sklearn degrade (flag off) is untouched.
+* **``warm_up()``**, whose NEVER-raises contract is separate (see below).
+
+What the flag DOES guarantee, and what this module plus
+``tests/test_5275_required_read_path.py`` pin: every ``None`` origin inside
+``EmbeddingModel.get`` raises ``EmbedderUnavailableError`` (this module), and
+``TortoiseSDK.tortoise_fts_query`` catches that class BY NAME and re-raises it
+instead of laundering it into the designed-absence ``no_embedder`` degrade
+(#5275).
 
 The contract is OFF by default and reversible: unset, ``get()`` returns ``None``
 exactly as before. Every test below arms the embedder's own failure state, so the

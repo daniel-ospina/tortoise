@@ -19320,17 +19320,34 @@ class TortoiseSDK:
         # but the trace records WHY: a run can never confuse "no embedder
         # installed" with "embedder present but broken" (present-but-broken
         # used to be conflated into query_vec=None silently).
+        # #5275: ``EmbedderUnavailableError`` is the CONTRACT of
+        # ``TORTOISE_EMBEDDING_MODEL_REQUIRED=1`` — a process that armed it
+        # must not be handed a keyword-only read, and the exception carries
+        # the ``failure_kind`` attribution (name/context/kind) that no trace
+        # term could. It is caught BY NAME and re-raised AHEAD of the generic
+        # handler below: the blanket ``except Exception`` converted the named
+        # refusal into ``model = None`` → the designed-absence reason
+        # ``no_embedder``, so the read returned FTS-only results with no
+        # error and no signal — exactly the outcome #4861 exists to prevent
+        # (#2985). Every OTHER exception keeps the historical degrade: an
+        # encoder bug or a shape error is not the flag's contract.
         query_vec = None
         _vec_reason: str | None = None
         if strategies.get("vector") and query and query.strip():
             from .embeddings import EmbeddingModel
+            from .exceptions import EmbedderUnavailableError
             model = None
             try:
                 model = EmbeddingModel.get()
+            except EmbedderUnavailableError:
+                raise  # #5275: REQUIRED — fail loud, never an FTS-only read
             except Exception:  # noqa: BLE001, RUF100
                 model = None
             if model is None:
-                _vec_reason = "no_embedder"
+                # #5275: a present-but-BROKEN embedder (load_failed /
+                # load_timeout) is not the designed absence the
+                # ``no_embedder`` term names — carry the recorded cause.
+                _vec_reason = EmbeddingModel.absent_reason()
             else:
                 try:
                     query_vec = model.encode([_dense_query])[0].tolist()

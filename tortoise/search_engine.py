@@ -3352,7 +3352,14 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict
     dicts from ``self.query`` carry ``search_keys`` when present (additive;
     absent → byte-identical to the pre-R2 path). The returned payload keeps
     the REAL content (the alias text is index-only, never surfaced).
+
+    #5275: under ``TORTOISE_EMBEDDING_MODEL_REQUIRED=1`` this function
+    PROPAGATES :class:`~tortoise.exceptions.EmbedderUnavailableError` instead
+    of logging it into ``[]`` — an empty result is a read result too, and the
+    quietest possible outcome is indistinguishable from "nothing matched".
+    With the flag unset the historical degrade is unchanged.
     """
+    from .exceptions import EmbedderUnavailableError
     try:
         from tortoise.embeddings import search_points
 
@@ -3386,6 +3393,14 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict
             ).to_dict()
             for r in results
         ]
+    except EmbedderUnavailableError:
+        # #5275: this tier's rows ARE a read result, so a REQUIRED process
+        # must not be handed the quietest possible outcome — an empty list.
+        # ``search_points`` resolves the embedder without a handler, so under
+        # ``TORTOISE_EMBEDDING_MODEL_REQUIRED=1`` the named refusal lands here;
+        # re-raise it ahead of the generic handler instead of logging it into
+        # ``[]`` (which is indistinguishable from "nothing matched").
+        raise
     except Exception as e:
         logger.error("TF-IDF fallback failed: %s", e)
         return []

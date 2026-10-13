@@ -129,6 +129,14 @@ def _doc_text(name: str) -> str:
 # ─────────────────────────────────────────────────────────────────────
 VOCAB_PATH = ROOT / "config" / "disposition-vocabulary.yml"
 
+# The axis blocks the legend renders, in render order. `render()` iterates this tuple and
+# `_load_vocabulary()` requires every name in it, so the guard covers exactly the blocks
+# the legend reads BY NAME — adding a name here renders it AND validates it, in one edit.
+# `STAKED_AXES` (below) cannot serve: those are the *disposition* axes
+# (`lifecycle`/`visibility`/`delete`), and `basis` is deliberately excluded there because
+# a row never leaves it unstated, yet the legend still renders a `Basis` row (#4722).
+LEGEND_AXES = ("lifecycle", "visibility", "basis")
+
 
 def _load_vocabulary() -> dict:
     """The declared vocabulary, read from its one authoritative home."""
@@ -143,9 +151,71 @@ def _load_vocabulary() -> dict:
     for key in ("axes", "delete_instruction", "dispositions"):
         if not isinstance(doc, dict) or key not in doc:
             raise SystemExit(f"{VOCAB_PATH.name} declares no `{key}` section")
-    for axis in ("lifecycle", "visibility"):
-        if "values" not in doc["axes"].get(axis, {}):
-            raise SystemExit(f"{VOCAB_PATH.name} declares no `{axis}` values")
+    # EVERY declared axis, not a named subset. The loop used to name two of the three,
+    # so a `basis`-less vocabulary walked past the guard and died as a bare `KeyError`
+    # in the `AXIS_VALUES` comprehension below — at import, with no readable message,
+    # while the legend that follows reads `AXIS_VALUES["basis"]`. Naming the axes here
+    # cannot be kept in step with the file it validates; iterating it can. A new axis is
+    # therefore covered by the guard the moment it is declared, which is what the tests
+    # parametrised over this file's axes assert (#4722).
+    if not isinstance(doc["axes"], dict):
+        raise SystemExit(
+            f"{VOCAB_PATH.name} declares `axes` as a {type(doc['axes']).__name__}, "
+            "not a mapping of axes"
+        )
+    # Every VALUES-carrying block is checked, and there is one more of them than the
+    # axis loop knew about: `DELETE_VALUES` reads `delete_instruction` exactly as
+    # `AXIS_VALUES` reads an axis and the legend renders its `Delete` row from it, so a
+    # vocabulary without it hit the same bare `KeyError` one line below the reported
+    # hole. A missing `values` was the reported defect; an EMPTY one degrades in silence
+    # instead (an empty Values cell, `AXIS_VALUES[axis] == ()`), and a non-mapping spec
+    # raises `AttributeError` where this guard should have raised `SystemExit`.
+    blocks = dict(doc["axes"], delete_instruction=doc["delete_instruction"])
+    for name, spec in blocks.items():
+        if not isinstance(spec, dict) or not spec.get("values"):
+            raise SystemExit(
+                f"{VOCAB_PATH.name} declares no `{name}` values — every "
+                "values-carrying block (each axis, and `delete_instruction`) must "
+                "carry a non-empty `values` mapping"
+            )
+    # The loop above covers every block the file DECLARES. It cannot cover a block
+    # `render()` reads BY NAME and the file omits, and render names four of them:
+    # `LEGEND_AXES` plus `delete_instruction`. A vocabulary declaring fewer axes than the
+    # legend renders (`axes: {}` included) passed the loop and then died as a bare
+    # `KeyError: 'lifecycle'` in `render()`/`AXIS_VALUES` — the same fail-silently-then-
+    # crash shape the loop was added to remove, one level up. `question` was unvalidated
+    # for the same reason — render reads it beside `values` — so a question-less block
+    # passed the guard and died as `KeyError: 'question'`. Requiring the names render
+    # reads makes the guard's coverage a function of the renderer, not of the file it is
+    # checking (#4722). `axes: {}` is refused separately, mirroring `dispositions`, so an
+    # empty axes table names its own defect rather than reporting one missing axis.
+    if not doc["axes"]:
+        raise SystemExit(
+            f"{VOCAB_PATH.name} declares no axes — the legend renders "
+            + ", ".join(f"`{a}`" for a in LEGEND_AXES)
+            + ", and an empty axes table cannot render"
+        )
+    named = {"delete_instruction": doc["delete_instruction"]}
+    for axis in LEGEND_AXES:
+        if axis not in doc["axes"]:
+            raise SystemExit(
+                f"{VOCAB_PATH.name} declares no `{axis}` axis — the legend renders it "
+                "and `AXIS_VALUES`/`VOCAB` read it by name"
+            )
+        named[axis] = doc["axes"][axis]
+    for name, spec in named.items():
+        if not isinstance(spec, dict) or not spec.get("question"):
+            raise SystemExit(
+                f"{VOCAB_PATH.name} declares no `{name}` question — the legend renders "
+                "a Question cell from every block it reads by name"
+            )
+    # `dispositions` is the combinations table, not a values block. Empty is not benign:
+    # every row would fall through to the implicit UNCHANGED/RENAMED pair in
+    # `_disposition` and the `—` caveat would render an empty list of unstaked axes.
+    if not isinstance(doc["dispositions"], dict) or not doc["dispositions"]:
+        raise SystemExit(
+            f"{VOCAB_PATH.name} declares no `dispositions` combinations"
+        )
     return doc
 
 
@@ -165,6 +235,15 @@ CONTESTED = "CONTESTED"
 NON_TARGET = (UNCHANGED, RENAMED, DISCARDED, UNLISTED, RELOCATED, UNBACKED, CONTESTED)
 BASIS_UNBACKED = "unbacked"
 BASIS_CONTESTED = "contested"
+
+# The axes a DISPOSITION stakes directly — the three STATE axes the legend renders as
+# cells, and the only cells a `—` can appear in. `basis` is deliberately NOT one of them:
+# a disposition may OVERRIDE it (`unbacked`, `contested`) but never leaves it unstated,
+# because a row's basis is otherwise computed from its citation, so no row renders `—`
+# there. This tuple is the single home for that set: `_disposition` reads it, and so does
+# the legend's `—` caveat, which is why the caveat cannot contradict the vocabulary
+# (#4722).
+STAKED_AXES = ("lifecycle", "visibility", "delete")
 
 
 def _disposition(method: str, value: str) -> dict:
@@ -188,9 +267,7 @@ def _disposition(method: str, value: str) -> dict:
     return {
         "disposition": key,
         "target": target,
-        "lifecycle": spec.get("lifecycle"),
-        "visibility": spec.get("visibility"),
-        "delete": spec.get("delete"),
+        **{axis: spec.get(axis) for axis in STAKED_AXES},
         "basis_override": spec.get("basis"),
     }
 
@@ -1487,6 +1564,44 @@ def _cell(text: str) -> str:
     return re.sub(r"\s+", " ", text.replace("|", "\\|")).strip()
 
 
+def _emdash_caveat() -> str:
+    """The `—` caveat, DERIVED from the declaration instead of restated (#4722).
+
+    The sentence this replaces said a `—` in an axis cell marks "an `unbacked` or
+    `contested` row". That is true of `unbacked` — which renders `—` in three of its four
+    cells — and false of `contested`, which states `basis: contested` and
+    `delete: retain` and so leaves only `Lifecycle` and `Visibility` unstaked. It drifted
+    because it RESTATED a rendering fact in a legend whose own introduction says the
+    vocabulary declares and this legend "does not restate it" — and the test that pinned
+    it pinned the WORDING, so the wording stayed wrong while every gate stayed green.
+
+    Reading the unstaked axes out of `dispositions` makes the sentence a function of the
+    declaration: it cannot contradict it, and a new axis or a new combination carries
+    over with no edit here (the truth of the claim is what
+    `test_the_em_dash_caveat_states_the_cells_the_declaration_leaves_unstaked` checks,
+    from an independent parse of the same file).
+    """
+    clauses: list[str] = []
+    for key, spec in VOCAB["dispositions"].items():
+        unstaked = [a for a in STAKED_AXES if spec.get(a) is None]
+        if not unstaked:
+            continue
+        # The name the reader sees in that row's `Basis` cell, not the disposition KEY.
+        name = spec.get("basis", key.lower())
+        clause = (f"`{name}` leaves "
+                  + ", ".join(f"`{a.capitalize()}`" for a in unstaked))
+        stated = [a for a in STAKED_AXES if a not in unstaked]
+        if stated:
+            clause += (" (its " + ", ".join(f"`{a.capitalize()}`" for a in stated)
+                       + " is " + ", ".join(f"`{spec[a]}`" for a in stated) + ")")
+        clauses.append(clause)
+    return (
+        "A `—` in an axis cell means the declared disposition leaves that axis "
+        "unstaked: " + "; ".join(clauses) + ". `Basis` is never `—`: it is declared "
+        "by the row's disposition or computed from its citation."
+    )
+
+
 def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
            findings: dict) -> str:
     n = len(rows)
@@ -1553,21 +1668,19 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         "",
         "| Axis | Question | Values |",
         "|---|---|---|",
-        f"| `Lifecycle` | {VOCAB['axes']['lifecycle']['question']} | "
-        + ", ".join(f"`{v}`" for v in AXIS_VALUES["lifecycle"]) + " |",
-        f"| `Visibility` | {VOCAB['axes']['visibility']['question']} | "
-        + ", ".join(f"`{v}`" for v in AXIS_VALUES["visibility"]) + " |",
-        f"| `Basis` | {VOCAB['axes']['basis']['question']} | "
-        + ", ".join(f"`{v}`" for v in AXIS_VALUES["basis"]) + " |",
+        *(
+            f"| `{axis.capitalize()}` | {VOCAB['axes'][axis]['question']} | "
+            + ", ".join(f"`{v}`" for v in AXIS_VALUES[axis]) + " |"
+            for axis in LEGEND_AXES
+        ),
         f"| `Delete` | {VOCAB['delete_instruction']['question']} | "
         + ", ".join(f"`{v}`" for v in DELETE_VALUES) + " |",
         "",
         "The axes are independent, and that is the point: `DISCARDED` used to mean both "
         "\u201cnot on the public surface\u201d and \u201cDELETE this\u201d at once, so one "
         "word carried a visibility fact and a delete COMMAND. Now the visibility is "
-        "`internal` **and** the delete instruction is `delete`, each in its own cell. A "
-        "`—` in an axis cell means the doc states nothing for that axis (an `unbacked` "
-        "or `contested` row).",
+        "`internal` **and** the delete instruction is `delete`, each in its own cell. "
+        + _emdash_caveat(),
         "",
         "`Target` names the destination method; `—` means no destination is stated. The "
         "canonical inventory's group names are an **earlier sketch** "
