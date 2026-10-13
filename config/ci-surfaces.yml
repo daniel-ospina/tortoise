@@ -2729,6 +2729,19 @@ surfaces:
   # `onboarding`-only change could add an unclassified `.apply` door silently
   # (the #1349/#2938 silent-drop class; full rationale in the `api` entry).
   - test_7951_write_doors.py
+  # #3094: DUAL-REGISTERED with `core`/`eval`. The empty-means-unset URI-read
+  # census (`test_no_empty_default_tortoise_db_uri_reads`) scans `tests/**`,
+  # and `tests/_html_links.py` is an EXACT SOURCE_PATTERNS entry of THIS
+  # surface — a SOURCE_PATTERNS match REPLACES the `core` fallback in
+  # `select()`, so a `tests/_html_links.py`-only change selects `onboarding`
+  # and would otherwise skip the census on a file the census scans (the
+  # #1349/#2938/#4367 silent-drop class). Measured:
+  # `select(["tests/_html_links.py"])` -> `surfaces=['onboarding']`, guard
+  # ABSENT from `test_files`. This is why one arm per census ROOT is NOT the
+  # complete set — the ratchet
+  # (`test_empty_default_uri_census_is_registered_on_every_surface_it_covers`)
+  # enumerates every in-scope file rather than sampling a representative pair.
+  - test_uri_env_mutations_declared.py
   # #1652: the served skill set's own guard. `website/apps/dashboard/public/
   # skills/` is a SOURCE_PATTERN for THIS surface (tools/ci_selection.py), and
   # the surface's existing tests pin the onboarding document + the installer's
@@ -3146,6 +3159,20 @@ surfaces:
   # `eval` and would otherwise skip the guard — the #1349/#2938 silent-drop
   # class (surface audit: `... <- tortoise/embeddings.py`, registered: core).
   - test_7809_hosted_prewarm_warmup_flag.py
+  # #3094: DUAL-REGISTERED with `core` (below) and `onboarding`. The
+  # empty-means-unset URI-read census
+  # (`test_no_empty_default_tortoise_db_uri_reads`) scans `tests/**` AND
+  # `tools/longmem_eval/**`, and `tools/longmem_eval/` is a SOURCE_PATTERNS
+  # entry of THIS surface — so a `tools/longmem_eval/run.py`-only change
+  # selects `eval`, REPLACING the `core` fallback, and without this arm the
+  # census would not run on exactly the change it covers. That was the closed
+  # #2840 census's defect: it scanned `tests/**` and was registered in `core`
+  # alone, so it was blind to its own `tools/longmem_eval/run.py` fix site (the
+  # #1349/#2938/#4367 silent-drop class). One arm per census ROOT is NOT the
+  # complete set: the `tests/` half is `core`'s only while no exact
+  # SOURCE_PATTERNS entry matches (see the `onboarding` arm for
+  # `tests/_html_links.py`, which does).
+  - test_uri_env_mutations_declared.py
   # #4097: registered in `core`/`sdk`/`api`/`ep`/`eval`/`onboarding` — the guard
   # scans all of `tortoise/**`, and this surface owns `tortoise/embeddings.py`
   # (a module #4097 migrated) and `tortoise/cross_lens.py`.

@@ -893,7 +893,8 @@ class BackupWatcher:
         The heartbeat written right after this call is the watcher's OWN
         liveness evidence: the DR driver files WATCHER_DOWN when it goes stale.
         The alerts share the same R2 store, so the degraded condition that
-        R2_DOWN exists to report is exactly the one that makes
+        the reachability tier (R2_DOWN) exists to report is exactly the one that
+        makes
         ``open_incident``/``resolve_incident`` raise (``_read_json`` re-raises a
         read ``RuntimeError``; ``create_if_not_exists`` re-raises anything that
         is neither 412 nor an accepted fallback). Uncontained, that exception
@@ -1058,6 +1059,14 @@ class BackupWatcher:
                     self._alert_leg("resolve_incident", KIND_BACKUP_SET_MISSING, org)
                 self._last_backup_set_missing = cur_bsm
             # R2_DOWN: emit while degraded-from-known-good, resolve when healthy.
+            # #3147: the kind's meaning is NARROWED to the reachability tier (the
+            # substrate does not answer), and its owner is this WATCHER — the one
+            # surface whose own R2 read is the reachability evidence. So this leg
+            # is now a legitimate open+resolve pair rather than an open the owner
+            # (the driver) had to close. The unlistable tier (R2 answers but the
+            # pool cannot be listed, R2_LIST_OK=0) is the DRIVER's R2_UNLISTABLE;
+            # this probe cannot discriminate it, so on FAILURE the watcher files
+            # the reachability tier (a named residual — see the runbook).
             # Its own guard kept for symmetry with the other legs; the outer
             # `except` below remains as a backstop for structural errors (a
             # malformed status dict), and per-leg containment means it is now
