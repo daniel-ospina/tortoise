@@ -57,7 +57,15 @@ if ! claim; then
   rm -f "$CLAIM"
   claim || { echo "[merge $PR] claim race — exiting" >> "$L.log"; exit 0; }
 fi
-trap 'rm -f "$CLAIM"' EXIT INT TERM
+# ⛔ Same defect as orch-loop.sh, on the per-PR claim (§5.1b): a RETURNING INT/TERM handler
+# resumes the interrupted command loop, so a TERM removed the claim while this worker kept
+# reviewing and merging, and the controller could spawn a second worker for the same head. The
+# handlers TERMINATE; the claim is released by the EXIT trap alone. Measured on /bin/bash 3.2.57:
+# `exit 143` from a TERM handler still runs the EXIT trap (rc=143); an untrapped INT is ignored
+# outright (still alive after 3s), so INT is trapped rather than dropped. (agent-infra#1715)
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'rm -f "$CLAIM"' EXIT
 
 HEAD="$(gh pr view "$PR" --repo "$OR" --json headRefOid --jq .headRefOid 2>/dev/null)"
 echo "[merge $PR] start $(date) head=$HEAD branch=$BR" > "$L.log"
