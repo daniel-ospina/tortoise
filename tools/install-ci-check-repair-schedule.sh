@@ -213,8 +213,14 @@ preflight() {
 }
 
 render_plist() {
+    # BOTH modes render as a VISIBLE argument, and the launcher accepts both:
+    # `--apply` (armed) and `--dry-run` (report-only). The ABSENCE of an argument is
+    # not "inert" — it is the launcher's ARMED default — which is how `--report-only`
+    # once installed a job that closed and reopened PRs unattended. A mode that is
+    # only ever implied cannot be reviewed in the plist (the bug this contract fix
+    # closes: `--apply` was rendered for ARMED, and the launcher rejected the token).
     local mode="--apply"
-    [ "${MODE_FLAG:-}" = "report-only" ] && mode=""
+    [ "${MODE_FLAG:-}" = "report-only" ] && mode="--dry-run"
     # QUOTED heredoc + explicit token substitution, the shape
     # tools/install-queue-reconcile-schedule.sh established: an unquoted heredoc
     # runs COMMAND SUBSTITUTION on the template, so a backtick inside a comment
@@ -316,14 +322,38 @@ uninstall() {
 
 MODE_FLAG=""
 PLAN_ONLY=0
-case "${1:-}" in
-    --report-only) MODE_FLAG="report-only" ;;
-    --dry-run) PLAN_ONLY=1 ;;
-    --status) MODE_FLAG="${MODE_FLAG:-}"; status; exit $? ;;
-    --uninstall) uninstall; exit $? ;;
-    --help|-h) usage; exit 0 ;;
-    "") ;;
-    *) echo "ERROR: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+ACTION=""
+# TWO PASSES: every argument is validated FIRST, and only then is anything executed.
+# Reading only `$1` meant `--report-only --dry-run` INSTALLED (the dry run was never
+# seen); executing action flags inside the parse loop then traded that for the
+# opposite hazard — `--dry-run --uninstall` ran the uninstall, deleting the installed
+# schedule despite the documented "NO SIDE EFFECTS" contract. Parsing fully before
+# acting closes both orders, because nothing can execute before the last argument is
+# known, and an unknown argument can no longer hide behind an earlier action flag.
+for _arg in "$@"; do
+    case "$_arg" in
+        --report-only) MODE_FLAG="report-only" ;;
+        --dry-run) PLAN_ONLY=1 ;;
+        --status) ACTION="status" ;;
+        --uninstall) ACTION="uninstall" ;;
+        --help|-h) ACTION="help" ;;
+        *) echo "ERROR: unknown argument: $_arg" >&2; usage >&2; exit 2 ;;
+    esac
+done
+case "$ACTION" in
+    help) usage; exit 0 ;;
+    status) status; exit $? ;;
+    uninstall)
+        # `--dry-run` promises no side effects, and removing an installed schedule is
+        # the largest one available here. Refuse the combination rather than let word
+        # order decide whether the schedule survives.
+        if [ "$PLAN_ONLY" = 1 ]; then
+            echo "ERROR: --dry-run and --uninstall are mutually exclusive (--dry-run" >&2
+            echo "       promises no side effects; --uninstall removes the schedule)." >&2
+            exit 2
+        fi
+        uninstall; exit $?
+        ;;
 esac
 
 [ "$(uname -s)" = "Darwin" ] || { echo "ERROR: launchd only (macOS); on Linux add a cron line running $LAUNCHER" >&2; exit 2; }

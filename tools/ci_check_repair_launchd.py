@@ -35,8 +35,9 @@ cannot be pointed at the wrong checkout by a stale argument. Everything else —
 the read, the `bash -s` handoff, the exit-code pass-through — is the same shape.
 
 USAGE (all arguments are forwarded to the launcher unchanged):
-    ci_check_repair_launchd.py --apply
-    ci_check_repair_launchd.py            # report-only
+    ci_check_repair_launchd.py --apply       # ARMED — closes/reopens PRs and re-runs CI
+    ci_check_repair_launchd.py --dry-run     # report-only (alias: --report-only)
+    ci_check_repair_launchd.py               # ARMED — the launcher's no-argument default
 Exit code: the launcher's own (0 ok / 1 unresolved / 2 could-not-measure).
 """
 from __future__ import annotations

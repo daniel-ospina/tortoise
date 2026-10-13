@@ -85,6 +85,11 @@ Exit codes (fail-closed, mirroring `~/.pi/agent/scripts/ci_runner_gate.sh`):
   2  could not measure (API/auth/record failure). NOTHING is changed — "could not
      read the head" must never be read as "no action needed".
 
+Without `--apply` (the default) the tool only MEASURES: exits 1 and 2 mean the same
+thing, but 0 means "measured and nothing needs REPAIRING", not "a repair was
+applied" — there was never an attempt to make. Callers that key on exit 0 as "the
+window is discharged" (tools/ci-check-repair-local.sh) always pass `--apply`.
+
 Usage:
   python3 tools/ci_check_repair.py                 # dry-run report
   python3 tools/ci_check_repair.py --apply         # perform repairs
@@ -99,12 +104,14 @@ import sys
 # whichever 3.12-only construct happens to trip first. The repo's CI and the
 # local launcher both run the checkout's own >=3.12 interpreter.
 if sys.version_info < (3, 12):  # noqa: UP036 -- intentional RUNTIME guard
-    raise SystemExit(
-        f"tools/ci_check_repair.py requires Python >= 3.12 (got "
-        f"{sys.version_info[0]}.{sys.version_info[1]}) -- run it as "
-        f"`uv run python tools/ci_check_repair.py` or point CI_REPAIR_PYTHON at "
-        f"a >= 3.12 interpreter"
-    )
+    # Exit 2, not 1: 1 is reserved for "a PR still needs a repair this credential
+    # cannot perform". Refusing to run is a MEASUREMENT failure, and `SystemExit`
+    # with a message exits 1.
+    print(f"tools/ci_check_repair.py requires Python >= 3.12 (got "
+          f"{sys.version_info[0]}.{sys.version_info[1]}) -- run it as "
+          f"`uv run python tools/ci_check_repair.py` or point CI_REPAIR_PYTHON at "
+          f"a >= 3.12 interpreter", file=sys.stderr)
+    raise SystemExit(2)
 
 import argparse
 import json
@@ -130,6 +137,10 @@ REQUIRED_RECORD_DEFAULT = "docs/ci/required-contexts.json"
 # `gh` resolution: never assume the shim. `GH_BIN` wins, then PATH. In Actions
 # the runner's `gh` is real; locally the fleet PATH puts `~/bin` (the real
 # binary) ahead of the `~/.pi/agent/shims` admin-merge guard.
+# `GH_BIN` is honoured so the CALLER can hand the tool the same `gh` it resolved
+# (the launcher prefers the real binary over the fleet shim, which macOS TCC denies
+# under launchd). Without it the tool re-resolves via PATH and can silently pick a
+# different binary than the one the caller validated.
 GH_BIN = os.environ.get("GH_BIN") or shutil.which("gh") or "gh"
 
 # A required check whose producing workflow has a run at the head that is NOT
@@ -184,6 +195,18 @@ class PrPlan:
         """Absent checks that are neither pending nor already exhausted."""
         dead = {c for c in self.absent if c not in self.pending}
         return bool(dead - set(self.exhausted))
+
+    @property
+    def needs_report(self) -> bool:
+        """Does this PR have anything to report or act on?
+
+        `report()` uses THIS, not a private copy of the predicate, so the property
+        the tests exercise is the one that actually runs. It is deliberately NOT the
+        same as `actionable`: a PR whose every absent context is EXHAUSTED has
+        nothing left to act on (`actionable` is False) and must still be reported
+        and escalated — dropping it is how an unrepairable check goes silent.
+        """
+        return bool(self.actionable or self.rerun or self.exhausted)
 
 
 def _run(argv: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
@@ -483,22 +506,58 @@ def _rerun(repo: str, run: Run) -> bool:
         return False
 
 
-def _reopen(repo: str, number: int) -> str:
-    """close + reopen. Returns 'reopened' | 'left_closed' | 'failed'.
+def _reopen(repo: str, number: int, expected_head: str = "") -> str:
+    """close + reopen. Returns 'reopened'|'left_closed'|'failed'|'head_moved'.
 
     The two phases are reported SEPARATELY because they are not equally safe: if
     `close` succeeds and `reopen` does not, the PR is left CLOSED — strictly worse
     than the absent check this was repairing, and invisible if the two are folded
     into one boolean. 'failed' means nothing changed (close refused).
+
+    A LOAD-BEARING PRECONDITION: the head is re-read immediately before acting. A
+    reopen re-fires EVERY PR-evaluable workflow, and their `concurrency:` groups
+    cancel the in-flight CI of whatever head is current — so repairing a head that
+    has already been replaced destroys the new head's CI, which is the exact harm
+    the deferral logic exists to avoid. A pass over many PRs takes minutes. If the
+    head cannot be re-read the action is SKIPPED, never guessed.
+
+    A TIMEOUT IS NOT A NO-OP. `close` and `reopen` are timed separately, and when a
+    phase's outcome is unknown the PR's state is re-read: reporting a timed-out
+    reopen as 'failed' ("nothing changed") is how a PR could be left CLOSED with
+    nobody told — the outcome this docstring calls the worst one.
     """
+    if expected_head:
+        try:
+            now = gh_json(["pr", "view", str(number), "--repo", repo,
+                           "--json", "headRefOid"])
+        except (MeasureError, subprocess.TimeoutExpired):
+            return "failed"
+        if not isinstance(now, dict) or (now.get("headRefOid") or "") != expected_head:
+            return "head_moved"
     try:
         c = _run([GH_BIN, "pr", "close", str(number), "--repo", repo])
-        if c.returncode != 0:
-            return "failed"
+    except (OSError, subprocess.TimeoutExpired):
+        # Unknown whether the close landed. Ask the PR — and an UNREADABLE answer is
+        # reported as `left_closed`, not as "nothing changed": the one outcome that
+        # must never be silent is a PR left CLOSED, so the presumption goes to the
+        # state that names it. (Only a definite OPEN is a plain failure.)
+        return "failed" if _pr_state(repo, number) == "OPEN" else "left_closed"
+    if c.returncode != 0:
+        return "failed"
+    try:
         o = _run([GH_BIN, "pr", "reopen", str(number), "--repo", repo])
     except (OSError, subprocess.TimeoutExpired):
-        return "failed"
+        return "left_closed" if _pr_state(repo, number) != "OPEN" else "reopened"
     return "reopened" if o.returncode == 0 else "left_closed"
+
+
+def _pr_state(repo: str, number: int) -> str:
+    """The PR's `state` (`OPEN`/`CLOSED`/`MERGED`), or '' when unreadable."""
+    try:
+        doc = gh_json(["pr", "view", str(number), "--repo", repo, "--json", "state"])
+    except (MeasureError, subprocess.TimeoutExpired, OSError):
+        return ""
+    return (doc.get("state") or "") if isinstance(doc, dict) else ""
 
 
 def open_prs(repo: str, include_drafts: bool) -> list[dict]:
@@ -582,25 +641,36 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
         # producing run is still in flight is LATE, not absent — that is the
         # normal state of every freshly-pushed PR, and reporting it every window
         # would be the noise that gets a rail muted.
-        if not (p.missing_run or p.rerun or p.exhausted):
+        # `needs_report` is the SAME predicate `report` acts on — the plan's own
+        # property, so the tested predicate is the executed one.
+        if not p.needs_report:
             continue
         rec: dict = {"pr": p.number, "head": p.head, "absent": p.absent,
                      "pending": p.pending, "rerun": [], "reopened": False,
-                     "missing_run": p.missing_run, "exhausted": p.exhausted,
+                     "missing_run": p.missing_run, "exhausted": list(p.exhausted),
                      "reopen_attempts": 0, "needs_user_actor": False}
+        # A SPENT BUDGET ESCALATES REGARDLESS OF WHAT ELSE IS TRUE OF THE PR, so it
+        # is hoisted above the repair branches. When a PR had BOTH an exhausted
+        # context and a missing run, the missing-run branch skipped the escalation
+        # entirely: the tool exited 0 — the exact "window discharged" signal the
+        # local fallback keys on — while a required check could never be produced,
+        # and nothing was acting on it and nobody was told.
+        if p.exhausted and apply:
+            escalations += 1
         if p.missing_run and trigger_ok:
             # A required context with NO producing run at the head can only be
             # produced by a NEW PR event. The reopen is the universal one, so it
             # is also the whole repair for this PR (see the exclusivity note).
             recent, total = _timeline_reopen_state(repo, p.number, cooldown_min)
             rec["reopen_attempts"] = total
-            if p.in_flight:
-                # Deferred, not failed: the reopen would cancel these runs through
-                # their concurrency groups. Waiting costs one window; reopening now
-                # costs the CI that was already running, and it can only report what
-                # we are waiting for anyway.
-                rec["deferred"] = p.in_flight
-            elif total >= max_attempts:
+            # THE BUDGET IS TESTED FIRST, the deferral second. The other order is
+            # unreachable once a run is stuck: `in_flight` is true for EVERY run that
+            # has not completed, so a permanently-queued run made the escalation that
+            # exists to END a failure loop unreachable for ever. Deferring is a
+            # courtesy to CI that is about to report; it is not a reason to stop
+            # counting. (The KNOWN RESIDUAL for a queued-forever run is bounded by
+            # this: the budget still escalates.)
+            if total >= max_attempts:
                 # Budget spent. The PR is still absent, so a reopen is not a repair
                 # any more — it is a repeating full-CI re-fire that also cancels the
                 # PR's in-flight runs. Report it instead of looping (bounded
@@ -608,16 +678,28 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                 rec["exhausted"] = sorted(set(rec["exhausted"]) | set(p.missing_run))
                 if apply:
                     escalations += 1
+            elif p.in_flight:
+                # Deferred, not failed: the reopen would cancel these runs through
+                # their concurrency groups. Waiting costs one window; reopening now
+                # costs the CI that was already running, and it can only report what
+                # we are waiting for anyway.
+                rec["deferred"] = p.in_flight
             elif recent:
                 rec["cooldown"] = True
             elif apply:
-                state = _reopen(repo, p.number)
+                state = _reopen(repo, p.number, expected_head=p.head)
                 rec["reopened"] = state == "reopened"
                 if state == "left_closed":
                     # The PR is now CLOSED. Report it by name: this is worse than
                     # the absent check, and it needs a human immediately.
                     rec["left_closed"] = True
                     escalations += 1
+                elif state == "head_moved":
+                    # A reopen re-fires every PR-evaluable workflow, whose concurrency
+                    # groups cancel the NEW head's in-flight CI — the harm the deferral
+                    # above exists to avoid. The head is therefore re-read immediately
+                    # before acting (a pass over many PRs takes minutes).
+                    rec["head_moved"] = True
                 elif state == "failed":
                     escalations += 1
             else:
@@ -638,10 +720,6 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                 rec["needs_user_actor"] = True
                 if apply:
                     escalations += 1
-            if p.exhausted:
-                if apply:
-                    escalations += 1
-                rec["exhausted"] = p.exhausted
             if any(r["ok"] is False for r in rec["rerun"]):
                 escalations += 1
         records.append(rec)
@@ -670,12 +748,19 @@ def workflow_state(rows: list[dict], window_minutes: int, in_flight_grace_minute
     `covered` and `in-flight` both discharge the window. A run that is still going
     but older than `in_flight_grace_minutes` is NOT `in-flight`: a wedged run would
     otherwise hold the fallback off forever, so it is downgraded to
-    `ran-not-succeeded` and the local actor proceeds.
+    `ran-not-succeeded` and the local actor proceeds. Callers must pass the history
+    NEWEST FIRST (`gh run list` order): the newest run in the window decides, and an
+    older success cannot mask a newer failure.
     """
     if rows is not None and not isinstance(rows, list):
         return "unreadable"
+    # `gh run list` returns NEWEST FIRST, and the verdict is taken from the NEWEST
+    # run in the window — not from "did any run succeed". With a 35-minute window
+    # and a 30-minute cadence two runs routinely share a window, so an "any success"
+    # rule lets a stale success mask a newer, failed run: the workflow's exit-1
+    # handoff (a PR needs a user credential) would be suppressed and the local
+    # fallback would sit idle for a whole window.
     seen = False
-    inflight = False
     for r in rows or []:
         if not isinstance(r, dict):
             # Valid JSON of the wrong SHAPE must not traceback out of a documented
@@ -692,9 +777,14 @@ def workflow_state(rows: list[dict], window_minutes: int, in_flight_grace_minute
             return "covered"
         if ((r.get("status") or "") not in ("", "completed")
                 and age <= in_flight_grace_minutes * 60):
-            inflight = True
-    if inflight:
-        return "in-flight"
+            return "in-flight"
+        # NEWEST FIRST, and the newest qualifying run DECIDES. An "any run in the
+        # window succeeded" rule lets a stale success mask a newer failure, and that
+        # is not hypothetical: with a 35-minute window and a 30-minute cadence two
+        # runs routinely share a window, so the workflow's exit-1 handoff (a PR needs
+        # a user credential) would be suppressed and the local fallback would sit
+        # idle for a whole window.
+        break
     return "ran-not-succeeded" if seen else "absent"
 
 

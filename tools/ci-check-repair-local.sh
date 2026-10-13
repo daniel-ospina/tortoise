@@ -43,10 +43,12 @@
 # inside `$( )`, nor a `local arr=(...)` compound assignment.
 #
 # USAGE
-#   ci-check-repair-local.sh            # decide + repair + notify on a transition
-#   ci-check-repair-local.sh --force    # run locally regardless of GitHub coverage
-#   ci-check-repair-local.sh --dry-run  # report only; run the tool WITHOUT --apply
-#   ci-check-repair-local.sh --status   # print the recorded state, exit 0
+#   ci-check-repair-local.sh                # ARMED default — decide + repair + notify
+#   ci-check-repair-local.sh --apply        # ARMED, stated explicitly (the plist's token)
+#   ci-check-repair-local.sh --force        # run locally regardless of GitHub coverage
+#   ci-check-repair-local.sh --dry-run      # report only; run the tool WITHOUT --apply
+#   ci-check-repair-local.sh --report-only  # alias of --dry-run (the installer's mode name)
+#   ci-check-repair-local.sh --status       # print the recorded state, exit 0
 #
 # EXIT: 0 ok (repaired, or GitHub coverage is current) · 1 repair still
 #       unresolved · 2 could not measure (nothing was changed)
@@ -121,13 +123,33 @@ if [ -z "$GH_BIN" ]; then
     done
 fi
 
+# THE MODE IS ALWAYS STATED, AND `--apply` IS A REAL FLAG. The installer renders
+# this same argument list into the plist (`--apply` armed, `--dry-run`
+# report-only), so an argument this parser rejects is not a cosmetic mismatch:
+# the job installs, reports `loaded: yes`, and exits 2 on every fire BEFORE it has
+# created its state dir or logged anything — the "installed but silently dead"
+# class this fallback exists to remove. `--report-only` is accepted because it is
+# the installer's own mode name. The two mode flags are mutually exclusive: word
+# order must never be what decides whether the job repairs unattended.
+MODE_SEEN=""
 DRY=0; FORCE=0; STATUS_ONLY=0
 for a in "$@"; do
     case "$a" in
-        --dry-run) DRY=1 ;;
+        --apply)
+            if [ "$MODE_SEEN" = report ]; then
+                echo "ERROR: --apply and --dry-run/--report-only are mutually exclusive" >&2
+                exit 2
+            fi
+            MODE_SEEN="armed"; DRY=0 ;;
+        --dry-run|--report-only)
+            if [ "$MODE_SEEN" = armed ]; then
+                echo "ERROR: --apply and --dry-run/--report-only are mutually exclusive" >&2
+                exit 2
+            fi
+            MODE_SEEN="report"; DRY=1 ;;
         --force) FORCE=1 ;;
         --status) STATUS_ONLY=1 ;;
-        *) echo "usage: $0 [--dry-run|--force|--status]" >&2; exit 2 ;;
+        *) echo "usage: $0 [--apply|--dry-run|--report-only|--force|--status]" >&2; exit 2 ;;
     esac
 done
 
@@ -207,6 +229,11 @@ workflow_covered() {
 
 # ── run the ONE implementation ─────────────────────────────────────────────
 run_tool() {
+    # `GH_BIN` is exported because the tool resolves `gh` from its own PATH
+    # otherwise, and under launchd a PATH that does not lead with this directory can
+    # silently pick a DIFFERENT binary — the fleet shim under `~/Documents`, which
+    # TCC denies. The caller resolved it; the tool must not re-resolve it.
+    export GH_BIN
     if [ "$DRY" = 1 ]; then
         log "running: $PYTHON_BIN $TOOL --json (report-only)"
         "$PYTHON_BIN" "$TOOL" --json > "$OUT_FILE" 2>> "$LOG_FILE"
@@ -233,6 +260,11 @@ needing_repair_count() {
 if [ "$STATUS_ONLY" = 1 ]; then
     echo "state file : $STATE_FILE"
     if [ -f "$STATE_FILE" ]; then cat "$STATE_FILE"; else echo "(no state recorded yet)"; fi
+    # The resolved tool path is printed because the launchd entry point runs this
+    # file as `bash -s`: `$SCRIPT_DIR` (and therefore `$TOOL`) is the one thing that
+    # can silently go wrong there, and this line is what proves it did not.
+    if [ -f "$TOOL" ]; then echo "tool       : $TOOL (present)"
+    else echo "tool       : $TOOL (MISSING)"; fi
     if workflow_covered; then
         echo "workflow coverage (last ${WINDOW_MINUTES}m): yes ($WF_STATE)"
     else
@@ -301,7 +333,7 @@ if [ "$signature" != "$last" ]; then
     elif [ "$rc" = 1 ]; then
         notify "ci-check-repair RAN LOCALLY and is STILL UNRESOLVED in ${mode_word} mode (${reason}). PRs needing repair: ${needing}. Some PR needs a repair even the local credential could not complete; see $OUT_FILE."
     else
-        notify "ci-check-repair COULD NOT MEASURE locally (${reason}), exit=$rc. Nothing was changed. See $LOG_FILE."
+        notify "ci-check-repair COULD NOT MEASURE locally (${reason}), exit=$rc. No further action was taken; any repair already issued is not undone. See $LOG_FILE."
     fi
     printf '%s\n' "$signature" > "$STATE_FILE"
 else

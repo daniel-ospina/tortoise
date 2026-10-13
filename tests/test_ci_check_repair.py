@@ -132,7 +132,7 @@ def test_missing_run_under_automatic_token_escalates_to_the_local_fallback(monke
     """GITHUB_TOKEN cannot create a workflow run, so reopen must NOT be attempted."""
     opened = []
     monkeypatch.setattr(R, "_reopen", lambda *a: opened.append(a) or True)
-    monkeypatch.setattr(R, "_rerun", lambda *a: True)
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: True)
     plan = _plan(absent=["ai-review-gate"], missing_run=["ai-review-gate"])
     code, recs = R.report([plan], apply=True, trigger_ok=False, repo="o/r", cooldown_min=60)
     assert code == 1
@@ -144,7 +144,7 @@ def test_missing_run_under_automatic_token_escalates_to_the_local_fallback(monke
 def test_missing_run_with_a_user_credential_reopens_and_does_not_also_rerun(monkeypatch):
     """The reopen subsumes every rerun — doing both is pure churn."""
     opened, rerun = [], []
-    monkeypatch.setattr(R, "_reopen", lambda *a: opened.append(a) or "reopened")
+    monkeypatch.setattr(R, "_reopen", lambda *a, **k: opened.append(a) or "reopened")
     monkeypatch.setattr(R, "_rerun", lambda repo, r: rerun.append(r) or True)
     monkeypatch.setattr(R, "_timeline_reopen_state", lambda *a, **k: (False, 0))
     plan = _plan(absent=["docs", "ai-review-gate"], missing_run=["ai-review-gate"],
@@ -198,7 +198,7 @@ def test_reopen_budget_is_bounded_and_escalates_instead_of_looping(monkeypatch):
 
 def test_reopen_budget_below_max_still_reopens(monkeypatch):
     monkeypatch.setattr(R, "_timeline_reopen_state", lambda *a, **k: (False, 2))
-    monkeypatch.setattr(R, "_reopen", lambda *a: "reopened")
+    monkeypatch.setattr(R, "_reopen", lambda *a, **k: "reopened")
     plan = _plan(absent=["ai-review-gate"], missing_run=["ai-review-gate"])
     code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r",
                           cooldown_min=60, max_attempts=3)
@@ -208,7 +208,7 @@ def test_reopen_budget_below_max_still_reopens(monkeypatch):
 def test_reopen_that_leaves_the_pr_closed_is_named_and_escalated(monkeypatch):
     """`close` succeeded and `reopen` did not: worse than the absent check."""
     monkeypatch.setattr(R, "_timeline_reopen_state", lambda *a, **k: (False, 0))
-    monkeypatch.setattr(R, "_reopen", lambda *a: "left_closed")
+    monkeypatch.setattr(R, "_reopen", lambda *a, **k: "left_closed")
     plan = _plan(absent=["ai-review-gate"], missing_run=["ai-review-gate"])
     code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
     assert code == 1
@@ -218,7 +218,7 @@ def test_reopen_that_leaves_the_pr_closed_is_named_and_escalated(monkeypatch):
 
 def test_a_close_that_never_happened_is_a_plain_failure(monkeypatch):
     monkeypatch.setattr(R, "_timeline_reopen_state", lambda *a, **k: (False, 0))
-    monkeypatch.setattr(R, "_reopen", lambda *a: "failed")
+    monkeypatch.setattr(R, "_reopen", lambda *a, **k: "failed")
     plan = _plan(absent=["ai-review-gate"], missing_run=["ai-review-gate"])
     code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
     assert code == 1
@@ -232,7 +232,7 @@ def test_exit_zero_never_hides_an_unhandled_repair(monkeypatch):
     That is only sound if exit 0 cannot coexist with an unhandled repair.
     """
     monkeypatch.setattr(R, "_timeline_reopen_state", lambda *a, **k: (False, 0))
-    monkeypatch.setattr(R, "_reopen", lambda *a: "reopened")
+    monkeypatch.setattr(R, "_reopen", lambda *a, **k: "reopened")
     monkeypatch.setattr(R, "_rerun", lambda repo, r: True)
     dirty = [_plan(number=1, absent=["docs"],
                    rerun=[run(1, "ci.yml", "completed", "failure")]),
@@ -524,13 +524,57 @@ def test_launchd_entry_point_passes_its_own_directory(tmp_path):
     launcher = (repo / "tools/ci-check-repair-local.sh").read_text()
     assert 'CI_REPAIR_SCRIPT_DIR:-' in launcher, "launcher must accept the passed dir"
     assert '${BASH_SOURCE[0]:-}' in launcher, "`set -u` makes an unset BASH_SOURCE fatal"
-    # Run it the way launchd does and require that the tool is actually FOUND.
+    # Run it the way launchd does and require that the tool is actually FOUND. The
+    # state dir is redirected so the run cannot touch the developer's real
+    # ~/.pi/agent/state, and `--status` is read-only (it never repairs).
+    env = {**os.environ, "CI_REPAIR_STATE_DIR": str(tmp_path),
+           "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
     r = subprocess.run([sys.executable, str(repo / "tools/ci_check_repair_launchd.py"),
-                        "--status"], capture_output=True, text=True, timeout=120,
-                       cwd=repo)
+                        "--status"], capture_output=True, text=True, timeout=180,
+                       cwd=repo, env=env)
     assert r.returncode == 0, r.stderr
     assert "tool not found" not in (r.stdout + r.stderr)
     assert "unbound variable" not in (r.stdout + r.stderr)
+    assert "FATAL" not in (r.stdout + r.stderr)
+    # And the runtime leg proves it: `--status` prints the RESOLVED tool path, so a
+    # wrong `$SCRIPT_DIR` (the P0's actual failure) shows up here as MISSING. Without
+    # this line the leg would pass even with a wrong path — `--status` returns before
+    # the launcher's own tool-existence check.
+    assert "(present)" in r.stdout, r.stdout
+    assert str(repo / "tools/ci_check_repair.py") in r.stdout
+
+
+def test_the_python_guard_refuses_an_old_interpreter_with_exit_2(tmp_path):
+    """Exit 2, not 1: 1 is reserved for a repair this credential cannot perform.
+
+    Actually executed when the box has a pre-3.12 `python3` (it does: /usr/bin/python3
+    is 3.9), because a source-level `assert "SystemExit(2)" in src` would pass against
+    a guard that never runs.
+    """
+    old = Path("/usr/bin/python3")
+    if not old.exists():
+        pytest.skip("no /usr/bin/python3 to compare against")
+    probe = subprocess.run([str(old), "-c", "import sys; print(sys.version_info[0])"],
+                           capture_output=True, text=True)
+    if probe.stdout.strip() != "3":
+        pytest.skip("this box's /usr/bin/python3 is already >= 3.12")
+    repo = Path(__file__).resolve().parents[1]
+    r = subprocess.run([str(old), str(repo / "tools/ci_check_repair.py"), "--help"],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+    assert "requires Python >= 3.12" in r.stderr
+
+
+def test_the_tool_honours_the_GH_BIN_the_caller_resolved(tmp_path):
+    """The launcher resolves a TCC-safe `gh`; a re-resolution via PATH can silently
+    pick the fleet shim under ~/Documents that macOS denies."""
+    repo = Path(__file__).resolve().parents[1]
+    r = subprocess.run([sys.executable, "-c",
+                        "from tools import ci_check_repair as R; print(R.GH_BIN)"],
+                       capture_output=True, text=True, timeout=120, cwd=repo,
+                       env={**os.environ, "GH_BIN": "/tmp/a-brand-new-gh"})
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "/tmp/a-brand-new-gh"
 
 
 def test_installer_uses_the_checkout_interpreter_not_a_bash_entry_point():
@@ -575,12 +619,333 @@ def test_installer_dry_run_touches_nothing(tmp_path):
     assert not agents.exists(), "--dry-run wrote to the launchd dir"
 
 
-def test_installer_report_only_is_a_separate_flag_from_dry_run():
-    """The two do different things and must not be aliases of each other."""
-    src = (Path(__file__).resolve().parents[1]
-           / "tools/install-ci-check-repair-schedule.sh").read_text()
-    assert "--report-only) MODE_FLAG=\"report-only\"" in src
-    assert "--dry-run) PLAN_ONLY=1" in src
+def _render_plist(tmp_path, *args):
+    """Render the installer's plist without touching launchd, and parse it."""
+    import plistlib
+    repo = Path(__file__).resolve().parents[1]
+    agents = tmp_path / "LaunchAgents"
+    env = {**os.environ, "AGENTS_DIR": str(agents), "TORTOISE_REPO": str(repo),
+           "CI_REPAIR_ALLOW_NONSTANDARD_AGENTS_DIR": "1",
+           "CI_REPAIR_ALLOW_WORKTREE_INSTALL": "1"}
+    r = subprocess.run(["bash", str(repo / "tools/install-ci-check-repair-schedule.sh"),
+                        "--dry-run", *args], capture_output=True, text=True, env=env,
+                       timeout=120)
+    assert r.returncode == 0, r.stderr
+    return plistlib.loads(r.stdout.encode())
+
+
+def test_installer_report_only_installs_an_INERT_job(tmp_path):
+    """RENDER it, do not grep the source.
+
+    The source-grep version of this test passed against a job that was ARMED:
+    `--report-only` left the launcher with no arguments, and the launcher defaults
+    to `--apply` — so the flag documented as "never repairs" closed and reopened PRs
+    unattended. The plist is the artifact that decides.
+    """
+    args = _render_plist(tmp_path, "--report-only")["ProgramArguments"]
+    assert "--dry-run" in args, args
+    assert "--apply" not in args, args
+
+
+def _run_installed_job(tmp_path, *installer_args):
+    """Run the ENTRY POINT with the arguments the installer actually rendered.
+
+    The plist's `ProgramArguments` are only half the contract; this asserts the
+    OTHER half — that the launcher ACCEPTS those tokens and hands the tool the mode
+    they name. Returns (CompletedProcess, list of tool invocation argv lines).
+    """
+    prog = _render_plist(tmp_path, *installer_args)["ProgramArguments"]
+    assert prog[1].endswith("ci_check_repair_launchd.py"), prog
+    mode_args = prog[2:]
+
+    call_log = tmp_path / "tool-calls.log"
+    stub = tmp_path / "pystub"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "${1:-}" = "-c" ]; then exit 0; fi\n'
+        'case " $* " in\n'
+        '  *" --workflow-state "*) printf "absent\\n"; exit 1 ;;\n'
+        "esac\n"
+        f'printf "%s\\n" "$*" >> {str(call_log)!r}\n'
+        "printf '{\"needing_repair\": 0}\\n'\n"
+        "exit 0\n")
+    stub.chmod(0o755)
+    ghstub = tmp_path / "ghstub"
+    ghstub.write_text("#!/usr/bin/env bash\nprintf '[]'\nexit 0\n")
+    ghstub.chmod(0o755)
+
+    env = {**os.environ, "CI_REPAIR_PYTHON": str(stub), "CI_REPAIR_GH": str(ghstub),
+           "CI_REPAIR_STATE_DIR": str(tmp_path / "state")}
+    r = subprocess.run([sys.executable, prog[1], *mode_args], capture_output=True,
+                       text=True, timeout=180, env=env)
+    calls = call_log.read_text().splitlines() if call_log.exists() else []
+    return r, calls
+
+
+def test_the_armed_install_actually_runs_the_tool_armed(tmp_path):
+    """P1 (both reviews): the armed plist passed `--apply`, the launcher rejected it,
+    and the installed job exited 2 on every fire — before it made its state dir or
+    logged anything. Render the plist, RUN the entry point with the plist's real
+    arguments, and assert the tool is invoked, armed. `--status` (the only token the
+    old test exercised) never reaches this path.
+    """
+    r, calls = _run_installed_job(tmp_path)          # armed is the install default
+    assert r.returncode != 2, (r.returncode, r.stderr)
+    assert "usage:" not in (r.stdout + r.stderr), r.stderr
+    tool_calls = [c for c in calls if "--json" in c]
+    assert tool_calls, f"the tool was never invoked: {calls!r}"
+    assert "--apply" in tool_calls[-1], tool_calls
+
+
+def test_the_report_only_install_never_arms_the_tool(tmp_path):
+    """P1: `--report-only` must reach the tool WITHOUT `--apply`."""
+    r, calls = _run_installed_job(tmp_path, "--report-only")
+    assert r.returncode != 2, (r.returncode, r.stderr)
+    tool_calls = [c for c in calls if "--json" in c]
+    assert tool_calls, f"the tool was never invoked: {calls!r}"
+    assert "--apply" not in tool_calls[-1], tool_calls
+
+
+def test_the_launcher_accepts_every_token_the_installer_renders(tmp_path):
+    """The launcher's real CLI contract, asserted directly."""
+    launcher = str(Path(__file__).resolve().parents[1] / "tools/ci-check-repair-local.sh")
+    harmless = {**os.environ, "CI_REPAIR_STATE_DIR": str(tmp_path / "s"),
+                "CI_REPAIR_GH": "/bin/echo", "CI_REPAIR_PYTHON": "/bin/echo"}
+    for token in ("--apply", "--dry-run", "--report-only", "--force"):
+        r = subprocess.run(["bash", launcher, token, "--status"], capture_output=True,
+                           text=True, timeout=120, env=harmless)
+        assert r.returncode == 0, (token, r.returncode, r.stderr)
+        assert "usage:" not in r.stderr, (token, r.stderr)
+    # Word order must never decide the mode.
+    r = subprocess.run(["bash", launcher, "--apply", "--dry-run"], capture_output=True,
+                       text=True, timeout=120, env=harmless)
+    assert r.returncode == 2 and "mutually exclusive" in r.stderr, r.stderr
+
+
+def test_exhausted_context_escalates_even_when_the_pr_also_has_a_missing_run(monkeypatch):
+    """P1: this combination used to exit 0 and report nothing to act on.
+
+    Exit 0 is the workflow's "window discharged" signal the local fallback keys on,
+    so a required check that can never be produced was reported as handled and
+    nobody was told. The escalation is now hoisted above the repair branches.
+    """
+    monkeypatch.setattr(R, "_timeline_reopen_state", lambda *a, **k: (False, 0))
+    monkeypatch.setattr(R, "_reopen", lambda *a, **k: "reopened")
+    plan = _plan(absent=["docs", "ai-review-gate"], exhausted=["docs"],
+                 missing_run=["ai-review-gate"])
+    code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
+    assert code == 1, "an exhausted context must never be silently discharged"
+    assert recs[0]["exhausted"] == ["docs"]
+
+
+def test_a_stuck_run_cannot_make_the_budget_escalation_unreachable(monkeypatch):
+    """P1: the deferral was tested BEFORE the budget, so a permanently-queued run
+    (the documented residual) kept `in_flight` true for ever and the escalation that
+    exists to end the loop could never fire — while the tool still exited 0."""
+    monkeypatch.setattr(R, "_timeline_reopen_state", lambda *a, **k: (False, 99))
+    monkeypatch.setattr(R, "_reopen", lambda *a, **k: "reopened")
+    plan = _plan(absent=["ai-review-gate"], missing_run=["ai-review-gate"],
+                 in_flight=["Mergify Merge Queue"])
+    code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r",
+                          cooldown_min=60, max_attempts=3)
+    assert code == 1
+    assert "deferred" not in recs[0]
+    assert recs[0]["exhausted"] == ["ai-review-gate"]
+
+
+def test_deferral_still_applies_below_the_budget(monkeypatch):
+    monkeypatch.setattr(R, "_timeline_reopen_state", lambda *a, **k: (False, 0))
+    monkeypatch.setattr(R, "_reopen", lambda *a, **k: "reopened")
+    plan = _plan(absent=["ai-review-gate"], missing_run=["ai-review-gate"],
+                 in_flight=["Python CI"])
+    code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
+    assert code == 0 and recs[0]["deferred"] == ["Python CI"]
+
+
+def test_a_head_that_moved_is_not_repaired(monkeypatch):
+    """TOCTOU: a pass over many PRs takes minutes, and a reopen re-fires EVERY
+    PR-evaluable workflow, whose concurrency groups cancel the NEW head's CI."""
+    seen = {}
+
+    def fake(repo, number, expected_head=""):
+        seen["head"] = expected_head
+        return "head_moved"
+
+    monkeypatch.setattr(R, "_timeline_reopen_state", lambda *a, **k: (False, 0))
+    monkeypatch.setattr(R, "_reopen", fake)
+    plan = _plan(absent=["ai-review-gate"], missing_run=["ai-review-gate"])
+    code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
+    assert seen["head"] == "b" * 40, "the expected head must be passed through"
+    assert recs[0]["head_moved"] is True and recs[0]["reopened"] is False
+    assert code == 0, "a moved head is a skip, not a failure"
+
+
+def test_a_timed_out_reopen_is_not_reported_as_nothing_changed(monkeypatch):
+    """P1: `close` succeeded and `reopen` timed out — the PR is CLOSED, and that
+    used to be reported as 'failed' ("nothing changed"), the one outcome the
+    docstring calls strictly worse than the absent check."""
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="gh", timeout=30)
+
+    monkeypatch.setattr(R, "_run", boom)
+    monkeypatch.setattr(R, "_pr_state", lambda repo, n: "CLOSED")
+    assert R._reopen("o/r", 1) == "left_closed"
+
+
+def test_a_timed_out_close_that_did_not_land_is_a_plain_failure(monkeypatch):
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="gh", timeout=30)
+
+    monkeypatch.setattr(R, "_run", boom)
+    monkeypatch.setattr(R, "_pr_state", lambda repo, n: "OPEN")
+    assert R._reopen("o/r", 1) == "failed"
+
+
+def test_a_close_timeout_with_an_UNREADABLE_state_still_names_left_closed(monkeypatch):
+    """The presumption goes to the outcome that must never be silent.
+
+    `_pr_state` returns '' when the PR cannot be read. Reporting that as "nothing
+    changed" would lose the name of the one outcome the docstring calls worse than
+    the absent check.
+    """
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="gh", timeout=30)
+
+    monkeypatch.setattr(R, "_run", boom)
+    monkeypatch.setattr(R, "_pr_state", lambda repo, n: "")
+    assert R._reopen("o/r", 1) == "left_closed"
+
+
+def test_uninstall_under_dry_run_is_refused_not_executed(tmp_path):
+    """`--dry-run` promises NO side effects; removing the installed schedule is the
+    largest one available. Word order must not decide whether it survives."""
+    repo = Path(__file__).resolve().parents[1]
+    agents = tmp_path / "LaunchAgents"
+    agents.mkdir()
+    stale = agents / "com.tortoise.ci-check-repair.plist"
+    stale.write_text("<plist/>")
+    env = {**os.environ, "AGENTS_DIR": str(agents), "TORTOISE_REPO": str(repo),
+           "CI_REPAIR_ALLOW_NONSTANDARD_AGENTS_DIR": "1",
+           "CI_REPAIR_ALLOW_WORKTREE_INSTALL": "1"}
+    for order in (["--dry-run", "--uninstall"], ["--uninstall", "--dry-run"]):
+        r = subprocess.run(["bash", str(repo / "tools/install-ci-check-repair-schedule.sh"),
+                            *order], capture_output=True, text=True, env=env, timeout=120)
+        assert r.returncode == 2, (order, r.stdout, r.stderr)
+        assert "mutually exclusive" in r.stderr
+        assert stale.exists(), f"{order} removed the installed schedule"
+    # An unknown argument is refused even when it follows an action flag.
+    r = subprocess.run(["bash", str(repo / "tools/install-ci-check-repair-schedule.sh"),
+                        "--status", "--nonsense"], capture_output=True, text=True,
+                       env=env, timeout=120)
+    assert r.returncode == 2 and "unknown argument" in r.stderr
+
+
+def test_reopen_skips_when_the_head_cannot_be_re_read(monkeypatch):
+    """An unverifiable head is a skip, never a guessed repair."""
+    def boom(*a, **k):
+        raise R.MeasureError("unreadable")
+
+    monkeypatch.setattr(R, "gh_json", boom)
+    called = []
+    monkeypatch.setattr(R, "_run", lambda *a, **k: called.append(a))
+    assert R._reopen("o/r", 1, expected_head="a" * 40) == "failed"
+    assert called == [], "nothing may be closed when the head is unknown"
+
+
+def test_workflow_state_the_newest_run_decides():
+    """P2: 'any run in the window succeeded' let a stale success mask a newer
+    failure, suppressing the credential handoff for a whole window."""
+    assert R.workflow_state([_wf("failure", age_min=3), _wf("success", age_min=25)],
+                            35, 30) == "ran-not-succeeded"
+    assert R.workflow_state([_wf("success", age_min=25), _wf("failure", age_min=30)],
+                            35, 30) == "covered"
+
+
+def test_can_trigger_events_reads_the_environment(monkeypatch):
+    """The whole GitHub/local credential split, previously untested."""
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("CI_CHECK_REPAIR_TRIGGER", raising=False)
+    assert R.can_trigger_events() is True, "a local box holds a user credential"
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert R.can_trigger_events() is False, "GITHUB_TOKEN events create no runs"
+    monkeypatch.setenv("CI_CHECK_REPAIR_TRIGGER", "yes")
+    assert R.can_trigger_events() is True, "an operator may declare a PAT"
+    monkeypatch.setenv("CI_CHECK_REPAIR_TRIGGER", "no")
+    assert R.can_trigger_events() is False
+
+
+def test_a_readable_but_empty_live_required_set_refuses(monkeypatch, tmp_path):
+    """P2: `if live_ctx:` collapsed [] into None, so after every required context
+    was removed the tool silently fell back to the RECORD and kept reopening PRs for
+    a set that is no longer protected. A readable live set that disagrees refuses."""
+    rec = tmp_path / "required-contexts.json"
+    rec.write_text(json.dumps({"required_contexts": ["docs"]}))
+    monkeypatch.setattr(R, "gh_api", lambda *a, **k: {
+        "required_status_checks": {"contexts": []}})
+    with pytest.raises(R.MeasureError, match="disagree"):
+        R.resolve_required("o/r", rec, live=True)
+
+
+def test_an_empty_live_set_and_an_empty_record_refuses(monkeypatch, tmp_path):
+    """Nothing is required at all: repairs would act on a retired set."""
+    rec = tmp_path / "required-contexts.json"
+    rec.write_text(json.dumps({"required_contexts": []}))
+    monkeypatch.setattr(R, "gh_api", lambda *a, **k: {
+        "required_status_checks": {"contexts": []}})
+    with pytest.raises(R.MeasureError, match="requires NOTHING"):
+        R.resolve_required("o/r", rec, live=True)
+
+
+def test_an_UNREADABLE_live_set_still_falls_back_to_the_record(monkeypatch, tmp_path):
+    """The other pole: unreadable is not empty, and the record is the fallback."""
+    rec = tmp_path / "required-contexts.json"
+    rec.write_text(json.dumps({"required_contexts": ["docs"]}))
+
+    def boom(*a, **k):
+        raise R.MeasureError("no admin")
+
+    monkeypatch.setattr(R, "gh_api", boom)
+    assert R.resolve_required("o/r", rec, live=True) == ["docs"]
+
+
+def test_main_reports_exit_2_when_the_record_cannot_be_read(capsys, tmp_path):
+    """The fail-closed pole of the contract, through `main()` itself."""
+    assert R.main(["--repo", "o/r", "--no-live", "--record",
+                   str(tmp_path / "nope.json")]) == 2
+    assert "COULD NOT MEASURE" in capsys.readouterr().err
+
+
+def test_an_unexpected_error_in_the_pass_is_exit_2_not_1(capsys, monkeypatch):
+    """Exit 1 is a specific claim; a bug must not be able to make it."""
+    def boom(*a, **k):
+        raise KeyError("malformed run payload")
+
+    monkeypatch.setattr(R, "open_prs", boom)
+    assert R.main(["--repo", "o/r", "--no-live"]) == 2
+    assert "unexpected KeyError" in capsys.readouterr().err
+
+
+def test_installer_armed_by_default(tmp_path):
+    assert _render_plist(tmp_path)["ProgramArguments"][-1] == "--apply"
+
+
+def test_installer_refuses_an_unknown_argument_and_dry_run_wins_by_order(tmp_path):
+    """Only `$1` used to be read, so `--report-only --dry-run` INSTALLED."""
+    repo = Path(__file__).resolve().parents[1]
+    agents = tmp_path / "LaunchAgents"
+    env = {**os.environ, "AGENTS_DIR": str(agents), "TORTOISE_REPO": str(repo),
+           "CI_REPAIR_ALLOW_NONSTANDARD_AGENTS_DIR": "1",
+           "CI_REPAIR_ALLOW_WORKTREE_INSTALL": "1"}
+    r = subprocess.run(["bash", str(repo / "tools/install-ci-check-repair-schedule.sh"),
+                        "--report-only", "--nonsense"],
+                       capture_output=True, text=True, env=env, timeout=120)
+    assert r.returncode == 2 and "unknown argument" in r.stderr
+    assert not agents.exists()
+    r = subprocess.run(["bash", str(repo / "tools/install-ci-check-repair-schedule.sh"),
+                        "--report-only", "--dry-run"],
+                       capture_output=True, text=True, env=env, timeout=120)
+    assert r.returncode == 0 and "DRY RUN" in r.stderr
+    assert not agents.exists(), "--dry-run did not win by word order"
 
 
 def test_launchd_entry_point_hands_the_launcher_to_bash_on_stdin():
