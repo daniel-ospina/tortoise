@@ -548,8 +548,7 @@ This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 > | the S4 flag | — | ⚠️ `TORTOISE_S4_DELTA` selects the **delta vs complete-list contract of S4's OUTPUT**, **not** whether S4 runs (`:689-710`) |
 > | stage order | the eight steps above | `run_s1` `:7290` → `run_s2` `:7314` → `S2.2 VET` `:7331` → `S3 search_graph` `:7375` → **`run_s4` `:7396`** → `S5` |
 >
-> **⚠️ `TORTOISE_S4_DELTA=0` does NOT disable S4** — it selects the legacy complete-list contract. No flag
-> turns S4 off today, so "set the flag to turn it off" is not available.
+> **⚠️ `TORTOISE_S4_DELTA=0` does NOT disable S4** — it selects the legacy complete-list contract. To bypass S4 you must leave the v2 pipeline entirely: **`TORTOISE_EXTRACTOR=v1`** routes to the legacy `value_extractor.extract_session` path, which has no S4 stage at all (`sdk.py:2495`, `:6878`). There is **no S4-specific** off switch.
 >
 > **Removing `run_s4` is a v4 migration deliverable, not a cleanup** — it is §4.3 **G5**'s S4 clause,
 > tracked at **`#8500`**. ⚠️ **Not `#5333`**: that issue's own body scopes it to the deletion/relocation
@@ -562,9 +561,7 @@ This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 > `S3` and `S5` were absent from the code as well; that was wrong** — `S3` and `S5` appear 51 and 22 times
 > in `extractor_v2.py`, including as production stage comments.
 >
-> **⚠️ Currency of these line numbers:** the figures above are at the **current tip**. This document's
-> other citations are pinned to `c79ba1cf2` and **some are stale at the tip** — e.g. `merge_embed_lists`
-> is cited here as def `:2284` / called `:4845`, but is actually `:2673` / `:7414`. The header's rule
+> **⚠️ Currency of these line numbers:** the figures above are pinned to **`4c801fb18`** (the `origin/main` this edit was based on) — pin them so they can be re-verified. This document's other citations are pinned to `c79ba1cf2` and **some are stale at the later pin** — e.g. `merge_embed_lists` is cited here as def `:2284` / called `:4845`, but at `4c801fb18` it is `:2673` / `:7414`. The header's rule
 > stands: *the symbol name is authoritative and the line number is a convenience.*
 
 **Why Jev fits:** it is a **decision-only** model — it cannot return a value outside the supplied schema, so it cannot invent an entity or a name. Three primitives, **mixable in one call**: *Choice* (pick from a list), *Score*, *Noul* (0–1 probability). Doc: `https://jevtypesafeai.com/docs#apis`. ⚠️ Measured **$0.000243/item at 3 questions** (~$6/month at 25k items) — **~4–7× cheaper than a frontier LLM, not the vendor's claimed 40–400×** (self-tested).
@@ -737,7 +734,7 @@ S6  COMMIT
 
 | # | the gap | why it matters |
 |---|---|---|
-| **G1** → `#5064` (span; `#5007` is CLOSED `COMPLETED`, consolidated here) · `#4894` (narrative) | **No step PERSISTS the narrative or the raw-fact span.** S6 is *"write entities + connections + metadata/lifecycle"*. §4.0 has no persistence purpose beyond S6. | ⛔ **D1 and §2.4 are not implementable from the steps as written.** If the narrative and the span are not written by a named step, they are not written. **Needs an explicit persistence step (or an explicit S6 sub-job).** |
+| **G1** → `#5064` (open remainder; `#5007` CLOSED `COMPLETED` via PR `#5108` — the schema + passthrough **shipped**, but the extractor still emits no `span_start`) · `#4894` (narrative) | **No step PERSISTS the narrative or the raw-fact span.** S6 is *"write entities + connections + metadata/lifecycle"*. §4.0 has no persistence purpose beyond S6. | ⛔ **D1 and §2.4 are not implementable from the steps as written.** If the narrative and the span are not written by a named step, they are not written. **Needs an explicit persistence step (or an explicit S6 sub-job).** |
 | **G2** → `#5008` | **No EMBEDDING-DECISION step.** `STORAGE-ARCHITECTURE.md` §12.2a **decides** the `EMBED` gate exists (*"a row can be worth KEEPING but not worth EMBEDDING"*, *"the lever is what gets an embedding"*) — **and this document never mentions it.** S2.3's kNN path **silently assumes every candidate is embedded.** | ⛔ **The two documents would ship contradictory designs.** The `EMBED` gate and the `KEEP` gate **share one rule set and enforce at TWO points** (§12.2a) — so the second enforcement point needs a home in this step list. |
 | **G3** → `#8495` | **No per-step FAILURE POLICY.** Only S2.2 (*"fail-open — keep"*) and S2.3 (*"never raises"*) state one. | **The S3 failure is the dangerous one: the natural fail-open marks candidates `new` — MANUFACTURING DUPLICATES, the exact failure S3 exists to prevent.** Also: partial S6 has no transaction/retry boundary vs `#4240`/`#4716`; and **re-narrate has no tie-break** for a worse second narrative. |
 | **G4** → `#8496` | ⛔ **`#4911` (no secret redaction) + an append-only immutable raw layer = IMMORTAL SECRETS.** | **`#4911` is listed in §15 as an unrelated capture-path issue. It is not unrelated** — §2.4.2 makes the raw layer **append-only by design**, so **a secret captured once is a secret retained forever.** Redaction must be designed *with* the layer, or the layer's immutability becomes a liability. |
@@ -745,7 +742,7 @@ S6  COMMIT
 
 **⚠️ And G2 is where the two documents bind:** `STORAGE-ARCHITECTURE.md` §12.2a's decided rule (*one rule set, two enforcement points*) **requires a step to hold the second point.** Until G2 is closed, **the storage doc's central lever has no implementation site.**
 
-**Where the five gaps live in the tracker** (checked 2026-10-13): **G1** `#5064` (span — `#5007` is CLOSED, consolidated into `#5064`) + `#4894` (narrative placement) · **G2** `#5008` · **G3** `#8495` · **G4** `#8496` · **G5** `#5333` + `#5059` + `#8500` (the S4 clause). The owning epic is **`#5087`** (E1 — the selective write path) under tracking **`#5086`**; end-to-end acceptance is capstone **`#7949`**. ⚠️ **G4's original issue `#4911` is CLOSED `COMPLETED` (2026-09-26)** — redaction landed for the capture path that exists today, but the raw-fact layer does not exist yet, so the *design-level* consequence (append-only + no redaction = immortal secrets) needed its own home. That is why `#8496` is filed rather than `#4911` reopened. ⚠️ **G5's S4 clause needed `#8500` for the same reason** — neither `#5333` (whose own body scopes it to the deletion/relocation half and says it must not absorb other work) nor `#5059` covers *"what happens to the live S4 `merge_embed_lists`"*.
+**Where the five gaps live in the tracker** (checked 2026-10-13): **G1** `#5064` (the open remainder — `#5007` closed `COMPLETED` via PR `#5108`, which **shipped** the span schema + passthrough; what is still missing is that *the extractor emits no `span_start`*, so the gap is **partly landed, not "never built"**) + `#4894` (narrative placement) · **G2** `#5008` · **G3** `#8495` · **G4** `#8496` · **G5** `#5333` + `#5059` + `#8500` (the S4 clause). The owning epic is **`#5087`** (E1 — the selective write path) under tracking **`#5086`**; end-to-end acceptance is capstone **`#7949`**. ⚠️ **G4's original issue `#4911` is CLOSED `COMPLETED` (2026-09-26)** — redaction landed for the capture path that exists today, but the raw-fact layer does not exist yet, so the *design-level* consequence (append-only + no redaction = immortal secrets) needed its own home. That is why `#8496` is filed rather than `#4911` reopened. ⚠️ **G5's S4 clause needed `#8500` because neither `#5333` (whose own body scopes it to the deletion/relocation half and says it must not absorb other work) nor `#5059` covers** *"what happens to the live S4 `merge_embed_lists`"*.
 
 ### S3 — RESOLVE (find what exists · disambiguate · attach)
 
@@ -1185,7 +1182,7 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 | **minting an `Object` per entity** | entities are extracted to **link facts** (*"Extract anything that could help link related facts together"*) and kept in a mapping table | ⚠️ **The strongest available support for the `^the <X>` finding.** Their entity extraction *purpose* is linking; ours has become node creation. |
 | **connection fan-out** | bounded everywhere, with a timeout that drops an arm | ⚠️ **We bound nothing today** — `the plan doc` (63) and `config/ci-surfaces.yml` (123) are unbounded. |
 
-**⇒ Two of the three questions this raises are still the owner's; the third (question 2) is measured, ruled and deferred — see it below:**
+**⇒ One of the three questions below is still the owner's (question 1). Question 2 is measured, ruled and deferred; question 3 was adopted and is CLOSED — `#5010` (`PER_ENTITY_FANOUT_CAP = 200`) — see below:**
 
 1. **Should the LLM be allowed to propose connections to the graph at all**, or should cross-batch connection be mechanical (embedding + entity) with the model confined to within-batch, as Hindsight confines it?
 2. **Should `aboutObject` be a stored edge or a derived join?** ✅ **MEASURED 2026-09-23 — the answer is split; RULED (owner, 2026-09-23): KEEP the stored edge; DEFERRED to post-launch (not open). Record: `#7948`.** The primary search path does **not** read it (`grep -in aboutObject tortoise/retrieval.py tortoise/search_engine.py tortoise/session_reinjection.py` → exit 1, case-insensitive) — so Hindsight's premise holds *there*. **On the traversal sample, FOUR sites are customer-callable** (all pinned to `c79ba1cf2`): `belief_timeline` (`sdk.py:6411`; MCP `tortoise_belief_timeline`, `tool_registry.py:391`) · `topic_summarize` (`topic_summarization.py:174`; SDK `sdk.py:7516` + hosted REST `hosted_api.py:6294` ⚠️ **its MCP twin `tortoise_topic_summarize` (`mcp_server.py:2354`) is registered nowhere and never served — filed as `#7988`; the capability survives on the SDK + REST doors**) · `recall_subgraph` — `ranking.SubgraphExpander._neighbors` (`ranking.py:1195`/`:1206`), whose default `completeness="full"` walks **every** relationship type via `MATCH (n)-[r]->(m)`, so it reads the edge **without naming it** and is therefore invisible to any grep-based enumeration · `search(order_by="graph")` (`ranking.py:461`, `ranking.py:714`; MCP `tortoise_search`). **Two more are default-ON on the ingestion path:** `extractor_v2._enrich_point_priors` (`extractor_v2.py:1934`) and `mining._temporal_wire` (`mining.py:477`, **2-hop, and it mints a NAND**). **Off by default:** `_entity_key_expansion_pass` (`sdk.py:14744`; `entity_key_expansion: bool = False`, `sdk.py:13777`) and the connected-assembly reads (`assembly.py:573`/`:789`/`:809`; `TORTOISE_ASK_CONNECTED_ASSEMBLY` default OFF). **36 test files assert the edge at the pin** (41 at HEAD, 2026-10-10). ⚠️ **The *"four default-ON sites, two customer-callable"* phrasing this bullet carried before is WRONG on both counts, and the correction is the load-bearing part: `recall_subgraph` and `search(order_by="graph")` were missing** (review finding B2.7, `REVIEW-CONSOLIDATED-2026-09-23.md`). **Deleting the edge would silently break FOUR customer-callable surfaces → the comparable's conclusion does NOT transfer.** The structural door stays open though: **no** `aboutObject` edge carries any property (the write path emits `MERGE (s)-[:aboutObject]->(t)` and never a `SET` — `projection/edges.py:344`). ⚠️ **And deriving is what creates the fan-out problem** — a join on a hub with ~1,200 claims yields ~1,200 rows *per anchor*, which is exactly why Hindsight carries a `LIMIT 200` and a timeout that drops the whole arm. **See `STORAGE-ARCHITECTURE.md` §13 for the full classification and the durability finding, and §11 for why the connection layer is cheap to keep.**
@@ -1228,7 +1225,7 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 | §14 not established | `#4894` | the small-sample-first measurement list |
 | **capture-path issues (same pipeline, not steps)** | `#4897` · `#4911` · `#4714` · `#4614` | mid-word truncation at 5,000 chars · ~~no secret redaction~~ (**`#4911` CLOSED `COMPLETED` 2026-09-26** — the redaction landed; the *v4 raw-layer* consequence is `#8496`, §4.3 G4) · **2 of 4 harnesses 404** · invisible quota refusals |
 
-**Two of the three questions this document raises** (§13.8) belong to **D6** and are the owner's: cross-batch connection by LLM or mechanically (the third was hard fan-out caps, and it is **CLOSED** — `#5010`, see the table below). **The third — `aboutObject` as edge or join — is measured, ruled and deferred, NOT open** (§13.8 question 2, §16): the measurement is SPLIT, the owner ruled **KEEP the stored edge** on 2026-09-23, and `#7948` is the filed record.
+**One of the three questions this document raises** (§13.8) remains the owner's: **cross-batch connection — by LLM or mechanically.** The other two are settled: **hard fan-out caps** are **CLOSED** (`#5010` — adopted at 200, `PER_ENTITY_FANOUT_CAP`, §13.8 question 3), and **`aboutObject` as edge or join** is measured, ruled (**KEEP** the stored edge, 2026-09-23) and deferred — **`#7948`** is the filed record (§13.8 question 2, §16).
 
 **Filed status — revalidated 2026-10-13 against the tracker.**
 
@@ -1241,7 +1238,7 @@ filed"* claim is what causes duplicate filing — the same failure the §4.3 gap
 | **The raw-vs-narrative measurement** (D3's falsifier, §10) — *"the next real work"*, settles whether Option 4 stays provisional | **`#7947`** | ✅ **FILED** — this block said *not yet filed* |
 | **Fan-out caps** (mirrored in `STORAGE-ARCHITECTURE.md` §13) | **`#5010`** | ✅ **CLOSED** — cap landed query-side (`tortoise/fanout.py`, `PER_ENTITY_FANOUT_CAP = 200`, PR `#5057`) |
 | **`aboutObject` join-vs-edge** | **`#7948`** | ✅ **FILED** — measured SPLIT, owner ruled **KEEP**, deferred. Not open (§13.8 question 2, §16) |
-| **G1** — narrative + raw-fact span persistence | **`#5064`** (span; `#5007` CLOSED → consolidated) · **`#4894`** (narrative) | ✅ filed |
+| **G1** — narrative + raw-fact span persistence | **`#5064`** (open remainder; `#5007` CLOSED `COMPLETED` via PR `#5108`) · **`#4894`** (narrative) | ✅ filed |
 | **G2** — the EMBED gate | **`#5008`** | ✅ filed |
 | **G3** — per-step failure policy | **`#8495`** | ✅ filed |
 | **G4** — redaction designed with the append-only layer | **`#8496`** | ✅ filed (`#4911` is CLOSED; its design-level consequence was unowned) |
@@ -1249,10 +1246,12 @@ filed"* claim is what causes duplicate filing — the same failure the §4.3 gap
 
 **⇒ There are no longer any unfiled candidates in this document.** G1–G5 were recorded in §4.3 as *"all
 must be closed before implementation"*, and **two** of them (`#8495`, `#8496`) had no tracker entry until
-2026-10-13. Two G5 sub-clauses also needed their own homes rather than a reopen of a closed issue, and got
-them on the same day: the S4 clause is **`#8500`** (`#5333`'s body explicitly refuses to absorb it). The
-owning epic is **`#5087`** (E1) under tracking **`#5086`**, with end-to-end acceptance in capstone
-**`#7949`**.
+2026-10-13 — those two are the newly filed ones. **G5's S4 clause** also needed its own home and got one
+the same day, because `#5333` explicitly refuses to absorb it and `#5059` covers a different half: it is
+**`#8500`**. (That is a scope boundary, not a closed-issue reopen — both `#5333` and `#5059` are OPEN. The
+closed-issue reopen rationale belongs to **G4**, where `#4911` is CLOSED `COMPLETED` and its design-level
+consequence is `#8496`.) The owning epic is **`#5087`** (E1) under tracking **`#5086`**, with end-to-end
+acceptance in capstone **`#7949`**.
 
 ---
 
