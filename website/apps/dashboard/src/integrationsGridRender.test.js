@@ -153,4 +153,9 @@ test('#3513: a collapsed integration panel is ACTUALLY hidden (the [hidden] attr
   // non-vacuity: the conflicting author rule the UA sheet cannot beat is real
   assert.match(css, /\.toggle-row\s*\{[^}]*display\s*:\s*flex/,
     'the conflicting .toggle-row display:flex rule must exist')
+  // …and the hide rule must not PRECEDE it: if the selector is ever widened to a
+  // bare `[hidden]` (equal specificity), source order decides, so a rule hoisted
+  // above `.toggle-row` would silently lose and the panels would come back.
+  assert.ok(rule.index > css.search(/\.toggle-row\s*\{/),
+    'the [hidden] hide rule must follow `.toggle-row` in the sheet (source order is the tiebreak)')
 })

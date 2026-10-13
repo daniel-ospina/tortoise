@@ -99,6 +99,18 @@ DURABLE_ROW = {"id": "k-paste", "name": "agent key", "key_prefix": PASTED_KEY[:1
                "created_via": "dashboard", "enabled": True, "expires_at": None,
                "revoked_at": None}
 
+# #3513: the Data-sources step renders its grid from the onboarding projection
+# (`MemorySources state={onboarding}` — main.jsx). `_wire` DEFAULTs to a 401,
+# which leaves `onboarding` null and the step renders its "Couldn't load memory
+# sources" card INSTEAD of the grid — so any spec that asserts the grid must
+# SERVE a projection. `fork` is deliberately ABSENT: the re-entry door then
+# resumes ON the fork card (`resumeStep` → step 1, #2005) and `_walk_to_connect`
+# reaches the connect step. `github_connected` is false so the done screen's
+# incomplete-setup variant ("GitHub was not connected") is the one asserted.
+GRID_PROJECTION = {"org_id": "team_o", "status": "active",
+                   "onboarding_complete": False, "completed_steps": [],
+                   "session_recording": False, "github_connected": False}
+
 
 def _row(prefix: str, **over) -> dict:
     """A key row matching `prefix`, overridable for the refusal cases."""
@@ -452,8 +464,10 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     page.get_by_role("button", name="Skip for now").click()
     # #3513: the connect step's Skip now lands on the DATA-SOURCES step (index
     # 3) — the integrations grid — not on done. It is the single source-list
-    # presentation in the product.
-    expect(page.locator(".integrations-grid")).to_be_visible(timeout=10_000)
+    # presentation in the product. The GRID itself is asserted in the dedicated
+    # grid specs below: it renders only from a served onboarding projection
+    # (GRID_PROJECTION), while this journey deliberately keeps `_wire`'s default
+    # 401 so the walk still exercises the step-0 read-only org summary shape.
     expect(page.locator(".welcome-title")).to_have_text(
         "Choose your memory sources", timeout=10_000)
     # Skip does NOT block on an incomplete connection and advances to done.
@@ -519,7 +533,7 @@ def test_data_sources_grid_renders_in_order_and_continue_reaches_done(page: Page
     Coming-soon group LOWER in the same grid at FULL contrast with a badge and
     never disabled — and Continue reaches `done` at index 4."""
     _seed_cookie(page, "u-onb")
-    _wire(page, key_rows=[DURABLE_ROW])
+    _wire(page, key_rows=[DURABLE_ROW], onboarding_projection=GRID_PROJECTION)
     _walk_to_connect(page)
     page.get_by_role("button", name="Skip for now").click()
     expect(page.locator(".integrations-grid")).to_be_visible(timeout=10_000)
@@ -541,6 +555,26 @@ def test_data_sources_grid_renders_in_order_and_continue_reaches_done(page: Page
     assert coming.is_disabled() is False, "a coming-soon tile must stay clickable (the click is the signal)"
     assert coming.evaluate("el => getComputedStyle(el).opacity") == "1", \
         "a coming-soon tile must be FULL contrast — never opacity-muted into reading as disabled"
+
+    # #8327 review P1: the panels must ACTUALLY collapse. `.toggle-row` sets
+    # `display: flex` (author origin outranks the UA `[hidden]` sheet), so the
+    # `hidden` attribute alone left all four panels on screen while each tile's
+    # aria-expanded advertised the opposite. Assert the COMPUTED display, not
+    # the attribute: the recording tile opens two sibling panels by default,
+    # and expanding another tile collapses them (one at a time).
+    def _visible_panel_count() -> int:
+        return page.locator(".integration-panel").evaluate_all(
+            "els => els.filter(e => getComputedStyle(e).display !== 'none').length")
+
+    expect(page.locator("#integration-panel-sessions")).to_be_visible()
+    expect(page.locator("#integration-panel-issues")).to_be_hidden()
+    assert _visible_panel_count() == 2, \
+        "only the default-open tile's panels (sessions + extract) may be in flow at entry"
+    page.locator('.integration-tile[data-integration-key="github_issues"]').click()
+    expect(page.locator("#integration-panel-issues")).to_be_visible()
+    expect(page.locator("#integration-panel-sessions")).to_be_hidden()
+    assert _visible_panel_count() == 1, \
+        "expanding one tile must collapse the other — never all four panels at once"
     # Continue does not block on an incomplete connection and reaches done.
     page.get_by_role("button", name="Continue →").click()
     expect(page.locator("div.done")).to_be_visible(timeout=10_000)
@@ -555,7 +589,7 @@ def test_coming_soon_modal_dialog_contract_and_skip_reaches_done(page: Page) -> 
     tile — and the tile is keyboard reachable (Enter activates). Skip reaches
     `done` at index 4 too."""
     _seed_cookie(page, "u-onb")
-    _wire(page, key_rows=[DURABLE_ROW])
+    _wire(page, key_rows=[DURABLE_ROW], onboarding_projection=GRID_PROJECTION)
     _walk_to_connect(page)
     page.get_by_role("button", name="Skip for now").click()
     expect(page.locator(".integrations-grid")).to_be_visible(timeout=10_000)
@@ -1389,12 +1423,16 @@ def _skip_data_sources_to_done(page: Page) -> None:
     """#3513: leave the Data-sources step (index 3) for done (index 4).
 
     The connect step's skip/advance now lands on the Data-sources step, so any
-    journey that used to reach `div.done` one hop after connect must also take
-    the grid step's own Skip. `exact=True` targets the grid's "Skip" and never
-    the connect step's "Skip for now".
-    """
-    expect(page.locator(".integrations-grid")).to_be_visible(timeout=10_000)
-    page.get_by_role("button", name="Skip", exact=True).click()
+    journey that used to reach `div.done` one hop after connect must also get
+    past this step. Continue — NOT Skip — because Continue leaves
+    `wizardPaused` exactly as the caller set it (the connect step's skip pauses,
+    its advance does not), so a caller's paused/not-paused reading survives the
+    hop; the grid's Skip would pause an advance-path journey and flip the done
+    title to the paused wording. Wait on the step TITLE, never on the grid:
+    `MemorySources` renders its error card when the onboarding projection is
+    unserved (see GRID_PROJECTION), and the step is real either way."""
+    expect(page.locator(".welcome-title")).to_have_text("Choose your memory sources", timeout=10_000)
+    page.get_by_role("button", name="Continue →").click()
     expect(page.locator("div.done")).to_be_visible(timeout=10_000)
 
 
