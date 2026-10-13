@@ -121,7 +121,8 @@ class _FakeDb:
                  copy_empties_source: bool = False,
                  copy_mixed: tuple[int, int] | None = None,
                  copy_clone_ahead: int = 0,
-                 copy_makes_source_writable: bool = False) -> None:
+                 copy_makes_source_writable: bool = False,
+                 swap_rename_fails: bool = False) -> None:
         self.graphs = graphs
         self.commands: list[tuple] = []
         self._copy_drops_edges = copy_drops_edges
@@ -149,6 +150,9 @@ class _FakeDb:
         #: restart, or another repair) while this run was mid-flight, so the source is back
         #: to accepting writes and competing fleet writes can land in the window.
         self._copy_makes_source_writable = copy_makes_source_writable
+        #: Raise on a RENAME whose DESTINATION is the live source (the swap) while still
+        #: allowing a RENAME onto an `__gwr_*` quarantine key (the retain park).
+        self._swap_rename_fails = swap_rename_fails
         # `repair()` reaches GRAPH.COPY/RENAME through `db.connection`.
         self.connection = self
 
@@ -185,6 +189,8 @@ class _FakeDb:
                 del self.graphs[src]
         elif cmd == "RENAME":
             src, dst = args
+            if self._swap_rename_fails and not str(dst).startswith("__gwr_"):
+                raise redis_exc.ResponseError("RENAME refused by the engine")
             self.graphs[dst] = self.graphs.pop(src)
         else:
             raise AssertionError(f"unexpected command {cmd!r}")
@@ -764,6 +770,93 @@ def test_a_standing_failure_retains_at_most_one_clone(monkeypatch, fake_lock):
         assert ok is False, msg
     assert _scratch_graphs(db) == [gwr.QUARANTINE_PREFIX + "tortoise"], db.graphs
     assert db.graphs[gwr.QUARANTINE_PREFIX + "tortoise"].nodes == BIG
+
+
+def test_a_failing_swap_rename_parks_the_clone_instead_of_accumulating(monkeypatch, fake_lock):
+    """The swap's OWN RENAME failing must park the clone too -- it is the retried path.
+
+    The deterministic quarantine key is what bounds retention when a standing failure keeps
+    the repair from succeeding. A failed swap `RENAME` is the one failure the scheduled job
+    is GUARANTEED to retry (the job runs every StartInterval and the probe still classes the
+    graph as the defect), so leaving the clone under its run-unique name leaked one full-graph
+    copy per run and no `__gwr_q_*` ever appeared (#8451 review cycle 5, P2).
+
+    Mutation: drop the `retain_clone(...)` call from the swap-RENAME failure branch -> three
+    failures leave three `__gwr_<uuid>` graphs and no quarantine key -> RED.
+    """
+    q = gwr.QUARANTINE_PREFIX + "tortoise"
+    db = _FakeDb({"tortoise": _defect_state(nodes=BIG)}, swap_rename_fails=True)
+    for _ in range(3):
+        ok, msg = gwr.repair(db, "tortoise")
+        assert ok is False, msg
+        assert "RENAME failed" in msg, msg
+        assert q in msg, f"the verdict must name the retained clone: {msg}"
+    assert _scratch_graphs(db) == [q], db.graphs
+    assert db.graphs[q].nodes == BIG
+
+
+def test_a_lossier_clone_never_downgrades_a_more_complete_retained_copy(monkeypatch, fake_lock):
+    """A known-incomplete clone must not replace a more complete retained copy.
+
+    Retention parks at one key per source, and the park is an unconditional `RENAME` -- so
+    the NEWEST clone always won, even from the "incomplete copy" branch, whose whole point
+    is that the clone is known to be MISSING data. A later, lossier clone therefore
+    destroyed an earlier, more complete retained copy while the log still asserted the
+    survivor "may be the only copy of data the source no longer has" (#8451 review cycle 5,
+    P2).
+
+    Mutation: park unconditionally (drop the dominance guard) -> the second run replaces
+    the (BIG, 100) retained copy with (BIG, 0) -> RED on the edges assertion.
+    """
+    def _boom(*_a, **_k):
+        raise RuntimeError("boolean index survived the drop")
+
+    monkeypatch.setattr("tortoise.hosted_backup._audit_copied_boolean_indexes", _boom)
+    q = gwr.QUARANTINE_PREFIX + "tortoise"
+    db = _FakeDb({"tortoise": _defect_state(nodes=BIG, edges=100)})
+
+    # run 1: the clone is complete (BIG, 100); the #3154 audit fails, so it is parked.
+    ok, msg = gwr.repair(db, "tortoise")
+    assert ok is False, msg
+    assert db.graphs[q].edges == 100, db.graphs[q]
+
+    # run 2: GRAPH.COPY now loses every edge, so this run's clone is KNOWN incomplete. It
+    # must not overwrite the more complete copy already retained.
+    db._copy_drops_edges = True
+    ok2, msg2 = gwr.repair(db, "tortoise")
+    assert ok2 is False, msg2
+    assert "RETAINED" in msg2, msg2
+    assert db.graphs[q].edges == 100, (
+        f"the retained copy was downgraded to {db.graphs[q]}")
+    assert db.graphs[q].nodes == BIG
+
+
+def test_an_unexpected_failure_still_parks_the_clone(monkeypatch, fake_lock):
+    """The outer failure path retains too -- an unexpected raise must not leak the clone.
+
+    Anything raised inside the repair AFTER `GRAPH.COPY` (before the swap) used to return
+    with the clone still at its run-unique name, so a standing failure accumulated a full
+    copy per scheduled run and no `__gwr_q_*` appeared (#8451 review cycle 5, P2).
+
+    Mutation: drop the `retain_clone(...)` call from the outer `except Exception` -> the
+    clone stays at `__gwr_<uuid>` and no quarantine key exists -> RED.
+    """
+    real_probe = gwr.probe
+
+    def _probe(db, name):
+        if str(name).startswith("__gwr_"):
+            raise RuntimeError("unexpected probe failure")
+        return real_probe(db, name)
+
+    monkeypatch.setattr(gwr, "probe", _probe)
+    q = gwr.QUARANTINE_PREFIX + "tortoise"
+    db = _FakeDb({"tortoise": _defect_state(nodes=BIG)})
+    ok, msg = gwr.repair(db, "tortoise")
+    assert ok is False, msg
+    assert "repair aborted" in msg, msg
+    assert q in msg, f"the verdict must name the retained clone: {msg}"
+    assert _scratch_graphs(db) == [q], db.graphs
+    assert db.graphs[q].nodes == BIG
 
 
 # ── the installer: CLI contract, escaping, lint-before-move, load verification ──
