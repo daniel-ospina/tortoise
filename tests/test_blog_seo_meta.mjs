@@ -20,44 +20,53 @@ import {
 } from "../website/functions/blog/_shared/seo-keywords.ts";
 import { rateLimited, __resetRateLimits } from "../website/functions/blog/_shared/agent-auth.ts";
 import { constraints } from "../website/functions/blog/_shared/seo-constraints.ts";
+import {
+  META_TITLE_MAX,
+  META_DESCRIPTION_MAX,
+} from "../website/functions/blog/_shared/meta-contract.ts";
 
 let failures = 0;
 
-// ⛔ THE round-4 invariant, asserted where it is OBSERVABLE.
+// ⛔ THE keyword_ok contract, asserted by DERIVING the expected verdict from each
+// fixture's own INPUTS rather than from a hand-written flag.
 //
-// A generic loop ("keyword_ok true ⟹ the title is not prefixed") is NOT usable:
-// a model may legitimately write a title that itself begins "Keyword: Subtitle",
-// and `ensureKeyword` produces the same shape, so the two are indistinguishable
-// from the response alone. What IS decidable is the invariant PER CASE, because
-// whether the repair fired is known by construction from the mock's input:
+// Two earlier versions of this guard were wrong and both are worth naming:
+//  1. A `/^[a-z0-9 ]+: /` regex silently ignores hyphens, so for the hyphenated
+//     primary "long-term memory for ai agents" a prefixed title could never
+//     match and the guard could not fail.
+//  2. A hand-written `fired` boolean described whether the TITLE repair ran, but
+//     cases like `titleOnly` repair only the DESCRIPTION — the flag was wrong,
+//     so the assertion checked the wrong thing and passed by coincidence of the
+//     mock's title shape (whose own "Keyword:" prefix mimicked the repair).
 //
-//   • repair fired  → `keyword_ok` MUST be false, and the title must carry the
-//     `${keyword}: ` prefix — the shape #8445 exists to remove. Reporting `true`
-//     here is the round-4 P1: a green verdict on a title the repair rebuilt.
-//   • repair silent → `keyword_ok` MUST be true, and the title must contain the
-//     keyword because the MODEL put it there.
-//
-// ⛔ Two ways this guard was already wrong, both worth naming:
-//   1. A `/^[a-z0-9 ]+: /` regex silently ignores hyphens, so for the hyphenated
-//      primary "long-term memory for ai agents" a prefixed title could never
-//      match and the guard could not fail. Derive the predicate from the
-//      response's OWN keyword instead of a character class.
-//   2. Even a correct predicate is unassertable as an implication over ALL
-//      cases (above), so it is asserted per case with the expectation written
-//      out, and the detector's reachability is asserted on the fired cases.
-const assertRepairOutcome = (label, probe, fired) => {
+// Deriving the expectation from the inputs removes the manual flag entirely:
+// `keyword_ok` is true exactly when the model's own text, unshortened by the
+// length contract, carried the keyword into both returned fields.
+const expectedKeywordOk = (rawTitle, rawDescription, kw) =>
+  rawTitle.trim().length <= META_TITLE_MAX &&
+  rawDescription.trim().length <= META_DESCRIPTION_MAX &&
+  containsKeyword(rawTitle, kw) &&
+  containsKeyword(rawDescription, kw);
+
+const assertKeywordOk = (label, probe, rawTitle, rawDescription) => {
   const kw = probe.body.primary_keyword;
-  const prefixed = typeof kw === "string" && kw.length > 0 &&
-    probe.body.meta_title.toLowerCase().startsWith(`${kw.toLowerCase()}: `);
-  if (fired) {
-    assert(prefixed, `[${label}] the case really exercised the repair — title is prefixed (got ${JSON.stringify(probe.body.meta_title)})`);
-    assertEq(probe.body.keyword_ok, false, `[${label}] a title the repair rebuilt MUST NOT carry a green verdict`);
-  } else {
-    assert(!prefixed || probe.body.keyword_ok === true, `[${label}] sanity`);
-    assertEq(probe.body.keyword_ok, true, `[${label}] the repair stayed silent, so the verdict is true`);
+  if (kw === null) {
+    assertEq(probe.body.keyword_ok, null, `[${label}] no keyword derived, so the verdict is null (unverified)`);
+    return;
+  }
+  const expected = expectedKeywordOk(rawTitle, rawDescription, kw);
+  assertEq(
+    probe.body.keyword_ok,
+    expected,
+    `[${label}] verdict must equal the derived expectation ` +
+      `(raw=${JSON.stringify([rawTitle.length, rawDescription.length])}, kw=${JSON.stringify(kw)})`,
+  );
+  if (expected) {
+    // A green verdict must mean the artifact is the model's own work — not a
+    // repair, and not a truncated fragment.
     assert(
       probe.body.meta_title.toLowerCase().includes(String(kw).toLowerCase()),
-      `[${label}] ...and the keyword is in the title because the MODEL put it there`,
+      `[${label}] a green verdict implies the returned title carries the keyword`,
     );
   }
 };
@@ -509,7 +518,7 @@ console.log("generate-seo with NO request tags — the keyword check must not be
   // The SAME keyword, model-placed instead of repaired → verdict flips to true.
   // This pair is what makes `keyword_ok` falsifiable rather than tautological.
   const modelPlaced = await driveNoTags({
-    metaTitle: `Long-Term Memory for AI Agents: Recall vs Learning | Tortoise`,
+    metaTitle: "Long-Term Memory for AI Agents: Recall vs Learning",
     metaDescription:
       "Long-term memory for AI agents measures recall, not learning. Tortoise tracks confidence and updates beliefs when information conflicts.",
   });
@@ -524,7 +533,7 @@ console.log("generate-seo with NO request tags — the keyword check must not be
   // only, which is what tells "the model filled both fields it was asked for"
   // apart from "it filled one".
   const titleOnly = await driveNoTags({
-    metaTitle: "Long-Term Memory for AI Agents: Recall vs Learning | Tortoise",
+    metaTitle: "Long-Term Memory for AI Agents: Recall vs Learning",
     metaDescription: "A description about confidence tracking that names no keyword at all.",
   });
   assertEq(
@@ -541,10 +550,14 @@ console.log("generate-seo with NO request tags — the keyword check must not be
   // never accompanies a title the repair prefixed. This is the negative control
   // for the round-4 P1, where computing the verdict on the model's discarded raw
   // output produced exactly that pair.
-  assertRepairOutcome("noTags", noTags, true);
-  assertRepairOutcome("repairedCase", repairedCase, true);
-  assertRepairOutcome("titleOnly", titleOnly, true);
-  assertRepairOutcome("modelPlaced", modelPlaced, false);
+  assertKeywordOk("noTags", noTags, "Agent Memory 2026: Recall vs Learning | Tortoise",
+    "Agent memory systems measure recall, not learning. Tortoise tracks confidence and updates beliefs when information conflicts.");
+  assertKeywordOk("repairedCase", repairedCase, "A title with no keyword in it at all",
+    "Also nothing relevant here whatsoever, just filler prose.");
+  assertKeywordOk("titleOnly", titleOnly, "Long-Term Memory for AI Agents: Recall vs Learning",
+    "A description about confidence tracking that names no keyword at all.");
+  assertKeywordOk("modelPlaced", modelPlaced, "Long-Term Memory for AI Agents: Recall vs Learning",
+    "Long-term memory for AI agents measures recall, not learning. Tortoise tracks confidence and updates beliefs when information conflicts.");
 
   // No tag maps to the vocabulary at all → nothing was verified. That is
   // `null` (unknown), never `true` (success).
@@ -781,18 +794,98 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   assertEq(
     overBudget.body.keyword_ok,
     false,
-    "...but the verdict is conservatively FALSE, because the returned title needed the repair",
+    "...but the verdict is conservatively FALSE: the model's title was over the cap",
   );
   assert(
     overBudget.body.meta_title.startsWith("epistemic memory: "),
     `...the returned title is indeed repaired/truncated (got ${JSON.stringify(overBudget.body.meta_title)})`,
   );
-  // The general invariant, asserted directly rather than case by case: a green
-  // verdict can never sit next to a prefixed title.
-  assertRepairOutcome("fluent", fluent, false);
-  assertRepairOutcome("descriptionOnly", descriptionOnly, true);
-  assertRepairOutcome("overBudget", overBudget, true);
-  assertRepairOutcome("claimsUnused", claimsUnused, true);
+  // ⛔ THE round-5 case, and the reason the truncation check exists. The prompt
+  //    tells the model to front-load the keyword, so a model that OVERSHOOTS the
+  //    cap keeps its keyword through the cut — and the `enforced` check alone
+  //    stayed GREEN on a title truncated mid-phrase:
+  //
+  //      returned   : "Epistemic memory explains why a belief changed in | Tortoise"
+  //      keyword_ok : true      repair fired: no      contract truncated: YES
+  //
+  //    The `overBudget` fixture above cannot catch this: it puts the keyword at
+  //    the END, so truncation removes it and the enforced check fires anyway.
+  //    Measured at 68% of green verdicts on randomised input before the fix.
+  const frontLoaded = await drive({
+    primaryKeyword: "epistemic memory",
+    metaTitle: "Epistemic memory explains why a belief changed in production agent systems today",
+    metaDescription: "A description within its own cap that names epistemic memory early on.",
+  });
+  assertEq(
+    frontLoaded.body.primary_keyword,
+    "epistemic memory",
+    "...the front-loaded keyword is still the model's choice",
+  );
+  assertEq(
+    frontLoaded.body.keyword_ok,
+    false,
+    "a title the length contract cut mid-phrase is NOT the model's text, so the verdict is false",
+  );
+  assert(
+    frontLoaded.body.meta_title.toLowerCase().includes("epistemic memory"),
+    "...even though the keyword DID survive the cut (this is what the enforced-only check missed)",
+  );
+  assert(
+    frontLoaded.body.meta_title.length <= 60,
+    `...and the returned title really is at the cap (got ${frontLoaded.body.meta_title.length})`,
+  );
+
+  // The description half of the truncation check needs its own fixture: a model
+  // description past the 155-char cap that KEEPS the keyword through the cut.
+  // Without one, dropping that half of the check was a no-op for the suite.
+  const longDescription = await drive({
+    primaryKeyword: "epistemic memory",
+    metaTitle: "Epistemic Memory: Why Beliefs Change",
+    metaDescription:
+      `Epistemic memory records why a belief changed, and this sentence exists purely to push the ` +
+      `description past its cap so the length contract has to cut it somewhere after the keyword.`,
+  });
+  assert(
+    longDescription.body.meta_description.length <= 155,
+    `...the description really is at its cap (got ${longDescription.body.meta_description.length})`,
+  );
+  assert(
+    longDescription.body.meta_description.toLowerCase().includes("epistemic memory"),
+    "...and the keyword survived the cut, so only the truncation check can catch it",
+  );
+  assertEq(
+    longDescription.body.keyword_ok,
+    false,
+    "a description the length contract cut is not the model's text, so the verdict is false",
+  );
+
+  assertKeywordOk("fluent", fluent, "Epistemic Memory: Why Confidence Matters | Tortoise",
+    "Epistemic memory records why a belief changed. Tortoise tracks confidence and updates beliefs when information conflicts.");
+  assertKeywordOk("descriptionOnly", descriptionOnly, "Why Confidence Matters More Than Recall | Tortoise",
+    "Epistemic memory records why a belief changed, and why that matters more than recall alone.");
+  assertKeywordOk("overBudget", overBudget,
+    "A practical guide to graph memory for teams building agents with epistemic memory",
+    "A description placing the term epistemic memory deliberately at the very end again.");
+  // A padded claim normalises onto a vocabulary term (`isKnownKeyword`
+  // normalises), so if the model also WRITES it the claim would be honoured and
+  // echoed back at arbitrary length. An over-long claim is rejected outright.
+  const paddedKw = `${"epistemic"}${".".repeat(200)}${"memory"}`;
+  const padded = await drive({
+    primaryKeyword: paddedKw,
+    metaTitle: `A guide to ${paddedKw}`,
+    metaDescription: `A description that mentions ${paddedKw} somewhere in it.`,
+  });
+  assert(
+    String(padded.body.primary_keyword).length <= 40,
+    `an over-long claim is REJECTED, not echoed (got ${String(padded.body.primary_keyword).length} chars)`,
+  );
+  assert(
+    padded.body.primary_keyword !== paddedKw,
+    "...and it is not the padded string itself",
+  );
+
+  assertKeywordOk("claimsUnused", claimsUnused, "Knowledge Graph RAG: A Practical Guide | Tortoise",
+    "A practical guide to knowledge graph retrieval augmented generation for production systems.");
 
   // 3. ⛔ The model must not be able to introduce a keyword the research never
   //    produced. An unknown choice falls back to the tag-derived keyword.

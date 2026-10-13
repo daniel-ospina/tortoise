@@ -18,7 +18,7 @@ import { type Env, HSTS } from "../_lib.ts";
 import { requireAdmin } from "../_shared/admin-auth.ts";
 import { authenticate, rateLimited, type RateLimit } from "../_shared/agent-auth.ts";
 import { constraints } from "../_shared/seo-constraints.ts";
-import { META_TITLE_MAX, META_DESCRIPTION_MAX } from "../_shared/meta-contract.ts";
+import { META_TITLE_MAX, META_DESCRIPTION_MAX, TAG_LEN_MAX } from "../_shared/meta-contract.ts";
 import {
   TAG_KEYWORDS,
   keywordsFor,
@@ -316,10 +316,25 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   // intended and tested; do not "fix" one to match the other.
   const rawTitle = typeof result.json.meta_title === "string" ? result.json.meta_title : "";
   const rawDescription = typeof result.json.meta_description === "string" ? result.json.meta_description : "";
-  const chosen = typeof result.json.primary_keyword === "string" ? result.json.primary_keyword.trim() : "";
+  // A raw field longer than its cap WILL be shortened by the length contract —
+  // `metaTitle` truncates to the cap before appending the suffix, so
+  // `length <= cap` means the model's own words survive intact and
+  // `length > cap` means they do not.
+  const titleTruncated = rawTitle.trim().length > META_TITLE_MAX;
+  const descriptionTruncated = rawDescription.trim().length > META_DESCRIPTION_MAX;
+  // The model's claim is length-bounded for the same reason the caller's tags
+  // are: it is echoed back to callers. Bound it by REJECTING an over-long claim,
+  // not by slicing it — slicing before `isKnownKeyword` (the first attempt) cut
+  // "epistemic" + dots + "memory" down to "epistemic", which is not a vocabulary
+  // term, so a padded claim was rejected for the wrong reason and the real
+  // length guard was untestable. A real keyword cannot exceed the vocabulary's
+  // own cap, so anything longer is not one.
+  const chosen =
+    typeof result.json.primary_keyword === "string" ? result.json.primary_keyword.trim() : "";
   const chosenUsed =
     tags.length === 0 &&
     chosen !== "" &&
+    chosen.length <= TAG_LEN_MAX &&
     isKnownKeyword(chosen) &&
     (containsKeyword(rawTitle, chosen) || containsKeyword(rawDescription, chosen));
   const primary = chosenUsed ? chosen : resolvePrimaryKeyword(tags, enforced.tags);
@@ -356,41 +371,42 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   return json(
     {
       ...repaired,
-      // ⛔ `keyword_ok` reports ONE thing, conservatively: the keyword is in the
-      // fields the caller RECEIVES **as the model wrote them** — i.e. the repair
-      // did NOT have to fire. Computed on `enforced.*` (post length-contract,
-      // pre-repair), so it is true only when the returned meta is clean.
+      // ⛔ `keyword_ok` is a GUARANTEE and is deliberately CONSERVATIVE. It is
+      // true only when the returned meta fields are the MODEL'S OWN TEXT with
+      // the keyword in them — untouched by the repair AND unshortened by the
+      // length contract:
       //
-      // Two other artifacts were tried and both were wrong:
-      //   • `repaired.*` — a TAUTOLOGY. `ensureKeyword` guarantees its result
-      //     contains the keyword, so the answer was always `true` whenever
-      //     `primary` was non-null and `false` was unreachable.
-      //   • the model's RAW fields — it let `keyword_ok: true` coexist with
-      //     exactly the defect #8445 exists to remove. A title over the 60-char
-      //     cap whose keyword falls outside the cut is truncated, then the
-      //     repair re-front-loads it:
+      //   • `containsKeyword(enforced.*)` — the repair did not have to fire.
+      //   • `!truncated` — the length contract did not cut the model's words.
       //
-      //       keyword_ok: true
-      //       meta_title: "epistemic memory: A practical guide to graph memory for"
+      // Both halves are needed, and the second was missing until the round-5
+      // review. Checking the repaired fields made it a TAUTOLOGY (ensureKeyword
+      // guarantees presence); checking `enforced.*` alone verified a PROXY —
+      // "the keyword survived truncation" — which is not the artifact. The
+      // prompt tells the model to front-load the keyword, so a model that
+      // overshoots the cap keeps its keyword through the cut and the verdict
+      // stayed GREEN on a title cut mid-phrase:
       //
-      //     Measured at a ~7.5% rate on randomised tagless input. A consumer
-      //     gating on `keyword_ok` (the field #8293 tells callers to read) would
-      //     PUBLISH that. Verifying the model's discarded output instead of the
-      //     artifact the caller receives is the same proxy-for-artifact mistake
-      //     this PR keeps finding.
+      //   returned    : "Epistemic memory explains why a belief changed in | Tortoise"
+      //   keyword_ok  : true        repair fired: no        contract truncated: YES
       //
-      // So: `true` = the model placed it unaided AND the length contract did not
-      // remove it, so the returned title reads fluently around it (indicator 1).
-      // `false` = the repair had to fire — the model omitted it, or the title was
-      // too long — and the returned field needed help. Conservative by design:
-      // a needless regeneration is cheap, publishing a colon-prefixed title is
-      // not. `null` = no primary keyword could be derived, so nothing was
-      // verified (never a positive claim).
+      // Measured at 68% of green verdicts on randomised input. A consumer gating
+      // on `keyword_ok` (the field #8293 tells callers to read) would PUBLISH
+      // that, which is #8445 indicator 1 violated behind a passing verdict.
+      //
+      // So `true` means: this is the model's meta, keyword included, as written.
+      // `false` means something downstream (the repair, the cap, or the model
+      // itself) altered or omitted it — a needless regeneration is cheap,
+      // publishing a truncated or bolted-on title is not. `null` = no primary
+      // keyword could be derived, so nothing was verified (never a positive
+      // claim).
       primary_keyword: primary,
       keyword_ok:
         primary === null
           ? null
-          : containsKeyword(enforced.meta_title, primary) &&
+          : !titleTruncated &&
+            !descriptionTruncated &&
+            containsKeyword(enforced.meta_title, primary) &&
             containsKeyword(enforced.meta_description, primary),
       provider: result.provider,
       input_tokens: result.inputTokens,
