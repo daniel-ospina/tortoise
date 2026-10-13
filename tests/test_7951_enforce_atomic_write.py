@@ -464,3 +464,123 @@ def test_create_point_is_apply_first_a_recorded_deviation(
         f"(observed: {cache_at_journal!r})"
     )
     assert _count(proj, "Point", "id", point["id"]) == 1
+
+
+# ── P0 (review round 4): the onboarding FLOW writers must not be refused ──
+
+def test_onboarding_flow_writes_are_not_refused_on_a_journal_backed_projection(
+        sdk_with_journal):
+    """P0 — the armed guard must not break the onboarding FLOW writers.
+
+    `tortoise/onboarding/state.py::_run` used to dispatch through the PUBLIC
+    raw-query lane (`FalkorProjection.query`). §17.1 closes that lane on a
+    journal-backed projection, and the hosted lane (`TORTOISE_EVENT_LOG_BASE_DIR`
+    → `hosted_api._org_proj()` → a journal-bound SDK) is exactly that — so
+    every onboarding writer (`ensure_onboarding_state_node`, `write_status`,
+    `write_completed_step`, `write_member_progress`, `write_fork`, …) raised
+    `DirectCacheWriteRefused` in production, and the callers swallow it
+    (fail-open) so orgs silently never reached `complete`.
+
+    Onboarding FLOW state is OPERATIONAL state, not a projection of the event
+    journal, so the fix routes `_run` through the projection's own graph handle
+    (`proj.g.query`) — the lane the SDK's live writes use, and the residual
+    §17.1 records as still-open. This test drives every writer the reported
+    path uses and asserts they all land.
+
+    RED before the fix: the first write raises `DirectCacheWriteRefused`.
+    """
+    from tortoise.onboarding import state as onboarding_state
+
+    sdk = sdk_with_journal
+    proj = sdk._get_proj()
+    org = "org-7951-onboarding"
+    assert proj._journal_backed, (
+        "the fixture must ARM the guard, or this regression pin is vacuous"
+    )
+
+    onboarding_state.ensure_onboarding_state_node(proj, org)
+    onboarding_state.write_completed_step(proj, org, "harness-connected")
+    onboarding_state.write_member_progress(
+        proj, org, "user-1", ["harness-connected"])
+    onboarding_state.write_fork(proj, org, "self")
+    onboarding_state.write_status(proj, org, onboarding_state.STATUS_ACTIVE)
+
+    node = onboarding_state.read_onboarding_node(proj, org)
+    assert node is not None, "the FLOW node was never created"
+    assert node.get("fork") == "self"
+    assert "harness-connected" in onboarding_state.completed_steps(proj, org)
+
+
+def test_the_selfhost_lane_is_armed_and_its_onboarding_writes_succeed(
+        tmp_path, monkeypatch):
+    """P2 — the self-host MCP lane IS armed, and must keep onboarding working.
+
+    `mcp_auth._get_org_sdk` arms the guard for `SELFHOST_ORG_ID`
+    (`namespace='selfhost'`), so the earlier boundary claim that this lane
+    "is NOT armed, and could not be" was wrong. This pins the corrected
+    boundary AND the P0 fix on it: the ARMING must not stop
+    `ensure_selfhost_onboarding` from creating the node.
+    """
+    from tortoise import mcp_auth
+    from tortoise.onboarding import selfhost as _selfhost
+    from tortoise.onboarding import state as onboarding_state
+
+    monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", str(tmp_path))
+    # Force the once-per-process memo to run for THIS test.
+    monkeypatch.setattr(_selfhost, "_INITIALIZED", set())
+    monkeypatch.setattr(_selfhost, "_INIT_FAILURE_WARNED", set())
+
+    tok = mcp_auth._current_org_id.set(mcp_auth.SELFHOST_ORG_ID)
+    try:
+        sdk = mcp_auth._get_org_sdk()
+        proj = sdk._get_proj()
+        assert proj._journal_backed is True, (
+            "the self-host lane is not armed — the corrected boundary says it is"
+        )
+        assert sdk._event_log_path == str(
+            tmp_path / "org_selfhost" / "events.jsonl")
+        # `_get_org_sdk` runs the selfhost init seam; pre-fix its `_run` was
+        # refused and the fail-open wrapper hid it, leaving no node.
+        node = onboarding_state.read_onboarding_node(
+            proj, mcp_auth.SELFHOST_ORG_ID)
+        assert node is not None, (
+            "the selfhost onboarding init was silently refused on the armed lane"
+        )
+        assert node.get("fork") == "self", (
+            "the selfhost init wrote the node but not its pinned fork value"
+        )
+    finally:
+        mcp_auth._current_org_id.reset(tok)
+
+
+# ── P2 (review round 4): the stdio fast path must not build hosted_api ────
+
+def test_the_stdio_fast_path_never_resolves_a_journal(tmp_path, monkeypatch):
+    """P2 — `_get_sdk` must not call the hosted-api journal resolver.
+
+    On the base/stdio lane the journal key is `namespace=None, graph_name=None`
+    by construction, and the ONE derivation returns ``None`` for it — so
+    resolving it bought nothing while importing `hosted_api` (and the whole
+    FastAPI app it builds) on the tool fast path, which the module's own
+    invariant forbids (#3834). The resolver is patched to FAIL if called, so
+    this is RED on the pre-fix code and GREEN after.
+    """
+    from tortoise import mcp_auth, mcp_server
+
+    monkeypatch.setattr(mcp_server, "_sdk", None)
+    monkeypatch.setenv("TORTOISE_DB_URI", str(tmp_path / "fastpath.db"))
+    called: list[tuple] = []
+
+    def _fail_if_called(*args, **kwargs):
+        called.append((args, kwargs))
+        raise AssertionError(
+            "the stdio fast path resolved a journal — it must not import "
+            "hosted_api for a path that is always None (#7951 P2)"
+        )
+
+    monkeypatch.setattr(mcp_auth, "_journal_path_for", _fail_if_called)
+
+    sdk = mcp_server._get_sdk()
+    assert not called, "_journal_path_for was called on the journal-less lane"
+    assert sdk._event_log_path is None
+    sdk.close()

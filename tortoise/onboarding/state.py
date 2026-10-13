@@ -14,6 +14,13 @@ The module is graph-agnostic: every writer/reader takes a ``graph`` handle
 with a ``.query(cypher, **params)`` surface (FalkorProjection) returning a
 result with ``.result_set`` and ``.stats``. Importable without hosted_api
 (no circular import).
+
+#7951 §17.1: onboarding FLOW state is OPERATIONAL state, not a projection of
+the event journal, so ``_run`` writes it straight at the graph handle
+(``FalkorProjection.g``) rather than through the public raw-query lane
+(``FalkorProjection.query``), which the single-writer guard closes on a
+journal-backed projection. The handle is the lane the SDK's own live writes
+use, and the residual §17.1 records as still-open.
 """
 from __future__ import annotations
 
@@ -368,12 +375,25 @@ def _org_lock(org_id: str) -> threading.Lock:
 
 
 def _run(graph: Any, cypher: str, params: dict[str, Any] | None = None):
-    """Run a query on the injected graph handle — tolerant of both the
-    FalkorProjection surface (``.query(cypher, **params)``) and the raw
-    graph surface (``.query(cypher, params=...)``). A cypher/DB error
-    raises a ResponseError (never a TypeError), so the fallback only fires
-    on a signature mismatch."""
+    """Run a query on the injected graph handle.
+
+    #7951 §17.1: prefer the projection's own graph handle (``graph.g``) when
+    one is present. ``FalkorProjection.query`` is the public raw-query lane,
+    which the single-writer guard CLOSES on a journal-backed projection (the
+    production hosted lane); onboarding FLOW state is operational state, not a
+    projection of the event journal, so it must not travel that lane. The
+    handle (``proj.g.query``) is the same lane the SDK's own live writes use
+    and is the residual §17.1 records as still-open.
+
+    Falls back to the duck-typed surfaces when there is no ``.g`` (a raw
+    graph): the ``.query(cypher, **params)`` keyword form, then the
+    ``.query(cypher, params=...)`` form. A cypher/DB error raises a
+    ResponseError (never a TypeError), so the fallback only fires on a
+    signature mismatch."""
     params = params or {}
+    inner = getattr(graph, "g", None)
+    if inner is not None:
+        return inner.query(cypher, params=params)
     try:
         return graph.query(cypher, **params)
     except TypeError:

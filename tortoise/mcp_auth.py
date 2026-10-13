@@ -121,7 +121,17 @@ def _get_org_sdk() -> TortoiseSDK:
     (``_journal_path_for``), so ``TortoiseSDK._get_proj`` binds it and §17.1's
     single-writer guard is ARMED on this lane. Before this, no MCP-lane SDK
     carried an ``event_log_path`` and the guard was inert on the surface
-    agents actually write through."""
+    agents actually write through.
+
+    ⛔ BOUNDARY, corrected so it is not over-read: the guard is armed on the
+    ORG-SCOPED lane — including the SELF-HOST lane (``SELFHOST_ORG_ID`` →
+    ``namespace='selfhost'`` → ``<base>/org_selfhost/events.jsonl`` when
+    ``TORTOISE_EVENT_LOG_BASE_DIR`` is set). It is the BASE/stdio lane
+    (``_get_base_sdk``, no org) that is journal-less and therefore unarmed;
+    that lane's journal resolves to ``None`` by construction and is not this
+    function's concern. So the earlier claim that the self-host lane "could
+    not be armed" was wrong: it is armed whenever the journal base dir is
+    set."""
     org_id = _current_org_id.get()
     if org_id is None:
         return _get_base_sdk()
