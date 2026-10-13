@@ -2917,6 +2917,128 @@ def _journal_safe_params(params, cypher=None):
     return out
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# #7951 §17.1 — THE SINGLE-WRITER GUARD. Read this before adding a fold or a
+# raw cache write.
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# THE RULE (`docs/architecture/STORAGE-ARCHITECTURE.md` §17.1 — a consequence
+# of the §2.0 owner ruling of 2026-10-08: **Postgres is the system of record;
+# FalkorDB is a derived hot cache**):
+#
+#   > every write goes to the truth store first, and the cache is projected
+#   > from it.
+#
+# The reason is definitional, not stylistic:
+#
+#   > **A derived cache that is also written to directly is not derived.**
+#
+# §3 already states the protocol for the derived TABLES — *"Writes go to the
+# truth first, then project"* — and §17.1 extends it to the CACHE. `#8127`
+# built the chokepoint (`TortoiseSDK._apply_and_journal`, journal-first then
+# project) and `#8315` enumerated the doors to the fold. **This guard is step
+# three: enforce it, so a direct cache write FAILS rather than merely being
+# discouraged.**
+#
+# WHY A RUNTIME GATE AND NOT A BIGGER LIST. The failure mode is not one bad
+# writer; it is that a *new* unjournaled writer can appear silently. A
+# lexical/AST inventory cannot be sound by construction (the terminal finding
+# of `#8315`, accepted), so this enforcement is RUNTIME and FAIL-CLOSED: a
+# fold on a **journal-backed** projection is refused unless the caller has
+# declared that it is a sanctioned projection of the journal —
+#
+#   * `_live_write_scope(...)` — opened by the live doors that append FIRST and
+#     fold second (`TortoiseSDK._apply_and_journal`, `_doc_write`,
+#     `_create_entity`, `EventAPI._emit`, `ConversationMiner._emit_event`).
+#     The append is the COMMIT POINT (the ordering contract at the top of
+#     `tortoise/sdk.py`); the scope is opened immediately AFTER it, around the
+#     fold that follows — so the journal write is never inside the scope that
+#     authorizes the cache write, it strictly precedes it.
+#   * `_replay_write_scope()` — opened by the replay engines (`rebuild`,
+#     `recover_from_log`, `backup.restore`, `_cmd_reconcile`), whose records
+#     came FROM the journal and must not journal again.
+#
+# The declaration is not a bypass flag: it is a per-call `with` block (no
+# instance attribute, constructor argument or env var can set it), and the
+# gate REFUSES BY DEFAULT — so a writer that forgets to declare itself fails
+# closed, which is the direction the definitional rule requires.
+#
+# SCOPE — STATED SO IT IS NOT OVER-READ. This closes the FOLD
+# (`FalkorProjection.apply`) and the public raw-query lane
+# (`FalkorProjection.query`) for a journal-backed projection. It does NOT yet
+# refuse a mutating statement issued straight at the guarded handle
+# (`proj.g.query(...)`). That handle is *also* the live path of every SDK
+# writer — `create_point`'s `CREATE (:Point)`, `update_point`'s
+# `SET n += $props` — so a blanket refusal there would break the product's own
+# write path, not a violation of it: the SDK's live doors journal (or carry
+# the recorded apply-first exception), and there is no runtime signal at the
+# handle that separates a journaled live write from a direct one. Converting
+# that 300+-site surface is §17.1's mechanism (1), the atomic write, and it is
+# recorded as still-open on `#7951` rather than papered over here.
+#
+# ⛔ THE RESIDUAL IS THREE ESCAPES, NOT ONE — named so it is stated, not
+# discovered. A writer that wants to write this cache directly has:
+#   1. `proj.g.query("CREATE …")`     — the guarded handle itself (the SDK's
+#      own live lane, above);
+#   2. `proj.g._g.query("CREATE …")`  — one private hop past the handle into
+#      the raw `_GuardedGraph`;
+#   3. `proj.db.select_graph(<g>).query("CREATE …")` — straight at the
+#      falkordb client, naming ANY graph.
+# All three are verified ALLOWED against a journal-backed projection. (2) and
+# (3) are the same class as (1) — they bypass the same fold — and none of the
+# three is guarded in this increment. They are the surface §17.1's atomic
+# write has to close; a lexical inventory cannot, because each is one hop
+# below anything a runtime signal is placed on.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class DirectCacheWriteRefused(RuntimeError):
+    """§17.1: a write reached the derived cache without authorization.
+
+    Raised when a fold (`FalkorProjection.apply`) or a mutating statement on
+    the public raw-query lane (`FalkorProjection.query`) is issued against a
+    **journal-backed** projection outside a sanctioned scope. The projection is
+    the derived cache of a journal; a write it did not receive through its
+    journal is the second writer §17.1 forbids.
+    """
+
+
+#: The single-writer authorization for the current context. ``None`` = no
+#: sanctioned projection is in flight, so the default is REFUSAL. A ContextVar
+#: (not an instance or `threading.local` attribute) so a concurrent thread
+#: writing through the same projection sees the default and is refused rather
+#: than inheriting another thread's authorization — the same thread-isolation
+#: property the #7951 replay anchors were moved to in round 3.
+_CACHE_WRITE_AUTHORIZED: ContextVar[str | None] = ContextVar(
+    "tortoise_cache_write_authorized", default=None)
+
+
+@contextlib.contextmanager
+def _cache_write_authorized(reason: str):
+    """Declare the enclosed writes a sanctioned projection of the journal.
+
+    ``reason`` is carried for the refusal message and for a test that asserts
+    the live doors declare themselves. Entry is always paired with a ``reset``
+    in a ``finally``, so a raising fold can never leave the scope armed over
+    the caller's next write.
+    """
+    token = _CACHE_WRITE_AUTHORIZED.set(reason)
+    try:
+        yield
+    finally:
+        _CACHE_WRITE_AUTHORIZED.reset(token)
+
+
+def _live_write_scope(reason: str = "live-door"):
+    """The live doors' scope: journal appended first, then the fold."""
+    return _cache_write_authorized(reason)
+
+
+def _replay_write_scope():
+    """The replay engines' scope: the record came FROM the journal."""
+    return _cache_write_authorized("replay")
+
+
 class _GuardedGraph:
     """Wrapper around the FalkorDB Graph handle that guards bulk graph-wipe queries.
 
@@ -6508,6 +6630,39 @@ class FalkorProjection(
     non-disposable server graph.
     """
 
+    # #7951 §17.1: whether this projection is the DERIVED CACHE OF A CONFIGURED
+    # JOURNAL, and so under the single-writer guard. A CLASS attribute (not set
+    # in ``__init__``) so the ``object.__new__`` guard stubs that skip
+    # ``__init__`` do not raise `AttributeError` — the same property the
+    # `_replay_*` ContextVar properties have.
+    #
+    # ⛔ READ THE POLARITY — the two defaults point OPPOSITE ways:
+    #   * ``_journal_backed = False`` here is the PERMISSIVE default. A
+    #     projection that never bound a journal is NOT under the guard, because
+    #     with no journal there is no truth store for its cache to be ahead of
+    #     (§17.1 has nothing to enforce). Only ``_bind_journal`` sets it
+    #     ``True``, and only a live door that OWNS a journal calls it.
+    #   * the REFUSAL lives in the authorization ContextVar
+    #     (``_CACHE_WRITE_AUTHORIZED``, default ``None`` = refusal), and it is
+    #     read ONLY on the ``_journal_backed`` branch. So the gate refuses by
+    #     default *given a journal*, which is the fail-closed direction.
+    # A stub that skips ``__init__`` therefore reads "no journal configured"
+    # and is ALLOWED to fold — it is not silently authorized against a bound
+    # journal (it cannot be: nothing turned ``True``), and no stub can flip the
+    # refusal off on a projection whose journal really was bound.
+    _journal_backed: bool = False
+
+    def _bind_journal(self, journal_path: str | None) -> None:
+        """Mark this projection as the derived cache of a journal (`#7951`).
+
+        Called by the live doors that OWN a journal (`TortoiseSDK._get_proj`
+        when an event log is configured). It does not enable a bypass — it
+        ARMS the guard: from this point a fold or a mutating raw-query on this
+        projection is refused unless the caller declares a sanctioned scope
+        (``_live_write_scope`` / ``_replay_write_scope``).
+        """
+        self._journal_backed = bool(journal_path)
+
     # #7951 round 3: the replay anchors are CONTEXT-LOCAL (ContextVar), not
     # instance attributes. `rebuild_all` runs with them armed on its own
     # thread/context; another thread writing through the same `_GuardedGraph`
@@ -7370,6 +7525,28 @@ class FalkorProjection(
               journal_object_deleted=None, journal_first_materialized=None,
               journal_seq: int | None = None,
               journal_existence=None) -> None:
+        # #7951 §17.1 — THE SINGLE-WRITER GATE (fail-closed, default REFUSAL).
+        # A fold is the cache WRITE of the record/cache split, so on a
+        # journal-backed projection it is legal only when a sanctioned scope is
+        # in flight: a live door that appended to the journal FIRST (the
+        # chokepoint), or a replay engine whose record came FROM the journal.
+        # A direct `proj.apply(ev)` with neither is the "hidden door" class the
+        # door inventory (`#8315`) names as the remaining S2 failure mode — it
+        # would put the DERIVED store ahead of the TRUTH with no repair path,
+        # and it now RAISES instead of silently folding.
+        if self._journal_backed and _CACHE_WRITE_AUTHORIZED.get() is None:
+            raise DirectCacheWriteRefused(
+                "Refusing a DIRECT fold: `FalkorProjection.apply` was called "
+                "with no sanctioned write scope in flight. This projection is "
+                "the derived cache of a journal, and §17.1 requires every "
+                "write to go to the truth store first — "
+                "docs/architecture/STORAGE-ARCHITECTURE.md §17.1: a derived "
+                "cache that is also written to directly is not derived. Live "
+                "writers must append first and fold through "
+                "`TortoiseSDK._apply_and_journal` (or `EventAPI._emit`); replay "
+                "engines must run inside `_replay_write_scope()`. event_type="
+                f"{(event or {}).get('type')!r}"
+            )
         # #3585 re-review (cycle 2, FIX A): `journal_object_surviving` is
         # ``(ids, names)`` of every Object the WHOLE journal leaves in place,
         # and `journal_object_deleted` the ids it hard-deletes. They are
@@ -7957,6 +8134,28 @@ class FalkorProjection(
     @_fail_closed("rebuild(log)")
     @tolerates_altered_numbers
     def rebuild(self, log, *, confirm_destructive: bool = False) -> None:
+        """#7951 §17.1: the REPLAY entry point for one EventLog.
+
+        A thin wrapper that opens the replay scope and delegates to
+        ``_replay_log``. The replay's records CAME FROM the journal, so they
+        are authorized to be folded — and, by the ordering contract's exception
+        1, they must NOT be journaled again. Opening the scope here (rather
+        than at each `apply` call) means a fold added to any of this engine's
+        helpers is covered without a second declaration.
+
+        #7174/#5011: BOTH markers are declared on THIS public name, not on the
+        private ``_replay_log`` — ``rebuild`` is the whole-journal replay engine
+        the exemption set names (``cypher_guard.tolerates_altered_numbers``'
+        docstring and ``test_7174_param_boundary_numeric_guard``), and the guard
+        reads the MODULE-LEVEL attribute. ``functools.wraps`` on the marker
+        wrappers is the documented thing the guard inspects, so placing them on
+        the wrapper keeps the exemption on the public entry point while the
+        implementation stays extracted.
+        """
+        with _replay_write_scope():
+            self._replay_log(log, confirm_destructive=confirm_destructive)
+
+    def _replay_log(self, log, *, confirm_destructive: bool = False) -> None:
         """Wipe the graph and replay one EventLog. DESTRUCTIVE.
 
         #2944: the wipe is gated by L1 — the caller MUST pass
@@ -12103,6 +12302,26 @@ class FalkorProjection(
         }
 
     def query(self, cypher: str, **params):
+        # #7951 §17.1 — the public raw-query lane is closed for a
+        # journal-backed projection. This is the door the SDK does NOT use
+        # (`proj.g.query` is the SDK's write lane); it is the raw lane a caller
+        # reaches for when it wants to write the cache without the projection,
+        # and a mutating statement here is exactly the second writer §17.1
+        # forbids. Reads pass unchanged; the classifier is the same
+        # conservative `_statement_writes` the parameter gate uses, so an
+        # unreadable statement fails CLOSED.
+        if self._journal_backed and _CACHE_WRITE_AUTHORIZED.get() is None \
+                and _statement_writes(cypher):
+            raise DirectCacheWriteRefused(
+                "Refusing a mutating statement on the raw-query lane: "
+                "`FalkorProjection.query` bypasses the projection and this "
+                "projection is the derived cache of a journal "
+                "(docs/architecture/STORAGE-ARCHITECTURE.md §17.1). Write "
+                "through the journal instead (`TortoiseSDK._apply_and_journal` "
+                "or the SDK's public write API); replay engines run inside "
+                "`_replay_write_scope()`. statement="
+                + " ".join((cypher or "").split())[:160]
+            )
         # L2 guard (#99): refuse bulk graph-wipe on non-test graphs. There is
         # NO bypass attribute (#2944 removed `_skip_guard`): this path is
         # unconditional, exactly like _GuardedGraph.query. The authorized

@@ -85,6 +85,11 @@ surfaces:
   # addition candidate). `--integrity` also requires every test file to be
   # classified, which the `core` entry satisfies.
   - test_7951_write_doors.py
+  # #7951 (steps 1-3, the ENFORCEMENT): DUAL-REGISTERED with the same six
+  # surfaces as the door inventory above, for the same reason — the guard's
+  # subjects span `projection/` (core), `sdk.py`, `api.py` (api),
+  # `backup.py`/`consistency.py`/`mining.py` (core), and `__main__.py` (api).
+  - test_7951_enforce_atomic_write.py
   - test_7677_create_org_retry_idempotent.py  # #7677: wait-bound retry must not 409 on the caller's own org; owns to `api` (the change pins tortoise/hosted_api.py + tortoise/supabase_control.py create-org lanes)
   # #7968 / PR #8179 review P1: DUAL-REGISTERED with `core` below. The guard
   # pins `purge_org_control_plane` in `tortoise/supabase_control.py`, which IS a
@@ -1030,6 +1035,12 @@ surfaces:
   # → `"full": true` — so it needs no entry here.) `--integrity` also
   # requires every test file to be classified, which this entry satisfies.
   - test_7951_write_doors.py
+  # #7951 (steps 1-3, the ENFORCEMENT): the single-writer guard's own pins —
+  # a direct fold and a mutating raw-query are REFUSED on a journal-backed
+  # projection, the chokepoint/replay scopes still fold. `projection/` and
+  # `sdk.py` are this guard's subjects; an `sdk.py`-only change selects the
+  # full matrix, and a `projection/`-only change falls through to `core`.
+  - test_7951_enforce_atomic_write.py
   # #5141: `graph-scripts/backfill_references.py` matches no named surface and
   # falls through to `core`, so this arm is what runs the script's smoke test on
   # a graph-script-only diff. The pre-existing coverage could not see the
@@ -2608,6 +2619,7 @@ surfaces:
   # change could add an unclassified `.apply` door silently (the
   # #1349/#2938 silent-drop class; full rationale in the `api` entry).
   - test_7951_write_doors.py
+  - test_7951_enforce_atomic_write.py
   # #2884 D3: the EP/dream belief-state journal+replay guard. `tortoise/dream.py`
   # selects `ep`, so this registration is what runs the guard on a dream.py
   # change. Dual-registered under `core` (above) for its
@@ -2729,6 +2741,7 @@ surfaces:
   # `onboarding`-only change could add an unclassified `.apply` door silently
   # (the #1349/#2938 silent-drop class; full rationale in the `api` entry).
   - test_7951_write_doors.py
+  - test_7951_enforce_atomic_write.py
   # #3094: DUAL-REGISTERED with `core`/`eval`. The empty-means-unset URI-read
   # census (`test_no_empty_default_tortoise_db_uri_reads`) scans `tests/**`,
   # and `tests/_html_links.py` is an EXACT SOURCE_PATTERNS entry of THIS
@@ -2958,6 +2971,7 @@ surfaces:
   # `sdk`-only change could add an unclassified `.apply` door silently (the
   # #1349/#2938 silent-drop class; full rationale in the `api` entry).
   - test_7951_write_doors.py
+  - test_7951_enforce_atomic_write.py
   - test_5359_unchecked_window_writers.py
   - test_7108_operator_scope_predicate.py
   # #5346: a PAGED read must order by a TOTAL key, or its pages are not
@@ -3152,6 +3166,7 @@ surfaces:
   # could add an unclassified `.apply` door silently (the #1349/#2938
   # silent-drop class; full rationale in the `api` entry).
   - test_7951_write_doors.py
+  - test_7951_enforce_atomic_write.py
   # #7809: DUAL-REGISTERED with `api`/`core` — this guard pins
   # `tortoise/embeddings.py::_embedder_warmup_enabled` (the flag resolution the
   # hosted lifespan now calls), and that module is an EXACT
