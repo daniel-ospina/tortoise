@@ -372,8 +372,29 @@ def _run(graph: Any, cypher: str, params: dict[str, Any] | None = None):
     FalkorProjection surface (``.query(cypher, **params)``) and the raw
     graph surface (``.query(cypher, params=...)``). A cypher/DB error
     raises a ResponseError (never a TypeError), so the fallback only fires
-    on a signature mismatch."""
+    on a signature mismatch.
+
+    §17.1 (#7951): a *journal-backed* projection refuses a mutating statement
+    on the PUBLIC ``FalkorProjection.query`` lane (``DirectCacheWriteRefused``).
+    The onboarding writers are the plain **unjournaled live writes** #7951's
+    work list records as class (a) — the remaining work, not an enforcing
+    increment — so they must reach the cache the way the SDK's OWN live writes
+    do: through the raw graph handle (``proj.g.query``), which #7951 records as
+    the still-open residual (that handle is *also* the SDK's live write path —
+    ``create_point``/``update_point`` — so a blanket refusal there would break
+    the product, not a violation of it). Taking the public lane here refused
+    EVERY onboarding write on the hosted lane, and the callers are fail-open
+    (``hosted_api._maybe_apply_completion`` -> ``except Exception: return
+    False``, ``mcp_server._maybe_onboarding_auto_complete`` -> ``return``, and
+    ``selfhost.ensure_selfhost_onboarding_once`` is best-effort), so the
+    regression was SILENT — orgs never reached ``complete``. Routing through
+    the raw handle keeps every other guard on this path (the guarded handle's
+    own #3595 operator and #7174 numeric-domain refusals and its L2 bulk-wipe
+    check all still run)."""
     params = params or {}
+    raw = getattr(graph, "g", None)  # FalkorProjection -> its raw handle
+    if raw is not None and hasattr(raw, "query"):
+        return raw.query(cypher, params=params)
     try:
         return graph.query(cypher, **params)
     except TypeError:

@@ -460,6 +460,9 @@ def restore(backup_dir: str, db_path: str,
                 journal_object_surviving_keys,
                 plan_point_restamp_folds,
             )
+            # #7951 §17.1: a replay's records came FROM the journal, so the
+            # fold is authorized by the replay scope (and must NOT re-journal).
+            from tortoise.projection import _replay_write_scope
             from tortoise.projection.nonfolded import (
                 assert_no_non_folded,
                 collect_non_folded,
@@ -570,9 +573,11 @@ def restore(backup_dir: str, db_path: str,
                                 deferred_corrects.append(edge)
                             continue
                         if _pass_seq:
-                            proj.apply(ev, journal_seq=seq, **apply_kwargs)
+                            with _replay_write_scope():
+                                proj.apply(ev, journal_seq=seq, **apply_kwargs)
                         else:
-                            proj.apply(ev, **apply_kwargs)
+                            with _replay_write_scope():
+                                proj.apply(ev, **apply_kwargs)
                     if deferred_corrects:
                         try:
                             proj.fold_deferred_corrects_edges(
