@@ -608,6 +608,28 @@ def test_drop_clone_never_deletes_the_last_copy_when_the_source_is_gone(monkeypa
     ok2, msg2 = gwr.repair(db2, "tortoise")
     assert ok2 is False
     assert "boolean-index audit failed" in msg2, msg2
+
+    # (j) the source is PRESENT BUT EMPTIED -- presence is TRUE, so the absence guard
+    # alone passes and `drop_clone` used to delete the last DATA-BEARING copy. This is
+    # the case that defeated the first version of the guard.
+    db3 = _FakeDb({"tortoise": _defect_state(nodes=BIG)}, copy_drops_edges=True,
+                  copy_empties_source=True)
+    ok3, msg3 = gwr.repair(db3, "tortoise")
+    assert ok3 is False
+    assert msg3, "the refusal must explain itself"
+    retained3 = [k for k in db3.graphs if k.startswith("__gwr_")]
+    assert retained3, f"the LAST COPY was deleted; remaining graphs: {sorted(db3.graphs)}"
+    assert db3.graphs[retained3[0]].nodes == BIG, "the retained clone lost its data"
+
+    # (k) same, on the #3154 path: the clone is data-complete and only its INDEX is
+    # corrupt -- the worst possible copy to destroy.
+    db4 = _FakeDb({"tortoise": _defect_state(nodes=BIG)}, copy_empties_source=True)
+    ok4, msg4 = gwr.repair(db4, "tortoise")
+    assert ok4 is False
+    assert "boolean-index audit failed" in msg4, msg4
+    retained4 = [k for k in db4.graphs if k.startswith("__gwr_")]
+    assert retained4, f"the LAST COPY was deleted; remaining graphs: {sorted(db4.graphs)}"
+    assert db4.graphs[retained4[0]].nodes == BIG, "the retained clone lost its data"
     retained2 = [k for k in db2.graphs if k.startswith("__gwr_")]
     assert retained2, f"the LAST COPY was deleted; remaining graphs: {sorted(db2.graphs)}"
     assert db2.graphs[retained2[0]].nodes == BIG, "the retained clone lost its data"

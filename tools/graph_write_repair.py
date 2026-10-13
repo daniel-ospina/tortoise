@@ -243,9 +243,31 @@ def repair(db, name: str, verbose: bool = True) -> tuple[bool, str]:
         # second is the worse case -- the clone is data-complete, writable and
         # probe-passed, and only its INDEX is corrupt. Guarding here covers every present
         # and future call site in one place rather than at each one.
-        if not graph_exists(db, name):
-            say(f"  note: RETAINED clone {scratch} ({reason}) -- the source is gone, so "
-                f"this clone may be the only copy")
+        # ⛔ PRESENCE IS NOT DATA-PRESENCE. Retaining on ABSENCE alone is defeatable in two
+        # ways, both measured by review cycle 3:
+        #   * the source is PRESENT BUT EMPTIED, and
+        #   * the source is re-materialised EMPTY by another lane's read on the absent key
+        #     (the auto-create hazard this very module is built around) -- so
+        #     `graph_exists` comes back TRUE and the absence guard passes.
+        # Either way `drop_clone` then deletes the last DATA-BEARING copy while the source
+        # sits at (0, 0). In the #3154 case that copy is data-complete and writable and only
+        # its INDEX is corrupt -- the worst possible thing to destroy.
+        # So the guard re-reads the source and retains on the same LOSS direction the
+        # pre-RENAME guard uses. A source that GAINED still means the clone is stale.
+        try:
+            if not graph_exists(db, name):
+                say(f"  note: RETAINED clone {scratch} ({reason}) -- the source is gone, so "
+                    f"this clone may be the only copy")
+                return
+            _now = fingerprint(db.select_graph(name))
+        except Exception as exc:  # a listing/read failure must not cost the last copy
+            say(f"  note: RETAINED clone {scratch} ({reason}) -- could not verify the "
+                f"source ({type(exc).__name__}: {exc}), so this clone may be the only copy")
+            return
+        if _now[0] < before_nodes or _now[1] < before_edges:
+            say(f"  note: RETAINED clone {scratch} ({reason}) -- the source LOST data "
+                f"({_now} vs {(before_nodes, before_edges)}), so this clone may be the "
+                f"only copy")
             return
         # The scratch clone is the ONLY key this module deletes, it is run-unique (never the
         # live graph), and this process's own `GRAPH.COPY` created it -- so it is dropped with
