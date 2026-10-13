@@ -89,10 +89,10 @@ Production graph: **~25,000 quota nodes in 3–4 active days** (~27 per emitting
 | | the question it answers | effect on volume |
 |---|---|---|
 | **v2** (live) | did we extract it? | baseline |
-| **v3** (approved, unbuilt) | did we extract it **correctly**? (dates, verbatim state values, atomic points, supersession) | ⬆️ **increases it** — E2 preserves more, E3 splits into more |
+| **v3** (approved, ⚠️ **CLOSED `NOT_PLANNED` 2026-10-10 — never built, and no longer planned**) | did we extract it **correctly**? (dates, verbatim state values, atomic points, supersession) | ⬆️ **increases it** — E2 preserves more, E3 splits into more |
 | **v4** (this document) | should we have extracted it **at all**? | ⬇️ **reduces it** |
 
-**v3 has no discard, trim or gate anywhere.** It is a fidelity workstream. **v4 is a selection workstream — and it must land with, or before, v3's volume-increasing parts (E2, E3).**
+**v3 has no discard, trim or gate anywhere.** It is a fidelity workstream. **v4 is a selection workstream.** ⚠️ **The ordering obligation this passage used to state — *"it must land with, or before, v3's volume-increasing parts (E2, E3)"* — is VOID: the v3 epic is `CLOSED NOT_PLANNED` (2026-10-10), so there is no v3 work to land before. The v4 design does not wait on v3** (see §15's `§1 v2 → v3 → v4` row, corrected the same day).
 
 ⚠️ **Part of v3 has already landed.** Its E4 (`"S4 merges, not replaces"`) is live — `merge_embed_lists(embed_list, s4)` runs at `extractor_v2.py:4845` and S2 is preserved. **v3's premise there is stale; re-check the epic's status before building from it.**
 
@@ -730,11 +730,11 @@ S6  COMMIT
 
 **⚠️ And the "structural enforcement" argument is weaker than it reads.** `closed_vocab_rejects` **already exists** (the closed vocabulary is enforced today), so Jev's `Choice` does not add a new guarantee the pipeline lacks — it removes a class of **malformed / off-vocabulary** emission. And a repo-wide search for `entityCues` returns **no READER** — #1026 Stage 2 made the slot declarable, but nothing consumes it yet, so do not cite it as an implemented classifier surface.
 
-**⚠️ And a hard constraint this ordering must respect:** ⚠️ **`#4899`'s Phase-1 mechanical DISCARD has known false positives** — *"a bare `#\d{3,}` in a working note is discardable; **a PR number a decision turned on is not**"* ⚠️ **that quoted `#\d{3,}` is `#4899`'s *proposal*, not the shipped predicate — the shipped one is `value_gate._REFERENCE = r"#\d{1,6}(?!\d)"` with a whole-residue test (§15's `§1 mechanism` row). It is BROADER: `#12` and `See #12` ARE discarded, while a 7-digit run is NOT. Do not implement from this quotation** — and **only the lookup or a semantic judgment can tell them apart.** Phase 1 runs before the lookup deliberately, which is why `#4899` **gates it behind a flag, records every discard with its rule id, and requires the counterfactual to be recoverable.** **Any reordering that moves the gate earlier must preserve those three.**
+**⚠️ And a hard constraint this ordering must respect:** ⚠️ **`#4899`'s Phase-1 mechanical DISCARD has known false positives** — *"a bare `#\d{3,}` in a working note is discardable; **a PR number a decision turned on is not**"* ⚠️ **that quoted `#\d{3,}` is `#4899`'s *proposal*, not the shipped predicate — the shipped one is `value_gate._REFERENCE = r"#\d{1,6}(?!\d)"` with a whole-residue test (§15's `§1 mechanism` row). ⚠️ It differs in BOTH directions from the quoted pattern: `#12` and `See #12` ARE discarded, while a 7-digit run is NOT. Do not implement from this quotation** — and **only the lookup or a semantic judgment can tell them apart.** Phase 1 runs before the lookup deliberately, which is why `#4899` **gates it behind a flag, records every discard with its rule id, and requires the counterfactual to be recoverable.** **Any reordering that moves the gate earlier must preserve those three.**
 
 ### 4.3 ⚠️ What the steps above do NOT yet cover (review-provided, all unaddressed)
 
-**The step list is the SHAPE, not a complete specification.** Five gaps were identified by review and are recorded here rather than silently implied by the diagram. **These are gaps to close, not designs already settled — but three of the filed issues ask the *owner* for a ruling** (`#5333` for G5's deletion/relocation half; `#8496` for G4's immutability-vs-redaction reconciliation; **`#8500` for G5's S4 clause**, whose own body closes on *"Which is authoritative until the migration lands?"*), **so closing them means obtaining a decision, not drafting a design.** ✅ **All five are now filed** — the issue reference is in each row (revalidated 2026-10-13; G3 and G4 had no tracker entry before that, and are `#8495` / `#8496`).
+**The step list is the SHAPE, not a complete specification.** Five gaps were identified by review and are recorded here rather than silently implied by the diagram. **These are gaps to close, not designs already settled — but **two** of the filed issues ask the *owner* for a ruling** (`#5333` for G5's deletion/relocation half; **`#8500` for G5's S4 clause**, whose own body closes on *"Which is authoritative until the migration lands?"*), **and a third (`#8496`, G4's immutability-vs-redaction reconciliation) requires a stated design choice** — it asks for that choice and its reason to be *stated, not implied*, but requests no owner ruling. **So closing these means obtaining a decision, not drafting a design.** ✅ **All five are now filed** — the issue reference is in each row (revalidated 2026-10-13; G3 and G4 had no tracker entry before that, and are `#8495` / `#8496`).
 
 | # | the gap | why it matters |
 |---|---|---|
@@ -1241,15 +1241,15 @@ filed"* claim is what causes duplicate filing — the same failure the §4.3 gap
 |---|---|---|
 | **The raw-vs-narrative measurement** (D3's falsifier, §10) — *"the next real work"*, settles whether Option 4 stays provisional | **`#7947`** | ✅ **FILED** — this block said *not yet filed* |
 | **Fan-out caps** (mirrored in `STORAGE-ARCHITECTURE.md` §13) | **`#5010`** | ✅ **CLOSED** — cap landed query-side (`tortoise/fanout.py`, `PER_ENTITY_FANOUT_CAP = 200`, PR `#5057`) |
-| **`aboutObject` join-vs-edge** | **`#7948`** | ✅ **FILED** — measured SPLIT, owner ruled **KEEP**, deferred. Not open (§13.8 question 2, §16) |
+| **`aboutObject` join-vs-edge** | **`#7948`** | ✅ **FILED** — measured SPLIT, owner ruled **KEEP**, deferred. ⚠️ **The *issue* is `OPEN`; what is not open is the §13.8 question 2 / §16 matter — that is settled and deferred** |
 | **G1** — narrative + raw-fact span persistence | **`#5064`** (open remainder; `#5007` CLOSED `COMPLETED` via PR `#5108`) · **`#4894`** (narrative) | ✅ filed |
 | **G2** — the EMBED gate | **`#5008`** | ✅ filed |
 | **G3** — per-step failure policy | **`#8495`** | ✅ filed |
 | **G4** — redaction designed with the append-only layer | **`#8496`** | ✅ filed (`#4911` is CLOSED; its design-level consequence was unowned) |
 | **G5** — migration / backfill / the live S4 | **`#5333`** · **`#5059`** · **`#8500`** (the S4 clause) | ✅ filed |
 
-**⇒ There are no longer any unfiled candidates in this document.** G1–G5 were recorded in §4.3 as *"all
-must be closed before implementation"*, and **two** of them (`#8495`, `#8496`) had no tracker entry until
+**⇒ There are no longer any unfiled candidates in this document.** G1–G5 were recorded in §4.3 as gaps to close before
+implementation begins, and **two** of them (`#8495`, `#8496`) had no tracker entry until
 2026-10-13 — those two are the newly filed ones. **G5's S4 clause** also needed its own home and got one
 the same day, because `#5333` explicitly refuses to absorb it and `#5059` covers a different half: it is
 **`#8500`**. (That is a scope boundary, not a closed-issue reopen — both `#5333` and `#5059` are OPEN. The
