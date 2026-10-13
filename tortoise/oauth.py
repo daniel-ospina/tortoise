@@ -49,7 +49,7 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import NoReturn
-from urllib.parse import parse_qs, urlencode, urlparse  # noqa: F401
+from urllib.parse import parse_qs, urlencode, urlparse, urlsplit, urlunsplit  # noqa: F401
 
 logger = logging.getLogger("tortoise.oauth")
 
@@ -429,9 +429,23 @@ def _is_loopback(hostname: str) -> bool:
 
 
 # Bytes we refuse to reason about in a redirect URI, checked BEFORE any
-# comparison or echo. The authorization code is delivered by NAVIGATING THE
-# BROWSER to the raw `redirect_uri` (see `redirectBack` in the consent page), so
-# the browser's parse — never ours — is what decides where the code actually goes.
+# comparison or echo. The authorization code reaches the client by NAVIGATING
+# THE BROWSER, and the thing navigated is now a URL REBUILT from the registered
+# URI (`_canonical_redirect_target`, #3443) rather than the request string — so
+# this gate is no longer the boundary it was when `redirectBack` navigated the
+# raw `redirect_uri`. It is kept, and it is still load-bearing, in two roles:
+#
+#   * ON THE REGISTERED SIDE — and this is the one that cannot be retired. The
+#     rebuild TRUSTS the registered URI (it re-emits the scheme, authority, path
+#     and query from it verbatim, taking only the port from the request), so a
+#     differential string sitting in a client row would be navigated with the
+#     server's own blessing. `_valid_redirect_uri` refuses these bytes at
+#     REGISTRATION for exactly that reason, and `_redirect_uri_matches` refuses
+#     them on both sides so no pair carrying one can ever reach the rebuild.
+#   * ON THE REQUEST SIDE, as defence in depth: a request that carries a byte we
+#     refuse to reason about is refused outright rather than canonicalized. That
+#     is what makes "the two parsers cannot disagree" a property of the COMPOSED
+#     path (rebuild + gate) and not only of the rebuild.
 #
 #   * `\` is a GENUINE parser differential and the reason this gate exists.
 #     WHATWG ends the authority at a backslash for special schemes (http/https);
@@ -454,6 +468,19 @@ def _is_loopback(hostname: str) -> bool:
 #     character, so the conservative direction costs nothing real. It does mean a
 #     URI registered before this gate existed stops matching — deliberate, and
 #     pinned by `test_differential_uris_are_refused_even_on_exact_match`.
+#
+#   * C1 controls (U+0080-U+009F) and the other Unicode `Cc` characters are NOT
+#     refused, and that is a RECORDED boundary rather than an unexamined gap:
+#     this predicate is "C0 + DEL", never "all control characters". Review
+#     established empirically that C1 does not move the authority boundary —
+#     0 host divergences across 7,623 single-insertion and 57,212 fuzz
+#     candidates without a backslash — so it is not a differential today.
+#     Recorded HERE because #3443 makes the registered URI the trust anchor of
+#     the navigation (`_canonical_redirect_target` re-emits its authority
+#     verbatim): the property that has to hold is therefore "our parse of the
+#     REGISTERED uri agrees with the browser's", and C1 is the byte class where
+#     that rests on measurement rather than on a refusal. If it is ever
+#     challenged, widening this predicate is a one-line change.
 #
 # Refusing the bytes outright is preferred to modelling WHATWG: a whitelist of
 # "URIs both parsers agree on" cannot be kept correct, and fail-closed is the
@@ -480,8 +507,9 @@ def _unsafe_redirect_uri_bytes(uri: str) -> bool:
 # entirely: Cursor never reaches /oauth/authorize and the tester cannot sign in.
 #
 # Deliberately an ALLOWLIST, not "any private-use scheme". The consent page
-# delivers the code by navigating to the raw redirect_uri
-# (`window.location.href = redirect_uri + "?code=…"`), so a scheme the browser
+# delivers the code by navigating to the target rebuilt from the REGISTERED uri
+# (`window.location.href = <rebuilt target> + "?code=…"`, #3443), whose scheme
+# is therefore the registered one — so a registrable scheme the browser
 # executes rather than navigates — javascript:, data:, vbscript: — would run in
 # the consent page's own origin, and a scheme with an app handler the user has
 # is a code-delivery target we have not reasoned about. Failing closed on every
@@ -510,10 +538,13 @@ def _valid_redirect_uri(uri: str) -> bool:
         # this function's error message already promises rejection. Tested as
         # the literal delimiter, NOT `parsed.fragment`: a bare trailing `#`
         # parses to an EMPTY fragment, so `if parsed.fragment:` let it through
-        # while it still made the consent page's `redirect_uri + "?code=…"`
-        # navigation land the code inside the fragment (caught in review — both
-        # reviewers, independently). `#` can only ever begin the fragment
-        # (RFC 3986 pchar excludes it), so presence is the correct predicate.
+        # while it still made the consent page's navigation (the target rebuilt
+        # from this URI, fragment included — #3443) land the code inside the
+        # fragment (caught in review — both reviewers, independently). `#` can
+        # only ever begin the fragment (RFC 3986 pchar excludes it), so presence
+        # is the correct predicate. Still load-bearing after #3443: the rebuild
+        # re-emits the registered URI's fragment, so a `#` in a client row would
+        # put the code where the browser never sends it.
         return False
     if parsed.scheme == "https" and parsed.hostname:
         return True
@@ -590,6 +621,146 @@ def _redirect_uri_matches(registered: str | None,
         # exact-equality shortcut above, preserving legacy rows.
         and "#" not in registered and "#" not in presented
     )
+
+
+# #3443 — the redirect target the BROWSER IS SENT TO.
+#
+# `_redirect_uri_matches` answers WHETHER a presented URI may be redirected to;
+# this answers WHAT is navigated. Keeping those two questions apart is the whole
+# point: the browser's parse — never ours — is what decides where the code
+# actually goes, so while the navigated string IS the request's string, the two
+# parsers have to agree on every byte, and the byte gate is the boundary (the
+# arrangement #2846 left behind, and the one three review rounds kept revisiting
+# — see the comment above `_unsafe_redirect_uri_bytes`).
+#
+# Rebuilding the target from the REGISTERED URI's components with only the
+# presented PORT applied (RFC 8252 §7.3 — the one component permitted to vary)
+# removes the requirement instead of enumerating its cases: no byte of the
+# presented authority ever reaches the browser, so a differential cannot move
+# the host whatever the two parsers disagree about. The rebuild deliberately
+# takes the authority from the REGISTERED side — rebuilding it from the
+# PRESENTED components would re-emit the presented authority verbatim and keep
+# the differential (`urlsplit` reads the host after the last `@`, so
+# `http://evil.example\@localhost/cb` parses to host `localhost` with the whole
+# `evil.example\@localhost` still in its netloc).
+
+#: The largest port a browser will dial — also the top of `urlsplit().port`'s
+#: accepted range. RFC 3986's ``port = *DIGIT`` carries no bound of its own, so
+#: the limit comes from the transport rather than the grammar.
+_PORT_TEXT_MAX = 65535
+
+
+def _authority_parts(netloc: str) -> tuple[str, str]:
+    """Split an authority into ``(authority-without-port, port-text)``.
+
+    Textual on purpose: ``urlsplit(...).port`` raises on a port that is not
+    ASCII digits or is out of range, and every caller here must stay total on
+    input `_redirect_uri_matches` accepts — it deliberately does NOT validate
+    port sanity (pinned by ``test_port_values_are_not_validated``), because a
+    browser refuses to navigate such a URI at all.
+
+    RFC 3986 §3.2: the port is the last ``:``-delimited component of the
+    authority. ``@`` cannot follow the host, and a bracketed IPv6 literal is
+    self-delimiting, so the host ends at the first ``]``, or at the first ``:``
+    after the last ``@``, whichever form applies.
+    """
+    bracket = netloc.find("]")
+    if bracket >= 0:
+        port_at = netloc.find(":", bracket)
+    else:
+        at = netloc.rfind("@")
+        port_at = netloc.find(":", at + 1 if at >= 0 else 0)
+    if port_at < 0:
+        return netloc, ""
+    return netloc[:port_at], netloc[port_at + 1:]
+
+
+def _navigable_port(port_text: str) -> bool:
+    """RFC 3986 ``port = *DIGIT``, inside the range a browser will dial.
+
+    ``isascii`` first: ``str.isdigit()`` is true for Unicode digits such as
+    ``\u0663`` and ``int()`` accepts them, but the WHATWG port parser does not —
+    an ASCII-only grammar is what keeps this a rebuild of the registered URI
+    rather than a re-introduction of the request's bytes.
+    """
+    return (port_text.isascii() and port_text.isdigit()
+            and int(port_text) <= _PORT_TEXT_MAX)
+
+
+def _canonical_redirect_target(registered: str, presented: str) -> str:
+    """#3443 — the URL to NAVIGATE the browser to, for a matched pair.
+
+    The registered URI's scheme, authority, path, query and fragment, with the
+    presented port applied. Only the port comes from the request: that is the
+    component RFC 8252 §7.3 requires the AS to ignore, so it is the only one
+    that may legitimately differ, and copying its TEXT (never re-rendering it
+    from a parsed int) keeps the emitted string free of the presented
+    authority's bytes.
+
+    For every pair the current matcher accepts, the result is byte-identical to
+    the PRESENTED string except (a) where only the case of the scheme or the
+    host differs — `_redirect_uri_matches` compares those case-insensitively,
+    and the authority is re-emitted from the registered side — and (b) a
+    presented port no URI may carry, where the registered authority stands. So
+    this changes nothing where the current code works and nothing where it does
+    not.
+
+    Total (never raises) and idempotent: rebuilding from a rebuilt target
+    returns it unchanged.
+
+    Called ONLY after `_redirect_uri_matches` accepted the pair; the `presented`
+    port it copies is the one component the matcher never inspects.
+    """
+    try:
+        reg = urlsplit(registered)
+        pre = urlsplit(presented)
+    except ValueError:
+        # An unbalanced IPv6 bracket is the one input `urlsplit` rejects
+        # outright. `_redirect_uri_matches` refuses such a pair before this is
+        # reached (it catches the same ValueError), so this branch is a
+        # totality guard, not a live path: the REGISTERED string is the trusted,
+        # validated side, and returning it is what keeps the function total.
+        return registered
+    reg_authority, _ = _authority_parts(reg.netloc)
+    _, presented_port = _authority_parts(pre.netloc)
+    if presented_port and _navigable_port(presented_port):
+        netloc = reg_authority + ":" + presented_port
+    elif presented_port:
+        # A port no URI may carry (`:abc`, `:99999`) — there is nothing to
+        # apply, so the REGISTERED authority stands as it is. Reachable only
+        # because the matcher does not validate port sanity; the presented URI
+        # is one no browser navigates at all, so this loses no working
+        # destination and keeps the code on the endpoint that was registered.
+        netloc = reg.netloc
+    else:
+        # No port presented: the request names the scheme's default port, which
+        # is the registered port DROPPED when the registration carried one.
+        # Identical to what `redirectBack` navigated before this change for
+        # every accepted pair, which is the fidelity the CLI depends on.
+        netloc = reg_authority
+    return urlunsplit((reg.scheme, netloc, reg.path, reg.query, reg.fragment))
+
+
+def canonical_redirect_target(client: dict | None,
+                              presented: str | None) -> str | None:
+    """#3443 — the navigation target for ``client`` + ``presented``, or
+    ``None`` when no registered URI matches (NEVER the raw request string).
+
+    The single source both the success navigation and the pre-round-trip error
+    redirect take their destination from, so neither can fall back to
+    `redirect_uri` as presented. A non-list ``redirect_uris`` (legacy or
+    hand-corrupted row) is normalized exactly as `validate_authorize_params`
+    normalizes it, so the two can never disagree about which entries exist.
+    """
+    if not client or not isinstance(presented, str) or not presented:
+        return None
+    registered_uris = client.get("redirect_uris") or []
+    if not isinstance(registered_uris, (list, tuple)):
+        registered_uris = [registered_uris]
+    for uri in registered_uris:
+        if _redirect_uri_matches(uri, presented):
+            return _canonical_redirect_target(uri, presented)
+    return None
 
 
 def mcp_resource_url(base: str) -> str:
@@ -2284,9 +2455,28 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     document.getElementById("error").classList.remove("visible");
   }
   function spinner(on) { document.getElementById("spinner").style.display = on ? "block" : "none"; }
-  function redirectBack(params) {
-    const sep = PARAMS.redirect_uri.includes("?") ? "&" : "?";
-    window.location.href = PARAMS.redirect_uri + sep + new URLSearchParams(params).toString();
+  // #3443: the destination is the URL the SERVER rebuilt from the validated
+  // registered URI (`_canonical_redirect_target`), never the raw request string
+  // this page also carries — so the server's parser and the browser's can no
+  // longer disagree about the host BY CONSTRUCTION (the byte gate that used to
+  // stand in for that agreement is now defence in depth). `target` is the value
+  // returned alongside the code by POST /oauth/consent; `PARAMS.redirect_target`
+  // is the one the server embedded at authorize time, which covers the deny
+  // path (no server round trip) and a page/API version skew mid-deploy. Both
+  // are server-built; neither is `PARAMS.redirect_uri`.
+  function redirectBack(params, target) {
+    const dest = target || PARAMS.redirect_target;
+    if (!dest) {
+      // Unreachable while /oauth/authorize keeps building the target, and
+      // fail-closed if it ever stops: `undefined` would resolve as a RELATIVE
+      // url and send the code to this page's own origin, and falling back to
+      // the request string is the class this issue exists to remove.
+      spinner(false);
+      showError("Return address unavailable — start the connection again from your client.");
+      return;
+    }
+    const sep = dest.includes("?") ? "&" : "?";
+    window.location.href = dest + sep + new URLSearchParams(params).toString();
   }
 
   async function fetchPreview(accessToken) {
@@ -2645,7 +2835,8 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       }
       const q = { code: payload.code };
       if (payload.state) q.state = payload.state;
-      redirectBack(q);
+      // #3443: the target the server computed when it minted this code.
+      redirectBack(q, payload.redirect_target);
     } catch (e) { spinner(false); showError(e.message); }
   };
 
@@ -2867,7 +3058,10 @@ def consent_page_html(*, client_name: str, scope: str | None,
                       params: dict, supabase_url: str,
                       supabase_anon_key: str) -> tuple[str, str]:
     """Render the branded consent page (D2). ``params`` are the raw authorize
-    query params — JSON-encoded into the page so the JS echoes them back.
+    query params — JSON-encoded into the page so the JS echoes them back — plus
+    the server-built ``redirect_target`` (#3443), which is the ONLY value the
+    page navigates (see `redirectBack`); the raw ``redirect_uri`` stays in the
+    page only to be posted back to /oauth/consent for validation.
 
     Returns ``(html, csp_nonce)``. The nonce is embedded in both <script>
     tags so the caller can serve a script-src CSP that still permits the
