@@ -242,7 +242,7 @@ passes the flag → the recorded flag floor is 22.7, matching
 |---|---|---|
 | #4497 redislite RDB schedule in subprocess fixtures | `tests/_embedded.py` + spawn sites | needs a child-process hook or per-site `serverconfig`; **not** reset per test (subprocesses don't import conftest) |
 | #4499 health-truth flake | `tests/test_selfhost.py` | needs a decision (stub probe vs liveness/readiness split) |
-| #4512 exact-embedding equality (**rule 3**) | `tests/test_rebuild_recreate_content_parity.py` | numerical tolerance/pin — a different contract surface, not expressible as a wait/skip |
+| #4512 exact-embedding equality (**rule 3**) | `tests/test_rebuild_recreate_content_parity.py` | **CONVERTED** — rule 3 lands here: the derivation is pinned to a deterministic content-addressed encoder (`_pinned_embedding`), so the parity verdict is a function of the fold/rebuild logic, not of whether the 90 MB model was loaded or in TF-IDF cooldown at that instant; the pin's mutation control reds on the pre-pin code with the exact #4512 assertion |
 | #4601 single-flight timing window | `tests/test_github_index_lifecycle.py` | needs an exposed synchronization seam |
 | #4627 first-commit 10 s transport bound | `tortoise/hosted_api.py` + test | touches the recorded #3834 ruling → owner decision |
 | #4717 order-dependent BFF clickthrough | `tests/e2e/test_auth_bff_clickthrough.py` | needs the leaking precondition identified |
