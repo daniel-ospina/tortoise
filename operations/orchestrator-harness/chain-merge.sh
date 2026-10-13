@@ -18,4 +18,10 @@ if [ -z "${PR:-}" ] || [ "$PR" = "null" ]; then
 fi
 echo "[chain $N] PR #$PR found — starting merge chain $(date)" >> "$LOG"
 bash "$O/merge-one.sh" "$REPO" "$OR" "$PR" "$BR" >> "$LOG" 2>&1
+rc=$?
+# A load refusal (75) is not a failure of the work: nothing ran and nothing was consumed. Name it
+# HERE, in the log the operator reads for this chain — the reviewer's own line is inside
+# merge-$PR.log, and on a box with no controller running nothing else would ever re-dispatch it.
+echo "[chain $N] merge-one rc=$rc $(date)" >> "$LOG"
+[ "$rc" = "75" ] && echo "[chain $N] reviewer NOT started (load gate) — re-run this chain (or let the controller re-dispatch it) when 1-min load is below MAX_LOAD" >> "$LOG"
 echo "[chain $N] done $(date)" >> "$LOG"

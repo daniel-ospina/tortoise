@@ -17,6 +17,7 @@ ck() { # ck <name> <0|1>
   else printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=$((fail+1)); fi
 }
 LOOP="$HERE/orch-loop.sh"; MERGE="$HERE/merge-one.sh"; INST="$HERE/install.sh"; REFRESH="$HERE/refresh-candidates.sh"
+GATE="$HERE/spawn-gate.sh"   # the ONE load gate and the ONE `pi` invocation (agent-infra#1720)
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 # A missing extraction must FAIL, not warn: if the shipped script lacks the code under test the
 # dependent checks would pass on an empty file — the exact vacuity this file was rewritten to fix.
@@ -322,7 +323,14 @@ eff_defaults() {
     eval "$(grep -E "$_LIMIT_RE" "$2" 2>/dev/null)"
     for v in $_LIMITS; do printf '%s=%s\n' "$v" "$(eval "printf '%s' \"\${$v:-UNSET}\"")"; done )
 }
-_da="$(eff_defaults unset "$LOOP"; eff_defaults env "$LOOP")"
+# The loop's effective limits are the ones IT resolves — and since agent-infra#1720 that includes
+# the limits declared in the helper it sources (MAX_LOAD lives there, because the workers read it
+# too). Concatenate in SOURCING ORDER (helper first) so a later assignment in orch-loop.sh still
+# wins, exactly as bash would resolve it at runtime. §7 therefore compares the gate's ceiling
+# against the ceiling install.sh renders into the plist — the two must not diverge, or the daemon
+# would advertise one MAX_LOAD while the gate applied another.
+cat "$GATE" "$LOOP" > "$TMP/loop-limits.sh"
+_da="$(eff_defaults unset "$TMP/loop-limits.sh"; eff_defaults env "$TMP/loop-limits.sh")"
 _db="$(eff_defaults unset "$INST"; eff_defaults env "$INST")"
 if [ -n "$_da" ] && [ "$_da" = "$_db" ]; then
   echo "      effective: $(printf '%s' "$_da" | tr '\n' ' ')"
@@ -332,7 +340,7 @@ else
   diff "$TMP/da.txt" "$TMP/db.txt" 2>/dev/null | sed 's/^/        /'
   rc=1
 fi
-ck "orch-loop.sh and install.sh resolve the same effective defaults for all 10 limits" $rc
+ck "orch-loop.sh (+ the helper it sources) and install.sh resolve the same effective defaults for all 10 limits" $rc
 
 # ── 8) the dispatch gate consults load and names the binding gate ────────────────
 # MAX_LOAD was rendered into the plist and documented, but never compared to anything.
@@ -532,14 +540,21 @@ if need "$TMP/reapw.sh" "reap_stale_workers() is extracted from the shipped loop
   ck "the reaper resolves the pane pid with an exact target" $rc
   unset -f tmux kill
 fi
-# the agent invocation is wall-clock bounded, portably (macOS has no timeout/gtimeout)
-sed -n '/^run_agent() {/,/^}/p' "$MERGE" > "$TMP/runagent.sh"
-if need "$TMP/runagent.sh" "run_agent() is extracted from the shipped merge-one.sh"; then
+# the agent invocation is wall-clock bounded, portably (macOS has no timeout/gtimeout). It lives in
+# the shared helper since agent-infra#1720 (it is also the ONE gated spawn site — the gate itself is
+# driven by the checks further down).
+sed -n '/^run_agent() {/,/^}/p' "$GATE" > "$TMP/runagent.sh"
+if need "$TMP/runagent.sh" "run_agent() is extracted from the shipped spawn-gate.sh"; then
   # NOTE: the heredoc must EXPAND $TMP (unquoted) while leaving the runtime substitutions for the
   # script itself. A quoted heredoc left the source path literal, so run_agent never got defined and
   # the check passed on "command not found" — the exact vacuity this file exists to prevent.
+  # `load1` is held at 0 so a genuinely loaded box cannot make this check pass for the wrong reason:
+  # it asserts the WATCHDOG, and a gate refusal would otherwise look like a kill. The real gate
+  # (sourced from $GATE) still runs — only its reading is controlled.
   cat > "$TMP/ra.sh" <<SH
 pi() { sleep 60; }
+. "$GATE"
+load1() { echo 0; }
 . "$TMP/runagent.sh"
 start=\$(date +%s); run_agent 2 "$TMP/ra.log" /dev/null; rc=\$?; end=\$(date +%s)
 echo "\$((end-start)) \$rc"
@@ -778,21 +793,24 @@ fi
 # ── load gate: an agent spawn must not be piled onto a post-boot indexing storm ──
 # Driven, not grep'd: a text-presence check passes against a build with the gate neutered to
 # `can_spawn() { true; }` — reproduced before this version replaced it.
-grep -m1 '^can_spawn() {' "$LOOP" > "$TMP/canspawn.sh"
-if need "$TMP/canspawn.sh" "can_spawn() is extracted from the shipped loop"; then
+# The predicate now lives in the shared helper (agent-infra#1720), which is the only file in the
+# harness that invokes `pi`. Extraction is against THAT file, so this check tracks the real gate.
+grep -m1 '^can_spawn() {' "$GATE" > "$TMP/canspawn.sh"
+if need "$TMP/canspawn.sh" "can_spawn() is extracted from the shipped spawn-gate.sh"; then
   MAX_LOAD=16
   . "$TMP/canspawn.sh"
-  L=0;   can_spawn && rc=0 || rc=1; ck "shipped can_spawn(): load 0 < 16 -> spawn allowed" $rc
-  L=15;  can_spawn && rc=0 || rc=1; ck "shipped can_spawn(): load 15 < 16 -> spawn allowed" $rc
-  L=16;  can_spawn && rc=1 || rc=0; ck "shipped can_spawn(): load 16 -> spawn held back" $rc
-  L=221; can_spawn && rc=1 || rc=0; ck "shipped can_spawn(): load 221 (post-boot storm) -> held back" $rc
-  L="";  can_spawn && rc=0 || rc=1; ck "shipped can_spawn(): unset load defaults to 0 (documented fail-open)" $rc
+  can_spawn 0   && rc=0 || rc=1; ck "shipped can_spawn(): load 0 < 16 -> spawn allowed" $rc
+  can_spawn 15  && rc=0 || rc=1; ck "shipped can_spawn(): load 15 < 16 -> spawn allowed" $rc
+  can_spawn 16  && rc=1 || rc=0; ck "shipped can_spawn(): load 16 -> spawn held back" $rc
+  can_spawn 221 && rc=1 || rc=0; ck "shipped can_spawn(): load 221 (post-boot storm) -> held back" $rc
+  can_spawn ""  && rc=0 || rc=1; ck "shipped can_spawn(): an empty reading is the documented fail-open (a failed probe must not wedge merging)" $rc
 fi
 # Assert each of the four spawn SITES, not a count — a count is satisfied by decoy comments,
-# which is exactly how an earlier version of this check passed against a stripped build.
-fixer_sites=$(grep -F "grep -c '^fix-')" "$LOOP" | grep -cF can_spawn)
-merge_site=$(grep -F "grep -c '^merge-')" "$LOOP" | grep -cF can_spawn)
-review_site=$(grep -cF '&& can_spawn \' "$LOOP")
+# which is exactly how an earlier version of this check passed against a stripped build. They pass
+# the reading they cached for the cycle, so the [cap] log line and the gate cannot disagree.
+fixer_sites=$(grep -F "grep -c '^fix-')" "$LOOP" | grep -cF 'can_spawn "$L"')
+merge_site=$(grep -F "grep -c '^merge-')" "$LOOP" | grep -cF 'can_spawn "$L"')
+review_site=$(grep -cF '&& can_spawn "$L" \' "$LOOP")
 [ "$fixer_sites" = "2" ] && rc=0 || rc=1
 ck "both fixer spawn sites (conflict + CI-red) carry the load gate" $rc
 [ "$merge_site" = "1" ] && rc=0 || rc=1
@@ -801,6 +819,142 @@ ck "the merge re-review spawn carries the load gate" $rc
 ck "the review-fix spawn carries the load gate" $rc
 grep -q 'gh pr merge "\$PR" --repo "\$OR" --squash >>"\$LOG"' "$LOOP" && rc=0 || rc=1
 ck "the cheap merge path stays ungated" $rc
+
+# ── every WORKER launch path is gated at the spawn (agent-infra#1720) ──────────────
+# The controller's four decision sites above were never the invariant: they gate the choice to
+# create a session, not the `pi` process. chain-<N> carries the claim and waits up to 90 min for
+# its PR, so it must re-read load when it actually spawns — which only happens if the SPAWN is
+# gated. These checks pin (a) that there is exactly ONE spawn site and it is gated, and (b) that
+# each worker ENTRY POINT really reaches it, by running the shipped script.
+#
+# (a) One spawn site. A fourth launch path added tomorrow fails HERE, which is the point: the
+#     invariant is universal, not three fixes.
+spawn_files="$(grep -lE '^[[:space:]]*(exec +)?pi( |$)' "$HERE"/*.sh 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')"
+[ "$spawn_files" = "spawn-gate.sh " ] && rc=0 || { rc=1; echo "      pi is invoked by: ${spawn_files:-<none>}"; }
+ck "exactly one shipped file invokes pi — the shared gated helper spawn-gate.sh" $rc
+# Each worker must reach the gate and must not grow a private copy of the spawn (the copy-paste
+# that produced this defect). Absence of a `pi` call in the worker is asserted by (a) already.
+PATHCK=0
+for w in lane.sh merge-one.sh fix-one.sh; do
+  grep -q 'spawn-gate\.sh' "$HERE/$w" || { echo "      $w does not source spawn-gate.sh"; PATHCK=1; }
+  grep -q 'run_agent "' "$HERE/$w" || { echo "      $w never calls run_agent"; PATHCK=1; }
+  grep -qE '^[[:space:]]*run_agent\(\)' "$HERE/$w" && { echo "      $w defines its own private run_agent"; PATHCK=1; }
+  grep -q 'AGENT_LOAD_REFUSED' "$HERE/$w" || { echo "      $w ignores a load refusal (rc 75)"; PATHCK=1; }
+done
+ck "lane.sh, merge-one.sh and fix-one.sh all start their agent through the shared gated run_agent()" $PATHCK
+# A partial `cp` to $O (README §9) would leave a worker with no helper. It must die, not fall back
+# to an ungated spawn — an undefined `run_agent` would otherwise read as "the agent ran" (rc 127).
+FAILLOUD=0
+for w in orch-loop.sh lane.sh merge-one.sh fix-one.sh; do
+  grep -q 'spawn-gate\.sh missing' "$HERE/$w" || { echo "      $w would run WITHOUT the gate if the helper were missing"; FAILLOUD=1; }
+done
+ck "the controller and every worker refuse to run when the shared helper is missing (no ungated fallback)" $FAILLOUD
+# (b) Drive the shipped helper with a stubbed sysctl and a stubbed pi: high load -> pi never runs.
+#     Non-vacuous: deleting the gate, or neutering it to `can_spawn() { true; }`, starts pi at load
+#     150 and fails this — which is exactly how the pre-fix tree is proved to fail it.
+# This block is deliberately NOT guarded by `if [ -s "$GATE" ]`: a missing helper would then skip
+# every driven check while still reporting a pass, which is the vacuity this file exists to
+# prevent. On a tree without the gate these probes still RUN and fail — each worker starts its
+# agent under a fake load of 150, which is exactly the defect, reproduced. (The block stays
+# indented because the heredocs inside it must not be indented; bash does not care.)
+  GB="$TMP/gatebin"; mkdir -p "$GB"; GMARK="$TMP/pi-ran"
+  cat > "$GB/pi" <<'SH'
+#!/bin/bash
+: > "$PI_MARKER"
+exit 0
+SH
+  # `sysctl -n hw.ncpu` is what the helper resolves MAX_LOAD from; `-n vm.loadavg` is the gate's
+  # reading. Both are stubbed, so the test runs offline and at a load this box does not have.
+  cat > "$GB/sysctl" <<'SH'
+#!/bin/bash
+if [ "${1:-}" = "-n" ] && [ "${2:-}" = "vm.loadavg" ]; then
+  printf '{ %s.00 %s.00 %s.00 }\n' "$FAKE_LOAD" "$FAKE_LOAD" "$FAKE_LOAD"
+else
+  echo 10
+fi
+SH
+  # `gh` returns a head sha (so the refusal path has a real head it COULD have recorded against),
+  # `git` answers the worktree lookup — no repo, no network, no writes outside $TMP.
+  printf '#!/bin/bash\nfor a in "$@"; do [ "$a" = ".headRefOid" ] && { echo deadbeefdeadbeef; exit 0; }; done\nexit 0\n' > "$GB/gh"
+  printf '#!/bin/bash\ncase "${1:-}" in worktree) printf "worktree /tmp/w\\nbranch refs/heads/br\\n" ;; rev-parse) exit 0 ;; *) printf "\\n" ;; esac\nexit 0\n' > "$GB/git"
+  chmod +x "$GB"/*
+  printf 'prompt\n' > "$TMP/gate-prompt.txt"
+  # the shipped helper, run under a fake load of 150 (the box's real ceiling is 100)
+  ( export PATH="$GB:$PATH" FAKE_LOAD=150 PI_MARKER="$GMARK" MAX_LOAD=100
+    rm -f "$GMARK"; . "$GATE"
+    run_agent 1 "$TMP/gate-high.log" "$TMP/gate-prompt.txt" "probe agent" ) >/dev/null 2>&1
+  GOT=$?
+  [ "$GOT" = "75" ] && [ ! -e "$GMARK" ] && rc=0 || { rc=1; echo "      rc=$GOT marker=$([ -e "$GMARK" ] && echo present || echo absent)"; }
+  ck "shipped run_agent(): load 150 >= MAX_LOAD=100 -> pi is NOT started, returns 75" $rc
+  grep -q 'REFUSED' "$TMP/gate-high.log" && rc=0 || rc=1
+  ck "shipped run_agent(): the refusal is logged where the operator will see it" $rc
+  # …and a quiet box still starts it. The stub pi exits at once, so the 1 s watchdog is killed by
+  # run_agent itself and nothing is left behind.
+  ( export PATH="$GB:$PATH" FAKE_LOAD=3 PI_MARKER="$GMARK" MAX_LOAD=100
+    rm -f "$GMARK"; . "$GATE"
+    run_agent 1 "$TMP/gate-low.log" "$TMP/gate-prompt.txt" "probe agent" ) >/dev/null 2>&1
+  [ -e "$GMARK" ] && rc=0 || rc=1
+  ck "shipped run_agent(): load 3 < MAX_LOAD=100 -> pi IS started" $rc
+
+  # (c) Drive the three WORKER ENTRY POINTS end to end. Each is the shipped script, run with the
+  #     stubbed PATH above; the assertions are on what it DID (start an agent or not) and on the
+  #     records a refusal must not leave behind.
+  probe() { # probe <script> <load> <O> <args...>
+    local script="$1" load="$2" o="$3"; shift 3
+    mkdir -p "$o/logs" "$o/state"; rm -f "$GMARK"
+    ( export PATH="$GB:$PATH" FAKE_LOAD="$load" PI_MARKER="$GMARK" MAX_LOAD=100 \
+             O="$o" LANE_TIMEOUT=1 REVIEW_TIMEOUT=1 FIX_TIMEOUT=1
+      bash "$HERE/$script" "$@" ) >/dev/null 2>&1
+    PROBE_RC=$?
+  }
+  mkdir -p "$TMP/mrepo"
+  # lane.sh <issue> <branch> <owner/repo>
+  probe lane.sh 150 "$TMP/plO" 5 br owner/repo
+  [ "$PROBE_RC" = "75" ] && [ ! -e "$GMARK" ] && grep -q REFUSED "$TMP/plO/logs/lane-5.log" && rc=0 || { rc=1; echo "      rc=$PROBE_RC"; }
+  ck "lane.sh under load 150: REFUSES to spawn the lane agent, exits 75" $rc
+  probe lane.sh 3 "$TMP/plO2" 5 br owner/repo
+  [ -e "$GMARK" ] && rc=0 || rc=1
+  ck "lane.sh under load 3: the agent IS spawned" $rc
+  # merge-one.sh — the reviewer path behind chain-<N>, fix-<PR> and the controller sweep. Assert a
+  # refusal leaves NO needsfix marker (recording one would authorise a fixer for a review that never
+  # happened, burn a MAX_FIX_TRIES attempt and can park the PR) and releases the per-PR claim, so
+  # the next cycle re-dispatches instead of skipping the PR as "in flight".
+  probe merge-one.sh 150 "$TMP/pmO" "$TMP/mrepo" owner/repo 1 br
+  [ "$PROBE_RC" = "75" ] && [ ! -e "$GMARK" ] && grep -q REFUSED "$TMP/pmO/logs/merge-1.log" && rc=0 || { rc=1; echo "      rc=$PROBE_RC"; }
+  ck "merge-one.sh under load 150 (the chain-<N> path): reviewer REFUSES to spawn, exits 75" $rc
+  [ -z "$(ls "$TMP/pmO/state" 2>/dev/null | grep '^needsfix-1-')" ] && [ ! -e "$TMP/pmO/state/mergeclaim-1.lock" ] && rc=0 || { rc=1; echo "      state: $(ls "$TMP/pmO/state" 2>/dev/null | tr '\n' ' ')"; }
+  ck "a load refusal is NOT a verdict: no needsfix marker, and the PR claim is released" $rc
+  probe merge-one.sh 3 "$TMP/pmO2" "$TMP/mrepo" owner/repo 1 br
+  [ -e "$GMARK" ] && rc=0 || rc=1
+  ck "merge-one.sh under load 3: the reviewer IS spawned" $rc
+  # fix-one.sh — the post-fix re-review path, and what adopt-fix.sh runs. A refusal must also skip
+  # re-running the merge chain: nothing changed, so a re-review is pure cost on a loaded box.
+  probe fix-one.sh 150 "$TMP/pfO" "$TMP/mrepo" owner/repo 1 br
+  [ "$PROBE_RC" = "75" ] && [ ! -e "$GMARK" ] && grep -q REFUSED "$TMP/pfO/logs/fix-1.log" && rc=0 || { rc=1; echo "      rc=$PROBE_RC"; }
+  ck "fix-one.sh under load 150 (the adopt-fix path): fixer REFUSES to spawn, exits 75" $rc
+  grep -q 'merge chain NOT re-run' "$TMP/pfO/logs/fix-1.log" && rc=0 || rc=1
+  ck "a refused fixer does not re-run the merge chain on an unchanged head" $rc
+  probe fix-one.sh 3 "$TMP/pfO2" "$TMP/mrepo" owner/repo 1 br
+  [ -e "$GMARK" ] && rc=0 || rc=1
+  ck "fix-one.sh under load 3: the fixer IS spawned" $rc
+  # The same probe on a copy with NO helper beside it: a partial sync must exit 78, not run ungated.
+  # A quiet box is used deliberately — an ungated build WOULD spawn here, which is what this
+  # discriminates.
+  mkdir -p "$TMP/nogate"; cp "$HERE/lane.sh" "$TMP/nogate/"; rm -f "$GMARK"
+  ( export PATH="$GB:$PATH" FAKE_LOAD=3 PI_MARKER="$GMARK" MAX_LOAD=100 O="$TMP/ngO"
+    bash "$TMP/nogate/lane.sh" 5 br owner/repo ) >/dev/null 2>&1
+  NG=$?
+  [ "$NG" = "78" ] && [ ! -e "$GMARK" ] && rc=0 || { rc=1; echo "      rc=$NG marker=$([ -e "$GMARK" ] && echo present || echo absent)"; }
+  ck "a worker with no spawn-gate.sh beside it exits 78 instead of starting an ungated agent" $rc
+# The retired scripts are the named residual of §4's gating claim: they invoke pi and are NOT
+# gated. A banner on each is what stops a silent re-activation from looking like any other file, so
+# pin it — the claim is only honest while the residual is visible where reuse would happen.
+RCK=0
+for f in "$HERE"/retired/*.sh; do
+  grep -qE '^[[:space:]]*(exec +)?pi( |$)' "$f" || continue
+  { grep -q 'NOT load-gated' "$f" && grep -q 'spawn-gate\.sh' "$f"; } || { echo "      $(basename "$f") spawns pi with no 'not load-gated' banner"; RCK=1; }
+done
+ck "every retired script that invokes pi carries the 'not load-gated' banner" $RCK
 
 # ── refresh-candidates.sh: the pool is ordered by SEVERITY, not by issue number ─────
 # #8465: the pool was sorted `sort -n -u` over the NUMBERS ALONE — oldest first — so 238

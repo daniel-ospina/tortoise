@@ -2,6 +2,9 @@
 # Continue the fix loop for a PR whose findings did NOT converge in one cycle.
 #   refix.sh <repo> <pr> <branch> [rounds]
 # Reuses the prompt templates watch-one.sh wrote (~/orchestrator/<tag>-*.txt).
+# RETIRED, kept for the record. NOTE: its `pi` spawns are NOT load-gated — the live spawn path is
+# spawn-gate.sh::run_agent() (agent-infra#1720). Do not re-activate this without routing its
+# spawns through that helper; README §4 names this file as the residual of its gating claim.
 set -u
 REPO="$1"; PR="$2"; BR="$3"; ROUNDS="${4:-2}"
 O="${O:-$HOME/orchestrator}"; mkdir -p "$O/logs" "$O/state"

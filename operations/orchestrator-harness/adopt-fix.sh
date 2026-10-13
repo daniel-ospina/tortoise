@@ -14,3 +14,7 @@ if ! git worktree list | grep -q "/$WT "; then
 fi
 echo "[adopt-fix $PR] worktree=$WT branch=$BR $(date)" >> "$O/logs/adopt-$PR.log"
 bash "$O/fix-one.sh" "$REPO" "$OR" "$PR" "$BR" >> "$O/logs/adopt-$PR.log" 2>&1
+rc=$?
+# 75 = the load gate refused to start the fixer (nothing ran, nothing consumed). Name it here: the
+# fixer's own line is inside fix-$PR.log, and this is the log a manual operator reads.
+[ "$rc" = "75" ] && echo "[adopt-fix $PR] fixer NOT started (load gate) — re-run when 1-min load is below MAX_LOAD" >> "$O/logs/adopt-$PR.log"
