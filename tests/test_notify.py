@@ -206,9 +206,22 @@ def test_file_incident_returns_false_when_there_is_no_alert_channel(monkeypatch)
     the absence of an alert channel. The sink asks the ALERT-only seam, so the
     sweep switch is irrelevant here — only a missing channel (no
     ``DR_ISSUES_PAT``, or an unusable object store) turns filing off.
+
+    NON-VACUOUS BY CONSTRUCTION: the raw pre-#4778 chain is fully ARMED here —
+    a truthy sweep config and a store whose ``open_incident`` answers ``True``
+    are both stubbed — so the raw chain would FILE and return ``True``. The
+    only thing that can make this ``False`` is the seam's own ``None``. On the
+    pre-fix code (raw ``_backup_config_safe() -> _alert_store_from``) this
+    test FAILS; an ambient-unconfigured environment cannot satisfy it.
     """
     from tortoise import hosted_api as ha
 
+    class _WouldFile:
+        def open_incident(self, kind, org_id="", detail=None):
+            return True  # the raw chain WOULD file — the seam must forbid it
+
+    monkeypatch.setattr(ha, "_backup_config_safe", lambda: object())
+    monkeypatch.setattr(ha, "_alert_store_from", lambda *a, **k: _WouldFile())
     monkeypatch.setattr(ha, "_incident_alert_store", lambda *a, **k: None)
     assert notify.file_incident("ANY_KIND") is False
 
