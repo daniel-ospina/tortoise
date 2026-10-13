@@ -425,6 +425,15 @@ surfaces:
   # this entry the cross-tenant IDOR pins (and the #2642 boundary tests) never
   # run on a diff-based lane at all.
   - test_connector_scope.py
+  # #4685: the OAuth COMPLETION half of the same surface —
+  # `POST /v1/connectors/github/auth` -> the shared GitHub callback -> one
+  # connector row. Registered here because the file drives `@app.*` routes in
+  # `tortoise/hosted_api.py` AND `supabase_control.connector_by_org_source`,
+  # and BOTH files select `api`: without this entry a change to either would
+  # leave the "a completed OAuth leaves a connector" pin unrun (the
+  # #1349/#2938 silent-drop class), and the file would red
+  # `tools/ci_selection.py --integrity` as unclassified.
+  - test_connector_oauth_flow.py
   # #1370: dual-registered with `core` — the same test file covers the hosted
   # commit seam (tortoise/hosted_api.py), so a hosted-only change must run it too.
   - test_subject_binding_1370.py
@@ -4483,6 +4492,17 @@ durations:
   test_ci_verdict.py: 0.2
   test_compute_attribution.py: 0.6
   test_connector_scope.py: 0.9
+  # #4685: a NEW file has no CI junit measurement (a file that never ran cannot
+  # appear in an artifact), so this is the pre-merge estimate: the four tests'
+  # CALL times summed to ~1.7 s locally (0.70 + 0.53 + 0.14 + 0.04). The
+  # per-test `setup` bodies are the embedded lane's shared cold-start (measured
+  # 0.2-22 s across runs and mostly one-time), which the packer's per-file
+  # weight must not double-count. Both halves are load-bearing: the surface
+  # entry alone leaves `durations` coverage under the floor and
+  # `tools/ci_selection.py --integrity` reds (#4348 trap), and a durations entry
+  # with no surface registration leaves the file unclassified. Refresh from the
+  # first post-merge run that includes it.
+  test_connector_oauth_flow.py: 2.5
   test_cypher_regex_guard_3595.py: 0.2
   test_definite_description_backfill_5059.py: 0.3
   test_document_source_gold.py: 0.1
