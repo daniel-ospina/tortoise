@@ -345,12 +345,12 @@ is re-dispatched on the next sweep, with `claim_live()` freeing the dead owner's
 
 ```text
 [scope] open=24 -> BROAD (help drain all)
-[cap]   lanes=4 swap_free=588M swap_total=4096M load=7
+[cap] load=7/100 lanes=4/4 mem_avail=11761M/512M swap_free=588M/600M   ← every gate names its own ceiling
 [dispatch] load=7 lanes=4 -> 4429 4489
 [refresh] +#4508 CLEAN -> backlog
 #8219 FAILED:ai-review-gate          ← per-PR verdict for the required checks
 #8192 fixer attempt 1                ← routed to a fixer, not a re-record
-[dispatch] skipped (load=7 lanes=4)  ← and why
+[dispatch] skipped (load=7>=max_load=100)   ← and WHY, naming the binding gate
 ```
 
 ---
@@ -427,7 +427,7 @@ because the self-test now drives every one of them:
 | `retired/watch-one.sh` built the fixer prompt from a log the reviewer had not written yet | the fixer always ran against an empty FINDINGS section | build the prompt after the reviewer run |
 | the pre-fix sweep logged `#<PR> re-record` even when the concurrency cap suppressed the spawn (`{A\|\|B\|\|C;} \|\| D && echo` parses as `({A\|\|B\|\|C} \|\| D) && echo`) | a stalled drain looked busy | explicit `if/elif` branches |
 | **this file's own self-test** re-implemented the fixed logic instead of reading the shipped scripts | it passed on the broken copy, so it pinned nothing — and the README claimed it did (found by the History reviewer, who proved 10/16 still passed on the pre-fix tree) | every check now extracts and drives the real classifier, `sess()`, claim block and reaper, or runs `install.sh`; §9/§7 claims corrected |
-| `MAX_REVIEW` defaulted to 2 in `orch-loop.sh` but 4 in `install.sh`, the plist it renders, and §4 | running the loop directly (not via the plist) silently halved reviewer concurrency against the documented value; the `${MAX_REVIEW:-4}` fallback was dead code | default is 4 everywhere, and the self-test asserts all 8 limit defaults agree between the two scripts |
+| `MAX_REVIEW` defaulted to 2 in `orch-loop.sh` but 4 in `install.sh`, the plist it renders, and §4 | running the loop directly (not via the plist) silently halved reviewer concurrency against the documented value; the `${MAX_REVIEW:-4}` fallback was dead code | default is 4 everywhere, and the self-test resolves all 10 limit defaults in both scripts and asserts they agree — including with the limits supplied via the environment, which is how the plist delivers them |
 | the live sweep dropped the `CLOSED` guard that `retired/sweep.sh` had, keeping only `MERGED` | a PR listed open that closed in between fell through to `gh pr ready` + `gh pr merge` every cycle and logged `#<PR> merge fail` forever | `case "$PR_ST" in MERGED\|CLOSED) continue ;;` |
 | `retired/auto-loop.sh` and `retired/sweep.sh` still carried the fail-open `ai-review-gate` classifier | shipping "the record" with the very bug being fixed invites reuse of it | both annotated in place as retired-with-known-fail-open |
 | §3 and §8 admitted cross-box duplication while §5.1b said "one owner per PR" | the invariant was stated more strongly than the code delivers | §5.1b scoped to per-box; §7.2b states the open cross-box gap |

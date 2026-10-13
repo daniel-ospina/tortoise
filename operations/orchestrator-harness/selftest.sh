@@ -248,15 +248,24 @@ rc=0
 # same hole and left another -- a literal, an arithmetic default, a duplicate definition, a duplicate
 # with no trailing newline, then an indented/bare/conditional reassignment. Each fix taught the regex
 # one more trick while bash kept resolving assignments by its own rules. Executing the assignments and
-# comparing what bash RESOLVES ends the sequence, because it tests the property we actually care about
-# (the two files agree) rather than a spelling of it.
+# comparing what bash RESOLVES tests the property we actually care about (that the two files agree)
+# rather than a spelling of it.
 #
-# Only lines that assign a KNOWN limit var are evaluated -- never the whole script.
+# KNOWN LIMIT, stated so this is not oversold: the regex only matches an assignment that BEGINS a line
+# (optionally after `export`). A `readonly VAR=`, an assignment on the same line as an `if`, or one
+# inside a function body written on one line are therefore NOT evaluated, and such a form would evade
+# this check. Those spellings do not occur in either file and neither is a natural way to write a
+# limit, but a check cannot be stronger than what it evaluates, so the guarantee is "the assignments
+# either file actually uses agree", not "any conceivable bash file agrees".
+#
+# Only lines that assign a KNOWN limit var (or _NCPU, below) are evaluated -- never the whole script.
 _LIMITS="MAX_LOAD MAX_LANES MAX_REVIEW MERGE_PRIORITY_AT MAX_FIX MAX_FIX_TRIES MIN_SWAP_FREE MIN_MEM_FREE_MB BATCH CYC"
-_LIMIT_RE="^[[:space:]]*(export[[:space:]]+)?($(printf '%s|' $_LIMITS | sed 's/|$//'))="
+# _NCPU is evaluated but not printed: MAX_LOAD is derived from it, so pinning it here (as an earlier
+# version did) would hide a divergence in the one input the derived ceiling depends on.
+_EVAL_VARS="$_LIMITS _NCPU"
+_LIMIT_RE="^[[:space:]]*(export[[:space:]]+)?($(printf '%s|' $_EVAL_VARS | sed 's/|$//'))="
 eff_defaults() {
-  ( _NCPU=10; export _NCPU
-    if [ "$1" = env ]; then
+  ( if [ "$1" = env ]; then
       # Second pass: the limits are SET. This distinguishes `VAR="${VAR:-4}"` (honours the
       # override) from a bare `VAR=4` (ignores it) -- two forms that resolve identically when the
       # variable is unset, so a single unset pass cannot tell them apart. They diverge exactly where
@@ -265,6 +274,7 @@ eff_defaults() {
     else
       for v in $_LIMITS; do unset "$v"; done
     fi
+    unset _NCPU
     eval "$(grep -E "$_LIMIT_RE" "$2" 2>/dev/null)"
     for v in $_LIMITS; do printf '%s=%s\n' "$v" "$(eval "printf '%s' \"\${$v:-UNSET}\"")"; done )
 }
@@ -328,6 +338,16 @@ tpl="$(grep -oE '__[A-Z_]+__' "$HERE/launchd.plist.template" | sort -u)"
 sedlist="$(sed -n '/^sed \\/,/launchd.plist.template/p' "$INST" | grep -oE '__[A-Z_]+__' | sed 's/^__//; s/__$//' | sed 's/^/__/; s/$/__/' | sort -u)"
 [ -n "$tpl" ] && [ "$tpl" = "$sedlist" ] && rc=0 || rc=1
 ck "every template placeholder is substituted by install.sh" $rc
+
+# The placeholder parity above cannot see a renamed <key>: rename the env KEY, keep the placeholder,
+# and both checks stay green while the loop reads a variable launchd never sets -- so the plist's
+# environment override is silently ignored. That is the exact mechanism the `env` pass in §7 models,
+# so the key names deserve their own assertion.
+rck=0
+for v in $_LIMITS; do
+  grep -q "<key>$v</key>" "$HERE/launchd.plist.template" || { echo "      template has no <key>$v</key>"; rck=1; }
+done
+ck "every limit the loop reads is rendered as a plist env KEY" $rck
 
 # ── 11) no credential material shipped ───────────────────────────────────────────
 rc=0
