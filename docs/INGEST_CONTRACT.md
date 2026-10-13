@@ -87,8 +87,10 @@ with identical contracts.
 }
 ```
 
-The `direction` values accepted today are `bidirectional` and `unidirectional` — see the direction
-model and its *Transition state* note in `docs/ONTOLOGY.md` (§8).
+The `direction` values accepted are the model's four — `->` (source→target), `<-` (target→source),
+`<->` (both ways), `-` (none: the connection exists and no confidence transfers) — plus the legacy
+aliases `unidirectional` ≡ `->` and `bidirectional` ≡ `<->`. See the direction model and its
+*Transition state* note in `docs/ONTOLOGY.md` (§8).
 
 Rules that hold regardless of granularity or policy:
 

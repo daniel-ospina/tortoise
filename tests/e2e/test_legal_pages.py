@@ -146,6 +146,7 @@ _RESOURCE_LOG_RE = re.compile(r"Failed to load resource")
 
 # ── Lazy playwright import — bare collection must never error. ─────────────
 from playwright.sync_api import Page, expect  # noqa: E402
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError  # noqa: E402
 
 # ── Tortoise-host check contract (cycle-4 P2-1). ───────────────────────────
 TORTISE_HOST_CHECK = os.environ.get("TORTISE_HOST_CHECK") == "1"
@@ -454,10 +455,22 @@ def _goto(page: Page, url: str, status: int = 200) -> str:
     stale edge response is not a defect — the external-crawl check below retries for
     the same reason. Without this, the two unconditional production assertions added
     for #3950 could redden the post-deploy job on a blip (review finding, #3962).
+
+    A transient navigation TIMEOUT is retried the same way. `page.goto` raises
+    `TimeoutError` before it can report a status, so the status retry below never
+    saw the flake that reddened `test_company_root_links_to_the_blog` in #8384
+    (the same SHA passed on the prior run); the helper's contract is "one retry
+    on a transient failure", and a hang is one.
     """
-    resp = page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-    if resp is None or resp.status != status:
+    try:
         resp = page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+    except PlaywrightTimeoutError:
+        resp = None
+    if resp is None or resp.status != status:
+        try:
+            resp = page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        except PlaywrightTimeoutError:
+            resp = None
     assert resp is not None, f"{url} produced no response"
     assert resp.status == status, f"{url} returned {resp.status} (expected {status})"
     return page.content()

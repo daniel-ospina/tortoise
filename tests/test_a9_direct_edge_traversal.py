@@ -1,8 +1,9 @@
 """A9 (epic #902, issue #1059) — EP selector direct-edge traversal.
 
 Plan §5.6 + E2E-14: ``_bfs_select_operators``/``_select_subgraph`` traverse
-operator-less direct edges DIRECTION-RESPECTING (NAND both ways always; IMPL
-both ways only when the edge's ``direction`` ≠ ``"unidirectional"``), the
+operator-less direct edges DIRECTION-RESPECTING (the four-value vocabulary
+``->`` / ``<-`` / ``<->`` / ``-``: an IMPL edge only where it flows; a NAND
+edge both ways for every flowing token, neither for ``-``), the
 selection set ALSO carries direct-edge factor anchors ((src, tgt, type),
 deduped), and the GATE-2 Q3 DERIVED-LIVENESS predicate applies to operator
 nodes (an operator participates in EP IFF ≥2 of its connected points are
@@ -13,8 +14,8 @@ Covers:
 - A9 units: direct-edge-only subgraph ⇒ zero operators + non-empty
   factor anchors (return contract); factor-anchor uniqueness (one anchor
   per (src,tgt,type) regardless of BFS discovery direction); direction-
-  respect (no back-traversal of a unidirectional IMPL edge; NAND always
-  both ways); cyclic selection terminates; derived-liveness 1-live/1-draft
+  respect (no back-traversal of a forward-only IMPL edge; a NAND edge both
+  ways except ``-``); cyclic selection terminates; derived-liveness 1-live/1-draft
   boundary (operator inert → promote second endpoint → active);
   pre-existing-path activation (a legacy-created direct edge is selected
   and computed by dream post-A9).
@@ -197,6 +198,47 @@ def test_a9_nand_always_bidirectional():
                                direction="unidirectional")
         ops, anchors = _select(sdk._get_proj(), [tgt["id"]], max_hops=1)  # noqa: RUF059
         assert anchors == {(src["id"], tgt["id"], "NAND")}, anchors
+    finally:
+        sdk.close()
+
+
+def test_a9_nand_negative_direction_traversed_neither_way_7852():
+    """#7852: `-` means "the connection exists and NO confidence transfers".
+    The NAND always-both exception must not resurrect it — seeding from
+    EITHER endpoint of a `-` NAND direct edge discovers nothing. The
+    forward-flowing tokens keep NAND's legacy always-both behaviour."""
+    sdk = _fresh_sdk()
+    try:
+        src = _live(sdk, "Source")
+        tgt = _live(sdk, "Target")
+        sdk.create_direct_edge("NAND", src["id"], tgt["id"], direction="-")
+        _, anchors_s = _select(sdk._get_proj(), [src["id"]], max_hops=1)
+        assert anchors_s == set(), \
+            f"a `-` NAND edge must not traverse forward: {anchors_s}"
+        _, anchors_t = _select(sdk._get_proj(), [tgt["id"]], max_hops=1)
+        assert anchors_t == set(), \
+            f"a `-` NAND edge must not traverse backward: {anchors_t}"
+        # the model token `->` keeps NAND's legacy always-both behaviour
+        sdk.create_direct_edge("NAND", src["id"], tgt["id"], direction="->")
+        _, anchors_f = _select(sdk._get_proj(), [tgt["id"]], max_hops=1)
+        assert (src["id"], tgt["id"], "NAND") in anchors_f, anchors_f
+    finally:
+        sdk.close()
+
+
+def test_a9_nand_backward_direction_walked_both_ways_7852():
+    """#7852: NAND is a symmetric constraint, so it keeps its always-both
+    behaviour for EVERY flowing token — a `<-` NAND direct edge is selected
+    from BOTH endpoints (only `-` is excluded)."""
+    sdk = _fresh_sdk()
+    try:
+        src = _live(sdk, "Source")
+        tgt = _live(sdk, "Target")
+        sdk.create_direct_edge("NAND", src["id"], tgt["id"], direction="<-")
+        _, anchors_s = _select(sdk._get_proj(), [src["id"]], max_hops=1)
+        assert (src["id"], tgt["id"], "NAND") in anchors_s, anchors_s
+        _, anchors_t = _select(sdk._get_proj(), [tgt["id"]], max_hops=1)
+        assert (src["id"], tgt["id"], "NAND") in anchors_t, anchors_t
     finally:
         sdk.close()
 
