@@ -2828,7 +2828,7 @@ _RESERVED_ACTOR_PROPS = frozenset(
 
 
 def _sanitize_props(props: dict, *, reject_id: bool = False,
-                    reject_credibility: bool = False) -> dict:
+                    reject_belief_props: bool = False) -> dict:
     """#329: reject server-managed fields on tenant write surfaces.
 
     ``sourcePath``/``source_path`` are server-filesystem fields consumed by the
@@ -2849,13 +2849,16 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     the store would silently alter is REJECTED with a key-naming ValueError —
     this runs before the ``sourcePath``/``id`` rejects below.
 
-    ``reject_credibility`` (#7951): the GENERIC props surfaces
-    (``update_point`` / ``create_entity`` / ``update_entity``) refuse
-    ``credibility`` — it is a documented WORD INPUT of
-    ``create_point(credibility=…)`` / ``mitigate_operator(credibility=…)``, not
-    a generic property, and through a generic bag it bypassed the
-    authored-assertion accounting. #7951 is the structural home (ONE write
-    chokepoint instead of per-path patching).
+    ``reject_belief_props`` (#7951): the GENERIC props surfaces
+    (``update_point`` / ``create_entity`` / ``update_entity``) refuse the
+    BELIEF fields — ``credibility``, and the baseline fields ``ep_alpha`` /
+    ``ep_beta`` / ``baseline_set`` / ``baseline_source``. ``credibility`` is a
+    documented WORD INPUT of ``create_point(credibility=…)`` /
+    ``mitigate_operator(credibility=…)``; the baseline fields belong to the
+    dedicated writers (``set_point_baseline`` and the source-inheritance
+    recompute), which write them TOGETHER and keep the #398 label in sync.
+    Through a generic bag they bypassed that accounting. #7951 is the
+    structural home (ONE write chokepoint instead of per-path patching).
     """
     props = dict(props)
     # #2600: reserved actor keys are STRIP-AND-IGNORE (never a 4xx — the
@@ -2980,14 +2983,39 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # born-live part (frozen at 3.0 even under a real T1 source), a label with
     # no baseline and no body, and an unvalidated value stored verbatim
     # ('gold', 'banana'). Fail closed; #7951 owns the single chokepoint.
-    if reject_credibility and "credibility" in props:
-        raise ValueError(
-            "'credibility' is not a generic property — it is a documented input "
-            "of create_point(credibility=…) and mitigate_operator(credibility=…), "
-            "which validate the ladder word and record it as the "
-            "authored-assertion label. Use one of those, or set_point_baseline "
-            "for an explicit belief (#7951)."
-        )
+    #
+    # #6151 review P1(b)/P3-2: the SAME generic surfaces must refuse the
+    # BASELINE fields. `baseline_source` is the token the dedup path used to
+    # read as proof of the #2199 provision, and the whole belief quartet is
+    # written by the dedicated chokepoints (`set_point_baseline`, the
+    # inheritance recompute) which keep `ep_alpha`/`ep_beta`/`baseline_*` and
+    # the #398 `credibility` label consistent. Through a generic bag they
+    # bypassed that: `baseline_source='system-default'` forged the #2199
+    # provision (measured +2.0 unearned, 1.2 -> 3.2), and `ep_alpha=0.4` on a
+    # word-bearing `set-by-author` row wrote a "frozen" value the recompute
+    # then replaced (0.4 -> 5.1). Fail closed; #7951 owns the one chokepoint.
+    if reject_belief_props:
+        if "credibility" in props:
+            raise ValueError(
+                "'credibility' is not a generic property — it is a documented "
+                "input of create_point(credibility=…) and "
+                "mitigate_operator(credibility=…), which validate the ladder "
+                "word and record it as the authored-assertion label. Use one "
+                "of those, or set_point_baseline for an explicit belief "
+                "(#7951)."
+            )
+        _baseline_props = [k for k in
+                           ("ep_alpha", "ep_beta", "baseline_set",
+                            "baseline_source")
+                           if k in props]
+        if _baseline_props:
+            raise ValueError(
+                f"{_baseline_props} are baseline fields the dedicated writers "
+                "own (set_point_baseline for an explicit belief, the "
+                "source-inheritance recompute for a derived one) — they are "
+                "not generic properties. Use set_point_baseline(alpha, beta) "
+                "(#7951)."
+            )
     # #2491: outdated is the terminalizing flag written ONLY by the lifecycle
     # writers via raw cypher (invalidate_point/supersede_point SET
     # n.outdated=true) after they journal + drop EP messages. Accepting it via
@@ -5914,12 +5942,15 @@ class TortoiseSDK:
                 # as an AUTHORED ASSERTION: `_apply_source_inheritance` then
                 # recomputes it, so a real source attached later displaces the
                 # weak body through ordinary aggregation. An EXPLICIT
-                # `set_point_baseline` / inherited baseline with no such label
-                # stays IMMUTABLE evidence (#844): a dedup hit — which matches
-                # by CONTENT HASH, and so may be an unrelated writer stating a
+                # `set_point_baseline` baseline with no such label stays
+                # IMMUTABLE evidence (#844): a dedup hit — which matches by
+                # CONTENT HASH, and so may be an unrelated writer stating a
                 # different belief — never rewrites it, and SAYS SO (the
                 # self-host surface dedups by DEFAULT, which makes the
-                # same-word retry the NORMAL path, so that one stays quiet).
+                # same-word retry the NORMAL path, so that one stays quiet). An
+                # INHERITED (`inherited-from-source`) baseline is DERIVED, not
+                # explicit, so the word is ADDED on top of it (#6151 review
+                # P2).
                 _word_applied = False
                 if cred_prior is not None:
                     from tortoise.source_credibility import (
@@ -5957,15 +5988,33 @@ class TortoiseSDK:
                         # 3.1/0.7561 (an unearned +2.0 alpha); after, the word
                         # is its own weak body on neutral -> 1.1/0.5238.
                         _apply_word = True
-                    elif _bl_src == BASELINE_SOURCE_SYSTEM_DEFAULT \
-                            or _existing.get("baseline_system_default"):
+                    elif _existing.get("baseline_system_default"):
                         # The #2199 provision is this claim's recorded base; the
                         # author's word ADDS the weak body ON TOP of it and
                         # never deletes it (#398: a labelled claim is never
-                        # weaker than the same claim unlabelled).
+                        # weaker than the same claim unlabelled). The marker is
+                        # the ONLY legitimate signal: it is written by the birth
+                        # path (`create_point`) and the mitigation grant — never
+                        # inferred from the caller-supplied `baseline_source`
+                        # token (#6151 review P1(b)). The token is writeable
+                        # through `set_point_baseline(source=…)`, so trusting it
+                        # let a caller stamp the marker and collect the +2.0
+                        # default unearned (measured 1.2 -> 3.2).
                         _base_a = _existing.get("ep_alpha") or 1.0
                         _base_b = _existing.get("ep_beta") or 1.0
                         _record_default = True
+                        _apply_word = True
+                    elif _bl_src == BASELINE_SOURCE_INHERITED:
+                        # #6151 review P2: an `inherited-from-source` baseline
+                        # is DERIVED evidence, not an authored belief — the word
+                        # is one more weak body ON TOP of it, exactly as on the
+                        # other dedup cases. This shape used to fall to the
+                        # drop below, so a documented word produced no body and
+                        # no label (measured: an inherited 5.0 stayed 5.0 with
+                        # `credibility` None). The next recompute re-derives it
+                        # from the sources PLUS the word.
+                        _base_a = _existing.get("ep_alpha") or 1.0
+                        _base_b = _existing.get("ep_beta") or 1.0
                         _apply_word = True
                     else:
                         _drop_note = (
@@ -8902,7 +8951,7 @@ class TortoiseSDK:
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         # #329: id mutation + server-managed fields rejected
         props = _sanitize_props(props, reject_id=True,
-                                reject_credibility=True)
+                                reject_belief_props=True)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
         # E4 (#5007): same rule as `create_point` / the `Point` model — an
@@ -16984,13 +17033,22 @@ class TortoiseSDK:
         # and let the revert pass neutralise a word-bearing point whose sources
         # are removed. Only the two EXPLICIT (frozen) provenance classes
         # supersede the word.
+        #
+        # #6151 review P1(a): the SAME explicit write must also clear the #2199
+        # `baseline_system_default` marker — the OTHER half of the same birth
+        # fact. The marker is what the recompute's `+2.0` re-injection is gated
+        # on, so leaving it behind re-injected the default OVER an explicit
+        # baseline on the next word-bearing recompute (measured 0.4 -> 7.1). An
+        # explicit baseline SUPERSEDES the provision exactly as it supersedes
+        # the word: after this write the point is a frozen author belief, not a
+        # born-live decide part that still carries the default.
         _set_clause = (
             "n.ep_alpha = $a, n.ep_beta = $b, n.baseline_set = true, "
             "n.baseline_source = $src, "
             "n.posterior_alpha = null, n.posterior_beta = null"
         )
         if source != BASELINE_SOURCE_INHERITED:
-            _set_clause += ", n.credibility = null"
+            _set_clause += ", n.credibility = null, n.baseline_system_default = null"
         written = proj.g.query(
             f"MATCH (n:Point {{id: $id}}) SET {_set_clause} RETURN n.id",
             params={"id": claim_id, "a": alpha, "b": beta, "src": source},
@@ -17115,8 +17173,10 @@ class TortoiseSDK:
           - Baseline provenance: an EXPLICIT `set_point_baseline` /
             system-default baseline is FROZEN against source recomputation
             (#844), with NO exception — and `set_point_baseline` ENFORCES that
-            class by CLEARING the #398 `credibility` label when it writes
-            (#6151 review P1: an explicit write SUPERSEDES the authored word).
+            class by CLEARING the #398 `credibility` label AND the #2199
+            `baseline_system_default` marker when it writes (#6151 review P1:
+            an explicit write SUPERSEDES the authored word and the recorded
+            default).
             A baseline carrying the #398 `credibility` label IS recomputed so
             its authored assertion joins the aggregate as one weak body — that
             label is only ever present on a baseline written by a WORD input
@@ -17273,14 +17333,22 @@ class TortoiseSDK:
             # is neutral is still seen.
             if word_label:
                 author_word[pid] = word_label
+            # #398 (owner ruling 2026-10-12), #6151 review P3-3: an
+            # `agentSession` is a SESSION source — WEAK when it ORIGINATES and
+            # ZERO when it CARRIES — whatever `credibilityTier` a caller may
+            # have stamped. Route it BEFORE `resolve_tier`: an explicit tier
+            # won the documented precedence and entered the tier groups as a
+            # NORMAL source (measured: `credibilityTier='T0'` on an
+            # `agentSession` → ep_alpha 10.0), letting an agent's own assertion
+            # carry a strong body — exactly what the ruling forbids.
+            # `agentSession` is already registered NEUTRAL in
+            # `SOURCE_KIND_DEFAULTS`; this makes the explicit-tier case agree
+            # with it instead of silently overriding the ruling.
+            if skind == "agentSession" or ctier == "agentSession":
+                session_sources.append((pid, url))
+                continue
             tier = resolve_tier(ctier, skind)
             if tier is None:
-                # #398: `agentSession` used to resolve to None (neutral, i.e.
-                # NO weight — a claim only an agent knows sat permanently at
-                # alpha=1/beta=1, ignorance). The ruling makes it weak when it
-                # originates, zero when it carries.
-                if skind == "agentSession" or ctier == "agentSession":
-                    session_sources.append((pid, url))
                 continue  # neutral source — no inheritance contribution
             # Identity = the ALREADY-MATERIALISED S0a key. `:Source` carries
             # `canonicalUrl` (written by the write path), which is precisely the
@@ -23268,7 +23336,7 @@ class TortoiseSDK:
         # into the event dict AFTER sanitize.
         if not _skip_sanitize:
             props = _sanitize_props(props, reject_id=True,
-                                    reject_credibility=True)
+                                    reject_belief_props=True)
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         proj = self._get_proj()
@@ -23713,7 +23781,7 @@ class TortoiseSDK:
     def _update_entity(self, id_val: str, **props) -> dict:
         # #329: id + sourcePath/source_path are server-managed — reject
         props = _sanitize_props(props, reject_id=True,
-                                reject_credibility=True)
+                                reject_belief_props=True)
         # #3998 (D30): the generic entity surface reaches `:Source` TOO, and its
         # per-label branch below writes caller props with a live `SET n += $p`.
         # Without this the closed :Source surface declared in

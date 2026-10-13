@@ -513,6 +513,100 @@ class TestBaselineProvenance:
         assert sdk.get_point(p).get("credibility") is None, (
             "a rejected generic write must not have stored the label")
 
+    def test_baseline_fields_are_not_generic_properties(self, sdk):
+        """#6151 review P3-2 / #7951 — the generic bag refuses the BASELINE
+        fields too, not only ``credibility``.
+
+        ``ep_alpha``/``ep_beta``/``baseline_set``/``baseline_source`` belong to
+        the dedicated writers (``set_point_baseline``, the inheritance
+        recompute), which write them together and keep the #398 label in sync.
+        Through a generic bag they bypassed that: ``ep_alpha=0.4`` on a
+        word-bearing ``set-by-author`` row left the label intact and wrote a
+        "frozen" value the recompute then replaced (measured 0.4 -> 5.1), and
+        ``baseline_source='system-default'`` forged the #2199 provision.
+        """
+        p = sdk.create_point("statement", "no generic baseline")["id"]
+        for key, val in (("ep_alpha", 0.4), ("ep_beta", 1.0),
+                         ("baseline_set", True),
+                         ("baseline_source", "set-by-author")):
+            with pytest.raises(ValueError, match=key):
+                sdk.update_point(p, **{key: val})
+        with pytest.raises(ValueError, match="baseline_source"):
+            sdk.update_entity(p, baseline_source="system-default")
+        with pytest.raises(ValueError, match="ep_alpha"):
+            sdk.create_entity("subject", "generic baseline", ep_alpha=0.4)
+        pt = sdk.get_point(p)
+        assert pt.get("baseline_set") in (None, False), (
+            "a rejected generic write must not have stored a baseline")
+        assert pt.get("ep_alpha") is None, pt
+
+    def test_system_default_token_cannot_forge_the_2199_provision(self, sdk):
+        """#6151 review P1(b) — the ``baseline_system_default`` marker is
+        granted ONLY by the birth path, never inferred from a caller-supplied
+        ``baseline_source`` token.
+
+        The dedup path used to read ``baseline_source == 'system-default'`` as
+        proof of the #2199 provision. That token is writeable through
+        ``set_point_baseline(source=…)``, so a plain (never-born-live)
+        statement with a T4 source could park itself there, take a dedup word,
+        and collect +2.0 unearned (measured 1.2 -> 3.2). The token is no longer
+        trusted, so the forged point stays frozen at the value the caller
+        actually set, with no marker.
+        """
+        sdk.create_source("https://p1b-t4.example", "document", tier="T4",
+                          sourceDate=FRESH)
+        honest = sdk.create_point("statement", "honest p1b", status="live",
+                                  extractedFrom="https://p1b-t4.example")["id"]
+        sdk.create_point("statement", "honest p1b", dedup=True,
+                         credibility="gold")
+        forged = sdk.create_point("statement", "forged p1b", status="live",
+                                  extractedFrom="https://p1b-t4.example")["id"]
+        # The forgery: claim the #2199 provision through the provenance token.
+        sdk.set_point_baseline(forged, 1.0, 1.0, source="system-default")
+        sdk.create_point("statement", "forged p1b", dedup=True,
+                         credibility="gold")
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        h, f = sdk.get_point(honest), sdk.get_point(forged)
+        assert h["ep_alpha"] == pytest.approx(1.2), h  # T4 + the weak word
+        assert f.get("baseline_system_default") is None, f
+        assert f["ep_alpha"] == pytest.approx(1.0), f  # no unearned +2.0
+        # The generic surface refuses the same provenance outright.
+        with pytest.raises(ValueError, match="baseline_source"):
+            sdk.update_point(forged, baseline_source="system-default",
+                             baseline_set=True, ep_alpha=1.0, ep_beta=1.0)
+
+    def test_label_bearing_point_keeps_its_prior_when_sources_are_removed(
+            self, sdk):
+        """#6151 review P3-1 — the ``credibility IS NULL`` guard on the REVERT
+        pass is load-bearing, and before this test it was UNFALSIFIED: removing
+        it left every other test green.
+
+        A word-bearing Point is an authored assertion, so it is never reverted
+        to neutral even when ALL of its source edges are deleted — its own weak
+        body keeps a prior. Without the guard the revert REMOVEs
+        ``ep_alpha``/``ep_beta``/``baseline_*`` and the point becomes
+        uncalibrated.
+        """
+        url = "https://p31.example"
+        p = sdk.create_point("statement", "worded, then orphaned",
+                             status="live", credibility="gold",
+                             extractedFrom=url)["id"]
+        sdk.create_source(url, "document", tier="T1", sourceDate=FRESH)
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        assert sdk.get_point(p)["ep_alpha"] == pytest.approx(5.1)  # T1 + word
+        # Delete the ONLY source edge — the revert pass would otherwise fire.
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$pid})-[e:extractedFrom]->(s:Source {url:$url}) "
+            "DELETE e",
+            params={"pid": p, "url": url},
+        )
+        sdk._invalidate_inheritance_gate([p])
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        pt = sdk.get_point(p)
+        # NOT reverted to neutral: the authored assertion is still a source.
+        assert pt["ep_alpha"] == pytest.approx(5.1), pt
+        assert pt["credibility"] == "T0", pt
+
 
 class TestAuthorAsSourceAndDifference:
     """#398 + #6151 — an authored assertion is a SOURCE and the aggregation
@@ -973,6 +1067,71 @@ class TestAuthorAsSourceIntegration:
         # stays neutral. A misread ORIGINATING session would write 1.1.
         assert pt.get("ep_alpha") in (None, 1.0), pt
 
+    def test_dedup_word_on_an_inherited_baseline_is_added(self, sdk):
+        """#6151 review P2 — a documented word must be ADDED (weak body +
+        label) even when the existing baseline is DERIVED
+        (``inherited-from-source``).
+
+        The drop branch treated derived evidence like an explicit belief, so a
+        dedup word produced no body and no label (measured: an inherited 5.0
+        point + dedup word stayed 5.0 with ``credibility`` None). The word is
+        one more weak body on top of the derived baseline; the next recompute
+        re-derives it from the source PLUS the word.
+        """
+        sdk.create_source("https://p2-t1.example", "document", tier="T1",
+                          sourceDate=FRESH)
+        p = sdk.create_point("statement", "inherited then word",
+                             status="live",
+                             extractedFrom="https://p2-t1.example")["id"]
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        assert sdk.get_point(p)["ep_alpha"] == pytest.approx(5.0)
+        dup = sdk.create_point("statement", "inherited then word",
+                               dedup=True, credibility="gold")["id"]
+        assert dup == p
+        after = sdk.get_point(p)
+        assert after["credibility"] == "T0", after  # the label IS written
+        assert after["ep_alpha"] == pytest.approx(5.1), after  # + weak body
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        recomputed = sdk.get_point(p)
+        assert recomputed["ep_alpha"] == pytest.approx(5.1), recomputed
+        assert recomputed["credibility"] == "T0", recomputed
+
+    def test_explicitly_tiered_agent_session_is_still_weak(self, sdk):
+        """#6151 review P3-3 — an ``agentSession`` is WEAK for what it
+        ORIGINATES, whatever tier a caller stamped on it.
+
+        ``resolve_tier``'s documented explicit-tier precedence used to win, so
+        a session with ``credibilityTier='T0'`` entered the tier groups as a
+        normal source (measured: ``ep_alpha`` 10.0) — an agent's own assertion
+        carrying a strong body, which the #398 ruling forbids. The belief path
+        now routes ``agentSession`` to the carrier rule BEFORE tier resolution.
+        """
+        sdk.create_source("session:tiered-p33", "agentSession", tier="T0")
+        p = sdk.create_point("statement", "tiered session", status="live",
+                             extractedFrom="session:tiered-p33")["id"]
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        pt = sdk.get_point(p)
+        assert pt["ep_alpha"] == pytest.approx(TIER_PRIORS["T4"][0])  # 1.1
+        assert pt["ep_alpha"] == pytest.approx(1.0 + weak_support_pc(1))
+
+    def test_explicitly_tiered_carrying_session_is_still_zero(self, sdk):
+        """#6151 review P3-3 — a tiered ``agentSession`` that CARRIES an
+        attached source is still provenance (ZERO), not a T0 body."""
+        sdk.create_source("https://p33-doc.example", "document", tier="T1",
+                          sourceDate=FRESH)
+        sdk.create_source("session:p33-carrier", "agentSession", tier="T0")
+        sdk._get_proj().g.query(
+            "MATCH (a:Source {url:$a}),(b:Source {url:$b}) "
+            "CREATE (a)-[:references]->(b)",
+            params={"a": "session:p33-carrier", "b": "https://p33-doc.example"},
+        )
+        p = sdk.create_point("statement", "tiered carrier", status="live",
+                             extractedFrom="https://p33-doc.example")["id"]
+        sdk._get_proj()._link_source(p, "session:p33-carrier")
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        # T1 document only — the tiered carrying session adds nothing.
+        assert sdk.get_point(p)["ep_alpha"] == pytest.approx(TIER_PRIORS["T1"][0])
+
 
 class TestExplicitBaselineSupersedesTheWord:
     """#6151 review P1 — an explicit `set_point_baseline` SUPERSEDES the word.
@@ -1039,6 +1198,39 @@ class TestExplicitBaselineSupersedesTheWord:
         assert mean_from_beta(after["ep_alpha"], after["ep_beta"]) == \
             pytest.approx(0.8361, abs=1e-4)
         assert after["credibility"] == "T0", after  # label survives the recompute
+
+    def test_explicit_baseline_clears_the_2199_marker(self, sdk):
+        """#6151 review P1(a) — the explicit write must clear the #2199
+        ``baseline_system_default`` marker WITH the label, or a later
+        word-bearing recompute re-injects +2.0 OVER the explicit baseline.
+
+        Chain measured before the fix: a born-live decide part + word → 3.1 with
+        the marker; ``set_point_baseline(0.4)`` → 0.4 but the marker SURVIVED;
+        a dedup word re-opened the label; the recompute returned 7.1. After the
+        fix the marker is cleared in the same statement, the dedup word is
+        refused by the #844 explicit-baseline rule, and 0.4 survives.
+        """
+        p = sdk.create_point("option", "p1a decide word",
+                             credibility="gold")["id"]
+        assert sdk.get_point(p)["baseline_system_default"] is True
+        sdk.set_point_baseline(p, 0.4, 1.0)
+        after_write = sdk.get_point(p)
+        assert after_write["ep_alpha"] == pytest.approx(0.4), after_write
+        assert after_write.get("credibility") is None, after_write
+        assert after_write.get("baseline_system_default") is None, after_write
+        # The word-bearing recompute: a dedup hit with a word, then a real T1
+        # source. Before the fix this re-injected the default (7.1).
+        dup = sdk.create_point("option", "p1a decide word", dedup=True,
+                               credibility="low")["id"]
+        assert dup == p
+        sdk.create_source("https://p1a.example", "document", tier="T1",
+                          sourceDate=FRESH)
+        sdk._get_proj()._link_source(p, "https://p1a.example")
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        after = sdk.get_point(p)
+        assert after["ep_alpha"] == pytest.approx(0.4), after
+        assert after.get("baseline_system_default") is None, after
+        assert after.get("credibility") is None, after
 
 
 class TestLowFactorFloodBound:

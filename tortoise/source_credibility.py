@@ -223,6 +223,16 @@ def resolve_tier(
     Precedence: explicit ``credibilityTier`` (must be a valid T0-T4 form) >
     ``sourceKind`` tier-form (T0-T4) > registry default > None (neutral).
     Malformed values ("T9", "t1", "T1 ") resolve to None — never crash.
+
+    ⛔ ``agentSession`` is NOT resolved here, by design: an agent session is a
+    SESSION source whose weight depends on whether it ORIGINATES the claim
+    (weak) or merely CARRIES an attached source (zero), never on a tier
+    (#398 owner ruling 2026-10-12). Its kind is registered NEUTRAL in
+    ``SOURCE_KIND_DEFAULTS``, and the belief path routes it to the carrier
+    rule BEFORE calling this function — so an explicit ``credibilityTier``
+    cannot promote an agent's own assertion to a strong body (#6151 review
+    P3-3). Callers that need a tier for a session must not use this as a
+    loophole.
     """
     for candidate in (credibility_tier, source_kind):
         if candidate in _TIER_FORM:
