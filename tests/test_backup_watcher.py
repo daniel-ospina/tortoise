@@ -1976,3 +1976,61 @@ def test_recovery_window_keeps_a_vanished_graph_pending(monkeypatch):
     w.poll()
     assert "team_a:vanished" not in w._last_graph_keys
     assert ch.issues == {}, "the second consecutive healthy poll closes it"
+
+
+def test_recovery_window_keeps_a_state_only_backup_set_missing_pending(monkeypatch):
+    """#3146 acceptance, watcher side: the cross-poll diff retries too.
+
+    ``BACKUP_SET_MISSING`` for a state-only org (present in the state bucket,
+    absent from ``per_team``) is resolved ONLY by the cross-poll diff
+    ``_last_backup_set_missing - cur_bsm`` — no other set contains the org, so
+    a single window-skipped resolve would retire the subject and leave the
+    incident open forever (the #3030 orphan class, one set over from the
+    vanished-graph path). The failed poll must keep the org in the set so the
+    next poll re-includes it; the declared window of 2 then closes it.
+    """
+    monkeypatch.delenv("ALERT_RECOVERY_STREAK", raising=False)
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_state(storage, "team_x")   # state present, no archives, not in census
+    w = _watcher(storage, ch, orgs=())
+    w.poll()
+    assert any("BACKUP_SET_MISSING — team_x" in t for t in ch.issues.values())
+
+    storage.delete("ops/teams/team_x/state.json")
+    w.poll()
+    assert "team_x" in w._last_backup_set_missing, (
+        "a window-skipped resolve must keep the org pending for the next poll")
+    assert ch.issues, "one healthy poll must not clear the incident"
+
+    w.poll()
+    assert "team_x" not in w._last_backup_set_missing
+    assert ch.issues == {}, "the second consecutive healthy poll closes it"
+
+
+def test_recovery_window_is_not_defeated_by_a_double_resolve(monkeypatch):
+    """#3146: one poll credits ONE healthy observation, not two.
+
+    An org that is in the census AND carried state appears in BOTH resolve
+    universes (the positive `per_team` scan and the cross-poll diff). The store
+    counts one healthy observation per resolve CALL, so two calls in one poll
+    would reach a window of 2 on the FIRST healthy poll — the hysteresis
+    defeating itself on exactly the orgs it guards. The two universes are
+    unioned, so the subject is attempted once per poll.
+    """
+    monkeypatch.delenv("ALERT_RECOVERY_STREAK", raising=False)
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_state(storage, "team_a")   # state present, no archive yet
+    w = _watcher(storage, ch, orgs=("team_a",))   # ...and in the census
+    w.poll()
+    assert any("BACKUP_SET_MISSING — team_a" in t for t in ch.issues.values())
+
+    _seed_archive(storage, "team_a", 0.5)   # archives reappear → healthy
+    w.poll()
+    assert any("BACKUP_SET_MISSING — team_a" in t for t in ch.issues.values()), (
+        "the first healthy poll must NOT close a window of 2 — a second "
+        "resolve for the same org in the same poll would")
+
+    w.poll()
+    assert ch.issues == {}, "the second consecutive healthy poll closes it"

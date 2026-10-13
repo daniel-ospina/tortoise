@@ -1069,14 +1069,35 @@ class BackupWatcher:
                 # BACKUP_SET_MISSING whose archives recovered before the first
                 # poll — the incident would stay open and its dedup state
                 # could absorb the next genuine recurrence.
-                for org in set(status["per_team"]) - cur_bsm:
-                    self._alert_leg("resolve_incident", KIND_BACKUP_SET_MISSING, org)
                 # ...and a state-only org that LEFT the set (tracked across
                 # polls — it is never in `per_team`, so the scan above cannot
                 # close it).
-                for org in self._last_backup_set_missing - cur_bsm:
-                    self._alert_leg("resolve_incident", KIND_BACKUP_SET_MISSING, org)
-                self._last_backup_set_missing = cur_bsm
+                #
+                # #3146 (review P1): a state-only org is in NO other set, so
+                # its cross-poll resolve gets a single attempt; a resolve left
+                # ON RECORD (`SKIPPED_WINDOW`: the recovery window is not yet
+                # satisfied) would retire the subject here and never revisit
+                # it, leaving the incident open forever. So a failed resolve is
+                # kept pending and the next poll's diff re-includes it.
+                #
+                # The two universes are UNIONED deliberately. An org can be in
+                # BOTH (it is in the census AND carried state, so it appears in
+                # `per_team` and was in `_last_backup_set_missing`), and the
+                # store counts ONE healthy observation per resolve call — two
+                # calls in one poll would credit two consecutive observations
+                # and close on the FIRST healthy poll, defeating exactly the
+                # hysteresis this window provides. One attempt per subject per
+                # poll, and `_last_backup_set_missing` is carried as
+                # `cur | pending` so a failure is retried next poll — the same
+                # convention `_last_graph_keys` and `_pending_team_resolves`
+                # use.
+                to_resolve = ((set(status["per_team"]) - cur_bsm)
+                              | (self._last_backup_set_missing - cur_bsm))
+                pending_bsm: set[str] = set()
+                for org in sorted(to_resolve):
+                    if not self._alert_leg("resolve_incident", KIND_BACKUP_SET_MISSING, org):
+                        pending_bsm.add(org)
+                self._last_backup_set_missing = cur_bsm | pending_bsm
             # R2_DOWN: emit while degraded-from-known-good, resolve when healthy.
             # Its own guard kept for symmetry with the other legs; the outer
             # `except` below remains as a backstop for structural errors (a

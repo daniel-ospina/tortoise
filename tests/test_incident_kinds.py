@@ -421,9 +421,11 @@ def test_resolve_streak_config_contract(caplog):
 
     Precedence: global ``ALERT_RECOVERY_STREAK`` > per-kind
     ``ALERT_RECOVERY_STREAKS`` > the legacy ``BACKUP_POOL_RESOLVE_STREAK`` (the
-    POOL_STALE-only #4994 knob) > the declared value. A non-integer is IGNORED
-    with a warning (the declared value stands); ``< 1`` is read as 1 with a
-    warning, because a window of zero would mean "never resolve".
+    POOL_STALE-only #4994 knob) > the declared value. A non-integer OR a
+    NEGATIVE value is IGNORED with a warning (the declared value stands); ``0``
+    is read as 1 with a warning, because a window of zero would mean "never
+    resolve". A negative is a typo, not the ``1`` "clear now" spelling, so it
+    must not defeat the hysteresis — the bash twin agrees (#3146 review P2).
     """
     import logging
 
@@ -446,9 +448,12 @@ def test_resolve_streak_config_contract(caplog):
         assert ik.resolve_streak_for(
             "R2_DOWN", {"ALERT_RECOVERY_STREAKS": "R2_DOWN=x"}) == 2
         assert ik.resolve_streak_for("R2_DOWN", {"ALERT_RECOVERY_STREAK": "0"}) == 1
-        assert ik.resolve_streak_for("R2_DOWN", {"ALERT_RECOVERY_STREAK": "-4"}) == 1
+        assert ik.resolve_streak_for("R2_DOWN", {"ALERT_RECOVERY_STREAK": "-4"}) == 2
+        # ``-0`` IS zero, so it is not the negative branch: below-1 → 1.
+        assert ik.resolve_streak_for("R2_DOWN", {"ALERT_RECOVERY_STREAK": "-0"}) == 1
     assert caplog.text.count("is not an integer") == 1, caplog.text
     assert caplog.text.count("below 1") == 2, caplog.text
+    assert caplog.text.count("is negative") == 1, caplog.text
 
 
 def test_recovery_streak_contract_with_driver():
@@ -712,3 +717,72 @@ def test_driver_recovery_streak_config_precedence(tmp_path):
     assert proc.stdout.strip() == "2 2 1 1", proc.stdout
     assert "is not an integer" in proc.stderr, proc.stderr
     assert "below 1" in proc.stderr, proc.stderr
+
+    # A NEGATIVE value is IGNORED too (the declared value stands) — it must not
+    # silently defeat the hysteresis, and the Python twin must agree. This used
+    # to be the exact divergence #3146's review caught: bash read ``-4`` as a
+    # non-integer (declared window stands) while Python clamped it to 1, so one
+    # env var selected two different recovery windows across the two writers.
+    # ``-0`` is ZERO (Python's ``int("-0") == 0``), so it is NOT the negative
+    # branch: both writers read it through the below-1 clamp. The expected window
+    # for each kind is taken from the PYTHON twin, so the assertion cannot
+    # silently agree with only one side.
+    #
+    # The shape cases pin the rest of the contract the review called out:
+    # surrounding whitespace is trimmed by BOTH (the store's `str.strip()` and
+    # the driver's parameter-expansion trim), while spellings ``int()`` happens
+    # to tolerate but bash's digit guard does not (``+3``, ``1_0``) must be
+    # IGNORED by both rather than accepted by one side only.
+    cross_language_cases = {
+        "a negative value is ignored":
+            ({"ALERT_RECOVERY_STREAKS": "STALE=-4,POOL_STALE=-4"},
+             "is negative"),
+        "a signed zero is still zero":
+            ({"ALERT_RECOVERY_STREAKS": "STALE=-0,POOL_STALE=-0"},
+             "below 1"),
+        "surrounding whitespace is trimmed, not rejected":
+            ({"ALERT_RECOVERY_STREAKS": " STALE = 3 ,POOL_STALE= 4 "},
+             None),
+        "a plus sign is not an integer":
+            ({"ALERT_RECOVERY_STREAKS": "STALE=+3,POOL_STALE=+3"},
+             "is not an integer"),
+        "an underscore is not a digit":
+            ({"ALERT_RECOVERY_STREAKS": "STALE=1_0,POOL_STALE=1_0"},
+             "is not an integer"),
+    }
+    for label, (extra_env, expected_warning) in cross_language_cases.items():
+        env.update(extra_env)
+        proc = subprocess.run(["bash", "-c", script], capture_output=True,
+                              text=True, env=env)
+        assert proc.returncode == 0, proc.stderr
+        expected = " ".join(
+            str(ik.resolve_streak_for(kind, extra_env)) for kind in
+            ("R2_DOWN", "STALE", "POOL_STALE", "DATA_LOSS_CANDIDATE"))
+        assert proc.stdout.strip() == expected, (label, proc.stdout, expected)
+        if expected_warning is None:
+            assert "is not an integer" not in proc.stderr, (label, proc.stderr)
+            assert "below 1" not in proc.stderr, (label, proc.stderr)
+        else:
+            assert expected_warning in proc.stderr, (label, proc.stderr)
+
+
+def test_driver_workflow_binds_the_recovery_window_knobs():
+    """The runbook's knobs must reach the driver through its only production caller.
+
+    Actions passes a job ONLY the env it enumerates, so a knob the runbook
+    documents but the workflow omits is unreachable no matter what an operator
+    sets (#3146 review P2). The driver's sole production invocation is
+    ``registry-backup-cron.yml``, so pin the bindings there. The value is
+    ``${{ vars.… }}`` deliberately: an unset repository variable expands to the
+    empty string, which ``recovery_streak_for`` reads as "no override".
+    """
+    import yaml
+
+    wf = yaml.safe_load(
+        (ROOT / ".github/workflows/registry-backup-cron.yml").read_text())
+    env = wf["jobs"]["drive"]["env"]
+    for key in ("ALERT_RECOVERY_STREAK", "ALERT_RECOVERY_STREAKS",
+                "BACKUP_POOL_RESOLVE_STREAK"):
+        assert env.get(key) == f"${{{{ vars.{key} }}}}", (
+            f"registry-backup-cron must bind {key} so the documented lever "
+            f"reaches the driver; got {env.get(key)!r}")

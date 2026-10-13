@@ -170,14 +170,23 @@ def _streak_of(state: dict[str, Any]) -> int:
     pre-generalization ``fresh_streak`` (the #4994 POOL_STALE field) is read as a
     fallback for one deploy cycle — an object written by the still-deployed
     driver must not read as "no count" and be cleared a window early.
+
+    A PRESENT ``healthy_streak`` wins even when it is ``0``: the reset writes
+    ``healthy_streak = 0``, and letting a leftover ``fresh_streak`` sibling
+    override it would resurrect the pre-reset count and clear on a single
+    healthy observation — the fabricated recovery the reset exists to prevent
+    (review ISSUE 3). This matches the bash twin's
+    ``(.healthy_streak // .fresh_streak) // 0``: ``0`` is not null, so it wins,
+    and the legacy spelling is consulted only when the new one is ABSENT (or
+    explicitly null). A negative count is never a real window, so it reads 0.
     """
     for field in ("healthy_streak", "fresh_streak"):
+        if field not in state or state[field] is None:
+            continue
         try:
-            value = int(state.get(field) or 0)
+            return max(0, int(state[field]))
         except (TypeError, ValueError):
             continue
-        if value > 0:
-            return value
     return 0
 
 

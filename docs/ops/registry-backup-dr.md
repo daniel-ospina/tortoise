@@ -447,8 +447,17 @@ Both writers honour the same config: `ALERT_RECOVERY_STREAKS="KIND=n,KIND2=m"`
 per kind, overridden by `ALERT_RECOVERY_STREAK=N` for ALL kinds (the "clear now"
 emergency lever — set it to 1 to restore the single-poll behaviour), over the
 declared value; the driver also keeps `BACKUP_POOL_RESOLVE_STREAK` as the
-POOL_STALE-only alias. A non-integer value is ignored with a warning, and `<1`
-is read as 1 (a window of 0 would mean "never resolve").
+POOL_STALE-only alias. A non-integer or negative value is ignored with a warning
+(the declared window stands; a negative is a typo, not the `1` "clear now"
+spelling), and `<1` is read as 1 (a window of 0 would mean "never resolve");
+surrounding whitespace is trimmed on both sides.
+
+**Where to set them.** The driver runs from the `registry-backup-cron` job, whose
+`env:` enumerates every variable it receives — Actions passes nothing else. Set
+these three as repository **variables** (Settings → Secrets and variables →
+Actions → **Variables**, not Secrets); an unset variable expands to the empty
+string, which the driver treats as "no override". The app-side writer reads the
+same names from its own environment (Fly secrets).
 `SWEEP_NO_COVERAGE` clears **only** on a run that actually backed up
 (`backed_up`/`degraded`), and that judgment is made from
 `graph_totals.backed_up`, not `teams_backed_up`.

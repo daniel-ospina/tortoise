@@ -1703,3 +1703,52 @@ def test_recovery_window_honours_the_per_kind_override(monkeypatch):
             "STALE", "team_x") is ResolveOutcome.SKIPPED_WINDOW
         assert _sentinel(storage, "STALE", "team_x")["healthy_streak"] == expected
     assert store.resolve_incident_state("STALE", "team_x") is ResolveOutcome.RESOLVED
+
+
+def test_streak_reader_prefers_a_present_healthy_streak_even_at_zero():
+    """#3146 review ISSUE 3: the reset spelling (``healthy_streak: 0``) is authoritative.
+
+    Both spellings can coexist for one deploy cycle (the driver's legacy
+    ``fresh_streak`` beside the new ``healthy_streak``). If the reader skipped a
+    present ``0`` and fell through to a leftover ``fresh_streak: 1``, the window
+    gate would compute ``1 + 1 = 2`` and clear on a SINGLE healthy observation —
+    the fabricated recovery the reset exists to prevent. The bash twin's
+    ``.healthy_streak // .fresh_streak`` prefers the explicit ``0``; so must this.
+    """
+    from tortoise.alert_store import _streak_of
+
+    assert _streak_of({"healthy_streak": 0, "fresh_streak": 1}) == 0, (
+        "a present healthy_streak of 0 must win over a stale fresh_streak sibling")
+    assert _streak_of({"healthy_streak": 2, "fresh_streak": 5}) == 2
+    # the fallback is real: only an ABSENT (or null) new spelling falls through
+    assert _streak_of({"fresh_streak": 1}) == 1
+    assert _streak_of({"healthy_streak": None, "fresh_streak": 1}) == 1
+    assert _streak_of({}) == 0
+
+
+def test_recovery_reset_is_not_defeated_by_a_leftover_fresh_streak(monkeypatch):
+    """#3146 review ISSUE 3, end to end: the reset survives the fallback.
+
+    Seeded with ``healthy_streak: 0`` beside ``fresh_streak: 1``, one healthy
+    observation must count as 1/2 and keep the incident open. Pre-fix the reader
+    returned 1, the gate computed 2/2 and the incident was RESOLVED.
+    """
+    from tortoise.alert_store import DEDUP_PREFIX, ResolveOutcome
+
+    monkeypatch.delenv("ALERT_RECOVERY_STREAK", raising=False)
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    store.open_incident("STALE", "team_x")
+    key = f"{DEDUP_PREFIX}STALE/team_x.json"
+    state = json.loads(storage.download(key))
+    state["healthy_streak"] = 0
+    state["fresh_streak"] = 1
+    storage.upload(key, json.dumps(state).encode(),
+                   content_type="application/json")
+
+    assert store.resolve_incident_state(
+        "STALE", "team_x") is ResolveOutcome.SKIPPED_WINDOW, (
+        "the reset count (0) must not be overridden by the legacy sibling")
+    assert ch.closed == [], "one healthy observation must not close the incident"
+    assert _sentinel(storage, "STALE", "team_x")["healthy_streak"] == 1

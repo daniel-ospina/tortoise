@@ -57,7 +57,7 @@ open/close pair per cycle. The window is declared HERE (one site), consumed by
 test beside ``test_kind_owner_contract_with_driver``).
 
 The boundary is deliberate: the threshold-driven DR plane listed under
-:data:`DR_RECOVERY_STREAK` (reachability probes, an archive's age against the
+:data:`DR_RECOVERY_KINDS` (reachability probes, an archive's age against the
 staleness threshold, a heartbeat against its window, a whole-pool freshness
 reading) carries a window; every other kind keeps 1 and is unchanged. A
 human-triggered resolve (``SIZE_GUARD_ABORT`` / ``DATA_LOSS_CANDIDATE`` at
@@ -129,7 +129,7 @@ class KindSpec:
     #: threshold-driven measurement can hover at its boundary and must not be
     #: cleared by one lucky reading, while a human-triggered resolve (a
     #: re-baseline) or an app-owned trigger that already carries its own
-    #: threshold must clear promptly. See :data:`DR_RECOVERY_STREAK` for the
+    #: threshold must clear promptly. See :data:`DR_RECOVERY_KINDS` for the
     #: declared plane and the module docstring for the boundary rule.
     resolve_streak: int = 1
 
@@ -434,17 +434,39 @@ def is_declared(kind: str) -> bool:
 def _coerce_streak(value: Any, origin: str) -> int | None:
     """A configured window, or ``None`` when the value is not usable (#3146).
 
-    Mirrors the driver's own coercion: a non-integer is IGNORED with a warning
-    (the declared value stands), and ``< 1`` is read as 1 with a warning — a
-    window of zero would mean "never resolve", which no typo may reach.
+    Mirrors the driver's own coercion exactly: a non-integer OR a NEGATIVE
+    value is IGNORED with a warning (the declared value stands), and ``0`` is
+    read as 1 with a warning — a window of zero would mean "never resolve",
+    which no typo may reach. A negative value is a typo, not the deliberate
+    "clear now" spelling (that is the explicit ``1``), so it must not silently
+    defeat the hysteresis this window exists to provide (#3146 review P2: the
+    bash twin already ignored it, so the two writers disagreed on the recovery
+    window for the same env var).
+
+    The accepted shape is spelled out rather than left to ``int()``, which is
+    deliberately MORE permissive than the bash ``case`` guard (it accepts
+    ``+3``, ``1_0`` and non-ASCII digits). Relying on it is how the two writers
+    drifted in the first place, so the shape here is exactly the driver's:
+    an optional ``-`` followed by ASCII digits, compared after
+    :meth:`str.strip` (the same surrounding whitespace the bash twin trims).
     """
-    try:
-        parsed = int(str(value).strip())
-    except (TypeError, ValueError):
+    text = str(value).strip()
+    negative = text.startswith("-")
+    digits = text[1:] if negative else text
+    if not digits or any(ch not in "0123456789" for ch in digits):
         logger.warning(
             "ALERT_RECOVERY_STREAK config %s=%r is not an integer — ignoring it",
             origin, value)
         return None
+    if negative and any(ch != "0" for ch in digits):
+        logger.warning(
+            "ALERT_RECOVERY_STREAK config %s=%r is negative — ignoring it "
+            "(the declared window stands; use 1 to deliberately clear now)",
+            origin, value)
+        return None
+    # ``-0`` is ZERO (the sign carries no value), not a negative window, so it
+    # falls through the below-1 clamp exactly like the bash twin.
+    parsed = 0 if negative else int(digits)
     if parsed < 1:
         logger.warning(
             "ALERT_RECOVERY_STREAK config %s=%r is below 1 — reading it as 1 "

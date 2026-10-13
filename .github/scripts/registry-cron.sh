@@ -258,19 +258,46 @@ recovery_streak_declared() { # kind -> the DECLARED window (no env overrides)
   esac
 }
 _coerce_streak() { # value origin -> n on stdout; EMPTY when unusable (warned)
-  # Non-integer values are IGNORED with a warning; `<1` is read as 1 with a
-  # warning, because a window of zero would mean "never resolve" — a state no
-  # typo may reach. The warning goes to STDERR: this function's stdout is
-  # captured, and a warning on stdout would become a bogus window value.
-  local value="${1:-}" origin="${2:-}" n
-  case "$value" in
+  # A non-integer OR a NEGATIVE value is IGNORED with a warning (the declared
+  # value stands); `0` (and its signed spelling `-0`, which IS zero) is read as
+  # 1 with a warning, because a window of zero would mean "never resolve". A
+  # negative value is a typo, not the deliberate "clear now" spelling (that is
+  # the explicit `1`), so it must not silently defeat the hysteresis — and this
+  # MUST match the Python `_coerce_streak` on every case (the cross-language
+  # contract test pins them; the two used to disagree on a negative value).
+  # The warning goes to STDERR: this function's stdout is captured, and a
+  # warning on stdout would become a bogus window value.
+  local value="${1:-}" origin="${2:-}" n digits shown
+  # Trim surrounding whitespace first, to match the Python twin's
+  # `str(value).strip()`: without it `STALE= 3` is 3 in the store and IGNORED in
+  # the driver, so one env var selects two different recovery windows.
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  shown="$value"
+  # An optional leading `-` followed by digits is an integer; anything else
+  # (empty, letters, an embedded `-`) is not. Validating the SHAPE first keeps
+  # the `-lt` comparison below from being handed a non-numeric string.
+  digits="${value#-}"
+  case "$digits" in
     ''|*[!0-9]*)
-      log "ALERT_RECOVERY_STREAK config ${origin}=${value} is not an integer — ignoring it" >&2
+      log "ALERT_RECOVERY_STREAK config ${origin}=${shown} is not an integer — ignoring it" >&2
       return 0 ;;
+  esac
+  case "$value" in
+    -*)
+      # All-zero digits under a sign is ZERO (Python's ``int("-0") == 0``), not
+      # a negative window: normalise it to `0` so the below-1 clamp below reads
+      # it as 1, exactly like the Python twin. Any other negative is ignored.
+      case "$digits" in
+        *[!0]*)
+          log "ALERT_RECOVERY_STREAK config ${origin}=${shown} is negative — ignoring it (the declared window stands; use 1 to deliberately clear now)" >&2
+          return 0 ;;
+        *) value=0 ;;
+      esac ;;
   esac
   n="$value"
   if [ "$n" -lt 1 ]; then
-    log "ALERT_RECOVERY_STREAK config ${origin}=${value} is below 1 — reading it as 1 (a window of 0 would mean 'never resolve')" >&2
+    log "ALERT_RECOVERY_STREAK config ${origin}=${shown} is below 1 — reading it as 1 (a window of 0 would mean 'never resolve')" >&2
     n=1
   fi
   printf '%s' "$n"
@@ -292,6 +319,10 @@ recovery_streak_for() { # kind -> the EFFECTIVE window (declared, env-overridabl
       # Python twin does, rather than warning about "not an integer".
       case "$pair" in *=*) ;; *) continue ;; esac
       name="${pair%%=*}"
+      # Trim the kind name too (Python's `name.strip()`), so `STALE =3` names
+      # STALE on both sides rather than only in the store.
+      name="${name#"${name%%[![:space:]]*}"}"
+      name="${name%"${name##*[![:space:]]}"}"
       [ "$name" = "$kind" ] || continue
       value="$(_coerce_streak "${pair#*=}" ALERT_RECOVERY_STREAKS)"
       [ -n "$value" ] && n="$value"
