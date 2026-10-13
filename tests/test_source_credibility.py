@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from tortoise.exceptions import CalibrationError
 from tortoise.source_credibility import (
     AUTHOR_ASSERTION_WEAK_PC,
     FACTOR_MAX,
@@ -338,6 +339,21 @@ def _set_source_tier_raw(sdk, url, tier, ingested_at="2024-01-01T00:00:00+00:00"
     sdk._get_proj().g.query(
         "MATCH (s:Source {url: $url}) SET s.credibilityTier = $t, s.ingestedAt = $ts",
         params={"url": url, "t": tier, "ts": ingested_at},
+    )
+
+
+def _simulate_replay_outcome(sdk, pid: str) -> None:
+    """Reproduce the state a `rebuild_all` leaves on a Point.
+
+    `credibility` and `baseline_system_default` are DECLARED Point props and
+    replay (`_POINT_DECLARED_PROPS`), while `ep_alpha` / `ep_beta` /
+    `baseline_set` / `baseline_source` sit in `_POINT_DENY` and do NOT — so a
+    rebuilt word-bearing Point holds its label with NO baseline.
+    """
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.ep_alpha = null, n.ep_beta = null, "
+        "n.baseline_set = null, n.baseline_source = null",
+        params={"id": pid},
     )
 
 
@@ -1231,6 +1247,93 @@ class TestExplicitBaselineSupersedesTheWord:
         assert after["ep_alpha"] == pytest.approx(0.4), after
         assert after.get("baseline_system_default") is None, after
         assert after.get("credibility") is None, after
+
+
+class TestWordPointRebaselinedAfterRebuild:
+    """#6151 review P2(b) — a word-bearing Point that LOST its baseline (the
+    replay outcome) must be RE-BASELINED by the dedup retry, not silently
+    no-op'd.
+
+    `credibility` is a DECLARED prop and replays; `ep_alpha`/`baseline_set`/
+    `baseline_source` are in `_POINT_DENY` and do not. Keying first-writer-wins
+    on the label alone therefore turned the routine same-word retry (dedup is
+    the MCP/self-host DEFAULT) into a complete no-op on the rebuilt point: no
+    body, no `_drop_note`, the point uncalibrated forever. Before the fix these
+    tests fail on the healed state (ep_alpha stays None / CalibrationError),
+    and the decide part additionally loses the #2199 marker because
+    `set_point_baseline` clears it and the re-stamp must re-assert it.
+    """
+
+    def test_same_word_retry_rebaselines_a_rebuilt_point(self, sdk):
+        p = sdk.create_point("statement", "rebuilt word point",
+                             status="live", credibility="gold")["id"]
+        assert sdk.get_point(p)["ep_alpha"] == pytest.approx(1.1)
+        _simulate_replay_outcome(sdk, p)
+        rebuilt = sdk.get_point(p)
+        assert rebuilt.get("credibility") == "T0"   # declared — replays
+        assert rebuilt.get("baseline_set") is None   # denied — does not
+        with pytest.raises(CalibrationError):
+            sdk.compute_confidence(require_calibration=True)
+        # The retry with the SAME word heals the point (pre-fix: a no-op).
+        dup = sdk.create_point("statement", "rebuilt word point", dedup=True,
+                               credibility="gold")["id"]
+        assert dup == p
+        healed = sdk.get_point(p)
+        assert healed["ep_alpha"] == pytest.approx(1.1), healed
+        assert healed["baseline_set"] is True, healed
+        assert healed["baseline_source"] == "set-by-author", healed
+        assert healed["credibility"] == "T0", healed
+        summary = sdk.calibrate_summary()
+        assert next(i for i in summary if i["id"] == p)["calibrated"] is True
+        sdk.compute_confidence(require_calibration=True)  # no longer raises
+
+    def test_same_word_retry_keeps_the_2199_provision_of_a_rebuilt_part(self, sdk):
+        p = sdk.create_point("option", "rebuilt decide word",
+                             credibility="gold")["id"]
+        born = sdk.get_point(p)
+        assert born["ep_alpha"] == pytest.approx(3.1), born
+        assert born["baseline_system_default"] is True, born
+        _simulate_replay_outcome(sdk, p)
+        rebuilt = sdk.get_point(p)
+        assert rebuilt.get("baseline_set") is None, rebuilt
+        # The marker is a BIRTH fact in the original PointAdded snapshot, so it
+        # replays even though the baseline does not. `set_point_baseline` on
+        # the healing write CLEARS it, so the re-stamp must put it back —
+        # without `_record_default` the recorded #2199 provision is LOST and a
+        # later recompute can never re-inject the +2.0.
+        assert rebuilt.get("baseline_system_default") is True, rebuilt
+        dup = sdk.create_point("option", "rebuilt decide word", dedup=True,
+                               credibility="gold")["id"]
+        assert dup == p
+        healed = sdk.get_point(p)
+        assert healed["ep_alpha"] == pytest.approx(1.1), healed  # weak body
+        assert healed["baseline_system_default"] is True, healed
+        assert healed["credibility"] == "T0", healed
+        # With a real source the word plus the re-asserted provision recompute
+        # above the neutral weak body (the +2.0 is re-injected).
+        sdk.create_source("https://rebuilt.example", "document", tier="T1",
+                          sourceDate=FRESH)
+        sdk._get_proj()._link_source(p, "https://rebuilt.example")
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+        after = sdk.get_point(p)
+        assert after["baseline_system_default"] is True, after
+        assert after["ep_alpha"] > 3.0, after  # provision + weak body + source
+
+
+class TestNestedWordNeverLeaksIntoTheDedupUpdate:
+    def test_both_word_forms_on_a_dedup_hit_do_not_raise(self, sdk):
+        """#6151 review P3-1: the explicit kwarg wins, and the nested
+        `props={"credibility": …}` must be popped even when the kwarg is set.
+        Otherwise the dedup path forwards the residual key to `update_point`,
+        which HARD-REJECTS `credibility` from a generic bag.
+        """
+        p = sdk.create_point("statement", "both word forms")["id"]
+        dup = sdk.create_point("statement", "both word forms", dedup=True,
+                               credibility="gold",
+                               props={"credibility": "low"})
+        assert dup["id"] == p
+        # The explicit kwarg wins over the nested bag (as documented).
+        assert sdk.get_point(p)["credibility"] == "T0"
 
 
 class TestLowFactorFloodBound:

@@ -5803,8 +5803,16 @@ class TortoiseSDK:
         # explicit ``credibility`` kwarg binds at the signature; a caller may
         # also reach it through a nested props dict (flattened by _coerce_props
         # above) — the explicit kwarg wins, the pop covers the nested path.
-        credibility = credibility if credibility is not None \
-            else props.pop("credibility", None)
+        # #6151 review P3: pop the nested form UNCONDITIONALLY. The pop used to
+        # be conditional on the kwarg being absent, so a direct SDK caller
+        # passing BOTH forms left `credibility` in `props`; the create path then
+        # overwrote the key (`props["credibility"] = canonical_tier(...)`) and
+        # hid it, but the DEDUP path forwards `props` to `update_point`, which
+        # now HARD-REJECTS `credibility` as a generic property — a ValueError
+        # from an input both surfaces document as valid.
+        _nested_credibility = props.pop("credibility", None)
+        if credibility is None:
+            credibility = _nested_credibility
         # #2199: resolve + validate an author-stated belief BEFORE any graph
         # write — a bad ladder word fails loud with nothing created (never a
         # silent Beta(1,1) fallback, #7478; and never an uncalibrated live
@@ -5965,28 +5973,55 @@ class TortoiseSDK:
                     _record_default = False
                     _base_a, _base_b = 1.0, 1.0
                     _drop_note = None
-                    if _existing_label:
-                        # Already an authored assertion — FIRST-WRITER-WINS. A
-                        # retry stating the SAME word loses nothing; a DIFFERENT
-                        # word is dropped and must be audible.
+                    if _existing_label and _existing.get("baseline_set"):
+                        # Already an authored assertion WITH its recorded
+                        # baseline — FIRST-WRITER-WINS. A retry stating the SAME
+                        # word loses nothing; a DIFFERENT word is dropped and
+                        # must be audible.
+                        #
+                        # #6151 review P2(b): the label ALONE is NOT proof the
+                        # baseline survived. `credibility` is a DECLARED Point
+                        # prop and replays (`_POINT_DECLARED_PROPS`), while
+                        # `ep_alpha`/`baseline_set`/`baseline_source` sit in
+                        # `_POINT_DENY` and do NOT — so after a `rebuild_all` a
+                        # word-bearing point holds the label with NO baseline.
+                        # Keying first-writer-wins on the label alone made the
+                        # dedup retry a silent no-op there (no `_drop_note`, no
+                        # `_word_applied`): the point stayed uncalibrated
+                        # forever and `compute_confidence(require_calibration=
+                        # True)` raised. The baseline must actually be present
+                        # for the claim to be "already" written; otherwise fall
+                        # through to the apply branch below, which is the
+                        # documented healing write (main re-baselined this
+                        # shape, because `credibility` was not persisted there).
                         if _existing_label != _word_label:
                             _drop_note = (
                                 "already carries the authored assertion "
                                 f"{_existing_label!r}")
                     elif not _existing.get("baseline_set"):
-                        # No baseline yet — and `baseline_set` false is PROOF the
-                        # #2199 default was never granted (#6151 review P2): the
-                        # ONLY shape #2199 ever provisions is a decide part BORN
-                        # live, and that part always carries `baseline_set=true`
-                        # from its create (`_baseline_create_fields`, :187). So
-                        # this branch is an explicit-STATUS decide part or a
-                        # pre-#2199 row, and the default must NOT be granted
-                        # from `kind`/`explicit_status` HERE — that is the
-                        # current CALL's context, not the existing point's
-                        # birth. Measured before the fix: a born-draft option
-                        # dedup-hit with credibility=gold landed at
-                        # 3.1/0.7561 (an unearned +2.0 alpha); after, the word
+                        # No baseline recorded — and `baseline_set` false is PROOF
+                        # the #2199 default was never granted (#6151 review P2):
+                        # the ONLY shape #2199 ever provisions is a decide part
+                        # BORN live, and that part always carries
+                        # `baseline_set=true` from its create
+                        # (`_baseline_create_fields`, :187). So this branch is an
+                        # explicit-STATUS decide part or a pre-#2199 row, and the
+                        # default must NOT be granted from `kind`/`explicit_status`
+                        # HERE — that is the current CALL's context, not the
+                        # existing point's birth. Measured before the fix: a
+                        # born-draft option dedup-hit with credibility=gold landed
+                        # at 3.1/0.7561 (an unearned +2.0 alpha); after, the word
                         # is its own weak body on neutral -> 1.1/0.5238.
+                        #
+                        # This branch ALSO carries the post-rebuild healing write
+                        # (label present, baseline gone) described above: the
+                        # #2199 birth marker DOES replay (it rides the original
+                        # `PointAdded` snapshot), so re-assert it here — a
+                        # born-live decide part must keep its recorded provision
+                        # and the next recompute re-injects the +2.0 on top of
+                        # the word's weak body.
+                        _record_default = bool(
+                            _existing.get("baseline_system_default"))
                         _apply_word = True
                     elif _existing.get("baseline_system_default"):
                         # The #2199 provision is this claim's recorded base; the
