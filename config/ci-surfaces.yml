@@ -3026,6 +3026,11 @@ surfaces:
   - test_prior_bound_4509.py
   - test_sdk.py
   - test_sdk_dedup.py
+  # #6110: create_point(key=K, dedup=True) treats `key` as a PER-KIND identity —
+  # a re-run folds, a pre-existing collision is warned, a content-dedup hit
+  # never reassigns a key, and the ingest counter shares the writer's
+  # resolution. Hermetic (embedded store).
+  - test_6110_key_identity.py
   - test_search_engine_recency.py
   - test_temporal_constraint.py
   - test_terminal_dedup_nullhash.py  # #2971: _find_terminal_dedup_hit A10 hash-less fallback (rebuild-durable terminal guard)
