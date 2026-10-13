@@ -714,6 +714,14 @@ _NEVER_RAISE_OPS = frozenset({
     # keeps that from mapping onto the webhook's 500, which would strand a
     # claimed Stripe event whose payment was already taken.
     "billing_notify",
+    # #3514 review P2: the demand READ half (``_demand_store_rows_off_loop``).
+    # ``_demand_store_rows`` already never raises — a failed read IS
+    # ``(None, "unavailable")`` — so the offload seam must not add the
+    # fail-closed 503 on top: an offload failure degrades to the SAME
+    # unavailable polarity, which the two read routes map to their own
+    # (accurate) 503 ``DEMAND_STORE_UNAVAILABLE`` body rather than the
+    # sign-in-specific ``control_plane_unavailable`` copy.
+    "data_source_demand_read",
 })
 
 

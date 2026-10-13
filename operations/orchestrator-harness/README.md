@@ -207,6 +207,13 @@ secret into a world-readable plist, and launchd inherits no shell environment �
 | `REVIEW_TIMEOUT` | `1800` | wall-clock limit on a reviewer `pi` run (s) |
 | `FIX_TIMEOUT` | `2400` | wall-clock limit on a fixer `pi` run (s) |
 
+**Every agent spawn is load-gated, not just lane dispatch.** A Mac reboot lands in an indexing
+storm (Spotlight, `PerfPowerServices`, `duetexpertd`) that routinely pushes 1-min load past 200. The
+lane gate already respected `MAX_LOAD`; the merge sweep did not, so a fresh boot got six reviewers
+piled onto the spike. `can_spawn()` now guards all four spawn sites — conflict fixer, review-fix
+fixer, CI-red fixer, merge re-review — while the cheap actions (`gh pr merge`, `gh pr ready`,
+`gh run rerun`) stay ungated, so merges keep flowing during a spike and nothing is starved.
+
 **Swap, not lanes, is what actually throttles this box.** Observed at 15 concurrent workers:
 `swap_free=588M` → dispatch correctly refused. Raising `MAX_LANES` alone buys nothing on 8 GB;
 it just moves the pressure into the compressor. `swap_total=0` right after boot is treated as
