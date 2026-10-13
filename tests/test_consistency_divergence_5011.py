@@ -30,10 +30,12 @@ import pytest
 
 from tortoise.consistency import (
     _GRAPH_DEFAULTED_PROPS,
+    _PROJECTION_STATE_FORMAT,
     _WRITER_DEFAULTS,
     _compare_views,
     _fold_journal,
     _values_equal,
+    baseline_warning,
     check_consistency,
     read_projection_state,
     recover_from_log,
@@ -68,6 +70,20 @@ def _seed(proj, log_path: str, events: list[dict]) -> EventLog:
         log.append(ev)
         proj.apply(ev)
     return log
+
+
+def _state_json(*, seq: str = "0", digest: str = "0" * 64,
+                fmt: int | None = None) -> str:
+    """A projection-state sidecar for the tamper tests.
+
+    ``fmt`` defaults to the CURRENT ``_PROJECTION_STATE_FORMAT``, so a test whose
+    subject is a FIFO, a planted symlink or a boolean watermark keeps THAT
+    subject instead of silently becoming a format-mismatch test on the next
+    format bump. ``seq`` is a raw JSON token (``0``, ``true``, …).
+    """
+    return (f'{{"format_version": {fmt or _PROJECTION_STATE_FORMAT}, '
+            f'"last_applied_seq": {seq}, '
+            f'"projection_hash_sha256": "{digest}"}}')
 
 
 @pytest.fixture
@@ -276,24 +292,90 @@ def test_unrecorded_graph_write_is_named_unrecorded_mutation(proj, tmp_path):
 
 
 def test_uncarried_journal_content_is_named_not_hidden(proj, tmp_path):
-    """``tags`` is journal content the projection writer drops (#2897).
+    """An undeclared list prop is journal content the projection writer drops,
+    and the loss is NAMED — never silently hidden.
     (1) Fails if the loss is reported as an empty list — i.e. hidden.
-    (2) Reachable: the fixture's point carries ``tags``."""
-    log_path = str(tmp_path / "tags.jsonl")
-    _seed(proj, log_path, [_pt("p1", "tagged", tags=["alpha", "beta"])])
+    (2) Reachable: the fixture's point carries ``custom_list``.
+
+    ``tags`` was this test's exemplar until #2897 replayed it; the mechanism is
+    unchanged and is now pinned on a prop that is still uncarried."""
+    log_path = str(tmp_path / "listy.jsonl")
+    _seed(proj, log_path, [_pt("p1", "listy", custom_list=["a", "b"])])
 
     r = check_consistency(log_path, proj)
-    assert "tags" in r["uncarried_journal_fields"], r
+    assert "custom_list" in r["uncarried_journal_fields"], r
     # The gap is reported as a COVERAGE GAP; it does not masquerade as a
-    # content divergence (which would make the check unusable until #2897).
+    # content divergence (which would make the check unusable until #2795).
     assert r["ok"] is True
     assert r["divergence"] is None
+
+
+def test_tags_are_compared_not_exempted(proj, tmp_path):
+    """#2897: ``tags`` is replay-carried now, so the #5011 check must COMPARE it.
+
+    An exemption (an ``_uncarried``/exclusion entry) is the blind spot that
+    would let the old loss return unseen — the reason the field moved out of
+    ``_UNCARRIED_CONTENT_PROPS`` and into ``_POINT_HANDLED``.
+    (1) Fails if ``tags`` is put back into a skip list (the tampered graph then
+        reads healthy), or if the replay writer stops carrying it (the faithful
+        ``ok`` assertion fails).
+    (2) Reachable: the fixture's point carries ``tags`` and the graph's copy is
+        then tampered.
+    """
+    log_path = str(tmp_path / "tags.jsonl")
+    _seed(proj, log_path, [_pt("p1", "tagged", tags=["alpha", "beta"])])
+    assert "tags" not in check_consistency(
+        log_path, proj)["uncarried_journal_fields"]
+    assert check_consistency(log_path, proj)["ok"] is True
+
+    proj.g.query("MATCH (n:Point {id:'p1'}) SET n.tags=['beta']")
+    r = check_consistency(log_path, proj)
+    assert r["ok"] is False, r
+    assert "tags" in {f for d in r["divergent_points"] for f in d["fields"]}, r
+
+
+def test_a_tag_edit_does_not_read_as_a_false_divergence(proj, tmp_path):
+    """#2897: the CHECKER's reference fold must mirror the writer's tag fold.
+
+    ``check_consistency`` builds its journal view through ``_apply_one`` — the
+    same function the pure fold loops over, and the base its own docstring calls
+    ground truth — so emptying ``_UNCARRIED_CONTENT_PROPS`` made ``tags``
+    COMPARED while the reference fold still ignored every ``PointRevised``
+    carrying one. The journal side kept the CREATION list, the faithfully
+    replayed graph held the EDITED one, and the run reported
+    ``divergence="content"`` on ``tags`` — with an ``action`` (*reconcile by
+    replaying the journal*) that could never clear it, because replay produces
+    exactly the graph that was already there. That is the false-divergence class
+    ``_canonical_point_fields``'s own docstring calls a defect (#8317 review P1,
+    reproduced).
+    (1) Fails if ``_apply_one`` stops folding the edit or the clear, or if the
+        writer stops carrying them — either way the two views disagree and the
+        run goes red on a graph that is byte-faithful.
+    (2) Reachable: the journal holds a create carrying two tags, then an edit
+        carrying one, then an explicit ``None`` clear.
+    """
+    log_path = str(tmp_path / "tagedit.jsonl")
+    _seed(proj, log_path, [_pt("p1", "tag churn", tags=["alpha", "beta"])])
+    assert check_consistency(log_path, proj)["ok"] is True
+
+    for revision in ({"tags": ["alpha"]}, {"tags": None}):
+        EventLog(log_path).append(
+            {"type": "PointRevised", "id": "p1", **revision})
+        proj.apply({"type": "PointRevised", "id": "p1", **revision})
+        r = check_consistency(log_path, proj)
+        assert r["ok"] is True, (
+            f"the tag revision {revision!r} read as a divergence — the "
+            f"reference fold is not mirroring the writer: "
+            f"{r['divergent_points']}")
+        assert "tags" not in {
+            f for d in r["divergent_points"] for f in d["fields"]
+        }, r
 
 
 def test_uncarried_list_is_empty_when_the_journal_has_no_such_field(proj, tmp_path):
     """The negative control for the test above: without the field, the report
     must be empty — otherwise ``uncarried_journal_fields`` is a constant.
-    (1) Fails if it is non-empty. (2) The fixture has no ``tags`` row."""
+    (1) Fails if it is non-empty. (2) The fixture has no such field row."""
     log_path = str(tmp_path / "notags.jsonl")
     _seed(proj, log_path, [_pt("p1", "plain")])
     r = check_consistency(log_path, proj)
@@ -1279,20 +1361,22 @@ def test_a_promotion_snapshot_without_the_operator_key_resets_operator_ness(
 def test_a_repair_that_drops_an_uncarried_key_is_not_an_unrecorded_mutation(
         proj, tmp_path):
     """A DECLARED live/replay asymmetry must not move the baseline: the live
-    writer stores `tags`, the replayed writer drops it (#2897), so a repair over
-    the same journal leaves a graph the baseline no longer matches. Excluding the
-    per-point `uncarried` keys from the fingerprint is what keeps a repair from
-    reading as an unrecorded mutation for ever.
+    writer stores an undeclared list prop, the replayed writer drops it
+    (#2795), so a repair over the same journal leaves a graph the baseline no
+    longer matches. Excluding the per-point `uncarried` keys from the
+    fingerprint is what keeps a repair from reading as an unrecorded mutation
+    for ever.
     (1) Fails if the fingerprint includes comparison-skipped keys.
-    (2) Reachable: `tags` on a live write, then `rebuild_all`.
+    (2) Reachable: `custom_list` on a live write, then `rebuild_all`.
+    (``tags`` was this test's exemplar until #2897 replayed it.)
     """
-    events_dir = tmp_path / "tags"
+    events_dir = tmp_path / "listy"
     events_dir.mkdir()
     log_path = str(events_dir / "events.jsonl")
-    _seed(proj, log_path, [_pt("p1", "a", tags=["alpha", "beta"])])
+    _seed(proj, log_path, [_pt("p1", "a", custom_list=["alpha", "beta"])])
     first = check_consistency(log_path, proj)
     assert first["ok"] is True and first["state_recorded"] is True
-    assert "tags" in first["uncarried_journal_fields"]
+    assert "custom_list" in first["uncarried_journal_fields"]
 
     proj.query("MATCH (n) DETACH DELETE n")
     proj.rebuild_all(str(events_dir), confirm_destructive=True)
@@ -1609,8 +1693,7 @@ def test_a_torn_sidecar_is_reported_and_never_re_baselined(proj, tmp_path):
     # A SYMLINK to a valid sidecar elsewhere is not this journal's baseline.
     foreign = str(tmp_path / "foreign.json")
     with open(foreign, "w", encoding="utf-8") as fh:
-        fh.write('{"format_version": 1, "last_applied_seq": 0,'
-                 ' "projection_hash_sha256": "' + "0" * 64 + '"}')
+        fh.write(_state_json(seq="0"))
     os.symlink(foreign, state_path)
     r2 = check_consistency(log_path, proj)
     assert r2["state_error"], r2
@@ -1639,9 +1722,119 @@ def test_a_torn_sidecar_is_reported_and_never_re_baselined(proj, tmp_path):
     # rule `_values_equal` applies, on the path that reads operator-planted
     # sidecars.
     with open(state_path, "w", encoding="utf-8") as fh:
-        fh.write('{"format_version": 1, "last_applied_seq": true,'
-                 ' "projection_hash_sha256": "' + "0" * 64 + '"}')
+        fh.write(_state_json(seq="true"))
     r5 = check_consistency(log_path, proj)
     assert r5["state_error"], r5
     assert r5["state_recorded"] is False, r5
     os.unlink(state_path)
+
+
+def test_a_predecessor_format_baseline_is_untrusted_not_a_mutation(proj, tmp_path):
+    """#2897: the digest SHAPE changed with the ``tags`` widening, so a v1
+    baseline must read as UNTRUSTED — never as ``unrecorded-mutation``.
+
+    Emptying ``_UNCARRIED_CONTENT_PROPS`` removed ``tags`` from the graph
+    fingerprint's per-point skip set, so ``projection_hash_sha256`` moves for
+    every pre-existing baseline whose graph holds a tag. The sidecar has no
+    migration, so without the format bump the next run would find
+    ``journal_moved=False, graph_moved=True`` and report
+    ``divergence="unrecorded-mutation"`` on a healthy graph — an ``action``
+    telling the operator to hunt an unjournalled writer that does not exist.
+    Reading the PREDECESSOR format as untrusted instead yields ``adopted=True``
+    plus a ``state_error`` that names the actual cause.
+    (1) Fails if ``_PROJECTION_STATE_FORMAT`` does not move with the digest
+        shape: the run reports a phantom mutation instead (the assertion
+        ``divergence != "unrecorded-mutation"`` is then the one that fires).
+    (2) Reachable: the journal and the graph are byte-faithful — only the
+        recorded baseline is from the predecessor format.
+    """
+    log_path = str(tmp_path / "prevfmt.jsonl")
+    _seed(proj, log_path, [_pt("p1", "tagged", tags=["alpha"])])
+    check_consistency(log_path, proj)  # adopt at the CURRENT format
+
+    with open(log_path + ".projection-state.json", "w",
+              encoding="utf-8") as fh:
+        fh.write(_state_json(seq="1", fmt=_PROJECTION_STATE_FORMAT - 1))
+
+    r = check_consistency(log_path, proj)
+    assert r["divergence"] != "unrecorded-mutation", (
+        "a predecessor-format baseline read as a graph mutation — the "
+        "operator is sent after a phantom unjournalled writer: " + str(r))
+    assert r["state_error"], (
+        "a predecessor-format baseline must be REPORTED as untrusted, not "
+        "silently trusted")
+    assert r["state_recorded"] is False, r
+    assert r["ok"] is True, r
+    assert r["adopted"] is True, r
+
+
+def test_a_non_persistable_tag_value_is_reported_not_a_false_divergence(
+        proj, tmp_path):
+    """#2897 review round 2: a `tags` value the STORE cannot hold is uncarried,
+    and that must be a REPORT — never an unclearable `content` divergence.
+
+    The writer's clause is presence+persistable gated, and the driver degrades a
+    value it cannot send to null before dispatch (#7369), so for a map-valued
+    `tags` the node ends with NO property (measured: `'tags' IN keys(n)` is
+    False). The journal still carries the map, so a checker that compared it
+    reds a byte-faithful graph — with an `action` (*reconcile by replaying the
+    journal*) that can never clear it, because replay produces exactly that
+    graph. The fix routes it through the declared `uncarried` channel, so the
+    drop is NAMED and the verdict stays green.
+    (1) Fails if `_uncarried` stops flagging a non-persistable `tags` (the run
+        goes red on a healthy graph); the opposite direction — flagging a
+        persistable one — is pinned by `test_tags_are_compared_not_exempted`.
+    (2) Reachable: the journal row carries `tags` as a map. No writer can
+        produce it, which is precisely why it must neither crash nor red the
+        check.
+    """
+    log_path = str(tmp_path / "maptags.jsonl")
+    _seed(proj, log_path, [_pt("p1", "map tags", tags={"a": 1})])
+    r = check_consistency(log_path, proj)
+    assert r["ok"] is True, r
+    assert "tags" in r["uncarried_journal_fields"], (
+        "a `tags` value the store cannot hold must be NAMED as uncarried, "
+        f"not silently dropped or compared: {r['uncarried_journal_fields']}")
+    assert "tags" not in {
+        f for d in r["divergent_points"] for f in d["fields"]
+    }, r
+
+
+def test_a_stranded_baseline_is_surfaced_on_the_green_path(proj, tmp_path):
+    """#2897 review round 2: a green verdict must not hide an INERT baseline.
+
+    A predecessor-format sidecar makes every run adopt, so the baseline half of
+    the invariant — the only thing that catches a graph moving while the journal
+    did not — is silently disabled, and `state_recorded` stays False so the
+    state is never replaced. `check_consistency` still returns `ok=True`, and
+    the CLI printed only its green tick, so an inert guard read as a healthy
+    graph.
+    The surface asserted here is `consistency.baseline_warning` — what
+    `tortoise check-consistency` prints on its green path — rather than the CLI
+    process itself: the CLI's `--db` resolves only `docker`/`redis`/`rediss`
+    URIs, so pinning the wording at the seam keeps the assertion on the embedded
+    lane while still failing if the surface goes silent.
+    (1) Fails if the surface stops naming a stranded baseline (an operator sees
+        a green tick over an inert guard) — or if it warns when there is nothing
+        wrong (the first assertion), which would make the signal noise.
+    (2) Reachable: the journal and graph are byte-faithful; only the recorded
+        baseline is from the predecessor format.
+    """
+    log_path = str(tmp_path / "stranded.jsonl")
+    _seed(proj, log_path, [_pt("p1", "tagged", tags=["alpha"])])
+    check_consistency(log_path, proj)  # adopt at the CURRENT format
+
+    assert baseline_warning({"state_error": None}, log_path) is None, (
+        "a healthy baseline must not warn, or the signal is noise")
+
+    with open(log_path + ".projection-state.json", "w", encoding="utf-8") as fh:
+        fh.write(_state_json(seq="1", fmt=_PROJECTION_STATE_FORMAT - 1))
+    r = check_consistency(log_path, proj)
+    assert r["ok"] is True, r
+
+    warning = baseline_warning(r, log_path)
+    assert warning and "UNTRUSTED" in warning, (
+        f"a stranded baseline must be surfaced with its reason: {warning!r}")
+    assert "projection-state.json" in warning, (
+        f"the warning must name the recovery (the sidecar to remove): "
+        f"{warning!r}")

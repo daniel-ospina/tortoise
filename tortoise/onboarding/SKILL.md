@@ -659,7 +659,42 @@ rendered from there by both this prompt and the dashboard; the same file names
 the `settings-memory-heading` anchor so a UI rename cannot silently drift the
 sentence a user reads. **Do not re-type the path anywhere** — print the render.
 
-## 6. Next steps (do NOT do them in this session unless asked)
+## 6. Choose what Tortoise remembers (data sources — #3513)
+
+The hosted wizard asks this at step 3, before `done`. The self-hosted prompt
+asks the **same question, in the same order**, so the two surfaces expose
+**equivalent** capture behaviour (epic #1714 R12/J8). Ask it as a setting, not
+a consent gate — every source is optional and reversible, and the user can
+change it any time from `Settings → Memory sources`.
+
+The pinned order and the per-source state keys are the dashboard's tile
+inventory (`website/apps/dashboard/src/integrationsGrid.js`, one declaration
+shared with the demand keys in `tortoise/demand.py`):
+
+| Tile (pinned order) | What it does | State key |
+|---|---|---|
+| **Agent session recording** | sessions captured on this machine (see section 5) | `session_recording` |
+| **GitHub issues** | issues become work items with a lifecycle record | `issues_enabled` |
+| **GitHub documents** | the repos' `docs/` folders are indexed as Sources | `docs_enabled` |
+
+GitHub's two sources are **separately enable-able** and share **one OAuth
+connect** — turning issues off never disconnects GitHub for documents (the
+`github_connected` key is the connection, never a per-source toggle).
+
+- **Ask, then honour the answer.** A "no" writes nothing (a source absent from
+  the projection is off, not enabled); a "yes" writes the per-source enable
+  intent through the same tool surface the hosted wizard uses
+  (`tortoise_onboarding_session_recording` / the onboarding-state path) — one state path,
+  never a second copy of the flag.
+- **An unbuilt integration is never faked.** Anything not in the inventory
+  above is **coming soon**: say so plainly, honour a "yes" as interest rather
+  than as a setup step, and **never** present it as available or connect it.
+- **The delete path is named, never promised blind.** Captured sessions are
+  viewed and deleted in `Settings → Captured sessions` (the
+  `id="settings-capture-heading"` home). Print that path; do not describe a
+  deletion route that does not exist.
+
+## 7. Next steps (do NOT do them in this session unless asked)
 
 - **Seed** (files your Organization + User as Subjects, linked `memberOf`) —
   owned by the W3 seed skill; the Setup guide card asks when it is that
@@ -668,7 +703,7 @@ sentence a user reads. **Do not re-type the path anywhere** — print the render
   MCP-tool decide protocol below. It requires NO local skill file (works on
   all 6 harnesses); the local `tortoise-decide` skill is a convenience, not
   a prerequisite.
-- **Capture disclosure** — see the copy contract in section 7 (fired at the
+- **Capture disclosure** — see the copy contract in section 8 (fired at the
   user's first capture, not during install).
 
 ### Enabling a data source (thin UI, capable backend, agent-addressable — #3540)
@@ -771,7 +806,7 @@ cannot reach the graph (never decide against a dead connection):
    *why*: the top edges that moved each option. Run `tortoise_check_structure`
    to confirm no orphaned operators.
 
-## 7. Capture-announcement COPY CONTRACT (W6 implements the trigger)
+## 8. Capture-announcement COPY CONTRACT (W6 implements the trigger)
 
 Owned here (epic #1976 §3 + §8 timing pin). At the user's FIRST capture —
 the first time a session/conversation is filed to the graph — the agent says

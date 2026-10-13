@@ -7,9 +7,10 @@
 // **Integrations** (where the agent-session recorder lives) and **Tortoise
 // Decide**. Tortoise Decide is an agent/CLI skill with no in-product
 // destination, so it ships no button. Integrations HAD nowhere to land: the
-// live wizard (WIZARD_STEPS) is org-create → fork → connect → done — there is
-// no integrations step — so the old action pointed at the external welcome
-// page, a dead end (#3890).
+// live wizard (WIZARD_STEPS) is org-create → fork → connect → data-sources →
+// done, and that Data-sources step (#3513) is an ONBOARDING surface — a
+// first-run flow, not a destination a returning user's action can link — so
+// the old action pointed at the external welcome page, a dead end (#3890).
 //
 // The action's real destination is the LIVE home of the four source toggles
 // (github_connected / github_indexed / github_docs_indexed / session_recording):

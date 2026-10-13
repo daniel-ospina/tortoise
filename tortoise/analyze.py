@@ -388,12 +388,14 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
         posteriors with green tests, §5.6 cycle-3).
 
     A9 traversal (epic #902 §5.6): the selector ALSO walks operator-less
-    direct edges — DIRECTION-RESPECTING: NAND edges traversed both
-directions ALWAYS; IMPL edges traversed both directions ONLY when the
-    edge's stored ``direction`` ≠ ``"unidirectional"`` (a unidirectional
-    direct IMPL edge must NOT back-propagate into its source — mirrors
-    §4.3's EP read coalesce(r.direction,'bidirectional') and the operator-
-    path selector's direction handling). The direct-edge traversal expands
+    direct edges — DIRECTION-RESPECTING (#7852): a direct edge is walked
+    forward only where its stored ``direction`` flows forward
+    (``->``/``<->`` and their legacy aliases) and backward only where it
+    flows backward (``<-``/``<->`` and their aliases); ``-`` (no confidence
+    transfers) is walked NEITHER way. The one historical exception is NAND:
+    it keeps its always-both legacy behaviour (never back-propagating into a
+    forward-only IMPL source is an IMPL rule), minus the new ``-``. The
+    direct-edge traversal expands
     the frontier like the operator BFS does, so mixed subgraphs select
     operators AND direct factors together; a direct-edge-only subgraph
     yields ZERO operator ids + non-empty factor anchors (the return
@@ -544,7 +546,10 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
             # mirroring the operator-mediated dirs. NAND is ALWAYS both
             # (matching the operator BFS's NAND bidirectionality).
             # forward: (frontier) -[rel]-> (plain neighbor); every rel type
-            # traverses forward from the frontier point.
+            # traverses forward from the frontier point. #7852: only where the
+            # edge's direction actually flows forward (`->`/`<->` and their
+            # legacy aliases) — a backward-only `<-` edge is never walked the
+            # wrong way.
             if rel == "NAND" or direction in ("outgoing", "both"):
                 rows = proj.g.query(
                     f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
@@ -554,6 +559,10 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                     "AND a.op_type IS NULL "
                     "AND (b.is_operator IS NULL OR b.is_operator = false) "
                     "AND b.op_type IS NULL "
+                    "AND (type(r) = 'NAND' "
+                    "     AND coalesce(r.direction, 'bidirectional') <> '-' "
+                    "     OR coalesce(r.direction, 'bidirectional') IN "
+                    "        ['bidirectional', '<->', '->', 'unidirectional']) "
                     "RETURN DISTINCT b.id, a.id, type(r)",
                     params={"frontier": frontier_list},
                 ).result_set
@@ -562,8 +571,8 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                         new_points.add(bid)
                     factor_anchors.add((aid, bid, rtype))
             # backward: (plain neighbor) -[rel]-> (frontier); NAND always;
-            # IMPL only when the edge is NOT unidirectional (never
-            # back-propagate into a unidirectional edge's source).
+            # IMPL only where the edge flows BACKWARD (`<-`/`<->` and their
+            # legacy aliases — never back-propagate into a forward-only edge).
             if rel == "NAND" or direction in ("incoming", "both"):
                 rows = proj.g.query(
                     f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
@@ -574,7 +583,9 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                     "AND (b.is_operator IS NULL OR b.is_operator = false) "
                     "AND b.op_type IS NULL "
                     "AND (type(r) = 'NAND' "
-                    "     OR coalesce(r.direction, 'bidirectional') <> 'unidirectional') "
+                    "     AND coalesce(r.direction, 'bidirectional') <> '-' "
+                    "     OR coalesce(r.direction, 'bidirectional') IN "
+                    "        ['bidirectional', '<->', '<-']) "
                     "RETURN DISTINCT a.id, b.id, type(r)",
                     params={"frontier": frontier_list},
                 ).result_set

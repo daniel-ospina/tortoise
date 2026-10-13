@@ -54,6 +54,19 @@ INT64_BEYOND = 2 ** 63
 CYPHER = "MATCH (n {v: $v}) RETURN n"
 
 
+class _EmptyResult:
+    """The vendor ``QueryResult`` shape with no rows.
+
+    A real ``falkordb`` handle answers a ``RETURN`` with a result object; the
+    projection's Point edge fold reads the node's final ``tags`` through
+    ``.result_set`` (#2897), so a fake that returns a bare forwarded-verb
+    sentinel is no longer a faithful stand-in for that one read.
+    """
+
+    def __init__(self) -> None:
+        self.result_set: list = []
+
+
 class _FakeHandle:
     """Stand-in for a graph handle: records EVERY verb that reaches the wire."""
 
@@ -65,7 +78,13 @@ class _FakeHandle:
         return "SENTINEL-REACHED-HANDLE"
 
     def query(self, q, params=None, timeout=None):
-        return self._record("query", q, params, timeout)
+        sentinel = self._record("query", q, params, timeout)
+        # #2897: the tag-sync fold issues this one indexed RETURN and reads
+        # ``.result_set`` off it; answer with an empty result (no tags) so the
+        # fold is a no-op and every other assertion keeps the sentinel.
+        if "RETURN n.tags" in q:
+            return _EmptyResult()
+        return sentinel
 
     def ro_query(self, q, params=None, timeout=None):
         return self._record("ro_query", q, params, timeout)

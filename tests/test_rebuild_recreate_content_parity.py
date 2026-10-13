@@ -275,6 +275,51 @@ def test_recreate_with_falsy_content_clears_derived(sup, tmp_path):
     _assert_parity(sdk.get_point(pid), applied)
 
 
+def test_dead_incarnations_tags_do_not_leak_onto_the_recreation(sup, tmp_path):
+    """#2897: a re-creation that states no tags must not inherit the dead
+    incarnation's tags — in the node PROPERTY or the ``TAGGED`` edges.
+
+    The pass-1a recreate wipe clears the conditional derived fields because a
+    re-creation is a FRESH node live. ``tags`` now has the same shape: its
+    clause is presence-and-store gated and pass 2 re-derives the ``:Tag``/``TAGGED`` half
+    from the node's OWN value, so without the wipe the dead incarnation's tag
+    list survives the MERGE and pass 2 rebuilds the edges for a tag the new
+    incarnation never had. This is precisely the risk the #3817 negative control
+    named — *"a restore needs an explicit rule for state the journal never
+    authored"* — and it is a leak this change would otherwise INTRODUCE:
+    before the fold replayed tags at all, there was nothing to leak (#8317
+    review P2, reproduced).
+
+    DIFFERENTIAL against the live oracle, like every other test here: the oracle
+    replays the same records through ``apply()``, which pops the entry on the
+    delete and then creates a fresh node — so it is the authority on what the
+    re-created incarnation owns.
+    """
+    events, sdk = sup
+    pid = sdk.create_point("statement", "ORIG", status="live",
+                           tags=["alpha"])["id"]
+    records = _journal(events)
+    records.extend([
+        _deleted(sdk, pid),
+        _added(sdk, pid, "RECREATED"),
+    ])
+    _rewrite_journal(events, records)
+
+    applied = _oracle(tmp_path, "oracle_tags_recreate", records, pid)
+    assert applied.get("tags") in (None, []), (
+        "the live oracle's re-created incarnation must own no tags — the "
+        "re-creation states none, so this is what the rebuild must match")
+
+    _rebuild(sdk, events)
+    post = sdk.get_point(pid)
+    assert post.get("tags") in (None, []), (
+        "the dead incarnation's tag leaked onto the re-created node "
+        f"(got {post.get('tags')!r})")
+    assert sdk.query_points_by_tag("alpha") == [], (
+        "the dead incarnation's TAGGED edge was rebuilt — the recreate wipe "
+        "must clear the property the edge half derives from")
+
+
 def test_two_delete_recreate_generations(sup, tmp_path):
     """Two generations: every revision preceding the FINAL re-creation is
     superseded; only revisions after it survive."""

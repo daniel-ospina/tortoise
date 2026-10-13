@@ -357,6 +357,30 @@ class TestLegitimateNoOpIsDistinguishable:
         # The read path lazily dreams the dirty root — it must not raise.
         sdk.get_confidence(tgt, require_calibration=False)
 
+    def test_no_direction_direct_edge_is_not_a_factor(self, sdk):
+        """#7852: a `-` direct edge ("the connection exists and no confidence
+        transfers") is never selected by `_bfs_select_operators`, so the
+        graph-wide probe (`window=None`, full mode) must not count it either —
+        otherwise a legitimate no-op false-fires `DreamNoOpError`. The probe's
+        window-INDEPENDENT eligibility is exactly `direction <> '-'`."""
+        a = _claim(sdk, "claim a")
+        b = _claim(sdk, "claim b")
+        sdk.create_direct_edge("IMPL", a, b, direction="-")
+        assert sdk._count_ep_factors(None) == 0
+        result = sdk.dream(mode="full", require_calibration=False)
+        assert result["converged_all"] is True
+        assert result["total_affected"] == 0
+        assert sdk.dream_health_check()["no_op_reason"] == "no_ep_factors"
+
+    def test_backward_only_direct_edge_is_still_a_factor(self, sdk):
+        """#7852: the graph-wide probe keeps counting an edge that flows AT ALL —
+        a backward-only (`<-`) direct IMPL edge is selected from its target, so
+        it stays a factor (only `-` is excluded)."""
+        a = _claim(sdk, "claim a")
+        b = _claim(sdk, "claim b")
+        sdk.create_direct_edge("IMPL", a, b, direction="<-")
+        assert sdk._count_ep_factors(None) == 1
+
 
 class TestHealthAlarmIsHonest:
     """#3139 (review P1): ``dream_health_check()`` must not report

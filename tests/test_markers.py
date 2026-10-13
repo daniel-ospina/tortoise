@@ -714,6 +714,17 @@ def test_no_redirect_stems_registry_exact():
         # working as designed, so the stem is DECLARED here rather than
         # exempted (the #4921/#4521 shape, minus their module-level marker).
         "test_semantics_write_path_7852",
+        # #7852 v3.25: the four-value direction STORAGE vocabulary. The fixture
+        # builds `TortoiseSDK(<tmpfile>)` and reads EP message state off the live
+        # graph. As with the W1 entry above, the file carries NO module-level
+        # `embedded_only` marker, so the load-bearing reason it needs the
+        # exemption is the REDIRECT: a URI-set lane would connect the
+        # construction to the server and the embedded assertions would certify a
+        # lane the file does not target. The third leg of the three-way mirror:
+        # config/ci-surfaces.yml:carve_out and TEST_NO_REDIRECT_STEMS were
+        # registered with the PR — this pin reding on the addition is the pin
+        # working as designed, so the stem is DECLARED here rather than exempted.
+        "test_direction_storage_7852",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

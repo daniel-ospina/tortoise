@@ -76,6 +76,7 @@ from .projection import (
     journal_first_materialization,
     journal_hard_delete_seqs,
     journal_object_surviving_keys,
+    journal_recreate_seqs,
     plan_point_restamp_folds,
     prewipe_snapshot_path,
 )
@@ -84,6 +85,7 @@ from .projection.entities import (
     BELIEF_PROPS,
     _EntityHandlers,
     _is_persistable_prop_value,
+    _store_holds_prop_value,
     _usable_instant,
     _writable_journalled_vector,
     flatten_search_keys_prop,
@@ -223,14 +225,17 @@ _EXCLUSION_REASONS = {
 # `_uncarried`) because the loss has its own issue and its own reason. They are
 # excluded from the comparison PER POINT, by `_uncarried` — not statically — so a
 # graph-only value is still compared and can still be reported as a divergence.
-_UNCARRIED_CONTENT_PROPS: dict[str, str] = {
-    "tags": (
-        "#2897 — the live writer stores the raw list (`SET n += $props`), the "
-        "REPLAYED writer refuses it (`_POINT_LIST_PROPS` is empty, #2795), so "
-        "live and replay disagree by construction; the loss is REPORTED, not "
-        "treated as a divergence"
-    ),
-}
+#
+# EMPTY since #2897 landed: `tags` was the only entry, and it is now CARRIED
+# (`_POINT_HANDLED`, with its own node-property clause plus the pass-2
+# `:Tag`/`TAGGED` sync), so the checker COMPARES it instead of exempting it —
+# which is what makes a future regression on that door visible instead of
+# silently tolerated. ⚠️ That widening also moves the graph FINGERPRINT for
+# every baseline whose graph holds a tag, which is why
+# `_PROJECTION_STATE_FORMAT` went to 2 in the same change. The dict is kept
+# (rather than deleted) because the mechanism is the right home for the next
+# declared live/replay asymmetry.
+_UNCARRIED_CONTENT_PROPS: dict[str, str] = {}
 
 # A key whose EXISTENCE legitimately depends on the payload, so a one-sided
 # presence is a representation asymmetry rather than content the journal
@@ -329,9 +334,38 @@ _UNCARRIED_NON_PERSISTABLE = (
     "a value FalkorDB rejects as a node property (map/dict at any depth, bytes, "
     "set) — `_is_persistable_prop_value` filters it before the SET"
 )
+# #8317 review round 3: the `tags` carriage question asks the writer's EFFECTIVE
+# predicate (transport gate + numeric domain), not the shape allowlist — so a
+# value that passes the shape test but is nulled by the `#7369` transport gate
+# (a non-finite float, a NUL/surrogate string, a null inside an array) or
+# CLAMPED by a 4.16–4.20 engine / refused at parameter parse by a 6.x one (an
+# int outside INT64) gets its own, accurate reason.
+_UNCARRIED_TAGS_UNWRITABLE = (
+    "a `tags` value the store cannot hold as stated — the `#7369` transport "
+    "gate nulls what `_value_ok` refuses (non-finite float, NUL/surrogate "
+    "string, null inside an array, map/bytes/set) and an int outside INT64 is "
+    "clamped or refused (`_store_holds_prop_value`)"
+)
+# ⚠️ BOUND, stated rather than implied, on the `tags` branch that reads the
+# reason above (#8317 review round 4):
+#   * an `_uncarried` key is skipped on BOTH sides (journal AND graph) and left
+#     out of `_graph_fingerprint`, so a GRAPH-only `tags` on a point whose
+#     JOURNAL value is unwritable goes uncompared. That is PRE-EXISTING
+#     `_uncarried` semantics (every `_UNCARRIED_*` reason behaves this way), not
+#     something the `tags` case introduces — `_UNCARRIED_LIST` and
+#     `_UNCARRIED_NULL` are the PRE-EXISTING cases with this exact behaviour, and
+#     pre-#2897 `tags` was one too (see the reason text above). Recorded on the
+#     `tags` branch because carrying `tags` made the hole observable through a
+#     property `check_consistency` now COMPARES;
+#   * the verdict deliberately differs from the #5011 numeric contract for a
+#     GENERIC prop, where an over-range number is a DIVERGENCE
+#     (`test_an_over_range_int_is_a_divergence_not_a_crash`): `tags` has a
+#     declared carriage rule whose writer states "no property" for that value,
+#     so naming the drop is the accurate verdict. The generic rule is untouched.
 _UNCARRIED_LIST = (
     "list-valued prop the REPLAYED writer refuses (`_POINT_LIST_PROPS` is empty, "
-    "#2795); the live path may still write it (#2897 class)"
+    "#2795); the live path may still write it raw — the live/replay asymmetry "
+    "class (`tags` was the named instance until #2897 replayed it)"
 )
 
 
@@ -525,6 +559,29 @@ def _uncarried(journal_by_id: dict) -> dict[str, dict[str, str]]:
             continue
         found: dict[str, str] = {}
         for k, v in props.items():
+            if k == "tags":
+                # #2897: the one `_POINT_HANDLED` key whose carriage depends on
+                # the VALUE's type rather than the key's presence. Its writer's
+                # clause is presence+`_store_holds_prop_value` gated
+                # (`_stated_tags`), so a value the store cannot HOLD AS STATED
+                # is genuinely uncarried and must be NAMED — the `_POINT_HANDLED`
+                # short-circuit below would swallow it, and an unnamed drop
+                # surfaced as an UNCLEARABLE `divergence="content"` whose
+                # `action` ("replay the journal") produces exactly the graph that
+                # is already there (#8317 review round 2 with a map; round 3 with
+                # `[nan]`/`[NUL]`/`[2**70]`, all reproduced). The predicate is
+                # the writer's EFFECTIVE one, NOT `_is_persistable_prop_value`:
+                # the shape allowlist admits a non-finite float and a huge int,
+                # which the transport gate nulls and a 4.16–4.20 engine clamps
+                # (6.x refuses it at parameter parse) respectively. (Deliberately
+                # a NARROW `tags` case, not a reorder
+                # of the generic list/persistable tests above the
+                # `_POINT_HANDLED` check: `provenance` is also
+                # handled-and-dict-valued, and a generic reorder would newly flag
+                # it.)
+                if v is not None and not _store_holds_prop_value(v):
+                    found[k] = _UNCARRIED_TAGS_UNWRITABLE
+                continue
             if k in _POINT_HANDLED or k in _NOT_COMPARED:
                 continue
             if v is None:
@@ -704,8 +761,8 @@ def _graph_fingerprint(graph_by_id: dict,
 
     It reads ONLY the graph, but it is NOT independent of the journal: one skip
     set below (`uncarried`) is journal-derived, deliberately — a digest that
-    ignored it would move on every legitimate repair of a #2897 `tags` list and
-    report that repair as an unrecorded mutation. The journal dependence is
+    ignored it would move on every legitimate repair of an uncarried list prop
+    and report that repair as an unrecorded mutation. The journal dependence is
     therefore narrow and declared, not absent.
 
     The keys the COMPARISON declares undecidable are dropped here too, because a
@@ -715,9 +772,9 @@ def _graph_fingerprint(graph_by_id: dict,
       * the one-sided parity keys — a live-only `speaker`/`embedding_verbatim`;
       * `_GRAPH_DEFAULTED_PROPS` — the non-deterministic writer fallbacks the
         journal never states (the baseline is what catches a rewrite of those);
-      * the per-point `uncarried` keys — a `tags` list survives on a LIVE graph
-        and is DROPPED by the replayed writer (#2897), so without this a repair
-        reads as an unrecorded mutation for ever;
+      * the per-point `uncarried` keys — an undeclared list survives on a LIVE
+        graph and is DROPPED by the replayed writer (#2795), so without this a
+        repair reads as an unrecorded mutation for ever;
       * the operator `content`/`pointKind` (#548) — the live node lacks them and
         a replayed one has them.
 
@@ -767,13 +824,60 @@ def _graph_fingerprint(graph_by_id: dict,
 # deployment shape, and the journal is the reconstruction source the invariant
 # names.
 _PROJECTION_STATE_SUFFIX = ".projection-state.json"
-_PROJECTION_STATE_FORMAT = 1
+# v2 (#2897): the per-point canonical view widened by `tags`. It left
+# `_UNCARRIED_CONTENT_PROPS` so the field-aware comparison would SEE it, and the
+# same view feeds `_graph_fingerprint` — so `projection_hash_sha256` MOVES for
+# every existing baseline whose graph holds a tag. The sidecar has no migration
+# (an untrusted/differing state is never re-recorded), so a v1 baseline must be
+# read as UNTRUSTED — adoption plus a `state_error` naming the format — rather
+# than as a graph that moved while the journal did not. That second reading is
+# `unrecorded-mutation`, whose `action` sends the operator hunting a phantom
+# unjournalled writer for a digest this change moved deliberately.
+# ⚠️ This bump is the PRECURSOR only, and it is the change the file's own note on
+# the `(label, id)` re-key says must come first. The MIGRATION that retires the
+# untrusted state (recognising a known-old format and re-baselining it, instead
+# of refusing it for ever) is owned by **#8268** ("a superseded projection-state
+# format_version disables the baseline for ever — format migration is
+# unreachable"), whose residual this is; #7936 is the parent that widened the
+# digest (the tags trigger is a SECOND, landed one — note it on #8268).
+_PROJECTION_STATE_FORMAT = 2
 
 
 def projection_state_path(log_path) -> str:
     """The sidecar path for a journal. `.json`, never `.jsonl`, so it can never
     be mistaken for a second journal by `recover_from_log`'s single-log check."""
     return str(log_path) + _PROJECTION_STATE_SUFFIX
+
+
+def baseline_warning(result: dict, log_path) -> str | None:
+    """The operator-visible warning for a STRANDED baseline, or ``None``.
+
+    #2897 review round 2: ``check_consistency`` can return ``ok=True`` while the
+    BASELINE half of the invariant is inert. An untrusted sidecar — a
+    predecessor format after a digest-shape change, a torn file, a planted
+    FIFO/symlink — makes :func:`read_projection_state` error, so ``stored`` is
+    ``None`` and every run ADOPTS. ``state_recorded`` is gated on
+    ``state_error is None`` (deliberately: recording over an untrusted state
+    would destroy the only evidence of what the graph looked like before), so
+    the state is never replaced either. The green verdict says nothing about any
+    of that, which is how an inert guard reads as a healthy graph — so the
+    surface names it, with the recovery, instead of leaving it to a field the
+    CLI never printed.
+
+    A function rather than inline prose in ``__main__`` so the surface is
+    PINNED by a test without needing a live URI (the CLI's ``--db`` resolves
+    only ``docker``/``redis``/``rediss``).
+    """
+    error = result.get("state_error")
+    if not error:
+        return None
+    return (
+        f"projection baseline UNTRUSTED ({error}) — the baseline check is INERT "
+        "until it is re-baselined, so a graph write that bypasses the journal "
+        "cannot be detected on this graph. Confirm no unjournalled writer "
+        f"exists, then remove {projection_state_path(log_path)} and re-run to "
+        "record a fresh baseline."
+    )
 
 
 def read_projection_state(log_path) -> tuple[dict | None, str | None]:
@@ -973,6 +1077,11 @@ def _fold_journal(events: list[dict]) -> dict:
     # side of the write, so the reference verdict would disagree with
     # `rebuild_all`.
     _epistemic_existence = journal_epistemic_existence(events)
+    # #8317 review round 3: the re-creation boundary, so `_apply_one` preserves a
+    # prop (`tags`) the payload states no WRITABLE value for on a bare re-emit,
+    # and drops it on a real delete→recreate — the writer's own MERGE-vs-wipe
+    # semantics.
+    _recreate_seqs = journal_recreate_seqs(events)
     by_id: dict = {}
     for seq, ev in enumerate(events):
         # Same normalisation the writer applies (`_apply_one`/`apply`): the
@@ -1119,7 +1228,8 @@ def _fold_journal(events: list[dict]) -> dict:
         _apply_one(by_id, ev,
                    journal_first_materialized=_first_materialized,
                    journal_seq=seq,
-                   journal_existence=_epistemic_existence)
+                   journal_existence=_epistemic_existence,
+                   journal_recreate=seq in _recreate_seqs)
         # #4208: a content EDIT re-derives the vector. The live `update_point`
         # and the replay's `_revise_point` both re-encode from the new content,
         # so the journal states no vector for the edited point — yet the entry
@@ -1271,7 +1381,8 @@ _NAME_MERGE_LABELS: frozenset[str] = frozenset({"Object", "Subject"})
 #: ``content_hash`` for every existing baseline, which the check reports as an
 #: ``unrecorded-mutation`` and — because it never re-records over an
 #: untrusted/differing baseline — would report for ever. Widening the digest
-#: needs a baseline-format migration, which is #7936's remaining durable step.
+#: needs a baseline-format migration (#8268 owns the unreachable-migration class;
+#: #7936 is the parent that widened the digest).
 _ENTITY_BELIEF_FIELDS: tuple[str, ...] = tuple(BELIEF_PROPS) + tuple(
     BELIEF_BOOL_PROPS)
 

@@ -104,6 +104,12 @@ from tortoise.hosted_backup import (
     prune_backups,
     restore_backup,
 )
+from tortoise.incident_kinds import (  # #4780: the one kind declaration site
+    KIND_ANALYTICS_SINK_DEGRADED,
+    KIND_DATA_LOSS_CANDIDATE,
+    KIND_RESTORE_DRILL_FAILED,
+    KIND_SIZE_GUARD_ABORT,
+)
 from tortoise.live import epistemic_disjunction  # #7902: the shared label set
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
@@ -2205,8 +2211,27 @@ async def _lifespan(app):
                         return None
 
                 from tortoise.alert_store import WRITER_WATCHER
+                # #4778: the ALERT-only policy seam, not the sweep-gated raw
+                # chain. `cfg` is non-None here (the branch above requires it),
+                # so this builds the SAME store
+                # `_alert_store_from(cfg, writer=WRITER_WATCHER)` built — the
+                # difference is that the channel now comes from the ONE declared
+                # builder, so the D5a class of raw sites is REMOVED rather than
+                # merely enumerated by a guard.
+                watcher_alerts = _incident_alert_store(writer=WRITER_WATCHER)
+                if watcher_alerts is None:
+                    # Reachable only where the raw constructor RAISED (an
+                    # unusable object store): `incident_alert_store` answers
+                    # None instead. Re-raising keeps #2922's contract — the
+                    # enclosing handler logs loudly and records
+                    # `_WATCHER_START_ERROR`, so a watcher with no channel is
+                    # never a silent "all clear".
+                    raise RuntimeError(
+                        "backup watcher alert channel unavailable (no "
+                        "DR_ISSUES_PAT, or the object store cannot be built)"
+                    )
                 watcher = BackupWatcher(
-                    _backup_storage(), _alert_store_from(cfg, writer=WRITER_WATCHER),
+                    _backup_storage(), watcher_alerts,
                     org_provider=_sweep_orgs,
                     eligible_provider=_eligible_orgs if cfg.org_sweep_enabled else None,
                     graph_provider=_graph_provider,
@@ -7011,6 +7036,7 @@ DEFAULT_ONBOARDING_STATE = {
     "session_capture_receipt_cursor": None,
     "session_capture_receipt_pi": None,
     "session_capture_receipt_openclaw": None,
+    "session_capture_receipt_hermes": None,
     "session_capture_last_error_claude": None,
     "session_capture_last_error_claude-desktop": None,
     "session_capture_last_error_claude-web": None,
@@ -7018,6 +7044,7 @@ DEFAULT_ONBOARDING_STATE = {
     "session_capture_last_error_cursor": None,
     "session_capture_last_error_pi": None,
     "session_capture_last_error_openclaw": None,
+    "session_capture_last_error_hermes": None,
     "install_probe_claude": None,
     "install_probe_pi": None,
     # #1893: persisted GitHub source-scope keys (written by the dashboard's
@@ -8355,6 +8382,53 @@ async def _check_invite_accept_rate_limit(request: Request, token: str) -> None:
 
 # ── Endpoints ─────────────────────────────────────────────────────
 
+async def _require_approved_kind(sdk: TortoiseSDK, kind: str, *, door: str) -> None:
+    """#5475: refuse a NAMESPACED kind the graph's approval set does not hold.
+
+    ``pack_state.graph_kind_namespaces`` mines ``ns`` prefixes out of the
+    graph's data into the graph's APPROVAL set, so a write door that persists
+    an unvalidated ``ns:kind`` value WIDENS the set that is supposed to gate
+    it — ``objectKind=marketing:contentBrief`` on a ``dev``-only graph made
+    the whole ``marketing`` pack writable. This is the input constraint:
+    compare the namespace against the resolved set (records ∪ data) BEFORE
+    the write and 422 a namespace it does not hold.
+
+    REJECT, never silently normalise: it is the fail-closed direction, it is
+    the same 422 the sibling ``/v1/points`` ``kind`` validator returns for a
+    kind outside the vocabulary, and the import door already rejects unknown
+    namespaced vocabulary (``_check_foreign_kinds``). A silent coerce would
+    also leave the write metered and audited under a kind it does not carry.
+
+    A bare kind, an empty namespace, and a ``None`` gate (a graph with no
+    ``:PackInstall`` records — the catalog-union back-compat of #2714
+    indicator 3) are all admitted by ``kind_namespace_is_approved``, so this
+    is not a blanket ban on writes.
+
+    The gate read is a WHOLE-GRAPH scan (``graph_installed_namespaces`` is
+    O(nodes) and documented to run per call) and this handler is ``async`` —
+    the read rides the #3498 graph pool, exactly as the #5163 commit door
+    does, rather than parking the event loop.
+    """
+    from tortoise.pack_state import (
+        graph_installed_namespaces,
+        kind_namespace_is_approved,
+    )
+    approved = await _graph_offload(
+        lambda: graph_installed_namespaces(sdk), op=f"{door}.kind_gate")
+    if not kind_namespace_is_approved(kind, approved):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error_code": "KIND_NAMESPACE_NOT_INSTALLED",
+                "message": (
+                    f"{kind!r} names a pack namespace this graph has not "
+                    "installed; write a kind from an installed pack, or "
+                    "install that pack first"),
+                "kind": kind,
+                "installed_namespaces": sorted(approved),
+            })
+
+
 class CreateObjectRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     objectKind: str = Field(default="other")
@@ -8378,6 +8452,8 @@ async def create_object(body: CreateObjectRequest, request: Request,
     await _graph_offload(lambda: _check_org_limit(org, "points"),
                          op="check_org_limit.points")
     sdk = await _data_sdk_offloaded(org)
+    # #5475: the kind must not widen the graph's own approval set.
+    await _require_approved_kind(sdk, body.objectKind, door="create_object")
     try:
         props = {}
         if body.status:
@@ -8428,6 +8504,8 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
     await _graph_offload(lambda: _check_org_limit(org, "points"),
                          op="check_org_limit.points")
     sdk = await _data_sdk_offloaded(org)
+    # #5475: the same input constraint as /v1/objects, on the subject door.
+    await _require_approved_kind(sdk, body.subjectKind, door="create_subject")
     try:
         # #3718: sync FalkorDB I/O — off-loaded off the event loop (see
         # create_object above for the pattern and rationale).
@@ -10247,7 +10325,27 @@ def _seed_demo_graph(org_id: str) -> dict:
     (sentinel). #2360: NEVER called on the fresh-org provisioning path —
     fresh orgs get the REAL starter seed (/internal/starter-seed) instead.
     Every Point written here is excluded from org.point_count, so opt-in
-    sample content is never counted as the user's own filings."""
+    sample content is never counted as the user's own filings.
+
+    #2897: each of the THREE TAG-BEARING layers (semantic, epistemic,
+    procedural — the episodic layer carries none) writes its Point with the
+    `tags` PROPERTY beside the `:Tag`/`TAGGED` MERGE loop. The edge half is
+    snapshot-derivable from that property (`_upsert_point_edges` pass 2 reads
+    the node's own final value), so a seeder that wrote only the edge left its
+    tags with nothing for a rebuild to re-derive. This is the one tag producer
+    OUTSIDE the SDK↔projection `_sync_tags` pair, and its edges are still
+    hand-rolled MERGEs rather than routed through that routine — the property
+    is what makes them durable, and this duplication is why the "ONE routine
+    for BOTH writers" claim is scoped to the SDK and the projection rather than
+    to every producer.
+
+    ⚠️ NOT RETROACTIVE: the sentinel short-circuit above returns before any
+    write, so a graph seeded BEFORE this landed keeps its edge-only tags and
+    still loses them to the #548 snapshot on the next `rebuild_all`. Blast
+    radius is opt-in sample content (excluded from `org.point_count`), not user
+    filings; deleting the sentinel and re-seeding, or a one-shot backfill of
+    `tags` from the existing `TAGGED` edges, closes it per graph.
+    """
     sdk = _make_sdk(namespace=org_id)
     proj = sdk._get_proj()
     now = datetime.now(UTC).isoformat()
@@ -10265,8 +10363,10 @@ def _seed_demo_graph(org_id: str) -> dict:
         proj.g.query(
             "MERGE (p:Point {id:$id}) "
             "SET p.content=$c, p.pointKind=$k, p.is_operator=false, "
-            "p.status='live', p.createdAt=$now, p.updatedAt=$now",
-            params={"id": pid, "c": content, "k": kind, "now": now},
+            "p.status='live', p.createdAt=$now, p.updatedAt=$now, "
+            "p.tags=$tags",
+            params={"id": pid, "c": content, "k": kind, "now": now,
+                    "tags": tags},
         )
         for tag in tags:
             proj.g.query(
@@ -10303,8 +10403,10 @@ def _seed_demo_graph(org_id: str) -> dict:
         proj.g.query(
             "MERGE (p:Point {id:$id}) "
             "SET p.content=$c, p.pointKind=$k, p.is_operator=false, "
-            "p.status='live', p.confidence=$conf, p.createdAt=$now, p.updatedAt=$now",
-            params={"id": pid, "c": content, "k": kind, "conf": confidence, "now": now},
+            "p.status='live', p.confidence=$conf, p.createdAt=$now, "
+            "p.updatedAt=$now, p.tags=$tags",
+            params={"id": pid, "c": content, "k": kind, "conf": confidence,
+                    "now": now, "tags": tags},
         )
         for tag in tags:
             proj.g.query(
@@ -10320,8 +10422,10 @@ def _seed_demo_graph(org_id: str) -> dict:
         proj.g.query(
             "MERGE (p:Point {id:$id}) "
             "SET p.content=$c, p.pointKind=$k, p.is_operator=false, "
-            "p.status='live', p.createdAt=$now, p.updatedAt=$now",
-            params={"id": pid, "c": content, "k": kind, "now": now},
+            "p.status='live', p.createdAt=$now, p.updatedAt=$now, "
+            "p.tags=$tags",
+            params={"id": pid, "c": content, "k": kind, "now": now,
+                    "tags": tags},
         )
         for tag in tags:
             proj.g.query(
@@ -12050,6 +12154,16 @@ _SESSION_HARNESS_VALUES = frozenset({
     # OpenClaw sessions can never carry a capture receipt — the ingestion half
     # of the two-way seam would be unreachable however correctly it parsed.
     "openclaw",
+    # #2121: the Hermes seam, the same defect the OpenClaw member above closes.
+    # `sessions import --harness hermes` POSTs this value verbatim (only
+    # `desktop` is aliased), and a 422 at the Pydantic boundary is NOT in
+    # `capture_spool.classify_failure`'s transient family (402/408/425/429/5xx)
+    # — so the turns are neither stored NOR spooled, no receipt key exists, and
+    # the session is lost rather than deferred. The derived receipt/last-error
+    # keys for this member are registered in both onboarding-state dicts and the
+    # PATCH model (pinned by tests/test_5051_capture_receipt_key_registry.py
+    # and tests/test_onboarding_endpoints.py).
+    "hermes",
 })
 
 # #3516 §B / #3515 piece 8: which producer captured a session — 'hook' (the
@@ -13773,9 +13887,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # written (idempotent keyed-MERGE step edge; FWW — a later capture is a
     # 200 no-op) and the response marks first_capture=true so the calling
     # in-conversation agent fires the ONE-line announcement whose COPY
-    # CONTRACT lives in tortoise/onboarding/SKILL.md §7 (W2 owns the copy;
+    # CONTRACT lives in tortoise/onboarding/SKILL.md §8 (W2 owns the copy;
     # #3517: the wording itself is RENDERED from
-    # tortoise/config/capture_disclosure.json — the §7 section names the render
+    # tortoise/config/capture_disclosure.json — the §8 section names the render
     # rather than repeating it, so the copy has exactly one home.
     # W6 owns the trigger — never duplicate the wording here). capture-
     # disclosed is a NODE CHECKPOINT, never a card-counted step (state.py
@@ -14123,7 +14237,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # matched), byte-parity with the SDK receipt.
             "capture_redactions": _capture_redactions,
             # #2002 (W6): first_capture=true exactly once per org — the
-            # trigger for the in-conversation announcement (SKILL.md §7 copy
+            # trigger for the in-conversation announcement (SKILL.md §8 copy
             # contract; the wording renders from
             # tortoise/config/capture_disclosure.json — #3517).
             "first_capture": bool(first_capture)}
@@ -25547,6 +25661,7 @@ _ONBOARDING_DEFAULT_STATE = {
     "session_capture_receipt_cursor": None,
     "session_capture_receipt_pi": None,
     "session_capture_receipt_openclaw": None,
+    "session_capture_receipt_hermes": None,
     "session_capture_last_error_claude": None,
     "session_capture_last_error_claude-desktop": None,
     "session_capture_last_error_claude-web": None,
@@ -25554,6 +25669,7 @@ _ONBOARDING_DEFAULT_STATE = {
     "session_capture_last_error_cursor": None,
     "session_capture_last_error_pi": None,
     "session_capture_last_error_openclaw": None,
+    "session_capture_last_error_hermes": None,
     "install_probe_claude": None,          # Task 14: harness + timestamp, no content
     "install_probe_pi": None,
     # #1893: persisted GitHub source-scope keys (dashboard scope selectors
@@ -26708,6 +26824,13 @@ class OnboardingStatePatchRequest(BaseModel):
     # tests/test_onboarding_endpoints.py::test_capture_verification_keys_not_client_writable
     # closes — it caught exactly this omission when openclaw was added).
     session_capture_receipt_openclaw: str | None = None
+    # #2121: the Hermes seam — same requirement as the OpenClaw field above: a
+    # member of _SESSION_HARNESS_VALUES derives a receipt/last-error pair of
+    # _CAPTURE_SERVER_OWNED_KEYS, and without a PATCH field its 403 refusal
+    # cannot be exercised at all (the hole
+    # tests/test_onboarding_endpoints.py::test_capture_verification_keys_not_client_writable
+    # closes).
+    session_capture_receipt_hermes: str | None = None
     session_capture_last_error_claude: str | None = None
     session_capture_last_error_claude_desktop: str | None = None
     session_capture_last_error_claude_web: str | None = None
@@ -26715,6 +26838,7 @@ class OnboardingStatePatchRequest(BaseModel):
     session_capture_last_error_cursor: str | None = None
     session_capture_last_error_pi: str | None = None
     session_capture_last_error_openclaw: str | None = None
+    session_capture_last_error_hermes: str | None = None
     install_probe_claude: str | None = None
     install_probe_pi: str | None = None
     # #1726 (Slice 1): docs staged + ingested — server-written; registered so
@@ -28408,7 +28532,7 @@ _ANALYTICS_OUTCOMES = ("supabase", "fallback", "unconfigured", "dropped")
 # like DRIVER_DOWN / R2_DOWN — because the analytics sink is shared by every
 # org: a per-org subject would fan one degradation out into one issue per
 # tenant.
-_ANALYTICS_INCIDENT_KIND = "ANALYTICS_SINK_DEGRADED"
+_ANALYTICS_INCIDENT_KIND = KIND_ANALYTICS_SINK_DEGRADED
 
 # #3820 (D2/P2-1): a single 5s POST timeout must not open a GitHub issue,
 # but a persistent outage must be visible within seconds. The trigger is a
@@ -32792,7 +32916,7 @@ _DRILL_COOLDOWN_S = 3600
 # but too slowly) or the drill fails outright.
 _DRILL_RTO_S = 900.0
 _DRILL_RECORD_KEY = "ops/drills/last.json"
-_DRILL_FAILED_KIND = "RESTORE_DRILL_FAILED"
+_DRILL_FAILED_KIND = KIND_RESTORE_DRILL_FAILED
 _SWEEP_ORG_LOCKS: dict[str, threading.Lock] = {}
 _SWEEP_LOCKS_GUARD = threading.Lock()
 _SWEEP_INFLIGHT = asyncio.Lock()
@@ -33036,20 +33160,53 @@ async def backups_sweep(request: Request):
         except RuntimeError as e:
             raise HTTPException(status_code=503, detail=f"Sweep failed: {e}")  # noqa: B904
 
-        alerts = _alert_store_from(cfg)
+        # #4778: the ALERT-only policy seam. `cfg` is non-None here (the handler
+        # 503s otherwise), so this is the store the raw chain built — but the
+        # channel now comes from the ONE declared builder, and that builder
+        # ANSWERS None instead of raising when no channel can exist, which both
+        # loops below REPORT rather than swallow.
+        alerts = _incident_alert_store()
+        # #4778 review P3: the resolution candidates are needed by BOTH the
+        # no-channel decision below AND the resolve loop, so compute them once,
+        # here — `sweep_resolutions` reads only `status`/`results`/`incidents`,
+        # not `alerts_failed`, so hoisting it changes no outcome.
+        from tortoise.backup_sweep import sweep_resolutions
+
+        candidates = sweep_resolutions(result)
         alerts_failed = []
-        for inc in result.get("incidents", []):
-            try:
-                # #2313: graph-scoped incidents (custom graphs) route under
-                # the "{org}:{gid}" subject — coherent with the watcher and
-                # re-baseline. Default/org incidents keep the bare org.
-                await asyncio.to_thread(
-                    alerts.open_incident, inc["kind"],
-                    _incident_subject(inc), inc.get("detail")
+        if alerts is None:
+            # No channel (no `DR_ISSUES_PAT`, or an unusable object store):
+            # every incident this run emitted is UNSENT, and the response must
+            # say so — a sweep whose incidents vanished silently reads as a
+            # clean sweep.
+            alerts_failed = [inc.get("kind") for inc in result.get("incidents", [])]
+            # #4778 review P3: warn only when this run actually NEEDED the
+            # channel (something to file or something to resolve). The sweep is
+            # called hourly and most runs emit nothing, so the unconditional
+            # warning flooded the log with "no alert channel" about clean runs.
+            # (The monthly drill warns unconditionally instead — see
+            # `backups_drill_scheduled` — because its pre-flight warning is the
+            # point and a monthly cadence cannot flood.)
+            if alerts_failed or candidates:
+                _logger.warning(
+                    "backup sweep has no alert channel: %d incident(s) could "
+                    "not be filed and %d resolve candidate(s) could not be "
+                    "cleared (DR_ISSUES_PAT unset, or the object store is "
+                    "unusable)", len(alerts_failed), len(candidates),
                 )
-            except Exception as e:  # incident-filing must never fail the run (review P3)
-                _logger.warning("incident routing failed for %s: %s", inc.get("kind"), e)
-                alerts_failed.append(inc.get("kind"))
+        else:
+            for inc in result.get("incidents", []):
+                try:
+                    # #2313: graph-scoped incidents (custom graphs) route under
+                    # the "{org}:{gid}" subject — coherent with the watcher and
+                    # re-baseline. Default/org incidents keep the bare org.
+                    await asyncio.to_thread(
+                        alerts.open_incident, inc["kind"],
+                        _incident_subject(inc), inc.get("detail")
+                    )
+                except Exception as e:  # incident-filing must never fail the run (review P3)
+                    _logger.warning("incident routing failed for %s: %s", inc.get("kind"), e)
+                    alerts_failed.append(inc.get("kind"))
         if alerts_failed:
             result["alerts_failed"] = alerts_failed
 
@@ -33064,13 +33221,17 @@ async def backups_sweep(request: Request):
         # one LIST per kind, never an R2 GET per graph, so an hourly sweep over a
         # few thousand graphs does not serialise thousands of reads while holding
         # the sweep lock (nor does a listing failure close anything).
-        from tortoise.backup_sweep import sweep_resolutions
-
-        candidates = sweep_resolutions(result)
+        # (`candidates` is computed above, next to the no-channel decision.)
         resolved: list[str] = []
         failed: list[str] = []
         open_cache: dict[str, set[str]] = {}
         for kind, subject in candidates:
+            if alerts is None:
+                # #4778: no channel — the resolve cannot be attempted, and the
+                # run must not read as clean (the same contract the failed-close
+                # branch below enforces for a raised close).
+                failed.append(f"{kind}/{subject}" if subject else kind)
+                continue
             try:
                 if kind not in open_cache:
                     # strict: a failed LIST must not be indistinguishable from
@@ -33495,11 +33656,11 @@ async def backups_rebaseline(request: Request):
     if graph_id == "default":
         _write_json(storage, f"ops/teams/{org_id}/state.json", state)
     subject = f"{org_id}:{graph_id}" if graph_id != "default" else org_id
-    # #4777: the ALERT-only seam, NEVER the sweep-gated chain. Re-baseline is
-    # precisely the operator action that clears an incident FILED WHILE THE SWEEP
-    # WAS ENABLED, so the channel must survive the sweep being switched off (the
-    # production default) — the sweep switch decides whether backups RUN, never
-    # whether an incident is VISIBLE (#3820 D5a).
+    # #4778/#4777: the ALERT-only policy seam, NEVER the sweep-gated chain.
+    # Re-baseline is precisely the operator action that clears an incident FILED
+    # WHILE THE SWEEP WAS ENABLED, so the channel must survive the sweep being
+    # switched off (the production default) — the sweep switch decides whether
+    # backups RUN, never whether an incident is VISIBLE (#3820 D5a).
     #
     # `_alert_store_from(_backup_config_safe())` was gated on `BACKUP_SWEEP_ENABLED`
     # and dereferenced the `None` config, so with the sweep off it raised
@@ -33508,7 +33669,7 @@ async def backups_rebaseline(request: Request):
     # missing step (the resolve of DATA_LOSS_CANDIDATE + SIZE_GUARD_ABORT, kinds
     # NOTHING else clears) was silently skipped. `_incident_alert_store` reads the
     # alert credentials ungated and returns `None` — it cannot raise — when no
-    # channel can be built.
+    # channel can be built, which `_resolve_incidents` reports below.
     alerts = _incident_alert_store()
     # #3718 round-3 review P2: both resolves are blocking NETWORK round
     # trips — a storage read plus a GitHub issue close / Telegram push — the
@@ -33527,11 +33688,12 @@ async def backups_rebaseline(request: Request):
     # per kind so the operator can re-run re-baseline after GitHub recovers.
     def _resolve_incidents() -> list[str]:
         if alerts is None:
-            # No channel can be built (no DR_ISSUES_PAT, or an unusable object
-            # store), so NOTHING can clear these two kinds — they are resolved
-            # here and nowhere else. Report them instead of letting the response
-            # read as a re-baseline that closed incidents it never touched; the
-            # state write DID succeed, which is why this is not a 5xx.
+            # #4778: no channel can be built (no DR_ISSUES_PAT, or an unusable
+            # object store). NOTHING can clear these two kinds — they are
+            # resolved here and nowhere else — so report them per kind rather
+            # than letting the response read as a re-baseline that closed
+            # incidents it never touched; the state write DID succeed, which is
+            # why this is not a 5xx.
             _logger.warning(
                 "no alert channel on re-baseline of %s — DATA_LOSS_CANDIDATE and "
                 "SIZE_GUARD_ABORT cannot be resolved by this call (check "
@@ -33539,9 +33701,9 @@ async def backups_rebaseline(request: Request):
                 "itself succeeded", subject,
             )
             return [f"{kind}/{subject}"
-                    for kind in ("DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT")]
+                    for kind in (KIND_DATA_LOSS_CANDIDATE, KIND_SIZE_GUARD_ABORT)]
         failed: list[str] = []
-        for kind in ("DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT"):
+        for kind in (KIND_DATA_LOSS_CANDIDATE, KIND_SIZE_GUARD_ABORT):
             try:
                 alerts.resolve_incident(kind, subject)
             except Exception:
@@ -33841,27 +34003,47 @@ async def backups_drill_scheduled(request: Request):
     # the registry namespace (see _control_plane_source's docstring).
     _data_sdk, db = await asyncio.to_thread(_data_plane_db)
     storage = _backup_storage()
-    alerts = _alert_store_from(cfg)
+    # #4778: the ALERT-only policy seam (`cfg` is non-None here — the handler
+    # 503s otherwise — so this is the store the raw chain built). It ANSWERS
+    # None when no channel can exist, and a scheduled drill whose
+    # RESTORE_DRILL_FAILED could not be filed is exactly the silence D5a
+    # forbids — so every use below is guarded, and every skip is logged rather
+    # than degrading into an AttributeError caught by the wrong handler.
+    alerts = _incident_alert_store()
+    if alerts is None:
+        _logger.warning(
+            "scheduled drill is running WITHOUT an alert channel "
+            "(DR_ISSUES_PAT unset, or the object store is unusable) — a "
+            "RESTORE_DRILL_FAILED this run would be UNSENT and any open "
+            "incident stays OPEN"
+        )
     try:
         result = await asyncio.to_thread(
             _scheduled_drill, cfg=cfg, registry=registry, db=db, storage=storage,
         )
     except ValueError as e:
-        try:
-            await asyncio.to_thread(
-                alerts.open_incident, _DRILL_FAILED_KIND, "global",
-                # #3293: an exception MESSAGE is app-controlled text and this
-                # detail is published verbatim into a PUBLIC issue body
-                # (``alert_store._body``). ``error_type`` is the bounded half
-                # the other operator incidents already carry
-                # (``operator_alert.alert_abuse_fault``); the message goes
-                # through the publication scrubber before it joins it.
-                {"error_type": type(e).__name__,
-                 "error": redact_for_publication(str(e)),
-                 "source": "drill-scheduled"},
+        if alerts is None:
+            _logger.error(
+                "RESTORE_DRILL_FAILED NOT FILED (no alert channel) — the "
+                "scheduled drill was rejected: %s",
+                redact_for_publication(str(e)),
             )
-        except Exception:
-            _logger.warning("RESTORE_DRILL_FAILED open failed (ValueError path)", exc_info=True)
+        else:
+            try:
+                await asyncio.to_thread(
+                    alerts.open_incident, _DRILL_FAILED_KIND, "global",
+                    # #3293: an exception MESSAGE is app-controlled text and this
+                    # detail is published verbatim into a PUBLIC issue body
+                    # (``alert_store._body``). ``error_type`` is the bounded half
+                    # the other operator incidents already carry
+                    # (``operator_alert.alert_abuse_fault``); the message goes
+                    # through the publication scrubber before it joins it.
+                    {"error_type": type(e).__name__,
+                     "error": redact_for_publication(str(e)),
+                     "source": "drill-scheduled"},
+                )
+            except Exception:
+                _logger.warning("RESTORE_DRILL_FAILED open failed (ValueError path)", exc_info=True)
         # #3293 review: the response body is echoed verbatim into a PUBLIC
         # Actions log by the drill drivers (``registry-drill*.sh``), so the
         # raw exception is a publication sink too — scrub it here, not only in
@@ -33872,18 +34054,24 @@ async def backups_drill_scheduled(request: Request):
             detail=f"Drill rejected: {redact_for_publication(str(e))}",
         ) from e
     except RuntimeError as e:
-        try:
-            await asyncio.to_thread(
-                alerts.open_incident, _DRILL_FAILED_KIND, "global",
-                # #3293: see the ValueError path above — same public sink, same
-                # scrub. This is the path a STORAGE error takes, i.e. the one
-                # most likely to echo a signed URL or endpoint in its message.
-                {"error_type": type(e).__name__,
-                 "error": redact_for_publication(str(e)),
-                 "source": "drill-scheduled"},
+        if alerts is None:
+            _logger.error(
+                "RESTORE_DRILL_FAILED NOT FILED (no alert channel) — the "
+                "scheduled drill failed: %s", redact_for_publication(str(e)),
             )
-        except Exception:
-            _logger.warning("RESTORE_DRILL_FAILED open failed (RuntimeError path)", exc_info=True)
+        else:
+            try:
+                await asyncio.to_thread(
+                    alerts.open_incident, _DRILL_FAILED_KIND, "global",
+                    # #3293: see the ValueError path above — same public sink, same
+                    # scrub. This is the path a STORAGE error takes, i.e. the one
+                    # most likely to echo a signed URL or endpoint in its message.
+                    {"error_type": type(e).__name__,
+                     "error": redact_for_publication(str(e)),
+                     "source": "drill-scheduled"},
+                )
+            except Exception:
+                _logger.warning("RESTORE_DRILL_FAILED open failed (RuntimeError path)", exc_info=True)
         # #3293 review: see the ValueError path above — same public-Actions-log
         # sink, same boundary scrub.
         raise HTTPException(
@@ -33893,29 +34081,39 @@ async def backups_drill_scheduled(request: Request):
     if result.get("status") == "drill_ok" and not result.get("within_rto", True):
         # Restore succeeded but missed the committed RTO — incident-worthy
         # (restore speed is a target, not an accident).
-        try:
-            await asyncio.to_thread(
-                alerts.open_incident, _DRILL_FAILED_KIND, "global",
-                {
-                    "error": "restore exceeded the committed RTO",
-                    "duration_s": result.get("duration_s"),
-                    "rto_s": result.get("rto_s"),
-                    "org_id": (result.get("record") or {}).get("org_id"),
-                    "backup_key": (result.get("record") or {}).get("backup_key"),
-                    # #4233: if either GRAPH.COPY (pre-restore safety copy or
-                    # swap) outlived the restore's read bound, name it — that
-                    # is the attributable cause.
-                    "copy_read_bound_overrun": result.get(
-                        "copy_read_bound_overrun"),
-                },
+        if alerts is None:
+            _logger.error(
+                "RESTORE_DRILL_FAILED NOT FILED (no alert channel) — the "
+                "restore exceeded the committed RTO"
             )
-        except Exception:
-            _logger.warning("RESTORE_DRILL_FAILED open failed (RTO-breach path)", exc_info=True)
+        else:
+            try:
+                await asyncio.to_thread(
+                    alerts.open_incident, _DRILL_FAILED_KIND, "global",
+                    {
+                        "error": "restore exceeded the committed RTO",
+                        "duration_s": result.get("duration_s"),
+                        "rto_s": result.get("rto_s"),
+                        "org_id": (result.get("record") or {}).get("org_id"),
+                        "backup_key": (result.get("record") or {}).get("backup_key"),
+                        # #4233: if either GRAPH.COPY (pre-restore safety copy or
+                        # swap) outlived the restore's read bound, name it — that
+                        # is the attributable cause.
+                        "copy_read_bound_overrun": result.get(
+                            "copy_read_bound_overrun"),
+                    },
+                )
+            except Exception:
+                _logger.warning("RESTORE_DRILL_FAILED open failed (RTO-breach path)", exc_info=True)
     else:
         # success (or no eligible archive) closes any open incident. A failed
         # close has NO retry until the next monthly drill, so report it in the
         # response (final-cycle review P2 — the runbook claimed this field).
         try:
+            if alerts is None:
+                # #4778: no channel — the incident cannot be closed, and the run
+                # must REPORT it rather than return a `drill_ok` implying it was.
+                raise RuntimeError("no alert channel")
             await asyncio.to_thread(
                 alerts.resolve_incident, _DRILL_FAILED_KIND, "global"
             )
