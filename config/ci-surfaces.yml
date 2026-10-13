@@ -1030,6 +1030,13 @@ surfaces:
   # → `"full": true` — so it needs no entry here.) `--integrity` also
   # requires every test file to be classified, which this entry satisfies.
   - test_7951_write_doors.py
+  # #5141: `graph-scripts/backfill_references.py` matches no named surface and
+  # falls through to `core`, so this arm is what runs the script's smoke test on
+  # a graph-script-only diff. The pre-existing coverage could not see the
+  # defect: `test_references_edge.py` inlines a MIRROR of the backfill loop, so
+  # the script's own query building (which raised `KeyError: 'id'` before it
+  # wrote anything) was never executed by a test.
+  - test_backfill_references_5141.py
   - test_cache_projection.py
   - test_cache_projection_live.py
   # #4197: the saved-backlog ledger (`tortoise/capture_backlog.py`) and its
@@ -2732,6 +2739,15 @@ surfaces:
   # `tortoise/hosted_api.py`) would therefore leave the token.ts guard unrun exactly
   # when that file changes, so the same file needs this arm too.
   - test_oauth_consent_bridge.py
+  # #3524 task 3: the BEHAVIOURAL guard for the four session-flow properties.
+  # It reads `website/apps/dashboard/functions/_shared/auth/{token,consent-flow}.ts`
+  # and executes them under Node, so `website/apps/dashboard/functions/` — a
+  # SOURCE_PATTERN for THIS surface — is exactly the diff that must run it
+  # (`tools/ci_selection.py`: a token.ts-only diff selects `['onboarding']` and
+  # NOT `api`). It does NOT read `tortoise/oauth.py`, so the `api` arm is not
+  # needed here; the static anchors in `test_oauth_consent_bridge.py` own that
+  # direction. Registered once, on the surface whose sources it reads.
+  - test_oauth_session_flow_properties.py
   # #4097: the env-truthiness non-divergence guard scans all of `tortoise/**`,
   # including `tortoise/onboarding/**`, and an `onboarding` surface match replaces
   # the `core` fallback (tools/ci_selection.py) — so the guard needs this arm too.
