@@ -13,6 +13,10 @@ import os  # noqa: F401
 import sys  # noqa: F401
 
 import pytest
+from tortoise.entity_identity import (
+    clear_non_folded_entries,
+    non_folded_entries,
+)
 from tortoise.sdk import TortoiseSDK
 from tortoise.topic_summarization import (
     topic_summarize,
@@ -493,6 +497,86 @@ class TestUncalibratedNANDPair:
         )
         assert not pair_has_these, \
             "NAND-connected uncalibrated pair must NOT be classified as disputed"
+
+
+class TestStage1aEntityNameResolution:
+    """#5510: stage 1a routes each enumerated NAME to exactly ONE live id.
+
+    Under #3590 D2 two live same-name carriers are legal, so a name-keyed
+    ``MATCH ... (e:{label} {name: $name})`` unions the Points hanging off BOTH
+    carriers into one topic neighborhood — a fold of two identities with no
+    refusal. The fix resolves each name through ``resolve_entity_id`` and
+    matches ``e.id``; a name held by two live carriers is refused (non-folded
+    entry recorded) and SKIPPED — a retrieval seed set degrades the
+    neighborhood instead of failing the run.
+
+    The topic token is unique per test so the module-scoped graph (shared by
+    every test in this file) cannot leak a seed in through stage 1b, and the
+    claim contents deliberately do NOT contain the topic: the ONLY path to a
+    seed here is stage 1a.
+    """
+
+    def test_single_live_holder_seeds_the_neighborhood(self, sdk):
+        """(a) One live carrier of the name -> its Points ARE the seeds."""
+        proj = sdk._get_proj()
+        proj.g.query(
+            "CREATE (o:Object {id:'obj-5510-solo', name:'zq5510solo', "
+            "objectKind:'org', status:'live'})")
+        point = sdk.create_point("statement", "unrelated alpha claim")
+        proj.g.query(
+            "MATCH (p:Point {id:$pid}), (o:Object {id:'obj-5510-solo'}) "
+            "CREATE (p)-[:aboutObject]->(o)",
+            params={"pid": point["id"]})
+
+        result = topic_summarize(proj.g, topic="zq5510solo", max_seeds=50,
+                                 max_hops=0)
+
+        # The name routed to exactly one id and the id-keyed read found it.
+        # (The Point is uncalibrated, so it is classified neither settled nor
+        # contested; seed_count is the stage-1a witness.)
+        assert result.seed_count == 1, \
+            f"one live carrier must seed exactly one Point: {result.seed_count}"
+        assert result.total_points == 1
+
+    def test_two_live_same_name_carriers_refuse_and_never_union(self, sdk):
+        """(b) Two live same-name carriers -> SKIP + non-folded entry, never a
+        union of both carriers' Points.
+
+        The mutation this reds: reverting the read to ``{name: $name}`` returns
+        BOTH Points (seed_count == 2, total_points == 2) — the fold.
+        """
+        proj = sdk._get_proj()
+        for oid in ("obj-5510-dup-a", "obj-5510-dup-b"):
+            proj.g.query(
+                "CREATE (o:Object {id:$id, name:'zq5510dup', "
+                "objectKind:'org', status:'live'})",
+                params={"id": oid})
+        point_a = sdk.create_point("statement", "unrelated beta claim")
+        point_b = sdk.create_point("statement", "unrelated gamma claim")
+        proj.g.query(
+            "MATCH (p:Point {id:$pid}), (o:Object {id:$oid}) "
+            "CREATE (p)-[:aboutObject]->(o)",
+            params={"pid": point_a["id"], "oid": "obj-5510-dup-a"})
+        proj.g.query(
+            "MATCH (p:Point {id:$pid}), (o:Object {id:$oid}) "
+            "CREATE (p)-[:aboutObject]->(o)",
+            params={"pid": point_b["id"], "oid": "obj-5510-dup-b"})
+
+        clear_non_folded_entries()
+        result = topic_summarize(proj.g, topic="zq5510dup", max_seeds=50,
+                                 max_hops=0)
+
+        # Neither carrier's Point is seeded: the name was refused, not folded.
+        assert result.seed_count == 0, \
+            "two live same-name carriers must not union their Points into one "
+        assert result.total_points == 0
+        # ... and the refusal is EVIDENCE (the resolver's non-folded entry), not
+        # a silently swallowed warning.
+        assert [(e.label, e.name, e.shape, list(e.candidate_ids))
+                for e in non_folded_entries()] == [
+            ("Object", "zq5510dup", "ambiguous-name",
+             ["obj-5510-dup-a", "obj-5510-dup-b"])
+        ]
 
 
 class TestHostedEndpointExists:

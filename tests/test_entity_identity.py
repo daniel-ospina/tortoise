@@ -935,11 +935,6 @@ _ALLOWED_FSTRING = {
         # "Delete in S1"; the slice is unlanded on main.
         'r = proj.g.query( f"MATCH (n:{label} {{name: $name}}) RETURN n.id", params={"name": name}, )': 1,
     },
-    'tortoise/topic_summarization.py': {
-        # #5509: name-keyed `about*` read; the f-string variable is
-        # `entity_label`, so only the interpolation sweep sees it.
-        'point_rows = graph.query( f"MATCH (p:Point)-[:{edge_type}]->(e:{entity_label} {{name: $name}}) " "WHERE p.is_operator = false " " AND (p.status IS NULL OR p.status <> \'retracted\') " "RETURN p.id, p.content, p.pointKind " "LIMIT $max_seeds", params={"name": entity_name, "max_seeds": max_seeds}, ).result_set': 1,
-    },
 }
 
 
