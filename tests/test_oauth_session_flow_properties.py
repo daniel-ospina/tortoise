@@ -45,6 +45,9 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+import pytest
 
 # The toolchain contract is owned by the sibling harness — one guard, not a
 # second variant. It FAILS (never skips) when node is absent.
@@ -130,6 +133,7 @@ class FakeD1 {
       return Promise.resolve({ meta: { changes } });
     }
     if (/UPDATE sessions SET refresh_token = \\?2/.test(sql)) {
+      if (this.beforeCas) { const f = this.beforeCas; this.beforeCas = null; f(); }
       const [handle, newRefresh, access, exp, oldRefresh] = args;
       const r = this.row;
       // The single-flight guard is the `refresh_token = ?5` predicate. Same
@@ -160,7 +164,10 @@ function installFetch(responses) {
     const r = responses[Math.min(i, responses.length - 1)];
     i += 1;
     if (!r) throw new Error("no fake provider response was supplied");
-    return { ok: r.status < 400, status: r.status, text: async () => JSON.stringify(r.body) };
+    // `raw` carries a non-JSON body (a WAF/HTML page) verbatim; without it every
+    // body is re-encoded as JSON, so the non-JSON branch of the classifier is
+    // unreachable and a string body parses to "" — an unfalsifiable test.
+    return { ok: r.status < 400, status: r.status, text: async () => (r.raw !== undefined ? r.raw : JSON.stringify(r.body)) };
   };
 }
 
@@ -185,8 +192,11 @@ function provider(access, refresh, expiresIn) {
 
 switch (scenario) {
   case "single_flight": {
-    // A stale cached token so BOTH concurrent callers refresh from the same
-    // generation (the stampede the CAS exists for).
+    // A stale cached token so BOTH concurrent callers want a refresh from the
+    // same generation. With the in-flight guard they share ONE provider refresh;
+    // without it each spends the same rotating token and the CAS catches the
+    // loser. The second provider response is supplied so a regression shows up
+    // as a second fetch (and a different token), not as a silent reuse.
     const db = new FakeD1(row({ access_token_expires_at: Date.now() + 1_000 }));
     installFetch([provider("a1", "r1", 3600), provider("a2", "r2", 3600)]);
     env.SESSIONS = db;
@@ -200,16 +210,44 @@ switch (scenario) {
     out.changeCounts = out.updates.map((u) => u.changes);
     break;
   }
+  case "cas_loser": {
+    // The CROSS-ISOLATE race the in-flight map cannot see: another isolate
+    // rotates the token between our SELECT and our CAS. `beforeCas` mutates the
+    // store at exactly that moment, so the CAS predicate (`refresh_token = ?5`)
+    // matches zero rows and the loser must RE-READ the winner's token instead of
+    // clobbering it. This keeps #5355's first arm covered now that concurrent
+    // same-isolate callers are deduped before they ever reach the CAS.
+    const db = new FakeD1(
+      row({ access_token_expires_at: 0, access_token: "a0", refresh_token: "r0" }),
+    );
+    db.beforeCas = () => {
+      db.row.refresh_token = "rX";
+      db.row.access_token = "aW";
+      db.row.access_token_expires_at = Date.now() + 3_600_000;
+    };
+    installFetch([provider("a1", "r1", 3600)]);
+    env.SESSIONS = db;
+    out.results = await token.getAccessTokenForSession(env, "h1");
+    out.storedRefresh = db.row.refresh_token;
+    out.changeCounts = out.updates.map((u) => u.changes);
+    break;
+  }
   case "refresh_once_cooldown": {
     const db = new FakeD1(row({ access_token: "a0", access_token_expires_at: 0 }));
     env.SESSIONS = db;
-    await token.invalidateCachedToken(env, "h1");
+    // The clock is INJECTED. On the real clock a run that merely SPANNED the 30 s
+    // window produced [1, 1] — indistinguishable from the genuine "cooldown
+    // predicate dropped" signature, so the false red invited loosening the guard.
+    const t0 = 1_700_000_000_000;
+    await token.invalidateCachedToken(env, "h1", 30_000, t0);
     const first = db.row.token_rejected_at;
-    await token.invalidateCachedToken(env, "h1");
+    await token.invalidateCachedToken(env, "h1", 30_000, t0 + 1_000);
     const second = db.row.token_rejected_at;
-    out.results = { first, second };
-    // The cooldown is the WHERE clause: the second call matches zero rows, so
-    // the stamp it would write is never written and the timestamp is unchanged.
+    // ... and the guard must EXPIRE outside the window, or "always bounded"
+    // would pass the two calls above while disabling legitimate refreshes.
+    await token.invalidateCachedToken(env, "h1", 30_000, t0 + 31_000);
+    const third = db.row.token_rejected_at;
+    out.results = { first, second, third };
     out.changeCounts = out.updates.filter((u) => u.sql === "invalidate").map((u) => u.changes);
     break;
   }
@@ -234,6 +272,7 @@ switch (scenario) {
   }
   case "auto_advance": {
     out.results = opts.cases.map((c) => consent.decideConsentAdvance(c));
+    out.consentRetryParam = consent.CONSENT_RETRY_PARAM;
     break;
   }
   default:
@@ -268,65 +307,118 @@ def _run(scenario: str, **opts) -> dict:
 
 # ── property 1 — single-flight ───────────────────────────────────────────────
 
-def test_property_1_single_flight_the_loser_never_clobbers_the_winner() -> None:
-    """One in-flight attempt wins the rotation; the others must not destroy it.
+def test_property_1_single_flight_issues_exactly_one_refresh() -> None:
+    """ONE in-flight attempt per generation; concurrent callers await the same one.
 
     The reference page holds `previewInFlight` and returns the RUNNING flow, so a
     second caller can never start a second attempt at the same generation. The
-    server equivalent is the D1 CAS on the OLD refresh token: both callers may
-    still reach the provider (GoTrue's ~10s reuse tolerance makes that safe), but
-    only the FIRST may write, and the loser must re-read the winner's token rather
-    than overwrite it with its own now-dead one.
+    server equivalent is `token.ts`'s module-level `inFlightRefreshes` map: two
+    concurrent calls for the SAME handle share one `refreshSession`, so exactly
+    one rotating refresh token is spent. The D1 CAS is the CROSS-ISOLATE half
+    (a second isolate cannot see the map) and is covered by the `cas_loser` test
+    below.
 
-    Removing the property is removing `AND refresh_token = ?5` from the UPDATE:
-    the second write then succeeds and the live session is destroyed. That is what
-    the `storedRefresh`/`accessToken` assertions below detect — verified by
-    mutation (see the PR body).
+    Removing the property means removing the in-flight map: both callers then
+    POST the same rotating refresh token, so `fetchCount` becomes 2. Outside
+    GoTrue's ~10 s reuse window that answers `refresh_token_already_used` —
+    classified as a DEAD session, so every racing caller answers 401 and clears
+    the cookie, the #3485 sign-out these properties exist to prevent.
     """
     out = _run("single_flight")
-    # Both callers get a USABLE token — the loser is served, not failed.
+    # The property itself: two concurrent callers, ONE provider refresh.
+    assert out["fetchCount"] == 1, (
+        f"two concurrent callers issued {out['fetchCount']} provider refreshes — "
+        "the in-flight guard is gone, so each spends the same rotating refresh token "
+        "and the session dies outside GoTrue's ~10 s reuse window"
+    )
+    # Both callers get a USABLE token — the sharing callers are served, not failed.
     assert out["results"] == [
         {"ok": True, "accessToken": "a1"},
         {"ok": True, "accessToken": "a1"},
     ], (
-        "the rotation race did not resolve to the winner's token: "
-        f"{out['results']!r} (the loser must re-read, not fail and not clobber)"
+        "the shared refresh did not resolve to the same token: "
+        f"{out['results']!r} (both callers must await the one refresh)"
     )
-    # The WINNER's refresh token is what survives in the store.
+    # The one refresh's token is what survives in the store.
     assert out["storedRefresh"] == "r1", (
-        f"the store holds {out['storedRefresh']!r} — the loser overwrote the winner, "
-        "which is the rotating-refresh-token stampede the CAS exists to prevent"
+        f"the store holds {out['storedRefresh']!r} — a caller overwrote the winner, "
+        "which is the rotating-refresh-token stampede the property exists to prevent"
     )
-    # Two attempts, one write: the CAS matched exactly the winner.
-    assert out["changeCounts"] == [1, 0], (
-        f"CAS outcomes were {out['changeCounts']!r} — expected one write and one no-op"
+    # One refresh, one write: the CAS matched exactly the one writer.
+    assert out["changeCounts"] == [1], (
+        f"write outcomes were {out['changeCounts']!r} — expected exactly one rotation"
+    )
+
+
+def test_property_1_the_cas_serves_a_cross_isolate_loser_without_clobbering() -> None:
+    """The in-flight map is per-isolate; the D1 CAS must still protect the write.
+
+    A second isolate cannot see `inFlightRefreshes`, so it may reach the provider
+    while another has already rotated. Its CAS on the OLD refresh token then
+    matches zero rows, and it must RE-READ the winner's token rather than
+    overwrite the live session with its own now-dead one. `cas_loser` mutates the
+    store between the SELECT and the CAS to model exactly that moment.
+
+    Removing `AND refresh_token = ?5` from the UPDATE makes the loser's write
+    land, so `storedRefresh` becomes its dead token and the store's live token is
+    destroyed. This keeps #5355's first arm covered now that same-isolate
+    concurrent callers are deduped before they reach the CAS.
+    """
+    out = _run("cas_loser")
+    assert out["results"] == {"ok": True, "accessToken": "aW"}, (
+        f"the cross-isolate loser did not serve the winner's token: {out['results']!r} — "
+        "it must re-read, not fail and not clobber"
+    )
+    assert out["storedRefresh"] == "rX", (
+        f"the store holds {out['storedRefresh']!r} — the loser clobbered the winner's "
+        "live session with its own now-dead refresh token"
+    )
+    assert out["changeCounts"] == [0], (
+        f"the CAS matched rows it must not ({out['changeCounts']!r}) — the loser's write "
+        "must be a no-op"
     )
 
 
 # ── property 2 — refresh-once ────────────────────────────────────────────────
 
 def test_property_2_refresh_once_is_bounded_by_skew_and_cooldown() -> None:
-    """A refresh must not be issued twice concurrently, nor unboundedly on error.
+    """A refresh is bounded on the hot path and on the error path.
 
     Two halves, both server-side:
 
       * the 60 s `REFRESH_SKEW_MS` — a cached token is used until it is within a
         minute of expiry, so the hot path does not refresh at all;
       * the `invalidateCachedToken` cooldown — a persistent upstream rejection
-        may force at most ONE refresh per 30 s window, so a 401 storm cannot
+        may force at most ONE invalidation per 30 s window, so a 401 storm cannot
         become unbounded rotating-refresh-token traffic against GoTrue.
 
+    What this test does NOT claim (it is a weaker property than "a refresh is
+    never issued twice concurrently"): the cooldown bounds INVALIDATIONS, not
+    CONCURRENCY. That half is property 1's in-flight guard, covered by
+    `test_property_1_single_flight_issues_exactly_one_refresh`, and the D1 CAS is
+    the cross-isolate half (`…the_cas_serves_a_cross_isolate_loser…`). One
+    load-bearing assumption remains and is recorded in the spec: GoTrue's ~10 s
+    refresh-token reuse tolerance, without which even a deduped pair of isolates
+    could mutually invalidate their tokens. It is a dependency of the rotating
+    design, not something this cooldown provides.
+
     Removing either half changes an observable here: the skew inside its band, and
-    the cooldown by the second write matching a row it must not match. Verified by
-    mutation (see the PR body).
+    the cooldown by an invalidation matching a row it must not (and, outside the
+    window, by one that must match). Verified by mutation (see the PR body).
     """
     cooldown = _run("refresh_once_cooldown")
-    assert cooldown["changeCounts"] == [1, 0], (
-        f"the second invalidation inside the cooldown wrote a row "
-        f"({cooldown['changeCounts']!r}) — a 401 storm would refresh unboundedly"
+    # The clock is injected, so these outcomes do not depend on wall time: t0,
+    # t0+1s (inside the 30 s window), t0+31s (outside it).
+    assert cooldown["changeCounts"] == [1, 0, 1], (
+        f"expected [inside-write, inside-noop, outside-write], got "
+        f"{cooldown['changeCounts']!r} — the WHERE clause is not bounding by cooldown"
     )
     assert cooldown["results"]["second"] == cooldown["results"]["first"], (
         "the cooldown stamp moved on the second call — the WHERE clause is not bounding it"
+    )
+    assert cooldown["results"]["third"] > cooldown["results"]["first"], (
+        "the cooldown never expired: a legitimate refresh after the window was refused, "
+        "so a persistently rejected token would be cached forever"
     )
 
     # Comfortably inside the cached window: no provider call at all.
@@ -352,6 +444,14 @@ _NEVER_SIGN_OUT_CASES = [
     ([{"status": 403, "body": {"message": "forbidden"}}], "unavailable", "edge/WAF 403 is infrastructure"),
     ([{"status": 404, "body": {"message": "not found"}}], "unavailable", "404 is a misconfigured URL"),
     ([{"status": 400, "body": {"error": "invalid_credentials"}}], "unavailable", "not the refresh family"),
+    # A NON-JSON body cannot be GoTrue evidence, however suggestive its text: an
+    # HTML/WAF page that happens to say "token has expired" is infrastructure, not
+    # a session verdict. Testing the raw text signs the user out (#3485).
+    (
+        [{"status": 403, "raw": "<html><body>your token has expired</body></html>"}],
+        "unavailable",
+        "non-JSON infrastructure page naming `token has expired`",
+    ),
     ([{"status": 200, "body": {}}], "unavailable", "a malformed 2xx is a fault, not a token"),
     ([{"status": 400, "body": {"error": "invalid_grant"}}], "no_session", "the session IS dead"),
     ([{"status": 400, "body": {"error_code": "refresh_token_already_used"}}], "no_session", "reuse kill"),
@@ -398,38 +498,58 @@ def test_property_3_never_sign_out_a_transient_failure_is_not_a_dead_session() -
 
 # ── property 4 — auto-advance ────────────────────────────────────────────────
 
-_FLOW = "https://app.premiselabs.co/api/consent/start?client_id=c1&state=s1"
-_AUTH = "https://app.premiselabs.co/auth?next=/api/consent/start%3Fclient_id%3Dc1"
+# The BFF route that CALLS `decideConsentAdvance` (the consent start/bounce on
+# `app.*`). The advance target must NEVER be this URL: returning from sign-in the
+# browser is already AT this route, so a 302 to it re-enters and 302s again —
+# `ERR_TOO_MANY_REDIRECTS`. The loop guard cannot stop it because `usable` is
+# checked before `attempted` (spec §4).
+_CALLING_ROUTE = (
+    "https://app.premiselabs.co/api/consent/start?client_id=c1&state=s1"
+)
+# The authorization-server authorize URL, REBUILT FROM THE VALIDATED PARAMS
+# (spec §4) — cross-origin on `api.*`, where the consent page lives. This is the
+# advance target.
+_AUTHORIZE = "https://api.premiselabs.co/oauth/authorize?client_id=c1&state=s1"
+# The same-origin sign-in hop. Its `next` returns to `_CALLING_ROUTE` carrying
+# the loop-guard carrier `consent_retry=1` — deliberately NOT `stale=1`, which
+# marks an out-of-date snapshot and means something else.
+_AUTH = (
+    "https://app.premiselabs.co/auth?next=%2Fapi%2Fconsent%2Fstart%3F"
+    "client_id%3Dc1%26state%3Ds1%26consent_retry%3D1"
+)
 
 
 def test_property_4_auto_advance_without_a_manual_click() -> None:
-    """The flow advances to the consent decision with no click and no reload.
+    """The flow advances to the AS authorize URL, never back into the calling route.
 
     The reference page runs the flow on load AND on every `INITIAL_SESSION` /
     `SIGNED_IN` event, so a session that lands during a sign-in hop is picked up
     without the user doing anything. Under HttpOnly no event ever fires, so the
-    equivalent is deterministic: a usable session ALWAYS redirects onward (the
-    return to the consent URL *is* the advance), an absent session makes exactly
-    ONE hop to sign-in carrying this flow as its return target, a store fault is a
-    terminal 503 (never a redirect — property 3's edge), and a second round trip
-    with still no session stops instead of bouncing forever (#3485/#3503).
+    equivalent is deterministic: a usable session ALWAYS redirects to the AS
+    authorize URL rebuilt from the validated params, an absent session makes
+    exactly ONE hop to sign-in carrying this flow as its return target, a store
+    fault is a terminal 503 (never a redirect — property 3's edge), and a second
+    round trip with still no session stops instead of bouncing forever
+    (#3485/#3503).
 
-    Removing the property is a decision table that no longer advances — verified
-    by mutation (see the PR body).
+    The advance target is asserted BOTH ways — it equals the rebuilt authorize
+    URL and it differs from the calling route — so the self-redirect loop cannot
+    be reintroduced silently. Removing the property is a decision table that no
+    longer advances — verified by mutation (see the PR body).
     """
     cases = [
-        {"session": "usable", "flow_url": _FLOW, "auth_url": _AUTH, "attempted": False},
-        {"session": "usable", "flow_url": _FLOW, "auth_url": _AUTH, "attempted": True},
-        {"session": "none", "flow_url": _FLOW, "auth_url": _AUTH, "attempted": False},
-        {"session": "none", "flow_url": _FLOW, "auth_url": _AUTH, "attempted": True},
-        {"session": "unavailable", "flow_url": _FLOW, "auth_url": _AUTH, "attempted": False},
+        {"session": "usable", "authorize_url": _AUTHORIZE, "auth_url": _AUTH, "attempted": False},
+        {"session": "usable", "authorize_url": _AUTHORIZE, "auth_url": _AUTH, "attempted": True},
+        {"session": "none", "authorize_url": _AUTHORIZE, "auth_url": _AUTH, "attempted": False},
+        {"session": "none", "authorize_url": _AUTHORIZE, "auth_url": _AUTH, "attempted": True},
+        {"session": "unavailable", "authorize_url": _AUTHORIZE, "auth_url": _AUTH, "attempted": False},
     ]
     out = _run("auto_advance", cases=cases)
     assert out["results"] == [
         # A usable session advances — on the FIRST pass and on the RETURN from
-        # sign-in alike. The return is the advance.
-        {"action": "advance", "status": 302, "to": _FLOW},
-        {"action": "advance", "status": 302, "to": _FLOW},
+        # sign-in alike — to the AS authorize URL rebuilt from the params.
+        {"action": "advance", "status": 302, "to": _AUTHORIZE},
+        {"action": "advance", "status": 302, "to": _AUTHORIZE},
         # No session: exactly one hop, carrying the flow as the return target.
         {"action": "sign_in", "status": 302, "to": _AUTH},
         # Returned with no session: terminal, never a second bounce.
@@ -437,6 +557,30 @@ def test_property_4_auto_advance_without_a_manual_click() -> None:
         # A store fault is terminal and is never a redirect.
         {"action": "unavailable", "status": 503},
     ], f"the advance decision table changed: {out['results']!r}"
+
+    # The loop is structurally gone: the advance target differs from the route
+    # that calls the decision (and from the sign-in hop).
+    for advance in out["results"][:2]:
+        assert advance["to"] != _CALLING_ROUTE, (
+            "a usable session 302s back to the route that called the decision — on return "
+            "from sign-in the browser is already there, so this is an infinite redirect loop"
+        )
+        assert advance["to"] != _AUTH, (
+            "a usable session 302s to the sign-in hop instead of advancing the flow"
+        )
+
+    # The `attempted` carrier is a NAMED param, distinct from `stale=1`, and the
+    # sign-in hop's return target carries it (the round trip that sets it).
+    assert out["consentRetryParam"] == "consent_retry"
+    return_to = parse_qs(urlparse(_AUTH).query)["next"][0]
+    assert f"{out['consentRetryParam']}=1" in return_to, (
+        "the sign-in hop's return target does not carry the already-attempted marker — "
+        "the loop guard's `attempted` input has no producer"
+    )
+    assert "stale" not in return_to, (
+        "the return target reuses `stale=1`, which marks an out-of-date snapshot and means "
+        "something different — one flag cannot answer two questions"
+    )
 
 
 # ── the module contract itself ───────────────────────────────────────────────
@@ -452,11 +596,72 @@ def test_the_consent_flow_module_is_the_server_side_property_four_decision() -> 
     first: the module's own docstring QUOTES the reference JS (which is `async`),
     and prose is not I/O.
     """
-    code = re.sub(r"/\*.*?\*/", "", CONSENT_FLOW_TS.read_text(), flags=re.DOTALL)
-    code = re.sub(r"//[^\n]*", "", code)
-    assert "export function decideConsentAdvance(" in code
+    _assert_consent_flow_is_pure(CONSENT_FLOW_TS.read_text())
+
+
+def _strip_js_comments(code: str) -> str:
+    """Remove JS/TS comments WITHOUT removing `//` or `/*` that sit inside strings.
+
+    A regex `//[^\n]*` strip is bypassed by any URL or string literal: in
+    `const u = "https://api/x"; fetch(u);` the `//` starts INSIDE a string, so the
+    regex eats the rest of the line — including the `fetch(` the purity guard
+    exists to find. Tracking quote state (with escapes) closes that hole.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(code)
+    while i < n:
+        ch = code[i]
+        nxt = code[i + 1] if i + 1 < n else ""
+        if ch == "/" and nxt == "*":
+            end = code.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            continue
+        if ch == "/" and nxt == "/":
+            end = code.find("\n", i + 2)
+            i = n if end == -1 else end
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+            out.append(ch)
+            i += 1
+            while i < n:
+                c = code[i]
+                out.append(c)
+                if c == "\\" and i + 1 < n:
+                    out.append(code[i + 1])
+                    i += 2
+                    continue
+                i += 1
+                if c == quote:
+                    break
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _assert_consent_flow_is_pure(code: str) -> None:
+    stripped = _strip_js_comments(code)
+    assert "export function decideConsentAdvance(" in stripped
     for forbidden in ("fetch(", "D1Database", "async "):
-        assert forbidden not in code, (
+        assert forbidden not in stripped, (
             f"consent-flow.ts now contains {forbidden!r} in CODE — property 4's decision "
             "is no longer pure, so it can no longer be tested as the guarantee itself"
         )
+
+
+def test_the_purity_guard_cannot_be_bypassed_by_an_inline_comment_in_a_string() -> None:
+    """`//` inside a string must not hide I/O from the purity guard.
+
+    The previous guard ran `re.sub(r"//[^\n]*", "", code)` and then looked for
+    `fetch(`. In `const u = "https://api/x"; fetch(u);` the `//` begins inside a
+    string literal, so the regex stripped through end-of-line and hid the call.
+    This pins that the quote-tracking stripper keeps the call visible.
+    """
+    adversarial = (
+        "export function decideConsentAdvance(i: unknown) { "
+        'const u = "https://api/x"; fetch(u); return i; }'
+    )
+    with pytest.raises(AssertionError, match="fetch"):
+        _assert_consent_flow_is_pure(adversarial)

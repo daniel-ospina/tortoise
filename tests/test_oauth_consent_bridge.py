@@ -42,6 +42,9 @@ CONSENT_FLOW_TS = (
 )
 SPEC = REPO / "docs/engineering/auth/consent-identity-bridge.md"
 ALLOWLIST_RECORD = REPO / "docs/ops/auth-email-flows.md"
+#: Property 4's route (the bridge's §9 step 3). Its PRESENCE is the artifact that
+#: decides whether the spec's "un-routed" status is honest — never a prose claim.
+CONSENT_ROUTE_DIR = REPO / "website/apps/dashboard/functions/api/consent"
 
 
 def _lines(path: Path) -> list[str]:
@@ -172,14 +175,18 @@ def test_the_four_properties_have_live_implementation_sites() -> None:
         )
 
 
-def test_auto_advance_records_its_server_side_status() -> None:
-    """`auto-advance` is the property whose server-side form is NEW here — so pin its status.
+def test_auto_advance_status_matches_the_route_artifact() -> None:
+    """`auto-advance`'s server-side status is pinned to the ARTIFACT, not to prose.
 
-    Properties 1–3 already had server-side equivalents. Property 4's decision now exists
-    (`consent-flow.ts::decideConsentAdvance`) but is NOT routed yet, because §9 orders the
-    bridge's steps 2→4 to land together. Both halves are claims, and both are falsifiable:
-    if the decision is deleted the `auto-advance` entry above reds, and if the spec stops
-    recording the un-routed gap this test reds. Neither may quietly become "done".
+    Properties 1–3 already had server-side equivalents. Property 4's decision
+    (`consent-flow.ts::decideConsentAdvance`) is NEW here and its route is the
+    bridge's §9 step 3. The status must not rest on a sentence that can only
+    re-stale: a claim about our own process has no artifact to check it against,
+    and the honest update — deleting the sentence when the route ships — would fail
+    a test that pinned the sentence, so the cheapest way to stay green would be to
+    leave a false statement. This guard instead reads REALITY (does the route
+    directory exist?) and asserts the spec AGREES with it, either way. When the
+    route lands and the spec's "NOT built" line is deleted, it retires itself.
     """
     spec = SPEC.read_text()
     assert "auto-advance" in spec
@@ -187,9 +194,15 @@ def test_auto_advance_records_its_server_side_status() -> None:
         "the spec no longer names property 4's server-side decision — the implementation and "
         "the contract have drifted apart"
     )
-    assert "the route that calls it is §9 step 3 and is NOT built" in spec, (
-        "the spec no longer records that property 4's decision is UN-ROUTED. That gap is the "
-        "honest status; deleting the record turns a partial delivery into a false claim"
+    routed = CONSENT_ROUTE_DIR.is_dir() and any(CONSENT_ROUTE_DIR.rglob("*.ts"))
+    claims_unbuilt = "is NOT built" in spec
+    assert routed or claims_unbuilt, (
+        "no `api/consent/` route exists and the spec no longer records the un-routed gap — "
+        "a partial delivery has become a false claim"
+    )
+    assert not (routed and claims_unbuilt), (
+        "the `api/consent/` route now exists but the spec still says it is NOT built — "
+        "update the spec's status to match the artifact"
     )
 
 
