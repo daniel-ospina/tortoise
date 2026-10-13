@@ -6383,9 +6383,10 @@ _2600_UUID_B = "22222222-2222-4222-8222-222222222222"
 # idempotent upsert on `session_id`. Of the statuses that classifier marks
 # TRANSIENT, the three refusals THIS route emits on the capture admission path
 # are re-issued:
-#   504  transport wait-bound breach      (Retry-After 10, mcp_auth.py:179)
+#   504  transport wait-bound breach      (Retry-After 10, mcp_auth.py:204)
 #   429  capture capacity saturated       (Retry-After 30, hosted_api.py:664)
-#   409  same-session-in-flight           (Retry-After 30, hosted_api.py:670)
+#   409  same-session-in-flight           (Retry-After 30, hosted_api.py:670;
+#        the gate-2 recording-off 409 is a different refusal, not on this path)
 # The 429 shares that admission path with the 409 — both are raised by
 # `_reserve_capture_slot`, called from THIS route at hosted_api.py:12439 — and
 # the condition that drives it is the one documented above: a 504'd sibling
@@ -6403,9 +6404,14 @@ _2600_UUID_B = "22222222-2222-4222-8222-222222222222"
 # `test_capture_gate_409_when_recording_off` and
 # `test_capture_gate_boundary_422_before_409` deliberately assert a 409 on this
 # route and a blanket retry would mask it, and (b) a test that is SUPPOSED to
-# fail must not be handed four retries first. Bounded, and never a pass: the
-# LAST response is returned, so an exhausted retry still fails the caller's own
-# status assertion loudly. Pinned by `TestCaptureTransportRetry3246`.
+# fail must not be handed four retries first — for the same reason the two
+# failing-extractor tests in TestSessionActorStamp2600
+# (`test_failed_prior_true_retry_keeps_first_writer_actor`,
+# `test_raise_shape_repost_replays_keeps_actor`) keep a bare `tc.post`: they
+# assert extractor call counts a re-issue would consume. Bounded, and never a
+# pass: the LAST response is returned, so an exhausted retry still fails the
+# caller's own status assertion loudly. Pinned by
+# `TestCaptureTransportRetry3246`.
 _CAPTURE_TRANSIENT_TRANSPORT = frozenset({504, 429, 409})
 
 #: Cap on the `Retry-After` the helper will honour. The advertised delay is the
@@ -6509,6 +6515,19 @@ class TestCaptureTransportRetry3246:
         assert client.calls == 1, "the quota 402 must not be retried"
         assert slept == [], slept
 
+    def test_another_5xx_is_deliberately_not_reissued(self):
+        # The cited contract marks EVERY 5xx TRANSIENT, and this helper does
+        # not — the natural next editor, holding that classifier, would widen
+        # the set to `status >= 500`. Pins the other half of the exclusion the
+        # 402 case pins: a genuine handler 5xx must fail on the first call.
+        client = self._Client(self._Response(503))
+        slept: list[float] = []
+        r = _post_capture_allowing_transport_retry(
+            client, headers={}, payload={}, sleep=slept.append)
+        assert r.status_code == 503
+        assert client.calls == 1, "a non-504 5xx must not be retried"
+        assert slept == [], slept
+
     def test_a_nontransient_refusal_is_returned_without_retry(self):
         client = self._Client(self._Response(400))
         slept: list[float] = []
@@ -6529,6 +6548,19 @@ class TestCaptureTransportRetry3246:
         # The advertised 999 s is capped — a pathological run cannot park the
         # suite on the server's own back-off instruction.
         assert slept == [_CAPTURE_RETRY_AFTER_CAP_S] * 3, slept
+
+    def test_the_last_refusal_is_the_one_returned_on_exhaustion(self):
+        # Distinct transient statuses so a "return the FIRST response" mutant
+        # cannot pass: the caller must see the LAST refusal, never an earlier
+        # one (which would let an exhausted retry read as a different outcome).
+        client = self._Client(self._Response(504, retry_after=0),
+                              self._Response(429, retry_after=0))
+        slept: list[float] = []
+        r = _post_capture_allowing_transport_retry(
+            client, headers={}, payload={}, attempts=2, sleep=slept.append)
+        assert r.status_code == 429, "the LAST refusal must be the one returned"
+        assert client.calls == 2
+        assert slept == [0.0], slept
 
 
 class TestSessionActorStamp2600:
