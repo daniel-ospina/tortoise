@@ -69,6 +69,7 @@ import logging
 import pytest
 
 from tortoise.log import EventLog
+from tortoise.projection import _replay_write_scope  # #7951: replay folds need the scope
 from tortoise.sdk import TortoiseSDK
 
 # The replay writer's own logger — the channel every drop report rides.
@@ -234,8 +235,14 @@ def test_the_drop_is_reported_on_every_replay_arm(env, caplog):
     sdk.create_point("statement", "the sky is blue", tags=["alpha"])
     proj = sdk._get_proj()
 
+    def _apply_arm() -> list:
+        # #7951 §17.1: the `apply(ev)` arm IS a replay of the journal, so it
+        # declares the replay scope (the same scope the two engines open).
+        with _replay_write_scope():
+            return [proj.apply(e) for e in _journal(events)]
+
     arms = {
-        "apply()": lambda: [proj.apply(e) for e in _journal(events)],
+        "apply()": _apply_arm,
         "rebuild(EventLog)": lambda: proj.rebuild(
             EventLog(str(events / "events.jsonl")), confirm_destructive=True),
         "rebuild_all(dir)": lambda: proj.rebuild_all(

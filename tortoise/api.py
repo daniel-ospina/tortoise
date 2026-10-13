@@ -13,7 +13,9 @@ import logging
 
 from .idempotency import IngestKey, IngestResult
 from .ids import now_iso, ulid
-from .projection import fold
+
+# #7951 §17.1: the live-write scope the journal-first doors open around the fold.
+from .projection import _live_write_scope, fold
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +73,10 @@ class EventAPI:
             event["actor_user_id"] = actor
         self.log.append(event)
         if self.projection is not None:
-            self.projection.apply(event)
+            # #7951 §17.1: journal-first door — the append above is the COMMIT
+            # POINT, so the fold runs inside the live-write scope.
+            with _live_write_scope("event_api._emit"):
+                self.projection.apply(event)
         return event
 
     def emit_belief(self, type_: str, **payload) -> None:
