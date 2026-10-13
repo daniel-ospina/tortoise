@@ -99,13 +99,21 @@ function buildUserPrompt(title: string, body: string, tags: string[], primary: s
   // then bolted the keyword on the front as `"<keyword>: <title>"` and truncated
   // it (#8445). Asking for a keyword we never showed the model is not possible,
   // so the candidates are seeded here instead.
-  const candidates = primary ? [] : allKeywords();
+  // ⛔ The candidate list is seeded on EXACTLY the condition that later honours
+  // the model's choice ("the caller supplied no tags"). Seeding it more widely —
+  // e.g. whenever no MAPPED tag exists — would ask the model to choose a keyword
+  // and then discard the choice, and it would let a free-form caller tag (an
+  // unmapped "kubernetes") still have a keyword forced into the generated title.
+  const tagless = tags.length === 0;
+  const candidates = tagless ? allKeywords() : [];
   const kwLine = primary
     ? `PRIMARY keyword: "${primary}". It MUST appear verbatim in meta_title and meta_description.\n` +
       `Other keywords — use naturally in tags or the excerpt, never stuffed: ${kw.filter((k) => k !== primary).join(", ") || "(none)"}`
-    : candidates.length > 0
-      ? `PRIMARY keyword: choose exactly ONE of these researched keywords — the one that best matches the article — and make it appear verbatim and as EARLY as possible in meta_title and meta_description, written as a natural phrase rather than prefixed with a colon. Return the exact keyword you used as "primary_keyword".\nCandidates: ${candidates.join(", ")}`
-      : "No candidate keywords are available — derive terms from the content itself, and return primary_keyword as null.";
+    : tagless
+      ? candidates.length > 0
+        ? `PRIMARY keyword: choose exactly ONE of these researched keywords — the one that best matches the article — and make it appear verbatim and as EARLY as possible in meta_title and meta_description, written as a natural phrase rather than prefixed with a colon. Return the exact keyword you used as "primary_keyword".\nCandidates: ${candidates.join(", ")}`
+        : "No candidate keywords are available — derive terms from the content itself, and return primary_keyword as null."
+      : "The supplied tags do not map to a researched keyword. The caller's tags stay authoritative, so there is no primary keyword to verify against: derive terms from the content itself.";
   const bodyPreview = body.slice(0, MAX_BODY_PREVIEW);
   return `Title: ${title}\n\nTags (comma-separated): ${tags.join(", ") || "(none)"}\n\n${kwLine}\n\nArticle content:\n${bodyPreview}`;
 }
@@ -273,22 +281,29 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   // intent); otherwise use the model's own tags, which describe what the article
   // is actually about. Deterministic, so the repair below is reproducible.
   //
-  // The model's own CHOICE wins ONLY when the caller supplied no mapped tag.
-  // The prompt seeds a candidate list on that path and asks the model to return
-  // the exact keyword it used, so verifying that string checks the keyword the
-  // model was actually asked for — instead of inferring one from tags it wrote
-  // for a different purpose.
+  // The model's own CHOICE wins ONLY when the caller supplied NO TAGS AT ALL —
+  // the pipeline's normal shape, and the path the prompt seeds a candidate list
+  // on. There we ask the model to return the exact keyword it used, so verifying
+  // that string checks the keyword it was actually asked for, instead of
+  // inferring one from tags it wrote for a different purpose.
   //
-  // ⛔ On the TAG-SUPPLIED path the override must NOT apply: there the prompt
-  // names the CALLER's keyword, and the caller's intent is authoritative (the
-  // contract `resolvePrimaryKeyword` documents). Applying the model's choice
-  // unconditionally let a model silently swap the caller's tag-derived keyword
-  // for a different known keyword, discarding explicit intent.
+  // ⛔ The condition is `tags.length === 0`, NOT `promptPrimary === null`. Those
+  // differ for a caller-supplied FREE-FORM tag (`["kubernetes"]`): it maps to
+  // nothing, so `promptPrimary` is null, but the caller HAS expressed intent and
+  // the prompt does not offer them a candidate list. Gating on `promptPrimary`
+  // therefore let the model's keyword be forced into the generated title on a
+  // path the caller controls, and reported it as an earned guarantee.
+  //
+  // ⛔ And on the TAG-SUPPLIED path the override must NOT apply: there the
+  // prompt names the CALLER's keyword, and the caller's intent is authoritative
+  // (the contract `resolvePrimaryKeyword` documents). Applying the model's
+  // choice unconditionally let a model silently swap the caller's tag-derived
+  // keyword for a different known keyword, discarding explicit intent.
   // Validated against the vocabulary either way, so the model can never
   // introduce a term the research did not produce.
   const chosen = typeof result.json.primary_keyword === "string" ? result.json.primary_keyword.trim() : "";
   const primary =
-    promptPrimary === null && chosen && isKnownKeyword(chosen)
+    tags.length === 0 && chosen && isKnownKeyword(chosen)
       ? chosen
       : resolvePrimaryKeyword(tags, enforced.tags);
 
