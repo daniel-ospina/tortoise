@@ -37,6 +37,37 @@ class TestTaxonomy:
         # :Source, so the label set carries ``Source``, not ``Document``.
         for label in ("Point", "Event", "Subject", "Object", "Source"):
             assert label in result
+        assert "Document" not in result
+
+    def test_published_keys_match_the_counted_labels(self, sdk):
+        """The MCP description's published key set must BE what taxonomy() counts.
+
+        The description is the published contract: a consumer that codes to its
+        keys gets ``KeyError`` when they disagree — the exact defect D10 left
+        (the description kept ``Document`` after the label retired, #5121).
+        Read the keys out of the registry description and pin them to what
+        ``taxonomy()`` actually returns, so a future label retirement cannot
+        re-stale the prose silently.
+
+        The entry lives in ``RETIRED_TOOL_REGISTRY`` (the name was folded into
+        ``tortoise_overview(section="taxonomy")``, #3883), and a retired name's
+        docstring is the description its warning shim serves — so it is read
+        through both registries rather than assumed live.
+        """
+        import re
+
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+
+        entries = [
+            e for e in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY)
+            if e.id == "surface.taxonomy"
+        ]
+        assert len(entries) == 1, f"expected exactly one surface.taxonomy entry, got {len(entries)}"
+        block = re.search(r"\{([^}]*)\}", entries[0].description)
+        assert block, f"no {{Key: N}} block in the description: {entries[0].description!r}"
+        published = {part.split(":")[0].strip() for part in block.group(1).split(",")}
+        assert published == set(sdk.taxonomy().keys())
+        assert "Document" not in published
 
     def test_counts_points(self, sdk):
         result = sdk.taxonomy()
