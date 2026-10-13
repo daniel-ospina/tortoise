@@ -13164,8 +13164,12 @@ class FalkorProjection(
         evidence that the gap read as intended rather than as drift. What this
         function actually issues, in full:
 
-          * RANGE indexes on ``Point`` (``_POINT_RANGE_INDEX_PROPS``) plus the
-            plain ``Point.lastDreamedAt`` staleness index (epic 903-C2, #1240);
+          * RANGE indexes on canonical entity keys — ``Point``
+            (``_POINT_RANGE_INDEX_PROPS``, plus the plain ``Point.lastDreamedAt``
+            staleness index, epic 903-C2, #1240); the four entity labels
+            ``_RANGE_INDEX_LABEL_PROPS`` names — ``Subject``, ``Object``,
+            ``Event``, ``Source`` (#327); and two ``Session`` keys
+            (``actor_user_id``, #2600; ``id``, #3947);
           * FULL-TEXT indexes on the FIVE labels ``_FULLTEXT_INDEX_LABEL_FIELDS``
             names — ``Point``, ``Event``, ``Subject``, ``Object``, ``Source``;
           * the VECTOR index on ``Point.embedding`` ONLY, resolved or created by
