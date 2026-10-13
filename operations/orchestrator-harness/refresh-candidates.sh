@@ -121,8 +121,11 @@ done < "$O/.pool"
 # LATER cycle joins at the BACK, behind whatever is already queued — so a P0 discovered while P2s sit
 # at the head waits for them instead of displacing them. That residual is deliberate and bounded: the
 # refresh only runs while the backlog is below 6 (orch-loop.sh) and BATCH is 2, so at most 5 entries
-# — about 3 cycles — can be ahead of it. Carrying the tier through orch-loop.sh's reader would remove
-# the delay at the cost of a second ordering surface; not worth it for ~12 minutes.
+# can be ahead of it. The TIME that costs is contingent, not a ceiling: 5 entries at 2 per cycle is 3
+# cycles only if the capacity gate is open each cycle — a load/lane/swap/memory gate that holds
+# dispatch delays it further. The ENTRY bound is what the refresh guarantees; do not read a wall-clock
+# ceiling into it. Carrying the tier through orch-loop.sh's reader would remove the residual at the
+# cost of a second ordering surface; not worth it for a bounded handful of entries.
 #
 # `mv` is atomic within the directory (rename(2)), so a concurrent reader sees the old file or the new
 # one, never a torn one; `&&` keeps a failed awk from truncating the live backlog. One deliberate

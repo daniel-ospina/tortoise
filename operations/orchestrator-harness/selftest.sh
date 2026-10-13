@@ -793,13 +793,27 @@ if [ -s "$REFRESH" ]; then
   grep -m1 -E '^awk .!seen\[\$0\]' "$REFRESH" > "$TMP/dedupe.sh"
   if [ -s "$TMP/dedupe.sh" ]; then
     sed -e 's#"\$O/candidates\.txt"#in.txt#g' -e 's#"\$O/\.cand"#out.tmp#g' "$TMP/dedupe.sh" > "$TMP/drive.sh"
-    printf '5000\n5001\n100\n9000\n5000\n' > "$TMP/in.txt"
-    ( cd "$TMP" && bash drive.sh )
-    dedupe_got="$(tr '\n' ' ' < "$TMP/in.txt" 2>/dev/null | sed 's/ *$//')"
-    [ "$dedupe_got" = "5000 5001 100 9000" ] && rc=0 || rc=1
+    # The substitutions must have LANDED. If a quoting refactor of the shipped line stops them
+    # matching, drive.sh would address the real $O path instead of the fixture — fail closed rather
+    # than run it. (``in.txt`` present AND the real name gone is the evidence they landed.)
+    if grep -q 'in\.txt' "$TMP/drive.sh" && ! grep -q 'candidates\.txt' "$TMP/drive.sh"; then
+      printf '5000\n5001\n100\n9000\n5000\n' > "$TMP/in.txt"
+      ( cd "$TMP" && bash drive.sh )
+      dedupe_got="$(tr '\n' ' ' < "$TMP/in.txt" 2>/dev/null | sed 's/ *$//')"
+      [ "$dedupe_got" = "5000 5001 100 9000" ] && rc=0 || rc=1
+    else rc=1; fi
   else rc=1; fi
 else rc=1; fi
 ck "refresh-candidates.sh dedupes the backlog in place (order preserved, duplicates collapsed)" $rc
+
+# ...AND assert that nothing ELSE re-sorts it. Driving the dedupe line in isolation cannot see an
+# ADDED re-sort: a copy that KEEPS the shipped dedupe and adds the pre-fix `sort -n -u -o` line
+# passes the check above while shipping #8465's defect on every cycle (verified on that copy, which
+# the earlier grep-absence form did catch — so this restores coverage the replacement had dropped).
+# Match a command-position `sort` touching candidates.txt so the spelling is irrelevant; the shipped
+# file mentions the name only in comments and in the awk/mv line, which this does not match.
+grep -qE '(^|[|;&])[[:space:]]*sort[[:space:]].*candidates\.txt' "$REFRESH" && rc=1 || rc=0
+ck "refresh-candidates.sh never re-sorts the backlog it deduped" $rc
 
 echo
 echo "==> $pass passed, $fail failed"
