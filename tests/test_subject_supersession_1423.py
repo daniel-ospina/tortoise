@@ -680,11 +680,18 @@ def test_fts_and_index_legs_hide_every_terminal_subject(tmp_path):
         g = proj.g
         with contextlib.suppress(Exception):
             g.query("CALL db.idx.fulltext.createNodeIndex('Subject', 'name')")
+        # Subject vector index — see the balanced-brace note in
+        # tests/test_object_search_visibility_3301.py: the trailing literal is
+        # NOT an f-string, so ONE closing brace. It carried two until
+        # 2026-10-12, so the index was never created and `suppress` hid it —
+        # invisible on 4.20.6 (the scan fallback covers a RAISING
+        # `queryNodes`) but fatal on 6.0.x, where `queryNodes` returns EMPTY
+        # and the leg below then found nothing.
         with contextlib.suppress(Exception):
             g.query(
                 "CREATE VECTOR INDEX FOR (s:Subject) ON (s.embedding) "
                 f"OPTIONS {{dimension: {EMBEDDING_DIM}, "
-                "similarityFunction: 'cosine'}}")
+                "similarityFunction: 'cosine'}")
         for st in [*sorted(CANONICAL_SUBJECT_TERMINAL), "live"]:
             g.query(
                 "CREATE (s:Subject {id:$id, name:$name, subjectKind:'core:team',"
