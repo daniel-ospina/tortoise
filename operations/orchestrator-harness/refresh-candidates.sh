@@ -81,15 +81,25 @@ for f in "$O/.open_iss" "$O/.pr_brs"; do rm -f "$f"; done
 
 touch "$O/checked.txt" "$O/candidates.txt"
 
-# pool = open unassigned P1-severe ∪ P2-moderate, minus epics/owner-decisions
-{  
-  gh issue list --repo "$OR" --state open --limit 300 --label P0-blocker --json number,assignees,title \
-    --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|lane|OWNER DECISION|decision|analysis|investigation)";"i")|not)|.number' 2>/dev/null
-  gh issue list --repo "$OR" --state open --limit 200 --label P1-severe --json number,assignees,title \
-    --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|OWNER DECISION)";"i")|not)|.number' 2>/dev/null
-  gh issue list --repo "$OR" --state open --limit 200 --label P2-moderate --json number,assignees,title \
-    --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|OWNER DECISION)";"i")|not)|.number' 2>/dev/null
-} | sort -n -u > "$O/.pool"
+# pool = open unassigned P0-blocker ∪ P1-severe ∪ P2-moderate, minus epics/owner-decisions.
+#
+# ⛔ THE ORDER OF THIS POOL *IS* THE QUEUE — never sort it by issue number.
+# `orch-loop.sh` drains `candidates.txt` HEAD-FIRST (it reads lines until BATCH is reached), so
+# whatever order is written here IS the dispatch priority. This block used to end in `sort -n -u`,
+# i.e. ASCENDING ISSUE NUMBER — and because the P0-blocker backlog is mostly 7xxx/8xxx while
+# P2-moderate still holds the 3xxx, the fleet spent every lane on non-P0 work while the blockers
+# waited. Measured 2026-10-13: 48 PRs merged in 12h, 0 P0/P1 closed, and 25 of 36 open
+# P0-blockers already carried a MERGED PR (#8468). Priority label first, number second; a numeric
+# sort anywhere in this file re-creates the exact bug it replaces.
+p0() { gh issue list --repo "$OR" --state open --limit 300 --label P0-blocker --json number,assignees,title \
+    --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|lane|OWNER DECISION|decision|analysis|investigation)";"i")|not)|.number' 2>/dev/null | sed 's/^/0 /'; }
+p1() { gh issue list --repo "$OR" --state open --limit 200 --label P1-severe --json number,assignees,title \
+    --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|OWNER DECISION)";"i")|not)|.number' 2>/dev/null | sed 's/^/1 /'; }
+p2() { gh issue list --repo "$OR" --state open --limit 200 --label P2-moderate --json number,assignees,title \
+    --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|OWNER DECISION)";"i")|not)|.number' 2>/dev/null | sed 's/^/2 /'; }
+{ p0; p1; p2; } | awk 'NF==2' | sort -k1,1n -k2,2n -u > "$O/.pool"
+# number -> priority, so the backlog can be kept in priority order after every append.
+awk '{print $2"\t"$1}' "$O/.pool" > "$O/.prio"
 
 n=0
 while read -r N; do
@@ -97,12 +107,28 @@ while read -r N; do
   grep -qx "$N" "$O/checked.txt" 2>/dev/null && continue
   grep -qx "$N" "$O/dispatched.txt" 2>/dev/null && continue
   n=$((n+1)); [ "$n" -gt "$LIMIT" ] && break
-  echo "$N" >> "$O/checked.txt"
-  V="$("$SC/.venv/bin/python" tools/collision_preflight.py "$N" --repo . 2>&1 | grep -E '^VERDICT' | head -1 | sed -E 's/.*VERDICT: (CLEAN|COLLISION).*/\1/')"
-  if [ "$V" = "CLEAN" ]; then
-    echo "$N" >> "$O/candidates.txt"
-    echo "[refresh] +#$N CLEAN -> backlog"
-  fi
+  # ⛔ A pre-flight that ERRORED is not a verdict. Mark the issue checked only on a real
+  # CLEAN/COLLISION answer: an empty VERDICT line (API failure, missing venv, timeout) used to
+  # be written to checked.txt just the same, consuming the issue permanently and invisibly.
+  # checked.txt=63 against candidates.txt=9 on 2026-10-13 is what that leak looks like.
+  PRE="$("$SC/.venv/bin/python" tools/collision_preflight.py "$N" --repo . 2>&1)"
+  V="$(printf '%s\n' "$PRE" | grep -E '^VERDICT' | head -1 | sed -E 's/.*VERDICT: (CLEAN|COLLISION).*/\1/')"
+  case "$V" in
+    CLEAN)
+      echo "$N" >> "$O/checked.txt"
+      echo "$N" >> "$O/candidates.txt"
+      echo "[refresh] +#$N CLEAN -> backlog" ;;
+    COLLISION)
+      echo "$N" >> "$O/checked.txt"
+      echo "[refresh] =#$N collision — a peer owns it, not queued" ;;
+    *)
+      echo "[refresh] ?#$N no verdict from the pre-flight — left unchecked for the next pass" ;;
+  esac
 done < "$O/.pool"
-sort -n -u -o "$O/candidates.txt" "$O/candidates.txt"
-echo "[refresh] checked $n; backlog now $(wc -l < "$O/candidates.txt" | tr -d ' ') issues"
+# Keep the backlog in PRIORITY order: `orch-loop.sh` takes its head, so this line decides which
+# label the fleet works on. Anything not in .prio (an issue that lost its label) sorts last.
+sort -u "$O/candidates.txt" | awk -v p="$O/.prio" '
+  BEGIN{while((getline l < p) > 0){if(split(l,a,"\t")==2) pr[a[1]]=a[2]}}
+  {printf "%d\t%d\n", ($1 in pr)?pr[$1]:9, $1}' \
+  | sort -k1,1n -k2,2n | cut -f2 > "$O/candidates.txt.new" && mv "$O/candidates.txt.new" "$O/candidates.txt"
+echo "[refresh] checked $n; backlog now $(wc -l < "$O/candidates.txt" | tr -d ' ') issues; head=$(head -1 "$O/candidates.txt" 2>/dev/null)"
