@@ -8355,6 +8355,53 @@ async def _check_invite_accept_rate_limit(request: Request, token: str) -> None:
 
 # ── Endpoints ─────────────────────────────────────────────────────
 
+async def _require_approved_kind(sdk: TortoiseSDK, kind: str, *, door: str) -> None:
+    """#5475: refuse a NAMESPACED kind the graph's approval set does not hold.
+
+    ``pack_state.graph_kind_namespaces`` mines ``ns`` prefixes out of the
+    graph's data into the graph's APPROVAL set, so a write door that persists
+    an unvalidated ``ns:kind`` value WIDENS the set that is supposed to gate
+    it — ``objectKind=marketing:contentBrief`` on a ``dev``-only graph made
+    the whole ``marketing`` pack writable. This is the input constraint:
+    compare the namespace against the resolved set (records ∪ data) BEFORE
+    the write and 422 a namespace it does not hold.
+
+    REJECT, never silently normalise: it is the fail-closed direction, it is
+    the same 422 the sibling ``/v1/points`` ``kind`` validator returns for a
+    kind outside the vocabulary, and the import door already rejects unknown
+    namespaced vocabulary (``_check_foreign_kinds``). A silent coerce would
+    also leave the write metered and audited under a kind it does not carry.
+
+    A bare kind, an empty namespace, and a ``None`` gate (a graph with no
+    ``:PackInstall`` records — the catalog-union back-compat of #2714
+    indicator 3) are all admitted by ``kind_namespace_is_approved``, so this
+    is not a blanket ban on writes.
+
+    The gate read is a WHOLE-GRAPH scan (``graph_installed_namespaces`` is
+    O(nodes) and documented to run per call) and this handler is ``async`` —
+    the read rides the #3498 graph pool, exactly as the #5163 commit door
+    does, rather than parking the event loop.
+    """
+    from tortoise.pack_state import (
+        graph_installed_namespaces,
+        kind_namespace_is_approved,
+    )
+    approved = await _graph_offload(
+        lambda: graph_installed_namespaces(sdk), op=f"{door}.kind_gate")
+    if not kind_namespace_is_approved(kind, approved):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error_code": "KIND_NAMESPACE_NOT_INSTALLED",
+                "message": (
+                    f"{kind!r} names a pack namespace this graph has not "
+                    "installed; write a kind from an installed pack, or "
+                    "install that pack first"),
+                "kind": kind,
+                "installed_namespaces": sorted(approved),
+            })
+
+
 class CreateObjectRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     objectKind: str = Field(default="other")
@@ -8378,6 +8425,8 @@ async def create_object(body: CreateObjectRequest, request: Request,
     await _graph_offload(lambda: _check_org_limit(org, "points"),
                          op="check_org_limit.points")
     sdk = await _data_sdk_offloaded(org)
+    # #5475: the kind must not widen the graph's own approval set.
+    await _require_approved_kind(sdk, body.objectKind, door="create_object")
     try:
         props = {}
         if body.status:
@@ -8428,6 +8477,8 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
     await _graph_offload(lambda: _check_org_limit(org, "points"),
                          op="check_org_limit.points")
     sdk = await _data_sdk_offloaded(org)
+    # #5475: the same input constraint as /v1/objects, on the subject door.
+    await _require_approved_kind(sdk, body.subjectKind, door="create_subject")
     try:
         # #3718: sync FalkorDB I/O — off-loaded off the event loop (see
         # create_object above for the pattern and rationale).
