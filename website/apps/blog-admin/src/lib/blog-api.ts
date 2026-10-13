@@ -359,8 +359,12 @@ export interface GenerateSeoResult {
   primary_keyword: string | null;
   /**
    * Whether the returned `meta_title`/`meta_description` are the MODEL'S OWN
-   * text with `primary_keyword` in them — untouched by the repair AND
-   * unshortened by the length caps.
+   * text with `primary_keyword` in them, unshortened by the length caps.
+   *
+   * It does NOT promise the field is byte-identical to the raw model output —
+   * the contract normalises trailing punctuation and removes a brand suffix the
+   * model wrote. It promises the keyword is the model's own placement and no cap
+   * cut it.
    *
    * ⛔ Deliberately CONSERVATIVE, and narrower than the #8293 contract of
    * "the returned fields contain the keyword" (which the repair always

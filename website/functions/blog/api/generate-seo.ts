@@ -25,7 +25,7 @@ import {
   primaryKeyword,
   resolvePrimaryKeyword,
   allKeywords,
-  isKnownKeyword,
+  canonicalKeyword,
   ensureKeyword,
   containsKeyword,
 } from "../_shared/seo-keywords.ts";
@@ -299,13 +299,14 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   // (the contract `resolvePrimaryKeyword` documents).
   //
   // ⛔ The claim is honoured only when the model's OWN OUTPUT contains it.
-  // `isKnownKeyword` alone proves only that the string is one of ours — it says
-  // nothing about whether the model USED it. A model returning a valid keyword
-  // it never wrote would otherwise become the value the repair force-prefixes,
-  // reproducing the exact #8445 symptom (`"<keyword>: <its title>"`) while
-  // reporting `keyword_ok: true` (#8446 review, P1). Presence in either
-  // generated field counts as "used", so a keyword the model placed in one field
-  // never becomes a SECOND keyword through a different fallback.
+  // Vocabulary membership alone proves only that the string is one of ours — it
+  // says nothing about whether the model USED it. A model returning a valid
+  // keyword it never wrote would otherwise become the value the repair
+  // force-prefixes, reproducing the exact #8445 symptom
+  // (`"<keyword>: <its title>"`) while reporting `keyword_ok: true` (#8446
+  // review, P1). Presence in either generated field counts as "used", so a
+  // keyword the model placed in one field never becomes a SECOND keyword through
+  // a different fallback.
   // The model's choice is honoured when its own generated text uses it. This is
   // an OR over the two fields, deliberately, and is NOT the same predicate as
   // `keyword_ok` below (which ANDs them): the model placing the keyword in only
@@ -318,26 +319,32 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   const rawDescription = typeof result.json.meta_description === "string" ? result.json.meta_description : "";
   // A raw field longer than its cap WILL be shortened by the length contract —
   // `metaTitle` truncates to the cap before appending the suffix, so
-  // `length <= cap` means the model's own words survive intact and
-  // `length > cap` means they do not.
+  // `length <= cap` means the cap did not shorten the model's words. (The
+  // contract may still normalise trailing punctuation or remove a brand suffix
+  // the model wrote; `keyword_ok` does not claim otherwise — see its comment.)
   const titleTruncated = rawTitle.trim().length > META_TITLE_MAX;
   const descriptionTruncated = rawDescription.trim().length > META_DESCRIPTION_MAX;
-  // The model's claim is length-bounded for the same reason the caller's tags
-  // are: it is echoed back to callers. Bound it by REJECTING an over-long claim,
-  // not by slicing it — slicing before `isKnownKeyword` (the first attempt) cut
-  // "epistemic" + dots + "memory" down to "epistemic", which is not a vocabulary
-  // term, so a padded claim was rejected for the wrong reason and the real
-  // length guard was untestable. A real keyword cannot exceed the vocabulary's
-  // own cap, so anything longer is not one.
+  // Bounded by REJECTING an over-long claim, not by slicing it — slicing before
+  // validation (an earlier attempt) cut "epistemic" + dots + "memory" down to
+  // "epistemic", which is not a vocabulary term, so a padded claim was rejected
+  // for the wrong reason and the real guard was untestable. A vocabulary term
+  // cannot exceed `TAG_LEN_MAX`, so `canonicalKeyword` below returning non-null
+  // is what actually bounds this value.
   const chosen =
     typeof result.json.primary_keyword === "string" ? result.json.primary_keyword.trim() : "";
+  // Canonicalise to the RESEARCHED spelling before use. The model returns its own
+  // casing/spacing/punctuation (`"LONG-TERM MEMORY FOR AI AGENTS"`), and
+  // `primary_keyword` is documented as the keyword the response was VERIFIED
+  // against — callers compare it against `TAG_KEYWORDS`/tags, so echoing the raw
+  // claim would not match anything lookupable, and one keyword could be returned
+  // in two spellings. Canonicalising also bounds the length (a vocabulary term is
+  // at most `TAG_LEN_MAX`), so no separate cap is needed.
+  const canonicalChosen = chosen === "" ? null : canonicalKeyword(chosen);
   const chosenUsed =
     tags.length === 0 &&
-    chosen !== "" &&
-    chosen.length <= TAG_LEN_MAX &&
-    isKnownKeyword(chosen) &&
+    canonicalChosen !== null &&
     (containsKeyword(rawTitle, chosen) || containsKeyword(rawDescription, chosen));
-  const primary = chosenUsed ? chosen : resolvePrimaryKeyword(tags, enforced.tags);
+  const primary = chosenUsed ? canonicalChosen : resolvePrimaryKeyword(tags, enforced.tags);
 
   // VERIFY, DON'T HOPE (#8293). The prompt above ASKS for the primary keyword;
   // a prompt is a request, not a guarantee, and the previous behaviour never
@@ -394,12 +401,19 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       // on `keyword_ok` (the field #8293 tells callers to read) would PUBLISH
       // that, which is #8445 indicator 1 violated behind a passing verdict.
       //
-      // So `true` means: this is the model's meta, keyword included, as written.
-      // `false` means something downstream (the repair, the cap, or the model
-      // itself) altered or omitted it — a needless regeneration is cheap,
-      // publishing a truncated or bolted-on title is not. `null` = no primary
-      // keyword could be derived, so nothing was verified (never a positive
-      // claim).
+      // So `true` means: the model's own text carried the keyword into both
+      // returned fields, and the length caps did not shorten either of them.
+      // `false` means the model omitted the keyword, or a cap cut its text — a
+      // needless regeneration is cheap, publishing a truncated or bolted-on
+      // title is not. `null` = no primary keyword could be derived, so nothing
+      // was verified (never a positive claim).
+      //
+      // ⛔ It does NOT promise the returned field is byte-identical to the raw
+      // model output: the contract legitimately normalises trailing punctuation
+      // and removes a brand suffix the model wrote (a 60-char title ending "!"
+      // comes back without the "!"). Claiming "untouched" was wrong and was
+      // called out in review; the two things this field guarantees are the two
+      // above.
       primary_keyword: primary,
       keyword_ok:
         primary === null

@@ -931,11 +931,13 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   //    Exactly 60 chars → NOT truncated → green; with `>=` it would be false.
   const titleAtCap = "Long-Term Memory for AI Agents Explained in Depth Right Now!";
   assertEq(titleAtCap.length, 60, "(fixture precondition: the title is exactly the cap)");
+  // Reach the handler, not a 429 — a rate-limited body makes every assertion below vacuous.
   const atCap = await drive({
     primaryKeyword: "long-term memory for ai agents",
     metaTitle: titleAtCap,
     metaDescription: "A description naming long-term memory for ai agents comfortably within its own cap.",
-  });
+  })
+  assertEq(atCap.status, 200, "the atCap fixture reached the handler");
   assertEq(
     atCap.body.keyword_ok,
     true,
@@ -947,11 +949,13 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   //    enforced check cannot catch this — only the cap comparison can.
   const titleOverCap = "Long-Term Memory for AI Agents Explained in Depth Right Now!!";
   assertEq(titleOverCap.length, 61, "(fixture precondition: the title is one char over the cap)");
+  // Reach the handler, not a 429 — a rate-limited body makes every assertion below vacuous.
   const overTitle = await drive({
     primaryKeyword: "long-term memory for ai agents",
     metaTitle: titleOverCap,
     metaDescription: "A description naming long-term memory for ai agents comfortably within its own cap.",
-  });
+  })
+  assertEq(overTitle.status, 200, "the overTitle fixture reached the handler");
   assert(
     overTitle.body.meta_title.toLowerCase().includes("long-term memory for ai agents"),
     "...the keyword really does survive the truncation, so only the cap check catches it",
@@ -969,11 +973,13 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   //    verifier, not by me).
   const descAtCap = 'long-term memory for ai agents records why a belief changed, compared with recall-only systems that x x x x x x x x x x x x x x x x x x x x x x x x x x x x';
   assertEq(descAtCap.length, 155, "(fixture precondition: the description is exactly the cap)");
+  // Reach the handler, not a 429 — a rate-limited body makes every assertion below vacuous.
   const descAtCapCase = await drive({
     primaryKeyword: "long-term memory for ai agents",
     metaTitle: "Long-Term Memory for AI Agents",
     metaDescription: descAtCap,
-  });
+  })
+  assertEq(descAtCapCase.status, 200, "the descAtCapCase fixture reached the handler");
   assertEq(
     descAtCapCase.body.keyword_ok,
     true,
@@ -983,11 +989,13 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   //    Exactly 156 chars → truncated → false; with `> cap + 1` it would be true.
   const longDesc = `Long-term memory for ai agents ${"x".repeat(156 - "Long-term memory for ai agents ".length)}`;
   assertEq(longDesc.length, 156, "(fixture precondition: the description is one char over the cap)");
+  // Reach the handler, not a 429 — a rate-limited body makes every assertion below vacuous.
   const overDesc = await drive({
     primaryKeyword: "long-term memory for ai agents",
     metaTitle: "Long-Term Memory for AI Agents",
     metaDescription: longDesc,
-  });
+  })
+  assertEq(overDesc.status, 200, "the overDesc fixture reached the handler");
   assertEq(
     overDesc.body.keyword_ok,
     false,
@@ -1005,11 +1013,20 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   // normalises), so if the model also WRITES it the claim would be honoured and
   // echoed back at arbitrary length. An over-long claim is rejected outright.
   const paddedKw = `${"epistemic"}${".".repeat(200)}${"memory"}`;
+  // ⛔ Reset FIRST. This fixture used to sit at exactly the 20-request burst
+  // ceiling, so it was one fixture away from a silent 429 — and on a 429 body the
+  // two assertions below passed anyway (String(undefined).length <= 40 ✓,
+  // undefined !== paddedKw ✓). Proven: with burst=19 the over-long-claim guard
+  // mutation is MISSED unless the status assertion is present. Asserting the
+  // status closed the hole; resetting here keeps the fixture off the boundary so
+  // the hole cannot reopen as the suite grows.
+  __resetRateLimits();
   const padded = await drive({
     primaryKeyword: paddedKw,
     metaTitle: `A guide to ${paddedKw}`,
     metaDescription: `A description that mentions ${paddedKw} somewhere in it.`,
   });
+  assertEq(padded.status, 200, "the over-long-claim fixture actually reached the handler");
   assert(
     String(padded.body.primary_keyword).length <= 40,
     `an over-long claim is REJECTED, not echoed (got ${String(padded.body.primary_keyword).length} chars)`,

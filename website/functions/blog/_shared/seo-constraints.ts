@@ -16,6 +16,24 @@ import { SLUG_MAX } from "./slug.ts";
 
 export const BRAND_SUFFIX = " | Tortoise";
 
+// ⛔ A REPEATING, punctuation-insensitive match for any brand-suffix spelling the
+// model may have emitted, so the suffix is appended exactly once.
+//
+// Two earlier versions were wrong, and each was caught only by a review round:
+//   1. `t.endsWith(BRAND_SUFFIX)` matched the exact string only, so `"|Tortoise"`
+//      (no space) got a SECOND suffix — 92% of a near-miss matrix.
+//   2. `/[\s|—–-]*[|—–-]\s*Tortoise\.?\s*$/i` allowed at most ONE trailing dot and
+//      a fixed separator set, so `"| Tortoise.."`, `"| Tortoise!"`, `": Tortoise"`,
+//      `"· Tortoise"` and an already-doubled title all still doubled (68%).
+//
+// The separator class is punctuation only — a bare space is NOT enough — so a
+// title that legitimately ends in the word ("Why Tortoise") is left alone, while
+// `"… | Tortoise"`, `"… — Tortoise"`, `"…· Tortoise"` and their repeated forms are
+// all treated as the brand suffix. The `+` makes it idempotent, which matters
+// because `generate-seo.ts` enforces, repairs, then enforces AGAIN: a first pass
+// that left a suffix behind would be appended to by the second.
+const BRAND_SUFFIX_TAIL_RE = /(?:\s*[|\u2014\u2013\-\u00b7:\u2022]\s*Tortoise\b[\s.,;:!?\u2026\u00b7]*)+$/iu;
+
 export interface SeoFields {
   slug: string;
   excerpt: string;
@@ -71,7 +89,7 @@ export const constraints: Constraints = {
     // SECOND pass, defeating its own `enforce(enforce(x)) === enforce(x)` claim in
     // ~0.16% of random inputs.
     const stripped = truncateAtWord(raw.trim(), META_TITLE_MAX)
-      .replace(/[\s|—–-]*[|—–-]\s*Tortoise\.?\s*$/i, "")
+      .replace(BRAND_SUFFIX_TAIL_RE, "")
       .replace(/[\s,.;:!?|—–-]+$/, "")
       .trim();
     if (!stripped) return "";

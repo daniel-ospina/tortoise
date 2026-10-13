@@ -113,6 +113,30 @@ export function allKeywords(limit = Number.POSITIVE_INFINITY): string[] {
 }
 
 /**
+ * The researched spelling of `keyword`, or null when it is not one of ours.
+ *
+ * The model returns its own spelling (`"LONG-TERM MEMORY FOR AI AGENTS"`,
+ * `"Long  Term  Memory  for  AI  Agents"`), and `isKnownKeyword` deliberately
+ * normalises. But `primary_keyword` is documented as "the keyword the response is
+ * verified against" and callers compare it against `TAG_KEYWORDS`/tags, so the
+ * UN-normalised claim would not match anything the caller can look up — the same
+ * article could return two different strings for one keyword (#8446 review).
+ * Canonicalising here also bounds the value: a vocabulary term is at most
+ * `TAG_LEN_MAX` characters, so no separate length guard is needed at the call
+ * site.
+ */
+export function canonicalKeyword(keyword: string): string | null {
+  const norm = normalizeForMatch(keyword);
+  if (!norm) return null;
+  for (const tag of Object.keys(TAG_KEYWORDS)) {
+    for (const kw of keywordsFor(tag)) {
+      if (normalizeForMatch(kw) === norm) return kw;
+    }
+  }
+  return null;
+}
+
+/**
  * True when `keyword` is one of the researched keywords.
  *
  * The model may CHOOSE a keyword (#8445), and its choice is then the value the
@@ -121,14 +145,7 @@ export function allKeywords(limit = Number.POSITIVE_INFINITY): string[] {
  * produced, and we would verify the article against a keyword nobody chose.
  */
 export function isKnownKeyword(keyword: string): boolean {
-  const norm = normalizeForMatch(keyword);
-  if (!norm) return false;
-  for (const tag of Object.keys(TAG_KEYWORDS)) {
-    for (const kw of keywordsFor(tag)) {
-      if (normalizeForMatch(kw) === norm) return true;
-    }
-  }
-  return false;
+  return canonicalKeyword(keyword) !== null;
 }
 
 /** Normalize for a contains-check: lowercase, punctuation -> spaces. */
