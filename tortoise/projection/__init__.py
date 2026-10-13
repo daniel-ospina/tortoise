@@ -13155,7 +13155,35 @@ class FalkorProjection(
         )
 
     def _ensure_indexes(self) -> None:
-        """Create indexes on frequently-filtered Point properties.
+        """Create this store's indexes, and resolve its vector-index handle.
+
+        ⛔ The historical opening line — *"Create indexes on frequently-filtered
+        Point properties"* — under-described the function badly enough that its
+        vector half had to be re-derived BY HAND from `CALL db.indexes()` plus
+        two functions (#4997), and lane L2 (#5094) cites the line as its
+        evidence that the gap read as intended rather than as drift. What this
+        function actually issues, in full:
+
+          * RANGE indexes on canonical entity keys — ``Point``
+            (``_POINT_RANGE_INDEX_PROPS``, plus the plain ``Point.lastDreamedAt``
+            staleness index, epic 903-C2, #1240); the four entity labels
+            ``_RANGE_INDEX_LABEL_PROPS`` names — ``Subject``, ``Object``,
+            ``Event``, ``Source`` (#327); and two ``Session`` keys
+            (``actor_user_id``, #2600; ``id``, #3947);
+          * FULL-TEXT indexes on the FIVE labels ``_FULLTEXT_INDEX_LABEL_FIELDS``
+            names — ``Point``, ``Event``, ``Subject``, ``Object``, ``Source``;
+          * the VECTOR index on ``Point.embedding`` ONLY, resolved or created by
+            ``_ensure_vector_index_api``, which then MEASURES the engine's
+            vector-index inventory against the labels the vector leg SERVES
+            (``ENTITY_TYPE_LABELS.values()``) and reports the gap (#4997).
+
+        ⛔ The vector index stays ``Point``-only ON PURPOSE. Whether the other
+        served labels (``Object`` / ``Event`` / ``Subject`` / ``Source``) should
+        carry one is the owner's OPEN decision V1
+        (``docs/architecture/STORAGE-ARCHITECTURE.md`` §12.1c / §14.3, raised
+        2026-09-24) — this store MAKES THE GAP A FACT (``_vector_indexed_labels``;
+        every served label absent from that set full-scans) and never spends that
+        decision. See ``_record_vector_index_inventory``.
 
         Wraps CREATE INDEX in try/except because FalkorDB raises
         "Attribute 'X' is already indexed" rather than silently no-opping.
