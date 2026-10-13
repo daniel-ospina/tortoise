@@ -766,16 +766,74 @@ ck "the cheap merge path stays ungated" $rc
 # whose output is `0 7951 1 8039 2 1120` and fails this assertion.
 POOL_SORT="$(grep -E '^\} \| sort ' "$REFRESH" | sed -e 's/^} | //' -e 's/ > "\$O\/\.pool"$//')"
 if [ -n "$POOL_SORT" ]; then
-  pool_got="$(printf '2 1120\n1 8039\n0 7951\n2 3147\n1 7936\n0 7846\n2 3329\n1 8039\n0 3846\n' \
+  # The within-tier pairs are MIXED WIDTH on purpose. With every number four digits, `sort -n`
+  # happens to agree with `sort -k1,1n -k2,2n` on this fixture, so a copy that dropped the key spec
+  # stayed green (verified 2026-10-13). 900/1000 separate them — keyed puts 900 first, a bare
+  # `sort -n` puts 1000 first — and tortoise is about to cross issue 10000.
+  pool_got="$(printf '2 1120\n1 8039\n0 7951\n2 3147\n1 7936\n0 7846\n2 3329\n1 8039\n0 3846\n1 900\n1 1000\n' \
               | sh -c "$POOL_SORT" | tr '\n' ' ' | sed 's/ *$//')"
-  [ "$pool_got" = "3846 7846 7951 7936 8039 1120 3147 3329" ] && rc=0 || rc=1
+  [ "$pool_got" = "3846 7846 7951 900 1000 7936 8039 1120 3147 3329" ] && rc=0 || rc=1
 else rc=1; fi
 ck "refresh-candidates.sh orders the pool severity-first (P0<P1<P2), age second, dedup by number" $rc
 
-# The backlog file is consumed top-down, so its ORDER IS the priority — a numeric re-sort put any
-# appended P0 at the BACK (#8465). The shipped script must dedupe WITHOUT sorting.
-if [ -s "$REFRESH" ] && ! grep -qE '^sort -n -u -o "\$O/candidates\.txt"' "$REFRESH"; then rc=0; else rc=1; fi
-ck "refresh-candidates.sh dedupes the backlog without re-sorting it by issue number" $rc
+# The pipeline above cannot see the TIER->RANK half. A copy that emitted the SAME rank for every
+# tier still sorts "correctly" and still starves the P0s — #8465 itself. So assert the label->rank
+# pairs the shipped script actually emits. Join backslash continuations first, or `--label` and the
+# `|"N ` land on different lines and the extraction finds nothing (verified).
+if [ -s "$REFRESH" ]; then
+  RANKS="$(awk '{printf "%s", $0} /\\$/{next} {print ""}' "$REFRESH" \
+    | awk '/--label/{lab=""; for(i=1;i<=NF;i++) if($i=="--label") lab=$(i+1);
+	     if(match($0,/\|"[0-9] /)) print lab" -> "substr($0,RSTART+2,1)}' \
+    | tr '\n' ' ' | sed 's/ *$//')"
+  [ "$RANKS" = "P0-blocker -> 0 P1-severe -> 1 P2-moderate -> 2" ] && rc=0 || rc=1
+else rc=1; fi
+ck "refresh-candidates.sh ranks the tiers P0=0 < P1=1 < P2=2 (a constant rank would starve the P0s)" $rc
+
+# The backlog is consumed top-down, so its ORDER IS the priority — a numeric re-sort put the P0s
+# behind the P2s on every cycle (#8465). Assert BEHAVIOUR, not spelling: drive the shipped TAIL —
+# the dedupe line to EOF, with the real $O redirected into $TMP — against a fixture, and assert the
+# resulting file. Executing it is what makes the check spelling-independent. The textual forms both
+# missed and over-matched: a grep for a command-position `sort` accepted 10 of 16 built variants that
+# really did re-sort the backlog (`LC_ALL=C sort`, `command sort`, `env sort`, a subshell, an `if`, an
+# absolute path, the path in a variable…), and it went RED on a COMMENT that merely quoted the pre-fix
+# line — the natural thing to write here. A comment is inert when executed; it cannot trip this.
+# Driving the dedupe line ALONE is also not enough: that cannot see an ADDED re-sort after it, so this
+# drives to EOF rather than `-m1`.
+# ⛔ ANCHOR BELOW THE POOL LOOP, NOT AT THE DEDUPE LINE. The pre-fix re-sort sat directly after
+# `done < "$O/.pool"`, so anchoring on the dedupe left its own former position — the most likely
+# place a partial revert restores it — outside the driven region: with the pre-fix line re-added
+# there this check reported 130 passed, 0 failed (reproduced 2026-10-13 against the head). Starting
+# after the loop's `done` covers every write the pool loop and the dedupe make to candidates.txt.
+# RESIDUAL — a boundary, not a claim of completeness: the driven region starts after the pool loop,
+# so code ABOVE it is not executed. The pool pipeline writes `$O/.pool`, never candidates.txt, and the
+# reaping pass above that writes dispatched.txt/checked.txt — so nothing above the loop can re-sort the
+# backlog today. A re-sort GATED on a value assigned above the loop would still be missed (verified).
+# Widening further means stubbing `gh` and driving the pool build too; this is the boundary drawn.
+if [ -s "$REFRESH" ]; then
+  awk '/^done < /{f=1;next} f' "$REFRESH" > "$TMP/tail.sh"
+  # Fail closed if the extraction found nothing, or lost the file it is supposed to exercise.
+  if [ -s "$TMP/tail.sh" ] && grep -q 'candidates\.txt' "$TMP/tail.sh"; then
+    # Redirect $O at the SOURCE rather than editing paths: `awk -v` passes the fixture dir without any
+    # shell quoting of `$O` on the command line. Escape it first — in awk's gsub REPLACEMENT `&` means
+    # the matched text and `\x` is an escape, so a `&` or `\\` in $TMP would corrupt the generated
+    # script. macOS `mktemp -d` ignores TMPDIR so it cannot occur here, but the Linux CI lane honours
+    # TMPDIR and this harness treats `&`-in-path as hostile everywhere else.
+    esc_tmp="${TMP//\\/\\\\}"; esc_tmp="${esc_tmp//&/\\&}"
+    awk -v tmp="$esc_tmp" '{gsub(/\$O/, tmp)} 1' "$TMP/tail.sh" > "$TMP/tail-drive.sh"
+    # 5000 leads AND repeats, so one expectation separates all three outcomes: in-place dedupe keeps
+    # the first occurrence (5000 100 9000); a re-sort of ANY spelling moves 100 to the front; a
+    # deleted dedupe leaves both 5000s.
+    printf '5000\n100\n9000\n5000\n' > "$TMP/candidates.txt"
+    # ⛔ SANDBOX THE DRIVE. The substitution above only rewrites the literal `$O`; a path spelled any
+    # other way escapes to the REAL location — and `$HOME/orchestrator/candidates.txt` is the shipped
+    # script's own default O and is live on a running box. Binding O and HOME to $TMP closes it
+    # (confirmed: without this a `$HOME/orchestrator/...` variant rewrote the live file).
+    ( cd "$TMP" && O="$TMP" HOME="$TMP" bash tail-drive.sh ) >/dev/null 2>&1
+    tail_got="$(tr '\n' ' ' < "$TMP/candidates.txt" 2>/dev/null | sed 's/ *$//')"
+    [ "$tail_got" = "5000 100 9000" ] && rc=0 || rc=1
+  else rc=1; fi
+else rc=1; fi
+ck "refresh-candidates.sh dedupes the backlog in place and nothing running it re-sorts it" $rc
 
 echo
 echo "==> $pass passed, $fail failed"
