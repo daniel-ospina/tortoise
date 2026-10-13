@@ -15,7 +15,7 @@ import {
   containsKeyword,
   normalizeForMatch,
   ensureKeyword,
-  isKnownKeyword,
+  canonicalKeyword,
   allKeywords,
 } from "../website/functions/blog/_shared/seo-keywords.ts";
 import { rateLimited, __resetRateLimits } from "../website/functions/blog/_shared/agent-auth.ts";
@@ -93,9 +93,13 @@ const assertKeywordOk = (label, probe, rawTitle, rawDescription) => {
   if (expected) {
     // A green verdict must mean the artifact is the model's own work — not a
     // repair, and not a truncated fragment.
+    // ⛔ Use the module's OWN word-boundary predicate, not `String.includes`. A
+    // green verdict implies a boundary match, so a substring check could never
+    // fail — a non-falsifiable secondary assertion is worse than none, because it
+    // reads as coverage.
     assert(
-      probe.body.meta_title.toLowerCase().includes(String(kw).toLowerCase()),
-      `[${label}] a green verdict implies the returned title carries the keyword`,
+      containsKeyword(probe.body.meta_title, kw),
+      `[${label}] a green verdict implies the returned title carries the keyword at a word boundary`,
     );
   }
 };
@@ -212,7 +216,8 @@ console.log("allKeywords — the prompt's candidate list is the whole vocabulary
     vocab.every((k) => normalizeForMatch(k) !== ""),
     "...and no term in the DATA normalises to empty",
   );
-  assert(all.every((k) => isKnownKeyword(k)), "every seeded candidate passes the validator");
+  assert(all.every((k) => canonicalKeyword(k) === k),
+    "every seeded candidate is a canonical vocabulary term (not merely a normalised match)");
   // Seed and validator must agree in the other direction too: every keyword
   // reachable through a tag is offered. A narrower seed makes the prompt state
   // "choose exactly ONE of these" about a list that is missing the right answer.
@@ -423,22 +428,22 @@ console.log("generate-seo handler — one brand suffix, no dangling separator, n
     // Then fixing the regex did NOT fix this test: because the list still held
     // only the 8 handled spellings, the suite stayed GREEN on the broken code —
     // a fix whose test cannot fail is not tested. Enumerate the MATRIX.
-    const separators = ["|", "\u2014", "\u2013", "-", "\u00b7", ":", "\u2022", ",", "(", "/", " "];
+    const separators = ["|", "\u2014", "\u2013", "-", "\u00b7", ":", "\u2022", ",", "(", "/"];
+    const gaps = ["", " "];
+    const casings = ["Tortoise", "tortoise", "TORTOISE"];
     const tails = ["", ".", "..", "!", ",", ";", ":", "?", "\u2026", "\u00b7", "\u2022", ")", "]", "}", "\u201d", "\u2019", "*", "/", "-", "\u2013", "\u2014"];
+    const repeats = ["", " | Tortoise", " | Tortoise | Tortoise"];
     let familyChecked = 0;
     for (const sep of separators) {
-      for (const gap of ["", " "]) {
-        for (const word of ["Tortoise", "tortoise", "TORTOISE"]) {
+      for (const gap of gaps) {
+        for (const word of casings) {
           for (const tail of tails) {
-            for (const repeat of ["", ` | Tortoise`]) {
+            for (const repeat of repeats) {
               const variant = `${gap}${sep}${gap === "" ? " " : ""}${word}${tail}${repeat}`;
-              if (sep === " ") continue; // a bare space is not a separator
               const out = constraints.metaTitle(`${base}${variant}`);
               familyChecked++;
               assertEq(out, `${base} | Tortoise`,
                 `family suffix ${JSON.stringify(variant)} canonicalises to exactly one`);
-              // The pass-1/pass-2 agreement matters as much as the count: the
-              // handler enforces, repairs, then enforces again.
               assertEq(constraints.metaTitle(out), out,
                 `...and is idempotent, so pass 1 and pass 2 agree for ${JSON.stringify(variant)}`);
             }
@@ -446,7 +451,15 @@ console.log("generate-seo handler — one brand suffix, no dangling separator, n
         }
       }
     }
-    assert(familyChecked > 1000, `the suffix family matrix actually ran (${familyChecked} spellings)`);
+        // ⛔ Derive the expected count from the dimensions themselves. A floor like
+    // `> 1000` let an entire dimension vanish silently (the real count is 2,520),
+    // so the matrix could shrink to a sample while still asserting "it ran".
+    assertEq(
+      familyChecked,
+      separators.length * gaps.length * casings.length * tails.length * repeats.length,
+      "the suffix matrix ran EVERY combination of its dimensions, not a sample",
+    );
+    assert(familyChecked >= 2500, `the suffix family matrix actually ran (${familyChecked} spellings)`);
     // A bare space is NOT a separator — the subject word must SURVIVE. Counting
     // "Tortoise" occurrences would be wrong (the subject word and the brand token
     // are different things), and so is asserting the exact string, because the
@@ -1089,7 +1102,7 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   assertKeywordOk("overBudget", overBudget,
     "A practical guide to graph memory for teams building agents with epistemic memory",
     "A description placing the term epistemic memory deliberately at the very end again.");
-  // A padded claim normalises onto a vocabulary term (`isKnownKeyword`
+  // A padded claim normalises onto a vocabulary term (the vocabulary check
   // normalises), so if the model also WRITES it the claim would be honoured and
   // echoed back at arbitrary length. An over-long claim is rejected outright.
   const paddedKw = `${"epistemic"}${".".repeat(200)}${"memory"}`;
@@ -1125,9 +1138,78 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
   // no way to tell from the response.
   {
     __resetRateLimits();
-    const malformed = await drive({ requestTags: "agent-memory" });
-    assertEq(malformed.status, 400, "a non-array `tags` is refused, not coerced to []");
-    assertEq(malformed.body.error, "validation", "...with the validation error code");
+    // ⛔ A non-ARRAY was the first half; an ARRAY of non-strings is the same
+    // mistake and was only half-closed — the filter dropped them, so `[123]`
+    // became `[]` (the tagless path) and the caller earned the model its own
+    // verified keyword. Every element must be a string.
+    for (const bad of ["agent-memory", [123], [null], [{}], ["agent-memory", 123]]) {
+      __resetRateLimits();
+      const malformed = await drive({ requestTags: bad });
+      assertEq(malformed.status, 400,
+        `malformed \`tags\` ${JSON.stringify(bad)} is refused, not coerced to []`);
+      assertEq(malformed.body.error, "validation", "...with the validation error code");
+    }
+  }
+
+  // ⛔ P1-2 (round 9): the SECOND trailing-separator strip was untested. Every
+  // other fixture ends in the word `Tortoise`, so `BRAND_SUFFIX_TAIL_RE` consumes
+  // it and the bare-separator strip never runs — deleting that line left the
+  // suite green, and a raw title ending in `" |"` came back as `"… | | Tortoise"`
+  // (a doubled separator) beside `keyword_ok: true`.
+  {
+    __resetRateLimits();
+    const bareSeparator = await drive({
+      primaryKeyword: "long-term memory for ai agents",
+      metaTitle: "long-term memory for ai agents guide |",
+      metaDescription: "Long-term memory for ai agents measures recall, not learning.",
+    });
+    assertLive(bareSeparator, "bareSeparator");
+    assertEq(
+      bareSeparator.body.meta_title,
+      "long-term memory for ai agents guide | Tortoise",
+      "a title ending in a bare separator gets ONE suffix, not '| | Tortoise'",
+    );
+  }
+
+  // ⛔ P2-2 (round 9): the empty-after-strip guard was untested. A title that is
+  // ONLY a brand suffix strips to "" — shipping it would publish a suffix-only
+  // <title>; the guard turns it into the honest 502 instead.
+  {
+    __resetRateLimits();
+    const suffixOnly = await drive({ metaTitle: " | Tortoise" });
+    assertEq(suffixOnly.status, 502, "a title that is only the brand suffix is refused, not published");
+    assertEq(suffixOnly.body.error, "generation_incomplete", "...as an incomplete generation");
+  }
+
+  // ⛔ P1-1 (round 9): the TITLE branch of `chosenUsed`'s OR was untested.
+  // `titleOnly` above does NOT cover it — it asserts the FALLBACK keyword, which
+  // is identical whether or not the title branch exists, so deleting
+  // `containsKeyword(rawTitle, chosen) ||` left the suite GREEN and reproduced
+  // #8445 (the model's own choice discarded, the title repair-prefixed with a
+  // DIFFERENT keyword). The distinguishing assertion is `primary_keyword`: it is
+  // the model's choice ONLY because the title carried it.
+  {
+    __resetRateLimits();
+    const titleBearing = await drive({
+      primaryKeyword: "epistemic memory",
+      metaTitle: "Epistemic Memory: Why Confidence Matters More Than Recall",
+      metaDescription: "A description that names no keyword at all, so the repair must fire here.",
+    });
+    assertLive(titleBearing, "titleBearing");
+    assertEq(
+      titleBearing.body.primary_keyword,
+      "epistemic memory",
+      "a keyword the model used in the TITLE is honoured — the title branch is load-bearing",
+    );
+    assert(
+      titleBearing.body.meta_title.toLowerCase().includes("epistemic memory"),
+      "...and the model's own title is kept, not repair-prefixed with a different keyword",
+    );
+    assertEq(
+      titleBearing.body.keyword_ok,
+      false,
+      "...but the description still needed the repair, so the verdict is honestly false",
+    );
   }
 
   // ⛔ `keyword_ok` is computed on the artifact the caller RECEIVES. `enforced`
@@ -1284,7 +1366,7 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     "a model-chosen keyword does NOT override the caller's tags",
   );
   assertEq(
-    isKnownKeyword("agent memory architecture"),
+    canonicalKeyword("agent memory architecture") !== null,
     true,
     "(the ignored keyword was itself valid — the guard is about precedence, not validity)",
   );

@@ -246,8 +246,18 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   if (input.tags !== undefined && !Array.isArray(input.tags)) {
     return json({ error: "validation", message: "tags must be an array of strings" }, 400);
   }
+  // ⛔ EVERY element must be a string, not merely the container an array. The
+  // first version refused a non-array and then FILTERED non-strings out — so
+  // `["agent-memory", 123]` silently became `["agent-memory"]` and `[123]`
+  // became `[]`, which is the tagless path. The refusal was therefore only half
+  // closed: junk tags still earned the model its own verified keyword. A caller
+  // sending the wrong SHAPE and a caller sending the wrong ELEMENTS are the same
+  // mistake and get the same answer.
+  if (Array.isArray(input.tags) && input.tags.some((t) => typeof t !== "string")) {
+    return json({ error: "validation", message: "tags must be an array of strings" }, 400);
+  }
   const tags = Array.isArray(input.tags)
-    ? input.tags.filter((t): t is string => typeof t === "string").slice(0, 10).map((t) => t.slice(0, 40))
+    ? input.tags.slice(0, 10).map((t) => t.slice(0, 40))
     : [];
   if (!title) return json({ error: "validation", message: "title required" }, 400);
   if (!body.trim()) return json({ error: "validation", message: "body required" }, 400);

@@ -77,7 +77,7 @@ export function resolvePrimaryKeyword(suppliedTags: string[], generatedTags: str
  * have not shown it, and it cannot be asked for the TAG-DERIVED one because
  * that is derived from the tags it has not written yet.
  *
- * ⛔ The default is the WHOLE vocabulary, deliberately. `isKnownKeyword` accepts
+ * ⛔ The default is the WHOLE vocabulary, deliberately. `canonicalKeyword` accepts
  * every one of these terms, so a seed list narrower than the validator makes the
  * two disagree: the prompt would present a partial list as the complete choice
  * set ("choose exactly ONE of these researched keywords") while the validator
@@ -116,7 +116,7 @@ export function allKeywords(limit = Number.POSITIVE_INFINITY): string[] {
  * The researched spelling of `keyword`, or null when it is not one of ours.
  *
  * The model returns its own spelling (`"LONG-TERM MEMORY FOR AI AGENTS"`,
- * `"Long  Term  Memory  for  AI  Agents"`), and `isKnownKeyword` deliberately
+ * `"Long  Term  Memory  for  AI  Agents"`), and the vocabulary check deliberately
  * normalises. But `primary_keyword` is documented as "the keyword the response is
  * verified against" and callers compare it against `TAG_KEYWORDS`/tags, so the
  * UN-normalised claim would not match anything the caller can look up — the same
@@ -134,18 +134,6 @@ export function canonicalKeyword(keyword: string): string | null {
     }
   }
   return null;
-}
-
-/**
- * True when `keyword` is one of the researched keywords.
- *
- * The model may CHOOSE a keyword (#8445), and its choice is then the value the
- * guarantee verifies. It must therefore be checked against the vocabulary
- * before use — otherwise the model could introduce a term the research never
- * produced, and we would verify the article against a keyword nobody chose.
- */
-export function isKnownKeyword(keyword: string): boolean {
-  return canonicalKeyword(keyword) !== null;
 }
 
 /** Normalize for a contains-check: lowercase, punctuation -> spaces. */
