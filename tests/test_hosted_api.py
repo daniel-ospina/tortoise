@@ -17,6 +17,7 @@ import os
 import pathlib
 import tempfile
 import threading
+import time
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -6353,6 +6354,135 @@ _2600_UUID_A = "11111111-1111-4111-8111-111111111111"
 _2600_UUID_B = "22222222-2222-4222-8222-222222222222"
 
 
+# ── #3246: a TRANSIENT transport refusal is a retriable capture outcome ──────
+# The measured cause of this class's flake, and of the wider full-file
+# nondeterminism recorded on #8122. Under a large combined selection the
+# capture in `POST /v1/sessions` exceeds the OWNER-PINNED 10 s transport wait
+# bound (`mcp_auth._TRANSPORT_WAIT_BOUND_S`, mcp_auth.py:179 — a module constant
+# deliberately NOT an env knob) and the route answers a 504 whose body says the
+# work may still complete. Measured in a full-file run
+# (`pytest tests/test_hosted_api.py`, 2026-10-13): 4 failed / 428 passed, and ALL
+# FOUR failures are this one signature — `assert 504 == 200` on
+# `POST /v1/sessions` — in TestDreamEndpoint, TestSessionCaptureWriteVerb,
+# TestSessionDetail and TestSessionFloodGate:
+#
+#   WARNING tortoise.hosted_api: transport wait bound (10s) exceeded:
+#                                POST /v1/sessions — refusing legibly
+#   assert 504 == 200
+#
+# It is a TRANSPORT outcome, not an actor-stamp defect: the Session MERGE
+# (`sdk._write_session_and_turns`, awaited at hosted_api.py:13109) commits the
+# actor clause — first-writer-wins by `coalesce` (sdk.py:2364) — BEFORE
+# extraction runs, so a refusal during extraction leaves the contract under test
+# untouched.
+#
+# The retry below is the repo's OWN client contract for that refusal, not a
+# flake mask: the refusal body instructs the caller to wait for the advertised
+# delay and re-issue, and `tortoise/capture_spool.py::classify_failure`
+# classifies every 5xx and EVERY 409 as TRANSIENT because a capture is an
+# idempotent upsert on `session_id`. Only those two statuses are re-issued —
+# deliberately NOT every 5xx — so a genuine handler error still fails on the
+# first call. Applied per call-site rather than to the shared client fixture,
+# because (a) `test_capture_gate_409_when_recording_off` and
+# `test_capture_gate_boundary_422_before_409` deliberately assert a 409 on this
+# route and a blanket retry would mask it, and (b) a test that is SUPPOSED to
+# fail must not be handed four retries first. Bounded, and never a pass: the
+# LAST response is returned, so an exhausted retry still fails the caller's own
+# status assertion loudly. Pinned by `TestCaptureTransportRetry3246`.
+_CAPTURE_TRANSIENT_TRANSPORT = frozenset({504, 409})
+
+#: Cap on the `Retry-After` the helper will honour. The advertised delay is the
+#: server's instruction (10 s on the wait-bound breach, 30 s on the in-flight
+#: 409); capping keeps a pathological run from parking the suite, and a re-issue
+#: that is too early merely earns another transient refusal.
+_CAPTURE_RETRY_AFTER_CAP_S = 15.0
+
+
+def _post_capture_allowing_transport_retry(tc, *, headers, payload,
+                                           attempts: int = 4,
+                                           sleep=time.sleep):
+    """POST /v1/sessions, re-issuing the request on a TRANSIENT transport
+    refusal (504 wait-bound breach / 409 same-session-in-flight — the latter is
+    the direct consequence of a 504'd sibling still completing server-side).
+
+    Returns the LAST response; a non-transient status (including the extractor
+    failure shapes the other tests pin) is returned on the first call.
+    """
+    response = None
+    budget = max(1, attempts)
+    for attempt in range(budget):
+        response = tc.post("/v1/sessions", headers=headers, json=payload)
+        if response.status_code not in _CAPTURE_TRANSIENT_TRANSPORT:
+            return response
+        if attempt + 1 == budget:
+            break  # exhausted: never sleep after the final attempt
+        try:
+            delay = float(response.headers.get("Retry-After", ""))
+        except (TypeError, ValueError):
+            delay = 2.0
+        sleep(min(max(delay, 0.0), _CAPTURE_RETRY_AFTER_CAP_S))
+    return response
+
+
+class TestCaptureTransportRetry3246:
+    """Falsifiable guard for ``_post_capture_allowing_transport_retry``.
+
+    No DB and no server: the helper's contract is a transport one, so a canned
+    response sequence is the whole fixture. Each case fails if the helper's
+    behaviour is changed to the opposite (no retry / blanket retry / silent
+    pass on exhaustion).
+    """
+
+    class _Response:
+        def __init__(self, status_code, retry_after=None):
+            self.status_code = status_code
+            self.headers = ({} if retry_after is None
+                            else {"Retry-After": str(retry_after)})
+            self.text = f"status {status_code}"
+
+    class _Client:
+        def __init__(self, *responses):
+            self._responses = list(responses)
+            self.calls = 0
+
+        def post(self, *_args, **_kwargs):
+            self.calls += 1
+            return self._responses.pop(0)
+
+    def test_transient_refusals_are_reissued_and_the_success_returned(self):
+        client = self._Client(self._Response(504, retry_after=10),
+                              self._Response(409, retry_after=1),
+                              self._Response(200))
+        slept: list[float] = []
+        r = _post_capture_allowing_transport_retry(
+            client, headers={}, payload={}, sleep=slept.append)
+        assert r.status_code == 200
+        assert client.calls == 3, "both transient refusals must be re-issued"
+        # The ADVERTISED delay is honoured, and capped (10 is under the cap).
+        assert slept == [10.0, 1.0], slept
+
+    def test_a_nontransient_refusal_is_returned_without_retry(self):
+        client = self._Client(self._Response(400))
+        slept: list[float] = []
+        r = _post_capture_allowing_transport_retry(
+            client, headers={}, payload={}, sleep=slept.append)
+        assert r.status_code == 400
+        assert client.calls == 1, "a genuine refusal must not be retried"
+        assert slept == [], slept
+
+    def test_an_exhausted_retry_surfaces_the_refusal_never_a_pass(self):
+        client = self._Client(*(self._Response(504, retry_after=999)
+                                for _ in range(4)))
+        slept: list[float] = []
+        r = _post_capture_allowing_transport_retry(
+            client, headers={}, payload={}, sleep=slept.append)
+        assert r.status_code == 504, "exhaustion must not become a pass"
+        assert client.calls == 4
+        # The advertised 999 s is capped — a pathological run cannot park the
+        # suite on the server's own back-off instruction.
+        assert slept == [_CAPTURE_RETRY_AFTER_CAP_S] * 3, slept
+
+
 class TestSessionActorStamp2600:
     """Session MERGE actor clause — first-writer-wins coalesce + legacy
     backfill, asserted via DIRECT graph read (list_sessions does not expose
@@ -6399,7 +6529,7 @@ class TestSessionActorStamp2600:
         try:
             keyA = sdk.apikey_create(tid, _2600_UUID_A)
             hA = {"Authorization": f"Bearer {keyA['api_key']}"}
-            r = tc.post("/v1/sessions", headers=hA, json={
+            r = _post_capture_allowing_transport_retry(tc, headers=hA, payload={
                 "conversation": [{"role": "user", "content": "we should ship actor attribution first."},
                                   {"role": "assistant", "content": "agree — stamp it at capture."}],
                 "session_id": "s-stamp-2600-a", "harness": "claude"})
@@ -6425,7 +6555,7 @@ class TestSessionActorStamp2600:
             hB = {"Authorization": f"Bearer {keyB['api_key']}"}
             for h, sid, _expect in ((hA, "s-stamp-2600-ba", _2600_UUID_A),
                                    (hB, "s-stamp-2600-bb", _2600_UUID_B)):
-                r = tc.post("/v1/sessions", headers=h, json={
+                r = _post_capture_allowing_transport_retry(tc, headers=h, payload={
                     "conversation": [{"role": "user", "content": "member capture."},
                                       {"role": "assistant", "content": "stamped."}],
                     "session_id": sid})
@@ -6453,10 +6583,10 @@ class TestSessionActorStamp2600:
             hB = {"Authorization": f"Bearer {keyB['api_key']}"}
             conv = [{"role": "user", "content": "we should open the beta."},
                     {"role": "assistant", "content": "agreed."}]
-            r1 = tc.post("/v1/sessions", headers=hA, json={
+            r1 = _post_capture_allowing_transport_retry(tc, headers=hA, payload={
                 "conversation": conv, "session_id": "s-stamp-2600-fww"})
             assert r1.status_code == 200, r1.text[:300]
-            r2 = tc.post("/v1/sessions", headers=hB, json={
+            r2 = _post_capture_allowing_transport_retry(tc, headers=hB, payload={
                 "conversation": conv, "session_id": "s-stamp-2600-fww"})
             assert r2.status_code == 200, r2.text[:300]
             rows = self._data_sdk(tid)._get_proj().g.query(
@@ -6488,7 +6618,7 @@ class TestSessionActorStamp2600:
                         "tid": "s-stamp-2600-legacy_t0"})
             keyB = sdk.apikey_create(tid, _2600_UUID_B)
             hB = {"Authorization": f"Bearer {keyB['api_key']}"}
-            r = tc.post("/v1/sessions", headers=hB, json={
+            r = _post_capture_allowing_transport_retry(tc, headers=hB, payload={
                 "conversation": [{"role": "user", "content": "true-retry legacy backfill."},
                                   {"role": "assistant", "content": "ok."}],
                 "session_id": "s-stamp-2600-legacy"})
@@ -6504,7 +6634,12 @@ class TestSessionActorStamp2600:
     def test_actorless_key_repost_keeps_first_writer(self, tmp_path):
         """P1-1 variant: the pre-#2600 'api' class (non-UUID created_by) is
         NOT an actor — its re-POST must not erase A's stamp (missing clause
-        ≠ wipe)."""
+        ≠ wipe).
+
+        The two captures ride `_post_capture_allowing_transport_retry`: this is
+        the test #3246 reported as flaky under large combined selections, and
+        the measured cause is the transport wait-bound 504 (not this path) — see
+        that helper's comment."""
         gen = self._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
@@ -6514,10 +6649,10 @@ class TestSessionActorStamp2600:
             hL = {"Authorization": f"Bearer {legacy['api_key']}"}
             conv = [{"role": "user", "content": "attribution contract."},
                     {"role": "assistant", "content": "locked."}]
-            r1 = tc.post("/v1/sessions", headers=hA, json={
+            r1 = _post_capture_allowing_transport_retry(tc, headers=hA, payload={
                 "conversation": conv, "session_id": "s-stamp-2600-api"})
             assert r1.status_code == 200, r1.text[:300]
-            r2 = tc.post("/v1/sessions", headers=hL, json={
+            r2 = _post_capture_allowing_transport_retry(tc, headers=hL, payload={
                 "conversation": conv, "session_id": "s-stamp-2600-api"})
             assert r2.status_code == 200, r2.text[:300]
             rows = self._data_sdk(tid)._get_proj().g.query(
@@ -6666,7 +6801,7 @@ class TestSessionActorStamp2600:
         try:
             legacy = sdk.apikey_create(tid, "api")
             hL = {"Authorization": f"Bearer {legacy['api_key']}"}
-            r = tc.post("/v1/sessions", headers=hL, json={
+            r = _post_capture_allowing_transport_retry(tc, headers=hL, payload={
                 "conversation": [{"role": "user", "content": "legacy key capture."},
                                   {"role": "assistant", "content": "ok."}],
                 "session_id": "s-stamp-2600-legacy-key"})
