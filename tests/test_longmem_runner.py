@@ -5892,11 +5892,15 @@ def test_tortoise_fts_query_records_no_embedder_and_encode_failed(
         sdk.close()
 
 
-def test_poisoned_plain_list_node_fts_still_hits(tmp_path):
-    """D4 (R3): a plain-list embedding node (raw projection write bypassing
-    create_point) → vector trace reason='query_failed' (NOT no_embeddings),
-    and FTS still returns hits — the leg-mix shows the failure, never a
-    silent empty vector leg."""
+def test_wrong_dim_node_fts_still_hits(tmp_path):
+    """D4 (R3): a malformed embedding node → leg reason='query_failed' (NOT
+    no_embeddings), and FTS still returns hits — the leg-mix shows the failure,
+    never a silent empty vector leg.
+
+    The node is malformed by DIMENSION (`[0.1, 0.2]` against the 384-dim query)
+    — #8430's root. The plain-``List`` SHAPE alone no longer poisons the MATCH;
+    #8316 normalises it at the read boundary.
+    """
     _require_embedder()
     q = {
         "question_id": "mini_poison_001",

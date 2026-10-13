@@ -37,8 +37,14 @@ REPO = Path(__file__).resolve().parent.parent
 OAUTH = REPO / "tortoise" / "oauth.py"
 HOSTED = REPO / "tortoise" / "hosted_api.py"
 TOKEN_TS = REPO / "website/apps/dashboard/functions/_shared/auth/token.ts"
+CONSENT_FLOW_TS = (
+    REPO / "website/apps/dashboard/functions/_shared/auth/consent-flow.ts"
+)
 SPEC = REPO / "docs/engineering/auth/consent-identity-bridge.md"
 ALLOWLIST_RECORD = REPO / "docs/ops/auth-email-flows.md"
+#: Property 4's route (the bridge's §9 step 3). Its PRESENCE is the artifact that
+#: decides whether the spec's "un-routed" status is honest — never a prose claim.
+CONSENT_ROUTE_DIR = REPO / "website/apps/dashboard/functions/api/consent"
 
 
 def _lines(path: Path) -> list[str]:
@@ -132,15 +138,18 @@ _PAGE_PROPERTIES = {
     "auto-advance": (OAUTH, "supabaseClient.auth.onAuthStateChange("),
 }
 
-#: The same three properties, already re-implemented server-side by the BFF (#3522/#4054). The
-#: bridge's job for them is to ROUTE the page onto this path, not to write them again.
+#: The same three properties, already re-implemented server-side by the BFF (#3522/#4054), plus
+#: property 4's new decision. Each entry is (module, the token that carries the guarantee).
+#: The bridge's job for 1-3 is to ROUTE the page onto this path, not to write them again.
 _BFF_PROPERTIES = {
     # CAS on the OLD refresh token: the loser re-reads the winner's token instead of clobbering it.
-    "single-flight": "AND refresh_token = ?5",
+    "single-flight": (TOKEN_TS, "AND refresh_token = ?5"),
     # Do not refresh until just before expiry, and bound how often a rejection may force one.
-    "refresh-once": "const REFRESH_SKEW_MS = 60_000;",
+    "refresh-once": (TOKEN_TS, "const REFRESH_SKEW_MS = 60_000;"),
     # `no_session` (401) and `unavailable` (503) stay DISTINCT — collapsing them is #3485.
-    "never-sign-out": '| { ok: false; reason: "unavailable" }',
+    "never-sign-out": (TOKEN_TS, '| { ok: false; reason: "unavailable" }'),
+    # Property 4's decision — the event listener's server-side replacement (#3524 task 3).
+    "auto-advance": (CONSENT_FLOW_TS, "export function decideConsentAdvance("),
 }
 
 
@@ -158,24 +167,43 @@ def test_the_four_properties_have_live_implementation_sites() -> None:
             "the guard have drifted apart"
         )
 
-    for prop, token in _BFF_PROPERTIES.items():
+    for prop, (path, token) in _BFF_PROPERTIES.items():
         # At-least-once here: the cooldown stamp legitimately appears in both the DDL and the SQL.
-        assert any(token in line for line in _lines(TOKEN_TS)), (
-            f"the BFF no longer carries the {prop!r} property ({token!r} is absent from "
-            "token.ts) — the spec's claim that it is already server-side is now false"
+        assert any(token in line for line in _lines(path)), (
+            f"{path.name} no longer carries the {prop!r} property ({token!r} is absent) — the "
+            "spec's claim that it is server-side is now false"
         )
 
 
-def test_auto_advance_is_the_property_with_no_server_side_equivalent_yet() -> None:
-    """`auto-advance` is the gap the bridge closes — the claim is falsifiable, so pin it.
+def test_auto_advance_status_matches_the_route_artifact() -> None:
+    """`auto-advance`'s server-side status is pinned to the ARTIFACT, not to prose.
 
-    Properties 1–3 already have server-side equivalents. If a 4th ever acquires one, the spec's
-    §3 table ("Gap: none — this is the property the bridge changes") becomes wrong and this test
-    reds for the right reason.
+    Properties 1–3 already had server-side equivalents. Property 4's decision
+    (`consent-flow.ts::decideConsentAdvance`) is NEW here and its route is the
+    bridge's §9 step 3. The status must not rest on a sentence that can only
+    re-stale: a claim about our own process has no artifact to check it against,
+    and the honest update — deleting the sentence when the route ships — would fail
+    a test that pinned the sentence, so the cheapest way to stay green would be to
+    leave a false statement. This guard instead reads REALITY (does the route
+    directory exist?) and asserts the spec AGREES with it, either way. When the
+    route lands and the spec's "NOT built" line is deleted, it retires itself.
     """
     spec = SPEC.read_text()
     assert "auto-advance" in spec
-    assert "**none — this is the property the bridge changes**" in spec
+    assert "decideConsentAdvance" in spec, (
+        "the spec no longer names property 4's server-side decision — the implementation and "
+        "the contract have drifted apart"
+    )
+    routed = CONSENT_ROUTE_DIR.is_dir() and any(CONSENT_ROUTE_DIR.rglob("*.ts"))
+    claims_unbuilt = "is NOT built" in spec
+    assert routed or claims_unbuilt, (
+        "no `api/consent/` route exists and the spec no longer records the un-routed gap — "
+        "a partial delivery has become a false claim"
+    )
+    assert not (routed and claims_unbuilt), (
+        "the `api/consent/` route now exists but the spec still says it is NOT built — "
+        "update the spec's status to match the artifact"
+    )
 
 
 def test_the_consent_page_still_does_not_call_any_logout_api() -> None:
@@ -240,3 +268,16 @@ def test_the_spec_binds_every_authorize_param_single_use_and_a_ttl() -> None:
         "class 4(i)",                                             # the half that is still open
     ):
         assert clause in spec, f"the token contract no longer states {clause!r}"
+
+
+def test_the_spec_names_the_behavioural_guard_for_all_four_properties() -> None:
+    """The spec must point at the file that PROVES the four properties, not only at anchors.
+
+    `test_oauth_consent_bridge.py` pins WHERE they live; `tests/test_oauth_session_flow_properties.py`
+    pins WHAT they do (and each of its tests goes red when its property is deleted). A spec that
+    names only the anchors lets "the four properties" be satisfied by prose again.
+    """
+    assert "tests/test_oauth_session_flow_properties.py" in SPEC.read_text(), (
+        "the spec no longer names the behavioural guard for the four properties — the contract "
+        "would be anchor-only again, which is the state #3524 task 3 exists to end"
+    )

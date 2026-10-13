@@ -12,8 +12,10 @@ Covers:
   per-(graph,namespace) lock #1307)
 - Deployment gate: tortoise_pack_install is an actionable stub when the
   serving app is not hosted_api (self-host)
-- tenant_view memoization: cached per (tenant, pack_config_version),
-  invalidated on :PackManifest write (#1154/#1350)
+- tenant_view memoization: cached per (graph_identity, pack_config_version)
+  — the key `pack_manifest_store.tenant_view` is the authority for, whose
+  `version` also carries the #2714 approval set — invalidated on
+  :PackManifest write (#1154/#1350)
 
 Docker lane (default): TORTOISE_DB_URI must be set (epic #1647 P4).
 """

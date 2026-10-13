@@ -97,11 +97,22 @@ truncating.
 *Idempotent*: :func:`plan_backfill` is a **pure function** of
 ``(census, resolver)`` — no clock, no environment read beyond the flag, no
 graph I/O — so two runs over the same census are byte-identical (pinned by
-:func:`plan_fingerprint`). Every record carries ``from_state``/``to_state``, so
-a future applier is a no-op when a row is already at ``to_state``; and a census
-row that already carries ``backfill_applied`` is answered
-:data:`RULE_ALREADY_APPLIED` → ``KEEP``, which is what makes a second run after
-an application produce an empty actionable set.
+:func:`plan_fingerprint`). Every record carries ``from_state``/``to_state``, and
+every rung whose write this plan **describes** (``RESOLVE`` and ``RECLASSIFY``)
+puts :data:`APPLIED_MARKER` in its ``to_state``, so a future applier that writes
+``to_state`` verbatim lands the marker the idempotence rule reads. Two halves
+are required for that to hold and neither is optional: the rung must **record**
+the marker, and the census must **read it back** — :data:`CENSUS_QUERY` projects
+it. A census row already carrying it is answered
+:data:`RULE_ALREADY_APPLIED` → ``KEEP``, so applying the plan and re-running over
+the same graph advances nothing.
+
+Two consequences are stated here rather than left implied: **a rung whose
+``to_state`` omits the marker is re-planned forever** (the marker's absence, not
+the row's state, would decide), and a :data:`RULE_MERGE` candidate carries
+``applied: False`` deliberately — the merge is ``#5006``'s — so it stays a
+**recorded candidate** until ``#5006`` applies it. It is the one actionable
+outcome this planner records without describing an application of its own.
 
 Failure policy (§4.2): FAIL-OPEN
 --------------------------------
@@ -182,6 +193,21 @@ DESTRUCTIVE_DISPOSITIONS: frozenset[str] = frozenset()
 
 #: Dispositions that change nothing at all.
 INERT_DISPOSITIONS: frozenset[str] = frozenset({KEEP, REPORT})
+
+# ── The applied marker ──────────────────────────────────────────────────────
+
+#: The property an applier writes to a row it has dispositioned, and the property
+#: :data:`RULE_ALREADY_APPLIED` reads back. **One spelling, two sides**: the rule
+#: reads :data:`APPLIED_MARKER`, every rung that describes an application writes
+#: it, and :data:`CENSUS_QUERY` projects it — so the rule cannot be dead code
+#: against this module's own read path (which is exactly the defect the pairing
+#: exists to prevent: a rule reading a column the census never returns can never
+#: fire, and the backfill would re-plan every applied row forever).
+APPLIED_MARKER = "backfill_applied"
+
+#: The human-readable label of what was applied, for the rule's reason string.
+#: Display only — nothing dispatches on it, so it may not be read as the marker.
+APPLIED_CLASS = "backfill_class"
 
 # ── The rule vocabulary (each id is recorded on every disposition —
 #    #4899 safeguard 2: nothing happens silently) ──────────────────────────
@@ -394,16 +420,26 @@ def definite_article_stripped(name: object) -> str | None:
 #: ``o.status`` and ``o.objectKind`` are read so a future relocation rung has the
 #: field it would need, and so the ledger can show what a reclassification would
 #: leave untouched.
+#:
+#: :data:`APPLIED_MARKER` and :data:`APPLIED_CLASS` are read because the
+#: idempotence rule keys on them: **a marker the census does not return is a
+#: marker the planner can never observe**, so every applied row would be
+#: re-planned as actionable and every count of "what remains" would be wrong.
+#: A census that cannot see its own applied state cannot honour "a second run is
+#: a no-op". The alias is the property name, spelled once in
+#: :data:`APPLIED_MARKER` / :data:`APPLIED_CLASS` and pinned by a test.
 CENSUS_QUERY = """
 MATCH (o:Object)
 OPTIONAL MATCH (o)<-[r]-()
 WITH o, count(r) AS ref_count, collect(DISTINCT type(r)) AS ref_edges
-RETURN o.id            AS id,
-       o.name          AS name,
-       ref_count       AS ref_count,
-       ref_edges       AS ref_edges,
-       o.status        AS status,
-       o.objectKind    AS object_kind
+RETURN o.id                  AS id,
+       o.name                AS name,
+       ref_count             AS ref_count,
+       ref_edges             AS ref_edges,
+       o.status              AS status,
+       o.objectKind          AS object_kind,
+       o.backfill_applied    AS backfill_applied,
+       o.backfill_class      AS backfill_class
 ORDER BY ref_count DESC, id
 """
 
@@ -619,13 +655,13 @@ def _classify_row(
         )
 
     # 3. Already dispositioned ⇒ no-op. This is the idempotence rule.
-    if row.get("backfill_applied"):
+    if row.get(APPLIED_MARKER):
         return _record(
             row_id=row_id, name=name, rule_id=RULE_ALREADY_APPLIED,
             disposition=KEEP,
             reason=(
                 "a disposition is already recorded for this row "
-                f"({row.get('backfill_class') or 'recorded'}) — re-running is a no-op"
+                f"({row.get(APPLIED_CLASS) or 'recorded'}) — re-running is a no-op"
             ),
             counterfactual="nothing would change; the disposition is already applied",
         )
@@ -673,8 +709,9 @@ def _classify_row(
                     f"would record that this object denotes {target!r}; the row is "
                     "kept and no field is overwritten"
                 ),
-                from_state={"denotes": None},
-                to_state={"denotes": target, "referent_validated": validated},
+                from_state={"denotes": None, APPLIED_MARKER: None},
+                to_state={"denotes": target, "referent_validated": validated,
+                          APPLIED_MARKER: True, APPLIED_CLASS: "resolved"},
             )
 
     # 6. RESOLVE by the article-stripped name — a deterministic, no-model
@@ -695,8 +732,9 @@ def _classify_row(
                     f"would record that this object denotes {target!r}; the row is "
                     "kept and no field is overwritten"
                 ),
-                from_state={"denotes": None},
-                to_state={"denotes": target, "referent_validated": True},
+                from_state={"denotes": None, APPLIED_MARKER: None},
+                to_state={"denotes": target, "referent_validated": True,
+                          APPLIED_MARKER: True, APPLIED_CLASS: "resolved"},
             )
 
     # 7. RECLASSIFY — positive, conservative classification. ADDITIVE: it labels
@@ -714,8 +752,9 @@ def _classify_row(
                 f"would label {name!r} as a definite description and leave "
                 "objectKind untouched; undo: clear the label"
             ),
-            from_state={"backfill_class": None},
-            to_state={"backfill_class": "definite_description",
+            from_state={APPLIED_CLASS: None, APPLIED_MARKER: None},
+            to_state={APPLIED_CLASS: "definite_description",
+                      APPLIED_MARKER: True,
                       "overwrites": [], "kind_untouched": True},
             preserves=("objectKind", "name", "status", "id"),
         )

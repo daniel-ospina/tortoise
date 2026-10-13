@@ -929,6 +929,31 @@ def test_the_csp_plan_doc_guard_runs_on_its_plan_doc_too():
     )
 
 
+def test_the_blog_authoring_doc_guard_runs_on_its_doc_too():
+    """#8379 (finding 2): the authoring-doc guard's own subject must select it.
+
+    `test_blog_authoring_doc.py` renders `docs/blog-authoring.md` with a real
+    CommonMark parser (markdownlint cannot see an unterminated fence). `docs/` is
+    in NON_PYTHON_PREFIXES and is not itself a SOURCE_PATTERNS pattern, so without
+    the concrete `docs/blog-authoring.md` entry a docs-only edit selects NO surface
+    and the guard never sees the page it guards — the same silent-drop class as the
+    #3524 docs records and the #8334 plan doc above.
+    """
+    root = Path(__file__).resolve().parents[1]
+    changed = "docs/blog-authoring.md"
+    assert (root / changed).exists(), f"guarded docs record is gone: {changed}"
+    r = _sel([changed])
+    assert r["full"] is False
+    assert "onboarding" in r["surfaces"], (
+        f"{changed} selects {r['surfaces']} — the guard is not in tier1, so a "
+        "docs-only edit to the authoring contract runs it nowhere"
+    )
+    assert "test_blog_authoring_doc.py" in r["test_files"], (
+        f"a docs-only edit to {changed} does not run tests/test_blog_authoring_doc.py, "
+        "so its render guard cannot fire on the change it pins (#8379)"
+    )
+
+
 def test_session_import_change_selects_the_window_guard():
     """#3575 P1-A: `tortoise/session_import/` maps to no named surface, so a
     parsers.py change selects `core` via the fallback. The window guard must be
@@ -1261,6 +1286,30 @@ def test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1():
     assert "core" in r["surfaces"], r
     assert "test_install_queue_reconcile_schedule.py" in r["test_files"], r
     assert r["full"] is False, r
+
+
+def test_graph_write_repair_tool_change_selects_core_not_tier1():
+    # PR #8427 review Finding 4: tools/graph_write_repair.py and its launchd
+    # installer (tools/install-graph-write-repair-schedule.sh) own
+    # tests/test_graph_write_repair.py (`core`): the probe classification that
+    # authorises a repair, the `--quiet` count contract, and the installer's
+    # escaping / interval validation / lint-before-move / load verification.
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and neither path matches a
+    # SOURCE_PATTERNS row, so without the CORE_ALSO entries an installer-only
+    # change came back with `changed == []` and took the docs-only early return:
+    # `select()` returned NO surface and the guard never ran on the file it
+    # guards (the #3261/#6138 silent-drop class).
+    #
+    # Mutation: remove either CORE_ALSO entry -> that path selects no surface, so
+    # the assertion below fails.
+    for path in ("tools/graph_write_repair.py",
+                 "tools/install-graph-write-repair-schedule.sh"):
+        r = _sel([path])
+        assert r["full"] is False, (path, r)
+        assert "core" in r["surfaces"], (path, r)
+        assert "test_graph_write_repair.py" in r["test_files"], (path, r)
+        assert set(r["test_files"]) != _tier1(), (path, r)
 
 
 def test_source_currency_tool_change_selects_core_not_tier1():

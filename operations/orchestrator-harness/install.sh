@@ -14,16 +14,19 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 O="${O:-$HOME/orchestrator}"
-REPO="${REPO:-/Users/home/eldato/tortoise}"
+REPO="${REPO:-/Users/danielospina/Documents/GitHub/tortoise}"
 OR="${OR:-daniel-ospina/tortoise}"
 
-MAX_LOAD="${MAX_LOAD:-16}"
+# sanity ceiling only; the swap/RAM gates below are the real constraint.
+_NCPU="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+MAX_LOAD="${MAX_LOAD:-$(( _NCPU * 10 ))}"
 MAX_LANES="${MAX_LANES:-4}"
 MAX_REVIEW="${MAX_REVIEW:-4}"
 MERGE_PRIORITY_AT="${MERGE_PRIORITY_AT:-10}"
 MAX_FIX="${MAX_FIX:-3}"
 MAX_FIX_TRIES="${MAX_FIX_TRIES:-3}"
 MIN_SWAP_FREE="${MIN_SWAP_FREE:-600}"
+MIN_MEM_FREE_MB="${MIN_MEM_FREE_MB:-512}"
 BATCH="${BATCH:-2}"
 CYC="${CYC:-240}"
 
@@ -240,6 +243,7 @@ sed \
   -e "s|__MAX_FIX__|$MAX_FIX|g" \
   -e "s|__MAX_FIX_TRIES__|$MAX_FIX_TRIES|g" \
   -e "s|__MIN_SWAP_FREE__|$MIN_SWAP_FREE|g" \
+  -e "s|__MIN_MEM_FREE_MB__|$MIN_MEM_FREE_MB|g" \
   -e "s|__BATCH__|$BATCH|g" \
   -e "s|__CYC__|$CYC|g" \
   "$TEMPLATE" > "$PLIST"
@@ -267,7 +271,7 @@ cat <<EOF
   harness   $O
   repo      $REPO   ($OR)
   limits    lanes=$MAX_LANES review=$MAX_REVIEW fix=$MAX_FIX fix_tries=$MAX_FIX_TRIES
-            max_load=$MAX_LOAD min_swap_free=${MIN_SWAP_FREE}M batch=$BATCH cycle=${CYC}s
+            max_load=$MAX_LOAD min_swap_free=${MIN_SWAP_FREE}M min_mem_free_mb=${MIN_MEM_FREE_MB}M batch=$BATCH cycle=${CYC}s
             merge_priority_at=${MERGE_PRIORITY_AT} open PRs
 
 The loop is NOT running. To start it:

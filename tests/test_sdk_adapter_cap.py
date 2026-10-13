@@ -83,10 +83,20 @@ def test_openrouter_last_finish_reason(monkeypatch, finish_reason, expected):
     assert model.last_finish_reason == expected
 
 
-def test_routing_model_forwards_cap_and_finish_reason(monkeypatch):
+def test_routing_model_forwards_cap_and_finish_reason(monkeypatch, no_provider_keys):
     """The production routing adapter (build_extractor_model — the sdk
     capture path and the v2-ingest runner both use it) forwards the per-call
-    cap to the inner adapter and surfaces last_finish_reason."""
+    cap to the inner adapter and surfaces last_finish_reason.
+
+    #5161: the route is pinned by the DERIVED provider scrub
+    (``no_provider_keys``, #3695/#5477), not a hand-list. The hand-list this
+    test used to carry deleted DEEPSEEK/OPENROUTER but neither
+    ``VENICE_API_KEY`` nor the ``TORTOISE_EXTRACTOR_PROVIDER`` selector, so an
+    ambient value in either decided the route — a keyed selector reds this test
+    with a fail-closed ValueError (measured on main, #5161). With no routing
+    env at all the adapter takes the keyless lenient leg, which is what the
+    assertions below are about.
+    """
     captured: dict = {}
 
     def _fake_post(self_or_url, url=None, headers=None, json=None, timeout=None, **kwargs):
@@ -94,8 +104,6 @@ def test_routing_model_forwards_cap_and_finish_reason(monkeypatch):
         return _FakeResponse(_chat_data(finish_reason="length"))
 
     monkeypatch.setattr("tortoise.model_adapters.requests.Session.post", _fake_post)
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     routing = build_extractor_model("deepseek/deepseek-v4-flash",
                                     max_tokens=8000)
     routing.complete(system="s", user="u", max_tokens=1500)

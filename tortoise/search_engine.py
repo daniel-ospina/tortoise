@@ -18,6 +18,14 @@ from typing import Any, Literal
 
 from .env_truthy import is_truthy
 from .security import entity_label, validate_entity_type
+# #8316: the READ half of the stored-embedding shape seam. A caller-supplied
+# embedding is stored VERBATIM as a plain Cypher `List` (PR #3018's recorded
+# decision) and a read spelled `<alias>.embedding` makes
+# `vec.euclideanDistance` raise for the WHOLE `MATCH` — one such node degrades
+# the entire dense leg. Every dense read that can MEET a stored `List` must
+# normalise through this helper (the HNSW index arm cannot meet one: a `List`
+# node is not in the index at all — that cohort gap is #8429).
+from .vector_write import stored_embedding_vector_expr
 
 # #1391: terminal (no-longer-current) Point statuses EXCLUDED from every
 # default read surface (FTS/vector/structural/operator + sdk query paths).
@@ -279,10 +287,29 @@ def ep_baseline_cypher(alias: str) -> str:
     return f"coalesce({alias}.baseline_set, false)"
 
 
+def ep_prior_only_cypher(alias: str) -> str:
+    """Cypher boolean: ``alias`` is PRIOR-ONLY — the ``'baseline'`` state of
+    :func:`ep_measurement_state` (#3415).
+
+    The third predicate of the three-state vocabulary: a declared #2199
+    baseline with NO EP measurement. NOT the same as "unmeasured" — an
+    unmeasured claim carries no persisted prior at all (Beta(1,1) neutral),
+    while a prior-only claim's confidence_mean IS the declared PRIOR mean.
+
+    Kept textually in step with the Python twin: for every combination of
+    (posterior_alpha, ep_alpha, baseline_set) this helper is true iff
+    ``ep_measurement_state(...) == 'baseline'`` — including the rows where
+    ``baseline_set`` is true and ``ep_alpha`` is NULL (the twin calls those
+    prior-only too, since ``baseline_set`` alone disqualifies "measured").
+    """
+    return (f"({alias}.posterior_alpha IS NULL "
+            f"AND coalesce({alias}.baseline_set, false))")
+
+
 def ep_measurement_state(*, posterior_alpha, ep_alpha,
                          baseline_set: bool) -> str:
-    """Python twin of :func:`ep_measured_cypher`: 'measured' | 'baseline' |
-    'unmeasured' (#3276).
+    """Python twin of :func:`ep_measured_cypher` / :func:`ep_prior_only_cypher`:
+    'measured' | 'baseline' | 'unmeasured' (#3276).
 
     Pure measurement predicate — it does NOT know about the #2490 terminal
     override, which each read surface applies on top (a terminal claim is
@@ -1247,8 +1274,10 @@ def run_vector_query(
     raising — the exception-only catch never fires for the real empty case):
     {0-row result set with zero embedded points → ``no_embeddings``},
     {0-row result set with embedded points present → ``empty_results``},
-    {malformed plain-list embedding node (the vecf32 MATCH throws per-row)
-    or driver exception → ``query_failed``}. Default None = no trace.
+    {an embedding the distance expression cannot read — a non-numeric value, or
+    a width the query vector cannot pair with (a plain ``List`` of the RIGHT
+    width is normalised by ``vector_write.stored_embedding_vector_expr``, #8316)
+    — or a driver exception → ``query_failed``}. Default None = no trace.
 
     In Docker/server mode (is_embedded=False), uses the HNSW vector index
     via CALL db.idx.vector.queryNodes — with both known argument orders
@@ -1642,8 +1671,11 @@ def run_vector_query(
         # ("expected Null or Vectorf32 but was List") in embedded FalkorDBLite
         # and whenever the HNSW index is unavailable — wrap the param in
         # vecf32() so vector search actually runs. Stored embeddings must be
-        # vecf32-encoded too (a single plain-list node poisons the whole
-        # MATCH — see _upsert_event / session indexers).
+        # readable too (one unreadable node poisons the whole MATCH) — the
+        # STORED side is normalised by the shared read seam rather than assumed
+        # to be typed, because a caller-supplied embedding is stored VERBATIM
+        # as a plain `List` by a recorded decision (PR #3018) — see
+        # `stored_embedding_vector_expr` (#8316).
         # #689: retracted Points must not leak into vector results.
         # D10 (#5026): discriminate the document Source from the
         # corpus/provenance Source in the MATCH's WHERE — the brute-force
@@ -1663,7 +1695,7 @@ def run_vector_query(
             f"MATCH (n:{label}) "
             "WHERE n.embedding IS NOT NULL" + bf_status_clause +
             " WITH vecf32($query_vec) AS _qv, n "
-            "WITH n, vec.euclideanDistance(n.embedding, _qv) AS distance "
+            f"WITH n, vec.euclideanDistance({stored_embedding_vector_expr('n')}, _qv) AS distance "
             "WHERE distance IS NOT NULL "
             f"RETURN n.{id_field}, 1.0 / (1.0 + distance) AS score "
             # #3019: a distance tie (equal values, or repeated rows) must not fall
@@ -2530,7 +2562,34 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
         cypher = (
             "MATCH (n:Point) "
             "WHERE n.id IN $ids "
-            "OPTIONAL MATCH (n)<-[r:IMPL]-(:Point) "
+            # #6871: `impl_count` is an INCOMING EVIDENCE count, and an
+            # operator's typed edges are its input set — idx 0 is the
+            # operator's SOURCE, idx >= 1 its targets. IMPL pairs are ALWAYS
+            # source -> target (`ep.py::_update_nary_factor` takes the
+            # `input_ids[0]` arm unconditionally for IMPL), so an idx=0 edge is
+            # the operator's own input and never evidence pointing AT it.
+            # Unguarded, a source with nothing supporting it reported
+            # impl_count=1 and a diluted `contention` (nand/(impl+nand)) on the
+            # wire. So the ONE edge excluded is the operator's input: idx = 0 ON
+            # an operator. Everything else counts, including an operator-less
+            # direct edge — `create_direct_edge` writes it with NO `idx`, so it
+            # can never carry a role and is evidence by definition.
+            #
+            # `c.is_operator IS NULL` is NOT the same as "not an operator": the
+            # canonical identity is `bool(is_operator or op_type)`
+            # (graph-scripts/backfill_is_operator.py, which stamps exactly that
+            # legacy class), and five sites match
+            # `(is_operator = true OR op_type IS NOT NULL)`. Treating a NULL on
+            # a legacy operator as operator-less fails OPEN — its idx=0 edge
+            # counts again for its own source, the very symptom being fixed.
+            #
+            # ⛔ NAND is deliberately NOT guarded here: its pairs depend on the
+            # operator's `direction` (`-` = no pairs, directed = source ->
+            # targets, mutual — the `create_operator` DEFAULT — = all pairs),
+            # which this count cannot express. Filed as its own root: #8460.
+            "OPTIONAL MATCH (n)<-[r:IMPL]-(c:Point) "
+            "WHERE NOT (coalesce(r.idx, -1) = 0 "
+            "           AND (c.is_operator = true OR c.op_type IS NOT NULL)) "
             "WITH n, count(r) AS impl_count "
             "OPTIONAL MATCH (n)<-[r2:NAND]-(:Point) "
             "WITH n, impl_count, count(r2) AS nand_count "

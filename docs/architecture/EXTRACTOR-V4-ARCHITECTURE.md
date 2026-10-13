@@ -360,17 +360,24 @@ A GitHub PR already **is** an ontology shape — title, body, state, number, tim
 
 ```text
 S0  READ       source → common shape + THE MAPPING it carries      [per source type]
+S0a NORMALIZE + HASH   mechanical, free — the hash both exact dedups share  ← NEW (proposal, §4.2)
+S0b SOURCE DEDUP       URL-keyed today; the biggest missing volume lever    ← NEW (proposal, §4.2)
 S1  NARRATE    shape → connected narrative, verbatim entity wording
 S2.1 EXTRACT   narrative (+ raw) → candidate Object / Point / Event AND their connections  [LLM]
-S2.2 VET       adversarial review of the candidates (validity + coverage)             [Jev]
+S2.2a-α EXACT DEDUP    within-batch + against-store; exact text only, mechanical  ← NEW (proposal, §4.2)
+S2.2a-β NEAR-DUP       DETECT the pair and apply the §16.4 never-across guard —
+                       NOTHING IS FUSED HERE (constraint 2)               ← NEW (proposal, §4.2)
+S2.2b VET      the gate: adversarial review (validity + coverage) + the identifier-only
+               DISCARD; may FLAG a merge (`MERGE`), never perform one        [Jev]
 S2.3 CLASSIFY  each SURVIVOR → its pack kind, against the declared vocabulary      [Jev + kNN]
 S3  RESOLVE    look up what exists for these candidates → disambiguate (narrative as
-               context) → AND ATTACH the new context to the surviving entity
+               context) → AND ATTACH the new context to the surviving entity — and the
+               FUSION a `MERGE` flag asked for is executed HERE, after the gate
 S5  CONNECT    two distinct sets: within this batch · to the graph
 S6  COMMIT     create entities + connections + metadata/lifecycle
 ```
 
-**Eight steps.** No S4 and no S1.5 — both were deleted by the purpose test in §4.0. ⚠️ **The numbering gap is deliberate for now:** S-numbers are referenced in posted comments on `#4894` / `#4899`, so **renumber only once the design settles.**
+**Eight steps.** No S4 and no S1.5 — both were deleted by the purpose test in §4.0. ⚠️ **The count is the TOP-LEVEL steps** (S0 · S1 · S2.1 · S2.2 · S2.3 · S3 · S5 · S6): `S0a`/`S0b` are sub-steps of S0 and `S2.2a`/`S2.2b` sub-steps of S2.2, so a sub-step does not make a ninth step. ⚠️ **§4.2's ordering table is the SAME list** — this block carries every id §4.2 lists, and `tests/test_extractor_v4_step_list_consistency.py` is the guard that keeps the two from drifting apart again (`#5092`). ⚠️ **The numbering gap is deliberate for now:** S-numbers are referenced in posted comments on `#4894` / `#4899`, so **renumber only once the design settles.**
 
 ### S0 — READ  *(mechanical — no LLM)*
 
@@ -522,9 +529,9 @@ This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 
 **Mechanism (proposed):** if the batch verdict is poor — *e.g. VET discarded almost everything, or the keep-rate is below a threshold* — **re-narrate ONCE with the pack's `memory_granularity` emphasised, then re-extract.** ⚠️ **Bounded: once, then accept.** A model-call loop can oscillate — the second narrative can be worse than the first, and nothing in the design currently prevents that. **A retry, not a loop.**
 
-**Outputs:** `KEEP` · `DISCARD` · `SPLIT` *(for a fused item — extraction may then split it from the raw, which it already has)* · **`RENARRATE`** *(batch-level only)*.
+**Outputs:** `KEEP` · `NOOP` · `DISCARD` · **`MERGE`** *(the VERDICT — a flag, §16.4)* · `SPLIT` *(for a fused item — extraction may then split it from the raw, which it already has)* · **`RENARRATE`** *(batch-level only)*. ⚠️ **`KEEP`/`NOOP`/`DISCARD`/`MERGE` are the four members §16.4 rules and `tortoise/vet_gate.py` implements (`OUTCOMES`); `SPLIT` is declared here and is NOT in that set — the shipped gate cannot emit it (a disclosed omission, named in `vet_gate.py`), so read `SPLIT` as design intent, not as shipped behaviour.**
 
-⚠️ **`MERGE-INTO-EXISTING` is deliberately NOT a VET output.** VET runs **before** S3 (§4.2), and S3 is **the single authority on whether a candidate is new or an existing node**. A VET stage that emitted `MERGE-INTO-EXISTING` would be deciding new-vs-existing itself — the VET/S3 circular dependency §16.2 identifies. **Merging is S3's decision, made after the gate; VET may only keep, discard, split, or ask for a re-narration.**
+⚠️ **`MERGE-INTO-EXISTING` is deliberately NOT a VET output — and `MERGE` and `MERGE-INTO-EXISTING` are not the same thing.** VET **may** emit the **verdict** `MERGE` — *"fold into another candidate"* (`tortoise/vet_gate.py:OUTCOMES`), a **flag** and nothing more. VET may **not** emit the **action** `MERGE-INTO-EXISTING`. VET runs **before** S3 (§4.2), and S3 is **the single authority on whether a candidate is new or an existing node**. A VET stage that *performed* the merge would be deciding new-vs-existing itself — the VET/S3 circular dependency §16.2 identifies. **The FUSION is S3's action, executed after the gate; VET may only keep, discard, split, FLAG one merge candidate, or ask for a re-narration.** ⚠️ **Nothing consumes the flag yet** — no code routes a `MERGE` verdict to S3, and the union-merge itself is `#5006`'s (`vet_gate.py`: the verdict is *"recorded in the VET evidence surface only"*). **This distinction is what makes this paragraph and §4.2's ordering AGREE rather than contradict: `S2.2a-β` detects the pair, `S2.2b VET` records the verdict, `S3` executes the fusion — three sites, one operation each (`#5092`).**
 
 **⚠️ Unmeasured, and it needs the small-sample-first method:** *whether re-narrating actually improves yield*, and *what keep-rate counts as "poor"*. Both are thresholds that must be set by hand on tens of real sessions with the owner correcting the rule — **not chosen in advance.**
 
@@ -630,10 +637,20 @@ A four-way audit of the write path found **FOUR distinct dedups at FOUR differen
 | # | constraint | consequence |
 |---|---|---|
 | 1 | **Exact dedup needs NOTHING** — identical text is identical, entity-free | **may run first** |
-| 2 | **Non-exact (paraphrase) dedup needs semantic judgement** | **only in VET** — never before it |
+| 2 | **Non-exact (paraphrase) dedup needs semantic judgement** — and "dedup" here means **FUSION** (a candidate folded into another), never *detection* | **the FUSION only after the gate** — never before it. `S2.2a-β` **detects and refuses; it fuses nothing**, so its position above the gate is not a tension with this row |
 | 3 | **The mechanical half of the gate needs NO graph** | **may precede S3** |
 | 4 | ✅ **CONSTRAINT 4 IS TRUE — AND AN EARLIER "CORRECTION" BROKE IT.** *"CLASSIFY needs no graph; the LOOKUP needs KINDS → CLASSIFY before RESOLVE"* | ⛔ **RESTORED 2026-09-24. The 2026-09-23 correction here was WRONG and had the pipeline backwards.** It cited `_derive_queries` (`extractor_v2.py:1744-1778`) — which genuinely never reads `kind`, but **builds FTS query strings only; it is not the resolution lookup.** The lookup is **`resolve_entities` (`:2755`), called at `:4926`**, which builds `ent_refs` with `{"name":…, "kind": str(e.get("kind",""))}` and hands each to **`_find_existing_entity(entities, name, kind)` (`:2705`) — whose EXACT-MATCH branch folds and compares `kind`:** `str(e.get("kind","")).strip().lower() == kind_folded`, with a bare-form fallback only when unambiguous. **So the match half DOES need kinds.** ⚠️ **And the code agrees on the order: the classify pass runs at `:4803`/`:4888`; `resolve_entities` at `:4926` — after it.** |
 | 5 | **Against-priors consolidation needs the lookup** | **cannot precede S3** |
+
+**⚠️ Constraint 2 is what fixes the near-duplicate stage's SITE — it is not merely compatible with it.** Three passages in this document used to disagree: this table put a `MERGE` at `S2.2a-β` (*before* the gate) while §S2.2 said *"merging is S3's decision, made after the gate"*. **They describe two different operations, and each has exactly one site:**
+
+| operation | site | who |
+|---|---|---|
+| **DETECT** the near-duplicate pair **+ apply the §16.4 never-across guard** | **`S2.2a-β`** | mechanical |
+| record the **VERDICT** `MERGE` for a pair that survives the guard | **`S2.2b VET`** | the Jev arbiter (`vet_gate.py:OUTCOMES`) |
+| execute the **FUSION** — the union of both sides' attachments | **`S3`** | the resolve/consolidation tail, after the gate |
+
+The fusion cannot precede the gate: §S2.2 reserves new-vs-existing to S3, and the against-store leg needs the lookup anyway (constraint 5) — the fusion needs a *destination*, which only S3 has. **So no operation has two homes, and no passage in this document places a fusion before the gate.** *(This is the reconciliation of `#5092`; `tests/test_extractor_v4_step_list_consistency.py` is the guard.)* ⚠️ **Nothing consumes the flagged verdict yet** — the union-merge itself is `#5006`'s.
 
 **⚠️ Constraint 4 stands, and it is the basis of the S2.3-before-S3 order.** **CLASSIFY runs after the gate** (so only survivors are classified) **and BEFORE S3** — because `_find_existing_entity` (`:2705`) uses `kind` as its exact-match discriminator, so a lookup that runs before classification cannot exact-match and degrades to the ambiguous bare-form path. ⚠️ **Moving it after S3 manufactures duplicates — the exact failure this document exists to prevent.** *(An earlier version of this line said the opposite; it was wrong. §16.2.)*
 
@@ -645,8 +662,10 @@ S0b SOURCE DEDUP       URL-keyed today; the biggest missing lever           ← 
 S1  NARRATE
 S2.1 EXTRACT
 S2.2a-α EXACT DEDUP    within-batch + against-store                          ← NEW (store half)
-S2.2a-β NEAR-DUP       detect; MERGE only when nothing distinguishing is lost (Jev arbitrates)
+S2.2a-β NEAR-DUP       DETECT + apply the §16.4 never-across guard — NO FUSION HERE (constraint 2)
 S2.2b VET              the gate (identifier-only DISCARD) + adversarial      [Jev]
+                       ↳ may record the VERDICT `MERGE` for a flagged pair; never the
+                         ACTION `MERGE-INTO-EXISTING` — the fusion is S3's (§S2.2)
 S2.3 CLASSIFY          kNN fast path → Jev tail, on SURVIVORS only            [kNN + Jev]
 S3  RESOLVE + D-d      lookup → against-priors semantic dedup
 S5  CONNECT

@@ -965,45 +965,16 @@ def test_no_new_raw_alert_channel_builder_sites():
     )
 
 
-def test_kind_constants_match_the_runbook():
-    """Each new kind has a runbook row naming the manual-close mechanism."""
-    from tortoise import cohort_cost as cc
-
-    runbook = (ROOT / "docs/ops/registry-backup-dr.md").read_text(encoding="utf-8")
-    rows = {ln.split("|")[1].strip(): ln
-            for ln in runbook.splitlines() if ln.startswith("| ")
-            and ln.count("|") >= 3}
-    kinds = (oa.UNMETERED_INCREMENT_KIND, cc.UNENFORCEABLE_INCIDENT_KIND,
-             cc.INCIDENT_KIND, oa.ABUSE_DECISION_FAULT_KIND,
-             oa.ABUSE_ENFORCEMENT_FAULT_KIND, oa.BILLING_NOTIFY_REFUSED_KIND,
-             "abuse_review_needed",  # #5425: the escalation that replaced the suspend
-             oa.PROVIDER_BILLING_EXHAUSTED_KIND)
-    for kind in kinds:
-        assert kind in rows, f"no runbook triage row for {kind}"
-        row = rows[kind]
-        assert "close the GitHub issue" in row and "then delete" in row, (
-            f"the {kind} row must name the close-then-delete procedure: {row}")
-    assert cc.UNENFORCEABLE_INCIDENT_KIND != cc.INCIDENT_KIND
-    assert cc.INCIDENT_KIND not in cc.UNENFORCEABLE_INCIDENT_KIND
-    assert cc.UNENFORCEABLE_INCIDENT_KIND not in cc.INCIDENT_KIND
-    # #4872: the abuse kinds must be their own, not aliases of the metering one
-    # — the R2-unreachable adoption path resolves an incident by GitHub search
-    # on the subject suffix, so a superstring relation would cross-adopt.
-    assert oa.ABUSE_DECISION_FAULT_KIND not in oa.UNMETERED_INCREMENT_KIND
-    assert oa.ABUSE_ENFORCEMENT_FAULT_KIND not in oa.UNMETERED_INCREMENT_KIND
-    assert oa.ABUSE_DECISION_FAULT_KIND not in oa.ABUSE_ENFORCEMENT_FAULT_KIND
-    assert oa.ABUSE_ENFORCEMENT_FAULT_KIND not in oa.ABUSE_DECISION_FAULT_KIND
-    for kind in (oa.ABUSE_DECISION_FAULT_KIND, oa.ABUSE_ENFORCEMENT_FAULT_KIND):
-        assert kind not in cc.INCIDENT_KIND
-        assert kind not in cc.UNENFORCEABLE_INCIDENT_KIND
-    # #3873: a provider-billing exhaustion is its OWN incident, not a spelling of
-    # the Stripe notification drop or of a cohort cap firing — the adoption path
-    # resolves by GitHub search on the subject suffix, so a superstring relation
-    # would cross-adopt.
-    assert oa.PROVIDER_BILLING_EXHAUSTED_KIND != oa.BILLING_NOTIFY_REFUSED_KIND
-    assert oa.PROVIDER_BILLING_EXHAUSTED_KIND not in cc.INCIDENT_KIND
-    assert oa.PROVIDER_BILLING_EXHAUSTED_KIND not in cc.UNENFORCEABLE_INCIDENT_KIND
-    assert cc.INCIDENT_KIND not in oa.PROVIDER_BILLING_EXHAUSTED_KIND
+# #4780: `test_kind_constants_match_the_runbook` lived here. It hand-listed 8
+# kinds and asserted each had a runbook row plus a close-then-delete sentence —
+# the shape #4780 generalizes. It is SUPERSEDED by the registry-generated checks
+# in `tests/test_incident_kinds.py`, which assert runbook ⇄ code set equality in
+# BOTH directions (so a NEW kind cannot be added without a row), the
+# manual-close procedure set exactly, and the prefix-safety property the
+# hand-written non-substring assertions below were approximating (they covered
+# the few pairs the author thought of; #4780 measured that `STALE` IS a substring
+# of `POOL_STALE`/`SWEEP_OFF_STALE` while no kind is a PREFIX of another, which is
+# the property `github_issue.incident_title_matches` actually needs).
 
 
 def test_alert_unmetered_increment_helper_dispatches(monkeypatch):

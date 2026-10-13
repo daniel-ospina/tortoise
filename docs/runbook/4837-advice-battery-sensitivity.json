@@ -1,0 +1,26 @@
+{
+ "receipt": "docs/runbook/4837-advice-battery-receipt.json",
+ "note": "SENSITIVITY ONLY — the receipt's own decision block is the pre-registered result, measured with the product label.",
+ "product_label_verdict": "REJECT",
+ "strict_label_decision": {
+  "metric": "abstained_strict",
+  "C_class_flips_v2": 4,
+  "N3_class_flips_v3": 3,
+  "G1_shipped_guard_false_commits": 0,
+  "G2_v2_guard_false_commits": 0,
+  "G3_v3_guard_false_commits": 0,
+  "class_size_valid": 6,
+  "class_size": 6,
+  "invalid_class_items": [],
+  "guard_size_valid": 7,
+  "guard_size": 7,
+  "thresholds": {
+   "CLASS_FLIP_MIN": 5,
+   "CLASS_SIZE": 6,
+   "BACKSTOP": 0,
+   "GROUND_MIN_WORDS": 4
+  },
+  "verdict": "REJECT",
+  "reason": "C=4 (needs >= 5), G2=0, N3=3, G3=0 — no measured variant both reproduces the class and survives the guard."
+ }
+}

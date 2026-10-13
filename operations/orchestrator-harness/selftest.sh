@@ -242,12 +242,53 @@ ck "the rendered plist PATH contains no */shims or */.pi/* segment" $rc
 # A limit documented in README §4 and rendered by install.sh must not be silently different in
 # orch-loop.sh — MAX_REVIEW was 2 in the loop and 4 everywhere else.
 rc=0
-for v in MAX_LOAD MAX_LANES MAX_REVIEW MERGE_PRIORITY_AT MAX_FIX MAX_FIX_TRIES MIN_SWAP_FREE BATCH CYC; do
-  a="$(grep -oE "^$v=\"\\\$\{$v:-[0-9]+\}\"" "$LOOP" | grep -oE '[0-9]+' | head -1)"
-  b="$(grep -oE "^$v=\"\\\$\{$v:-[0-9]+\}\"" "$INST" | grep -oE '[0-9]+' | head -1)"
-  [ -n "$a" ] && [ "$a" = "$b" ] || { echo "      $v: orch-loop=${a:-?} install=${b:-?}"; rc=1; }
-done
-ck "orch-loop.sh defaults match install.sh for all 9 limits" $rc
+# Assert the EFFECTIVE default, not the source text.
+#
+# Pattern-matching the source was a losing game: four review rounds each closed one spelling of the
+# same hole and left another -- a literal, an arithmetic default, a duplicate definition, a duplicate
+# with no trailing newline, then an indented/bare/conditional reassignment. Each fix taught the regex
+# one more trick while bash kept resolving assignments by its own rules. Executing the assignments and
+# comparing what bash RESOLVES tests the property we actually care about (that the two files agree)
+# rather than a spelling of it.
+#
+# KNOWN LIMIT, stated so this is not oversold: the regex only matches an assignment that BEGINS a line
+# (optionally after `export`). A `readonly VAR=`, an assignment on the same line as an `if`, or one
+# inside a function body written on one line are therefore NOT evaluated, and such a form would evade
+# this check. Those spellings do not occur in either file and neither is a natural way to write a
+# limit, but a check cannot be stronger than what it evaluates, so the guarantee is "the assignments
+# either file actually uses agree", not "any conceivable bash file agrees".
+#
+# Only lines that assign a KNOWN limit var (or _NCPU, below) are evaluated -- never the whole script.
+_LIMITS="MAX_LOAD MAX_LANES MAX_REVIEW MERGE_PRIORITY_AT MAX_FIX MAX_FIX_TRIES MIN_SWAP_FREE MIN_MEM_FREE_MB BATCH CYC"
+# _NCPU is evaluated but not printed: MAX_LOAD is derived from it, so pinning it here (as an earlier
+# version did) would hide a divergence in the one input the derived ceiling depends on.
+_EVAL_VARS="$_LIMITS _NCPU"
+_LIMIT_RE="^[[:space:]]*(export[[:space:]]+)?($(printf '%s|' $_EVAL_VARS | sed 's/|$//'))="
+eff_defaults() {
+  ( if [ "$1" = env ]; then
+      # Second pass: the limits are SET. This distinguishes `VAR="${VAR:-4}"` (honours the
+      # override) from a bare `VAR=4` (ignores it) -- two forms that resolve identically when the
+      # variable is unset, so a single unset pass cannot tell them apart. They diverge exactly where
+      # it matters: the launchd plist supplies these as environment, and it OVERRIDES the script.
+      for v in $_LIMITS; do export "$v=997"; done
+    else
+      for v in $_LIMITS; do unset "$v"; done
+    fi
+    unset _NCPU
+    eval "$(grep -E "$_LIMIT_RE" "$2" 2>/dev/null)"
+    for v in $_LIMITS; do printf '%s=%s\n' "$v" "$(eval "printf '%s' \"\${$v:-UNSET}\"")"; done )
+}
+_da="$(eff_defaults unset "$LOOP"; eff_defaults env "$LOOP")"
+_db="$(eff_defaults unset "$INST"; eff_defaults env "$INST")"
+if [ -n "$_da" ] && [ "$_da" = "$_db" ]; then
+  echo "      effective: $(printf '%s' "$_da" | tr '\n' ' ')"
+else
+  echo "      effective defaults DIFFER:"
+  printf '%s\n' "$_da" > "$TMP/da.txt"; printf '%s\n' "$_db" > "$TMP/db.txt"
+  diff "$TMP/da.txt" "$TMP/db.txt" 2>/dev/null | sed 's/^/        /'
+  rc=1
+fi
+ck "orch-loop.sh and install.sh resolve the same effective defaults for all 10 limits" $rc
 
 # ── 8) the dispatch gate consults load and names the binding gate ────────────────
 # MAX_LOAD was rendered into the plist and documented, but never compared to anything.
@@ -297,6 +338,16 @@ tpl="$(grep -oE '__[A-Z_]+__' "$HERE/launchd.plist.template" | sort -u)"
 sedlist="$(sed -n '/^sed \\/,/launchd.plist.template/p' "$INST" | grep -oE '__[A-Z_]+__' | sed 's/^__//; s/__$//' | sed 's/^/__/; s/$/__/' | sort -u)"
 [ -n "$tpl" ] && [ "$tpl" = "$sedlist" ] && rc=0 || rc=1
 ck "every template placeholder is substituted by install.sh" $rc
+
+# The placeholder parity above cannot see a renamed <key>: rename the env KEY, keep the placeholder,
+# and both checks stay green while the loop reads a variable launchd never sets -- so the plist's
+# environment override is silently ignored. That is the exact mechanism the `env` pass in §7 models,
+# so the key names deserve their own assertion.
+rck=0
+for v in $_LIMITS; do
+  grep -q "<key>$v</key>" "$HERE/launchd.plist.template" || { echo "      template has no <key>$v</key>"; rck=1; }
+done
+ck "every limit the loop reads is rendered as a plist env KEY" $rck
 
 # ── 11) no credential material shipped ───────────────────────────────────────────
 rc=0
@@ -706,6 +757,25 @@ ck "the merge re-review spawn carries the load gate" $rc
 ck "the review-fix spawn carries the load gate" $rc
 grep -q 'gh pr merge "\$PR" --repo "\$OR" --squash >>"\$LOG"' "$LOOP" && rc=0 || rc=1
 ck "the cheap merge path stays ungated" $rc
+
+# ── refresh-candidates.sh: the pool is ordered by SEVERITY, not by issue number ─────
+# #8465: the pool was sorted `sort -n -u` over the NUMBERS ALONE — oldest first — so 238
+# pool-eligible P2-moderate sat ahead of 20 P0-blocker and the P0s were unreachable. Extract the
+# REAL pipeline from the shipped script and drive it with a fixture; re-implementing the sort here
+# would pass on the broken copy too. Verified non-vacuous: the pre-fix extraction yields `sort -n -u`,
+# whose output is `0 7951 1 8039 2 1120` and fails this assertion.
+POOL_SORT="$(grep -E '^\} \| sort ' "$REFRESH" | sed -e 's/^} | //' -e 's/ > "\$O\/\.pool"$//')"
+if [ -n "$POOL_SORT" ]; then
+  pool_got="$(printf '2 1120\n1 8039\n0 7951\n2 3147\n1 7936\n0 7846\n2 3329\n1 8039\n0 3846\n' \
+              | sh -c "$POOL_SORT" | tr '\n' ' ' | sed 's/ *$//')"
+  [ "$pool_got" = "3846 7846 7951 7936 8039 1120 3147 3329" ] && rc=0 || rc=1
+else rc=1; fi
+ck "refresh-candidates.sh orders the pool severity-first (P0<P1<P2), age second, dedup by number" $rc
+
+# The backlog file is consumed top-down, so its ORDER IS the priority — a numeric re-sort put any
+# appended P0 at the BACK (#8465). The shipped script must dedupe WITHOUT sorting.
+if [ -s "$REFRESH" ] && ! grep -qE '^sort -n -u -o "\$O/candidates\.txt"' "$REFRESH"; then rc=0; else rc=1; fi
+ck "refresh-candidates.sh dedupes the backlog without re-sorting it by issue number" $rc
 
 echo
 echo "==> $pass passed, $fail failed"

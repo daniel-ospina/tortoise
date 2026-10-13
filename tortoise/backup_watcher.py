@@ -35,6 +35,14 @@ from datetime import datetime, timezone
 from typing import Any, Callable  # noqa: UP035
 
 from .alert_store import AlertStore, CloseCooldown
+from .incident_kinds import (
+    KIND_BACKUP_SET_MISSING,
+    KIND_DRIVER_DOWN,
+    KIND_METADATA_LOST,
+    KIND_NEVER_BACKED_UP,
+    KIND_R2_DOWN,
+    KIND_STALE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -817,8 +825,8 @@ class BackupWatcher:
             prev_graph_keys = set(getattr(self, "_last_graph_keys", set()))
             cur_graph_keys = set(per_graph)
             for key in sorted(prev_graph_keys - cur_graph_keys):
-                for kind in ("STALE", "NEVER_BACKED_UP", "METADATA_LOST",
-                             "BACKUP_SET_MISSING"):
+                for kind in (KIND_STALE, KIND_NEVER_BACKED_UP, KIND_METADATA_LOST,
+                             KIND_BACKUP_SET_MISSING):
                     # False covers BOTH "close failed" and "cooling down" — the
                     # key is kept pending either way, which is exactly the retry
                     # semantics this path had before.
@@ -885,7 +893,8 @@ class BackupWatcher:
         The heartbeat written right after this call is the watcher's OWN
         liveness evidence: the DR driver files WATCHER_DOWN when it goes stale.
         The alerts share the same R2 store, so the degraded condition that
-        R2_DOWN exists to report is exactly the one that makes
+        the reachability tier (R2_DOWN) exists to report is exactly the one that
+        makes
         ``open_incident``/``resolve_incident`` raise (``_read_json`` re-raises a
         read ``RuntimeError``; ``create_if_not_exists`` re-raises anything that
         is neither 412 nor an accepted fallback). Uncontained, that exception
@@ -917,19 +926,19 @@ class BackupWatcher:
                 # stale incident open beside the new one.
                 if state == "never":
                     if r2_confirmed:
-                        self._alert_leg("resolve_incident", "STALE", org)
-                        self._alert_leg("resolve_incident", "METADATA_LOST", org)
-                    self._alert_leg("open_incident", "NEVER_BACKED_UP", org)
+                        self._alert_leg("resolve_incident", KIND_STALE, org)
+                        self._alert_leg("resolve_incident", KIND_METADATA_LOST, org)
+                    self._alert_leg("open_incident", KIND_NEVER_BACKED_UP, org)
                 elif state == "stale":
                     if r2_confirmed:
-                        self._alert_leg("resolve_incident", "NEVER_BACKED_UP", org)
-                        self._alert_leg("resolve_incident", "METADATA_LOST", org)
-                    self._alert_leg("open_incident", "STALE", org)
+                        self._alert_leg("resolve_incident", KIND_NEVER_BACKED_UP, org)
+                        self._alert_leg("resolve_incident", KIND_METADATA_LOST, org)
+                    self._alert_leg("open_incident", KIND_STALE, org)
                 elif state == "stamp_missing":
                     if r2_confirmed:
-                        self._alert_leg("resolve_incident", "STALE", org)
-                        self._alert_leg("resolve_incident", "NEVER_BACKED_UP", org)
-                    self._alert_leg("open_incident", "METADATA_LOST", org)
+                        self._alert_leg("resolve_incident", KIND_STALE, org)
+                        self._alert_leg("resolve_incident", KIND_NEVER_BACKED_UP, org)
+                    self._alert_leg("open_incident", KIND_METADATA_LOST, org)
                 elif state == "not_eligible":
                     # #3658: an org the sweep does not target is not a DR
                     # gap. Open nothing — and close everything a previous
@@ -937,15 +946,15 @@ class BackupWatcher:
                     # to free does not leave an incident behind forever.
                     # NOT gated on `r2_confirmed`: eligibility is a
                     # control-plane fact, not an R2 measurement.
-                    self._alert_leg("resolve_incident", "STALE", org)
-                    self._alert_leg("resolve_incident", "NEVER_BACKED_UP", org)
-                    self._alert_leg("resolve_incident", "METADATA_LOST", org)
-                    self._alert_leg("resolve_incident", "BACKUP_SET_MISSING", org)
+                    self._alert_leg("resolve_incident", KIND_STALE, org)
+                    self._alert_leg("resolve_incident", KIND_NEVER_BACKED_UP, org)
+                    self._alert_leg("resolve_incident", KIND_METADATA_LOST, org)
+                    self._alert_leg("resolve_incident", KIND_BACKUP_SET_MISSING, org)
                 else:
                     if r2_confirmed:
-                        self._alert_leg("resolve_incident", "STALE", org)
-                        self._alert_leg("resolve_incident", "NEVER_BACKED_UP", org)
-                        self._alert_leg("resolve_incident", "METADATA_LOST", org)
+                        self._alert_leg("resolve_incident", KIND_STALE, org)
+                        self._alert_leg("resolve_incident", KIND_NEVER_BACKED_UP, org)
+                        self._alert_leg("resolve_incident", KIND_METADATA_LOST, org)
             # Universe shrink: an org that LEFT the census (partial or full —
             # `no_teams` is the degenerate case) keeps no DR incident. The
             # per-org loop above only maintains orgs in THIS poll's census, so
@@ -987,7 +996,7 @@ class BackupWatcher:
                 departed = (set(prev_per_team or set()) - cur_per_team) | pending
                 for org in sorted(departed):
                     ok = True
-                    for kind in ("STALE", "NEVER_BACKED_UP", "METADATA_LOST"):
+                    for kind in (KIND_STALE, KIND_NEVER_BACKED_UP, KIND_METADATA_LOST):
                         if not self._alert_leg("resolve_incident", kind, org):
                             ok = False
                     if ok:
@@ -996,28 +1005,28 @@ class BackupWatcher:
                         pending.add(org)
                 self._pending_team_resolves = pending
             if status.get("driver_down"):
-                self._alert_leg("open_incident", "DRIVER_DOWN")
+                self._alert_leg("open_incident", KIND_DRIVER_DOWN)
             elif r2_ok is not False:
                 # Resolving requires HAVING READ the heartbeat: on an R2 read
                 # failure the heartbeat is never read (`driver_ts=None`), so
                 # `driver_down` is False out of ignorance, not out of evidence.
                 # Resolving there would clear a real DRIVER_DOWN and re-file it on
                 # recovery (final-cycle review P2).
-                self._alert_leg("resolve_incident", "DRIVER_DOWN")
+                self._alert_leg("resolve_incident", KIND_DRIVER_DOWN)
             for key, state in status.get("per_graph", {}).items():
                 if state == "never":
-                    self._alert_leg("open_incident", "NEVER_BACKED_UP", key)
+                    self._alert_leg("open_incident", KIND_NEVER_BACKED_UP, key)
                 elif state == "stale":
-                    self._alert_leg("open_incident", "STALE", key)
+                    self._alert_leg("open_incident", KIND_STALE, key)
                 elif state == "stamp_missing":
-                    self._alert_leg("open_incident", "METADATA_LOST", key)
+                    self._alert_leg("open_incident", KIND_METADATA_LOST, key)
                 elif state == "backup_set_missing":
-                    self._alert_leg("open_incident", "BACKUP_SET_MISSING", key)
+                    self._alert_leg("open_incident", KIND_BACKUP_SET_MISSING, key)
                 else:
-                    self._alert_leg("resolve_incident", "STALE", key)
-                    self._alert_leg("resolve_incident", "NEVER_BACKED_UP", key)
-                    self._alert_leg("resolve_incident", "METADATA_LOST", key)
-                    self._alert_leg("resolve_incident", "BACKUP_SET_MISSING", key)
+                    self._alert_leg("resolve_incident", KIND_STALE, key)
+                    self._alert_leg("resolve_incident", KIND_NEVER_BACKED_UP, key)
+                    self._alert_leg("resolve_incident", KIND_METADATA_LOST, key)
+                    self._alert_leg("resolve_incident", KIND_BACKUP_SET_MISSING, key)
             if r2_confirmed:
                 # The BACKUP_SET_MISSING OPEN is an ABSENCE claim ("this org's
                 # state exists and NO archive does"), so it needs a confirmed
@@ -1029,7 +1038,7 @@ class BackupWatcher:
                 # direction; this one is not, because the state it asserts was
                 # never measured.
                 for org in status.get("backup_set_missing", []):
-                    self._alert_leg("open_incident", "BACKUP_SET_MISSING", org)
+                    self._alert_leg("open_incident", KIND_BACKUP_SET_MISSING, org)
                 # BACKUP_SET_MISSING resolves when the org's archives reappear
                 # OR the org leaves the set. Gated on a confirmed archive read,
                 # like every other resolve here.
@@ -1042,22 +1051,30 @@ class BackupWatcher:
                 # poll — the incident would stay open and its dedup state
                 # could absorb the next genuine recurrence.
                 for org in set(status["per_team"]) - cur_bsm:
-                    self._alert_leg("resolve_incident", "BACKUP_SET_MISSING", org)
+                    self._alert_leg("resolve_incident", KIND_BACKUP_SET_MISSING, org)
                 # ...and a state-only org that LEFT the set (tracked across
                 # polls — it is never in `per_team`, so the scan above cannot
                 # close it).
                 for org in self._last_backup_set_missing - cur_bsm:
-                    self._alert_leg("resolve_incident", "BACKUP_SET_MISSING", org)
+                    self._alert_leg("resolve_incident", KIND_BACKUP_SET_MISSING, org)
                 self._last_backup_set_missing = cur_bsm
             # R2_DOWN: emit while degraded-from-known-good, resolve when healthy.
+            # #3147: the kind's meaning is NARROWED to the reachability tier (the
+            # substrate does not answer), and its owner is this WATCHER — the one
+            # surface whose own R2 read is the reachability evidence. So this leg
+            # is now a legitimate open+resolve pair rather than an open the owner
+            # (the driver) had to close. The unlistable tier (R2 answers but the
+            # pool cannot be listed, R2_LIST_OK=0) is the DRIVER's R2_UNLISTABLE;
+            # this probe cannot discriminate it, so on FAILURE the watcher files
+            # the reachability tier (a named residual — see the runbook).
             # Its own guard kept for symmetry with the other legs; the outer
             # `except` below remains as a backstop for structural errors (a
             # malformed status dict), and per-leg containment means it is now
             # only reached for defects rather than for an ordinary store failure.
             if r2_ok is False:
-                self._alert_leg("open_incident", "R2_DOWN")
+                self._alert_leg("open_incident", KIND_R2_DOWN)
             else:
-                self._alert_leg("resolve_incident", "R2_DOWN")
+                self._alert_leg("resolve_incident", KIND_R2_DOWN)
         except Exception:
             logger.exception(
                 "alert store legs failed — heartbeat unaffected (a broken "

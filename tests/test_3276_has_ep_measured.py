@@ -277,22 +277,36 @@ class TestCrossSurfaceHonesty:
     def test_prior_only_low_credibility_not_contested_in_review_prune(self):
         """#3276 review fix: `_review_prune`'s variance scan must use the same
         measured predicate. A prior-only decision with a LOW-credibility author
-        baseline (Beta(2,1), variance 0.0556 > the 0.04 threshold) used to read
+        baseline whose variance exceeds the 0.04 threshold used to read
         `contested` on review_connections while annotate_ep_batch read it
-        unmeasured — a fresh #2206-class disagreement."""
+        unmeasured — a fresh #2206-class disagreement.
+
+        CHANGED (#398 owner ruling 2026-10-12): the declared word is a validated
+        LABEL and ONE weak evidence body, not the ladder prior it names. A
+        BORN-LIVE decide part therefore starts at the #2199 system default
+        Beta(3,1) PLUS the weak body (Beta(3.1,1), variance 0.03616) — BELOW
+        this test's 0.04 threshold, so the assertion no longer exercised its
+        subject. The test's intent is a *weak* prior that is not contested, so
+        it takes the documented route (the same one used in
+        ``test_battery_ep_outcome.py::test_contested_non_decisive_even_when_
+        converged``): pass an EXPLICIT ``status="live"`` so the born-live
+        #2199 default is NOT granted and the word is the weak body ALONE —
+        Beta(1.1,1), variance 0.08046 > 0.04 (measured). The point is still a
+        prior-only decision (unmeasured, set-by-author baseline)."""
         sdk = _fresh_sdk()
         try:
             src = sdk.create_point(
                 "statement", "Quokka prune source zzqx", status="live")["id"]
             pid = sdk.create_point(
                 "decision", "Quokka prioronly lowcred zzqx",
-                credibility="low")["id"]
+                credibility="low", status="live")["id"]
             sdk.create_operator("IMPL", src, [pid], direction="unidirectional")
 
             ep = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
             assert ep.measured is False and ep.baseline is True, ep
             # The low-credibility prior's variance is above the threshold, but
-            # an unmeasured claim is never contested.
+            # an unmeasured claim is never contested. (Explicit status ⇒ no
+            # #2199 default ⇒ the weak body alone, Beta(1.1,1), var 0.08046.)
             assert ep.variance > 0.04 and ep.contested is False, ep
 
             out = sdk.review_connections(mode="prune", scope=None, prune_limit=50)
@@ -337,5 +351,149 @@ class TestTerminalBaselineNotPriorOnly:
             from tortoise.why import assemble_why_blocks
             wep = assemble_why_blocks(sdk._get_proj(), [pid])[pid]["ep"]
             assert wep["measured"] is False and wep["baseline"] is False, wep
+        finally:
+            sdk.close()
+
+
+class TestPriorOnlyCypherMatchesPythonTwin:
+    """#3415: the Cypher predicate naming the canonical 'baseline' state must
+    agree with ``ep_measurement_state`` on every combination of the three
+    columns. They are ONE vocabulary (a drift between them is precisely the
+    #2206/#3276 bug class), so the agreement is pinned here rather than left
+    to the two spellings happening to stay in step."""
+
+    def test_all_eight_column_combinations(self):
+        from tortoise.search_engine import (
+            ep_measurement_state,
+            ep_prior_only_cypher,
+        )
+        sdk = _fresh_sdk()
+        try:
+            g = sdk._get_proj().g
+            pid = sdk.create_point(
+                "statement", "Quokka twin probe zzqx", status="live")["id"]
+            predicate = ep_prior_only_cypher("n")
+            for posterior_alpha in (None, 22.0):
+                for ep_alpha in (None, 3.0):
+                    for baseline_set in (None, True):
+                        g.query(
+                            "MATCH (n:Point {id:$id}) "
+                            "SET n.posterior_alpha = $pa, "
+                            "    n.ep_alpha = $ea, n.baseline_set = $bs",
+                            params={"id": pid, "pa": posterior_alpha,
+                                    "ea": ep_alpha, "bs": baseline_set},
+                        )
+                        cypher = bool(g.query(
+                            f"MATCH (n:Point {{id:$id}}) RETURN {predicate}",
+                            params={"id": pid},
+                        ).result_set[0][0])
+                        twin = ep_measurement_state(
+                            posterior_alpha=posterior_alpha,
+                            ep_alpha=ep_alpha,
+                            baseline_set=bool(baseline_set)) == "baseline"
+                        assert cypher is twin, (
+                            f"{predicate} disagrees with ep_measurement_state "
+                            f"for pa={posterior_alpha} ea={ep_alpha} "
+                            f"bs={baseline_set}: cypher={cypher} twin={twin}")
+        finally:
+            sdk.close()
+
+
+class TestContestedClaimsMeasurementState:
+    """#3415 — the residual #2206/#3276 cross-surface disagreement:
+    ``get_contested_claims`` applied the 0.04 POSTERIOR bar to a prior's
+    WIDTH, so a declared #2199 baseline listed as contested while
+    annotate_ep_batch / why / rankers / ``_review_prune`` read the very same
+    node unmeasured (contested=False).
+
+    The rule under test: the canonical 'baseline' state is excluded; an
+    UNMEASURED (no persisted prior at all) LIVE claim STILL lists — the
+    deliberate listing pinned by the supersede path must survive, so the fix
+    narrows the no-``has_ep``-gate exception rather than harmonizing the two
+    scans."""
+
+    def test_prior_only_low_credibility_baseline_not_listed(self):
+        sdk = _fresh_sdk()
+        try:
+            pid = sdk.create_point(
+                "decision", "Quokka prioronly lowcred contested zzqx",
+                credibility="low")["id"]
+            # #6151 (now an ancestor via main): the authored word is ONE weak
+            # body (AUTHOR_ASSERTION_WEAK_PC = 0.1) on top of the #2199
+            # default, so credibility='low' alone is Beta(3.1, 1) v=0.03616 —
+            # UNDER the 0.04 bar, so no longer the discriminating shape this
+            # test exists for. Widen the DECLARED prior explicitly to
+            # Beta(2,1) v=0.0556 (> 0.04) so the exclusion under test is the
+            # #3415 prior-only gate, not the variance bar (pre-#3415 this
+            # listed as contested).
+            sdk.set_point_baseline(pid, 2, 1)
+            ep = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
+            assert ep.measured is False and ep.baseline is True, ep
+            # The discriminating shape: the DECLARED prior's variance clears
+            # the bar (Beta(2,1) -> 0.0556) while the canonical contested
+            # flag — the one every other surface reads — does not.
+            assert ep.variance > 0.04 and ep.contested is False, ep
+
+            contested = {
+                c["id"]: c for c in sdk._get_ep().get_contested_claims()}
+            assert pid not in contested, (
+                f"prior-only baseline listed as contested: {contested.get(pid)}")
+        finally:
+            sdk.close()
+
+    def test_system_default_baseline_decision_not_listed(self):
+        """The #2199 repro shape (mean 0.75, variance 0.0375 — under the bar)
+        must not list either; the low-credibility case above is the one that
+        actually discriminated pre-fix."""
+        sdk = _fresh_sdk()
+        try:
+            pid = _system_default_decision(
+                sdk, "Quokka prioronly systemdefault zzqx")
+            ep = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
+            assert ep.baseline is True and ep.measured is False, ep
+            contested = {
+                c["id"]: c for c in sdk._get_ep().get_contested_claims()}
+            assert pid not in contested, contested.get(pid)
+        finally:
+            sdk.close()
+
+    def test_unmeasured_live_claim_still_listed(self):
+        """The deliberate listing (:169 pin) survives the narrowing: an
+        unmeasured claim with NO persisted prior coalesces to Beta(1,1),
+        variance 1/12 > 0.04, and MUST list."""
+        sdk = _fresh_sdk()
+        try:
+            pid = sdk.create_point(
+                "statement", "Quokka unmeasured still contested zzqx",
+                status="live")["id"]
+            ep = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
+            assert ep.measured is False and ep.baseline is False, ep
+            contested = {
+                c["id"]: c for c in sdk._get_ep().get_contested_claims()}
+            assert pid in contested, f"unmeasured live claim dropped: {pid}"
+            assert contested[pid]["variance"] > 0.04, contested[pid]
+        finally:
+            sdk.close()
+
+    def test_legacy_measured_high_variance_prior_still_listed(self):
+        """The exclusion is the BASELINE state, not 'any persisted prior': a
+        legacy (pre-#2199) measured ep_alpha with no baseline flag is a
+        measurement (#3276 back-compat) and keeps listing."""
+        sdk = _fresh_sdk()
+        try:
+            pid = sdk.create_point(
+                "statement", "Quokka legacy measured contested zzqx",
+                status="live")["id"]
+            sdk._get_proj().g.query(
+                "MATCH (n:Point {id:$id}) SET n.ep_alpha = 2.0, "
+                "    n.ep_beta = 2.0, n.baseline_set = false, "
+                "    n.posterior_alpha = null, n.posterior_beta = null",
+                params={"id": pid})
+            ep = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
+            assert ep.measured is True and ep.baseline is False, ep
+            assert ep.variance > 0.04, ep
+            contested = {
+                c["id"]: c for c in sdk._get_ep().get_contested_claims()}
+            assert pid in contested, f"legacy measured claim dropped: {pid}"
         finally:
             sdk.close()

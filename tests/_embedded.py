@@ -392,6 +392,15 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # config/ci-surfaces.yml; the two registries are one set in two homes
     # (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
     "test_direction_storage_7852",
+    # #6871: the operator's INPUT set (idx=0 source, idx>=1 targets), the source
+    # edge being EP's factor source slot, and the canonical evidence read never
+    # surfacing a point as its own supporter. The fixture builds
+    # `TortoiseSDK(<tmpfile>)`, so a URI-set lane would redirect the construction
+    # to the server and the embedded graph under test would be gone. Mirror of
+    # the `carve_out:` entry in config/ci-surfaces.yml; the two registries are one
+    # set in two homes (tests/test_ci_selection.py::
+    # test_carve_out_mirrors_test_no_redirect_stems).
+    "test_6871_operator_input_set",
     "test_redis_guard",
     "test_resume_gate_parity",
     "test_smoke_embedded",
@@ -419,6 +428,14 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # list in config/ci-surfaces.yml (the two are one set in two homes;
     # tests/test_ci_selection.py pins the equality).
     "test_update_point_derived_embedding_4520",
+    # #8316: the module-level `embedded_only` guard for the VERBATIM
+    # (caller-supplied) embedding's dense read asserts the EMBEDDED store's
+    # plain-`List` shape and the read seam that tolerates it, so it must
+    # construct a real embedded store — a redirected construction would run
+    # against the server and certify nothing. Registered with the carve_out
+    # list in config/ci-surfaces.yml (the two are one set in two homes;
+    # tests/test_ci_selection.py pins the equality).
+    "test_verbatim_embedding_read_8316",
     # #5148: `test_sdk_emit_event_survives_unreachable_seam` is `embedded_only`
     # (it constructs a real embedded store), so it is a permanently green,
     # permanently unexecuted gate on main unless this stem is routed to the

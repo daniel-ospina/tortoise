@@ -1374,6 +1374,32 @@ class _EntityHandlers:
         # keeps the replay open-set passthrough from logging a FALSE
         # `"Point prop %r is not declared"` drift warning on every rebuild.
         "goalState",
+        # #6110/#8400: the per-kind dedup IDENTITY supplied to
+        # `create_point(key=…)`. It rides the `PointAdded` snapshot and is
+        # restored through this same open-set passthrough — declaring it keeps
+        # the shared live+replay writer from logging a FALSE `"Point prop %r
+        # is not declared"` drift warning for a documented identity prop (and
+        # removes the one-warning-per-keyed-point rebuild noise the #6110
+        # review measured). Declaration is warning-suppression only: the
+        # passthrough persists `key` either way.
+        "key",
+        # #398 (owner ruling 2026-10-12): the author's declared credibility
+        # WORD, persisted by `create_point(credibility=…)` as a validated
+        # LABEL (it no longer sets the claim's strength). `_apply_source_
+        # inheritance` reads it to treat the authored assertion as ONE weak
+        # evidence body and to keep recomputing an authored baseline as real
+        # sources arrive. Declared so the replay open-set passthrough does not
+        # log a FALSE `"Point prop %r is not declared"` drift warning on every
+        # rebuild.
+        "credibility",
+        # #6151 defect 2: the #2199 system-default provision, recorded on a
+        # decide part BORN live (no explicit status). `_apply_source_
+        # inheritance` re-injects the default ONLY where this marker says one
+        # was granted, so a decide part created with an EXPLICIT status never
+        # gets an unearned default. Declared so the replay open-set passthrough
+        # does not log a FALSE `"Point prop %r is not declared"` drift warning
+        # on every rebuild.
+        "baseline_system_default",
     })
     # #2795 (D2 mechanic 1): list-valued props are persisted ONLY when their
     # key is declared here. Arrays are not fulltext-indexed and the canonical
@@ -3830,9 +3856,15 @@ class _EntityHandlers:
         # NULL).
         embedding = inner.get("embedding")
         if embedding is None and inner.get("eventKind") != "meeting":
-            # Stored vecf32 (#244): vec.euclideanDistance rejects plain-list
-            # vectors — a single List-typed embedding poisons brute-force vector
-            # search for the whole Event label. Align with the Point pattern.
+            # Stored vecf32 (#244): the QUERY param must be cast (a plain-list
+            # param is rejected there), and the STORED side goes through the
+            # typed write seam so every server-owned vector has the shape every
+            # other writer produces. Event has NO vector index — the only vector
+            # index is on Point (#8429 is Point-scoped) — so the Event dense leg
+            # is always the brute-force scan, where #8316 normalises a
+            # right-width stored List at the READ boundary (a wrong width or a
+            # non-numeric value still aborts the MATCH — #8430). Align with the
+            # Point pattern.
             event_content = " ".join(filter(None, [
                 inner.get("subject", ""),
                 inner.get("eventKind", ""),

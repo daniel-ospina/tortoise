@@ -351,15 +351,16 @@ make the hourly job RED, so a broken pipeline cannot stay green for weeks (the
 |---|---|---|
 | deliberate-off | `enabled:false`, no `config_error`/`storage_error`, pool **measured** fresh | silent `exit 0` — a real operator pause must not page |
 | off-because-broken | `enabled:false` + non-null `config_error` | files **SWEEP_CONFIG_ERROR**, job RED |
-| off-because-storage-down | `enabled:false` + non-null `storage_error` | files **R2_DOWN**, job RED |
+| off-because-storage-down | `enabled:false` + non-null `storage_error` | files **R2_UNLISTABLE** (#3147: the app ANSWERED and reports broken storage — the listing/measurement tier, not unreachability), job RED |
 | off-while-pool-stale | `enabled:false`, no config/storage error, and the pool is not **measured fresh**: a `backups/{org_id}/default/` archive older than `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (240), a team prefix with **no default archive at all**, or a listing that failed | files **SWEEP_OFF_STALE**, job RED (the pooled **POOL_STALE** incident still files when a tenant measured stale; the per-tenant `STALE` residual is the watcher's) |
 | enabled-but-backing-up-nothing | `enabled:true` and the sweep backed up 0 teams (`no_teams` / `no_eligible_teams` / `no_work` / `enum_failed` / `error`) while the R2 pool holds ≥1 team prefix, **or while the pool cannot be measured**, **or** the sweep reported a lock that cannot be verified as recent | files **SWEEP_NO_COVERAGE**, job RED |
 
 **Filing ⇒ the job is RED.** The taxonomy above is the classifier; the job
 status is simpler and deliberately blunter — `file_alert` sets a run-level
 `LOUD` flag and every terminal exit goes through it, so *any* incident filed
-this run (APP_DOWN, WATCHER_DOWN, a pooled **POOL_STALE** from the direct-R2 leg, an
-R2_DOWN — preflight or partial-listing — a stuck-lock SWEEP_NO_COVERAGE, or a
+this run (APP_DOWN, WATCHER_DOWN, a pooled **POOL_STALE** from the direct-R2 leg,
+an **R2_DOWN** — the reachability tier — or an **R2_UNLISTABLE** — the listing
+and measurement tier — a stuck-lock SWEEP_NO_COVERAGE, or a
 PURGE_FAILED/RECONCILE_FAILED ride-along) exits 1. (The converse does not hold
 **only** where filing is impossible by construction: the two pre-flight guards —
 a missing `GITHUB_TOKEN`, or a missing `INTERNAL_API_URL`/`FASTAPI_INTERNAL_KEY`
@@ -380,8 +381,8 @@ top-level listing, any per-team listing — or a failed `get-object` of the
 legacy-flat classification index leaves the pool *unmeasured*: the driver then
 never reads it as fresh, never files a false `STALE` from a failed read, and
 never lets it silence the 0-team envelope. A listing that fails while
-`head-bucket` passes also files **R2_DOWN** (storage partially reachable,
-pool unverifiable) so a "successful" sweep cannot keep the run green. A failed
+`head-bucket` passes also files **R2_UNLISTABLE** (storage reachable,
+pool unverifiable — #3147) so a "successful" sweep cannot keep the run green. A failed
 read while the sweep is OFF is **not** a confirmed deliberate pause, so it
 files SWEEP_OFF_STALE. An unclassifiable `/status` (no boolean `.enabled`, or a
 non-JSON 200) fails **closed** as SWEEP_NO_COVERAGE. A held sweep lock is not
@@ -409,17 +410,25 @@ whose default graph is legitimately empty while a custom graph archived is not
 a coverage gap.
 
 **Storage errors are not the kill-switch.** A non-null `storage_error` files
-**R2_DOWN** whether or not the sweep is enabled (the enabled path used to drop
-it), and it blocks the `R2_DOWN` self-heal for that run — a sweep that
+**R2_UNLISTABLE** whether or not the sweep is enabled (the enabled path used to
+drop it) — #3147: the app ANSWERED and reports broken storage, so this is the
+listing/measurement tier, never the reachability tier. It blocks the
+`R2_UNLISTABLE` self-heal for that run — a sweep that
 "completes" while `/status` reports broken app storage has not recovered it.
 
 **Self-heal is evidence-tiered (#2411 + #2796):** `APP_DOWN` and the resolved
 `SWEEP_CONFIG_ERROR`/`SWEEP_OFF_STALE` clear when `/status` + the sweep complete
-(the app answered). `R2_DOWN` clears **only** when the driver's own
+(the app answered). `R2_UNLISTABLE` (#3147, the LISTING tier — driver-owned)
+clears **only** when the driver's whole-pool measurement is clean: the
 `head-bucket` preflight succeeded, `storage_error` is clear **and** the pool was
 measured this run — a sweep that "completes" with R2 down must not close the
-`R2_DOWN` it just filed (that would re-file and re-close forever). It can
+incident it just filed (that would re-file and re-close forever). It can
 therefore also clear from the disabled path once storage is proven back.
+`R2_DOWN` (#3147, the REACHABILITY tier — **watcher-owned**) clears only on the
+watcher's own evidence: its R2 probe reaches the substrate again. The driver
+files it when its preflight fails but **cannot** clear it (`resolve_global`
+refuses a watcher-owned kind), which is what makes the split safe in both
+directions.
 `WATCHER_DOWN` clears on **watcher evidence** (a `.watcher` block with a real
 boolean `running` read this run) — a missing/malformed block neither files nor
 clears it, because unknown is not evidence the daemon is alive.
@@ -467,11 +476,14 @@ cover a kind's recovery condition may declare it recovered — `KIND_OWNERS` in
 pinned across the language boundary by `test_kind_owner_contract_with_driver`.
 Anything else is refused and logged with the sentinel left intact. This exists
 because one shared object let the weaker probe win: the watcher's reachability
-check cannot distinguish "R2 unreachable" from
+check could not distinguish "R2 unreachable" from
 "the bucket cannot be listed" (the driver's `R2_LIST_OK=0` class), so its
 all-clear would close the driver's `R2_DOWN` — a false recovery, and the driver
 would then re-file on its next run: one duplicate issue + Telegram pair per
-hour. Each sentinel records the `writer` that filed it for diagnosis only — it
+hour. #3147 modelled the two as two kinds with two owners
+(see §"The two R2 tiers (#3147)" in this document), so each writer clears the
+tier its own
+probes cover. Each sentinel records the `writer` that filed it for diagnosis only — it
 is not an authority token, and a legacy object with no `writer` field resolves
 by the same `KIND_OWNERS` rule. See
 `docs/adr/ADR-011-resolution-authority-for-dr-alerts.md`.
@@ -544,6 +556,61 @@ enabled+unmeasurable cases, the empty-prefix measured-empty case (#3659), and
 dedup open/closed/404/blip/backfill. (The driver carries the exec bit so the
 harness invokes it directly — a `$(bash script)` command substitution trips the
 agent worktree guard, #1484.)
+
+### The two R2 tiers (#3147)
+
+R2_DOWN used to cover two failure modes with two different evidence requirements,
+so one kind was cleared by writers that had only one of them — and ADR-011 had to
+refuse the watcher the right to close `R2_DOWN` at all. That refusal was a guard
+around a modelling error rather than a model; #3147 models it. **One kind now
+corresponds to exactly one recovery condition and one evidence tier.**
+
+| Tier | Kind | Filed by | Recovery evidence (the ONLY thing that clears it) | Owner |
+|---|---|---|---|---|
+| unreachable | `R2_DOWN` (frozen key **retained**, meaning narrowed) | the driver's `head-bucket` preflight **and** the watcher's R2 read | the substrate **ANSWERS** — a probe reaches it | **watcher** (was driver) |
+| unlistable | `R2_UNLISTABLE` (**new**) | the driver's listing leg (`R2_LIST_OK=0`) and the app's `storage_error` (read from `/status` by the driver) | the driver's **whole-pool measurement**: `head-bucket` OK + `storage_error` clear + `R2_LIST_OK=1` | **driver** |
+
+**Why R2_DOWN keeps its key instead of being renamed `R2_UNREACHABLE`.**
+`tortoise/incident_kinds.py` freezes kind strings: the kind IS the R2 dedup key
+(`ops/alerts/{KIND}/{subject}.json`) AND the `[DR] {KIND}` adoption token, so a
+rename is a data migration (the module docstring carries the playbook), not a
+refactor. Keeping `R2_DOWN` means no live dedup object or open issue is orphaned
+and the R2-unreachable adoption path keeps working, while its *meaning* narrows to
+the reachability tier. `R2_UNLISTABLE` is a NEW key — there was no open
+`[DR] R2_DOWN` incident to hand-adopt when the split landed, so playbook step 2
+had nothing to do.
+
+**Ownership holds in BOTH directions** (indicator 4). The driver may not clear
+`R2_DOWN`: `kind_owner()`/`KIND_OWNERS` make it watcher-owned, so the driver's
+`resolve_global` refuses it and leaves the sentinel intact (pinned by
+`registry-cron.test.sh` case 66 and by `tests/test_alert_store.py`). The watcher
+may not clear `R2_UNLISTABLE`: its probe measures reachability, not the pool
+(pinned by `tests/test_alert_store.py`). No provenance exception was added — the
+`writer` field on a sentinel is diagnostic only.
+
+**Suppression is per-kind, so the two tiers suppress independently.**
+`ops/suppression.json` is keyed `{"KIND": {"until": "ISO"}}`, and the issue
+titles differ (`[DR] R2_DOWN …` vs `[DR] R2_UNLISTABLE …`), so pausing one tier
+does not pause the other and the GH-search adoption path cannot cross-adopt them
+(`github_issue.incident_title_matches` is `[DR] {kind}`-prefix anchored).
+
+**NAMED RESIDUAL — a watcher-side permission failure is filed at the
+reachability tier.** The watcher's probe is `storage.list("backups/")` →
+`list-objects-v2`. On FAILURE it cannot tell "R2 does not answer" from "R2
+answers but this key cannot list" (the body's premise that only the driver tests
+the listing tier is imprecise for the watcher), so it files the incident at the
+reachability tier (`R2_DOWN`) — the tier its evidence *claims*. When the real
+cause is a watcher-side `ListObjects` failure, the incident is therefore filed
+under `R2_DOWN` while the driver's `R2_UNLISTABLE` (if its listing leg also
+fails) is the accurate one; both can be open, and the `R2_DOWN` one clears as
+soon as the watcher's read succeeds again. This is a labelling residual, not a
+lost signal — filed as **#8472**. Anti-flap/hysteresis for the tier BOTH surfaces
+can file is **#3146**.
+
+**Not done here (deliberately).** ADR-011 is a dated, human-gated decision record
+and is not edited by this change; this runbook section is the operational home.
+The `R2_DOWN` key is retained, never renamed (see the migration playbook in
+`tortoise/incident_kinds.py`).
 
 ## Control plane / dialect (#2823)
 
@@ -633,7 +700,8 @@ warning ahead of it.
 | METADATA_LOST | archives exist but the graph's per-graph state object missing | Re-run sweep (state re-created) |
 | BACKUP_SET_MISSING | state exists but no archives (bulk delete/erroneous prune) | Investigate R2; restore from a retained archive if possible |
 | DRIVER_DOWN | driver heartbeat stale (> 4h) — workflow disabled/dead | Re-enable the workflow; GH 60-day auto-disable |
-| R2_DOWN | R2 unreachable or not listable (driver-side signal: `head-bucket` failed, or it passed but `list-objects-v2` failed so the pool is unverifiable) | Check R2 creds/billing/bucket policy and the access key's `ListObjects` permission |
+| R2_DOWN | #3147: R2 is **UNREACHABLE** — no probe reaches the substrate. The driver files it when its own `head-bucket` preflight fails. Filed by BOTH surfaces: the driver's preflight AND the watcher's R2 read (on a FAILING read the watcher cannot tell the two tiers apart, so it files at this one — see the named residual in §"The two R2 tiers (#3147)") | Check R2 reachability (network/endpoint/billing) and the R2 credentials. **Auto-resolves** on the WATCHER's own evidence: its next R2 probe reaches the substrate. The driver deliberately CANNOT clear it (`resolve_global` refuses a watcher-owned kind) — its passing preflight is not the watcher's evidence |
+| R2_UNLISTABLE | #3147: R2 **answers** (a probe reaches it) but the pool cannot be **listed** — the driver's `R2_LIST_OK=0` class (typically the access key lacks `ListObjects`), or a non-null `/status.storage_error`. The unlistable half of the old single `R2_DOWN` key | Check the R2 access key's `ListObjects` permission (`head-bucket` succeeds while `list-objects-v2` fails), the bucket policy, and — for a `storage_error` filing — the app-side storage. **Auto-resolves** on the DRIVER's whole-pool measurement: preflight OK + `storage_error` clear + `R2_LIST_OK=1`. The watcher deliberately cannot clear it (its probe measures reachability, not the pool) |
 | ALERTER_DOWN | daemon's GitHub PAT dead (`gh_ok: false`) | **NOT EMITTED — no writer exists.** `gh_ok` is not on `/status`, so the driver has nothing to read; the condition currently surfaces only as a red workflow run. See "Kinds with no writer" below (deferred: #3033; the writer is tracked as **#3412**) |
 | APP_DOWN | app unreachable from the driver | Fly health; cold-start OOM (#545) |
 | WATCHER_DOWN | watcher heartbeat stale (daemon dead) | Check app logs; restart |
@@ -657,8 +725,39 @@ warning ahead of it.
 | ABUSE_DECISION_FAULT | #4872: a store call on the abuse **enforcement DECISION path** raised, so the evaluation could not complete — the lane is `window_sum`, `clean_window_episode_end`, `latest_flag_at`, or `rule_event_between`. **PLATFORM-SCOPED (subject `_`)**: the cause is a shared substrate fault (PostgREST schema-cache miss `PGRST202`, ACL `42501`, transport), so ONE incident covers every org. Detail is a bounded, message-free vocabulary — `lane`, `error_type`, `rule` (`point_create`/`key_create`), `subject_org` (**the FIRST org to fault — evidence, NOT scope**: the body is written create-once, so later orgs are not recorded), and `fallback` (what the swallow DID: `return_none`/`reflag`/`continuity_true`). TWO lanes push **TOWARD** the escalation — `continuity_true`, and the `clean_window_episode_end` leg (a failed guard read or clear write leaves the flag episode ARMED, so the stale anchor survives and a later over-threshold evaluation still escalates to the review alert); `window_sum`/`reflag` fall away from it. ⚠️ **#5425: the terminal action is an operator REVIEW ALERT, never a suspension** — no lane suspends anyone. The same create-once rule as `subject_org` applies to `lane`/`fallback`: they name the FIRST faulting lane of the incident's life (an R1 `flag_org` failure can own the body while a later lane's failure in the same request is throttled), so the UNTHROTTLED ERROR records are the complete per-lane evidence. The ERROR record carries the resolved `kind` and the `exc_info` stack (the stack at most once per lane per 60s — a shared-substrate outage must not amplify logs); the PostgREST message is the diagnosis. **Not gated on `BACKUP_SWEEP_ENABLED`** (the un-gated `operator_alert` seam, D5a); with no `DR_ISSUES_PAT` the ERROR log is the residual | Identify the failing store call from `lane` and the substrate cause from `error_type`; `subject_org` names only the first org whose evaluation failed. This is OBSERVABILITY: it does not suspend anyone and does not repair the fault. Confirm the substrate fault (PostgREST logs / `pg_get_function_arguments` / a direct `service_role` call), then decide whether the affected orgs' missed enforcement must be applied by hand. The sibling `abuse_suspended`/`abuse_review_needed` filings (`notify.py`) resolve through the same un-gated `_incident_alert_store` seam (#4778), so they too are visible on a sweep-disabled deployment. **Manual close:** close the GitHub issue **first**, then delete `ops/alerts/ABUSE_DECISION_FAULT/_.json` (that order matches `AlertStore.resolve_incident` — close, then delete-to-resolve; deleting the object first leaves the issue open and re-arms a recurrence as a SECOND issue) |
 | ABUSE_ENFORCEMENT_FAULT | #4872: the abuse **enforcement ACTION** could not be applied — after #5425 the only lane is `flag_org` (a stage-1 flag row was not written, while the caller still returns `flag` and still notifies "flagged"). The `suspend_org` lane is **GONE**: the automatic stage-2 suspension was deleted by the owner ruling on #5425, so no lane can emit it and `return_breach` is unreachable. Kept a DIFFERENT kind from `ABUSE_DECISION_FAULT` because the incident body is written create-once: a transient evaluation-read blip must never mask a failed enforcement write. **PLATFORM-SCOPED (subject `_`)** for the same shared-substrate reason. Detail: `lane`, `error_type`, `rule`, `subject_org` (first org to fault, evidence not scope), `fallback` (only `return_flag` remains). `lane`/`fallback` obey the same create-once rule as `subject_org`: they name the FIRST faulting lane for the incident's life, so read the UNTHROTTLED ERROR records for the full per-lane picture. The ERROR record names the resolved `kind` and carries the `exc_info` stack (bounded to one per lane per 60s). **Not gated on `BACKUP_SWEEP_ENABLED`** (D5a); with no `DR_ISSUES_PAT` the ERROR log is the residual | `lane=flag_org` is the #4872 instance: the flag row did not land, so the staging clock never started even though the caller was told `flag`. Failure to WRITE the flag means the episode silently does not begin — the org is not surfaced for review and no alert escalates. Determine WHY from `error_type` + the ERROR record's `exc_info` (the PostgREST message), or by a direct `service_role` call / `pg_get_function_arguments('public.abuse_flag')` / `NOTIFY pgrst, 'reload schema'` then retry. ⛔ **#5425: nothing suspends any more** — an org already flagged past the staging window with continuity satisfied raises `abuse_review_needed` on its next `point_create` evaluation and stays served (no 403/-32006). Re-flag it by hand if the missing row was the only thing keeping it unreviewed. **Manual close:** close the GitHub issue **first**, then delete `ops/alerts/ABUSE_ENFORCEMENT_FAULT/_.json` (close, then delete-to-resolve) |
 | abuse_review_needed | #5425: an org is **persistently** over its abuse threshold — the escalation that replaced the deleted automatic suspension. Raised by `AbuseEngine._evaluate` when a stage-1 flag has persisted a full window with continuity evidence, and filed through `notify_abuse` (the engine's own kind, deliberately NOT `abuse_suspended`, so "we chose not to enforce automatically" can never be read as "an operator suspended this"). A **dashboard row** (`abuse_events.event_type=review_needed`) is written best-effort alongside it, and it is that row, not the notification, that makes the escalation durable. Subject is the org id. The engine takes **NO enforcement action**: the account keeps serving under its tier quota and the per-key request rate. ✅ **Not gated on `BACKUP_SWEEP_ENABLED`** (#4778, D5a) — `notify.notify_abuse` resolves its channel through the un-gated `incident_alert_store()` seam, so an incident object IS created on a sweep-disabled deployment. Before #4778 this filing ran the raw `_backup_config_safe()` chain, which answers `None` with `BACKUP_SWEEP_ENABLED` unset (the default), so **no incident object was created at all** — that was the #4778 defect, and it is FIXED here. The residual is now only the channel's CONSTRUCTION: no `DR_ISSUES_PAT` (no filer), or an unbuildable object store (`R2_*` missing/typoed) — then the Telegram alert is the residual and the dashboard row below is the durable trace. With the channel configured, the GitHub issue is the assignable record, so read it rather than relying on the abuse list alone. ⚠️ That row write is **best-effort** (`_notify` is a declared `DECISION_FAULT_LANES` exclusion, so its failure is debug-only): if it fails **and** no chat channel is configured, the stage-2 marker is lost — the stage-1 `flag` rows in the same list are the backstop, so never treat this row as guaranteed. With no `DR_ISSUES_PAT` the Telegram alert is the residual | Decide, with the volume in hand, whether to raise the ceiling or reach out — the owner ruling on #5425 is "rate-limits, and if they want more they need to speak with us", so the action is a **conversation**, never a suspension. This incident existing but unread means a customer is being watched and has not been spoken to. **Manual close only:** close the GitHub issue **first**, then delete `ops/alerts/abuse_review_needed/{org}.json` (that order matches `AlertStore.resolve_incident` — close, then delete-to-resolve) |
+| abuse_suspended | #5425: an **operator-initiated** suspension was recorded. The engine no longer suspends automatically (that is what #5425 deleted — see `abuse_review_needed` above), so this kind has NO automatic writer left: it fires only from `notify.notify_abuse("abuse_suspended", …)`, i.e. from an out-of-band operator action or a routine that deliberately uses the old shape (`tests/test_notify.py` pins that it still reaches the ops sink under its OWN kind). Subject is the org id; the body names the rule and the count. ⛔ The kind string is a **grandfathered** lowercase spelling — it is an R2 dedup key (`ops/alerts/abuse_suspended/{org}.json`), so it is NOT renamed to match the SCREAMING_CASE siblings; see "One declaration site" below for the rename policy. Filed through the un-gated `_incident_alert_store` seam (#4778, D5a), so it is visible on a sweep-disabled deployment; with no `DR_ISSUES_PAT` (or an unbuildable object store) the Telegram leg is the residual | Confirm the suspension was intended and that the `suspended_at` read is what the customer sees (the durable flag, not this notification). **Manual close only:** close the GitHub issue **first**, then delete `ops/alerts/abuse_suspended/{org}.json` (that order matches `AlertStore.resolve_incident` — close, then delete-to-resolve); deleting the object first leaves the issue open and re-arms a recurrence as a SECOND issue |
 | BILLING_NOTIFY_REFUSED | #4456: a Stripe billing notification was **dropped** — the #3498 offload seam REFUSED the submission (the telemetry pool's backlog was full, or a queued submission was cancelled before any worker ran it). The `WebhookEvent` idempotency marker commits **before** the notification, so Stripe's retry sees `is_first=False` and the notification is lost **permanently**: the org is never told its plan changed. Subject is **PLATFORM-SCOPED** (`""`, stored as `_`) by the #4456 plan — one Resend account serves every team AND the shared telemetry pool makes the refusal cross-tenant, so a per-org key would file N issues for one outage; the affected org travels in the detail, a fixed, message-free vocabulary — `op` (`billing_notify`), `event_type` (the Stripe event type), `org_id`. **Not gated on `BACKUP_SWEEP_ENABLED`** (D5a); with no `DR_ISSUES_PAT` (or an unbuildable object store) the site's rate-limited **ERROR** line is the residual | The dropped notification is **not recoverable from this incident**. Confirm the org's current tier, then re-fire it manually (`notify_billing_event(kind, {org_id, tier}, …)`); and investigate why the seam refused — a wedged best-effort call parking all `CONTROL_PLANE_TELEMETRY_WORKERS` slots. **Manual close:** close the GitHub issue **first**, then delete `ops/alerts/BILLING_NOTIFY_REFUSED/_.json` (that order matches `AlertStore.resolve_incident` — close, then delete-to-resolve). Deleting the object first leaves the issue open and re-arms a recurrence as a SECOND issue |
+| BILLING_SEND_FAILED | #3631: a billing notification's **email leg failed** — the Resend send was refused or raised (`notify.notify_billing_event` → `_file_incident_once_a_day`). Distinct from `BILLING_NOTIFY_REFUSED`: that kind is the offload seam refusing to SUBMIT the notify (the event is already claimed, so the notification is lost permanently), while this one is the send itself failing after the submission was accepted. Subject is platform-scoped (`""`, stored as `_`) — ONE Resend account serves every team, so a per-org key would file N issues for ONE outage; the affected org travels in the detail (`org_id`, `event_type`, `reason`). ⚠️ It is filed **at most once per `(kind, org)` per UTC day per process** (the budget-skip branch is informational and the Resend budget stays spent for the rest of the day), so the incident is not a per-send record. With no `DR_ISSUES_PAT` the caller's own WARNING is the residual | Treat as a **transactional-email outage, not a billing outage**: the Stripe state change itself landed. Check `RESEND_API_KEY` / the shared send budget (`email_notify` slot accounting, #3631) and the Resend account status, then re-send the notification by hand if the customer must be told. **Manual close only:** close the GitHub issue **first**, then delete `ops/alerts/BILLING_SEND_FAILED/_.json` (that order matches `AlertStore.resolve_incident` — close, then delete-to-resolve); deleting the object first leaves the issue open and re-arms a recurrence as a SECOND issue. Added as a triage row by #4780 — the kind was emitted with no runbook row, so an operator held an incident with no documented recovery |
+| INVITE_SEND_FAILED | #3631: a transactional **invite** email could not be delivered — the invite send leg exhausted its retries (`email_notify.send_invite_email` → `file_incident`). The invite is the ONLY automated token-delivery path (the dashboard discards the token), so a provider failure means the invitee never receives a way in; before this kind existed that was visible only in a log line. Subject is platform-scoped (`""`, stored as `_`) for the same reason as the billing leg — the Resend account is shared across teams, so keying by team would file one issue per affected team for a SINGLE outage. Detail carries `invitation_id` and the redacted error. With no `DR_ISSUES_PAT` the WARNING line is the residual | Confirm the Resend account/budget (see `BILLING_SEND_FAILED` above) and then **re-invite** the affected invitation id — the token in the failed send is not recoverable from this incident, and the dashboard does not hold it. **Manual close only:** close the GitHub issue **first**, then delete `ops/alerts/INVITE_SEND_FAILED/_.json` (that order matches `AlertStore.resolve_incident` — close, then delete-to-resolve); deleting the object first leaves the issue open and re-arms a recurrence as a SECOND issue. Added as a triage row by #4780 — the kind was emitted with no runbook row |
 | PROVIDER_BILLING_EXHAUSTED | #3873: a serving model lane's provider refused on its **OWN budget/limit** — HTTP 402, or an OpenRouter 403 carrying a key-limit body signature (`model_adapters.is_billing_exhausted`). This is the POST-HOC record of the beta's aggregate spend bound (the provider credit balance) being reached: `RotatingModel` cooled the lane and rotated and, before this kind existed, told no operator. **It carries NO threshold** — the trigger is the provider's own refusal, an observed event, never a policy line, and the trip is **advisory only** (it never refuses a request; the refusal already happened). Subject is the **serving leg's provider slug** (`deepseek-direct`/`openrouter`/`venice`), not the platform sentinel and not an org: the alert names the leg that ACTUALLY refused (a hop can reach a leg that was not the configured primary), and per-leg dedup keeps a second lane's exhaustion visible instead of swallowing it under the first's open incident. Detail is a fixed, message-free vocabulary — `provider`, `error_type`, `status`, `has_alternative` (`true` = more than one lane was configured, so this lane is rotated AWAY from and the call continues on the rotation path; `false` = the refusal was raised with no alternative configured, i.e. the cliff for that call. ⚠️ `true` does **not** mean the call ultimately succeeded — every other lane can still refuse, which is the all-lanes-down shape). Filed through the un-gated `operator_alert` seam (D5a); with no `DR_ISSUES_PAT` the WARNING log is the residual | Confirm the provider's balance and top up — see **Cohort spend cap ↔ provider credit balance** below. The incident records that the cliff ARRIVED; it is not a warning ahead of it, and nothing here sets the cap. **Manual close only:** close the GitHub issue **first**, then delete `ops/alerts/PROVIDER_BILLING_EXHAUSTED/{provider}.json` (that order matches `AlertStore.resolve_incident` — close, then delete-to-resolve); deleting the object first leaves the issue open and re-arms a recurrence as a SECOND issue |
+
+### One declaration site, and why a kind string is never renamed (#4780)
+
+The vocabulary above is **declared once**, in `tortoise/incident_kinds.py`
+(one `KIND_*` constant + one `KindSpec` entry per kind). This table is pinned to
+it in **both directions** by `tests/test_incident_kinds.py`: a row with no
+declaration and a declaration with no row both fail the suite. The same test
+scans the emitters and refuses a bare kind literal outside the registry, so
+"three edit sites per kind, kept in step by hand" (a constant, a row, a tuple in
+a test) is no longer the shape of a new kind.
+
+**Resolution authority** (`KIND_OWNERS`, mirrored by the driver's `kind_owner()`)
+is a field of each declaration (`KindSpec.owner`), not a second hand-maintained
+map.
+
+> **OVERRIDES:** the usual practice of renaming a constant to match a naming
+> convention when the value is a storage key. A kind string IS the durable R2
+> dedup key (`ops/alerts/{KIND}/{subject}.json`, create-once / delete-to-resolve)
+> and the `[DR] {KIND}` token the R2-unreachable adoption search matches on, so
+> the convention loses to the key: the two lowercase spellings
+> (`abuse_review_needed`, `abuse_suspended`) are **grandfathered**, and a
+> SCREAMING_CASE kind added from #4780 onward is the only thing the registry will
+> accept. Renaming a kind is a **data migration**, not a refactor, and the
+> playbook is in the `tortoise/incident_kinds.py` module docstring — skipping it
+> (a) orphans the dedup object, so the stale object keeps arming the long attempt
+> window while Telegram (which pushes only on FILED) never fires again, and
+> (b) makes a recurrence file a **second** issue, because the adoption search
+> matches the old title.
 
 ### Diagnostic blocks on `/status` — read-only, NOT incident kinds
 
@@ -742,7 +841,10 @@ Three paths exist:
 1. **Producer-side clear** (`AlertStore.resolve_incident` → close the issue, push
 the resolved Telegram, delete the dedup object). The watcher drives this for the
 absence kinds (`STALE`, `NEVER_BACKED_UP`, `METADATA_LOST`, `BACKUP_SET_MISSING`,
-`R2_DOWN`, `DRIVER_DOWN`); the sweep endpoint drives it for **its own guards**
+`DRIVER_DOWN`) **and for `R2_DOWN`** (#3147: its own R2 read is the reachability
+evidence); the driver drives it for `R2_UNLISTABLE` (the whole-pool measurement is
+its evidence) and for the rest of its substrate kinds; the sweep endpoint drives
+it for **its own guards**
 (`P0_GUARD_FAIL`, `NO_ELIGIBLE_TEAMS`, `ENUM_DELTA`,
 `GRAPH_NAME_RESOLUTION_FAIL`) — before #3030 those four had no resolver on any
 surface and stayed open forever (the live case was #2821).
@@ -849,14 +951,16 @@ Two residuals are known and tracked, not silently absorbed:
 
 | Kind | Why there is no writer | Disposition |
 |---|---|---|
-| `ALERTER_DOWN` | The #596 plan (§3.8) specified it as *"`/status` reports `gh_ok:false` (daemon PAT dead)"* — but `/status` has **no `gh_ok` field** and no app-side GitHub-health tracking exists, so the driver has nothing to read. The real failure mode is visible as a **red workflow run** plus a stale `DRIVER_DOWN` / `SWEEP_NO_COVERAGE` signal | Implement only with a real app-side health signal (a new `/status` field); until then it stays unemitted and is excluded from the kind-completeness test |
-| `LIVENESS_NO_WORK` | Superseded by `SWEEP_NO_COVERAGE` (#2796) for the enabled-but-0-teams case; no surface ever emitted it | Kept only as a reserved name; excluded from the kind-completeness test |
+| `ALERTER_DOWN` | The #596 plan (§3.8) specified it as *"`/status` reports `gh_ok:false` (daemon PAT dead)"* — but `/status` has **no `gh_ok` field** and no app-side GitHub-health tracking exists, so the driver has nothing to read. The real failure mode is visible as a **red workflow run** plus a stale `DRIVER_DOWN` / `SWEEP_NO_COVERAGE` signal | Implement only with a real app-side health signal (a new `/status` field). Until then it is declared `emitted=False` in `tortoise/incident_kinds.py` (#4780), and `tests/test_incident_kinds.py` fails if ANY emitter references it or if this cell loses its **NOT EMITTED** marker |
+| `LIVENESS_NO_WORK` | Superseded by `SWEEP_NO_COVERAGE` (#2796) for the enabled-but-0-teams case; no surface ever emitted it | Kept only as a reserved name, declared `emitted=False` (#4780) and pinned by the same registry test — an emitter referencing it is a failure, not a fix |
 
 Both are listed in the table above (with a **NOT EMITTED** triage cell) so an
 operator is never sent to rotate a credential for an alert that cannot fire. The
-drift is caught mechanically: `tests/test_alert_store.py::test_documented_kinds_have_a_writer`
-parses this table and scans the emitters — a documented kind with no writer fails
-the suite unless it appears in this section.
+drift is caught mechanically in BOTH directions by
+`tests/test_incident_kinds.py` (#4780, generalizing the #3033 check): `KindSpec.emitted`
+must agree with a scan of the emitters, and the triage cell must carry the marker —
+so a writer-less kind cannot read as live, and a kind that GAINS a writer cannot
+keep claiming to be dead.
 
 ## Restore / drill
 
@@ -990,7 +1094,8 @@ curl -m 900 -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
 - **App down AND driver disabled simultaneously** — no alert (documented residual; reopen condition: first unattended app-down).
 - **NEVER detection while the app is down** — daemon-only; a never-backed-up team during an outage is silent until recovery.
 - **GH single-provider scheduling axis** — the driver terminates in GitHub; a GH incident delays backup triggers (the daemon still alerts).
-- **R2 outage** — neither fabricates (UNKNOWN on fresh boot) nor silences (GH-search fallback + driver R2_DOWN) once a known-good baseline exists.
+- **R2 outage** — neither fabricates (UNKNOWN on fresh boot) nor silences (GH-search fallback + the driver's `R2_DOWN`/`R2_UNLISTABLE` filings) once a known-good baseline exists.
+- **Watcher-side `ListObjects` failure is labelled at the reachability tier (#3147 → #8472)** — the watcher's R2 read cannot tell "R2 does not answer" from "R2 answers but this key cannot list", so it files `R2_DOWN` while `R2_UNLISTABLE` is the accurate kind. The fault is still filed and paged; only the kind label is imprecise. See §"The two R2 tiers (#3147)".
 
 ### Post-#2313 residuals (recorded 2026-09-06 audit — #2378)
 

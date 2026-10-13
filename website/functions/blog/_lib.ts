@@ -10,7 +10,9 @@
 // Local dev: wrangler pages dev reads .env / .dev.vars
 
 import { RELAXED_CSP } from "../_shared/security-headers.ts";
+import { unescapeMd } from "./_shared/md-escape.ts";
 import { createAnchorAllocator } from "./_shared/slug.ts";
+import { parseVideoMarker, videoObjectJsonLd, type VideoRef } from "./_shared/video.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 export interface BlogPost {
@@ -62,6 +64,45 @@ export function validUrl(u: string): boolean {
   }
 }
 
+/**
+ * A safe `href` for an author-written link (#8313).
+ *
+ * `validUrl` correctly rejects `javascript:`/`data:`/`//host`, but it ALSO
+ * rejected every RELATIVE reference — so `[another post](/blog/foo)` and
+ * `[jump](#a-heading)` were both rewritten to a literal `"#"`, silently: the
+ * stored markdown was right, the CMS showed the right link, and only the
+ * rendered HTML was wrong. Internal linking is how a hub-and-spoke content set
+ * works at all, so this was a live defect for the SEO engine.
+ *
+ * The fix accepts a same-origin RELATIVE reference while keeping the scheme
+ * rejection intact — the two are different jobs and only the second was wrong.
+ * Anything carrying a scheme must still be http(s), which is what stops
+ * `javascript:` and `data:`. Protocol-relative (`//host`) is rejected because it
+ * inherits the page scheme and points off-origin, which is not "relative" here.
+ *
+ * Backslashes are path separators to WHATWG URL parsing for special schemes, so
+ * a backslash-escaped `//host` resolves off-origin exactly like `//host` while
+ * failing a literal `startsWith("//")`. A raw backslash has no place in a URL
+ * (a real one is percent-encoded), so the whole class is rejected — fail-closed,
+ * and it cannot be mislabelled as same-origin (#8379 finding 1).
+ */
+export function validHref(href: string): boolean {
+  const h = href.trim();
+  if (!h) return false;
+  // Reject backslashes BEFORE anything else: `\/\/host` and `\\host` are the
+  // same off-origin reference as `//host` to a browser, and a backslash-prefixed
+  // form passes the literal `startsWith("//")` test below.
+  if (h.includes("\\")) return false;
+  // Protocol-relative: off-origin, and not what an author means by "relative".
+  if (h.startsWith("//")) return false;
+  // Carries a scheme? Then it must be http(s) — the original security property.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(h)) return validUrl(h);
+  // No scheme: an in-page fragment, an absolute path, or a relative path.
+  // Reject control characters and whitespace, which have no business in an href
+  // and are a common smuggling vector.
+  return !/[\u0000-\u001f\u007f\s]/.test(h);
+}
+
 // Cover URLs embedded in CSS style attributes — stricter: scheme-checked AND
 // no quotes/parens/spaces (escapeHtml cannot protect a CSS url('...') string
 // from quote-decoding; validated here before embedding).
@@ -108,19 +149,8 @@ export async function fetchPostBySlug(env: Env, slug: string): Promise<BlogPost 
 // strong/em/code, links, images, tables, hr. ALL text content is escaped;
 // only allowlisted tags are emitted; href/src validated https/http.
 
-// CommonMark backslash escapes (#4481). The canonical body is authored in the
-// TipTap editor, whose serializer escapes ASCII punctuation — `\~`, `\*`,
-// `\[`, `\_` … — so text that is not markup cannot re-parse as markup. That is
-// correct markdown (`~` is escaped because `~~` is GFM strikethrough), but the
-// renderer has to undo it: otherwise the escape backslash leaks into the page
-// and a literal "~" (the summary table's partial-capability marker) renders as
-// "\~". A backslash before a non-punctuation character is literal, per spec.
-const MD_ESCAPE_RE = /\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g;
-
-/** Undo CommonMark backslash escapes: `\~` → `~`, `\\` → `\`. */
-function unescapeMd(s: string): string {
-  return s.replace(MD_ESCAPE_RE, "$1");
-}
+// CommonMark backslash escapes (#4481) now live in `_shared/md-escape.ts` so the
+// body renderer and the video-marker parser share ONE rule (#8379 finding 1).
 
 /** True when `text[index]` is preceded by an odd run of backslashes (escaped). */
 function isEscaped(text: string, index: number): boolean {
@@ -163,8 +193,19 @@ function inline(text: string): string {
       out += `<img src="${safeSrc}" alt="${escapeHtml(unescapeMd(m[5] ?? ""))}">`;
     } else if (m[7] !== undefined) {
       const href = m[9] ?? "";
-      const safeHref = validUrl(href) ? escapeHtml(href) : "#";
-      out += `<a href="${safeHref}" target="_blank" rel="noopener">${escapeHtml(unescapeMd(m[8] ?? ""))}</a>`;
+      // Validate first, then emit only what was validated. A backslash form of
+      // `//host` is the same off-origin reference to a browser, so it is
+      // REJECTED by `validHref` — and a rejected reference never gets the
+      // external shape, whatever it looks like (#8379 finding 1).
+      const accepted = validHref(href);
+      const safeHref = accepted ? escapeHtml(href.trim()) : "#";
+      // An INTERNAL link (relative/fragment) opens in the same tab and needs no
+      // `noopener`; an off-site absolute link keeps the hard-won `_blank` +
+      // `noopener`. Previously every link was treated as external (#8313).
+      const external = accepted && /^https?:\/\//i.test(href.trim());
+      out += external
+        ? `<a href="${safeHref}" target="_blank" rel="noopener">${escapeHtml(unescapeMd(m[8] ?? ""))}</a>`
+        : `<a href="${safeHref}">${escapeHtml(unescapeMd(m[8] ?? ""))}</a>`;
     }
     last = re.lastIndex;
   }
@@ -331,16 +372,32 @@ const MD_HOUSE_ANSWER_RE =
   /^\s*(?:(\\?\*\\?\*|__)\s*quick answer\s*\1\s*:|(\\?\*\\?\*|__)\s*quick answer\s*:\s*\2\s*|quick answer\s*:)\s*/i;
 
 /**
+ * A fenced-code delimiter line. ONE definition, used by every body scan below
+ * (`renderMarkdown`, `hasPublishedH2`, `extractFaq`, `extractVideo`): when two of
+ * them keep their own fence rule the embed, the structured data and the table of
+ * contents disagree about what is code. Measured on a 1–3 space indented fence
+ * (valid CommonMark — the shape a list item produces): `renderMarkdown` emitted a
+ * live iframe while `extractVideo` skipped it, so the page shipped a video with
+ * no `VideoObject` (#8379 finding 4).
+ *
+ * Up to three spaces of indent, per CommonMark; four or more is an indented code
+ * block, where a ``` is literal.
+ */
+function isFenceLine(line: string): boolean {
+  return /^ {0,3}```/.test(line);
+}
+
+/**
  * Whether the body publishes at least one `##` heading. The generated nav is
  * H2-only, so this decides whether a house-style marker has a replacement at
  * all — without one the marker and its list must stay ordinary content rather
- * than be deleted in exchange for nothing. Fenced code blocks are skipped,
- * matching the main scan.
+ * than be deleted in exchange for nothing. Fenced code blocks are skipped via
+ * the SAME predicate `renderMarkdown` uses, so this cannot disagree with it.
  */
 function hasPublishedH2(lines: string[]): boolean {
   let inFence = false;
   for (const line of lines) {
-    if (/^```/.test(line)) {
+    if (isFenceLine(line)) {
       inFence = !inFence;
       continue;
     }
@@ -429,6 +486,29 @@ export function renderMarkdown(markdown: string): string {
   while (i < lines.length) {
     const line = lines[i];
 
+    // Video embed (#7751). Intercepted BEFORE the link/paragraph branches so
+    // the marker is never rendered as literal text; an unrecognised payload
+    // falls through and stays ordinary content, exactly like an unknown
+    // `[!X]` alert degrades to a blockquote. The iframe `src` is CONSTRUCTED
+    // from a provider-validated id (see _shared/video.ts), never taken from the
+    // author's URL, so no off-site or `javascript:` frame can reach the page.
+    const videoMarker = MD_VIDEO_RE.exec(line.trim());
+    if (videoMarker) {
+      const payload = videoMarker[1].replace(/\\?\]\\?\]\s*$/, "").trim();
+      const ref = payload ? parseVideoMarker(payload) : null;
+      if (ref) {
+        flushPara(paragraphBuf);
+        out.push(
+          `<figure class="video-embed"><iframe src="${escapeHtml(ref.embedUrl)}" ` +
+            `title="${escapeHtml(ref.title ?? "Video")}" loading="lazy" ` +
+            `allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" ` +
+            `referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe></figure>`,
+        );
+        i++;
+        continue;
+      }
+    }
+
     // Table-of-contents placeholder (filled in once every heading is known)
     if (MD_TOC_RE.test(line.trim())) {
       flushPara(paragraphBuf);
@@ -460,11 +540,11 @@ export function renderMarkdown(markdown: string): string {
     }
 
     // Fenced code block
-    if (/^```/.test(line)) {
-      const lang = line.slice(3).trim();
+    if (isFenceLine(line)) {
+      const lang = line.trim().slice(3).trim();
       const buf: string[] = [];
       i++;
-      while (i < lines.length && !/^```/.test(lines[i])) {
+      while (i < lines.length && !isFenceLine(lines[i])) {
         buf.push(lines[i]);
         i++;
       }
@@ -669,7 +749,7 @@ export function extractFaq(markdown: string): FaqEntry[] {
   while (i < lines.length) {
     const line = lines[i];
 
-    if (/^```/.test(line)) {
+    if (isFenceLine(line)) {
       inFence = !inFence;
       // Keep the fence markers so markdownToText renders the block as code
       // (otherwise a `#` inside the snippet would parse as a heading).
@@ -762,9 +842,71 @@ function breadcrumbJsonLd(post: BlogPost, url: string): unknown {
   };
 }
 
+// Video embed marker (#7751): `[[video: <url>]]`, optionally
+// `[[video: <url> | <title> | PT12M34S | 2026-10-10]]`. TipTap escapes the
+// brackets, so the pattern tolerates `\[`. The PAYLOAD is captured to the end
+// of the line and the trailing `]]` stripped afterwards, because the payload
+// itself may contain separators.
+const MD_VIDEO_RE = /^\\?\[\\?\[\s*video\s*:\s*(.*)$/i;
+
+/**
+ * The video references in an article body — the renderer's promotion of the
+ * `[[video: …]]` convention (#7751). Pure, so the structured data it feeds is
+ * testable without a runtime.
+ *
+ * It scans with the SAME fence predicate `renderMarkdown` uses (`isFenceLine`),
+ * so the markers it returns are exactly the ones that became an embed: a marker
+ * the renderer left as code is not here, and a marker it embedded is (#8379
+ * finding 4 — the two used to hold different fence rules and disagreed on a
+ * 1–3 space indented fence).
+ */
+export function extractVideo(markdown: string): VideoRef[] {
+  const found: VideoRef[] = [];
+  let inFence = false;
+  for (const raw of markdown.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (isFenceLine(raw)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const m = MD_VIDEO_RE.exec(line);
+    if (!m) continue;
+    const payload = m[1].replace(/\\?\]\\?\]\s*$/, "").trim();
+    const ref = parseVideoMarker(payload);
+    if (ref) found.push(ref);
+  }
+  return found;
+}
+
 /** `FAQPage` for an article that has an FAQ section, or `null` when it has none. */
 function faqPageJsonLdFor(post: BlogPost): unknown | null {
   return faqPageJsonLd(extractFaq(post.body));
+}
+
+/**
+ * `VideoObject` for every video an article embeds, or `null` when it embeds
+ * none. A body may carry MORE THAN ONE marker (each one renders its own iframe),
+ * so this returns one node per DISTINCT video rather than silently keeping the
+ * first — previously `const [video] = extractVideo(...)` dropped every video
+ * after the first while the page still embedded it (#8379 finding 4).
+ *
+ * The video is a ranking surface of its own (#7751), so these are emitted
+ * ALONGSIDE `BlogPosting`/`BreadcrumbList`/`FAQPage` rather than replacing
+ * anything. `post.published_at`/title/excerpt stand in for a video's own
+ * metadata when the marker does not carry it, which is correct for the intended
+ * shape: an interview published with its article.
+ */
+function videoObjectsJsonLdFor(post: BlogPost, url: string): unknown[] | null {
+  const nodes: unknown[] = [];
+  const seen = new Set<string>();
+  for (const video of extractVideo(post.body)) {
+    // Two markers for one video embed it twice; the schema should not duplicate.
+    if (seen.has(video.embedUrl)) continue;
+    seen.add(video.embedUrl);
+    nodes.push(videoObjectJsonLd(video, post, url));
+  }
+  return nodes.length ? nodes : null;
 }
 
 /**
@@ -777,17 +919,22 @@ const ARTICLE_SCHEMA_BUILDERS: ReadonlyArray<(post: BlogPost, url: string) => un
   blogPostingJsonLd,
   breadcrumbJsonLd,
   faqPageJsonLdFor,
+  videoObjectsJsonLdFor,
 ];
 
 /**
  * The JSON-LD array for an article, composed from `ARTICLE_SCHEMA_BUILDERS`.
  * Pure, so the wiring is testable without a Cloudflare runtime; a builder that
- * returns `null` (currently only the FAQ node) is omitted.
+ * returns `null` is omitted, and a builder may return an ARRAY of nodes (one
+ * video marker per iframe, many markers per body), which is flattened so the
+ * result is always a flat list of schema nodes.
  */
 export function articleJsonLd(post: BlogPost, url: string): unknown[] {
-  return ARTICLE_SCHEMA_BUILDERS
-    .map((build) => build(post, url))
-    .filter((node) => node !== null && node !== undefined);
+  return ARTICLE_SCHEMA_BUILDERS.flatMap((build) => {
+    const node = build(post, url);
+    if (node === null || node === undefined) return [];
+    return Array.isArray(node) ? node : [node];
+  });
 }
 
 // ── HTML shell ─────────────────────────────────────────────────────────────
@@ -897,6 +1044,8 @@ h1.art-title{font-family:var(--serif);font-size:40px;line-height:1.2;color:#fff;
 .art-body pre{background:#0b1220;border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:16px 0}
 .art-body pre code{border:0;background:transparent;padding:0;color:inherit}
 .art-body .table-wrap{overflow-x:auto;margin:16px 0}
+.art-body .video-embed{margin:22px 0;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:#000}
+.art-body .video-embed iframe{display:block;width:100%;aspect-ratio:16/9;height:auto;border:0}
 .art-body table{border-collapse:collapse;margin:16px 0;width:100%}
 .art-body .table-wrap table{margin:0}
 .art-body th,.art-body td{border:1px solid var(--border);padding:8px 12px;text-align:left}
