@@ -1883,6 +1883,117 @@ class TestTeamInfo:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# #5475 — the per-graph pack approval set must not be self-widening
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPackApprovalGateOnKindWrites5475:
+    """#5475: ``POST /v1/objects`` / ``POST /v1/subjects`` persisted an
+    unvalidated ``objectKind``/``subjectKind`` verbatim, and
+    ``pack_state.graph_kind_namespaces`` mines ``ns:kind`` values out of the
+    graph's data into the graph's APPROVAL set. So one authenticated write of
+    ``marketing:contentBrief`` widened a ``dev``-only graph to also allow
+    ``marketing`` — the gate's own input was writable by the write it gated.
+
+    The fix is an INPUT constraint on the allowed set: a namespaced kind is
+    writable only when its namespace is ALREADY in the graph's approval set
+    (records ∪ data), so a write can never add a namespace. The union keeps
+    its #2714 indicator-2 property — historical data stays writable — because
+    a namespace the data already carries IS in the set it is checked against.
+    """
+
+    def _seed_install(self, *namespaces: str) -> TortoiseSDK:
+        """Write ``:PackInstall`` activation records into THIS org's graph.
+
+        ``_make_sdk(namespace=TEST_ORG_ID)`` is the exact graph
+        ``_data_sdk_offloaded`` opens for a graph-bound-less org key (see its
+        docstring), so the record the test seeds is the one the route reads.
+        """
+        sdk = _ha_mod._make_sdk(namespace=TEST_ORG_ID)
+        for ns in namespaces:
+            sdk._get_proj().g.query(
+                "MERGE (p:PackInstall {namespace: $ns}) "
+                "SET p.version='0.0.0', p.status='active', p.source='starter'",
+                params={"ns": ns})
+        return sdk
+
+    def test_reproduction_blocked_write_cannot_widen_the_set(self, client):
+        """The issue's reproduction, end to end: a dev-only graph refuses the
+        foreign namespace, and the refusal leaves the approval set alone.
+
+        FAIL-ON: the route persists ``objectKind='marketing:contentBrief'``,
+        so ``marketing`` appears in the data leg and the same graph's approval
+        set becomes ``{dev, marketing}`` — the self-widening the issue names.
+        REACHABLE: the write is a real HTTP request through the live route and
+        the second read is the resolver the write gate itself consumes.
+        """
+        from tortoise.pack_state import graph_installed_namespaces
+        sdk = self._seed_install("dev")
+        assert graph_installed_namespaces(sdk) == frozenset({"dev"})
+
+        r = client.post("/v1/objects",
+                        json={"name": "widened", "objectKind": "marketing:contentBrief"})
+        assert r.status_code == 422, r.text
+
+        assert graph_installed_namespaces(sdk) == frozenset({"dev"}), (
+            "the refused write must not leave a marketing row for the data "
+            "leg to mine back into the approval set")
+
+    def test_subject_kind_is_gated_too(self, client):
+        """The same door on ``/v1/subjects`` — the issue names both."""
+        self._seed_install("dev")
+        r = client.post("/v1/subjects",
+                        json={"name": "persona", "subjectKind": "marketing:persona"})
+        assert r.status_code == 422, r.text
+
+    def test_approved_namespace_is_writable(self, client):
+        """The constraint is not a blanket ban: an INSTALLED namespace keeps
+        writing its namespaced kinds (the extractor's gated S5 forms include
+        the full ``ns:kind`` spelling)."""
+        self._seed_install("dev", "marketing")
+        r = client.post("/v1/objects",
+                        json={"name": "campaign", "objectKind": "marketing:campaign"})
+        assert r.status_code == 200, r.text
+
+    def test_bare_kind_is_never_gated(self, client):
+        """A bare (legacy/core) kind names no pack, so it cannot widen the
+        set and must keep writing — the same core-leg exemption every gate
+        seam takes (``compile_vocab`` never gates its core legs)."""
+        self._seed_install("dev")
+        r = client.post("/v1/objects", json={"name": "proj", "objectKind": "project"})
+        assert r.status_code == 200, r.text
+
+    def test_no_records_is_the_catalog_union_back_compat(self, client):
+        """#2714 indicator 3: a graph with NO ``:PackInstall`` records has no
+        gate — the approval set is the catalog union, so the write is
+        admitted exactly as it was before #5475."""
+        r = client.post("/v1/objects",
+                        json={"name": "pre-records", "objectKind": "marketing:contentBrief"})
+        assert r.status_code == 200, r.text
+
+    def test_historical_data_namespace_stays_writable(self, client):
+        """#2714 indicator 2's back-compat clause, at the door: a namespace
+        ALREADY present in the graph's data is in the approval set, so it is
+        never refused — the data leg's whole purpose is preserved.
+
+        FAIL-ON: the gate is re-derived from records only, so a graph whose
+        marketing rows predate its pack state refuses the update.
+        REACHABLE: the marketing row is a real node in the same graph the
+        resolver scans.
+        """
+        from tortoise.pack_state import graph_installed_namespaces
+        sdk = self._seed_install("dev")
+        sdk._get_proj().g.query(
+            "MERGE (n:Object {id: 'l7-historical'}) "
+            "SET n.objectKind = 'marketing:campaign'",
+        )
+        assert graph_installed_namespaces(sdk) == frozenset({"dev", "marketing"})
+        r = client.post("/v1/objects",
+                        json={"name": "campaign-2", "objectKind": "marketing:campaign"})
+        assert r.status_code == 200, r.text
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # API Key Endpoints
 # ═══════════════════════════════════════════════════════════════════════════════
 

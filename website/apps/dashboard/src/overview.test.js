@@ -226,8 +226,8 @@ test('#4646 (A): card and wizard step-3 state the SAME fact for the grandfathere
   const card = overviewConnection(GRANDFATHERED)
   assert.equal(card.kind, 'disconnected',
     'the card must not claim Connected ✓ without the server-observed edge')
-  assert.equal(card.value, wizardStageLabel(3, { connected }),
-    'the card and the step-3 heading must state the SAME observed fact')
+  assert.equal(card.value, wizardStageLabel(4, { connected }),
+    'the card and the done-step heading must state the SAME observed fact')
 })
 
 test('#4646 (B): main.jsx derives serverHarnessConnected from the ONE shared helper', async () => {
@@ -521,7 +521,7 @@ test('#4646 (E): a graph-down read never reads as connected on EITHER surface', 
   // The card is stricter still — it names the outage outright:
   assert.equal(overviewConnection(outage).value, 'Unavailable')
   // and the wizard's heading is the honest understatement, not a connected claim:
-  assert.equal(wizardStageLabel(3, { connected: false }), NO_CONNECTION_OBSERVED)
+  assert.equal(wizardStageLabel(4, { connected: false }), NO_CONNECTION_OBSERVED)
 })
 
 test('#4646 (E2): a non-array `completed_steps` carrying the marker never reads as connected', async () => {
@@ -620,8 +620,8 @@ test('#3724: the Overview card and the wizard step state the SAME observation ph
   const c = overviewConnection({ status: 'active', completed_steps: ['team-named'] })
   assert.equal(c.value, 'No connection observed yet',
     'the card states the observation phrase')
-  assert.equal(wizardStageLabel(3), 'No connection observed yet',
-    'the wizard step-3 heading states the SAME phrase — pinned literally, not via the shared constant')
+  assert.equal(wizardStageLabel(4), 'No connection observed yet',
+    'the wizard done-step heading states the SAME phrase — pinned literally, not via the shared constant')
 })
 
 test('connection: graph-down markers → unavailable, NEVER connected', () => {

@@ -484,3 +484,48 @@ def graph_installed_namespaces(sdk: TortoiseSDK, *,
         return None
     recorded = {ns for ns, _v, _status, _src, _at in rows if ns}
     return frozenset(recorded) | graph_kind_namespaces(g)
+
+
+def kind_namespace_is_approved(kind: str,
+                               approved: frozenset[str] | None) -> bool:
+    """#5475: may a graph WRITE a kind with this spelling?
+
+    The approval set (``graph_installed_namespaces``) decides which packs a
+    graph may write, but its DATA leg (``graph_kind_namespaces``) is mined out
+    of values already in the graph — so a write door that persisted an
+    unvalidated ``ns:kind`` value WIDENED the very set that is supposed to
+    gate it, and the gate was advisory for any namespace the caller named
+    (#5475: ``objectKind=marketing:contentBrief`` on a ``dev``-only graph made
+    the whole ``marketing`` pack writable).
+
+    This is the INPUT constraint that closes it, stated as the closure
+    property the set needs: **a write may only use a namespace the set already
+    contains**. ``ns`` is compared RAW (no case folding), matching every other
+    gate seam — ``_installed_pack_ns``, ``compile_value_brief``,
+    ``compile_kind_index_spec`` and ``compile_vocab`` (#5339 review, P2).
+
+    * a BARE kind (no ``:``) names no pack, cannot widen the set, and is
+      admitted — the core/legacy leg is never gated (``compile_vocab`` gates
+      only its pack legs);
+    * an empty namespace (``":kind"``) contributes nothing to
+      ``graph_kind_namespaces`` either, so it is admitted on the same grounds;
+    * ``approved is None`` is the MEANINGFUL back-compat answer, not an empty
+      one: the graph has no ``:PackInstall`` records, so its approval set IS
+      the catalog union (#2714 indicator 3) and every namespace is already
+      writable.
+
+    Keeping the check against the resolved set (records **∪** data) is what
+    preserves #2714 indicator 2: a namespace the graph's own data already
+    carries is IN the set, so historical rows stay updatable.
+    """
+    if approved is None:
+        return True
+    ns, sep, _ = kind.partition(":")
+    if not sep:
+        return True
+    ns = ns.strip()
+    # An empty namespace (``":kind"``) names no pack and is not collected by
+    # ``graph_kind_namespaces`` (``if ns:``) — same admission as a bare kind.
+    if not ns:
+        return True
+    return ns in approved
