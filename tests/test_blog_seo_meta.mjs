@@ -42,11 +42,40 @@ let failures = 0;
 // Deriving the expectation from the inputs removes the manual flag entirely:
 // `keyword_ok` is true exactly when the model's own text, unshortened by the
 // length contract, carried the keyword into both returned fields.
-const expectedKeywordOk = (rawTitle, rawDescription, kw) =>
-  rawTitle.trim().length <= META_TITLE_MAX &&
-  rawDescription.trim().length <= META_DESCRIPTION_MAX &&
-  containsKeyword(rawTitle, kw) &&
-  containsKeyword(rawDescription, kw);
+const expectedKeywordOk = (rawTitle, rawDescription, kw) => {
+  // ⛔ Mirror the CODE's real predicate, not the one that reads nicely. Two
+  // subtleties the first version of this helper got wrong, both of which made it
+  // agree with the code by accident:
+  //   - the handler checks the ENFORCED fields (the contract normalises them),
+  //     not the raw ones — identical for short input, different past the cap;
+  //   - the verdict is `false` when the REPAIR supplied the keyword, because a
+  //     repaired field is not the model's own text. `ensureKeyword` returns its
+  //     input unchanged exactly when the text already carries the keyword, so
+  //     "the repair did not fire" is exactly "the enforced text carried it".
+  // Deriving it from `constraints` rather than hand-copied strings is the point:
+  // if a mock default changes, this expectation changes with it.
+  const enforced = constraints.enforce({ meta_title: rawTitle, meta_description: rawDescription }, "");
+  return (
+    rawTitle.trim().length <= META_TITLE_MAX &&
+    rawDescription.trim().length <= META_DESCRIPTION_MAX &&
+    containsKeyword(enforced.meta_title, kw) &&
+    containsKeyword(enforced.meta_description, kw)
+  );
+};
+
+// A fixture that never reached the handler proves nothing, and a 429 is an
+// INFRASTRUCTURE failure rather than a test result. Fail LOUDLY here — the first
+// version asserted the status and then dereferenced `body.meta_title` on the 429
+// body, so the suite died with a `TypeError` that hid the real cause and silently
+// skipped every later assertion. Throwing is deliberate: the run is invalid and
+// continuing would report a hazy pass.
+const assertLive = (probe, label) => {
+  if (probe.status !== 200) {
+    throw new Error(
+      `fixture "${label}" never reached the handler: HTTP ${probe.status} ${JSON.stringify(probe.body)}`,
+    );
+  }
+};
 
 const assertKeywordOk = (label, probe, rawTitle, rawDescription) => {
   const kw = probe.body.primary_keyword;
@@ -387,14 +416,48 @@ console.log("generate-seo handler — one brand suffix, no dangling separator, n
   // and assert it for EVERY spelling rather than one.
   {
     const base = "long-term memory for ai agents";
-    const nearMisses = [
-      "| Tortoise", "|Tortoise", "| tortoise", "  |  Tortoise",
-      " \u2014 Tortoise", "| Tortoise.", "- Tortoise", " | TORTOISE",
-    ];
-    for (const variant of nearMisses) {
-      const out = constraints.metaTitle(`${base}${variant}`);
-      assertEq(out, `${base} | Tortoise`, `near-miss suffix ${JSON.stringify(variant)} is canonicalised, not doubled`);
-      assertEq((out.match(/Tortoise/gi) || []).length, 1, `...exactly one brand token for ${JSON.stringify(variant)}`);
+    // ⛔ A HAND-WRITTEN LIST IS THE BUG — twice over. An 8-entry list of
+    // spellings I thought of missed every case with trailing punctuation past a
+    // single ".", and the character-list regex it tested missed "," "•" ")" "]"
+    // "}" "\u201d" "*" "/" and a trailing -/\u2013/\u2014 (21.2% of the family).
+    // Then fixing the regex did NOT fix this test: because the list still held
+    // only the 8 handled spellings, the suite stayed GREEN on the broken code —
+    // a fix whose test cannot fail is not tested. Enumerate the MATRIX.
+    const separators = ["|", "\u2014", "\u2013", "-", "\u00b7", ":", "\u2022", ",", "(", "/", " "];
+    const tails = ["", ".", "..", "!", ",", ";", ":", "?", "\u2026", "\u00b7", "\u2022", ")", "]", "}", "\u201d", "\u2019", "*", "/", "-", "\u2013", "\u2014"];
+    let familyChecked = 0;
+    for (const sep of separators) {
+      for (const gap of ["", " "]) {
+        for (const word of ["Tortoise", "tortoise", "TORTOISE"]) {
+          for (const tail of tails) {
+            for (const repeat of ["", ` | Tortoise`]) {
+              const variant = `${gap}${sep}${gap === "" ? " " : ""}${word}${tail}${repeat}`;
+              if (sep === " ") continue; // a bare space is not a separator
+              const out = constraints.metaTitle(`${base}${variant}`);
+              familyChecked++;
+              assertEq(out, `${base} | Tortoise`,
+                `family suffix ${JSON.stringify(variant)} canonicalises to exactly one`);
+              // The pass-1/pass-2 agreement matters as much as the count: the
+              // handler enforces, repairs, then enforces again.
+              assertEq(constraints.metaTitle(out), out,
+                `...and is idempotent, so pass 1 and pass 2 agree for ${JSON.stringify(variant)}`);
+            }
+          }
+        }
+      }
+    }
+    assert(familyChecked > 1000, `the suffix family matrix actually ran (${familyChecked} spellings)`);
+    // A bare space is NOT a separator — the subject word must SURVIVE. Counting
+    // "Tortoise" occurrences would be wrong (the subject word and the brand token
+    // are different things), and so is asserting the exact string, because the
+    // pre-existing trailing-separator strip legitimately drops a dangling "?".
+    // The property being guarded is narrower and is the one that matters: the
+    // strip did not DELETE the subject word as if it were the brand suffix.
+    for (const real of ["Why Tortoise", "What is Tortoise?"]) {
+      const out = constraints.metaTitle(real);
+      assert(out.includes(" | Tortoise"), `the canonical suffix is appended once (${JSON.stringify(real)})`);
+      assert(out.split(" | Tortoise").slice(0, -1).join(" | Tortoise").includes("Tortoise"),
+        `the subject word is NOT deleted as a brand suffix (${JSON.stringify(real)})`);
     }
     // The separator is REQUIRED: a title legitimately ending in the word is not
     // mistaken for the brand suffix.
@@ -558,6 +621,7 @@ console.log("generate-seo with NO request tags — the keyword check must not be
     metaTitle: "A title with no keyword in it at all",
     metaDescription: "Also nothing relevant here whatsoever, just filler prose.",
   });
+  assertLive(repairedCase, "repairedCase");
   assertEq(
     repairedCase.body.primary_keyword !== null,
     true,
@@ -586,6 +650,7 @@ console.log("generate-seo with NO request tags — the keyword check must not be
     metaDescription:
       "Long-term memory for AI agents measures recall, not learning. Tortoise tracks confidence and updates beliefs when information conflicts.",
   });
+  assertLive(modelPlaced, "modelPlaced");
   assertEq(
     modelPlaced.body.keyword_ok,
     true,
@@ -600,6 +665,7 @@ console.log("generate-seo with NO request tags — the keyword check must not be
     metaTitle: "Long-Term Memory for AI Agents: Recall vs Learning",
     metaDescription: "A description about confidence tracking that names no keyword at all.",
   });
+  assertLive(titleOnly, "titleOnly");
   assertEq(
     titleOnly.body.keyword_ok,
     false,
@@ -627,6 +693,7 @@ console.log("generate-seo with NO request tags — the keyword check must not be
   // `null` (unknown), never `true` (success).
   const unmapped = await driveNoTags({ generatedTags: ["a-tag-not-in-the-vocabulary"] });
   assertEq(unmapped.body.primary_keyword, null, "an unmapped tag yields no primary keyword");
+  assertLive(unmapped, "unmapped");
   assertEq(
     unmapped.body.keyword_ok,
     null,
@@ -706,7 +773,14 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     const request = new Request("https://tortoise.premiselabs.co/blog/api/generate-seo", {
       method: "POST",
       headers: { "X-Agent-Key": "test-key", "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "A title", body: "Sentence. ".repeat(40) }),
+      body: JSON.stringify({
+        title: "A title",
+        body: "Sentence. ".repeat(40),
+        // `requestTags` is deliberately distinct from `generatedTags` (what the
+        // mock MODEL returns): one is the caller's input, the other the model's
+        // output, and a fixture that confuses them proves nothing.
+        ...(opts.requestTags === undefined ? {} : { tags: opts.requestTags }),
+      }),
     });
     const res = await onRequestPost({
       request,
@@ -753,6 +827,7 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     metaDescription:
       "Epistemic memory records why a belief changed. Tortoise tracks confidence and updates beliefs when information conflicts.",
   });
+  assertLive(fluent, "fluent");
   assertEq(fluent.body.primary_keyword, "epistemic memory", "the model's chosen keyword is the verified one");
   assert(
     fluent.body.primary_keyword !== primaryKeyword(["agent-memory"]),
@@ -782,6 +857,7 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     metaDescription:
       "A practical guide to knowledge graph retrieval augmented generation for production systems.",
   });
+  assertLive(claimsUnused, "claimsUnused");
   assert(
     claimsUnused.body.primary_keyword !== "epistemic memory",
     `a claimed keyword the model never wrote is NOT honoured (got ${JSON.stringify(claimsUnused.body.primary_keyword)})`,
@@ -814,6 +890,7 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     metaDescription:
       "Epistemic memory records why a belief changed, and why that matters more than recall alone.",
   });
+  assertLive(descriptionOnly, "descriptionOnly");
   assertEq(
     descriptionOnly.body.primary_keyword,
     "epistemic memory",
@@ -850,6 +927,7 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     metaTitle: "A practical guide to graph memory for teams building agents with epistemic memory",
     metaDescription: "A description placing the term epistemic memory deliberately at the very end again.",
   });
+  assertLive(overBudget, "overBudget");
   assertEq(
     overBudget.body.primary_keyword,
     "epistemic memory",
@@ -880,6 +958,7 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     metaTitle: "Epistemic memory explains why a belief changed in production agent systems today",
     metaDescription: "A description within its own cap that names epistemic memory early on.",
   });
+  assertLive(frontLoaded, "frontLoaded");
   assertEq(
     frontLoaded.body.primary_keyword,
     "epistemic memory",
@@ -909,6 +988,7 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
       `Epistemic memory records why a belief changed, and this sentence exists purely to push the ` +
       `description past its cap so the length contract has to cut it somewhere after the keyword.`,
   });
+  assertLive(longDescription, "longDescription");
   assert(
     longDescription.body.meta_description.length <= 155,
     `...the description really is at its cap (got ${longDescription.body.meta_description.length})`,
@@ -937,7 +1017,7 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     metaTitle: titleAtCap,
     metaDescription: "A description naming long-term memory for ai agents comfortably within its own cap.",
   })
-  assertEq(atCap.status, 200, "the atCap fixture reached the handler");
+  assertLive(atCap, "atCap");
   assertEq(
     atCap.body.keyword_ok,
     true,
@@ -955,7 +1035,7 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     metaTitle: titleOverCap,
     metaDescription: "A description naming long-term memory for ai agents comfortably within its own cap.",
   })
-  assertEq(overTitle.status, 200, "the overTitle fixture reached the handler");
+  assertLive(overTitle, "overTitle");
   assert(
     overTitle.body.meta_title.toLowerCase().includes("long-term memory for ai agents"),
     "...the keyword really does survive the truncation, so only the cap check catches it",
@@ -979,7 +1059,7 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     metaTitle: "Long-Term Memory for AI Agents",
     metaDescription: descAtCap,
   })
-  assertEq(descAtCapCase.status, 200, "the descAtCapCase fixture reached the handler");
+  assertLive(descAtCapCase, "descAtCapCase");
   assertEq(
     descAtCapCase.body.keyword_ok,
     true,
@@ -995,7 +1075,7 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     metaTitle: "Long-Term Memory for AI Agents",
     metaDescription: longDesc,
   })
-  assertEq(overDesc.status, 200, "the overDesc fixture reached the handler");
+  assertLive(overDesc, "overDesc");
   assertEq(
     overDesc.body.keyword_ok,
     false,
@@ -1026,15 +1106,82 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     metaTitle: `A guide to ${paddedKw}`,
     metaDescription: `A description that mentions ${paddedKw} somewhere in it.`,
   });
-  assertEq(padded.status, 200, "the over-long-claim fixture actually reached the handler");
-  assert(
-    String(padded.body.primary_keyword).length <= 40,
-    `an over-long claim is REJECTED, not echoed (got ${String(padded.body.primary_keyword).length} chars)`,
+  assertLive(padded, "over-long claim");
+  // ⛔ The mechanism is CANONICALISATION, not rejection — the earlier comment
+  // said "rejected outright", and `length <= 40` + `!== paddedKw` pass under BOTH
+  // mechanisms, so they pinned neither. `canonicalKeyword` normalises the padding
+  // away (`"epistemic" + 200 dots + "memory"` -> the vocabulary term), which is
+  // what bounds the value. Assert the term, which only canonicalisation produces.
+  assertEq(
+    padded.body.primary_keyword,
+    "epistemic memory",
+    "an over-long claim is canonicalised to the vocabulary term it normalises to",
   );
-  assert(
-    padded.body.primary_keyword !== paddedKw,
-    "...and it is not the padded string itself",
-  );
+
+  // ⛔ A present-but-malformed `tags` must be REFUSED, not silently become `[]`.
+  // `[]` is the TAGLESS path — it seeds the whole vocabulary and lets the model's
+  // own choice become the verified keyword — so a caller passing a string used to
+  // be walked into the path reserved for callers who expressed no position, with
+  // no way to tell from the response.
+  {
+    __resetRateLimits();
+    const malformed = await drive({ requestTags: "agent-memory" });
+    assertEq(malformed.status, 400, "a non-array `tags` is refused, not coerced to []");
+    assertEq(malformed.body.error, "validation", "...with the validation error code");
+  }
+
+  // ⛔ `keyword_ok` is computed on the artifact the caller RECEIVES. `enforced`
+  // is the first contract pass; the response carries `repaired`, the second. A
+  // non-idempotent contract made them differ and the verdict then described a
+  // field the caller never saw. The `!repairFired` clause is what prevents that
+  // AND keeps the check from being a tautology (the repair guarantees presence).
+  // Both halves get a fixture: the keyword the model wrote, and the keyword the
+  // repair had to add.
+  {
+    __resetRateLimits();
+    const wroteIt = await drive({
+      primaryKeyword: "long-term memory for ai agents",
+      metaTitle: "Long-term memory for AI agents",
+      metaDescription: "Long-term memory for ai agents measures recall, not learning, and tracks confidence instead.",
+    });
+    assertLive(wroteIt, "wroteIt");
+    assertEq(wroteIt.body.keyword_ok, true, "the model's OWN placement is green");
+    assertEq(wroteIt.body.meta_title, "Long-term memory for AI agents | Tortoise",
+      "...and the returned title is the model's own text plus the one canonical suffix");
+    // The SAME request, but the model never writes the keyword: the repair adds it.
+    __resetRateLimits();
+    const repairAdded = await drive({
+      primaryKeyword: "long-term memory for ai agents",
+      metaTitle: "A title with no keyword in it at all",
+      metaDescription: "A description with no keyword in it either.",
+    });
+    assertLive(repairAdded, "repairAdded");
+    assert(repairAdded.body.meta_title.toLowerCase().includes("long-term memory for ai agents"),
+      "...the repair did add the keyword (otherwise this fixture proves nothing)");
+    assertEq(repairAdded.body.keyword_ok, false,
+      "but a REPAIRED field is not the model's own text, so the verdict is NOT green");
+  }
+
+  // ⛔ `primary_keyword` is documented as the keyword the response was VERIFIED
+  // against, and callers compare it against TAG_KEYWORDS/tags. Vocabulary
+  // membership normalises, so the model's own casing/spacing/punctuation was
+  // accepted and echoed — matching nothing lookupable, and letting one keyword
+  // come back two ways.
+  for (const spelling of [
+    "LONG-TERM MEMORY FOR AI AGENTS",
+    "Long  Term  Memory  for  AI  Agents",
+    "long-term memory for ai agents!!",
+  ]) {
+    __resetRateLimits();
+    const cased = await drive({
+      primaryKeyword: spelling,
+      metaTitle: "Long-Term Memory for AI Agents: Recall vs Learning",
+      metaDescription: "Long-term memory for ai agents measures recall, not learning.",
+    });
+    assertEq(cased.status, 200, `the spelling fixture reached the handler (${spelling})`);
+    assertEq(cased.body.primary_keyword, "long-term memory for ai agents",
+      `primary_keyword is returned in the researched spelling, not the model's (${JSON.stringify(spelling)})`);
+  }
 
   assertKeywordOk("claimsUnused", claimsUnused, "Knowledge Graph RAG: A Practical Guide | Tortoise",
     "A practical guide to knowledge graph retrieval augmented generation for production systems.");
@@ -1052,6 +1199,7 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     metaTitle: "Make money fast with AI agents today",
     metaDescription: "A description that does not happen to contain the real keyword either.",
   });
+  assertLive(invented, "invented");
   assertEq(
     invented.body.primary_keyword,
     primaryKeyword(["agent-memory"]),
@@ -1072,6 +1220,7 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     primaryKeyword(["agent-memory"]),
     "a null choice falls back to the tag-derived keyword",
   );
+  assertLive(silent, "silent");
 
   // 5. The tag-SUPPLIED path is unchanged: the caller's intent wins and the
   //    prompt names their keyword rather than a candidate list.

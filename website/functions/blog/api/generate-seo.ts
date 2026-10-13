@@ -236,6 +236,16 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   }
   const title = typeof input.title === "string" ? input.title.trim() : "";
   const body = typeof input.body === "string" ? input.body : "";
+  // ⛔ A present-but-malformed `tags` must be REFUSED, not silently coerced to
+  // `[]`. `[]` is not "no opinion" here — it is the tagless path, which seeds the
+  // model with the whole vocabulary and lets its own choice become the keyword the
+  // response is verified against. So `tags: "agent-memory"` (a string) used to
+  // walk a caller holding a position straight into the path reserved for callers
+  // holding none, and the caller could not tell from the response. `undefined`
+  // legitimately means "no tags"; anything else must be an array of strings.
+  if (input.tags !== undefined && !Array.isArray(input.tags)) {
+    return json({ error: "validation", message: "tags must be an array of strings" }, 400);
+  }
   const tags = Array.isArray(input.tags)
     ? input.tags.filter((t): t is string => typeof t === "string").slice(0, 10).map((t) => t.slice(0, 40))
     : [];
@@ -370,6 +380,18 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     title,
   );
 
+  // ⛔ Does the response's field differ from the one `keyword_ok` below checks?
+  // `enforced` is the FIRST contract pass; the caller receives `repaired`, the
+  // SECOND. They agreed only because `metaTitle`/`metaDescription` happened to be
+  // idempotent — so a non-idempotent spelling meant the verdict described a field
+  // the caller never saw (measured 10.5% of green verdicts). `ensureKeyword`
+  // firing is the other way they differ, and that one is not a bug: a repaired
+  // field is by definition NOT the model's own text, which is the whole point of
+  // the verdict. Both are now explicit.
+  const repairFired =
+    repaired.meta_title !== enforced.meta_title ||
+    repaired.meta_description !== enforced.meta_description;
+
   // Reject rather than silently ship junk when generation produced nothing usable.
   if (!repaired.meta_title || !repaired.meta_description || !repaired.excerpt || repaired.tags.length === 0) {
     return json({ error: "generation_incomplete", message: "generated fields incomplete after constraints" }, 502);
@@ -415,13 +437,20 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       // called out in review; the two things this field guarantees are the two
       // above.
       primary_keyword: primary,
+      // ⛔ Each clause is load-bearing and independently falsifiable — which is
+      // why the `containsKeyword(repaired.*)` pair is GONE. Given `!repairFired`,
+      // `repaired === enforced` and `ensureKeyword` returned its input unchanged,
+      // which happens exactly when the field already carried the keyword — so
+      // both `containsKeyword` calls were REDUNDANT (a mutation deleting the
+      // description one left the suite green). A clause no test can distinguish
+      // reads as coverage while providing none, so state the precise thing once:
+      // `!repairFired` IS "both returned fields already carried the keyword, in
+      // the model's own words". The remaining clauses bound it: no cap cut either
+      // field, and a keyword existed to verify against at all.
       keyword_ok:
         primary === null
           ? null
-          : !titleTruncated &&
-            !descriptionTruncated &&
-            containsKeyword(enforced.meta_title, primary) &&
-            containsKeyword(enforced.meta_description, primary),
+          : !titleTruncated && !descriptionTruncated && !repairFired,
       provider: result.provider,
       input_tokens: result.inputTokens,
       output_tokens: result.outputTokens,

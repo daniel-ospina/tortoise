@@ -26,13 +26,21 @@ export const BRAND_SUFFIX = " | Tortoise";
 //      a fixed separator set, so `"| Tortoise.."`, `"| Tortoise!"`, `": Tortoise"`,
 //      `"· Tortoise"` and an already-doubled title all still doubled (68%).
 //
-// The separator class is punctuation only — a bare space is NOT enough — so a
-// title that legitimately ends in the word ("Why Tortoise") is left alone, while
-// `"… | Tortoise"`, `"… — Tortoise"`, `"…· Tortoise"` and their repeated forms are
-// all treated as the brand suffix. The `+` makes it idempotent, which matters
-// because `generate-seo.ts` enforces, repairs, then enforces AGAIN: a first pass
-// that left a suffix behind would be appended to by the second.
-const BRAND_SUFFIX_TAIL_RE = /(?:\s*[|\u2014\u2013\-\u00b7:\u2022]\s*Tortoise\b[\s.,;:!?\u2026\u00b7]*)+$/iu;
+//   3. An explicit character list (`[|—–-·:•]`, then `[\s.,;:!?…·]*`) STILL only
+//      covered the characters I happened to think of: `","` as a separator and
+//      `"•"`, `")"`, `"]"`, `"}"`, `"”"`, `"*"`, `"/"`, and a trailing `-`/`–`/`—`
+//      all doubled (21.2% of a 74,520-spelling matrix), so the fix kept failing
+//      the same way one round later. Enumerating characters is the bug.
+//
+// Hence `[\p{P}\p{S}]`: ANY Unicode punctuation or symbol, in any run, on either
+// side — a CLASS, not a list. A bare space is still NOT a separator, so a title
+// that legitimately ends in the word ("Why Tortoise") is left alone, while every
+// punctuation-led spelling and its repetitions are treated as the brand suffix.
+// The `+` keeps it idempotent, which matters because `generate-seo.ts` enforces,
+// repairs, then enforces AGAIN — a first pass that left a suffix behind would be
+// appended to by the second, and the caller would receive a title that differs
+// from the one `keyword_ok` was computed on.
+const BRAND_SUFFIX_TAIL_RE = /(?:\s*[\p{P}\p{S}]\s*Tortoise\b[\p{P}\p{S}\s]*)+$/iu;
 
 export interface SeoFields {
   slug: string;
