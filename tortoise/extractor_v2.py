@@ -517,9 +517,18 @@ def build_master_list(sdk=None) -> dict:
     ``_make_sdk(namespace=org_id)`` — no separate identity argument to
     mismatch). The tenant path NEVER reads or writes the process-global
     ``_MASTER_LIST_CACHE`` (#1154: a tenant-scoped compile must not poison
-    the shared memo); the #1350 perf guard rides the tenant-view memo (per
-    (graph_identity, pack_config_version), invalidated on :PackManifest
-    write) instead.
+    the shared memo); it rides the tenant-view memo instead — the key and
+    its invalidation are defined by
+    ``tortoise/pack_manifest_store.py::tenant_view``. That key is the
+    two-tuple ``(graph_identity, pack_config_version)``, whose ``version``
+    hashes the tenant's ``(namespace, version, sha256)`` manifest tuples
+    TOGETHER WITH the #2714 approval-set key — so a pack install/uninstall,
+    or a change to the graph's data union, recompiles the view. ⚠️ The
+    #1350 perf guard does NOT cover the whole call: ``tenant_view`` computes
+    the approval set BEFORE the memo lookup, so on a graph that HAS
+    ``:PackInstall`` records a memo HIT still pays the record read plus one
+    whole-graph kind scan per property (8). Only the manifest read and the
+    brief compile are cached — see ``tenant_view``'s ⚠️ paragraph.
     """
     if sdk is None:
         import copy
