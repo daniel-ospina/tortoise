@@ -1894,6 +1894,34 @@ def test_ci_timing_tool_change_fails_closed_to_full():
     assert "core" in r["surfaces"]
 
 
+def test_ci_check_repair_tool_change_fails_closed_to_full():
+    # #8375 item 1: tools/ci_check_repair.py CLOSES and REOPENS pull requests, and
+    # re-runs workflow runs, on a schedule and unattended (the workflow and the
+    # launchd fallback both call it with `--apply`). Its suite lives in
+    # tests/test_ci_check_repair.py and is registered in the `ci-surfaces.yml`
+    # `core` surface — which covers edits of the TEST file, NOT of the tool. No
+    # SOURCE_PATTERNS entry matches the tool, so without the TOOL_CARVEOUTS entry
+    # the flat `tools/` prefix swallows it, `changed` comes back empty and select()
+    # takes the docs-only early return (surfaces=[], tier-1 smoke) — an early
+    # return that BYPASSES the `if not matched: matched.add("core")` fallback, so
+    # NOT ONE of the 74 guards would run on the PR that changes the tool. This was
+    # measured on the real path before the carve-out:
+    #   --changed-files tools/ci_check_repair.py -> surfaces=[] full=False
+    # `tools/ci_selection.py --integrity` cannot catch it: it only asks whether the
+    # test file is CLASSIFIED. ALL FOUR paths are asserted because all four decide
+    # whether the repair runs and what it does: the entry point (the macOS
+    # `bash -s`/TCC handoff), the local fallback, and the installer whose plist
+    # decides whether the job is ARMED. Mutation check: removing any entry filters
+    # that path out (docs-only early return) and fails the asserts below.
+    for path in ("tools/ci_check_repair.py", "tools/ci_check_repair_launchd.py",
+                 "tools/ci-check-repair-local.sh",
+                 "tools/install-ci-check-repair-schedule.sh"):
+        r = _sel([path])
+        assert r["full"] is True, (path, r)
+        assert r["test_files"] == "ALL", (path, r)
+        assert "core" in r["surfaces"], (path, r)
+
+
 def test_pr_lead_time_tool_change_fails_closed_to_full():
     # #6139: tools/pr_lead_time.py owns tests/test_pr_lead_time.py, whose guards
     # pin the decomposition's residence rule (a zero-length Mergify run is a
