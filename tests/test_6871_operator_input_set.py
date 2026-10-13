@@ -217,3 +217,79 @@ def test_annotate_ep_batch_does_not_count_the_sources_own_edge(sdk):
     assert out[hyp].evidence.impl_count == 1, (
         "the target must still count the operator's idx>=1 edge as support"
     )
+
+
+def test_annotate_ep_batch_still_counts_operator_less_direct_edges(sdk):
+    """The #6871 role guard must not swallow `create_direct_edge` support.
+
+    A direct edge is written with NO `idx` (there is no operator to index it),
+    so an idx-ONLY guard (`coalesce(r.idx, 0) >= 1`) silently zeroed
+    `impl_count` / `nand_count` / `contention` for every directly-supported
+    claim. The guard therefore mirrors `why._CONFLICTS_CYPHER`: an
+    operator-mediated edge obeys the role index, an operator-less direct edge
+    carries no role and stays evidence by definition.
+    """
+    from tortoise.search_engine import annotate_ep_batch
+
+    sup = sdk.create_point("evidence", "S: direct support", status="live")["id"]
+    atk = sdk.create_point("hypothesis", "A: direct attack", status="live")["id"]
+    hyp = sdk.create_point("hypothesis", "H: supported directly",
+                           status="live")["id"]
+    sdk.create_direct_edge("IMPL", sup, hyp)
+    sdk.create_direct_edge("NAND", atk, hyp)
+
+    out = annotate_ep_batch(sdk._get_proj().g, [hyp])
+    assert out[hyp].evidence.impl_count == 1, (
+        "a direct IMPL edge is support and must still be counted"
+    )
+    assert out[hyp].evidence.nand_count == 1, (
+        "a direct NAND edge is counter-evidence and must still be counted"
+    )
+    assert out[hyp].contention == pytest.approx(0.5)
+
+
+def test_counter_arguments_honours_the_nand_direction(sdk):
+    """#6871 on `tortoise_analyze`: NAND is direction-bearing.
+
+    The ontology defines NAND as "A contradicts B" and records the attacker's
+    direction on the write, so the attacker's own counter-argument read must
+    not return the claim it attacks. Pre-fix the template guarded identity
+    only, which made the relation symmetric.
+    """
+    from tortoise.analyze import TEMPLATES
+
+    atk = sdk.create_point("hypothesis", "ATKMARKER", status="live")["id"]
+    vic = sdk.create_point("hypothesis", "VICMARKER", status="live")["id"]
+    sdk.create_operator("NAND", atk, [vic])
+    proj = sdk._get_proj()
+
+    def _run(entity: str) -> list[str]:
+        return [r[0] for r in proj.g.query(
+            TEMPLATES["counter_arguments"]["cypher"],
+            params={"entity": entity, "limit": 20}).result_set]
+
+    assert _run("VICMARKER") == [atk], (
+        "the attacked claim's counter-argument is the operator's idx=0 attacker"
+    )
+    assert _run("ATKMARKER") == [], (
+        "the ATTACKER returned the claim it attacks as its own counter-argument"
+    )
+
+
+def test_state_counter_evidence_does_not_surface_the_attacker(sdk):
+    """#6871 on the state surface.
+
+    The operator-mediated half of `_state_counter_evidence` now obeys the role
+    index (mirroring `why._CONFLICTS_CYPHER`), so the NAND operator's idx=0
+    endpoint — the attacker — is no longer surfaced as contested by the very
+    operator it wrote.
+    """
+    atk = sdk.create_point("hypothesis", "ATK", status="live")["id"]
+    vic = sdk.create_point("hypothesis", "VIC", status="live")["id"]
+    sdk.create_operator("NAND", atk, [vic])
+
+    ce = sdk._state_counter_evidence([atk, vic])
+    assert ce.get(atk, []) == [], (
+        "the attacker was surfaced as contested by the NAND it wrote"
+    )
+    assert len(ce.get(vic, [])) == 1, "the attacked claim must stay contested"

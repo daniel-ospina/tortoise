@@ -62,9 +62,17 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["counter", "against", "objection", "contradicts", "opposes", "attack"],
         "description": "Find claims that contradict a target via NAND edges",
         "subgraph_vars": ["opponent"],
+        # #6871: NAND is direction-bearing — the ontology defines it as "A
+        # contradicts B" and records the attacker's direction on the write — so
+        # the counterargument is the operator's idx=0 endpoint and the attacked
+        # claim an idx>=1 one. Identity-only matching made the read symmetric:
+        # querying the ATTACKER returned the claim it attacks as the attacker's
+        # own counter-argument. Mirrors why._CONFLICTS_CYPHER's role clause.
         "cypher": """
-            MATCH (target:Point)<-[:NAND]-(op:Point {op_type:\"NAND\"})-[:NAND]->(opponent:Point)
-            WHERE target.id <> opponent.id
+            MATCH (target:Point)<-[r_in:NAND]-(op:Point {op_type:\"NAND\"})-[r_out:NAND]->(opponent:Point)
+            WHERE r_in.idx > 0
+              AND r_out.idx = 0
+              AND target.id <> opponent.id
               AND target.content CONTAINS $entity
               AND opponent.is_operator = false
             RETURN opponent.id, opponent.content, coalesce(opponent.confidence,0.5) as conf

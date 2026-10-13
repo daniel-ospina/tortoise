@@ -21936,9 +21936,15 @@ class TortoiseSDK:
         """
         if not point_ids:
             return {}
+        # #6871: the operator-mediated half obeys the role index — an
+        # operator's idx=0 endpoint is its SOURCE (the attacker), so without
+        # the guard the ATTACKER was surfaced as contested by its own operator.
+        # Mirrors why._CONFLICTS_CYPHER's role clause; direct operator-less
+        # NAND edges carry no idx and stay evidence by definition.
         rows = self._get_proj().g.query(
             "MATCH (c:Point)-[r:NAND]->(n:Point) "
             "WHERE n.id IN $ids "
+            "  AND (c.is_operator = false OR c.is_operator IS NULL OR r.idx > 0) "
             "RETURN n.id, c.id, coalesce(c.label, c.content, ''), "
             "  coalesce(c.is_operator, false), coalesce(c.op_type, '')",
             params={"ids": point_ids},
