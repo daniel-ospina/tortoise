@@ -113,9 +113,21 @@ while read -r N; do
   fi
 done < "$O/.pool"
 # Dedupe WITHOUT re-sorting. orch-loop.sh consumes this file top-down and dispatches the first
-# BATCH entries, so its ORDER IS the dispatch priority. `sort -n -u` re-ordered the backlog by
-# issue number, pushing any P0 that had just been appended to the BACK — the same defect as the
-# pool sort above (#8465). `mv` is atomic within the directory, and `&&` keeps a failed awk from
-# truncating the live backlog.
+# BATCH entries, so its ORDER IS the dispatch priority. `sort -n -u` re-ordered the ENTIRE backlog
+# by issue number, which is what put 238 P2s ahead of 20 P0s (#8465) — the same defect as the pool
+# sort above, and it reappeared here on every cycle.
+#
+# This file is FIFO. The pool above is severity-ordered when it is appended, but an entry added on a
+# LATER cycle joins at the BACK, behind whatever is already queued — so a P0 discovered while P2s sit
+# at the head waits for them instead of displacing them. That residual is deliberate and bounded: the
+# refresh only runs while the backlog is below 6 (orch-loop.sh) and BATCH is 2, so at most 5 entries
+# — about 3 cycles — can be ahead of it. Carrying the tier through orch-loop.sh's reader would remove
+# the delay at the cost of a second ordering surface; not worth it for ~12 minutes.
+#
+# `mv` is atomic within the directory (rename(2)), so a concurrent reader sees the old file or the new
+# one, never a torn one; `&&` keeps a failed awk from truncating the live backlog. One deliberate
+# trade: `mv` swaps the inode, so the target's mode is replaced by the temp's umask-derived one,
+# whereas the old `sort -o` preserved it. The file holds only public issue numbers and its mode is
+# never set deliberately, so 644 is not a property anything depends on.
 awk '!seen[$0]++' "$O/candidates.txt" > "$O/.cand" && mv "$O/.cand" "$O/candidates.txt"
 echo "[refresh] checked $n; backlog now $(wc -l < "$O/candidates.txt" | tr -d ' ') issues"

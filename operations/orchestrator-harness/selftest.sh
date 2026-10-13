@@ -772,10 +772,34 @@ if [ -n "$POOL_SORT" ]; then
 else rc=1; fi
 ck "refresh-candidates.sh orders the pool severity-first (P0<P1<P2), age second, dedup by number" $rc
 
-# The backlog file is consumed top-down, so its ORDER IS the priority — a numeric re-sort put any
-# appended P0 at the BACK (#8465). The shipped script must dedupe WITHOUT sorting.
-if [ -s "$REFRESH" ] && ! grep -qE '^sort -n -u -o "\$O/candidates\.txt"' "$REFRESH"; then rc=0; else rc=1; fi
-ck "refresh-candidates.sh dedupes the backlog without re-sorting it by issue number" $rc
+# The pipeline above cannot see the TIER->RANK half. A copy that emitted the SAME rank for every
+# tier still sorts "correctly" and still starves the P0s — #8465 itself. So assert the label->rank
+# pairs the shipped script actually emits. Join backslash continuations first, or `--label` and the
+# `|"N ` land on different lines and the extraction finds nothing (verified).
+if [ -s "$REFRESH" ]; then
+  RANKS="$(awk '{printf "%s", $0} /\\$/{next} {print ""}' "$REFRESH" \
+    | awk '/--label/{lab=""; for(i=1;i<=NF;i++) if($i=="--label") lab=$(i+1);
+	     if(match($0,/\|"[0-9] /)) print lab" -> "substr($0,RSTART+2,1)}' \
+    | tr '\n' ' ' | sed 's/ *$//')"
+  [ "$RANKS" = "P0-blocker -> 0 P1-severe -> 1 P2-moderate -> 2" ] && rc=0 || rc=1
+else rc=1; fi
+ck "refresh-candidates.sh ranks the tiers P0=0 < P1=1 < P2=2 (a constant rank would starve the P0s)" $rc
+
+# The backlog is consumed top-down, so its ORDER IS the priority — a numeric re-sort put the P0s
+# behind the P2s on every cycle (#8465). Assert the shipped line's BEHAVIOUR, not its spelling: a
+# grep-absence on one literal passes when the dedupe is deleted, or when the backlog is re-sorted
+# under any other spelling (both verified against the earlier check).
+if [ -s "$REFRESH" ]; then
+  grep -m1 -E '^awk .!seen\[\$0\]' "$REFRESH" > "$TMP/dedupe.sh"
+  if [ -s "$TMP/dedupe.sh" ]; then
+    sed -e 's#"\$O/candidates\.txt"#in.txt#g' -e 's#"\$O/\.cand"#out.tmp#g' "$TMP/dedupe.sh" > "$TMP/drive.sh"
+    printf '5000\n5001\n100\n9000\n5000\n' > "$TMP/in.txt"
+    ( cd "$TMP" && bash drive.sh )
+    dedupe_got="$(tr '\n' ' ' < "$TMP/in.txt" 2>/dev/null | sed 's/ *$//')"
+    [ "$dedupe_got" = "5000 5001 100 9000" ] && rc=0 || rc=1
+  else rc=1; fi
+else rc=1; fi
+ck "refresh-candidates.sh dedupes the backlog in place (order preserved, duplicates collapsed)" $rc
 
 echo
 echo "==> $pass passed, $fail failed"
