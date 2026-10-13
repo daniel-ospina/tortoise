@@ -281,7 +281,18 @@ def ensure_selfhost_event_log(*, data_root: str | None = None) -> str | None:
         return explicit
     root = _SELFHOST_DATA_ROOT if data_root is None else data_root
     if root in _SELFHOST_JOURNAL_ARMED:
-        return _SELFHOST_JOURNAL_ARMED[root]
+        cached = _SELFHOST_JOURNAL_ARMED[root]
+        if cached is not None:
+            # Re-establish the env the arm wrote. The memo is consulted only
+            # when the var is UNSET, and something outside this function can
+            # clear it after the arm (a test's monkeypatch teardown, an ops
+            # harness) — returning the cached base WITHOUT restoring the var
+            # made this function report "armed" while
+            # `_resolve_event_log_path` (the ONE derivation every door reads)
+            # resolved ``None``: a journal-less SDK built behind a claim that a
+            # journal was armed, with no signal (#8526 review P3).
+            os.environ[_HOSTED_EVENT_LOG_ENV] = cached
+        return cached
     if not _persistent_dir(root):
         # No persistent volume → no default. The dev/CI/test lane and the
         # ephemeral `docker run` shape stay journal-less by design (the #4240

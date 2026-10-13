@@ -251,6 +251,12 @@ Reviewer findings at `0e3cc5ba7` (deduplicated across the review's three comment
 - **CI (`test (h)`)**: `tests/test_probe_reset_inflight_4608.py`'s fake SDK factory predated this
   change's `event_log_path=` argument on `selfhost._probe_sdk`, so the probe raised before it reached
   its query. **Fixed in the fake** (`**_kwargs`), not by dropping the arming.
+- **P3 — a memo hit disagreed with the derivation**: with the var cleared after the arm (a test's
+  monkeypatch teardown, an ops harness), the cached verdict returned the armed base while
+  `_resolve_event_log_path` — the ONE derivation every door reads — returned `None`, so the door
+  built a journal-less SDK behind an "armed" claim. **Fixed**: a positive memo hit re-establishes
+  the env var the arm wrote; `test_a_cached_arm_re_establishes_the_env_the_derivation_reads` pins
+  it (fails with `KeyError: 'TORTOISE_EVENT_LOG_BASE_DIR'` before the fix).
 
 Re-verified at this head with the commands in the Evidence block below.
 
@@ -300,8 +306,9 @@ Re-verified at this head with the commands in the Evidence block below.
 ```bash
 env -u TORTOISE_DB_URI TORTOISE_TEST_CARVE_OUT=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
   .venv/bin/python -m pytest tests/test_selfhost_rest.py -q -p no:cacheprovider -k "8497 or Journal"
-# pre-fix (source reverted to origin/main, tests kept): 12 failed, 1 passed
-# post-fix:                                            13 passed
+# pre-fix (source reverted to origin/main, tests kept): 14 failed, 1 passed
+# fix-round pins only (source reverted to the PR head 0e3cc5ba7): 6 failed, 9 passed
+# post-fix:                                                      15 passed
 
 # CI fix for `test (h)`: the fake SDK factory must track the real call shape.
 # With the test file at the old head (no `**_kwargs`) and the source fixed:

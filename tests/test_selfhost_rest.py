@@ -435,6 +435,36 @@ class TestSelfHostJournal8497:
             "explicit-probe memo did not learn the value the arm wrote "
             "(#8526 review P2)")
 
+    def test_a_cached_arm_re_establishes_the_env_the_derivation_reads(
+            self, monkeypatch, tmp_path):
+        """A memo hit must not say "armed" while the derivation reads ``None``.
+
+        The default arm writes ``TORTOISE_EVENT_LOG_BASE_DIR`` itself, and the
+        memo is consulted only while the var is UNSET — so a caller that clears
+        the var after arming (a test's monkeypatch teardown, an ops harness) got
+        the cached base back while ``_resolve_event_log_path()`` — the ONE
+        derivation every door reads — returned ``None``. This function said a
+        journal was armed and the SDK built from it was journal-less, silently
+        (#8526 review P3).
+        """
+        from tortoise import config
+
+        monkeypatch.delenv("TORTOISE_EVENT_LOG_BASE_DIR", raising=False)
+        root = self._mounted_data_root(tmp_path, monkeypatch)
+        armed = config.ensure_selfhost_event_log(data_root=root)
+        assert armed == os.path.join(root, "events"), armed
+
+        # The var is cleared out from under the memo (teardown/harness shape).
+        monkeypatch.delenv("TORTOISE_EVENT_LOG_BASE_DIR", raising=False)
+        assert config.ensure_selfhost_event_log(data_root=root) == armed
+        assert os.environ["TORTOISE_EVENT_LOG_BASE_DIR"] == armed, (
+            "a memo hit returned the armed base without re-establishing the "
+            "env `_resolve_event_log_path` reads — the two disagree, so the "
+            "door builds a journal-less SDK behind an 'armed' claim (#8526 P3)")
+        assert config._resolve_event_log_path(
+            namespace="selfhost", graph_name=None) == os.path.join(
+                armed, "org_selfhost", "events.jsonl")
+
     def test_unwritable_default_refuses_loudly_and_arms_nothing(
             self, tmp_path, monkeypatch, caplog):
         monkeypatch.delenv("TORTOISE_EVENT_LOG_BASE_DIR", raising=False)
