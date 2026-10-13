@@ -586,6 +586,11 @@ export const DISCARD_ENTRY_TOO_LARGE = "entry_too_large";
 export const DISCARD_COUNT_EXCEEDED = "spool_count_exceeded";
 export const DISCARD_BYTES_EXCEEDED = "spool_total_bytes_exceeded";
 export const DISCARD_TRANSCRIPT_EMPTY = "transcript_empty";
+/** The turn log EXISTS with bytes but yields no parseable turn — a torn UTF-8
+ *  append, a non-UTF-8 tail, or a path that is not a readable file. The entry
+ *  is RECORDED and KEPT (marked terminal), NEVER unlinked (#7708 follow-up): a
+ *  read/decode failure must not delete the only copy of a conversation. */
+export const DISCARD_TRANSCRIPT_TORN = "transcript_torn";
 export const DISCARD_CORRUPT = "corrupt_entry";
 /** A filesystem error while writing the spool — recorded, never silent. */
 export const DISCARD_WRITE_FAILED = "spool_write_failed";
@@ -892,15 +897,15 @@ export function listSpoolEntries(
           detail: meta ? `meta has no usable session_id: ${path}` : `meta is not valid JSON: ${path}`,
         }),
       );
-      // Remove BOTH halves: an orphaned turns log is invisible to the meta
-      // scan, so it would never be counted or pruned and could grow the spool
-      // past its byte ceiling forever.
-      for (const orphan of [path, join(root, `${stem}.turns.jsonl`)]) {
-        try {
-          unlinkSync(orphan);
-        } catch {
-          // nothing more we can do — the record above is the observable signal
-        }
+      // Remove the corrupt META, but QUARANTINE the turn log, not delete it
+      // (#7708): the transcript has nothing to do with the corruption and is
+      // the only copy, so a bad `meta.json` must not become data loss. An
+      // absent/empty log is removed.
+      quarantineLog(join(root, `${stem}.turns.jsonl`));
+      try {
+        unlinkSync(path);
+      } catch {
+        // nothing more we can do — the record above is the observable signal
       }
       continue;
     }
@@ -920,6 +925,52 @@ export function spoolEntryBytes(dir: string, sessionId: string): number {
     }
   }
   return total;
+}
+
+/** Whether the turn log exists with bytes — the gate between the TWO
+ *  empty-transcript outcomes (#7708). An ABSENT/zero-byte log is
+ *  `transcript_empty` (removed — provably nothing to keep); a log with bytes is
+ *  `transcript_torn` (recorded, marked terminal and KEPT). `statSync` does not
+ *  need read permission, so a present-but-unreadable log counts as content. */
+function turnLogHasContent(dir: string, sessionId: string): boolean {
+  try {
+    return statSync(logPathFor(dir, sessionId)).size > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Move a turn log ASIDE instead of unlinking it — recoverable, not deleted.
+ *  Used when the META is corrupt and the transcript (which the corruption never
+ *  touched, and which is the only copy) must survive (#7708). An empty/absent
+ *  log is removed. A numeric suffix keeps an earlier orphan from being
+ *  clobbered. Best-effort: a rename failure leaves the log in place. */
+function quarantineLog(log: string): void {
+  let size = 0;
+  try {
+    size = statSync(log).size;
+  } catch {
+    // absent — nothing to keep
+  }
+  if (size <= 0) {
+    try {
+      unlinkSync(log);
+    } catch {
+      // already gone
+    }
+    return;
+  }
+  let target = `${log}.orphan`;
+  let suffix = 1;
+  while (existsSync(target)) {
+    suffix += 1;
+    target = `${log}.orphan${suffix}`;
+  }
+  try {
+    renameSync(log, target);
+  } catch {
+    // leave it in place — better than deleting it
+  }
 }
 
 /**
@@ -1512,8 +1563,17 @@ export async function flushSpool(
     try {
       const turns = readSpoolTurns(dir, meta.session_id);
       if (turns.length === 0) {
+        // TWO outcomes, decided by whether the log still holds bytes (#7708).
+        // An absent/zero-byte log is provably empty; a log with bytes may be
+        // the only copy of the conversation, so it is RECORDED and KEPT
+        // (terminal) rather than unlinked.
         summary.discarded.push(
-          discardEntry(dir, meta, DISCARD_TRANSCRIPT_EMPTY, "turn log is empty or unreadable"),
+          turnLogHasContent(dir, meta.session_id)
+            ? quarantineEntry(
+                dir, meta, DISCARD_TRANSCRIPT_TORN,
+                "turn log has bytes but no parseable turn — kept", nowMs,
+              )
+            : discardEntry(dir, meta, DISCARD_TRANSCRIPT_EMPTY, "turn log is empty"),
         );
         continue;
       }

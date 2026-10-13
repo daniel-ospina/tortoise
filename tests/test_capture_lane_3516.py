@@ -653,6 +653,22 @@ def test_the_spool_lane_vocabulary_mirrors_the_server_set():
         assert spool._normalise_lane(bad) is None, bad
 
 
+def test_the_spool_harness_vocabulary_mirrors_the_server_set():
+    """The HARNESS mirror (#7708 follow-up): the spool normalises `harness` at
+    the write and at the wire, so its set must equal the server's closed set —
+    a drift would either coerce a legal harness to the default or let an illegal
+    one through."""
+    import tortoise.capture_spool as spool
+
+    assert spool.SESSION_HARNESSES == ha_mod._SESSION_HARNESS_VALUES
+    for good in ("claude", "codex", "pi", "openclaw", "hermes", "claude-desktop"):
+        assert spool._normalise_harness(good) == good
+    # The CLI alias resolves; everything else (incl. non-strings) is the default.
+    assert spool._normalise_harness("desktop") == "claude-desktop"
+    for bad in ("bogus", "Claude", 0, False, None, [], ["codex"]):
+        assert spool._normalise_harness(bad) == "claude", bad
+
+
 def test_the_ts_lane_set_matches_the_server_and_python_legs(tmp_path):
     """The TS leg is a separate language, so its mirror has no import to pin it.
     Execute it and compare the SET — an over-wide TS set (e.g. one that also

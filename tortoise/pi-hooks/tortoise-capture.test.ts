@@ -1747,20 +1747,27 @@ test("a spool directory that cannot be created is discarded WITH a reason", () =
   assert.equal(res.discards[0].reason, "spool_write_failed");
 });
 
-test("a corrupt meta takes its orphaned turn log with it", () => {
-  // MUTATION THAT REDS THIS: unlink only the meta → the orphaned turns.jsonl
-  // stays on disk, invisible to the meta scan and never counted or pruned.
+test("a corrupt meta QUARANTINES its intact turn log (never unlinks)", () => {
+  // #7708: the transcript has nothing to do with a corrupt `meta.json` and is
+  // the only copy, so deleting it turns a bad meta into permanent data loss.
+  // The corrupt meta is removed (the ledger line is its evidence); the turn log
+  // is moved aside as `*.orphan` — recoverable, not deleted.
+  //
+  // MUTATION THAT REDS THIS: unlink the turn log with the meta.
   const spool = tmpSpool();
   mkdirSync(join(spool, "entries"), { recursive: true });
   writeFileSync(join(spool, "entries", "dead.meta.json"), "{not json");
-  writeFileSync(join(spool, "entries", "dead.turns.jsonl"), "{}\n");
+  const turns = '{"role":"user","content":"keep me"}\n';
+  writeFileSync(join(spool, "entries", "dead.turns.jsonl"), turns);
 
   const { metas, discards } = listSpoolEntries(spool);
   assert.equal(metas.length, 0);
   assert.equal(discards.length, 1);
   assert.equal(discards[0].reason, "corrupt_entry");
   assert.equal(existsSync(join(spool, "entries", "dead.turns.jsonl")), false,
-    "the orphaned turn log must be removed with its meta");
+    "the turn log must no longer be addressable as the live log");
+  assert.equal(readFileSync(join(spool, "entries", "dead.turns.jsonl.orphan"), "utf8"), turns,
+    "the intact transcript must be QUARANTINED, not deleted");
 });
 
 test("a meta with no usable session_id is corrupt, not a crash", () => {
@@ -1930,13 +1937,16 @@ test("the CAS compares the POSTED turns, not the stale meta digest", async () =>
 
 // ── Cycle-4 review fixes (P1/P2) ───────────────────────────────────────────
 
-test("an unreadable turn log is RECORDED, not thrown out of the flush loop", async () => {
+test("an unreadable turn log is RECORDED and KEPT, not thrown out of the flush loop", async () => {
   // `readFileSync` used to escape `readSpoolTurns`: one entry whose log was a
   // DIRECTORY (or EACCES / ELOOP) aborted the WHOLE drain loop, so every
   // session sorted after it was never filed — permanently, with no ledger line.
+  // It must be recorded and, since the path holds something, KEPT (a read
+  // failure must never unlink the only copy — #7708).
   //
   // MUTATION THAT REDS THIS: drop the try/catch around `readFileSync` in
-  // `readSpoolTurns` (or guard with `existsSync` only).
+  // `readSpoolTurns` (or guard with `existsSync` only); or route a byte-bearing
+  // log to `discardEntry` instead of `quarantineEntry`.
   const spool = tmpSpool();
   writeSpoolEntry(spool, snapshot("aaa-broken"));
   const broken = join(spool, "entries", `${entryKey("aaa-broken")}.turns.jsonl`);
@@ -1949,9 +1959,12 @@ test("an unreadable turn log is RECORDED, not thrown out of the flush loop", asy
 
   assert.deepEqual(calls.map((c) => c.body.session_id), ["zzz-good"],
     "a corrupt entry must not wedge the sessions sorted after it");
-  assert.deepEqual(summary.discarded.map((d) => d.reason), ["transcript_empty"],
+  assert.deepEqual(summary.discarded.map((d) => d.reason), ["transcript_torn"],
     "the unreadable entry must be recorded, never silently dropped");
-  assert.equal(readDiscards(spool).at(-1)?.reason, "transcript_empty");
+  assert.equal(readDiscards(spool).at(-1)?.reason, "transcript_torn");
+  assert.ok(existsSync(broken), "a byte-bearing log must NOT be unlinked");
+  assert.ok(readSpoolEntry(spool, "aaa-broken")?.terminal_failure,
+    "the kept entry must be terminal so the drain does not loop on it");
 });
 
 test("a discard records its reason BEFORE removing the entry files", () => {

@@ -1734,8 +1734,9 @@ def test_the_cas_compares_the_POSTED_turns_not_the_stale_meta(tmp_path):
 
 def test_an_unreadable_turn_log_discards_with_a_reason_instead_of_crashing(tmp_path):
     """`session drain` documents "always exits 0"; an unreadable log (EACCES, a
-    directory in its place) must become a RECORDED discard, not an exception
-    escaping the hook.
+    directory in its place) must become a RECORDED, KEPT entry, not an exception
+    escaping the hook and not an unlink — the path may be the only copy of the
+    transcript (#7708).
 
     MUTATION THAT REDS THIS: drop the `except OSError` around the log read.
     """
@@ -1748,8 +1749,12 @@ def test_an_unreadable_turn_log_discards_with_a_reason_instead_of_crashing(tmp_p
 
     summary = flush_spool(tmp_path, _Server().post, now=1000.0)
     assert summary.attempted == 0, "a log that cannot be read is not attempted"
-    assert summary.discarded[-1]["reason"] == "transcript_empty"
-    assert read_discards(tmp_path)[-1]["reason"] == "transcript_empty"
+    assert summary.discarded[-1]["reason"] == "transcript_torn"
+    assert read_discards(tmp_path)[-1]["reason"] == "transcript_torn"
+    # The entry is KEPT (recorded + terminal), never unlinked: a present log that
+    # cannot be read must not become data loss.
+    assert summary.lost == [], "a read failure must not read as a loss"
+    assert read_spool_meta(tmp_path, "sess-dir").get("terminal_failure")
 
 
 # ── (14) Cycle-4 review P1/P2 fixes ────────────────────────────────────────
@@ -1988,7 +1993,7 @@ console.log(JSON.stringify({ posted, discards: readDiscards(dir).map(d => d.reas
     out = json.loads(proc.stdout.strip().splitlines()[-1])
     assert "zzz-good" in out["posted"], (
         f"a corrupt entry must not wedge later sessions: {out}")
-    assert "transcript_empty" in out["discards"], (
+    assert "transcript_torn" in out["discards"], (
         f"the unreadable entry must be recorded, not dropped: {out}")
 
 
@@ -2310,7 +2315,14 @@ def test_a_non_utf8_turn_log_is_recorded_not_a_crash(tmp_path, monkeypatch, caps
     assert "zzz-healthy" in server.sessions, (
         "a corrupt entry must not stop the sessions sorted after it from filing")
     reasons = [d["reason"] for d in read_discards(root)]
-    assert "transcript_empty" in reasons, "the corrupt log is RECORDED, not silent"
+    assert "transcript_torn" in reasons, "the torn log is RECORDED, not silent"
+    # …and the intact prefix is KEPT, never unlinked: the torn tail must not
+    # take the whole transcript with it.
+    assert _log_path(root, "aaa-corrupt").exists(), (
+        "a torn append UNLINKED the only copy of the transcript")
+    meta = read_spool_meta(root, "aaa-corrupt")
+    assert meta is not None and meta.get("terminal_failure"), (
+        "the torn entry must be terminal-and-kept, not deleted")
 
 
 def test_a_corrupt_typed_meta_does_not_crash_or_wedge(tmp_path):
@@ -2629,3 +2641,255 @@ def test_per_turn_spool_repairs_a_non_utf8_meta_instead_of_crashing(tmp_path,
                      "--session-id", "sess-fixmeta"]) == 0
     assert "Traceback" not in capsys.readouterr().err
     assert read_spool_meta(root, "sess-fixmeta") is not None, "the meta is repaired"
+
+
+# ── (19) #7708 follow-up — a read/decode failure NEVER unlinks the transcript ─
+#
+# The lane fix closed "a bad VALUE unlinks the only copy". This closes the
+# sibling: a bad READ of a log or meta that still holds the conversation. The
+# invariant is one-directional — only an ABSENT or ZERO-BYTE log may be removed;
+# anything with bytes is recorded, marked terminal and KEPT.
+
+
+def test_a_torn_utf8_append_keeps_the_intact_prefix(tmp_path):
+    """A killed append of a multi-byte character (CJK/emoji, written raw by
+    `_serialise_turn`) leaves a torn codepoint at the log's tail. The strict
+    `read_text` raised on the WHOLE file and returned `[]`, so the drain recorded
+    `transcript_empty` and UNLINKED the intact prefix — the only copy. The TS leg
+    decodes tolerantly (Node replaces the invalid byte), so only Python lost it.
+
+    MUTATION THAT REDS THIS: restore `path.read_text(encoding="utf-8")` (strict)
+    in `read_spool_turns` — the prefix is neither posted nor kept.
+    """
+    from tortoise.capture_spool import _log_path
+
+    sid = "7708-torn-prefix"
+    turns = [{"role": "user", "content": "the only copy"}]
+    write_spool_entry(tmp_path, _snapshot(sid, turns=turns))
+    log = _log_path(tmp_path, sid)
+    with log.open("ab") as fh:
+        # A torn 4-byte codepoint (emoji prefix) appended after a new line.
+        fh.write(b'{"role":"assistant","content":"\xf0\x9f')
+
+    assert read_spool_turns(tmp_path, sid) == turns, (
+        "the intact prefix must survive a torn trailing codepoint")
+
+    server = _Server()
+    summary = flush_spool(tmp_path, server.post, now=1000.0)
+    assert summary.lost == [], "a torn append must not read as a loss"
+    assert sid in server.sessions, (
+        "the intact prefix must be FILED, not merely kept on disk")
+    assert log.exists(), "the torn tail must not unlink the intact transcript"
+    assert read_spool_meta(tmp_path, sid) is not None
+
+
+def test_a_wholly_unparseable_turn_log_is_terminal_and_kept(tmp_path):
+    """When even the first record never completed, the log still holds bytes —
+    possibly the only copy. It is recorded `transcript_torn` and KEPT (terminal),
+    never unlinked.
+
+    MUTATION THAT REDS THIS: route the empty-turns branch to `_discard_entry`
+    unconditionally → the log is UNLINKED and the entry reads as a loss.
+    """
+    from tortoise.capture_spool import _log_path
+
+    sid = "7708-wholly-torn"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    log = _log_path(tmp_path, sid)
+    log.write_bytes(b"\xf0\x9f")  # no complete record at all
+
+    server = _Server()
+    summary = flush_spool(tmp_path, server.post, now=1000.0)
+    assert [d["reason"] for d in summary.discarded] == ["transcript_torn"]
+    assert summary.lost == [], "a byte-bearing log must not read as a loss"
+    assert log.exists() and log.read_bytes() == b"\xf0\x9f", (
+        "a read that yields no turn must NOT unlink the bytes")
+    assert read_spool_meta(tmp_path, sid).get("terminal_failure"), (
+        "the kept entry must be terminal so the drain is not wedged on it")
+    assert server.sessions == {}, "nothing parseable should reach the wire"
+
+
+def test_a_wholly_torn_entry_is_retriable_after_new_content_arrives(tmp_path):
+    """The terminal marker on a torn entry must not be a dead end: a later
+    snapshot that REPLACES the log with real turns rebuilds the meta (dropping
+    the marker) and the capture files. Without this the keep would strand it."""
+    from tortoise.capture_spool import _log_path
+
+    sid = "7708-torn-recovers"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    _log_path(tmp_path, sid).write_bytes(b"\xf0\x9f")
+    flush_spool(tmp_path, _Server().post, now=1000.0)
+    assert read_spool_meta(tmp_path, sid).get("terminal_failure")
+
+    # The session keeps going and the next snapshot carries the whole (now
+    # complete) conversation — `_log_has_complete_records` is False, so the log
+    # is REWRITTEN, and the rebuilt meta drops the terminal marker.
+    turns = [{"role": "user", "content": "recovered"}]
+    write_spool_entry(tmp_path, _snapshot(sid, turns=turns))
+    assert not read_spool_meta(tmp_path, sid).get("terminal_failure"), (
+        "a rebuilt meta must drop the terminal marker")
+    server = _Server()
+    flush_spool(tmp_path, server.post, now=2_000_000.0)
+    assert server.sessions.get(sid, {}).get("conversation") == turns
+
+
+def test_a_corrupt_meta_quarantines_an_intact_turn_log(tmp_path):
+    """A hand-edited/corrupt `meta.json` (a typo made while fixing a lane — the
+    PR's own threat model) must not unlink the transcript: the log is the only
+    copy and has nothing to do with the corruption.
+
+    MUTATION THAT REDS THIS: restore the
+    `for orphan in (path, log): orphan.unlink()` loop → the transcript is lost.
+    """
+    from tortoise.capture_spool import _log_path, _meta_path
+
+    sid = "7708-corrupt-meta"
+    turns = [{"role": "user", "content": "the only copy"}]
+    write_spool_entry(tmp_path, _snapshot(sid, turns=turns))
+    log = _log_path(tmp_path, sid)
+    before = log.read_bytes()
+    _meta_path(tmp_path, sid).write_text("{not json", encoding="utf-8")
+
+    summary = flush_spool(tmp_path, _Server().post, now=1000.0)
+    assert [d["reason"] for d in summary.discarded] == ["corrupt_entry"]
+    assert not log.exists(), "the live log path should be vacated"
+    orphan = log.with_name(log.name + ".orphan")
+    assert orphan.read_bytes() == before, (
+        "the intact transcript must be QUARANTINED, not deleted")
+    assert not _meta_path(tmp_path, sid).exists()
+
+
+def test_an_empty_turn_log_is_still_removed_with_a_reason(tmp_path):
+    """Positive control for the gate: a log that is ABSENT/ZERO BYTES is
+    provably empty, so `transcript_empty` may remove it — the keep must not turn
+    a genuinely empty entry into a permanent terminal entry."""
+    from tortoise.capture_spool import _log_path
+
+    sid = "7708-truly-empty"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    _log_path(tmp_path, sid).write_bytes(b"")
+
+    summary = flush_spool(tmp_path, _Server().post, now=1000.0)
+    assert [d["reason"] for d in summary.discarded] == ["transcript_empty"]
+    assert summary.lost, "an empty entry really was removed"
+    assert not _log_path(tmp_path, sid).exists()
+    assert read_spool_meta(tmp_path, sid) is None
+
+
+# ── (20) #7708 follow-up — an unrecognised HARNESS never reaches the wire ─────
+
+
+def test_the_writer_stores_only_a_server_legal_harness(tmp_path):
+    """`harness` is the SAME class of closed server field as `capture_lane`. An
+    unrecognised value is coerced to the server-legal default at the WRITE, so it
+    can never be stored and forwarded (which 422s and strands the entry).
+
+    MUTATION THAT REDS THIS: store `snapshot.harness` raw.
+    """
+    def _write(sid, harness):
+        write_spool_entry(tmp_path, Snapshot(
+            session_id=sid, turns=[{"role": "user", "content": "x"}],
+            source="t", machine_id="m", harness=harness))
+        return read_spool_meta(tmp_path, sid)
+
+    assert _write("7708-h-writer-bad", "bogus")["harness"] == "claude"
+    # positive controls: a legal value is stored verbatim; the CLI alias resolves
+    assert _write("7708-h-writer-codex", "codex")["harness"] == "codex"
+    assert _write("7708-h-writer-desktop", "desktop")["harness"] == "claude-desktop"
+
+
+def test_the_drain_never_puts_an_unrecognised_harness_on_the_wire(tmp_path):
+    """Even a meta hand-edited AFTER the write (the threat model the lane fix
+    cites) cannot put an illegal harness on the wire.
+
+    MUTATION THAT REDS THIS: forward `meta.get("harness", "claude")` verbatim.
+    """
+    from tortoise.capture_spool import _write_meta
+
+    sid = "7708-harness-wire"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    meta = read_spool_meta(tmp_path, sid)
+    meta["harness"] = "bogus"
+    _write_meta(tmp_path, meta)
+
+    posted: list[dict] = []
+    flush_spool(
+        tmp_path, lambda p: (posted.append(dict(p)),
+                             PostOutcome(ok=True, status=200))[1],
+        only_session_id=sid)
+    assert posted and posted[0]["harness"] == "claude", posted
+
+    # Positive control: a LEGAL stored harness is forwarded verbatim, so the
+    # assertion above cannot pass on a leg that stopped forwarding harness.
+    write_spool_entry(tmp_path, Snapshot(
+        session_id="7708-harness-codex",
+        turns=[{"role": "user", "content": "y"}],
+        source="t", machine_id="m", harness="codex"))
+    posted2: list[dict] = []
+    flush_spool(
+        tmp_path, lambda p: (posted2.append(dict(p)),
+                             PostOutcome(ok=True, status=200))[1],
+        only_session_id="7708-harness-codex")
+    assert posted2 and posted2[0]["harness"] == "codex"
+
+
+# ── (21) #7708 follow-up — `terminal_failure` has a supported exit ───────────
+
+
+def test_reset_terminal_entries_clears_the_marker_and_refiles(tmp_path):
+    """`terminal_failure` was only ever SET, never cleared — so a capture a
+    client fix would make fileable stayed stranded forever. `reset_terminal_entries`
+    is the supported exit: it drops the marker and re-arms the window so the SAME
+    drain attempts the entry.
+
+    MUTATION THAT REDS THIS: make the reset a no-op → the second flush skips the
+    entry as terminal and it is never filed.
+    """
+    from tortoise.capture_spool import reset_terminal_entries
+
+    sid = "7708-reset-terminal"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    flush_spool(tmp_path, lambda p: PostOutcome(ok=False, status=422, detail="bad lane"),
+                only_session_id=sid)
+    assert read_spool_meta(tmp_path, sid).get("terminal_failure")
+
+    # A terminal entry is skipped, not re-POSTed.
+    skipped = flush_spool(tmp_path, _Server().post, only_session_id=sid)
+    assert skipped.terminal == 1 and skipped.filed == 0
+
+    assert reset_terminal_entries(tmp_path) == 1
+    assert not read_spool_meta(tmp_path, sid).get("terminal_failure")
+    assert read_spool_meta(tmp_path, sid).get("next_attempt_at_ms") == 0
+
+    server = _Server()
+    refiled = flush_spool(tmp_path, server.post, only_session_id=sid)
+    assert refiled.filed == 1 and sid in server.sessions
+
+
+def test_cli_drain_retry_terminal_is_the_supported_exit(tmp_path, monkeypatch, capsys):
+    """The operator message names `session drain --retry-terminal`, and that verb
+    really clears the marker and files the entry.
+
+    MUTATION THAT REDS THIS: drop `--retry-terminal` from the parser (or stop
+    forwarding it) → the entry stays terminal and is never filed.
+    """
+    from tortoise import __main__ as cli
+
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    sid = "7708-cli-retry"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    flush_spool(tmp_path, lambda p: PostOutcome(ok=False, status=422, detail="bad lane"),
+                only_session_id=sid)
+    assert read_spool_meta(tmp_path, sid).get("terminal_failure")
+
+    server = _Server()
+    monkeypatch.setattr("tortoise.capture_spool.spool_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_resolve_config_path",
+                        lambda *a, **k: (None, {}, "test-key", "http://test"))
+    monkeypatch.setattr(cli, "_session_post", lambda *a, **k: server.post)
+
+    assert cli.main(["session", "drain", "--retry-terminal"]) == 0
+    assert sid in server.sessions, "the retry did not file the entry"
+    err = capsys.readouterr().err
+    assert "--retry-terminal" in err, (
+        f"the remedy must be named in the operator output: {err}")

@@ -58,7 +58,9 @@ __all__ = [
     "DISCARD_ENTRY_TOO_LARGE",
     "DISCARD_HTTP_REJECTED",
     "DISCARD_TRANSCRIPT_EMPTY",
+    "DISCARD_TRANSCRIPT_TORN",
     "PROBE_SESSION_ID_PREFIX",
+    "SESSION_HARNESSES",
     "Bounds",
     "FlushSummary",
     "PostOutcome",
@@ -66,6 +68,7 @@ __all__ = [
     "backoff_delay",
     "capture_key",
     "classify_failure",
+    "clear_terminal_failure",
     "content_digest",
     "entry_key",
     "flush_spool",
@@ -76,6 +79,7 @@ __all__ = [
     "read_spool_meta",
     "read_spool_turns",
     "remove_spool_entry",
+    "reset_terminal_entries",
     "spool_dir",
     "write_spool_entry",
 ]
@@ -96,9 +100,18 @@ _MAX_ATTEMPTS = 64
 DISCARD_ENTRY_TOO_LARGE = "entry_too_large"
 DISCARD_COUNT_EXCEEDED = "spool_count_exceeded"
 DISCARD_BYTES_EXCEEDED = "spool_total_bytes_exceeded"
+#: The turn log is ABSENT or ZERO BYTES: there is provably no transcript to
+#: keep, so the entry (meta + empty log) is removed. This is the ONLY
+#: transcript-related reason that may unlink.
 DISCARD_TRANSCRIPT_EMPTY = "transcript_empty"
 #: A transcript that cannot be read at all (EACCES, EISDIR, non-UTF-8 bytes).
 DISCARD_TRANSCRIPT_UNREADABLE = "transcript_unreadable"
+#: The turn log EXISTS with bytes but yields no parseable turn — a torn UTF-8
+#: append (CJK/emoji, written raw), a non-UTF-8 tail, or a path that is not a
+#: readable file. The entry is RECORDED and KEPT (marked terminal), NEVER
+#: unlinked: the intact prefix — or the only copy — is still on disk, and a
+#: read/decode failure must never delete user data (#7708 follow-up).
+DISCARD_TRANSCRIPT_TORN = "transcript_torn"
 #: An UNEXPECTED failure while filing one entry (a bug, not a classification):
 #: recorded and backed off, but the entry is KEPT — an internal bug must never
 #: delete user data.
@@ -127,7 +140,8 @@ DISCARD_HTTP_REJECTED = "http_rejected"
 #: a permanent refusal. In BOTH cases the entry is kept (the former with a
 #: backoff, the latter marked terminal), so treating either as a failure would
 #: report a capture as lost while it is still on disk (#3971, #7708).
-RETAINED_DISCARD_REASONS = frozenset({DISCARD_ENTRY_FAILED, DISCARD_HTTP_REJECTED})
+RETAINED_DISCARD_REASONS = frozenset(
+    {DISCARD_ENTRY_FAILED, DISCARD_HTTP_REJECTED, DISCARD_TRANSCRIPT_TORN})
 
 
 def is_lost_discard(record: dict) -> bool:
@@ -490,23 +504,28 @@ def read_spool_turns(root: Path, session_id: str) -> list[dict]:
     a role here would silently post fewer turns than the digest covers while
     still stamping the entry FILED. Non-conversational roles are filtered at
     CAPTURE time (the CLI notes the drop), never silently at read time.
+
+    Decoding is TOLERANT (`errors="replace"`), mirroring the TS leg's
+    `readFileSync(path, "utf8")` — Node replaces an invalid byte rather than
+    throwing. A killed/partial append of a multi-byte character (CJK/emoji,
+    written raw by `_serialise_turn`) leaves a torn codepoint at the tail; a
+    strict decode raised `UnicodeDecodeError` on the WHOLE file and returned
+    `[]`, so `_flush_one` recorded `transcript_empty` and UNLINKED the intact
+    prefix — the only copy of the conversation (#7708). With `replace`, the
+    torn trailing line fails `json.loads` and is SKIPPED while every intact turn
+    before it survives.
     """
     path = _log_path(root, session_id)
     try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+        data = path.read_bytes()
+    except OSError:
         # An unreadable log (a directory in its place, EACCES, a partial-disk
-        # error) must not escape the drain: the entry is reported as
-        # `transcript_empty` and recorded, keeping `session drain`'s
-        # always-exit-0 contract.
-        #
-        # `UnicodeDecodeError` is a `ValueError`, NOT an `OSError` — and a
-        # KILLED/partial append of a multi-byte character (CJK/emoji, written
-        # raw by `_serialise_turn`) leaves exactly that: a torn codepoint in the
-        # log. Without it here the per-turn `session spool` crashed with a
-        # traceback and the drain wedged with NO ledger line, which is the
-        # failure this whole change exists to remove.
+        # error) must not escape the drain: the entry is reported and recorded,
+        # keeping `session drain`'s always-exit-0 contract. `_flush_one` decides
+        # whether that report may unlink: a log that exists with bytes is KEPT
+        # (`transcript_torn`), never deleted.
         return []
+    text = data.decode("utf-8", errors="replace")
     turns: list[dict] = []
     for line in text.splitlines():
         if not line.strip():
@@ -542,6 +561,46 @@ def _file_size(path: Path) -> int:
         return path.stat().st_size
     except OSError:
         return 0
+
+
+def _turn_log_has_content(root: Path, session_id: str) -> bool:
+    """Whether the turn log exists with bytes.
+
+    This is the gate between the TWO empty-transcript outcomes (#7708): an
+    ABSENT or zero-byte log is `transcript_empty` (removed — provably nothing to
+    keep); a log that exists with bytes is `transcript_torn` (recorded, marked
+    terminal and KEPT — the bytes on disk may be the only copy). `stat()` does
+    not need read permission, so a present-but-unreadable log still counts as
+    content and is never deleted.
+    """
+    return _file_size(_log_path(root, session_id)) > 0
+
+
+def _quarantine_log(log: Path) -> Path | None:
+    """Move a turn log ASIDE instead of unlinking it — recoverable, not deleted.
+
+    Used by `list_spool_metas` when the META is corrupt: the transcript has
+    nothing to do with the corruption and is the only copy, so deleting it turns
+    a bad `meta.json` into permanent data loss (#7708). An empty/absent log is
+    removed (nothing to keep); a log with bytes is renamed to
+    ``<name>.turns.jsonl.orphan`` with a numeric suffix so an earlier orphan is
+    never clobbered. Best-effort: a rename failure leaves the log in place,
+    which is still better than deleting it.
+    """
+    if _file_size(log) <= 0:
+        with contextlib.suppress(OSError):
+            log.unlink()
+        return None
+    target = log.with_name(log.name + ".orphan")
+    suffix = 1
+    while target.exists():
+        suffix += 1
+        target = log.with_name(f"{log.name}.orphan{suffix}")
+    try:
+        os.replace(log, target)
+    except OSError:
+        return None
+    return target
 
 
 def _now_iso() -> str:
@@ -703,13 +762,53 @@ def _quarantine_entry(root: Path, meta: dict, reason: str, detail: str,
     return record
 
 
+def clear_terminal_failure(root: Path, session_id: str) -> bool:
+    """Clear ONE entry's ``terminal_failure`` marker so a drain retries it.
+
+    ``terminal_failure`` is set by a permanent refusal (#7708) and nothing else
+    ever cleared it, so a capture that a client-side fix (a corrected lane or
+    harness, a server-side set widening) would now make fileable stayed stranded
+    forever — the operator message named no remedy. This is the supported exit.
+
+    Also resets the backoff so the SAME drain actually attempts the entry: the
+    marker is only meaningful together with "do not retry", and leaving the
+    window in place would defer the very retry this exists to enable. Best-effort
+    against a concurrent prune: returns False when there is no terminal entry.
+    """
+    meta = read_spool_meta(root, session_id)
+    if meta is None or not meta.get("terminal_failure"):
+        return False
+    meta.pop("terminal_failure", None)
+    meta["attempts"] = 0
+    meta["next_attempt_at_ms"] = 0
+    _write_meta(root, meta)
+    return True
+
+
+def reset_terminal_entries(root: Path) -> int:
+    """Clear every terminal marker on the spool; return how many were cleared.
+
+    The enumeration is `list_spool_metas`, so the reset sees exactly the entries
+    the drain sees (a corrupt entry is recorded, not skipped silently).
+    """
+    metas, _discards = list_spool_metas(root)
+    cleared = 0
+    for meta in metas:
+        session_id = meta.get("session_id")
+        if isinstance(session_id, str) and session_id \
+                and clear_terminal_failure(root, session_id):
+            cleared += 1
+    return cleared
+
+
 def list_spool_metas(root: Path) -> tuple[list[dict], list[dict]]:
     """All spool metas; malformed ones become ``corrupt_entry`` discards.
 
     A meta that is valid JSON but has no usable ``session_id`` is ALSO corrupt —
     otherwise the drain crashes on `meta["session_id"]` instead of recording it.
-    Both halves (meta + turn log) are removed: an orphaned log is invisible to
-    the meta scan and would never be counted or pruned.
+    The corrupt META is removed; the turn log is QUARANTINED as ``.orphan`` (or
+    removed when empty) — deleting it would destroy the only copy of a
+    conversation that the corruption never touched (#7708).
     """
     metas: list[dict] = []
     discards: list[dict] = []
@@ -755,9 +854,14 @@ def list_spool_metas(root: Path) -> tuple[list[dict], list[dict]]:
                 "detail": ("meta has no usable session_id" if meta is not None
                            else "meta is not valid JSON") + f": {path}",
             }))
-            for orphan in (path, d / f"{stem}.turns.jsonl"):
-                with contextlib.suppress(OSError):
-                    orphan.unlink()
+            # The corrupt META is removed (the ledger line is its evidence), but
+            # the turn log is QUARANTINED, not deleted (#7708): the transcript
+            # has nothing to do with the corruption and is the only copy, so a
+            # hand-edit of `meta.json` made while fixing a lane — the PR's own
+            # threat model — must not destroy it. An absent/empty log is removed.
+            _quarantine_log(d / f"{stem}.turns.jsonl")
+            with contextlib.suppress(OSError):
+                path.unlink()
             continue
         metas.append(meta)
     return metas, discards
@@ -795,6 +899,43 @@ def _normalise_lane(value: object) -> str | None:
     if isinstance(value, str) and value in CAPTURE_LANES:
         return value
     return None
+
+
+# #7708 follow-up: the HARNESS vocabulary, the SAME class of closed field. The
+# server's `SessionRequest._validate_harness` 422s any member outside
+# `hosted_api._SESSION_HARNESS_VALUES`, and `_flush_one` forwarded
+# `meta.get("harness", "claude")` VERBATIM — so a hand-edited / foreign /
+# corrupt `meta.json` (the PR's own threat model) put an illegal harness on the
+# wire, drew a 422, and the entry went terminal. Mirrored here (the spool cannot
+# import `hosted_api`'s FastAPI stack); a test pins the mirror to the server set.
+SESSION_HARNESSES = frozenset({
+    "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
+    "openclaw", "hermes",
+})
+
+#: The CLI alias `sessions import --harness desktop` resolves to the canonical
+#: member (`__main__._cmd_sessions_import`); the spool accepts it too so the two
+#: paths cannot disagree about what `desktop` means.
+_HARNESS_ALIASES = {"desktop": "claude-desktop"}
+
+
+def _normalise_harness(value: object) -> str:
+    """The ONE harness normalisation, used by the writer and the wire.
+
+    Returns a SERVER-LEGAL harness. An unrecognised token (a typo, a foreign
+    value from the other leg, a hand-edit) is coerced to the default
+    ``"claude"`` rather than dropped: unlike the lane, the harness is not part
+    of any filing identity and the server accepts absence, but the CLI's
+    documented default is ``claude`` and a missing/foreign value reaching a
+    breadcrumb path must not crash it. The coercion is fail-safe and, crucially,
+    NEVER a 422 — an unrecognised harness can no longer strand a capture in
+    ``terminal_failure``. Returns ``"claude"`` for a non-string.
+    """
+    if isinstance(value, str):
+        resolved = _HARNESS_ALIASES.get(value, value)
+        if resolved in SESSION_HARNESSES:
+            return resolved
+    return "claude"
 
 
 def _finite_instant(value: object) -> float | None:
@@ -953,7 +1094,12 @@ def write_spool_entry(
     meta = {
         "version": 1,
         "session_id": snapshot.session_id,
-        "harness": snapshot.harness,
+        # #7708 follow-up: normalised at the WRITE, the same class as the lane.
+        # An unrecognised harness is coerced to the server-legal default rather
+        # than stored and forwarded, where the server's 422 would mark the entry
+        # terminal (a stranded capture). The breadcrumb path also keys on this
+        # value, so an illegal/absent harness must still resolve.
+        "harness": _normalise_harness(snapshot.harness),
         "source": snapshot.source,
         "machine_id": snapshot.machine_id,
         "created_at": (prior or {}).get("created_at", now),
@@ -1406,9 +1552,22 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         return
     turns = read_spool_turns(root, sid)
     if not turns:
-        summary.discarded.append(
-            _discard_entry(root, meta, DISCARD_TRANSCRIPT_EMPTY, "turn log is empty or unreadable")
-        )
+        # TWO outcomes, decided by whether the log still holds bytes (#7708).
+        # An ABSENT/zero-byte log is provably empty — recording `transcript_empty`
+        # and removing it is not a loss. A log that EXISTS with bytes (a torn
+        # UTF-8 append, a path that is not a readable file) may still be the only
+        # copy of the conversation: record `transcript_torn` and KEEP it, marked
+        # terminal. Deleting it here was the exact data loss this PR exists to
+        # close — and the TS twin already tolerated the torn append, so the legs
+        # disagreed about the consequence.
+        if _turn_log_has_content(root, sid):
+            summary.discarded.append(_quarantine_entry(
+                root, meta, DISCARD_TRANSCRIPT_TORN,
+                "turn log has bytes but no parseable turn — kept", now_ms,
+            ))
+        else:
+            summary.discarded.append(_discard_entry(
+                root, meta, DISCARD_TRANSCRIPT_EMPTY, "turn log is empty"))
         return
     # The digest of what will actually be POSTed. The CAS below compares the
     # disk against THIS, never against the stale pre-POST meta: a writer that
@@ -1418,7 +1577,11 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
     posted_digest = content_digest(turns)
     summary.attempted += 1
     payload = {
-        "harness": meta.get("harness", "claude"),
+        # #7708 follow-up: the SAME normaliser at the wire as the writer, so a
+        # hand-edited/foreign/corrupt meta the other leg left behind cannot put
+        # an illegal harness on the wire. The server's 422 for a bad harness is
+        # now unreachable from this leg, exactly as the lane's is.
+        "harness": _normalise_harness(meta.get("harness")),
         "session_id": sid,
         "source": meta.get("source"),
         "conversation": turns,
