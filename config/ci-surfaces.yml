@@ -3109,6 +3109,12 @@ surfaces:
   # other file this pins — is a SHARED_MODULE, so a sdk.py change runs it under
   # the full matrix regardless. See the `core` arm's entry for the same file.
   - test_references_boundary_5213.py
+  # #6871: the operator's INPUT set (idx=0 source, idx>=1 targets) — the
+  # source's typed edge IS the EP factor's source slot, and the canonical
+  # evidence read never surfaces a point as its own supporter. `sdk` owns it
+  # (`tortoise/sdk.py`, `tortoise/why.py`, `tortoise/ep.py`); embedded-only, so
+  # also in `carve_out` below.
+  - test_6871_operator_input_set.py
   classify:
   # Issue #1695 (extractor-v3 classify-later): the kind-classification and
   # chain-enforcement surface. Pure-logic files (stub encoders, golden
@@ -3492,6 +3498,10 @@ carve_out:
 # live graph, so a URI-set lane would redirect it. Also in the `sdk` surface
 # above, which is where a diff selects it.
 - test_direction_storage_7852.py
+# #6871: embedded-only — the fixture builds `TortoiseSDK(<tmpfile>)`, so a
+# URI-set lane would redirect it. Also in the `sdk` surface above, which is
+# where the diff selects it.
+- test_6871_operator_input_set.py
 - test_redis_guard.py
 # #4524: the vecf32 overwrite-seam guards. The defect is embedded-only (the
 # server lane lands the same write), so the module is module-level

@@ -2562,7 +2562,34 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
         cypher = (
             "MATCH (n:Point) "
             "WHERE n.id IN $ids "
-            "OPTIONAL MATCH (n)<-[r:IMPL]-(:Point) "
+            # #6871: `impl_count` is an INCOMING EVIDENCE count, and an
+            # operator's typed edges are its input set — idx 0 is the
+            # operator's SOURCE, idx >= 1 its targets. IMPL pairs are ALWAYS
+            # source -> target (`ep.py::_update_nary_factor` takes the
+            # `input_ids[0]` arm unconditionally for IMPL), so an idx=0 edge is
+            # the operator's own input and never evidence pointing AT it.
+            # Unguarded, a source with nothing supporting it reported
+            # impl_count=1 and a diluted `contention` (nand/(impl+nand)) on the
+            # wire. So the ONE edge excluded is the operator's input: idx = 0 ON
+            # an operator. Everything else counts, including an operator-less
+            # direct edge — `create_direct_edge` writes it with NO `idx`, so it
+            # can never carry a role and is evidence by definition.
+            #
+            # `c.is_operator IS NULL` is NOT the same as "not an operator": the
+            # canonical identity is `bool(is_operator or op_type)`
+            # (graph-scripts/backfill_is_operator.py, which stamps exactly that
+            # legacy class), and five sites match
+            # `(is_operator = true OR op_type IS NOT NULL)`. Treating a NULL on
+            # a legacy operator as operator-less fails OPEN — its idx=0 edge
+            # counts again for its own source, the very symptom being fixed.
+            #
+            # ⛔ NAND is deliberately NOT guarded here: its pairs depend on the
+            # operator's `direction` (`-` = no pairs, directed = source ->
+            # targets, mutual — the `create_operator` DEFAULT — = all pairs),
+            # which this count cannot express. Filed as its own root: #8460.
+            "OPTIONAL MATCH (n)<-[r:IMPL]-(c:Point) "
+            "WHERE NOT (coalesce(r.idx, -1) = 0 "
+            "           AND (c.is_operator = true OR c.op_type IS NOT NULL)) "
             "WITH n, count(r) AS impl_count "
             "OPTIONAL MATCH (n)<-[r2:NAND]-(:Point) "
             "WITH n, impl_count, count(r2) AS nand_count "
