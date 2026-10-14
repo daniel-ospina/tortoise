@@ -213,8 +213,14 @@ validates it at load):
   before), but they are **suppressed** for a lifecycle-declaring kind. This is deliberate: the
   connector vocabulary already spells `open`→`in_progress` and `closed`→`completed`, so a new kind
   reusing those words would otherwise silently inherit the wrong lifecycle.
-- **Dispatch is on the namespaced kind** (`mydomain:tranche`), never the bare name, so two packs
-  declaring the same bare kind name cannot collide at the fold.
+- **Dispatch is on the namespaced kind** (`mydomain:tranche`), so two packs declaring the same
+  bare kind name do not collide for an Object whose stored `objectKind` carries the namespace. The
+  index is also **form-widened** (a bare-spelled `objectKind` folds by the same rule — see
+  "Event-kind spelling" below), so if two packs declare a lifecycle for the **same bare kind
+  name**, a bare-spelled Object matches both and the last declaring pack (catalog order) wins.
+  That cross-pack collision is recorded as a **warning** on `PackRegistry.lifecycle_warnings` at
+  load; the shipped catalog has none. A namespaced `objectKind` is unambiguous, so use the
+  namespaced spelling when a bare name is shared.
 - **Reusing a shared vocabulary word is DETECTED.** If `statuses` contains `open`, `closed`,
   `active`, `pending`, `in_progress` or `completed`, the registry records an explicit
   **warning** (`PackRegistry.lifecycle_warnings`) — not an error, because an owner-approved
@@ -226,7 +232,10 @@ validates it at load):
   ⚠️ The level does not currently change behaviour: `emit_violation` logs at WARNING and nothing
   consumes the code, so `warn`/`retry`/`block` are identical here (there is no retry loop on the
   projection write path). It is a recorded level, not a routed ladder. An `about_entities` target
-  that does not match the declaring kind is folded silently and is **not** a violation.
+  that does not match the declaring kind is folded silently and is **not** a violation. A miss is
+  suppressed when another declared fold for the **same event** folded *any* target (two packs that
+  share a bare event kind name both appear under the widened event key): the non-matching kind is
+  simply not this Object's kind, so it is not a real signal.
 
 **Scope of the declaration.** The fold index is compiled from the process **catalog** (every
 loaded pack), not from a graph's `:PackInstall` approval set. That is deliberate: a kind already

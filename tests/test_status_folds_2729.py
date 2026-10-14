@@ -38,6 +38,7 @@ from tortoise.status_folds import (
     BUILTIN_CONNECTOR_FOLDS,
     SHARED_CONNECTOR_STATUS_WORDS,
     StatusFoldIndex,
+    bare_lifecycle_kind_collisions,
     build_status_fold_index,
     builtin_fold_status,
     validate_status_decl,
@@ -125,6 +126,26 @@ class TestStatusDeclValidation:
             "folds": [_decl("trancheReleased", "a"),
                       _decl("trancheReleased", "b")]})
         assert any("more than once" in e for e in errors)
+
+    def test_duplicate_fold_event_across_admitted_spellings_is_rejected(self):
+        """#2729 review P2: the index resolves the bare and the
+        self-namespaced spelling (and any case variant) to ONE key, so the
+        duplicate guard must compare the RESOLVED name — not the raw string,
+        which let `trancheReleased` + `demo:trancheReleased` both index and
+        the second silently win. (Pre-fix the errors list is empty.)"""
+        for second in ("demo:trancheReleased", "TRANCHeReleased"):
+            errors, _ = self._validate({
+                "statuses": ["a", "b"],
+                "folds": [_decl("trancheReleased", "a"),
+                          _decl(second, "b")]})
+            assert any("more than once" in e for e in errors), (second, errors)
+        # Parity control: two genuinely distinct events are still accepted.
+        errors, _ = self._validate({
+            "statuses": ["a", "b"],
+            "folds": [_decl("trancheReleased", "a"),
+                      _decl("otherEvent", "b")]},
+            declared=("trancheReleased", "otherEvent"))
+        assert errors == []
 
     def test_two_distinct_fold_events_are_still_accepted(self):
         """Parity control: only the SAME event twice is rejected."""
@@ -761,6 +782,80 @@ class TestMultiPackEventKeySharing:
                        for r in caplog.records)
         finally:
             sdk.close()
+
+
+class TestBareKindCollisionAcrossPacks:
+    """#2729 review P2: the namespaced dispatch key cannot disambiguate a
+    BARE-spelled ``objectKind`` when two packs declare a lifecycle for the
+    same bare kind name — the index registers the bare form for BOTH, so the
+    last declaring pack wins. The residual is *detected and recorded*, never
+    silently claimed away: dispatching on ``ns:kind`` prevents collision only
+    for an Object whose stored ``objectKind`` carries the namespace."""
+
+    class _Pack:
+        def __init__(self, object_kinds, kind_defs):
+            self.object_kinds = object_kinds
+            self.kind_defs = kind_defs
+
+    def _packs(self):
+        return {
+            "a": self._Pack(["thing"], {"thing": {
+                "statuses": ["a-done"],
+                "folds": [_decl("thingDone", "a-done")]}}),
+            "b": self._Pack(["thing"], {"thing": {
+                "statuses": ["b-done"],
+                "folds": [_decl("thingDone", "b-done")]}}),
+        }
+
+    def test_collision_is_reported(self):
+        assert bare_lifecycle_kind_collisions(self._packs()) == {
+            "thing": ["a", "b"]}
+
+    def test_single_declaring_pack_is_not_a_collision(self):
+        packs = self._packs()
+        del packs["b"]
+        assert bare_lifecycle_kind_collisions(packs) == {}
+
+    def test_distinct_bare_kind_names_are_not_a_collision(self):
+        """Parity control: two packs declaring DIFFERENT bare kind names
+        never collide, even for the same event."""
+        packs = self._packs()
+        packs["b"] = self._Pack(["widget"], {"widget": {
+            "statuses": ["b-done"],
+            "folds": [_decl("thingDone", "b-done")]}})
+        assert bare_lifecycle_kind_collisions(packs) == {}
+
+    def test_bare_object_folds_with_the_last_declaring_pack(self, monkeypatch):
+        """The documented residual, pinned: a bare ``objectKind`` matches both
+        packs and the last one (catalog order) wins."""
+        from tortoise.projection import entities as ents
+
+        idx = build_status_fold_index(self._packs())
+        monkeypatch.setattr(ents, "_status_fold_index", lambda: idx)
+        sdk = _fresh_sdk()
+        try:
+            sdk.create_entity("object", "Z1", objectKind="thing")
+            sdk.create_event("done", "thingDone", object="Z1")
+            assert _object_status(sdk, "Z1") == "b-done"
+        finally:
+            sdk.close()
+
+    def test_registry_records_the_collision_on_lifecycle_warnings(self, tmp_path):
+        for ns in ("alpha", "beta"):
+            d = tmp_path / ns
+            d.mkdir()
+            (d / "manifest.yaml").write_text(
+                f"namespace: {ns}\nname: {ns}\nversion: 0.1.0\ntier: free\n"
+                "ontology:\n  extends: core\n  objectKinds: [thing]\n"
+                "  eventKinds: [thingDone]\n  kindDefs:\n    thing:\n"
+                f"      statuses: [{ns}-done]\n      folds:\n"
+                f"        - event: thingDone\n          status: {ns}-done\n")
+        reg = PackRegistry(tmp_path)
+        assert reg.load_all() == 2, reg.errors
+        for ns in ("alpha", "beta"):
+            assert any("multiple packs" in m
+                       for m in reg.lifecycle_warnings.get(ns, [])), \
+                reg.lifecycle_warnings
 
 
 # ── 9. The hosted (graph-native) route refuses the declaration ───────────

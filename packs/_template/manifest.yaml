@@ -82,13 +82,18 @@ ontology:
   #         enforcement: retry
   #         # #2729 per-kind state lifecycle: the kind's closed status
   #         # vocabulary, plus the event kinds THAT THIS PACK declares which
-  #         # fold the status. A kind with `statuses` owns its Object state:
+  #         # fold the status. Only a kind listed in this pack's
+  #         # `objectKinds` may declare these keys (the fold dispatches on
+  #         # the namespaced kind, and a core/non-Object kind has none).
+  #         # A kind with `statuses` owns its Object state:
   #         # the built-in connector fold no longer applies to it.
   #         statuses: [draft, active, retired]
   #         folds:
   #           - event: otherKindApproved   # bare or self-ns (`mydomain:...`);
   #             # must be an event kind THIS pack declares, and one fold per
-  #             # event per kind (a duplicate event is a validation error)
+  #             # event per kind (a duplicate event is a validation error —
+  #             # `otherKindApproved` and `mydomain:otherKindApproved` are
+  #             # the same event, and case variants too)
   #             status: active           # must be one of `statuses`
   kindDefs: {}
 

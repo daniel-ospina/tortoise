@@ -37,11 +37,17 @@ Three contracts this module owns:
    declaring ``open``/``closed`` for its own lifecycle would otherwise
    silently inherit connector semantics — one word, two incompatible
    lifecycles. Dispatch is on the NAMESPACED kind (``venture:tranche``), so
-   two packs declaring the same bare kind name cannot collide at the fold;
-   the lookup and the ownership guard are additionally **case-folded and
-   form-widened** (``venture:tranche`` and bare ``tranche``), because the
-   write gate admits both spellings and the extraction commit strips the
-   namespace.
+   two packs declaring the same bare kind name do not collide for an Object
+   whose ``objectKind`` carries the namespace — but the lookup and the
+   ownership guard are additionally **case-folded and form-widened**
+   (``venture:tranche`` and bare ``tranche``), because the write gate admits
+   both spellings and the extraction commit strips the namespace. A
+   **bare**-spelled ``objectKind`` therefore matches BOTH packs when two of
+   them declare a lifecycle for one bare kind name, and the last declaring
+   pack's fold wins (the stored value carries no namespace, so the
+   namespaced dispatch key cannot resolve it). `bare_lifecycle_kind_collisions`
+   detects that case at load and ``PackRegistry`` records it on
+   ``lifecycle_warnings`` rather than leaving the ambiguity silent.
 
 3. **The overlap is DETECTED, not silent.** When a declared ``statuses`` list
    contains a word the shared connector vocabulary also uses (``open``,
@@ -201,7 +207,11 @@ def validate_status_decl(
     # multiple folds apply to one event") is not settled by this PR, and an
     # orphan/miss lint already exists for the adjacent class, so an ambiguous
     # duplicate is a validation error rather than an undocumented last-wins.
-    seen_fold_events: set[str] = set()
+    # Keyed on the RESOLVED local name (case-folded), not the raw declaration
+    # string: the index maps `disbursement`, `venture:disbursement` and any
+    # case variant to ONE key, so comparing raw strings let the two admitted
+    # spellings of one event both index and the second silently win.
+    seen_fold_events: dict[str, str] = {}
     if folds_present and not statuses_present:
         errors.append(
             f"kindDefs '{kind}': 'folds' requires 'statuses' — a fold target "
@@ -249,23 +259,32 @@ def validate_status_decl(
                     f"kindDefs '{kind}': folds[{i}] 'event' must be a "
                     f"non-empty string"
                 )
-            elif event in seen_fold_events:
-                errors.append(
-                    f"kindDefs '{kind}': folds[{i}] names event {event!r} more "
-                    f"than once — the second entry would silently win "
-                    f"(declare one status per event; use one fold per "
-                    f"event)"
-                )
-            elif not _fold_event_resolves(event, namespace,
-                                          declared_event_kinds):
-                errors.append(
-                    f"kindDefs '{kind}': folds[{i}] 'event' {event!r} is not "
-                    f"an event kind declared by this pack (declared: "
-                    f"{', '.join(str(k) for k in sorted(declared_event_kinds, key=str)) or 'none'}) — "
-                    f"an orphan fold key would never fire"
-                )
-            if isinstance(event, str) and event:
-                seen_fold_events.add(event)
+            else:
+                # Resolve to the key the index will actually use (the local
+                # name, case-folded) before testing for a duplicate, so the
+                # two admitted spellings of one event (`disbursement`,
+                # `venture:disbursement`) and its case variants collide here
+                # instead of indexing twice and last-winning at runtime.
+                key = (event.partition(":")[2] or event).lower()
+                first_seen = seen_fold_events.get(key)
+                if first_seen is not None:
+                    errors.append(
+                        f"kindDefs '{kind}': folds[{i}] names event {event!r} "
+                        f"more than once — it resolves to the same event as "
+                        f"{first_seen!r} (a bare spelling, a self-namespaced "
+                        f"spelling and case variants share one index key); "
+                        f"the second entry would silently win (declare one "
+                        f"status per event)"
+                    )
+                elif not _fold_event_resolves(event, namespace,
+                                              declared_event_kinds):
+                    errors.append(
+                        f"kindDefs '{kind}': folds[{i}] 'event' {event!r} is not "
+                        f"an event kind declared by this pack (declared: "
+                        f"{', '.join(str(k) for k in sorted(declared_event_kinds, key=str)) or 'none'}) — "
+                        f"an orphan fold key would never fire"
+                    )
+                seen_fold_events[key] = event
             status = fold.get("status")
             if isinstance(statuses, list) and all(
                     isinstance(v, str) for v in statuses):
@@ -417,6 +436,38 @@ def build_status_fold_index(packs) -> StatusFoldIndex:
     index.kind_forms = frozenset(kind_forms)
     index.by_event = by_event
     return index
+
+
+def bare_lifecycle_kind_collisions(packs) -> dict[str, list[str]]:
+    """Bare object-kind names a lifecycle is declared for by MORE THAN ONE pack.
+
+    The fold index keys the declaring kind on ``ns:kind`` AND on the bare
+    ``kind`` (:meth:`StatusFoldIndex.kind_forms_for`), because the write gate
+    stores ``objectKind`` verbatim and admits the bare spelling. So for a
+    **bare**-spelled Object two packs that declare a lifecycle for the same
+    bare kind name both match and the last declaring pack's fold wins — the
+    ambiguity the namespaced dispatch key cannot resolve, because the stored
+    value carries no namespace.
+
+    Returns ``{bare_kind: [namespace, ...]}`` for every bare kind claimed by
+    more than one lifecycle-declaring pack. ``PackRegistry.load_all`` records
+    each one on ``lifecycle_warnings`` (a WARNING, not an error: a
+    namespaced Object is never ambiguous, the declaration is otherwise valid,
+    and isolating a pack for this would take down a legitimate catalog).
+    Empty when every bare lifecycle kind has exactly one declaring pack — the
+    shipped catalog's shape.
+    """
+    owners: dict[str, list[str]] = {}
+    for ns, pack in packs.items():
+        for kind in getattr(pack, "object_kinds", ()) or ():
+            if not _declared_statuses(pack, kind):
+                continue
+            owners.setdefault(str(kind), []).append(ns)
+    return {
+        bare: sorted(nss)
+        for bare, nss in owners.items()
+        if len(nss) > 1
+    }
 
 
 def builtin_fold_status(event_kind: str) -> str | None:

@@ -23,6 +23,7 @@ import yaml
 from .source_credibility import SOURCE_KIND_DEFAULTS
 from .status_folds import (
     StatusFoldIndex,
+    bare_lifecycle_kind_collisions,
     build_status_fold_index,
     validate_status_decl,
 )
@@ -937,16 +938,33 @@ class PackRegistry:
             for ns, msgs in self._pending_lifecycle_warnings.items()
             if ns in self.packs
         }
+        # #2729 review P2: a bare object-kind name a lifecycle is declared for
+        # by more than one pack is ambiguous at the fold — the index matches
+        # the bare spelling for BOTH packs (`kind_forms_for`) and the last
+        # declaring pack wins. Record it on the same non-blocking channel: a
+        # namespaced Object is never ambiguous, so this is a warning rather
+        # than a pack-isolating error.
+        for bare, owners in bare_lifecycle_kind_collisions(self.packs).items():
+            for ns in owners:
+                co_claimants = [o for o in owners if o != ns]
+                self.lifecycle_warnings.setdefault(ns, []).append(
+                    f"object kind '{bare}' is declared with a lifecycle by "
+                    f"multiple packs ({', '.join(owners)}) — a BARE-spelled "
+                    f"`objectKind` cannot be attributed to one of them, so "
+                    f"the fold applies the last declaring pack's rule "
+                    f"(co-claiming pack(s): {', '.join(co_claimants)}; use the "
+                    f"namespaced spelling or declare the lifecycle in one "
+                    f"pack)"
+                )
         if self.lifecycle_warnings:
             _warn_packs_once(
                 ("lifecycle-vocabulary", str(self.packs_dir),
                  tuple(sorted((ns, tuple(msgs))
                               for ns, msgs in self.lifecycle_warnings.items()))),
-                "pack registry %s: %d pack(s) declare a lifecycle status that "
-                "reuses a shared/connector vocabulary word — the pack owns its "
-                "kind's state (the built-in fold no longer applies to it), but "
-                "the overlap is ambiguous to a reader (see "
-                "registry.lifecycle_warnings): %s",
+                "pack registry %s: %d pack(s) carry a non-blocking lifecycle "
+                "declaration note — a `statuses` word shared with the connector "
+                "vocabulary, or a bare object kind claimed by more than one "
+                "pack (see registry.lifecycle_warnings): %s",
                 self.packs_dir, len(self.lifecycle_warnings),
                 "; ".join(f"{ns}: {msgs[0]}"
                           for ns, msgs in sorted(self.lifecycle_warnings.items())),
