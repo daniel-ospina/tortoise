@@ -108,6 +108,13 @@ def test_docs_scanning_gates_stay_in_tier1():
         "#2881 durability gate must stay in tier1 — same docs-only silent-drop "
         "class (#4309)"
     )
+    assert "test_7818_ontology_record.py" in tier1, (
+        "#7818 ONTOLOGY §4.7 doc↔code pin must be in tier1 — the other half of "
+        "the #7818 guard (`test_7818_boundary_ambiguity_contract.py`) is "
+        "`sdk`-registered and docker-lane, so a docs-only `docs/ONTOLOGY.md` "
+        "edit never runs it; without this hermetic pin the §4.7 coverage-rule "
+        "drift lands green (#4309 class, same as #5142/#2881)"
+    )
 
 
 def test_public_site_surface_change_selects_onboarding_and_skips_slow():

@@ -21,9 +21,10 @@ Two defects, one root, and one record gap:
   3. **ONTOLOGY §4.7 stated no coverage rule at all**, so the closed reading
      the code implements and the half-open reading the ``validTo`` row's prose
      describes coexisted silently. §4.7 now states the boundary, its shared
-     instant, and the OPEN decision between the two readings (#7818). The last
-     test is the anti-drift pin for that record, in the shape
-     ``tests/test_5142_ontology_record.py`` established.
+     instant, and the OPEN decision between the two readings (#7818). The
+     anti-drift pin for that record lives in ``tests/test_7818_ontology_record.py``
+     — hermetic and registered in ``core`` + ``tier1``, so a docs-only ONTOLOGY
+     edit runs it (this file is docker-lane and `sdk`-registered only).
 
 ⚠️ **Scope.** This change does NOT pick a representation. Flipping ``_covers``
 to half-open ``[vF, vT)`` is a global boundary-semantics change (it also makes a
@@ -53,15 +54,11 @@ import os
 import shutil
 import sys
 import tempfile
-from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
 from tortoise.sdk import TortoiseSDK
-
-REPO = Path(__file__).resolve().parent.parent
-ONTOLOGY = REPO / "docs" / "ONTOLOGY.md"
 
 # The contiguous chain's shared boundary: P[06-01, 06-10] ← C[06-10, ∞).
 P_START = "2026-06-01"
@@ -239,40 +236,3 @@ def test_forward_chain_shared_boundary_is_entry_point_dependent(sdk):
         "the walk from the predecessor must not reach the successor")
     assert out["chain"][0]["id"] == old
 
-
-# ── the §4.7 record: doc ↔ code anti-drift pin ──────────────────────────
-
-def test_ontology_section_4_7_states_the_coverage_boundary() -> None:
-    """ONTOLOGY §4.7 records the boundary rule, its consequence, and the OPEN flag.
-
-    The defect this closes was a *record* gap: §4.7 declared no coverage rule,
-    so the closed code and the half-open prose coexisted silently and the next
-    lane would re-derive one of them as the answer. This pin keeps the record
-    from being tidied away — a wording change that drops the rule, the shared
-    instant, or the open-decision pointer reds here (the same
-    doc↔code shape as ``tests/test_5142_ontology_record.py``).
-
-    (1) *What value makes this test fail?*  Deleting any of the named anchors
-        from §4.7 — the boundary sentence, the ``#5374`` pin it delegates to,
-        the entry-point-dependence disclosure, or the ``#7818`` open-decision
-        pointer.
-    (2) *Does the fixture reach it?*  Yes — the section text is read from the
-        committed ONTOLOGY and asserted for each anchor, not for a paraphrase.
-    """
-    doc = ONTOLOGY.read_text(encoding="utf-8")
-    start = doc.index("### §4.7 Temporal Model")
-    ends = [doc.find(m, start + 1) for m in ("\n### ", "\n## ")]
-    ends = [e for e in ends if e != -1]
-    section = doc[start:min(ends)] if ends else doc[start:]
-
-    assert "coverage boundary is stated here because it was not (#7818)" in section
-    # the implemented rule, and the test that pins it
-    assert "`_covers`" in section and "`vF <= t <= vT`" in section
-    assert "#5374" in section
-    # the consequence: one shared instant, and its entry-point dependence
-    assert "well-formed contiguous chain" in section.lower()
-    assert "entry-point-dependent" in section
-    # the half-open alternative is NAMED, not silently dropped
-    assert "[vF, vT)" in section
-    # and the decision is flagged OPEN at the issue that owns it
-    assert "open" in section.lower() and "#7818" in section
