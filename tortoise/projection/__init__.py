@@ -6308,12 +6308,14 @@ class WipePreconditionRefused(RuntimeError):
     rescue file is preserved.
 
     It exists because ``rebuild_all``'s wipe is unconditional over EVERY label
-    while its pre-wipe snapshot covers only ``:Point`` / ``:Batch`` /
-    ``Point.batch_id`` — ``:GraphEvent``, ``:GraphEventMeta`` and the
-    unjournaled ``:Event`` / ``:Subject`` / ``:Object`` / ``:Document`` /
-    ``:Source`` writes are deleted and never restored. A node that appears
-    between the emptiness probe and the wipe would be destroyed with no record
-    of it anywhere.
+    while its pre-wipe snapshot covers only the sections ``_SNAPSHOT_SECTIONS``
+    names (graph-only ``:Point``, ``:Batch``, ``:Session``, the onboarding
+    pair, the config registry, the ``:GraphEventMeta`` high-water mark and
+    ``:TeamMeta``; the journal-replayable labels are re-created by the replay
+    itself). The residual is therefore ``:GraphEvent`` rows — the raw event
+    log, which no replay pass recreates (#4664) — plus any label outside that
+    tuple. A node from either group that appears between the emptiness probe
+    and the wipe would be destroyed with no record of it anywhere.
     """
 
 
@@ -7468,9 +7470,26 @@ class FalkorProjection(
                     # rolled back by `recover_from_log`, so this really is an
                     # empty DB here rather than a half-built one that a later
                     # open would serve as "already has nodes".
-                    logger.warning(
-                        "empty embedded DB not auto-recovered: %s",
-                        result.get("reason"))
+                    #
+                    # #3044 review: NOT every decline leaves an empty store.
+                    # The #7929 rollback is itself REFUSED when the sidecar is
+                    # already retired, and the #3044 pre-wipe refusal never ran
+                    # a replay to roll back — both leave the nodes they found
+                    # in place. `db_points` is the field that says which shape
+                    # the operator is looking at, so describe the store from
+                    # the MEASURED count: telling them it is "empty" at the
+                    # moment they must not lose what is in it is the same lie
+                    # about the store #7929 removed from the count.
+                    if result.get("db_points"):
+                        logger.warning(
+                            "embedded DB NOT auto-recovered with %s node(s) "
+                            "still in the store (left untouched, NOT empty): "
+                            "%s",
+                            result.get("db_points"), result.get("reason"))
+                    else:
+                        logger.warning(
+                            "empty embedded DB not auto-recovered: %s",
+                            result.get("reason"))
 
     def _recover_or_raise(self, events_dir: str) -> None:
         """Run recover_from_log, fail loud if it did not recover.
@@ -9215,8 +9234,10 @@ class FalkorProjection(
                     f"graph holds {_present} node(s) — refusing to wipe "
                     f"(#3044). The caller proved this graph EMPTY before the "
                     f"journal parse; a node appearing since then would be "
-                    f"destroyed with no record (the pre-wipe snapshot covers "
-                    f"only :Point/:Batch). Re-run recovery when no writer is "
+                    f"destroyed with no record — the pre-wipe snapshot "
+                    f"covers only the labels in _SNAPSHOT_SECTIONS, so "
+                    f":GraphEvent rows and any label outside that set are "
+                    f"lost. Re-run recovery when no writer is "
                     f"active, or rebuild explicitly with "
                     f"`tortoise rebuild --dir <dir>`."
                 )

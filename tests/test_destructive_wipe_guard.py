@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tortoise.log import EventLog
 from tortoise.projection import (
+    _SNAPSHOT_SECTIONS,
     FalkorProjection,
     WipePreconditionRefused,
     _GuardedGraph,
@@ -687,8 +688,9 @@ def test_require_empty_refuses_a_graph_that_filled_after_the_probe(tmp_path):
 
     Without this the recovery route's 0-node probe — taken in another module,
     before the whole journal parse — is the only thing bounding a wipe that is
-    unconditional over EVERY label while its pre-wipe snapshot covers only
-    :Point/:Batch. The refusal must land before any destructive statement."""
+    unconditional over EVERY label while its pre-wipe snapshot covers only the
+    labels `_SNAPSHOT_SECTIONS` names. The refusal must land before any
+    destructive statement."""
     proj = _bare_projection(graph_name="test_3044", embedded=True)
     proj.g = _NonEmptyRecordingGraph()
     with pytest.raises(WipePreconditionRefused, match="require_empty"):
@@ -696,6 +698,49 @@ def test_require_empty_refuses_a_graph_that_filled_after_the_probe(tmp_path):
                          require_empty=True)
     assert proj.g.wipes() == [], (
         "the wipe ran even though the graph had stopped being empty")
+
+
+def test_wipe_refusal_names_the_real_snapshot_residual(tmp_path):
+    """#3044 review: the blast-radius claim must match `_SNAPSHOT_SECTIONS`.
+
+    The refusal is the operator's only account of what the wipe would have
+    destroyed, and the exception docstring is the whole stated justification
+    for the guard — so a residual clause that understates the snapshot's
+    coverage mis-scopes what the refusal protects. The pre-#548-era wording
+    ("covers only :Point/:Batch") is contradicted by the tuple: it also
+    carries `:Session`, the onboarding pair, the config registry,
+    `:GraphEventMeta` (restored by `reestablish_watermark` inside
+    `rebuild_all`) and `:TeamMeta`. The genuinely unrestorable residual is
+    `:GraphEvent` rows (#4664: no replay pass recreates them) plus any label
+    outside the tuple. The claim and the tuple it cites are asserted TOGETHER,
+    so an enrolment that changes the coverage reddens this test rather than
+    silently re-opening the gap."""
+    proj = _bare_projection(graph_name="test_3044_residual", embedded=True)
+    proj.g = _NonEmptyRecordingGraph()
+    with pytest.raises(WipePreconditionRefused) as excinfo:
+        proj.rebuild_all(str(tmp_path), confirm_destructive=True,
+                         require_empty=True)
+    message = str(excinfo.value)
+
+    # The clause the snapshot tuple contradicts must be gone...
+    assert "covers only :Point/:Batch" not in message, (
+        "the refusal still claims the snapshot covers only :Point/:Batch, "
+        "which _SNAPSHOT_SECTIONS contradicts")
+    # ...and the residual must be the REAL one.
+    assert ":GraphEvent" in message, (
+        "the refusal must name :GraphEvent rows — the residual no "
+        "_SNAPSHOT_SECTIONS entry restores")
+    # Pin the claim to the coverage it cites, so neither can drift alone.
+    assert "_SNAPSHOT_SECTIONS" in message
+    assert "event_meta" in _SNAPSHOT_SECTIONS, (
+        ":GraphEventMeta IS captured, so a 'covers only :Point/:Batch' "
+        "claim is false by construction")
+
+    doc = WipePreconditionRefused.__doc__ or ""
+    assert "covers only ``:Point`` / ``:Batch``" not in doc, (
+        "the exception docstring — the guard's stated justification — still "
+        "understates the snapshot coverage")
+    assert ":GraphEvent" in doc
 
 
 def test_require_empty_is_opt_in_not_a_new_global_precondition(tmp_path):
@@ -758,7 +803,8 @@ def test_require_empty_spares_a_label_the_wipe_never_restores(
             "MATCH (n:GraphEvent) RETURN count(n)").result_set
         assert int(rows[0][0]) == 1, (
             "a node that appeared after the emptiness probe was destroyed: "
-            "the wipe is unconditional and snapshots only :Point/:Batch")
+            "the wipe is unconditional and :GraphEvent rows are covered by "
+            "no _SNAPSHOT_SECTIONS entry")
         assert not os.path.exists(sidecar), (
             "a refused wipe must strand no rescue sidecar")
 

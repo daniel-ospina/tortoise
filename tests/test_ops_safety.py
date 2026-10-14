@@ -1634,3 +1634,44 @@ def test_the_pending_route_rolls_back_when_its_source_survives(monkeypatch):
         assert os.path.exists(sidecar), "an intact source must be left alone"
     finally:
         proj.close()
+
+
+def test_auto_health_recover_names_a_non_empty_decline(tmp_path, caplog):
+    """#3044 review: a decline that leaves nodes must not be reported as empty.
+
+    `_auto_health_recover`'s probe-OK lost-graph leg described EVERY refusal as
+    an "empty embedded DB not auto-recovered". That is false on both of the
+    non-empty decline shapes it reaches — "graph already has nodes" (measured
+    here), and the #3044 wipe refusal, which returns before touching the store
+    — so an operator reading "empty" has no reason to look for the nodes the
+    refusal just protected. The message is derived from the MEASURED
+    `db_points`. FAILS IF: the store is described as empty while it holds
+    nodes.
+    """
+    (tmp_path / "sdk.jsonl").write_text(json.dumps({
+        "event_id": "e1", "ts": "2026-01-01T00:00:00Z",
+        "type": "IngestStarted"}) + "\n", encoding="utf-8")
+
+    proj = FalkorProjection(str(tmp_path / "auto_3044.db"),
+                            graph_name="test_auto_3044",
+                            skip_health_check=True)
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj.g.query("CREATE (:GraphEvent {seq: 1})")
+        assert _node_total(proj) == 1
+
+        caplog.set_level("WARNING")
+        proj._auto_health_recover()  # probe OK + adjacent log -> decline
+
+        declined = [r.getMessage() for r in caplog.records
+                    if "auto-recovered" in r.getMessage()]
+        assert declined, [r.getMessage() for r in caplog.records]
+        assert not any(m.startswith("empty embedded DB not auto-recovered")
+                       for m in declined), (
+            "the store holds 1 node, but the operator was told it was empty: "
+            f"{declined!r}")
+        assert any("1 node(s)" in m for m in declined), declined
+        assert _node_total(proj) == 1, (
+            "a declined recovery must leave the store it found in place")
+    finally:
+        proj.close()
