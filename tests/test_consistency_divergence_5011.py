@@ -31,6 +31,7 @@ import pytest
 from tortoise.consistency import (
     _GRAPH_DEFAULTED_PROPS,
     _PROJECTION_STATE_FORMAT,
+    _PROJECTION_STATE_SUPERSEDED_FORMATS,
     _WRITER_DEFAULTS,
     _compare_views,
     _fold_journal,
@@ -616,6 +617,32 @@ def test_unreadable_baseline_is_reported_not_treated_as_divergence(
     r2 = check_consistency(log_path, proj)
     assert r2["state_error"] and "format" in r2["state_error"], r2
     assert r2["state_recorded"] is False
+
+    # #8268/#7936 review: a BOOLEAN or FLOAT `format_version` is MALFORMED, not
+    # a known predecessor. `_PROJECTION_STATE_SUPERSEDED_FORMATS` is a frozenset
+    # of ints and `in` binds by `==`/`hash`, so `True in frozenset({1})` and
+    # `1.0 in frozenset({1})` are both True: without a strict-int gate the
+    # sidecar is read as a predecessor and MIGRATED (re-baselined and
+    # OVERWRITTEN), the exact opposite of "never overwrite what we cannot read".
+    # Written as RAW JSON, not via `_state_json`: `fmt=True` would render the
+    # capital `True`, which `json.load` refuses for an unrelated reason (the
+    # case would then pass vacuously).
+    for raw in (
+        '{"format_version": true, "last_applied_seq": 1, '
+        '"projection_hash_sha256": "' + "0" * 64 + '"}',
+        '{"format_version": 1.0, "last_applied_seq": 1, '
+        '"projection_hash_sha256": "' + "0" * 64 + '"}',
+    ):
+        with open(sidecar, "w", encoding="utf-8") as fh:
+            fh.write(raw)
+        r3 = check_consistency(log_path, proj)
+        assert r3["state_error"], (raw, r3)
+        assert r3["state_recorded"] is False, (raw, r3)
+        assert r3["state_superseded_format"] is None, (raw, r3)
+        with open(sidecar, encoding="utf-8") as fh:
+            assert fh.read() == raw, (
+                "a malformed sidecar was overwritten instead of refused: "
+                + raw)
 
 
 def test_record_state_false_is_read_only(proj, tmp_path):
@@ -1729,22 +1756,26 @@ def test_a_torn_sidecar_is_reported_and_never_re_baselined(proj, tmp_path):
     os.unlink(state_path)
 
 
-def test_a_predecessor_format_baseline_is_untrusted_not_a_mutation(proj, tmp_path):
-    """#2897: the digest SHAPE changed with the ``tags`` widening, so a v1
-    baseline must read as UNTRUSTED — never as ``unrecorded-mutation``.
+def test_a_predecessor_format_baseline_is_migrated_not_a_mutation(
+        proj, tmp_path):
+    """#2897/#8268/#7936: a known-predecessor format baseline is RE-BASELINED —
+    never a phantom mutation, and never left inert for ever.
 
     Emptying ``_UNCARRIED_CONTENT_PROPS`` removed ``tags`` from the graph
     fingerprint's per-point skip set, so ``projection_hash_sha256`` moves for
-    every pre-existing baseline whose graph holds a tag. The sidecar has no
-    migration, so without the format bump the next run would find
-    ``journal_moved=False, graph_moved=True`` and report
+    every pre-existing baseline whose graph holds a tag. The format bump marks
+    the old digest as not-comparable, so without this migration the next run
+    would find ``journal_moved=False, graph_moved=True`` and report
     ``divergence="unrecorded-mutation"`` on a healthy graph — an ``action``
     telling the operator to hunt an unjournalled writer that does not exist.
-    Reading the PREDECESSOR format as untrusted instead yields ``adopted=True``
-    plus a ``state_error`` that names the actual cause.
-    (1) Fails if ``_PROJECTION_STATE_FORMAT`` does not move with the digest
-        shape: the run reports a phantom mutation instead (the assertion
-        ``divergence != "unrecorded-mutation"`` is then the one that fires).
+    Reading it as UNTRUSTED avoided that, but ``record_projection_state`` is
+    gated on ``state_error is None``, so the baseline half then stayed INERT for
+    ever and the migration was unreachable (#8268). Migrating it fixes both
+    ends: no phantom mutation AND a live baseline on the next run.
+    (1) Fails if a KNOWN predecessor is read as ``state_error`` (the re-record
+        is refused, ``state_recorded`` is False, and the second run is still
+        inert), or as ``unrecorded-mutation`` (the assertion on ``divergence``
+        then fires), or is migrated without naming the format it came from.
     (2) Reachable: the journal and the graph are byte-faithful — only the
         recorded baseline is from the predecessor format.
     """
@@ -1752,20 +1783,43 @@ def test_a_predecessor_format_baseline_is_untrusted_not_a_mutation(proj, tmp_pat
     _seed(proj, log_path, [_pt("p1", "tagged", tags=["alpha"])])
     check_consistency(log_path, proj)  # adopt at the CURRENT format
 
+    predecessor = _PROJECTION_STATE_FORMAT - 1
+    # The fixture must be a KNOWN predecessor, not merely "current - 1": if a
+    # future bump forgets to append to `_PROJECTION_STATE_FORMAT_HISTORY`, this
+    # predecessor is unknown and the migration assertions below fail loudly.
+    assert predecessor in _PROJECTION_STATE_SUPERSEDED_FORMATS, (
+        f"format {predecessor} is not a known predecessor — append it to "
+        f"_PROJECTION_STATE_FORMAT_HISTORY")
     with open(log_path + ".projection-state.json", "w",
               encoding="utf-8") as fh:
-        fh.write(_state_json(seq="1", fmt=_PROJECTION_STATE_FORMAT - 1))
+        fh.write(_state_json(seq="1", fmt=predecessor))
 
     r = check_consistency(log_path, proj)
     assert r["divergence"] != "unrecorded-mutation", (
         "a predecessor-format baseline read as a graph mutation — the "
         "operator is sent after a phantom unjournalled writer: " + str(r))
-    assert r["state_error"], (
-        "a predecessor-format baseline must be REPORTED as untrusted, not "
-        "silently trusted")
-    assert r["state_recorded"] is False, r
+    assert not r["state_error"], (
+        "a KNOWN predecessor format is version skew, not corruption — it must "
+        "be MIGRATED, not reported as an untrusted state: " + str(r))
+    assert r["state_superseded_format"] == predecessor, r
+    assert r["state_recorded"] is True, (
+        "the migration must re-record the baseline at the current format, or "
+        "the baseline half stays inert for ever (#8268): " + str(r))
     assert r["ok"] is True, r
-    assert r["adopted"] is True, r
+    assert r["adopted"] is False, (
+        "a migrated predecessor is a re-baseline of a graph already seen, not "
+        "a first-sighting adoption: " + str(r))
+
+    # The SECOND run reads a live, current-format baseline: no error, no
+    # migration, nothing inert.
+    stored, err = read_projection_state(log_path)
+    assert err is None and stored is not None, (stored, err)
+    assert stored["format_version"] == _PROJECTION_STATE_FORMAT, stored
+    r2 = check_consistency(log_path, proj)
+    assert r2["state_error"] is None, r2
+    assert r2["state_superseded_format"] is None, r2
+    assert r2["adopted"] is False, r2
+    assert r2["ok"] is True, r2
 
 
 def test_a_non_persistable_tag_value_is_reported_not_a_false_divergence(
@@ -1803,12 +1857,15 @@ def test_a_non_persistable_tag_value_is_reported_not_a_false_divergence(
 def test_a_stranded_baseline_is_surfaced_on_the_green_path(proj, tmp_path):
     """#2897 review round 2: a green verdict must not hide an INERT baseline.
 
-    A predecessor-format sidecar makes every run adopt, so the baseline half of
-    the invariant — the only thing that catches a graph moving while the journal
-    did not — is silently disabled, and `state_recorded` stays False so the
-    state is never replaced. `check_consistency` still returns `ok=True`, and
-    the CLI printed only its green tick, so an inert guard read as a healthy
-    graph.
+    An UNTRUSTED sidecar (a torn file, a malformed watermark, a FIFO/symlink)
+    makes every run adopt, so the baseline half of the invariant — the only
+    thing that catches a graph moving while the journal did not — is silently
+    disabled, and `state_recorded` stays False so the state is never replaced.
+    `check_consistency` still returns `ok=True`, and the CLI printed only its
+    green tick, so an inert guard read as a healthy graph.
+    #8268/#7936: a WELL-FORMED predecessor format is no longer in that class —
+    it is MIGRATED and re-baselined — so the surface must report the migration
+    and must NOT claim an inert guard for it.
     The surface asserted here is `consistency.baseline_warning` — what
     `tortoise check-consistency` prints on its green path — rather than the CLI
     process itself: the CLI's `--db` resolves only `docker`/`redis`/`rediss`
@@ -1818,7 +1875,7 @@ def test_a_stranded_baseline_is_surfaced_on_the_green_path(proj, tmp_path):
         a green tick over an inert guard) — or if it warns when there is nothing
         wrong (the first assertion), which would make the signal noise.
     (2) Reachable: the journal and graph are byte-faithful; only the recorded
-        baseline is from the predecessor format.
+        baseline is malformed / from the predecessor format.
     """
     log_path = str(tmp_path / "stranded.jsonl")
     _seed(proj, log_path, [_pt("p1", "tagged", tags=["alpha"])])
@@ -1827,10 +1884,13 @@ def test_a_stranded_baseline_is_surfaced_on_the_green_path(proj, tmp_path):
     assert baseline_warning({"state_error": None}, log_path) is None, (
         "a healthy baseline must not warn, or the signal is noise")
 
+    # A MALFORMED sidecar is evidence, not version skew: still untrusted, still
+    # never replaced, and still surfaced with the recovery.
     with open(log_path + ".projection-state.json", "w", encoding="utf-8") as fh:
-        fh.write(_state_json(seq="1", fmt=_PROJECTION_STATE_FORMAT - 1))
+        fh.write(_state_json(seq="1")[:-1])  # truncated JSON
     r = check_consistency(log_path, proj)
     assert r["ok"] is True, r
+    assert r["state_recorded"] is False, r
 
     warning = baseline_warning(r, log_path)
     assert warning and "UNTRUSTED" in warning, (
@@ -1838,3 +1898,17 @@ def test_a_stranded_baseline_is_surfaced_on_the_green_path(proj, tmp_path):
     assert "projection-state.json" in warning, (
         f"the warning must name the recovery (the sidecar to remove): "
         f"{warning!r}")
+
+    # #8268/#7936: a KNOWN PREDECESSOR is no longer stranded — it is MIGRATED,
+    # so the surface reports the migration and must NOT claim an inert guard.
+    os.unlink(log_path + ".projection-state.json")
+    with open(log_path + ".projection-state.json", "w", encoding="utf-8") as fh:
+        fh.write(_state_json(seq="1", fmt=_PROJECTION_STATE_FORMAT - 1))
+    r2 = check_consistency(log_path, proj)
+    assert r2["ok"] is True and r2["state_recorded"] is True, r2
+    migrated = baseline_warning(r2, log_path)
+    assert migrated and "MIGRATED" in migrated, (
+        f"a migrated predecessor baseline must be reported: {migrated!r}")
+    assert "INERT" not in migrated, (
+        "a migrated baseline is LIVE again — reporting it as inert is exactly "
+        f"the false signal this branch exists to remove: {migrated!r}")

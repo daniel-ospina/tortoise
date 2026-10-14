@@ -10,7 +10,8 @@ import {
   transcriptModel,
   turnRoleClass,
   kindBadgeClass,
-  DELETE_CONFIRM,
+  DELETE_CONFIRM_WORD,
+  DELETE_CONSEQUENCES,
   SESSION_EXTRACTION_STATES,
   SESSION_EXTRACTION_STATUS_LABEL,
   SESSION_EXTRACTION_UNKNOWN_LABEL,
@@ -18,6 +19,10 @@ import {
   sessionExtractionOutcomeKnown,
   sessionExtractionStatusFor,
 } from './capturedSessions.js'
+// #3885 (e) review P3-1: the type-to-confirm gate itself, shared with the graph
+// modal. Imported so the binding test EXECUTES the gate instead of comparing
+// the constant to itself (which passed while the two literals were independent).
+import { deleteTypedMatches } from './graphs.js'
 // #3520: the INSTALL axis, read from its own module — this file asserts the two
 // axes are SEPARATE (the extraction work must not have grown the install set).
 import { CAPTURE_STATES } from './captureStatus.js'
@@ -164,9 +169,47 @@ test('kindBadgeClass maps extracted kinds to badge classes', () => {
   assert.equal(kindBadgeClass('DECISION'), 'kind-decision')
 })
 
-test('DELETE_CONFIRM is present and mentions the permanent removal', () => {
-  assert.ok(DELETE_CONFIRM.includes('Delete this captured session'))
-  assert.ok(DELETE_CONFIRM.includes('permanently'))
+// #3885 (e): the raw-delete confirmation is a TYPE-TO-CONFIRM gate, so the
+// required word is a literal the modal and the tripwire both read. A bare
+// window.confirm ("a single click is not enough") is no longer the flow.
+test('DELETE_CONFIRM_WORD is the literal the destructive gate requires', () => {
+  // The constant itself is still pinned: the dialog's own copy says "Type
+  // delete to confirm", so it must never be emptied or renamed silently (a
+  // gate that accepts any word would have kept the suite green — review P3-3).
+  assert.equal(DELETE_CONFIRM_WORD, 'delete')
+  // Executed, not self-compared: the word the dialog RENDERS is fed through the
+  // gate the modal calls, so a change to the constant cannot leave the dialog
+  // instructing one word while the gate demands another.
+  assert.equal(deleteTypedMatches(DELETE_CONFIRM_WORD, DELETE_CONFIRM_WORD), true,
+    'the word the dialog displays must satisfy the gate it feeds')
+  assert.equal(deleteTypedMatches('', DELETE_CONFIRM_WORD), false,
+    'an empty input must never satisfy the gate')
+  // Non-vacuous: the gate honours its word argument. The pre-fix helper took a
+  // single argument and hardcoded 'delete', so this arm fails there.
+  assert.equal(deleteTypedMatches('erase', 'erase'), true,
+    'the gate must accept the word it is given, not a hardcoded default')
+  assert.equal(deleteTypedMatches('delete', 'erase'), false,
+    'the gate must not fall back to the graph modal default when given a word')
+  // …and a falsy word matches NOTHING rather than silently re-adopting 'delete'.
+  assert.equal(deleteTypedMatches('delete', ''), false,
+    'an empty required word must match nothing — no silent fallback to the default')
+  assert.equal(deleteTypedMatches('', ''), false,
+    'an empty required word can never be satisfied')
+})
+
+test('DELETE_CONSEQUENCES states the real consequences, including the backup residual', () => {
+  assert.ok(Array.isArray(DELETE_CONSEQUENCES))
+  assert.ok(DELETE_CONSEQUENCES.length >= 4)
+  const joined = DELETE_CONSEQUENCES.join(' ')
+  // what goes: the raw transcript AND the derived memory (no silent coupling)
+  assert.ok(joined.includes('transcript'))
+  assert.ok(joined.includes('memory extracted'))
+  // the absence of an undo, stated rather than implied
+  assert.ok(joined.includes('no Trash and no undo'))
+  // the residual the promise carries must be disclosed, not omitted
+  assert.ok(joined.includes('backups are not actively deleted'))
+  // frozen: a rendered list must not be mutable at runtime
+  assert.ok(Object.isFrozen(DELETE_CONSEQUENCES))
 })
 
 // ── #3520: the session-scoped EXTRACTION status ─────────────────────────────

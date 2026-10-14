@@ -34,7 +34,7 @@ from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Hashable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -16596,6 +16596,327 @@ async def activation_cohort(
     return payload
 
 
+# ── #3839 (lane B7): the retention indicator ──────────────────────────────
+# Teams active at day 7 / 15 / 30 / 60 / 90. The definition, the four axes and
+# the honest constraints live in `tortoise/retention_indicator.py` — read that module's
+# docstring first. The load-bearing properties here:
+#
+#   * ENUMERATION IS THE METRIC'S DENOMINATOR, and this is the ONE place that
+#     differs from `activation_cohort` above. That endpoint takes an EXPLICIT
+#     operator-named list; a retention rate needs EVERY team that started N
+#     days ago, churned or not, and a list an operator maintains by hand would
+#     silently omit a team — inflating the rate. So this read enumerates the
+#     fleet itself, and an enumeration that cannot be CERTIFIED complete is a
+#     refusal (`fleet_enumeration_incomplete`), never a partial denominator
+#     (#5388 parity — a lower bound is not a count).
+#   * STILL READ-ONLY and still behind `_check_internal` (`FASTAPI_INTERNAL_KEY`),
+#     the same operator credential that already gates `/v1/internal/backups/*`
+#     (which REWRITE every tenant's graph). A read-only aggregate over rows the
+#     platform already stores is strictly less capability, so no new secret is
+#     introduced. EVERY SERVED 200 payload gets one audit row, on the operator
+#     plane (`org_id=""`), naming the reading — the same shape and the same
+#     fail-open rule as the cohort endpoint above. That includes the refusal
+#     branches, which are the operator actions that read the fleet and went
+#     wrong; only the 422s (malformed/future `as_of`, fleet over the bound) are
+#     not audited, because they serve no payload.
+#   * AGGREGATION, NEVER A RETENTION WINDOW (binding guard D12-b): nothing is
+#     deleted, pruned or purged at any age. `as_of` bounds the READING, not the
+#     stored data.
+
+#: Blast-radius bound on a fleet-wide walk. The endpoint reads every
+#: ENUMERABLE org — live OR soft-deleted/churned — so an unbounded fleet is an
+#: unbounded batch job on the shared control plane; exceeding this is a 422 that
+#: names the bound, never a partial metric. The churned population is IN the
+#: walk on purpose (see `retention_indicator.read_team_starts`): a
+#: `deleted_at IS NULL` filter would drop every churned team from every
+#: denominator and bias the rate upward.
+_RETENTION_MAX_ORGS = 1000
+
+#: Default parallelism for the per-org analytics read. The real bound is the
+#: dedicated pool below (`_RETENTION_WORKERS`), and the request semaphore is
+#: sized FROM that pool so the two can never disagree — a semaphore wider than
+#: the pool would let a read spend its whole timeout queued and return a
+#: self-inflicted `org_read_timeout`. The read is a control-plane HTTP walk of
+#: up to `max_pages` round trips per org, which is the "long / stallable"
+#: class the #3060 doctrine above says must NOT share the loop's default
+#: executor with ~80 other `to_thread` sites and the auth middleware's abuse
+#: hooks.
+_RETENTION_MAX_CONCURRENCY = 4
+
+
+def _retention_worker_count(raw: str | None, default: int) -> int:
+    """Clamp a raw `TORTOISE_RETENTION_WORKERS` value to a usable pool size.
+
+    Pure on purpose: the pool is built at IMPORT time, so a test that
+    recomputes the production expression from the same env read cannot detect
+    a changed clamp. ``raw`` is the env value (``None`` means unset); a
+    missing or non-numeric value falls back to ``default`` (the
+    ``_int_env`` rule), and the result is clamped to ``[1, 8]``.
+    """
+    value = (default if raw is None or not raw.strip().isdigit()
+             else int(raw))
+    return max(1, min(value, 8))
+
+
+#: Dedicated pool for the fleet walk and the per-org activity reads (the
+#: `_SCORECARD_EXECUTOR` precedent above, same #3060 reasoning). It replaces
+#: `asyncio.to_thread` here: the default pool on a 2-vCPU host is
+#: `min(32, cpu+4)` = 6 workers, so four slow orgs would park most of the
+#: shared pool and queue every other `to_thread` tenant behind them.
+#:
+#: LIMITATION, stated because the pool is otherwise read as a guarantee: the
+#: pool SIZE bounds live threads (cancelling the await stops the awaitable,
+#: not the worker — CPython #87185, quoted in `_run_with_close`), but the pool
+#: is module-level and lives ACROSS requests. An abandoned worker runs the
+#: whole `read_org_activity` walk (up to `2 * max_pages` control-plane reads),
+#: not just until the HTTP client's per-request timeout, so four abandoned
+#: walks from concurrent requests can park all four workers for later
+#: requests. What the pool buys is that this cost is confined to the retention
+#: surface and can never starve the shared pool — not that a timeout is free.
+_RETENTION_WORKERS = _retention_worker_count(
+    os.environ.get("TORTOISE_RETENTION_WORKERS"), _RETENTION_MAX_CONCURRENCY)
+_RETENTION_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_RETENTION_WORKERS,
+    thread_name_prefix="retention-cohort")
+
+#: Per-org bound: one hung or unreadable org costs THAT team's cell — it folds
+#: to `unavailable` with the org named, and its exclusion from the denominator
+#: is visible as a `partial` cell. The abandoned worker keeps its pool slot
+#: until its walk returns (see the pool's LIMITATION above).
+_RETENTION_PER_ORG_TIMEOUT_S = 30.0
+
+
+def _parse_as_of(as_of: str | None) -> date:
+    """The reading's UTC day boundary. 422 on a malformed or FUTURE value.
+
+    A future `as_of` would make a day-N mark 'arrive' before it has, which is
+    the one way this reading can fabricate retention — so it is refused rather
+    than clamped. A bare date, a `Z`/offset datetime and a naive datetime are
+    all accepted; a naive one is treated as UTC (unlike a window bound, a
+    reading day has no adversarial ambiguity, and refusing it would break a
+    `curl` with a plain date).
+    """
+    if as_of is None:
+        return datetime.now(UTC).date()
+    text = str(as_of).strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="as_of must not be empty")
+    try:
+        if len(text) == 10:
+            day = date.fromisoformat(text)
+        else:
+            iso = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+            parsed = datetime.fromisoformat(iso)
+            # `.date()` on an AWARE datetime returns the date in that value's
+            # OWN offset — it does not convert. Two encodings of one instant
+            # (`2026-10-01T23:00:00-05:00` and `2026-10-02T04:00:00Z`) then
+            # yield two different reading days, moving which day-N marks have
+            # arrived and contradicting this function's own "UTC day boundary"
+            # and `DEFINITION["day_boundary"]`. `retention_indicator._as_utc`
+            # normalises for exactly this reason; a naive value is treated as
+            # UTC (the `replace`), an aware one is CONVERTED.
+            day = (parsed.astimezone(UTC) if parsed.tzinfo
+                   else parsed.replace(tzinfo=UTC)).date()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"as_of is not a valid ISO-8601 date or timestamp: {as_of!r}",
+        ) from exc
+    if day > datetime.now(UTC).date():
+        raise HTTPException(
+            status_code=422,
+            detail=(f"as_of {day.isoformat()} is in the future — a day-N mark "
+                    "must not be read before day N has arrived"),
+        )
+    return day
+
+
+@app.get("/v1/internal/retention/cohort")
+async def retention_cohort(request: Request, as_of: str | None = None):
+    """The retention indicator over the whole fleet. Operator-only, read-only.
+
+    Returns one row per team (start date plus active-at-day-7/15/30/60/90),
+    the cumulative C(N) as k/n with a Wilson 95% interval, the band drops, the
+    trailing-30-day active count and the distinct-active-days histogram. Every
+    number is computed in `tortoise/retention_indicator.py`; this handler owns auth, the
+    reads and the audit only.
+
+    Fail-soft in the right direction: an unreadable store, an uncertified
+    fleet walk, or a dark analytics write path makes the surface
+    `unavailable` with a REASON — it is never reported as a confident zero. A
+    single team that cannot be measured is excluded and NAMED; the surface
+    reads `partial` when only some teams measured and `unavailable` when NONE
+    did (derived from the rows in `assemble`, not asserted here), and the
+    note names the state the cells actually read.
+    """
+    _check_internal(request)
+
+    from tortoise.activation_scorecard import analytics_write_path_configured
+    from tortoise.retention_indicator import (
+        REASON_FLEET_FAILED,
+        REASON_FLEET_INCOMPLETE,
+        REASON_WRITE_PATH_UNCONFIGURED,
+        STATE_MEASURED,
+        STATE_PARTIAL,
+        STATE_UNAVAILABLE,
+        assemble,
+        build_team_rows,
+        cohort_cell_states,
+        read_org_activity,
+        read_team_starts,
+    )
+
+    as_of_day = _parse_as_of(as_of)
+    log = logging.getLogger("tortoise.api")
+    limits = {
+        "max_orgs": _RETENTION_MAX_ORGS,
+        "max_concurrency": _RETENTION_WORKERS,
+        "per_org_timeout_s": _RETENTION_PER_ORG_TIMEOUT_S,
+        "auth": "internal_key",
+        "read_only": True,
+        "aggregation_only": True,
+    }
+
+    def _unavailable(reason: str) -> dict:
+        return assemble(as_of=as_of_day, team_rows=[],
+                        surface_state=STATE_UNAVAILABLE, surface_reason=reason,
+                        limits=limits)
+
+    async def _serve(payload: dict) -> dict:
+        """Audit a SERVED payload, then return it (fail-open).
+
+        EVERY branch that serves an HTTP 200 goes through here, including the
+        refusal branches — a refusal that walked (or tried to walk) the fleet
+        is exactly the operator action whose accountability record must not be
+        missing. The activation-cohort endpoint this mirrors never serves a
+        200 unaudited. Bookkeeping must never turn a served read into a 500
+        (#1529 precedent), and `_async_audit` already never raises.
+        """
+        try:
+            await _async_audit(
+                request, "", "retention_cohort_read",
+                resource_type="retention_cohort",
+                detail={"as_of": as_of_day.isoformat(),
+                        "state": payload.get("state"),
+                        "teams_total": payload.get("teams_total", 0),
+                        "teams_measured": payload.get("teams_measured", 0)},
+            )
+        except Exception:
+            log.exception("retention cohort audit write failed (non-fatal)")
+        return payload
+
+    # The analytics write path is a LIVE environment check, not a date: a dark
+    # writer makes every absence indistinguishable from "no activity", so the
+    # whole reading refuses rather than reporting a fleet of zeros (#3677).
+    if not analytics_write_path_configured():
+        return await _serve(_unavailable(REASON_WRITE_PATH_UNCONFIGURED))
+
+    try:
+        from tortoise.supabase_control import (
+            get_control_plane,
+            is_supabase_enabled,
+        )
+        if not is_supabase_enabled():
+            return await _serve(_unavailable(REASON_FLEET_FAILED))
+        cp = get_control_plane()
+    except Exception:
+        log.warning("retention cohort: control plane unavailable", exc_info=True)
+        return await _serve(_unavailable(REASON_FLEET_FAILED))
+
+    try:
+        teams, complete, reason = await _run_off_loop(
+            _RETENTION_EXECUTOR, read_team_starts, cp)
+    except Exception as exc:  # pragma: no cover — read_team_starts is total
+        log.warning("retention cohort: fleet read failed: %s",
+                    type(exc).__name__, exc_info=True)
+        return await _serve(_unavailable(REASON_FLEET_FAILED))
+    if teams is None:
+        return await _serve(_unavailable(reason or REASON_FLEET_FAILED))
+    if not complete:
+        return await _serve(_unavailable(REASON_FLEET_INCOMPLETE))
+    if len(teams) > _RETENTION_MAX_ORGS:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"the fleet carries {len(teams)} orgs; this endpoint reads "
+                    f"at most {_RETENTION_MAX_ORGS} per request (a blast-radius "
+                    "bound) — a partial denominator is not a retention rate, "
+                    "so the metric is refused rather than truncated"))
+
+    sem = asyncio.Semaphore(min(_RETENTION_WORKERS, len(teams)))
+
+    async def _one_org(team: dict) -> tuple[str, tuple]:
+        """Read ONE team's activity, total against every store failure.
+
+        The org id is echoed back so a `gather` result cannot be attributed to
+        the wrong team if a future change reorders the work.
+        """
+        async with sem:
+            try:
+                return team["org_id"], await asyncio.wait_for(
+                    _run_off_loop(_RETENTION_EXECUTOR, read_org_activity, cp,
+                                  team["org_id"], since_day=team["start"],
+                                  until_day=as_of_day),
+                    timeout=_RETENTION_PER_ORG_TIMEOUT_S)
+            except TimeoutError:
+                log.warning("retention cohort: org %s exceeded %ss (fail-soft)",
+                            team["org_id"], _RETENTION_PER_ORG_TIMEOUT_S)
+                return team["org_id"], (None, set(), "org_read_timeout")
+            except Exception as exc:
+                # Class NAME only, never `str(exc)`: an exception message can
+                # carry a DSN, a host or a credential fragment.
+                log.warning("retention cohort: org %s read failed: %s",
+                            team["org_id"], type(exc).__name__, exc_info=True)
+                return team["org_id"], (
+                    None, set(), f"org_read_failed:{type(exc).__name__}")
+
+    results = await asyncio.gather(*(_one_org(t) for t in teams))
+    activity = dict(results)
+    rows = build_team_rows(teams=teams, activity=activity, as_of=as_of_day)
+    payload = assemble(as_of=as_of_day, team_rows=rows,
+                       surface_state=STATE_MEASURED, limits=limits)
+    unmeasured = [r["org_id"] for r in rows
+                  if r["state"] != STATE_MEASURED]
+    if unmeasured:
+        # The note must state the state the CELLS ACTUALLY READ, derived from
+        # the cells themselves — not from `payload["state"]`. Keying off the
+        # surface state made `partial` the default for every non-`unavailable`
+        # payload, so an unmeasured team created after the reading day (which
+        # feeds NO cell) was described by prose claiming the cells read
+        # `partial` while every cell read `measured` — the same
+        # prose-contradicts-the-field defect the derivation removed. A refused
+        # surface drops the cohort, and there the surface state IS the only
+        # available signal (`unavailable` is the only state that drops it).
+        cell_states = cohort_cell_states(payload.get("cohort"))
+        if STATE_UNAVAILABLE in cell_states or payload["state"] == STATE_UNAVAILABLE:
+            cells: str | None = STATE_UNAVAILABLE
+        elif STATE_PARTIAL in cell_states:
+            cells = STATE_PARTIAL
+        else:
+            cells = None
+        named = ", ".join(sorted(unmeasured))
+        if cells is None:
+            payload["notes"].append(
+                f"{len(unmeasured)} team(s) could not be measured and are "
+                f"EXCLUDED from every denominator; they feed no cohort cell "
+                f"(no mark or window is old enough to include them). "
+                f"Named in `teams`: {named}")
+        else:
+            payload["notes"].append(
+                f"{len(unmeasured)} team(s) could not be measured and are "
+                f"EXCLUDED from every denominator; the cells they feed read "
+                f"`{cells}`. Named in `teams`: {named}")
+    payload["notes"].append(
+        "This is an AGGREGATION over existing rows, never a data-retention "
+        "window (guard D12-b): no row is deleted, pruned or purged by this "
+        "read at any age.")
+
+    # Audit BEFORE returning, fail-open: every served payload (including the
+    # refusal branches above) gets one operator-plane row. Bookkeeping must
+    # never turn a served read into a 500 (#1529 precedent), and
+    # `_async_audit` already never raises.
+    return await _serve(payload)
+
+
 # #2002 (W6, epic #1976): DELETE /v1/sessions/{session_id} — the Settings
 # Captured-sessions view/delete home (DE2E-11). Removes the Session node +
 # its OWNED graph subgraph (CONTAINS turn/extracted Points, the
@@ -18170,6 +18491,342 @@ async def _apply_graph_recording_override(
     if not written:
         raise HTTPException(status_code=404, detail="Unknown graph")
     return {"graph_id": graph_id, "recording": body.recording}
+
+
+# ── #2728: per-graph pack selection — the management surface ──────────────
+#
+# #2714 gates the compile seams on the graph's installed set; this is the
+# surface that WRITES and READS that set per graph. It clones
+# ``_apply_graph_recording_override``'s shape deliberately (one shared core,
+# dual-lane auth, mode-branch graph resolution) so the two per-graph overrides
+# can never drift on permission or on which graph a name resolves to.
+#
+# Authz (owner recommendation, #2728 open questions 1 / 5 / 11):
+#   * MUTATION — a key carrying ``team:manage`` (or the legacy full-access
+#     class), or an owner/admin session user. A GRAPH-BOUND key is refused
+#     outright: pack selection is the MANAGEMENT plane, and C5 #2114's
+#     boundary (a data-plane key must not rewrite the graph's approved
+#     ontology) is preserved rather than loosened.
+#   * READ — any team member (session) or any key whose binding covers the
+#     graph; a graph-bound key reads ONLY its own graph's packs (its binding
+#     is a boundary, not a hint).
+
+
+class GraphPackEntry(BaseModel):
+    """One entry of the per-graph pack PUT body (#2728).
+
+    ``status`` is the CONFIGURABLE vocabulary only — ``removed`` is a derived
+    tombstone the write core applies to namespaces the caller dropped, so
+    handing one in is refused (``removal is expressed by omission``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    namespace: str
+    status: str = "active"
+
+    @field_validator("namespace")
+    @classmethod
+    def _namespace_non_empty(cls, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("namespace must be a non-empty string")
+        return value.strip()
+
+    @field_validator("status")
+    @classmethod
+    def _status_configurable(cls, value: str) -> str:
+        value = (value or "active").strip()
+        if value not in ("active", "disabled"):
+            raise ValueError("status must be 'active' or 'disabled'")
+        return value
+
+
+class GraphPacksPut(BaseModel):
+    """PUT /v1/graphs/{graph_id}/packs body (#2728) — the FULL desired set.
+
+    ``expected_revision`` is REQUIRED, not optional: a last-write-wins PUT
+    would let two admins silently erase each other's pack set, and the UX's
+    revision-conflict state would have no server-side trigger. A mismatch is
+    a 409 carrying the current revision, so the client can reload and retry.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    packs: list[GraphPackEntry]
+    expected_revision: int
+
+
+def _registry_graph_list(org_id: str) -> list[dict]:
+    """Registry-lane ``graph_list`` in ONE worker hop — SDK construction
+    included (#8648 review P1).
+
+    ``_make_sdk`` is NOT free: in embedded mode it runs the keepalive anchor's
+    probe query and, on a miss, an eager connect that holds the socket
+    (#4660). Building the SDK on the loop and off-loading only the callee
+    (``to_thread(sdk.graph_list, …)``) left that blocking I/O on the event
+    loop — the exact defect ``tests/test_read_routes_loop_responsiveness.py``
+    pins.
+    """
+    return _make_sdk(namespace="registry").graph_list(org_id)
+
+
+async def _resolve_graph_data_namespace(org_id: str, graph_id: str) -> str | None:
+    """#2728 — ``graph_id`` → the graph's PHYSICAL FalkorDB name, both modes.
+
+    ``None`` = unknown / deleted / another team's graph (fail closed). The
+    literal ``"default"`` resolves by KIND, not by id: in registry mode the
+    default node carries a real gid as its id, while in Supabase mode the
+    derived default row's id IS the literal — reading the ``graph_list`` seam
+    makes both lanes agree without a second resolution path.
+    """
+    try:
+        rows = await asyncio.to_thread(_registry_graph_list, org_id)
+    except Exception as _exc:
+        _raise_503_if_cp_outage(_exc)
+        raise
+    for row in rows:
+        if row.get("status") == "deleted":
+            continue
+        if graph_id == "default":
+            if row.get("kind") == "default":
+                return row.get("namespace") or f"org_{org_id}"
+        elif row.get("graph_id") == graph_id:
+            return row.get("namespace")
+    return None
+
+
+def _pack_kind_counts() -> dict[str, int]:
+    """#2728 — namespace → declared kind count, for the Configured-packs view.
+
+    Best-effort: the catalog is read-only for tenants and a registry failure
+    must DEGRADE the view (count omitted), never 503 a read.
+    """
+    try:
+        from tortoise.domain_loader import _get_registry
+        reg = _get_registry()
+        packs = getattr(reg, "packs", None) or {}
+        return {
+            ns: (len(p.object_kinds) + len(p.event_kinds) + len(p.point_kinds))
+            for ns, p in packs.items()
+        }
+    except Exception:
+        return {}
+
+
+def _graph_packs_view(gsdk) -> tuple[dict, list[dict]]:
+    """Read the per-graph state in ONE thread hop (blocking DB reads)."""
+    from tortoise.pack_state import get_tenant_packs, resolved_pack_set
+    return resolved_pack_set(gsdk).to_dict(), get_tenant_packs(gsdk)
+
+
+def _graph_packs_view_for(namespace: str) -> tuple[dict, list[dict]]:
+    """Read a graph's pack state in ONE worker hop — SDK construction
+    included (#8648 review P1).
+
+    Off-loading only the CALLEE (``to_thread(_graph_packs_view,
+    _make_sdk(graph_name=namespace))``) still evaluates ``_make_sdk`` on the
+    event loop, where its embedded-mode anchor probe / eager connect blocks
+    every other request (the app runs one uvicorn worker). The construction
+    belongs INSIDE the off-loaded callable.
+    """
+    return _graph_packs_view(_make_sdk(graph_name=namespace))
+
+
+def _packs_payload(graph_id: str, resolved: dict, packs: list[dict]) -> dict:
+    counts = _pack_kind_counts()
+    for p in packs:
+        p["kind_count"] = counts.get(p["namespace"])
+    return {
+        "graph_id": graph_id,
+        "revision": resolved["revision"],
+        "configured": resolved["configured"],
+        "packs": packs,
+    }
+
+
+async def _graph_packs_read(graph_id: str, org_id: str, key_ctx: dict) -> dict:
+    """SHARED read core for GET /v1/graphs/{graph_id}/packs."""
+    if key_ctx.get("org_id") != org_id:
+        raise HTTPException(status_code=404, detail="Unknown organization")
+    org = await _org_node(org_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="Unknown organization")
+    _ensure_not_suspended(org)
+    # Authz BEFORE graph resolution for the session lane (the house order —
+    # a non-member must not get a graph-existence oracle). The graph-bound key
+    # lane needs the resolved namespace to compare bindings, so it resolves
+    # first and its binding check is fail-closed on a None namespace.
+    session_user_id = key_ctx.get("session_user_id")
+    if session_user_id:
+        membership = await _membership_org(session_user_id, org_id)
+        if membership is None:
+            raise HTTPException(status_code=403, detail="No membership in team")
+    namespace = await _resolve_graph_data_namespace(org_id, graph_id)
+    if namespace is None:
+        raise HTTPException(status_code=404, detail="Unknown graph")
+    if not session_user_id and key_ctx.get("graph_id"):
+        # C5 #2114 cross-graph rule: a graph-bound key's binding is a
+        # boundary. Compare PHYSICAL names, so the default-graph alias
+        # ('default' vs the real gid) cannot be used to slip across — and
+        # reject a binding that resolved to NOTHING (`get_current_org`
+        # fail-closes a graph-bound key to graph_namespace=None; `not bound`
+        # is that refusal, not a pass).
+        bound = key_ctx.get("graph_namespace")
+        if not bound or bound != namespace:
+            raise HTTPException(
+                status_code=403,
+                detail={"error_code": "GRAPH_SCOPED_KEY_CROSS_GRAPH",
+                        "message": "A graph-scoped key can only read its own "
+                                   "graph's packs."})
+    try:
+        resolved, packs = await asyncio.to_thread(
+            _graph_packs_view_for, namespace)
+    except Exception:
+        _logger.exception("pack read failed for team %s graph %s",
+                          org_id, graph_id)
+        raise HTTPException(status_code=503,
+                            detail="Pack catalog unavailable") from None
+    return _packs_payload(graph_id, resolved, packs)
+
+
+@app.get("/v1/graphs/{graph_id}/packs")
+async def get_graph_packs(graph_id: str, org_id: str,
+                          key_ctx: dict = Depends(get_current_org_session)):  # noqa: B008
+    """#2728 — read ONE graph's configured pack set + its catalog metadata.
+
+    Response: ``{graph_id, revision, configured, packs: [{namespace, name,
+    version, tier, description, status, source, installed_at, kind_count}]}``.
+    ``configured=false`` means the graph was never explicitly configured, so
+    ``packs`` reflects the legacy starter/starter-healed state; a configured
+    graph with ``packs == []`` is a deliberate empty set.
+    """
+    return await _graph_packs_read(graph_id, org_id, key_ctx)
+
+
+async def _apply_graph_packs_put(graph_id: str, body: GraphPacksPut,
+                                 org_id: str, key_ctx: dict,
+                                 request: Request) -> dict:
+    """SHARED write core for PUT /v1/graphs/{graph_id}/packs.
+
+    Authz + graph resolution + optimistic concurrency + audit in ONE place,
+    so a future MCP/CLI surface cannot drift on permission or semantics.
+    ``removed`` is never accepted as an input status; omission from ``packs``
+    is what tombstones a namespace (the record survives for audit).
+    """
+    if key_ctx.get("org_id") != org_id:
+        raise HTTPException(status_code=404, detail="Unknown organization")
+    org = await _org_node(org_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="Unknown organization")
+    _ensure_not_suspended(org)
+    # C5 #2114: pack selection is the MANAGEMENT plane — a graph-bound
+    # (data-plane) key never mutates it, whatever scopes it carries.
+    if key_ctx.get("graph_id"):
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "GRAPH_SCOPED_TEAM_SURFACE",
+                    "message": "Graph-scoped keys cannot manage pack "
+                               "selection."})
+    if key_ctx.get("key_id"):
+        scopes = key_ctx.get("scopes") or []
+        if "team:manage" not in scopes and not key_ctx.get("legacy_full_access"):
+            raise HTTPException(status_code=403,
+                                detail="Missing team:manage scope")
+    else:
+        membership = await _membership_org(
+            key_ctx.get("session_user_id") or "", org_id)
+        if membership is None or membership.get("role") not in ("owner", "admin"):
+            raise HTTPException(
+                status_code=403,
+                detail="Requires owner or admin role in team")
+
+    namespace = await _resolve_graph_data_namespace(org_id, graph_id)
+    if namespace is None:
+        raise HTTPException(status_code=404, detail="Unknown graph")
+
+    desired = [entry.model_dump() for entry in body.packs]
+
+    def _write() -> tuple[dict, list[dict]]:
+        gsdk = _make_sdk(graph_name=namespace)
+        from tortoise.pack_state import set_graph_packs
+        set_graph_packs(gsdk, packs=desired,
+                        expected_revision=body.expected_revision,
+                        updated_by=(key_ctx.get("created_by")
+                                    or key_ctx.get("session_user_id")))
+        return _graph_packs_view(gsdk)
+
+    from tortoise.pack_state import (
+        InvalidPackStatus,
+        PackRevisionConflict,
+        UnknownPackNamespace,
+    )
+    try:
+        resolved, packs = await asyncio.to_thread(_write)
+    except PackRevisionConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"error_code": "PACK_SET_REVISION_CONFLICT",
+                    "message": "The graph's pack set changed since you "
+                               "loaded it — reload and retry.",
+                    "current_revision": exc.current}) from None
+    except UnknownPackNamespace as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": "UNKNOWN_PACK_NAMESPACE",
+                    "message": "Unknown pack namespace",
+                    "namespace": exc.namespace}) from None
+    except InvalidPackStatus as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": "INVALID_PACK_STATUS",
+                    "message": str(exc),
+                    "status": exc.status}) from None
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": "INVALID_PACK_SET",
+                    "message": str(exc)}) from None
+    except Exception:
+        _logger.exception("pack write failed for team %s graph %s",
+                          org_id, graph_id)
+        raise HTTPException(status_code=503,
+                            detail="Pack catalog unavailable") from None
+
+    # One audit record per change, mirroring the key-lane convention
+    # (actor = the key's owner, detail.via = 'api_key') so a key-driven write
+    # is attributable and never reads as a human session action.
+    if key_ctx.get("key_id"):
+        actor = key_ctx.get("created_by")
+        detail = {"via": "api_key", "key_id": key_ctx.get("key_id"),
+                  "revision": resolved["revision"],
+                  "packs": [{"namespace": p["namespace"],
+                             "status": p["status"]} for p in packs]}
+    else:
+        actor = key_ctx.get("session_user_id")
+        detail = {"via": "session", "revision": resolved["revision"],
+                  "packs": [{"namespace": p["namespace"],
+                             "status": p["status"]} for p in packs]}
+    await _async_audit(request, org_id, "graph_packs_update",
+                       resource_type="graph", resource_id=graph_id,
+                       actor_user_id=actor, detail=detail)
+    return _packs_payload(graph_id, resolved, packs)
+
+
+@app.put("/v1/graphs/{graph_id}/packs")
+async def put_graph_packs(graph_id: str, body: GraphPacksPut, org_id: str,
+                          request: Request,
+                          key_ctx: dict = Depends(get_current_org_session)):  # noqa: B008
+    """#2728 — replace ONE graph's pack set (full desired state).
+
+    Owner/admin (session) or a key carrying ``team:manage``. Requires
+    ``expected_revision``; a mismatch is 409 with the current revision. An
+    unknown namespace is 422; ``status='removed'`` is 422 (omit the namespace
+    instead). Supersedes the per-graph pack STATE MODEL only — the graph-bound
+    KEY rejection on the org-level ``GET /v1/packs`` / MCP surfaces is
+    preserved verbatim (C5 #2114).
+    """
+    return await _apply_graph_packs_put(graph_id, body, org_id, key_ctx,
+                                        request)
 
 
 @app.patch("/v1/graphs/{graph_id}")

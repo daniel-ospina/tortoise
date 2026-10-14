@@ -5151,15 +5151,74 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertEqual(
             int(declared.group(1)), len(cp.ALL_SURFACES),
             "the header's `Surfaces (N rows)` must equal len(ALL_SURFACES)")
+        # ⛔ #8629 review (F4). The per-row assertion must bind to the TABLE
+        # REGION, not the whole docstring. `assertIn(name, doc)` was satisfied by
+        # any prose mention: the wrapped row label `merged PRs naming an OPEN
+        # issue` occurs exactly ONCE in the docstring and that occurrence is the
+        # FOLLOW-ON paragraph (`The \`issue keywords\` row was removed …`), so
+        # renaming or deleting the row itself left the test green — the row this
+        # test exists to pin was never actually checked.
+        #
+        # ⛔ The table cannot be checked by flattening the WHOLE block. It is
+        # COLUMN-MAJOR once newlines are removed: a surface name that wraps shares
+        # its physical lines with the other columns, so `" ".join(block.split())`
+        # interleaves them (`merged PRs naming an no query of its own — it (MERGED
+        # PR whose OPEN issue …`) and the wrapped name is NOT recoverable that way.
+        # Extract the FIRST COLUMN instead — the column that holds every surface
+        # name AND the ADVISORY marker — so a wrapped name is rejoined (wrapping-
+        # tolerant) while a renamed/deleted row still fails.
+        table_lines = doc[declared.start():].splitlines()
+        table_end = next(
+            (i for i, ln in enumerate(table_lines) if i > 1 and not ln.strip()),
+            len(table_lines),
+        )
+        # Drop the `Surfaces (N rows …)` header and the rule beneath it: both are
+        # single-cell lines that contribute nothing to the first column.
+        row_lines = table_lines[2:table_end]
+        boundaries = [
+            2 + m.end()
+            for ln in row_lines
+            if (m := re.search(r" {2,}(?=\S)", ln[2:])) is not None
+        ]
+        self.assertTrue(
+            boundaries,
+            "the header table must have parseable column boundaries")
+        col = min(boundaries)  # the SECOND column starts here on every row
+        first_column = " ".join(
+            " ".join(ln[2:col].split()) for ln in row_lines
+        ).strip()
+        # Locate each name IN ORDER (the table is written in `ALL_SURFACES`
+        # order), so a name can only match its own row — an earlier row's prose
+        # cannot stand in for a missing later row.
+        starts: list[tuple[str, int]] = []
+        cursor = 0
         for name in cp.ALL_SURFACES:
-            self.assertIn(
-                name, doc,
+            idx = first_column.find(name, cursor)
+            self.assertNotEqual(
+                idx, -1,
                 f"surface {name!r} is missing from the header table — a row "
                 "that ships without a contract entry is a contract the next "
                 "reader cannot see")
+            starts.append((name, idx))
+            cursor = idx + len(name)
         # The ADVISORY marker is the only place a reader learns that a hit on a
-        # row cannot block; every advisory surface must carry one.
-        self.assertEqual(doc.count("· ADVISORY ·"), len(cp.ADVISORY_SURFACES))
+        # row cannot block, so it must sit in THAT surface's row — a docstring
+        # `count(...) == len(ADVISORY_SURFACES)` cannot enforce that.
+        for i, (name, idx) in enumerate(starts):
+            row = (first_column[idx:starts[i + 1][1]]
+                   if i + 1 < len(starts) else first_column[idx:])
+            if name in cp.ADVISORY_SURFACES:
+                self.assertIn(
+                    "· ADVISORY ·", row,
+                    f"advisory surface {name!r} has no `· ADVISORY ·` marker in its row")
+            else:
+                self.assertNotIn(
+                    "· ADVISORY ·", row,
+                    f"non-advisory surface {name!r} is marked `· ADVISORY ·` in its row")
+        self.assertEqual(
+            first_column.count("· ADVISORY ·"), len(cp.ADVISORY_SURFACES),
+            "the table must carry exactly one `· ADVISORY ·` marker per "
+            "advisory surface")
         # The exit-code table may not advertise an arm that cannot reach it:
         # after #8625 the timeline title arm is an ADVISORY, so only the issue's
         # own state may be named as a source of exit 4 ("a verdict must not
@@ -5389,6 +5448,17 @@ class CollisionPreflightTest(unittest.TestCase):
         # INCOMPLETE, so without this the test cannot tell "the query FAILED"
         # from "the query never ran".
         self.assertIn("gh-unavailable", out)
+        # ⛔ #8629 review (F2): the ADVISORY `merged PRs naming an OPEN issue`
+        # surface is fed by the SAME timeline read, so on this path it was never
+        # measured — and it used to print as a clean `0 hit(s)` with no note: a
+        # printed ABSENCE for a read that never happened (the defect class the
+        # `recently-closed PRs` row is already guarded against at the report
+        # site). The verdict is unchanged (exit 2 either way — an ADVISORY
+        # surface's own status never enters the incomplete set), but the row must say
+        # UNQUERIED, not `0`.
+        self.assertIn(
+            "[merged PRs naming an OPEN issue] 0 hit(s) — gh-unavailable", out)
+        self.assertNotIn("[merged PRs naming an OPEN issue] 0 hit(s)\n", out)
 
     def test_landed_outranks_an_incomplete_blocking_surface(self):
         # A terminal signal is decisive even when ANOTHER blocking surface could

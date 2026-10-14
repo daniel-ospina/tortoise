@@ -2994,6 +2994,154 @@ class TestE3Resolution:
             "the user's 5K best is 27:12. He trains daily."
 
 
+# ── #2684 Slice B: verbatim value-spans on value-bearing points ───────────
+
+class TestValueVerbSpan2684:
+    """#2684: a VALUE-BEARING point carries its verbatim source span.
+
+    The span is the ADDRESS of the point's own quote in the resolved turn —
+    the thing the assembly can surface so a consumer re-reads the exact value
+    instead of re-deriving it from a distillation (the aggregation-numerator
+    class: "300" vs "100", "$60" vs "$12"). Only a VERBATIM anchor yields
+    one; the overlap band resolves a turn about the claim, never the claim's
+    words.
+    """
+
+    # The quote anchors on a NON-first turn so a degenerate "offset 0"
+    # implementation cannot pass.
+    EDUS = [{"index": 0, "role": "assistant", "text": "maybe try intervals for speed"},  # noqa: RUF012
+            {"index": 1, "role": "user", "text": "my 5K best is 27:12"}]
+
+    def _embed(self, content, **point_kwargs):
+        p = {"content": content, "pointKind": "statement"}
+        p.update(point_kwargs)
+        return {"entities": [], "points": [p], "events": [], "operators": []}
+
+    # ── the offset helper ───────────────────────────────────────────────
+
+    def test_span_is_the_quote_offsets(self):
+        assert v2._verbatim_span_in_turn(
+            "my 5K best is 27:12", "my 5K best is 27:12") == (0, 19)
+
+    def test_span_tolerates_whitespace_runs_and_returns_RAW_offsets(self):
+        """The anchor test collapses whitespace; the span must map back to the
+        RAW text's coordinates or it addresses the wrong words."""
+        turn = "the value is\n480 ms under load"
+        assert turn[13:19] == "480 ms"
+        assert v2._verbatim_span_in_turn(turn, "480 ms") == (13, 19)
+        assert v2._verbatim_span_in_turn(turn, "480   ms") == (13, 19)
+
+    def test_span_is_case_insensitive_like_the_anchor(self):
+        assert v2._verbatim_span_in_turn(
+            "The TTL is 2 Hours", "the ttl is 2 hours") == (0, 18)
+
+    def test_a_paraphrase_has_no_span(self):
+        """The band is not proof of containment — a paraphrase must never get
+        a fabricated address."""
+        assert v2._verbatim_span_in_turn(
+            "maybe try intervals for speed", "speed intervals") is None
+        assert v2._verbatim_span_in_turn("anything", "") is None
+        assert v2._verbatim_span_in_turn("", "anything") is None
+
+    # ── the value-bearing gate + the emitted point ──────────────────────
+
+    def test_value_bearing_detector_reuses_the_production_engine(self):
+        for t in ("my 5K best is 27:12", "cost 400 dollars",
+                  "twelve million events", "released 2026-09-19",
+                  "the TTL is 2 hours"):
+            assert v2._carries_value(t), t
+        for t in ("the team prefers intervals", "no quantities here"):
+            assert not v2._carries_value(t), t
+
+    def test_value_bearing_point_carries_the_span(self):
+        """ACCEPTANCE: the value-bearing point nails its value to the raw
+        turn — offsets that address the quoted text verbatim."""
+        r = v2.execute_embed(
+            self._embed("the user's 5K best is 27:12",
+                        quote="my 5K best is 27:12"),
+            {}, session_id="s1", edus=self.EDUS)
+        pt = r["payload"]["points"][0]
+        turn = self.EDUS[1]["text"]
+        assert pt["source_turn_id"] == 1
+        assert (pt["span_start"], pt["span_end"]) == (0, 19)
+        assert turn[pt["span_start"]:pt["span_end"]] == "my 5K best is 27:12"
+        assert not any("no source span" in w for w in r["warnings"])
+
+    def test_span_addresses_the_value_inside_a_longer_turn(self):
+        edus = [{"index": 0, "role": "user",
+                 "text": "ok so my 5K best is 27:12, split 3:20 over 5k"}]
+        r = v2.execute_embed(
+            self._embed("the user's 5K best is 27:12",
+                        quote="my 5K best is 27:12"),
+            {}, session_id="s1", edus=edus)
+        pt = r["payload"]["points"][0]
+        assert edus[0]["text"][pt["span_start"]:pt["span_end"]] == \
+            "my 5K best is 27:12"
+
+    def test_a_non_value_bearing_point_carries_no_span(self):
+        """SCOPE BOUNDARY: #2684 scopes VALUE-BEARING points; the general
+        span on every Point is the separately-filed, deliberately-wider
+        #5007. A value-free point must keep the pre-change payload shape."""
+        r = v2.execute_embed(
+            self._embed("the team prefers intervals",
+                        quote="maybe try intervals"),
+            {}, session_id="s1", edus=self.EDUS)
+        pt = r["payload"]["points"][0]
+        assert pt["source_turn_id"] == 0
+        assert "span_start" not in pt and "span_end" not in pt
+
+    def test_a_band_resolved_value_is_REPORTED_not_silently_unspanned(self):
+        """The class #2817 measured: the value-bearing point resolves only by
+        the >=0.6 overlap band, so it has no address. The absence must be
+        LOUD — the band route is otherwise silent, and it misses by
+        construction exactly when the value was rewritten."""
+        r = v2.execute_embed(
+            self._embed("the user's 5K best is 27:12",
+                        quote="speed intervals"),
+            {}, session_id="s1", edus=self.EDUS)
+        pt = r["payload"]["points"][0]
+        assert pt["source_turn_id"] == 0       # the band DID resolve a turn
+        assert "span_start" not in pt
+        assert any("token-overlap band, not a verbatim anchor" in w
+                   for w in r["warnings"]), r["warnings"]
+
+    def test_no_resolution_reuses_the_existing_anchor_warning(self):
+        """A value-bearing point with NO resolvable turn is already loud (the
+        E3 anchor warning) — the span branch must not double-report it."""
+        r = v2.execute_embed(
+            self._embed("the user's 5K best is 27:12",
+                        quote="totally unrelated topic"),
+            {}, session_id="s1", edus=self.EDUS)
+        pt = r["payload"]["points"][0]
+        assert pt["source_turn_id"] is None
+        assert "span_start" not in pt
+        assert any("no resolvable source turn" in w for w in r["warnings"])
+        assert not any("token-overlap band" in w for w in r["warnings"])
+
+    def test_empty_quote_model_index_path_carries_no_span(self):
+        """The model-index route (empty quote + in-range index) has no
+        verbatim text to address — no span, and not the band's warning
+        either: the band was not consulted."""
+        r = v2.execute_embed(
+            self._embed("the user's 5K best is 27:12", source_turn_id=1),
+            {}, session_id="s1", edus=self.EDUS)
+        pt = r["payload"]["points"][0]
+        assert pt["source_turn_id"] == 1
+        assert "span_start" not in pt
+        assert not any("token-overlap band" in w for w in r["warnings"])
+
+    def test_span_is_all_or_nothing_on_the_payload(self):
+        """A half span is not an address — the two offsets are written
+        together or not at all (#5007's contract, enforced downstream)."""
+        r = v2.execute_embed(
+            self._embed("the user's 5K best is 27:12",
+                        quote="my 5K best is 27:12"),
+            {}, session_id="s1", edus=self.EDUS)
+        pt = r["payload"]["points"][0]
+        assert ("span_start" in pt) == ("span_end" in pt)
+        assert pt["span_end"] > pt["span_start"] >= 0
+
+
 # ── The orchestrator (mock model, no LLM) ──────────────────────────────────
 
 class TestOrchestrator:

@@ -121,6 +121,41 @@ def test_docs_scanning_gates_stay_in_tier1():
         "and a docs-only edit runs only tier1; without this pin a re-staled "
         "`found`-omission claim merges green (#4309 class)"
     )
+    assert "test_fly_secret_drift.py" in tier1, (
+        "#8614: the runbook's secret-drift guards read docs/infra-runbook.md "
+        "(`docs/` is in NON_PYTHON_PREFIXES and the runbook matches no "
+        "SOURCE_PATTERNS entry), so a runbook-only diff runs tier1 only — "
+        "without this registration a re-introduced `—` in a `gh-secret:` row "
+        "or a `fly secrets set NAME=$(openssl rand …)` recipe merges green "
+        "(#4309 class)"
+    )
+
+
+def test_fly_secret_drift_gate_runs_on_a_runbook_only_diff():
+    """#8614 review (P2): the runbook's own guards must run on the runbook.
+
+    `tests/test_fly_secret_drift.py` binds prose claims in
+    `docs/infra-runbook.md` (the Secrets Matrix GitHub column, §1/§2 never
+    giving a `gh-secret:` name a value minted on Fly, and §2's account of which
+    `workflow` names the deploy re-stages — the set grows with the file, so this
+    names the binding rather than counting it). `docs/` is in
+    NON_PYTHON_PREFIXES and `docs/infra-runbook.md` matches no SOURCE_PATTERNS
+    entry, so a runbook-only diff filtered to `changed == []` and took the
+    docs-only early return — tier1 ONLY. Registered in `core` but not in
+    `tier1`, the guards were therefore asleep on the only change that can break
+    them: the pre-#8614 state (`—` in the FASTAPI_INTERNAL_KEY /
+    TORTOISE_SECRET_PEPPER rows) would have merged green and only reddened
+    `main` post-merge. Dropping the tier1 entry re-opens that hole (#4309
+    silent-drop class).
+    """
+    r = _sel(["docs/infra-runbook.md"])
+    assert r["full"] is False
+    assert r["surfaces"] == []
+    assert "test_fly_secret_drift.py" in r["test_files"], (
+        "a docs/infra-runbook.md-only diff must select the guards that bind its "
+        "prose (`test_fly_secret_drift.py`) — otherwise a docs-only edit that "
+        "re-breaks a claim it pins merges green (#8614 review, #4309 class)"
+    )
 
 
 def test_public_site_surface_change_selects_onboarding_and_skips_slow():
@@ -1392,6 +1427,30 @@ def test_capstone_probe_change_selects_core_not_tier1():
         assert "core" in r["surfaces"], (path, r)
         assert "test_7950_capstone_probe.py" in r["test_files"], (path, r)
         assert r["full"] is False, (path, r)
+
+
+def test_supabase_config_change_selects_core_not_tier1():
+    # supabase/config.toml is the committed LOCAL-stack config and resolves its
+    # providers by `env(NAME)` substitution, so each of those names is required
+    # by a tracked file. tests/test_env_contract_covers_supabase_config.py
+    # (`core`) is the guard: every config `env(NAME)` must be declared in
+    # .env.example, the contract an operator reads.
+    #
+    # `supabase/` is a flat NON_PYTHON_PREFIXES entry and the path matches no
+    # SOURCE_PATTERNS row, so before the CORE_ALSO entry a CONFIG-ONLY change
+    # came back with `changed == []` and took the docs-only early return —
+    # `select()` returned NO surface and the guard never ran on the half of the
+    # pair it exists to hold (the #1349/#3332/#3616 silent-drop class). A
+    # SOURCE_PATTERNS entry cannot fix it: `_selection_relevant()` deliberately
+    # skips the `core` surface, and the guard is `core`-registered.
+    #
+    # Measured before the entry: `_sel(["supabase/config.toml"])` ->
+    # surfaces=[], full=False, 40 test files, the guard absent.
+    # Mutation check: removing the CORE_ALSO entry fails the assert below.
+    r = _sel(["supabase/config.toml"])
+    assert "core" in r["surfaces"], r
+    assert "test_env_contract_covers_supabase_config.py" in r["test_files"], r
+    assert r["full"] is False, r
 
 
 def test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1():
