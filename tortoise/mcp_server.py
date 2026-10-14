@@ -4142,8 +4142,9 @@ def _maybe_onboarding_auto_complete(*,
 # this tool. It calls the SAME capture pipeline as POST /v1/sessions
 # (hosted_api._capture_session_impl) so the two surfaces can never drift on
 # gate order: boundary 422 → admission 429 (#3060) / in-flight 409 (#3129)
-# → session_recording opt-out 409 → turn cap 400 → empty 422 → quota 402 —
-# the tool docstring below carries this surface's full ordered list.
+# → session_recording opt-out 409 → turn cap 400 → empty 422 → quota 402;
+# the tool docstring below carries the full list, including the inner
+# extractor-provider 503 that can follow them.
 # A missing provider key is NOT a gate (#3892): the capture
 # is STORED and only the LLM extraction is skipped, reported as
 # `extraction_mode: "no-provider"`. Stdio/self-host returns an honest "requires
@@ -4165,11 +4166,15 @@ def tortoise_session_capture(conversation: list[dict],
     in-flight capture of the same session_id — both raised by the admission
     reservation at ``_reserve_capture_slot`` below, #3060/#3129) -> 409
     (recording off) -> 400 (turn cap) -> 422 (empty/blank transcript) -> 402
-    (quota). There is deliberately NO
-    provider gate: since #3892 (owner ruling) a missing provider key STORES
-    the capture and skips only the LLM extraction (receipt mode
-    "no-provider") — the pre-#3892 docstring here listed a 503 that no longer
-    exists. Returns the
+    (quota). Provider-key handling is NOT a pre-write gate since #3892 (owner
+    ruling): a MISSING provider key stores the capture and skips only the LLM
+    extraction (receipt mode "no-provider") — the pre-#3892 no-provider 503
+    the old docstring listed is gone. An inner extractor-provider gate DOES
+    remain and fails closed with a 503 when a key is configured but not
+    routing-usable (a non-routing key such as OPENAI_API_KEY alone, or an
+    explicit TORTOISE_EXTRACTOR_PROVIDER naming an absent key, #1468/#1530) —
+    that refusal follows the gates above, with the turns already stored.
+    Returns the
     capture result (a memory_write_v1 envelope, #2104) on success, or an
     honest error dict on failure. Per-harness last-error bookkeeping (same on
     the REST path): the key is SET on a non-2xx EXCEPT the #3060 capacity 429
