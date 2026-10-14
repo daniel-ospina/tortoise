@@ -335,6 +335,28 @@ export function modelLabel(model: unknown): string | undefined {
  *  unreachable from either spool leg. */
 const CLIENT_CAPTURED_AT_SOURCES = new Set(["cli_observed", "file_mtime", "unknown"]);
 
+/** #7708: the CLOSED producer-lane vocabulary, mirroring the server's
+ *  `hosted_api._SESSION_CAPTURE_LANE_VALUES` (the set that produces the 422).
+ *  Pinned here (not imported — this is a different language) for the same reason
+ *  as `CLIENT_CAPTURED_AT_SOURCES`: the spool is the leg that can lose the
+ *  conversation. Distinct from the EXTRACTION lane (m2/v2): same word, different
+ *  meaning. A test asserts this equals the server's set, so drift reds. */
+export const CAPTURE_LANES = new Set(["hook", "store_sync"]);
+
+/** The ONE lane normalisation, used by the writer and every comparison site.
+ *
+ *  Returns the value iff it is a recognised lane, else `undefined` ("no lane").
+ *  A non-string or an unrecognised token can therefore never be stored, posted,
+ *  or used as part of a filing identity — the server's 422 for a bad lane is
+ *  unreachable from either spool leg, and a stored falsy lane (`""`/`0`/`false`)
+ *  normalises to the SAME `undefined` the payload omits, so the skip clause and
+ *  the compare-and-swap agree with the wire (without this, `undefined === ""` is
+ *  false on both and the entry re-POSTs its whole transcript on every drain —
+ *  the #4714 amplification loop). */
+export function normaliseLane(value: unknown): string | undefined {
+  return typeof value === "string" && CAPTURE_LANES.has(value) ? value : undefined;
+}
+
 /** A usable client capture instant, or `undefined`.
  *
  *  `typeof !== "number"` already refuses `true`/`false` (a JSON bool is not a
@@ -385,6 +407,22 @@ function stampPair(
   return [undefined, undefined];
 }
 
+/** The server cap on the client-claimed attribution fields
+ *  (`hosted_api.SessionRequest`): `machine_id` ≤256, `model` ≤128. Beyond
+ *  either is a 422, which `flushSpool` classifies PERMANENT → the entry goes
+ *  terminal. The WRITER bounds both (`deriveMachineId` emits 64 hex chars;
+ *  `modelLabel` slices to 128), but the DRAIN forwards the on-disk meta — so a
+ *  hand-edited / foreign / corrupt `meta.json` (the PR's own threat model) could
+ *  put an over-long field on the wire and strand the capture, the same class the
+ *  harness normalisation closed (#8531 review). TOTAL read: a non-string is
+ *  OMITTED, and control chars / surrounding whitespace are stripped exactly as
+ *  the Python leg's `sanitize_attribution_field` does, so the two legs agree. */
+export function boundAttribution(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const clean = value.replace(/[\x00-\x1f]/g, "").trim();
+  return clean ? clean.slice(0, maxLength) : undefined;
+}
+
 /** The POST /v1/sessions payload — the same shape `tortoise session capture` sends. */
 export function buildCapturePayload(args: {
   sessionId: string;
@@ -413,14 +451,20 @@ export function buildCapturePayload(args: {
     session_id: args.sessionId,
     source: args.source,
     conversation: args.turns,
-    machine_id: args.machineId,
+    // #8531 review: capped at the WIRE (`machine_id` ≤256, `model` ≤128 are
+    // server bounds; exceeding either is a PERMANENT 422 that strands the
+    // entry). Both reads are TOTAL and delegate to the writers' own rule, so the
+    // writer and the wire cannot disagree.
+    machine_id: boundAttribution(args.machineId, 256),
   };
-  if (args.captureLane) payload.capture_lane = args.captureLane;
-  // NORMALISED at the WIRE, not only at the writer. The drain forwards whatever
-  // is on disk, and the two legs share one directory — so a meta the OTHER leg
-  // (or a hand-edit) left with an unrecognised token would otherwise be posted
-  // verbatim, and the server's refusal is a 422, a 422 is classified PERMANENT,
-  // and `discardEntry` then unlinks the ONLY copy of the conversation.
+  // #7708: NORMALISED at the WIRE, not only at the writer. The drain forwards
+  // whatever is on disk, and the two legs share one directory — so a meta the
+  // OTHER leg (or a hand-edit) left with an unrecognised token would otherwise
+  // be posted verbatim, and the server's refusal is a 422. A stored falsy lane
+  // normalises to the same `undefined` the skip clause and the CAS use, so all
+  // three agree.
+  const drainLane = normaliseLane(args.captureLane);
+  if (drainLane) payload.capture_lane = drainLane;
   const postedAt = finiteInstant(args.clientCapturedAt);
   if (postedAt !== undefined) {
     payload.client_captured_at = postedAt;
@@ -432,7 +476,8 @@ export function buildCapturePayload(args: {
           : "unknown";
     }
   }
-  if (args.model) payload.model = args.model;
+  const wireModel = boundAttribution(args.model, 128);
+  if (wireModel) payload.model = wireModel;
   return payload;
 }
 
@@ -562,11 +607,20 @@ export const DISCARD_ENTRY_TOO_LARGE = "entry_too_large";
 export const DISCARD_COUNT_EXCEEDED = "spool_count_exceeded";
 export const DISCARD_BYTES_EXCEEDED = "spool_total_bytes_exceeded";
 export const DISCARD_TRANSCRIPT_EMPTY = "transcript_empty";
+/** The turn log EXISTS with bytes but yields no parseable turn — a torn UTF-8
+ *  append, a non-UTF-8 tail, or a path that is not a readable file. The entry
+ *  is RECORDED and KEPT (marked terminal), NEVER unlinked (#7708 follow-up): a
+ *  read/decode failure must not delete the only copy of a conversation. */
+export const DISCARD_TRANSCRIPT_TORN = "transcript_torn";
 export const DISCARD_CORRUPT = "corrupt_entry";
 /** A filesystem error while writing the spool — recorded, never silent. */
 export const DISCARD_WRITE_FAILED = "spool_write_failed";
 /** The spool's own `entries/` listing cannot be read — every capture is invisible. */
 export const DISCARD_SPOOL_UNREADABLE = "spool_unreadable";
+/** #7708: a PERMANENT HTTP refusal. The entry is RECORDED and KEPT (the turn
+ *  log is the only copy), and marked `terminal_failure` so the drain does not
+ *  retry it — terminal, never destructive. */
+export const DISCARD_HTTP_REJECTED = "http_rejected";
 
 export interface SpoolMeta {
   version: 1;
@@ -593,7 +647,8 @@ export interface SpoolMeta {
   content_digest: string;
   /** Stable client-generated idempotency key: sha256(session_id \0 content_digest). */
   capture_key: string;
-  /** Consecutive TRANSIENT upload failures (permanent failures discard instead). */
+  /** Consecutive TRANSIENT upload failures (a permanent refusal marks the
+   *  entry terminal instead of discarding it — #7708). */
   attempts: number;
   /** Epoch MILLISECONDS before which a retry must not be attempted. 0 = ready.
    *  Milliseconds in BOTH legs (they share this directory) — a seconds value
@@ -614,6 +669,12 @@ export interface SpoolMeta {
    *  equal. */
   filed_stamp?: number;
   filed_at?: string;
+  /** #7708: set when a PERMANENT HTTP refusal was recorded. The entry is KEPT
+   *  but `flushSpool` skips it — terminal, never destructive. Cleared when a
+   *  later snapshot REBUILDS the meta (genuinely new content → a fresh,
+   *  backoff-gated attempt); a byte-identical re-snapshot returns before the
+   *  meta is rebuilt, so the marker survives and the entry is not re-POSTed. */
+  terminal_failure?: { reason: string; detail?: string; at: string };
 }
 
 export interface DiscardRecord {
@@ -671,6 +732,11 @@ export interface FlushSummary {
    * states, and a silent hold-back reads as a drop in the log.
    */
   heldBack: number;
+  /** #7708: entries marked TERMINAL by a previous permanent refusal — KEPT on
+   *  disk (never unlinked) but never retried. Counted separately so a spool
+   *  whose entries are all terminal still reports on every flush instead of
+   *  reaching the silent steady state `heldByBackoff` was added to close. */
+  terminal: number;
   discarded: DiscardRecord[];
 }
 
@@ -791,6 +857,12 @@ export function readSpoolTurns(dir: string, sessionId: string): Turn[] {
     if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line) as { role?: unknown; content?: unknown };
+      // #8531 review: `role.length > 0` is the writers' contract — neither leg
+      // ever emits an empty role (`extractTurns` requires user/assistant;
+      // Python filters to the same pair) — and Python now applies the SAME
+      // non-empty predicate (`capture_spool.read_spool_turns`). Before that the
+      // legs disagreed about the same bytes: TS skipped `{"role":"",...}` and
+      // routed the log to `transcript_torn`, Python filed it as a turn.
       if (
         typeof parsed.role === "string" &&
         parsed.role.length > 0 &&
@@ -852,15 +924,15 @@ export function listSpoolEntries(
           detail: meta ? `meta has no usable session_id: ${path}` : `meta is not valid JSON: ${path}`,
         }),
       );
-      // Remove BOTH halves: an orphaned turns log is invisible to the meta
-      // scan, so it would never be counted or pruned and could grow the spool
-      // past its byte ceiling forever.
-      for (const orphan of [path, join(root, `${stem}.turns.jsonl`)]) {
-        try {
-          unlinkSync(orphan);
-        } catch {
-          // nothing more we can do — the record above is the observable signal
-        }
+      // Remove the corrupt META, but QUARANTINE the turn log, not delete it
+      // (#7708): the transcript has nothing to do with the corruption and is
+      // the only copy, so a bad `meta.json` must not become data loss. An
+      // absent/empty log is removed.
+      quarantineLog(join(root, `${stem}.turns.jsonl`));
+      try {
+        unlinkSync(path);
+      } catch {
+        // nothing more we can do — the record above is the observable signal
       }
       continue;
     }
@@ -880,6 +952,94 @@ export function spoolEntryBytes(dir: string, sessionId: string): number {
     }
   }
   return total;
+}
+
+/** Whether the turn log exists with bytes — the gate between the TWO
+ *  empty-transcript outcomes (#7708). An ABSENT/zero-byte log is
+ *  `transcript_empty` (removed — provably nothing to keep); a log with bytes is
+ *  `transcript_torn` (recorded, marked terminal and KEPT). `statSync` does not
+ *  need read permission, so a present-but-unreadable log counts as content. */
+function turnLogHasContent(dir: string, sessionId: string): boolean {
+  try {
+    return statSync(logPathFor(dir, sessionId)).size > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Move a turn log ASIDE instead of unlinking it — kept FOR FORENSICS.
+ *  Used when the META is corrupt and the transcript (which the corruption never
+ *  touched, and which is the only copy) must survive (#7708). An empty/absent
+ *  log is removed. A numeric suffix keeps an earlier orphan from being
+ *  clobbered. Best-effort: a rename failure leaves the log in place.
+ *
+ *  NOT re-fileable — the honesty this owes a reader who finds an `.orphan`: the
+ *  entry key is `sha256(session_id)[:32]` and the corrupt meta (the only copy of
+ *  the session id) is REMOVED, so no verb can rebuild the session id the server
+ *  needs. The bytes are kept FOR FORENSICS, not for a retry. (The wording here
+ *  once said "recoverable", which overstated what the name can deliver.) */
+function quarantineLog(log: string): void {
+  let size = 0;
+  try {
+    size = statSync(log).size;
+  } catch {
+    // absent — nothing to keep
+  }
+  if (size <= 0) {
+    try {
+      unlinkSync(log);
+    } catch {
+      // already gone
+    }
+    return;
+  }
+  let target = `${log}.orphan`;
+  let suffix = 1;
+  while (existsSync(target)) {
+    suffix += 1;
+    target = `${log}.orphan${suffix}`;
+  }
+  try {
+    renameSync(log, target);
+  } catch {
+    // leave it in place — better than deleting it
+  }
+}
+
+/** Quarantined turn logs in the entries dir, OLDEST first (#8531 review).
+ *
+ *  `quarantineLog` moves a corrupt-meta entry's transcript aside as
+ *  `<key>.turns.jsonl.orphan[N]`. Nothing else reads that name, so without this
+ *  accounting the bytes are invisible to `spoolEntryBytes` and to the meta scan:
+ *  the spool could grow past `maxTotalBytes` without bound the moment a meta was
+ *  quarantined — one full transcript per corrupt meta. A rename preserves mtime,
+ *  so an orphan carries the age of the transcript it holds and oldest-first
+ *  eviction is deterministic. */
+function orphanPaths(dir: string): string[] {
+  const root = entriesDir(dir);
+  let names: string[];
+  try {
+    names = readdirSync(root);
+  } catch {
+    return [];
+  }
+  const found: { path: string; mtime: number; name: string }[] = [];
+  for (const name of names) {
+    if (!name.includes(".turns.jsonl.orphan")) continue;
+    const path = join(root, name);
+    try {
+      const st = statSync(path);
+      if (!st.isFile()) continue;
+      found.push({ path, mtime: st.mtimeMs, name });
+    } catch {
+      continue;
+    }
+  }
+  return found
+    .sort((a, b) =>
+      a.mtime !== b.mtime ? a.mtime - b.mtime : a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+    )
+    .map((entry) => entry.path);
 }
 
 /**
@@ -944,6 +1104,53 @@ export function discardEntry(
 }
 
 /**
+ * Record a TERMINAL HTTP refusal WITHOUT unlinking the entry (#7708).
+ *
+ * A permanent 4xx is a *filing* failure, not a *capture* failure: the turn log
+ * on disk is still the only copy, and deleting it turns one refused payload
+ * into permanent data loss. The ledger record is written FIRST — the same
+ * "never a silent drop" ordering as `discardEntry` — then the entry is marked
+ * `terminal_failure` and KEPT. `flushSpool` skips a terminal entry, so the drain
+ * reaches a final state without the amplification an unmarked retry re-opens.
+ *
+ * `deps` is the same kind of testability seam as `discardEntry`'s.
+ */
+export function quarantineEntry(
+  dir: string,
+  meta: SpoolMeta,
+  reason: string,
+  detail: string,
+  nowMs: number,
+  deps: {
+    record: (dir: string, rec: Omit<DiscardRecord, "at"> & { at?: string }) => DiscardRecord;
+    read: (dir: string, sessionId: string) => SpoolMeta | undefined;
+    write: (dir: string, meta: SpoolMeta) => void;
+  } = { record: recordDiscard, read: readSpoolEntry, write: writeMeta },
+): DiscardRecord {
+  const record = deps.record(dir, {
+    session_id: meta.session_id,
+    capture_key: meta.capture_key,
+    reason,
+    detail,
+  });
+  const fresh = deps.read(dir, meta.session_id);
+  // Guarded on the re-read: if a concurrent prune removed the entry, writing
+  // the marker over the stale in-memory meta would resurrect an ORPHAN terminal
+  // entry with no turn log. The ledger line is already recorded either way.
+  if (fresh) {
+    fresh.terminal_failure = { reason, detail, at: new Date(nowMs).toISOString() };
+    // The marker is dropped when a later snapshot REBUILDS the meta, so advance
+    // the window here too — otherwise the first flush after a content change
+    // re-POSTs a still-refused payload at turn cadence rather than on the
+    // backoff clock.
+    fresh.attempts = clampAttempts(fresh.attempts) + 1;
+    fresh.next_attempt_at_ms = nowMs + backoffDelay(fresh.attempts);
+    deps.write(dir, fresh);
+  }
+  return record;
+}
+
+/**
  * Write (or extend) the spool entry for a session snapshot.
  *
  * Appends only the NEW turns when the incoming list extends the stored log
@@ -1001,7 +1208,16 @@ export function writeSpoolEntry(
   // || "hook"` fills the lane in, while `??` keeps `""` and the spread below
   // then OMITS the key. (A stored empty lane is reachable only from a crafted
   // or corrupt meta — which is why it has its own test.)
-  const lane = prior?.capture_lane || snapshot.captureLane;
+  //
+  // #7708: BOTH operands are NORMALISED BEFORE the comparison. Reading the raw
+  // values would let a stored foreign lane ("bogus") count as "the entry has a
+  // lane", so a valid snapshot lane would neither win the resolution nor set
+  // `laneUpgrade` — and the byte-identical dedup early-return would then strand
+  // the valid lane forever (the hook-reads-not-live false negative #3516
+  // exists to remove). One normaliser, used everywhere.
+  const priorLane = normaliseLane(prior?.capture_lane);
+  const snapLane = normaliseLane(snapshot.captureLane);
+  const lane = priorLane ?? snapLane;
   // #3516 §B / piece 12: the stamp and its clock resolve as a PAIR, so a later
   // writer can never relabel an earlier writer's instant with its own clock.
   // The store-sync backstop ships the SAME session after this leg, and a later,
@@ -1014,7 +1230,7 @@ export function writeSpoolEntry(
   // byte-identically) would keep its lane-less meta forever — and a WORKING
   // hook would file as not-live, the false-negative this feature exists to
   // remove.
-  const laneUpgrade = !!snapshot.captureLane && !prior?.capture_lane;
+  const laneUpgrade = snapLane !== undefined && priorLane === undefined;
   // The SAME upgrade bypass for the stamp: it is metadata, not content, so a
   // byte-identical re-snapshot that newly carries one must not be deduped away
   // — the entry would stay timeless forever and the floor could never run.
@@ -1183,6 +1399,13 @@ function compareAge(a: SpoolMeta, b: SpoolMeta): number {
  * Enforce the spool's COUNT and BYTE ceilings, evicting the oldest entries.
  * Excludes `keepSessionId` (the entry just written) so a write can never evict
  * itself. Returns one DiscardRecord per eviction, with the ceiling named.
+ *
+ * A quarantined turn log (`quarantineLog`) has no meta, so it is absent from the
+ * meta scan and from `spoolEntryBytes`: its bytes are counted HERE and it is
+ * evicted (oldest first, by mtime) before any live entry. Without this, the byte
+ * ceiling stopped applying the moment a meta was quarantined and the spool could
+ * grow past it without bound (#8531 review). The eviction is a real loss and is
+ * recorded like any other bound eviction.
  */
 export function pruneSpool(
   dir: string,
@@ -1191,13 +1414,35 @@ export function pruneSpool(
 ): DiscardRecord[] {
   const discards: DiscardRecord[] = [];
   const { metas } = listSpoolEntries(dir);
+  const orphans = orphanPaths(dir);
   const ranked = metas
     .filter((m) => m.session_id !== keepSessionId)
     .map((m) => ({ meta: m, bytes: spoolEntryBytes(dir, m.session_id) }))
     .sort((a, b) => compareAge(a.meta, b.meta));
 
   let count = metas.length;
-  let total = metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0);
+  let total =
+    metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) +
+    orphans.reduce((sum, path) => sum + fileSize(path), 0);
+  // Quarantined logs go FIRST: they are already unreachable to every surface,
+  // while an entry can still be filed by the next drain.
+  for (const orphan of orphans) {
+    if (total <= bounds.maxTotalBytes) break;
+    const size = fileSize(orphan);
+    discards.push(
+      recordDiscard(dir, {
+        session_id: `orphan:${basename(orphan)}`,
+        reason: DISCARD_BYTES_EXCEEDED,
+        detail: `spool is ${total} bytes > maxTotalBytes=${bounds.maxTotalBytes}`,
+      }),
+    );
+    try {
+      unlinkSync(orphan);
+    } catch {
+      // already gone
+    }
+    total -= size;
+  }
   for (const { meta, bytes } of ranked) {
     if (count <= bounds.maxEntries && total <= bounds.maxTotalBytes) break;
     const reason =
@@ -1258,8 +1503,10 @@ export function pruneSpool(
  * a `quota_exceeded` 402 as terminal here would re-open #4714's data loss. The
  * two legs must keep answering this the same way (`capture_spool.py`).
  *
- * PERMANENT (discard + record): every other 4xx — a malformed payload or an
- * out-of-range turn count never becomes valid by waiting.
+ * PERMANENT (record + terminal + KEEP — #7708): every other 4xx — a malformed
+ * payload or an
+ * out-of-range turn count never becomes valid by waiting. The verdict is
+ * unchanged; `flushSpool` no longer UNLINKS a permanently-refused entry.
  */
 export function classifyFailure(
   status: number | null | undefined,
@@ -1314,10 +1561,27 @@ function writeMeta(dir: string, meta: SpoolMeta): void {
   }
 }
 
+/** The entry's `terminal_failure` marker, or `undefined` — the ONE total read.
+ *
+ *  A truthy NON-object value (a hand-edited / foreign / corrupt `meta.json`:
+ *  `1`, `true`, `"yes"`, `[]`) is NOT a marker. Reading the field by truthiness
+ *  alone made such an entry append to `summary.terminal` on EVERY flush — never
+ *  retried, silent on every surface (#8531 review). The safe reading of an
+ *  unusable marker is "not terminal, retry" (the `clampWindow` reading): the
+ *  entry stays filable, and a genuine refusal re-marks it on the next attempt.
+ *  `[]` is excluded explicitly — `typeof [] === "object"` and an empty array is
+ *  truthy, so a bare object check would still strand it. */
+function terminalMarker(meta: SpoolMeta): { reason?: string; detail?: string } | undefined {
+  const marker: unknown = meta.terminal_failure;
+  if (!marker || typeof marker !== "object" || Array.isArray(marker)) return undefined;
+  return marker as { reason?: string; detail?: string };
+}
+
 /**
  * Replay opportunity. For every spooled session whose content has not been
- * filed, attempt one POST. Transient failures back off; permanent 4xx are
- * discarded with a reason; entries in a backoff window are skipped (not lost).
+ * filed, attempt one POST. Transient failures back off; a permanent 4xx is
+ * recorded and the entry is marked terminal and KEPT (never unlinked — #7708);
+ * entries in a backoff window are skipped (not lost).
  *
  * Filtering keeps the "deferred extraction" honest: `onlySessionId` files just
  * the current session at shutdown; `excludeSessionId` drains OTHER sessions
@@ -1349,6 +1613,7 @@ export async function flushSpool(
     skipped: 0,
     heldByBackoff: 0,
     heldBack: 0,
+    terminal: 0,
     discarded: [],
   };
 
@@ -1362,6 +1627,16 @@ export async function flushSpool(
       summary.heldBack += 1;
       continue;
     }
+    if (terminalMarker(meta) !== undefined) {
+      // A previous PERMANENT refusal (#7708). The entry is KEPT — terminal,
+      // never destructive — and never retried. Counted separately so a spool
+      // whose entries are all terminal still reports on every flush instead of
+      // reaching the silent steady state `heldByBackoff` was added to close.
+      // The read is TOTAL: a junk non-object marker is read as "not terminal"
+      // so a corrupt value can never strand the entry (#8531 review).
+      summary.terminal += 1;
+      continue;
+    }
     // Read tolerance: a meta written by an OLDER Python producer stored
     // `"filed_lane": null` for a lane-less filing. The Python leg now OMITS the
     // key, so both legs write alike — but a spool written before that fix, or
@@ -1369,8 +1644,11 @@ export async function flushSpool(
     // JSON has no `undefined`: a raw `JSON.parse` yields `null`, and strict
     // `===` against this leg's ABSENT key would bypass the skip and re-POST an
     // entry the other leg had already filed (#3516 §B).
+    // #7708: BOTH sides through ONE normaliser, so a stored falsy lane
+    // (`""`/`0`/`false`) agrees with the `undefined` the payload omits — a raw
+    // `undefined === ""` was false and the entry re-POSTed forever (#4714).
     if (meta.filed_key && meta.filed_key === meta.capture_key &&
-        (meta.filed_lane ?? undefined) === (meta.capture_lane ?? undefined) &&
+        normaliseLane(meta.filed_lane) === normaliseLane(meta.capture_lane) &&
         // Compared against the SAME normalisation the payload uses: the wire
         // carries `finiteInstant(...)`, so comparing the RAW disk value can never
         // match for a value the guards refuse — and the drain never rewrites the
@@ -1401,8 +1679,17 @@ export async function flushSpool(
     try {
       const turns = readSpoolTurns(dir, meta.session_id);
       if (turns.length === 0) {
+        // TWO outcomes, decided by whether the log still holds bytes (#7708).
+        // An absent/zero-byte log is provably empty; a log with bytes may be
+        // the only copy of the conversation, so it is RECORDED and KEPT
+        // (terminal) rather than unlinked.
         summary.discarded.push(
-          discardEntry(dir, meta, DISCARD_TRANSCRIPT_EMPTY, "turn log is empty or unreadable"),
+          turnLogHasContent(dir, meta.session_id)
+            ? quarantineEntry(
+                dir, meta, DISCARD_TRANSCRIPT_TORN,
+                "turn log has bytes but no parseable turn — kept", nowMs,
+              )
+            : discardEntry(dir, meta, DISCARD_TRANSCRIPT_EMPTY, "turn log is empty"),
         );
         continue;
       }
@@ -1468,7 +1755,11 @@ export async function flushSpool(
         if (
           onDisk &&
           contentDigest(onDiskTurns) === postedDigest &&
-          onDisk.capture_lane === postedLane &&
+          // #7708: normalised on BOTH sides, like the skip clause — the wire
+          // carried the NORMALISED lane (`postedLane`), so a raw stored
+          // falsy/foreign value could never equal it and the CAS would never
+          // stamp `filed_key` (the re-POST loop).
+          normaliseLane(onDisk.capture_lane) === postedLane &&
           // Normalised on BOTH sides of the CAS, for the same reason as the skip
           // clause: `postedStamp` is what the WIRE carried, so the raw disk value
           // can never equal it.
@@ -1490,12 +1781,18 @@ export async function flushSpool(
         continue;
       }
       if (classifyFailure(res.status, res.detail) === "permanent") {
+        // TERMINAL, NEVER DESTRUCTIVE (#7708): record the refusal and mark the
+        // entry terminal while KEEPING the turn log — `discardEntry` here used
+        // to unlink the only copy. The `classifyFailure` VERDICT is deliberately
+        // unchanged (the Python/Pi parity contract depends on it); what changed
+        // is its consequence.
         summary.discarded.push(
-          discardEntry(
+          quarantineEntry(
             dir,
             meta,
-            `permanent_http_${res.status ?? "none"}`,
-            res.detail ?? "permanent client error",
+            DISCARD_HTTP_REJECTED,
+            `HTTP ${res.status ?? "none"}: ${res.detail ?? "permanent client error"}`,
+            nowMs,
           ),
         );
         continue;
@@ -1503,8 +1800,10 @@ export async function flushSpool(
       // Re-read before the backoff write-back for the same reason as the CAS
       // above: never clobber newer turns written while the POST was in flight.
       const pending = readSpoolEntry(dir, meta.session_id) ?? meta;
+      // #7708: both sides through the normaliser (the same class as the skip
+      // clause and the CAS).
       if (pending.filed_key && pending.filed_key === pending.capture_key &&
-          (pending.filed_lane ?? undefined) === (pending.capture_lane ?? undefined) &&
+          normaliseLane(pending.filed_lane) === normaliseLane(pending.capture_lane) &&
           (pending.filed_stamp ?? undefined) === finiteInstant(pending.client_captured_at)) {
         // A CONCURRENT flush already filed this exact content while our POST was
         // in flight. Re-arming the backoff here would attach a window to content
@@ -1594,12 +1893,16 @@ function warn(message: string): void {
 /** Report a flush outcome — success lines on 2xx, every discard named. */
 function reportFlush(summary: FlushSummary, where: string): void {
   // Deferrals are reported too: a quota-blocked spool is otherwise a steady
-  // state that logs NOTHING while captures sit unfiled (#4714 review).
-  if (summary.filed > 0 || summary.deferred > 0 || summary.heldByBackoff > 0) {
+  // state that logs NOTHING while captures sit unfiled (#4714 review). A
+  // terminal-only spool is the same shape (#7708).
+  if (summary.filed > 0 || summary.deferred > 0 || summary.heldByBackoff > 0 ||
+      summary.terminal > 0) {
     log(
       `spool flush (${where}): filed ${summary.filed}, deferred ${summary.deferred}, ` +
         `skipped ${summary.skipped} (${summary.heldByBackoff} waiting on backoff), ` +
-        `held back ${summary.heldBack}`,
+        `held back ${summary.heldBack}, ` +
+        `terminal ${summary.terminal} (kept, not retried; re-file with ` +
+        `'tortoise session drain --retry-terminal')`,
     );
   }
   for (const d of summary.discarded) {

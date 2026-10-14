@@ -5377,18 +5377,20 @@ async def get_current_org(request: Request) -> dict:
             "MATCH (t:Team {id: $id}) RETURN t.tier, t.max_users, t.max_graphs, "
             "t.max_points, t.max_api_keys, t.max_sessions, t.suspended_at, "
             "t.flagged_at, t.email, t.subscription_status, t.customer_email, "
-            "t.graph_name",
+            "t.graph_name, t.backup_enabled",
             params={"id": org_id},
         )
         row = org.result_set[0] if org.result_set else None
         if row:
             (tier, mu, mg, mp, mak, _ms, t_suspended, t_flagged, t_email,
-             t_sub_status, t_customer_email, t_graph_name) = row
+             t_sub_status, t_customer_email, t_graph_name,
+             t_backup_enabled) = row
         else:
             tier, mu, mg, mp, mak, _ms = ("free", None, None, None, None, None)
             t_suspended = t_flagged = t_email = None
             t_sub_status = t_customer_email = None
             t_graph_name = None
+            t_backup_enabled = None
         # #308 (R5): durable suspension check (registry mode — the
         # MemoryAbuseStore registry_write callback wired in
         # supabase_control.get_abuse_store writes these props).
@@ -5443,6 +5445,12 @@ async def get_current_org(request: Request) -> dict:
                 # /v1/team can render plan state + the dashboard Billing page.
                 "subscription_status": t_sub_status,
                 "customer_email": t_customer_email,
+                # #3376: per-org backup eligibility (the sweep predicate's
+                # second half — see backup_sweep.enumerate_eligible_orgs) so
+                # the dashboard can distinguish "backups are off for this
+                # team" from "enabled but nothing recorded yet". None on a
+                # pre-flag node — the client stays NEUTRAL, never "disabled".
+                "backup_enabled": t_backup_enabled,
                 # #1148: dashboard key-login acceptance. Registry mode
                 # defaults true (selfhost operators control access directly).
                 "dashboard_key_login": True,
@@ -5770,6 +5778,10 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         # plan state from these.
         "subscription_status": row.get("subscription_status"),
         "customer_email": row.get("customer_email"),
+        # #3376: per-org backup eligibility off the orgs row (base 0006
+        # column, in _ORG_BASE_SELECT) so /v1/team can tell the Graphs tab
+        # that backups are OFF for this team rather than merely unrecorded.
+        "backup_enabled": row.get("backup_enabled"),
         # #2475: dashboard_key_login doubles as the UI state the dashboard
         # switch renders (website/apps/dashboard main.jsx: aria-checked /
         # data-on = org.dashboard_key_login !== false) — carry the REAL
@@ -6788,6 +6800,15 @@ class OrgInfoResponse(BaseModel):
     # The Protect-your-account banner + the toggle read this. Registry mode
     # defaults true (selfhost operators control access directly).
     dashboard_key_login: bool = True
+    # #3376: per-org backup eligibility — the second half of the sweep
+    # predicate (backup_sweep.enumerate_eligible_orgs: ``tier != 'free' AND
+    # backup_enabled = true``). Exposed so the Graphs tab's Last-backup column
+    # can state that backups are OFF for this team instead of rendering the
+    # neutral "None recorded" forever (indistinguishable from an eligible team
+    # whose sweep has not run). None when the read could not supply it (a
+    # legacy/override dict) — the client then keeps the NEUTRAL copy rather
+    # than claiming "not enabled".
+    backup_enabled: bool | None = None
     # #1623: billing surface for the dashboard Billing page — subscription
     # state (read off the Org node through the auth dict sources) and
     # catalog-resolved checkout price ids (STRIPE_PRICE_IDS via
@@ -9163,6 +9184,11 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
         # #308 (R7): flagged status rides /v1/team (suspended never reaches
         # here — the auth dependency 403s first; scoping delta 12).
         status="flagged" if org.get("flagged_at") is not None else "active",
+        # #3376: backup eligibility rides the team payload so the Graphs tab's
+        # Last-backup column can name the ineligible state. None (absent from
+        # the resolved dict) is forwarded as None — the client keeps the
+        # neutral empty copy rather than fabricating "not enabled".
+        backup_enabled=org.get("backup_enabled"),
         # max_orgs removed (D1): multi-org is a user capability, not a tier field.
         # OrgInfoResponse.max_orgs is optional — omit rather than KeyError (pre-existing
         # 500 on every /v1/team call, exposed by the zero-email signup verification).

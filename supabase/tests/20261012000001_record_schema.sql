@@ -140,6 +140,7 @@ INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
 VALUES ('org_7968','g_7968','Point','01HX0000000000000000000001'),
        ('org_7968','g_7968','Source','https://example.test/7968'),
        ('org_7968','g_7968','Object','rec-schema-object'),
+       ('org_7968','g_7968','Subject','rec-schema-subject'),
        ('org_7968','g_7968','Event','evt_7968')
 ON CONFLICT DO NOTHING;
 
@@ -150,6 +151,50 @@ BEGIN
     VALUES ('org_7968','g_7968','01HX0000000000000000000001',
             '01HX0000000000000000000001','a claim', '{"confidence": 0.81}'::jsonb);
     RAISE EXCEPTION '7968: chk_point_props_no_derived did NOT fire';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+END $$;
+
+-- 4a. The projection-owned lifecycle cache (`status`) is refused on BOTH
+-- semantic tables. `Object` refused it from PR #8179; `Subject` did NOT until
+-- the forward migration 20261014000001 (#8263) — §2.6 classifies the two
+-- identically, so the asymmetry was an oversight. Each block's node_identity
+-- row is seeded above, so the ONLY constraint that can reject the INSERT is the
+-- props CHECK; if the CHECK does not fire, the P0002 sentinel escapes the
+-- `check_violation` handler and this suite fails on the SPECIFIC assertion.
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.subject (org_id, graph_id, node_key, name, props)
+    VALUES ('org_7968','g_7968','rec-schema-subject','rec-schema-subject',
+            '{"status":"superseded"}'::jsonb);
+    RAISE EXCEPTION '8263: chk_subject_props_no_derived accepted `status`' USING ERRCODE = 'P0002';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+END $$;
+
+-- 4a(ii). The forward migration REPLACES the constraint wholesale, so the OTHER
+-- name it refuses must be pinned on the LIVE constraint (not just via the Python
+-- union parse, which cannot see a shrinking re-declaration). `embedding` is not
+-- a column on `subject`, so this is a props-tail refusal and nothing else.
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.subject (org_id, graph_id, node_key, name, props)
+    VALUES ('org_7968','g_7968','rec-schema-subject','rec-schema-subject',
+            '{"embedding":[0.1]}'::jsonb);
+    RAISE EXCEPTION '8263: the forward ALTER re-opened `embedding` on subject.props' USING ERRCODE = 'P0002';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.object (org_id, graph_id, node_key, name, props)
+    VALUES ('org_7968','g_7968','rec-schema-object','rec-schema-object',
+            '{"status":"live"}'::jsonb);
+    RAISE EXCEPTION '8263: chk_object_props_no_derived accepted `status`' USING ERRCODE = 'P0002';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
 END $$;

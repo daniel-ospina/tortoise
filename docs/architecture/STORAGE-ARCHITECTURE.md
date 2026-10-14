@@ -11,7 +11,7 @@ aboutObjects: STORAGE-ARCHITECTURE.md, records ledger, vector index, raw storage
 
 # Storage Architecture — the physical layout of the record
 
-**Status:** design — **AMENDED 2026-10-08 to the owner's hybrid ruling** (§2.0): **Postgres is the system of record for every layer; FalkorDB is a derived hot cache.** Read §2.0 and §3's table first. **Scope:** where Tortoise's data physically lives, and what that costs. This document is written in the vocabulary of `docs/ONTOLOGY.md` (v3.15) — it does not introduce new layers.
+**Status:** design — **AMENDED 2026-10-08 to the owner's hybrid ruling** (§2.0): **Postgres is the system of record for every layer; FalkorDB is a derived hot cache.** Read §2.0 and §3's table first. **Scope:** where Tortoise's data physically lives, and what that costs. This document is written in the vocabulary of `docs/ONTOLOGY.md` (v3.15) — it does not introduce new layers. **This document states target state** — decisions, issue states and code facts are stated as they are **now**, with their authority (`#N`, PR, or `file:line`), never as a record of how a passage changed; history lives in git and the tracker. **Legacy drift narrative in sections not yet re-read is removed as each is reached (`#8542`).**
 
 **⚠️ ONE WORD, TWO PRODUCTS — read this before any section mentioning "Supabase".** **Supabase *is* Postgres** (a managed Postgres is its core product). This document uses the single word for **three different things**, and the overload has already caused a real misreading — the owner asked *"why both Postgres and Supabase?"*, when **there is ONE database**: **(1)** the **Postgres vendor** (§14) · **(2)** the **Postgres database itself** (e.g. *"vectors move to Supabase Postgres (`pgvector`)"*, §12.1c — `pgvector` is a Postgres extension) · **(3)** **Supabase Storage**, the **object bucket** (true binaries only). **Every mention means one of these three; nothing here describes two databases.**
 
@@ -227,22 +227,22 @@ and §4.2:
 - **`Event`** — an *ontology* type: a domain occurrence ("what happened when"). Episodic layer.
 - **`GraphEvent`** — the graph's **own mutation journal** (34,020 exist). Not a domain occurrence.
 
-### Why these four are truth — the test is PER-WRITE, not per-class
+### Why these are truth — the test is PER-WRITE, not per-class
 
-**⚠️ CORRECTED 2026-09-23 after review. An earlier draft stated the test as *"append-only — rows are added, never updated"*. That test is FALSE for two of the four types it places in the truth layer**, and it put one class in both layers:
+**The naive test — *"append-only: rows are added, never updated"* — is FALSE for one of these types.**
 
 - `Source.updatedAt` is **set ON MATCH** by `_upsert_source`; `Source.reliability` is a **derived** query-time cache written onto the node (`#398`, `sdk.py:20667` `_write_reliability_cache`).
-- `Document.updatedAt` is set, and `doc_status` transitions **`captured`→`extracted`**. **⚠️ `doc_status` is RETIRED under D10/v3.15 (Q3)** — liveness is a READ, not a stored field, and this flip is **one of only two unjournalled raw-`SET` writes in the system** (`ingest.py:262-266`). The statement above describes the code **as it stands today**, not the target.
+- `Document.updatedAt` was set, and `doc_status` transitioned **`captured`→`extracted`** — **both retired under D10/v3.15 (Q3)**: `doc_status` is **RETIRED** (`tortoise/api.py:458`) and liveness is a READ, not a stored field. This was a second counterexample while `Document` was still a separate class; it is not one today.
 - **`Document ⊂ Object`** (`ONTOLOGY.md` §1/§4.4/§6 — `objectKind: document`), so the class appeared in **both** layers. **⚠️ SUPERSEDED (v3.15/D10): a document is a `:Source`, not an Object subclass** — see §9.3/§9.5. This bullet records the state that motivated the change.
 
 **✅ The test that DOES hold, and it binds at the WRITE/FIELD level rather than the class or table level:**
 > **TRUTH = a derivation root — nothing else can reconstruct it. DERIVED = reconstructible by replaying the journal.**
 
-The mechanical form of the same test: **is this write carried by the journal?** (`Source`/`Document`/`Event` are **not** in `_GRAPH_EVENT_TYPES` → primary; `Point`/`Object`/operators **are** journaled → derived.)
+The mechanical form of the same test: **is this write carried by the journal?** (`Source`/`Event` are **not** in `_GRAPH_EVENT_TYPES` → primary; `Point`/`Object`/operators **are** journaled → derived.)
 
 | | **The truth** | **The derived layer** |
 |---|---|---|
-| **write pattern** | **append-only** — rows are added, **never updated** | **updated in place** — revised, superseded, promoted, status-flipped |
+| **write pattern** | **versions are appended** — a truth row is never rewritten *as the authority* (`Source.updatedAt` is set ON MATCH) | **updated in place** — revised, superseded, promoted, status-flipped |
 | **read pattern** | written once, read rarely (rebuild, provenance lookup) | **read constantly** — it is what every query hits |
 | **what it costs** | stays **cold on disk** — no churn, cheap per GB | is the **working set** — this is what earns the indexes and the RAM cache |
 | **role** | **the rebuild source** | **droppable and regenerable** |
@@ -257,17 +257,17 @@ The mechanical form of the same test: **is this write carried by the journal?** 
 4. it is **never the only home**;
 5. it is **recomputed on rebuild, never restored**.
 
-**`Source.reliability` already satisfies all five** — `ONTOLOGY.md` calls it a *"documented cache, never authoritative"* (`#398`). **`Document` needs placing explicitly**: its **existence is truth** (a connector discovered it); its `doc_status` is a **mutable field on a truth row** — and ⚠️ its `captured`→`extracted` flip is currently an **unjournalled raw Cypher write** (`ingest.py:262-266`, `hosted_api.py:10929`), which is a **journal-completeness gap**, filed alongside `#4240`.
+**`Source.reliability` already satisfies all five** — `ONTOLOGY.md` calls it a *"documented cache, never authoritative"* (`#398`). **`Document` was once placed explicitly** — its existence was truth, and its `doc_status` a mutable field on a truth row whose `captured`→`extracted` flip was an unjournalled raw Cypher write. **Both are retired:** a document is a `:Source` (D10/v3.15, §9.3) and `doc_status` is **RETIRED** (`tortoise/api.py:458`), so that write no longer exists. **The live counterexample is `Source.updatedAt` set ON MATCH (`:234`).**
 
-#### ⚠️ The truth set is larger than these four — and the invariant is false today
+#### ⚠️ The truth set is larger than these three — and the invariant is false today
 
-**The truth set is these four types ∪ the preserved config classes** (`_config_classes()`; see `#4641`, `#4653`). So the invariant is:
+**The truth set is these three types ∪ the preserved config classes** (`_config_classes()`; see `#4641`, `#4653`). So the invariant is:
 
 ```text
 derived  =  replay(journal)  ∪  preserved_config
 ```
 
-**⚠️ And `derived = replay(journal)` is FALSE in the code as it stands** (`#4641`, `#4653`). **Journal completeness is a PRECONDITION of this design, not an observation about it** — raw-Cypher writes (`#4240`, the `doc_status` flip above) bypass the journal today.
+**⚠️ And `derived = replay(journal)` is FALSE in the code as it stands** (`#4641`, `#4653`). **Journal completeness is a PRECONDITION of this design, not an observation about it** — raw-Cypher writes that bypass the journal break it.
 
 #### ✅ THE `#2881` COLLISION IS CLOSED — by SCOPING, not by overriding (see §14.1 **O1**)
 
@@ -452,8 +452,8 @@ The extraction document states no target and no aggregate reduction; the number 
 
 **⚠️ STATUS — and the two documents disagreed until 2026-09-24** (extractor §9 records D8 as `DECIDED (retain half landed)`; this section is headed *PLACEMENT is DECIDED* as of 2026-10-06, and was headed *open* until then). **Both are right about different halves, and the split is the resolution:**
 
-- ✅ **RETAINING verbatim operational values is DECIDED and LANDED** — commit `4a690d0be` / PR `#2456` (2026-09-07): `STATE_VALUE_CARVE_OUT` (`extractor_v2.py:145-171`) plus `VALUE_FIDELITY_RULE` (`:230`, rendered into the S2/S4 `{anti_routine}` slot and appended to S1). **The rule reaches the model.**
-- ⛔ **What is MISSING is mechanical enforcement** — the rule was prompt-only; `valueGate` now EXISTS in code (`tortoise/value_gate.py`). **`#4899` is CLOSED** — whether the gate is enabled by default is not asserted here.
+- ✅ **RETAINING verbatim operational values is DECIDED and LANDED** — commit `4a690d0be` / PR `#2456` (2026-09-07): `STATE_VALUE_CARVE_OUT` (`extractor_v2.py:145-171`) plus `VALUE_FIDELITY_RULE` (`:230`, rendered into the S2/S4 `{anti_routine}` slot via `_s2s4_rules()`, `:299`); **`_granularity_text()` (`:732-744`) appends `STATE_VALUE_CARVE_OUT` to S1.** **The rule reaches the model.**
+- ⛔ **What is missing is enforcement BY DEFAULT — not the mechanism.** `valueGate` exists in code (`tortoise/value_gate.py`) and ships **OFF**, subordinate to VET. **`#4899` is CLOSED.**
 - ✅ **PLACEMENT is NO LONGER OPEN — it is DECIDED (owner, 2026-10-06; the decision paragraph follows immediately below).** It was: whether a state value becomes a `Point`, or a **structural field on an entity**. The paragraphs AFTER the decision record the reasoning that was open when they were written.
 
 **✅ PLACEMENT ACCEPTED (owner, 2026-10-06): a state/numeric value is a STRUCTURAL FIELD ON AN ENTITY, not a `Point`.** The reasoning is the ontology's own: operators connect only epistemic targets, EP confidence propagates over atomic beliefs, and relevance modulation needs beliefs separable (§8) — **a belief can be argued with, an attribute cannot.** The grounded requirement (*"75% of tranche 1 spent → tranche 2 unlocks"*) is a **comparison of an attribute**, so an amount is an entity field: no confidence, **no NAND-ability, and no embedding**. **⚠️ COST — CORRECTED 2026-10-06. An earlier version of this line read *"the cost lever is therefore skipping the vector, not leaving the graph"*, and that OVERSTATES it.** The measured model (§2.1, §12.1b): **on FalkorDB the WHOLE graph is RAM — no spill-to-disk, and no eviction on Cloud *as far as we can establish*; §2.1 names confirming that with the vendor as the single most valuable thing to confirm — so cost is proportional to total data and there is NO cold-data tier.** The three measured classes this cost model turns on, on a ~141 MB graph, are **45 MB of indices + 51.6 MB of embeddings + 16 MB of text — ≈113 MB of the ~141 MB** (a PARTIAL accounting, not the whole graph: the remainder is label matrices, edges and events, and the three do not sum to the total) — ⚠️ **the 141 MB / 45 MB pair is the one §1's ruling block declares superseded (it reads 143 MB / 46 MB; see its *"This block SUPERSEDES the body's older figures"*).** The vector class is the *biggest single* lever, but **the 45 MB of indices MIXES node- and text-driven fulltext indices with the embedding-driven `Point` HNSW index (§12.1b — exactly ONE vector index in the graph, on `Point`), so node count is an INDEPENDENT lever: reifying each value into its own node adds node- and label-matrix index entries that have nothing to do with embeddings** — and an index on the value itself is RAM rented forever, proportional to how many entities carry it, read or not. **⇒ Skipping the embedding makes a value CHEAPER, not FREE** — a value is cheap only if it is **neither embedded NOR indexed**, and the moment the requirement is *sum the amounts* or *filter by amount* that is an index and recurring RAM. **This is a COST question, separate from the PLACEMENT decision above, which stands on semantics** — and it is why the disk-tier option stays live (§2.2: *"the escape exists in Postgres"*). ⚠️ **Owner ruling, 2026-10-06: a zero `Object` count on the graph inspected is CONTEXTUAL, not a finding** — other graphs hold `Object`s, so such a count says nothing about the placement, and **no live-graph count is asserted here.** **An earlier draft of this line cited a zero `Object` count on this graph as evidence that the entity tier was empty — that reading is WITHDRAWN, and the figure is dropped as evidence.** The dated measurements this cost model rests on are §12.1b's and §12.2's, each against the snapshot recorded there — **none of them states or implies that an entity tier is empty or unpopulated.** ⚠️ **A NAMING conflict is open here, and it is NOT evidence about the placement:** this document calls the graph it measures *the live graph*, *the production graph* and *a dogfood instance* interchangeably, and §12.1b's **7,859 `:Object` embeddings** (2026-09-24) cannot be reconciled with a zero count until that naming is settled. **Recorded as an open item so that a later lane settles it by measurement rather than by assuming which graph a figure describes.** ⚠️ **Where a sentence ASSERTS a figure** ("I think we spent 2 million") that assertion is a belief and may be a `Point` — the separate, smaller prose question, not this placement.
@@ -477,7 +477,7 @@ State values are personal/entity attribute values that must survive verbatim —
 | **Personal state** | *"personal best 5K = 27:12"* | retained (E2 carve-out, `#1534`) | retained |
 | **Operational / decision values** | *"p99 latency 480 ms at 3k rps"* | ⚠️ **RETAINED — the fix LANDED** (commit `4a690d0be`, 2026-09-07; PR `#2456`) | retained |
 
-**⚠️ THIS ROW WAS WRONG AND THE ERROR MATTERED.** An earlier draft said operational values are *"DROPPED as a mechanics token (`#2453`)"*. **`#2453` already landed.** `STATE_VALUE_CARVE_OUT` was **extended** with an operational-value paragraph — *"a concrete value that is the SUBJECT of a decision, observation, or plan is DURABLE too … Measurements, deadlines/freezes, thresholds/TTLs, versions, and counts are carried VERBATIM"* — with the very examples the draft called dropped (*"the p95 hit 4.2 seconds"*, *"a ten minute TTL"*). It is **rendered**, not merely defined (`_granularity_text()`, `:732-744`). **What is actually missing is MECHANICAL ENFORCEMENT** — the rule was prompt-only; `valueGate` now EXISTS in code (`tortoise/value_gate.py`) and **`#4899` is CLOSED**.
+**Operational values are DURABLE.** `#2453` landed and **extended** `STATE_VALUE_CARVE_OUT` with an operational-value paragraph — *"a concrete value that is the SUBJECT of a decision, observation, or plan is DURABLE too … Measurements, deadlines/freezes, thresholds/TTLs, versions, and counts are carried VERBATIM"* — covering *"the p95 hit 4.2 seconds"* and *"a ten minute TTL"*. It is **rendered, not merely defined** (`_granularity_text()`, `:732-744`), and a mechanical gate exists (`tortoise/value_gate.py` — `identifier_only()` strips identifier-like residues).
 
 **⚠️ Harmonise, do not duplicate.** `#2453` (retain operational values verbatim) · `#2817` (no numeric/locale canonicalisation exists — PT-BR/EN amounts) · `#2782` (money needs amount + currency on entities) · `#2521` (numeric aggregation across sessions) · `#2820` (tracking map — its **"state & value model"** workstream owns all of this). **Read this section together with extractor §7; neither can be built alone.**
 
@@ -491,11 +491,19 @@ State values are personal/entity attribute values that must survive verbatim —
 
 **This bounds how far volume reduction may go.** The Epistemic layer's operators (`IMPL`, `NAND`) act on **individual claims** — and the mitigation mechanism is the **`mitigated_by` edge on an operator Point**, graded by `mitigation_strength` (`ONTOLOGY.md` §3.9, `#2315`). ⚠️ *`MITIGATES` is **not** a registered predicate* — an earlier draft of this line listed it as one, which invites a lane to implement a type that does not exist. A Point containing several fused claims cannot be argued about:
 
-- Operators connect only epistemic targets (any of `:Point`/`:Subject`/`:Object`/`:Event`) — you cannot `NAND` a paragraph. ⚠️ `:Subject`/`:Object` operator endpoints are spec-only until #7902 lands — the write path admits `:Point`/`:Event` only (`ONTOLOGY.md` §3.1/§5).
+- Operators connect only epistemic targets (any of `:Point`/`:Subject`/`:Object`/`:Event`) — you cannot `NAND` a paragraph. The `:Subject`/`:Object` operator endpoints are live (`#7902`); the write path admits all four (`ONTOLOGY.md` §3.1/§5).
 - EP confidence propagates over a **factor graph of atomic claims**; a fused claim gives one confidence number to several distinct beliefs.
 - Relevance modulation (a mitigation reducing one claim's weight) requires the claims be separable.
 
-**⇒ Volume reduction must come from *not writing* claims, never from *fusing* them.** The extractor's move to atomic Points (`#1509` E3) is a **requirement of the epistemic layer**, not an optimisation — and this document must not be read as licence to merge them.
+**Every claim is a single logical Point.** Operators act on individual claims — you cannot `NAND` or `IMPL` a paragraph, nor modulate the relevance of a bundle. `#1509` E3 is a **requirement of the epistemic layer**, not an optimisation.
+
+**Two moves are permitted, one is forbidden:**
+
+- ✅ **De-duplicate** — near-duplicates may be `MERGE`d. Admissible set: `KEEP` / `NOOP` / `DISCARD` / `MERGE`.
+- ✅ **Discard noise** — a claim not worth keeping is not written.
+- ⛔ **Do not aggregate** — distinct claims are never combined into one composite claim. A combined claim carries a single confidence number for several distinct beliefs, which is exactly what the belief layer exists to avoid.
+
+**The aim is quality, not volume.** What enters the graph must be worth keeping — a durable memory, not noise. Compared with earlier extractors this yields fewer nodes, but that is a **consequence** of extracting better, **never a goal in its own right**. **No volume target exists in this document**; `M6` (§15) measures what was kept, so a quality change can be checked for what it discarded.
 
 ---
 
@@ -552,7 +560,7 @@ FALKORDB — entities · Points (beliefs — "claims" in prose, never a type) ·
 - **My "Document sits in two graph layers" finding was WRONG** — it has **one** label; the subclass is conceptual, expressed as a property.
 - **But the owner's point is the real one:** being a *conceptual* subclass means it is **not a first-class entity** — so it cannot be reasoned about like an Object, and its **content** (raw text) is being stored **in the graph**, which is exactly what D30 says should not happen.
 
-**⇒ The change: `:Document` folds into `:Source`**, its content leaves the graph — to **raw text in Postgres** (true binaries to the object bucket; §3) — referenced per D30, and the entities extracted from it carry the epistemic weight. **⚠️ Production has ZERO `:Document` nodes today (the commit lane has never run) — which makes the DATA migration trivial, but is NOT grounds for calling the change free.** The label is **written** (`_upsert_document`, `projection/entities.py:1527` → `MERGE (d:Document {id:$id})`), **read** (`ingest.py:188/266/307/412`; `memory_orchestrator.py` `docIndex`) and **quota-metered** (`quota.py:524`, `#1726`), and `ONTOLOGY.md` §4.4 still declares it. **The code migration, the ontology change and the meter line are the real work** — the ontology change is filed as **`#5013`**.
+**⇒ `:Document` folds into `:Source` — LANDED.** Its content leaves the graph — to **raw text in Postgres** (true binaries to the object bucket; §3) — referenced per D30, and the entities extracted from it carry the epistemic weight. **The `:Document` NODE label is retired** (D10, PR `#5127`, merged 2026-09-25): the writer MERGEs `(s:Source {url:$id})`, so no `MERGE (d:Document)` or `MATCH (d:Document)` remains in `tortoise/`; `quota.py` holds no `:Document` match — the **`documents` cap** counts document-bearing `:Source` nodes instead (`#1726`). `ONTOLOGY.md` §4.4 retires the label with it (v3.15, PR `#5022`).
 
 **✅ Cross-check against the evidence, and it agrees.** The field's nearest comparable (GAAMA, 2026) deliberately keeps a **raw episode layer verbatim** and a **separate distilled node layer** — and Microsoft's consolidation work reports **97.2% retention precision at 58% store reduction**. **Both are the same two-layer instinct: keep the raw as raw, keep the distilled as distilled, and never let one pretend to be the other.**
 
@@ -632,7 +640,7 @@ Two link types look like near-duplicates:
 
 #### Q4 — the `documents` cap: **KEEP IT, RE-POINT IT AT `:Source`.**
 
-**Why the cap exists at all:** the main node cap counts `(:Point …) OR (:Object) OR (:Subject)`. **A `:Document` is none of those, so documents were invisible to it** — `#1726`'s own recorded rationale is *"the points gate is vacuous for Documents."* The separate `documents` resource closed that hole and gates `/v1/index/docs`.
+**Why the cap exists at all:** the main node cap counts `(:Point …) OR (:Object) OR (:Subject) OR (non-episodic :Event)`. **A `:Document` is none of those, so documents were invisible to it** — `#1726`'s own recorded rationale is *"the points gate is vacuous for Documents."* The separate `documents` resource closed that hole and gates `/v1/index/docs`.
 
 **⚠️ The reason does not expire when a document becomes a source — a `:Source` is equally invisible to the main cap.** So:
 
@@ -642,29 +650,17 @@ Two link types look like near-duplicates:
 | fold it into the node cap | ⛔ **silently starts metering ~2,193 sources** that were never metered — a price change disguised as a cleanup |
 | **keep it, re-point at `:Source`** | ✅ **keeps both the protection and the reason** |
 
-#### Q5 — the replay key: **fold, change the key, migrate — and it is free today.**
+#### Q5 — the replay key: **`:Document` → `coalesce(title, name)`; `:Source` → `url`.**
 
 A `:Document` resolved by `coalesce(title, name)`; a `:Source` resolves by `url`. **A source keyed the old way would resolve to nothing and mis-point the rebuilt edge.**
 
-**⭐ The whole risk is currently worth $0, and this is the single most time-sensitive item in D10:**
+**A `:Document` key and a `:Source` key are not interchangeable** — `coalesce(title, name)` does not resolve a node keyed by `url`. `#2489`'s own boundary is that **rebuild does NOT repair pre-existing graphs** (a `#2500`-style backfill is explicitly out of scope), so a graph written before the change has no later recovery path.
 
-- **Production holds zero `:Document` nodes**, and
-- **the commit lane creator has never run** (`commit_count = 0`).
+#### ⚠️ T6 — a `:Source` re-materialises in place, and it is journalled
 
-**⇒ The migration is free NOW and stops being free the moment that lane first runs.** `#2489`'s own boundary is that **rebuild does NOT repair pre-existing graphs** (a `#2500`-style backfill is explicitly out of scope), so there is no later recovery path. **This is why Q5 cannot be deferred behind the commit lane.**
+`_upsert_source` bumps `updatedAt` / `version` / `contentHash` on an `ON MATCH` when the hash differs. **A source that is re-fetched and found changed is a NEW VERSION, not an edit.** That transition is **journalled as `SourceVersioned`** (`#5024`, `log.py:155`), whose fold delegates to the same `_upsert_source` fold `SourceCreated` rides — so §3's central invariant (`derived = replay(journal)`) holds and D7's append-only rule is honoured.
 
-#### ⚠️ And the finding that is NOT about D10 at all — **T6**
-
-While checking D10, a separate defect surfaced and it may be the more consequential one: **a `:Source` mutates in place.** `_upsert_source` bumps `updatedAt` / `version` / `contentHash` on an `ON MATCH` when the hash differs, and the hosted commit path flips a status — **neither is journalled.**
-
-**That breaks §3's central invariant** (`derived = replay(journal)`) **and it contradicts the field's own rule for evidence** — the append-only/write-once convergence is explicit that *"changes are handled by new correction events, not in-place edits"*, which is also what **our own D7** says. **A source that is re-fetched and found changed is a NEW VERSION, not an edit.**
-
-**Two options, and they are not mutually exclusive:**
-
-- **journal the re-materialisation** — makes §3's invariant true, at the cost of log growth unless re-checks are made repeat-safe; or
-- **declare the re-materialised fields *recomputable*** — which fits the field's model and must be applied **field by field, not by class**, or it becomes the same category error as Q2.
-
-**This belongs to §3, not to D10**, and it is tracked separately.
+**T6 carries S6 COMMIT's extractor-side obligation** (§9.6): record the version read on the extraction link as `sourceVersion`.
 
 ---
 
@@ -688,7 +684,7 @@ The owner raised the gap the D10 pass left open: *"shouldn't we have some form o
 
 **⭐ What is superseded is the FACTS, not the source.** No Source→Source supersession edge exists or is needed. Successor facts attach to the standing `:Source` (`extractedFrom` is keyed by `url`, which a version change does not move), and the earlier facts are replaced through the ordinary `CORRECTS` mechanism. **The source is the identity; the entities are the belief.**
 
-**And one rule that is a write-time obligation, not a later repair: closing the interval is part of the write.** An unclosed `validTo` reads as *"still true"* indefinitely — the field names this as **the #1 production bug** in temporal knowledge graphs, and it is exactly what T6 above produces today.
+**And one rule that is a write-time obligation, not a later repair: closing the interval is part of the write.** An unclosed `validTo` reads as *"still true"* indefinitely — the field names this as **the #1 production bug** in temporal knowledge graphs.
 
 #### ⭐ The missing piece, in one line
 
@@ -760,7 +756,7 @@ The convergence is on **two layers with different jobs**: the **source** carries
 
 **⇒ This is why the version goes on the extraction link and not only on the source** — and it is why the storage cost lands on the edge, not on a document store.
 
-**Research:** `docs/research/2026-09-24-source-versioning/research-brief.md`. **Adoption gate: ADOPT** — no recorded decision contradicted; D7 governs it; the ontology's `§4.7` already declares the Source window; D30 bounds the cost. **Tracked:** `#5038` (the model) · `#5024` (the in-place mutation that blocks it) · `#5025` · `#5026`.
+**Research:** `docs/research/2026-09-24-source-versioning/research-brief.md`. **Adoption gate: ADOPT** — no recorded decision contradicted; D7 governs it; the ontology's `§4.7` already declares the Source window; D30 bounds the cost. **Tracked:** `#5038` (open) · D10 code-half work done: `#5024`, `#5025`, `#5026`.
 
 #### ⭐ Where this stands (2026-09-25) — a status pointer, not a new rule
 
@@ -768,7 +764,7 @@ The convergence is on **two layers with different jobs**: the **source** carries
 - **The currency CHECK is a read** (this section's model): it compares the recorded `sourceVersion` against the source's current `contentHash`, with **no stored `status`** field — so it belongs on the **existing** read surfaces and needs **no new tool and no new SDK method**.
 - **What a stale fact does — Policy B, REFINED by the owner on 2026-09-26** (`#5038` comment `5845802608`): *"We should not return an out-of-date fact when we have a newer one"* — so when a newer fact exists, the out-of-date fact is **withheld as an answer** and **disclosed as an FYI carrying its source** (*"let the user know that (newer fact but no source, and older fact from source X) … so I can disambiguate"*). This **refines rather than reverses** Policy B: Policy B's prohibition was on the fact being *"silently"* withdrawn, and the required disclosure is exactly what keeps this non-silent. **OVERRIDES:** the field's practice of returning a stale fact **alongside** its replacement with a flag (Zep/Graphiti's temporal fields; the RAG `is_latest` norm) — the withheld-as-answer + disclosed-as-FYI form is deliberate, because a visible flag is measurably not acted on (`arXiv 2609.08258`; `2605.06527`: 77.5% visible vs 3.3% adjudicated). The **write-time** notice the owner also asked for (*"ideally at write time it would have told me"*) is **`lane:c1-capture`'s** surface, not this one. **⚠️ Open alongside it:** how mechanical validity reconciles with **EP confidence** (owner, same comment — *"not sure how we reconcile the two here"*), tracked as **O9** in `docs/plans/2026-09-25-5038-source-version-anchor.md`; research first, and no second truth signal is added beside EP in the meantime.
 - **A non-re-read successor records no version** (owner, O1) and reads `unknown` until it is itself read from a source; `ONTOLOGY.md` §4.6 is unmodified and the §4.6 reopen was not taken.
-- **The re-inference step has no owner** — filed as **#5422**, because acceptance A2 of `#5038` cannot complete without it. **`#5024` is its precondition** (a re-fetched `:Source` currently mutates in place, unjournalled: if the old version is overwritten there is nothing to mark stale).
+- **The re-inference engine** — `#5422` (its ownership gap) is CLOSED `COMPLETED` (2026-09-28); acceptance **A2 of `#5038`** is what remains outstanding for it. **`#5024` landed** (`SourceVersioned`, `log.py:155`): a re-fetched `:Source` that changed is a **new version** whose prior window closes in the record, so there is something to mark stale.
 
 *This pointer records status only. `ONTOLOGY.md` §4.6 is owner-gated and is NOT edited by this work.*
 
@@ -1399,7 +1395,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 | **O3** | Which outcome word does the gate emit? | ✅ **ADOPTED — use the declared word (`DISCARD`), matching the engine's existing classifier.** | `#4899`'s text is corrected to the declared vocabulary. |
 | **O4** | Can near-duplicates be merged? | ✅ **YES — the owner authorised it, with Jev as arbiter over the claim plus narrative/raw data.** *"yes we can merge near duplicate claims. maybe we can have jev with the claim and the narrative/raw data/both arbiter that"* | ⛔ **This SUPERSEDES the `OVERRIDES:` ruling on `#4899`** (*"never merging two claims into one"*). **The new ruling is recorded on `#4899`, replacing the old — the owner overriding their own earlier ruling, which is the only valid way to reverse one.** ⚠️ **Shaped by evidence (§16.3): a HIGH merge bar, and merge only when nothing distinguishing is lost — never across differing numbers, names, negations or conditions (the list has since grown; `EXTRACTOR-V4-ARCHITECTURE.md` §16.4 carries the current classes).** Practical thresholds cluster at ~0.95. |
 | **O5** | Sample first, or make it deterministic? | ✅ **Neither as an either/or — draft and iterate.** *"we draft something (a prompt, a step of the extraction workflow, etc) and run it and see the result then refine and run again, until good."* | **The method is: draft → run → look → refine → repeat.** Recorded as the working method for every step. |
-| **O6** | Which layer owns `Document`? | ✅ **Resolved, and better than either option: a document is a SOURCE (§9.3).** *"I am suggesting making them sources so our entity layer can be extracted from them…"* | **`:Document` folds into `:Source`; its content leaves the graph for raw text in Postgres (§3, §9.1); liveness is a READ of the entities, not a stored field.** ⚠️ **My earlier "Document sits in two layers" P0 was WRONG** (`ONTOLOGY.md` §4.4: one label, conceptual subclass). ⚠️ **Cost of the change: NOT zero.** 0 nodes makes the *data* migration trivial, but the label is **written, read and quota-metered** (`quota.py:524`, `#1726`) and `ONTOLOGY.md` §4.4 still declares it — **the code + ontology change is the work (filed: `#5013`).** |
+| **O6** | Which layer owns `Document`? | ✅ **Resolved: a document is a SOURCE (§9.3).** *"I am suggesting making them sources so our entity layer can be extracted from them…"* | **`:Document` folds into `:Source`; its content leaves the graph for raw text in Postgres (§3, §9.1); liveness is a READ of the entities, not a stored field.** The `:Document` NODE label is **retired** (D10, PR `#5127`; `ONTOLOGY.md` §4.4 retires it with the label — v3.15, PR `#5022`), and the `documents` cap counts document-bearing `:Source` nodes. |
 
 ### 14.2 ⭐ The engine decision — AMENDED 2026-10-08: the engine stays, its ROLE changes
 

@@ -1131,10 +1131,12 @@ surfaces:
   # #7969 (epic #7879, Interface A): the record projection — journal →
   # Postgres, total + idempotent. Registered against `core` because BOTH
   # inputs it reads select `core`: `tortoise/record_projection.py` matches no
-  # named SOURCE_PATTERN (the `core` fallback), and the four record migrations
-  # under `supabase/migrations/` do too. So a projection-only or
-  # migration-only change selects `core` and this guard runs with it. Its
-  # DB-level half is NOT here — it is the PGlite replay in
+  # named SOURCE_PATTERN (the `core` fallback), and the record migrations
+  # under `supabase/migrations/` — the four CREATE-TABLE files plus forward
+  # migrations such as `20261014000001_record_subject_props_no_derived.sql`,
+  # each pinned in `CORE_ALSO` (`tools/ci_selection.py`) — do too. So a
+  # projection-only or migration-only change selects `core` and this guard runs
+  # with it. Its DB-level half is NOT here — it is the PGlite replay in
   # `supabase/tests/pglite/validate.mjs` (the #7968 convention: the SQL half
   # lives in the harness that has a Postgres, this file stays hermetic).
   - test_record_projection.py
