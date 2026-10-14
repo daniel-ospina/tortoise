@@ -330,11 +330,27 @@ class the system already tolerates at every window boundary.
 reading `res.get("found")` or `res.get("valid_point")` therefore reads the manufactured ambiguity as
 "nothing was true at `vP`" — the silent wrong answer the branch exists to prevent. That gap is
 **pre-existing** (it applies to every forward boundary today), belongs with the same read-path root,
-and is recorded on **#7818**; this plan does not fix it and does not rely on `found` being absent. A fourth alternative — a **chain-aware boundary
+and is recorded on **#7818**; this plan does not fix it and does not rely on `found` being absent.
+
+✅ **CORRECTED 2026-10-14 (#7818, merged separately):** the `found` omission is **fixed** and the
+reply shape is now uniform — every reply carries `status` (`"found"` | `"ambiguous"` |
+`"absent"`) and a boolean `found`, and the ambiguous shape sets `found=True` (a candidate WAS
+found; `valid_point` is what is absent). Any reader of this paragraph should not rely on the
+old omission. The method is now named `get_historical_knowledge` (renamed by #8337); read
+`sdk.py` for the line numbers. §4.7 now states the coverage boundary and flags the
+closed-vs-half-open choice as open.
+
+⚠️ **R10's rejection reason below is incomplete; reject R10 for a different, stronger reason.**
+The claim that `retrieval`/`assembly`/`time_aware`/`audit` would disagree is not supported: `_covers`
+is the sole coverage predicate in the tree (they render or annotate a window; none answers "what is
+true at `t`"), and `time_aware.is_stale_entry` (`valid_to <= question_date` ⇒ stale) already agrees
+with preferring the successor. What **does** defeat R10: the CORRECTS walk is **backwards-only**, so
+entering the shared instant from the PREDECESSOR resolves to the predecessor alone while entering
+from the successor yields two candidates — a tie-break makes the answer depend on which id you enter
+from, the #4021 defect class. A fourth alternative — a **chain-aware boundary
 tie-break in `restore_point_at`** (prefer the successor at `t == validTo == successor.validFrom`) —
-is evaluated as **R10** and rejected: it would make the one SDK-only reader disagree with every other
-window consumer (`retrieval`, `assembly`, `time_aware`, `audit`) unless all of them adopted it — the
-same all-readers change as R2, plus a new inconsistency between readers.
+is evaluated as **R10** and rejected for that same reason (entry-point dependence), **not** for
+reader disagreement: the R10 row in §12 carries the corrected reason in place.
 
 ### 3.4 Operation shape, journal event, and rebuild fold
 
@@ -490,7 +506,7 @@ temporal properties of both points (reachable through the SDK, MCP and the hoste
 
 | # | Residual | Polarity | Silent mis-read possible? |
 |---|---|---|---|
-| RES-1 | `t = vP` reads `ambiguous` (one instant per correction, §3.3) | fail-safe **only if the consumer tests `ambiguous`** — the branch omits `found` (§3.3) and the reader is SDK-only | **Yes**, for `.get("found")` consumers; recorded on **#7818** |
+| RES-1 | `t = vP` reads `ambiguous` (one instant per correction, §3.3) | fail-safe **only if the consumer tests `status`** — ✅ the `found` omission is **fixed by #7818**: the `ambiguous` branch now sets `found=True` with `valid_point` absent, and every reply carries `status` (`found`/`ambiguous`/`absent`) | **No** since #7818 for a `status`-aware consumer (branch on `status`, never on `found` alone); a `.get("found")`-only consumer still cannot tell two candidates from one — the `t = vP` ambiguity itself remains flagged, not silent |
 | RES-2 | both-refuse inputs (§2) | fail-safe (refuse; escape named) | no |
 | RES-3 | no automated trip for "#5362 never lands" | process | n/a |
 | RES-4 | `audit.py:665` flags only strict `k_to < k_from`, so the collapse is audit-invisible (and it never counted overlapping candidates) | fail-safe but **under-reports** | "audit clean" ≠ "no ambiguity" |
@@ -499,8 +515,8 @@ temporal properties of both points (reachable through the SDK, MCP and the hoste
 | RES-7 | the hosted path 422s and ingest warn-skips a retroactive record | fail-closed / visible skip, but the capability is unreachable there | filed **#7821** |
 
 **Explicitly OUT of scope:** any concurrent mutation between the validating read and the write
-(single-writer assumption) — the per-node write is what makes this safe against *inversion*; the
-`found`-omission in the ambiguous branch (**#7818**); a mid-chain target (unreachable by the guard); a
+(single-writer assumption) — the per-node write is what makes this safe against *inversion*; a
+mid-chain target (unreachable by the guard); a
 partial/middle-span correction (not expressible); duplicate-id **mixed-status** endpoints
 (**#7822**); legacy inverted windows already persisted (#5361); the hosted/ingest **routing**
 (**#7821**).
@@ -747,7 +763,7 @@ at `7360bab7d`.
 | 3 | `InvertedSupersedeWindow` | `sdk.py:3985` | exception | — | named, attributed refusal; scrub-stable message; hosted 422 maps it | a retroactive refusal reusing it would be mislabeled `supersede_window_inverted` | **needs a distinct refusal path/message** |
 | 4 | `supersede_point` writer | `sdk.py:8732` (emit `:8943`, stamp `:9234`) | SDK + DB write | write | validated-emit-then-mutate; CORRECTS + status + `validTo` + `expiredAt`; shared guard `:8480` | partial write; live/rebuild drift | **body factored into a shared private impl; bytes unchanged** |
 | 5 | new SDK method | proposed | SDK write | write | §3.1 preconditions 1–7 (ONE read-only `_assert_retroactive_correction`) + §3.1 effect | fail-open on any B-class input | **new (pending approval)**; the validator is the **shared** home for the refusals |
-| 6 | `restore_point_at` / `_covers` / `_inverted` | `sdk.py:19098` / `:19180` / `:19221` | SDK read (**no MCP/CLI/hosted route**) | read | CORRECTS walk; closed-interval coverage; `ambiguous`/`malformed`/`nearest`; ⚠️ the `ambiguous` branch sets no `found` | `ambiguous` at `t=vP` (deliberate, §3.3); `malformed` must NOT fire; a `.get("found")` consumer reads the ambiguity as absence (**#7818**) | **unchanged** |
+| 6 | `restore_point_at` / `_covers` / `_inverted` | `sdk.py:19098` / `:19180` / `:19221` | SDK read (**no MCP/CLI/hosted route**) | read | CORRECTS walk; closed-interval coverage; `ambiguous`/`malformed`/`nearest`; ✅ contract corrected by **#7818** — the method is now `get_historical_knowledge`, every reply carries `status` (`found`/`ambiguous`/`absent`) + a boolean `found`, and the `ambiguous` branch sets `found=True` with `valid_point` absent | `ambiguous` at `t=vP` (deliberate, §3.3); `malformed` must NOT fire; the `.get("found")`-reads-ambiguity-as-absence gap is **fixed** by #7818 (branch on `status`, never on `found` alone) | **unchanged** (✅ contract corrected by #7818) |
 | 7 | MCP `tortoise_supersede` + `_preview_supersede` | `mcp_server.py:2229` / `:5092`, `:5201`; `tool_registry.py:571` | MCP tool | write / dry-run | one-way guarantee: preview rejects what the write rejects (#4057) | preview/write disagreement on the retroactive arm | preview must handle the new verb; forward preview unchanged |
 | 8 | new MCP tool (`tortoise_supersede_retroactively`) | proposed | MCP tool | write / dry-run | **wrapper must be `_safe(_quota_gated(_get_org_sdk().supersede_retroactively, "points"), …)`** (`_quota_gated` `mcp_server.py:1040`; `tortoise_supersede` precedent `:2245`) — a bare `_safe(...)` would escape quota enforcement and the write-op meter (#681/#308); `dry_run` parity over B1–B13 | a fail-open preview; an unmetered write path | **new (pending approval)** |
 | 8b | new `_preview_correct_point` / shared validator | proposed | MCP dry-run | read | must call the **same** `_assert_retroactive_correction` as the writer (ONE home), and must **not** re-implement `_preview_supersede`'s ~400-line edge enumeration | refusal-set drift (#3985/#4057 class); a duplicated edge-enumeration surface | **new (pending approval)**; parameterise the shared preview on the same `end_source` where possible |
@@ -1099,7 +1115,7 @@ that documents them**, not a "clean" verdict, and it is reported as such.
 | **R7** | **Status-only route** (`retract_point` + CORRECTS, no window write) | `restore_point_at` is **status-blind** (`_covers` reads only the window), so leaving `P` open-ended makes every `t ≥ vP` return `ambiguous` — strictly worse than the collapse |
 | **R8** | **Move `P.validFrom` forward/downward** to hide it from the interval | `validFrom` is a **world fact**, not a mutable boundary — the invariant `_fold_point_invalidated` documents ("neither status nor validFrom is written"). Moving it down fabricates coverage before `vC`; moving it up makes `P` cover `C`'s whole window |
 | **R9** | **Leave `P` untouched and let `C`'s open window win by some precedence rule** | No such precedence exists in `_covers`; adding one is an R3-class reader change and makes the answer depend on which id you enter the chain from (the #4021 defect class) |
-| **R10** | **A chain-aware boundary tie-break in `restore_point_at`** (prefer the successor at `t == validTo == successor.validFrom`) | It would remove the manufactured `t = vP` instant (§3.3) without R2's representation flip, and would also close #7818. Rejected: `restore_point_at` is **one** of several window consumers and the only one that walks the chain with a successor relationship in hand; `retrieval._validity_marker`, `assembly`, `search_engine.fetch_point_epistemic_state`, `time_aware` and `audit` render the raw window and have no such tie-break available, so the SDK reader would silently disagree with them at every boundary — trading one pinned ambiguity for an untracked reader inconsistency. Fixing that means giving every consumer the tie-break, i.e. R2's blast radius. #7818 is where it belongs |
+| **R10** | **A chain-aware boundary tie-break in `restore_point_at`** (prefer the successor at `t == validTo == successor.validFrom`) | It would remove the manufactured `t = vP` instant (§3.3) without R2's representation flip, and would also close #7818. Rejected — **reason corrected in place by #7818** (see the §3.3 note): the CORRECTS walk is **backwards-only**, so at the shared instant entering from the PREDECESSOR resolves to the predecessor alone while entering from the successor yields two candidates; a tie-break would make the answer depend on which id you enter the chain from, the #4021 defect class. The reason recorded here until #7818 — that `retrieval._validity_marker`, `assembly`, `search_engine.fetch_point_epistemic_state`, `time_aware` and `audit` would silently disagree — is **not supported**: `_covers` is the sole coverage predicate in the tree (they render or annotate a window; none answers "what is true at `t`"), and `time_aware.is_stale_entry` already agrees with preferring the successor. #7818 is where the representation decision belongs |
 
 ---
 

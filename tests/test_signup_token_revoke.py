@@ -35,6 +35,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import tortoise.hosted_api as ha_mod
+from tests._verdict import require_answered
 from tortoise.auth import lookup_hash as _lookup_hash
 from tortoise.hosted_api import app
 
@@ -332,7 +333,9 @@ class TestRegistryLane:
         )
         # recover still resolves the hash-only node (PBKDF2 fallback in
         # signup_token_lookup — the pre-existing recoverable half)
-        r = client.post("/v1/agent/recover", json={"signup_token": token})
+        r = require_answered(
+            client.post("/v1/agent/recover", json={"signup_token": token}),
+            what="POST /v1/agent/recover answered")
         assert r.status_code == 200, r.text
         assert r.json()["org_id"] == org_id
         # revoke now works on the hash-only node too

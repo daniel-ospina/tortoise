@@ -1,0 +1,146 @@
+
+> validate
+> node validate.mjs
+
+✓ migration 0001_user_teams.sql
+✓ migration 0002_audit_events.sql
+✓ migration 0003_team_memberships.sql
+✓ migration 0004_analytics_events.sql
+✓ migration 0005_waitlist_subscribers.sql
+✓ migration 0006_teams.sql
+✓ migration 0007_api_keys.sql
+✓ migration 0008_invitations.sql
+✓ migration 0009_team_memberships_extend.sql
+✓ migration 0010_provisioning_rpcs.sql
+✓ migration 0011_teams_name_unique.sql
+✓ migration 0012_teams_billing_columns.sql
+✓ migration 0013_webhook_events.sql
+✓ migration 0014_metering_records.sql
+✓ migration 0015_abuse_events.sql
+✓ migration 0016_oauth.sql
+✓ migration 20260813000001_teams_deleted_at.sql
+✓ migration 20260813000002_metering_nodes_written.sql
+✓ migration 20260813000003_audit_ip_time_index.sql
+✓ migration 20260813000004_claim_membership.sql
+✓ migration 20260813000005_dashboard_login.sql
+✓ migration 20260813000006_inviter_email.sql
+✓ migration 20260814000001_agent_signup_tokens.sql
+✓ migration 20260817000001_import_ledger_points_cap.sql
+✓ migration 20260825000001_api_key_names.sql
+✓ migration 20260825214233_provision_team_keyless.sql
+✓ migration 20260826000001_revoke_signup_token.sql
+✓ migration 20260827000001_blog_cms.sql
+✓ migration 20260827000002_user_identity_profile.sql
+✓ migration 20260829000001_metering_ask_columns.sql
+✓ migration 20260830000001_import_pack_failure_marker.sql
+✓ migration 20260901000001_graphs_and_key_scopes.sql
+✓ migration 20260902000001_invite_fusion_v2.sql
+✓ migration 20260906000001_graphs_deleted_at.sql
+✓ migration 20260907000001_onboarding_email_sent.sql
+✓ migration 20260909000001_identity_methods_email.sql
+✓ migration 20260909000002_identity_methods_identifier.sql
+✓ migration 20260909000003_dashboard_key_login_default_false.sql
+✓ migration 20260915000001_tenancy_team_to_org.sql
+✓ migration 20260917000001_metering_capture_cost.sql
+✓ migration 20260918000001_metering_period_window.sql
+✓ migration 20260919000001_metering_period_end_repair.sql
+✓ migration 20260925000001_oauth_referential_integrity.sql
+✓ migration 20260925000002_oauth_redemption_state.sql
+✓ migration 20260927000001_metering_unmetered_increments.sql
+✓ migration 20261001000001_metering_capture_tokens.sql
+✓ migration 20261001000002_api_key_mint_serialization.sql
+✓ migration 20261001000003_connectors.sql
+✓ migration 20261001000004_metering_embedding_columns.sql
+✓ migration 20261001000005_metering_graph_storage.sql
+✓ migration 20261001000006_account_deletions.sql
+✓ migration 20261010000001_metering_period_end_refresh.sql
+✓ migration 20261011000001_recover_team_key_lru.sql
+✓ migration 20261012000001_record_event_stream.sql
+✓ migration 20261012000002_record_semantic.sql
+✓ migration 20261012000003_record_epistemic.sql
+✓ migration 20261012000004_record_procedural.sql
+✓ migration 20261012000005_record_org_purge_rpc.sql
+✓ migration 20261012000006_recover_team_key_expiry.sql
+✓ migration 20261013000001_metering_retrieval_columns.sql
+✓ migration 20261013000002_oauth_mint_rpcs.sql
+✓ migration 20261014000001_record_subject_props_no_derived.sql
+✓ #4216: the migration's deploy-time repair completed the seeded NULL-end org
+✓ #3036: the migration's own dangling-pointer repair nulled both seeded links
+✓ #3027: the migration's own backfill burned the consumed code and left the unconsumed one alone
+
+Running test suite 0006-0009_schema_rls_constraints.sql...
+✅ 0006-0009_schema_rls_constraints.sql PASSED (no exceptions)
+
+Running test suite 0010_provisioning_rpcs.sql...
+✅ 0010_provisioning_rpcs.sql PASSED (no exceptions)
+
+Running test suite 20260813000004_claim_membership.sql...
+✅ 20260813000004_claim_membership.sql PASSED (no exceptions)
+
+Running test suite 20260814000001_agent_signup_tokens.sql...
+✅ 20260814000001_agent_signup_tokens.sql PASSED (no exceptions)
+
+Running test suite 20260826000001_revoke_signup_token.sql...
+✅ 20260826000001_revoke_signup_token.sql PASSED (no exceptions)
+
+Running test suite 20260827000001_blog_cms.sql...
+✅ 20260827000001_blog_cms.sql PASSED (no exceptions)
+
+Running test suite 20260827000002_user_identity_profile.sql...
+✅ 20260827000002_user_identity_profile.sql PASSED (no exceptions)
+
+Running test suite 20260901000001_graphs_and_key_scopes.sql...
+✅ 20260901000001_graphs_and_key_scopes.sql PASSED (no exceptions)
+
+Running test suite 20260906000001_graphs_deleted_at.sql...
+✅ 20260906000001_graphs_deleted_at.sql PASSED (no exceptions)
+
+Running test suite 20260919000001_metering_period_end_repair.sql...
+✅ 20260919000001_metering_period_end_repair.sql PASSED (no exceptions)
+
+Running test suite 20260922000001_connectors.sql...
+✅ 20260922000001_connectors.sql PASSED (no exceptions)
+
+Running test suite 20260925000001_oauth_referential_integrity.sql...
+✅ 20260925000001_oauth_referential_integrity.sql PASSED (no exceptions)
+
+Running test suite 20260925000002_oauth_redemption_state.sql...
+✅ 20260925000002_oauth_redemption_state.sql PASSED (no exceptions)
+
+Running test suite 20260926000001_metering_capture_tokens.sql...
+✅ 20260926000001_metering_capture_tokens.sql PASSED (no exceptions)
+
+Running test suite 20260927000001_api_key_mint_serialization.sql...
+✅ 20260927000001_api_key_mint_serialization.sql PASSED (no exceptions)
+
+Running test suite 20260927000001_metering_unmetered_increments.sql...
+✅ 20260927000001_metering_unmetered_increments.sql PASSED (no exceptions)
+
+Running test suite 20260926000002_metering_set_graph_storage.sql...
+✅ 20260926000002_metering_set_graph_storage.sql PASSED (no exceptions)
+
+Running test suite 20261010000001_metering_period_end_refresh.sql...
+✅ 20261010000001_metering_period_end_refresh.sql PASSED (no exceptions)
+
+Running test suite 20261012000001_record_schema.sql...
+✅ 20261012000001_record_schema.sql PASSED (no exceptions)
+
+Running test suite 20261012000006_recover_team_key_expiry.sql...
+✅ 20261012000006_recover_team_key_expiry.sql PASSED (no exceptions)
+
+Running test suite 20261013000002_oauth_mint_rpcs.sql...
+✅ 20261013000002_oauth_mint_rpcs.sql PASSED (no exceptions)
+✓ 0011: duplicate org name rejected (unique index active)
+spot checks: {"provision_team":1,"update_user_team":0,"reveal_api_key":1,"identity_anchor_index":1,"orgs_name_unique":1,"leftover_test_orgs":0,"leftover_test_memberships":0,"signup_tokens_org_unique":1,"recover_team_key":1,"resolve_signup_token":1,"provision_team_with_token":1,"revoke_signup_token":1}
+
+── C8 rollback drill (apply → rollback → re-apply) ──
+✓ drill 1: C1 additions dropped (rollback path)
+✓ drill 2: pre-C1 shape restored (graphs gone, api_keys columns gone, organizations.graph_name intact)
+✓ drill 3: C1 migration re-applied
+✓ drill 4: C1 assertion suite passes after re-apply
+✅ ROLLBACK DRILL PASSED (apply → rollback → re-apply round trip)
+✓ #3036: OAuth FK migration re-applies idempotently
+✓ #3027: redemption-state migration re-applies idempotently (a live claim survives)
+✓ #4779: the unmetered-increment representation survives a re-apply
+✓ #7969: the record projection replays 39 journal records, is idempotent, total, and stores no EP scalar
+✅ ALL MIGRATIONS + BOTH TEST SUITES + SPOT CHECKS PASSED

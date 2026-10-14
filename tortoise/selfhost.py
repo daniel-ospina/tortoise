@@ -18,10 +18,15 @@ Environment:
   TORTOISE_PORT          8000
   TORTOISE_RATE_LIMIT    100 req/min per IP (MCP SSE bursts ~5-10 req/call)
   TORTOISE_ALLOWED_ORIGINS  comma-separated (default http://localhost:8000)
-  R2_* / BACKUP_SWEEP_ENABLED    the off-box backup TARGET (declare one), or
+  R2_* + TORTOISE_BACKUP_KEY    the off-box backup TARGET (declare one; ALL
+                         FIVE vars are required — without the key no RESTORABLE
+                         archive can be sealed), or
   TORTOISE_OFFBOX_BACKUP_DECLINED=1  decline one EXPLICITLY (#8543). Unset on
                          both sides is ABSENT and is reported loudly at boot —
-                         never silently treated as "declined".
+                         never silently treated as "declined". A COMPLETE target
+                         also arms the off-box backup driver (#8544,
+                         ``tortoise/selfhost_backup.py``);
+  TORTOISE_OFFBOX_BACKUP_INTERVAL_SECONDS  driver cadence (default 3600, floor 60).
 """
 from __future__ import annotations
 
@@ -762,38 +767,72 @@ if not os.environ.get("TORTOISE_DB_URI"):
 # ABSENT stays distinguishable from DECLINED. This resolver never raises and
 # never imports the backup subsystem: it is a boot-time READ of the decision.
 #
-# HONESTY BOUND (#8544): declaring a target does NOT yet produce an archive on
-# this lane. ``backup_sweep.run_backup_sweep`` has exactly one production caller
-# — the hosted app's ``POST /v1/internal/backups/sweep`` (``hosted_api.py``);
-# nothing in the self-host lane runs it. So ``configured`` means "target
-# DECLARED", never "copy exists", and the signal says so rather than implying a
-# copy. The driver gap is tracked on #8544 and is NOT built here.
+# THE EXECUTION HALF (#8544): the marker alone was not enough. #8543's lane
+# recorded the gap — ``backup_sweep.run_backup_sweep`` had exactly one
+# production caller (the hosted app's ``POST /v1/internal/backups/sweep``), so
+# a self-host deploy declared a target and produced no archive. #8544 adds the
+# driver (``tortoise/selfhost_backup.py``), armed by the same resolved state
+# below, so ``configured`` now means "this deployment runs a driver against a
+# complete target". It still means "target DECLARED", never "copy exists": the
+# signal cannot observe the driver's runs, and it says so.
 OFF_BOX_CONFIGURED = "configured"
 OFF_BOX_DECLINED = "declined"
 OFF_BOX_ABSENT = "absent"
 
 # The off-box TARGET vocabulary is the repo's existing backup env contract
-# (``tortoise/backup_config.py``): the bucket is the target and the account/keys
-# are its access. ``BACKUP_SWEEP_ENABLED`` is the hosted driver switch and also
-# counts as a declared target (an operator who flips it has decided to have one).
+# (``tortoise/backup_config.py``): the bucket is the target, the account/keys
+# are its access, and ``TORTOISE_BACKUP_KEY`` is the key the archive is sealed
+# with. It is an ALL-OR-NOTHING set — see ``off_box_backup_missing``.
+#
+# WHY ALL OF IT (and not "any one of the four R2 vars", the pre-#8544 rule):
+# ``hosted_backup.R2Storage.__init__`` refuses a partial R2 config and
+# ``encrypt_backup`` fail-closes without ``TORTOISE_BACKUP_KEY``, so a
+# deployment holding SOME of the target cannot produce a restorable archive.
+# Reporting it as "declared" recreates the exact defect #8544 names — a
+# decided-looking state that yields no copy — one layer down, and it is the
+# FALSE-POSITIVE polarity the A/B test calls category A (a wrong PASS on the
+# surface that tells an operator whether they are backed up).
+#
+# ``BACKUP_SWEEP_ENABLED`` is deliberately NOT in this set: it is the HOSTED
+# app's driver switch (``hosted_api`` reads it; the hosted cron calls the
+# sweep), and nothing in the self-host lane ever consumed it — a self-host
+# deployment flipping it was reported "declared" while nothing could run. The
+# self-host driver is armed by this target set alone (``tortoise/selfhost_backup.py``).
 _OFF_BOX_TARGET_ENVS = (
-    "R2_BUCKET",
     "R2_ACCOUNT_ID",
     "R2_ACCESS_KEY_ID",
     "R2_SECRET_ACCESS_KEY",
+    "R2_BUCKET",
+    "TORTOISE_BACKUP_KEY",
 )
 _OFF_BOX_DECLINE_ENV = "TORTOISE_OFFBOX_BACKUP_DECLINED"
+
+
+def off_box_backup_missing(env: dict | None = None) -> list[str]:
+    """Target vars the deployment has not set — empty means COMPLETE.
+
+    Split out from the state resolver so the boot signal can name the exact
+    omission (a "no target" message an operator cannot act on is how a partial
+    config stays partial). Order follows ``_OFF_BOX_TARGET_ENVS`` so the list
+    reads the same way every boot.
+    """
+    e = os.environ if env is None else env
+    return [n for n in _OFF_BOX_TARGET_ENVS if not (e.get(n) or "").strip()]
 
 
 def off_box_backup_state(env: dict | None = None) -> str:
     """Resolve the self-host off-box backup decision.
 
-    Returns ``OFF_BOX_CONFIGURED`` when the deployment (or its env) declares an
-    off-box target, ``OFF_BOX_DECLINED`` when it explicitly declines one, and
-    ``OFF_BOX_ABSENT`` when neither is true — the state #8543 exists to make
-    loud. A declared target wins over a decline flag so a half-switched
+    Returns ``OFF_BOX_CONFIGURED`` when the deployment (or its env) declares a
+    COMPLETE off-box target, ``OFF_BOX_DECLINED`` when it explicitly declines
+    one, and ``OFF_BOX_ABSENT`` when neither is true — the state #8543 exists to
+    make loud. A declared target wins over a decline flag so a half-switched
     deployment reports the target it is actually configured with (the flag is a
     boolean, so both-set is a config error, not a normal state).
+
+    "Complete" is ALL of ``_OFF_BOX_TARGET_ENVS`` — a partial target is ABSENT
+    because no restorable archive can be produced from it (see the comment
+    above); the boot signal names the missing vars.
 
     ``env`` defaults to the process environment (whole mapping, no merge), so a
     caller — a test, or a preflight — can resolve a hypothetical decision
@@ -801,17 +840,15 @@ def off_box_backup_state(env: dict | None = None) -> str:
     """
     e = os.environ if env is None else env
 
-    declared = [n for n in _OFF_BOX_TARGET_ENVS if (e.get(n) or "").strip()]
-    if is_truthy(e.get("BACKUP_SWEEP_ENABLED")):
-        declared.append("BACKUP_SWEEP_ENABLED")
-    if declared:
+    if not off_box_backup_missing(e):
         return OFF_BOX_CONFIGURED
     if is_truthy(e.get(_OFF_BOX_DECLINE_ENV)):
         return OFF_BOX_DECLINED
     return OFF_BOX_ABSENT
 
 
-def off_box_backup_signal(state: str | None = None) -> str:
+def off_box_backup_signal(state: str | None = None,
+                          missing: list[str] | None = None) -> str:
     """The one-line setup/startup signal for a resolved off-box state.
 
     The message never asserts a store MECHANISM (AOF/RDB): the resolver reads
@@ -822,15 +859,22 @@ def off_box_backup_signal(state: str | None = None) -> str:
     (a deployment believed durable on a mechanism it did not have), so every
     branch instead SCOPES the local-copy claim to the store paths where it
     holds and never claims an off-box copy is present. The configured branch
-    names the #8544 driver gap for the same reason (#8552 review).
+    says what the #8544 driver does and that a declared target is not yet a
+    copy, for the same reason (#8552 review).
+
+    ``missing`` names the target vars absent from a PARTIAL config (from
+    ``off_box_backup_missing``); the boot caller supplies it so a half-declared
+    target is actionable rather than merely reported as "absent". ``None``
+    keeps the message generic (the pure-function callers, and the tests).
     """
     state = off_box_backup_state() if state is None else state
     if state == OFF_BOX_CONFIGURED:
         return (
-            "off-box backup target DECLARED (R2_*/BACKUP_SWEEP_ENABLED), but this "
-            "lane has NO archive driver yet — no self-host process runs the sweep "
-            "(#8544), so NO off-box copy is being produced. Treat the target as "
-            "declared, not as a copy."
+            "off-box backup target DECLARED and COMPLETE — the self-host backup "
+            "driver runs on this daemon and writes a verified archive of this "
+            "deployment's graph to that target, reporting every failed run "
+            "loudly rather than skipping it. A declared target is still not a "
+            "copy: it is a copy once a run reports one."
         )
     if state == OFF_BOX_DECLINED:
         return (
@@ -845,8 +889,11 @@ def off_box_backup_signal(state: str | None = None) -> str:
         "produces no off-box copy. On the compose and embedded paths the store "
         "is a SINGLE LOCAL COPY, so a lost volume or host is TOTAL LOSS; a "
         "remote store's durability is its vendor's, not one this deployment "
-        "arranges. Declare an R2_* target, or set "
-        f"{_OFF_BOX_DECLINE_ENV}=1 to decline explicitly."
+        "arranges. Declare the FULL target (all five of "
+        f"{', '.join(_OFF_BOX_TARGET_ENVS)} — a partial target cannot produce "
+        f"a restorable archive), or set {_OFF_BOX_DECLINE_ENV}=1 to decline "
+        "explicitly."
+        + (f" MISSING: {', '.join(missing)}." if missing else "")
     )
 
 
@@ -858,7 +905,7 @@ def emit_off_box_backup_signal(env: dict | None = None) -> str:
     log aggregator. Returns the state so a caller can branch on it.
     """
     state = off_box_backup_state(env)
-    message = off_box_backup_signal(state)
+    message = off_box_backup_signal(state, missing=off_box_backup_missing(env))
     print(f"tortoise selfhost: {message}", file=sys.stderr)
     _logger.warning("selfhost off-box backup: %s", message)
     return state
@@ -948,6 +995,18 @@ async def _lifespan(app: FastAPI):
     _probe_sdk_reset()
     _HEALTH_PROBE.reset()
     refresher = asyncio.get_running_loop().create_task(_health_probe_loop())
+    # #8544: arm the off-box backup DRIVER when the setup decision is
+    # CONFIGURED — the same resolved state the boot signal reports, so the two
+    # cannot disagree about whether this deployment claims an off-box copy.
+    # Imported LAZILY on purpose: the backup engine (``hosted_backup`` — the
+    # dump/encrypt/R2 stack) must not be pulled into a daemon that declined an
+    # off-box target, and the import stays out of this module's top-level
+    # surface (the grep gate keeps hosted platform machinery out of it).
+    offbox_driver = None
+    if off_box_backup_state() == OFF_BOX_CONFIGURED:
+        from tortoise.selfhost_backup import start_offbox_backup_driver
+
+        offbox_driver = start_offbox_backup_driver()
     try:
         async with mcp_http_app.lifespan(mcp_http_app):
             yield
@@ -959,6 +1018,13 @@ async def _lifespan(app: FastAPI):
         refresher.cancel()
         with suppress(asyncio.CancelledError):
             await refresher
+        # Order matters only in that this runs at all: the backup thread is a
+        # daemon, so a missed stop leaves it holding a graph handle past
+        # interpreter teardown (the #2203 orphan class).
+        if offbox_driver is not None:
+            from tortoise.selfhost_backup import stop_offbox_backup_driver
+
+            stop_offbox_backup_driver()
 
 
 app = FastAPI(title="Tortoise Self-Host", version="0.1.0", lifespan=_lifespan)

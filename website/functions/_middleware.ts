@@ -92,6 +92,11 @@ export const onRequest: PagesFunction = async (context) => {
     // outreach link must not land a prospect on a host that serves the same
     // page under a different URL (the consolidation this block exists for).
     "/design-partners-intro", "/design-partners-intro.html",
+    // The investor one-pager (#8568). It is a real page on the shared Pages
+    // project like its design-partner sibling above, so without this entry the
+    // company host serves its own copy at a second URL. Its canonical address
+    // is the tortoise host — the document has ONE address.
+    "/investors", "/investors.html",
     "/privacy", "/privacy.html",
     "/tos", "/tos.html",
     "/license", "/license.html",

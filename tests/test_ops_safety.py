@@ -1612,7 +1612,14 @@ def test_the_pending_route_rolls_back_when_its_source_survives(monkeypatch):
         "session_point_links": [],
     })
 
-    def _half_rebuild(self, log_dir, *, confirm_destructive=False):
+    def _half_rebuild(self, log_dir, *, confirm_destructive=False,
+                      require_empty=False):
+        # #3044: `require_empty` is accepted and ignored — this stub models a
+        # rebuild that WIPED and then raised mid-replay, which is the #7929
+        # rollback path, not the pre-wipe emptiness refusal. `_rebuild_wiped`
+        # is set so the route can tell this shape from a pre-wipe failure
+        # (#3044 review, P1).
+        self._rebuild_wiped = True
         self.g.query(
             "CREATE (n:Point {id:'half', content:'half', status:'live',"
             " pointKind:'statement'})")
@@ -1627,6 +1634,157 @@ def test_the_pending_route_rolls_back_when_its_source_survives(monkeypatch):
         assert r["replay_rolled_back"] == 1, r
         assert _node_total(proj) == 0, (
             "the half-built graph must be undone when the sidecar survives")
+        assert os.path.exists(sidecar), "an intact source must be left alone"
+    finally:
+        proj.close()
+
+
+def test_auto_health_recover_names_a_non_empty_decline(tmp_path, caplog):
+    """#3044 review: a decline that leaves nodes must not be reported as empty.
+
+    `_auto_health_recover`'s probe-OK lost-graph leg described EVERY refusal as
+    an "empty embedded DB not auto-recovered". That is false on both of the
+    non-empty decline shapes it reaches — "graph already has nodes" (measured
+    here), and the #3044 wipe refusal, which returns before touching the store
+    — so an operator reading "empty" has no reason to look for the nodes the
+    refusal just protected. The message is derived from the MEASURED
+    `db_points`. FAILS IF: the store is described as empty while it holds
+    nodes.
+    """
+    (tmp_path / "sdk.jsonl").write_text(json.dumps({
+        "event_id": "e1", "ts": "2026-01-01T00:00:00Z",
+        "type": "IngestStarted"}) + "\n", encoding="utf-8")
+
+    proj = FalkorProjection(str(tmp_path / "auto_3044.db"),
+                            graph_name="test_auto_3044",
+                            skip_health_check=True)
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj.g.query("CREATE (:GraphEvent {seq: 1})")
+        assert _node_total(proj) == 1
+
+        caplog.set_level("WARNING")
+        proj._auto_health_recover()  # probe OK + adjacent log -> decline
+
+        declined = [r.getMessage() for r in caplog.records
+                    if "auto-recovered" in r.getMessage()]
+        assert declined, [r.getMessage() for r in caplog.records]
+        assert not any(m.startswith("empty embedded DB not auto-recovered")
+                       for m in declined), (
+            "the store holds 1 node, but the operator was told it was empty: "
+            f"{declined!r}")
+        assert any("1 node(s)" in m for m in declined), declined
+        assert _node_total(proj) == 1, (
+            "a declined recovery must leave the store it found in place")
+    finally:
+        proj.close()
+
+
+def test_auto_health_recover_names_an_unmeasurable_decline(
+        tmp_path, caplog, monkeypatch):
+    """#3044 review: `db_points is None` is UNMEASURABLE, not empty.
+
+    `recover_from_log` passes `None` through when a count could not be taken
+    (the backend died before the measurement) — it is this surface's
+    established "not observed" value, and `_node_count` returns it too. The
+    decline branch read a falsy value as "empty" and told the operator the
+    store was empty while it was never measured, which is the same false
+    claim the non-empty branch was split to remove. FAILS IF: an unmeasured
+    store is reported as empty.
+    """
+    import tortoise.consistency as consistency_mod
+
+    (tmp_path / "sdk.jsonl").write_text(json.dumps({
+        "event_id": "e1", "ts": "2026-01-01T00:00:00Z",
+        "type": "IngestStarted"}) + "\n", encoding="utf-8")
+
+    proj = FalkorProjection(str(tmp_path / "auto_unmeasured.db"),
+                            graph_name="test_auto_unmeasured",
+                            skip_health_check=True)
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        monkeypatch.setattr(consistency_mod, "recover_from_log",
+                            lambda *a, **k: {
+                                "recovered": False, "log_points": 0,
+                                "db_points": None,
+                                "reason": "graph unresponsive — recovery "
+                                          "requires a live DB"})
+
+        caplog.set_level("WARNING")
+        proj._auto_health_recover()  # probe OK + adjacent log -> decline
+
+        declined = [r.getMessage() for r in caplog.records
+                    if "auto-recovered" in r.getMessage()]
+        assert declined, [r.getMessage() for r in caplog.records]
+        assert not any("empty embedded DB not auto-recovered" in m
+                       for m in declined), (
+            "the node count was never measured, but the store was described "
+            f"as empty: {declined!r}")
+        assert any("UNMEASURABLE" in m for m in declined), declined
+    finally:
+        proj.close()
+
+
+def test_the_pre_wipe_failure_leaves_the_window_node_alone(monkeypatch):
+    """#3044 review (P1): a failure BEFORE `rebuild_all`'s wipe must not roll
+    back the store.
+
+    The pending route's generic `except` used to call
+    `_roll_back_declined_replay` on the measured count, which is only sound
+    once a replay has run — on a pre-wipe failure a node written in the #3044
+    window is still present and that rollback wipes it. The fake models the
+    pre-wipe shape directly (no wipe issued) and the test pins that no
+    destructive statement runs.
+
+    FAILS IF: the route rolls back a store no replay ever touched.
+    """
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "pending-before-wipe.db")
+    from tortoise.projection import (
+        _write_prewipe_snapshot,
+        prewipe_snapshot_path,
+    )
+
+    proj = _lost_store(db_path)
+    EventLog(os.path.join(tmp, "events.jsonl")).append(_point_event(0))
+    sidecar = prewipe_snapshot_path(tmp)
+    _write_prewipe_snapshot(sidecar, {
+        "version": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+        "synthetic_events": [{
+            "type": "PointAdded",
+            "projection_version": 2,
+            "point": {"id": "sidecar-only-1", "content": "[user] hi",
+                      "pointKind": "event", "speaker": "user",
+                      "is_episodic": True, "status": "draft"},
+        }],
+        "batch_snapshot": [],
+        "batch_point_links": [],
+        "session_snapshot": [],
+        "session_point_links": [],
+    })
+
+    def _abort_before_the_wipe(self, log_dir, *, confirm_destructive=False,
+                               require_empty=False):
+        # #3044 review (P1): models a failure in the parse — the wipe is never
+        # issued, so `_rebuild_wiped` stays False and the route must not roll
+        # back the node the window writer landed.
+        self._rebuild_wiped = False
+        self.g.query(
+            "CREATE (n:GraphEvent {seq: 1})")
+        raise RuntimeError("journal corrupt (injected, pre-wipe)")
+
+    monkeypatch.setattr(FalkorProjection, "rebuild_all",
+                        _abort_before_the_wipe)
+    try:
+        assert _node_total(proj) == 0
+        r = recover_from_log(tmp, proj)
+        assert r["recovered"] is False, r
+        assert "journal corrupt" in r["reason"], r["reason"]
+        assert r.get("replay_rolled_back") is None, r
+        assert "before the wipe" in r["reason"], r["reason"]
+        assert _node_total(proj) == 1, (
+            "the pre-wipe failure rolled back the window node")
         assert os.path.exists(sidecar), "an intact source must be left alone"
     finally:
         proj.close()

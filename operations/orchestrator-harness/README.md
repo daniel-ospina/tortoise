@@ -83,6 +83,9 @@ processes in tmux sessions, so a killed worker cannot take the controller down w
                         2. CLEAN   → record-review.sh (HMAC-signed marker into the PR body)
                                      → wait for ai-review-gate SUCCESS → gh pr merge --squash
                             ISSUES  → touch state/needsfix-<PR>-<head>   ← hands off to the fixer path
+                            no line → NOTHING is written: the reviewer stalled/failed, so no fixer is
+                                      authorised and no MAX_FIX_TRIES attempt is spent; the next
+                                      cycle re-records a fresh review at the same head (#8602)
                         ▼
         fix-<PR>   → fix-one.sh  : materialises a worktree for the branch (including foreign
                                    branches), runs a fixer over the reviewer's findings, pushes a
@@ -95,7 +98,7 @@ processes in tmux sessions, so a killed worker cannot take the controller down w
 |---|---|---|---|
 | `lane-<N>` | `lane.sh` | `.worktrees/tm-<N>` on `feat/<N>-tm` | implement issue #N → commit → push → open PR |
 | `chain-<N>` | `chain-merge.sh` | — | wait for the lane's PR, then delegate to `merge-one.sh` |
-| `merge-<PR>` | `merge-one.sh` | — | fresh review → signed record → wait green → squash-merge |
+| `merge-<PR>` | `merge-one.sh` | — (the reviewer gets its OWN disposable checkout, see §5.3) | fresh review → signed record → wait green → squash-merge |
 | `fix-<PR>` | `fix-one.sh` | the PR's worktree | repair findings **or a failing required check**, push, re-run the merge chain |
 
 ### State files (`$O/`)
@@ -106,7 +109,8 @@ processes in tmux sessions, so a killed worker cannot take the controller down w
 | `.orch.lock` | atomic single-instance lock (noclobber create); stale locks are reclaimed |
 | `candidates.txt` | the dispatch backlog: issue numbers that passed collision pre-flight |
 | `dispatched.txt` | issues already handed to a lane. **Append-only — never expires** (see §7.1) |
-| `checked.txt` | issues whose pre-flight returned **CLEAN** (the terminal verdict); an **errored** pre-flight and a **COLLISION** leave no entry, so the next pass re-attempts them (agent-infra#1716) |
+| `checked.txt` | issues whose pre-flight returned **CLEAN** — the one verdict that terminates the issue by **queueing** it. An **errored** pre-flight, a **COLLISION** and a **LANDED** verdict leave no entry (agent-infra#1716, #8560) |
+| `landed.txt` | issues whose pre-flight returned **LANDED** (exit 4): the work already shipped, so they are kept out of the backlog and out of the LIMIT budget — but **not** recorded as checked-forever. The set is printed on every refresh pass and an entry is dropped once its issue is **CLOSED**; see §7.1b (#8560) — reachable since #8625 only when an issue closes between the pool listing and its pre-flight |
 | `state/mergeclaim-<PR>.lock` | single-owner claim: only one worker may review/record/merge a given PR |
 | `state/needsfix-<PR>-<head>` | "a reviewer found real issues at this exact head" |
 | `state/fixcount-<PR>` | fixer attempts for that PR, capped by `MAX_FIX_TRIES` |
@@ -115,6 +119,7 @@ processes in tmux sessions, so a killed worker cannot take the controller down w
 | `state/merged-<PR>.done` | merge confirmation |
 | `state/last-open-n` | the last SUCCESSFUL open-PR count; reused only when positive if a later count fails — a failure never reads as 0 |
 | `logs/` | one log per worker: `lane-*.log`, `chain-*.log`, `merge-*.log`, `fix-*.log`, `orch-loop.log` |
+| `review/<PR>-<head>/` | the reviewer's disposable detached worktree at the head it is reviewing (#8484). Created outside the repo, removed by the EXIT trap; its parent directory is the only thing left behind |
 | `wip/` | dirty-worktree captures taken before a shutdown (see §6) |
 
 ### Why the *reviewer* is a separate process from the *controller*
@@ -124,6 +129,13 @@ lane's reasoning. It reads the changed files at the PR head (`git show origin/<b
 rather than only diff hunks, and posts its verdict as a PR comment. That comment is the
 evidence the `record-review.sh` signature points at, so the merge gate is auditable after
 the fact: the PR body names the comment it was signed against.
+
+The reviewer runs in its **own** checkout, not the controller's: `merge-one.sh` provisions a
+**detached** worktree at the head under review and cds the agent into it. Detached is the point —
+a commit there moves no branch — and the tree is disposable, so a leaked mutation leaves with it
+(§5.3, #8484). The controller's `refs/heads/<branch>` and `refs/remotes/origin/<branch>` are sampled
+before and after the reviewer; a move the controller did not request is logged with its author and
+refuses to record a verdict, because a review marker is head-bound.
 
 ---
 
@@ -312,7 +324,12 @@ off macOS (it renders a launchd plist) — the portability that matters is `orch
 2. **The reviewer must state a plain outcome.** Its final line is exactly `CLEAN <comment-url>`
    or `ISSUES <n>`. A CLEAN comment may not contain "issues remain", "NOT CLEAN", or
    "requires human attention" — forbidden phrases, so an equivocal review cannot be laundered
-   into a merge.
+   into a merge. A run that ends with **neither** line wrote no verdict at all (a stall at the
+   wall limit, a crash): it authorises nothing — no `needsfix` marker, no fixer attempt, no
+   `MAX_FIX_TRIES` spend — and the next cycle re-records a fresh review at the same head
+   (#8602, agent-infra#1741). What the reviewer is asked to DO is also bounded: it runs in a
+   disposable checkout with no interpreter environment of its own, and executing tests is the
+   fixer's and CI's job, not the reviewer's.
 3. **Scope adapts to the queue.** `open PRs > 10` → **broad** mode: the sweep covers *every*
    non-draft PR in the repo, not just this box's. `≤ 10` → own branches only
    (`*-tm`, `*-cap`, `fix/*`). Broad mode is how this box drains a peer's queue; it is also
@@ -345,10 +362,24 @@ off macOS (it renders a launchd plist) — the portability that matters is `orch
 This harness passes **attacker-controlled text** to language-model agents with shell access. Be
 clear about what is and is not enforced:
 
-- **Not sandboxed.** The spawned reviewer and fixer run with `AGENT_SKIP_REVIEW_GATE=1`,
-  `ELDATO_SKIP_VGATE=1`, `AGENT_ALLOW_MAIN_EDITS=1`, `SKILL_ENFORCER_DISABLED=1` and
-  `LOOP_ENFORCER_DISABLED=1`, with `bash` and `gh` on `PATH`. "Do NOT merge" and "do not touch the
-  main checkout" are **prompt instructions, not controls**.
+- **The reviewer is contained; the fixer is deliberately not.** `merge-one.sh` runs its
+  fresh-context reviewer in a **disposable, detached** git worktree of its own
+  (`$O/review/<PR>-<head>`, created outside the repo), and **unsets** the main-edits hatch rather
+  than merely not exporting it — `fix-one.sh` exports the hatch and runs `merge-one.sh` as a child,
+  and an exported variable is inherited, so the unset is what makes the refusal hold on the
+  re-review path that follows every fixer run.
+  A commit there moves no branch, a mutation in it cannot reach the reviewed tree, and a reviewer
+  that wanders into the shared checkout is **refused by `main-worktree-guard` rather than obeyed**.
+  The tree is removed on exit, deregistering **only its own** worktree record by name — a repo-wide
+  `git worktree prune` is banned (it deregisters every record whose directory is not stat-able at
+  that instant, orphaning a sibling lane's checkout) — and a move of the **reviewed branch's** refs
+  under the reviewer is logged with the ref and sha that actually moved, and refuses to record a
+  verdict (#8484). The **fixer** is the opposite on purpose: `fix-one.sh` runs in the PR's own
+  worktree with `AGENT_ALLOW_MAIN_EDITS=1`, because writing to that tree IS its job. Both still run
+  with `AGENT_SKIP_REVIEW_GATE=1`, `ELDATO_SKIP_VGATE=1`, `SKILL_ENFORCER_DISABLED=1` and
+  `LOOP_ENFORCER_DISABLED=1`, with `bash` and `gh` on `PATH`. **"Do NOT merge" remains a prompt
+  instruction, not a control** — the harness's own gate (§5.1) is what stops an agent merging
+  through this path.
 - **Prompt injection is possible.** `fix-one.sh` reads the PR's comments into the fixer prompt as
   the authoritative review, and `merge-one.sh` feeds the reviewer the PR title, body and diff. A
   malicious PR body can therefore attempt to steer an agent that has shell access.
@@ -454,6 +485,52 @@ PR (duplicate work against the shared queue, agent-infra#1705). The self-test's 
 pin both halves (absent → nothing reaped and `checked.txt` untouched; empty-but-readable → still
 reaps), and the capture site is driven directly with a stub `gh`.
 
+### 7.1b A `LANDED` verdict is suppressed, not blacklisted — **now a CLOSE-RACE arm (#8625)**
+
+`collision_preflight.py` answers "is #N already done?" with exit **4 (`LANDED`)** (#8560). This
+refresh loop runs that pre-flight over a pool built **only** from `gh issue list --state open`.
+
+⛔ **#8625 narrowed `LANDED` to the issue's own state, and that changed which arm is reachable.**
+Before #8625 the title arm could return `LANDED` for an OPEN issue, so this loop saw it constantly;
+the #8625 change demoted that arm to the ADVISORY surface `merged PRs naming an OPEN issue` (a merged
+PR *references* an issue, it does not *close* it), so a landed-but-OPEN issue — the #7174 shape —
+now reads **CLEAN** and flows to `candidates.txt`. That is #8625's accepted cost: a wasted dispatch
+is recoverable and self-correcting, a false `LANDED` (measured on #7951 against three merged
+increments, none of them closing it) is not.
+
+**What the `LANDED` arm is for now:** a **close race** — an issue the pool's `gh issue list`
+returned as open, but which is closed by the time its pre-flight runs. That window is real (the
+pool queries and the per-issue pre-flights are one pass), so the arm is kept rather than retired;
+since #8625 it can no longer fire for a merely-referenced open issue.
+
+Recording that verdict in `checked.txt` — as the first fix in this PR did — traded a visible
+capacity leak for an invisible permanent one: `checked.txt` is pruned only by the reaper, which
+walks `dispatched.txt`, and a landed issue is never dispatched, so the open work item left the
+backlog permanently and nothing ever mentioned it again. That is the failure class §7.1 removed,
+quoted two lines above the arm itself.
+
+**Fix:** `LANDED` writes `landed.txt` instead:
+
+- the pool loop filters it **before** the `LIMIT` counter, so a landed issue does not consume a
+  pre-flight slot (the leak the first fix closed stays closed);
+- the set is echoed on **every** pass (not only when a new verdict arrives), so an operator who asks
+  "why is #N never dispatched again?" sees it — alongside the remedy — instead of it vanishing;
+- nothing is queued: only `CLEAN` reaches `candidates.txt`;
+- the reaper drops an entry once its issue is `CLOSED`, so the list drains as decisions are made.
+  It does **not** infer CLOSED from absence in the capped `.open_iss` listing: that listing is
+  `--limit 500` and this repo has >500 open issues, so it is permanently saturated and absence there
+  proves nothing — the earlier `len(open_iss) < 500` guard tripped on every pass and the prune was a
+  no-op. The prune asks the entry's own state directly (`gh issue view <N> --json state`, uncapped),
+  and **keeps** an entry whose state cannot be read — a failed read never drops a suppression that is
+  still owed. (Widening the shared listing is not the fix: `.pr_brs` is capped the same way, so a
+  longer open list would expose the dispatcher reaper's `has_pr` to more false negatives — duplicate
+  dispatch, worse than a stale entry.)
+
+The self-test's `5f`/`5g` blocks pin all of it: the separate file, the absence of a `checked.txt`
+entry, not queued, the set named on a later pass, the targeted per-entry prune dropping a closed
+entry and keeping an open one — including against a **saturated** `.open_iss` that omits it — and
+keeping (with a log line) an entry whose state could not be read.
+
 ### 7.2 Draft PRs are invisible to the sweep — **FIXED in this PR**
 
 The selector was `select(.isDraft|not)` and nothing readied our own lanes' drafts, so a draft ran
@@ -513,6 +590,8 @@ because the self-test now drives every one of them:
 | **the check classifier was a deny-list** (`bad = FAILURE\|ERROR\|CANCELLED\|TIMED_OUT\|ACTION_REQUIRED`) | a conclusion in **neither** list — one GitHub has not documented, or a **null** one — read `PENDING`, and `PENDING` arms the merge (`gh pr merge --auto`): the merge decision failed **open**. At the same time `CANCELLED` was named *red*, so a normally-superseded run (`cancel-in-progress: true`) was routed to `fix-one.sh` or to `gh run rerun` — failing **closed** on a green PR. `fix-one.sh`'s failing-check list named `CANCELLED` too, so such a run burned a capped fixer attempt (agent-infra#1714) | the classifier is an **allow-list with polarity**, the rule `admin-merge.sh` and `record-review.sh` already implement: non-red only for a NAMED conclusion (`success`/`neutral`/`skipped`/`cancelled`/`stale`), in-flight only for a NAMED status, and **everything else RED** — so an unrecognised or null conclusion blocks instead of arming; grouping is per `(app, name)` (newest attempt by `id`) so one app cannot mask another's; and an **empty** surface is `NOCHECKS`, never `GREEN`. `fix-one.sh` uses the same allow-list (agent-infra#1714) |
 | the claim-file guard added in the first fix round introduced a permanent stall | the controller treated *the existence of* `mergeclaim-<PR>.lock` as "in flight", but only `merge-one.sh` removes it — a SIGKILLed worker or a reboot mid-merge left the PR skipped forever with no fixer and no re-record | `claim_live()` tests the recorded pid with `kill -0` and removes a dead owner's claim |
 | 6 self-test checks passed vacuously because an empty extraction did not fail the check | the round-1 vacuity fix was incomplete: checks depending on `sess()`, the claim block or the reaper passed when the shipped script had no such code | `need()` turns a missing extraction into a FAIL; each check was then re-proved against the pre-fix tree it pins |
+| the reviewer prompt told its agent to run `.venv/bin/python -m pytest` in a checkout that has no `.venv` (and, after #8484, to `uv sync` first) | reviewers hunted for an interpreter — `find $HOME -name pyvenv.cfg`, killed at >120s — and 35% of runs (7/7 in one window) ended at the 1800s cap with **no verdict**; 43/124 runs, 4 PRs false-parked | the reviewer is told tests are the fixer's and CI's job and not to run them or provision an environment here (non-vacuity argued by reading the pre-fix code); the prompt is a shipped `reviewer_prompt()` FUNCTION the self-test executes, so a reflow cannot silently restore the sentence |
+| a verdict-less review (timeout/crash) and a real `ISSUES` verdict shared one `*)` arm in `merge-one.sh`, both writing `needsfix-<PR>-<head>` | a pure stall authorised a fixer for a review that never happened, spent one of `MAX_FIX_TRIES` on it, and three stalls PARKED the PR "needs a human" with the findings never addressed (7 PRs at `fixcount==3`; agent-infra#1741) | `verdict_kind()` classifies the final message (`clean`/`issues`/`none`) and `apply_verdict_marker()` writes the fixer authorisation for a real `ISSUES` verdict **only**; a no-verdict run is logged as a stall and writes no marker, so the next cycle re-records instead of inventing a fixer task (#8602) |
 | **a hung worker held a concurrency slot for 9 hours** | `pi -p` has no timeout and the caps count **tmux sessions**, so a hung reviewer (or a runaway `find /` it spawned) permanently reduced merge throughput while the queue looked busy — three slots were dead weight overnight on 2026-10-12 | portable `run_agent()` wall-clock limit (bash `wait` + watchdog subshell, since macOS ships no `timeout`) plus a `reap_stale_workers()` sweep that kills any worker silent for `STALE_MIN` minutes |
 | **only the controller's DECISION was load-gated; the `pi` spawns were not** (agent-infra#1720) | `chain-<N>` — the primary first-review path, and the one path the controller stands down for — waits up to 90 min for its PR, so its reviewer launched onto the load that existed *then*, not the quiet load the lane was dispatched under, and `fix-one.sh`/`adopt-fix.sh` reached the same ungated spawn while §4 claimed all of it was gated | the one `pi` invocation moved into `spawn-gate.sh::run_agent()`, which takes a **fresh** reading and refuses above `MAX_LOAD` — so the gate is at the spawn, and a fourth launch path is refused by construction. A refusal is `AGENT_LOAD_REFUSED` and is **not** a verdict: `merge-one.sh` exits without writing `needsfix-<PR>-<head>`, because recording one would authorise a fixer for a review that never happened and burn a `MAX_FIX_TRIES` attempt (the #1716 class). The self-test drives all three worker entry points under a stubbed high load and asserts no agent started, and asserts exactly one shipped file invokes `pi`. The ceiling, the core-count probe and `load1()` all live in the helper now, so the controller's decision and the worker's spawn cannot disagree |
 | **a load-refused FIXER still consumed a `MAX_FIX_TRIES` attempt, and the controller had deleted the reviewer's findings marker before the gate ran** (#1720, review round) | the controller books the attempt on **session creation** (`orch-loop.sh`), which is upstream of the gate inside `fix-one.sh`; a refusal did no work yet left the counter incremented and `needsfix-<PR>-<head>` removed. Three refusals — the normal regime on a box running at load 95–175 against `MAX_LOAD=100` — reached the terminal branch and **parked a PR that never had a fixer run**, the #1716 class this change set out to close | `fix-one.sh` **refunds** `fixcount-<PR>` on a refusal (controller-dispatched runs only) and the controller no longer deletes the findings marker at dispatch: `fix-one.sh` consumes it itself, once the agent has started. Both halves are driven in §9's self-test with a pre-seeded counter and marker; the refund check fails on the pre-fix fixer |
@@ -532,7 +611,12 @@ because the self-test now drives every one of them:
   is to end every script on an explicit status — `exit "$rc"` where a caller reads it (as here),
   `exit 0` where the last line is only reporting.
 - **Worktree reaping.** Every dispatch and every foreign-branch fixer adds a worktree; the box
-  carried ~150 by the end of the run. Nothing removes them after their PR merges.
+  carried ~150 by the end of the run. Nothing removes them after their PR merges. The reviewer's
+  sandbox is the exception — `merge-one.sh`'s EXIT trap removes it on every exit, normal or
+  trapped — but a worker that is SIGKILLed (or the box that dies) leaves one behind, like every
+  other worktree. That trap deregisters **only its own** record (the sandbox's own `gitdir:` name);
+  repo-wide pruning is the #1095 reaper's job, because a bare `git worktree prune` deregisters every
+  record whose directory is not stat-able at that instant and can orphan a sibling lane's checkout.
 
 ---
 

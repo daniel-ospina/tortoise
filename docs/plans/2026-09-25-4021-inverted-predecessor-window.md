@@ -52,7 +52,8 @@ distinguish that from honest absence.
 
 The body's "forward control works correctly" is also overstated: at the shared-boundary instant
 (`t == validTo == successor.validFrom`) a closed-interval chain reads `ambiguous=True` even
-forward. That is a pre-existing closed-interval property, **out of scope** (see §6).
+forward. That is a pre-existing closed-interval property — filed as **#7818** (§6), where the
+closed-vs-half-open reading is an open decision, not decided here.
 
 ### Root cause and its home
 
@@ -442,6 +443,7 @@ MCP parity tests (`tests/test_dry_run_preview.py`):
 | **#5365** | `commit_ops.apply_supersessions` **and** `promote_point` turn the refusal into a silent fail-open skip of a previously-succeeding (corrupting) retroactive supersession | `commit_ops.py:537-541`; `sdk.py:6681-6686` |
 | **#5374** | no shared `validate_validity_window(valid_from, valid_to)` declaration binds the eight window writers — the per-writer fixes are drivers without a contract | `tortoise/commit_schema.py:332-366` (`validate_span`) is the ONE-HOME precedent; no `validate_validity_window` exists |
 | **#5361 owner** | the retrofit audit for already-corrupted windows has no owner — an owner note is posted on #5361 and the plan requires the lane assignment before the fix lands | `#5361` |
+| **#7818** | the closed-interval shared-boundary ambiguity: `restore_point_at`/`get_historical_knowledge` reads `ambiguous` at `t == validTo == successor.validFrom` for every forward chain. A **different root** from the inversion guard (a representation question, not a writer guard), and the closed-vs-half-open reading is an **open decision** there. Also the read-path contract defect found while scoping: the `ambiguous` reply set no `found`, so a `.get("found")` consumer read two candidates as honest absence | `_covers` (`closed`); ONTOLOGY §4.7 states the boundary + the open flag; `commit_schema.validate_validity_window` (#5374) pins closed coverage |
 | **#5375** | `_now_iso` is defined twice in `sdk.py` (2041 and 21906) with **no** consistency assertion, and its "shared by write paths" docstring is false (≈4 of ~30 now-sites route through it) | AST check of `tortoise/sdk.py`; `grep -c 'datetime.now(timezone.utc).isoformat()' tortoise/sdk.py` → 29 |
 
 ## 7. Owner question (recorded on #4021, protocol shape — does not block)

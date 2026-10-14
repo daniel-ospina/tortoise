@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.25"
+title: "Tortoise — Canonical Ontology v3.27"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-10-13
+updated: 2026-10-14
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.25
+# Tortoise — Canonical Ontology v3.27
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -32,6 +32,39 @@ doc_status: live
 > **⭐ If this document and the code disagree, THIS DOCUMENT IS RIGHT and the code
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in the changelog.
+>
+> **Changelog v3.27 (2026-10-14 — issue #7818 — the §4.7 coverage boundary, stated and left OPEN):**
+>
+> **A record of an undocumented rule, not a model change** — no field, marker or
+> vocabulary moves. §4.7 stated no coverage rule for the query instant `t`, so two
+> readings coexisted silently: the `validTo` row's prose (*"the old fact stops being
+> true when the new one starts being true"*) describes a **half-open** `[vF, vT)`,
+> while the only read path that answers *"what was true at `t`"* —
+> `get_historical_knowledge`'s `_covers` — implements a **closed** `[vF, vT]`, the
+> rule `commit_schema.validate_validity_window` declares and its #5374 agreement
+> test pins (`t == vT` and a zero-length `[t, t]` cover). §4.7 now states the
+> boundary and its consequence — a well-formed contiguous chain reports
+> `status="ambiguous"` at the one shared instant — and records the choice between
+> the two readings as **OPEN**, tracked at **#7818**. Two read-path contract defects
+> are fixed alongside it: the `ambiguous` reply now carries an explicit `found`
+> (True) instead of omitting the key, so a `.get("found")` consumer can no longer
+> read two candidates as honest absence, and every reply carries a `status`
+> (`"found"` | `"ambiguous"` | `"absent"`).
+>
+> **Changelog v3.26 (2026-10-14 — issue #7551 — the operator-label declared vocabulary is stated, and the write path consults the whole of it):**
+>
+> **A code/record alignment, not a model change** — no meaning, direction or vocabulary
+> moves. §3.9 already said operators are *"`IMPL`, `NAND` (+ semantic label)"*, but the set
+> `create_operator` checked a `label` against was the **pack relations alone**: every core
+> predicate read as *undeclared*, so `supports` — this document's own evidence→claim meaning
+> (§8) — returned the same `undeclared_relation` warning as an invented name. A lane with no
+> reachable declared predicate therefore invented one (`measures`, ≈25 such edges). §3.9 now
+> **states the declared vocabulary** — the mechanism pair ∪ the closed §8 semantics vocabulary
+> ∪ every predicate an installed pack declares (`pack_registry.CORE_OPERATOR_LABELS`) — and
+> the write path consults all three. **Warn-not-block is unchanged (#1934):** declaredness is
+> what the check answers, not shape (the §8 reification table governs the latter), and a
+> **retired** spelling (`opposes` / `produces` / `holds` / `funds`) deliberately keeps warning
+> so the caller learns the canonical word. `measures` stays undeclared.
 >
 > **Changelog v3.25 (2026-10-13 — issue #5142 — the D10 code half's ONTOLOGY record: the `format` markers, the deferred node collapse, and the document `:Source` scoping):**
 >
@@ -56,10 +89,13 @@ doc_status: live
 >   posted on #5013** and carried at §4.4.
 > - **§4.6: the document `:Source` scoping is now stated at the row a reader trusts.**
 >   §4.6 marks `sourceKind`/`contentHash`/`version` REQUIRED ✅, but a document `:Source`
->   is written by a different path (`_upsert_document`) and supplies a different set. Two
->   of the three are written (**`contentHash` + `version`**, PR #5592 / `700960943`) and
->   **`sourceKind` is the one still missing** — a work item (**#5082**), named at §4.6
->   rather than left as a quiet absence under the global "code may lag" caveat.
+>   is written by different paths (`_upsert_document` for the `DocumentCreated` fold, plus
+>   the `objectType='Document'` event branch and the hosted `/v1/sessions` transcript MERGE)
+>   and supplies them conditionally.
+>   `contentHash` + `version` are written on the path that READS content (PR #5592 /
+>   `700960943`), and **`sourceKind='document'` since #5082** (all three writers, CREATE-only,
+>   #398) — so the note records which field is conditional on the read path instead of
+>   leaving the absence quiet under the global "code may lag" caveat.
 >
 > **Changelog v3.23 (2026-10-10 — issues #7813 + #7853 — confidence propagates across all four epistemic labels):**
 >
@@ -487,8 +523,10 @@ doc_status: live
 >   `tortoise_taxonomy`/`tortoise_ingest_corpus`/`tortoise_get` are retired names
 >   served only by the warning shim) and re-cut the `config/surface-manifest.yml`
 >   baseline — no tool was added, removed or renamed. **The D10 code half's own
->   residuals are named and open:** `#5082` (the document `:Source` carries no
->   `sourceKind`, while §4.6 marks it REQUIRED — scoped at §4.6), and `#5140` (the ten
+>   residuals are named and open:** **`#5082` closed** — the document `:Source` now
+>   writes `sourceKind='document'` (CREATE-only, #398), the field §4.6 marks REQUIRED;
+>   the remaining caveat is the read-path-conditional `contentHash`, recorded at §4.6;
+>   and `#5140` (the ten
 >   residuals outside the declared B1–B6 threat surface, including three reproduced
 >   P1s). **Landed:** `#5126` — `graph-scripts/backfill_embeddings.py` now targets
 >   `:Source` (PR `#8420`).
@@ -1026,6 +1064,19 @@ wasDerivedFrom
 
 Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label).
 
+> **The operator-label declared vocabulary (#7551).** A `label` passed to
+> `create_operator` / `tortoise_create_operator` is **declared** — written without an
+> `undeclared_relation` warning — when it is `IMPL`/`NAND`, a value of the §8 Layer-2 semantics
+> vocabulary, or a predicate an installed pack declares. The declared set is the **union** of
+> those three, and it is **derived** (`pack_registry.CORE_OPERATOR_LABELS`), never
+> re-transcribed, so it cannot drift from §8's table. **Declaredness is not shape:** the §8
+> reification table governs which edges *ought* to carry an operator, and an undeclared label
+> still warns without blocking (warn-not-block, #1934). A **retired** spelling (`opposes`,
+> `produces`, `holds`, `funds` — the transition map) is deliberately **not** declared, so it
+> keeps warning and the caller learns the canonical word. `measures` is declared nowhere and
+> was never a §8 meaning — it was invented by a lane that could find no reachable declared
+> predicate, which is what this statement exists to prevent.
+
 Mitigation edge: `mitigated_by` — Point → Point (operator → mitigation Point), written by `mitigate_operator` (`TortoiseSDK.mitigate_operator`): `(op:Point {is_operator:true})-[:mitigated_by]->(m:Point)`, with the mitigation Point back-linking `-[:IMPL]->` the operator (#909 §4.3 #7 — registered).
 
 > **Hard rule (#2315, pinned 2026-09-07):** a `mitigated_by` edge can ONLY
@@ -1185,6 +1236,32 @@ model**, never as an invitation to merge the two nodes. The reasoning is pinned 
 
 > **agentSession Event (#909 §4.3 #1):** the canonical eventKind for session-capture Events is **`AgentSession`** — EXACT code spelling (capital A; sdk.py `ingest_corpus`, session_indexer.py); `sessionCaptured` (the core kind still written by the regex capture path) is an **alias of the same concept** — both remain valid kinds, **no migration**. The capture graph's `:Session` node (session container, `CONTAINS` → turn Points) also carries `is_episodic: true` — the quota `sessions` branch counts `MATCH (s:Session)` (plan §4.4, slice 2).
 
+**An Event is a dated fact — it carries no projection-owned state.** An Event
+records *that something happened*. The current state of the thing it concerns
+lives on the Object (or Subject) it names, never on the Event: the projection
+declares **no Event `status` field and no Event state fold** — a later Event
+does not rewrite an earlier one, and the consistency gate compares `status` only
+for the Object/Subject families. The Event MERGE handles a declared field set and
+the projection's extras lane carries the rest of the payload as **content the
+writer supplied** — a prop lane, never a projection-owned state lane. A
+writer-supplied `status` prop is therefore not projection-owned, but it is **not
+inert**: `_promote_incident_operators` (`tortoise/sdk.py`, #7853) reads an Event
+endpoint's `status` as a live/draft gate, so a `status` prop on an Event
+suppresses operator promotion exactly as a draft Point does.
+
+> **(#2788)** The names this lane historically carried — `name`, `eventStatus`,
+> `createdAt` — are props, not projection state, and none of the three is read
+> back as Event state. `name` has one reader (`sdk.backfill_about_entities`
+> matches an Event against a Point's content); `eventStatus` is an **ingest**
+> marker (`scheduled` → `completed`) written by the session/meeting indexers,
+> deliberately outside the consistency gate's `status` comparison (which is
+> Object/Subject-only), and the typed commit path cannot set it at all
+> (`CommitEvent` is `extra="forbid"`). The `status` key is distinct from those
+> three: it is carried by the same extras lane, and it IS read as state by
+> `_promote_incident_operators` (#7853) — see the note above. The pack-declared
+> fold generalization (#2729) is Object-scoped and does not extend to Events —
+> the Event-carries-state question was answered **no** in #2725.
+
 ### §4.6 Source
 
 | Field | Type | Required | ISO/PROV/DC | Impl | Meaning |
@@ -1217,15 +1294,27 @@ model**, never as an invitation to merge the two nodes. The reasoning is pinned 
 | `reliabilityComponents` | JSON | — | — | ⚠️ | Cache metadata: tier, decay, factor, assessment_count, derivation time (#398) |
 | `reliability_derived_at` | ISO8601 | — | — | ⚠️ | Cache freshness stamp (#398) |
 
-> **⚠️ Document `:Source` scoping — which §4.6 REQUIRED fields a document actually supplies (`#5082`, recorded `#5142`).** §4.4 says a document is a `:Source`, but a document `:Source` is written by a **different path** (`tortoise/projection/entities.py::_upsert_document`, the `DocumentCreated` fold) from the provenance `:Source` (`_upsert_source`/`create_source`), and it does **not** supply the same REQUIRED set. Measured on `main`:
+> **⚠️ Document `:Source` scoping — which §4.6 REQUIRED fields a document actually supplies (`#5082`; recorded `#5142`, closed here).** §4.4 says a document is a `:Source`, but a document `:Source` is written by **different paths** from the provenance `:Source` (`_upsert_source`/`create_source`): the `DocumentCreated` fold (`entities.py::_upsert_document`), the `objectType='Document'` event branch (`entities.py::_event_plain_merge`), and the hosted `/v1/sessions` transcript MERGE (`hosted_api.py::_execute_commit_writes`) — **all three** are named at the row below. The `sourceKind` gap this note recorded is **closed**; `contentHash` stays **conditional on the read path**:
 >
 > | REQUIRED field | on a document `:Source` |
 > |---|---|
-> | `sourceKind` | ❌ **not written.** `_upsert_document` sets none, so a document node carries `sourceKind = NULL`; its genre rides `documentKind`, which is a **different axis** (§4.4). **Open: #5082** — the ruling is between scoping §4.6 to provenance Sources and adding the write; until it lands, the three index `_required_sweep` harnesses and `list_sources()` are scoped to provenance Sources for exactly this reason |
-> | `contentHash` | ✅ **written since PR #5592** (`#5422`, `700960943`) — through a preserve/replace gate: an absent or empty (`''`) hash preserves the stored one, an empty stored hash is completed, and a differing hash **replaces it on the SAME node** (never a second `:Source`) |
+> | `sourceKind` | ✅ **written since #5082 by every writer that creates a document `:Source`** — each stamps `'document'` **CREATE-ONLY** (`coalesce` writes only when the value is absent — #398's never-overwrite contract; the event branch also **fills a pre-#5082 NULL** on its match arm): the `DocumentCreated` fold (`entities.py::_upsert_document`), the `objectType='Document'` event branch (`entities.py::_event_plain_merge`), and the hosted `/v1/sessions` transcript MERGE (`hosted_api.py::_execute_commit_writes`). A document node therefore carries the **TYPE** axis beside its `documentKind` **GENRE** axis (§4.4 — different questions, neither absorbs the other). The value is the registered §5 term and is **NEUTRAL** in `SOURCE_KIND_DEFAULTS`, so no credibility inheritance moves (#398); it agrees with `_mint_source_stub`'s own non-`session:` default (`projection/edges.py`). `list_sources()` still filters on `documentKind` — a document node is not a *provenance* source |
+> | `contentHash` | ⚠️ **written on the path that READS content.** Since PR #5592 (`#5422`, `700960943`) the extraction-ingest path writes it through a preserve/replace gate: an absent or empty (`''`) hash preserves the stored one, an empty stored hash is completed, and a differing hash **replaces it on the SAME node** (never a second `:Source`). The `#900` index path (`_doc_write`) and `--capture-metadata` deliberately emit none (no content read — the latter skips extraction by design), so a document node can sit with `contentHash = NULL` until extraction; the `_required_sweep` harnesses scope the `contentHash` clause to provenance Sources for exactly this reason |
 > | `version` | ✅ **written by the same clause**, advancing with the hash exactly as §4.6 specifies ("1 at creation, +1 on each content-hash change"), so the pair §4.6 calls a version anchor can no longer be half-written |
 >
-> So **`sourceKind` is the one field that is a declared-but-unwritten gap** — a **work item (#5082)**, not a licence to read §4.4 as *"a document is a `:Source` that carries no `sourceKind`"*, and not a licence to close it by collapsing the two nodes (§4.4's `OVERRIDES`).
+> The recorded ruling is **#5013 Q2** (*"KEEP BOTH AXES. A source is `sourceKind: document` **and** carries a genre"*) plus §4.6's REQUIRED marking — the `#5082` write implements it; it is **not** a licence to read §4.4 as *"a document is a `:Source` that carries no `sourceKind`"*, and **not** a licence to close it by collapsing the two nodes (§4.4's `OVERRIDES`).
+>
+> **What the write does and does not move downstream (`#8525` review).** It does **not** move credibility: a
+> document node resolves **no tier** (`SOURCE_KIND_DEFAULTS['document'] is None`), so it contributes no group
+> to `_apply_source_inheritance`'s aggregate; and the #398 word-point un-freeze requires a **resolved
+> evidence body** (a tiered source, or an ORIGINATING `agentSession` whose weak body is the evidence), so a
+> word Point whose only source is a neutral document keeps its authored `set-by-author` baseline instead of
+> being re-labelled `inherited-from-source` with nothing inherited — the false provenance report
+> (`calibrate_summary` → "inherited from its source's trust rating" for a source with no rating) that the
+> un-guarded write produced on the primary path. It **does** change candidate generation, and that is
+> intended under **D3** ("registered kinds of any tier count"): `_cross_lens_pool` gates on
+> `s.sourceKind IN $registered`, and §5 registers `'document'`, so Points extracted from a document are now
+> eligible for the cross-lens candidate pool.
 
 **Versioning.** Identity is `url`; `contentHash` identifies a **version** of that identity. A re-fetched source whose content differs is a **new version, never an edit** — so **identity is stable and version is per-read**, and the two are never conflated.
 
@@ -1262,6 +1351,33 @@ window, independent of when Tortoise learned it. Canonical pair:
 | start | `validFrom` | `prov:generatedAtTime` | Populated by the date-carrying write paths — the hosted commit path sets it from the payload `when`, mining W-4 from the session frontmatter date (§4.1). An undated session stamps **no** `validFrom` at all (`ConversationMiner._temporal_wire`, #3654), so an **absent** `validFrom` means an **open/unbounded start** (`get_historical_knowledge`) — the write wall clock is never borrowed as a start. `create_point`'s base CREATE map seeds no `validFrom`; caller props — including `validFrom` — are appended to it, so `create_point` itself never **synthesizes** a clock-stamped start either. The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp |
 | end | `validTo` | `prov:invalidatedAtTime` | On **supersession** set to the successor's `validFrom` **when the successor carries one** — the **contiguous Graphiti (Zep) window intent: the old fact stops being true when the new one starts being true** (`supersede_point`, E6 #1538). An **undated** successor (absent `validFrom` ⇒ open start, row above) falls back to its `createdAt`, then to `now` — so the old `validTo` lands on the successor's `createdAt` and the windows **overlap** rather than being exactly contiguous. Exact contiguity requires a successor `validFrom` (`valid_from` kwarg → successor `validFrom` → successor `createdAt` → `now`). The kwarg is a **claim**, not an unconditional override: when the successor carries a stored `validFrom` the two must be **parseable** timestamps naming the **same instant** (compared by instant via `_created_sort_key`, the measure `_covers` uses), else `supersede_point` raises `ValueError` **before any mutation** — a disagreeing kwarg would otherwise gap or overlap the chain (#3980). The kwarg is the sole source for an undated successor **unless it names no instant** — a STRING kwarg that is unparseable falls through to the successor's `createdAt`, and that fallback itself requires an orderable value and otherwise lands on `now` (#5360). **The resolved end is additionally checked against the PREDECESSOR's own `validFrom`**: when BOTH order to an instant and the end is strictly earlier ⇒ `ValueError` before any mutation (#4021), because an inverted window (`validTo < validFrom`) is satisfied by **no** query instant, so the predecessor would be silently unreachable from every read surface — equality (a zero-length predecessor window) remains legal. An **unorderable** bound on either side is NOT compared even so: it names no instant, so a refusal would rest on a lexicographic accident rather than a comparison (and a point whose window is already unorderable is not newly hidden by the write) — the orderability residual is closed on the write path (#5360), except the deliberately-exempt NUMERIC `valid_from` kwarg (whose `str()` form `_covers` still cannot order). `invalidate_point` instead stamps `validTo = now` (no successor ⇒ no contiguity), and refuses with `ValueError` when a stored `validFrom` is after `now` — `retract_point` is the window-agnostic route (#5358) |
 
+> **The coverage boundary is stated here because it was not (#7818).** The read
+> path that answers *"what was true at `t`"* (`get_historical_knowledge`'s
+> `_covers`, `tortoise/sdk.py`) treats a window `[vF, vT]` as covering `t` iff
+> `vF <= t <= vT`, an absent bound read as open — the rule
+> `commit_schema.validate_validity_window` declares (#5374), whose agreement test
+> pins `t == vT` **and** a zero-length `[t, t]` as covering. Two consequences, both
+> stated so they are not rediscovered as defects:
+>
+> - **A well-formed contiguous chain has ONE shared instant.** For
+>   `P[vP, vC] ← C[vC, ∞)` — the shape every dated `supersede_point` writes —
+>   `t == vC` is covered by BOTH windows, so `get_historical_knowledge` reports
+>   `status="ambiguous"` with two `candidates` there. That is the closed-interval
+>   consequence, not corruption and not a silent wrong answer. The instant is also
+>   **entry-point-dependent**: entering from `C` reports the two candidates, while
+>   entering from `P` — whose CORRECTS walk is backwards-only — resolves to `P`
+>   alone. A chain-local tie-break ("prefer the successor") is therefore **not** a
+>   route: it makes the answer depend on the id you enter from, the #4021 defect
+>   class.
+> - **The `validTo` row's prose describes a DIFFERENT (half-open) reading.**
+>   *"The old fact stops being true when the new one starts being true"* is
+>   `[vF, vT)`; the code is closed `[vF, vT]`. Which is canonical is an **open
+>   decision** — flip to half-open (a global boundary-semantics change, which also
+>   makes a zero-length window genuinely empty; evaluated as R2 of the #5362 plan),
+>   accept the closed ambiguity, or a third shape — tracked at **#7818**. Until it
+>   is decided, a shared boundary instant is a known property of the closed
+>   reading, not a defect to be silently patched reader-by-reader.
+>
 > **Point's `when` is not a second valid-time slot.** `when` (§4.1) is the
 > **occurrence-date input** — the payload-level anchor the hosted commit path
 > copies verbatim into `validFrom` on the same node

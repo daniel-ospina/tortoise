@@ -1326,10 +1326,12 @@ def test_the_declared_limit_helper_fires_on_the_constructs_it_names() -> None:
 # `design-partners-intro.html` was ADDED (2026-10-01): the design-partner
 # one-pager. A top-level served document, so the id guard covers it — its
 # `noindex` keeps it out of the BLOG guard's scope, not out of this one.
+# `investors.html` was ADDED (#8568, 2026-10-13): the investor one-pager, forked
+# from it. Same class of document, same reasoning — `noindex`, covered here.
 _ALL_WEBSITE_PAGES_AT_3436 = frozenset({
     "404.html", "aviso-privacidad.html", "contact.html", "design-partners-intro.html",
     "docs.html", "dpa.html", "faq.html",
-    "index.html", "invite-accept.html", "license.html", "privacy.html",
+    "index.html", "investors.html", "invite-accept.html", "license.html", "privacy.html",
     "product.html", "security.html", "self-hosted.html",
     "signup.html", "tos.html", "welcome.html",
 })

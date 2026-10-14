@@ -1125,6 +1125,38 @@ def _vector_retrieve(sdk: TortoiseSDK, question: dict, qid: str, *,
     }
     return out
 
+
+def resolve_rerank_arm_pool_limit(
+    *,
+    rerank_pool: int,
+    max_k: int,
+    pool_size: int | None = None,
+) -> int:
+    """The rerank arm's FETCH depth — the pool knob floored at the baseline.
+
+    #2992: ``--rerank`` without ``--rerank-pool`` used to replace the #1947
+    baseline fetch depth (``DEFAULT_POOL_SIZE`` = 120, env
+    ``TORTOISE_LME_POOL_SIZE``) with the 40-item rerank default, so turning
+    the reranker on silently discarded the deepening unless the caller also
+    passed ``--rerank-pool 120``. The reranker can only reorder the
+    candidates it is handed, so a pool below the baseline is a strict
+    candidate loss: the baseline depth is the FLOOR for this arm and the
+    rerank-pool knob can only RAISE it.
+
+    Single-sourced with ``run.py::_resolve_rerank`` so the recorded (and
+    fingerprinted) ``config["pool_size"]`` is EXACTLY the depth the
+    retrieve path fetches (methodology == actual == fingerprint).
+    """
+    baseline = resolve_pool_size(
+        max_k,
+        pool_size=pool_size,
+        env_name="TORTOISE_LME_POOL_SIZE",
+        default=DEFAULT_POOL_SIZE,
+        exact=False,
+    )
+    return max(rerank_pool, baseline)
+
+
 def retrieve_for_question(
     sdk: TortoiseSDK,
     question: dict,
@@ -1400,9 +1432,13 @@ def retrieve_for_question(
     pool_override = (rerank_pool if rerank_pool is not None
                      else _env_int("TORTOISE_LME_RERANK_POOL", 40))
     if rerank_on and scorer is not None:
-        # applied arm — the deep pool (default 2x the baseline 20) gives the
-        # reranker reorderable headroom (D4)
-        pool_limit = max(pool_override, max(ks))
+        # applied arm — the deep pool gives the reranker reorderable
+        # headroom (D4), and it is FLOORED at the #1947 baseline fetch depth
+        # (#2992): the reranker can only reorder what it is handed, so a
+        # pool below the baseline is a strict candidate loss (the 40-item
+        # rerank default must never collapse the deepened pool).
+        pool_limit = resolve_rerank_arm_pool_limit(
+            rerank_pool=pool_override, max_k=max(ks), pool_size=pool_size)
     elif (rerank_pool is not None) and not rerank_on:
         # pool-only isolation arm (--rerank off --rerank-pool N): deeper
         # pool, baseline ordering, hits truncated to top_k (OQ5)

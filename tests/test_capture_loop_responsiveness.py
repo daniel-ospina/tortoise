@@ -44,6 +44,8 @@ from contextlib import suppress
 import httpx
 import pytest
 
+from tests._verdict import require_answered
+
 # Hosted-surface tests reuse test_hosted_api's authenticated TestClient
 # fixture (temp-DB SDK patching + the session-recording consent seed), which
 # also installs the module-level env (pepper/encryption key) on import.
@@ -2232,6 +2234,13 @@ def _measure_capture_graph_work(monkeypatch, turns: int, sid: str):
     resp = asyncio.run(_run())
     monkeypatch.setattr(graph_cls, "query", orig_query)
     monkeypatch.setattr(sdk_mod, "_write_capture_turns", orig_writer)
+    # #5049: the capture route is not exempt from the transport wait bound, so a
+    # 504 here is a non-answer — INCONCLUSIVE, never the bare FAIL every caller
+    # (both `_measure_on_loop_graph_work` and this helper's direct callers)
+    # would otherwise read off `resp.status_code`. Converting the LOWER seam
+    # covers every caller; converting the wrapper alone left the direct callers
+    # reading the refusal as a FAIL.
+    require_answered(resp, what=f"POST /v1/sessions answered (capture {sid})")
     return resp, records, writer_threads
 
 

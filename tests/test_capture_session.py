@@ -3025,8 +3025,8 @@ def test_apply_supersessions_chain_three_link_reverse(sdk):
 def test_apply_supersessions_chain_mixed_id_name_forms(sdk):
     """#2249: chains are naturally MIXED-FORM — the extractor emits the
     superseded side as the graph ID when the object pre-exists
-    (extractor_v2.py:3021) while supersedes_by is always the NAME
-    (commit_schema.py:476). So the chain records are X.supersedes_by = name
+    (extractor_v2.py:5836) while supersedes_by is always the NAME
+    (commit_schema.py:776). So the chain records are X.supersedes_by = name
     'mx-B' (id-form-free) and Y.superseded = B's canonical id
     obj-<sha26('mx-B')>. Reverse emission must STILL converge. This test
     forces the fold-order pre-pass to resolve BOTH sides against the graph
@@ -3057,7 +3057,7 @@ def test_apply_supersessions_chain_mixed_id_name_forms(sdk):
 def test_apply_supersessions_chain_legacy_noncanonical_mid_node(sdk):
     """#2249: a chain whose middle node carries a NON-canonical id (legacy
     raw-Cypher write with an explicit pre-canonical id — the
-    test_status_projection.py:304 registration-id class) must still
+    test_status_projection.py:399 registration-id class) must still
     converge. This discriminates PROBE-based fold-order resolution from
     canonical-id MATH (obj-<sha26(name)>): math would fail to see the edge
     (actual id != computed id) and the reverse-order divergence would
@@ -6663,15 +6663,17 @@ def test_phase_e_sdk_mirror_verification_fail_open_omits_marker(sdk, monkeypatch
     ]
     proj = sdk._get_proj()
     # The guarded wrapper (proj.g) is read-only; patch the RAW graph handle
-    # (precedent: test_search_engine.py:297 / test_capture_session.py:2114).
+    # (precedent: test_search_engine.py:304 / test_capture_session.py:3774).
     raw = proj.g._g
     real_query = raw.query
 
     def failing_query(query, params=None, timeout=None):
-        # Only the Phase E verification read (exact text) fails — every
+        # Only the post-write enrichment/verification read fails — every
         # other capture write/read proceeds, so the capture commits and the
-        # marker is the ONLY degraded surface.
-        if query == "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id":
+        # marker + verb enrichment are the ONLY degraded surfaces. Matched by
+        # prefix (the read is shared by Phase E's marker and the memory_write_v1
+        # verb's per-point enrichment, #2104 S12).
+        if query.startswith("MATCH (n:Point) WHERE n.id IN $ids RETURN n.id"):
             raise RuntimeError("simulated verification read failure")
         return real_query(query, params=params, timeout=timeout)
 
@@ -6680,7 +6682,14 @@ def test_phase_e_sdk_mirror_verification_fail_open_omits_marker(sdk, monkeypatch
     assert res["points"], "the capture itself commits"
     assert res["surfaced"] == [], (
         "a failed verification read must omit the marker, never fabricate it")
-    assert any("marker omitted" in w for w in res["warnings"]), res["warnings"]
+    assert any("write-verb enrichment read failed" in w for w in res["warnings"]), \
+        res["warnings"]
+    # The verb (S12) survives a failed enrichment read: un-enriched points are
+    # reported honestly and the status downgrades to partial — never a
+    # fabricated live/new claim (anti-gaming).
+    assert res["protocol_version"] == "memory_write_v1", res
+    assert res["status"] == "partial", res
+    assert all("ep_updated" not in p for p in res["points"]), res["points"]
 
 
 # ── W5 Phase F (#2104): concurrent session_id idempotency ──────────────────

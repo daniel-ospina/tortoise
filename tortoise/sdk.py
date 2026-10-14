@@ -2710,6 +2710,108 @@ _JOURNAL_ENVELOPE_KEYS = (
     "event_id", "ts", "recorded_ts", "initiated_by", "projection_version",
 )
 
+#: Every `_emit_event` ENVELOPE name a caller prop must not be able to set —
+# that is `_JOURNAL_ENVELOPE_KEYS` minus ``id``, which is deliberately absent:
+# the entity create/update doors REJECT a caller ``id`` fail-closed
+# (`_sanitize_props(reject_id=True)` raises), and ``create_point`` instead
+# consumes it as its documented explicit-id path — a sanctioned contract either
+# way, which a silent strip would weaken. Refused at prop INTAKE, not merely
+# stripped from the record, because the collision is invisible from inside
+# `_emit_event` and each name has a distinct failure:
+#
+# * ``recorded_ts`` / ``point`` / ``payload`` are `_emit_event` PARAMETERS, and
+#   Python binds a ``**props`` key to a named parameter AT THE CALL — so any
+#   door that splats caller props into the call turns the prop into that
+#   parameter. ``recorded_ts`` forges the record's envelope ``ts``; ``point``
+#   hands the record a CALLER-AUTHORED node snapshot, which the rebuild then
+#   replays (measured on ``update_point``); ``payload`` is swallowed by the
+#   parameter while the door's own node write still persists it LIVE, so the
+#   value ends up live-only (the #8553 divergence) — and on a graph-event type
+#   it would become the ``:GraphEvent`` payload rather than a node property (no
+#   such type splats caller props today).
+# * ``type`` is the key BOTH the live fold and the journal record dispatch on,
+#   so a prop of that name re-types or silently SUPPRESSES the record
+#   (measured: ``create_document(type="SourceCreated")`` journalled NOTHING,
+#   and ``rebuild_all`` destroyed the node — the #2296 defect itself, reachable
+#   through a caller prop).
+# * ``ts`` / ``event_id`` / ``projection_version`` / ``initiated_by`` land in
+#   ``**extra`` and are applied by ``event.update(extra)`` AFTER the envelope is
+#   built, overwriting it (measured on ``update_point``: a caller ``ts``,
+#   ``event_id`` and ``projection_version`` all reached the record).
+#
+# The set is spelled out rather than derived so an auditor sees it whole; it
+# must stay equal to `_JOURNAL_ENVELOPE_KEYS` minus ``id``.
+_RESERVED_ENVELOPE_PROPS = (
+    "type", "point", "payload", "event_id", "ts", "recorded_ts",
+    "initiated_by", "projection_version",
+)
+
+#: `_emit_event`-owned names that are NOT journal-envelope keys, yet still
+#: collide with a caller prop AT THE CALL — the same fail-open the set above
+#: closes, but invisible to `_journal_record_payload` (neither name is in
+#: `_JOURNAL_ENVELOPE_KEYS`, so nothing else strips them):
+#:
+#: * ``type_`` is `_emit_event`'s FIRST PARAMETER. Every door that splats
+#:   caller props into the call passes the record type positionally, so a prop
+#:   of this name raises ``TypeError: got multiple values for argument
+#:   'type_'`` — AFTER the live write has landed, leaving an unjournalled
+#:   live-only mutation. Measured: ``update_point(pid, type_="X")`` and
+#:   ``create_subject(name, type_="Y")`` both wrote the node and journaled
+#:   nothing; on ``create_source`` the collision is swallowed by that door's
+#:   journal ``try/except``, so the ``:Source`` was live-only and
+#:   ``rebuild_all`` destroyed it — the #2296 defect itself.
+#: * ``new_content`` is passed EXPLICITLY as a keyword by ``update_point``'s
+#:   ``PointRevised`` emit; a caller prop of that name in the same splat raises
+#:   the identical ``TypeError`` after the identical write (measured: the live
+#:   node kept the prop and NO ``PointRevised`` record was written). On the
+#:   ``create_source`` lane there is no call collision, but the name rode into
+#:   the ``SourceCreated`` record as a caller-forged payload key (measured).
+#:
+#: * ``self`` is the FIRST parameter of the bound method, and it is reachable
+#:   through the documented nested-``props`` convention (``_coerce_props``:
+#:   direct SDK callers mirror the MCP tool signature and pass ``props={...}``):
+#:   the nested dict is flattened AFTER the public method's own ``self`` is
+#:   bound, so the outer-call collision does not protect it. Measured:
+#:   ``create_source(url, "document", props={"self": "FORGED"})`` raised inside
+#:   `_emit_event`, that door's journal ``try/except`` swallowed it, and
+#:   ``rebuild_all`` destroyed the live-only ``:Source`` — the #2296 defect
+#:   itself; ``update_point(pid, props={"self": …})`` and
+#:   ``create_entity(..., props={"self": …})`` likewise wrote the node with no
+#:   record. THIS IS WHY THE SET IS NOT HAND-TRUSTED: the test derives the
+#:   required names from ``inspect.signature(TortoiseSDK._emit_event)``, so a
+#:   parameter added to `_emit_event` fails the suite instead of silently
+#:   re-opening this hole.
+#:
+#: Strip it at prop INTAKE like the envelope set above, and ALSO before any
+#: RELAY that forwards a caller bag into another method — the collision is at
+#: the call, so `update_entity` (relays to `_update_entity`) and
+#: `create_subject`/`create_object`/`create_event` (relay to `create_entity`)
+#: drop the reserved names before splatting, and `create_source` — the one door
+#: that bypasses intake — drops them itself. With every relay covered, the
+#: collision is impossible and live == replay.
+_RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self")
+
+
+def _drop_reserved_emit_props(props: dict) -> list[str]:
+    """Drop every `_emit_event`-owned name from ``props``, IN PLACE.
+
+    Returns the dropped names, sorted. Membership is decided here and only here,
+    so the strip cannot drift from the sets (it did, when it was hand-written at
+    each site: `self` stayed open through a RELAY splat).
+
+    Call it wherever a caller bag is about to be SPLATTED into a method, not
+    only at intake: the collision is AT THE CALL, so a relay that forwards
+    ``**props`` must strip first. `_update_entity` and `create_entity` take
+    ``self`` as their first parameter, so a ``self`` key raised ``TypeError`` at
+    the relay — one frame BEFORE `_sanitize_props` could drop it (measured).
+    """
+    _dropped = sorted(
+        _k for _k in props
+        if _k in _RESERVED_ENVELOPE_PROPS or _k in _RESERVED_EMIT_CALL_PROPS)
+    for _k in _dropped:
+        props.pop(_k)
+    return _dropped
+
 #: The canonical record types a live entity door may journal.
 # `DocumentCreated` (#2296) joins the set: the last unjournaled canonical
 # create, now appended by `_create_entity`'s Document arm (`.query`-invisible —
@@ -2729,10 +2831,11 @@ def _journal_record_payload(event: dict) -> dict:
     fold re-derives ``ingestedAt``/``updatedAt`` at replay. For an envelope name
     a write door does NOT drop from the live event, the caller prop survives
     LIVE while this strips it — the live ≠ replay residue tracked as #8553.
-    ``recorded_ts`` is NOT in that residue: it is an `_emit_event` parameter
-    name, stripped at prop INTAKE (``_sanitize_props``) so it can never be bound
-    to that parameter, and popped explicitly by the doors that bypass intake
-    (``create_source``) or emit unconditionally (``_create_entity``).
+    ``_RESERVED_ENVELOPE_PROPS`` is NOT in that residue: every envelope name
+    except ``id`` (which keeps its own fail-closed contract) is stripped at prop
+    INTAKE (``_sanitize_props``) so none of them can reach ``_emit_event`` as a
+    call argument or as the dispatch key, and the door that bypasses intake
+    (``create_source``) drops them — plus the reserved actor keys — itself.
     """
     return {k: v for k, v in event.items() if k not in _JOURNAL_ENVELOPE_KEYS}
 
@@ -2920,24 +3023,34 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
             _logger.warning(
                 "ignoring client-supplied %r on tenant props", _reserved)
             props.pop(_reserved)
-    # #2296 review: `recorded_ts` is `_emit_event`'s own PARAMETER name, and
-    # Python binds a `**props` key to a named parameter AT THE CALL — so every
-    # door that splats caller props into `_emit_event` (`update_point` splats
-    # straight through) turns the prop into the RECORDED instant and forges the
-    # record's envelope `ts`; `_emit_event` cannot see the collision from
-    # inside. Strip it HERE, at the one intake every props surface passes
+    # #2296 review: an `_emit_event`-owned name must never survive as a caller
+    # prop. Python binds a `**props` key to a named parameter (or an explicit
+    # keyword) AT THE CALL, so every door that splats caller props into
+    # `_emit_event` (`update_point` splats straight through) turns the prop
+    # into that argument — and `_emit_event` cannot see the collision from
+    # inside. TWO sets are reserved here, both strip-and-ignore:
+    #   * `_RESERVED_ENVELOPE_PROPS` — the journal ENVELOPE names. A caller
+    #     `recorded_ts` forges the record's envelope `ts`; `point`/`payload`
+    #     bind the snapshot/payload parameters; `type` re-types or SUPPRESSES
+    #     the record; `ts`/`event_id`/`projection_version`/`initiated_by`
+    #     overwrite the built envelope via `event.update(extra)`.
+    #   * `_RESERVED_EMIT_CALL_PROPS` — names that are not envelope keys but
+    #     collide at the CALL (`type_` is `_emit_event`'s first parameter;
+    #     `new_content` is passed explicitly by `update_point`'s emit), which
+    #     raised a `TypeError` AFTER the live write and left the mutation
+    #     live-only.
+    # The strip belongs HERE, at the one intake every props surface passes
     # through (`create_point`/`update_point`/`create_entity`/`update_entity`),
     # rather than at each emitting door — the same fix shape #5196 used for the
     # parameter spelling of the index-merge run token, after a per-door patch
-    # left this class of door open. Strip-and-ignore, matching the doors that
-    # bypass this intake (`create_source` pops the key itself) and the reserved
-    # actor keys above: it is an ENVELOPE name (`_JOURNAL_ENVELOPE_KEYS`), not a
-    # tenant property, so dropping it also keeps live == replay.
-    if "recorded_ts" in props:
+    # left this class of door open. Strip-and-ignore, matching the door that
+    # bypasses this intake (`create_source` pops the sets itself) and the
+    # reserved actor keys above: these are `_emit_event` names, not tenant
+    # properties, so dropping them also keeps live == replay.
+    for _emit_name in _drop_reserved_emit_props(props):
         _logger.warning(
-            "ignoring client-supplied 'recorded_ts' on tenant props "
-            "(reserved journal-envelope name)")
-        props.pop("recorded_ts")
+            "ignoring client-supplied %r on tenant props "
+            "(reserved `_emit_event` name)", _emit_name)
     # #4647: a value the store cannot hold without altering it must fail here,
     # not be silently clamped/rounded by FalkorDB on the way in.
     for _key, _value in props.items():
@@ -5486,9 +5599,10 @@ class TortoiseSDK:
         ``event["ts"]`` — this function cannot observe the collision. The strip
         therefore happens at prop INTAKE (``_sanitize_props``, the one surface
         ``create_point``/``update_point``/``create_entity``/``update_entity``
-        all pass through) and explicitly at the doors that bypass intake
-        (``create_source`` pops it) or emit unconditionally (``_create_entity``)
-        — the same all-labels rule those doors apply to ``point``/``payload``.
+        all pass through) and explicitly at the door that bypasses intake
+        (``create_source``) — see ``_RESERVED_ENVELOPE_PROPS``, which reserves
+        the same way (and for the same call-time-binding reason) this
+        function's other parameter names ``point``/``payload``.
         Measured before the intake strip: ``update_point``'s props splat turned
         the prop into the ``PointRevised`` record's ``ts`` (#2296 review). The
         name is also in ``_JOURNAL_ENVELOPE_KEYS``, so the record strips it
@@ -7058,7 +7172,12 @@ class TortoiseSDK:
         ``conversation`` is a list of {"role", "content"} dicts. Returns
         {"session_id", "turns", "extracted", "points": [...],
         "extraction_mode", "extraction_provider", "ok", "errors",
-        "warnings"} — the v2 path reports "extraction_mode": "llm:<route>"
+        "warnings"} plus additive keys (e.g. "surfaced", "diagnostics",
+        "stats", "capture_redactions") — and, on a write-back response, the
+        frozen ``memory_write_v1`` envelope keys "protocol_version"/"status"/
+        "provenance"/"error" (#2104; a pre-write gate rejection such as the
+        empty/blank gate carries no verb). The v2 path reports
+        "extraction_mode": "llm:<route>"
         (e.g. "llm:deepseek-direct") and the configured
         "extraction_provider" (#1530 D8). P1 #1529 fail-closed contract:
         "ok" is the success signal (never "extracted" — extracted > 0 can
@@ -7706,11 +7825,15 @@ class TortoiseSDK:
         # no-op — the stored True/None stays untouched). The empty/blank
         # gate returns before the Session MERGE, so nothing to record there.
         # NOTE (documented lane divergence, mirror of hosted): sdk computes ok
-        # BEFORE the surfaced-verification read (~3260) — a post-write
-        # verification failure appends a warning only, capture_ok stays True.
-        # Hosted computes _capture_ok AFTER its enrichment and downgrades to
-        # partial (retryable) when points are skipped. Both internally
-        # consistent; not forced-aligned (no skipped/verb concept here).
+        # BEFORE the write-verb enrichment read below. A failed or
+        # partial post-write read therefore leaves capture_ok True while the
+        # returned memory_write_v1 verb is reported partial with the affected
+        # points left un-enriched; hosted additionally appends a per-point
+        # warning to its receipt that the sdk does not. Hosted computes
+        # _capture_ok AFTER its enrichment and downgrades to partial when
+        # points are skipped. Both internally consistent: the two share the
+        # skipped counter and the verb, diverging only in the ORDER ok is
+        # computed (the recorded retry bit) and in that per-point warning.
         # #3892: what THIS attempt RECORDS on the Session. A keyed attempt
         # records its real outcome + lane, exactly as before. A KEYLESS
         # attempt records capture_ok=False + lane "none": no extraction lane
@@ -7921,28 +8044,62 @@ class TortoiseSDK:
         # rephrase_linked folds added no item — the canonical pre-existed
         # with its original provenance). A failed verification read yields []
         # plus an additive warning — never a fabricated marker count.
-        verified_ids: set[str] = set()
+        # W5 Phase A+B mirror-parity (#2104, S12) + Phase E (#2104, S11):
+        # ONE post-write verification read serves BOTH the frozen
+        # ``memory_write_v1`` verb's per-point enrichment AND the disclosure
+        # marker — byte-parity with ``hosted_api._capture_session_impl``
+        # (same query, same anti-gaming rules: graph truth only, a missing
+        # node is never fabricated live/new, and a missing node's seam
+        # verdict is dropped so it cannot ride a fabricated dedup
+        # classification).
+        from tortoise.write_verb import (
+            DEDUP_NEW,
+            STATUS_OK,
+            STATUS_PARTIAL,
+            build_write_verb,
+            surfaced_marker,
+        )
+        skipped = 0
+        facts: dict = {}
         if extracted:
             try:
                 rows = proj.g.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id",
+                    "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
+                    "coalesce(n.pointKind, 'statement'), "
+                    "coalesce(n.status, 'live'), "
+                    "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL)",
                     params={"ids": [p["id"] for p in extracted]},
                 ).result_set
-                verified_ids = {r[0] for r in rows}
+                facts = {r[0]: (r[1] or "statement", r[2] or "live", bool(r[3]))
+                         for r in rows}
             except Exception:  # noqa: BLE001, RUF100 — fail-open, mirror
                 # hosted's enrichment-read posture (additive warning, never
                 # raise over a committed capture).
                 _logger.warning(
-                    "capture_session: surfaced disclosure verification read "
+                    "capture_session: write-verb enrichment read "
                     "failed (non-fatal) for session %s", session_id,
                     exc_info=True,
                 )
                 extraction_warnings.append(
-                    "surfaced disclosure verification read failed — "
-                    "marker omitted")
-        from tortoise.write_verb import surfaced_marker
+                    "write-verb enrichment read failed (non-fatal)")
+        for p in extracted:
+            pid = p.get("id")
+            if pid not in facts:
+                # A swept/deleted point (delete race) or a failed write is
+                # NEVER fabricated as live/new (anti-gaming): the entry stays
+                # un-enriched, its seam verdict is dropped, and the verb
+                # downgrades to partial below.
+                skipped += 1
+                p.pop("dedup", None)
+                continue
+            kind, status, has_ep = facts[pid]
+            p["kind"] = kind  # graph truth wins over the extractor's claim
+            p.setdefault("point_id", p.get("id"))
+            p["status"] = status
+            p["ep_updated"] = has_ep
+            p["dedup"] = p.get("dedup", DEDUP_NEW)
         resp["surfaced"] = surfaced_marker(
-            extracted, verified_ids=verified_ids)
+            extracted, verified_ids=set(facts))
         # #2335 WI-1d: the observation leg — one structured line per capture
         # at the shared assembly (mode covers v2/m2/replayed/error/no-provider/
         # extraction-disabled — empty returns pre-emit).
@@ -7952,7 +8109,40 @@ class TortoiseSDK:
                 mode=effective_mode, turns=len(conversation), meta=meta)
         except Exception as e:  # pragma: no cover — never block capture
             _logger.warning("capture_observation emit failed: %s", e)
-        return resp
+        # W5 Phase A+B (#2104, S12): the frozen version-stamped write verb —
+        # ``protocol_version`` is REQUIRED on every WRITE-BACK response. The
+        # empty/blank gate above returns before any write: it is a pre-write
+        # rejection, not a write-back, and like the hosted surface's HTTP gate
+        # rejections (``write_verb.py`` scope note) it deliberately carries no
+        # verb. The hosted
+        # capture surface has always spoken this envelope; the mirror speaks
+        # it too now (``tests/eval/write_path/runner.py`` — the W2 gate's own
+        # lane — drives THIS surface, so the gate's lane now RECEIVES the verb
+        # it could not see before; the runner does not yet read it).
+        # Additive over the legacy keys (``extra=resp``):
+        # the protocol-owned keys win, the legacy ``points`` list is preferred
+        # as the verb's per-point array, and a legacy key can never silently
+        # corrupt ``protocol_version``/``status``/``provenance``/``error``.
+        #
+        # Deliberate lane divergence, preserved (``hosted_api.py`` documents
+        # it too): the SESSION-recorded ``capture_ok`` (``ok`` above) keeps
+        # its pre-enrichment value — a verification-read failure is a benign
+        # warning here, whereas hosted folds ``skipped`` into ``capture_ok``
+        # and makes the capture retryable. The verb's ``status`` is derived
+        # from the SAME facts on both surfaces (``partial`` on
+        # errors/skipped); only the recorded retry bit differs, so a later
+        # capture of a session whose verification read failed is REPLAYED on
+        # the mirror instead of re-attempted. Changing that would change
+        # fleet-wide retry semantics — out of scope for the verb wrap.
+        return build_write_verb(
+            source_session=session_id,
+            source_harness=harness or "unknown",
+            ingested_at=now,
+            status=(STATUS_PARTIAL if (extraction_errors or skipped)
+                    else STATUS_OK),
+            error=None,
+            extra=resp,
+        )
 
     @phased("extract")
     def _extract_session_llm(
@@ -9092,10 +9282,12 @@ class TortoiseSDK:
         (#6131).
 
         Note what this path does NOT do: unlike ``create_operator``, which returns
-        a structured ``undeclared_relation`` warning when no installed pack
-        declares the predicate, ``update(<operator_id>, label=...)`` performs no
+        a structured ``undeclared_relation`` warning when the predicate is neither
+        a core operator label (``pack_registry.CORE_OPERATOR_LABELS`` — ONTOLOGY
+        §3.9's ``IMPL``/``NAND`` plus §8's semantics vocabulary) nor a predicate an
+        installed pack declares, ``update(<operator_id>, label=...)`` performs no
         declaredness check and installs the label silently. Take valid predicates
-        from ``list_relations()``.
+        from ``list_relations()`` for the pack-declared leg, or the core set above.
 
         Detects the node type by label:
           - Point → point-lifecycle semantics (delegates to update_point):
@@ -9383,7 +9575,7 @@ class TortoiseSDK:
         # silently MISSING from the index-served Point dense leg (#8429) — the
         # write seam exists so a server-owned vector is always the typed,
         # indexable shape. (#8316 has since normalised a right-width `List` at
-        # the READ boundary, so the "expected Null or VectorF32 but was List"
+        # the READ boundary, so the "expected Null or Vectorf32 but was List"
         # abort this comment used to cite no longer happens for the right-width
         # case; a wrong-width or non-numeric value still aborts the MATCH —
         # #8430.) That is the #4521 class on the LIVE path
@@ -11440,8 +11632,15 @@ class TortoiseSDK:
         # #1934 (epic #1891 slice 3): relation-level write validation —
         # warn-not-block (governance D1/D2). An undeclared domain label is
         # warned (structured) and the write proceeds; the violations event
-        # feeds the future governance app. Consults the pack registry's
-        # declared relation predicates — the ladder is no longer dead config.
+        # feeds the future governance app.
+        #
+        # #7551: the declared set is the CORE operator-label vocabulary
+        # (`pack_registry.CORE_OPERATOR_LABELS` — the §3.9 mechanism pair plus
+        # the closed §8 semantics vocabulary) UNIONED with every pack-declared
+        # relation predicate. It used to be pack relations alone, so EVERY core
+        # predicate read as undeclared and the warning carried no information:
+        # `supports` — the graph's own evidence→claim convention — warned
+        # exactly like an invented name, which is how `measures` accumulated.
         #
         # #2030 (verified, NOT a bug): relation predicates are declared and
         # matched BARE by contract — manifests declare bare `relations[]
@@ -11457,15 +11656,16 @@ class TortoiseSDK:
         if label:
             from tortoise.domain_loader import _get_registry
             from tortoise.enforcement import emit_violation, warning_for_relation
+            from tortoise.pack_registry import CORE_OPERATOR_LABELS
             reg = _get_registry()
-            declared = set()
+            declared = set(CORE_OPERATOR_LABELS)
             if reg is not None:
-                declared = {r.get("predicate") for r in reg.list_relations()}
-            # #4937: the generic operator menu is IMPL/NAND (+ pack-declared
-            # relations) — MITIGATES is NOT a built-in operator label. A
-            # caller spelling it here gets the undeclared-relation warning
-            # instead of a silent peer spelling of mitigation.
-            if label not in declared and label not in ("IMPL", "NAND"):
+                declared |= {r.get("predicate") for r in reg.list_relations()}
+            # #4937: MITIGATES is NOT a built-in operator label — it is absent
+            # from both legs above, so a caller spelling it here gets the
+            # undeclared-relation warning instead of a silent peer spelling of
+            # mitigation.
+            if label not in declared:
                 warnings.append(warning_for_relation(label))
                 emit_violation(code="undeclared_relation", relation=label,
                                detail=f"op_type={op_type}")
@@ -12385,11 +12585,13 @@ class TortoiseSDK:
 
         Returns [{url, sourceKind, points}]. D10 (ONTOLOGY v3.15 §4.4): a
         run-endpoint `doc_<rel>` document is also a `:Source`, but it is NOT a
-        provenance source — it carries `documentKind` and NO `sourceKind`, so
-        including it would (a) add a `sourceKind=None` row to a
-        `sourceKind`-keyed vocabulary and (b) double-count every indexed file
-        (its corpus Source AND its document node). Filtering keeps the
-        pre-D10 observable row set byte-identical (see #5082).
+        provenance source — it carries `documentKind` (and, since #5082,
+        `sourceKind='document'`; the TYPE axis, §4.6), so including it would
+        (a) add a second `document` row to a `sourceKind`-keyed vocabulary and
+        (b) double-count every indexed file (its corpus Source AND its document
+        node). The `documentKind IS NULL` partition — not `sourceKind` — is what
+        separates the two, and #5082 does not remove the need for it; filtering
+        keeps the pre-D10 observable row set byte-identical.
         """
         proj = self._get_proj()
         rows = proj.g.query(
@@ -15491,6 +15693,13 @@ class TortoiseSDK:
         and explicitly-registered kinds count; unregistered kinds stay
         neutral). Bounded to the CROSS_LENS_POOL_CAP most-recently-updated
         points so the per-cycle scan stays proportional to new data.
+
+        Since #5082 a document `:Source` carries `sourceKind='document'`
+        (§4.6; registered and NEUTRAL), so Points extracted from documents are
+        now eligible here — intended under D3, which counts registered kinds of
+        ANY tier. Before the write their `sourceKind` was NULL and the gate
+        excluded them. Recorded at ONTOLOGY §4.6 (the `#8525` review asked for
+        this unstated output change to be named).
         """
         from tortoise.source_credibility import SOURCE_KIND_DEFAULTS
 
@@ -17813,6 +18022,12 @@ class TortoiseSDK:
             label is only ever present on a baseline written by a WORD input
             (`create_point(credibility=…)` / `mitigate_operator` /
             `_stamp_authored_word`), never by an explicit `set_point_baseline`;
+            and the un-freeze requires a body for the word to displace, i.e. at
+            least one RESOLVED tier source or an ORIGINATING `agentSession`
+            (#5082 review P1: a purely NEUTRAL source — a document `:Source`
+            with `sourceKind='document'`, no tier — resolves no group, so
+            recomputing would re-label `set-by-author` as
+            `inherited-from-source` with nothing inherited);
             inherited baselines
             (baseline_source='inherited-from-source')
             recompute per run subject to the per-point time gate
@@ -18184,6 +18399,29 @@ class TortoiseSDK:
             # assertion, never a re-opened explicit baseline. #7951 owns
             # the single write chokepoint.
             is_word_point = pid in author_word
+            # #5082 review P1: the ONE exception is a DERIVATION, so it needs
+            # something to derive FROM. `author_word` is populated from any
+            # admitted row — including a purely NEUTRAL source (a document
+            # `:Source` carries `sourceKind='document'`, which is registered
+            # NEUTRAL, and no `credibilityTier`). A neutral source resolves no
+            # tier, so it contributes NO group to the aggregate: the rewrite
+            # would carry the author's own word alone and still re-label the
+            # baseline `set-by-author` -> `inherited-from-source` — inventing
+            # an inheritance that never happened. Measured on the #5082 head
+            # before this guard: a `create_point(credibility=…)` Point
+            # extracted from a document flipped its token, stamped
+            # `inherited_at` (un-freezing it forever), and made
+            # `calibrate_summary` report "inherited from its source's trust
+            # rating" for a source that carries no rating (the number itself
+            # was unchanged: 1.1 -> 1.1, so only the provenance moved).
+            # The un-freeze is therefore granted only when at least one REAL
+            # evidence body resolved: a tiered source (`sources`, i.e. the
+            # non-neutral rows) or an ORIGINATING `agentSession`, whose weak
+            # body IS the evidence for an agent assertion (#398/#6151).
+            # `point_extra_support` holds exactly those originating sessions,
+            # so a key's presence is the signal (it is a defaultdict — use
+            # `in`, never `[]`).
+            has_resolved_evidence = bool(sources) or pid in point_extra_support
             # #6151 review round 6 P2: the polarity is “freeze everything that
             # is NOT a derivation”. The old allow-list
             # (`bl_src in (set-by-author, system-default)`) let an
@@ -18205,7 +18443,8 @@ class TortoiseSDK:
             if (bl_src is None and bl_set) or (
                 bl_src not in (None, BASELINE_SOURCE_INHERITED)
                 and not (bl_src == BASELINE_SOURCE_SET_BY_AUTHOR
-                         and is_word_point)
+                         and is_word_point
+                         and has_resolved_evidence)
             ):
                 continue
 
@@ -21599,30 +21838,52 @@ class TortoiseSDK:
         contiguous windows (D2: old.validTo == successor's validFrom), so the
         walk answers "what was true then" exactly.
 
-        Return shapes:
-          {valid_point: {id, content, valid_from, valid_to},
-           current: {id, content},
-           chain: [{id, valid_from, valid_to}], ...}
-            — exactly one candidate covers ``at_date``.
-          {ambiguous: true, candidates: [...]} — two+ candidates whose
-            windows both plausibly cover (malformed/overlapping windows):
-            explicit ambiguity signal, never a silent wrong answer.
-          {found: false, nearest: {...}, chain: [...]} — honest absence:
-            the date lies outside every window (before the earliest / after
-            the latest); ``nearest`` is the closest window for context.
-            When a chain window is INVERTED (``validTo`` before
-            ``validFrom``, so it covers no instant at all) the reply also
-            carries ``malformed: true`` and ``malformed_ids``, and the
-            affected ``nearest`` entry carries ``malformed: true``. Without
-            that flag a corrupt window is indistinguishable from a point
-            that honestly has no window at this date (#5361). Detection is
-            scoped to THIS branch: a covering window cannot be inverted, so
-            the signal is only needed where absence is being reported.
+        Return shapes. EVERY reply carries a uniform ``status``
+        (``"found"`` | ``"ambiguous"`` | ``"absent"``) and a boolean
+        ``found``; branch on ``status``, never on ``found`` alone:
+
+          "found" — exactly one window covers ``at_date``. ``valid_point``
+            is present, ``found`` is True, and ``current``/``chain`` give
+            context.
+          "ambiguous" — two or more windows cover it. ``ambiguous`` (True)
+            and ``candidates`` are present and ``valid_point`` is ABSENT,
+            but ``found`` is **True**: a candidate WAS found, just not a
+            unique one. ``found`` is True here deliberately — a consumer
+            reading ``res.get("found")`` must never read two candidates as
+            "nothing was true at that instant" (#7818).
+          "absent" — no window covers ``at_date`` (before the earliest /
+            after the latest). ``found`` is False and ``nearest`` carries
+            the closest window for context. When a chain window is
+            INVERTED (``validTo`` before ``validFrom``, so it covers no
+            instant at all) the reply also carries ``malformed: true`` and
+            ``malformed_ids``, and the affected ``nearest`` entry carries
+            ``malformed: true``. Without that flag a corrupt window is
+            indistinguishable from a point that honestly has no window at
+            this date (#5361). Detection is scoped to THIS branch: a
+            covering window cannot be inverted, so the signal is only
+            needed where absence is being reported.
+
+        Coverage boundary (#7818). ``_covers`` is INCLUSIVE at BOTH ends:
+        a window ``[vF, vT]`` covers ``t`` iff ``vF <= t <= vT``, with an
+        absent bound read as open. That is the rule
+        ``commit_schema.validate_validity_window`` declares (#5374), whose
+        agreement test pins ``t == vT`` and a zero-length ``[t, t]`` as
+        covering. Consequence, recorded so it is never rediscovered: for a
+        well-formed contiguous chain ``P[vP, vC] ← C[vC, ∞)`` the shared
+        instant ``t == vC`` is covered by BOTH windows, so this method
+        reports ``"ambiguous"`` there — the closed-interval reading, NOT
+        the half-open ``[vF, vT)`` reading the ONTOLOGY's ``validTo`` prose
+        describes. The instant is also entry-point-dependent: entering from
+        ``P`` (whose CORRECTS walk is backwards-only) resolves to ``P``
+        alone, while entering from ``C`` reports the two candidates. Which
+        representation is canonical is an OPEN decision (ONTOLOGY §4.7,
+        #7818); a shared boundary instant is not corruption.
 
         Legacy undated points: no ``validFrom`` ⇒ open start; a superseded
         point without ``validTo`` ⇒ open end (covers everything before the
         successor's ``validFrom`` — no special case beyond IS NULL
-        handling). Missing point / empty chain ⇒ ``{found: false}``.
+        handling). Missing point / empty chain ⇒ ``status="absent"``,
+        ``found: false``.
 
         Date comparison reuses ``_created_sort_key``'s mixed-format
         tolerance (ISO strings + numeric epoch both parse).
@@ -21651,7 +21912,8 @@ class TortoiseSDK:
             if not rows:
                 if cur == point_id:
                     # Asked point missing entirely.
-                    return {"found": False, "point_id": point_id,
+                    return {"found": False, "status": "absent",
+                            "point_id": point_id,
                             "at_date": at_date, "chain": []}
                 break
             content, vf, vt, created = rows[0]  # noqa: RUF059
@@ -21667,7 +21929,8 @@ class TortoiseSDK:
             cur = older[0][0]
 
         if not chain:
-            return {"found": False, "point_id": point_id,
+            return {"found": False, "status": "absent",
+                    "point_id": point_id,
                     "at_date": at_date, "chain": []}
 
         t_key = _created_sort_key(at_date)
@@ -21694,10 +21957,19 @@ class TortoiseSDK:
                                    "valid_from": e["valid_from"],
                                    "valid_to": e["valid_to"]}
             out["found"] = True
+            out["status"] = "found"
             return out
         if len(covering) > 1:
-            # Overlapping/malformed windows — never a silent wrong answer.
+            # Two or more candidates — never a silent wrong answer. The
+            # shared instant of a well-formed contiguous chain lands here
+            # too (`_covers` is closed at both ends), not only a malformed
+            # overlap; see the docstring's coverage-boundary note (#7818).
+            # `found` is True on purpose: a candidate WAS found, so a
+            # `.get("found")` consumer must not read the ambiguity as
+            # honest absence — `status`/`valid_point` name the difference.
             out["ambiguous"] = True
+            out["found"] = True
+            out["status"] = "ambiguous"
             out["candidates"] = [{"id": e["id"], "content": e["content"],
                                    "valid_from": e["valid_from"],
                                    "valid_to": e["valid_to"]}
@@ -21706,6 +21978,7 @@ class TortoiseSDK:
 
         # Honest absence: no window covers. Report the nearest window.
         out["found"] = False
+        out["status"] = "absent"
 
         # #5361: an inverted window (validTo before validFrom) covers NO
         # instant, so `_covers` can never match it and this reply is otherwise
@@ -22344,6 +22617,12 @@ class TortoiseSDK:
 
         Returns the SearchResult shape (list of dicts), each annotated with
         ``entity_type`` and ``gaps_ranking`` (score breakdown).
+
+        #2598: a DRAFT is not excluded from the candidate pool (a draft is
+        CURRENT, not terminal), so a returned draft gap is rendered HONESTLY —
+        ``gaps_ranking.draft: True``, ``confidence: None`` +
+        ``confidence_source: "uncomputed"`` (never the fabricated neutral 0.5),
+        and sorted after every live gap.
         """
         from .ranking import GapsRanker
 
@@ -23491,7 +23770,7 @@ class TortoiseSDK:
             scopes = m.get("scopes") or []
             # C5 #2114 (parity): REST's registry-lane resolution derives the
             # D2 owner class (deleg NULL + scopes [] → legacy_full_access)
-            # at hosted_api.py:1560 — apikey_verify is the MCP registry lane
+            # at hosted_api.py:5414 — apikey_verify is the MCP registry lane
             # and MUST carry the same field or the C5 scope gate 403s every
             # tt_/legacy owner key on the selfhost MCP surface.
             # #2300 (C5 registry-lane parity): a C1/C2 graph-bound key
@@ -24108,8 +24387,22 @@ class TortoiseSDK:
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         proj = self._get_proj()
-        # Build event dict
+        # Build event dict. (#2296 review) The ENVELOPE owns `type`: the
+        # `**props` splat would otherwise let a caller prop of that name become
+        # the type BOTH the live fold and the journal record dispatch on —
+        # measured, `create_document(type="SourceCreated")` journalled nothing
+        # and `rebuild_all` destroyed the node. `_sanitize_props` strips it for
+        # every sanitizing caller, and the `_skip_sanitize` door
+        # (`create_source`) drops the name itself. On THIS funnel the line is
+        # also load-bearing: the Object/Subject/Event/Document records are built
+        # from the repaired dict, so the re-assert alone keeps them honest if the
+        # intake strip is removed (measured). It does NOT cover
+        # `create_source`, which journals from its own payload and still records
+        # a caller-forged `type` when its drop is removed (measured) — only that
+        # door's drop keeps it honest. Assigned rather than reordered so the
+        # dict's key order is unchanged.
         event = {"type": event_type, "id": id_val, **props}
+        event["type"] = event_type
         # Normalize field names for projection compatibility
         if label == "Subject" and "subjectKind" in props:
             event["subject_kind"] = props["subjectKind"]
@@ -24148,14 +24441,15 @@ class TortoiseSDK:
             # (Tenant-visible narrowing — see docs/ONTOLOGY.md §4.2/§4.3.)
             event.pop("point", None)
             event.pop("payload", None)
-        # #2296 review: `recorded_ts` is `_emit_event`'s own PARAMETER (it binds
-        # the envelope `ts`), so — like point/payload — a caller prop of that
-        # name must not persist LIVE either. The record strips it
-        # (`_JOURNAL_ENVELOPE_KEYS`), so keeping it here would be the live ≠
-        # replay divergence #8553 tracks. Unconditional (all labels) for the
-        # same reason the block above is: the pop must not depend on journal
-        # config.
-        event.pop("recorded_ts", None)
+        # #2296 review: every reserved `_emit_event` name
+        # (`_RESERVED_ENVELOPE_PROPS`, `_RESERVED_EMIT_CALL_PROPS`) is stripped
+        # at prop intake (`_sanitize_props`) and dropped by the one door that
+        # bypasses that intake (`create_source`), so this funnel needs no
+        # per-name pop of its own. The `point`/`payload` pops just above are
+        # PRE-EXISTING guards for the Event/Object/Subject labels and do NOT
+        # cover the `create_source` lane — that lane reaches this funnel with
+        # `label = "Source"`, so the branch never executes for it;
+        # `create_source`'s own strip is what covers it.
         # (#2194) Journal ObjectRegistered on FIRST canonical registration
         # only — probe the deterministic canonical id + name
         # (obj-<sha26(name)>) before apply. The name conjunct hardens against
@@ -24584,7 +24878,18 @@ class TortoiseSDK:
                            if k not in _ENTITY_MUTATION_RESERVED_KEYS})
         self._emit_event(_ENTITY_MUTATION_RECORD_TYPE, **record)
 
-    def _update_entity(self, id_val: str, **props) -> dict:
+    def _update_entity(self, id_val: str, *, _reserved_supplied: tuple = (), **props) -> dict:
+        # #2296 review: `_reserved_supplied` is the set of reserved names the
+        # CALLER supplied, captured by `update_entity` before it strips them for
+        # the relay — it cannot be captured here, because a `self` key raises at
+        # that relay call, before this line would run. The #3998/D30
+        # closed-surface guard below uses it so an UNDECLARED spelling still gets
+        # the LOUD refusal the raw-body mistake needs, instead of the silent drop
+        # the strip would otherwise leave. The reserved ACTOR keys are never in
+        # it: their contract is strip-and-ignore, never a 4xx (#2600). NOTE: a
+        # reserved name that IS a declared `:Source` property (`event_id`) must
+        # not be pushed into the guard's "undeclared" set — see the subtraction
+        # where that set is built below.
         # #329: id + sourcePath/source_path are server-managed — reject
         props = _sanitize_props(props, reject_id=True,
                                 reject_belief_props=True)
@@ -24597,7 +24902,7 @@ class TortoiseSDK:
         # Measured before this guard: `create_source(...)` then
         # `update_entity(url, text=<2 KB body>)` persisted the body as `s.text`
         # and it SURVIVED `rebuild_all`.
-        if props:
+        if props or _reserved_supplied:
             # The predicate MUST be the one the write below uses. The write
             # resolves a canonical label by its PRIMARY key then its SECONDARY
             # (`secondary_entity_id_props`), so a url-only `:Source` STUB (minted
@@ -24644,9 +24949,21 @@ class TortoiseSDK:
                 # still refuses every OTHER undeclared spelling, which is where
                 # a raw payload would land.
                 _undeclared = sorted(
-                    k for k in props
-                    if k not in _SOURCE_NODE_PROP_NAMES
-                    and k not in self._get_proj()._DOC_RETIRED_KEYS
+                    {k for k in props
+                     if k not in _SOURCE_NODE_PROP_NAMES
+                     and k not in self._get_proj()._DOC_RETIRED_KEYS}
+                    # The reserved names are unioned in because the intake strip
+                    # above already removed them from `props` — the guard must
+                    # still answer them. Subtracting the DECLARED surface keeps
+                    # a reserved name that is ALSO a declared `:Source`
+                    # property (`event_id`) out of the refusal: measured, the
+                    # unsubtracted union refused `update_entity(url,
+                    # event_id=…)` — a write that landed live and survived
+                    # `rebuild_all` before this review change — with a message
+                    # whose own "Declared :Source properties" list names that
+                    # key as settable. Declared reserved names stay
+                    # strip-and-ignore, like the actor keys.
+                    | (set(_reserved_supplied) - _SOURCE_NODE_PROP_NAMES)
                 )
                 if _undeclared:
                     raise ValueError(
@@ -24985,7 +25302,7 @@ class TortoiseSDK:
                 #     Decimal/numpy reaches this point — the write guard refuses
                 #     the rest);
                 #   * keys the write did NOT apply are absent, so replay never
-                #     overwrites the typed VectorF32 the upsert created
+                #     overwrites the typed Vectorf32 the upsert created
                 #     (`properties(n)` returns a vector as a plain list;
                 #     re-applying it would demote it and break the vector leg).
                 if "name" in props:
@@ -25353,6 +25670,7 @@ class TortoiseSDK:
     def create_subject(self, name: str, subjectKind: str = "other", **props) -> dict:
         """Thin alias for create_entity(type='subject') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
         if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
             raise ValueError(
                 "'is_episodic' is a server-managed field and cannot be set via props.")
@@ -25362,6 +25680,7 @@ class TortoiseSDK:
     def create_object(self, name: str, objectKind: str = "other", **props) -> dict:
         """Thin alias for create_entity(type='object') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
         if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
             raise ValueError(
                 "'is_episodic' is a server-managed field and cannot be set via props.")
@@ -25381,6 +25700,7 @@ class TortoiseSDK:
         rather than stored as string properties.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
         # Second-model gate P2: a single-nested props={"is_episodic": true}
         # flattens here and would splat-bind create_entity's explicit param —
         # reject it; the explicit `is_episodic` param (internal callers) is the
@@ -27971,14 +28291,20 @@ class TortoiseSDK:
                 __import__('datetime').timezone.utc).isoformat(),
             **props,
         }
-        # #2296 review: `recorded_ts` is `_emit_event`'s own PARAMETER (it binds
-        # the envelope `ts`). This door emits its OWN record (`SourceCreated` /
-        # `SourceVersioned`) and does not go through `_journal_entity_event`, so
-        # `_create_entity`'s live pop cannot cover it — a caller prop of that
-        # name would bind the parameter and forge the record's envelope `ts`.
-        # Envelope-reserved: drop it (same semantics as point/payload in
-        # `_create_entity`).
-        ev.pop("recorded_ts", None)
+        # #2296 review: this door bypasses `_sanitize_props`
+        # (`_skip_sanitize=True`), so the shared intake strip cannot cover it —
+        # and these are the names that are `_emit_event` PARAMETERS
+        # (`recorded_ts` binds the record's `ts`; `point`/`payload` bind the
+        # record's snapshot/payload; `type_` is the type parameter) or the
+        # record's dispatch key (`type`), or overwrite the built envelope via
+        # `event.update(extra)` (`ts`/`event_id`/`projection_version`), or ride
+        # into the record as a forged payload key (`new_content`), plus the
+        # reserved ACTOR keys (`initiated_by` and siblings), which the sanitizer
+        # would also have stripped. Drop them all, as `_create_entity` drops
+        # point/payload on its own route.
+        for _emit_name in (*_RESERVED_ENVELOPE_PROPS, *_RESERVED_EMIT_CALL_PROPS,
+                           *_RESERVED_ACTOR_PROPS):
+            ev.pop(_emit_name, None)
         if is_episodic is not None:
             # #1488: server-managed quota discriminator — explicit param only
             # (mirrors create_point). The props passthrough is rejected above.
@@ -28851,7 +29177,20 @@ class TortoiseSDK:
         """Update any entity's properties. Implementation behind
         update(id, ...) — the consolidated Point/entity update (epic #888 W2)."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
-        return self._update_entity(id_val, **props)
+        # #2296 review: strip the `_emit_event`-owned names BEFORE the relay.
+        # `_update_entity`'s first parameter is `self`, so a `self` key (reachable
+        # through the nested props= convention just flattened) raised `TypeError`
+        # AT THIS CALL — one frame before intake could drop it — instead of the
+        # strip-and-ignore every other reserved name gets, and the D30 guard
+        # below could never see the name. The names are passed on so that guard
+        # can still answer the UNDECLARED ones loudly; `_reserved_supplied` is
+        # popped first because it is this relay's own channel, not a tenant
+        # property.
+        props.pop("_reserved_supplied", None)
+        _reserved = sorted(
+            set(_drop_reserved_emit_props(props)) - _RESERVED_ACTOR_PROPS)
+        return self._update_entity(id_val, _reserved_supplied=_reserved,
+                                   **props)
 
     def delete_entity(self, id_val: str) -> bool:
         """Delete any entity by ID. Implementation behind delete(id) — the

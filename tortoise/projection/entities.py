@@ -1069,9 +1069,33 @@ class _EntityHandlers:
         # `_event_guarded_merge`), and `backfill_sources` reads it back — the
         # connector content fields ride `itemState` instead of the envelope.
         "itemState", "labels", "assignees",
-        # name / eventStatus / createdAt are intentionally NOT here —
-        # they were historically dropped by the fixed-field MERGE and
-        # are now persisted as arbitrary props via _persist_extra_props.
+        # #8010: the Slack/Linear connectors' full-text hash. It is an EDIT
+        # SIGNAL, not node content — the raw text it hashes must not reach the
+        # graph, and an undeclared digest string would be a persistable prop
+        # (the open passthrough the #3998 note below closes for :Source).
+        # Declared here so it rides the version digest without growing the
+        # Event surface.
+        "textDigest",
+        # #2788: `name` / `eventStatus` / `createdAt` are deliberately NOT in
+        # this skip set — the omission is what lets `_persist_extra_props`
+        # carry them onto the node (its skip is `_META_KEYS |
+        # _EVENT_HANDLED`). This is a PROP lane, never a projection-owned STATE
+        # lane: an Event is a dated fact (§4.5), so no fold reads any of the
+        # three back into Event state. `status` is not in this skip set either
+        # (so a writer-supplied `status` also lands as a prop), and the
+        # consistency gate compares `status` only for the Object/Subject
+        # families — but a `status` prop on an Event is NOT inert:
+        # `_promote_incident_operators` (sdk.py, #7853) reads an Event
+        # endpoint's `status` as a live/draft gate, so it suppresses operator
+        # promotion exactly as a draft Point does. Of the three omitted keys,
+        # only `name` has a reader (`sdk.backfill_about_entities` matches an
+        # Event against a Point's content); `eventStatus` is an INGEST marker
+        # (`scheduled` → `completed`, written by the session/meeting indexers),
+        # not a state read. The typed commit path cannot populate the lane at
+        # all — `CommitEvent` is `extra="forbid"` (`commit_schema.py`) — so
+        # only in-tree SDK/indexer writers reach it. The pack-declared fold
+        # generalization is Object-scoped and does NOT extend to Events
+        # (#2729); #2725 answered the Event-carries-state question "no".
     })
     # #3998 (D30): the DECLARED extra-property surface of a :Source. The graph
     # is the INDEX of the raw, not its store — so this is a CLOSED set, not an
@@ -3687,6 +3711,11 @@ class _EntityHandlers:
         `objectKind` are RETIRED and are never written (nor re-admissible via
         the open passthrough).
 
+        #5082: ``sourceKind`` is written ``'document'`` on CREATE ONLY
+        (``coalesce``), completing §4.6's REQUIRED field set for this node and
+        agreeing with the sibling ``_mint_source_stub`` default. It is the
+        TYPE axis; ``documentKind`` stays the GENRE axis (§4.4).
+
         #5422: ``contentHash`` is the node's **version anchor** on the
         extraction path (ONTOLOGY §4.6 — the hash identifies a version;
         identity is ``url``). It is written by the fixed clause above, gated
@@ -3763,6 +3792,23 @@ class _EntityHandlers:
             "MERGE (s:Source {url:$id}) " + clear_then_set_prefix("s") +
             "SET s.id=coalesce(s.id, $id), "
             "    s.title=coalesce($title, s.title), "
+            # #5082 (ONTOLOGY §4.6 + #5013 Q2): a document IS a `:Source`, and
+            # §4.6 marks `sourceKind` REQUIRED (✅) on every `:Source` — it is
+            # the TYPE axis, distinct from `documentKind`'s genre axis (§4.4:
+            # "`documentKind` is not `sourceKind` … neither absorbs the
+            # other"). This writer wrote none, so a document node carried
+            # `sourceKind = NULL` — a declared-but-unwritten REQUIRED field —
+            # while the sibling mint path `_mint_source_stub`
+            # (`projection/edges.py`) already defaults any non-`session:` url
+            # to exactly `'document'`: two writers of one node, disagreeing on
+            # a REQUIRED field. `'document'` is the registered §5 vocabulary
+            # term and `SOURCE_KIND_DEFAULTS` registers it NEUTRAL, so no
+            # credibility inheritance moves (#398).
+            # SET-ON-CREATE-ONLY via `coalesce`: #398's never-overwrite
+            # contract — a node that already carries an authoritative
+            # `sourceKind` (a stub, a connector Source, a session Source)
+            # keeps it, and a partial re-write cannot change it.
+            "    s.sourceKind=coalesce(s.sourceKind, 'document'), "
             # #5422: the document :Source's version anchor (ONTOLOGY §4.6 —
             # the hash names a version, identity is `url`). Gated so a write
             # that CARRIES no hash ($ch IS NULL) or an EMPTY one ($ch = '' —
@@ -4023,10 +4069,24 @@ class _EntityHandlers:
             from tortoise.security import validate_document_id
             validate_document_id(str(obj))
             # D10 (ONTOLOGY §4.4): a document is a :Source keyed by url.
+            # #5082 (second writer): the SAME document `:Source` shape the
+            # `DocumentCreated` fold writes — §4.6 marks `sourceKind` REQUIRED
+            # on every `:Source`, and #5013 Q2 keeps the TYPE axis here while
+            # the genre rides `documentKind` (the two are different questions,
+            # §4.4). Written on BOTH arms: create stamps 'document', match
+            # FILLS a NULL — which is exactly the effect of
+            # `_upsert_document`/`_execute_commit_writes`' plain-`SET` +
+            # `coalesce` (#398's never-overwrite contract). An authoritative
+            # kind (a `_mint_source_stub` stub, a connector/session Source) is
+            # kept, and a document node minted by THIS writer before the fix
+            # (or replayed from an old journal line) is repaired by the next
+            # fold instead of staying NULL forever.
             self.g.query(
                 "MERGE (s:Source {url:$id}) "
                 "ON CREATE SET s.id=$id, s.title=$id, "
-                "              s.documentKind='transcript'",
+                "              s.sourceKind=coalesce(s.sourceKind, 'document'), "
+                "              s.documentKind='transcript' "
+                "ON MATCH SET s.sourceKind=coalesce(s.sourceKind, 'document')",
                 params={"id": obj},
             )
             self.g.query(

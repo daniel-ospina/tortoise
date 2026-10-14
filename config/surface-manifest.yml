@@ -88,8 +88,9 @@ response_fields:
   field: malformed
   emitted_when: only in the honest-absence branch, and only when a chain window is inverted (validTo before validFrom,
     so it covers no instant)
-  unchanged_when_off: yes — no flag; the found and ambiguous replies are byte-identical, and this key is ABSENT
-    rather than false when no window is inverted (#5361)
+  unchanged_when_off: 'yes — no flag; this key is ABSENT rather than false when no window is inverted, so a
+    non-inverted reply never gains it. (That was the #5361 baseline; since #7818 the found AND ambiguous replies
+    additionally carry the uniform `status`, and the ambiguous reply also carries `found` — see those rows below.)'
 - response: sdk:get_historical_knowledge
   field: malformed_ids
   emitted_when: the same condition as malformed, and always alongside it — the ids of the chain entries carrying
@@ -99,8 +100,26 @@ response_fields:
   field: nearest.malformed
   emitted_when: ALWAYS in the honest-absence branch, on every call that reports a nearest entry; true iff that entry
     is the inverted one
-  unchanged_when_off: NO — deliberately not gated. nearest gains this key (true or false) whenever it is present,
-    so the absence-branch reply gains one key on every call; the found and ambiguous replies are untouched (#5361)
+  unchanged_when_off: 'NO — deliberately not gated. nearest gains this key (true or false) whenever it is present,
+    so the absence-branch reply gains one key on every call. (That was the #5361 baseline; since #7818 every reply
+    additionally carries the uniform `status`, and the ambiguous reply also carries `found` — see those rows below.)'
+- response: sdk:get_historical_knowledge
+  field: status
+  emitted_when: 'ALWAYS, on every reply — the uniform three-value reply contract added by #7818, one of
+    found|ambiguous|absent. `found` means exactly one window covers the instant (`valid_point` present);
+    `ambiguous` means two or more cover it (`candidates` present, `valid_point` ABSENT); `absent` means none does.
+    Branch on `status`, never on `found` alone — see the `found` row below'
+  unchanged_when_off: 'n/a — not gated by a flag; every reply gains the key, so no pre-#7818 reply shape is
+    byte-identical (the key is always present, never omitted)'
+- response: sdk:get_historical_knowledge
+  field: found
+  emitted_when: 'ALWAYS, on every reply — a boolean. True on the `found` reply (`valid_point` present) and, since
+    #7818, also on the `ambiguous` reply (two candidates WERE found; `valid_point` is what is absent); false on
+    `absent`. Before #7818 the `ambiguous` reply OMITTED the key, so a consumer reading `.get("found")` read a
+    genuine two-candidate ambiguity as nothing-was-true-at-that-instant'
+  unchanged_when_off: 'NO for the ambiguous reply, yes for the found and absent replies — not flag-gated. On the
+    found and absent replies the value is unchanged; on the ambiguous reply `found` changed from ABSENT to True,
+    which is the deliberate #7818 contract fix (a consumer must branch on `status`, not on `found` alone)'
 - response: sdk:capture_session
   field: graph_ops
   emitted_when: always on the SDK path — the capture's measured graph-operation count as {total, by_phase}, added
@@ -140,7 +159,7 @@ response_fields:
   emitted_when: 'the row is a Point with status `draft` — present only when true (the #1353 D8 / #2294 additive
     rule), so every live hit is byte-identical. It is the machine-readable badge: the status vocabulary is not something
     a consumer should have to know to see that a row is staged. tortoise_recall mode=state and mode=custom (both
-    serve recall_state); mode=gaps has its own ranker'
+    serve recall_state); mode=gaps has its OWN ranker and carries the `gaps_ranking.*` trio instead (below)'
   unchanged_when_off: yes — not flag-gated; the key is ABSENT on every non-draft row
 - response: tortoise_recall
   field: recall_ranking.confidence
@@ -163,6 +182,31 @@ response_fields:
     without knowing the status vocabulary
   unchanged_when_off: NO for an unmeasured draft, yes for everything else — the same scoping as recall_ranking.confidence;
     every live row keeps its "posterior"/"neutral" verdict
+- response: tortoise_recall
+  field: gaps_ranking.draft
+  emitted_when: 'mode=gaps ONLY: the row is a Point with status `draft` — present only when true (the #1353 D8 / #2294
+    additive rule), so every live gap is byte-identical. `recall_gaps` does not exclude drafts (a draft is CURRENT,
+    not terminal — live.py), so the gaps ranker is a second surface that can return one; the recall_ranking.draft entry
+    above is state/custom-only, which is why this is its own field'
+  unchanged_when_off: yes — not flag-gated; the key is ABSENT on every non-draft gap
+- response: tortoise_recall
+  field: gaps_ranking.confidence
+  emitted_when: 'mode=gaps ONLY: the same rows as gaps_ranking.draft, and only when EP has NOT measured the claim
+    (no persisted posterior, and no non-baseline legacy ep_alpha — the #3276 measured predicate): confidence becomes
+    null. Rationale is the one the state/custom entry states — a draft is EP-inert, so no belief is computed for it,
+    and the neutral 0.5 it used to report reads as a measurement. A draft gap that DOES carry a persisted posterior
+    keeps its measured number: the number is real, only the staging is the news. A draft gap also sorts after every
+    live gap (an explicit status tiebreaker — its structural score is not an acceptable basis for placing it first)'
+  unchanged_when_off: 'NO for an unmeasured draft, yes for everything else — deliberately not flag-gated. Live gaps:
+    identical number, identical key set, identical order. Uncalibrated LIVE gaps keep the documented #898 neutral
+    0.5 + "neutral" (a recorded decision this change does not reopen)'
+- response: tortoise_recall
+  field: gaps_ranking.confidence_source
+  emitted_when: the same rows as gaps_ranking.confidence becomes null — the source reads "uncomputed" instead of
+    "neutral", so a consumer can tell "no belief was computed for this staged row" from "a live gap nobody measured"
+    without knowing the status vocabulary
+  unchanged_when_off: NO for an unmeasured draft, yes for everything else — the same scoping as gaps_ranking.confidence;
+    every live gap keeps its "posterior"/"neutral" verdict
 - response: sdk:create_operator
   field: direction_basis
   emitted_when: 'always, on every operator created through the #7852 W1 write path — the basis the recorded direction
@@ -177,6 +221,89 @@ response_fields:
     "w1 yes approved" 2026-10-09)
   unchanged_when_off: n/a — not flag-gated; the tool returns the operator properties, so every pre-existing key
     keeps its value
+# #8482: the repair at the dispatch seam moves a failure the tool's own advertised
+# output schema cannot carry off `structured_content` and onto the ERROR channel. The
+# status/prose half needs no record (it ships in `content`, which an error result always
+# has). The MACHINE-READABLE half is recorded ONLY for the wait-bound refusal, the one
+# producer whose mapping sits at the payload's TOP LEVEL (`{"error": {code, message,
+# data}}`), which is where `_schema_error_result` reads it. A `_safe` failure DOES carry a
+# mapping (`code`/`violations`/`batch_id`), but inside a wrap envelope it sits under
+# `result` (`{"result": {"error": ...}}`) — the top-level read cannot reach it, so it is
+# repaired off `structured_content` and survives VERBATIM as the JSON text in `content`, and
+# no `_meta` is claimed for it. Recorded once per tool that carries a wrap envelope
+# (`x-fastmcp-wrap-result`) — the 11 typed envelopes plus the 2 union ones, which are
+# repaired only for the wait-bound refusal (their schema admits a dict `result`, so a
+# `_safe` error dict is left exactly as it was). A non-wrap tool is NOT repaired: its
+# object schema already carries the same payload in `structured_content.error`.
+- response: tortoise_check_structure
+  field: _meta.tortoise_error
+  emitted_when: 'only for the transport wait-bound refusal — the ONE producer whose failure payload is a `{code, message, data}`
+    mapping the advertised schema cannot carry; re-homed verbatim (the wait bound''s `data.retry_after` is the retry
+    delay''s ONE source, the refusal prose being digit-free by design). A `_safe` failure inside an `array` envelope
+    does NOT set this key: it is dropped from `structured_content` and survives as the JSON text in `content`.
+    Absent on every successful call'
+  unchanged_when_off: yes — a successful call's `structured_content` and `_meta` are byte-identical
+- response: tortoise_list_namespaces
+  field: _meta.tortoise_error
+  emitted_when: 'the same #8482 repair on this tool''s wrap envelope. `_meta.tortoise_error` is set ONLY by the transport
+    wait-bound refusal; a `_safe` failure is dropped from `structured_content` and survives as the JSON text in `content`'
+  unchanged_when_off: yes — a successful call's `structured_content` and `_meta` are byte-identical
+- response: tortoise_list_batches
+  field: _meta.tortoise_error
+  emitted_when: 'the same #8482 repair on this tool''s wrap envelope. `_meta.tortoise_error` is set ONLY by the transport
+    wait-bound refusal; a `_safe` failure is dropped from `structured_content` and survives as the JSON text in `content`'
+  unchanged_when_off: yes — a successful call's `structured_content` and `_meta` are byte-identical
+- response: tortoise_packs_list
+  field: _meta.tortoise_error
+  emitted_when: 'the same #8482 repair on this tool''s wrap envelope. `_meta.tortoise_error` is set ONLY by the transport
+    wait-bound refusal; a `_safe` failure is dropped from `structured_content` and survives as the JSON text in `content`'
+  unchanged_when_off: yes — a successful call's `structured_content` and `_meta` are byte-identical
+- response: tortoise_suggest_entry_points
+  field: _meta.tortoise_error
+  emitted_when: 'the same #8482 repair on this tool''s wrap envelope. `_meta.tortoise_error` is set ONLY by the transport
+    wait-bound refusal; a `_safe` failure is dropped from `structured_content` and survives as the JSON text in `content`'
+  unchanged_when_off: yes — a successful call's `structured_content` and `_meta` are byte-identical
+- response: tortoise_search
+  field: _meta.tortoise_error
+  emitted_when: 'the same #8482 repair on this tool''s wrap envelope (the P0 fixture of the issue). `_meta.tortoise_error` is set
+    ONLY by the transport wait-bound refusal; a `_safe` failure is dropped from `structured_content` and survives as
+    the JSON text in `content`'
+  unchanged_when_off: yes — a successful call's `structured_content` and `_meta` are byte-identical
+- response: tortoise_expand_relationships
+  field: _meta.tortoise_error
+  emitted_when: 'the same #8482 repair on this tool''s wrap envelope. `_meta.tortoise_error` is set ONLY by the transport
+    wait-bound refusal; a `_safe` failure is dropped from `structured_content` and survives as the JSON text in `content`'
+  unchanged_when_off: yes — a successful call's `structured_content` and `_meta` are byte-identical
+- response: tortoise_calibrate_summary
+  field: _meta.tortoise_error
+  emitted_when: 'the same #8482 repair on this tool''s wrap envelope. `_meta.tortoise_error` is set ONLY by the transport
+    wait-bound refusal; a `_safe` failure is dropped from `structured_content` and survives as the JSON text in `content`'
+  unchanged_when_off: yes — a successful call's `structured_content` and `_meta` are byte-identical
+- response: tortoise_diary_read
+  field: _meta.tortoise_error
+  emitted_when: 'the same #8482 repair on this tool''s wrap envelope. `_meta.tortoise_error` is set ONLY by the transport
+    wait-bound refusal; a `_safe` failure is dropped from `structured_content` and survives as the JSON text in `content`'
+  unchanged_when_off: yes — a successful call's `structured_content` and `_meta` are byte-identical
+- response: tortoise_list_graphs
+  field: _meta.tortoise_error
+  emitted_when: 'the same #8482 repair on this tool''s wrap envelope. `_meta.tortoise_error` is set ONLY by the transport
+    wait-bound refusal; a `_safe` failure is dropped from `structured_content` and survives as the JSON text in `content`'
+  unchanged_when_off: yes — a successful call's `structured_content` and `_meta` are byte-identical
+- response: tortoise_search_sessions
+  field: _meta.tortoise_error
+  emitted_when: 'the same #8482 repair on this tool''s wrap envelope. `_meta.tortoise_error` is set ONLY by the transport
+    wait-bound refusal; a `_safe` failure is dropped from `structured_content` and survives as the JSON text in `content`'
+  unchanged_when_off: yes — a successful call's `structured_content` and `_meta` are byte-identical
+- response: tortoise_query
+  field: _meta.tortoise_error
+  emitted_when: 'the same #8482 repair, on this tool''s UNION envelope, and ONLY for the wait-bound refusal — its schema
+    admits a dict `result`, so a `_safe` error dict is deliberately left untouched'
+  unchanged_when_off: yes — a successful call's `structured_content` and `_meta` are byte-identical
+- response: tortoise_delete_entity
+  field: _meta.tortoise_error
+  emitted_when: 'the same #8482 repair, on this tool''s UNION envelope, and ONLY for the wait-bound refusal — its schema
+    admits a dict `result`, so a `_safe` error dict is deliberately left untouched'
+  unchanged_when_off: yes — a successful call's `structured_content` and `_meta` are byte-identical
 - response: tortoise_search
   field: relationships_unavailable
   emitted_when: only on a Point search whose bounded relationship-decoration query RAISED — every hit of the batch
@@ -1769,7 +1896,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_session_capture
-  served_from: tortoise/mcp_server.py:5aac73bc86e8a8a1
+  served_from: tortoise/mcp_server.py:d877e36cde199530
   served_attributes: a1b8417f6b1ea4c9
   family: sessions
   family_rank: 4

@@ -15,6 +15,7 @@ import pytest  # noqa: I001
 from fastapi.testclient import TestClient
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import require_answered
 from tortoise.hosted_api import app, _make_sdk
 from tortoise.sdk import TortoiseSDK
 
@@ -485,7 +486,8 @@ def test_off_switch_patch_stops_capture_409(client, monkeypatch):
     assert r0.status_code == 200, r0.text
     conv = [{"role": "user", "content": "we decided to ship the memory capture slice"},
             {"role": "assistant", "content": "agreed — capture is default-on now"}]
-    r1 = client.post("/v1/sessions", json={"conversation": conv})
+    r1 = require_answered(client.post("/v1/sessions", json={"conversation": conv}),
+                          what="POST /v1/sessions answered")
     assert r1.status_code == 200, r1.text
     sessions_after_on = _make_sdk(namespace="test-team-1")._get_proj().g.query(
         "MATCH (s:Session) RETURN count(s)").result_set[0][0]

@@ -65,11 +65,15 @@ from tortoise.sdk import TortoiseSDK
 
 # The defect (a plain-list embedding write) and its fix (the clear-then-set
 # seam) are embedded-engine specific — the server lane lands the plain-list
-# write too, so the module is module-level `embedded_only` and MUST be
-# registered in config/ci-surfaces.yml `carve_out:` AND in
-# tests/_embedded.py TEST_NO_REDIRECT_STEMS. Without that registration a
-# URI-set selection collects the file and SKIPS every case via the marker hook
-# — a permanently green, permanently unexecuted gate (the #4047 shape).
+# write too, so the module is module-level `embedded_only` and its stem MUST
+# be registered in ALL THREE pinned homes: config/ci-surfaces.yml `carve_out:`,
+# tests/_embedded.py TEST_NO_REDIRECT_STEMS, and the `expected` frozenset in
+# tests/test_markers.py::test_no_redirect_stems_registry_exact (the third leg
+# of the three-way mirror — #8461 records that the hand-maintained literal is
+# the mechanism behind three separate drifts). Without the registration a URI-set selection collects the file and
+# SKIPS every case via the marker hook — a permanently green, permanently
+# unexecuted gate (the #4047 shape); with the stem missing from the mirror,
+# test_markers.py reds instead.
 pytestmark = pytest.mark.embedded_only
 
 _EMBED_PATCH = "tortoise.embeddings.compute_embedding"

@@ -108,6 +108,19 @@ def test_docs_scanning_gates_stay_in_tier1():
         "#2881 durability gate must stay in tier1 — same docs-only silent-drop "
         "class (#4309)"
     )
+    assert "test_7818_ontology_record.py" in tier1, (
+        "#7818 ONTOLOGY §4.7 doc↔code pin must be in tier1 — the other half of "
+        "the #7818 guard (`test_7818_boundary_ambiguity_contract.py`) is "
+        "`sdk`-registered and docker-lane, so a docs-only `docs/ONTOLOGY.md` "
+        "edit never runs it; without this hermetic pin the §4.7 coverage-rule "
+        "drift lands green (#4309 class, same as #5142/#2881)"
+    )
+    assert "test_7818_plan_record_5362.py" in tier1, (
+        "#7818/#5362 plan-record pin must be in tier1 — the #5362 plan's "
+        "RES-1 residual and out-of-scope list are docs the drift arrives on, "
+        "and a docs-only edit runs only tier1; without this pin a re-staled "
+        "`found`-omission claim merges green (#4309 class)"
+    )
 
 
 def test_public_site_surface_change_selects_onboarding_and_skips_slow():
@@ -1324,6 +1337,61 @@ def test_orchestrator_harness_change_selects_core_not_tier1():
     assert "core" in r["surfaces"], r
     assert "test_orchestrator_harness.py" in r["test_files"], r
     assert r["full"] is False, r
+
+
+def test_queue_dispatch_and_fleet_state_change_select_core_not_tier1():
+    # PR #8594 review P2: tools/agent-infra-queue-dispatch.py owns
+    # tests/test_queue_dispatch_fail_closed.py and tools/fleet_state.py owns
+    # tests/test_fleet_state.py — both `core`-registered. `tools/` is a flat
+    # NON_PYTHON_PREFIXES entry and neither path matches a SOURCE_PATTERNS row,
+    # so each one's own change came back with `changed == []` and took the
+    # docs-only early return — `select()` returned NO surface and the guard never
+    # ran on the file it guards (the #1349/#3332/#3616 silent-drop class).
+    #
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: both guards are
+    # hermetic and sub-second, so selecting `core` runs them at the lowest CI cost.
+    # Mutation check: removing either CORE_ALSO entry fails its assert below.
+    for path, guard in (
+        ("tools/agent-infra-queue-dispatch.py", "test_queue_dispatch_fail_closed.py"),
+        ("tools/fleet_state.py", "test_fleet_state.py"),
+    ):
+        r = _sel([path])
+        assert r["full"] is False, (path, r)
+        assert "core" in r["surfaces"], (path, r)
+        assert guard in r["test_files"], (path, r)
+        assert set(r["test_files"]) != _tier1(), (path, r)
+
+
+def test_capstone_probe_change_selects_core_not_tier1():
+    # docs/evidence/7950-capstone/probes/e2e_chain_probe.py owns
+    # tests/test_7950_capstone_probe.py (`core`): the DB-free pin asserting the
+    # probe's two reconciliation readers (`record_key_map` / `cache_key_map`)
+    # return the REAL property maps, not `{}` placeholders — two empty mappings
+    # always agree, so the pre-fix shape made `field_mismatches` structurally
+    # zero and the probe's committed log proved key-set agreement only.
+    #
+    # PR #8609 review P1: `docs/` is a flat NON_PYTHON_PREFIXES entry and no
+    # SOURCE_PATTERNS row matches the probe, so a PROBE-ONLY change came back
+    # with `changed == []` and took the docs-only early return — `select()`
+    # returned NO surface and the pin never ran on the very file whose readers
+    # it pins. Reverting the readers to the pre-fix `{}` shape would land with
+    # CI green (the #1349/#3332/#3616 silent-drop class). A SOURCE_PATTERNS
+    # entry alone cannot fix it: `_selection_relevant()` deliberately skips the
+    # `core` surface, and the guard is `core`-registered.
+    #
+    # Measured before the CORE_ALSO entry: `_sel(["docs/evidence/7950-capstone/
+    # probes/e2e_chain_probe.py"])` -> surfaces=[], full=False, test_files 39,
+    # test_7950_capstone_probe.py absent. CORE_ALSO keeps the path and selects
+    # `core`; the directory prefix covers the sibling probes too.
+    # Mutation check: removing the CORE_ALSO entry fails assert 1 below.
+    for path in (
+        "docs/evidence/7950-capstone/probes/e2e_chain_probe.py",
+        "docs/evidence/7950-capstone/probes/s1_census.py",
+    ):
+        r = _sel([path])
+        assert "core" in r["surfaces"], (path, r)
+        assert "test_7950_capstone_probe.py" in r["test_files"], (path, r)
+        assert r["full"] is False, (path, r)
 
 
 def test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1():

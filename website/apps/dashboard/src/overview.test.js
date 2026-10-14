@@ -976,6 +976,15 @@ test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"'
   // points") from the verb ("point your agent at") — which is why
   // wizardFlow.js:85 is exempt. Verb-sense usage must be ALLOWLISTED above,
   // never silently tolerated.
+  //
+  // SCOPE NOTE (#3103 — DECIDED, do not re-litigate): this class scan covers
+  // point(s) vocabulary ONLY. The rescue panel's artifact-side count reads
+  // `nodes / edges` and is deliberately OUTSIDE this ratchet. That is a ruling,
+  // not an oversight — and it is NOT listed in ALLOW above, because it is not
+  // point vocabulary at all (allowlisting it would imply it were a tolerated
+  // exception). The decision, its reason, and the guard that pins it live in
+  // the #3103 test at the end of this file; read that before sweeping the
+  // panel to the anchor.
   const residual = scrubbed.match(/\bpoints?\b/gi) ?? []
   assert.deepEqual(residual, [],
     `new "point" vocabulary in main.jsx: ${[...new Set(residual)].join(', ')}`)
@@ -1036,4 +1045,108 @@ test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"'
     assert.ok(!re.test(commentOnlyStripped),
       `${label} — a commented-out anchor must not satisfy the presence ratchet`)
   }
+})
+
+// ── #3103: the rescue panel DELIBERATELY keeps engine vocabulary ─────────────
+// #3012 declared this out of scope (its scope record, Fix 8) as a DECISION:
+// relabel the rescue panel's `nodes / edges` to the #2361 anchor, or keep the
+// engine terms. It is decided HERE — and recorded here, next to the #2361
+// guard above — so the next lane that reads #2361 as "sweep every surface"
+// finds the ruling instead of relabelling it.
+//
+// DECISION: KEEP the engine terms. The panel is not a count-of-record surface.
+//   * The number is `latest_backup.node_count` — the dump projection's
+//     DATA-NODE count (tortoise/hosted_backup.py `dump_graph`: `MATCH (n)`
+//     minus the export-skip bookkeeping, `_EXPORT_SKIP_LABELS` in
+//     tortoise/hosted_api.py). It carries :Point operators, :Session nodes
+//     and capture receipts, so it is a SUPERSET of what the user calls
+//     memories — sized by the graph engine, not by the product's noun.
+//   * "Memories" is a DIFFERENT quantity: `team.point_count`, the
+//     :Point-only, demo-excluded count behind the dashboard's own Memories
+//     card — operators INCLUDED (operators are :Point; the non-operator
+//     filter belongs to the separate "Nodes used" metric, #4331). That the
+//     card counts operators as "Memories" is #8573, not part of this ruling.
+//     Every memory is a node; not every node is a memory. Writing
+//     "N memories" over node_count would assert a number that is not the
+//     memory count — a false equivalence, which is worse than jargon.
+//   * `edge_count` has no user-facing anchor at all (#2361 anchored only the
+//     STORED OBJECT), so relabelling the node half alone yields
+//     "N memories / M edges": two vocabularies inside one phrase.
+//   * The panel is an artifact-side diagnostic for owners/admins — the server
+//     itself calls it a "Read-only rescue view (artifact side)".
+//
+// The guard is bidirectional on purpose: it fails if the copy is relabelled
+// WITHOUT this decision being revisited, and it fails if the stated REASON
+// stops holding (i.e. if the two counts ever collapse to one field).
+test('#3103 decision: the rescue panel keeps ENGINE terms (nodes / edges) — artifact-side, not count-of-record', () => {
+  const src = readFileSync(join(__dirname, 'main.jsx'), 'utf8')
+  const scan = stripComments(src)
+
+  // Located by the ARTIFACT FIELD that feeds it, never by the words: anchoring
+  // on the copy would make a relabel report "the line is gone" instead of
+  // "the label is wrong" — the wrong failure for a reviewer to act on
+  // (mutation-verified: M1 of the #3103 cycle). A 400-char window from the
+  // field spans the whole count expression, and it is extended BACK to the
+  // row's opening `{trashInspect.latest_backup ? (` so the label BEFORE the
+  // field is inside it too — a forward-only window let the mutation
+  // `Latest backup:` → `Latest memories backup:` pass unnoticed. The scan is
+  // the STRIPPED view: this is about RENDERED copy, so a commented-out
+  // `nodes / edges` can neither satisfy it nor trip it.
+  const fieldAt = scan.indexOf('trashInspect.latest_backup.node_count')
+  assert.notEqual(fieldAt, -1,
+    'latest_backup.node_count no longer feeds the rescue panel — re-derive the #3103 decision site')
+  const rowAt = scan.lastIndexOf('trashInspect.latest_backup ? (', fieldAt)
+  const countCopy = scan.slice(rowAt === -1 ? fieldAt : rowAt, fieldAt + 400)
+
+  // (1) DECISION — engine terms present, anchor absent.
+  assert.match(countCopy, /\bnodes\b/,
+    '#3103: the backup count keeps the engine term "nodes"')
+  assert.match(countCopy, /\bedges\b/,
+    '#3103: the backup count keeps the engine term "edges"')
+  assert.ok(!/memor/i.test(countCopy),
+    '#3103: the rescue panel must NOT label the artifact-side node count "memories" — ' +
+    'node_count is the dump projection (all data nodes), not point_count. Re-read ' +
+    'the #3103 decision above before relabelling.')
+  assert.ok(!/point_count/.test(countCopy),
+    '#3103: the rescue panel reads the artifact counts, never the memories count')
+
+  // (2) ...and it is fed by the ARTIFACT fields, which is what makes (1) true.
+  assert.match(countCopy, /latest_backup\.edge_count/,
+    '#3103: the edge half of the pair also comes from the artifact manifest')
+
+  // (3) The REASON still holds — machine-checked, not prose. "Memories" is the
+  // :Point-only, demo-excluded count (team.point_count) on a DIFFERENT card, so the
+  // two quantities are genuinely different fields. If they ever collapse to a
+  // single source, the rationale is void and this decision must be re-argued.
+  const memoriesCard = scan.match(
+    /card-val">\{[^}]*team\.point_count[\s\S]{0,400}?card-label">\s*Memories</)
+  assert.ok(memoriesCard,
+    'the Memories card is no longer fed by team.point_count — the #3103 rationale ' +
+    '(node_count != the memory count) must be re-verified before trusting this decision')
+  assert.ok(!/node_count/.test(memoriesCard[0]),
+    'the Memories card must not read node_count — a memory is a node, not every node is a memory')
+
+  // (4) The exemption is DOCUMENTED at the copy site, so it reads as a ruling
+  // rather than as an accident of history (the failure the OVERRIDES line
+  // exists to prevent): the lane holding #2361 opens main.jsx, not this file.
+  const decisionAt = src.indexOf('/* #3103 DECISION')
+  assert.notEqual(decisionAt, -1,
+    '#3103: the decision record must sit at the copy site in main.jsx — the file a ' +
+    'copy editor opens — not only in this test')
+  // Measured from the CODE, never from the raw first occurrence of the field:
+  // the decision comment itself cites `latest_backup.node_count` in its prose,
+  // so a raw `indexOf` resolves INSIDE the comment and the distance check
+  // becomes a tautology — mutation-verified by relocating this whole block to
+  // the top of main.jsx, which left the guard green. Search AFTER the block.
+  const afterDecision = src.indexOf('*/', decisionAt) + 2
+  const copyAt = src.indexOf('trashInspect.latest_backup.node_count', afterDecision)
+  assert.notEqual(copyAt, -1,
+    'the rescue panel no longer reads trashInspect.latest_backup.node_count — ' +
+    're-derive the #3103 decision site')
+  assert.ok(copyAt - afterDecision < 3000,
+    '#3103: the decision record must sit AT the rescue panel copy site, not elsewhere in main.jsx')
+  const decisionBlock = src.slice(decisionAt, src.indexOf('*/', decisionAt))
+  assert.match(decisionBlock, /OVERRIDES:/,
+    '#3103: a deliberate departure from #2361 needs its OVERRIDES line, so a future ' +
+    'lane holding that rule does not tidy this away as drift')
 })

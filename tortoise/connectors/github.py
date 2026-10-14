@@ -172,7 +172,7 @@ class GitHubConnector:
                 "--state", self.state,
                 "--limit", str(self.limit),
                 "--json", "number,title,state,createdAt,closedAt,url,"
-                          "labels,assignees,author,milestone",
+                          "labels,assignees,author,milestone,body",
             ],
             capture_output=True, text=True, timeout=30,
         )
@@ -188,7 +188,7 @@ class GitHubConnector:
                 "--state", self.state,
                 "--limit", str(self.limit),
                 "--json", "number,title,state,createdAt,closedAt,url,"
-                          "labels,assignees",
+                          "labels,assignees,body",
             ],
             capture_output=True, text=True, timeout=30,
         )
@@ -205,7 +205,7 @@ class GitHubConnector:
                 "--state", self.state,
                 "--limit", str(self.limit),
                 "--json", "number,title,state,createdAt,closedAt,mergedAt,url,"
-                          "labels,assignees",
+                          "labels,assignees,body",
             ],
             capture_output=True, text=True, timeout=30,
         )
@@ -466,6 +466,10 @@ class GitHubConnector:
             content = {
                 "labels": issue.get("labels"),
                 "assignees": issue.get("assignees"),
+                # #8010: the body's digest is part of the version, so the
+                # webhook must carry the body too or one unchanged item hashes
+                # two ways against the poll/REST producers (a false stale).
+                "body": issue.get("body", ""),
             }
             entry = {
                 "number": issue.get("number"),
@@ -502,6 +506,8 @@ class GitHubConnector:
                 # digest matches the poll/REST producers' for one item state.
                 "labels": pr.get("labels"),
                 "assignees": pr.get("assignees"),
+                # #8010: same for the PR body — its digest is item content.
+                "body": pr.get("body", ""),
             })
         return None
 

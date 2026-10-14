@@ -2049,6 +2049,57 @@ def test_minted_source_stub_does_not_clobber_the_document_anchor(live_proj):
     assert int(edge[0][0]) == 1, "extractedFrom edge not wired to the document Source"
 
 
+# ── #5082: the document :Source's TYPE axis (sourceKind) ───────────────────
+# §4.6 marks `sourceKind` REQUIRED on every `:Source`, and #5013 Q2 rules
+# that a document is `sourceKind: document` **and** carries a `documentKind`
+# genre (the two axes are different questions). `_upsert_document` wrote no
+# `sourceKind`, so a document node carried NULL until this write landed.
+
+def _doc_axes(proj, url: str):
+    rows = proj.g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.sourceKind, s.documentKind",
+        params={"u": url},
+    ).result_set
+    return list(rows[0]) if rows else None
+
+
+def test_document_source_carries_source_kind_document(live_proj):
+    """#5082 + ONTOLOGY §4.6 + #5013 Q2: a document `:Source` carries the TYPE
+    axis (`sourceKind='document'`) beside its GENRE axis (`documentKind`) —
+    before this it carried `sourceKind = NULL`, a declared-but-unwritten
+    REQUIRED field."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-sk1", "title": "V1",
+                "document_kind": "brief"})
+    assert _doc_axes(proj, "doc-sk1") == ["document", "brief"]
+
+
+def test_document_source_kind_is_create_only_398(live_proj):
+    """#398 never-overwrite: a `:Source` that already carries an authoritative
+    `sourceKind` keeps it when a document write MERGEs the same `url` — the
+    #5082 write is a `coalesce`, never a clobber."""
+    proj = live_proj
+    proj.apply({"type": "SourceCreated", "url": "doc-sk2",
+                "sourceKind": "agentSession", "title": "session"})
+    proj.apply({"type": "DocumentCreated", "id": "doc-sk2", "title": "V1",
+                "document_kind": "brief"})
+    assert _doc_axes(proj, "doc-sk2") == ["agentSession", "brief"]
+
+
+def test_document_source_kind_matches_the_stub_mint_default(live_proj):
+    """#5082: the two writers of a document `:Source` agree. `_mint_source_stub`
+    (`projection/edges.py`) already defaults a non-`session:` url to
+    `'document'`; a stub minted BEFORE the document fold must leave the fold
+    with nothing to change."""
+    proj = live_proj
+    prov = provenance("doc-sk3", [0, 10], "a claim", extracted_by="test@0")
+    _api(projection=proj)[0].add_point("a claim in the doc", prov,
+                                       extractedFrom="doc-sk3")
+    proj.apply({"type": "DocumentCreated", "id": "doc-sk3", "title": "V1",
+                "document_kind": "brief"})
+    assert _doc_axes(proj, "doc-sk3") == ["document", "brief"]
+
+
 def test_add_document_journals_the_anchor_and_replays_identically(live_proj):
     """#5422: the anchor rides the JOURNALED event, so replay reproduces it.
 
@@ -2121,21 +2172,64 @@ def test_upsert_event_uses_dict_kind(live_proj):
 
 
 def test_upsert_event_produces_document(live_proj):
-    """#125: objectType='Document' → produces→real Document node, no Object clone."""
+    """#125: objectType='Document' → produces→real Document node, no Object clone.
+
+    #5082: the minted document `:Source` must carry the **TYPE** axis
+    (`sourceKind='document'`) beside its genre — §4.6 marks `sourceKind`
+    REQUIRED on every `:Source`, and pre-fix this writer created the node with
+    `sourceKind = NULL` (the gap the four `_required_sweep` harnesses pin).
+    """
     proj = live_proj
     proj.apply({"type": "EventRecorded", "event": {
         "id": "evt-2", "eventKind": "sessionCaptured",
         "subject": "agent-pi", "object": "doc-1", "objectType": "Document",
         "uses": [{"name": "tortoise-capture", "kind": "skill"}]}})
     rows = proj.g.query(
-        "MATCH (e:Event {eventId:'evt-2'})-[:produces]->(d:Source) RETURN d.id"
+        "MATCH (e:Event {eventId:'evt-2'})-[:produces]->(d:Source) "
+        "RETURN d.id, d.sourceKind, d.documentKind"
     ).result_set
     assert rows and rows[0][0] == "doc-1", rows
+    assert list(rows[0][1:]) == ["document", "transcript"], rows
     # No Object clone
     rows2 = proj.g.query(
         "MATCH (e:Event {eventId:'evt-2'})-[:produces]->(o:Object) RETURN count(o)"
     ).result_set
     assert rows2[0][0] == 0, rows2
+
+
+def test_upsert_event_document_source_kind_is_create_only_398(live_proj):
+    """#398 never-overwrite: the event-document write MERGEs an existing
+    `:Source` that an authoritative writer already stamped — the `coalesce`
+    must leave that kind alone (#5082). A plain `SET` mutation is caught here."""
+    proj = live_proj
+    proj.g.query(
+        "MERGE (s:Source {url:'doc-sk-evt2'}) "
+        "SET s.sourceKind='agentSession', s.documentKind='transcript'")
+    proj.apply({"type": "EventRecorded", "event": {
+        "id": "evt-sk-2", "eventKind": "sessionCaptured",
+        "subject": "agent-pi", "object": "doc-sk-evt2",
+        "objectType": "Document"}})
+    assert _doc_axes(proj, "doc-sk-evt2") == ["agentSession", "transcript"]
+
+
+def test_upsert_event_document_source_kind_repairs_a_pre_fix_null(live_proj):
+    """#5082: a document `:Source` minted by THIS writer before the fix (or
+    replayed from an old journal line) carries `sourceKind = NULL`. The write
+    must FILL it on the match arm — an `ON CREATE`-only write leaves the
+    pre-existing node NULL forever (re-review P3 on 59e5d44d6), and the
+    `coalesce` keeps an authoritative kind intact."""
+    proj = live_proj
+    proj.g.query(
+        "MERGE (s:Source {url:'doc-sk-evt3'}) "
+        "SET s.documentKind='transcript'")
+    pre = proj.g.query(
+        "MATCH (s:Source {url:'doc-sk-evt3'}) RETURN s.sourceKind").result_set
+    assert pre and pre[0][0] is None, pre
+    proj.apply({"type": "EventRecorded", "event": {
+        "id": "evt-sk-3", "eventKind": "sessionCaptured",
+        "subject": "agent-pi", "object": "doc-sk-evt3",
+        "objectType": "Document"}})
+    assert _doc_axes(proj, "doc-sk-evt3") == ["document", "transcript"]
 
 
 def test_upsert_event_legacy_string_uses_still_works(live_proj):

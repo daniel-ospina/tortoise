@@ -566,6 +566,13 @@ SOURCE_PATTERNS = {
                    # touching only this page selects no surface and the id guard
                    # never executes on it.
                    "website/design-partners-intro.html",
+                   # The investor one-pager (#8568). Same reasoning as the
+                   # design-partner entry directly above: `noindex`, so it is out
+                   # of the #3950 blog guard's scope — but NOT out of the
+                   # element-id uniqueness guard, whose scope is every served
+                   # document. Without this entry a PR touching only this page
+                   # selects no surface and the id guard never executes on it.
+                   "website/investors.html",
                    # The shared href extractor both blog-guard layers call
                    # (tests/test_website_docs_consistency.py here, and
                    # tests/e2e/test_legal_pages.py in the separate `legal-e2e`
@@ -722,6 +729,13 @@ SOURCE_PATTERNS = {
             # this entry a retrieval_metering.py-only diff matched no pattern,
             # fell through to `core`, and skipped the guard that pins it — the
             # #7076 self-guard class the test below refuses.
+            # #8544: the self-host off-box backup DRIVER. Its guard
+            # (tests/test_selfhost_backup.py) is registered in `api`, and it is
+            # armed from `tortoise/selfhost.py` (already an entry above) — but a
+            # selfhost_backup.py-only diff would otherwise match no pattern and
+            # fall through to `core`, skipping the guard that pins it (the
+            # #2938/#3154/#4367 silent-drop class).
+            "tortoise/selfhost_backup.py",
             "tortoise/retrieval_metering.py",
             "tortoise/transport.py",
             # #2938: EventAPI — the append surface `ingest.py`, `mining.py`,
@@ -999,9 +1013,40 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # silent-drop class), the same shape as tools/queue_resweep.py and
              # tools/drift-guard.py above. Pinned by
              # tests/test_ci_selection.py::test_orchestrator_harness_change_selects_core_not_tier1.
-             "operations/orchestrator-harness/")
-
-# Paths that are NOT python-relevant (docs/config PRs skip the matrix).
+             "operations/orchestrator-harness/",
+             # PR #8594 review P2: the fail-closed dispatcher's review copy
+             # (tools/agent-infra-queue-dispatch.py) owns
+             # tests/test_queue_dispatch_fail_closed.py, and tools/fleet_state.py
+             # owns tests/test_fleet_state.py — BOTH `core`-registered. `tools/` is a
+             # flat NON_PYTHON_PREFIXES entry and neither path matches a
+             # SOURCE_PATTERNS row, so each one's own change came back with
+             # `changed == []`, took the docs-only early return and fell back to
+             # tier-1 smoke: the guards pinning the lane-read fail-closed and the
+             # registry-provenance refusals never ran on the very files that can
+             # weaken them. Same #1349/#3332/#3616 silent-drop class as
+             # tools/queue_resweep.py above. Pinned by
+             # tests/test_ci_selection.py::test_queue_dispatch_and_fleet_state_change_select_core_not_tier1.
+             "tools/agent-infra-queue-dispatch.py",
+             "tools/fleet_state.py",
+             # #7950 / PR #8609 review P1: the capstone end-to-end probe
+             # (docs/evidence/7950-capstone/probes/e2e_chain_probe.py) owns
+             # tests/test_7950_capstone_probe.py, registered `core` — the DB-free
+             # pin asserting the probe's two reconciliation readers map the REAL
+             # property sets (not `{}` placeholders, which make
+             # `field_mismatches` structurally zero). `docs/` is a flat
+             # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches the
+             # probe, so a PROBE-ONLY change came back with `changed == []` and
+             # took the docs-only early return: `select()` returned NO surface
+             # and the pin never ran on the exact file it guards — reverting the
+             # readers to the pre-fix `{}` shape landed with the pin silent (the
+             # #1349/#3332/#3616 silent-drop class, the same shape as the
+             # migrations/placement-doc entries above and
+             # docs/research/1714-solution-converge.md). A SOURCE_PATTERNS entry
+             # could not fix it: `_selection_relevant()` deliberately skips the
+             # `core` surface, and the probe's guard is `core`-registered.
+             # Pinned by
+             # tests/test_ci_selection.py::test_capstone_probe_change_selects_core_not_tier1.
+             "docs/evidence/7950-capstone/probes/")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",

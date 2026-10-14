@@ -1428,8 +1428,16 @@ def _sweep_events() -> None:
                 proj = sdk._get_proj()
                 purge_expired(proj, retention_days=days)
                 purge_overflow(proj, max_events=cap)
-            except Exception:
-                _logger.debug("event retention sweep skipped for %s", org.get("org_id"))
+            except Exception as exc:
+                # #3007: WARNING, not debug. A per-team retention failure was
+                # invisible here (this is the hosted sweeper), so a silently
+                # unenforced per-team event cap read as a healthy sweep. The
+                # exception is carried in the message; there is no stack
+                # (the loop must continue) but the team and the cause are.
+                _logger.warning(
+                    "event retention sweep skipped for %s: %s",
+                    org.get("org_id"), exc,
+                )
     except Exception as exc:
         _logger.warning("event retention sweep failed: %s", exc)
 
@@ -14071,10 +14079,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # NOTE (documented lane divergence): hosted computes _capture_ok AFTER
         # the post-write enrichment — an enrichment-read failure marks points
         # skipped → verb partial → capture_ok False → retryable. The sdk
-        # computes ok BEFORE its surfaced-verification read and treats a
-        # verification failure as a benign warning (capture_ok True). Both
-        # are internally consistent; the divergence is documented, not
-        # forced-aligned (the sdk surface has no skipped/verb concept).
+        # computes ok BEFORE its enrichment read and treats a
+        # verification failure as a benign warning (capture_ok True), while
+        # its verb status — derived from the SAME facts — is still partial.
+        # Both are internally consistent; the divergence is documented, not
+        # forced-aligned (it is now only the RECORDED retry bit, not the
+        # verb: the sdk mirror speaks memory_write_v1 too, with the same
+        # per-point enrichment).
         # Non-fatal bookkeeping (mirror of the sdk guard): a graph hiccup
         # must NOT 500 a committed capture — and on a FAILED capture a raise
         # would leave capture_ok=None → the next same-session re-POST would
@@ -14765,9 +14776,16 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # :Source) — deterministic id, replay-safe MERGE. NO content on the
     # derived path (§4.1: summary/story_arc/sessionId only); doc_status is
     # retired (§9.5 Q3). ──
+    # #5082 (third writer): `sourceKind='document'` is the document's TYPE
+    # axis beside the `documentKind='transcript'` GENRE axis (ONTOLOGY §4.6
+    # marks `sourceKind` REQUIRED on every `:Source`; #5013 Q2 keeps both).
+    # `coalesce` is CREATE-ONLY (#398's never-overwrite contract): a node an
+    # authoritative writer already stamped — e.g. a `_mint_source_stub` stub
+    # for a non-`session:` doc url — keeps its kind.
     proj.g.query(
         "MERGE (s:Source {url:$did}) "
         "SET s.id=coalesce(s.id, $did), "
+        "    s.sourceKind=coalesce(s.sourceKind, 'document'), "
         "    s.documentKind='transcript', s.title=$title, s.summary=$summary, "
         "    s.story_arc=$arc, s.sessionId=$sid, s.eventId=$eid, "
         "    s.sourcePath=$srcpath, s.is_episodic=true, "
@@ -33510,6 +33528,14 @@ async def backups_rebaseline(request: Request):
     graphs update only their per-graph state. Incident subjects follow the
     graph: bare org for the default, "{org}:{gid}" for customs (the same
     key the sweep routes and the watcher uses).
+
+    #8595 review P1: the write refreshes ``label_counts`` as well as
+    ``node_count``. The #661 per-label drift guard compares the CURRENT
+    per-label counts against the ``label_counts`` in the persisted state, and
+    only the sweep's success path ever wrote that field — so refreshing
+    ``node_count`` alone left the label baseline at its PRE-drop value and the
+    next sweep re-fired the very incident the operator cleared (deleting that
+    run's fresh archive and, by delete-to-resolve, filing a NEW issue).
     """
     _check_internal(request)
     body = await _read_internal_json_body(request, required=True)
@@ -33536,6 +33562,8 @@ async def backups_rebaseline(request: Request):
     from tortoise.backup_sweep import (
         _graph_state_key,
         _write_json,
+        query_label_counts,
+        read_graph_state,
         read_org_state,
         resolve_active_graph,
     )
@@ -33571,14 +33599,34 @@ async def backups_rebaseline(request: Request):
         # never walks a sync helper — so `_OFFLOADED_ASYNC_BODIES`' "no inline
         # seam" check passed VACUOUSLY here. Off-loaded, so the declaration is
         # true.
-        count = await asyncio.to_thread(
-            count_data_nodes, db, row["graph_name"])
+        graph_name = row["graph_name"]
+
+        def _current_counts() -> tuple[int, dict[str, int]]:
+            # #8595 review P1: BOTH reads — the total and the per-label
+            # baseline the #661 guard compares against — in ONE hand-off, so
+            # the label query cannot be left inline on the loop (the same
+            # round-trip class as `count_data_nodes`). A label-read failure
+            # RAISES out of the helper and fails the request: writing
+            # `node_count` with an unrefreshed label baseline would re-fire
+            # the incident this call exists to clear.
+            return (count_data_nodes(db, graph_name),
+                    query_label_counts(db.select_graph(graph_name)))
+
+        count, label_counts = await asyncio.to_thread(_current_counts)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"graph unavailable: {e}")  # noqa: B904
     state = {
+        # The default graph merges the legacy org file (the pre-#2313 mirror);
+        # a custom graph merges its OWN per-graph state, so a re-baseline no
+        # longer drops fields the sweep wrote (pre-fix it merged `{}`, which
+        # also left NO `label_counts` at all — the #8595 review's custom-graph
+        # half, where the guard was skipped for a run because one side was
+        # empty).
         **(read_org_state(storage, org_id)
-          if graph_id == "default" else {}),
+          if graph_id == "default"
+          else read_graph_state(storage, org_id, graph_id)),
         "node_count": count,
+        "label_counts": label_counts,
         "updated_at": datetime.now(UTC).isoformat(),
     }
     _write_json(storage, _graph_state_key(org_id, graph_id), state)

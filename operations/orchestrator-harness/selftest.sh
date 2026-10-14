@@ -280,7 +280,7 @@ printf '4114\n8888\n' > "$R/.open_iss"
 printf 'feat/8888-tm\n' > "$R/.pr_brs"
 tmux() { printf 'lane-7777\nmerge-100\n'; }
 # extract the embedded reaper (the heredoc body only)
-awk '/^python3 - "\$O" <<.PY.$/{f=1;next} /^PY$/{f=0} f' "$REFRESH" > "$R/reap.py"
+awk '/^python3 - "\$O" "\$OR" <<.PY.$/{f=1;next} /^PY$/{f=0} f' "$REFRESH" > "$R/reap.py"
 if need "$R/reap.py" "the reaper is extracted from the shipped refresh-candidates.sh"; then
 # the extracted body shells out to tmux; export the fake so the child sees it
 cat > "$R/tmux" <<'SH'
@@ -288,7 +288,19 @@ cat > "$R/tmux" <<'SH'
 printf 'lane-7777\nmerge-100\n'
 SH
 chmod +x "$R/tmux"
-( PATH="$R:$PATH" python3 "$R/reap.py" "$R" ) > "$TMP/reap.out" 2>&1
+# the landed prune shells out to `gh issue view <N> --repo <slug> --json state`
+# (UNCAPPED, per-entry) — the fake answers from GH_STUB_OPEN (`<N> ...` = open,
+# anything else = closed), and GH_STUB_FAIL=1 is the unreadable case.
+cat > "$R/gh" <<'SH'
+#!/bin/bash
+if [ "${GH_STUB_FAIL:-0}" = "1" ]; then
+  echo "gh: could not reach api.github.com" >&2; exit 1
+fi
+case " ${GH_STUB_OPEN:-} " in *" $3 "*) echo '{"state":"OPEN"}'; exit 0;; esac
+echo '{"state":"CLOSED"}'
+SH
+chmod +x "$R/gh"
+( PATH="$R:$PATH" python3 "$R/reap.py" "$R" "acme/example" ) > "$TMP/reap.out" 2>&1
 kept="$(tr '\n' ' ' < "$R/dispatched.txt")"
 case "$kept" in *4114*) rc=1;; *) rc=0;; esac
 ck "shipped reaper: open+no-PR+no-lane dispatch is un-blacklisted" $rc
@@ -312,7 +324,7 @@ printf '4114\n8888\n' > "$RF/dispatched.txt"
 printf '4114\n8888\n' > "$RF/checked.txt"
 printf '4114\n8888\n' > "$RF/.open_iss"
 # .pr_brs deliberately ABSENT: this is the shape the shipped capture leaves on a failed `gh pr list`
-( PATH="$R:$PATH" python3 "$R/reap.py" "$RF" ) > "$TMP/reap-failpr.out" 2>&1
+( PATH="$R:$PATH" python3 "$R/reap.py" "$RF" "acme/example" ) > "$TMP/reap-failpr.out" 2>&1
 kept="$(tr '\n' ' ' < "$RF/dispatched.txt")"
 case "$kept" in *4114*8888*) rc=0;; *) rc=1; echo "      dispatched.txt: '$kept'";; esac
 ck "shipped reaper: an UNREADABLE PR listing reaps NOTHING (both entries kept)" $rc
@@ -325,7 +337,7 @@ RO="$TMP/reap-failopen"; mkdir -p "$RO"
 printf '4114\n8888\n' > "$RO/dispatched.txt"
 printf '4114\n8888\n' > "$RO/checked.txt"
 printf 'feat/8888-tm\n' > "$RO/.pr_brs"
-( PATH="$R:$PATH" python3 "$R/reap.py" "$RO" ) > "$TMP/reap-failopen.out" 2>&1
+( PATH="$R:$PATH" python3 "$R/reap.py" "$RO" "acme/example" ) > "$TMP/reap-failopen.out" 2>&1
 case "$(tr '\n' ' ' < "$RO/dispatched.txt")" in *4114*) rc=0;; *) rc=1;; esac
 ck "shipped reaper: an UNREADABLE open-issue listing reaps nothing either" $rc
 # a PRESENT but EMPTY list is a REAL answer and must still reap
@@ -334,7 +346,7 @@ printf '4114\n7777\n' > "$RE/dispatched.txt"
 printf '4114\n7777\n' > "$RE/checked.txt"
 printf '4114\n' > "$RE/.open_iss"   # 7777 is not open -> kept
 : > "$RE/.pr_brs"                     # readable and empty: there are genuinely no PRs
-( PATH="$R:$PATH" python3 "$R/reap.py" "$RE" ) > "$TMP/reap-emptypr.out" 2>&1
+( PATH="$R:$PATH" python3 "$R/reap.py" "$RE" "acme/example" ) > "$TMP/reap-emptypr.out" 2>&1
 kept="$(tr '\n' ' ' < "$RE/dispatched.txt")"
 case "$kept" in *4114*) rc=1;; *) rc=0;; esac
 ck "shipped reaper: a genuinely EMPTY (readable) PR listing still reaps 4114" $rc
@@ -348,7 +360,7 @@ unset -f tmux
 # (LIMIT+1)-th candidate was recorded as checked and then the loop broke without ever running
 # collision_preflight.py for it. checked.txt suppresses that issue forever and the §7.1 reaper
 # only un-blacklists dispatched.txt entries — so one dispatchable issue was lost per refresh.
-awk '/^n=0$/{f=1} f{print} /^done < /{f=0}' "$REFRESH" > "$TMP/refreshloop.sh"
+awk '/^n=0$/{f=1} f{print} f&&/^echo "\[refresh\] checked \$n;/{exit}' "$REFRESH" > "$TMP/refreshloop.sh"
 if need "$TMP/refreshloop.sh" "the refresh loop body is extracted from the shipped refresh-candidates.sh"; then
   RL="$TMP/refresh"; mkdir -p "$RL/fakesc/.venv/bin"
   # The pool the SHIPPED producer writes: bare numbers, one per line (severity lives in the
@@ -459,6 +471,136 @@ PY
   O="$RC" LIMIT=5 SC="$RC/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/collide-2.out" 2>&1
   case "$(tr '\n' ' ' < "$RC/candidates.txt")" in *10*) rc=0;; *) rc=1;; esac
   ck "shipped refresh loop: the COLLISION is re-attempted and queued once it clears" $rc
+
+  # ── 5f) LANDED is suppressed, NOT blacklisted: landed.txt, reported on every pass ──────────
+  # #8560 added a fourth verdict, LANDED (exit 4): the issue's work already shipped. Two properties
+  # must hold, and the first fix in this PR delivered only the second one (#8560 review):
+  #   (i)  nothing is queued for it, and it does not consume a LIMIT slot (a dispatch onto shipped
+  #        code, plus a capacity leak);
+  #   (ii) it is NOT recorded in checked.txt. A LANDED verdict means the issue's own state is
+  #        CLOSED (#8560; since #8625 the timeline title arm cannot produce it — a merged PR that
+  #        merely NAMES an issue is an ADVISORY, so a landed-but-OPEN issue flows to the backlog as
+  #        CLEAN, #8625's accepted cost). This loop's pool is built from `--state open`, so the ONLY
+  #        reachable LANDED here is a CLOSE RACE: listed open by the pool, closed before the
+  #        pre-flight ran. Writing it to checked.txt would remove that issue from the backlog
+  #        permanently and silently — checked.txt is only pruned for a reaped DISPATCH, and a
+  #        landed issue is never dispatched — the failure class the §7.1 reaper removed.
+  #        The fake pre-flight below stands in for that close race; it cannot be produced through a
+  #        real pool entry any more, which is why the arm is pinned with a stub rather than live.
+  # Pre-fix (this branch's previous head) `checked.txt` held 10 and no landed.txt existed, so
+  # assertions (ii), the landed.txt write, and both "reported" checks below are RED.
+  RL2="$TMP/landed"; mkdir -p "$RL2/fakesc/.venv/bin"
+  printf '10\n' > "$RL2/.pool"
+  : > "$RL2/checked.txt"; : > "$RL2/candidates.txt"; : > "$RL2/dispatched.txt"; : > "$RL2/landed.txt"
+  cat > "$RL2/fakesc/.venv/bin/python" <<'PY'
+#!/bin/bash
+# stand-in for a landed pre-flight: a terminal verdict, non-zero exit in production. Since #8625
+# this cannot be produced by a real pool entry (only a close race can), so the LANDED arm is pinned
+# with a stub. Each invocation is counted so pass 2 can prove the recorded issue is not
+# re-pre-flighted.
+echo x >> "$(dirname "$0")/.calls"
+echo "VERDICT: LANDED (exit 4) — 1 authoritative terminal signal(s)"
+PY
+  chmod +x "$RL2/fakesc/.venv/bin/python"
+  O="$RL2" LIMIT=5 SC="$RL2/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/landed-1.out" 2>&1
+  case "$(tr '\n' ' ' < "$RL2/landed.txt")" in *10*) rc=0;; *) rc=1;; esac
+  ck "shipped refresh loop: a LANDED verdict is recorded in landed.txt (not checked.txt)" $rc
+  case "$(tr '\n' ' ' < "$RL2/checked.txt")" in *10*) rc=1;; *) rc=0;; esac
+  ck "shipped refresh loop: a LANDED OPEN issue is NOT blacklisted in checked.txt" $rc
+  case "$(tr '\n' ' ' < "$RL2/candidates.txt")" in *10*) rc=1;; *) rc=0;; esac
+  ck "shipped refresh loop: a LANDED verdict is NOT queued as a dispatch candidate" $rc
+  case "$(cat "$TMP/landed-1.out")" in *"no verdict"*) rc=1;; *) rc=0;; esac
+  ck "shipped refresh loop: a LANDED verdict is not logged as a missing verdict" $rc
+  # the suppression is VISIBLE: the set and its remedy are named on the pass that records it
+  case "$(cat "$TMP/landed-1.out")" in *"landed (awaiting verify/close"*"10"*) rc=0;; *) rc=1;; esac
+  ck "shipped refresh loop: the landed set and its remedy are printed when it is recorded" $rc
+  # ... and on a LATER pass, where no new verdict arrives at all. That is what makes the entry a
+  # reported decision instead of an invisible permanent suppression (pre-fix: pass 2 prints nothing).
+  O="$RL2" LIMIT=5 SC="$RL2/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/landed-2.out" 2>&1
+  case "$(cat "$TMP/landed-2.out")" in *"landed (awaiting verify/close"*"10"*) rc=0;; *) rc=1;; esac
+  ck "shipped refresh loop: the landed set is STILL reported on a later pass" $rc
+  [ "$(wc -l < "$RL2/fakesc/.venv/bin/.calls" | tr -d ' ')" = "1" ] && rc=0 || rc=1
+  ck "shipped refresh loop: a recorded LANDED issue is not re-pre-flighted on the next pass" $rc
+  # ⛔ CANARY, not decoration: the comment above says the arm is reachable ONLY through a close race
+  # because #8625 routed a title-naming OPEN-issue PR to the advisory `SURFACE_UNCLOSED_REF`
+  # surface. A comment cannot fail, so pin the producer half executably: if that routing is reverted,
+  # the timeline title arm regains authority, the close-race claim in §7.1b becomes false, and this
+  # check goes red. The tool lives two levels up from this script (repo root / tools).
+  HARNESS_TOOL="$HERE/../../tools/collision_preflight.py"
+  if grep -q 'SURFACE_UNCLOSED_REF' "$HARNESS_TOOL" 2>/dev/null \
+     && grep -q 'unclosed\.add(' "$HARNESS_TOOL" 2>/dev/null; then rc=0; else rc=1; fi
+  ck "shipped refresh loop: LANDED is a close-race arm — the tool routes a title-naming OPEN-issue PR to an ADVISORY surface (#8625)" $rc
+  # a landed entry is recorded but does not consume a slot on LATER passes: the pool is 10 (LANDED
+  # once) then 20 (CLEAN), LIMIT=1. Pass 1 spends the single pre-flight slot on 10; pass 2 filters
+  # the landed entry BEFORE the LIMIT counter, so 20 is pre-flighted and queued. Pre-fix (before
+  # #8560's arm existed) the LANDED line fell through to `*)`, was never recorded, and so 10 was
+  # re-pre-flighted on every pass — 20 could never be reached.
+  RC2="$TMP/landed-cap"; mkdir -p "$RC2/fakesc/.venv/bin"
+  printf '10\n20\n' > "$RC2/.pool"
+  : > "$RC2/checked.txt"; : > "$RC2/candidates.txt"; : > "$RC2/dispatched.txt"; : > "$RC2/landed.txt"
+  cat > "$RC2/fakesc/.venv/bin/python" <<'PY'
+#!/bin/bash
+case "$*" in *" 10 "*) echo "VERDICT: LANDED (exit 4)";; *) echo "VERDICT: CLEAN";; esac
+PY
+  chmod +x "$RC2/fakesc/.venv/bin/python"
+  O="$RC2" LIMIT=1 SC="$RC2/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/landed-cap-1.out" 2>&1
+  case "$(tr '\n' ' ' < "$RC2/landed.txt")" in *10*) rc=0;; *) rc=1;; esac
+  ck "shipped refresh loop: the LANDED entry is recorded while the slot is spent" $rc
+  [ "$(tr '\n' ' ' < "$RC2/candidates.txt" | wc -w | tr -d ' ')" = "0" ] && rc=0 || rc=1
+  ck "shipped refresh loop: the LIMIT-1 pass pre-flights one issue and queues none of them" $rc
+  O="$RC2" LIMIT=1 SC="$RC2/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/landed-cap-2.out" 2>&1
+  case "$(tr '\n' ' ' < "$RC2/candidates.txt")" in *20*) rc=0;; *) rc=1;; esac
+  ck "shipped refresh loop: a recorded LANDED entry frees the next pass's LIMIT slot (20 queued)" $rc
+
+  # ── 5g) the reaper DROPS a landed entry once its issue is CLOSED ───────────────────────────
+  # landed.txt must not become the same permanent list checked.txt was: an entry means "a decision
+  # is owed", and once the issue is CLOSED the decision is made. Fail-closed still applies: an
+  # entry whose state cannot be READ is kept, never assumed closed.
+  #
+  # ⛔ THE PRUNE READS `gh issue view <N> --json state` (UNCAPPED), NOT absence from `.open_iss`. The
+  # pre-fix `len(open_iss) < 500` guard was a permanent no-op: `.open_iss` is `--limit 500` and this
+  # repo has >500 open issues, so the guard tripped on EVERY pass and landed.txt could only be
+  # cleared by hand. The saturated-listing check below is the non-vacuous one: `.open_iss` omits the
+  # landed issues entirely, and the pre-fix code would keep BOTH (its cap guard fires).
+  RP="$TMP/landed-prune"; mkdir -p "$RP"
+  printf '10\n30\n' > "$RP/landed.txt"
+  : > "$RP/.open_iss"
+  : > "$RP/.pr_brs"
+  : > "$RP/dispatched.txt"; : > "$RP/checked.txt"
+  awk '/^python3 - "\$O" "\$OR" <<.PY.$/{f=1;next} /^PY$/{f=0} f' "$REFRESH" > "$RP/reap.py"
+  if need "$RP/reap.py" "the reaper is extracted from the shipped refresh-candidates.sh"; then
+    ( PATH="$R:$PATH" GH_STUB_OPEN="10" python3 "$RP/reap.py" "$RP" "acme/example" ) > "$TMP/landed-prune.out" 2>&1
+    case "$(tr '\n' ' ' < "$RP/landed.txt")" in *10*) rc=0;; *) rc=1;; esac
+    ck "shipped reaper: a landed entry whose issue is still OPEN is kept" $rc
+    case "$(tr '\n' ' ' < "$RP/landed.txt")" in *30*) rc=1;; *) rc=0;; esac
+    ck "shipped reaper: a landed entry whose issue is CLOSED is dropped" $rc
+    case "$(cat "$TMP/landed-prune.out")" in *"dropped"*30*) rc=0;; *) rc=1;; esac
+    ck "shipped reaper: dropping a settled landed entry is logged, not silent" $rc
+    # fail-closed half: an UNREADABLE state prunes NOTHING (a failed read is not "closed")
+    RPF="$TMP/landed-prune-fail"; mkdir -p "$RPF"
+    printf '10\n30\n' > "$RPF/landed.txt"
+    : > "$RPF/.open_iss"; : > "$RPF/.pr_brs"
+    : > "$RPF/dispatched.txt"; : > "$RPF/checked.txt"
+    ( PATH="$R:$PATH" GH_STUB_FAIL=1 python3 "$RP/reap.py" "$RPF" "acme/example" ) > "$TMP/landed-prune-fail.out" 2>&1
+    case "$(tr '\n' ' ' < "$RPF/landed.txt")" in *10*30*) rc=0;; *) rc=1;; esac
+    ck "shipped reaper: an UNREADABLE landed state prunes no entry (both kept)" $rc
+    case "$(cat "$TMP/landed-prune-fail.out")" in *"could not be re-read"*) rc=0;; *) rc=1;; esac
+    ck "shipped reaper: keeping an unreadable landed entry is logged, not silent" $rc
+    # ⛔ NON-VACUOUS against the pre-fix cap guard: `.open_iss` is SATURATED at 500 entries and
+    # omits 10, while gh reports 10 OPEN. Absence from a capped listing proves nothing, so 10 must
+    # be KEPT; and 30 (gh: CLOSED) must still be dropped. Pre-fix, the `len(open_iss) < 500` guard
+    # fired and neither entry was pruned.
+    RPT="$TMP/landed-prune-saturated"; mkdir -p "$RPT"
+    printf '10\n30\n' > "$RPT/landed.txt"
+    seq 1 500 | grep -v '^10$' | grep -v '^30$' > "$RPT/.open_iss"   # 500 entries: the cap is hit
+    : > "$RPT/.pr_brs"
+    : > "$RPT/dispatched.txt"; : > "$RPT/checked.txt"
+    ( PATH="$R:$PATH" GH_STUB_OPEN="10" python3 "$RP/reap.py" "$RPT" "acme/example" ) > "$TMP/landed-prune-sat.out" 2>&1
+    case "$(tr '\n' ' ' < "$RPT/landed.txt")" in *10*) rc=0;; *) rc=1;; esac
+    ck "shipped reaper: a saturated .open_iss does NOT make an OPEN landed entry look closed" $rc
+    case "$(tr '\n' ' ' < "$RPT/landed.txt")" in *30*) rc=1;; *) rc=0;; esac
+    ck "shipped reaper: the landed prune settles a CLOSED entry even when .open_iss is saturated" $rc
+  fi
 fi
 
 # ── 5e) the capture site itself: a failed `gh` leaves ABSENCE, not an empty file ──────────────
@@ -1194,8 +1336,33 @@ fi
 SH
   # `gh` returns a head sha (so the refusal path has a real head it COULD have recorded against),
   # `git` answers the worktree lookup — no repo, no network, no writes outside $TMP.
+  # ⚠️ The `git` stub must model the EFFECT of `worktree add --detach <dir> <base>`, not only its
+  # status: the shipped merge-one.sh cds INTO the review sandbox it asks for (#8484), so a stub that
+  # exits 0 without creating <dir> models a git that does not exist and the driven checks below stop
+  # measuring the load gate at all.
   printf '#!/bin/bash\nfor a in "$@"; do [ "$a" = ".headRefOid" ] && { echo deadbeefdeadbeef; exit 0; }; done\nexit 0\n' > "$GB/gh"
-  printf '#!/bin/bash\ncase "${1:-}" in worktree) printf "worktree /tmp/w\\nbranch refs/heads/br\\n" ;; rev-parse) exit 0 ;; *) printf "\\n" ;; esac\nexit 0\n' > "$GB/git"
+  cat > "$GB/git" <<'SH'
+#!/bin/bash
+# HATCH_ENVF: record what the SHIPPED script's own environment looks like when it runs a command.
+# The main-edits hatch must be UNSET by that point (a caller — fix-one.sh — exports it and runs
+# merge-one.sh as a child); reading it here is host-independent and needs no `pi` to run.
+[ -n "${HATCH_ENVF:-}" ] && printf 'AGENT_ALLOW_MAIN_EDITS=%s ELDATO_ALLOW_MAIN_EDITS=%s\n' "${AGENT_ALLOW_MAIN_EDITS:-unset}" "${ELDATO_ALLOW_MAIN_EDITS:-unset}" >> "$HATCH_ENVF"
+if [ "${3:-}" = "worktree" ] && [ "${4:-}" = "add" ]; then
+  prev=""
+  for a in "$@"; do
+    if [ "$prev" = "--detach" ]; then mkdir -p "$a"; break; fi
+    prev="$a"
+  done
+  # WMARK makes the CALL visible, not just its effect: the load-gate ordering check asserts a
+  # refused run never got this far, which an absent directory cannot distinguish from a host with
+  # no $O/review at all.
+  [ -n "${WMARK:-}" ] && printf '%s\n' "$a" >> "$WMARK"
+  echo "Preparing worktree"
+  exit 0
+fi
+case "${1:-}" in worktree) printf 'worktree /tmp/w\nbranch refs/heads/br\n' ;; rev-parse) exit 0 ;; *) printf '\n' ;; esac
+exit 0
+SH
   chmod +x "$GB"/*
   printf 'prompt\n' > "$TMP/gate-prompt.txt"
   # the shipped helper, run under a fake load of 150 (the box's real ceiling is 100)
@@ -1220,8 +1387,8 @@ SH
   #     records a refusal must not leave behind.
   probe() { # probe <script> <load> <O> <args...>
     local script="$1" load="$2" o="$3"; shift 3
-    mkdir -p "$o/logs" "$o/state"; rm -f "$GMARK"
-    ( export PATH="$GB:$PATH" FAKE_LOAD="$load" PI_MARKER="$GMARK" MAX_LOAD=100 \
+    mkdir -p "$o/logs" "$o/state"; rm -f "$GMARK" "$o/wmark"
+    ( export PATH="$GB:$PATH" FAKE_LOAD="$load" PI_MARKER="$GMARK" WMARK="$o/wmark" MAX_LOAD=100 \
              O="$o" LANE_TIMEOUT=1 REVIEW_TIMEOUT=1 FIX_TIMEOUT=1
       bash "$HERE/$script" "$@" ) >/dev/null 2>&1
     PROBE_RC=$?
@@ -1241,11 +1408,56 @@ SH
   probe merge-one.sh 150 "$TMP/pmO" "$TMP/mrepo" owner/repo 1 br
   [ "$PROBE_RC" = "75" ] && [ ! -e "$GMARK" ] && grep -q REFUSED "$TMP/pmO/logs/merge-1.log" && rc=0 || { rc=1; echo "      rc=$PROBE_RC"; }
   ck "merge-one.sh under load 150 (the chain-<N> path): reviewer REFUSES to spawn, exits 75" $rc
+  # #8484: the refusal must also leave NO review sandbox. Pin the ORDERING on the CALL that would
+  # provision it — the stub `git` records every `worktree add` into $WMARK — rather than on the
+  # absence of a directory: absent is also what a host with no $O/review at all looks like, which is
+  # why the old assertion could not fail for the reason it named (review finding, PR #8589). A
+  # reordering that provisions before the gate now fails here, and the positive half below pins the
+  # other direction (the pre-fix tree, which has no sandbox at all, fails THAT one).
+  [ ! -e "$TMP/pmO/wmark" ] && rc=0 || { rc=1; echo "      'git worktree add' was invoked: $(tr '\n' ' ' < "$TMP/pmO/wmark" 2>/dev/null)"; }
+  ck "a load-refused reviewer never runs 'git worktree add' (the gate precedes the checkout)" $rc
+  [ ! -e "$TMP/pmO/review" ] && rc=0 || { rc=1; echo "      sandbox left: $(ls "$TMP/pmO/review" 2>/dev/null | tr '\n' ' ')"; }
+  ck "a load-refused reviewer creates NO review sandbox" $rc
   [ -z "$(ls "$TMP/pmO/state" 2>/dev/null | grep '^needsfix-1-')" ] && [ ! -e "$TMP/pmO/state/mergeclaim-1.lock" ] && rc=0 || { rc=1; echo "      state: $(ls "$TMP/pmO/state" 2>/dev/null | tr '\n' ' ')"; }
   ck "a load refusal is NOT a verdict: no needsfix marker, and the PR claim is released" $rc
   probe merge-one.sh 3 "$TMP/pmO2" "$TMP/mrepo" owner/repo 1 br
   [ -e "$GMARK" ] && rc=0 || rc=1
   ck "merge-one.sh under load 3: the reviewer IS spawned" $rc
+  # …and the POSITIVE half of the ordering: a reviewer that DID start really did ask git for its
+  # checkout. Together the two pin "provisioned iff the gate passed" — the pre-fix tree has no
+  # review_sandbox at all and fails THIS one, so the pair is not vacuous.
+  [ -s "$TMP/pmO2/wmark" ] && grep -q "$TMP/pmO2/review/" "$TMP/pmO2/wmark" && rc=0 || { rc=1; echo "      wmark: $(tr '\n' ' ' < "$TMP/pmO2/wmark" 2>/dev/null)"; }
+  ck "a started reviewer DID provision its checkout ('git worktree add' on the review sandbox)" $rc
+  # The ORDERING pinned host-independently: force the gate itself to refuse (MAX_LOAD=0 is numeric
+  # and still flows through can_spawn) and assert the run refused AND never reached
+  # `git worktree add`. The FAKE_LOAD probe above cannot pin this on a host where /proc/loadavg is
+  # readable and the fake load never applies (this file's macOS-only probes), so this one carries
+  # the check everywhere: provisioning before the gate leaves a marker even on Linux.
+  GO="$TMP/pgO"; mkdir -p "$GO/logs" "$GO/state"; rm -f "$GO/wmark" "$GMARK"
+  ( export PATH="$GB:$PATH" MAX_LOAD=0 WMARK="$GO/wmark" PI_MARKER="$GMARK" O="$GO" REVIEW_TIMEOUT=1
+    bash "$HERE/merge-one.sh" "$TMP/mrepo" owner/repo 1 br ) >/dev/null 2>&1
+  grep -q 'REFUSED reviewer' "$GO/logs/merge-1.log" && [ ! -e "$GO/wmark" ] && [ ! -e "$GMARK" ] && rc=0 \
+    || { rc=1; echo "      log: $(tail -2 "$GO/logs/merge-1.log" 2>/dev/null | tr '\n' ' ')"; }
+  ck "a gate-refused run never provisions: the gate's refusal precedes 'git worktree add'" $rc
+  # ⛔ PR #8589 review: merge-one.sh no longer EXPORTS the main-edits hatch, but fix-one.sh:30 does
+  # and then runs merge-one.sh as a CHILD (fix-one.sh:137) — an exported variable is inherited
+  # across `bash <script>`, so the re-review that follows EVERY fixer began with the hatch OPEN and
+  # main-worktree-guard obeyed it. Driven: run the SHIPPED script with the hatch pre-set in the
+  # parent and read the hatch out of a stub command the script itself runs (the `git` stub above).
+  # That observation point is host-independent — it needs no `pi` — and it is AFTER the unset.
+  # Non-vacuous: the pre-fix script has no unset, so the recorded values are 1 and the check fails.
+  HO="$TMP/peO"; mkdir -p "$HO/logs" "$HO/state"; HATCHF="$HO/hatch.txt"; rm -f "$HATCHF" "$GMARK"
+  ( export PATH="$GB:$PATH" FAKE_LOAD=3 HATCH_ENVF="$HATCHF" MAX_LOAD=100 \
+           O="$HO" REVIEW_TIMEOUT=1 AGENT_ALLOW_MAIN_EDITS=1 ELDATO_ALLOW_MAIN_EDITS=1
+    bash "$HERE/merge-one.sh" "$TMP/mrepo" owner/repo 1 br ) >/dev/null 2>&1
+  [ -s "$HATCHF" ] && rc=0 || rc=1
+  ck "the hatch-inheritance probe reached the script's own commands (the hatch was observable)" $rc
+  grep -q 'AGENT_ALLOW_MAIN_EDITS=unset ELDATO_ALLOW_MAIN_EDITS=unset' "$HATCHF" 2>/dev/null && rc=0 || { rc=1; echo "      saw: $(sort -u "$HATCHF" 2>/dev/null | tr '\n' ' ')"; }
+  ck "merge-one.sh UNSETS an inherited main-edits hatch (it is not merely un-exported)" $rc
+  # …and the reviewer really was given the sandbox: the EXIT trap must have removed it again, so a
+  # leaked mutant cannot survive the run (#8484).
+  [ -d "$TMP/pmO2/review" ] && [ ! -e "$TMP/pmO2/review/1-deadbeefdeadbeef" ] && rc=0 || { rc=1; echo "      review dir: $(ls "$TMP/pmO2/review" 2>/dev/null | tr '\n' ' ')"; }
+  ck "a completed review leaves no sandbox behind (the EXIT trap reaped it)" $rc
   # fix-one.sh — the post-fix re-review path, and what adopt-fix.sh runs. A refusal must also skip
   # re-running the merge chain: nothing changed, so a re-review is pure cost on a loaded box.
   probe fix-one.sh 150 "$TMP/pfO" "$TMP/mrepo" owner/repo 1 br
@@ -1659,8 +1871,11 @@ if need "$TMP/lockblock.sh" "the lock+trap block is extracted from the shipped o
 
   # The same defect on merge-one.sh's per-PR claim (§5.1b): a TERM must not free the claim while
   # the worker keeps reviewing/merging, which let a second worker spawn for the same head.
-  sed -n '/^CLAIM="\$O\/state\/mergeclaim-\$PR.lock"/,/^trap .rm -f "\$CLAIM".*$/p' "$MERGE" > "$TMP/claimtrap.sh"
-  if need "$TMP/claimtrap.sh" "the claim+trap block is extracted from the shipped merge-one.sh"; then
+  # The extraction starts at the review helpers (#8484) because the EXIT trap now calls
+  # review_cleanup: a driver holding the trap but not the function would fail at exit for a reason
+  # unrelated to what this check measures.
+  sed -n '/^# .*review_helpers: the reviewer/,/^trap .rm -f "\$CLAIM".*$/p' "$MERGE" > "$TMP/claimtrap.sh"
+  if need "$TMP/claimtrap.sh" "the claim+trap block (with the review helpers it now calls) is extracted from the shipped merge-one.sh"; then
     { echo 'set -u'; echo "O='$LK'"; echo 'PR=9191'; echo "L='$LK/claim'"; cat "$TMP/claimtrap.sh"; echo 'while :; do sleep 0.2; done'; } > "$LK/mdrive.sh"
     bash -n "$LK/mdrive.sh" && rc=0 || rc=1
     ck "the claim-trap driver parses" $rc
@@ -1729,6 +1944,144 @@ if need "$TMP/lockblock.sh" "the lock+trap block is extracted from the shipped o
   out="$(bash "$LK/acquire.sh" 2>&1)"
   case "$out" in *ACQUIRED*) rc=1; echo "      a live lock was stolen";; *) rc=0;; esac
   ck "a lock held by a LIVE pid is NOT stolen (reclamation is not a silent overwrite)" $rc
+fi
+
+# ── 21) the reviewer is CONTAINED in its own checkout, and a ref move is LOUD (#8484) ─────────
+# #8484: the fresh-context reviewer was run with cwd = the SHARED checkout, with the main-edits hatch
+# open and VGATE skipped, so "do not touch the main checkout" was a prompt aimed at a model with
+# shell access. A reviewer that mutated the tree it was reading, committed, merged origin/main and
+# pushed — unprompted — is the observed failure, and it absorbed the controller's unstaged edits.
+# These checks read the SHIPPED script and drive the SHIPPED helpers against a real throwaway repo,
+# so they fail on the pre-fix copy rather than re-implementing the fix.
+rc=0
+grep -qE '^export [^#]*AGENT_ALLOW_MAIN_EDITS' "$MERGE" && rc=1 || rc=0
+ck "merge-one.sh does NOT open the main-edits hatch for its reviewer" $rc
+grep -q 'cd "\$SANDBOX"' "$MERGE" && rc=0 || rc=1
+ck "the reviewer's cwd is the sandbox (cd \"\$SANDBOX\")" $rc
+grep -qE '^ *cd \$REPO && git fetch' "$MERGE" && rc=1 || rc=0
+ck "the reviewer prompt no longer sends the reviewer into the shared checkout" $rc
+# A bare `git worktree prune` in the EXIT trap is the banned shape (agent-infra docs/ops/load-policy.md:491):
+# it deregisters EVERY record whose directory is not stat-able at that instant, so it can orphan an
+# unrelated sibling lane's checkout. Match CODE only — the comment above legitimately names it.
+grep -vE '^[[:space:]]*#' "$MERGE" | grep -q 'worktree prune' && rc=1 || rc=0
+ck "merge-one.sh runs NO repo-wide 'git worktree prune' (targeted deregistration instead)" $rc
+grep -q 'drop_sandbox_record' "$MERGE" && rc=0 || rc=1
+ck "merge-one.sh deregisters its sandbox's OWN worktree record by name" $rc
+grep -q 'refs/pull/\$PR/head' "$MERGE" && rc=0 || rc=1
+ck "merge-one.sh fetches the PR head ref (a fork PR's head is not on origin)" $rc
+sed -n '/^sandbox_record() {/,/^}/p;/^drop_sandbox_record() {/,/^}/p;/^review_sandbox() {/,/^}/p;/^review_cleanup() {/,/^}/p;/^ref_shas() {/,/^}/p;/^mover_of() {/,/^}/p' "$MERGE" > "$TMP/rfuncs.sh"
+if need "$TMP/rfuncs.sh" "the review-sandbox helpers are extracted from the shipped merge-one.sh"; then
+  SB="$TMP/src"; mkdir -p "$SB"
+  git -C "$SB" init -q
+  git -C "$SB" config user.email sb@test; git -C "$SB" config user.name sb
+  echo one > "$SB/f"; git -C "$SB" add f; git -C "$SB" commit -qm one
+  git -C "$SB" branch -q feat/x
+  SHA="$(git -C "$SB" rev-parse refs/heads/feat/x)"
+  OUT="$TMP/out"
+  {
+    echo 'set -u'
+    echo "O='$OUT'"; echo "REPO='$SB'"; echo 'PR=9191'
+    cat "$TMP/rfuncs.sh"
+    echo 'SANDBOX="$(review_sandbox '"$SHA"')"; echo "SANDBOX=$SANDBOX"'
+    echo '[ -n "$SANDBOX" ] || exit 1'
+    echo 'cd "$SANDBOX" || exit 1'
+    echo 'echo "DETACHED=$(git rev-parse --abbrev-ref HEAD)"'
+    echo 'echo mutant > f'
+    echo 'git add f && git commit -qm mutant'
+    echo 'echo "SRC_TIP=$(git -C "$REPO" rev-parse refs/heads/feat/x)"'
+    echo 'echo "SRC_FILE=$(cat "$REPO/f")"'
+    echo 'echo "PRE=$(ref_shas feat/x)"'
+    echo 'echo two > "$REPO/g"; git -C "$REPO" add g; git -C "$REPO" commit -qm two'
+    echo 'git -C "$REPO" update-ref refs/heads/feat/x HEAD'
+    echo 'echo "POST=$(ref_shas feat/x)"'
+    echo 'review_cleanup'
+    echo 'echo "GONE=$([ -d "$SANDBOX" ] && echo no || echo yes)"'
+  } > "$TMP/sbdrive.sh"
+  bash -n "$TMP/sbdrive.sh" && rc=0 || rc=1
+  ck "the review-sandbox driver parses" $rc
+  sbout="$(bash "$TMP/sbdrive.sh" 2>&1)"
+  sbp="$(printf '%s' "$sbout" | grep -a '^SANDBOX=' | cut -d= -f2-)"
+  case "$sbp" in "" | "$SB"/*) rc=1;; *) rc=0;; esac
+  ck "the reviewer's checkout is created OUTSIDE the reviewed repo" $rc
+  case "$sbout" in *'DETACHED=HEAD'*) rc=0;; *) rc=1;; esac
+  ck "the reviewer's checkout is DETACHED — a commit there cannot move a branch" $rc
+  case "$sbout" in *"SRC_TIP=$SHA"*) rc=0;; *) rc=1; echo "      got: $(printf '%s' "$sbout" | grep -a SRC_TIP)";; esac
+  ck "a commit made in the sandbox does NOT move the reviewed branch" $rc
+  case "$sbout" in *'SRC_FILE=one'*) rc=0;; *) rc=1;; esac
+  ck "a mutation written in the sandbox does NOT reach the reviewed tree" $rc
+  sbpre="$(printf '%s' "$sbout" | grep -a '^PRE=' | cut -d= -f2-)"
+  sbpost="$(printf '%s' "$sbout" | grep -a '^POST=' | cut -d= -f2-)"
+  [ -n "$sbpre" ] && [ "$sbpre" != "$sbpost" ] && rc=0 || { rc=1; echo "      pre='$sbpre' post='$sbpost'"; }
+  ck "ref_shas reports an unrequested ref move (the detector is not vacuous)" $rc
+  case "$sbout" in *'GONE=yes'*) rc=0;; *) rc=1;; esac
+  ck "review_cleanup removes the reviewer's checkout (no mutant is left behind)" $rc
+  [ "$(git -C "$SB" worktree list 2>/dev/null | wc -l | tr -d ' ')" = "1" ] && rc=0 || rc=1
+  ck "review_cleanup leaves no worktree admin entry in the reviewed repo" $rc
+
+  # ── a RECORD WHOSE TREE IS GONE must not brick this head forever (#8589 review) ──
+  # Drive the SHIPPED review_sandbox through the exact state its own comment anticipates: a damaged
+  # tree makes `worktree remove` refuse, the `rm -rf` fallback removes the directory, and the
+  # registration survives. Without the targeted drop the second call gets
+  # "fatal: '<dir>' is a missing but already registered worktree" and prints nothing — merge-one.sh
+  # then exits 6, which writes no needsfix marker, so the head is re-dispatched forever and can
+  # never be reviewed.
+  S2O="$TMP/out2"
+  {
+    echo 'set -u'
+    echo "O='$S2O'"; echo "REPO='$SB'"; echo 'PR=9192'
+    cat "$TMP/rfuncs.sh"
+    echo 'A="$(review_sandbox '"$SHA"')"'
+    echo '[ -n "$A" ] || { echo FIRST_FAILED; exit 1; }'
+    echo 'rm -f "$A/.git"'          # damaged in place: remove refuses, the directory is still there
+    echo 'B="$(review_sandbox '"$SHA"')"'
+    echo 'echo "B=$B"'
+    echo '[ -n "$B" ] || { echo SECOND_FAILED; exit 1; }'
+    echo 'echo "BDET=$(git -C "$B" rev-parse --abbrev-ref HEAD)"'
+    echo 'rm -rf "$B"'              # the directory is simply gone; the record is not
+    echo 'C="$(review_sandbox '"$SHA"')"'
+    echo 'echo "C=$C"'
+    echo '[ -n "$C" ] || { echo THIRD_FAILED; exit 1; }'
+    echo 'SANDBOX="$C"; review_cleanup'
+    echo 'echo "CGONE=$([ -d "$C" ] && echo no || echo yes)"'
+    echo 'echo "CRECORDS=$(git -C "$REPO" worktree list | wc -l | tr -d " ")"'
+  } > "$TMP/sbdrive2.sh"
+  bash -n "$TMP/sbdrive2.sh" && rc=0 || rc=1
+  ck "the dangling-record recovery driver parses" $rc
+  sbout2="$(bash "$TMP/sbdrive2.sh" 2>&1)"
+  case "$sbout2" in *SECOND_FAILED*|*THIRD_FAILED*) rc=1; echo "      $(printf '%s' "$sbout2" | tr '\n' ' ')";; *) rc=0;; esac
+  ck "review_sandbox recovers from a registration whose tree is gone (the head is not bricked)" $rc
+  case "$sbout2" in *'BDET=HEAD'*) rc=0;; *) rc=1;; esac
+  ck "the recovered sandbox is a real detached checkout, not a reused tree" $rc
+  case "$sbout2" in *'CGONE=yes'*'CRECORDS=1'*) rc=0;; *) rc=1; echo "      got: $(printf '%s' "$sbout2" | grep -aE 'CGONE|CRECORDS' | tr '\n' ' ')";; esac
+  ck "the recovered sandbox is cleaned up with its record (nothing left behind)" $rc
+
+  # ── the cleanup is TARGETED: a sibling lane's record survives even when its directory is not
+  # stat-able — exactly the harm of the banned repo-wide prune, which deregisters every such record.
+  SIB="$TMP/sibling"; rm -rf "$SIB"; mkdir -p "$SIB"
+  git -C "$SB" worktree add --detach "$SIB" "$SHA" >/dev/null 2>&1
+  rm -rf "$SIB"   # unmounted volume / permission blip: the directory is not stat-able
+  {
+    echo 'set -u'
+    echo "O='$TMP/out3'"; echo "REPO='$SB'"; echo 'PR=9193'
+    cat "$TMP/rfuncs.sh"
+    echo 'S="$(review_sandbox '"$SHA"')"'
+    echo '[ -n "$S" ] || exit 1'
+    echo 'SANDBOX="$S"; review_cleanup'
+  } > "$TMP/sbtarget.sh"
+  bash "$TMP/sbtarget.sh" >/dev/null 2>&1
+  [ -d "$SB/.git/worktrees/sibling" ] && rc=0 || { rc=1; echo "      a sibling record was deregistered"; }
+  ck "review_cleanup leaves a sibling worktree record alone (no repo-wide prune)" $rc
+  rm -rf "$TMP/sibling"
+
+  # ── the mover the ref-move detector names is the field that ACTUALLY moved (#8589 review) ──
+  # A reviewer that pushes moves `refs/remotes/origin/<br>` but NOT `refs/heads/<br>`; the old
+  # local-first pick therefore logged the UNCHANGED, already-reviewed head.
+  got="$(bash -c ". '$TMP/rfuncs.sh'; mover_of 'aaa bbb' 'aaa ccc' feat/x")"
+  [ "$got" = "refs/remotes/origin/feat/x ccc" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "a remote-only move is attributed to the NEW remote tip, not the unchanged local tip" $rc
+  got="$(bash -c ". '$TMP/rfuncs.sh'; mover_of 'aaa bbb' 'ddd bbb' feat/x")"
+  [ "$got" = "refs/heads/feat/x ddd" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "a local move is attributed to the new local tip" $rc
 fi
 
 echo
