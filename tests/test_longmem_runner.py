@@ -1937,6 +1937,104 @@ def test_annotate_hits_passes_through_supersession_state():
     assert "[SUPERSEDED BY: drip now]" in text
 
 
+def test_annotate_hits_surfaces_the_verbatim_span_2684():
+    """#2684 (Slice B): the value-bearing verbatim SPAN rides the annotated
+    hit — the exact surface ``package_evidence_pool`` reads — so the assembly
+    hands the consumer an ADDRESS into the Source's raw text, not just a
+    distilled claim. A spanless point keeps its pre-change key set exactly
+    (additive + all-or-nothing)."""
+    from tortoise.retrieval import package_evidence_pool
+
+    raw = [{"id": "pt_v", "content": "the tea set cost 400 dollars",
+            "match_source": "rrf"},
+           {"id": "pt_plain", "content": "no quantities here",
+            "match_source": "rrf"}]
+    props = {"pt_v": {"lme_session_index": 0, "session_id": "s0",
+                      "has_answer": False,
+                      "quote": "the tea set cost 400 dollars",
+                      "source_turn_id": "lme:q1:s0:t3",
+                      "span_start": 12, "span_end": 41},
+             "pt_plain": {"lme_session_index": 1, "session_id": "s1",
+                          "has_answer": False, "quote": "",
+                          "source_turn_id": "",
+                          "span_start": None, "span_end": None}}
+    annotated = _annotate_hits(raw, props, ["2025-06-02", "2025-06-16"])
+    by_id = {h["id"]: h for h in annotated}
+    assert (by_id["pt_v"]["span_start"], by_id["pt_v"]["span_end"]) == (12, 41)
+    assert "span_start" not in by_id["pt_plain"]
+    assert "span_end" not in by_id["pt_plain"]
+    # the ASSEMBLY surfaces it WITH the point (Slice A's package copies the
+    # kept anchor's keys) — the consumer re-fetches, never re-derives.
+    packaged, _stats = package_evidence_pool(annotated)
+    assert (packaged[0]["span_start"], packaged[0]["span_end"]) == (12, 41)
+
+
+def test_ingest_v2_carries_the_value_span_to_the_node_and_the_hit(tmp_path):
+    """#2684 end to end on the eval measurement lane: the extractor's span
+    rides the payload ONTO the node, ``point_props_for_hits`` fetches it, and
+    ``_annotate_hits`` surfaces it on the hit the package reads."""
+    from tools.longmem_eval import retrieve as rt
+    from tools.longmem_eval.ingest import point_props_for_hits
+    from tools.longmem_eval.ingest_v2 import _write_payload
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        payload = {
+            "entities": [], "events": [], "operators": [],
+            "points": [{
+                "id": "pt_span",
+                "content": "the tea set cost 400 dollars",
+                "pointKind": "statement",
+                "quote": "the tea set cost 400 dollars",
+                "source_turn_id": 0,
+                "span_start": 0, "span_end": 29,
+            }],
+        }
+        _write_payload(sdk, payload, sid="s0", qid="q1", si=0,
+                       evidence_turns=[], session_date=None, turns=[],
+                       ev_sessions=set(), n_turns=1)
+        props = point_props_for_hits(sdk._get_proj(), ["pt_span"])
+        assert (props["pt_span"]["span_start"],
+                props["pt_span"]["span_end"]) == (0, 29)
+        annotated = rt._annotate_hits(
+            [{"id": "pt_span", "content": "the tea set cost 400 dollars",
+              "match_source": "fts"}], props, [])
+        assert (annotated[0]["span_start"],
+                annotated[0]["span_end"]) == (0, 29)
+    finally:
+        sdk.close()
+
+
+def test_ingest_v2_drops_a_half_span_without_losing_the_point(tmp_path):
+    """All-or-nothing: a malformed half-span must cost the POINTER, never the
+    claim. ``create_point`` would raise on a half span and the ingest catch
+    would drop the whole point (a silent fidelity-AND-content loss); the
+    writer validates first instead."""
+    from tools.longmem_eval.ingest import point_props_for_hits
+    from tools.longmem_eval.ingest_v2 import _write_payload
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        payload = {
+            "entities": [], "events": [], "operators": [],
+            "points": [{
+                "id": "pt_half",
+                "content": "the tea set cost 400 dollars",
+                "pointKind": "statement", "quote": "the tea set cost 400 dollars",
+                "span_start": 0,          # half an address — not an address
+            }],
+        }
+        _write_payload(sdk, payload, sid="s0", qid="q1", si=0,
+                       evidence_turns=[], session_date=None, turns=[],
+                       ev_sessions=set(), n_turns=1)
+        props = point_props_for_hits(sdk._get_proj(), ["pt_half"])
+        assert "pt_half" in props, "the claim itself must still land"
+        assert props["pt_half"]["span_start"] is None
+        assert props["pt_half"]["span_end"] is None
+    finally:
+        sdk.close()
+
+
 def test_ingest_v2_supersession_end_to_end(tmp_path, monkeypatch):
     """E5 Task 4 (#1537): the v2 eval ingest materializes point-level
     supersession records via the EXISTING canonical sdk.supersede() — a
