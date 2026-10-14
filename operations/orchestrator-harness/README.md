@@ -106,7 +106,8 @@ processes in tmux sessions, so a killed worker cannot take the controller down w
 | `.orch.lock` | atomic single-instance lock (noclobber create); stale locks are reclaimed |
 | `candidates.txt` | the dispatch backlog: issue numbers that passed collision pre-flight |
 | `dispatched.txt` | issues already handed to a lane. **Append-only — never expires** (see §7.1) |
-| `checked.txt` | issues whose pre-flight returned **CLEAN** (the terminal verdict); an **errored** pre-flight and a **COLLISION** leave no entry, so the next pass re-attempts them (agent-infra#1716) |
+| `checked.txt` | issues whose pre-flight returned **CLEAN** — the one verdict that terminates the issue by **queueing** it. An **errored** pre-flight, a **COLLISION** and a **LANDED** verdict leave no entry (agent-infra#1716, #8560) |
+| `landed.txt` | issues whose pre-flight returned **LANDED** (exit 4): the work already shipped, so they are kept out of the backlog and out of the LIMIT budget — but **not** recorded as checked-forever. The set is printed on every refresh pass and an entry is dropped once its issue is **CLOSED**; see §7.1b (#8560) |
 | `state/mergeclaim-<PR>.lock` | single-owner claim: only one worker may review/record/merge a given PR |
 | `state/needsfix-<PR>-<head>` | "a reviewer found real issues at this exact head" |
 | `state/fixcount-<PR>` | fixer attempts for that PR, capped by `MAX_FIX_TRIES` |
@@ -453,6 +454,43 @@ guard, a failed `gh pr list` left an empty `.pr_brs`, `has_pr` was false for eve
 PR (duplicate work against the shared queue, agent-infra#1705). The self-test's failure-path checks
 pin both halves (absent → nothing reaped and `checked.txt` untouched; empty-but-readable → still
 reaps), and the capture site is driven directly with a stub `gh`.
+
+### 7.1b A `LANDED` verdict is suppressed, not blacklisted — **FIXED in this PR**
+
+`collision_preflight.py` answers "is #N already done?" with exit **4 (`LANDED`)** (#8560). The
+refresh loop runs that pre-flight over a pool built **only** from `gh issue list --state open`, so
+the pre-flight's state-`CLOSED` arm is unreachable here: every `LANDED` this loop sees comes from
+the **timeline** arm on an **open** issue, and may belong to a multi-PR issue that still needs work
+(the gate's own #4886 caveat, whose remedy is *"verify it … if it still needs work, state the
+remaining scope before dispatch"*).
+
+Recording that verdict in `checked.txt` — as the first fix in this PR did — traded a visible
+capacity leak for an invisible permanent one: `checked.txt` is pruned only by the reaper, which
+walks `dispatched.txt`, and a landed issue is never dispatched, so the open work item left the
+backlog permanently and nothing ever mentioned it again. That is the failure class §7.1 removed,
+quoted two lines above the arm itself.
+
+**Fix:** `LANDED` writes `landed.txt` instead:
+
+- the pool loop filters it **before** the `LIMIT` counter, so a landed issue does not consume a
+  pre-flight slot (the leak the first fix closed stays closed);
+- the set is echoed on **every** pass (not only when a new verdict arrives), so an operator who asks
+  "why is #N never dispatched again?" sees it — alongside the remedy — instead of it vanishing;
+- nothing is queued: only `CLEAN` reaches `candidates.txt`;
+- the reaper drops an entry once its issue is `CLOSED`, so the list drains as decisions are made.
+  It does **not** infer CLOSED from absence in the capped `.open_iss` listing: that listing is
+  `--limit 500` and this repo has >500 open issues, so it is permanently saturated and absence there
+  proves nothing — the earlier `len(open_iss) < 500` guard tripped on every pass and the prune was a
+  no-op. The prune asks the entry's own state directly (`gh issue view <N> --json state`, uncapped),
+  and **keeps** an entry whose state cannot be read — a failed read never drops a suppression that is
+  still owed. (Widening the shared listing is not the fix: `.pr_brs` is capped the same way, so a
+  longer open list would expose the dispatcher reaper's `has_pr` to more false negatives — duplicate
+  dispatch, worse than a stale entry.)
+
+The self-test's `5f`/`5g` blocks pin all of it: the separate file, the absence of a `checked.txt`
+entry, not queued, the set named on a later pass, the targeted per-entry prune dropping a closed
+entry and keeping an open one — including against a **saturated** `.open_iss` that omits it — and
+keeping (with a log line) an entry whose state could not be read.
 
 ### 7.2 Draft PRs are invisible to the sweep — **FIXED in this PR**
 

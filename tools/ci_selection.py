@@ -566,6 +566,13 @@ SOURCE_PATTERNS = {
                    # touching only this page selects no surface and the id guard
                    # never executes on it.
                    "website/design-partners-intro.html",
+                   # The investor one-pager (#8568). Same reasoning as the
+                   # design-partner entry directly above: `noindex`, so it is out
+                   # of the #3950 blog guard's scope — but NOT out of the
+                   # element-id uniqueness guard, whose scope is every served
+                   # document. Without this entry a PR touching only this page
+                   # selects no surface and the id guard never executes on it.
+                   "website/investors.html",
                    # The shared href extractor both blog-guard layers call
                    # (tests/test_website_docs_consistency.py here, and
                    # tests/e2e/test_legal_pages.py in the separate `legal-e2e`

@@ -56,9 +56,10 @@ if ! gh pr list --repo "$OR" --state all --limit 500 --json headRefName --jq '.[
   rm -f "$O/.pr_brs"
   echo "[refresh] WARN: PR listing FAILED — reaping pass will be skipped (an unreadable listing is not an empty one)"
 fi
-python3 - "$O" <<'PY'
-import os, re, subprocess, sys
+python3 - "$O" "$OR" <<'PY'
+import json, os, re, subprocess, sys
 O = sys.argv[1]
+OR = sys.argv[2] if len(sys.argv) > 2 else ""
 def lines(name):
     p = os.path.join(O, name)
     return [l.strip() for l in open(p)] if os.path.exists(p) else []
@@ -102,10 +103,67 @@ if reaped:
         with open(ck, "w") as fh:
             fh.write("\n".join(kept) + ("\n" if kept else ""))
     print("[reap] un-blacklisted (open, no PR, no live lane): %s" % " ".join(sorted(reaped, key=int)))
+# `landed.txt` is the LANDED verdicts' home (see the loop below), NOT a second blacklist. An entry
+# whose issue is now CLOSED has had its decision made, so drop it — otherwise landed.txt would be the
+# same invisible permanent suppression checked.txt was, and the only escape would be hand-editing the
+# file. A still-OPEN entry is left in place and reported by the loop on every pass, because it is
+# exactly the case the operator must act on: verify and close, or re-state the remaining scope.
+#
+# ⛔ THE PRUNE READS THE ENTRY'S OWN STATE — it does NOT infer CLOSED from ABSENCE in the capped
+# `.open_iss` listing (#8560 review). `.open_iss` is `gh issue list --limit 500`, and this repo has
+# >500 open issues, so that listing is PERMANENTLY saturated: the earlier `len(open_iss) < 500`
+# guard tripped on every pass and the prune was a no-op, so landed.txt could only ever be cleared by
+# hand. Absence from a saturated listing proves nothing, and widening the shared listing is not the
+# fix either — `.pr_brs` is capped the same way, so a longer open list would expose the reaper's
+# `has_pr` to more false negatives (duplicate dispatch, a worse failure than a stale entry). The
+# targeted, UNCAPPED `gh issue view <N> --json state` answers the actual question.
+#
+# ⛔ FAIL CLOSED PER ENTRY: an entry whose state cannot be read is KEPT — a failed read never drops a
+# suppression that is still owed. This is the landed list's own fail-closed rule, named in the log so
+# it is never silent.
+lp = os.path.join(O, "landed.txt")
+landed_entries = [l for l in lines("landed.txt") if l]
+
+def landed_issue_state(n):
+    """The issue's own state, straight from gh — UNCAPPED, and None on ANY
+    failure (which the caller reads as "keep the entry", never "closed")."""
+    if not OR:
+        return None
+    try:
+        r = subprocess.run(["gh", "issue", "view", n, "--repo", OR,
+                            "--json", "state"], capture_output=True, text=True)
+        if r.returncode != 0:
+            return None
+        state = json.loads(r.stdout).get("state")
+    except Exception:
+        return None
+    if not isinstance(state, str):
+        return None
+    return state.strip().upper() or None
+
+if landed_entries:
+    still_landed, settled, unreadable = [], [], []
+    for n in landed_entries:
+        state = landed_issue_state(n)
+        if state == "CLOSED":
+            settled.append(n)
+        else:
+            still_landed.append(n)
+            if state != "OPEN":
+                unreadable.append(n)
+    if os.path.exists(lp):
+        with open(lp, "w") as fh:
+            fh.write("\n".join(still_landed) + ("\n" if still_landed else ""))
+    if settled:
+        print("[reap] landed list: decision made (issue CLOSED), dropped: %s"
+              % " ".join(sorted(settled, key=int)))
+    if unreadable:
+        print("[reap] landed list: %d entr(ies) could not be re-read — KEPT, not assumed "
+              "closed: %s" % (len(unreadable), " ".join(sorted(unreadable, key=int))))
 PY
 for f in "$O/.open_iss" "$O/.pr_brs"; do rm -f "$f"; done
 
-touch "$O/checked.txt" "$O/candidates.txt"
+touch "$O/checked.txt" "$O/candidates.txt" "$O/landed.txt"
 
 # pool = open unassigned P0-blocker ∪ P1-severe ∪ P2-moderate, minus epics/owner-decisions
 #
@@ -135,6 +193,7 @@ n=0
 while read -r N; do
   [ -z "${N:-}" ] && continue
   grep -qx "$N" "$O/checked.txt" 2>/dev/null && continue
+  grep -qx "$N" "$O/landed.txt" 2>/dev/null && continue
   grep -qx "$N" "$O/dispatched.txt" 2>/dev/null && continue
   # ⛔ THE PASS BUDGET COUNTS *ANSWERED* CANDIDATES, not entries walked. Counting every entry
   # (the pre-fix `n=$((n+1))` that used to sit here) let a few persistently non-answering entries
@@ -148,10 +207,28 @@ while read -r N; do
   # checked.txt=63 against candidates.txt=9 on 2026-10-13 is what that leak looks like. A
   # COLLISION is likewise transient — the colliding work lands — so it too is retried rather than
   # blacklisted forever (agent-infra#1716 / #8515).
+  #
+  # LANDED must be matched explicitly: it did not exist before #8560, so the sed below dropped the
+  # whole line and control fell to `*)` — logged as "no verdict" and re-pre-flighted on EVERY pass.
+  # Nothing is dispatched for it (only CLEAN is queued), but a terminal fact read as an error is a
+  # false diagnosis. INCOMPLETE (exit 2, some surfaces unqueried) is likewise a REAL verdict, not a
+  # missing one — the sed captures it so the log names what happened instead of "no verdict".
+  # LANDED is a settled answer and counts against the pass budget like CLEAN and COLLISION (its arm
+  # below increments `n`); INCOMPLETE keeps the existing rule — it costs nothing against LIMIT and is
+  # bounded by RETRY_MAX in the `*)` arm (#8469 review P2).
+  #
+  # ⛔ LANDED IS NOT TERMINAL HERE, so it does NOT go in checked.txt. The pool is built from
+  # `gh issue list --state open`, so the pre-flight's state-CLOSED arm is unreachable from this loop:
+  # 100% of the LANDED verdicts written below come from the TIMELINE arm on an OPEN issue — and that
+  # landing may belong to a multi-PR issue that still needs work (the gate's own #4886 caveat, whose
+  # remedy is "verify it … if it still needs work, state the REMAINING scope before dispatch").
+  # checked.txt is never pruned for an issue the reaper did not dispatch, and a landed issue is never
+  # dispatched, so writing it there removed an OPEN work item from the backlog permanently and
+  # silently — the exact failure class #8515 removed. landed.txt instead keeps it out of the backlog
+  # WITHOUT hiding it: the pool filter above spares the LIMIT slot, and the pass summary below names
+  # the set on every pass. The reaper drops an entry once the issue is CLOSED (#8560 review).
   PRE="$("$SC/.venv/bin/python" tools/collision_preflight.py "$N" --repo . 2>&1)"
-  # INCOMPLETE (exit 2, some surfaces unqueried) is a REAL verdict, not a missing one — capture
-  # it so the log names what happened instead of calling it "no verdict".
-  V="$(printf '%s\n' "$PRE" | grep -E '^VERDICT' | head -1 | sed -E 's/.*VERDICT: (CLEAN|COLLISION|INCOMPLETE).*/\1/')"
+  V="$(printf '%s\n' "$PRE" | grep -E '^VERDICT' | head -1 | sed -E 's/.*VERDICT: (CLEAN|COLLISION|LANDED|INCOMPLETE).*/\1/')"
   case "$V" in
     CLEAN)
       n=$((n+1))
@@ -159,6 +236,13 @@ while read -r N; do
       rm -f "$O/state/pretry-$N"
       echo "$N" >> "$O/candidates.txt"
       echo "[refresh] +#$N CLEAN -> backlog" ;;
+    LANDED)
+      # Counts against the pass budget like every other ANSWERED verdict: without this the loop
+      # would walk past the LIMIT hunting for more entries on every pass a landed issue appears.
+      n=$((n+1))
+      rm -f "$O/state/pretry-$N"
+      echo "$N" >> "$O/landed.txt"
+      echo "[refresh] =#$N landed — work already shipped; verify/close, NOT queued, NOT checked" ;;
     COLLISION)
       # A peer's work is in flight; a collision is transient by nature, so leave the issue
       # unchecked and re-attempt it next pass rather than consuming it permanently.
@@ -207,4 +291,12 @@ done < "$O/.pool"
 # whereas the old `sort -o` preserved it. The file holds only public issue numbers and its mode is
 # never set deliberately, so 644 is not a property anything depends on.
 awk '!seen[$0]++' "$O/candidates.txt" > "$O/.cand" && mv "$O/.cand" "$O/candidates.txt"
+# ⛔ THE LANDED SET IS REPORTED ON EVERY PASS, not only when a new verdict arrives. A list that is
+# filtered but never printed is the same invisible suppression it replaced: the operator debugging
+# "why is #N never dispatched again?" must see it here. It is not an error and not a missing verdict —
+# it is a decision waiting to be made (verify + close, or re-state the remaining scope). The reaper
+# above drops an entry once its issue is CLOSED, so the list drains as decisions are made.
+if [ -s "$O/landed.txt" ]; then
+  echo "[refresh] landed (awaiting verify/close or a re-scope), not queued: $(tr '\n' ' ' < "$O/landed.txt")"
+fi
 echo "[refresh] checked $n; backlog now $(wc -l < "$O/candidates.txt" | tr -d ' ') issues"

@@ -52,6 +52,9 @@
 /faq/      /faq      301
 /self-hosted/  /self-hosted  301
 /design-partners-intro/  /design-partners-intro  301
+# The investor one-pager (#8568) — same document class as the design-partner
+# page above, so it carries the same trailing-slash 301.
+/investors/  /investors  301
 
 # Raw index asset → host root (middleware rewrites / per host)
 /index.html  /  301
@@ -62,3 +65,4 @@
 /faq.html   /faq           301
 /self-hosted.html  /self-hosted  301
 /design-partners-intro.html  /design-partners-intro  301
+/investors.html  /investors  301

@@ -39,6 +39,11 @@ public contact.html
 # rather than the site nav — but it IS a public top-level asset, so it must be
 # classified or the deploy's checker fails closed.
 public design-partners-intro.html
+# The investor one-pager (#8568) — the same class of asset as the design-partner
+# page above: a public top-level document on the tortoise host, reached by
+# outreach link. Classified `public` because it IS staged, or the preflight
+# fails closed.
+public investors.html
 public docs.html
 public dpa.html
 public faq.html
