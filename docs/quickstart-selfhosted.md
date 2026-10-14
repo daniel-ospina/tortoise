@@ -14,7 +14,7 @@ aboutObjects: tortoise-cli, tortoise-mcp
 
 Tortoise is a graph engine for agent memory: claims are **Points**, relationships are **edges**, and belief scores are computed by propagating evidence through the graph. You run Tortoise as a service and your tools connect to it over MCP — like running MongoDB and connecting a driver.
 
-This guide gets you from zero to a running server in about 5 minutes. **The recommended path uses Docker** (durable, multi-writer safe); a no-Docker embedded path is available for single-agent eval only.
+This guide gets you from zero to a running server in about 5 minutes. **The recommended path uses Docker** (multi-writer; AOF-durable against a process crash — the off-box copy is a setup step, see [Option A2](#option-a2--the-off-box-backup-target-is-part-of-setup-declare-or-decline)); a no-Docker embedded path is available for single-agent eval only.
 
 Prefer a managed server? See [quickstart-cloud.md](quickstart-cloud.md) — sign up, paste an API key, done. Operator/infra notes (deploying, upgrading, backing up the daemon itself): [infra-runbook.md](infra-runbook.md).
 
@@ -29,7 +29,7 @@ Prefer a managed server? See [quickstart-cloud.md](quickstart-cloud.md) — sign
 | You are… | Use… |
 |---|---|
 | One agent, experimenting / laptop eval | **Embedded (Option C)** — single-writer, eval only |
-| A team / multiple agents / production | **Docker (Option A or B)** — durable multi-writer |
+| A team / multiple agents / production | **Docker (Option A or B)** — multi-writer, AOF on-box |
 | Zero-ops | [Hosted Cloud](quickstart-cloud.md) |
 
 ## 1. Install
@@ -52,9 +52,9 @@ pip install git+https://github.com/daniel-ospina/tortoise.git
 
 ## 2. Choose a database
 
-### Option A — Docker compose (recommended, durable)
+### Option A — Docker compose (recommended, multi-writer)
 
-The repo ships a complete reference topology (`docker-compose.yml`): the daemon plus a **FalkorDB sidecar** with AOF on, a named volume, a healthcheck, and `TORTOISE_DB_URI` wired. This is the durable multi-writer path — safe for teams and multiple agents writing concurrently.
+The repo ships a complete reference topology (`docker-compose.yml`): the daemon plus a **FalkorDB sidecar** with AOF on, a named volume, a healthcheck, and `TORTOISE_DB_URI` wired. This is the multi-writer path — safe for teams and multiple agents writing concurrently.
 
 ```bash
 docker compose up -d          # daemon on http://localhost:8000 (MCP at /mcp)
@@ -63,7 +63,32 @@ docker compose up -d          # daemon on http://localhost:8000 (MCP at /mcp)
 - The sidecar is bound to `127.0.0.1:6379` (loopback only) so host-side tools can reach it with `TORTOISE_DB_URI=docker://:falkordb@localhost:6379/tortoise`.
 - Set a strong `TORTOISE_API_KEY` in `docker-compose.yml` before exposing beyond localhost.
 
-### Option B — Bare container (durable variant) *(requires Docker)*
+> **What this path survives, scoped to AOF:** the sidecar's AOF `everysec` survives
+a process or container crash — **≤1 s** of lost writes. It does **not** survive
+losing the named volume or the host. The full posture, including the strongest
+verification actually performed, is [docs/durability-posture.md](durability-posture.md)
+— the one authority for durability claims.
+
+#### Option A2 — the off-box backup target is part of setup (declare or decline)
+
+Durability is the store's persistence **plus an off-box copy**. On this path AOF
+is on-box, so the off-box copy is a **setup decision you make here** — never a
+silent default. In `docker-compose.yml`, pick exactly one:
+
+- **Declare a target** — fill `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
+  `R2_SECRET_ACCESS_KEY` and `R2_BUCKET` (the repo's backup-target contract), or
+- **Decline explicitly** — set `TORTOISE_OFFBOX_BACKUP_DECLINED=1` and accept
+  AOF-only durability.
+
+Leave both unset and the daemon still boots and serves — and **reports the single
+local copy loudly at startup**, so the omission cannot pass unnoticed.
+
+⚠️ **A declared target is an intent, not yet a copy.** The backup sweep's only
+driver is the hosted lane; nothing in the self-host lane runs it yet (#8544), so
+declaring a target does **not** produce an archive today. Do not treat a declared
+target as a recovery guarantee until that driver lands.
+
+### Option B — Bare container (multi-writer variant) *(requires Docker)*
 
 Same image, standalone — useful when you don't want the full compose stack:
 
@@ -75,7 +100,7 @@ docker run -d --name tortoise-falkordb -p 127.0.0.1:6379:6379 \
 
 Point Tortoise at it with `TORTOISE_DB_URI=docker://:falkordb@localhost:6379/tortoise`.
 
-⚠️ Auth/AOF go via the **`REDIS_ARGS` env var** — the falkordb image entrypoint ignores command-line args. A bare `--requirepass` as a run arg silently starts a passwordless sidecar.
+⚠️ Auth/AOF go via the **`REDIS_ARGS` env var** — the falkordb image entrypoint ignores command-line args. A bare `--requirepass` as a run arg silently starts a passwordless sidecar. This variant runs only the sidecar (no daemon), so the off-box backup target is still **your** setup step — see [Option A2](#option-a2--the-off-box-backup-target-is-part-of-setup-declare-or-decline).
 
 ### Option C — Embedded (single-agent eval only, no Docker)
 
@@ -89,6 +114,7 @@ Point Tortoise at it with `TORTOISE_DB_URI=docker://:falkordb@localhost:6379/tor
 |---|---|---|
 | `TORTOISE_DB_URI` | Docker (Option A/B) | `docker://:falkordb@localhost:6379/tortoise` |
 | `TORTOISE_DB_PATH` | Embedded (Option C) | `~/.tortoise/tortoise.db` (the default) |
+| `TORTOISE_EVENT_LOG_BASE_DIR` | Rebuild journal (daemon) | `/data/events` — set by `docker-compose.yml`; the daemon also defaults it when `/data` is a mount. Per-graph JSONL: `derived = replay(journal)`, so `tortoise rebuild --dir` can reconstruct the graph. It is the **REBUILD source, not the durability mechanism** — see [docs/durability-posture.md](durability-posture.md) |
 
 ⚠️ Set these in your **MCP client's `env` block** (step 5) — **not** in a `.env` file. A repo-root `.env` is only auto-loaded for editable installs; the CLI reads the process environment only. (With the compose daemon, the URI is already wired inside compose — host-side clients only need it if they talk to the sidecar directly.)
 
@@ -338,8 +364,9 @@ what actually carries the new order to an existing install.
 ### How to restore (backup → wipe → rebuild → re-index)
 
 1. Back up: (1) the corpus files (source of truth), (2) the FULL `events/`
-   JSONL directory (the sole replay source for Sources/Events/Documents),
-   (3) the db file.
+   JSONL directory — the sole replay source for Sources/Events/Documents; on
+   the compose daemon this is the `tortoise-data` volume at `/data/events`
+   (`TORTOISE_EVENT_LOG_BASE_DIR`); (3) the db file.
 2. Restore onto a fresh graph — `rebuild_all` is line-tolerant (a torn
    trailing line from a crash is skipped, never fatal). The rebuild wipes the
    target graph first, so it requires an explicit per-call opt-in (#2944) —

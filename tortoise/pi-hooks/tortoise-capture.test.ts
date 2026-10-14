@@ -26,6 +26,8 @@ import {
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import {
+  CAPTURE_LANES,
+  DISCARD_HTTP_REJECTED,
   HARNESS,
   MAX_ATTEMPTS,
   MAX_TURNS,
@@ -50,12 +52,16 @@ import {
   flushSpool,
   listSpoolEntries,
   modelLabel,
+  normaliseLane,
   postInstallProbe,
+  pruneSpool,
+  quarantineEntry,
   readDiscards,
   readSpoolEntry,
   readSpoolTurns,
   resolveConfig,
   sourceName,
+  spoolEntryBytes,
   truncationMarker,
   writeSpoolEntry,
 } from "./tortoise-capture.ts";
@@ -1244,6 +1250,52 @@ test("the spool byte bound evicts with its own recorded reason", () => {
   assert.ok(readDiscards(spool).some((d) => d.reason === "spool_total_bytes_exceeded"));
 });
 
+test("#8531: a quarantined orphan is COUNTED under the byte ceiling, not invisible to it", () => {
+  // The `.orphan` turn log has no meta, so it is absent from the meta scan AND
+  // from `spoolEntryBytes`: without explicit accounting it is never counted and
+  // never pruned, and the spool grows past `maxTotalBytes` without bound — one
+  // full transcript per corrupt meta (#8531 review).
+  //
+  // MUTATION THAT REDS THIS: drop the orphan branch from `pruneSpool` → the
+  // orphan survives every byte ceiling and no `spool_total_bytes_exceeded` line
+  // names it.
+  const spool = tmpSpool();
+  const dir = join(spool, "entries");
+  const sid = "orphan-bounded";
+  writeSpoolEntry(spool, snapshot(sid));
+  const log = join(dir, `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(log, "z".repeat(4096));
+  writeFileSync(join(dir, `${entryKey(sid)}.meta.json`), "{not json");
+
+  const { metas } = listSpoolEntries(spool);
+  assert.equal(metas.length, 0, "the corrupt meta is quarantined, not listed");
+  const orphan = `${log}.orphan`;
+  assert.equal(readFileSync(orphan, "utf8").length, 4096, "the transcript is quarantined");
+
+  const keep = "orphan-keep";
+  writeSpoolEntry(spool, snapshot(keep));
+
+  // Generous ceiling: the orphan survives (no over-eager delete)…
+  assert.equal(
+    pruneSpool(spool, keep, { maxEntries: 1000, maxTotalBytes: 1 << 30, maxEntryBytes: 1 << 20 })
+      .length,
+    0,
+  );
+  assert.ok(existsSync(orphan), "an orphan under the ceiling must survive");
+
+  // …but, with the orphan COUNTED in the total, a ceiling just over the live
+  // entry's own size must reap it and RECORD the loss (never a silent drop).
+  const ceiling = spoolEntryBytes(spool, keep) + 1024;
+  pruneSpool(spool, keep, { maxEntries: 1000, maxTotalBytes: ceiling, maxEntryBytes: 1 << 20 });
+  assert.equal(existsSync(orphan), false, "the orphan must be reaped under the byte ceiling");
+  assert.ok(
+    readDiscards(spool).some(
+      (d) => d.reason === "spool_total_bytes_exceeded" && d.session_id.startsWith("orphan:"),
+    ),
+    "the eviction must be recorded",
+  );
+});
+
 // ── (4) Endpoint unreachable → retry with backoff, never a loss ────────────
 
 test("a network failure defers the entry (retry with backoff), it is never lost", async () => {
@@ -1299,24 +1351,73 @@ test("backoff grows exponentially and is capped", () => {
 
 // ── (5) Permanent 4xx → discard WITH a reason, never retried ───────────────
 
-test("a permanent 4xx discards with a recorded reason and is never retried", async () => {
+test("a permanent 4xx is recorded terminal and KEEPS the transcript (never unlinked)", async () => {
   const spool = tmpSpool();
   writeSpoolEntry(spool, snapshot("sess-400"));
   const { fetchImpl, calls } = statusFetch(400, "bad payload");
 
-  // MUTATIONS THAT RED THIS:
-  //   * classify 400 as retryable → no discard, attempts=1, entry stays;
-  //   * discard WITHOUT recordDiscard → the ledger stays empty (silent drop).
+  // MUTATION THAT REDS THIS: route a permanent verdict to `discardEntry`
+  // (record + UNLINK) → `readSpoolEntry` is undefined and the only copy is
+  // GONE. `classifyFailure`'s verdict is deliberately unchanged (#7708).
   const first = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1_000 });
   assert.equal(first.discarded.length, 1);
-  assert.equal(first.discarded[0].reason, "permanent_http_400");
-  assert.equal(readSpoolEntry(spool, "sess-400"), undefined, "a permanent failure is not kept");
-  assert.equal(readDiscards(spool).length, 1, "the discard is observable on disk");
+  assert.equal(first.discarded[0].reason, DISCARD_HTTP_REJECTED);
+  const meta = readSpoolEntry(spool, "sess-400");
+  assert.ok(meta, "a permanent refusal must NOT unlink the transcript");
+  assert.ok(meta.terminal_failure, "the entry must be marked terminal");
+  assert.deepEqual(readSpoolTurns(spool, "sess-400"), SPOOL_TURNS,
+    "the turn log must survive verbatim");
+  assert.equal(readDiscards(spool).length, 1, "the refusal is observable on disk");
 
   // A later opportunity must NOT retry what was permanently rejected.
   const second = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 10 ** 12 });
   assert.equal(second.attempted, 0);
+  assert.equal(second.terminal, 1, "a terminal entry must be counted, not silently skipped");
   assert.equal(calls.length, 1, "exactly one POST, never a retry loop");
+  // ...and a byte-IDENTICAL re-snapshot must not resurrect the retry: the dedup
+  // early-return does not rebuild the meta, so the marker survives.
+  writeSpoolEntry(spool, snapshot("sess-400"));
+  assert.ok(readSpoolEntry(spool, "sess-400")?.terminal_failure,
+    "a byte-identical re-snapshot cleared the terminal marker");
+  const third = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 10 ** 13 });
+  assert.equal(third.attempted, 0);
+  assert.equal(calls.length, 1);
+});
+
+test("#7708: a 422 does not unlink the only copy of the transcript", async () => {
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-422"));
+  const { fetchImpl, calls } = statusFetch(422, 'invalid capture_lane "bogus"');
+  const first = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1_000 });
+  assert.equal(first.discarded.length, 1);
+  assert.equal(first.discarded[0].reason, DISCARD_HTTP_REJECTED);
+  assert.ok(readSpoolEntry(spool, "sess-422"), "a 422 UNLINKED the transcript");
+  const second = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 10 ** 12 });
+  assert.equal(second.terminal, 1);
+  assert.equal(calls.length, 1, "a terminal entry was re-POSTed");
+});
+
+test("#8531: a non-object terminal_failure marker does not strand the entry", async () => {
+  // The marker is read by SHAPE, not truthiness: a hand-edited / foreign /
+  // corrupt meta can carry `1`, `true`, `"yes"` or `[]`. Read by truthiness
+  // alone such an entry is counted terminal on EVERY flush — never retried,
+  // silent except in `summary.terminal` (#8531 review).
+  //
+  // MUTATION THAT REDS THIS: restore `if (meta.terminal_failure)` → terminal=1,
+  // zero calls, the capture stranded.
+  const spool = tmpSpool();
+  const sid = "junk-marker";
+  writeSpoolEntry(spool, snapshot(sid));
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
+  meta.terminal_failure = 1;
+  writeFileSync(metaPath, JSON.stringify(meta));
+
+  const { fetchImpl, calls } = statusFetch(200);
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1_000 });
+  assert.equal(summary.terminal, 0, "a junk marker must not read as terminal");
+  assert.equal(summary.attempted, 1);
+  assert.equal(calls.length, 1, "the entry must be retried, not stranded");
 });
 
 test("a quota-refused 402 defers the capture instead of destroying it (#4714)", async () => {
@@ -1717,20 +1818,27 @@ test("a spool directory that cannot be created is discarded WITH a reason", () =
   assert.equal(res.discards[0].reason, "spool_write_failed");
 });
 
-test("a corrupt meta takes its orphaned turn log with it", () => {
-  // MUTATION THAT REDS THIS: unlink only the meta → the orphaned turns.jsonl
-  // stays on disk, invisible to the meta scan and never counted or pruned.
+test("a corrupt meta QUARANTINES its intact turn log (never unlinks)", () => {
+  // #7708: the transcript has nothing to do with a corrupt `meta.json` and is
+  // the only copy, so deleting it turns a bad meta into permanent data loss.
+  // The corrupt meta is removed (the ledger line is its evidence); the turn log
+  // is moved aside as `*.orphan` — recoverable, not deleted.
+  //
+  // MUTATION THAT REDS THIS: unlink the turn log with the meta.
   const spool = tmpSpool();
   mkdirSync(join(spool, "entries"), { recursive: true });
   writeFileSync(join(spool, "entries", "dead.meta.json"), "{not json");
-  writeFileSync(join(spool, "entries", "dead.turns.jsonl"), "{}\n");
+  const turns = '{"role":"user","content":"keep me"}\n';
+  writeFileSync(join(spool, "entries", "dead.turns.jsonl"), turns);
 
   const { metas, discards } = listSpoolEntries(spool);
   assert.equal(metas.length, 0);
   assert.equal(discards.length, 1);
   assert.equal(discards[0].reason, "corrupt_entry");
   assert.equal(existsSync(join(spool, "entries", "dead.turns.jsonl")), false,
-    "the orphaned turn log must be removed with its meta");
+    "the turn log must no longer be addressable as the live log");
+  assert.equal(readFileSync(join(spool, "entries", "dead.turns.jsonl.orphan"), "utf8"), turns,
+    "the intact transcript must be QUARANTINED, not deleted");
 });
 
 test("a meta with no usable session_id is corrupt, not a crash", () => {
@@ -1834,6 +1942,45 @@ test("session_start never files the LIVE session (a /reload must not freeze it)"
   assert.ok(readSpoolEntry(spool, "sess-live"), "its turns stay durable in the spool");
 });
 
+test("#8531: the terminal operator message names the supported retry verb", async () => {
+  // The Pi leg's only operator surface for a terminal entry must name the exit
+  // (`tortoise session drain --retry-terminal`), as the Python drain does —
+  // otherwise the message reports a dead end (#8531 review).
+  //
+  // MUTATION THAT REDS THIS: print `(kept, not retried)` alone → no line names
+  // the verb an operator has to run.
+  const spool = tmpSpool();
+  const sid = "terminal-msg";
+  writeSpoolEntry(spool, snapshot(sid));
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
+  meta.terminal_failure = { reason: "http_rejected", detail: "422", at: "now" };
+  writeFileSync(metaPath, JSON.stringify(meta));
+
+  const { fetchImpl } = statusFetch(200);
+  const pi = mockPi();
+  tortoiseCapture(pi as never, hermeticDeps(fetchImpl, spool));
+
+  const lines: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  };
+  try {
+    await pi.handlers.session_start(
+      undefined,
+      mockCtx({ entries: [], sessionId: "live" }) as never,
+    );
+    await settle();
+  } finally {
+    console.log = original;
+  }
+  assert.ok(
+    lines.some((line) => line.includes("terminal 1") && line.includes("--retry-terminal")),
+    `the terminal line must name the retry verb: ${JSON.stringify(lines)}`,
+  );
+});
+
 test("readSpoolTurns returns every stored role (the store is the record)", () => {
   // The meta's turns_count/content_digest describe the STORE. If read-back
   // filters a role, a flush POSTs fewer turns than the digest it marks filed —
@@ -1900,13 +2047,16 @@ test("the CAS compares the POSTED turns, not the stale meta digest", async () =>
 
 // ── Cycle-4 review fixes (P1/P2) ───────────────────────────────────────────
 
-test("an unreadable turn log is RECORDED, not thrown out of the flush loop", async () => {
+test("an unreadable turn log is RECORDED and KEPT, not thrown out of the flush loop", async () => {
   // `readFileSync` used to escape `readSpoolTurns`: one entry whose log was a
   // DIRECTORY (or EACCES / ELOOP) aborted the WHOLE drain loop, so every
   // session sorted after it was never filed — permanently, with no ledger line.
+  // It must be recorded and, since the path holds something, KEPT (a read
+  // failure must never unlink the only copy — #7708).
   //
   // MUTATION THAT REDS THIS: drop the try/catch around `readFileSync` in
-  // `readSpoolTurns` (or guard with `existsSync` only).
+  // `readSpoolTurns` (or guard with `existsSync` only); or route a byte-bearing
+  // log to `discardEntry` instead of `quarantineEntry`.
   const spool = tmpSpool();
   writeSpoolEntry(spool, snapshot("aaa-broken"));
   const broken = join(spool, "entries", `${entryKey("aaa-broken")}.turns.jsonl`);
@@ -1919,9 +2069,12 @@ test("an unreadable turn log is RECORDED, not thrown out of the flush loop", asy
 
   assert.deepEqual(calls.map((c) => c.body.session_id), ["zzz-good"],
     "a corrupt entry must not wedge the sessions sorted after it");
-  assert.deepEqual(summary.discarded.map((d) => d.reason), ["transcript_empty"],
+  assert.deepEqual(summary.discarded.map((d) => d.reason), ["transcript_torn"],
     "the unreadable entry must be recorded, never silently dropped");
-  assert.equal(readDiscards(spool).at(-1)?.reason, "transcript_empty");
+  assert.equal(readDiscards(spool).at(-1)?.reason, "transcript_torn");
+  assert.ok(existsSync(broken), "a byte-bearing log must NOT be unlinked");
+  assert.ok(readSpoolEntry(spool, "aaa-broken")?.terminal_failure,
+    "the kept entry must be terminal so the drain does not loop on it");
 });
 
 test("a discard records its reason BEFORE removing the entry files", () => {
@@ -2015,4 +2168,216 @@ test("an unreadable spool ROOT is RECORDED, not reported as an empty spool", asy
   } finally {
     chmodSync(spool, 0o700);
   }
+});
+
+// ── #7708: ONE lane normalisation, every site ─────────────────────────────
+//
+// Site map, one discriminating test each; REMOVING the normaliser at a site
+// reds that site's test:
+//   1 WRITE          writer drops / heals a lane
+//   2 DRAIN payload  buildCapturePayload
+//   3 SKIP clause    flushSpool skip
+//   4 SUCCESS CAS    flushSpool CAS
+//   5 post-POST      flushSpool transient already-filed check
+// The TS set is pinned to the server + Python sets by a Python node-driver
+// test (tests/test_capture_lane_3516.py).
+
+/** Write a `capture_lane` straight into the meta file (a crafted/foreign spool). */
+function craftLane(spool: string, sid: string, lane: unknown): void {
+  const crafted = readSpoolEntry(spool, sid)!;
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  writeFileSync(metaPath, `${JSON.stringify({ ...crafted, capture_lane: lane }, null, 2)}\n`);
+}
+
+test("the lane vocabulary is closed and normalises to undefined", () => {
+  assert.deepEqual([...CAPTURE_LANES].sort(), ["hook", "store_sync"]);
+  assert.equal(normaliseLane("hook"), "hook");
+  assert.equal(normaliseLane("store_sync"), "store_sync");
+  for (const bad of ["bogus", "recorder", "", "Hook", 0, false, null, undefined, [], ["hook"]]) {
+    assert.equal(normaliseLane(bad), undefined, String(bad));
+  }
+});
+
+test("#7708 site 1: the writer never stores an unrecognised lane", () => {
+  const spool = tmpSpool();
+  // MUTATION THAT REDS THIS: drop `normaliseLane` from the writer → "bogus" is
+  // stored and later posted verbatim (the 422 the issue is about).
+  writeSpoolEntry(spool, { ...snapshot("sess-bad-lane"), captureLane: "bogus" });
+  assert.equal(readSpoolEntry(spool, "sess-bad-lane")?.capture_lane, undefined,
+    "an unrecognised lane reached the stored meta");
+  // positive control: a recognised lane IS stored.
+  writeSpoolEntry(spool, { ...snapshot("sess-good-lane"), captureLane: "hook" });
+  assert.equal(readSpoolEntry(spool, "sess-good-lane")?.capture_lane, "hook");
+});
+
+test("#7708 site 1: a stored foreign lane is healed by a valid snapshot", () => {
+  const spool = tmpSpool();
+  const sid = "sess-heal";
+  const turns = [{ role: "user" as const, content: "same" }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+  craftLane(spool, sid, "bogus");
+  // MUTATION THAT REDS THIS: resolve the RAW prior lane → it wins the truthy
+  // `||` and `laneUpgrade` stays false, so the dedup early-return strands the
+  // valid lane forever.
+  const res = writeSpoolEntry(spool, { ...snapshot(sid, turns), captureLane: "hook" });
+  assert.equal(res.written, true, "the dedup early-return stranded the valid lane");
+  assert.equal(readSpoolEntry(spool, sid)?.capture_lane, "hook");
+});
+
+test("#7708 site 2: the drain never puts an unrecognised lane on the wire", async () => {
+  const spool = tmpSpool();
+  const sid = "sess-bad-wire";
+  writeSpoolEntry(spool, snapshot(sid));
+  craftLane(spool, sid, "bogus");
+  const server = recordingServer();
+  // MUTATION THAT REDS THIS: drop `normaliseLane` from `buildCapturePayload`
+  // → the wire carries "bogus" and the server 422s.
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.equal(server.posts(), 1);
+  assert.equal(server.sessions.get(sid)?.capture_lane, undefined,
+    "an unrecognised lane reached the wire");
+});
+
+test("#7708 site 3: a filed entry with a falsy lane is skipped, not re-POSTed", async () => {
+  const spool = tmpSpool();
+  const sid = "sess-falsy-skip";
+  writeSpoolEntry(spool, snapshot(sid));
+  const server = recordingServer();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.equal(server.posts(), 1);
+  assert.ok(readSpoolEntry(spool, sid)?.filed_key);
+  craftLane(spool, sid, ""); // filed_lane stays absent (a lane-less filing)
+  // MUTATION THAT REDS THIS: raw `undefined === ""` is FALSE → the entry
+  // re-POSTs its whole transcript on EVERY flush (#4714).
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 2 });
+  assert.equal(summary.skipped, 1);
+  assert.equal(server.posts(), 1, "the entry was re-POSTed");
+});
+
+test("#7708 site 4: a falsy stored lane is stamped filed on the first drain", async () => {
+  const spool = tmpSpool();
+  const sid = "sess-falsy-cas";
+  writeSpoolEntry(spool, snapshot(sid));
+  craftLane(spool, sid, "");
+  const server = recordingServer();
+  // MUTATION THAT REDS THIS: raw `"" === undefined` is FALSE in the CAS →
+  // `filed_key` is never stamped and the entry re-POSTs every drain.
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.equal(server.posts(), 1);
+  assert.equal(server.sessions.get(sid)?.capture_lane, undefined);
+  assert.ok(readSpoolEntry(spool, sid)?.filed_key,
+    "the CAS did not stamp filed_key for a falsy lane (re-POST loop)");
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 2 });
+  assert.equal(summary.skipped, 1);
+  assert.equal(server.posts(), 1, "the entry was re-POSTed");
+});
+
+test("#7708 site 5: the transient already-filed check normalises the lane", async () => {
+  const spool = tmpSpool();
+  const sid = "sess-post-post";
+  writeSpoolEntry(spool, snapshot(sid));
+  craftLane(spool, sid, "");
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const current = readSpoolEntry(spool, sid)!;
+  // A concurrent flush files the exact content while our POST is in flight.
+  const concurrent = { ...current, filed_key: current.capture_key };
+  const fetchImpl = (async () => {
+    writeFileSync(metaPath, `${JSON.stringify(concurrent, null, 2)}\n`);
+    return { ok: false, status: 503, json: async () => ({}) };
+  }) as never;
+  // MUTATION THAT REDS THIS: the raw check (`undefined === ""`) is false → the
+  // backoff is re-armed (deferred) instead of skipping an already-filed entry.
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1 });
+  assert.equal(summary.skipped, 1);
+  assert.equal(summary.deferred, 0);
+});
+
+test("#7708: quarantineEntry records FIRST and keeps the entry (no unlink)", () => {
+  const spool = tmpSpool();
+  const sid = "sess-quarantine";
+  writeSpoolEntry(spool, snapshot(sid));
+  const order: string[] = [];
+  const meta = readSpoolEntry(spool, sid)!;
+  quarantineEntry(spool, meta, DISCARD_HTTP_REJECTED, "HTTP 422: bad lane", 1_000, {
+    record: (dir, rec) => {
+      order.push("record");
+      return { at: "", ...rec };
+    },
+    read: (dir, sessionId) => {
+      order.push("read");
+      return readSpoolEntry(dir, sessionId);
+    },
+    write: (dir, m) => {
+      order.push("write");
+      const p = join(dir, "entries", `${entryKey(m.session_id)}.meta.json`);
+      writeFileSync(p, `${JSON.stringify(m, null, 2)}\n`);
+    },
+  });
+  assert.deepEqual(order, ["record", "read", "write"], "record must precede the mark");
+  assert.ok(readSpoolEntry(spool, sid), "quarantine must keep the entry");
+});
+
+test("#8531: buildCapturePayload caps the server-bounded attribution fields at the wire", () => {
+  // `machine_id` ≤256 and `model` ≤128 are SERVER caps; exceeding either is a
+  // 422, which `flushSpool` classifies PERMANENT → the entry goes terminal. The
+  // WRITER bounds both, but the DRAIN forwards the on-disk meta, so a
+  // hand-edited / foreign / corrupt `meta.json` (the PR's own threat model)
+  // could strand the capture (#8531 review).
+  //
+  // MUTATION THAT REDS THIS: forward `args.machineId` / `args.model` verbatim.
+  const over = buildCapturePayload({
+    sessionId: "s",
+    turns: [{ role: "user", content: "x" }],
+    source: "t",
+    machineId: "m".repeat(257),
+    model: "x".repeat(200),
+  });
+  assert.equal((over.machine_id as string).length, 256);
+  assert.equal((over.model as string).length, 128);
+
+  // POSITIVE CONTROL: a legal value reaches the wire verbatim, so the cap
+  // cannot pass by a leg that simply stopped forwarding either field.
+  const legal = buildCapturePayload({
+    sessionId: "s",
+    turns: [{ role: "user", content: "x" }],
+    source: "t",
+    machineId: "deadbeef",
+    model: "deepseek/deepseek-v4-flash",
+  });
+  assert.equal(legal.machine_id, "deadbeef");
+  assert.equal(legal.model, "deepseek/deepseek-v4-flash");
+
+  // A NON-STRING (a foreign meta) is OMITTED, never a crash or a verbatim post.
+  const junk = buildCapturePayload({
+    sessionId: "s",
+    turns: [{ role: "user", content: "x" }],
+    source: "t",
+    machineId: 1 as unknown as string,
+    model: ["x"] as unknown as string,
+  });
+  assert.equal(junk.machine_id, undefined);
+  assert.equal("model" in junk, false);
+});
+
+test("#8531: an empty role is not a turn (the writers' contract on both legs)", () => {
+  // Neither leg's writer ever emits an empty role (`extractTurns` requires
+  // user/assistant; Python filters to the same pair), so `{"role":"",...}` is a
+  // malformed line. Python used to file it while this leg skipped it and routed
+  // the log to `transcript_torn` — the one place the legs disagreed about the
+  // SAME bytes. Python now applies the same non-empty predicate.
+  //
+  // MUTATION THAT REDS THIS: accept an empty role → the malformed line becomes a
+  // filed turn.
+  const spool = tmpSpool();
+  const sid = "empty-role";
+  const entries = join(spool, "entries");
+  mkdirSync(entries, { recursive: true });
+  const log = join(entries, `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(log, '{"role":"","content":"ghost"}\n');
+  assert.deepEqual(readSpoolTurns(spool, sid), []);
+
+  // POSITIVE CONTROL: a NON-EMPTY non-conversational role is still returned —
+  // the reader is not a role-VALUE filter. Only EMPTINESS is refused.
+  writeFileSync(log, '{"role":"system","content":"policy"}\n');
+  assert.deepEqual(readSpoolTurns(spool, sid), [{ role: "system", content: "policy" }]);
 });

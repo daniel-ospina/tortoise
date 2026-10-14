@@ -247,24 +247,51 @@ def test_backoff_grows_and_is_capped():
     assert backoff_delay(100) <= 6 * 60 * 60
 
 
-# ── (5) Permanent 4xx → discard WITH a reason, never retried ───────────────
+# ── (5) Permanent 4xx → recorded, TERMINAL, and KEPT (never unlinked) ───────
 
 
-def test_a_permanent_4xx_discards_with_a_reason_and_is_never_retried(tmp_path):
-    """MUTATIONS THAT RED THIS: classify 400 as retryable (no discard, entry
-    stays); discard without `record_discard` (ledger stays empty)."""
+def test_a_permanent_4xx_is_terminal_and_keeps_the_transcript(tmp_path):
+    """#7708. MUTATIONS THAT RED THIS: route the permanent verdict back to
+    `_discard_entry` (records then UNLINKS — the only copy is gone); drop the
+    `terminal_failure` mark (the entry is re-POSTed every drain)."""
     root = tmp_path
     write_spool_entry(root, _snapshot("sess-400"))
     server = _Server(PostOutcome(ok=False, status=400, detail="bad payload"))
 
     first = flush_spool(root, server.post, now=1000.0)
     assert len(first.discarded) == 1
-    assert first.discarded[0]["reason"] == "permanent_http_400"
-    assert read_spool_meta(root, "sess-400") is None, "a permanent failure is not kept"
-    assert len(read_discards(root)) == 1, "the discard is observable on disk"
+    assert first.discarded[0]["reason"] == "http_rejected"
+    meta = read_spool_meta(root, "sess-400")
+    assert meta is not None, "a permanent 4xx must NOT unlink the transcript"
+    assert meta.get("terminal_failure"), meta
+    assert read_spool_turns(root, "sess-400") == TURNS, "the turns must survive"
+    assert first.lost == [], (
+        "a retained terminal refusal must not read as a loss (#3971 class)")
+    assert len(read_discards(root)) == 1, "the refusal is observable on disk"
 
     second = flush_spool(root, server.post, now=10**12)
-    assert second.attempted == 0, "a permanent rejection must never be retried"
+    assert second.attempted == 0, "a terminal rejection must never be retried"
+    assert second.terminal == 1, "a terminal entry must be counted, not silent"
+
+
+def test_a_422_does_not_unlink_the_only_copy(tmp_path):
+    """#7708: the exact status the unrecognised-lane defect produced. The entry
+    is retained and terminal — a lone bad metadata token can never destroy the
+    transcript."""
+    root = tmp_path
+    write_spool_entry(root, _snapshot("sess-422"))
+    posts: list[dict] = []
+
+    def refuse(payload):
+        posts.append(dict(payload))
+        return PostOutcome(
+            ok=False, status=422, detail='invalid capture_lane "bogus"')
+
+    first = flush_spool(root, refuse, now=1000.0)
+    assert [d["reason"] for d in first.discarded] == ["http_rejected"]
+    assert read_spool_meta(root, "sess-422") is not None, "a 422 unlinked the copy"
+    second = flush_spool(root, refuse, now=10**12)
+    assert second.terminal == 1 and len(posts) == 1
 
 
 def _node_that_can_strip_ts() -> str:
@@ -998,9 +1025,16 @@ def test_a_filesystem_write_failure_is_discarded_with_a_reason(tmp_path, monkeyp
     assert read_discards(tmp_path)[-1]["reason"] == "spool_write_failed"
 
 
-def test_a_corrupt_meta_takes_its_orphaned_turn_log_with_it(tmp_path):
-    """MUTATION THAT REDS THIS: unlink only the meta → the orphaned turns.jsonl
-    stays on disk, invisible to the meta scan and never counted or pruned."""
+def test_a_corrupt_meta_quarantines_its_intact_turn_log(tmp_path):
+    """MUTATION THAT REDS THIS: restore the
+    `for orphan in (path, log): orphan.unlink()` loop → the intact transcript is
+    deleted with the corrupt meta, irrecoverably.
+
+    (`test_a_corrupt_meta_quarantines_an_intact_turn_log` pins the same keep
+    through `flush_spool`; this pins `list_spool_metas` directly. The `.orphan`
+    BYTE accounting is pinned by
+    `test_a_quarantined_orphan_is_counted_and_reaped_under_the_byte_ceiling`.)
+    """
     entries = tmp_path / "entries"
     entries.mkdir(parents=True)
     (entries / "dead.meta.json").write_text("{not json", encoding="utf-8")
@@ -1011,7 +1045,11 @@ def test_a_corrupt_meta_takes_its_orphaned_turn_log_with_it(tmp_path):
     assert metas == []
     assert len(discards) == 1
     assert discards[0]["reason"] == "corrupt_entry"
-    assert not (entries / "dead.turns.jsonl").exists(), "the orphan log is removed with its meta"
+    assert not (entries / "dead.turns.jsonl").exists(), \
+        "the live log path must be vacated"
+    assert (entries / "dead.turns.jsonl.orphan").read_text(encoding="utf-8") == "{}\n", \
+        "the intact transcript is QUARANTINED, not deleted"
+    assert not (entries / "dead.meta.json").exists(), "the corrupt meta is removed"
 
 
 def test_a_meta_without_a_usable_session_id_is_corrupt_not_a_crash(tmp_path):
@@ -1707,8 +1745,9 @@ def test_the_cas_compares_the_POSTED_turns_not_the_stale_meta(tmp_path):
 
 def test_an_unreadable_turn_log_discards_with_a_reason_instead_of_crashing(tmp_path):
     """`session drain` documents "always exits 0"; an unreadable log (EACCES, a
-    directory in its place) must become a RECORDED discard, not an exception
-    escaping the hook.
+    directory in its place) must become a RECORDED, KEPT entry, not an exception
+    escaping the hook and not an unlink — the path may be the only copy of the
+    transcript (#7708).
 
     MUTATION THAT REDS THIS: drop the `except OSError` around the log read.
     """
@@ -1721,8 +1760,12 @@ def test_an_unreadable_turn_log_discards_with_a_reason_instead_of_crashing(tmp_p
 
     summary = flush_spool(tmp_path, _Server().post, now=1000.0)
     assert summary.attempted == 0, "a log that cannot be read is not attempted"
-    assert summary.discarded[-1]["reason"] == "transcript_empty"
-    assert read_discards(tmp_path)[-1]["reason"] == "transcript_empty"
+    assert summary.discarded[-1]["reason"] == "transcript_torn"
+    assert read_discards(tmp_path)[-1]["reason"] == "transcript_torn"
+    # The entry is KEPT (recorded + terminal), never unlinked: a present log that
+    # cannot be read must not become data loss.
+    assert summary.lost == [], "a read failure must not read as a loss"
+    assert read_spool_meta(tmp_path, "sess-dir").get("terminal_failure")
 
 
 # ── (14) Cycle-4 review P1/P2 fixes ────────────────────────────────────────
@@ -1961,7 +2004,7 @@ console.log(JSON.stringify({ posted, discards: readDiscards(dir).map(d => d.reas
     out = json.loads(proc.stdout.strip().splitlines()[-1])
     assert "zzz-good" in out["posted"], (
         f"a corrupt entry must not wedge later sessions: {out}")
-    assert "transcript_empty" in out["discards"], (
+    assert "transcript_torn" in out["discards"], (
         f"the unreadable entry must be recorded, not dropped: {out}")
 
 
@@ -2283,7 +2326,14 @@ def test_a_non_utf8_turn_log_is_recorded_not_a_crash(tmp_path, monkeypatch, caps
     assert "zzz-healthy" in server.sessions, (
         "a corrupt entry must not stop the sessions sorted after it from filing")
     reasons = [d["reason"] for d in read_discards(root)]
-    assert "transcript_empty" in reasons, "the corrupt log is RECORDED, not silent"
+    assert "transcript_torn" in reasons, "the torn log is RECORDED, not silent"
+    # …and the intact prefix is KEPT, never unlinked: the torn tail must not
+    # take the whole transcript with it.
+    assert _log_path(root, "aaa-corrupt").exists(), (
+        "a torn append UNLINKED the only copy of the transcript")
+    meta = read_spool_meta(root, "aaa-corrupt")
+    assert meta is not None and meta.get("terminal_failure"), (
+        "the torn entry must be terminal-and-kept, not deleted")
 
 
 def test_a_corrupt_typed_meta_does_not_crash_or_wedge(tmp_path):
@@ -2602,3 +2652,471 @@ def test_per_turn_spool_repairs_a_non_utf8_meta_instead_of_crashing(tmp_path,
                      "--session-id", "sess-fixmeta"]) == 0
     assert "Traceback" not in capsys.readouterr().err
     assert read_spool_meta(root, "sess-fixmeta") is not None, "the meta is repaired"
+
+
+# ── (19) #7708 follow-up — a read/decode failure NEVER unlinks the transcript ─
+#
+# The lane fix closed "a bad VALUE unlinks the only copy". This closes the
+# sibling: a bad READ of a log or meta that still holds the conversation. The
+# invariant is one-directional — only an ABSENT or ZERO-BYTE log may be removed;
+# anything with bytes is recorded, marked terminal and KEPT.
+
+
+def test_a_torn_utf8_append_keeps_the_intact_prefix(tmp_path):
+    """A killed append of a multi-byte character (CJK/emoji, written raw by
+    `_serialise_turn`) leaves a torn codepoint at the log's tail. The strict
+    `read_text` raised on the WHOLE file and returned `[]`, so the drain recorded
+    `transcript_empty` and UNLINKED the intact prefix — the only copy. The TS leg
+    decodes tolerantly (Node replaces the invalid byte), so only Python lost it.
+
+    MUTATION THAT REDS THIS: restore `path.read_text(encoding="utf-8")` (strict)
+    in `read_spool_turns` — the prefix is neither posted nor kept.
+    """
+    from tortoise.capture_spool import _log_path
+
+    sid = "7708-torn-prefix"
+    turns = [{"role": "user", "content": "the only copy"}]
+    write_spool_entry(tmp_path, _snapshot(sid, turns=turns))
+    log = _log_path(tmp_path, sid)
+    with log.open("ab") as fh:
+        # A torn 4-byte codepoint (emoji prefix) appended after a new line.
+        fh.write(b'{"role":"assistant","content":"\xf0\x9f')
+
+    assert read_spool_turns(tmp_path, sid) == turns, (
+        "the intact prefix must survive a torn trailing codepoint")
+
+    server = _Server()
+    summary = flush_spool(tmp_path, server.post, now=1000.0)
+    assert summary.lost == [], "a torn append must not read as a loss"
+    assert sid in server.sessions, (
+        "the intact prefix must be FILED, not merely kept on disk")
+    assert log.exists(), "the torn tail must not unlink the intact transcript"
+    assert read_spool_meta(tmp_path, sid) is not None
+
+
+def test_a_wholly_unparseable_turn_log_is_terminal_and_kept(tmp_path):
+    """When even the first record never completed, the log still holds bytes —
+    possibly the only copy. It is recorded `transcript_torn` and KEPT (terminal),
+    never unlinked.
+
+    MUTATION THAT REDS THIS: route the empty-turns branch to `_discard_entry`
+    unconditionally → the log is UNLINKED and the entry reads as a loss.
+    """
+    from tortoise.capture_spool import _log_path
+
+    sid = "7708-wholly-torn"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    log = _log_path(tmp_path, sid)
+    log.write_bytes(b"\xf0\x9f")  # no complete record at all
+
+    server = _Server()
+    summary = flush_spool(tmp_path, server.post, now=1000.0)
+    assert [d["reason"] for d in summary.discarded] == ["transcript_torn"]
+    assert summary.lost == [], "a byte-bearing log must not read as a loss"
+    assert log.exists() and log.read_bytes() == b"\xf0\x9f", (
+        "a read that yields no turn must NOT unlink the bytes")
+    assert read_spool_meta(tmp_path, sid).get("terminal_failure"), (
+        "the kept entry must be terminal so the drain is not wedged on it")
+    assert server.sessions == {}, "nothing parseable should reach the wire"
+
+
+def test_a_wholly_torn_entry_is_retriable_after_new_content_arrives(tmp_path):
+    """The terminal marker on a torn entry must not be a dead end: a later
+    snapshot that REPLACES the log with real turns rebuilds the meta (dropping
+    the marker) and the capture files. Without this the keep would strand it."""
+    from tortoise.capture_spool import _log_path
+
+    sid = "7708-torn-recovers"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    _log_path(tmp_path, sid).write_bytes(b"\xf0\x9f")
+    flush_spool(tmp_path, _Server().post, now=1000.0)
+    assert read_spool_meta(tmp_path, sid).get("terminal_failure")
+
+    # The session keeps going and the next snapshot carries the whole (now
+    # complete) conversation — `_log_has_complete_records` is False, so the log
+    # is REWRITTEN, and the rebuilt meta drops the terminal marker.
+    turns = [{"role": "user", "content": "recovered"}]
+    write_spool_entry(tmp_path, _snapshot(sid, turns=turns))
+    assert not read_spool_meta(tmp_path, sid).get("terminal_failure"), (
+        "a rebuilt meta must drop the terminal marker")
+    server = _Server()
+    flush_spool(tmp_path, server.post, now=2_000_000.0)
+    assert server.sessions.get(sid, {}).get("conversation") == turns
+
+
+def test_a_corrupt_meta_quarantines_an_intact_turn_log(tmp_path):
+    """A hand-edited/corrupt `meta.json` (a typo made while fixing a lane — the
+    PR's own threat model) must not unlink the transcript: the log is the only
+    copy and has nothing to do with the corruption.
+
+    MUTATION THAT REDS THIS: restore the
+    `for orphan in (path, log): orphan.unlink()` loop → the transcript is lost.
+    """
+    from tortoise.capture_spool import _log_path, _meta_path
+
+    sid = "7708-corrupt-meta"
+    turns = [{"role": "user", "content": "the only copy"}]
+    write_spool_entry(tmp_path, _snapshot(sid, turns=turns))
+    log = _log_path(tmp_path, sid)
+    before = log.read_bytes()
+    _meta_path(tmp_path, sid).write_text("{not json", encoding="utf-8")
+
+    summary = flush_spool(tmp_path, _Server().post, now=1000.0)
+    assert [d["reason"] for d in summary.discarded] == ["corrupt_entry"]
+    assert not log.exists(), "the live log path should be vacated"
+    orphan = log.with_name(log.name + ".orphan")
+    assert orphan.read_bytes() == before, (
+        "the intact transcript must be QUARANTINED, not deleted")
+    assert not _meta_path(tmp_path, sid).exists()
+
+
+def test_an_empty_turn_log_is_still_removed_with_a_reason(tmp_path):
+    """Positive control for the gate: a log that is ABSENT/ZERO BYTES is
+    provably empty, so `transcript_empty` may remove it — the keep must not turn
+    a genuinely empty entry into a permanent terminal entry."""
+    from tortoise.capture_spool import _log_path
+
+    sid = "7708-truly-empty"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    _log_path(tmp_path, sid).write_bytes(b"")
+
+    summary = flush_spool(tmp_path, _Server().post, now=1000.0)
+    assert [d["reason"] for d in summary.discarded] == ["transcript_empty"]
+    assert summary.lost, "an empty entry really was removed"
+    assert not _log_path(tmp_path, sid).exists()
+    assert read_spool_meta(tmp_path, sid) is None
+
+
+# ── (20) #7708 follow-up — an unrecognised HARNESS never reaches the wire ─────
+
+
+def test_the_writer_stores_only_a_server_legal_harness(tmp_path):
+    """`harness` is the SAME class of closed server field as `capture_lane`. An
+    unrecognised value is coerced to the server-legal default at the WRITE, so it
+    can never be stored and forwarded (which 422s and strands the entry).
+
+    MUTATION THAT REDS THIS: store `snapshot.harness` raw.
+    """
+    def _write(sid, harness):
+        write_spool_entry(tmp_path, Snapshot(
+            session_id=sid, turns=[{"role": "user", "content": "x"}],
+            source="t", machine_id="m", harness=harness))
+        return read_spool_meta(tmp_path, sid)
+
+    assert _write("7708-h-writer-bad", "bogus")["harness"] == "claude"
+    # positive controls: a legal value is stored verbatim; the CLI alias resolves
+    assert _write("7708-h-writer-codex", "codex")["harness"] == "codex"
+    assert _write("7708-h-writer-desktop", "desktop")["harness"] == "claude-desktop"
+
+
+def test_the_drain_never_puts_an_unrecognised_harness_on_the_wire(tmp_path):
+    """Even a meta hand-edited AFTER the write (the threat model the lane fix
+    cites) cannot put an illegal harness on the wire.
+
+    MUTATION THAT REDS THIS: forward `meta.get("harness", "claude")` verbatim.
+    """
+    from tortoise.capture_spool import _write_meta
+
+    sid = "7708-harness-wire"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    meta = read_spool_meta(tmp_path, sid)
+    meta["harness"] = "bogus"
+    _write_meta(tmp_path, meta)
+
+    posted: list[dict] = []
+    flush_spool(
+        tmp_path, lambda p: (posted.append(dict(p)),
+                             PostOutcome(ok=True, status=200))[1],
+        only_session_id=sid)
+    assert posted and posted[0]["harness"] == "claude", posted
+
+    # Positive control: a LEGAL stored harness is forwarded verbatim, so the
+    # assertion above cannot pass on a leg that stopped forwarding harness.
+    write_spool_entry(tmp_path, Snapshot(
+        session_id="7708-harness-codex",
+        turns=[{"role": "user", "content": "y"}],
+        source="t", machine_id="m", harness="codex"))
+    posted2: list[dict] = []
+    flush_spool(
+        tmp_path, lambda p: (posted2.append(dict(p)),
+                             PostOutcome(ok=True, status=200))[1],
+        only_session_id="7708-harness-codex")
+    assert posted2 and posted2[0]["harness"] == "codex"
+
+
+# ── (21) #7708 follow-up — `terminal_failure` has a supported exit ───────────
+
+
+def test_reset_terminal_entries_clears_the_marker_and_refiles(tmp_path):
+    """`terminal_failure` was only ever SET, never cleared — so a capture a
+    client fix would make fileable stayed stranded forever. `reset_terminal_entries`
+    is the supported exit: it drops the marker and re-arms the window so the SAME
+    drain attempts the entry.
+
+    MUTATION THAT REDS THIS: make the reset a no-op → the second flush skips the
+    entry as terminal and it is never filed.
+    """
+    from tortoise.capture_spool import reset_terminal_entries
+
+    sid = "7708-reset-terminal"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    flush_spool(tmp_path, lambda p: PostOutcome(ok=False, status=422, detail="bad lane"),
+                only_session_id=sid)
+    assert read_spool_meta(tmp_path, sid).get("terminal_failure")
+
+    # A terminal entry is skipped, not re-POSTed.
+    skipped = flush_spool(tmp_path, _Server().post, only_session_id=sid)
+    assert skipped.terminal == 1 and skipped.filed == 0
+
+    assert reset_terminal_entries(tmp_path) == 1
+    assert not read_spool_meta(tmp_path, sid).get("terminal_failure")
+    assert read_spool_meta(tmp_path, sid).get("next_attempt_at_ms") == 0
+
+    server = _Server()
+    refiled = flush_spool(tmp_path, server.post, only_session_id=sid)
+    assert refiled.filed == 1 and sid in server.sessions
+
+
+def test_cli_drain_retry_terminal_is_the_supported_exit(tmp_path, monkeypatch, capsys):
+    """The operator message names `session drain --retry-terminal`, and that verb
+    really clears the marker and files the entry.
+
+    MUTATION THAT REDS THIS: drop `--retry-terminal` from the parser (or stop
+    forwarding it) → the entry stays terminal and is never filed.
+    """
+    from tortoise import __main__ as cli
+
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    sid = "7708-cli-retry"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    flush_spool(tmp_path, lambda p: PostOutcome(ok=False, status=422, detail="bad lane"),
+                only_session_id=sid)
+    assert read_spool_meta(tmp_path, sid).get("terminal_failure")
+
+    server = _Server()
+    monkeypatch.setattr("tortoise.capture_spool.spool_dir", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_resolve_config_path",
+                        lambda *a, **k: (None, {}, "test-key", "http://test"))
+    monkeypatch.setattr(cli, "_session_post", lambda *a, **k: server.post)
+
+    assert cli.main(["session", "drain", "--retry-terminal"]) == 0
+    assert sid in server.sessions, "the retry did not file the entry"
+    err = capsys.readouterr().err
+    assert "--retry-terminal" in err, (
+        f"the remedy must be named in the operator output: {err}")
+
+
+# ── (21) #8531 review — the `.orphan` is inside the ceiling, and a corrupt
+#          `terminal_failure` marker never strands an entry ────────────────
+
+
+def test_a_quarantined_orphan_is_counted_and_reaped_under_the_byte_ceiling(tmp_path):
+    """A `.orphan` turn log has no meta, so it is invisible to the meta scan AND
+    to `_entry_bytes`: without explicit accounting it is never counted and never
+    pruned, and the spool grows past `max_total_bytes` without bound — one full
+    transcript per corrupt meta, each up to `max_entry_bytes` (#8531 review).
+
+    MUTATION THAT REDS THIS: drop the orphan branch from `prune_spool` → the
+    orphan survives every byte ceiling and no `spool_total_bytes_exceeded` line
+    names it.
+    """
+    from tortoise.capture_spool import (
+        _entry_bytes,
+        _log_path,
+        _meta_path,
+        list_spool_metas,
+        prune_spool,
+    )
+
+    sid = "8531-orphan-bounded"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    log = _log_path(tmp_path, sid)
+    log.write_bytes(b"z" * 4096)
+    _meta_path(tmp_path, sid).write_text("{not json", encoding="utf-8")
+
+    # The quarantine happens on the meta scan (both prune and drain run it).
+    metas, discards = list_spool_metas(tmp_path)
+    assert metas == [] and discards[0]["reason"] == "corrupt_entry"
+    orphan = log.with_name(log.name + ".orphan")
+    assert orphan.read_bytes() == b"z" * 4096, "the transcript is quarantined"
+
+    keep = "8531-orphan-keep"
+    write_spool_entry(tmp_path, _snapshot(keep))
+
+    # Under a generous ceiling the orphan is untouched (no over-eager delete)…
+    generous = Bounds(max_entries=1000, max_total_bytes=1 << 30, max_entry_bytes=1 << 20)
+    assert prune_spool(tmp_path, keep, generous) == []
+    assert orphan.exists(), "an orphan under the ceiling must survive"
+
+    # …but, with the orphan COUNTED in the total, a ceiling just over the live
+    # entry's own size must reap it and RECORD the loss (never a silent drop).
+    ceiling = _entry_bytes(tmp_path, keep) + 1024  # far below the 4096-byte orphan
+    out = prune_spool(tmp_path, keep, Bounds(
+        max_entries=1000, max_total_bytes=ceiling, max_entry_bytes=1 << 20))
+    assert not orphan.exists(), "the orphan must be reaped under the byte ceiling"
+    assert any(d["reason"] == "spool_total_bytes_exceeded"
+               and d["session_id"].startswith("orphan:") for d in out), out
+
+
+def test_a_non_dict_terminal_marker_does_not_strand_the_entry(tmp_path):
+    """The marker is read by SHAPE, not truthiness. A hand-edited / foreign /
+    corrupt `meta.json` can carry a truthy non-dict (`1`, `true`, `"yes"`,
+    `[]`) there; read by truthiness alone it made the entry terminal on EVERY
+    drain — never retried, silent except in `summary.terminal` (#8531 review).
+
+    MUTATION THAT REDS THIS: gate the terminal skip on `meta.get(...)`
+    truthiness → `summary.terminal == 1`, the POST is never attempted, and the
+    capture is stranded until its content changes.
+    """
+    from tortoise.capture_spool import _write_meta
+
+    sid = "8531-junk-marker"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    meta = read_spool_meta(tmp_path, sid)
+    meta["terminal_failure"] = 1
+    _write_meta(tmp_path, meta)
+
+    server = _Server()
+    summary = flush_spool(tmp_path, server.post, now=1000.0)
+    assert summary.terminal == 0, "a junk marker must not read as terminal"
+    assert summary.attempted == 1
+    assert sid in server.sessions, "a corrupt marker stranded the capture"
+    assert read_spool_turns(tmp_path, sid) == TURNS, "the turns survive verbatim"
+
+
+def test_retry_terminal_clears_a_junk_marker_too(tmp_path):
+    """`--retry-terminal` is the supported exit from a terminal entry; it must
+    leave no junk marker behind (a falsy non-dict is read as "not terminal",
+    but its `clear_terminal_failure` gate must not be the same truthiness read
+    that would answer False and keep it on disk forever).
+
+    MUTATION THAT REDS THIS: gate the clear on `not meta.get(...)` → a
+    `terminal_failure: 0` answers False and stays.
+    """
+    from tortoise.capture_spool import _write_meta, clear_terminal_failure
+
+    sid = "8531-junk-clear"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    meta = read_spool_meta(tmp_path, sid)
+    meta["terminal_failure"] = 0
+    _write_meta(tmp_path, meta)
+
+    assert clear_terminal_failure(tmp_path, sid) is True
+    assert "terminal_failure" not in read_spool_meta(tmp_path, sid)
+
+
+def test_cli_capture_does_not_raise_on_a_corrupt_terminal_marker(
+        tmp_path, monkeypatch, capsys):
+    """`session capture` must return an exit code, never a traceback, when the
+    entry's `terminal_failure` is a truthy non-dict: pre-fix the branch derived
+    `tf = meta.get(...) or {}` and `tf.get("detail")` raised `AttributeError`
+    out of `main()`, which has no blanket catch (#8531 review).
+
+    MUTATION THAT REDS THIS: restore the truthiness gate plus `or {}` → the
+    second call raises instead of returning.
+    """
+    import tortoise.__main__ as cli
+    from tortoise.capture_spool import _write_meta
+
+    _isolate(monkeypatch, tmp_path)
+    transcript = tmp_path / "t.claude.jsonl"
+    transcript.write_text("User: the only copy\nAssistant: yes\n", encoding="utf-8")
+    sid = "8531-cli-junk"
+    monkeypatch.setattr(
+        cli, "_session_post",
+        lambda k, u: (lambda payload: PostOutcome(
+            ok=False, status=422, detail="bad lane")))
+
+    assert cli.main(["session", "capture", "--file", str(transcript),
+                     "--session-id", sid, "--harness", "claude"]) == 0
+    root = tmp_path / "spool"
+    assert read_spool_meta(root, sid).get("terminal_failure")
+
+    # A hand-edit / foreign writer corrupts the marker, then the SAME bytes are
+    # captured again: the dedup early-return keeps the corrupt marker on the
+    # entry, so the `outcome is None` branch reads it.
+    meta = read_spool_meta(root, sid)
+    meta["terminal_failure"] = 1
+    _write_meta(root, meta)
+
+    assert cli.main(["session", "capture", "--file", str(transcript),
+                     "--session-id", sid, "--harness", "claude"]) == 0
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_the_drain_never_puts_an_over_long_attribution_field_on_the_wire(tmp_path):
+    """`machine_id` (≤256) and `model` (≤128) are SERVER caps, and exceeding
+    either is a 422 — which `classify_failure` reads as PERMANENT, so the entry
+    goes terminal. Both writers bound them, but the WIRE forwarded the on-disk
+    value verbatim: a hand-edited / foreign / corrupt `meta.json` (the PR's own
+    threat model) could strand the capture. Both are now length-capped and
+    type-totalled at the wire (#8531 review).
+
+    MUTATION THAT REDS THIS: restore `"machine_id": meta.get("machine_id")` and
+    `payload["model"] = meta["model"]` → the 257-char id and the 200-char model
+    reach the post.
+    """
+    from tortoise.capture_spool import _write_meta
+
+    def _post_after_edit(sid, mutate):
+        write_spool_entry(tmp_path, _snapshot(sid))
+        meta = read_spool_meta(tmp_path, sid)
+        mutate(meta)
+        _write_meta(tmp_path, meta)
+        posted: list[dict] = []
+        flush_spool(tmp_path, lambda p: (posted.append(dict(p)),
+                                         PostOutcome(ok=True, status=200))[1],
+                    only_session_id=sid)
+        assert posted, sid
+        return posted[0]
+
+    over = _post_after_edit("8531-cap-len", lambda m: (
+        m.__setitem__("machine_id", "m" * 257), m.__setitem__("model", "x" * 200)))
+    assert len(over["machine_id"]) == 256, len(over["machine_id"])
+    assert len(over["model"]) == 128, len(over["model"])
+
+    # POSITIVE CONTROL: a legal value reaches the wire verbatim, so the cap
+    # cannot pass by a leg that simply stopped forwarding either field.
+    legal = _post_after_edit("8531-cap-legal", lambda m: (
+        m.__setitem__("machine_id", "deadbeef"), m.__setitem__("model", "deepseek/v4")))
+    assert legal["machine_id"] == "deadbeef"
+    assert legal["model"] == "deepseek/v4"
+
+    # A NON-STRING (a foreign meta) is omitted, never a crash. The raw
+    # `sanitize_attribution_field` would raise `AttributeError` on `1.str.strip`
+    # — and `_flush_one` raising is what `session drain` must never do.
+    junk = _post_after_edit("8531-cap-junk", lambda m: (
+        m.__setitem__("machine_id", 1), m.__setitem__("model", ["x"])))
+    assert junk["machine_id"] is None
+    assert "model" not in junk
+
+
+def test_an_empty_role_is_not_a_turn_on_either_leg(tmp_path):
+    """The writers only ever emit a non-EMPTY role (`__main__._parse_transcript`
+    filters to user/assistant; the Pi leg's `extractTurns` requires the same
+    pair), so `{"role":"","content":"x"}` is a malformed line, not a turn.
+    Python accepted it and filed it while the Pi leg — which requires
+    `parsed.role.length > 0` — skipped it and routed the log to
+    `transcript_torn` (terminal + kept): the one place the two legs disagreed
+    about the SAME bytes (#8531 review). Both now require a non-empty role.
+
+    MUTATION THAT REDS THIS: drop the `and role` predicate from
+    `read_spool_turns` → the empty-role line is returned as a filed turn again.
+    """
+    from tortoise.capture_spool import _log_path
+
+    sid = "8531-empty-role"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    with _log_path(tmp_path, sid).open("a", encoding="utf-8") as fh:
+        fh.write('{"role": "", "content": "ghost"}\n')
+    assert read_spool_turns(tmp_path, sid) == TURNS, (
+        "an empty role is malformed, not a turn")
+
+    # POSITIVE CONTROL: a NON-EMPTY non-conversational role is still returned —
+    # the reader is not a role-VALUE filter (that is a separate pinned contract,
+    # `test_read_spool_turns_returns_every_stored_role`). Only EMPTINESS is
+    # refused, so this cannot pass by re-adding the user/assistant filter.
+    with _log_path(tmp_path, sid).open("a", encoding="utf-8") as fh:
+        fh.write('{"role": "system", "content": "policy"}\n')
+    assert [t["role"] for t in read_spool_turns(tmp_path, sid)] == \
+        ["user", "assistant", "system"]

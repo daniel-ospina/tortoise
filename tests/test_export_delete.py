@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import time
 import warnings
 from datetime import datetime, timedelta, timezone
@@ -1479,6 +1480,120 @@ class TestPurge:
         assert all(r["id"] != ORG_ID for r in fake.tables["organizations"])
         assert all(r["org_id"] != ORG_ID for r in fake.tables["api_keys"])
         assert fake.tables["invitations"] == []
+        ops = [e["operation"] for e in capture_audit]
+        assert ops.count("team_delete_purged") == 1
+
+    # ── #5269: the purge is SINGLE-FLIGHT ──────────────────────────────
+
+    def test_concurrent_purge_entry_is_single_flight_supabase(
+            self, sb_client, capture_audit, monkeypatch):
+        """#5269: a second entry of the sweep, running WHILE the first is still
+        inside it, does not append a second ``team_delete_purged`` for the same
+        org.
+
+        The audit append is keyed on ROW OBSERVATION — each entry re-reads the
+        same past-grace row — so two entries in flight at once each appended
+        their own row, which is permanent in an append-only log.
+
+        The overlap is driven DIRECTLY here (a second ``_purge_deleted_orgs()``
+        call on this thread while the first is parked inside the sweep). That is
+        the shape the duplicate was actually observed in (#3472: the lifespan's
+        background entry racing a DIRECT call from another thread, which
+        bypasses the worker) — NOT the two lifespan callers, which today submit
+        to the same single-slot ``tortoise-boot-sweep`` worker and therefore
+        cannot overlap. See ``_PURGE_ORG_IN_FLIGHT_LOCK`` for the full
+        re-measurement.
+
+        RED condition: without the guard, the second entry re-fetches the row
+        (still present — the first is parked inside the graph drop, BEFORE the
+        control-plane delete and its audit append) and appends a second
+        ``team_delete_purged``.
+
+        MUTATION CONFIRMED RED: drop the ``acquire(blocking=False)``
+        early-return from ``_purge_deleted_orgs`` — the drop list becomes
+        ``[ORG_ID, ORG_ID]`` and the audit count 2.
+        """
+        tc, fake, _ = sb_client  # noqa: RUF059
+        past = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()  # noqa: UP017
+        fake.seed("organizations", [dict(FREE_TEAM, deleted_at=past)])
+        fake.seed("org_memberships", [_membership_row()])
+        fake.seed("api_keys", [_key_row()])
+
+        entered = threading.Event()
+        release = threading.Event()
+        drops: list[str] = []
+
+        def _blocking_drop(org_id, graph_name=None):
+            drops.append(org_id)
+            if len(drops) == 1:
+                entered.set()
+                release.wait(10)  # park the FIRST entry mid-sweep
+            return None
+
+        monkeypatch.setattr(ha_mod, "_drop_org_graph_strict", _blocking_drop)
+
+        first = threading.Thread(target=ha_mod._purge_deleted_orgs)
+        first.start()
+        try:
+            assert entered.wait(10), "first entry never reached the drop"
+            # The second entry (the retention loop's tick) runs to completion
+            # HERE, while the first is still inside the sweep. It must SKIP.
+            ha_mod._purge_deleted_orgs()
+        finally:
+            release.set()
+            first.join(10)
+        assert not first.is_alive()
+
+        assert all(r["id"] != ORG_ID for r in fake.tables["organizations"])
+        assert drops == [ORG_ID]
+        ops = [e["operation"] for e in capture_audit]
+        assert ops.count("team_delete_purged") == 1
+
+    def test_concurrent_purge_entry_is_single_flight_registry(
+            self, reg_client, capture_audit, monkeypatch):
+        """#5269, self-host lane: the same invariant over the registry sweep,
+        where the duplicate surfaces as a second graph drop + audit row
+        (``_purge_registry_org`` cascades the nodes and drops the graph).
+        Same directly-driven overlap and same re-measurement as the Supabase
+        case above — see ``_PURGE_ORG_IN_FLIGHT_LOCK``.
+
+        RED condition: the parked first entry has FETCHED the row but not yet
+        deleted the Team node, so an unguarded second entry re-fetches it,
+        cascades and appends again — 2 drops, 2 ``team_delete_purged`` rows.
+
+        MUTATION CONFIRMED RED: remove the guard's early return — the call
+        list becomes ``['reg-5269', 'reg-5269']`` and the audit count 2.
+        """
+        tc, db_path = reg_client  # noqa: RUF059
+        past = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()  # noqa: UP017
+        _seed_registry(db_path, org_id="reg-5269", deleted_at=past)
+
+        real_purge = ha_mod._purge_registry_org
+        entered = threading.Event()
+        release = threading.Event()
+        purges: list[str] = []
+
+        def _blocking_purge(sdk, org_id, graph_name=None):
+            purges.append(org_id)
+            if len(purges) == 1:
+                entered.set()
+                release.wait(10)  # park the FIRST entry mid-sweep
+            return real_purge(sdk, org_id, graph_name)
+
+        monkeypatch.setattr(ha_mod, "_purge_registry_org", _blocking_purge)
+
+        first = threading.Thread(target=ha_mod._purge_deleted_orgs)
+        first.start()
+        try:
+            assert entered.wait(10), "first entry never reached the purge"
+            ha_mod._purge_deleted_orgs()  # concurrent entry → SKIP
+        finally:
+            release.set()
+            first.join(10)
+        assert not first.is_alive()
+
+        assert _registry_count(db_path, "Team", "reg-5269") == 0
+        assert purges == ["reg-5269"]
         ops = [e["operation"] for e in capture_audit]
         assert ops.count("team_delete_purged") == 1
 

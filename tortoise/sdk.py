@@ -9108,6 +9108,11 @@ class TortoiseSDK:
 
         ``credibility`` is refused here (#7951) — it is a documented word input
         of ``create_point``/``mitigate_operator``, not a generic property.
+
+        ``content=None`` is NOT a content edit (#5240) — it is treated exactly
+        like an absent key, so it neither re-derives the hash/vector nor
+        touches ``n.content``. An EMPTY STRING is a real edit (it hashes and
+        stores ``""``); only ``None`` means "nothing to set".
         """
         proj = self._get_proj()
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
@@ -9131,6 +9136,41 @@ class TortoiseSDK:
         # be checked as (None, EARLY) and pass, persisting the inversion. The
         # predicate itself is the ONE HOME, never a second copy.
         _refuse_inverted_point_window(proj.g, props, point_id=id)
+        # #5240: `content`'s None boundary is decided ONCE, here, before any
+        # consumer reads the key — because the consumers disagreed. The
+        # derived-hash line below tested KEY PRESENCE (``"content" in props``)
+        # and so reached ``None.encode("utf-8")``, raising a bare
+        # ``AttributeError`` from a private helper two frames from the caller's
+        # call — naming neither ``content`` nor this verb — while the #4208
+        # embedding guard further down already tested the VALUE
+        # (``_new_content is not None``), the boundary ``_revise_point``
+        # implements (``if new_content is not None:`` folding
+        # ``n.content = coalesce($c, n.content)``). A guard on the hash ALONE
+        # would not close it: ``SET n += $props`` carrying a None REMOVES the
+        # property (measured), so the live node would LOSE its content while
+        # the replay's ``coalesce`` restored it — live != rebuild, strictly
+        # worse than the crash. Normalising to "absent" makes the hash, the
+        # derived vector, the write and the journal agree with the replay: no
+        # content edit at all, exactly like ``is_episodic=None`` below. A
+        # GENERIC prop is the opposite by design — ``SET n += $props`` with a
+        # None clears it, and the replay deliberately matches
+        # (``_is_persistable_prop_value`` in ``tortoise/projection``: "a live
+        # ``update_point(x=None)`` clears the property, and replay must match
+        # by clearing it too"). ``content`` is not generic because its clear
+        # has NO replay: ``coalesce($c, n.content)`` cannot express one, so a
+        # live clear would be unrecordable and a rebuild would undo it. A
+        # non-str is refused here for the same reason ``None`` was
+        # diagnosable only from a helper — it would die at ``.encode`` a frame
+        # away too.
+        if "content" in props:
+            _c = props["content"]
+            if _c is None:
+                props.pop("content")  # "nothing to set", never a clear
+            elif not isinstance(_c, str):
+                raise TypeError(
+                    "update_point: content must be a str (or None for no "
+                    f"content edit), got {type(_c).__name__}"
+                )
         # #1904 (bug-hunt 2026-08-28 P1-3): a content edit MUST recompute
         # content_hash in the same round trip — every dedup surface matches
         # on the stored hash (create_point dedup, ingest, _content_exists),

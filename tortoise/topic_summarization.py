@@ -23,6 +23,11 @@ from __future__ import annotations  # noqa: I001
 import logging
 from dataclasses import dataclass, field, asdict
 
+from tortoise.entity_identity import (
+    AmbiguousEntityName,
+    UnaddressableEntityName,
+    resolve_entity_id,
+)
 from tortoise.search_engine import (
     annotate_ep_batch,
     get_relationships,
@@ -145,7 +150,13 @@ def _retrieve_topic_neighborhood(
     Strategy (staged retrieval):
     1. Find seed Points via:
        a. Subject/Object entities whose name matches the topic -> incoming
-          aboutSubject/aboutObject edges -> Points
+          aboutSubject/aboutObject edges -> Points. Each enumerated NAME is
+          resolved to exactly ONE live id through
+          ``entity_identity.resolve_entity_id`` and the edge read matches that
+          id; a name held by two or more live carriers (or by a single id-less
+          holder) is REFUSED by the resolver, which records a non-folded entry,
+          and is skipped here — a retrieval seed set degrades the neighborhood
+          rather than failing the run (#5510, plan §B.1 route-then-refuse).
        b. Points whose content/pointKind matches the topic via CONTAINS
     2. Expand seeds via IMPL/NAND operator chains (max_hops)
 
@@ -159,25 +170,50 @@ def _retrieve_topic_neighborhood(
     # Stage 1a: Topic -> Subjects/Objects -> about* -> Points
     for entity_label in ("Subject", "Object"):
         try:
-            # Match entities by name (case-insensitive substring)
-            entity_rows = graph.query(
-                f"MATCH (e:{entity_label}) "
-                "WHERE toLower(coalesce(e.name, '')) CONTAINS toLower($topic) "
-                "RETURN e.name LIMIT $max_seeds",
-                params={"topic": topic, "max_seeds": max_seeds},
-            ).result_set
+            # Enumerate candidate entity NAMES (case-insensitive substring).
+            # This is a candidate enumeration, NOT an identity read: it
+            # returns names only, and the id is resolved below.
+            entity_names = [
+                row[0] for row in graph.query(
+                    f"MATCH (e:{entity_label}) "
+                    "WHERE toLower(coalesce(e.name, '')) CONTAINS toLower($topic) "
+                    "RETURN e.name LIMIT $max_seeds",
+                    params={"topic": topic, "max_seeds": max_seeds},
+                ).result_set
+            ]
 
-            for row in entity_rows:
-                entity_name = row[0]
-                # Follow incoming about* edges from Points
-                edge_type = "aboutSubject" if entity_label == "Subject" else "aboutObject"
+            edge_type = "aboutSubject" if entity_label == "Subject" else "aboutObject"
+            for entity_name in dict.fromkeys(entity_names):
+                # ROUTE-THEN-REFUSE (#5510, plan §B.1). The coordinate above is
+                # a NAME, and under #3590 D2 two live same-name carriers are
+                # legal, so the about* read must NOT match `e.name`: that unions
+                # the Points hanging off BOTH carriers into ONE topic
+                # neighborhood — a fold of two identities into one seed set,
+                # with no refusal. Resolve the name to EXACTLY ONE live id
+                # through the shared resolver (it applies
+                # `live._terminal_excluded`, so a terminal holder never seeds a
+                # live read) and match `e.id` instead.
+                #
+                # POSTURE: stage 1a is a retrieval SEED set, so a refusal skips
+                # that one name — degrading the neighborhood — instead of
+                # failing the run. `resolve_entity_id` records the non-folded
+                # entry itself, so the skip is evidence rather than a silently
+                # swallowed warning. `None` (no live holder — absent, or held
+                # only by terminal carriers, D2's terminal-only reference) is
+                # likewise skipped: there is nothing live to seed from.
+                try:
+                    entity_id = resolve_entity_id(graph, entity_label, entity_name)
+                except (AmbiguousEntityName, UnaddressableEntityName):
+                    continue
+                if entity_id is None:
+                    continue
                 point_rows = graph.query(
-                    f"MATCH (p:Point)-[:{edge_type}]->(e:{entity_label} {{name: $name}}) "
+                    f"MATCH (p:Point)-[:{edge_type}]->(e:{entity_label} {{id: $eid}}) "
                     "WHERE p.is_operator = false "
                     "  AND (p.status IS NULL OR p.status <> 'retracted') "
                     "RETURN p.id, p.content, p.pointKind "
                     "LIMIT $max_seeds",
-                    params={"name": entity_name, "max_seeds": max_seeds},
+                    params={"eid": entity_id, "max_seeds": max_seeds},
                 ).result_set
                 for pr in point_rows:
                     if pr[0] not in seed_ids:
