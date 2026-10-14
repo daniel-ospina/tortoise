@@ -350,29 +350,55 @@ def test_the_manual_close_rollup_names_the_measured_headline_range():
         "cited incidents, so the label-path class is not narrowed below it")
 
 
-def test_the_data_loss_row_documents_the_one_sweep_baseline_transition():
+def test_the_data_loss_row_documents_the_recurring_baseline_transition():
     """#8595 review P3: the post-deploy transition must be on the operator's copy.
 
     Baselines persisted before the per-label read began excluding the
     projection's bookkeeping can carry any label the predicate now skips —
     ``EpMeta`` / ``GraphEventMeta`` / ``TeamMeta``, or a ``Meta`` node keyed
-    ``point_fts_v2`` / ``event_fts_v2``. On the first sweep after the change
+    ``point_fts_v2`` / ``event_fts_v2``. On the next sweep after the change
     each reads ``n → 0``, which fires this kind for a label below
     ``REGISTRY_LABEL_FLOOR`` (and ``_delete_uploaded`` deletes that run's
     archive), so the row must state the transition and its disposition rather
     than leave it to a PR description an operator never reads.
 
+    ⚠️ It must state the transition as RECURRING, not as a single fire: a fire
+    does not advance the persisted baseline (the sweep returns before the
+    ``state.json`` write), so the same breach re-fires every sweep until an
+    operator re-baselines. The first version of this sentence said
+    "one such fire" two sentences after the same cell said the opposite — the
+    reviewer caught the contradiction and this pin now holds the re-fire
+    wording, so the understatement cannot come back.
+
     RED (pre-fix): the row names no transition and none of the skipped labels.
     """
     row = _runbook_rows()["DATA_LOSS_CANDIDATE"]
-    assert "One-sweep transition" in row, (
-        "the row must name the one-sweep baseline transition, or an operator "
+    assert "Post-deploy transition" in row, (
+        "the row must name the post-deploy baseline transition, or an operator "
         "meets the first post-deploy fire with no disposition (#8595 review P3)")
     assert all(lbl in row for lbl in ("EpMeta", "GraphEventMeta", "TeamMeta")), (
         "the transition can fire on any label the predicate excludes, so the "
         "row must name them rather than only `Meta`")
-    assert "re-baseline" in row, (
-        "the transition's disposition is the existing verify + re-baseline")
+    # NOT `"re-baseline" in row` — the disposition cell already contains that
+    # word, so it would pass without this sentence. The discriminating clause is
+    # the REPETITION: it is the part a reader gets wrong, and the part that
+    # decides whether one re-baseline is enough.
+    assert "NOT a single fire" in row and "every" in row, (
+        "the row must say the transition re-fires every sweep until a "
+        "re-baseline — a single-fire reading understates the cost and is what "
+        "the #8595 review rejected")
+    # The claim lives in TWO passages — the triage row and the "Manual close
+    # only" prose below it — and the first version of this correction fixed only
+    # the row, leaving the prose stating the rejected single-fire wording so the
+    # document contradicted itself. Pin the ABSENCE document-wide instead, so a
+    # third copy cannot reintroduce it either.
+    whole = RUNBOOK.read_text(encoding="utf-8")
+    for banned in ("One-sweep transition", "one such fire",
+                   "fire once on the first sweep"):
+        assert banned not in whole, (
+            f"the runbook still states the transition as a SINGLE fire "
+            f"({banned!r}); it recurs every sweep until a re-baseline "
+            f"(#8595 review P3)")
 
 
 def test_manual_close_kinds_document_the_dedup_close_procedure():
