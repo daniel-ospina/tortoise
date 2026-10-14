@@ -212,6 +212,17 @@
     p { max-width: 68ch; }
     p + p { margin-top: 1.15rem; }
 
+    /* The Market Gaps intro is prose, not a list item, so the anti-widow wrap
+       is declared for it separately. Without it the sentence ends on
+       "operations" alone — 84px of a 272px measure — at 320-342px and
+       394-486px; with it the hyphen the author already wrote in "AI-forward"
+       may break, and the last line becomes "forward operations" (152px). A
+       hyphen break there is not novel: at 343-393px the measure forces one.
+       Swept at every width from 320px to 540px plus 620/768/1280/1600, the
+       line count and element height are unchanged and the wrap at 620px and
+       above is identical. */
+    #market-gaps p { text-wrap: pretty; }
+
     /* ── The solution block's opening sentence ────────────────────────────
        The source copy titles every block EXCEPT this one ("Tortoise provides an
        agent-native cognitive layer: reasoning, memory, learning." has no
@@ -234,12 +245,12 @@
        `text-wrap: pretty` re-breaks a paragraph to avoid ending it on a short
        lone word, which this copy does easily: the third market gap ended on
        "teams." alone — 55px against a 591px measure — and now ends at 146px.
-       It is declared once, with no `.profile` exception, because the trade it
-       makes is not one a wider measure fixes — the Wedge proof point's middle
-       line holds ~156px of ink whether the measure is 262px or 272px — so a
-       narrower column reset would buy nothing. Line count and element height
-       are unchanged for all 14 items across the page's 5 `.bullets` lists,
-       from 320px to 1600px. */
+       The declaration on the list carries no `.profile` exception, because the
+       trade it makes is not one a wider measure fixes — the Wedge proof point's
+       middle line holds ~156px of ink whether the measure is 262px or 272px —
+       so a narrower column reset would buy nothing. Line count and element
+       height are unchanged for all 14 items across the page's 5 `.bullets`
+       lists, from 320px to 1600px. */
     .bullets { list-style: none; margin-top: 1.15rem; }
     .bullets li { display: flex; gap: 0.7rem; align-items: baseline; font-size: 0.95rem; text-wrap: pretty; }
     .bullets li + li { margin-top: 0.4rem; }
@@ -420,7 +431,7 @@
 
         <div class="outcomes">
           <ul class="up">
-            <li><span class="a">↑</span><span>Successful outcomes per token</span></li>
+            <li><span class="a">↑</span><span>Token efficiency</span></li>
             <li><span class="a">↑</span><span>Decision quality</span></li>
             <li><span class="a">↑</span><span>Agent Autonomy</span></li>
           </ul>
@@ -437,7 +448,7 @@
     <section id="market-gaps">
       <div class="wrap">
         <h2>Market Gaps</h2>
-        <p>Enterprise-grade reasoning, built for an agent-native world.</p>
+        <p>Plug-and-play context and organizational intelligence for AI-native and AI-forward operations</p>
         <ul class="bullets">
           <li><span><strong>Harnesses</strong> coordinate execution, but reasoning is agent-local.</span></li>
           <li><span><strong>Memory systems</strong> retrieve information, but don&rsquo;t model its logical implications.</span></li>

@@ -1046,7 +1046,25 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `core` surface, and the probe's guard is `core`-registered.
              # Pinned by
              # tests/test_ci_selection.py::test_capstone_probe_change_selects_core_not_tier1.
-             "docs/evidence/7950-capstone/probes/")
+             "docs/evidence/7950-capstone/probes/",
+             # #4030: `supabase/config.toml` is the committed LOCAL-stack config,
+             # and every env var it resolves by `env(NAME)` substitution must be
+             # declared in `.env.example` — the guard for that pair
+             # (tests/test_env_contract_covers_supabase_config.py) is
+             # `core`-registered. `supabase/` is a flat NON_PYTHON_PREFIXES entry
+             # and the path matches no SOURCE_PATTERNS row, so a CONFIG-ONLY
+             # change came back with `changed == []` and took the docs-only early
+             # return: `select()` returned NO surface and the guard never ran on
+             # the half of the pair it exists to hold (the #1349/#3332/#3616
+             # silent-drop class, the same shape as the migrations/placement-doc
+             # entries above). A SOURCE_PATTERNS entry cannot fix it —
+             # `_selection_relevant()` deliberately skips the `core` surface.
+             # Measured before this entry: `select(["supabase/config.toml"])` ->
+             # surfaces=[], full=False, 40 test files, the guard absent. `core` is
+             # the right surface rather than a cost concern: config.toml is edited
+             # rarely (9 commits ever as of 2026-10-14). Pinned by
+             # tests/test_ci_selection.py::test_supabase_config_change_selects_core_not_tier1.
+             "supabase/config.toml")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",

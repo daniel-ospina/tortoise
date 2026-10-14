@@ -285,6 +285,81 @@ machine still holds the old password and new connections fail. There is no
 fully-windowless in-place order; that is why the create-a-new-user path above is
 preferable.
 
+### 2.1 Workstation credential posture — relocate, do not rotate (#4030)
+
+§2 rotates the **deployed** secrets, which live in GitHub Actions secrets → Fly
+and stay managed there (§8.1). This subsection governs the **operator
+workstation**, where a plaintext credential is the exposure #4030's inventory
+is about.
+
+**The rule.** Deploy/production credential material belongs to the GitHub +
+Fly stores. The repo-root `.env` is the home for **local-run** credentials
+only, must stay `0600`, and is gitignored (`.gitignore:19-20`). A local copy of
+a production credential, where a local job genuinely needs one, goes to the
+**macOS Keychain** (access-controlled) or an owner-only `0600` file — never to
+`.env`, a shared file, or a command line that lands in shell history.
+
+**Must-stay-local, each with the consumer that forces the exception** — a
+documented exception, not a silent one:
+
+| In `.env` | Consumer | Why it cannot move |
+|---|---|---|
+| `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `VENICE_API_KEY` | the local agent runtime + the eval/ask/longmem lanes (`tortoise/model_adapters.py`) | no remote store serves a local run; the production legs already read their own stores |
+| `SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID` / `_SECRET` | the **local** Supabase CLI / GoTrue (`supabase/config.toml:364-365`) | a CI store would serve no job; the hosted project's provider is dashboard-configured |
+| `JEV_API_KEY` | `tools/collision_preflight.py` (`$JEV_API_KEY`, else the repo-root `.env`) | the pre-dispatch gate is a local tool — the repo-root `.env` is its documented home (declared in `.env.example`) |
+| `BLOG_AGENT_KEY` | the blog publish workflow — `X-Agent-Key` against the blog CMS API (`agent-infra` `skills/seo-content-generation/workflow/05-cms-publish.md`) | **it has a consumer.** The 2026-09-18 inventory recorded it as unused; re-measuring on 2026-10-14 found the publish skill reads it from this `.env` line — **do not delete it** |
+
+**Relocated off the workstation** (implemented 2026-09-19, recorded on #4030;
+values were verified byte-identical to the plaintext before the plaintext was
+deleted, and the deploy leg reads the GitHub secrets either way —
+`deploy-hosted.yml:340-346`, which never reads `.env`):
+
+```bash
+security find-generic-password -a danielospina -s tortoise-stripe-secret-key -w       # live restricted key
+security find-generic-password -a danielospina -s tortoise-stripe-webhook-secret -w   # webhook signing secret
+security find-generic-password -a danielospina -s tortoise-stripe-price-ids -w        # price catalog JSON
+```
+
+Still access-controlled where they were, per the 2026-09-18 inventory (not
+re-measured by this change): the Supabase CLI management token (write reach to
+production projects — Keychain) and the CRM key (`~/.minutes/attio_api_key`,
+`0600` — the #388 fix, re-measured `0600` on 2026-10-14; the bridge reads it
+with nothing in its launchd environment).
+
+**Do not rotate** — owner ruling 2026-09-18: **OVERRIDES:** the
+rotate-on-uncertainty practice (NIST SP 800-57 Pt 1 Rev 5; AWS IAM; Google
+Cloud all treat a key of uncertain history as compromised) — the beta must ship
+and earn before we spend engineering time on credential churn. The compensating
+control is **relocation + least exposure**, above. **The trigger to revisit is
+the beta earning, not a date.**
+
+**Constraints a future move must respect** (from the consumer lanes, recorded so
+a move is testable rather than assumed):
+
+- **The env-var NAME must not change.** Production sets
+  `SUPABASE_SERVICE_ROLE_KEY` while some readers still accept only the legacy
+  `SUPABASE_SERVICE_KEY`; a rename re-opens a silent write-path fallback
+  (`#3677`, closed — the surviving single-name reader is `#3744`).
+- The analytics fallback file (`~/.tortoise/analytics_fallback.jsonl`) must
+  survive until the code stops needing it.
+- The CRM bridge must still read the key file with nothing in its launchd
+  environment, and that file must stay owner-only — its resolver refuses a
+  group/other-readable file and would then stop syncing silently.
+
+**Gotchas measured on this box.**
+
+- `security add-generic-password … -w` fed by **piped stdin** (the argv-free
+  form) **silently truncates the value at 128 characters** — a 573-char price
+  catalog came back as a 128-char prefix, and that was caught only because the
+  write was verified by a round-trip comparison rather than a length check. Use
+  the argv form for a long value, or verify the round trip.
+- `premise-labs/.env`'s protection lives only in that clone's
+  `.git/info/exclude`, so a FRESH clone there has no committed protection
+  (tortoise's is a committed `.gitignore` rule). Its mode is `0600`.
+- A credential's HOME on the workstation is otherwise recorded nowhere but an
+  untracked file: `.env` is not in git, so a regenerated `.env` loses the
+  pointer to these Keychain items. Keep this table current with any move.
+
 ## 3. Rollback
 
 ```bash
