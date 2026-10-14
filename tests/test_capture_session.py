@@ -3025,7 +3025,7 @@ def test_apply_supersessions_chain_three_link_reverse(sdk):
 def test_apply_supersessions_chain_mixed_id_name_forms(sdk):
     """#2249: chains are naturally MIXED-FORM — the extractor emits the
     superseded side as the graph ID when the object pre-exists
-    (extractor_v2.py:5759) while supersedes_by is always the NAME
+    (extractor_v2.py:5836) while supersedes_by is always the NAME
     (commit_schema.py:776). So the chain records are X.supersedes_by = name
     'mx-B' (id-form-free) and Y.superseded = B's canonical id
     obj-<sha26('mx-B')>. Reverse emission must STILL converge. This test
