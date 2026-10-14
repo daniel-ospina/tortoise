@@ -10,6 +10,7 @@ Under D10 a document is a :Source, so the boundary is
 """
 from __future__ import annotations
 
+import json
 import os
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
@@ -28,7 +29,7 @@ from fastapi.testclient import TestClient
 
 from tests._github_docs_mock import MockGitHubDocsTransport, gh_docs_entry
 from tests._http_fixtures import patched_tortoise_sdk
-from tests._verdict import require_answered
+from tests._verdict import require_answered, require_within, transport_wait_bound_s
 from tortoise.hosted_api import (
     _ALLOWED_STATE_KEYS,
     _INDEX_JOBS,
@@ -189,12 +190,46 @@ def _docs_count(client) -> int:
                             sdk=_team_sdk(client))
 
 
-def _wait_for(predicate, timeout_s: float = 8.0):
-    deadline = time.time() + timeout_s
-    while not predicate():
-        if time.time() > deadline:
-            raise AssertionError("timed out waiting for background job")
-        time.sleep(0.02)
+def _pump_until_midwalk(client, job_id: str, mid: dict,
+                       *, timeout_s: float = 12.0) -> None:
+    """Pump `GET /v1/index/docs/<id>` until the walk's mid-progress window is
+    observed, recording `repos_processed`/`progress`/`repos_total` into `mid`.
+
+    #5049 rule 1 + #8579 review P2: the pump-and-observe loop carries its own
+    wall-clock budget in addition to the request's transport bound. Its expiry
+    is a machine-load event — INCONCLUSIVE naming the budget — never the
+    rule-1 `assert mid["seen"]` FAIL this used to raise. The request itself is
+    converted through `require_answered`, and an ANSWERED error status is
+    asserted, so a genuine 404/403 stays a FAIL (#8590 review P2).
+
+    Replaces the dead `_wait_for` this file used to carry (unused at head and
+    at base — #8579 review P2).
+    """
+
+    def _observe() -> bool:
+        rp = require_answered(
+            client.get(f"/v1/index/docs/{job_id}"),
+            what=f"GET /v1/index/docs/{job_id} answered",
+        )
+        # #8590 review P2: an ANSWERED error (404/403) is not a non-answer —
+        # assert it here (as `_poll_until._reached` does) so it stays a FAIL
+        # instead of a load-event SKIP.
+        assert rp.status_code == 200, rp.text
+        body = rp.json()
+        if (body.get("repos_processed", 0) >= 1
+                and 0 < body.get("progress", 0) < 100):
+            mid["seen"] = True
+            mid["repos_processed"] = body["repos_processed"]
+            mid["progress"] = body["progress"]
+            mid["repos_total"] = body.get("repos_total", 0)
+            return True
+        return False
+
+    require_within(
+        _observe, timeout_s=timeout_s,
+        what="mid-walk live progress on GET /v1/index/docs/<id>",
+        diagnosis="_job() must write repos_processed/progress after each repo",
+    )
 
 
 def _drain_jobs(client, timeout_s: float = 5.0):
@@ -208,20 +243,207 @@ def _drain_jobs(client, timeout_s: float = 5.0):
         time.sleep(0.02)
 
 
-def _poll_until(client, job_id: str, status: str, timeout_s: float = 10.0):
-    deadline = time.time() + timeout_s
-    while True:
-        r = client.get(f"/v1/index/docs/{job_id}")
-        # #5049: the poll route is not exempt from the transport wait bound —
-        # a 504 is the product refusing legibly, not an answer.
-        require_answered(r, what=f"GET /v1/index/docs/{job_id} answered")
+#: The index job's terminal statuses: `hosted_api` mints "started" and writes
+#: exactly "completed"/"failed" (`_job(status=...)`). A body in this set either
+#: MATCHES the expected status or is a determinate contradiction — never the
+#: indeterminate "still working" state a load-driven deadline is allowed to
+#: skip on.
+_TERMINAL_JOB_STATUSES = ("completed", "failed")
+
+
+def _poll_until(client, job_id: str, status: str, timeout_s: float | None = None):
+    """Poll the docs index job; INCONCLUSIVE (never FAIL) on either deadline.
+
+    TWO clocks meet here (#8579 review P2-2): the PRODUCT's transport wait bound
+    (10 s) bounds ONE request — its refusal is `require_answered`'s to convert —
+    while THIS deadline bounds the whole poll loop, so it must outlast a single
+    request's bound or it decides the verdict first. The default is the product
+    bound plus a 2 s margin; a caller may pass an explicit budget for a
+    deterministic test.
+    """
+    budget = transport_wait_bound_s() + 2.0 if timeout_s is None else timeout_s
+    observed: dict = {}
+
+    def _reached() -> bool:
+        r = require_answered(
+            client.get(f"/v1/index/docs/{job_id}"),
+            what=f"GET /v1/index/docs/{job_id} answered",
+        )
         assert r.status_code == 200, r.text
-        body = r.json()
-        if body["status"] == status:
-            return body
-        if time.time() > deadline:
-            raise AssertionError(f"docs job {job_id} not {status}: {body}")
-        time.sleep(0.02)
+        observed["body"] = r.json()
+        observed_status = observed["body"]["status"]
+        if observed_status != status and observed_status in _TERMINAL_JOB_STATUSES:
+            # #8590 review P2 (fail-open): an ANSWERED terminal status that
+            # CONTRADICTS the expected one is a determinate product
+            # observation — the run already ended in a different terminal
+            # state — not a machine-load event. Raising INSIDE the predicate
+            # keeps the FAIL observation-triggered, never deadline-triggered;
+            # a non-terminal body ("started") at the budget still expires
+            # through `require_within` as INCONCLUSIVE.
+            raise AssertionError(
+                f"docs job {job_id} reached {observed_status!r}, expected "
+                f"{status!r}: {observed['body']}"
+            )
+        return observed_status == status
+
+    # #5049 rule 1: the poll's own deadline is a wall-clock budget, so its
+    # expiry is INCONCLUSIVE and names the budget — never the AssertionError
+    # (`docs job <id> not <status>`) this used to raise.
+    require_within(
+        _reached, timeout_s=budget,
+        what=f"docs job {job_id} reached status {status!r}",
+    )
+    return observed["body"]
+
+
+def test_poll_until_is_inconclusive_on_a_bound_refusal():
+    """#5049: the docs poll's bound refusal is a non-answer — never a FAIL."""
+
+    class _Refusing:
+        status_code = 504
+
+        def __init__(self) -> None:
+            from tortoise import mcp_auth
+
+            self._message = mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE
+            self.text = json.dumps({"detail": self._message})
+
+        def get(self, *_args, **_kwargs):
+            return self
+
+        def json(self):
+            return {"detail": self._message}
+
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        _poll_until(_Refusing(), "job-1", "completed")
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert f"{transport_wait_bound_s():g}" in message
+
+
+def test_poll_until_deadline_is_inconclusive_never_an_assertion():
+    """#8579 P2-2: the docs poll's OWN deadline must not produce FAIL.
+
+    Deterministic: a 200 whose body never reaches the target status, with the
+    budget spent. Pre-fix this raised
+    `AssertionError: docs job job-1 not completed: {'status': 'running'}`; the
+    rule-1 budget expiry must SKIP and name the budget it spent.
+    """
+
+    class _Stuck:
+        status_code = 200
+
+        def __init__(self) -> None:
+            self.text = '{"status": "running"}'
+
+        def get(self, *_args, **_kwargs):
+            return self
+
+        def json(self):
+            return {"status": "running"}
+
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        _poll_until(_Stuck(), "job-1", "completed", timeout_s=0.0)
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "0s" in message, message
+    assert "docs job job-1 reached status 'completed'" in message, message
+
+
+def test_poll_until_terminal_mismatch_is_a_fail_not_a_skip():
+    """#8590 review P2 must-fail leg: a CONTRADICTORY terminal status is a
+    determinate observation, never a machine-load SKIP.
+
+    Deterministic: an answered 200 whose body has already reached the OTHER
+    terminal status, with the budget spent. Pre-fix the predicate was false
+    forever and the budget exited as `INCONCLUSIVE [#5049]`, dropping the run's
+    own failure text; an answered terminal contradiction must FAIL.
+    """
+
+    class _Failed:
+        status_code = 200
+        text = '{"status": "failed", "error": "boom"}'
+
+        def get(self, *_args, **_kwargs):
+            return self
+
+        def json(self):
+            return {"status": "failed", "error": "boom"}
+
+    try:
+        _poll_until(_Failed(), "job-1", "completed", timeout_s=0.0)
+    except AssertionError as exc:
+        message = str(exc)
+    except pytest.skip.Exception as exc:
+        raise AssertionError(
+            "a contradictory terminal status ('failed' while awaiting "
+            f"'completed') was swallowed as an INCONCLUSIVE skip: {exc}"
+        ) from exc
+    else:
+        raise AssertionError(
+            "the poll raised no verdict for a contradictory terminal status")
+    assert "reached 'failed', expected 'completed'" in message, message
+    assert "boom" in message, message
+
+
+def test_pump_until_midwalk_deadline_is_inconclusive_never_an_assertion():
+    """#8579 review P2: the pump-and-observe loop's OWN budget must SKIP, not
+    FAIL. Deterministic: a 200 whose body never reaches the mid-walk window,
+    with the budget already spent. Pre-fix the loop exited its deadline into
+    `assert mid["seen"]` — this pins the conversion through `require_within`.
+    """
+
+    class _AnsweredButNeverMidwalk:
+        status_code = 200
+        text = '{"repos_processed": 0, "progress": 0}'
+
+        def get(self, *_args, **_kwargs):
+            return self
+
+        def json(self):
+            return {"repos_processed": 0, "progress": 0}
+
+    mid: dict = {"seen": False}
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        _pump_until_midwalk(_AnsweredButNeverMidwalk(), "job-1", mid,
+                            timeout_s=0.0)
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "0s" in message, message
+    assert "mid-walk live progress" in message, message
+
+
+def test_pump_until_midwalk_answered_error_is_a_fail_not_a_skip():
+    """#8590 review P2 must-fail leg: a genuine ANSWERED error on the docs pump
+    GET reaches the caller's own assertion — never a machine-load SKIP.
+
+    Pre-fix (no status assertion after `require_answered`) the 404 missed the
+    mid-walk window on every iteration and the budget exited as
+    `INCONCLUSIVE [#5049]`; the conversion must leave it a FAIL.
+    """
+
+    class _NotFound:
+        status_code = 404
+        text = '{"detail": "job not found"}'
+
+        def get(self, *_args, **_kwargs):
+            return self
+
+        def json(self):
+            return {"detail": "job not found"}
+
+    mid: dict = {"seen": False}
+    try:
+        _pump_until_midwalk(_NotFound(), "job-1", mid, timeout_s=0.0)
+    except AssertionError:
+        return  # expected: the answered 404 reaches the caller's assertion
+    except pytest.skip.Exception as exc:
+        raise AssertionError(
+            "an answered 404 was swallowed as an INCONCLUSIVE skip instead of "
+            f"failing: {exc}"
+        ) from exc
+    raise AssertionError(
+        "the pump helper returned without asserting the answered 404 status")
 
 
 # ── state-key registration ───────────────────────────────────────
@@ -306,25 +528,13 @@ def test_docs_live_progress_written_during_walk(provisioned, mock_github,
     # the portal advances the walk while servicing the GET.
     mid = {"seen": False, "repos_processed": 0, "progress": 0,
            "repos_total": 0}
-    deadline = time.time() + 12.0
-    while time.time() < deadline:
-        rp = provisioned.tc.get(f"/v1/index/docs/{job_id}")
-        # #5049: the same non-exempt poll route `_poll_until` converts — a
-        # refusal is a non-answer, not a missing-progress deadline.
-        require_answered(rp, what=f"GET /v1/index/docs/{job_id} answered")
-        body = rp.json()
-        if (body.get("repos_processed", 0) >= 1
-                and 0 < body.get("progress", 0) < 100):
-            mid["seen"] = True
-            mid["repos_processed"] = body["repos_processed"]
-            mid["progress"] = body["progress"]
-            mid["repos_total"] = body.get("repos_total", 0)
-            break
-        time.sleep(0.02)
+    # #5049: the poll route is not exempt from the transport wait bound — a
+    # refusal is the product refusing legibly, not an answer. This loop is a
+    # separate pump-and-observe path from `_poll_until`, so BOTH its GET and
+    # its own wall-clock deadline are converted (#8579 review P2) — a bound
+    # refusal or a load event never exits into a rule-1 FAIL.
+    _pump_until_midwalk(provisioned.tc, job_id, mid)
 
-    assert mid["seen"], (
-        "docs mid-walk live progress never observed — _job() must write "
-        "repos_processed/progress after each repo in the single-branch site")
     assert mid["repos_processed"] == 1
     assert mid["repos_total"] == 2
     assert mid["progress"] == 50  # 1 of 2 repos
@@ -374,26 +584,11 @@ def test_docs_live_progress_all_branches_site(provisioned, mock_github,
 
     mid = {"seen": False, "repos_processed": 0, "progress": 0,
            "repos_total": 0}
-    deadline = time.time() + 12.0
-    while time.time() < deadline:
-        rp = provisioned.tc.get(f"/v1/index/docs/{job_id}")
-        # #5049: same non-exempt poll route as `_poll_until` — a bound
-        # refusal must not be read as a missing-progress deadline FAIL.
-        require_answered(rp, what=f"GET /v1/index/docs/{job_id} answered")
-        body = rp.json()
-        if (body.get("repos_processed", 0) >= 1
-                and 0 < body.get("progress", 0) < 100):
-            mid["seen"] = True
-            mid["repos_processed"] = body["repos_processed"]
-            mid["progress"] = body["progress"]
-            mid["repos_total"] = body.get("repos_total", 0)
-            break
-        time.sleep(0.02)
+    # #5049: a bound refusal on the poll is a non-answer (see the
+    # single-branch site above); the loop's own deadline is likewise
+    # INCONCLUSIVE, never a rule-1 FAIL (#8579 review P2).
+    _pump_until_midwalk(provisioned.tc, job_id, mid)
 
-    assert mid["seen"], (
-        "all-branches site mid-walk progress never observed — _job() must "
-        "write repos_processed/progress after the scope_branch=='all' "
-        "increment")
     assert mid["repos_processed"] == 1  # repo1 fully walked (both branches)
     assert mid["repos_total"] == 2
     assert mid["progress"] == 50
@@ -666,7 +861,10 @@ def test_cross_team_job_poll_404(provisioned, mock_github, ingest_base):
         "max_users": 1, "max_graphs": 1, "max_teams": 1, "max_points": 10000,
         "max_sessions": None,
     }
-    rb = provisioned.tc.get(f"/v1/index/docs/{job_id}")
+    rb = require_answered(
+        provisioned.tc.get(f"/v1/index/docs/{job_id}"),
+        what=f"GET /v1/index/docs/{job_id} answered (cross-team 404)",
+    )
     assert rb.status_code == 404
     # team A still polls fine
     app.dependency_overrides[get_current_org] = lambda: {

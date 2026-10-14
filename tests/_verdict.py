@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import json
 import re
 import shutil
 import subprocess
@@ -146,21 +147,36 @@ def inconclusive_on_timeout(
 # ── rule 1, product side: the transport wait-bound refusal ────────────────
 # The hosted API wraps every non-exempt route in `WaitBoundMiddleware` and
 # answers a request that outlives `mcp_auth._TRANSPORT_WAIT_BOUND_S` with a
-# 504 whose body is `mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE` (#3834, owner
-# ruling 2026-09-20). That refusal is the LEGIBLE REFUSAL the ruling requires —
-# it is the product saying "no answer yet", not an answer. A test that reads it
-# as a FAIL is therefore reading the host's load, which is exactly what rule 1
-# forbids; the property under test was never observed.
+# refusal (#3834, owner ruling 2026-09-20). The refusal's shape differs by
+# surface, and the product emits exactly two:
 #
-# The detection is deliberately narrow: the product's own refusal message must
-# be present in the response body. It is NOT gated on the status, because the
-# refusal's status differs by surface — the REST arm answers 504, while the MCP
-# arm answers HTTP 200 with a `CallToolResult(isError=True)` that carries the
-# SAME message (the SDK collapses a raised `McpError` into that shape — see
-# `mcp_server._await_under_mcp_wait_bound`). A 504 that does NOT carry the
-# message (a proxy, another seam) is not this refusal and is left to the caller.
-# Everything that is not this refusal — including every other error status — is
-# returned untouched, so a genuine product failure still FAILs the caller.
+#   * REST — status 504, body `{"detail": mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE}`
+#     (`hosted_api._send_wait_bound_refusal`);
+#   * JSON-RPC / MCP — a `{code, message, data}` error mapping carrying
+#     `mcp_auth.ERR_TIMEOUT` + the same message, on status 504 for the `/mcp`
+#     route and inside a `CallToolResult(isError=True)` on the SSE arm (HTTP
+#     200), the SDK having collapsed a raised `McpError` into that shape — see
+#     `mcp_server._await_under_mcp_wait_bound`. The SSE `data:` payload is a
+#     JSON-RPC RESPONSE, so the `CallToolResult` sits one level down at
+#     `result`, and the mapping is homed at `result.structuredContent.error`
+#     (no wrap envelope) or `result._meta.tortoise_error` (a wrap-envelope tool
+#     — #8482). (`test_transport_wait_bound.py` reads the real wire the same
+#     way: `_parse_sse(r.text)` then `body["result"]`.)
+#
+# That refusal is the LEGIBLE REFUSAL the ruling requires — it is the product
+# saying "no answer yet", not an answer. A test that reads it as a FAIL is
+# therefore reading the host's load, which is exactly what rule 1 forbids; the
+# property under test was never observed.
+#
+# ⛔ The detection is the refusal ENVELOPE, never the message text alone. A bare
+# substring test classified ANY response whose body merely CONTAINED the
+# message — a genuine 4xx/5xx error included — as a non-answer, so a true red
+# was reported INCONCLUSIVE and silently not reported (#8579 review: a 500 and a
+# 200 whose bodies carried the message both returned `True`). Each arm is gated
+# on the surface's own shape above. Everything that is not this refusal —
+# including every other error status, and any body that merely mentions the
+# message — is returned untouched, so a genuine product failure still FAILs the
+# caller.
 
 
 def _body_text(response: Any) -> str:
@@ -185,19 +201,104 @@ def transport_wait_bound_s() -> float:
     return float(mcp_auth._TRANSPORT_WAIT_BOUND_S)
 
 
+def _json_objects(response: Any) -> list[dict]:
+    """Every JSON object the response body carries.
+
+    A REST/JSON response carries one; the MCP arm's SSE stream carries its
+    ``data:`` payloads. Parsing the STRUCTURE — not searching the text — is what
+    lets the refusal be identified by its envelope rather than by a substring.
+    """
+    as_json = getattr(response, "json", None)
+    if callable(as_json):
+        try:
+            parsed = as_json()
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            return [parsed]
+    text = _body_text(response).strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, dict):
+        return [parsed]
+    objects: list[dict] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if not payload:
+            continue
+        try:
+            parsed = json.loads(payload)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            objects.append(parsed)
+    return objects
+
+
+def _refusal_error_mapping(body: dict) -> dict | None:
+    """The ``{code, message}`` mapping a JSON-RPC/MCP refusal carries.
+
+    JSON-RPC homes it at ``error``. The MCP SSE arm's ``data:`` payload is a
+    JSON-RPC *response*, so the ``CallToolResult`` is one level down at
+    ``result`` and the same mapping lives at ``result.structuredContent.error``
+    (no wrap envelope) or ``result._meta.tortoise_error`` (the wrap-envelope
+    repair, #8482). Both levels are probed: the `/mcp` pre-SSE 504 carries the
+    mapping at the TOP level, the SSE frame carries it under ``result``.
+    """
+    layers: list[dict] = [body]
+    result = body.get("result")
+    if isinstance(result, dict):
+        layers.append(result)
+    for layer in layers:
+        homes: list[Any] = [layer.get("error")]
+        structured = layer.get("structuredContent")
+        if isinstance(structured, dict):
+            homes.append(structured.get("error"))
+        meta = layer.get("_meta")
+        if isinstance(meta, dict):
+            homes.append(meta.get("tortoise_error"))
+        for home in homes:
+            if isinstance(home, dict):
+                return home
+    return None
+
+
 def is_transport_wait_bound_refusal(response: Any) -> bool:
     """True when ``response`` is the product's transport wait-bound refusal.
 
-    Surface-agnostic by construction: the REST arm answers a 504 whose body is
-    the refusal message, and the MCP arm answers 200 whose body carries the same
-    message inside an ``isError`` result. The message — emitted from one module
-    by one seam — is the signal; the status is not, because it differs by
-    surface. A conforming caller therefore cannot read the MCP refusal as a
-    silent PASS while the REST one is caught.
+    Gated on the refusal ENVELOPE per surface — never on the message alone, which
+    classified a genuine error that merely mentioned the message as a non-answer
+    and reported a true red as INCONCLUSIVE (#8579 review). The accepted shapes
+    are the two the product actually emits (see the block comment above), so a
+    conforming caller catches the refusal on every surface while every other
+    response reaches its own assertion.
     """
     from tortoise import mcp_auth
 
-    return mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE in _body_text(response)
+    status = getattr(response, "status_code", None)
+    message = mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE
+    for body in _json_objects(response):
+        # REST arm: 504 whose body is exactly the refusal.
+        if status == 504 and body == {"detail": message}:
+            return True
+        # JSON-RPC / MCP arm: the product's error code AND message, on either
+        # the `/mcp` route's 504 or the SSE arm's 200.
+        error = _refusal_error_mapping(body)
+        if (
+            status in (200, 504)
+            and error is not None
+            and error.get("code") == mcp_auth.ERR_TIMEOUT
+            and error.get("message") == message
+        ):
+            return True
+    return False
 
 
 def require_answered(response: Any, *, what: str) -> Any:
@@ -208,7 +309,9 @@ def require_answered(response: Any, *, what: str) -> Any:
     verdict is an INCONCLUSIVE skip that names the bound — never a bare FAIL
     (which reads as a product defect) and never a silent pass.
 
-    Every other response, including a non-504 error, is returned unchanged.
+    Every other response — including a non-504 error, and any response that
+    merely mentions the refusal message without its envelope — is returned
+    unchanged.
     """
     if is_transport_wait_bound_refusal(response):
         inconclusive(

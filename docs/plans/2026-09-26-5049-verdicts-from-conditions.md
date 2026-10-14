@@ -287,9 +287,15 @@ here:
   its verdict is reading the host's load, which is rule 1's subject. The contract now
   expresses it: `tests/_verdict.py::require_answered` returns an ANSWERED response and
   turns the refusal into `INCONCLUSIVE [#5049]` naming the 10 s bound. It detects the
-  refusal by the product's own message, not by the status, so the MCP arm's 200 cannot be
-  read as a silent pass. Every other response — including the 4xx refusals the callers
-  assert on — is returned unchanged.
+  refusal by its per-surface **envelope** — REST `504` + `{"detail": MESSAGE}`, JSON-RPC/MCP
+  `error.code == ERR_TIMEOUT` + `message == MESSAGE` on the `/mcp` 504 or the SSE arm's 200
+  (the JSON-RPC response's `result.structuredContent.error` /
+  `result._meta.tortoise_error`) — never by the message text alone,
+  so the MCP arm's 200 cannot be read as a silent pass while a genuine 4xx/5xx error that
+  merely mentions the message still reaches the caller's own assertion. Every other
+  response is returned unchanged. (#8579 review P2-1: the message-substring test this
+  replaced was status-blind, so a real red whose body contained the message was reported
+  INCONCLUSIVE.)
 - **Product half (owner).** Whether the bound's VALUE is right for a cold commit, whether
   to warm the embedder, or whether to reopen the exemption, is the recorded **#3834**
   ruling's territory. Nothing here changes the product: the bound stays 10 s and the
@@ -300,15 +306,33 @@ caller behind them):
 
 | Site / seam | Covers |
 |---|---|
-| `test_commit_endpoint.py::_commit` | every hosted-app `/v1/sessions/commit` POST in the file — the seam plus the direct posts in `test_failed_write_retry_applies_the_counters_once`, `TestLayer1`, the 401 and body-cap sites (#4627's own reproducer) |
-| `test_github_index_lifecycle.py::_poll_until` | the file's whole `_poll_until` path, plus the pump-and-observe poll in `test_live_progress_written_during_walk` |
-| `test_index_docs_api.py::_poll_until` | the file's whole `_poll_until` path, plus the pump-and-observe polls in `test_docs_live_progress_written_during_walk` and `test_docs_live_progress_all_branches_site` |
+| `test_commit_endpoint.py::_commit` + its eight direct-post bodies | every hosted-app `/v1/sessions/commit` POST in the file — the seam plus the direct posts in `test_failed_write_retry_applies_the_counters_once`, `TestLayer1`, the 401 and body-cap sites (#4627's own reproducer). Those eight bypass the seam, so each is named individually in the registry (#8579 review P3 — pinning `_commit` alone left them unpinned) |
+| `test_github_index_lifecycle.py::_poll_until` + `_post_index` + `_pump_until_walk_entered` + `_pump_until_midwalk` | the file's whole poll path (`GET /v1/index/github/<id>` including the pump-and-observe loops) AND every `POST /v1/index/github[/re-poll]` call site through one seam — the direct posts left unwrapped were the `KeyError: 'job_id'` mode (#8579 P3-2). The two pump helpers own their loops' wall-clock budgets, so a load event that misses the transient window SKIPs naming the budget instead of raising the rule-1 `assert beats` / `assert mid["seen"]` FAIL (#8579 review P2) |
+| `test_index_docs_api.py::_poll_until` + `_pump_until_midwalk` | the file's whole `_poll_until` path, plus the pump-and-observe polls in `test_docs_live_progress_written_during_walk` and `test_docs_live_progress_all_branches_site` (GET and the loops' own budget, #8579 review P2) |
 | `test_capture_loop_responsiveness.py::_measure_capture_graph_work` | the measured `#3086` capture through **both** callers (`_measure_on_loop_graph_work` and the direct schema-bootstrap caller) — the LOWER seam, not the wrapper |
 | `test_one_free_org_entitlement.py::_post_signed` | the `/webhooks/stripe` seam |
 | `test_activation_scorecard.py::test_default_window_is_24h` | `#5049`'s `KeyError: 'window'` instance |
 | `test_pack_state.py::TestGetV1Packs` (2) | `#4883`/`#4816`'s measured GETs |
 | `test_writer_inventory.py` (2) | the `#7931` signup / graph-write instances |
 | `test_capture_cost_measurement.py`, `test_onboarding_endpoints.py`, `test_oauth_mcp.py`, `test_signup_token_revoke.py`, `test_hosted_api.py::TestDreamEndpoint` | each issue-measured instance |
+
+A dropped conversion at any row of this table is itself pinned:
+`tests/test_verdict_contract.py::test_every_converted_site_wires_the_verdict_contract`
+asserts each named seam/test body still calls `require_answered` (#8579 P3-3), so the
+conversion cannot be silently deleted back to a wall-clock FAIL. Both `_poll_until`s
+additionally route their OWN wall-clock deadline through `require_within`, so a poll
+exhausting its budget SKIPs naming that budget instead of raising `AssertionError`
+(#8579 P2-2); the four pump-and-observe loops do the same through the two
+`_pump_until_*` helpers, closing the residual budget the P2-2 pass left unconverted
+(#8579 review P2). Those helpers keep `require_answered`'s P2-1 principle too:
+the refusal is a non-answer, but an **answered** 4xx/5xx is not — each helper asserts
+the answered status (`assert rp.status_code == 200`) before reading the body, so a
+genuine 404 stays a FAIL instead of exiting the budget as a machine-load SKIP that
+hides the regression (#8590 review P2). A contradictory **terminal** status is not a
+load event either: both `_poll_until`s raise the FAIL from INSIDE the predicate when an
+answered body has already reached the OTHER terminal status (`completed`/`failed`), so a
+determinate contradiction is observation-triggered while a still-`started` body at the
+budget keeps expiring through `require_within` as INCONCLUSIVE (#8590 review P2).
 
 **Remaining, deliberately not converted here:** the bare `assert r.status_code == 200`
 reads on non-exempt routes that sit behind no shared seam (≈1.7k across `tests/`, top
@@ -325,10 +349,18 @@ exhausted; `#5049` stays open until #8582 lands.
 
 ### Rule-1 driver inventory (the `wait_for` family the contract unifies)
 
-The contract's `wait_for` is adopted at the converted sites only. The pre-existing predicate
-waiters — `tests/test_index_docs_api.py`, `tests/test_github_index_lifecycle.py`,
-`tests/test_4314_inert_hooks.py`, `tests/test_agent_signup.py`,
-`tests/test_agent_signup_idempotency.py` (five `_wait_for(predicate, timeout)` copies);
+The contract's `wait_for` is adopted at the converted sites only. `_wait_for` in
+`tests/test_github_index_lifecycle.py` is converted to an **event** wait (the run was
+invoked) whose callers then assert the captured payload deterministically — an
+exact-equality predicate over that payload was fail-open, reporting a wrong forward as a
+machine-load SKIP (#8579 review P2) — and whose INCONCLUSIVE reason names that event
+(`what="the background index run was invoked"`), not the job's terminal state it does not
+observe (#8590 review P3). `tests/test_index_docs_api.py`'s `_wait_for` was
+unused at head and at base and has been removed along with its conversion.
+
+The pre-existing predicate
+waiters — `tests/test_4314_inert_hooks.py`, `tests/test_agent_signup.py`,
+`tests/test_agent_signup_idempotency.py` (three `_wait_for(predicate, timeout)` copies);
 `tests/test_embedded_lifecycle.py::{_wait_server_dead, _wait_for_registry_redis,
 _wait_ready_file}`; `tests/e2e/auth/bff_test_helpers.py::wait_for_port`; and the per-file `_wait*`
 copies in `test_embedded_concurrency.py`, `test_cursor_capture_hook.py`,

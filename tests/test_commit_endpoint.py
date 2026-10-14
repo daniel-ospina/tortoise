@@ -3117,15 +3117,23 @@ def test_commit_seam_is_inconclusive_on_a_transport_bound_refusal():
     """
 
     class _BoundRefusalClient:
+        # #8579 P2-1: the fake must carry the product's REST ENVELOPE, not just
+        # the message text — the detector is envelope-gated now.
         status_code = 504
 
         def __init__(self) -> None:
+            import json
+
             from tortoise import mcp_auth
 
-            self.text = mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE
+            self._message = mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE
+            self.text = json.dumps({"detail": self._message})
 
         def post(self, *_args, **_kwargs):
             return self
+
+        def json(self):
+            return {"detail": self._message}
 
     with pytest.raises(pytest.skip.Exception) as excinfo:
         _commit(

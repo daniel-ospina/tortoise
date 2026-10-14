@@ -8,6 +8,7 @@ script (dry-run + opt-in merge).
 """
 from __future__ import annotations
 
+import json
 import os
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
@@ -28,7 +29,7 @@ from fastapi.testclient import TestClient
 
 from tests._github_mock import MockGitHubTransport, gh_issue
 from tests._http_fixtures import patched_tortoise_sdk
-from tests._verdict import require_answered
+from tests._verdict import require_answered, require_within, transport_wait_bound_s
 from tortoise.hosted_api import (
     _ALLOWED_STATE_KEYS,
     _INDEX_JOBS,
@@ -155,14 +156,109 @@ def _load_dedup_script():
     return mod
 
 
-def _wait_for(predicate, timeout_s: float = 8.0):
-    """Poll for a fire-and-forget side effect (background _run_indexing task
-    on the TestClient's portal loop). Raises AssertionError on timeout."""
-    deadline = time.time() + timeout_s
-    while not predicate():
-        if time.time() > deadline:
-            raise AssertionError("timed out waiting for background job")
-        time.sleep(0.02)
+def _wait_for(
+    predicate,
+    timeout_s: float = 8.0,
+    what: str = "the background index run was invoked",
+):
+    """Wait for a fire-and-forget side effect (background _run_indexing task
+    on the TestClient's portal loop).
+
+    #5049 rule 1: a deadline expiry here is a machine-load event, so it is
+    INCONCLUSIVE naming the budget — never the `AssertionError` this used to
+    raise (the same wall-clock-FAIL class as `_poll_until`, #8579 review P2-2).
+
+    #8579 review P2 (fail-open): pass the **event** ("the run was invoked"),
+    not an exact-equality predicate over the captured payload. An exact
+    predicate is false forever on a wrong forward too, so its expiry would
+    report a regression as a machine-load SKIP. The event is the only part
+    that legitimately depends on load; callers assert the captured payload
+    deterministically AFTER it returns.
+
+    #8590 review P3: the INCONCLUSIVE reason must name THAT event. It used to
+    say "a background index job reached its terminal state" — a property this
+    predicate does not observe (the five callers wait on `bool(seen)`, the run
+    being *invoked*) — which pointed the reader at the job-status/heartbeat
+    path instead of the invocation path, and contradicted
+    `tests/_verdict.py::inconclusive`'s own contract ("``what`` names the
+    property that was not observed"). `what` stays overridable for a future
+    caller with a different predicate.
+    """
+    require_within(predicate, timeout_s=timeout_s, what=what)
+
+
+def _pump_until_walk_entered(client, job_id: str, beats: list,
+                            *, timeout_s: float = 10.0) -> None:
+    """Pump the poll GET until the walk has been entered (an `on_progress`
+    beat is captured).
+
+    #5049 rule 1 + #8579 review P2: the loop's OWN wall-clock budget is a
+    machine-load clock, so its expiry is INCONCLUSIVE naming that budget —
+    never the rule-1 `assert beats` FAIL this used to raise. The request is
+    converted through `require_answered`, so a bound refusal is a non-answer;
+    an ANSWERED error status stays a FAIL (asserted here, #8590 review P2).
+    """
+
+    def _entered() -> bool:
+        if beats:
+            return True
+        # #5049: a bound refusal on the pump GET is a non-answer, not a FAIL.
+        rp = require_answered(
+            client.get(f"/v1/index/github/{job_id}"),
+            what=f"GET /v1/index/github/{job_id} answered (pump)",
+        )
+        # #8590 review P2 (fail-open): `require_answered` returns every
+        # non-refusal unchanged, so an ANSWERED error (404/403) must be
+        # asserted here — mirroring `_poll_until._reached` — or it misses the
+        # window forever and the budget exits as an INCONCLUSIVE SKIP instead
+        # of the FAIL the pre-fix loop produced.
+        assert rp.status_code == 200, rp.text
+        return bool(beats)
+
+    require_within(
+        _entered, timeout_s=timeout_s,
+        what="the index walk was entered with an on_progress beat",
+    )
+
+
+def _pump_until_midwalk(client, job_id: str, mid: dict,
+                       *, timeout_s: float = 10.0) -> None:
+    """Pump `GET /v1/index/github/<id>` until the walk's mid-progress window
+    is observed, recording `repos_processed`/`progress`/`repos_total` into
+    `mid`.
+
+    #5049 rule 1 + #8579 review P2: the pump-and-observe loop carries its own
+    wall-clock budget in addition to the request's transport bound. Its expiry
+    is a machine-load event — INCONCLUSIVE naming the budget — never the
+    rule-1 `assert mid["seen"]` FAIL this used to raise. The request itself is
+    converted through `require_answered`, and an ANSWERED error status is
+    asserted, so a genuine 404/403 stays a FAIL (#8590 review P2).
+    """
+
+    def _observe() -> bool:
+        rp = require_answered(
+            client.get(f"/v1/index/github/{job_id}"),
+            what=f"GET /v1/index/github/{job_id} answered",
+        )
+        # #8590 review P2: an ANSWERED error (404/403) is not a non-answer —
+        # assert it here (as `_poll_until._reached` does) so it stays a FAIL
+        # instead of a load-event SKIP.
+        assert rp.status_code == 200, rp.text
+        body = rp.json()
+        if (body.get("repos_processed", 0) >= 1
+                and 0 < body.get("progress", 0) < 100):
+            mid["seen"] = True
+            mid["repos_processed"] = body["repos_processed"]
+            mid["progress"] = body["progress"]
+            mid["repos_total"] = body.get("repos_total", 0)
+            return True
+        return False
+
+    require_within(
+        _observe, timeout_s=timeout_s,
+        what="mid-walk live progress on GET /v1/index/github/<id>",
+        diagnosis="_job() must write repos_processed/progress after each repo",
+    )
 
 
 def _drain_jobs(client, timeout_s: float = 5.0):
@@ -183,21 +279,79 @@ def _drain_jobs(client, timeout_s: float = 5.0):
         time.sleep(0.02)
 
 
-def _poll_until(client, job_id: str, status: str, timeout_s: float = 8.0):
-    deadline = time.time() + timeout_s
-    while True:
-        r = client.get(f"/v1/index/github/{job_id}")
-        # #5049: `GET /v1/index/github/<id>` is not exempt from the transport
-        # wait bound, so a 504 here is the product refusing legibly, not an
-        # answer — INCONCLUSIVE, never the bare FAIL this assert used to make.
-        require_answered(r, what=f"GET /v1/index/github/{job_id} answered")
+#: The index job's terminal statuses: `hosted_api` mints "started" and writes
+#: exactly "completed"/"failed" (`_job(status=...)`). A body in this set either
+#: MATCHES the expected status or is a determinate contradiction — never the
+#: indeterminate "still working" state a load-driven deadline is allowed to
+#: skip on.
+_TERMINAL_JOB_STATUSES = ("completed", "failed")
+
+
+def _poll_until(client, job_id: str, status: str, timeout_s: float | None = None):
+    """Poll the index job; INCONCLUSIVE (never FAIL) on either deadline.
+
+    TWO clocks meet here, and they are deliberately reconciled (#8579 P2-2):
+
+    * the PRODUCT's transport wait bound (10 s) bounds ONE request — a request
+      that outlives it is answered with the legible refusal, which
+      `require_answered` turns INCONCLUSIVE. The pre-fix 8 s default was
+      SHORTER than that bound, so under load this poll's own budget fired
+      before the refusal could even be read;
+    * this poll's deadline bounds the WHOLE poll loop, so it must outlast a
+      single request's bound or it decides the verdict first. The default is the
+      product bound plus a 2 s margin, and a caller may still pass an explicit
+      budget for a deterministic test.
+    """
+    budget = transport_wait_bound_s() + 2.0 if timeout_s is None else timeout_s
+    observed: dict = {}
+
+    def _reached() -> bool:
+        r = require_answered(
+            client.get(f"/v1/index/github/{job_id}"),
+            what=f"GET /v1/index/github/{job_id} answered",
+        )
         assert r.status_code == 200, r.text
-        body = r.json()
-        if body["status"] == status:
-            return body
-        if time.time() > deadline:
-            raise AssertionError(f"job {job_id} not {status}: {body}")
-        time.sleep(0.02)
+        observed["body"] = r.json()
+        observed_status = observed["body"]["status"]
+        if observed_status != status and observed_status in _TERMINAL_JOB_STATUSES:
+            # #8590 review P2 (fail-open): an ANSWERED terminal status that
+            # CONTRADICTS the expected one is a determinate product
+            # observation — the run already ended in a different terminal
+            # state — not a machine-load event. Raising INSIDE the predicate
+            # keeps the FAIL observation-triggered, never deadline-triggered;
+            # a non-terminal body ("started") at the budget still expires
+            # through `require_within` as INCONCLUSIVE.
+            raise AssertionError(
+                f"job {job_id} reached {observed_status!r}, expected "
+                f"{status!r}: {observed['body']}"
+            )
+        return observed_status == status
+
+    # #5049 rule 1: the poll's own deadline is a wall-clock budget, so its
+    # expiry is INCONCLUSIVE and names the budget — never the AssertionError
+    # (`job <id> not <status>`) this used to raise.
+    require_within(
+        _reached, timeout_s=budget,
+        what=f"job {job_id} reached status {status!r}",
+    )
+    return observed["body"]
+
+
+def _post_index(client, path: str = "/v1/index/github", **kwargs):
+    """POST an index route through the #5049 verdict seam.
+
+    `POST /v1/index/github` and its `/re-poll` sibling are not exempt from the
+    transport wait bound, so a request that outlives it is answered with the
+    legible refusal — which carries no `job_id`, so dereferencing it is the
+    `KeyError: 'job_id'` #8122 measured as a red (four times). Routing EVERY
+    post in this file through one seam — not the two leaves an earlier pass
+    converted — leaves no unwrapped poster to reintroduce that error
+    (#8579 review P3-2/P3-3).
+    """
+    return require_answered(
+        client.post(path, **kwargs),
+        what=f"POST {path} answered",
+    )
 
 
 def test_poll_until_is_inconclusive_on_a_bound_refusal():
@@ -214,13 +368,127 @@ def test_poll_until_is_inconclusive_on_a_bound_refusal():
         def __init__(self) -> None:
             from tortoise import mcp_auth
 
-            self.text = mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE
+            self._message = mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE
+            self.text = json.dumps({"detail": self._message})
 
         def get(self, *_args, **_kwargs):
             return self
 
+        def json(self):
+            return {"detail": self._message}
+
     with pytest.raises(pytest.skip.Exception) as excinfo:
         _poll_until(_Refusing(), "job-1", "completed")
+    assert "INCONCLUSIVE [#5049]" in str(excinfo.value)
+
+
+def test_poll_until_deadline_is_inconclusive_never_an_assertion():
+    """#8579 P2-2: the poll's OWN deadline must not produce FAIL.
+
+    Deterministic: a 200 whose body never reaches the target status, with the
+    budget spent. Pre-fix this raised
+    `AssertionError: job job-1 not completed: {'status': 'running'}` from the
+    same helper that already converted the transport refusal; the rule-1
+    budget expiry must SKIP and name the budget it spent.
+    """
+
+    class _Stuck:
+        status_code = 200
+
+        def __init__(self) -> None:
+            self.text = '{"status": "running"}'
+
+        def get(self, *_args, **_kwargs):
+            return self
+
+        def json(self):
+            return {"status": "running"}
+
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        _poll_until(_Stuck(), "job-1", "completed", timeout_s=0.0)
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "0s" in message, message
+    assert "job job-1 reached status 'completed'" in message, message
+
+
+def test_poll_until_terminal_mismatch_is_a_fail_not_a_skip():
+    """#8590 review P2 must-fail leg: a CONTRADICTORY terminal status is a
+    determinate observation, never a machine-load SKIP.
+
+    Deterministic: an answered 200 whose body has already reached the OTHER
+    terminal status, with the budget spent. Pre-fix the predicate was false
+    forever and the budget exited as `INCONCLUSIVE [#5049]`, dropping the run's
+    own failure text; an answered terminal contradiction must FAIL.
+    """
+
+    class _Failed:
+        status_code = 200
+        text = '{"status": "failed", "error": "boom"}'
+
+        def get(self, *_args, **_kwargs):
+            return self
+
+        def json(self):
+            return {"status": "failed", "error": "boom"}
+
+    try:
+        _poll_until(_Failed(), "job-1", "completed", timeout_s=0.0)
+    except AssertionError as exc:
+        message = str(exc)
+    except pytest.skip.Exception as exc:
+        raise AssertionError(
+            "a contradictory terminal status ('failed' while awaiting "
+            f"'completed') was swallowed as an INCONCLUSIVE skip: {exc}"
+        ) from exc
+    else:
+        raise AssertionError(
+            "the poll raised no verdict for a contradictory terminal status")
+    assert "reached 'failed', expected 'completed'" in message, message
+    assert "boom" in message, message
+
+
+def test_wait_for_names_the_event_it_waits_for():
+    """#8590 review P3: the INCONCLUSIVE reason names the event the predicate
+    observes — the run was INVOKED — not its terminal state.
+
+    Pre-fix the reason said "a background index job reached its terminal
+    state", a property `lambda: bool(seen)` never observes, so this fails on
+    the pre-fix string.
+    """
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        _wait_for(lambda: False, timeout_s=0.0)
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message, message
+    assert "the background index run was invoked" in message, message
+    assert "terminal state" not in message, message
+
+
+def test_post_index_is_inconclusive_on_a_bound_refusal():
+    """#8579 P3-2/P3-3: the file's ONE post seam converts the refusal.
+
+    Every `/v1/index/github` POST in this file goes through `_post_index`, so
+    pinning the seam pins all of them: a bound refusal is a non-answer — never
+    the `KeyError: 'job_id'` a bare `.json()["job_id"]` would raise.
+    """
+
+    class _Refusing:
+        status_code = 504
+
+        def __init__(self) -> None:
+            from tortoise import mcp_auth
+
+            self._message = mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE
+            self.text = json.dumps({"detail": self._message})
+
+        def post(self, *_args, **_kwargs):
+            return self
+
+        def json(self):
+            return {"detail": self._message}
+
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        _post_index(_Refusing(), json={"org": "acme"})
     assert "INCONCLUSIVE [#5049]" in str(excinfo.value)
 
 
@@ -286,11 +554,11 @@ def test_in_flight_single_flight_reuses(provisioned, mock_github, monkeypatch):
         await orig_run(*args, **kw)
 
     monkeypatch.setattr(ha, "_run_indexing", _counting)
-    r1 = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
+    r1 = _post_index(provisioned.tc, "/v1/index/github", json={"org": "acme"})
     assert r1.status_code == 200
     job_id = r1.json()["job_id"]
     assert _INDEX_JOBS[job_id]["status"] == "started"
-    r2 = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
+    r2 = _post_index(provisioned.tc, "/v1/index/github", json={"org": "acme"})
     assert r2.status_code == 200
     assert r2.json()["job_id"] == job_id, "in-flight job must be reused"
     body = _poll_until(provisioned.tc, job_id, "completed")
@@ -313,7 +581,7 @@ def test_stuck_started_evicted(provisioned, mock_github):
     dead_at = time.time() - _INDEX_JOB_STALE_S - 10
     _INDEX_JOBS[stale]["started_at"] = dead_at
     _INDEX_JOBS[stale]["heartbeat_at"] = dead_at
-    r = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
+    r = _post_index(provisioned.tc, "/v1/index/github", json={"org": "acme"})
     assert r.status_code == 200
     new_job = r.json()["job_id"]
     assert new_job != stale
@@ -347,7 +615,7 @@ def test_long_live_run_not_duplicated_by_ttl_expiry(provisioned, mock_github,
         await orig_run(*args, **kw)
 
     monkeypatch.setattr(ha, "_run_indexing", _counting)
-    r1 = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
+    r1 = _post_index(provisioned.tc, "/v1/index/github", json={"org": "acme"})
     assert r1.status_code == 200
     job_id = r1.json()["job_id"]
     assert _INDEX_JOBS[job_id]["status"] == "started"
@@ -355,7 +623,7 @@ def test_long_live_run_not_duplicated_by_ttl_expiry(provisioned, mock_github,
     # TTL — and it is STILL BEATING (the heartbeat is kept fresh by progress).
     _INDEX_JOBS[job_id]["started_at"] = time.time() - _INDEX_JOB_STALE_S * 4
     _INDEX_JOBS[job_id]["heartbeat_at"] = time.time()
-    r2 = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
+    r2 = _post_index(provisioned.tc, "/v1/index/github", json={"org": "acme"})
     assert r2.status_code == 200
     assert r2.json()["job_id"] == job_id, (
         "a LONG but LIVE run must keep its claim — entry age is not a "
@@ -392,17 +660,14 @@ def test_progress_beat_stamps_heartbeat(provisioned, mock_github, monkeypatch):
         return await orig_index_repo(self, sdk, repo, **kw)
 
     monkeypatch.setattr(GitHubIndexer, "index_repo", _held_index_repo)
-    r = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
+    r = _post_index(provisioned.tc, "/v1/index/github", json={"org": "acme"})
     assert r.status_code == 200
     job_id = r.json()["job_id"]
 
     # pump the portal (the poll GET both advances and observes the run) until
-    # the walk has been entered
-    deadline = time.time() + 10.0
-    while not beats and time.time() < deadline:
-        provisioned.tc.get(f"/v1/index/github/{job_id}")
-        time.sleep(0.02)
-    assert beats, "the walk was never entered with an on_progress beat"
+    # the walk has been entered; the loop's own deadline is INCONCLUSIVE
+    # (never the rule-1 `assert beats` FAIL) — #8579 review P2.
+    _pump_until_walk_entered(provisioned.tc, job_id, beats)
     assert _INDEX_JOBS[job_id]["status"] == "started", (
         "the hold must keep the run in flight for a mid-walk assertion")
 
@@ -422,7 +687,7 @@ def test_terminal_jobs_evicted_on_enqueue(provisioned, mock_github):
     org_id = provisioned.org_id
     job_id, _ = _start_index_job(org_id)
     _INDEX_JOBS[job_id]["status"] = "completed"
-    r = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
+    r = _post_index(provisioned.tc, "/v1/index/github", json={"org": "acme"})
     new_job = r.json()["job_id"]
     assert new_job != job_id
     assert job_id not in _INDEX_JOBS
@@ -434,7 +699,7 @@ def test_terminal_jobs_evicted_on_enqueue(provisioned, mock_github):
 def test_first_run_single_repo(provisioned, mock_github):
     """First-run scope = ONE repo regardless of org size; job status reports
     repos_total vs repos_processed (the honest 'index more' affordance)."""
-    r = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
+    r = _post_index(provisioned.tc, "/v1/index/github", json={"org": "acme"})
     job_id = r.json()["job_id"]
     body = _poll_until(provisioned.tc, job_id, "completed")
     assert body["repos_total"] == 1
@@ -447,9 +712,9 @@ def test_first_run_single_repo(provisioned, mock_github):
 def test_second_run_full_org_with_cursors(provisioned, mock_github):
     """After the first run (github_indexed=True), a re-poll walks ALL repos
     with their persisted cursors."""
-    r = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
+    r = _post_index(provisioned.tc, "/v1/index/github", json={"org": "acme"})
     _poll_until(provisioned.tc, r.json()["job_id"], "completed")
-    r = provisioned.tc.post("/v1/index/github/re-poll")
+    r = _post_index(provisioned.tc, "/v1/index/github/re-poll")
     job_id = r.json()["job_id"]
     body = _poll_until(provisioned.tc, job_id, "completed")
     assert body["repos_total"] == 2
@@ -486,7 +751,7 @@ def test_live_progress_written_during_walk(provisioned, mock_github, monkeypatch
         return await orig_index_repo(self, sdk, repo, **kw)
 
     monkeypatch.setattr(GitHubIndexer, "index_repo", _slow_repo2)
-    r = provisioned.tc.post("/v1/index/github/re-poll")
+    r = _post_index(provisioned.tc, "/v1/index/github/re-poll")
     assert r.status_code == 200, r.text
     job_id = r.json()["job_id"]
 
@@ -496,26 +761,12 @@ def test_live_progress_written_during_walk(provisioned, mock_github, monkeypatch
     # a request, so the poll GET both pumps and observes (mirrors _drain_jobs).
     mid = {"seen": False, "repos_processed": 0, "progress": 0,
            "repos_total": 0}
-    deadline = time.time() + 10.0
-    while time.time() < deadline:
-        rp = provisioned.tc.get(f"/v1/index/github/{job_id}")
-        # #5049: the same non-exempt poll route `_poll_until` converts — a
-        # refusal here is a non-answer, so the loop must not read its
-        # `{"detail": ...}` body as a missing-progress deadline FAIL.
-        require_answered(rp, what=f"GET /v1/index/github/{job_id} answered")
-        body = rp.json()
-        if (body.get("repos_processed", 0) >= 1
-                and 0 < body.get("progress", 0) < 100):
-            mid["seen"] = True
-            mid["repos_processed"] = body["repos_processed"]
-            mid["progress"] = body["progress"]
-            mid["repos_total"] = body.get("repos_total", 0)
-            break
-        time.sleep(0.02)
+    # #5049: this pump-and-observe loop is a separate poll path from
+    # `_poll_until`; its GET is converted through `require_answered` AND its
+    # own wall-clock deadline through `require_within` (#8579 review P2), so
+    # neither a bound refusal nor a load event exits into a rule-1 FAIL.
+    _pump_until_midwalk(provisioned.tc, job_id, mid)
 
-    assert mid["seen"], (
-        "mid-walk live progress never observed — _job() must write "
-        "repos_processed/progress after each repo")
     assert mid["repos_processed"] == 1
     assert mid["repos_total"] == 2
     assert 0 < mid["progress"] < 100  # 1 of 2 repos → 50
@@ -551,7 +802,7 @@ def test_midwalk_fetch_error_stamps_indexed_at(provisioned, mock_github,
         return await orig_index_repo(self, sdk, repo, **kw)
 
     monkeypatch.setattr(GitHubIndexer, "index_repo", _fail_repo2)
-    r = provisioned.tc.post("/v1/index/github/re-poll")
+    r = _post_index(provisioned.tc, "/v1/index/github/re-poll")
     assert r.status_code == 200, r.text
     body = _poll_until(provisioned.tc, r.json()["job_id"], "failed")
     assert body["status"] == "failed"
@@ -593,7 +844,7 @@ def test_auto_index_after_connect(provisioned, mock_github, monkeypatch):
 
 
 def test_re_poll_requires_connection(client):
-    r = client.tc.post("/v1/index/github/re-poll")
+    r = _post_index(client.tc, "/v1/index/github/re-poll")
     assert r.status_code == 400
     assert "GitHub not connected" in r.json()["detail"]
 
@@ -611,10 +862,14 @@ def test_re_poll_scoped_repo(provisioned, monkeypatch):
         ha._INDEX_JOBS[job_id]["status"] = "completed"  # settle the drain
 
     monkeypatch.setattr(ha, "_run_indexing", _capture)
-    r = provisioned.tc.post("/v1/index/github/re-poll", json={"repo": "repo2"})
+    r = _post_index(provisioned.tc, "/v1/index/github/re-poll", json={"repo": "repo2"})
     assert r.status_code == 200
     assert r.json()["status"] == "started"
-    _wait_for(lambda: seen == [("acme", ["repo2"])])
+    # #8579 review P2: wait for the EVENT (the run was invoked), then assert
+    # the forwarded scope deterministically — an exact-equality predicate makes
+    # a wrong scope a machine-load SKIP instead of the FAIL it is.
+    _wait_for(lambda: bool(seen))
+    assert seen == [("acme", ["repo2"])]
 
 
 def test_re_poll_multi_repo_scope(provisioned, monkeypatch):
@@ -628,10 +883,11 @@ def test_re_poll_multi_repo_scope(provisioned, monkeypatch):
         ha._INDEX_JOBS[job_id]["status"] = "completed"
 
     monkeypatch.setattr(ha, "_run_indexing", _capture)
-    r = provisioned.tc.post("/v1/index/github/re-poll",
+    r = _post_index(provisioned.tc, "/v1/index/github/re-poll",
                             json={"repos": ["repo1", "repo2"]})
     assert r.status_code == 200
-    _wait_for(lambda: seen == [("acme", ["repo1", "repo2"])])
+    _wait_for(lambda: bool(seen))
+    assert seen == [("acme", ["repo1", "repo2"])]
 
 
 def test_re_poll_empty_repos_is_full_org(provisioned, monkeypatch):
@@ -645,9 +901,10 @@ def test_re_poll_empty_repos_is_full_org(provisioned, monkeypatch):
         ha._INDEX_JOBS[job_id]["status"] = "completed"
 
     monkeypatch.setattr(ha, "_run_indexing", _capture)
-    r = provisioned.tc.post("/v1/index/github/re-poll", json={"repos": []})
+    r = _post_index(provisioned.tc, "/v1/index/github/re-poll", json={"repos": []})
     assert r.status_code == 200
-    _wait_for(lambda: seen == [("acme", None)])
+    _wait_for(lambda: bool(seen))
+    assert seen == [("acme", None)]
 
 
 def test_re_poll_invalid_repo_400(provisioned, monkeypatch):
@@ -663,10 +920,10 @@ def test_re_poll_invalid_repo_400(provisioned, monkeypatch):
 
     monkeypatch.setattr(ha, "_run_indexing", _capture)
     for bad in ("../victimorg/secret", "a/b?q=1", "repo name", "../.."):
-        r = provisioned.tc.post("/v1/index/github/re-poll", json={"repo": bad})
+        r = _post_index(provisioned.tc, "/v1/index/github/re-poll", json={"repo": bad})
         assert r.status_code == 400, f"repo={bad!r} should 400"
         assert "Invalid repo name" in r.json()["detail"]
-        r2 = provisioned.tc.post("/v1/index/github/re-poll",
+        r2 = _post_index(provisioned.tc, "/v1/index/github/re-poll",
                                  json={"repos": [bad]})
         assert r2.status_code == 400, f"repos=[{bad!r}] should 400"
     assert seen == [], "no job must be spawned for an invalid repo"
@@ -683,9 +940,10 @@ def test_re_poll_whitespace_repo_is_full_org(provisioned, monkeypatch):
         ha._INDEX_JOBS[job_id]["status"] = "completed"
 
     monkeypatch.setattr(ha, "_run_indexing", _capture)
-    r = provisioned.tc.post("/v1/index/github/re-poll", json={"repo": "   "})
+    r = _post_index(provisioned.tc, "/v1/index/github/re-poll", json={"repo": "   "})
     assert r.status_code == 200
-    _wait_for(lambda: seen == [("acme", None)])
+    _wait_for(lambda: bool(seen))
+    assert seen == [("acme", None)]
 
 
 def test_re_poll_no_repo_is_full_org(provisioned, monkeypatch):
@@ -699,15 +957,105 @@ def test_re_poll_no_repo_is_full_org(provisioned, monkeypatch):
         ha._INDEX_JOBS[job_id]["status"] = "completed"
 
     monkeypatch.setattr(ha, "_run_indexing", _capture)
-    r = provisioned.tc.post("/v1/index/github/re-poll")
+    r = _post_index(provisioned.tc, "/v1/index/github/re-poll")
     assert r.status_code == 200
-    _wait_for(lambda: seen == [("acme", None)])
+    _wait_for(lambda: bool(seen))
+    assert seen == [("acme", None)]
+
+
+def test_pump_until_midwalk_deadline_is_inconclusive_never_an_assertion():
+    """#8579 review P2: the pump-and-observe loop's OWN budget must SKIP, not
+    FAIL. Deterministic: a 200 whose body never reaches the mid-walk window,
+    with the budget already spent. Pre-fix the loop exited its deadline into
+    `assert mid["seen"]` — this pins the conversion through `require_within`.
+    """
+
+    class _AnsweredButNeverMidwalk:
+        status_code = 200
+        text = '{"repos_processed": 0, "progress": 0}'
+
+        def get(self, *_args, **_kwargs):
+            return self
+
+        def json(self):
+            return {"repos_processed": 0, "progress": 0}
+
+    mid: dict = {"seen": False}
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        _pump_until_midwalk(_AnsweredButNeverMidwalk(), "job-1", mid,
+                            timeout_s=0.0)
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "0s" in message, message
+    assert "mid-walk live progress" in message, message
+
+
+def test_pump_until_midwalk_answered_error_is_a_fail_not_a_skip():
+    """#8590 review P2 must-fail leg: a genuine ANSWERED error on the pump GET
+    reaches the caller's own assertion — never a machine-load SKIP.
+
+    Pre-fix (no status assertion after `require_answered`) the 404 missed the
+    mid-walk window on every iteration and the budget exited as
+    `INCONCLUSIVE [#5049]`; a real regression was thus reported as a skip. The
+    conversion must leave it a FAIL.
+    """
+
+    class _NotFound:
+        status_code = 404
+        text = '{"detail": "job not found"}'
+
+        def get(self, *_args, **_kwargs):
+            return self
+
+        def json(self):
+            return {"detail": "job not found"}
+
+    mid: dict = {"seen": False}
+    try:
+        _pump_until_midwalk(_NotFound(), "job-1", mid, timeout_s=0.0)
+    except AssertionError:
+        return  # expected: the answered 404 reaches the caller's assertion
+    except pytest.skip.Exception as exc:
+        raise AssertionError(
+            "an answered 404 was swallowed as an INCONCLUSIVE skip instead of "
+            f"failing: {exc}"
+        ) from exc
+    raise AssertionError(
+        "the pump helper returned without asserting the answered 404 status")
+
+
+def test_pump_until_walk_entered_answered_error_is_a_fail_not_a_skip():
+    """#8590 review P2 must-fail leg for `_pump_until_walk_entered`: an
+    answered 404 on the pump GET is a FAIL, not a load-event SKIP."""
+
+    class _NotFound:
+        status_code = 404
+        text = '{"detail": "job not found"}'
+
+        def get(self, *_args, **_kwargs):
+            return self
+
+        def json(self):
+            return {"detail": "job not found"}
+
+    beats: list = []
+    try:
+        _pump_until_walk_entered(_NotFound(), "job-1", beats, timeout_s=0.0)
+    except AssertionError:
+        return  # expected: the answered 404 reaches the caller's assertion
+    except pytest.skip.Exception as exc:
+        raise AssertionError(
+            "an answered 404 was swallowed as an INCONCLUSIVE skip instead of "
+            f"failing: {exc}"
+        ) from exc
+    raise AssertionError(
+        "the pump helper returned without asserting the answered 404 status")
 
 
 # ── Cursor + backfill marker persistence (Tasks 2/3) ──────────────
 
 def test_cursor_and_backfill_marker_persisted(provisioned, mock_github):
-    r = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
+    r = _post_index(provisioned.tc, "/v1/index/github", json={"org": "acme"})
     _poll_until(provisioned.tc, r.json()["job_id"], "completed")
     state = provisioned.tc.get("/v1/onboarding/state").json()["onboarding"]
     assert state["github_indexed"] is True
@@ -745,18 +1093,14 @@ def test_repoll_drains_and_clears_truncated_persisted(client, tmp_path,
 
     monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
     # run 1: cap 500 → truncated cursor persisted
-    r = client.tc.post("/v1/index/github", json={"org": "acme"})
-    # #5049: `POST /v1/index/github` is not exempt from the transport wait
-    # bound — a 504 refusal has no `job_id`, so dereferencing it produced the
-    # `KeyError: 'job_id'` that was read as a red (#8122, measured four times).
-    require_answered(r, what="POST /v1/index/github returned a job id")
+    r = _post_index(client.tc, "/v1/index/github", json={"org": "acme"})
     body = _poll_until(client.tc, r.json()["job_id"], "completed")
     assert body["repos_processed"] == 1
     state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
     assert state["github_index_cursor"]["acme/repo1"] == {
         "updated_at": S, "number": 500, "truncated": True}
     # re-poll 1 (DRAIN): drains the remaining 100 → CLEAN persisted cursor
-    r2 = client.tc.post("/v1/index/github/re-poll")
+    r2 = _post_index(client.tc, "/v1/index/github/re-poll")
     body2 = _poll_until(client.tc, r2.json()["job_id"], "completed")
     assert body2["repos_processed"] == 1
     state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
@@ -766,7 +1110,7 @@ def test_repoll_drains_and_clears_truncated_persisted(client, tmp_path,
     # re-poll 2 (DIFF): first issues request carries `since` — no DRAIN,
     # and the run stays exact-once (0 new mints)
     n_queries_before = len(t.issue_query_params())
-    r3 = client.tc.post("/v1/index/github/re-poll")
+    r3 = _post_index(client.tc, "/v1/index/github/re-poll")
     body3 = _poll_until(client.tc, r3.json()["job_id"], "completed")
     assert body3["events_minted"] == 0, "exact-once — 0 new mints"
     new_queries = t.issue_query_params()[n_queries_before:]
@@ -798,14 +1142,14 @@ def test_backfill_marker_set_only_on_success(client, tmp_path, monkeypatch):
 
     monkeypatch.setattr(GitHubIndexer, "backfill_legacy_closed",
                         _flaky_backfill)
-    r = client.tc.post("/v1/index/github", json={"org": "acme"})
+    r = _post_index(client.tc, "/v1/index/github", json={"org": "acme"})
     _poll_until(client.tc, r.json()["job_id"], "completed")
     state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
     assert state["github_legacy_backfill_done"] is False, \
         "marker must stay UNSET when the backfill raises"
     # heal the backfill → the next run re-runs it and sets the marker
     fail_backfill["fail"] = False
-    r2 = client.tc.post("/v1/index/github/re-poll")
+    r2 = _post_index(client.tc, "/v1/index/github/re-poll")
     _poll_until(client.tc, r2.json()["job_id"], "completed")
     state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
     assert state["github_legacy_backfill_done"] is True
@@ -824,7 +1168,7 @@ def test_resolve_repos_404_fails_job(client, tmp_path, monkeypatch):
         return self._client
 
     monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
-    r = client.tc.post("/v1/index/github", json={"org": "acme"})
+    r = _post_index(client.tc, "/v1/index/github", json={"org": "acme"})
     job_id = r.json()["job_id"]
     body = _poll_until(client.tc, job_id, "failed")
     assert "not found" in body["error"] or "no access" in body["error"]
@@ -859,7 +1203,7 @@ def test_issue_ingest_no_longer_consumes_points_quota(client, tmp_path,
         return self._client
 
     monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
-    r = client.tc.post("/v1/index/github", json={"org": "acme"})
+    r = _post_index(client.tc, "/v1/index/github", json={"org": "acme"})
     job_id = r.json()["job_id"]
     body = _poll_until(client.tc, job_id, "completed")
     assert body["quota_hit"] is False, \
@@ -906,7 +1250,7 @@ def test_resolve_repos_failure_preserves_persisted_cursors(client, tmp_path,
         raise GitHubFetchError("org not found")
 
     monkeypatch.setattr(GitHubIndexer, "resolve_repos", _boom)
-    r = client.tc.post("/v1/index/github", json={"org": "acme"})
+    r = _post_index(client.tc, "/v1/index/github", json={"org": "acme"})
     body = _poll_until(client.tc, r.json()["job_id"], "failed")
     assert "org not found" in body["error"]
     state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
