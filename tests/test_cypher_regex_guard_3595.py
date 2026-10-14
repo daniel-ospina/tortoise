@@ -75,16 +75,54 @@ LEGACY_SHAPE_CHECK = (
     "MATCH (n) WHERE n.id =~ '^[a-z]{2,3}-[0-9a-f]{26}$' RETURN n.id"
 )
 
+#: The #6976 offender — the SAME shape as
+#: ``tests/test_id_predicate_barrier_6976.py::_OFFENDER``: a ``WHERE`` predicate on
+#: ``n`` followed at the same query level by a plain ``MATCH`` whose pattern
+#: re-binds ``n``. On a 6.x engine that later ``MATCH`` makes the engine DROP the
+#: predicate, so the caller silently gets foreign rows.
+_OFFENDER = (
+    "MATCH (n:Point) WHERE n.id IN $ids MATCH (n)-[:REL]->(m:Point) RETURN n.id"
+)
+
+#: What ``_predicate_drop_barrier`` owes for ``_OFFENDER`` — pins the barrier's
+#: POSITION (before the re-binding ``MATCH``), not merely its presence.
+_OFFENDER_BARRED = _OFFENDER.replace(
+    "MATCH (n)-[:REL]", "WITH * MATCH (n)-[:REL]"
+)
+
 
 class _FakeHandle:
-    """Stand-in for a FalkorDB graph handle: records what reaches the wire."""
+    """Stand-in for a FalkorDB graph handle: records what reaches the wire.
+
+    It carries every query verb ``_GuardedGraph`` overrides, so a test can drive
+    each entry point past the pre-dispatch refusals and observe the statement the
+    wrapper actually dispatches (the #7162 barrier is an insertion into the text).
+    It deliberately has NO ``.client``: the engine-version probe then resolves to
+    UNKNOWN and the #7162 gate is OPEN, which is what makes the barrier tests
+    below DB-free.
+    """
 
     def __init__(self) -> None:
         self.calls: list[tuple] = []
 
-    def query(self, cypher, params=None, timeout=None):
+    def _record(self, cypher, params, timeout=None):
         self.calls.append((cypher, params, timeout))
         return "SENTINEL-EMPTY-RESULT"
+
+    def query(self, cypher, params=None, timeout=None):
+        return self._record(cypher, params, timeout)
+
+    def ro_query(self, cypher, params=None, timeout=None):
+        return self._record(cypher, params, timeout)
+
+    def _query(self, cypher, params=None, timeout=None, read_only=False):
+        return self._record(cypher, params, timeout)
+
+    def profile(self, cypher, params=None):
+        return self._record(cypher, params, None)
+
+    def explain(self, cypher, params=None):
+        return self._record(cypher, params, None)
 
 
 class _StubProj:
@@ -374,10 +412,23 @@ def test_raw_select_graph_handle_refuses_every_other_query_entry_point(verb):
 
 
 def test_raw_select_graph_supported_query_reaches_the_wire():
-    """Anti-overfix guard: the guarded handle still passes supported queries."""
+    """Anti-overfix guard: the guarded handle still passes supported queries.
+
+    #7162: the engine-version probe is a SECOND, one-time command on this wire —
+    the lazy, per-client read that gates the `WITH *` barrier. Both halves are
+    pinned here: the supported statement reaches the wire BYTE-IDENTICAL (it
+    carries no defect shape, so nothing is inserted), and the probe is issued
+    ONCE per client rather than once per query.
+    """
     g, wire = _guarded_vendor_handle()
-    g.query("MATCH (n) WHERE n.id STARTS WITH 'obj-' RETURN n.id")
-    assert len(wire.commands) == 1, wire.commands
+    statement = "MATCH (n) WHERE n.id STARTS WITH 'obj-' RETURN n.id"
+    g.query(statement)
+    assert [c[0] for c in wire.commands] == ["MODULE", "GRAPH.QUERY"], wire.commands
+    assert wire.commands[1][2] == statement, "a legitimate query was rewritten"
+    g.query(statement)
+    assert [c[0] for c in wire.commands] == [
+        "MODULE", "GRAPH.QUERY", "GRAPH.QUERY"
+    ], f"the version probe is per-QUERY, not per-client: {wire.commands}"
 
 
 def test_projection_wrapper_refuses_on_every_query_entry_point():
@@ -392,6 +443,45 @@ def test_projection_wrapper_refuses_on_every_query_entry_point():
         with pytest.raises(UnsupportedCypherOperatorError):
             getattr(g, verb)(LEGACY_SHAPE_CHECK)
         assert handle.calls == [], f"{verb} reached the raw handle"
+
+
+# ── #7162: the `proj.g` wrapper's OWN `WITH *` barrier (`_bar`) ──────────────
+
+@pytest.mark.parametrize("verb", ["query", "ro_query", "_query", "profile", "explain"])
+def test_projection_wrapper_bars_the_6976_offender_on_every_query_entry_point(verb):
+    """Falsifier: ``_GuardedGraph._bar`` is not dead code on the ``proj.g`` path.
+
+    The #3595 refusal fires BEFORE ``_bar`` runs, so a ``=~`` statement proves
+    nothing about the barrier; and the #7162 wire tests use the embedded engine,
+    whose 4.18.3 probe SHUTS the gate. This is the falsifier for the other half of
+    the seam. ``_FakeHandle`` has no ``.client``, so the version probe resolves to
+    UNKNOWN and the gate is OPEN without a DB or a version stub.
+
+    Value that makes it fail: ``_OFFENDER``, the #6976 shape. With ``_bar``
+    reduced to ``return cypher`` the RAW statement reaches the handle instead of
+    the barred one, so the assertion reds. Reachable: the spy fixture above
+    records exactly what the wrapper dispatches, per verb.
+    """
+    g, handle = _guarded()
+    getattr(g, verb)(_OFFENDER)
+    assert len(handle.calls) == 1, f"{verb} never reached the handle: {handle.calls}"
+    sent = handle.calls[0][0]
+    assert sent == _OFFENDER_BARRED, (
+        f"{verb} dispatched an unbarred (or wrongly barred) offender: {sent!r}"
+    )
+    assert "WITH *" in sent, f"{verb} lost the barrier: {sent!r}"
+
+
+def test_projection_wrapper_barrier_is_idempotent_through_the_verb():
+    """Anti-overfix guard: a second pass cannot double-insert a barrier.
+
+    ``_bar`` runs after an already-barred statement reaches the raw handle in the
+    normal double-guard path, so a non-idempotent insertion would corrupt every
+    statement. Value that makes it fail: the BARRED text, handed back in.
+    """
+    g, handle = _guarded()
+    g.query(_OFFENDER_BARRED)
+    assert handle.calls[0][0] == _OFFENDER_BARRED, handle.calls[0][0]
 
 
 # ── review round 2: the three P2 probes + the P1 duck-typed handle ──────────
@@ -561,11 +651,14 @@ def test_the_real_vendor_client_guards_the_handles_it_yields():
     g = client.select_graph("g")
     assert isinstance(g, falkordb.Graph), "the vendor Graph contract was broken"
     g.query("MATCH (n) WHERE n.id STARTS WITH 'obj-' RETURN n.id")
-    assert len(wire) == 1, wire
+    # #7162: one engine-version probe, then the dispatch. The probe is the
+    # per-client read that gates the `WITH *` barrier; it is issued lazily, so a
+    # REFUSED statement below never causes one.
+    assert [c[0] for c in wire] == ["MODULE", "GRAPH.QUERY"], wire
     with pytest.raises(UnsupportedCypherOperatorError) as exc:
         g.query(LEGACY_SHAPE_CHECK)
     assert exc.value.operator == "=~"
-    assert len(wire) == 1, "the unsupported statement reached the wire"
+    assert len(wire) == 2, "the unsupported statement reached the wire"
 
 
 def test_the_embedded_client_class_is_guarded_too():
@@ -690,7 +783,11 @@ def test_execute_command_refuses_the_operator_in_a_bytes_payload():
     assert wire.commands == [], "the bytes payload reached the wire"
     # A supported bytes query still passes through.
     g.execute_command(b"GRAPH.QUERY", b"g", b"RETURN 1")
-    assert wire.commands == [(b"GRAPH.QUERY", b"g", b"RETURN 1")]
+    # #7162: the one-time per-client engine-version probe precedes the dispatch;
+    # the supported statement itself is forwarded byte-for-byte.
+    assert wire.commands == [
+        ("MODULE", "LIST"), (b"GRAPH.QUERY", b"g", b"RETURN 1")
+    ], wire.commands
 
 
 def test_the_client_command_channel_is_guarded_too():

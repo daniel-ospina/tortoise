@@ -84,6 +84,14 @@ for comp_id, appr_id, label in WIRING:
     # Check if any operator Point with this marker already connects comp → appr
     existing = g.query(
         "MATCH (op:Point) WHERE op.content CONTAINS $marker "
+        # #7162 (was #6976): LOAD-BEARING. This script builds a RAW vendor
+        # client, so the in-package handle guard does not cover it — the barrier
+        # is hand-placed here. FalkorDB 6.0.0/6.0.1 DROP the `op.content CONTAINS
+        # $marker` predicate when the next plain MATCH re-binds `op`, and the
+        # idempotency check then counts OTHER operators' edges instead of this
+        # pair's, so a re-run can double-wire. `WITH *` keeps it bound (measured
+        # no-op on 4.20.x, which binds the predicate anyway).
+        "WITH * "
         "MATCH (op)-[:IMPL]->(c:Point {id:$comp}) "
         "MATCH (op)-[:IMPL]->(a:Point {id:$appr}) "
         "RETURN count(op)",

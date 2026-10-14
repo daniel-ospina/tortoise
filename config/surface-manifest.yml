@@ -21,7 +21,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: dc6ed063c61b33e0ff3cf02be61a2ddf15d1b34e
+cut_at_commit: e20de606be10fc9fda96729b6cfd6277ac3ad1ec
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -518,7 +518,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_index_files
-  served_from: tortoise/mcp_server.py:d7376787bf6dbb81
+  served_from: tortoise/mcp_server.py:b64bc0571780442f
   served_attributes: 056016f648fa419a
   family: memory
   family_rank: 1
@@ -529,11 +529,12 @@ rows:
   keyword_rank: 2
   cluster: deprecated-index
   canonical: true
-  job: Index a corpus directory of .md files as Sources + Events/Documents (the unified index path — replaces tortoise_index_sessions
-    + tortoise_ingest_corpus file semantics for local corpora). Returns the honest summary (file_count, indexed,
-    updated, skipped, failed, aborted, ignored, errors[], by_kind). Idempotent — re-runs converge to skipped. On
-    a shared graph, give each corpus a unique corpus_name (default = directory basename) to avoid cross-corpus url
-    collisions. EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.
+  job: 'Index a corpus directory of .md files as Sources + Events (D10: a document is a Source) (the unified index
+    path — replaces tortoise_index_sessions + tortoise_ingest_corpus file semantics for local corpora). Returns
+    the honest summary (file_count, indexed, updated, skipped, failed, aborted, ignored, errors[], by_kind). Idempotent
+    — re-runs converge to skipped. On a shared graph, give each corpus a unique corpus_name (default = directory
+    basename) to avoid cross-corpus url collisions. EXCLUDED from tenant HTTP — walks server filesystem with user-supplied
+    path.'
   dependency: declares TortoiseSDK.index_directory (resolves)
   lifecycle: active
   used_by: agents, tooling, docs
@@ -2318,7 +2319,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_file_human_approval
-  served_from: tortoise/mcp_server.py:80e93a9397565f9f
+  served_from: tortoise/mcp_server.py:f41b045696ca10ec
   served_attributes: bde251bf8d7cd4ae
   family: journal
   family_rank: 7
@@ -2344,7 +2345,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_create_document
-  served_from: tortoise/mcp_server.py:0ecc1785041000d5
+  served_from: tortoise/mcp_server.py:9d04c2ad2ffd125d
   served_attributes: 2fda7769c65f26af
   family: sources
   family_rank: 8
@@ -2355,7 +2356,7 @@ rows:
   keyword_rank: 2
   cluster: create
   canonical: false
-  job: Create a Document node (research, planDoc, meetingNotes, etc.).
+  job: Create a document — a :Source keyed by url (research, planDoc, meetingNotes, etc.).
   dependency: declares TortoiseSDK.create_document (resolves)
   lifecycle: active
   used_by: never called, tooling, docs

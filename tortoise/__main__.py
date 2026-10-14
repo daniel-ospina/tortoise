@@ -10843,8 +10843,10 @@ def main(argv: list[str] | None = None) -> int:
     isess.add_argument("--metadata", action="store_true",
                        help="Run LLM metadata extraction (default: keyword-only — sweep never burns LLM tokens)")
     # tortoise index directory — the unified index path (epic #900 T8, §6.5)
-    idir = idx_sp.add_parser("directory",
-                             help="Index a corpus directory of .md files as Sources + Events/Documents (unified index path)")
+    idir = idx_sp.add_parser(
+        "directory",
+        help="Index a corpus directory of .md files as Sources + Events "
+             "(documents are document Sources — D10); unified index path")
     idir.add_argument("corpus_dir", nargs="?", default=None,
                       help="Corpus directory (default: TORTOISE_INGEST_BASE_DIR — the hook passes positionally)")
     idir.add_argument("--db", default=None,

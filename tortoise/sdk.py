@@ -13038,10 +13038,13 @@ class TortoiseSDK:
         (that composition is ``live.is_terminal_status``). The builder emits the
         expanded OR-chain under a NULL guard —
         ``((n.status IS NOT NULL AND (n.status = '…' OR …)) OR
-        coalesce(n.outdated,false) = true)`` — i.e. the POSITIVE direction of
-        the vocabulary ``_terminal_excluded`` filters on. It assumes
-        ``outdated`` is a boolean; every in-repo writer emits the literal
-        ``true`` (see #7075 for the hand-edited/legacy-graph case). Before #3142 this site carried its own
+        coalesce(n.outdated,false) <> false)`` — i.e. the POSITIVE direction of
+        the vocabulary ``_terminal_excluded`` filters on, and its exact De
+        Morgan dual (#7075: the flag half negates ``= false`` rather than
+        testing ``= true``, so this builder and the keep-filter cannot
+        disagree on a non-boolean ``outdated``). ``outdated`` is
+        contractually a boolean; every in-repo writer emits the literal
+        ``true`` and the journal fold enforces the type. Before #3142 this site carried its own
         forked ``status IN $terminal AND coalesce(outdated,false) = false``,
         which is the AND of the two halves and so matched NEITHER: a point
         superseded through ``supersede_point`` (which stamps BOTH
@@ -14808,7 +14811,9 @@ class TortoiseSDK:
 
         Args:
             approver_id: Subject id (or name) of the human approving.
-            artifact_id: Object/Document id (or name) of the artifact approved.
+            artifact_id: Object id, or the url of the document Source, of the
+                artifact approved (D10: a document is a ``:Source``, not a
+                ``:Document`` node).
             point_ids: claim Point ids the approval covers (non-operator).
             decision_content: optional content override for the decision Point
                 (default ``"Approved: <artifact>"``).
@@ -25090,7 +25095,10 @@ class TortoiseSDK:
             aboutDocument props are extracted and wired as typed edges
             (Event)-[:aboutSubject]->(Subject) etc. rather than stored as
             string properties (ID or name resolution, legacy behavior).
-          - document → Document node (documentKind required, status='draft')
+          - document → a document ``:Source`` keyed ``url = id`` (documentKind
+            required; D10 (ONTOLOGY v3.15 §4.4) retires ``:Document`` — a
+            document is a ``:Source``, so this routes through the deprecated
+            label alias and journals ``DocumentCreated``)
 
         Write nudges (nudge, don't enforce): returns ``{node, nudges}`` where
         ``nudges`` lists top related Points (by name/content token overlap) with

@@ -481,10 +481,14 @@ doc_status: live
 >   (`validFrom` on the node; `validFrom` + `previousValidTo` on the
 >   `SourceVersioned` record), and what stays open is the node's
 >   `validTo`/`expiredAt` (**#3590** S2, the removal-field decision); and
->   `#5038` (the version model). **The D10 code half's own residuals are named and
->   open:** `#5082` (the document `:Source` carries no `sourceKind`, while §4.6 marks
->   it REQUIRED — scoped at §4.6), `#5121` (the MCP surface still describes a
->   `:Document` graph node; needs a surface-manifest re-cut), and `#5140` (the ten
+>   `#5038` (the version model). `#5121` **landed** — PR #8528 corrected the MCP
+>   surface descriptions that still spoke of a `:Document` graph node (of the
+>   advertised tools, `tortoise_index_files` and `tortoise_create_document`;
+>   `tortoise_taxonomy`/`tortoise_ingest_corpus`/`tortoise_get` are retired names
+>   served only by the warning shim) and re-cut the `config/surface-manifest.yml`
+>   baseline — no tool was added, removed or renamed. **The D10 code half's own
+>   residuals are named and open:** `#5082` (the document `:Source` carries no
+>   `sourceKind`, while §4.6 marks it REQUIRED — scoped at §4.6), and `#5140` (the ten
 >   residuals outside the declared B1–B6 threat surface, including three reproduced
 >   P1s). **Landed:** `#5126` — `graph-scripts/backfill_embeddings.py` now targets
 >   `:Source` (PR `#8420`).

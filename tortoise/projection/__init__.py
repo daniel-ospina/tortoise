@@ -35,6 +35,8 @@ from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
     _guard_execute_command,
     _guard_numeric_params,  # #7174: the store's numeric domain, same seam
     _guard_unsupported_cypher,
+    _predicate_barrier_required,  # #7162: engine-version gate for the barrier
+    _predicate_drop_barrier,  # #7162: the predicate-drop normaliser
     _skip_cypher_quoted,  # noqa: F401  re-export: the scanner's public test surface
     _unsupported_cypher_operator,  # noqa: F401  re-export
     guarded_client,
@@ -3093,6 +3095,7 @@ class _GuardedGraph:
         # ``cypher_guard._guard_unsupported_cypher`` — shared with the guarded
         # handles so the two paths cannot drift.
         _guard_unsupported_cypher(cypher)
+        cypher = self._bar(cypher)
         # #7951 R2-P1: observe the fold's OWN Source mint at the write
         # chokepoint. Every replay path that materialises a `:Source` writes
         # through this handle, so the anchor is derived from what was actually
@@ -3126,6 +3129,7 @@ class _GuardedGraph:
         # rather than relying on the inner handle's class.
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
+        cypher = self._bar(cypher)
         return self._g.ro_query(
             cypher, params=_journal_safe_params(params, cypher), timeout=timeout
         )
@@ -3135,6 +3139,7 @@ class _GuardedGraph:
         # reaching `_query` directly must not slip past the refusal either.
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
+        cypher = self._bar(cypher)
         return self._g._query(
             cypher, params=_journal_safe_params(params, cypher),
             timeout=timeout, read_only=read_only,
@@ -3145,11 +3150,13 @@ class _GuardedGraph:
         # `_query`, so they carry their own refusal.
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
+        cypher = self._bar(cypher)
         return self._g.profile(cypher, params=_journal_safe_params(params, cypher))
 
     def explain(self, cypher: str, params=None):
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
+        cypher = self._bar(cypher)
         return self._g.explain(cypher, params=_journal_safe_params(params, cypher))
 
     def execute_command(self, *args, **kwargs):
@@ -3157,11 +3164,25 @@ class _GuardedGraph:
         # `GRAPH.QUERY` / `GRAPH.PROFILE` / ... too, and the guarded handles
         # beneath `self._g` already intercept it — but keep the wrapper's own
         # refusal complete rather than depending on the inner handle's class.
-        _guard_execute_command(args)
+        # #7162: the returned args carry the `WITH *` barrier when the shape
+        # needs it, so they — not the original `args` — are what gets dispatched.
+        args = _guard_execute_command(args, getattr(self._g, "client", None))
         return self._g.execute_command(*args, **kwargs)
 
     def __getattr__(self, name):
         return getattr(self._g, name)
+
+    def _bar(self, cypher: str) -> str:
+        """#7162: the `WITH *` barrier, when this handle's engine needs it.
+
+        The inner handle is guarded too, so this normally runs a second (cheap,
+        idempotent) pass; it exists so the `proj.g` path stays complete even when
+        a lightweight stub is wrapped here, matching the wrapper's own
+        "refuse on its own rather than depend on the inner class" convention.
+        """
+        if _predicate_barrier_required(self._g):
+            return _predicate_drop_barrier(cypher)
+        return cypher
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS, parse_uri_userinfo  # noqa: E402, I001
 from tortoise.fork_slot import is_fork_refusal  # noqa: E402

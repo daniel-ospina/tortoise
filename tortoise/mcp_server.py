@@ -1022,8 +1022,8 @@ _QUOTA_GATED: frozenset[str] = frozenset({
     # #684: node-creating tools that were missed in the original #329 audit
     "tortoise_file_human_approval",  # creates Event + decision Point + IMPL edges
     "tortoise_assess_source",        # creates assessment Point
-    # epic #900 T7 (#1043): the index path creates Sources + Events/Documents
-    # + references edges — node/edge-creating, quota-gated (S8 pin, I25)
+    # epic #900 T7 (#1043): the index path creates Sources + Events (a document
+    # is a Source — D10) + references edges — node/edge-creating, quota-gated (S8 pin, I25)
     "tortoise_index_files",
 })
 
@@ -2364,7 +2364,8 @@ def tortoise_file_human_approval(approver_id: str, artifact_id: str,
     dependent claims strengthen.
 
     approver_id: Subject id of the human approving
-    artifact_id: Object/Document id of the artifact being approved
+    artifact_id: Object id, or the url of the document Source, of the artifact
+        being approved
     point_ids: claim Point ids being approved
     decision_content: optional content override for the decision Point
 
@@ -2722,7 +2723,7 @@ def tortoise_issue_insight(title: str, body: str | None = None,
 
 def tortoise_ingest_corpus(directory: str) -> dict:
     """Batch document ingestion — walk directory, parse YAML frontmatter
-    from .md files, create/update Document nodes.
+    from .md files, create/update document Sources (D10: a document is a :Source).
     Returns {ingested, updated, skipped}.
 
     #236: EXCLUDED from tenant HTTP — walks server filesystem with a
@@ -2735,7 +2736,8 @@ def tortoise_ingest_corpus(directory: str) -> dict:
 # ── Taxonomy ─────────────────────────────────────────────────
 
 def tortoise_taxonomy() -> dict[str, int]:
-    """Count entities by node label. Returns {Point: N, Event: N, Subject: N, Object: N, Document: N}.
+    """Count entities by node label. Returns {Point: N, Event: N, Subject: N,
+    Object: N, Source: N} (D10: a document is a Source, not a :Document node).
     Alias → overview(section='taxonomy') (epic #888 W3)."""
     return _safe(_get_org_sdk().taxonomy)
 
@@ -3066,8 +3068,8 @@ def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_m
 
 def tortoise_index_files(directory: str, corpus_name: str | None = None,
                         extract_metadata: bool = False) -> dict:
-    """Index a corpus directory of .md files as Sources + Events/Documents
-    (epic #900 — the unified index path). Returns the honest §3.1 summary
+    """Index a corpus directory of .md files as Sources + Events (D10: a document
+    is a Source; the unified index path, epic #900). Returns the honest §3.1 summary
     (file_count, indexed, updated, skipped, failed, aborted, ignored,
     errors[], by_kind). Idempotent: re-runs converge to skipped. On a shared
     graph, give each corpus a unique corpus_name (default = directory
@@ -3108,7 +3110,8 @@ def tortoise_search_sessions(query: str, agent: str | None = None, topics: Any =
                  after=after, before=before, limit=limit, offset=offset)
 
 def tortoise_create_document(title: str, documentKind: str, props: Any = None) -> dict:
-    """Create a Document node (research, planDoc, meetingNotes, etc.)."""
+    """Create a document — a :Source keyed by url (research, planDoc,
+    meetingNotes, etc.)."""
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
@@ -3552,8 +3555,8 @@ def tortoise_get(id: str, type: str | None = None,
 
     type selects the node kind:
       point | operator | entity | event | session | events | governance
-    Omitted type → auto-detect by id lookup (Point/Subject/Object/Document/
-    Source/Event by id|eventId|url; AgentSession by session_id|sessionId).
+    Omitted type → auto-detect by id lookup (Point/Subject/Object/Source/Event
+    by id|eventId|url; AgentSession by session_id|sessionId).
 
     Returns the node properties (same shape as the legacy tool it replaces).
     type='events': id is optional — recent Events list, id used as an
