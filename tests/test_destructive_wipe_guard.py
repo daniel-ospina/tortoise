@@ -820,10 +820,14 @@ class _NonEmptyRecordingGraph(_RecordingGraph):
 class _UnmeasurableRecordingGraph(_RecordingGraph):
     """A fake handle whose *total-node* count returns NO row at all.
 
-    #3044 review: an absent/NULL count is this surface's
-    "could not observe" shape (``_node_count`` returns None, and
-    ``recover_from_log`` passes None through) — never a measured 0. The guard
-    must fail CLOSED on it."""
+    #3044 review: an absent count row is the shape the guard fails CLOSED on.
+    `_node_count` does NOT model it the same way — it flattens the same absent
+    row to 0 and returns `None` only when the query RAISES — so the guard is
+    deliberately STRICTER than the entry probe: the probe may proceed on a
+    count it could not read, and the wipe then refuses rather than issuing a
+    destructive statement on an unobserved store. The refusal carries its own
+    measurement, so `recover_from_log` reports this shape to the operator as
+    `db_points: None` (UNMEASURABLE), never a fabricated 0."""
 
     def query(self, cypher, params=None, timeout=None):
         if " ".join((cypher or "").split()).upper() == \
@@ -839,13 +843,21 @@ def test_require_empty_refuses_an_unmeasurable_count(tmp_path):
     `MATCH (n) RETURN count(n)` yielding no row (or NULL) means the guard
     could not observe the store, not that the store is empty — flattening it
     to 0 issues the wipe on a count that was never taken and destroys whatever
-    the window holds. The fail-closed choice is to refuse. FAILS IF: the wipe
-    proceeds on an unmeasured count."""
+    the window holds. The fail-closed choice is to refuse. (Deliberately
+    stricter than `_node_count`, which flattens the same absent row to 0 and
+    returns `None` only when the query raises; the refusal carries its own
+    measurement so the two readers cannot disagree downstream.) The exception
+    reports `db_points is None` — UNMEASURABLE — never a measured 0.
+    FAILS IF: the wipe proceeds on an unmeasured count, or the refusal claims
+    the store holds 0 nodes."""
     proj = _bare_projection(graph_name="test_3044_unmeasured", embedded=True)
     proj.g = _UnmeasurableRecordingGraph()
-    with pytest.raises(WipePreconditionRefused, match="MEASURED"):
+    with pytest.raises(WipePreconditionRefused, match="MEASURED") as excinfo:
         proj.rebuild_all(str(tmp_path), confirm_destructive=True,
                          require_empty=True)
+    assert excinfo.value.db_points is None, (
+        "the unmeasurable refusal carried a fabricated count: "
+        f"{excinfo.value.db_points!r}")
     assert proj.g.wipes() == [], (
         "the wipe ran on a node count that was never measured")
 
@@ -860,9 +872,12 @@ def test_require_empty_refuses_a_graph_that_filled_after_the_probe(tmp_path):
     destructive statement."""
     proj = _bare_projection(graph_name="test_3044", embedded=True)
     proj.g = _NonEmptyRecordingGraph()
-    with pytest.raises(WipePreconditionRefused, match="require_empty"):
+    with pytest.raises(WipePreconditionRefused, match="require_empty") as excinfo:
         proj.rebuild_all(str(tmp_path), confirm_destructive=True,
                          require_empty=True)
+    assert excinfo.value.db_points == 1, (
+        "the refusal must carry the count it refused on — the operator reads "
+        f"it as db_points: {excinfo.value.db_points!r}")
     assert proj.g.wipes() == [], (
         "the wipe ran even though the graph had stopped being empty")
 
@@ -1031,6 +1046,9 @@ def test_recover_from_log_refuses_the_wipe_when_a_writer_lands_in_the_window(
 
         assert result["recovered"] is False, result
         assert "refused" in result["reason"], result
+        assert result["db_points"] == 1, (
+            "the refusal must report the count it refused on: the graph holds "
+            f"1 node, not {result['db_points']!r}")
         rows = proj.g.query(
             "MATCH (n:GraphEvent) RETURN count(n)").result_set
         assert int(rows[0][0]) == 1, (
@@ -1039,6 +1057,79 @@ def test_recover_from_log_refuses_the_wipe_when_a_writer_lands_in_the_window(
         assert os.path.exists(prewipe_snapshot_path(str(events))), (
             "the pre-existing sidecar is the record of an interrupted "
             "rebuild; a refusal must not retire it")
+    finally:
+        proj.close()
+
+
+def test_recover_from_log_reports_an_unmeasurable_refusal_as_unknown(
+        tmp_path):
+    """#3044 review (P2): the refusal RESULT carries the guard's OWN count.
+
+    The guard refuses the UNMEASURABLE shape — `MATCH (n) RETURN count(n)`
+    yields no row — with "could not be MEASURED". `recover_from_log` used to
+    report that refusal's `db_points` from `_node_count()`, which flattens the
+    SAME absent row to 0, so `_auto_health_recover` was told the store was
+    EMPTY in the very line that said its count was never taken. The
+    measurement now travels on the exception, so the producer and the consumer
+    cannot drift apart. FAILS IF: the empty-row refusal is reported as
+    `db_points: 0` — the false "empty store" claim this guard exists to
+    remove."""
+    from tortoise import consistency as consistency_mod
+
+    events = tmp_path / "events"
+    events.mkdir()
+    (events / "sdk.jsonl").write_text(json.dumps({
+        "event_id": "e1", "ts": "2026-01-01T00:00:00Z",
+        "type": "IngestStarted"}) + "\n", encoding="utf-8")
+    _write_prewipe_snapshot(prewipe_snapshot_path(str(events)), {
+        "version": 1, "created_at": "2026-01-01T00:00:00Z",
+        "synthetic_events": [{
+            "type": "PointAdded", "projection_version": 2,
+            "point": {"id": "sidecar-3044-unmeasured", "content": "x",
+                      "pointKind": "fact", "status": "live"}}],
+        "batch_snapshot": [], "batch_point_links": [],
+        "session_snapshot": [], "session_point_links": [],
+    })
+
+    proj = FalkorProjection(str(tmp_path / "recover_3044_unmeasured.db"),
+                            graph_name="test_recover_3044_unmeasured",
+                            skip_health_check=True)
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")  # the 0-node probe's subject
+
+        real_g = proj.g
+        seen = {"total_count_reads": 0}
+
+        class _UnmeasurableTotalCount:
+            """Delegate to the real guarded handle, but make the TOTAL-node
+            count unmeasurable (an empty rowset). `_GuardedGraph` is slotted,
+            so the read cannot be patched in place."""
+
+            def __getattr__(self, name):
+                return getattr(real_g, name)
+
+            def query(self, cypher, params=None, timeout=None):
+                if " ".join((cypher or "").split()).upper() == \
+                        "MATCH (N) RETURN COUNT(N)":
+                    seen["total_count_reads"] += 1
+                    return _Result([])  # the guard's "could not be MEASURED" row
+                return real_g.query(cypher, params=params, timeout=timeout)
+
+        proj.g = _UnmeasurableTotalCount()
+        result = consistency_mod.recover_from_log(str(events), proj)
+
+        assert seen["total_count_reads"] >= 2, (
+            "the unmeasurable count was never read by both the probe and the "
+            f"guard — this fixture is not exercising the shape ({seen})")
+        assert result["recovered"] is False, result
+        assert "refused" in result["reason"], result
+        assert "MEASURED" in result["reason"], (
+            "the fixture must reach the guard's UNMEASURABLE refusal, not "
+            f"another one: {result['reason']!r}")
+        assert result["db_points"] is None, (
+            f"the unmeasurable refusal was reported as {result['db_points']!r}; "
+            "0 asserts an empty store that was never observed, contradicting "
+            "the refusal's own 'could not be MEASURED' message")
     finally:
         proj.close()
 

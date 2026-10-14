@@ -6403,6 +6403,18 @@ class WipePreconditionRefused(RuntimeError):
     and the wipe would be destroyed with no record of it anywhere.
     """
 
+    def __init__(self, *args, db_points: int | None = None):
+        super().__init__(*args)
+        # #3044 review (P2): the MEASUREMENT this refusal was raised on travels
+        # WITH the exception, because ``recover_from_log`` reports it to the
+        # operator as ``db_points``. Re-deriving that count at the caller with
+        # ``_node_count()`` would flatten the very absent/NULL count row this
+        # guard refuses on to ``0`` — telling the operator the store is EMPTY
+        # in the same message that says its count could not be MEASURED. `None`
+        # here therefore means UNMEASURABLE, and a refusal raised without the
+        # field (e.g. a test double) reports `None` rather than a fabricated 0.
+        self.db_points = db_points
+
 
 # #3947 review: the journal event types whose replay CREATES a Point/Operator
 # node (an `_upsert` / `_upsert_point_props` MERGE). Kept next to the exception
@@ -9334,11 +9346,14 @@ class FalkorProjection(
         if require_empty:
             _rows = self.g.query("MATCH (n) RETURN count(n)").result_set
             # #3044 review: an ABSENT/NULL count row is UNMEASURABLE, not zero.
-            # `_node_count` and this surface use `None` for "could not
-            # observe" everywhere else, and flattening it to 0 here would let
-            # a wipe proceed on a store the guard never actually saw as empty
-            # — the fail-closed choice is to refuse. A query that RAISES was
-            # already fail-closed (the exception propagates).
+            # This surface uses `None` for "could not observe", and flattening
+            # it to 0 here would let a wipe proceed on a store the guard never
+            # actually saw as empty — the fail-closed choice is to refuse. (It
+            # is deliberately STRICTER than `_node_count`, which flattens the
+            # same absent row to 0 and returns `None` only when the query
+            # RAISES; that is why the refusal carries its own measurement to
+            # the caller instead of letting it re-query.) A query that RAISES
+            # was already fail-closed (the exception propagates).
             _measured = (int(_rows[0][0])
                          if _rows and _rows[0][0] is not None else None)
             if _measured is None:
@@ -9350,7 +9365,8 @@ class FalkorProjection(
                     "journal parse, and a wipe issued on an unverified count "
                     "is exactly the destruction that guard exists to "
                     "prevent. Re-run recovery once the backend responds, or "
-                    "rebuild explicitly with `tortoise rebuild --dir <dir>`."
+                    "rebuild explicitly with `tortoise rebuild --dir <dir>`.",
+                    db_points=_measured,
                 )
             if _measured:
                 raise WipePreconditionRefused(
@@ -9363,7 +9379,8 @@ class FalkorProjection(
                     f":GraphEvent rows and any label outside that set are "
                     f"lost. Re-run recovery when no writer is "
                     f"active, or rebuild explicitly with "
-                    f"`tortoise rebuild --dir <dir>`."
+                    f"`tortoise rebuild --dir <dir>`.",
+                    db_points=_measured,
                 )
 
         # Persist immediately before the destructive wipe: after DETACH DELETE

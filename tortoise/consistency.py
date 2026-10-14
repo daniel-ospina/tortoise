@@ -2571,9 +2571,14 @@ def recover_from_log(events_dir: str, projection) -> dict:
             # a rollback would BE the destruction this refusal exists to
             # prevent. `_roll_back_declined_replay` is sound only when every
             # node present was created by the declined replay; no replay ever
-            # ran here. Report the MEASURED count and leave the graph alone.
+            # ran here. Report the guard's OWN measurement, which travels on
+            # the exception: re-querying with `_node_count()` would flatten
+            # the UNMEASURABLE shape (an absent/NULL count row) to 0 and so
+            # describe a store that was never observed as EMPTY, contradicting
+            # the refusal's own "could not be MEASURED" message in the very
+            # line `_auto_health_recover` reads. `None` = UNMEASURABLE.
             return {"recovered": False, "log_points": 0,
-                    "db_points": _node_count(),
+                    "db_points": getattr(e, "db_points", None),
                     "reason": ("rebuild from the pending pre-wipe snapshot "
                                f"refused: {e}")}
         except Exception as e:
