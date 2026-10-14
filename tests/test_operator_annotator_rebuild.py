@@ -47,7 +47,7 @@ import logging
 
 import pytest
 
-from tortoise.projection import fold
+from tortoise.projection import _replay_write_scope, fold
 from tortoise.projection.nonfolded import NonFoldedEventsError
 from tortoise.sdk import TortoiseSDK
 
@@ -471,11 +471,14 @@ def test_apply_annotator_accepts_short_names(sup):
     pure fold) — a raw producer journaling the documented payload."""
     _, _, sdk = sup
     op = _operator(sdk)
-    sdk._get_proj().apply({
-        "type": "OperatorAnnotated", "id": op,
-        "bias": 0.7, "precision": 0.6, "consistency": 0.5,
-        "directness": 0.4,
-    })
+    # #7951 §17.1: a raw producer journaling the documented payload — a REPLAY
+    # fold, so it declares the replay scope.
+    with _replay_write_scope():
+        sdk._get_proj().apply({
+            "type": "OperatorAnnotated", "id": op,
+            "bias": 0.7, "precision": 0.6, "consistency": 0.5,
+            "directness": 0.4,
+        })
     assert _dims(sdk, op) == {
         "annotator_bias": 0.7, "annotator_precision": 0.6,
         "annotator_consistency": 0.5, "annotator_directness": 0.4,

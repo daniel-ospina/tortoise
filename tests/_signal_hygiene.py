@@ -26,10 +26,15 @@ This module makes the takeover loud and immediate instead of silent:
   watchdog; ``tortoise/embedded_reaper.py``): it silences the guard for the
   block and restores the harness handler + timer afterwards.
 * Calls made by ``pytest_timeout`` itself are allowed: its ``cancel()`` zeroes
-  ``ITIMER_REAL`` when a test fails or enters pdb, and a run with no timeout
-  armed (``pyproject.toml`` sets none; CI passes ``--timeout=300``) is
-  untouched.
-* ``--timeout-func-only`` runs are **not** covered: pytest-timeout arms its
+  ``ITIMER_REAL`` when a test fails or enters pdb, and a run that arms no timer
+  (``--timeout=0``, an ini ``timeout = 0``, or ``PYTEST_TIMEOUT=0``; the #5035
+  guard reads its opt-out from the parsed argv and the ini — which is why the
+  env forms do not opt the guard out, although any conftest can set them) is untouched. ``#5035`` put
+  ``timeout = 300`` in ``pyproject.toml``, so a BARE local run now arms it
+  exactly as CI always did.
+* An ini ``timeout_func_only = true`` / marker ``timeout(func_only=True)`` run is
+  **not** covered (there is no such CLI flag — the name only exists as the ini
+  key and the marker field): pytest-timeout arms its
   timer during the call phase, after this fixture's setup has already observed
   no timer.  Stated rather than silently assumed.
 * A call made through a **pre-bound** alias (``from signal import alarm``),
@@ -228,9 +233,14 @@ def _restore_sigalrm(handler: Any, timer: tuple[float, float]) -> None:
 def harness_sigalrm_integrity(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Refuse any in-process attempt to take pytest-timeout's SIGALRM/ITIMER_REAL.
 
-    Enforced only while the harness has a timer armed, so a run without
-    ``--timeout`` (there is none in ``pyproject.toml``; CI passes
-    ``--timeout=300``) is unaffected.
+    Enforced only while the harness has a timer armed, so a run that arms none
+    (``--timeout=0``, an ini ``timeout = 0``, or ``PYTEST_TIMEOUT=0``; the #5035
+  guard reads its opt-out from the parsed argv and the ini — which is why the
+  env forms do not opt the guard out, although any conftest can set them) is unaffected. ``#5035`` put
+    ``timeout = 300`` in ``pyproject.toml``, so a bare local run now arms the
+    timer — this fixture is ACTIVE locally for the same reason it was always
+    active in CI, and a local ``signal.alarm()`` that used to slip past now
+    raises ``HarnessAlarmStolen``.
     """
     if _relinquished != 0:
         raise AssertionError(

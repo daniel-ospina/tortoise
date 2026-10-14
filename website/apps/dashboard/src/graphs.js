@@ -43,6 +43,14 @@ export const GRAPH_KEY_SCOPES = Object.freeze(['graphs:read', 'graphs:write'])
 // tier-blocked — its create form stays until the 409 quota gate fires.
 export const LIMITED_TIERS = Object.freeze(['free', 'anon'])
 
+// #3376 (2): the shared LOADING FLOOR for every backups surface. A hung
+// `/v1/backups` must not render an eternal skeleton/`…` — past this window
+// the UI resolves to the honest unavailable state. ONE constant so the
+// Graphs Last-backup column and the API-Keys BackupsCard can never resolve
+// on different clocks (the pre-#3376 disagreement: card `—` at 15s while the
+// column stayed `…` indefinitely).
+export const BACKUP_LOADING_FLOOR_MS = 15_000
+
 export function tierCreateLocked(tier) {
   return LIMITED_TIERS.includes(tier)
 }
@@ -116,17 +124,47 @@ export function graphBackupSummary(backups) {
   return out
 }
 
+// #3376 (1): is this team's work eligible for the backup sweep at all?
+// The sweep predicate (tortoise/backup_sweep.py::enumerate_eligible_orgs) is
+// `tier != 'free' AND backup_enabled = true` — a PER-TEAM fact, not a
+// per-graph one. `tier` alone proves ineligibility only for free/anon (the
+// sweep requires tier != free); a PAID team with backups switched off is
+// indistinguishable from an eligible team whose sweep has not run — that is
+// why the dashboard reads `backup_enabled` off the team payload (/v1/team →
+// OrgInfoResponse.backup_enabled, fed from the orgs row / Team node in every
+// control-plane lane) rather than gating on tier.
+//
+// Returns true | false | null (null = UNKNOWN). null intentionally keeps the
+// NEUTRAL 'None recorded' reading: an absent flag (an older payload, or an
+// additive read that degraded) must never masquerade as a definite "not
+// enabled". The sweep never targets free regardless of the flag, so tier is
+// authoritative for that half of the predicate.
+export function teamBackupsEnabled(team) {
+  if (!team) return null
+  if (team.tier === 'free' || team.tier === 'anon') return false
+  if (team.backup_enabled === true) return true
+  if (team.backup_enabled === false) return false
+  return null
+}
+
 // One Graphs-table cell state. Precedence matters: an UNKNOWN window
 // (loading / list unavailable) must never render as a negative claim about
 // the graph — /backups 503s terminally on storage failure (#1923: the '—'
 // surface must not read as a previous team's count, nor as "no backups").
 // The known-empty copy is deliberately NEUTRAL ("None recorded"): the
 // listing cannot prove "never" — per-graph retention prunes manifests
-// (~35 objects/pool) and sweep eligibility is a per-team flag the dashboard
-// cannot read. No staleness verdict is computed here: the authoritative
-// threshold is server-side and internal-auth only (backup_watcher).
-export function graphBackupCellState(g, summary, backupsStatus, nowMs) {
-  if (backupsStatus === 'loading') {
+// (~35 objects/pool). No staleness verdict is computed here: the
+// authoritative threshold is server-side and internal-auth only
+// (backup_watcher).
+//
+// #3376: `backupsEnabled` is teamBackupsEnabled(team) (true/false/null) and
+// `loadingFloorHit` is the shared BACKUP_LOADING_FLOOR_MS window elapsing.
+// Both are OPTIONAL so existing callers keep their behaviour.
+export function graphBackupCellState(g, summary, backupsStatus, nowMs, backupsEnabled, loadingFloorHit) {
+  // #3376 (2): the loading state has a TERMINAL floor — past it the cell
+  // resolves to the honest unavailable state (the same shape a failed list
+  // renders), never an eternal `…`.
+  if (backupsStatus === 'loading' && !loadingFloorHit) {
     return { kind: 'loading', label: '…', title: 'Loading backup status…', at: null, count: 0 }
   }
   if (backupsStatus !== 'ok') {
@@ -138,6 +176,17 @@ export function graphBackupCellState(g, summary, backupsStatus, nowMs) {
   const key = graphBackupBucketKey(g)
   const b = key ? (summary || {})[key] : null
   if (!b || b.count === 0) {
+    // #3376 (1): an ineligible team can never record a backup, so the neutral
+    // "None recorded" (which reads as "nothing has run yet") is the wrong
+    // claim for it. Reserve that copy for eligible/unknown teams and state the
+    // team-level fact instead — the same answer on every row, because
+    // eligibility is a per-team fact.
+    if (backupsEnabled === false) {
+      return {
+        kind: 'disabled', label: 'Not enabled',
+        title: "Backups aren't enabled for this team.", at: null, count: 0,
+      }
+    }
     return {
       kind: 'none', label: 'None recorded',
       title: 'No backup recorded for this graph.', at: null, count: 0,

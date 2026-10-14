@@ -107,6 +107,11 @@ _SERVICE_KEY_ENV = ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY")
 _ORG_BASE_SELECT = [
     "id", "name", "tier", "max_users", "max_graphs", "graph_size_cap",
     "ops_allowance", "email", "deleted_at", "graph_name",
+    # #3376: the org's backup flag rides the BASE read (0006 column, NOT an
+    # additive tier) so the dashboard can tell an ineligible team from one
+    # whose sweep simply has not run — the sweep predicate is
+    # ``tier != 'free' AND backup_enabled = true`` (backup_sweep.py).
+    "backup_enabled",
 ]
 # Additive orgs columns, separately migrated after 0006 (0015 abuse state;
 # 20260813000005 dashboard_key_login; 20260817000001 import ledger + points
@@ -1095,6 +1100,10 @@ def resolve_api_key(cp, token: str) -> dict | None:
         # column either, and no constant supplies one.
         "max_api_keys": lim["max_api_keys"],
         "max_sessions": None,
+        # #3376: per-org backup eligibility, read off the orgs row (base 0006
+        # column). None when the row predates/omits it — the client renders
+        # the NEUTRAL empty state rather than a definite "not enabled".
+        "backup_enabled": org_row.get("backup_enabled"),
         # additive metadata (not part of the registry dict contract)
         "key_prefix": key_prefix,
         "created_via": created_via,

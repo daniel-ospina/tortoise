@@ -49,6 +49,19 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BACKUP_STALE_THRESHOLD_MIN: "90"
       BACKUP_DRIVER_DOWN_THRESHOLD_MIN: "240"
+      # #3146 review P2: Actions passes ONLY what is enumerated here, so the
+      # recovery-window knobs the runbook documents were unreachable in
+      # production (the driver's only caller is this job). Bind all three as
+      # repository VARIABLES (Settings → Secrets and variables → Actions →
+      # Variables, not Secrets) — an unset variable expands to the empty
+      # string, which `recovery_streak_for` treats as "no override", so the
+      # declared window stands until an operator deliberately sets one.
+      #   ALERT_RECOVERY_STREAK=1     → the fleet-wide "clear now" lever
+      #   ALERT_RECOVERY_STREAKS=…    → per-kind windows
+      #   BACKUP_POOL_RESOLVE_STREAK  → the legacy POOL_STALE-only alias
+      ALERT_RECOVERY_STREAK: ${{ vars.ALERT_RECOVERY_STREAK }}
+      ALERT_RECOVERY_STREAKS: ${{ vars.ALERT_RECOVERY_STREAKS }}
+      BACKUP_POOL_RESOLVE_STREAK: ${{ vars.BACKUP_POOL_RESOLVE_STREAK }}
     steps:
       - uses: actions/checkout@v4
       - name: Run backup driver

@@ -49,7 +49,7 @@ def _falkordb_available() -> bool:
     """Probe a live FalkorDB; reads TORTOISE_DB_URI at CALL time so the
     module never captures it at import (#221 test-isolation lint)."""
     uri = os.environ.get(
-        "TORTOISE_DB_URI",
+        "TORTOISE_DB_URI",  # empty-uri-default-ok: #2815 skip declared; converting flips the tier-2 lane
         _live_utils.docker_uri("tortoise_test_matrix")).rstrip("/")
     old = os.environ.get("TORTOISE_DB_URI")
     try:
@@ -74,7 +74,7 @@ FALKORDB_AVAILABLE = _falkordb_available()
 def _uri() -> str:
     """Current TORTOISE_DB_URI (or the default), read at CALL time."""
     return os.environ.get(
-        "TORTOISE_DB_URI",
+        "TORTOISE_DB_URI",  # empty-uri-default-ok: #2815 skip declared; converting flips the tier-2 lane
         _live_utils.docker_uri("tortoise_test_matrix")).rstrip("/")
 
 pytestmark = pytest.mark.skipif(

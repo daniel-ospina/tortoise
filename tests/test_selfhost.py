@@ -105,6 +105,157 @@ def test_uri_mode_no_banner(monkeypatch, tmp_path, capsys):
     assert "SINGLE-WRITER" not in err
 
 
+class TestOffBoxBackupSignal:
+    """#8543 — the off-box backup target is a setup-path decision, never silent.
+
+    Owner decision 2026-10-13 (parity with hosted): a self-host deployment must
+    DECLARE an off-box target or EXPLICITLY DECLINE one; ABSENT must stay
+    distinguishable from DECLINED. These tests pin the tristate, the message
+    polarity, and the boot emission — none of them touch the backup subsystem
+    (the resolver is a pure read; the driver does not exist, #8544).
+    """
+
+    def test_unset_is_absent_and_says_single_local_copy(self):
+        from tortoise import selfhost
+
+        assert selfhost.off_box_backup_state({}) == selfhost.OFF_BOX_ABSENT
+        msg = selfhost.off_box_backup_signal(selfhost.OFF_BOX_ABSENT)
+        low = msg.lower()
+        assert "single local copy" in low
+        assert "total loss" in low
+        # The decline knob is offered, so silence is actionable rather than a
+        # dead end.
+        assert selfhost._OFF_BOX_DECLINE_ENV in msg
+
+    def test_messages_never_assert_a_store_mechanism(self):
+        """#8552 review P1: the resolver reads only the BACKUP env vars, so it
+        cannot observe the store — and the mechanism is INVERTED between the two
+        self-host paths (embedded: AOF OFF by default per
+        ``projection._embedded_aof_enabled``, RDB the mechanism; compose: AOF
+        `everysec` on). A message that names the mechanism is therefore false on
+        one path — the #101 incident shape (a deployment believed durable on a
+        mechanism it did not have). Non-vacuous: the pre-fix ABSENT text said
+        "(AOF on the named volume; RDB is off)".
+        """
+        from tortoise import selfhost
+
+        absent = selfhost.off_box_backup_signal(selfhost.OFF_BOX_ABSENT)
+        declined = selfhost.off_box_backup_signal(selfhost.OFF_BOX_DECLINED)
+        for msg in (absent, declined):
+            low = msg.lower()
+            assert "rdb" not in low, msg
+            assert "aof" not in low, msg
+            # The local-copy claim is SCOPED to the paths where it holds, so a
+            # remote store's own off-box durability is not denied.
+            assert "compose and embedded" in low, msg
+
+    def test_declined_flag_is_explicit_not_the_default(self):
+        from tortoise import selfhost
+
+        env = {selfhost._OFF_BOX_DECLINE_ENV: "1"}
+        assert selfhost.off_box_backup_state(env) == selfhost.OFF_BOX_DECLINED
+        # A falsy spelling is NOT a decline — only an explicit truthy is.
+        assert selfhost.off_box_backup_state(
+            {selfhost._OFF_BOX_DECLINE_ENV: "0"}) == selfhost.OFF_BOX_ABSENT
+        msg = selfhost.off_box_backup_signal(selfhost.OFF_BOX_DECLINED)
+        assert "explicitly declined" in msg.lower()
+        # Declining does not license a mechanism claim: the message states the
+        # residual (no off-box copy) without naming AOF/RDB (#8552 review).
+        assert "no off-box copy" in msg.lower()
+
+    @pytest.mark.parametrize("var", [
+        "R2_BUCKET", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
+    ])
+    def test_each_declared_target_var_reports_configured(self, var):
+        from tortoise import selfhost
+
+        assert selfhost.off_box_backup_state({var: "x"}) == selfhost.OFF_BOX_CONFIGURED
+        # The hosted driver switch is also a declared target.
+        assert selfhost.off_box_backup_state(
+            {"BACKUP_SWEEP_ENABLED": "true"}) == selfhost.OFF_BOX_CONFIGURED
+        # Blank is UNSET, not declared.
+        assert selfhost.off_box_backup_state({var: "  "}) == selfhost.OFF_BOX_ABSENT
+
+    def test_declared_target_wins_over_a_decline_flag(self):
+        """Both set is a config error; the target the deploy is configured with
+        is the one to report, so the signal cannot claim "declined" over a live
+        target configuration."""
+        from tortoise import selfhost
+
+        env = {"R2_BUCKET": "b", selfhost._OFF_BOX_DECLINE_ENV: "1"}
+        assert selfhost.off_box_backup_state(env) == selfhost.OFF_BOX_CONFIGURED
+
+    def test_configured_message_never_claims_a_copy_exists(self):
+        """#8544: no self-host process runs the sweep, so a declared target must
+        not read as an off-box copy — the message names the gap instead."""
+        from tortoise import selfhost
+
+        msg = selfhost.off_box_backup_signal(selfhost.OFF_BOX_CONFIGURED)
+        assert "#8544" in msg
+        low = msg.lower()
+        assert "no off-box copy is being produced" in low
+        assert "declared" in low
+
+    def _reload_with_no_backup_env(self, monkeypatch):
+        """Reload selfhost with EVERY input of ``off_box_backup_state`` scrubbed.
+
+        Derived from the resolver's OWN registries (``_OFF_BOX_TARGET_ENVS`` +
+        the hosted driver switch + the decline flag) rather than a hand list, so
+        a new target var cannot silently re-introduce the ambient-shell premise
+        (#8552 review; #3695/#5477 doctrine). Returns the captured stderr.
+        """
+        import importlib
+
+        from tortoise import selfhost
+
+        for var in (*selfhost._OFF_BOX_TARGET_ENVS, "BACKUP_SWEEP_ENABLED"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.delenv(selfhost._OFF_BOX_DECLINE_ENV, raising=False)
+        importlib.reload(selfhost)
+
+    @pytest.mark.parametrize("var", [
+        "R2_BUCKET", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
+        "BACKUP_SWEEP_ENABLED",
+    ])
+    def test_boot_signal_premise_ignores_ambient_target_env(
+            self, monkeypatch, capsys, var):
+        """#8552 review P2: the boot-emission test asserts "nothing is
+        declared", so it must scrub ALL FIVE inputs the resolver reads — an
+        ambient ``R2_ACCOUNT_ID`` (a real exported var on this box's deploy and
+        backup lanes) otherwise flips the resolver to CONFIGURED and the
+        assertion fails on a clean tree. Non-vacuous by construction: pre-fix
+        the reload cleared only ``R2_BUCKET`` + the decline flag, so setting any
+        of the other four made the boot message read DECLARED.
+        """
+        monkeypatch.setenv(var, "ambient-value")
+        self._reload_with_no_backup_env(monkeypatch)
+        err = capsys.readouterr().err
+        assert "SINGLE LOCAL COPY" in err
+        assert "target DECLARED" not in err
+
+    def test_boot_signal_is_printed_and_logged(self, monkeypatch, capsys):
+        """The signal fires at daemon boot (module load) — the deploy ladder
+        ``docker compose up`` shows it, so the omission cannot pass unnoticed.
+        """
+        self._reload_with_no_backup_env(monkeypatch)
+        err = capsys.readouterr().err
+        assert "off-box backup" in err
+        assert "SINGLE LOCAL COPY" in err
+
+    def test_setup_surfaces_record_the_decision(self):
+        """Deliverable 1 of #8543: the decision is a STEP of the self-host setup
+        path, so the shipped compose template and the quickstart both name it."""
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        compose = (root / "docker-compose.yml").read_text()
+        assert "TORTOISE_OFFBOX_BACKUP_DECLINED" in compose
+        assert "R2_BUCKET" in compose
+        quickstart = (root / "docs" / "quickstart-selfhosted.md").read_text()
+        assert "TORTOISE_OFFBOX_BACKUP_DECLINED" in quickstart
+        assert "durability-posture.md" in quickstart
+
+
 class TestHealth:
     def test_health_liveness(self, monkeypatch, tmp_path):
         tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")

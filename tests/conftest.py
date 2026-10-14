@@ -385,6 +385,29 @@ if _is_db_uri_conftest(os.environ.get("TORTOISE_DB_URI")):
     import tests._embedded as _embedded_mod
     _embedded_mod._JOURNAL_FILE = _JOURNAL_PATH
 
+# ── #7357: a test session must not be pointed at the CANONICAL store ──────
+# Declared at conftest IMPORT time, for the same reason as the #4071 block
+# above: test modules build an SDK in their MODULE BODY during COLLECTION
+# (#7015's module-body probes), so a session-scoped fixture is structurally
+# too late to stop the first mint. The measured harm this closes — a test
+# suite that minted `test_mcp_*`/`test_registry_*` graphs ON the canonical
+# instance, pushing its graph count over FalkorDB's `CACHE_SIZE` and aborting
+# every fleet write with "graph was deleted or replaced while the query was
+# running, aborting" — is recorded in `tests/_canonical_store_guard.py`.
+#
+# `pytest.fail` here is a COLLECTION error naming the guard; it is inert for
+# the embedded/carve-out lane (no URI) and for every sanctioned test lane
+# (different port).
+# Imported HERE, not at the top: this module imports `tortoise`, and #1686
+# requires `TORTOISE_TEST_MODE` to be in the environment before `tortoise` is
+# first imported (the setdefault above).
+from tests import _canonical_store_guard  # noqa: E402
+
+_canonical_refusal = _canonical_store_guard.canonical_store_refusal(
+    os.environ.get("TORTOISE_DB_URI"))
+if _canonical_refusal:
+    pytest.fail(_canonical_refusal)
+
 def _session_will_connect(uri: str) -> bool:
     """Will this session actually connect to ``uri``? The SINGLE gate (#6073).
 

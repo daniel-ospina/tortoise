@@ -141,6 +141,39 @@ def test_public_site_surface_change_selects_onboarding_and_skips_slow():
         assert "test_website_docs_consistency.py" in r["test_files"], changed
 
 
+def test_the_capacity_guards_derived_source_selects_the_guard():
+    """#3329/#8492: a change to the guard's DERIVED SOURCE must select the guard.
+
+    `tests/test_capacity_page.py` derives the published write-concurrency figure
+    from `tests/test_embedded_concurrency.py`'s own loop bound. The two docs it
+    reads (`docs/capacity.md`, `docs/quickstart-selfhosted.md`) were registered
+    as `onboarding` `SOURCE_PATTERNS`, but the TEST FILE supplying the derived
+    value was not — so a diff that bumped the live test's coverage to six
+    writers and left the prose stale selected only `core`, excluded the guard,
+    and merged green. The drift then surfaced only on the `push`-event full run,
+    reddening `main` AFTER the merge — the failure mode the `#3442` guard in the
+    same workflow refuses to certify.
+
+    Asserted on the SURFACE and on the guard file, not merely "surfaces is
+    non-empty": `tests/` falls through to `core` on its own, so a bare
+    non-emptiness check passes with the wiring absent — a gate that can only
+    ever pass. Watched RED before the `SOURCE_PATTERNS` entry existed, GREEN
+    after.
+    """
+    changed = "tests/test_embedded_concurrency.py"
+    assert (REPO / changed).exists(), f"guarded derived source is gone: {changed}"
+    r = _sel([changed])
+    assert "onboarding" in r["surfaces"], (
+        f"{changed} selects {r['surfaces']} — its guard (test_capacity_page.py) "
+        "is not selected, so a coverage bump there merges with stale prose and "
+        "reds main after the merge"
+    )
+    assert "test_capacity_page.py" in r["test_files"], (
+        f"{changed} does not select test_capacity_page.py — the derived "
+        "write-concurrency figure has no guard on the change that invalidates it"
+    )
+
+
 def test_the_onboarding_copy_gate_is_wired_not_left_to_the_tier1_fallback():
     """#3673 indicator (2): the parity gate runs on every PR touching either copy.
 
@@ -1192,12 +1225,18 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
     # fails the corresponding arm below (surfaces == []).
     for changed in (
         "supabase/migrations/20261012000003_record_epistemic.sql",
+        # #8263: the FORWARD record migration sorts outside the `2026101200000`
+        # CORE_ALSO prefix, so it carries its own entry. Both readers must run on
+        # a change to this file alone — `test_record_projection.py` reads its
+        # ALTER, `test_record_schema_placement.py` pins the record schema.
+        "supabase/migrations/20261014000001_record_subject_props_no_derived.sql",
         "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
     ):
         r = _sel([changed])
         assert r["full"] is False, (changed, r)
         assert r["surfaces"] == ["core"], (changed, r)
         assert "test_record_schema_placement.py" in r["test_files"], (changed, r)
+        assert "test_record_projection.py" in r["test_files"], (changed, r)
 
 
 def test_a_linter_policy_file_at_any_depth_runs_the_full_matrix():
@@ -1263,6 +1302,30 @@ def test_queue_resweep_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_orchestrator_harness_change_selects_core_not_tier1():
+    # operations/orchestrator-harness/*.sh own tests/test_orchestrator_harness.py
+    # (`core`): the shipped-block pins for lane.sh's heredoc, merged-not-closed.sh's
+    # paged enumeration, refresh-candidates.sh's pool/checked contract and
+    # orch-loop.sh's P0 merge-priority override.
+    #
+    # #8469 review P1: `operations/` is a flat NON_PYTHON_PREFIXES entry and no
+    # SOURCE_PATTERNS row matches the harness scripts, so an operations-only diff
+    # came back with `changed == []` and took the docs-only early return — the
+    # guard never ran on the file it guards. Registering the test under `core` is
+    # NOT sufficient: a name in a surface's test_files only runs when that surface
+    # is already selected, and an operations-only diff selects none.
+    #
+    # Measured before the CORE_ALSO entry: `_sel(["operations/orchestrator-harness/
+    # lane.sh"])` -> surfaces=[], full=False, test_files 33, harness test absent.
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the suite is
+    # hermetic and sub-second, so selecting `core` runs it at the lowest CI cost.
+    # Mutation check: removing the CORE_ALSO entry fails assert 1 below.
+    r = _sel(["operations/orchestrator-harness/merged-not-closed.sh"])
+    assert "core" in r["surfaces"], r
+    assert "test_orchestrator_harness.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1():
     # tools/install-queue-reconcile-schedule.sh owns
     # tests/test_install_queue_reconcile_schedule.py (hermetic cases pinning
@@ -1286,6 +1349,30 @@ def test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1():
     assert "core" in r["surfaces"], r
     assert "test_install_queue_reconcile_schedule.py" in r["test_files"], r
     assert r["full"] is False, r
+
+
+def test_graph_write_repair_tool_change_selects_core_not_tier1():
+    # PR #8427 review Finding 4: tools/graph_write_repair.py and its launchd
+    # installer (tools/install-graph-write-repair-schedule.sh) own
+    # tests/test_graph_write_repair.py (`core`): the probe classification that
+    # authorises a repair, the `--quiet` count contract, and the installer's
+    # escaping / interval validation / lint-before-move / load verification.
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and neither path matches a
+    # SOURCE_PATTERNS row, so without the CORE_ALSO entries an installer-only
+    # change came back with `changed == []` and took the docs-only early return:
+    # `select()` returned NO surface and the guard never ran on the file it
+    # guards (the #3261/#6138 silent-drop class).
+    #
+    # Mutation: remove either CORE_ALSO entry -> that path selects no surface, so
+    # the assertion below fails.
+    for path in ("tools/graph_write_repair.py",
+                 "tools/install-graph-write-repair-schedule.sh"):
+        r = _sel([path])
+        assert r["full"] is False, (path, r)
+        assert "core" in r["surfaces"], (path, r)
+        assert "test_graph_write_repair.py" in r["test_files"], (path, r)
+        assert set(r["test_files"]) != _tier1(), (path, r)
 
 
 def test_source_currency_tool_change_selects_core_not_tier1():
@@ -3089,7 +3176,12 @@ def test_pmv_job_carries_uri_manifest_guard():
     provision = next(s for s in steps
                      if str(s.get("uses", "")).endswith("falkordb-provision"))
     assert provision["with"]["uri_graph"] == "tortoise_test_matrix"
-    assert provision["with"]["image"] == "falkordb/falkordb-server:latest"
+    # #6386: this used to assert `:latest` — i.e. it GUARDED the drift instead
+    # of catching it, so the tag was free to float to engine 6.x while every
+    # other job ran the v4.20.6 pin. It must name the same immutable engine the
+    # gate uses (pinned across all provisioned jobs in
+    # tests/test_runner_ports_6673.py).
+    assert provision["with"]["image"] == "falkordb/falkordb-server:v4.20.6"
     assert provision.get("if") == "needs.dedup-check.outputs.skip != 'true'"
     assert any(str(s.get("uses", "")).endswith("falkordb-teardown")
                and s.get("if") == "always()" for s in steps), \

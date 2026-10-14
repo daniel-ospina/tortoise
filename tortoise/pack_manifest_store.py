@@ -253,18 +253,21 @@ def validate_manifest(
 
     # Tenant policy (plan §4): reserved namespaces. The starter set is the
     # canonical collision surface (a tenant pack named `dev` would collide
-    # with the starter `dev` PackInstall); ``core`` and
-    # ``memory_granularity`` are reserved because the #2031 tenant-view
-    # compile overlays tenant kinds onto ``compile_value_brief``'s dicts,
-    # where a tenant ``core`` namespace would shadow the canonical core
-    # vocabulary and a ``memory_granularity`` namespace would shadow the
-    # brief's reserved granularity key.
+    # with the starter `dev` PackInstall); ``core`` and the brief's RESERVED
+    # non-kind sections (``value_extractor.RESERVED_BRIEF_KEYS`` —
+    # ``memory_granularity``, ``pack_hints``) are reserved because the #2031
+    # tenant-view compile overlays tenant kinds onto
+    # ``compile_value_brief``'s dicts, where a tenant ``core`` namespace would
+    # shadow the canonical core vocabulary and a namespace named after a
+    # reserved brief section would shadow that section's key. The tuple is
+    # written out rather than imported so this module stays free of the pack
+    # compile (the #4894 test pins the two lists against each other).
     from tortoise.pack_state import DEFAULT_STARTER_PACKS
     if ns in DEFAULT_STARTER_PACKS:
         return ManifestValidation(
             False, namespace=ns,
             errors=[f"namespace '{ns}' is a reserved starter pack — pick a different name"])
-    if ns in ("core", "memory_granularity"):
+    if ns in ("core", "memory_granularity", "pack_hints"):
         return ManifestValidation(
             False, namespace=ns,
             errors=[f"namespace '{ns}' is a reserved namespace — pick a different name"])

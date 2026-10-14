@@ -38,7 +38,7 @@ from tools.longmem_eval.retrieve import (
 from tortoise.sdk import TortoiseSDK
 
 DB_URI = os.environ.get(
-    "TORTOISE_DB_URI",
+    "TORTOISE_DB_URI",  # empty-uri-default-ok: #2815 skip declared; converting flips the tier-2 lane
     # CI's falkordb service requires the password (python-ci.yml
     # `--requirepass falkordb`); local passwordless instances can override.
     # #6673: the host port is the PROVISIONED (ephemeral) one, not the 6379

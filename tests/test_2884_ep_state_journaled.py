@@ -38,7 +38,9 @@ import os
 import pytest
 
 from tortoise.ep import TortoiseEP
-from tortoise.projection import fold
+
+# #7951 §17.1: replay folds need the scope.
+from tortoise.projection import _replay_write_scope, fold
 from tortoise.sdk import TortoiseSDK
 
 BELIEF_PROPS = ("posterior_alpha", "posterior_beta", "confidence",
@@ -206,7 +208,11 @@ def test_c_fold_applies_on_graph_and_pure_index(journaled):
     ev = {"type": "ConfidenceChanged", "id": ids[0], "confidence": 0.9,
           "posterior_alpha": 9.0, "posterior_beta": 1.0}
 
-    proj.apply(ev)
+    # #7951 §17.1: this is a REPLAY of a hand-built journal record through the
+    # graph fold, so it declares the replay scope (the chokepoint owns the
+    # live path).
+    with _replay_write_scope():
+        proj.apply(ev)
     assert _state(sdk, [ids[0]])[ids[0]]["posterior_alpha"] == 9.0
     assert _state(sdk, [ids[0]])[ids[0]]["confidence"] == 0.9
 
@@ -371,15 +377,17 @@ def test_f2_graph_fold_skips_corrupt_values(journaled):
     _db, _events, sdk = journaled
     ids = _chain(sdk, n=2)
     proj = sdk._get_proj()
-    proj.apply({"type": "ConfidenceChanged", "id": ids[0],
-                "posterior_alpha": "abc", "confidence": True,
-                "posterior_beta": float("nan"),
-                "lastDreamedAt": "2024-01-01T00:00:00+00:00"})
+    with _replay_write_scope():
+        proj.apply({"type": "ConfidenceChanged", "id": ids[0],
+                    "posterior_alpha": "abc", "confidence": True,
+                    "posterior_beta": float("nan"),
+                    "lastDreamedAt": "2024-01-01T00:00:00+00:00"})
     # #2884 A1: a huge int must be DROPPED, not raise inside the fold. The
     # pre-fix gate raised OverflowError here — during pass-1b that aborts
     # rebuild_all AFTER the wipe.
-    proj.apply({"type": "ConfidenceChanged", "id": ids[0],
-                "confidence": 10 ** 400})
+    with _replay_write_scope():
+        proj.apply({"type": "ConfidenceChanged", "id": ids[0],
+                    "confidence": 10 ** 400})
     st = _state(sdk, [ids[0]])[ids[0]]
     assert st["posterior_alpha"] is None, st
     assert st["confidence"] is None, st
@@ -395,10 +403,12 @@ def test_f2_graph_fold_nul_id_does_not_raise(journaled):
     _db, _events, sdk = journaled
     ids = _chain(sdk, n=2)
     proj = sdk._get_proj()
-    proj.apply({"type": "ConfidenceChanged", "id": ids[0] + "\x00",
-                "posterior_alpha": 9.0})
-    proj.apply({"type": "ConfidenceChanged", "id": "\ud800",
-                "posterior_alpha": 9.0})
+    with _replay_write_scope():
+        proj.apply({"type": "ConfidenceChanged", "id": ids[0] + "\x00",
+                    "posterior_alpha": 9.0})
+    with _replay_write_scope():
+        proj.apply({"type": "ConfidenceChanged", "id": "\ud800",
+                    "posterior_alpha": 9.0})
     assert _state(sdk, [ids[0]])[ids[0]]["posterior_alpha"] != 9.0
 
 

@@ -18,28 +18,19 @@ fi
 case "${PR:-}" in ''|*[!0-9]*) echo "[merge] refusing non-numeric PR: ${PR:-<empty>}" >&2; exit 1 ;; esac
 O="${O:-$HOME/orchestrator}"; mkdir -p "$O/logs" "$O/state"
 L="$O/logs/merge-$PR"
+# The wall-clock limit AND the load gate both live in the shared helper, so this script has no
+# `pi` invocation of its own to forget to gate (agent-infra#1720). NB: L above is a LOG PATH, not a
+# load reading — the gate takes its reading as an argument for exactly that reason.
+# Fail LOUD if the helper is missing: an unsourced helper leaves `run_agent` undefined, and that must
+# never degrade into a verdict (see README §9 on syncing $O).
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SELF/spawn-gate.sh" || { echo "[merge $PR] FATAL: $SELF/spawn-gate.sh missing — refusing to run an ungated reviewer" >&2; exit 78; }
 export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH
 export AGENT_SKIP_REVIEW_GATE=1 ELDATO_SKIP_VGATE=1 AGENT_ALLOW_MAIN_EDITS=1 ELDATO_ALLOW_MAIN_EDITS=1
 export PI_MCP_SERVERS=none   # headless reviewer uses no MCP servers — saves ~25 processes/run
 export PI_SKIP_VERSION_CHECK=1 SKILL_ENFORCER_DISABLED=1 LOOP_ENFORCER_DISABLED=1 SLACK_BRIDGE_DISABLE=1 VISION_INTERCEPTOR_DISABLED=1
 cd "$REPO" || exit 1
 
-# Portable wall-clock timeout for the agent invocation. `pi -p` has no internal limit, so one hung
-# model call holds a concurrency slot forever — and the caps count SESSIONS, so a single hang
-# silently halves throughput. macOS ships no `timeout`/`gtimeout`, so implement it in bash: run the
-# agent in the background with a watchdog subshell that kills it after N seconds. The stale-worker
-# reaper in orch-loop.sh is the second line of defence.
-run_agent() { # run_agent <seconds> <logfile> <promptfile>
-  local t="$1" log="$2" prompt="$3" pid w rc
-  pi -p --provider deepseek --model deepseek-v4-flash --no-session "$(cat "$prompt")" >> "$log" 2>&1 &
-  pid=$!
-  ( sleep "$t"; kill -TERM "$pid" 2>/dev/null; sleep 15; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 &
-  w=$!
-  wait "$pid" 2>/dev/null; rc=$?
-  kill "$w" 2>/dev/null
-  echo "[timeout] agent pid=$pid wall_limit=${t}s rc=$rc" >> "$log"
-  return "$rc"
-}
 git fetch origin "$BR" --quiet 2>/dev/null || true   # external (other-machine) branches may not be fetched locally
 
 # ── single-owner claim ────────────────────────────────────────────────────────
@@ -57,7 +48,15 @@ if ! claim; then
   rm -f "$CLAIM"
   claim || { echo "[merge $PR] claim race — exiting" >> "$L.log"; exit 0; }
 fi
-trap 'rm -f "$CLAIM"' EXIT INT TERM
+# ⛔ Same defect as orch-loop.sh, on the per-PR claim (§5.1b): a RETURNING INT/TERM handler
+# resumes the interrupted command loop, so a TERM removed the claim while this worker kept
+# reviewing and merging, and the controller could spawn a second worker for the same head. The
+# handlers TERMINATE; the claim is released by the EXIT trap alone. Measured on /bin/bash 3.2.57:
+# `exit 143` from a TERM handler still runs the EXIT trap (rc=143); an untrapped INT is ignored
+# outright (still alive after 3s), so INT is trapped rather than dropped. (agent-infra#1715)
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'rm -f "$CLAIM"' EXIT
 
 HEAD="$(gh pr view "$PR" --repo "$OR" --json headRefOid --jq .headRefOid 2>/dev/null)"
 echo "[merge $PR] start $(date) head=$HEAD branch=$BR" > "$L.log"
@@ -83,7 +82,18 @@ Your comment MUST state the outcome plainly and MUST NOT contain an unresolved a
     ISSUES <n>
 Do NOT modify code, commit, or merge.
 EOF
-run_agent "${REVIEW_TIMEOUT:-1800}" "$L.log" "$L-reviewer.txt"
+run_agent "${REVIEW_TIMEOUT:-1800}" "$L.log" "$L-reviewer.txt" "reviewer for PR #$PR"
+# A gate refusal (AGENT_LOAD_REFUSED) means NO agent ran. AGENT_STARTED is authoritative rather than
+# the exit code, because `pi` shares the 0–255 status namespace: a pi that exited 75 itself must not
+# be read as a refusal (that would skip recording a real verdict). (#1720 advisory)
+if [ "$AGENT_STARTED" = "0" ]; then
+  # A load refusal is NOT a verdict. Falling through would write `needsfix-<PR>-<head>`, which
+  # authorises a fixer for a review that never happened, consumes a MAX_FIX_TRIES attempt and can
+  # park the PR. Exit now; the claim is released by the EXIT trap and the controller's next cycle
+  # re-dispatches this PR when load has fallen.
+  echo "[merge $PR] reviewer NOT started (load gate) — no verdict recorded, none consumed" >> "$L.log"
+  exit "$AGENT_LOAD_REFUSED"
+fi
 LAST="$(grep -aE '^(CLEAN|ISSUES) ' "$L.log" | tail -1 | tr -d '\r')"
 echo "[merge $PR] verdict: ${LAST:-<none>}" >> "$L.log"
 
