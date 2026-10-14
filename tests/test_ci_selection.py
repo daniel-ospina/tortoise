@@ -3152,7 +3152,12 @@ def test_pmv_job_carries_uri_manifest_guard():
     provision = next(s for s in steps
                      if str(s.get("uses", "")).endswith("falkordb-provision"))
     assert provision["with"]["uri_graph"] == "tortoise_test_matrix"
-    assert provision["with"]["image"] == "falkordb/falkordb-server:latest"
+    # #6386: this used to assert `:latest` — i.e. it GUARDED the drift instead
+    # of catching it, so the tag was free to float to engine 6.x while every
+    # other job ran the v4.20.6 pin. It must name the same immutable engine the
+    # gate uses (pinned across all provisioned jobs in
+    # tests/test_runner_ports_6673.py).
+    assert provision["with"]["image"] == "falkordb/falkordb-server:v4.20.6"
     assert provision.get("if") == "needs.dedup-check.outputs.skip != 'true'"
     assert any(str(s.get("uses", "")).endswith("falkordb-teardown")
                and s.get("if") == "always()" for s in steps), \

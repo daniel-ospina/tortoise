@@ -262,7 +262,16 @@ jobs:
       # $TORTOISE_TEST_LEGACY_PORT (read by tests/_live_utils.py), and
       # `uri_graph` exports the TORTOISE_DB_URI this job used to carry as a
       # literal. The teardown step at the end of the job removes the containers.
-      # The image pin stays this file's own (`:latest`, not python-ci's v4.20.6).
+      #
+      # #6386: the image is pinned to the SAME engine python-ci's gate uses.
+      # It used to be `:latest` (carried over verbatim from this job's old
+      # `services:` block); the tag floated to engine 6.x, whose `reply.rs`
+      # panic killed the container mid-suite — measured on main, run
+      # 38494033413 (2026-10-14): the job died at `114 passed, 0 failed` with
+      # `Error 111 connecting to localhost:32768`. A post-merge lane on a
+      # different engine than the gate reports engine drift as a product
+      # regression. The pin is guarded in tests/test_runner_ports_6673.py,
+      # which reads the caller override AND the action default.
       - name: Provision FalkorDB services on ephemeral host ports (#6673)
         if: needs.dedup-check.outputs.skip != 'true'
         uses: ./.github/actions/falkordb-provision
@@ -273,7 +282,7 @@ jobs:
           # already qualified is passed through as a SINGLE candidate — which
           # would trade the anonymous-pull quota for a single point of failure on
           # Google's best-effort cache. The bare ref keeps the whole chain.
-          image: falkordb/falkordb-server:latest
+          image: falkordb/falkordb-server:v4.20.6
           uri_graph: tortoise_test_matrix
       # #1474 skip path — python-ci's push run on this tree was green; only
       # comment "covered" (aggregator reports success; no second pytest run).
