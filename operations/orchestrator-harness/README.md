@@ -110,7 +110,7 @@ processes in tmux sessions, so a killed worker cannot take the controller down w
 | `candidates.txt` | the dispatch backlog: issue numbers that passed collision pre-flight |
 | `dispatched.txt` | issues already handed to a lane. **Append-only — never expires** (see §7.1) |
 | `checked.txt` | issues whose pre-flight returned **CLEAN** — the one verdict that terminates the issue by **queueing** it. An **errored** pre-flight, a **COLLISION** and a **LANDED** verdict leave no entry (agent-infra#1716, #8560) |
-| `landed.txt` | issues whose pre-flight returned **LANDED** (exit 4): the work already shipped, so they are kept out of the backlog and out of the LIMIT budget — but **not** recorded as checked-forever. The set is printed on every refresh pass; an entry is dropped once its issue is **CLOSED**, and **released** once its issue is **OPEN** (a pre-#8625 entry, or one reopened after its close-race landing); only an entry whose state cannot be read is kept. See §7.1b (#8560, #8625, #8629) — reachable since #8625 only when an issue closes between the pool listing and its pre-flight |
+| `landed.txt` | issues whose pre-flight returned **LANDED** (exit 4): the work already shipped, so they are kept out of the backlog and out of the LIMIT budget — but **not** recorded as checked-forever. The set is printed on every refresh pass; an entry is dropped once its issue is **CLOSED**, and **released** once its issue is **OPEN** (a pre-#8625 entry, or one reopened after its close-race landing); only an entry whose state cannot be read is kept. See §7.1b (#8560, #8625, #8629, #8645) — reachable since #8625 only when an issue closes between the pool listing and its pre-flight |
 | `state/mergeclaim-<PR>.lock` | single-owner claim: only one worker may review/record/merge a given PR |
 | `state/needsfix-<PR>-<head>` | "a reviewer found real issues at this exact head" |
 | `state/fixcount-<PR>` | fixer attempts for that PR, capped by `MAX_FIX_TRIES` |
@@ -517,7 +517,8 @@ quoted two lines above the arm itself.
   "why is #N never dispatched again?" sees it — alongside the remedy — instead of it vanishing;
 - nothing is queued: only `CLEAN` reaches `candidates.txt`;
 - the reaper drops an entry once its issue is `CLOSED` **and releases one whose issue is `OPEN`**,
-  so the list drains as decisions are made. The OPEN release is #8629's fix for a durable-store trap:
+  so the list drains as decisions are made. The OPEN release is the follow-up to #8629's review
+  (PR #8645) for a durable-store trap:
   before #8625 the only persistent producer of `LANDED` was the timeline title arm on an **OPEN**
   issue, so a pre-existing entry names an OPEN issue — exactly the issues the tool now reports
   `CLEAN` — and the pre-fix prune kept it, permanently suppressing a now-authorized issue in the

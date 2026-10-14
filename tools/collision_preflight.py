@@ -32,11 +32,13 @@ Design contract
 1. EVERY surface is always evaluated. There is no ``--only`` flag, no partial
    mode, no early exit. If a BLOCKING surface cannot be queried the run is
    INCOMPLETE, never CLEAN. Surfaces declared ADVISORY (see the surface table)
-   are still evaluated and still reported, but they cannot block a dispatch and
-   their failure cannot set INCOMPLETE — a surface that could never prevent a
-   duplicate carries no information in its failure, and halting a dispatch for
-   it was the defect #5251 removes. Every blocking surface keeps the
-   fail-closed posture.
+   are still evaluated and still reported, but they cannot block a dispatch.
+   Their failure cannot set the RUN INCOMPLETE — though a row whose source was
+   never read is still marked INCOMPLETE ITSELF, so the report never prints an
+   unqueried advisory row as a measured zero. A surface that could never
+   prevent a duplicate carries no information in its failure, and halting a
+   dispatch for it was the defect #5251 removes. Every blocking surface keeps
+   the fail-closed posture.
 2. Worktree enumeration is UNTRUNCATED, and the OPEN-PR surface is enumerated
    to COMPLETENESS. This module never pipes, heads or tails git output — the
    reported count is the full count — and the open PR list is fetched with
@@ -95,8 +97,8 @@ Surfaces (8 rows, ALL hit-capable)
   merged PRs naming an      no query of its own — it         (MERGED PR whose
   OPEN issue                reuses the LANDED row's          TITLE names an
   · ADVISORY ·              /issues/N/timeline read; a       OPEN issue; a
-                            failure there makes the LANDED   reference, not a
-                            row INCOMPLETE, never this row   closure — #8625)
+                            failure marks THIS row           reference, not a
+                            INCOMPLETE, never the RUN        closure — #8625)
   open PRs                  gh pr list --state open   (title / headRef;
                                                          body closing
                                                          reference;

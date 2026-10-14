@@ -251,7 +251,9 @@ while read -r N; do
   # dispatched, so writing it there removed an OPEN work item from the backlog permanently and
   # silently — the exact failure class #8515 removed. landed.txt instead keeps it out of the backlog
   # WITHOUT hiding it: the pool filter above spares the LIMIT slot, and the pass summary below names
-  # the set on every pass. The reaper drops an entry once the issue is CLOSED (#8560 review).
+  # the set on every pass. The reaper drops an entry once its issue is CLOSED and RELEASES one whose
+  # issue is readable-OPEN (#8560 review, #8645) — a pre-#8625 entry was written by the timeline title
+  # arm, so it names an OPEN issue that the tool now reports CLEAN.
   PRE="$("$SC/.venv/bin/python" tools/collision_preflight.py "$N" --repo . 2>&1)"
   V="$(printf '%s\n' "$PRE" | grep -E '^VERDICT' | head -1 | sed -E 's/.*VERDICT: (CLEAN|COLLISION|LANDED|INCOMPLETE).*/\1/')"
   case "$V" in
@@ -322,7 +324,8 @@ awk '!seen[$0]++' "$O/candidates.txt" > "$O/.cand" && mv "$O/.cand" "$O/candidat
 # filtered but never printed is the same invisible suppression it replaced: the operator debugging
 # "why is #N never dispatched again?" must see it here. It is not an error and not a missing verdict —
 # it is a decision waiting to be made (verify + close, or re-state the remaining scope). The reaper
-# above drops an entry once its issue is CLOSED, so the list drains as decisions are made.
+# above drops an entry once its issue is CLOSED and releases one whose issue is OPEN, so the list
+# drains as decisions are made.
 if [ -s "$O/landed.txt" ]; then
   echo "[refresh] landed (awaiting verify/close or a re-scope), not queued: $(tr '\n' ' ' < "$O/landed.txt")"
 fi
