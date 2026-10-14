@@ -6663,7 +6663,7 @@ def test_phase_e_sdk_mirror_verification_fail_open_omits_marker(sdk, monkeypatch
     ]
     proj = sdk._get_proj()
     # The guarded wrapper (proj.g) is read-only; patch the RAW graph handle
-    # (precedent: test_search_engine.py:297 / test_capture_session.py:2114).
+    # (precedent: test_search_engine.py:297 / test_capture_session.py:3774).
     raw = proj.g._g
     real_query = raw.query
 
