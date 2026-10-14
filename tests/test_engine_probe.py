@@ -1269,7 +1269,10 @@ def test_an_unaddressable_graph_name_skips_the_read_rather_than_guessing():
     result = e.probe_graph("127.0.0.1", port, timeout=1.0, graph="bad name")
     assert result["ok"] is True, result
     assert result["read_ok"] is None, result
-    assert result["read_error"] == "unaddressable-graph-name", result
+    assert result["read_error"] == e.READ_UNADDRESSABLE, result
+    # A skipped read of the caller's OWN graph is not a green: the graph the
+    # caller named was never read, so the probe could not tell.
+    assert e.classify(result, {"status": e.ENGINE_OK}) == e.UNMEASURABLE
 
 
 def test_main_exits_two_and_names_the_wedge(monkeypatch, capsys):
@@ -1317,9 +1320,85 @@ def test_main_exits_zero_only_when_the_read_completed(monkeypatch, capsys):
 def test_the_uri_path_supplies_the_graph_name_the_read_uses(monkeypatch):
     """(a) FAILS if `main` falls back to the literal `tortoise` when the URI
     names a different graph: the read would probe a graph the caller never
-    named (and could mint it on a multi-tenant instance).
+    named (and could mint it on a multi-tenant instance). Asserted THROUGH
+    `main` — what the URI resolves to is pinned elsewhere; the load-bearing
+    claim here is what name `main` HANDS TO THE READ, so only a call to `main`
+    can observe it. (Mutation proof: replacing `graph_name` in `main` with the
+    literal `"tortoise"` leaves this test failing and the rest of the suite
+    green.)
     (b) Reachable: a per-tenant URI, e.g. `.../team_graph` (#7886).
     """
     monkeypatch.setenv("TORTOISE_DB_URI",
                        "docker://:pw@127.0.0.1:16379/team_graph")
-    assert e.graph_target_from_env()["graph_name"] == "team_graph"
+    seen: dict = {}
+
+    def fake_probe_graph(host, port, timeout, graph=None):
+        seen["graph"] = graph
+        return {"ok": True, "reply": "+PONG", "error": None,
+                "read_graph": graph, "read_ok": True, "read_reply": "+1",
+                "read_error": None, "elapsed_s": 0.01}
+
+    monkeypatch.setattr(e, "probe_graph", fake_probe_graph)
+    rc = e.main(["--no-docker", "--timeout", "1.5"])
+    assert rc == 0, seen
+    assert seen["graph"] == "team_graph", seen
+
+
+def test_the_graph_flag_overrides_the_uri_path(monkeypatch):
+    """(a) FAILS if `--graph` is parsed but not threaded into the read, so the
+    flag is decorative and a caller overriding the URI's graph silently probes
+    the URI's name instead. Asserted through `main` against a `probe_graph`
+    fake, because the flag's only observable effect is the name the read uses.
+    (b) Reachable: `--graph other` on a host whose URI names `team_graph`.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:pw@127.0.0.1:16379/team_graph")
+    seen: dict = {}
+
+    def fake_probe_graph(host, port, timeout, graph=None):
+        seen["graph"] = graph
+        return {"ok": True, "reply": "+PONG", "error": None,
+                "read_graph": graph, "read_ok": True, "read_reply": "+1",
+                "read_error": None, "elapsed_s": 0.01}
+
+    monkeypatch.setattr(e, "probe_graph", fake_probe_graph)
+    rc = e.main(["--no-docker", "--graph", "other", "--timeout", "1.5"])
+    assert rc == 0, seen
+    assert seen["graph"] == "other", seen
+
+
+def test_an_unaddressable_graph_name_is_not_a_green(monkeypatch, capsys):
+    """(a) FAILS if a skipped read of the caller's OWN named graph exits 0.
+    `--graph 'bad name'` cannot go into the inline protocol, so the read is
+    skipped; the remaining PING verifies nothing about that graph, and exit 0
+    is the #7235 false green one layer up (measured on the pre-fix code:
+    `VERDICT: GRAPH_UP` / RC=0 with no read line at all). It must be
+    UNMEASURABLE/exit 3 AND say in the report that the read was skipped.
+    (b) Reachable: `--graph 'my graph'`, or a percent-encoded URI path.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    server = _one_shot_server(b"+PONG\r\n")
+    port = server.getsockname()[1]
+    rc = e.main(["--no-docker", "--graph", "bad name",
+                 "--port", str(port), "--timeout", "1.0"])
+    out = capsys.readouterr().out
+    assert rc == 3, (rc, out)
+    assert "VERDICT: UNMEASURABLE" in out, out
+    assert "unaddressable-graph-name" in out, out
+
+
+def test_the_report_names_a_skipped_read_rather_than_showing_only_a_verdict(
+        monkeypatch, capsys):
+    """(a) FAILS if the read line is printed only when `read_ok is not None`:
+    a `-NOAUTH` PING skips the read, and a report with no read line reads as a
+    completed one — the operator cannot tell "verified" from "not attempted".
+    (b) Reachable: the canonical credential-bearing instance answers `-NOAUTH`.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    server = _one_shot_server(b"-NOAUTH Authentication required.\r\n")
+    port = server.getsockname()[1]
+    rc = e.main(["--no-docker", "--graph", "tortoise",
+                 "--port", str(port), "--timeout", "1.0"])
+    out = capsys.readouterr().out
+    assert rc == 0, (rc, out)
+    assert "skipped (pre-auth-ping)" in out, out

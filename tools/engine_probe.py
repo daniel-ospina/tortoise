@@ -37,8 +37,13 @@ THE ANSWERS, AND WHY UNMEASURABLE IS ONE OF THEM
                      verdict exists to remove. Recovery is an operator restart
                      of the instance, NOT of the client.
     GRAPH_UP       — a PING on the graph port returned PONG, the engine is not
-                     wedged, AND (when a graph name is known) a real read
-                     completed inside the bound.
+                     wedged, AND — when the read was actually ISSUED — a real
+                     read completed inside the bound. A `-NOAUTH` PING and an
+                     error reply to the read (an unknown graph) stay green
+                     deliberately: the probe cannot be admitted without
+                     credentials, and a missing graph is not a wedge. A graph
+                     name the caller NAMED that cannot be addressed is
+                     UNMEASURABLE, never green — that read never verified it.
 
 EVERY PROBE IS BOUNDED. A probe that can hang is not a probe: the 2026-10-03
 occurrence cost 900s to a single unbounded `docker ps`. `--timeout` (default
@@ -85,9 +90,11 @@ EXIT CONTRACT
     2  not usable: ENGINE_WEDGED, GRAPH_DOWN or GRAPH_WEDGED — a caller that
        must not proceed on a broken substrate can gate on this without parsing
        prose
-    3  UNMEASURABLE: the probes returned nothing usable (a malformed result, or
-       a rediss:// target this plaintext probe cannot address). Distinct from 2
-       on purpose: "broken" and "could not tell" are different recoveries.
+    3  UNMEASURABLE: the probes returned nothing usable (a malformed result, a
+       rediss:// target this plaintext probe cannot address, or a graph name
+       the caller NAMED that cannot be addressed in the inline protocol, so
+       the read was skipped). Distinct from 2 on purpose: "broken" and "could
+       not tell" are different recoveries.
 
     1  is reserved for a rejected `--timeout` (must be > 0). Note that argparse
        itself exits 2 on a malformed argument (`--timeout abc`), so the two
@@ -160,6 +167,19 @@ ENGINE_MEASURABLE = (ENGINE_OK, ENGINE_ABSENT, ENGINE_DAEMON_DOWN)
 #: No confident verdict is possible. Reported instead of guessing.
 UNMEASURABLE = "UNMEASURABLE"
 
+#: WHY a real read was not issued — recorded in `read_error` on EVERY skip, so
+#: the report can always say that the read did not happen. A skip with no trace
+#: is indistinguishable from a completed read once only the exit code is read.
+READ_NO_PING = "ping-failed"
+READ_NO_GRAPH_NAME = "no-graph-name"
+READ_PRE_AUTH_PING = "pre-auth-ping"
+#: The caller NAMED a graph that cannot go into the inline protocol unmangled.
+#: This one skip is a refusal to verify the graph the caller asked about, so
+#: `classify` returns UNMEASURABLE for it — never the green a nameless read
+#: keeps. A skipped read of the caller's own graph is the #7235 false green one
+#: layer up, and `--graph 'bad name'` reaches it.
+READ_UNADDRESSABLE = "unaddressable-graph-name"
+
 
 def _resolve_within_bound(host: str, port: int, timeout: float):
     """`getaddrinfo` inside the bound, or None on timeout.
@@ -214,9 +234,14 @@ def probe_graph(host: str, port: int, timeout: float,
       * `None`  — no read was issued, so it verifies nothing: no graph name was
                   known, the graph name is not safely addressable in the inline
                   protocol, or the pre-AUTH PING was itself a `-` error
-                  (`-NOAUTH`). A server that refused the PING cannot be asked to
-                  run a query without credentials, and an error reply can never
-                  be read as a completed read.
+                  (`-NOAUTH`). `read_error` ALWAYS records which of these it
+                  was, so a skipped read is visible in the report rather than
+                  reading as a green. The unaddressable case is UNMEASURABLE in
+                  `classify` — the caller named a graph that was never read;
+                  `-NOAUTH` and an error reply stay GRAPH_UP deliberately. A
+                  server that refused the PING cannot be asked to run a query
+                  without credentials, and an error reply can never be read as
+                  a completed read.
 
     A `read_ok` of False deliberately does NOT propagate to this function's
     `ok`/`error` fields: `ok=False` means "the port is unreachable" (recovery:
@@ -308,12 +333,19 @@ def probe_graph(host: str, port: int, timeout: float,
         }
         # The read is issued only when the PING itself was not an ERROR reply:
         # a `-NOAUTH` server has not admitted us, so it cannot be asked to run
-        # a query, and a command-level error is not a completed read.
-        if ok and graph is not None and not text.startswith("-"):
-            if not _addressable_graph_name(graph):
-                result["read_error"] = "unaddressable-graph-name"
-            else:
-                result.update(_probe_graph_read(sock, graph))
+        # a query, and a command-level error is not a completed read. EVERY
+        # skip records WHY in `read_error` (never left None) so the report can
+        # always name the skipped check.
+        if not ok:
+            result["read_error"] = READ_NO_PING
+        elif graph is None:
+            result["read_error"] = READ_NO_GRAPH_NAME
+        elif text.startswith("-"):
+            result["read_error"] = READ_PRE_AUTH_PING
+        elif not _addressable_graph_name(graph):
+            result["read_error"] = READ_UNADDRESSABLE
+        else:
+            result.update(_probe_graph_read(sock, graph))
         result["elapsed_s"] = round(time.monotonic() - started, 3)
         return result
     except TimeoutError:
@@ -344,7 +376,9 @@ def _addressable_graph_name(graph: str) -> bool:
     and `\\` specially, so a name carrying any of those would silently address a
     DIFFERENT graph (or a second command) rather than the one the URI named. A
     probe must not invent an endpoint, so an unaddressable name skips the read
-    (`read_ok=None`, i.e. unverified) instead of guessing.
+    (`read_error=READ_UNADDRESSABLE`, i.e. unverified) instead of guessing —
+    and `classify` reports that skip as UNMEASURABLE, never GRAPH_UP, because
+    the graph the caller NAMED was not verified.
     """
     return bool(graph) and not any(
         ch.isspace() or ch in '"\\' for ch in graph
@@ -472,6 +506,17 @@ def classify(graph: dict, engine: dict | None) -> str:
     # #7235, where PING kept returning True while every read timed out.
     if graph["ok"] and graph.get("read_ok") is False:
         return GRAPH_WEDGED
+    # A read the probe REFUSED to issue because the caller's own graph name is
+    # not safely addressable verifies nothing about that graph, so it is
+    # UNMEASURABLE — NOT the green a nameless probe keeps. Leaving it green is
+    # the #7235 false green reachable through `--graph 'bad name'` (measured:
+    # PING `+PONG` -> `GRAPH_UP`/exit 0 with no read line and no trace that the
+    # graph the caller named was never read). Keyed on the ONE skip reason that
+    # names a graph the caller asked about: `-NOAUTH` and an error reply stay
+    # green deliberately (see `probe_graph`).
+    if (graph.get("read_ok") is None
+            and graph.get("read_error") == READ_UNADDRESSABLE):
+        return UNMEASURABLE
     return GRAPH_UP if graph["ok"] else GRAPH_DOWN
 
 
@@ -627,10 +672,20 @@ def _report(args, verdict: str, graph: dict, host: str, port: int,
     print(f"graph  {host}:{port} -> "
           f"{graph.get('reply') or graph.get('error') or graph.get('ok')} "
           f"({graph.get('elapsed_s')}s)")
-    if graph.get("read_ok") is not None:
-        outcome = ("completed" if graph["read_ok"]
-                   else (graph.get("read_error") or "no reply"))
-        print(f"read   GRAPH.RO_QUERY {graph.get('read_graph')} "
+    # ALWAYS surface the read leg, including a skipped one. A probe that
+    # verified nothing must SAY so — a skip that prints no trace is
+    # indistinguishable from a completed read to anyone reading the output, and
+    # the exit code alone cannot tell them apart.
+    if graph.get("read_graph") or graph.get("read_error"):
+        read_ok = graph.get("read_ok")
+        if read_ok is True:
+            outcome = "completed"
+        elif read_ok is False:
+            outcome = graph.get("read_error") or "no reply"
+        else:
+            outcome = f"skipped ({graph.get('read_error') or 'no read issued'})"
+        target = graph.get("read_graph") or "(no graph name)"
+        print(f"read   GRAPH.RO_QUERY {target} "
               f'"RETURN 1" -> {outcome}')
     if engine is None:
         print("engine not probed"
