@@ -7,9 +7,11 @@
 // after the server half shipped. This is that missing control.
 //
 // It is a `.js` module written with `React.createElement` (no JSX) for the SAME
-// reason as `accountDeletion.js` / `overviewEmptyAction.js`: the dashboard suite
-// is `node --test` with no JSX transform and no jsdom, so a `.jsx` component
-// cannot be imported. A createElement module CAN be, and the guard
+// reason as `accountDeletion.js` / `overviewEmptyAction.js`: the `node --test`
+// suite has no JSX transform and no jsdom, so a `.jsx` component cannot be
+// imported by a `node --test` guard. (Since #4915 there is ALSO a jsdom/render
+// lane — `npm run test:dom` — which can import one; this control stays a
+// createElement module so BOTH runners can render it.) A createElement module CAN be, and the guard
 // EXECUTE-renders it (`react-dom/server`) and reads the consequence copy off the
 // element tree React produces — a source-text grep cannot be satisfied by a
 // commented-out or shadowed string (#4637: five review cycles of text pins each

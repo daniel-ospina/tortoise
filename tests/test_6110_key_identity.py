@@ -347,6 +347,51 @@ class TestPhase1GuardSeesTheKeyIdentity:
         assert res["ids"]["points"] == [holder]
 
 
+class TestKeyLookupIsIndexBacked:
+    """#8400 review P2: the key leg resolves FIRST on every key-bearing write,
+    so an unindexed label scan there makes the keyed path ~40x slower than the
+    index-backed content-hash lookup it precedes (measured on embedded
+    FalkorDB at 60k Points: 8.11 ms/op without the index, 0.20 ms/op with it).
+    These pin the ``Point.key`` RANGE index that removes the scan."""
+
+    def test_point_key_has_a_range_index(self, sdk):
+        """Pre-fix this FAILS: ``key`` was not in ``_POINT_RANGE_INDEX_PROPS``,
+        so ``_find_points_by_key``'s predicate had no index to seek."""
+        rows = sdk._get_proj().g.query("CALL db.indexes()").result_set
+        hits = []
+        for row in rows:
+            label, fields, types = row[0], row[1], row[2]
+            if label != "Point":
+                continue
+            if isinstance(types, dict):
+                kinds = dict(types)
+            elif isinstance(types, (list, tuple)):
+                kinds = {f: [t] for f, t in zip(fields, types)}  # noqa: B905
+            else:
+                kinds = {f: [types] for f in fields}
+            if "key" in list(fields) and "RANGE" in kinds.get("key", []):
+                hits.append(row)
+        assert hits, f"Point.key is not RANGE-indexed: {rows}"
+
+    def test_the_key_predicate_plans_as_an_index_seek(self, sdk):
+        """Pre-fix this FAILS with ``Node By Label Scan``.
+
+        The real ``_find_points_by_key`` query also carries ``n.pointKind``,
+        which is itself indexed — so the plan string reads ``Node By Index
+        Scan`` with OR without a ``key`` index and cannot discriminate.
+        Dropping the ``pointKind`` conjunct isolates the key leg; the
+        non-operator predicate is kept so the shape is the shared
+        ``_dedup_match_clauses``. (The real query's measured speed-up — 8.11
+        -> 0.20 ms/op at 60k — is what this index buys; this pins that the
+        index is actually PLANNED AGAINST.)
+        """
+        plan = str(sdk._get_proj().g.explain(
+            "MATCH (n:Point {key:'#8400-plan-probe'}) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "AND (n.op_type IS NULL OR n.is_operator = false) RETURN n.id"))
+        assert "Node By Index Scan" in plan, plan
+
+
 def test_key_is_declared_for_point_replay():
     """#8400 review observation: ``key`` rides the PointAdded snapshot and is
     restored through the open-set passthrough, so it must be DECLARED —

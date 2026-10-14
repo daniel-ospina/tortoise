@@ -19,11 +19,13 @@
 // an onClick that fakes one), the hash→tab deep-link resolver, and the focus
 // mover.
 //
-// WHY EXTRACTED, AND WHY React.createElement (no JSX): the dashboard suite is
-// `node --test` with no JSX transform and no jsdom. A component module written
-// with createElement CAN be imported and rendered by the suite with
+// WHY EXTRACTED, AND WHY React.createElement (no JSX): the `node --test` suite
+// has no JSX transform and no jsdom. A component module written
+// with createElement CAN be imported and rendered by that suite with
 // react-dom/server, so the guard is an EXECUTED render of the live action —
-// not a source-text grep that a dead link would sail past. The section's copy
+// not a source-text grep that a dead link would sail past. (#4915 added a second
+// runner — vitest + jsdom for `src/*.test.jsx` — which can import JSX; the
+// createElement shape is kept because it renders under BOTH.) The section's copy
 // stays in main.jsx (its vocabulary ratchet lives there); only the action
 // surface moves here.
 import React from 'react'

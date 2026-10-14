@@ -50,7 +50,9 @@ from tortoise.extractor_v2 import (
     master_kind_forms,
 )
 from tortoise.pack_state import (
+    _ATTRIBUTABLE_BARE_KIND_KEYS,
     _KIND_PROP_KEYS,
+    bare_event_kind_owners,
     graph_installed_namespaces,
     graph_kind_namespaces,
     kind_namespace_is_approved,
@@ -471,8 +473,13 @@ class TestPackKindDerivationFromBrief:
         """
         master = build_master_list()
         brief = compile_value_brief()
+        # #4894: the brief's RESERVED non-kind sections are excluded by the
+        # brief's OWN set, not by a literal here — the derivation under test
+        # reads that set, so a literal would let the two drift (and did: the
+        # new ``pack_hints`` section arrived with the reservation).
+        from tortoise.value_extractor import RESERVED_BRIEF_KEYS
         expected = [k for k in brief
-                    if k != "memory_granularity" and not k.startswith("core:")]
+                    if k not in RESERVED_BRIEF_KEYS and not k.startswith("core:")]
         assert expected, "fixture: the hermetic brief must have pack kinds"
         assert list(master["pack_kinds"]) == expected, \
             "pack_kinds must be exactly the brief's non-core keys, in order"
@@ -689,6 +696,56 @@ class TestGraphInstalledNamespaces:
         assert v2 is not v1, "the memo served a stale approval set"
         assert MARKETING in v2["installed_namespaces"]
 
+    def test_bare_event_kind_union_keeps_its_declaring_pack_writable(self, sdk):
+        """#5184's fixture: the graph's data carries a BARE pack event kind and
+        its only ``:PackInstall`` record is a SIBLING namespace (``dev``).
+
+        The record leg returns a SET — not ``None`` — so the catalog-union
+        fallback does not apply, and before the fix ``agent-ops`` drops out of
+        the approval set even though the graph's own data carries its event
+        kind. The Layer-1 gate then refuses a write of the very kind the graph
+        already holds: #2714 indicator 2, inverted.
+
+        FAIL-ON: the union is record + ``ns:``-prefix only, so the attributed
+        call below stays rejected.
+        REACHABLE + FAIL-ON CONTROL: the bare ``ruleRevised`` Event really is
+        written, the record really is only ``dev``, and the SAME payload is
+        asserted REJECTED under the record-only set (and the error is keyed to
+        ``events[0].eventKind``) — so the acceptance is caused by the
+        attribution, not by a permissive vocab.
+        """
+        _seed_install(sdk, DEV)
+        sdk._get_proj().g.query(
+            "MERGE (e:Event {id: 'l7-bare-event'}) SET e.eventKind = $k",
+            params={"k": "ruleRevised"},
+        )
+        assert graph_kind_namespaces(sdk._get_proj().g) == \
+            frozenset({"agent-ops"}), \
+            "the bare eventKind row must be attributed to its declaring pack"
+        installed = graph_installed_namespaces(sdk)
+        assert installed == frozenset({DEV, "agent-ops"})
+
+        raw = _raw_payload()
+        raw["events"] = [{"id": "ev_" + "1" * 62, "eventKind": "ruleRevised",
+                          "content": "the rule was revised",
+                          "confidence": 0.9, "about_entities": ["Alpha"],
+                          "source_ref": "session.md"}]
+        raw = _finalize(raw)
+
+        # CONTROL — the record leg alone refuses the kind the graph holds.
+        record_only, _ = validate_payload_dict(
+            raw, compile_vocab(installed_namespaces=frozenset({DEV})))
+        assert not record_only.ok, \
+            "control: the record-only set must still refuse the bare event kind"
+        assert any("events[0].eventKind" in k for k in record_only.errors), \
+            record_only.errors
+
+        # …and the attributed set accepts it (the issue's indicator 2).
+        result, payload = validate_payload_dict(
+            raw, compile_vocab(installed_namespaces=installed))
+        assert result.ok, result.errors
+        assert payload.events[0].eventKind == "ruleRevised"
+
     def test_stored_but_uninstalled_tenant_manifest_is_gated_out(self, sdk):
         """A ``:PackManifest`` node with no activation record contributes
         nothing — the tenant leg of the gate.
@@ -900,3 +957,167 @@ class TestKindScanFailureDirection:
             _FakeGraph({"objectKind": ["dev", None, "marketing:campaign"]}))
         assert noisy == frozenset({MARKETING}), \
             "bare and null kind values must not become namespaces"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# F. The BARE-event-kind attribution (#5184)
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestBareEventKindAttribution:
+    """#5184: a pack's EVENT kinds reach the graph in BARE form — #1933's FIX-A
+    strips the namespace off an event kind before the payload is built
+    (``extractor_v2``: ``ekind.rsplit(":", 1)[-1]``) — so the ``ns:`` prefix leg
+    of the back-compat union cannot see them. A namespace whose ``:PackInstall``
+    record is absent (while a SIBLING namespace's record makes the record leg
+    return a set) therefore dropped out of the approval set, and a write of a
+    bare event kind the graph already held was refused: #2714 indicator 2,
+    inverted.
+
+    The attribution is deliberately one key wide (``eventKind``) and bounded by
+    two rules — the value must not be core event vocabulary, and exactly one
+    catalog pack must declare it. Each rule has a test below, plus the failure
+    direction the resolver's contract requires.
+    """
+
+    def test_bare_pack_event_kind_is_attributed_to_its_declaring_pack(self):
+        """Indicator 1 on the pure resolver: the bare value keeps its pack.
+
+        FAIL-ON: the union is prefix-only, so the bare ``ruleRevised`` row
+        contributes nothing and the namespace drops out.
+        REACHABLE: ``ruleRevised`` is a real agent-ops eventKind in the catalog
+        (asserted here), so the attribution has a declaration to find.
+        """
+        owners = bare_event_kind_owners()
+        assert owners.get("ruleRevised") == frozenset({"agent-ops"}), \
+            "fixture: the live catalog must declare ruleRevised under agent-ops"
+        found = graph_kind_namespaces(
+            _FakeGraph({"eventKind": ["ruleRevised"]}))
+        assert found == frozenset({"agent-ops"})
+
+    def test_bare_core_event_kinds_read_no_catalog(self, monkeypatch):
+        """A CORE bare event kind names no pack — and the cost guard.
+
+        The core leg of the write gate is never gated, so a bare ``decision``
+        in the data is no evidence that any pack was ever installed;
+        attributing it would let a bare core-named write widen the approval set.
+        The catalog read is also the only new cost this fix adds, so a graph
+        whose bare event kinds are all core must pay nothing for it.
+
+        FAIL-ON: the core guard is absent, or the catalog is read
+        unconditionally (the recording stub asserts on the call itself — a
+        raising stub would be swallowed by the narrowing guard and prove
+        nothing).
+        REACHABLE: all three values are real CORE event kinds (asserted against
+        ``EVENT_KINDS``), so the branch under test is genuinely taken.
+        """
+        calls: list = []
+        monkeypatch.setattr(
+            "tortoise.pack_state.bare_event_kind_owners",
+            lambda *a, **k: calls.append((a, k)) or {})
+        core = ["decision", "AgentSession", "milestone"]
+        assert set(core) <= set(EVENT_KINDS), "fixture: these must be core"
+        assert graph_kind_namespaces(
+            _FakeGraph({"eventKind": core})) == frozenset()
+        assert calls == [], \
+            "the catalog must not be read for core-only bare event kinds"
+
+    def test_bare_unknown_or_ambiguous_event_kind_contributes_nothing(
+            self, monkeypatch):
+        """The union never GUESSES: an undeclared bare value names no pack, and
+        a value two packs declare does not name one either.
+
+        ``PackRegistry``'s own rule for an ambiguous bare reference is a
+        validation error (``_resolve_kind_ref``); the union follows it rather
+        than picking a pack by dict order.
+
+        FAIL-ON: ambiguity resolves to one owner, or an undeclared value
+        becomes a namespace.
+        REACHABLE: the stub supplies BOTH an ambiguous name with two real
+        owners and a name no pack declares, so both reject paths have a row.
+        """
+        monkeypatch.setattr(
+            "tortoise.pack_state.bare_event_kind_owners",
+            lambda *a, **k: {"shared": frozenset({"pack-a", "pack-b"})})
+        found = graph_kind_namespaces(
+            _FakeGraph({"eventKind": ["shared", "noPackDeclaresThis"]}))
+        assert found == frozenset()
+
+    def test_bare_object_and_point_kinds_are_never_attributed(
+            self, monkeypatch):
+        """#5475 is NOT re-opened: only ``eventKind`` is attributable.
+
+        ``POST /v1/objects`` / ``POST /v1/subjects`` persist objectKind /
+        subjectKind UNGATED, so attributing a bare value from those keys would
+        make the approval set writable again through the door #5475 closed: one
+        bare ``campaign`` write would add ``marketing`` and the door would be
+        self-widening again. Point kinds need no leg either — the classifier's
+        "points" section is core-only, so no bare pack point kind is written.
+
+        FAIL-ON: ``_ATTRIBUTABLE_BARE_KIND_KEYS`` grows, or the attribution is
+        applied to every kind property (the stub map declares all three bare
+        values, so a widened implementation WOULD resolve them).
+        REACHABLE: the namespaced ``marketing:campaign`` row in the same fixture
+        contributes ``marketing``, so the scan is running and the map is
+        genuinely consulted for these keys.
+        """
+        assert set(_ATTRIBUTABLE_BARE_KIND_KEYS) == {"eventKind"}, (
+            "the attributable kind set is a SECURITY boundary: objectKind/"
+            "subjectKind ride UNGATED doors (#5475) and must never widen the "
+            "approval set from a bare write")
+        monkeypatch.setattr(
+            "tortoise.pack_state.bare_event_kind_owners",
+            lambda *a, **k: {"campaign": frozenset({"marketing"}),
+                             "persona": frozenset({"marketing"}),
+                             "rationale": frozenset({"agent-ops"})})
+        found = graph_kind_namespaces(_FakeGraph({
+            "objectKind": ["campaign", "marketing:campaign"],
+            "subjectKind": ["persona"],
+            "pointKind": ["rationale"],
+        }))
+        assert found == frozenset({"marketing"}), (
+            "only the NAMESPACED value may contribute — the bare object/"
+            "subject/point kinds ride ungated doors (#5475)")
+
+    def test_bare_kind_attribution_failure_narrows_never_widens(
+            self, monkeypatch):
+        """A failed catalog read must NARROW the union, never raise.
+
+        ``graph_installed_namespaces`` does not catch an exception from
+        ``graph_kind_namespaces`` — an escape would abort the whole
+        approval-set read rather than narrow it, taking the write gate down
+        instead of refusing one kind.
+
+        FAIL-ON: the catalog read escapes the narrowing guard.
+        REACHABLE: the stub returns a real namespaced row (``dev:code``)
+        alongside the bare one, so "narrowed, not emptied" is observable.
+        """
+        def _raise(*a, **k):
+            raise RuntimeError("scripted catalog failure")
+        monkeypatch.setattr("tortoise.pack_state.bare_event_kind_owners",
+                            _raise)
+        found = graph_kind_namespaces(_FakeGraph({
+            "eventKind": ["ruleRevised"],
+            "objectKind": ["dev:code"],
+        }))
+        assert found == frozenset({DEV}), (
+            "the namespaced leg must survive; the failed attribution must "
+            "contribute nothing and must not raise")
+
+    def test_live_catalog_declares_no_ambiguous_bare_event_kind(self):
+        """The "never guess" bound is LOSSLESS against the shipped catalog.
+
+        Attribution is skipped for a bare name two packs declare. That bound is
+        only safe while no such collision exists: a collision would silently
+        re-open #5184 for that name (bare data whose pack can no longer be
+        recovered). This test turns the collision into a red test — a decision
+        for the lane that adds it — instead of a silent gap.
+
+        FAIL-ON: two packs declare the same bare event kind.
+        REACHABLE: the map is non-empty (asserted), so the scan is not vacuous.
+        """
+        owners = bare_event_kind_owners()
+        assert owners, "fixture: the live catalog declares pack event kinds"
+        ambiguous = {k: sorted(v) for k, v in owners.items() if len(v) > 1}
+        assert not ambiguous, (
+            "two packs declare the same bare event kind — #5184's attribution "
+            f"cannot recover either one from bare data: {ambiguous}")

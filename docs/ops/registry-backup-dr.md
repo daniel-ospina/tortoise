@@ -351,15 +351,16 @@ make the hourly job RED, so a broken pipeline cannot stay green for weeks (the
 |---|---|---|
 | deliberate-off | `enabled:false`, no `config_error`/`storage_error`, pool **measured** fresh | silent `exit 0` — a real operator pause must not page |
 | off-because-broken | `enabled:false` + non-null `config_error` | files **SWEEP_CONFIG_ERROR**, job RED |
-| off-because-storage-down | `enabled:false` + non-null `storage_error` | files **R2_DOWN**, job RED |
+| off-because-storage-down | `enabled:false` + non-null `storage_error` | files **R2_UNLISTABLE** (#3147: the app ANSWERED and reports broken storage — the listing/measurement tier, not unreachability), job RED |
 | off-while-pool-stale | `enabled:false`, no config/storage error, and the pool is not **measured fresh**: a `backups/{org_id}/default/` archive older than `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (240), a team prefix with **no default archive at all**, or a listing that failed | files **SWEEP_OFF_STALE**, job RED (the pooled **POOL_STALE** incident still files when a tenant measured stale; the per-tenant `STALE` residual is the watcher's) |
 | enabled-but-backing-up-nothing | `enabled:true` and the sweep backed up 0 teams (`no_teams` / `no_eligible_teams` / `no_work` / `enum_failed` / `error`) while the R2 pool holds ≥1 team prefix, **or while the pool cannot be measured**, **or** the sweep reported a lock that cannot be verified as recent | files **SWEEP_NO_COVERAGE**, job RED |
 
 **Filing ⇒ the job is RED.** The taxonomy above is the classifier; the job
 status is simpler and deliberately blunter — `file_alert` sets a run-level
 `LOUD` flag and every terminal exit goes through it, so *any* incident filed
-this run (APP_DOWN, WATCHER_DOWN, a pooled **POOL_STALE** from the direct-R2 leg, an
-R2_DOWN — preflight or partial-listing — a stuck-lock SWEEP_NO_COVERAGE, or a
+this run (APP_DOWN, WATCHER_DOWN, a pooled **POOL_STALE** from the direct-R2 leg,
+an **R2_DOWN** — the reachability tier — or an **R2_UNLISTABLE** — the listing
+and measurement tier — a stuck-lock SWEEP_NO_COVERAGE, or a
 PURGE_FAILED/RECONCILE_FAILED ride-along) exits 1. (The converse does not hold
 **only** where filing is impossible by construction: the two pre-flight guards —
 a missing `GITHUB_TOKEN`, or a missing `INTERNAL_API_URL`/`FASTAPI_INTERNAL_KEY`
@@ -380,8 +381,8 @@ top-level listing, any per-team listing — or a failed `get-object` of the
 legacy-flat classification index leaves the pool *unmeasured*: the driver then
 never reads it as fresh, never files a false `STALE` from a failed read, and
 never lets it silence the 0-team envelope. A listing that fails while
-`head-bucket` passes also files **R2_DOWN** (storage partially reachable,
-pool unverifiable) so a "successful" sweep cannot keep the run green. A failed
+`head-bucket` passes also files **R2_UNLISTABLE** (storage reachable,
+pool unverifiable — #3147) so a "successful" sweep cannot keep the run green. A failed
 read while the sweep is OFF is **not** a confirmed deliberate pause, so it
 files SWEEP_OFF_STALE. An unclassifiable `/status` (no boolean `.enabled`, or a
 non-JSON 200) fails **closed** as SWEEP_NO_COVERAGE. A held sweep lock is not
@@ -409,26 +410,63 @@ whose default graph is legitimately empty while a custom graph archived is not
 a coverage gap.
 
 **Storage errors are not the kill-switch.** A non-null `storage_error` files
-**R2_DOWN** whether or not the sweep is enabled (the enabled path used to drop
-it), and it blocks the `R2_DOWN` self-heal for that run — a sweep that
+**R2_UNLISTABLE** whether or not the sweep is enabled (the enabled path used to
+drop it) — #3147: the app ANSWERED and reports broken storage, so this is the
+listing/measurement tier, never the reachability tier. It blocks the
+`R2_UNLISTABLE` self-heal for that run — a sweep that
 "completes" while `/status` reports broken app storage has not recovered it.
 
 **Self-heal is evidence-tiered (#2411 + #2796):** `APP_DOWN` and the resolved
 `SWEEP_CONFIG_ERROR`/`SWEEP_OFF_STALE` clear when `/status` + the sweep complete
-(the app answered). `R2_DOWN` clears **only** when the driver's own
+(the app answered). `R2_UNLISTABLE` (#3147, the LISTING tier — driver-owned)
+clears **only** when the driver's whole-pool measurement is clean: the
 `head-bucket` preflight succeeded, `storage_error` is clear **and** the pool was
 measured this run — a sweep that "completes" with R2 down must not close the
-`R2_DOWN` it just filed (that would re-file and re-close forever). It can
+incident it just filed (that would re-file and re-close forever). It can
 therefore also clear from the disabled path once storage is proven back.
+`R2_DOWN` (#3147, the REACHABILITY tier — **watcher-owned**) clears only on the
+watcher's own evidence: its R2 probe reaches the substrate again. The driver
+files it when its preflight fails but **cannot** clear it (`resolve_global`
+refuses a watcher-owned kind), which is what makes the split safe in both
+directions.
 `WATCHER_DOWN` clears on **watcher evidence** (a `.watcher` block with a real
 boolean `running` read this run) — a missing/malformed block neither files nor
 clears it, because unknown is not evidence the daemon is alive.
 `POOL_STALE` (#4994) clears on the direct-R2 leg's OWN evidence — a whole-pool
 measured-fresh reading — and then only for the second consecutive such reading
-(`BACKUP_POOL_RESOLVE_STREAK`, default 2). The count rides on the incident's own
-R2 object as `fresh_streak`; a stale run, or one whose listings did not answer,
-resets it. Nothing else can clear it: it is driver-owned, so a watcher or app
-resolve is refused.
+(the declared recovery window, once `BACKUP_POOL_RESOLVE_STREAK`; #3146
+generalized it). The count rides on the incident's own R2 object as
+`healthy_streak`; a stale run, or one whose listings did not answer, resets it.
+Nothing else can clear it: it is driver-owned, so a watcher or app resolve is
+refused.
+
+**Recovery windows (hysteresis, #3146):** a clear is an explicit condition —
+**N consecutive healthy observations**, not "the alert condition stopped looking
+true" — so a fault that flaps around its threshold (a reachability probe, an
+archive age at the boundary, a heartbeat at its window) produces ONE incident per
+flap-suppression window instead of one open/close pair per cycle. The declared
+per-kind value lives in `tortoise/incident_kinds.py` (`KindSpec.resolve_streak`)
+and is mirrored by `recovery_streak_for()` in `.github/scripts/registry-cron.sh`;
+the threshold-driven DR plane defaults to **2** and every other kind keeps **1**
+(a human-triggered re-baseline, or an app-owned trigger that already carries its
+own threshold, must not need a second action). The count is carried on the
+incident's OWN sentinel as `healthy_streak`, so it is created with the incident
+and dies with it at delete-to-resolve; an unhealthy observation resets it to 0.
+Both writers honour the same config: `ALERT_RECOVERY_STREAKS="KIND=n,KIND2=m"`
+per kind, overridden by `ALERT_RECOVERY_STREAK=N` for ALL kinds (the "clear now"
+emergency lever — set it to 1 to restore the single-poll behaviour), over the
+declared value; the driver also keeps `BACKUP_POOL_RESOLVE_STREAK` as the
+POOL_STALE-only alias. A non-integer or negative value is ignored with a warning
+(the declared window stands; a negative is a typo, not the `1` "clear now"
+spelling), and `<1` is read as 1 (a window of 0 would mean "never resolve");
+surrounding whitespace is trimmed on both sides.
+
+**Where to set them.** The driver runs from the `registry-backup-cron` job, whose
+`env:` enumerates every variable it receives — Actions passes nothing else. Set
+these three as repository **variables** (Settings → Secrets and variables →
+Actions → **Variables**, not Secrets); an unset variable expands to the empty
+string, which the driver treats as "no override". The app-side writer reads the
+same names from its own environment (Fly secrets).
 `SWEEP_NO_COVERAGE` clears **only** on a run that actually backed up
 (`backed_up`/`degraded`), and that judgment is made from
 `graph_totals.backed_up`, not `teams_backed_up`.
@@ -467,11 +505,14 @@ cover a kind's recovery condition may declare it recovered — `KIND_OWNERS` in
 pinned across the language boundary by `test_kind_owner_contract_with_driver`.
 Anything else is refused and logged with the sentinel left intact. This exists
 because one shared object let the weaker probe win: the watcher's reachability
-check cannot distinguish "R2 unreachable" from
+check could not distinguish "R2 unreachable" from
 "the bucket cannot be listed" (the driver's `R2_LIST_OK=0` class), so its
 all-clear would close the driver's `R2_DOWN` — a false recovery, and the driver
 would then re-file on its next run: one duplicate issue + Telegram pair per
-hour. Each sentinel records the `writer` that filed it for diagnosis only — it
+hour. #3147 modelled the two as two kinds with two owners
+(see §"The two R2 tiers (#3147)" in this document), so each writer clears the
+tier its own
+probes cover. Each sentinel records the `writer` that filed it for diagnosis only — it
 is not an authority token, and a legacy object with no `writer` field resolves
 by the same `KIND_OWNERS` rule. See
 `docs/adr/ADR-011-resolution-authority-for-dr-alerts.md`.
@@ -544,6 +585,61 @@ enabled+unmeasurable cases, the empty-prefix measured-empty case (#3659), and
 dedup open/closed/404/blip/backfill. (The driver carries the exec bit so the
 harness invokes it directly — a `$(bash script)` command substitution trips the
 agent worktree guard, #1484.)
+
+### The two R2 tiers (#3147)
+
+R2_DOWN used to cover two failure modes with two different evidence requirements,
+so one kind was cleared by writers that had only one of them — and ADR-011 had to
+refuse the watcher the right to close `R2_DOWN` at all. That refusal was a guard
+around a modelling error rather than a model; #3147 models it. **One kind now
+corresponds to exactly one recovery condition and one evidence tier.**
+
+| Tier | Kind | Filed by | Recovery evidence (the ONLY thing that clears it) | Owner |
+|---|---|---|---|---|
+| unreachable | `R2_DOWN` (frozen key **retained**, meaning narrowed) | the driver's `head-bucket` preflight **and** the watcher's R2 read | the substrate **ANSWERS** — a probe reaches it | **watcher** (was driver) |
+| unlistable | `R2_UNLISTABLE` (**new**) | the driver's listing leg (`R2_LIST_OK=0`) and the app's `storage_error` (read from `/status` by the driver) | the driver's **whole-pool measurement**: `head-bucket` OK + `storage_error` clear + `R2_LIST_OK=1` | **driver** |
+
+**Why R2_DOWN keeps its key instead of being renamed `R2_UNREACHABLE`.**
+`tortoise/incident_kinds.py` freezes kind strings: the kind IS the R2 dedup key
+(`ops/alerts/{KIND}/{subject}.json`) AND the `[DR] {KIND}` adoption token, so a
+rename is a data migration (the module docstring carries the playbook), not a
+refactor. Keeping `R2_DOWN` means no live dedup object or open issue is orphaned
+and the R2-unreachable adoption path keeps working, while its *meaning* narrows to
+the reachability tier. `R2_UNLISTABLE` is a NEW key — there was no open
+`[DR] R2_DOWN` incident to hand-adopt when the split landed, so playbook step 2
+had nothing to do.
+
+**Ownership holds in BOTH directions** (indicator 4). The driver may not clear
+`R2_DOWN`: `kind_owner()`/`KIND_OWNERS` make it watcher-owned, so the driver's
+`resolve_global` refuses it and leaves the sentinel intact (pinned by
+`registry-cron.test.sh` case 66 and by `tests/test_alert_store.py`). The watcher
+may not clear `R2_UNLISTABLE`: its probe measures reachability, not the pool
+(pinned by `tests/test_alert_store.py`). No provenance exception was added — the
+`writer` field on a sentinel is diagnostic only.
+
+**Suppression is per-kind, so the two tiers suppress independently.**
+`ops/suppression.json` is keyed `{"KIND": {"until": "ISO"}}`, and the issue
+titles differ (`[DR] R2_DOWN …` vs `[DR] R2_UNLISTABLE …`), so pausing one tier
+does not pause the other and the GH-search adoption path cannot cross-adopt them
+(`github_issue.incident_title_matches` is `[DR] {kind}`-prefix anchored).
+
+**NAMED RESIDUAL — a watcher-side permission failure is filed at the
+reachability tier.** The watcher's probe is `storage.list("backups/")` →
+`list-objects-v2`. On FAILURE it cannot tell "R2 does not answer" from "R2
+answers but this key cannot list" (the body's premise that only the driver tests
+the listing tier is imprecise for the watcher), so it files the incident at the
+reachability tier (`R2_DOWN`) — the tier its evidence *claims*. When the real
+cause is a watcher-side `ListObjects` failure, the incident is therefore filed
+under `R2_DOWN` while the driver's `R2_UNLISTABLE` (if its listing leg also
+fails) is the accurate one; both can be open, and the `R2_DOWN` one clears as
+soon as the watcher's read succeeds again. This is a labelling residual, not a
+lost signal — filed as **#8472**. Anti-flap/hysteresis for the tier BOTH surfaces
+can file is **#3146**.
+
+**Not done here (deliberately).** ADR-011 is a dated, human-gated decision record
+and is not edited by this change; this runbook section is the operational home.
+The `R2_DOWN` key is retained, never renamed (see the migration playbook in
+`tortoise/incident_kinds.py`).
 
 ## Control plane / dialect (#2823)
 
@@ -628,12 +724,13 @@ warning ahead of it.
 | Kind | Meaning | Triage |
 |---|---|---|
 | STALE | a graph's newest archive is older than `BACKUP_STALE_THRESHOLD_MIN` (90) — subject `team` (default) or `team:graph` (custom) | Check sweep logs; run the sweep; R2 connectivity |
-| POOL_STALE | #4994: the DRIVER's app-independent direct-R2 leg measured at least one team's default archive older than `BACKUP_STALE_THRESHOLD_MIN` (90m). **Subject-less** (`_`): ONE incident names every stale tenant in its body, instead of one `[DR] STALE` per tenant. That N→1 cardinality is the fix — the driver filed one issue per tenant from inside its freshness loop (measured 2026-09-19: 51 issues/day, 11 landing within 40 minutes, one per tenant) for a single systemic fault. The kind is deliberately **not** `STALE`: the per-tenant residual stays **watcher-owned**, because the watcher resolves `STALE` per ORG in-process while the driver has no per-org probe — a per-tenant incident filed here would never close (`resolve_global` refuses a non-driver kind) and its sentinel would then swallow the next real recurrence. The body carries each measured tenant with its age in minutes, and says so explicitly when the pool listing did NOT complete (`R2_LIST_OK=0`), so a partial measurement never reads as the whole pool | Confirm backups are running (`/status` → `last_sweep`) and check R2 connectivity + the access key's `ListObjects` permission. **Auto-resolves** (driver-side `resolve_global`) on a **whole-pool** measured-fresh reading — every listing answered, no team stale or archive-less — held for `BACKUP_POOL_RESOLVE_STREAK` consecutive runs (default **2**). A SINGLE fresh reading never clears it (the pool reading can flap at the freshness boundary, so the clear is a recovery threshold, not a reading), and an **unmeasurable** pool neither clears it nor earns credit toward the threshold. Per-tenant `STALE` issues are closed by the **watcher**, per org. Both can be open at once **by design**: the pooled incident is the driver's app-independent record of the pool, the per-tenant `STALE` is the watcher's per-org trackable one. A legacy per-tenant `[DR] STALE` opened by the driver before this change is NOT adopted by the pooled kind (different kind, different title) and simply stays until the watcher's per-org recovery closes it |
+| POOL_STALE | #4994: the DRIVER's app-independent direct-R2 leg measured at least one team's default archive older than `BACKUP_STALE_THRESHOLD_MIN` (90m). **Subject-less** (`_`): ONE incident names every stale tenant in its body, instead of one `[DR] STALE` per tenant. That N→1 cardinality is the fix — the driver filed one issue per tenant from inside its freshness loop (measured 2026-09-19: 51 issues/day, 11 landing within 40 minutes, one per tenant) for a single systemic fault. The kind is deliberately **not** `STALE`: the per-tenant residual stays **watcher-owned**, because the watcher resolves `STALE` per ORG in-process while the driver has no per-org probe — a per-tenant incident filed here would never close (`resolve_global` refuses a non-driver kind) and its sentinel would then swallow the next real recurrence. The body carries each measured tenant with its age in minutes, and says so explicitly when the pool listing did NOT complete (`R2_LIST_OK=0`), so a partial measurement never reads as the whole pool | Confirm backups are running (`/status` → `last_sweep`) and check R2 connectivity + the access key's `ListObjects` permission. **Auto-resolves** (driver-side `resolve_global`) on a **whole-pool** measured-fresh reading — every listing answered, no team stale or archive-less — held for the declared recovery window (`BACKUP_POOL_RESOLVE_STREAK`, default **2**; #3146 generalized the per-kind window). A SINGLE fresh reading never clears it (the pool reading can flap at the freshness boundary, so the clear is a recovery threshold, not a reading), and an **unmeasurable** pool neither clears it nor earns credit toward the threshold. Per-tenant `STALE` issues are closed by the **watcher**, per org. Both can be open at once **by design**: the pooled incident is the driver's app-independent record of the pool, the per-tenant `STALE` is the watcher's per-org trackable one. A legacy per-tenant `[DR] STALE` opened by the driver before this change is NOT adopted by the pooled kind (different kind, different title) and simply stays until the watcher's per-org recovery closes it |
 | NEVER_BACKED_UP | an ELIGIBLE active graph exists with no archive yet (custom-graph incidents carry `team:graph`); orgs the sweep does not target (`tier=='free'` or `backup_enabled=false`) are `not_eligible` and open nothing when eligibility is CONFIRMED (an unconfirmed read fails open and is flagged `eligible_degraded`) — #3658 | Confirm graph is new/empty; if old, investigate |
 | METADATA_LOST | archives exist but the graph's per-graph state object missing | Re-run sweep (state re-created) |
 | BACKUP_SET_MISSING | state exists but no archives (bulk delete/erroneous prune) | Investigate R2; restore from a retained archive if possible |
 | DRIVER_DOWN | driver heartbeat stale (> 4h) — workflow disabled/dead | Re-enable the workflow; GH 60-day auto-disable |
-| R2_DOWN | R2 unreachable or not listable (driver-side signal: `head-bucket` failed, or it passed but `list-objects-v2` failed so the pool is unverifiable) | Check R2 creds/billing/bucket policy and the access key's `ListObjects` permission |
+| R2_DOWN | #3147: R2 is **UNREACHABLE** — no probe reaches the substrate. The driver files it when its own `head-bucket` preflight fails. Filed by BOTH surfaces: the driver's preflight AND the watcher's R2 read (on a FAILING read the watcher cannot tell the two tiers apart, so it files at this one — see the named residual in §"The two R2 tiers (#3147)") | Check R2 reachability (network/endpoint/billing) and the R2 credentials. **Auto-resolves** on the WATCHER's own evidence: its next R2 probe reaches the substrate. The driver deliberately CANNOT clear it (`resolve_global` refuses a watcher-owned kind) — its passing preflight is not the watcher's evidence |
+| R2_UNLISTABLE | #3147: R2 **answers** (a probe reaches it) but the pool cannot be **listed** — the driver's `R2_LIST_OK=0` class (typically the access key lacks `ListObjects`), or a non-null `/status.storage_error`. The unlistable half of the old single `R2_DOWN` key | Check the R2 access key's `ListObjects` permission (`head-bucket` succeeds while `list-objects-v2` fails), the bucket policy, and — for a `storage_error` filing — the app-side storage. **Auto-resolves** on the DRIVER's whole-pool measurement: preflight OK + `storage_error` clear + `R2_LIST_OK=1`. The watcher deliberately cannot clear it (its probe measures reachability, not the pool) |
 | ALERTER_DOWN | daemon's GitHub PAT dead (`gh_ok: false`) | **NOT EMITTED — no writer exists.** `gh_ok` is not on `/status`, so the driver has nothing to read; the condition currently surfaces only as a red workflow run. See "Kinds with no writer" below (deferred: #3033; the writer is tracked as **#3412**) |
 | APP_DOWN | app unreachable from the driver | Fly health; cold-start OOM (#545) |
 | WATCHER_DOWN | watcher heartbeat stale (daemon dead) | Check app logs; restart |
@@ -647,7 +744,7 @@ warning ahead of it.
 | GRAPH_NAME_RESOLUTION_FAIL | every enumerated team failed graph-name resolution (`resolution` results) — the control plane died between enumeration and the per-team phase (#669) | Check the control-plane read (`/status` → `last_sweep.source`, `graph_failures`). **Auto-resolves** on the next conclusive run in which at least one team's graph resolved |
 | LIVENESS_NO_WORK | driver ran but did nothing (sweep skipped + reconcile empty) | **NOT EMITTED — superseded, not wired.** The enabled-but-0-teams case is SWEEP_NO_COVERAGE (#2796); this kind was never emitted by any surface. See "Kinds with no writer" below (tracked by #3033) |
 | SIZE_GUARD_ABORT | team graph > 100k nodes — dump aborted | Investigate graph growth; raise limit deliberately. Closes via **re-baseline** (or a manual close) |
-| DATA_LOSS_CANDIDATE | a team's node count dropped >50% (or >0→0) | **Manual close only** — verify + re-baseline or restore |
+| DATA_LOSS_CANDIDATE | a **node-count drop against the org's prior persisted count**, on EITHER of two triggers — the detail says which. (a) The empty-content transition guard: overall `>50%`, or `>0 → 0` (steady-0 is a signal, not an incident). (b) The #661 **per-label drift guard**, which fires on a label whose previous count is **below `REGISTRY_LABEL_FLOOR` (default 10) on ANY drop**, and at or above that floor on a drop `>= REGISTRY_LABEL_DRIFT_PCT` (default 40%). ⚠️ **The two triggers disagree on magnitude, and they do not even carry the same fields — so identify the trigger from the detail before reading any number.** Only the label trigger (b) carries `overall_drop_pct` **and** `label_breaches`; the overall triggers (a) carry `drop_pct` and **no `label_breaches` key at all**. When the detail **has** `label_breaches`, read **that**, never a small `overall_drop_pct` alone: a 6.2% headline carrying a `floor=10 (any drop)` breach **IS this kind** — dismissing it on the `>50%` headline reads a real small-label wipe as a non-incident, which is how #4132–#4135 sat open, untriaged, from 2026-09-19 to the row's correction on 2026-10-14. On fire the just-uploaded archive is DELETED and `state.json` is not written, so this incident is the only trace | **Manual close only** — verify the drop is real churn (supersede / consolidation / retention) or genuine loss, then **re-baseline** `POST /v1/internal/backups/re-baseline {org_id}` (+ optional `graph_id`, default `"default"`) for a false positive, or **restore** for a real one. ⚠️ **Repetition proves nothing about churn vs. loss:** a fire does not advance the persisted baseline (no `state.json` write), so an unresolved drop re-fires with the same numbers every run until the baseline moves (a **re-baseline**) or the counts recover. Take the churn-vs-loss verdict from the data — supersede / consolidation / retention, or the restore-time diff — and treat a re-fire **after** a re-baseline as a fresh drop, not a stale incident. ⚠️ **Post-deploy transition — it RECURS until a re-baseline:** a baseline persisted before the per-label count excluded the projection's bookkeeping can carry an `EpMeta` / `GraphEventMeta` / `TeamMeta` label or a keyed `Meta` marker, so the next sweep reads each as `n → 0` and fires this kind for a label below the floor (deleting that run's archive). ⚠️ **This is NOT a single fire.** Because a fire does not advance the persisted baseline — the sweep returns before the `state.json` write — the same breach re-fires with the same numbers on **every** subsequent sweep, each time deleting that run's fresh archive, until an operator **re-baseline**s. Disposition: verify the drop is churn, then re-baseline; the repetition stops only then |
 | P0_GUARD_FAIL | a dump's manifest did not name the graph it was taken from — objects deleted. ⚠️ **the producer is currently unreachable (#3423): its check compares the manifest against the value it passed in**, so treat an open incident as operator-raised, not sweep-raised | Investigate the sweep. **Auto-resolves** on the next conclusive sweep in which that graph's dump passes the guard (the kind had no resolver before #3030, so it stayed open forever) |
 | RESTORE_DRILL_FAILED | the #2317 scheduled monthly drill failed or breached the ≤15-min RTO (subject `global`; detail carries team/archive/duration) | Investigate the drill record (`ops/drills/last.json`); re-drill after fixing the restore path; auto-resolves on the next successful/no-candidates scheduled run |
 | ANALYTICS_SINK_DEGRADED | #3820: the `analytics_events` write sink degraded. Subject-less (platform-level). Detail carries counts + a reason code only — `outcome` (`fallback` = the event is on the local JSONL; `dropped` = it reached no sink at all), `reason` (`fallback_dir_unavailable`/`fallback_append_failed`/`supabase_env_incomplete`), and `fallback`/`dropped`/`supabase`/`unconfigured` counts. Filed on the first `dropped`, or once the degraded streak reaches 3 consecutive writes; resolved by the next 2xx write (after a restart the FIRST 2xx write of the new process resolves the pre-restart incident — the resolve is probed once per process, not gated on the process-local latch). **Not gated on `BACKUP_SWEEP_ENABLED`** (D5a) — it files on a backups-disabled deployment too, and needs only the alert credentials (`DR_ISSUES_PAT` + `GH_REPO` + the R2 dedup seam); with no PAT the counter + WARNING are the residual. **D5b's absence half is IMPLEMENTED (#3944)** — a sink that silently STOPS emitting now files this same kind. The app writes a fixed-cadence CANARY through the real sink path (reserved event `_sink_canary` / org `__sink_canary__`, so canary rows stay out of every per-org analytics read) and publishes a last-**delivered** timestamp plus its own `Period+Grace` threshold (`silent_threshold_s` = 3x the canary period, default 900s) on `GET /v1/internal/backups/status` under `.analytics`. The hourly DR driver reads it and files when the integer second-count of `age_s` exceeds `silent_threshold_s` (the comparison truncates the fraction), or when `age_s` is **ABSENT** (no delivery since boot) and `uptime_s` exceeds the threshold. A **PRESENT but unmeasurable** `age_s` — a shape the app cannot emit, so only a non-compliant `/status` produces it — changes NOTHING: a present age proves a delivery happened, so it is neither stale (no false file) nor measurable (no false resolve) (the PROBE timer is in-process; the ALARM is external, because a check that dies with the process it monitors cannot report that process's death). The heartbeat is a **last-success**, never a last-attempt, stamp, and it travels `/status` — not the sink — so the sink cannot silence its own alarm. The two legs share this kind and the one R2 dedup object (`ops/alerts/ANALYTICS_SINK_DEGRADED/_.json`), so absence and degradation cannot double-file. The driver self-heals on a fresh heartbeat, which is the backstop the app's in-process resolve flag cannot be (it can be CLEAN while an incident is open); the resolve requires a **measured** `age_s`, so a cold start and an unmeasurable/malformed block leave an open incident UNTOUCHED — absence of evidence never closes one, and a crash-looping deploy that never reaches its first write cannot re-resolve it every hour. `unknown`/unmeasurable is NEVER stale: an absent or malformed block (an older app during a rolling deploy) and a deployment with no sink intended (selfhost/dev: neither `SUPABASE_URL` nor a service key) leave the kind untouched. The uptime fallback is reserved for an **absent** age; a present-but-unmeasurable one is not admitted into it, because a delivery demonstrably happened (a negative `age_s` from a pre-clamp revision used to fall through and FILE a false incident on a healthy sink). | Treat as a **sink outage, not a DR outage**: check the Fly secrets `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` and the Supabase project status / RLS on `analytics_events`. After the #3820 review, a `fallback` with reason `supabase_env_incomplete` means exactly ONE of the pair is set — #3677's own shape (a URL with the key resolving to `""`); check for a renamed key. `fallback` events are recoverable from `~/.tortoise/analytics_fallback.jsonl` (an ephemeral Fly rootfs — copy it off the machine before the next deploy/replacement). `dropped` events are gone. Cross-check `tortoise_analytics_events_total{outcome=…}` on `/metrics` **where a scrape exists** — in today's production nothing scrapes it, so the incident is the signal (#3820). **For the #3944 absence leg, read `.analytics` in `/status` first:** `canary_attempts: 0` with `uptime_s` past the threshold means the CANARY never ran (a lost heartbeat task, or a loop that never started) — the instrument is dead, not the sink; a **non-zero** `canary_attempts` with a growing `age_s` means the canary RAN and nothing landed — a saturated/refused telemetry-pool offload (the counter is incremented *before* the emit, so a refused offload lands here, not under zero attempts), a real sink outage, or a half-configured env. If the crash is `configured:false, intended:true`, exactly one credential is set. **Known residual:** a dead canary while real user traffic still delivers keeps the heartbeat fresh and files nothing — deliberate, because gating on `canary_attempts` would flap (the app's next delivered write would immediately resolve it and the driver would re-file hourly); the instrument's own liveness is the class tracked by #4573 (a disabled/never-run *receiver* also silences this alarm, and #4573 remains open for that). |
@@ -773,7 +870,10 @@ Three paths exist:
 1. **Producer-side clear** (`AlertStore.resolve_incident` → close the issue, push
 the resolved Telegram, delete the dedup object). The watcher drives this for the
 absence kinds (`STALE`, `NEVER_BACKED_UP`, `METADATA_LOST`, `BACKUP_SET_MISSING`,
-`R2_DOWN`, `DRIVER_DOWN`); the sweep endpoint drives it for **its own guards**
+`DRIVER_DOWN`) **and for `R2_DOWN`** (#3147: its own R2 read is the reachability
+evidence); the driver drives it for `R2_UNLISTABLE` (the whole-pool measurement is
+its evidence) and for the rest of its substrate kinds; the sweep endpoint drives
+it for **its own guards**
 (`P0_GUARD_FAIL`, `NO_ELIGIBLE_TEAMS`, `ENUM_DELTA`,
 `GRAPH_NAME_RESOLUTION_FAIL`) — before #3030 those four had no resolver on any
 surface and stayed open forever (the live case was #2821).
@@ -807,16 +907,33 @@ reconcile leg only on a **completed** 2xx exchange (curl exit 0 with a body — 
 **SKIPPED** ride-along (sweep `already_running`, or a timed-out/empty sweep)
 clears neither — no evidence was gathered, and the driver logs that it is leaving
 them unchanged. `POOL_STALE` (#4994) clears on a whole-pool measured-fresh
-reading held for `BACKUP_POOL_RESOLVE_STREAK` consecutive runs (default 2): the
-recovery count is carried as a `fresh_streak` field on the incident's **own** R2
+reading held for `BACKUP_POOL_RESOLVE_STREAK` consecutive runs (default 2, now
+the generic per-kind recovery window — #3146): the
+recovery count is carried as a `healthy_streak` field on the incident's **own** R2
 dedup object, so it is created with the incident and deleted with it by
 close-then-delete-to-resolve, and any run that is stale or unmeasurable **resets
 it to 0** — a pool that is only fresh on alternate runs never reaches the
 threshold. Delete-to-resolve is what makes a recurring fault page again: the
 cleared object cannot swallow the next occurrence (the `OVERRIDES` ruling
 recorded on #5047 — we re-file instead of reopening one record).
-3. **Manual close only** — `DATA_LOSS_CANDIDATE` (a >50% node drop needs a human
-verdict: verify + re-baseline, or restore). `SIZE_GUARD_ABORT` closes through
+3. **Manual close only** — `DATA_LOSS_CANDIDATE` needs a human verdict (verify +
+re-baseline, or restore). Its trigger is **either** an overall `>50%` / `>0 → 0`
+drop **or** the #661 per-label drift guard (any drop on a label below
+`REGISTRY_LABEL_FLOOR`, default 10; `>= REGISTRY_LABEL_DRIFT_PCT`, default 40%,
+at or above it) — so a detail carrying both `overall_drop_pct` and a
+`label_breaches` entry is still this kind at a **low headline**: the four open
+incidents read 6.2 / 12.5 / 12.5 / 7.1% overall, yet each carries a
+`floor=10 (any drop)` breach — read the breach, not the headline percentage.
+(The overall trigger carries `drop_pct` and
+no `label_breaches` key, so the field to read follows the trigger.)
+⚠️ **Post-deploy transition — it RECURS:** a baseline persisted before the
+per-label count excluded the projection's bookkeeping (`EpMeta` /
+`GraphEventMeta` / `TeamMeta`, or a keyed `Meta` marker) reads each such label
+as `n → 0` beneath the floor. This is **not a single fire**: the sweep returns
+before it writes `state.json`, so the baseline never advances and the same
+breach re-fires every sweep — deleting each run's fresh archive — until an
+operator re-baselines. Disposition is the existing verify + re-baseline.
+`SIZE_GUARD_ABORT` closes through
 **re-baseline** (`POST /v1/internal/backups/re-baseline` resolves it together with
 `DATA_LOSS_CANDIDATE`). Any kind added here must name the verification the
 operator performs.
@@ -896,7 +1013,7 @@ keep claiming to be dead.
 - **Drill endpoint:** `POST /v1/internal/backups/drill` `{org_id, backup_key}` — internal-key only; restores into `_drill_*` scratch (live-phase binds scratch; registry end-stamp skipped; ≥1h cooldown). Zero production writes — asserted server-side. The archive's key shape names its graph; the target resolves through the ACTIVE-graph seam — **drilling a deleted/quarantined graph's archive is refused (409)** (#2313 tombstone guard, #2304). #2317: every drill records pass/fail + measured restore time (`duration_s` / `rto_s` / `within_rto`) to `ops/drills/last.json` (surfaced on `/status` → `last_drill`) — restore time is measured against the committed ≤15-min RTO, not assumed.
 - **Scheduled drill (#2317):** `POST /v1/internal/backups/drill-scheduled` (no body) — the monthly, unattended leg driven by `.github/workflows/registry-drill-cron.yml` (`23 4 1 * *`). The app auto-selects the OLDEST eligible NESTED archive across teams (`backup_sweep.list_drill_candidates` — 5-segment per-graph pools only; legacy flat 4-segment artifacts are operator-drill territory), skips candidates whose graph is no longer ACTIVE (tombstone guard), drills the first eligible one through the same core as the manual endpoint (cooldown + boot-GC backstop shared), and records the outcome. Failure or an RTO breach opens a deduplicated **RESTORE_DRILL_FAILED** incident (GH issue + Telegram via the app's own secrets — the workflow carries only the internal key, no R2/PAT creds); success and the `no_candidates` state resolve it. The wrapper `.github/scripts/registry-drill-scheduled.sh` makes the job green/red (429 cooldown and `no_candidates` are benign exits — the chronic 0-archive state is the existing `NEVER_BACKED_UP` / `SWEEP_NO_COVERAGE` alarm's job; `LIVENESS_NO_WORK` is a writer-less reserved name, see "Kinds with no writer"). Manual drills never file incidents (an operator is present).
 - **ACL rebuild after full-platform restore:** a DR into a fresh FalkorDB server restores graph DATA from R2 — per-graph ACL server users do NOT live in the graph namespace. Run `POST /v1/internal/backups/acl-reconcile` (internal key) to replay the idempotent `create_acl_user` upsert for every active custom graph of every eligible team (default graphs ride the team-scoped ACL; tombstoned graphs never touched).
-- **Production restore (`drill:false`) is NOT in scope (501)** — restore-and-rotate machinery retired with the registry (#669).
+- **Production restore (`drill:false`):** `POST /backups/restore` (session alias `/v1/backups/restore`, #4144) is LIVE — `backups_restore` in `tortoise/hosted_api.py`, calling `hosted_backup.restore_backup(drill=False)`. It REPLACES live data: pre-restore safety copy → **delete the live graph** → `GRAPH.COPY` temp→live, then an index rebuild. Not a drill, not read-only. Gates, in order: org session auth (`get_current_org_session`); tier entitlement (`_require_backup_tier`, derived from `product/pricing.json` `features.hourly_backups` — **not JSON `true` on any tier today (`false` on free/solo/anon, `"planned"` on pro/team), so the route answers 402 for all tiers**; a JSON `true` enables a tier with zero code change, #656); org-wide key only — a graph-bound key is refused (`_reject_graph_bound_org_surface`) and `graphs:write` is required (`_require_scope`); **`confirm=true` required** (else 400); a per-org restore lock (`_org_restore_lock`) serializes concurrent restores. The target resolves through the ACTIVE-graph seam (`backup_sweep.resolve_active_graph` — tombstone guard, #2304/#2313) and a custom-graph key is refused ("graph-bound restore required" — no graph-bound archive-restore endpoint exists today, so the refusal is terminal: this endpoint restores the org DEFAULT graph only). Failure modes to expect on a real restore: **409** (`RestoreVerificationError` — empty/incomplete archive over a live graph, or a count mismatch), **400** (bad, missing or cross-team key), **503** (backend or storage unavailable), 500 otherwise. #669 retired the **registry/control-plane** restore-and-rotate path only (Supabase PITR covers it) — the tenant-graph restore above is unaffected (#305 shipped it; #3880 corrected this line, which had wrongly claimed a 501).
 - **Rollout drill:** operator-invoked (documented commands in the drill workflow) or via the scheduled endpoint (`workflow_dispatch` against a seeded archive — the CI/schedule acceptance). Requires ≥1 team archive; in the chronic 0-teams state run against a seeded scratch graph or defer with a recorded reason (the drill record shows `no_candidates`). **Re-drill after any restore-path code change, R2 layout change, or key rotation.**
 - **Mid-drill crash:** boot GC sweeps `_drill_*`/`registry_drill_*`/`*_restore_*`/`*_pre_restore_*` older than 6h.
 
@@ -1023,7 +1140,8 @@ curl -m 900 -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
 - **App down AND driver disabled simultaneously** — no alert (documented residual; reopen condition: first unattended app-down).
 - **NEVER detection while the app is down** — daemon-only; a never-backed-up team during an outage is silent until recovery.
 - **GH single-provider scheduling axis** — the driver terminates in GitHub; a GH incident delays backup triggers (the daemon still alerts).
-- **R2 outage** — neither fabricates (UNKNOWN on fresh boot) nor silences (GH-search fallback + driver R2_DOWN) once a known-good baseline exists.
+- **R2 outage** — neither fabricates (UNKNOWN on fresh boot) nor silences (GH-search fallback + the driver's `R2_DOWN`/`R2_UNLISTABLE` filings) once a known-good baseline exists.
+- **Watcher-side `ListObjects` failure is labelled at the reachability tier (#3147 → #8472)** — the watcher's R2 read cannot tell "R2 does not answer" from "R2 answers but this key cannot list", so it files `R2_DOWN` while `R2_UNLISTABLE` is the accurate kind. The fault is still filed and paged; only the kind label is imprecise. See §"The two R2 tiers (#3147)".
 
 ### Post-#2313 residuals (recorded 2026-09-06 audit — #2378)
 

@@ -2260,7 +2260,26 @@ def owner_socket_of(client) -> str | None:
     return sock if isinstance(sock, str) and sock else None
 
 
-def record_owner(socket_file: str | None) -> bool:
+#: `record_owner`'s tri-state answer (#4944). The in-flight hand-off must
+#: tell "this call JOINED a record this process already holds" (this client
+#: IS counted, so the last-client decision sees it) apart from "this call
+#: wrote NOTHING and counted nothing" (the client is live but UNRECORDED). A
+#: bool cannot, and the hand-off used to infer it from a refcount DELTA
+#: (`_owner_refcounts[key] > before`) whose two reads are not atomic — a
+#: same-process, same-socket concurrent construction whose increment landed
+#: between them made a FAILED write look recorded, releasing the in-flight
+#: claim for a live, unrecorded client (#4944, measured).
+#:
+#: `True`/`False`/`None` keep every existing caller correct: only the FAILURE
+#: arm moved, from `False` to `None` (both falsy, so `if record_owner(...)` is
+#: unchanged, and `False` still means exactly what it did — "a claim already
+#: existed and was re-used").
+OWNER_RECORD_CREATED = True
+OWNER_RECORD_JOINED = False
+OWNER_RECORD_FAILED = None
+
+
+def record_owner(socket_file: str | None) -> bool | None:
     """Record THIS process as a live owner of the server at ``socket_file``.
 
     Called from the guarded ``tortoise.FalkorDB`` constructor (the single
@@ -2268,12 +2287,21 @@ def record_owner(socket_file: str | None) -> bool:
     in one process share one record, so closing the first of two clients on
     a shared server must not drop the record that still protects the
     second (that would let the reaper kill a live co-tenant's server).
-    Returns True when a record was created. Never raises — an unwritable
-    socket dir simply leaves the server uninstrumented, and the reaper
-    falls back to its global gate (fail closed).
+
+    TRI-STATE answer (#4944) — never infer it from a counter delta:
+
+      * ``OWNER_RECORD_CREATED`` (True)  — this call wrote the record;
+      * ``OWNER_RECORD_JOINED``  (False) — this call incremented a record
+        this process already held, so the client IS recorded;
+      * ``OWNER_RECORD_FAILED``  (None)  — nothing was written and the count
+        was left untouched: the client is live but UNRECORDED.
+
+    Never raises — an unwritable socket dir simply leaves the server
+    uninstrumented, and the reaper falls back to its global gate (fail
+    closed).
     """
     if not socket_file:
-        return False
+        return OWNER_RECORD_FAILED
     key = os.path.abspath(socket_file)
     if _owner_refcounts.get(key, 0) > 0:
         _owner_refcounts[key] += 1  # this process already owns the record
@@ -2288,13 +2316,17 @@ def record_owner(socket_file: str | None) -> bool:
         if key in _owner_record_pending:
             with contextlib.suppress(Exception):
                 _write_owner_record_file_tracked(socket_file)
-        return False
+        # The increment above DID count this client (whether or not the
+        # pending retry landed) — the COUNTED answer, never the failure one.
+        return OWNER_RECORD_JOINED
     # #4487: this process's own start time is invariant — resolved once in
     # `_owner_record_stamp` (see `_own_start_time`), not a `ps` fork on every
     # construction. #3630: the record write is split out so the at-fork
     # adoption can reuse it without moving the refcount.
     if not _write_owner_record_file_tracked(socket_file):
-        return False
+        # Nothing written, count untouched — the ONLY arm the hand-off must
+        # read as "unrecorded" (#4944).
+        return OWNER_RECORD_FAILED
     _owner_refcounts[key] = _owner_refcounts.get(key, 0) + 1
     # #4577: hold the shared liveness lock alongside the record file. The
     # `key not in` guard keeps the fd map consistent with the refcount map —
@@ -2304,7 +2336,7 @@ def record_owner(socket_file: str | None) -> bool:
         fd = _acquire_owner_lock(socket_file)
         if fd is not None:
             _owner_lock_fds[key] = fd
-    return True
+    return OWNER_RECORD_CREATED
 
 
 def forget_owner(socket_file: str | None, client=None) -> bool:
@@ -2527,12 +2559,19 @@ def _inflight_replay_holds(key: str) -> bool:
 # the cross-process gap is bounded only by the rarity of that create failing
 # while the socket dir's owner-record store is readable.
 #
-# Residuals, named rather than implied (see also #4944): the publish/retract
-# decisions and the dictionary they are derived from are taken under
+# Residuals, named rather than implied: the publish/retract decisions and
+# the dictionary they are derived from are taken under
 # `_inflight_claim_lock`, so two constructions in THIS process cannot lose
-# each other's claim. `_owner_refcounts`' non-atomic hand-off is #4944 and is
-# untouched — when it mis-reads a hand-off as recorded, this claim is
-# retracted with it. A publisher SIGKILLed between publish and retract leaves
+# each other's claim.
+#
+# #4944 — CLOSED for this claim's sake. The hand-off no longer infers "this
+# client is recorded" from a refcount DELTA (`_owner_refcounts[key] >
+# before`); it reads `record_owner`'s tri-state answer directly, so a
+# same-process, same-socket increment landing inside the window can no longer
+# make a FAILED write look recorded and retract this claim with it. The
+# measured interleaving is `fail_with_concurrent_increment`, pinned by
+# `test_owner_handoff_counter_move_cannot_mask_a_failed_write`. A publisher
+# SIGKILLed between publish and retract leaves
 # a file whose pid is provably dead: `_inflight_claim_holds` ignores it and no
 # reader's verdict changes (a claim-only dir reads as "no owner evidence"
 # exactly as a missing one); the file is reclaimed with the socket dir.
@@ -2709,7 +2748,8 @@ def _install_owner_record_patch() -> None:
     matching the guard's previous behaviour. The #4879 in-flight claim that
     spans the call is released in the same `finally` on the abort and on a
     successful hand-off; if the HAND-OFF itself raises it is deliberately KEPT
-    (fail CLOSED — the client is alive but unrecorded). Never raises — a
+    (fail CLOSED — the client is alive but unrecorded), and so is a hand-off
+    that answers `OWNER_RECORD_FAILED` (#4944). Never raises — a
     `record_owner` I/O failure must never break client construction.
     """
     global _ORIGINAL_REDISLITE_INIT
@@ -2734,8 +2774,8 @@ def _install_owner_record_patch() -> None:
         # claim is RELEASED only when the construction left no live claim
         # behind: it either aborted inside `original(...)` (`release_claim`
         # stays True), or the owner record was written successfully. A
-        # HAND-OFF that did not record the client — `record_owner` returned
-        # falsy (its documented I/O-failure mode) OR raised — is deliberately
+        # HAND-OFF that did not record the client — `record_owner` answered
+        # `OWNER_RECORD_FAILED` (#4944) OR raised — is deliberately
         # NOT released: the client is alive but UNRECORDED, so dropping the
         # claim would make the last-client decision blind to a live client
         # (the #3653 failure this guard exists to stop), while a claim left
@@ -2799,28 +2839,18 @@ def _install_owner_record_patch() -> None:
                 # `record_owner` is documented NEVER-RAISE, so its RETURN
                 # VALUE — not the `except` below — is the real failure
                 # signal; the exception branch is a net, not the contract.
-                # The value is AMBIGUOUS on its own: `False` means BOTH "this
-                # process ALREADY owns the record" (the refcount was STILL
-                # incremented — recorded) AND "no record could be written"
-                # (`os.makedirs`/`os.open` OSError — the refcount is UNTOUCHED
-                # — NOT recorded). Read the refcount to tell them apart: this
-                # client is recorded exactly when it advanced. (The delta is
-                # NOT atomic — #4944, a documented residual: a concurrent
-                # hand-off on the same socket can mis-read this. It is
-                # untouched here, but note its blast radius now includes the
-                # on-disk claim, since `release_claim` below gates its
-                # retraction.) Anything else (a falsy socket, or a failed
-                # write) is live-but-UNRECORDED and must KEEP the claim (fail
-                # CLOSED, lifetime note above).
-                owner_key = (
-                    os.path.abspath(sock)
-                    if isinstance(sock, str) and sock else None)
-                before = (_owner_refcounts.get(owner_key, 0)
-                          if owner_key else 0)
-                record_owner(sock)
-                recorded = (
-                    owner_key is not None
-                    and _owner_refcounts.get(owner_key, 0) > before)
+                # #4944: READ THE ANSWER FROM THE CALLEE, never from a
+                # refcount delta. The old delta (`_owner_refcounts[key] >
+                # before`) was not atomic, so a same-process, same-socket
+                # concurrent construction whose increment landed between the
+                # two reads made a FAILED write look recorded and released
+                # this claim for a client that was live and UNRECORDED
+                # (measured: `fail_with_concurrent_increment`).
+                # `OWNER_RECORD_FAILED` — a falsy socket, or a write that
+                # wrote nothing and counted nothing — is live-but-UNRECORDED
+                # and must KEEP the claim (fail CLOSED, lifetime note above);
+                # BOTH counted arms (created, joined) release it.
+                recorded = record_owner(sock) is not OWNER_RECORD_FAILED
                 if not recorded:
                     release_claim = False
             except Exception:

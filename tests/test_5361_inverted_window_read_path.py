@@ -200,18 +200,25 @@ def test_zero_length_window_is_not_flagged(sdk):
     assert out["found"] is False and "malformed" not in out, out
 
 
-# ── The found path is untouched ───────────────────────────────────
+# ── The found path keeps the contract, with no #5361 flag ───────────
 
-def test_covering_window_reply_is_unchanged(sdk):
-    """When a window covers, the reply must be exactly as before — no new key.
+def test_covering_window_reply_carries_no_malformed_flag(sdk):
+    """When a window covers, the #5361 flag set is unchanged and the contract holds.
+
+    The #5361 marker is scoped to the absence branch, so this covering reply
+    gains no `malformed` and no `nearest` — that is the "unchanged" the test
+    pins. It does NOT claim the whole reply is byte-identical: since **#7818**
+    every reply, including this one, additionally carries `status` (and `found`
+    was already present here).
 
     Value that makes it fail: a date INSIDE the planted window
     ('2020-06-01'..'2030-06-01' at '2025-01-01'), where ``found`` is True and
-    ``valid_point`` is returned. The fixture reaches it. The flag is scoped to
-    the absence branch precisely so this reply does not change shape.
+    ``valid_point`` is returned. The fixture reaches it. The `status` assertion
+    reds on the pre-#7818 code (`KeyError: 'status'`).
     """
     pid = _plant(sdk, valid_from="2020-06-01", valid_to="2030-06-01")
     out = sdk.get_historical_knowledge(pid, "2025-01-01")
+    assert out["status"] == "found", out  # #7818: uniform on every reply
     assert out["found"] is True, out
     assert out["valid_point"]["id"] == pid
     assert "malformed" not in out, out

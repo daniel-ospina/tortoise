@@ -785,11 +785,15 @@ def test_hash_pair_sweep_clean(corpus):
 def _required_sweep(g) -> int:
     """§7 harness pin: no ontology-REQUIRED violation on any Source.
 
-    D10 (ONTOLOGY v3.15 §4.4): a document is a :Source keyed ``url`` that
-    carries ``documentKind`` and NOT the corpus-source fields ``sourceKind`` /
-    ``contentHash`` (§4.6). Each family is checked against its OWN required
-    set — the corpus clause is byte-identical to the pre-D10 pin, so this is
-    a split, never a relaxation.
+    D10 (ONTOLOGY v3.15 §4.4) + #5082: a document is a :Source keyed ``url``
+    that carries ``documentKind`` AND ``sourceKind='document'`` (§4.6 marks
+    ``sourceKind`` REQUIRED on every :Source; it is the TYPE axis, distinct
+    from ``documentKind``'s genre axis). ``contentHash`` is NOT guaranteed on
+    a document node — the #5422 anchor is written on the path that READS
+    content (the extraction ingest), while the #900 index path emits no hash —
+    so the corpus clause keeps the ``contentHash`` requirement and is
+    byte-identical to the pre-D10 pin: a split keyed on ``documentKind``,
+    never a relaxation.
     """
     return g.query(
         "MATCH (s:Source) WHERE "
@@ -797,7 +801,8 @@ def _required_sweep(g) -> int:
         "   OR s.sourceKind IS NULL OR s.contentHash IS NULL "
         "   OR s.contentHash='' OR s.ingestedAt IS NULL)) "
         "  OR (s.documentKind IS NOT NULL AND "
-        "      (s.url IS NULL OR s.url='' OR s.ingestedAt IS NULL)) "
+        "      (s.url IS NULL OR s.url='' OR s.ingestedAt IS NULL "
+        "       OR s.sourceKind IS NULL)) "
         "RETURN count(s)").result_set[0][0]
 
 
@@ -819,11 +824,12 @@ def test_e2e1_list_sources_flat_rows_and_by_kind(corpus):
         rows = sdk.list_sources()
         # list_sources is the PROVENANCE/corpus registry: 3 corpus Sources.
         # D10 (#5026): a document node is also a :Source, but it is NOT a
-        # provenance source — it carries documentKind and NO sourceKind, and
-        # its url is not a corpus:// permalink. Including it would add a
-        # sourceKind=None row and double-count the file (corpus Source + doc
-        # node), breaking the by_kind vocabulary pin below. So it is filtered
-        # out, keeping the pre-D10 row set byte-identical.
+        # provenance source — it carries documentKind (and, since #5082, the
+        # REQUIRED sourceKind='document'), and its url is not a corpus://
+        # permalink. Including it would add a second 'document' row and
+        # double-count the file (corpus Source + doc node), breaking the
+        # by_kind vocabulary pin below. So it is filtered out, keeping the
+        # pre-D10 row set byte-identical.
         assert len(rows) == 3
         kinds = {row["sourceKind"] for row in rows}
         assert kinds == {"agentSession", "meeting_summary", "document"}
@@ -834,6 +840,15 @@ def test_e2e1_list_sources_flat_rows_and_by_kind(corpus):
         assert r["by_kind"] == {"agentSession": 1, "meeting_summary": 1,
                                 "document": 1}
         g = sdk._get_proj().g
+        # #5082 (§4.6 + #5013 Q2): a document node IS a :Source and carries
+        # BOTH axes — sourceKind='document' (the TYPE) beside its documentKind
+        # genre. Before this the node carried `sourceKind = NULL`, a
+        # declared-but-unwritten REQUIRED field.
+        doc_rows = g.query(
+            "MATCH (s:Source) WHERE s.documentKind IS NOT NULL "
+            "RETURN s.url, s.sourceKind, s.documentKind").result_set
+        assert doc_rows, "expected at least one document :Source"
+        assert all(r[1] == "document" for r in doc_rows), doc_rows
         assert _required_sweep(g) == 0
     finally:
         sdk.close()

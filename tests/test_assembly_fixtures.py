@@ -11,11 +11,14 @@ substrate, so a vacuous arm must be impossible to discover late):
   the THIRD object bookshelf is outside BOTH resolved subgraphs, so the
   assembled arm's B=0 is structurally reachable).
 * R9: flag-OFF legacy run_ask_lane() at DEFAULT caps admits FEWER than 2 of the two
-  deep-rank golds (the 87-row corpus ranks both golds BELOW the default
-  pool-40 cutoff and INSIDE a widened 120-row fetch). #3095 re-measurement
-  (post-#3018): the engine's opaque fulltext order moved while the corpus
-  was unchanged, so the golds are now both outside DEFAULT — the
-  order-independent statement of the same geometry. Indices are deliberately
+  deep-rank golds (the tolerated set {0, 1}) while a widened 120-row fetch
+  reaches BOTH. #3095 re-measurement (post-#3018): the engine's opaque
+  fulltext order moved while the corpus was unchanged — the 87-row corpus
+  now MEASURES 0 golds inside the default pool-40 against 1 pre-#3018, and
+  (either way) both are INSIDE the widened fetch. #3273: the BOUND is the
+  contract and it is one-sided (spec R9 / plan Task 7 pin "<2", never "0");
+  0-vs-1 is a measurement of the engine's opaque order of tied rows, so both
+  pass and only BOTH golds in DEFAULT fails. Indices are deliberately
   NOT recorded: they are incidental to the engine's opaque sequence.
 
 Docker lane only (live FalkorDB — dedicated per-test graph with fulltext,
@@ -42,7 +45,7 @@ from tortoise.sdk import TortoiseSDK
 
 # ── Live-FalkorDB + FTS availability ───────────────────────────────────────
 _URI = os.environ.get(
-    "TORTOISE_DB_URI",
+    "TORTOISE_DB_URI",  # empty-uri-default-ok: #2815 skip declared; converting flips the tier-2 lane
     _live_utils.docker_uri("tortoise_test_matrix")).rstrip("/")
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
@@ -136,8 +139,9 @@ def _legacy_ask(sdk, monkeypatch, question: str, *, flag_off: bool = True):
         monkeypatch.delenv("TORTOISE_ASK_CONNECTED_ASSEMBLY",
                            raising=False)
     # #4105: pin the HISTORICAL ask-lane caps. This helper is the "legacy /
-    # DEFAULT" arm of the R9 geometry calibrations, whose contract ("the
-    # pool-40 binds below the deep golds") is a statement about THAT shape;
+    # DEFAULT" arm of the R9 geometry calibrations, whose contract (the
+    # DEFAULT window does not admit BOTH deep golds — the tolerated set
+    # {0, 1}) is a statement about THAT shape;
     # the product defaults were raised to 200/400/200/16000/128000 bytes and would
     # otherwise silently admit both deep golds and make the calibration
     # vacuous.
@@ -336,9 +340,15 @@ def test_deep_rank_geometry_calibration(sdk, monkeypatch):
     "almanac") deeper. #3018 removed the second post-CREATE write whose
     fulltext index-statistic skew produced that opaque order, so the scan
     order moved: on the SAME corpus (87 rows) BOTH golds now rank OUTSIDE
-    the default pool-40 and INSIDE a widened 120 fetch. The specific opaque
-    ranks are NOT pinned — they are incidental to the engine's sequence; only
-    the default-below / widened-above RELATIONSHIP is the contract.
+    the default pool-40 and INSIDE a widened 120 fetch — that re-measurement
+    moved the bound's MEASURED value from 1 to 0, it did not move the
+    contract. The specific opaque ranks are NOT pinned — they are incidental
+    to the engine's sequence; only the default-below / widened-above
+    RELATIONSHIP is the contract, stated one-sidedly as the tolerated set
+    {0, 1} (#3273: a `== 0` pin would re-pin opaque order and re-create the
+    #3095 main-red; 0-vs-1 differs only in the engine's sequence of tied
+    rows, so a single-gold leak is tolerated BY DESIGN — only BOTH golds in
+    DEFAULT fails).
 
     The calibration pins the delta Task 7's A-widened arm depends on,
     ORDER-INDEPENDENTLY: the DEFAULT window admits FEWER THAN 2 of the two
@@ -346,19 +356,24 @@ def test_deep_rank_geometry_calibration(sdk, monkeypatch):
     BOTH. The DEFAULT window must also stay NON-EMPTY and BOUNDED (the pool
     binds BELOW the golds, it does not starve and does not silently widen): a
     known in-pool crowd row is asserted present and the row count is bounded.
-    Fails if a deep gold leaks into DEFAULT evidence (the pool stopped
-    binding) or vanishes from widened reach (the widened arm would be
-    vacuous in the other direction)."""
+    Fails if BOTH deep golds leak into DEFAULT evidence (the A-widened arm
+    would be vacuous) or if either vanishes from widened reach (the widened
+    arm would be vacuous in the other direction). A single gold inside
+    DEFAULT is the TOLERATED pre-#3018 order and does not fail (#3273)."""
     d = ag.build_deep_rank_substrate(sdk)
     res = _legacy_ask(sdk, monkeypatch, d["question"])
     ev = res.get("evidence", "")
     # ORDER-INDEPENDENT gold admission (the invariant this calibration
-    # owns): the DEFAULT window admits FEWER THAN 2 of the two deep golds.
-    # Measured post-#3018 = 0, pre-#3018 = 1 — both satisfy the contract, so
-    # a future engine re-order does not falsely fail here the way the
-    # pre-#3018 "G1 is in-pool" phrasing did.
+    # owns): the DEFAULT window admits FEWER THAN 2 of the two deep golds,
+    # written as the named TOLERATED SET {0, 1}. Measured post-#3018 = 0,
+    # pre-#3018 = 1 — both satisfy the contract, so a future engine re-order
+    # does not falsely fail here the way the pre-#3018 "G1 is in-pool"
+    # phrasing did. #3273: the tolerated set is deliberate (a `== 0` pin
+    # would re-create the #3095 main-red); the collapse this calibration
+    # catches is BOTH golds in DEFAULT — a starved or silently-widened
+    # window stays loud via the crowd-row and 20..45 bounds below.
     n_gold_def = sum(m in ev for m in ("fieldtrip", "almanac"))
-    assert n_gold_def < 2, (
+    assert n_gold_def in (0, 1), (
         f"R9 geometry broken: the DEFAULT evidence admits {n_gold_def}/2 "
         "deep golds — the pool-40 no longer binds above them, so Task 7's "
         f"A-widened arm would be vacuous. Evidence head: {ev[:200]}")

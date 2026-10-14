@@ -360,10 +360,12 @@ uv run python tools/collision_preflight.py <N> --repo owner/name
 ```
 
 **Asking "who is on #N?" is a different question from "may I dispatch?"** The pre-flight is the
-*gate* — it exits 1 on a hit and 2 when a surface cannot be queried. For the human-facing question
-use the supported verb, which *answers*: it reuses the pre-flight's own enumeration (so the two
-cannot disagree), exits 0 for a complete answer, and 2 — never 1 — when a surface could not be
-queried:
+*gate* — it exits 1 on a collision, 2 when a surface cannot be queried, and 4 when the issue is
+already LANDED (its work has shipped — verify and close it, or re-state the remaining scope; do NOT
+dispatch). For the human-facing question use the supported verb, which *answers*: it reuses the
+pre-flight's own enumeration (so the two cannot disagree), exits 0 for a complete answer — including
+a landed issue, reported under its own LANDED heading, which is a real answer and not "nobody" — and
+2, never 1, when a surface could not be queried:
 
 ```bash
 tools/who-is-on.sh <N> --repo .   # who holds #N — local-only branches + worktrees included

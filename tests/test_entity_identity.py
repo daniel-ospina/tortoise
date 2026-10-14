@@ -821,7 +821,7 @@ _ALLOWED_OPERATOR = {
     'tortoise/sdk.py': {
         # #5509: `belief_timeline` — a REAL name-keyed Object read that unions
         # both same-name carriers' decision Points; not routed here.
-        'rows = proj.g.query( "MATCH (p:Point {pointKind:\'decision\'})-[:aboutObject]->" "(o:Object) " "WHERE (p.is_operator IS NULL OR p.is_operator = false) " "AND (o.name = $topic OR o.canonical_name = $topic) " "RETURN p.id, p.content, p.validFrom, p.status, p.outdated " "ORDER BY p.validFrom LIMIT $limit", params={"topic": topic, "limit": limit}, ).result_set': 1,
+        'rows = proj.g.query( "MATCH (p:Point {pointKind:\'decision\'})-[:aboutObject]->" "(o:Object) " "WHERE (p.is_operator IS NULL OR p.is_operator = false) " "AND (o.name = $topic OR o.canonical_name = $topic) " "RETURN p.id, p.content, p.validFrom, p.status, p.outdated " "ORDER BY (p.validFrom IS NULL), p.validFrom DESC LIMIT $limit", params={"topic": topic, "limit": limit}, ).result_set': 1,
         'clauses.append("(toLower(e.name) CONTAINS $q OR any(kw IN e.keywords WHERE toLower(kw) CONTAINS $q))")': 1,
     },
     'tortoise/session_link.py': {
@@ -934,11 +934,6 @@ _ALLOWED_FSTRING = {
         # #5509: `_create_entity` canonical-id re-fetch — plan §B P1-A
         # "Delete in S1"; the slice is unlanded on main.
         'r = proj.g.query( f"MATCH (n:{label} {{name: $name}}) RETURN n.id", params={"name": name}, )': 1,
-    },
-    'tortoise/topic_summarization.py': {
-        # #5509: name-keyed `about*` read; the f-string variable is
-        # `entity_label`, so only the interpolation sweep sees it.
-        'point_rows = graph.query( f"MATCH (p:Point)-[:{edge_type}]->(e:{entity_label} {{name: $name}}) " "WHERE p.is_operator = false " " AND (p.status IS NULL OR p.status <> \'retracted\') " "RETURN p.id, p.content, p.pointKind " "LIMIT $max_seeds", params={"name": entity_name, "max_seeds": max_seeds}, ).result_set': 1,
     },
 }
 

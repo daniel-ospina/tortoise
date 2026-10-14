@@ -279,10 +279,13 @@ def build_deep_rank_substrate(sdk: TortoiseSDK) -> dict:
     order. Re-measured on the same 87 rows / 57 retrievable matches: BOTH
     golds rank OUTSIDE the default pool-40 and INSIDE a widened 120 fetch.
     The R9 mechanism is therefore the pool-depth discriminator itself —
-    A-DEFAULT admits FEWER THAN 2 of the deep golds; A-WIDENED (pool 40→120)
-    admits BOTH — and Task 7's A-widened LEGACY arm is the only legacy arm
-    that reaches them. (The separate R16(b) canary pins the
-    A-DEFAULT-admits-≥1-gold property.)
+    A-DEFAULT admits FEWER THAN 2 of the deep golds (the tolerated set
+    {0, 1}: the pre-#3018 measurement was 1, the post-#3018 one is 0, and
+    with every tied row sharing a score the two differ only in the engine's
+    opaque sequence — #3273); A-WIDENED (pool 40→120) admits BOTH — and
+    Task 7's A-widened LEGACY arm is the only legacy arm that reaches them.
+    (The separate R16(b) canary pins the A-DEFAULT-admits-≥1-gold
+    property.)
     The ranks are still a pure function of the substrate contents, so the
     geometry is deterministic; what is NOT stable across an engine/write-path
     change is WHICH tied row lands at which opaque index — the test must

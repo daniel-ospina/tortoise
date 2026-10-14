@@ -95,7 +95,7 @@ the `[embeddings]` extra does not need it either (R3 #1542 D6).
 | `TORTOISE_LME_EVIDENCE_BOOST_SOURCE` | source-session-only mark rank-offset multiplier (C2 #1745) | `1.15` |
 | `TORTOISE_LME_RERANK` | R6 rerank gate (fail-safe OFF — only `1/true/yes/on` enables; explicit `--rerank`/`--no-rerank` beat it) | unset = OFF |
 | `TORTOISE_LME_RERANK_MODEL` | cross-encoder model name (R6 #1545) | `cross-encoder/ms-marco-MiniLM-L6-v2` |
-| `TORTOISE_LME_RERANK_POOL` | rerank pool depth (R6; applied pool = `max(pool, max(k))`; only read while rerank is on) | `40` |
+| `TORTOISE_LME_RERANK_POOL` | rerank pool depth (R6; the knob can only RAISE the depth — applied pool = `max(pool, baseline, max(k))` with baseline = `TORTOISE_LME_POOL_SIZE` when set (default 120), itself floored at `max(k)`; only read while rerank is on) | `40` |
 | `TORTOISE_LME_RERANK_CAP` | per-session MMR cap (R6; ≥ 1) | `2` |
 | `TORTOISE_LME_RERANK_LAMBDA` | MMR λ in [0,1] (R6; 1.0 = pure rerank, 0.0 = pure similarity; boundary values accepted) | `0.7` |
 
@@ -322,8 +322,12 @@ path via `--data` skips the download. Split S = `longmemeval_s_cleaned.json`
    paper-comparable recall.
 
    **Optional R6 post-fusion stage (cross-encoder + MMR, off by default):**
-   with `--rerank`, `hybrid_search` fetches the rerank pool (default 40 —
-   the effective applied pool is `max(pool, max(k))`), `rerank.py` scores
+   with `--rerank`, `hybrid_search` fetches the rerank pool (default 40,
+   floored at the #1947 baseline — the effective applied pool is
+   `max(pool, baseline, max(k))` with baseline =
+   `TORTOISE_LME_POOL_SIZE` when set (default 120), itself floored at
+   `max(k)`, so the knob can only RAISE the depth;
+   the rerank-OFF pool-only arm stays `max(pool, max(k))`), `rerank.py` scores
    every (query, chunk) pair with the pinned cross-encoder (sigmoid → (0,1))
    and selects up to `top_k` via greedy MMR (`λ·rel − (1−λ)·max_sim`;
    `sim = (1+cos)/2` over the stored point `embedding` with a per-pair

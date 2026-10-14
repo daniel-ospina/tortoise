@@ -173,7 +173,11 @@ class TestRecordWriteOps:
         with caplog.at_level(logging.WARNING, logger="tortoise.metering"):
             result = record_write_ops(tid, tier="pro")
         assert result is None  # non-fatal: only the increment failed
-        assert any("increment failed" in r.message for r in caplog.records), (
+        # #4966: the record filter is scoped by LOGGER (``_metering_records``).
+        # An unscoped ``caplog.records`` scan made this presence assertion
+        # satisfiable by ANY propagating logger's coincidental wording, so it
+        # did not pin metering's own emission.
+        assert _metering_records(caplog, needle="increment failed") != [], (
             [r.message for r in caplog.records]
         )
 
@@ -233,6 +237,10 @@ def _metering_records(caplog, needle: str = "threshold",
     "threshold" occurs in this test module's own tmpdir path, so an unscoped
     filter matches another module's record and turns a real absence into a
     failure. ``needle`` and ``levelno`` narrow WITHIN that scope.
+
+    #4966: it is also the scope for the NON-threshold metering assertions —
+    where an unscoped filter instead made a presence assertion satisfiable by
+    another logger's coincidental wording.
     """
     return [
         r for r in caplog.records
@@ -395,6 +403,56 @@ class TestThresholdEvents:
             f"event: {_metering_records(caplog)}"
         )
 
+# ── #4966: the NON-threshold metering assertions are logger-scoped too ──────
+
+class TestMeteringRecordScope:
+    """The non-threshold metering log assertions are scoped by LOGGER.
+
+    #4966: three ``caplog.records`` filters and one ``caplog.text`` assertion
+    were unscoped, so a foreign logger propagating to root could satisfy a
+    PRESENCE assertion with coincidental wording — or redden the ABSENCE one,
+    which is the #4957 shape. All four now go through ``_metering_records``;
+    this pins that scope for the needles they assert on, so a re-broadening of
+    the filter fails here rather than silently re-arming on main.
+    """
+
+    def test_foreign_logger_cannot_satisfy_the_scoped_metering_filters(
+            self, reg_sdk, monkeypatch, caplog):
+        sdk, tid = reg_sdk
+        _break_increment_only(monkeypatch, sdk)
+        foreign_logger = logging.getLogger("tortoise.embedded_lifecycle")
+        needles = ("increment failed", "metering usage query failed")
+
+        with caplog.at_level(logging.WARNING, logger=_METERING_LOGGER):
+            for needle in needles:
+                foreign_logger.warning("#4966 foreign logger emits: %s", needle)
+            record_write_ops(tid, tier="pro")
+
+        # Non-vacuous one way: every foreign record really IS captured, so what
+        # is under test is the LOGGER SCOPE, not the records' absence.
+        for needle in needles:
+            assert any(
+                r.name == "tortoise.embedded_lifecycle"
+                and needle in r.message
+                for r in caplog.records
+            ), f"the injected {needle!r} record must be captured to prove anything"
+
+        # Non-vacuous the other way: metering's OWN increment failure is found
+        # through the scoped lookup, so the empty result below is not because
+        # the exercised path logged nothing at all.
+        real = _metering_records(caplog, needle="increment failed")
+        assert real and all(r.name == _METERING_LOGGER for r in real), (
+            "metering's own increment failure must be found by the scoped "
+            f"lookup, got: {[(r.name, r.message) for r in real]}"
+        )
+
+        # The foreign wording is NOT reachable through the scoped lookup.
+        assert _metering_records(
+            caplog, needle="metering usage query failed") == [], (
+            "a foreign logger's record was visible to the metering filter: "
+            f"{_metering_records(caplog, needle='metering usage query failed')}"
+        )
+
 # ── Usage query tests ───────────────────────────────────────────────────────
 
 class TestGetCurrentUsage:
@@ -429,10 +487,17 @@ class TestGetCurrentUsage:
         """
         sdk, tid = reg_sdk  # noqa: RUF059
         record_ask_usage(tid, calls=1, tokens_in=1, tokens_out=1, cost_usd=0.0)
-        with caplog.at_level("WARNING"):
+        with caplog.at_level(logging.WARNING, logger=_METERING_LOGGER):
             usage = get_current_usage(tid)
         assert usage["write_ops_used"] == 0
-        assert "metering usage query failed" not in caplog.text
+        # #4966: the ABSENCE is asserted on the METERING logger's records, not
+        # on ``caplog.text`` — the formatted text of every logger propagating
+        # to root. The old form was the #4957 shape: a foreign logger's wording
+        # could redden it, and it made "no metering alarm" unpinnable.
+        assert _metering_records(
+            caplog, needle="metering usage query failed") == [], (
+            [r.message for r in caplog.records]
+        )
 
     def test_usage_reflects_accumulated_ops(self, reg_sdk):
         sdk, tid = reg_sdk  # noqa: RUF059
@@ -508,7 +573,7 @@ class TestGetCurrentUsageSupabaseDegrade:
             lambda: ErrorControlPlane(),
         )
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.WARNING, logger=_METERING_LOGGER):
             usage = get_current_usage("team-blip-001")  # must not raise
 
         assert usage["write_ops_used"] == 0
@@ -528,11 +593,13 @@ class TestGetCurrentUsageSupabaseDegrade:
         # its own (more precise) message and the supabase metering read never
         # runs. The subject of this assertion is "a failure was logged", not
         # a wording, so both messages are accepted.
-        assert any(
-            ("metering usage query failed" in r.message
-             or "metering window unresolvable" in r.message)
-            for r in caplog.records
-        )
+        # #4966: both accepted wordings are METERING's own text, looked up
+        # through the logger-scoped helper — an unscoped scan could be
+        # satisfied by any other module's coincidental wording.
+        assert (
+            _metering_records(caplog, needle="metering usage query failed")
+            or _metering_records(caplog, needle="metering window unresolvable")
+        ), [r.message for r in caplog.records]
 
     def test_erroring_cp_with_used_ops_still_degrades(self, monkeypatch):
         """Even a team WITH recorded usage gets the zero-usage view when the
@@ -737,7 +804,8 @@ class TestAskMetering:
         _break_increment_only(monkeypatch, sdk)
         with caplog.at_level(logging.WARNING, logger="tortoise.metering"):
             assert record_ask_usage(tid, tokens_in=1) is None  # non-fatal
-        assert any("increment failed" in r.message for r in caplog.records), (
+        # #4966: scoped by LOGGER — see ``test_non_fatal_on_db_error``.
+        assert _metering_records(caplog, needle="increment failed") != [], (
             [r.message for r in caplog.records]
         )
 

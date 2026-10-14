@@ -382,8 +382,18 @@ def _eligible(block: dict, *, min_confidence: float,
     why-block's dedicated ep read — post-#2206 identical to the search
     path's ep.confidence_mean, which reads the same coalesce of
     posterior_alpha/ep_alpha).
-    Unmeasured points sit at the Beta(1,1) neutral 0.5 (``has_ep=False``) —
-    below the 0.7 default → below-notability/silent, never fired.
+    UNMEASURED points (no persisted prior at all) sit at the Beta(1,1)
+    neutral 0.5 (``has_ep=False``, ``baseline=False``) — below the 0.7
+    default → below-notability/silent, never fired. #3415 correction: that
+    neutral-0.5 statement is NO LONGER true of every unmeasured point — a
+    #2199 DECLARED baseline (``baseline=True``, e.g. the decide-part system
+    default Beta(3,1) mean 0.75, or an author ``credibility=`` prior) is
+    prior-only yet reads its PRIOR mean, so it clears the mean floor. That is
+    deliberate: #2199 treats a baseline as the author's stated starting
+    belief ("set-by-author") and the mean floor is a NOTABILITY gate, not a
+    measurement claim. The why-block discloses the state honestly — every
+    entry carries ``ep.measured`` / ``ep.baseline`` — so a prior-only
+    candidate rides a block that says it was never measured.
 
     Contentiousness participates: a CONTESTED state (persisted variance >
     threshold) whose dispute the window actually touches may cross the floor

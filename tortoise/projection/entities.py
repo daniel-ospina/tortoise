@@ -53,6 +53,60 @@ from tortoise.vector_write import (
 logger = logging.getLogger(__name__)
 
 
+# #6239: live's TWO ``PointPromoted`` emitters are both gated on the Point's
+# status at the instant they fire, so a replay that re-applies the snapshot's
+# ``status='live'`` unconditionally can re-liven a Point live never re-livened:
+#
+#   * ``sdk.promote_point`` promotes through a ``WHERE n.status = 'draft'`` CAS
+#     (the reviewer-gated draft→live door);
+#   * the capture auto-promotion's candidate query is
+#     ``n.status IS NULL OR n.status = 'draft'``.
+#
+# ``None`` therefore answers BOTH "the node carries no status" and "the node
+# does not exist yet" — the #2256 shape where a ``PointPromoted`` snapshot is
+# the node's ONLY durable record and the replay must materialize it live.
+_PROMOTE_LEGAL_PRIOR_STATUS: frozenset = frozenset({"draft"})
+
+
+def promote_status_applies(prior_status) -> bool:
+    """#6239: may a ``PointPromoted``'s ``status='live'`` be written over
+    ``prior_status``?
+
+    ``True`` only where live itself could have emitted the record — see
+    ``_PROMOTE_LEGAL_PRIOR_STATUS``. Anything else (``superseded`` — a supersede
+    is status-TERMINAL — ``retracted``, ``archived``, a legacy word, the empty
+    string) is a status the promote could not have overwritten live, so the
+    record's status write is a NO-OP on every replay engine.
+
+    This is the ONE predicate shared by the graph replay engines
+    (``apply()``, ``rebuild_all``'s inline pass and its post-supersede re-fold)
+    and by the reference fold (``consistency._fold_journal``), so the promoted
+    status cannot drift between them — before #6239 ``rebuild_all`` kept the
+    terminal ``superseded`` while the chronological ``apply()`` arm re-livened
+    it, and neither engine agreed with the other.
+
+    The rest of the snapshot still folds (content/embedding/…), exactly as
+    ``rebuild_all``'s inline pass has always applied it; only the status column
+    is withheld.
+    """
+    return prior_status is None or prior_status in _PROMOTE_LEGAL_PRIOR_STATUS
+
+
+def gated_promote_payload(p: dict, prior_status) -> dict:
+    """``p`` with its ``status`` withheld when
+    :func:`promote_status_applies` is False.
+
+    The withheld form is ``{"status": None}``, which the shared Point writer
+    reads as ``n.status=coalesce($st, n.status, 'live')`` — i.e. it PRESERVES
+    the existing terminal status instead of re-livening it. A copy is returned
+    only when something is withheld, so the un-gated path stays byte-identical
+    to the pre-#6239 payload.
+    """
+    if promote_status_applies(prior_status):
+        return p
+    return {**p, "status": None}
+
+
 def is_non_operator_payload(payload: dict) -> bool:
     """True when a journal Point payload states its OWN non-operator identity.
 
@@ -1015,9 +1069,33 @@ class _EntityHandlers:
         # `_event_guarded_merge`), and `backfill_sources` reads it back — the
         # connector content fields ride `itemState` instead of the envelope.
         "itemState", "labels", "assignees",
-        # name / eventStatus / createdAt are intentionally NOT here —
-        # they were historically dropped by the fixed-field MERGE and
-        # are now persisted as arbitrary props via _persist_extra_props.
+        # #8010: the Slack/Linear connectors' full-text hash. It is an EDIT
+        # SIGNAL, not node content — the raw text it hashes must not reach the
+        # graph, and an undeclared digest string would be a persistable prop
+        # (the open passthrough the #3998 note below closes for :Source).
+        # Declared here so it rides the version digest without growing the
+        # Event surface.
+        "textDigest",
+        # #2788: `name` / `eventStatus` / `createdAt` are deliberately NOT in
+        # this skip set — the omission is what lets `_persist_extra_props`
+        # carry them onto the node (its skip is `_META_KEYS |
+        # _EVENT_HANDLED`). This is a PROP lane, never a projection-owned STATE
+        # lane: an Event is a dated fact (§4.5), so no fold reads any of the
+        # three back into Event state. `status` is not in this skip set either
+        # (so a writer-supplied `status` also lands as a prop), and the
+        # consistency gate compares `status` only for the Object/Subject
+        # families — but a `status` prop on an Event is NOT inert:
+        # `_promote_incident_operators` (sdk.py, #7853) reads an Event
+        # endpoint's `status` as a live/draft gate, so it suppresses operator
+        # promotion exactly as a draft Point does. Of the three omitted keys,
+        # only `name` has a reader (`sdk.backfill_about_entities` matches an
+        # Event against a Point's content); `eventStatus` is an INGEST marker
+        # (`scheduled` → `completed`, written by the session/meeting indexers),
+        # not a state read. The typed commit path cannot populate the lane at
+        # all — `CommitEvent` is `extra="forbid"` (`commit_schema.py`) — so
+        # only in-tree SDK/indexer writers reach it. The pack-declared fold
+        # generalization is Object-scoped and does NOT extend to Events
+        # (#2729); #2725 answered the Event-carries-state question "no".
     })
     # #3998 (D30): the DECLARED extra-property surface of a :Source. The graph
     # is the INDEX of the raw, not its store — so this is a CLOSED set, not an
@@ -2472,6 +2550,23 @@ class _EntityHandlers:
         self._upsert_point_props(p)
         self._upsert_point_edges(p, contains_session=contains_session)
 
+    def _point_status(self, pid: str):
+        """The replayed ``status`` of a Point, or ``None`` when the node does
+        not exist or carries no ``status``.
+
+        #6239: the ONE reader for the promote gate. Every replay engine asks the
+        same question — "was this Point ``draft``/status-less at the record's
+        position?" — of its own graph state, so the gate cannot drift between
+        them. A missing node and a status-less node are deliberately the SAME
+        answer: the capture path promotes an unset status, and the #2256
+        promote-only journal materializes the node from the snapshot itself, so
+        both must read as "promote legal" (see ``promote_status_applies``).
+        """
+        row = self.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.status",
+            params={"id": pid}).result_set
+        return row[0][0] if row else None
+
     def _delete(self, pid: str) -> None:
         self.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": pid})
 
@@ -3616,6 +3711,11 @@ class _EntityHandlers:
         `objectKind` are RETIRED and are never written (nor re-admissible via
         the open passthrough).
 
+        #5082: ``sourceKind`` is written ``'document'`` on CREATE ONLY
+        (``coalesce``), completing §4.6's REQUIRED field set for this node and
+        agreeing with the sibling ``_mint_source_stub`` default. It is the
+        TYPE axis; ``documentKind`` stays the GENRE axis (§4.4).
+
         #5422: ``contentHash`` is the node's **version anchor** on the
         extraction path (ONTOLOGY §4.6 — the hash identifies a version;
         identity is ``url``). It is written by the fixed clause above, gated
@@ -3692,6 +3792,23 @@ class _EntityHandlers:
             "MERGE (s:Source {url:$id}) " + clear_then_set_prefix("s") +
             "SET s.id=coalesce(s.id, $id), "
             "    s.title=coalesce($title, s.title), "
+            # #5082 (ONTOLOGY §4.6 + #5013 Q2): a document IS a `:Source`, and
+            # §4.6 marks `sourceKind` REQUIRED (✅) on every `:Source` — it is
+            # the TYPE axis, distinct from `documentKind`'s genre axis (§4.4:
+            # "`documentKind` is not `sourceKind` … neither absorbs the
+            # other"). This writer wrote none, so a document node carried
+            # `sourceKind = NULL` — a declared-but-unwritten REQUIRED field —
+            # while the sibling mint path `_mint_source_stub`
+            # (`projection/edges.py`) already defaults any non-`session:` url
+            # to exactly `'document'`: two writers of one node, disagreeing on
+            # a REQUIRED field. `'document'` is the registered §5 vocabulary
+            # term and `SOURCE_KIND_DEFAULTS` registers it NEUTRAL, so no
+            # credibility inheritance moves (#398).
+            # SET-ON-CREATE-ONLY via `coalesce`: #398's never-overwrite
+            # contract — a node that already carries an authoritative
+            # `sourceKind` (a stub, a connector Source, a session Source)
+            # keeps it, and a partial re-write cannot change it.
+            "    s.sourceKind=coalesce(s.sourceKind, 'document'), "
             # #5422: the document :Source's version anchor (ONTOLOGY §4.6 —
             # the hash names a version, identity is `url`). Gated so a write
             # that CARRIES no hash ($ch IS NULL) or an EMPTY one ($ch = '' —
@@ -3856,9 +3973,15 @@ class _EntityHandlers:
         # NULL).
         embedding = inner.get("embedding")
         if embedding is None and inner.get("eventKind") != "meeting":
-            # Stored vecf32 (#244): vec.euclideanDistance rejects plain-list
-            # vectors — a single List-typed embedding poisons brute-force vector
-            # search for the whole Event label. Align with the Point pattern.
+            # Stored vecf32 (#244): the QUERY param must be cast (a plain-list
+            # param is rejected there), and the STORED side goes through the
+            # typed write seam so every server-owned vector has the shape every
+            # other writer produces. Event has NO vector index — the only vector
+            # index is on Point (#8429 is Point-scoped) — so the Event dense leg
+            # is always the brute-force scan, where #8316 normalises a
+            # right-width stored List at the READ boundary (a wrong width or a
+            # non-numeric value still aborts the MATCH — #8430). Align with the
+            # Point pattern.
             event_content = " ".join(filter(None, [
                 inner.get("subject", ""),
                 inner.get("eventKind", ""),
@@ -3946,10 +4069,24 @@ class _EntityHandlers:
             from tortoise.security import validate_document_id
             validate_document_id(str(obj))
             # D10 (ONTOLOGY §4.4): a document is a :Source keyed by url.
+            # #5082 (second writer): the SAME document `:Source` shape the
+            # `DocumentCreated` fold writes — §4.6 marks `sourceKind` REQUIRED
+            # on every `:Source`, and #5013 Q2 keeps the TYPE axis here while
+            # the genre rides `documentKind` (the two are different questions,
+            # §4.4). Written on BOTH arms: create stamps 'document', match
+            # FILLS a NULL — which is exactly the effect of
+            # `_upsert_document`/`_execute_commit_writes`' plain-`SET` +
+            # `coalesce` (#398's never-overwrite contract). An authoritative
+            # kind (a `_mint_source_stub` stub, a connector/session Source) is
+            # kept, and a document node minted by THIS writer before the fix
+            # (or replayed from an old journal line) is repaired by the next
+            # fold instead of staying NULL forever.
             self.g.query(
                 "MERGE (s:Source {url:$id}) "
                 "ON CREATE SET s.id=$id, s.title=$id, "
-                "              s.documentKind='transcript'",
+                "              s.sourceKind=coalesce(s.sourceKind, 'document'), "
+                "              s.documentKind='transcript' "
+                "ON MATCH SET s.sourceKind=coalesce(s.sourceKind, 'document')",
                 params={"id": obj},
             )
             self.g.query(

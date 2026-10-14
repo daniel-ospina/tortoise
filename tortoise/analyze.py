@@ -38,9 +38,19 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["strongest", "best argument", "most support", "evidence for", "supports"],
         "description": "Find claims supporting a target via IMPL chains, ranked by confidence",
         "subgraph_vars": ["supporter"],
+        # #6871: the operator's typed edges ARE its input set — idx 0 is the
+        # operator's SOURCE, idx >= 1 its targets — so "the claim supporting a
+        # target" is the idx=0 endpoint and the supported claim is an idx>=1
+        # one. Without the two role guards a plain identity guard
+        # (target.id <> supporter.id) also matches INVERSELY — the operator's
+        # own source served as the SUPPORTER of a target: querying the source
+        # returned the target as its supporter, and `tortoise_analyze` answered
+        # with the claim's own hypothesis as its evidence.
         "cypher": """
-            MATCH (supporter:Point)<-[:IMPL]-(op:Point {op_type:\"IMPL\"})-[:IMPL]->(target:Point)
-            WHERE target.id <> supporter.id
+            MATCH (supporter:Point)<-[r_in:IMPL]-(op:Point {op_type:\"IMPL\"})-[r_out:IMPL]->(target:Point)
+            WHERE coalesce(r_in.idx, 0) = 0
+              AND coalesce(r_out.idx, 0) >= 1
+              AND target.id <> supporter.id
               AND target.content CONTAINS $entity
               AND coalesce(supporter.confidence, 0.5) > 0.0
             RETURN supporter.id, supporter.content, coalesce(supporter.confidence,0.5) as conf
@@ -84,6 +94,17 @@ TEMPLATES: dict[str, dict] = {
         # would dominate "most uncertain" on include-terminal surfaces — the
         # shared live.py terminal predicate excludes them ("uncertain" is for
         # LIVE claims).
+        # The WHERE is a FILTER — "this claim carries persisted EP state" —
+        # not a measurement claim, so a #2199 declared baseline (prior-only)
+        # is a legitimate candidate here: its variance is real and worth
+        # ranking. The reported `conf`, however, must be the canonical belief
+        # mean every other surface reads (#2206); `coalesce(c.confidence,0.5)`
+        # reported 0.5 for a prior-only 0.75 claim — the residual #2206-class
+        # divergence this fixes (#3415). The belief expression coerces with
+        # toFloat: FalkorDB `/` is INTEGER division when both operands are ints
+        # (unlike Python), so a prior persisted as ints (set_point_baseline(2,1),
+        # or the legacy 49705bf6e tier_map) truncated 2/3 → 0 — worse than the
+        # neutral fallback it replaced. Mirrors annotate_ep_batch's guard.
         "cypher": f"""
             MATCH (c:Point)
             WHERE c.is_operator = false
@@ -93,7 +114,12 @@ TEMPLATES: dict[str, dict] = {
                  coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
             WITH c, a, b, (a * b) / 
                ((a + b)^2 * (a + b + 1)) as variance
-            RETURN c.id, c.content, coalesce(c.confidence,0.5) as conf, variance
+            RETURN c.id, c.content,
+                   coalesce(c.confidence,
+                            CASE WHEN a + b > 0
+                                 THEN toFloat(a) / (a + b) ELSE 0.5 END)
+                     as conf,
+                   variance
             ORDER BY variance DESC LIMIT $limit
         """,
         "format": lambda rows: _format_uncertain(rows),
@@ -102,9 +128,15 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["evidence for", "supports", "basis", "foundation", "backing", "chain"],
         "description": "Trace IMPL support chain back to root evidence for a claim",
         "subgraph_vars": ["evidence"],
+        # #6871: same role guard as `strongest_for` above — the evidence is the
+        # operator's idx=0 endpoint, the chained claim an idx>=1 one. Without
+        # it, asking for the evidence chain of the SOURCE returned its own
+        # targets as its foundation.
         "cypher": """
-            MATCH (evidence:Point)<-[:IMPL]-(op:Point {op_type:\"IMPL\"})-[:IMPL]->(target:Point)
-            WHERE target.id <> evidence.id
+            MATCH (evidence:Point)<-[r_in:IMPL]-(op:Point {op_type:\"IMPL\"})-[r_out:IMPL]->(target:Point)
+            WHERE coalesce(r_in.idx, 0) = 0
+              AND coalesce(r_out.idx, 0) >= 1
+              AND target.id <> evidence.id
               AND target.content CONTAINS $entity
               AND evidence.is_operator = false
             RETURN evidence.id, evidence.content, coalesce(evidence.confidence,0.5) as conf
@@ -117,16 +149,25 @@ TEMPLATES: dict[str, dict] = {
         "description": "Show confidence changes by comparing node properties over time",
         "subgraph_vars": ["c"],
         # #2490: exclude decayed terminals from the confidence timeline (see
-        # most_uncertain — the shared live.py terminal predicate).
+        # most_uncertain — the shared live.py terminal predicate). #3415: the
+        # reported conf is the canonical belief mean (posterior→prior
+        # coalesce, #2206), never the neutral 0.5 — a prior-only 0.75 claim
+        # used to print conf=0.50 beside its own α=3/β=1 columns. toFloat on
+        # the numerator mirrors annotate_ep_batch: FalkorDB integer division
+        # would truncate an int prior mean (2/3 → 0) — see most_uncertain.
         "cypher": f"""
             MATCH (c:Point)
             WHERE c.content CONTAINS $entity
               AND {_terminal_excluded('c.status')}
               AND (c.posterior_alpha IS NOT NULL OR c.ep_alpha IS NOT NULL)
-            RETURN c.id, c.content, coalesce(c.confidence,0.5) as conf,
-                   coalesce(c.posterior_alpha, c.ep_alpha, 1.0) as a,
-                   coalesce(c.posterior_beta, c.ep_beta, 1.0) as b,
-                   c.createdAt
+            WITH c, coalesce(c.posterior_alpha, c.ep_alpha, 1.0) AS a,
+                 coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
+            RETURN c.id, c.content,
+                   coalesce(c.confidence,
+                            CASE WHEN a + b > 0
+                                 THEN toFloat(a) / (a + b) ELSE 0.5 END)
+                     as conf,
+                   a, b, c.createdAt
             ORDER BY c.createdAt DESC LIMIT $limit
         """,
         "format": lambda rows: _format_timeline(rows),

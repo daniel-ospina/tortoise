@@ -140,11 +140,18 @@ def emit_violation(
 
 def warning_for_relation(label: str, pack: str | None = None) -> dict:
     """The structured warning shape for an undeclared relation write
-    (warn-not-block — the write proceeds, the warning is returned)."""
+    (warn-not-block — the write proceeds, the warning is returned).
+
+    "Declared" means the CORE operator-label vocabulary (ONTOLOGY §3.9's
+    ``IMPL``/``NAND`` plus §8's semantics vocabulary —
+    ``pack_registry.CORE_OPERATOR_LABELS``) or a predicate an installed pack
+    declares (#7551). A retired spelling keeps warning, as it must.
+    """
     return {
         "code": "undeclared_relation",
-        "message": f"relation predicate '{label}' is not declared by any "
-                   f"installed pack — the write proceeded but the edge is "
-                   f"unconstrained (warn-not-block, epic #1891 governance D1)",
+        "message": f"relation predicate '{label}' is declared neither by the "
+                   f"core ontology nor by any installed pack — the write "
+                   f"proceeded but the edge is unconstrained (warn-not-block, "
+                   f"epic #1891 governance D1)",
         "pack": pack,
     }

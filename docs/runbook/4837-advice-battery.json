@@ -1,0 +1,901 @@
+{
+ "battery": "4837-advice-battery",
+ "created": "2026-10-13",
+ "authorship": "hand-written for #4837; pre-registered (SHA-pinned in docs/runbook/4837_advice_battery.py) BEFORE the live run",
+ "shape": "D3 ingest shape (haystack_session_ids/haystack_dates/haystack_sessions) so the ask lane seeds and retrieves it unmodified",
+ "arms": {
+  "class": 6,
+  "near_miss": 4,
+  "d3_abs": "3 questions read from tests/fixtures/ask_spotcheck_composition.json (frozen SHA asserted; never copied)"
+ },
+ "questions": [
+  {
+   "question_id": "c1_college",
+   "question": "Lately I've been wondering — do you think it would be a good idea for me to go back and get a master's degree?",
+   "question_type": "single-session-preference",
+   "question_date": "2023/04/08 (Sat) 20:05",
+   "answer": "The user loved their economics courses and misses classroom study with other people.",
+   "answer_session_ids": [],
+   "battery_arm": "class",
+   "relevant_needle": "I loved my economics courses",
+   "forbidden_in_haystack": [
+    "master's",
+    "masters degree",
+    "graduate degree",
+    "go back to college",
+    "go back to school"
+   ],
+   "expected_advice_basis": "The user loved their economics courses and misses classroom study with other people.",
+   "note": "Asked event: returning for a master's. Never mentioned in the haystack.",
+   "haystack_dates": [
+    "2023/02/11 (Sat) 10:02",
+    "2023/03/04 (Sat) 18:40",
+    "2023/03/25 (Sat) 09:15",
+    "2023/04/08 (Sat) 20:05"
+   ],
+   "haystack_session_ids": [
+    "c1_college_years",
+    "c1_standup",
+    "c1_piano",
+    "c1_hike"
+   ],
+   "haystack_sessions": [
+    [
+     {
+      "role": "user",
+      "content": "I still remember my college years really fondly. I loved my economics courses, and the late-night study sessions never felt like a chore — I actually looked forward to them.",
+      "has_answer": true
+     },
+     {
+      "role": "assistant",
+      "content": "That sounds like a period you got a lot out of. The courses and the studying clearly suited you.",
+      "has_answer": false
+     },
+     {
+      "role": "user",
+      "content": "Definitely. Being in a classroom and working through a hard problem with other people is the part I miss most.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "My manager moved our weekly standup to Tuesday mornings.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Noted — Tuesday mornings for the standup.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "I've been learning the piano on the old keyboard in the spare room. Slow going, but I enjoy it.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Enjoying it is the point. Fifteen minutes a day adds up.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "We hiked the ridge trail on Sunday. Legs are sore but the views were worth it.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "That sounds like a good way to spend a Sunday.",
+      "has_answer": false
+     }
+    ]
+   ]
+  },
+  {
+   "question_id": "c2_culinary",
+   "question": "I've been mulling it over — would it be a good idea to enrol in a culinary course this winter?",
+   "question_type": "single-session-preference",
+   "question_date": "2023/03/12 (Sun) 12:10",
+   "answer": "The user loves cooking, bakes bread, and cooked a praised paella for friends.",
+   "answer_session_ids": [],
+   "battery_arm": "class",
+   "relevant_needle": "I love cooking on the weekend",
+   "forbidden_in_haystack": [
+    "culinary",
+    "cooking course",
+    "culinary course",
+    "enrol",
+    "winter"
+   ],
+   "expected_advice_basis": "The user loves cooking, bakes bread, and cooked a praised paella for friends.",
+   "note": "Asked event: a culinary course this winter. Never mentioned.",
+   "haystack_dates": [
+    "2023/01/14 (Sat) 19:20",
+    "2023/02/01 (Wed) 08:30",
+    "2023/02/18 (Sat) 17:45",
+    "2023/03/12 (Sun) 12:10"
+   ],
+   "haystack_session_ids": [
+    "c2_cooking",
+    "c2_invoice",
+    "c2_neighbour",
+    "c2_film"
+   ],
+   "haystack_sessions": [
+    [
+     {
+      "role": "user",
+      "content": "I love cooking on the weekend. Spending an afternoon making bread from scratch is the thing that calms me down most.",
+      "has_answer": true
+     },
+     {
+      "role": "assistant",
+      "content": "That's a lovely ritual. Bread especially rewards the slow pace.",
+      "has_answer": false
+     },
+     {
+      "role": "user",
+      "content": "Exactly. And when I tried that paella recipe for friends, one of them said it was better than the restaurant version.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "High praise — clearly the practice is paying off.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "I still need to send the invoice for last month's contract.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Do it while it's fresh — the contract admin is easy to lose track of.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "The neighbour's tree came down in the storm and blocked the shared driveway.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "That's a problem for everyone on the driveway. Hope it's cleared quickly.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "I watched a documentary about deep-sea creatures. Strange and brilliant.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "The deep sea is reliably stranger than fiction.",
+      "has_answer": false
+     }
+    ]
+   ]
+  },
+  {
+   "question_id": "c3_piano",
+   "question": "Should I sign up for piano lessons this autumn?",
+   "question_type": "single-session-preference",
+   "question_date": "2023/06/17 (Sat) 16:25",
+   "answer": "The user plays guitar and uses music to unwind; it clears their head.",
+   "answer_session_ids": [],
+   "battery_arm": "class",
+   "relevant_needle": "Music has always been my way of unwinding",
+   "forbidden_in_haystack": [
+    "piano",
+    "lessons",
+    "autumn"
+   ],
+   "expected_advice_basis": "The user plays guitar and uses music to unwind; it clears their head.",
+   "note": "Asked event: piano lessons this autumn. Never mentioned.",
+   "haystack_dates": [
+    "2023/05/02 (Tue) 21:00",
+    "2023/05/20 (Sat) 11:30",
+    "2023/06/03 (Sat) 08:10",
+    "2023/06/17 (Sat) 16:25"
+   ],
+   "haystack_session_ids": [
+    "c3_music",
+    "c3_deadline",
+    "c3_car",
+    "c3_recipe"
+   ],
+   "haystack_sessions": [
+    [
+     {
+      "role": "user",
+      "content": "Music has always been my way of unwinding. I played guitar in a band all through high school and I still pick it up most evenings.",
+      "has_answer": true
+     },
+     {
+      "role": "assistant",
+      "content": "That's a long-running habit — and a useful one to have kept.",
+      "has_answer": false
+     },
+     {
+      "role": "user",
+      "content": "It really is. When I'm stuck on something at work, playing for twenty minutes clears my head.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "A reliable reset is worth a lot.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "The quarterly report is due Friday and I've barely started.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Friday is close — block the time now.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "The car passed its service with only a worn brake pad to replace.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Cheap as services go.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "I tried a new chilli recipe and it was far too hot.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Halve the chilli next time and taste as you go.",
+      "has_answer": false
+     }
+    ]
+   ]
+  },
+  {
+   "question_id": "c4_dog",
+   "question": "I keep going back and forth — do you think it would be a good idea to adopt a rescue dog next month?",
+   "question_type": "single-session-preference",
+   "question_date": "2023/05/27 (Sat) 19:55",
+   "answer": "The user grew up with dogs and loved the twice-daily walks.",
+   "answer_session_ids": [],
+   "battery_arm": "class",
+   "relevant_needle": "We always had a dog when I was growing up",
+   "forbidden_in_haystack": [
+    "adopt",
+    "rescue",
+    "shelter",
+    "litter",
+    "kennel"
+   ],
+   "expected_advice_basis": "The user grew up with dogs and loved the twice-daily walks.",
+   "note": "Asked event: adopting a rescue dog. Never mentioned.",
+   "haystack_dates": [
+    "2023/04/16 (Sun) 10:00",
+    "2023/04/29 (Sat) 14:15",
+    "2023/05/13 (Sat) 09:40",
+    "2023/05/27 (Sat) 19:55"
+   ],
+   "haystack_session_ids": [
+    "c4_childhood_dogs",
+    "c4_plumber",
+    "c4_book_club",
+    "c4_flat_tidy"
+   ],
+   "haystack_sessions": [
+    [
+     {
+      "role": "user",
+      "content": "We always had a dog when I was growing up. Having one around made the house feel alive, and I still think about our old collie.",
+      "has_answer": true
+     },
+     {
+      "role": "assistant",
+      "content": "A dog in the house changes the whole feel of a home.",
+      "has_answer": false
+     },
+     {
+      "role": "user",
+      "content": "It does. Walking her twice a day was my favourite part of the day, even in the rain.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "That habit tends to stick with people.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "The plumber is coming on Thursday to look at the bathroom tap.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Small leak or big job, better to have it looked at.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "Book club picked a Russian novel for the September meet. Ambitious.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Ambitious is one word for it — worth reading the introduction first.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "I spent Saturday clearing out the spare room. Two bags for the charity shop.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Progress is progress, even when it looks like two bags.",
+      "has_answer": false
+     }
+    ]
+   ]
+  },
+  {
+   "question_id": "c5_solo_trip",
+   "question": "Do you think it would be a good idea for me to book a solo trip abroad this year?",
+   "question_type": "single-session-preference",
+   "question_date": "2023/05/06 (Sat) 11:20",
+   "answer": "The user found solo travel to Lisbon deeply recharging and enjoys their own company.",
+   "answer_session_ids": [],
+   "battery_arm": "class",
+   "relevant_needle": "Travelling alone to Lisbon last spring",
+   "forbidden_in_haystack": [
+    "solo trip",
+    "book",
+    "abroad",
+    "flight",
+    "hotel"
+   ],
+   "expected_advice_basis": "The user found solo travel to Lisbon deeply recharging and enjoys their own company.",
+   "note": "Asked event: booking a solo trip abroad this year. Never mentioned.",
+   "haystack_dates": [
+    "2023/03/18 (Sat) 20:30",
+    "2023/04/02 (Sun) 09:05",
+    "2023/04/22 (Sat) 15:50",
+    "2023/05/06 (Sat) 11:20"
+   ],
+   "haystack_session_ids": [
+    "c5_travel",
+    "c5_team_rota",
+    "c5_coffee",
+    "c5_bike"
+   ],
+   "haystack_sessions": [
+    [
+     {
+      "role": "user",
+      "content": "Travelling alone to Lisbon last spring was the most recharging week I've had in years. Nobody to negotiate with, just me and the city.",
+      "has_answer": true
+     },
+     {
+      "role": "assistant",
+      "content": "Having the whole day to yourself is a different kind of holiday.",
+      "has_answer": false
+     },
+     {
+      "role": "user",
+      "content": "I walked something like thirty kilometres over the week and never once felt tired of my own company.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "That's a good sign you travel well on your own.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "The team rota changed again and now I'm on call every second weekend.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Every second weekend is a lot — worth flagging if it becomes unworkable.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "I've switched to filter coffee at home and it's cheaper and better.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Both cheaper and better is a rare combination.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "The bike needs a new chain before the summer.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Cheap job, and it saves the cassette.",
+      "has_answer": false
+     }
+    ]
+   ]
+  },
+  {
+   "question_id": "c6_novel",
+   "question": "I've been toying with the idea of writing a novel — would that be a good idea?",
+   "question_type": "single-session-preference",
+   "question_date": "2023/07/22 (Sat) 18:00",
+   "answer": "The user writes nightly, wrote short stories praised by a teacher, and loses track of time writing.",
+   "answer_session_ids": [],
+   "battery_arm": "class",
+   "relevant_needle": "I write in my journal every night",
+   "forbidden_in_haystack": [
+    "novel",
+    "writing a book",
+    "manuscript",
+    "publisher",
+    "fiction"
+   ],
+   "expected_advice_basis": "The user writes nightly, wrote short stories praised by a teacher, and loses track of time writing.",
+   "note": "Asked event: writing a novel. Never mentioned.",
+   "haystack_dates": [
+    "2023/06/10 (Sat) 22:10",
+    "2023/06/24 (Sat) 10:45",
+    "2023/07/08 (Sat) 13:30",
+    "2023/07/22 (Sat) 18:00"
+   ],
+   "haystack_session_ids": [
+    "c6_journal",
+    "c6_gym",
+    "c6_garden_fence",
+    "c6_podcast"
+   ],
+   "haystack_sessions": [
+    [
+     {
+      "role": "user",
+      "content": "I write in my journal every night — pages and pages of it. My English teacher used to read my short stories out to the class, and I've never really stopped making things up.",
+      "has_answer": true
+     },
+     {
+      "role": "assistant",
+      "content": "A nightly journal and a teacher who read your stories aloud is a strong foundation for storytelling.",
+      "has_answer": false
+     },
+     {
+      "role": "user",
+      "content": "I think so. When I'm writing I lose track of time entirely.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Losing track of time is usually the sign that the work suits you.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "I skipped the gym three times this week.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Three times is a pattern — either move the sessions or drop them, don't guilt yourself.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "The garden fence needs treating before the rain comes back.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "A dry weekend and a tin of wood preserver will do it.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "I've been listening to a podcast about the history of cartography.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Maps are a surprisingly good lens on history.",
+      "has_answer": false
+     }
+    ]
+   ]
+  },
+  {
+   "question_id": "n1_triathlon",
+   "question": "Should I train for a triathlon this year?",
+   "question_type": "single-session-preference",
+   "question_date": "2023/03/19 (Sun) 20:15",
+   "answer": null,
+   "answer_session_ids": [],
+   "battery_arm": "near_miss",
+   "relevant_needle": null,
+   "forbidden_in_haystack": [
+    "triathlon",
+    "swim",
+    "cycle",
+    "run",
+    "marathon",
+    "race"
+   ],
+   "expected_advice_basis": null,
+   "note": "No statement anywhere about the user's exercise, fitness, athletic interests, or how they feel about sport.",
+   "haystack_dates": [
+    "2023/02/05 (Sun) 12:00",
+    "2023/02/19 (Sun) 17:10",
+    "2023/03/05 (Sun) 09:30",
+    "2023/03/19 (Sun) 20:15"
+   ],
+   "haystack_session_ids": [
+    "n1_move",
+    "n1_deadline",
+    "n1_recipe",
+    "n1_wedding"
+   ],
+   "haystack_sessions": [
+    [
+     {
+      "role": "user",
+      "content": "The house move is finally booked for the last weekend of the month.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "That's the hard part settled. Pack the kitchen last.",
+      "has_answer": false
+     },
+     {
+      "role": "user",
+      "content": "Movers arrive at eight. I've started labelling boxes by room.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Labelling by room is the single best packing decision.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "The client pushed the deadline back a week, which helps.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "An extra week is worth using for review rather than more scope.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "I made the lemon tart again and the pastry finally worked.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Cold butter and a light touch — good that it landed.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "My cousin's wedding is in June and I still need to book a hotel.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Book now — June weddings fill the nearby places fast.",
+      "has_answer": false
+     }
+    ]
+   ]
+  },
+  {
+   "question_id": "n2_sabbatical",
+   "question": "Do you think I should take a sabbatical from work next year?",
+   "question_type": "single-session-preference",
+   "question_date": "2023/05/23 (Tue) 21:05",
+   "answer": null,
+   "answer_session_ids": [],
+   "battery_arm": "near_miss",
+   "relevant_needle": null,
+   "forbidden_in_haystack": [
+    "sabbatical",
+    "career break",
+    "leave of absence",
+    "break from work",
+    "burnout",
+    "time off"
+   ],
+   "expected_advice_basis": null,
+   "note": "No statement anywhere about the user's feelings about their job, their energy, their plans, or any wish for time away.",
+   "haystack_dates": [
+    "2023/04/11 (Tue) 08:00",
+    "2023/04/25 (Tue) 18:20",
+    "2023/05/09 (Tue) 12:40",
+    "2023/05/23 (Tue) 21:05"
+   ],
+   "haystack_session_ids": [
+    "n2_standup",
+    "n2_car",
+    "n2_birthday",
+    "n2_printer"
+   ],
+   "haystack_sessions": [
+    [
+     {
+      "role": "user",
+      "content": "We moved the standup to 9:30 so the Sydney team can join.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "9:30 works better for the overlap.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "The car is in for its annual service on Thursday.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Worth asking them to check the brake fluid while it's there.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "I need to order a cake for my nephew's birthday on Saturday.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Order by Wednesday and you'll have your pick of designs.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "The office printer is jamming again.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Report it — jammed rollers are a maintenance job, not a user problem.",
+      "has_answer": false
+     }
+    ]
+   ]
+  },
+  {
+   "question_id": "n3_sailing",
+   "question": "Would it be a good idea to learn to sail this summer?",
+   "question_type": "single-session-preference",
+   "question_date": "2023/07/18 (Tue) 20:45",
+   "answer": null,
+   "answer_session_ids": [],
+   "battery_arm": "near_miss",
+   "relevant_needle": null,
+   "forbidden_in_haystack": [
+    "sail",
+    "boat",
+    "water",
+    "sea",
+    "hobby",
+    "outdoor"
+   ],
+   "expected_advice_basis": null,
+   "note": "No statement anywhere about the user's interests, hobbies, or time outdoors.",
+   "haystack_dates": [
+    "2023/06/06 (Tue) 19:00",
+    "2023/06/20 (Tue) 09:50",
+    "2023/07/04 (Tue) 14:00",
+    "2023/07/18 (Tue) 20:45"
+   ],
+   "haystack_session_ids": [
+    "n3_groceries",
+    "n3_renovation",
+    "n3_dentist",
+    "n3_series"
+   ],
+   "haystack_sessions": [
+    [
+     {
+      "role": "user",
+      "content": "I did the big grocery run and the freezer is finally restocked.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "A full freezer makes the whole week easier.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "The neighbours are having their roof redone and the scaffolding is up.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Worth asking how long the scaffolding stays — it usually outlasts the estimate.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "Dentist on Friday, just a check-up.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Routine check-ups are the cheap ones.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "I finished the detective series everyone was talking about.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Did the ending hold up?",
+      "has_answer": false
+     },
+     {
+      "role": "user",
+      "content": "Not really, but the middle was good.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "The middle is usually where the good writing lives.",
+      "has_answer": false
+     }
+    ]
+   ]
+  },
+  {
+   "question_id": "n4_veg_garden",
+   "question": "Should I start a vegetable patch at my place this spring?",
+   "question_type": "single-session-preference",
+   "question_date": "2023/04/19 (Wed) 19:35",
+   "answer": null,
+   "answer_session_ids": [],
+   "battery_arm": "near_miss",
+   "relevant_needle": null,
+   "forbidden_in_haystack": [
+    "garden",
+    "vegetable",
+    "patch",
+    "plant",
+    "grow",
+    "cook",
+    "dig"
+   ],
+   "expected_advice_basis": null,
+   "note": "No statement anywhere about the user's interests, growing anything, cooking, or their outdoor space.",
+   "haystack_dates": [
+    "2023/03/08 (Wed) 07:30",
+    "2023/03/22 (Wed) 16:10",
+    "2023/04/05 (Wed) 11:25",
+    "2023/04/19 (Wed) 19:35"
+   ],
+   "haystack_session_ids": [
+    "n4_laptop",
+    "n4_talk",
+    "n4_friend_move",
+    "n4_book_club"
+   ],
+   "haystack_sessions": [
+    [
+     {
+      "role": "user",
+      "content": "My laptop fan is making a noise again. I think it needs a clean.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Dust in the heatsink is the usual cause. Compressed air from the vents usually fixes it.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "I have to give a conference talk in September and I haven't started the slides.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "September is far enough away to write them properly — start with the argument, not the slides.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "My friend is moving flats next weekend and asked me to help carry boxes.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "Take the stairs in stages and lift with your legs.",
+      "has_answer": false
+     }
+    ],
+    [
+     {
+      "role": "user",
+      "content": "Book club is doing a history title this month.",
+      "has_answer": false
+     },
+     {
+      "role": "assistant",
+      "content": "History titles tend to spark the better arguments.",
+      "has_answer": false
+     }
+    ]
+   ]
+  }
+ ]
+}

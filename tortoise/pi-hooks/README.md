@@ -236,7 +236,10 @@ Idempotency is `session_id` (the server's upsert key) plus a content-addressed
 client key `sha256(session_id \0 sha256(turns))`, so replaying the same spool
 files one session and issues one POST. Transient failures (network / 5xx /
 retryable 4xx / #3713's in-flight 409) back off and retry; a permanent 4xx is
-discarded **with a recorded reason**, never silently.
+recorded **with a reason** and the entry is marked terminal and KEPT (never
+unlinked — #7708), so a refused capture is never silently destroyed. A terminal
+entry is skipped by later drains; clear the mark with
+`tortoise session drain --retry-terminal` once the refusal's cause is fixed.
 
 The Claude Code leg implements the same contract in `tortoise/capture_spool.py`,
 wired through `tortoise session capture` (write-before-upload) and

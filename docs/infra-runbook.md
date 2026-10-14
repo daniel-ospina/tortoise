@@ -7,7 +7,7 @@ subjects.team: epistemic-team
 aboutSubjects: tortoise-infra
 aboutObjects: fly-io, falkordb, cloudflare
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-10-14
 ---
 
 # Tortoise Hosted Platform — Infrastructure Runbook
@@ -15,7 +15,7 @@ updated: 2026-09-23
 > **Retention/deletion windows:** the single source of truth is `docs/retention-and-deletion.md`. Do not restate a window here — link that document.
 
 **Epic:** #7711 (legacy provisioning epic — provenance) · availability watchdog: #2850
-**Last updated:** 2026-09-22
+**Last updated:** 2026-10-14
 
 ## 1. Initial Provisioning
 
@@ -28,16 +28,37 @@ updated: 2026-09-23
 
 ### FalkorDB Cloud (managed database)
 
-FalkorDB runs on FalkorDB Cloud (managed) — provides AOF durability, automated
-backups, and multi-tenancy. Create the instance in the FalkorDB Cloud console,
-then set the connection string:
+FalkorDB runs on FalkorDB Cloud (managed), which provides multi-tenancy and
+per-user ACL credentials. ⛔ **Do not state an in-box persistence (AOF)
+guarantee here — and do not restate the platform's snapshot cadence, retention
+or loss window either.** The vendor's own docs conflict on AOF (the tier table
+lists it as Pro/Enterprise while the API schema exposes `AOFPersistenceConfig`
+(`everysec`) as available on Startup), so on our tier it is **contested, not
+settled**; and a mechanism or window restated here is a second authority that
+drifts from the real one. The durability authority — the mechanism, the loss
+window and the strongest verification actually performed — is
+**`docs/durability-posture.md`**; link it. Create the instance in the FalkorDB
+Cloud console, then set the connection string:
 
-**tortoise-api (FastAPI) on Fly.io:**
+**tortoise-y4mjjq (FastAPI) on Fly.io** — the app name is `fly.toml`'s `app`;
+there is no `tortoise-api` app:
 
 ```bash
 fly apps create tortoise-y4mjjq   # or use the existing app
-fly secrets set FASTAPI_INTERNAL_KEY=$(openssl rand -hex 32)
-fly secrets set TORTOISE_SECRET_PEPPER=$(openssl rand -hex 32)
+
+# The two `gh-secret:` credentials are seeded in GitHub FIRST (§2): a value set
+# only on Fly is reverted by the next deploy, and `deploy-hosted` fails closed
+# when they are absent from GitHub Actions secrets (deploy-hosted.yml).
+FASTAPI_KEY=$(openssl rand -hex 32)
+gh secret set FASTAPI_INTERNAL_KEY --body "$FASTAPI_KEY"
+fly secrets set FASTAPI_INTERNAL_KEY="$FASTAPI_KEY"
+
+# ⚠️ Set ONCE here — every later rotation of this one invalidates all tenant
+# API key hashes (§2).
+PEPPER=$(openssl rand -hex 32)
+gh secret set TORTOISE_SECRET_PEPPER --body "$PEPPER"
+fly secrets set TORTOISE_SECRET_PEPPER="$PEPPER"
+
 # Set FALKORDB_CLOUD_URI in GitHub Actions secrets (deploy workflow sets it on Fly):
 #   docker://tortoise:<password>@<instance-endpoint>:53171/tortoise
 fly deploy
@@ -64,7 +85,7 @@ wrangler r2 bucket create tortoise-backups
 
 | Type | Name | Target |
 |------|------|--------|
-| CNAME | api | tortoise-api.fly.dev |
+| CNAME | api | tortoise-y4mjjq.fly.dev |
 | CNAME | app | tortoise-dashboard.pages.dev |
 
 ### Canonical API host — and why `tortoise.dev` is not ours (recorded 2026-09-19, #3474)
@@ -124,12 +145,11 @@ reached the same conclusion — its earlier "remove the record" decision is VOID
 the owner never owned the name. The issue's original "TLS black-hole" framing is also
 **stale**: the host now fails *loudly* with a 522 in ~20 s instead of hanging.
 
-*Adjacent work owned elsewhere — do not re-fix it in this section:* the
-`tortoise-api.fly.dev` target in the table above does not resolve (`dig +short
-tortoise-api.fly.dev` → empty; the Fly app is `tortoise-y4mjjq` per `fly.toml`),
-tracked by **#3046**. A host that answers slowly instead of failing fast is the
-client-contract defect tracked by **#3805** (one canonical base URL + bounded
-fail-fast).
+The `api` CNAME target is the Fly app host (`tortoise-y4mjjq.fly.dev`) — the
+earlier `tortoise-api.fly.dev` spelling did not resolve at all (`dig +short
+tortoise-api.fly.dev` → empty) and was corrected under **#2968**/**#3046**. A
+host that answers slowly instead of failing fast is the client-contract defect
+tracked by **#3805** (one canonical base URL + bounded fail-fast).
 
 ### GitHub Actions
 
@@ -140,25 +160,214 @@ Set these secrets in repo Settings → Secrets and variables → Actions:
 
 ## 2. Secrets Rotation
 
+⛔ **Every secret declared `gh-secret:` is managed from GitHub.**
+`.github/scripts/fly-managed-secrets.txt` is the declared inventory, and the
+`Set all app secrets on Fly.io` step of `deploy-hosted.yml` re-stages each name
+**it declares for propagation** from its GitHub Actions secret before the
+`Deploy` step. So for those names **the GitHub secret is the upstream source,
+and a rotation that updates only Fly is silently reverted by the next deploy** —
+including a routine push to `main`. Update the GitHub secret first; the Fly
+commands below then apply that same value without waiting for a deploy.
+
+The scope is the `gh-secret:` token, not "every declared name". The manifest's
+other source tokens are deliberate, not gaps, and a rotation must **not**
+"tidy" one of them into GitHub (the manifest header defines each token; §8.3 is
+the ruling for the first):
+`fly-only:<issue>` names are out-of-band **by recorded decision** —
+`REGISTRY_STREAM_KEY` (`fly-only:#661`) must never be present in GitHub;
+`fly-toml-env` names are applied from the versioned `fly.toml [env]`; and
+`workflow` names have no GitHub secret *as their declared source*. Two of them
+are re-staged on **every** run — `TORTOISE_GIT_SHA` from non-secret context
+(`${GITHUB_SHA}`) and `TORTOISE_SESSION_LLM_MODEL` from its GitHub secret when
+one is present, else the versioned default (§4.6) — so a Fly-only value for
+either is reverted by the next deploy exactly like a `gh-secret:` one.
+`BACKUP_SWEEP_ENABLED` is the exception: it is staged to `true` **only when**
+the whole backup/R2/DR secret set is present, and otherwise the assignment is
+skipped and any Fly-side value is left as it was (the fail-closed default —
+`docs/durability-posture.md`).
+
+**One value, two homes — generate once, set GitHub first, then apply that same
+value to Fly.** `$(openssl rand …)` re-rolled inside the `fly secrets set` line
+would put a *second* value on Fly, which the next deploy overwrites with
+GitHub's: a rotation that never actually rotated. The `NEW=` line below is that
+rule, not decoration.
+
 ```bash
 # Rotate FASTAPI_INTERNAL_KEY (no downtime — old key works during deploy)
-fly secrets set FASTAPI_INTERNAL_KEY=$(openssl rand -hex 32) -a tortoise-api
-fly deploy -a tortoise-api
+NEW=$(openssl rand -hex 32)
+gh secret set FASTAPI_INTERNAL_KEY --body "$NEW"   # GitHub first — the upstream
+fly secrets set FASTAPI_INTERNAL_KEY="$NEW" --stage -a tortoise-y4mjjq
+fly secrets deploy -a tortoise-y4mjjq
 
 # Rotate TORTOISE_SECRET_PEPPER (⚠️ DOWNTIME — invalidates all API key hashes)
 # Must re-provision all tenant API keys after rotation
-fly secrets set TORTOISE_SECRET_PEPPER=$(openssl rand -hex 32) -a tortoise-api
-fly deploy -a tortoise-api
+NEW=$(openssl rand -hex 32)
+gh secret set TORTOISE_SECRET_PEPPER --body "$NEW"
+fly secrets set TORTOISE_SECRET_PEPPER="$NEW" --stage -a tortoise-y4mjjq
+fly secrets deploy -a tortoise-y4mjjq
 ```
+
+A bare `fly secrets set` (no `--stage`) restarts every Machine; `fly secrets set
+… --stage -a tortoise-y4mjjq` followed by `fly secrets deploy -a tortoise-y4mjjq`
+applies the same value without an image rebuild. Either way the GitHub secret is
+the step that matters for a `gh-secret:` name (§8.4).
+
+### Rotating the FalkorDB Cloud DB credential (`FALKORDB_CLOUD_URI`)
+
+Needed because the URI is a credential the app holds, and the leak class is real
+— it appeared in the boot log stream until #2923. The credential lives in **two**
+places, and the ordering is the whole procedure:
+
+| Home | Role |
+|---|---|
+| GitHub Actions secret `FALKORDB_CLOUD_URI` | the **upstream** source — declared `gh-secret:FALKORDB_CLOUD_URI` in `.github/scripts/fly-managed-secrets.txt` |
+| The Fly secret of the same name | pushed from GitHub by the `Set all app secrets on Fly.io` step (`flyctl secrets set --stage … --app tortoise-y4mjjq`), applied by the `Deploy` step |
+
+⛔ **Rotating Fly alone is void.** Any `deploy-hosted` run re-stages
+`secrets.FALKORDB_CLOUD_URI` and overwrites the Fly value with the GitHub one.
+**Update the GitHub secret first**, and keep the old credential alive until step 4
+below is green.
+
+1. **Create a new DB user** — a **named** per-user ACL user via
+`POST https://api.falkordb.cloud/v1/customer-ldap/instances/{instanceId}/users`,
+*not* a change to the instance's default `falkordb` user. Rotation is **per
+user** (`PUT …/users/{username}`), so the old credential still works — zero
+downtime so far.
+
+   ⛔ **Do not assume a preset is sufficient — a `Write`-preset user is not.**
+   This URI becomes the app's `TORTOISE_DB_URI` (`entrypoint.sh` builds it from
+   `FALKORDB_CLOUD_URI`), and `tortoise/acl_graph_users.py::_admin_client()`
+   uses those same credentials as its **admin** connection to provision each
+   graph's per-graph ACL user: `ACL GETUSER` / `ACL SETUSER … reset` /
+   `ACL DELUSER` / `ACL SAVE` (`_ensure_default_user_secured`, `_user_exists_on`,
+   `_setuser`, `drop_acl_user`), behind a `MODULE LIST` capability probe
+   (`_falkordb_present`). The requirement is therefore `_GRAPH_COMMANDS`
+   **plus `+MODULE|LIST` and `+ACL`** — that file is the requirement's home, and
+   the vendor's presets meet neither ("No preset grants `+ACL`"; only **Admin**
+   adds `+MODULE|LIST`). A preset that misses them does not fail loudly: with
+   `MODULE LIST` denied, `create_acl_user()` returns `None` and the mint
+   succeeds with **no per-graph ACL user** — the C4/#2113 isolation layer
+   silently absent. Which credential the Cloud app's ACL provisioning can
+   actually use is **#8617**; until that is settled, do not narrow the ACL below
+   what `tortoise/acl_graph_users.py` requires.
+2. **Update the GitHub Actions secret `FALKORDB_CLOUD_URI` first**, to the new
+user's URI. This must land before any deploy and before the old credential is
+disabled, or a push to `main` re-stages the credential you are retiring.
+3. **Apply and verify it** — either dispatch `deploy-hosted` (the normal
+`--stage` + `Deploy` + `post-deploy-verify` path), or, without an image change:
+
+   ```bash
+   fly secrets set FALKORDB_CLOUD_URI='<new-uri>' --stage -a tortoise-y4mjjq
+   fly secrets deploy -a tortoise-y4mjjq
+   ```
+
+   Then `curl -sS https://api.premiselabs.co/health` → `db.ok: true` (and
+   `/health/ready` 200). The `post-deploy-verify` job runs this check as its DB
+   health step on a dispatch.
+4. **Retire the old credential — only after step 3 is green.** Rotate the leaked
+   user's password (`PUT …/users/{username}`) or delete the user (`DEL
+   …/users/{username}`). ⚠️ The instance's **default** user is managed by the
+   instance, not the API: it **cannot be deleted** (the API rejects it) and its
+   username cannot change — if that is the credential you are retiring, rotate
+   its password only. Prefer that
+   per-user path over changing the instance-level `falkordbPassword`, which
+   **restarts the instance** — and with in-box persistence contested (see §1 and
+   `docs/durability-posture.md`), a restart on a non-AOF tier can lose writes
+   since the last snapshot. Keeping the old user alive through step 3 also leaves
+   rollback as a secret revert.
+
+**Rotate in place only if you must keep the same username** (the URI's user
+component cannot change): set the GitHub secret to the new password first, rotate
+the password, then immediately apply the new URI —
+`fly secrets set FALKORDB_CLOUD_URI='<new-uri>' --stage -a tortoise-y4mjjq &&
+fly secrets deploy -a tortoise-y4mjjq` — accepting a short window in which the
+machine still holds the old password and new connections fail. There is no
+fully-windowless in-place order; that is why the create-a-new-user path above is
+preferable.
+
+### 2.1 Workstation credential posture — relocate, do not rotate (#4030)
+
+§2 rotates the **deployed** secrets, which live in GitHub Actions secrets → Fly
+and stay managed there (§8.1). This subsection governs the **operator
+workstation**, where a plaintext credential is the exposure #4030's inventory
+is about.
+
+**The rule.** Deploy/production credential material belongs to the GitHub +
+Fly stores. The repo-root `.env` is the home for **local-run** credentials
+only, must stay `0600`, and is gitignored (`.gitignore:19-20`). A local copy of
+a production credential, where a local job genuinely needs one, goes to the
+**macOS Keychain** (access-controlled) or an owner-only `0600` file — never to
+`.env`, a shared file, or a command line that lands in shell history.
+
+**Must-stay-local, each with the consumer that forces the exception** — a
+documented exception, not a silent one:
+
+| In `.env` | Consumer | Why it cannot move |
+|---|---|---|
+| `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `VENICE_API_KEY` | the local agent runtime + the eval/ask/longmem lanes (`tortoise/model_adapters.py`) | no remote store serves a local run; the production legs already read their own stores |
+| `SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID` / `_SECRET` | the **local** Supabase CLI / GoTrue (`supabase/config.toml:364-365`) | a CI store would serve no job; the hosted project's provider is dashboard-configured |
+| `JEV_API_KEY` | `tools/collision_preflight.py` (`$JEV_API_KEY`, else the repo-root `.env`) | the pre-dispatch gate is a local tool — the repo-root `.env` is its documented home (declared in `.env.example`) |
+| `BLOG_AGENT_KEY` | the blog publish workflow — `X-Agent-Key` against the blog CMS API (`agent-infra` `skills/seo-content-generation/workflow/05-cms-publish.md`) | **it has a consumer.** The 2026-09-18 inventory recorded it as unused; re-measuring on 2026-10-14 found the publish skill reads it from this `.env` line — **do not delete it** |
+
+**Relocated off the workstation** (implemented 2026-09-19, recorded on #4030;
+values were verified byte-identical to the plaintext before the plaintext was
+deleted, and the deploy leg reads the GitHub secrets either way —
+`deploy-hosted.yml:340-346`, which never reads `.env`):
+
+```bash
+security find-generic-password -a danielospina -s tortoise-stripe-secret-key -w       # live restricted key
+security find-generic-password -a danielospina -s tortoise-stripe-webhook-secret -w   # webhook signing secret
+security find-generic-password -a danielospina -s tortoise-stripe-price-ids -w        # price catalog JSON
+```
+
+Still access-controlled where they were, per the 2026-09-18 inventory (not
+re-measured by this change): the Supabase CLI management token (write reach to
+production projects — Keychain) and the CRM key (`~/.minutes/attio_api_key`,
+`0600` — the #388 fix, re-measured `0600` on 2026-10-14; the bridge reads it
+with nothing in its launchd environment).
+
+**Do not rotate** — owner ruling 2026-09-18: **OVERRIDES:** the
+rotate-on-uncertainty practice (NIST SP 800-57 Pt 1 Rev 5; AWS IAM; Google
+Cloud all treat a key of uncertain history as compromised) — the beta must ship
+and earn before we spend engineering time on credential churn. The compensating
+control is **relocation + least exposure**, above. **The trigger to revisit is
+the beta earning, not a date.**
+
+**Constraints a future move must respect** (from the consumer lanes, recorded so
+a move is testable rather than assumed):
+
+- **The env-var NAME must not change.** Production sets
+  `SUPABASE_SERVICE_ROLE_KEY` while some readers still accept only the legacy
+  `SUPABASE_SERVICE_KEY`; a rename re-opens a silent write-path fallback
+  (`#3677`, closed — the surviving single-name reader is `#3744`).
+- The analytics fallback file (`~/.tortoise/analytics_fallback.jsonl`) must
+  survive until the code stops needing it.
+- The CRM bridge must still read the key file with nothing in its launchd
+  environment, and that file must stay owner-only — its resolver refuses a
+  group/other-readable file and would then stop syncing silently.
+
+**Gotchas measured on this box.**
+
+- `security add-generic-password … -w` fed by **piped stdin** (the argv-free
+  form) **silently truncates the value at 128 characters** — a 573-char price
+  catalog came back as a 128-char prefix, and that was caught only because the
+  write was verified by a round-trip comparison rather than a length check. Use
+  the argv form for a long value, or verify the round trip.
+- `premise-labs/.env`'s protection lives only in that clone's
+  `.git/info/exclude`, so a FRESH clone there has no committed protection
+  (tortoise's is a committed `.gitignore` rule). Its mode is `0600`.
+- A credential's HOME on the workstation is otherwise recorded nowhere but an
+  untracked file: `.env` is not in git, so a regenerated `.env` loses the
+  pointer to these Keychain items. Keep this table current with any move.
 
 ## 3. Rollback
 
 ```bash
 # List releases
-fly releases -a tortoise-api
+fly releases -a tortoise-y4mjjq
 
 # Rollback to previous release
-fly deploy --image $(fly releases -a tortoise-api --json | jq -r '.[1].ImageRef') -a tortoise-api
+fly deploy --image $(fly releases -a tortoise-y4mjjq --json | jq -r '.[1].ImageRef') -a tortoise-y4mjjq
 ```
 
 ## 4. Health Check
@@ -169,7 +378,7 @@ curl https://api.premiselabs.co/health
 # → {"status": "ok"}
 
 # Verify FalkorDB connectivity
-fly ssh console -a tortoise-api -C "python -c 'from tortoise.sdk import TortoiseSDK; sdk = TortoiseSDK(namespace=\"registry\"); print(sdk.db.ping())'"
+fly ssh console -a tortoise-y4mjjq -C "python -c 'from tortoise.sdk import TortoiseSDK; sdk = TortoiseSDK(namespace=\"registry\"); print(sdk.db.ping())'"
 ```
 
 ### 4.1 What a client must observe on `/health` — the effect and its budget (#3811)
@@ -289,7 +498,7 @@ product path (#822) and there is no fallback, so with no key no memory points
 are produced. This section is the ops contract for making sure extraction is
 enabled.
 
-### Env keys (set on `tortoise-api`/Fly; GitHub Actions secrets are the source)
+### Env keys (set on `tortoise-y4mjjq`/Fly; GitHub Actions secrets are the source)
 
 | Key | Provider | Default model | Notes |
 |-----|----------|---------------|-------|
@@ -316,7 +525,7 @@ provider/model and fails in hosted mode when the key is missing.
   cost control.
 - The key must exist on BOTH GitHub Actions secrets (deploy source —
   `deploy-hosted.yml` sets Fly secrets from GH secrets) and the running app
-  (`fly secrets list -a tortoise-api`). A GH-secret miss ships a deploy whose
+  (`fly secrets list -a tortoise-y4mjjq`). A GH-secret miss ships a deploy whose
   captures STORE turns but never extract into memory; the deploy workflow
   warns (warn-only by design, #1346 — a fail-closed gate here held ALL deploys
   for 2+ days) so the miss is visible without blocking the rest of the API.
@@ -1970,7 +2179,10 @@ stays out-of-band: `tools/rotate-backup-keys.py --role registry_stream`.
    names both uses.
 
 **Rotation:** for a `gh-secret:` name, rotating the GitHub secret is the only
-step — the next deploy propagates it.
+step — the next deploy propagates it. The one exception in ordering is
+`FALKORDB_CLOUD_URI`, where the database user must be created **and** the GitHub
+secret updated before anything is applied to Fly (§2, "Rotating the FalkorDB
+Cloud DB credential").
 
 ### 8.5 The post-release DB health gate's phases — the weaker predicate informs, the strongest decides (#4771)
 
@@ -2077,10 +2289,10 @@ run (#2706).
 
 ## Secrets Matrix
 
-| Secret | tortoise-api (Fly.io) | FalkorDB Cloud | GitHub Actions |
+| Secret | tortoise-y4mjjq (Fly.io) | FalkorDB Cloud | GitHub Actions |
 |--------|----------------------|---------------|----------------|
-| FASTAPI_INTERNAL_KEY | ✅ | — | — |
-| TORTOISE_SECRET_PEPPER | ✅ | — | — |
+| FASTAPI_INTERNAL_KEY | ✅ (set via GitHub secret → Fly) | — | ✅ |
+| TORTOISE_SECRET_PEPPER | ✅ (set via GitHub secret → Fly) | — | ✅ |
 | FALKORDB_CLOUD_URI | ✅ (set via GitHub secret → Fly) | ✅ (instance creds) | ✅ |
 | FLY_API_TOKEN | — | — | ✅ |
 | CLOUDFLARE_API_TOKEN | — | — | ✅ |
@@ -2091,7 +2303,7 @@ run (#2706).
 | R2_BUCKET | ✅ (`tortoise-backups`) | — | ✅ |
 | RESEND_API_KEY | ✅ (billing + transactional email, #310/#307) | — | ✅ |
 | RESEND_FROM_EMAIL | ✅ (single managed sender identity — #1136; default `noreply@premiselabs.co`) | — | ✅ |
-| BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | — |
+| BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | ✅ |
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
 
 ### Runtime Config (non-secret)
@@ -2109,7 +2321,7 @@ Can a fresh Fly.io account + Cloudflare account follow §1 from zero and arrive 
 - [ ] `fly apps create tortoise-y4mjjq` → deploys, health check passes, connects to FalkorDB Cloud
 - [ ] `api.premiselabs.co` → resolves, TLS valid, /health returns ok (db: connected)
 - [ ] `app.premiselabs.co` → resolves, serves dashboard placeholder
-- [ ] GitHub push to main → auto-deploys tortoise-api
+- [ ] GitHub push to main → auto-deploys tortoise-y4mjjq
 - [ ] ≥1 LLM provider key in GitHub secrets → deployed to Fly (`fly secrets list -a tortoise-y4mjjq`) → `tortoise doctor` reports `Session extraction ✅` on the app
 - [ ] Live `POST /v1/sessions` smoke returns 200 + `extraction_mode: "llm"` (a keyless `"no-provider"`, or `"extraction-disabled"` for a team with extraction off, means turns were stored but extraction was skipped)
 - [ ] `fly.toml` declares `auto_stop_machines` / `auto_start_machines` / `min_machines_running` explicitly (no implicit platform defaults) and `fly config show` matches (§6.2)

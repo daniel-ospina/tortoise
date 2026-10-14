@@ -1780,6 +1780,179 @@ class TestRateLimitWindowReset:
         assert r.status_code == 200  # not 429
 
 
+class TestMcpBoundedMiddlewareStore:
+    """#5518 — `MCPRateLimitMiddleware._buckets` gets the #3124 capacity policy.
+
+    This lane's key space is FULLY attacker-chosen (``key_id = auth[7:]``
+    accepts ANY ``Bearer <string>`` — no ``tt_``/``tk_`` prefix gate), so the
+    old "bound it with the 60 s sweep" arrangement was the defect: a
+    rotating-key flood pruned nothing (every bucket charged inside the window)
+    and the wholesale sweep was O(n) over a store that grew for the whole
+    window. These pin the replacement — stated cap + reclaim-inactive + one
+    shared overflow + O(1) hot path + no bucket left by a 429.
+    """
+
+    class _Req:
+        """Minimal request: the limiter reads only url.path / method /
+        headers / client (unlike the REST lane it never touches state)."""
+
+        def __init__(self, auth="", host="10.0.0.1"):
+            import types
+
+            class _Url:
+                path = "/mcp"
+
+            class _Headers:
+                def get(self, key, default=None):
+                    return auth if key == "Authorization" else default
+
+            self.url = _Url()
+            self.method = "POST"
+            self.headers = _Headers()
+            self.client = types.SimpleNamespace(host=host)
+
+    class _CountingStore(dict):
+        """Measures store-wide iteration WORK, not just calls (the #3124
+        `_BucketCountingStore` seam): ``scans`` counts wholesale entry points,
+        ``yielded`` counts KEYS produced, so the O(1) one-head inspection is
+        distinguishable from a full-store scan."""
+
+        def __init__(self):
+            super().__init__()
+            self.scans = 0
+            self.yielded = 0
+
+        def __iter__(self):
+            for key in super().__iter__():
+                self.yielded += 1
+                yield key
+
+        def __reversed__(self):
+            for key in super().__reversed__():
+                self.yielded += 1
+                yield key
+
+        def items(self):
+            self.scans += 1
+            return super().items()
+
+        def keys(self):
+            self.scans += 1
+            return super().keys()
+
+        def values(self):
+            self.scans += 1
+            return super().values()
+
+    @staticmethod
+    def _middleware(monkeypatch, max_buckets, max_per_minute=1):
+        import tortoise.mcp_auth as ma
+
+        async def _noop(scope, receive, send):
+            pass
+
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        mw = ma.MCPRateLimitMiddleware(_noop, max_per_minute=max_per_minute,
+                                       max_buckets=max_buckets)
+
+        async def _next(_req):
+            return "ok"
+
+        return mw, _next
+
+    def test_store_is_bounded_under_a_rotating_key_flood(self, monkeypatch):
+        """#5518 repro: a rotating ``Bearer`` key set in ONE window.
+
+        Old shape: the store reached the number of keys sent (nothing was
+        stale, so the sweep deleted nothing). New shape: owned keys stay <=
+        cap, one shared overflow absorbs the next key, further new keys get the
+        documented store-overflow 429.
+        """
+        import tortoise.rate_buckets as rb
+
+        mw, _next = self._middleware(monkeypatch, max_buckets=8)
+
+        async def _run():
+            codes = []
+            for i in range(50):
+                resp = await mw.dispatch(self._Req(auth=f"Bearer flood-{i}"),
+                                         _next)
+                codes.append(getattr(resp, "status_code", 200))
+            return codes
+
+        codes = asyncio.run(_run())
+        assert rb._bucket_owned_count(mw._buckets) <= 8, len(mw._buckets)
+        assert len(mw._buckets) <= 9, len(mw._buckets)  # cap + the one overflow
+        assert 429 in codes, "an all-live cap must produce the overflow 429"
+
+    def test_tracked_key_hot_path_never_scans_the_store(self, monkeypatch):
+        """#5518: the old 60 s wholesale `.items()` prune is gone — a tracked
+        key must do no store-wide iteration on ANY dispatch."""
+        mw, _next = self._middleware(monkeypatch, max_buckets=100,
+                                     max_per_minute=10)
+        assert not hasattr(mw, "_last_cleanup"), (
+            "the 60 s sweep's deadline attribute is back — a periodic O(n) "
+            "prune has been reintroduced")
+        store = self._CountingStore()
+        for i in range(5):
+            store[f"ip:9.9.9.{i}"] = [time.time() - 10_000]
+        mw._buckets = store
+
+        async def _run():
+            req = self._Req(auth="Bearer hot")
+            await mw.dispatch(req, _next)  # create the tracked bucket
+            store.scans = store.yielded = 0
+            await mw.dispatch(req, _next)  # tracked key → pruned in place
+            return store.scans, store.yielded
+
+        scans, yielded = asyncio.run(_run())
+        assert scans == 0, f"middleware scanned the whole store: scans={scans}"
+        assert yielded <= 1, (
+            f"middleware iterated {yielded} keys on the tracked hot path "
+            f"(store holds {len(store)} keys) — only the O(1) tail peek may "
+            "yield one key")
+
+    def test_a_429_creates_no_bucket(self, monkeypatch):
+        """#5518 AC3: ``_bucket_route`` never inserts, so the refused key is
+        absent from the store. Pre-#5518 the READ ``self._buckets[key_id]`` on
+        a ``defaultdict`` inserted the bucket on the LOOKUP path (#1719's
+        insertion-discipline defect) — that is not a per-429 leak: a fresh
+        key's empty bucket is under any ``max_per_minute >= 1``, so a fresh key
+        is charged, never refused (only ``max_per_minute == 0`` could refuse a
+        lookup-created key). This pins the post-fix discipline: a refusal is
+        reached without ever writing the refused key."""
+        import tortoise.rate_buckets as rb
+
+        # cap=1, limit=1: A owns the single slot, B is charged to the shared
+        # overflow, C is refused — and must leave nothing behind.
+        mw, _next = self._middleware(monkeypatch, max_buckets=1)
+
+        async def _run():
+            out = []
+            for key in ("A", "B", "C"):
+                resp = await mw.dispatch(self._Req(auth=f"Bearer {key}"), _next)
+                out.append(getattr(resp, "status_code", 200))
+            return out
+
+        codes = asyncio.run(_run())
+        assert codes == [200, 200, 429], codes
+        assert "C" not in mw._buckets, (
+            "a 429 created a bucket for the refused key")
+        assert rb._bucket_owned_count(mw._buckets) == 1, mw._buckets
+        assert mw._buckets[rb._BUCKET_OVERFLOW_KEY], (
+            "B's charge did not go to the shared overflow")
+
+    def test_cap_does_not_drift_from_the_rest_lane(self):
+        """Both HTTP lanes share ONE capacity policy and ONE stated cap — a
+        cap changed on one side only would silently bound them differently."""
+        import tortoise.hosted_api as ha
+        import tortoise.mcp_auth as ma
+
+        assert (ma.MCPRateLimitMiddleware.MAX_BUCKETS
+                == ha.RateLimitMiddleware.MAX_BUCKETS), (
+            "the MCP lane's bucket cap drifted from the REST lane's")
+
+
 class TestContextVarNoLeak:
     """Authenticated request must not leak team ContextVar to a later request."""
 

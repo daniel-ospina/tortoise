@@ -27,15 +27,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tools.longmem_eval import rerank  # noqa: E402, RUF100
 from tools.longmem_eval.ingest import ingest_haystack  # noqa: E402, RUF100
 from tools.longmem_eval.retrieve import (  # noqa: E402, RUF100
+    resolve_rerank_arm_pool_limit,
     retrieve_for_question,
 )
 from tools.longmem_eval.run import (  # noqa: E402, RUF100
     CheckpointStaleError,
     _build_fingerprint,  # noqa: E402, RUF100
+    _build_parser,
     _resolve_rerank,
     run_evaluation,
     run_main,
 )
+from tortoise.retrieval import DEFAULT_POOL_SIZE  # noqa: E402, RUF100
 
 #: C4 (#2517): the ONE vocabulary of ``match_source`` legs the eval lane
 #: asserts against. The authoritative closed set is
@@ -531,10 +534,12 @@ def test_nan_embedding_falls_back():
 
 
 def test_retrieve_rerank_degraded_pool_depth(tmp_path, monkeypatch):
-    """Synthetic >40-point corpus, max(ks)=40 > top_k=20: a scorer-None
-    question yields exactly top_k hits (20) — the baseline-pool fallback +
-    truncation observable; an applied question yields
-    rerank_pass["pool_size"] == 40 with selected-only hits (D3)."""
+    """Synthetic >DEFAULT_POOL_SIZE corpus, max(ks)=40 > top_k=20: a
+    scorer-None question yields exactly top_k hits (20) — the baseline-pool
+    fallback + truncation observable; an applied question yields
+    rerank_pass["pool_size"] == DEFAULT_POOL_SIZE (D3 + #2992: the rerank
+    arm is FLOORED at the #1947 baseline, so the 40-item pool knob can only
+    widen — it can no longer collapse the deepened pool)."""
     sdk = _fresh_sdk(tmp_path)
     q = {
         "question_id": "synth_q1",
@@ -548,7 +553,7 @@ def test_retrieve_rerank_degraded_pool_depth(tmp_path, monkeypatch):
         "answer_session_ids": ["synth-s0"],
     }
     try:
-        for i in range(45):
+        for i in range(DEFAULT_POOL_SIZE + 1):
             sdk.create_point(
                 "point", f"the widget status is {i} and the serial is {i}",
                 id=f"synth:q1:t{i}", pointKind="event",
@@ -568,7 +573,7 @@ def test_retrieve_rerank_degraded_pool_depth(tmp_path, monkeypatch):
                                      rerank=True, rerank_pool=40,
                                      per_session_cap=2, mmr_lambda=0.7)
         assert ret2["rerank_pass"]["applied"] is True
-        assert ret2["rerank_pass"]["pool_size"] == 40
+        assert ret2["rerank_pass"]["pool_size"] == DEFAULT_POOL_SIZE
         assert len(ret2["hits"]) == ret2["rerank_pass"]["selected_count"] <= 20
         assert ret2["rerank_pass"]["selected_count"] <= 2  # 1 session, cap 2
     finally:
@@ -843,15 +848,17 @@ def test_env_parse_garbage_and_negative(tmp_path, monkeypatch):
 
 
 def test_effective_pool_recorded_truthfully(tmp_path, monkeypatch):
-    """--rerank --rerank-pool 40 --k 5,10,20,50 → max(ks)=50 overrides the
-    pool; the measured arm is labeled with the EFFECTIVE applied pool."""
+    """#2992: --rerank --rerank-pool 40 --k 5,10,20,50 records the depth the
+    retrieve path ACTUALLY fetches: the #1947 baseline (DEFAULT_POOL_SIZE),
+    which floors both the 40-item knob and max(ks)=50 — never the bare 50."""
+    monkeypatch.delenv("TORTOISE_LME_POOL_SIZE", raising=False)
     _inject_fake(monkeypatch)
     out = tmp_path / "report.json"
     report = run_main(["--data", str(MINI), "--limit", "5", "--split", "s",
                        "--mock", "--skip-preflight", "--rerank",
                        "--rerank-pool", "40",
                        "--k", "5,10,20,50", "--output", str(out)])
-    assert report["rerank"]["pool_size"] == 50
+    assert report["rerank"]["pool_size"] == DEFAULT_POOL_SIZE
 
 
 def test_runner_env_hermeticity(tmp_path, monkeypatch):
@@ -869,6 +876,83 @@ def test_runner_env_hermeticity(tmp_path, monkeypatch):
         assert ret["rerank_pass"]["applied"] is True
     finally:
         sdk.close()
+
+
+def test_rerank_pool_user_docs_state_the_floored_applied_pool(monkeypatch):
+    """#2992 defect 1 (docs-staleness P2): the user-facing descriptions of the
+    rerank-pool knob must state the SAME resolution the code applies.
+
+    Pre-fix these three surfaces advertised the retracted formula
+    ``max(pool, max(k))``, so with ``--rerank`` and no ``--rerank-pool`` a lane
+    was told the applied pool was 40 while ``retrieve_for_question`` fetched
+    ``DEFAULT_POOL_SIZE`` = 120. The knob is a raise-only FLOOR now; every
+    description must say so, and keep the rerank-OFF pool-only arm distinct.
+
+    #2992 review (P2): the baseline is the env override ``TORTOISE_LME_POOL_SIZE``
+    with a 120 DEFAULT — NOT a 120 floor — so the docs must not claim
+    ``max(TORTOISE_LME_POOL_SIZE, 120)``. The final assertions pin that
+    distinction against the code.
+    """
+    readme = (Path(__file__).resolve().parent.parent
+              / "tools" / "longmem_eval" / "README.md").read_text(
+                  encoding="utf-8")
+    # argparse HARD-WRAPS format_help() at the terminal width, which honours
+    # $COLUMNS — normalize whitespace so the assertion is a property of the
+    # help STRING, not of the environment it was rendered in (#2992 review:
+    # the raw substring was green at COLUMNS unset/80/200 and red at
+    # 40/50/60/120).
+    help_text = " ".join(_build_parser().format_help().split())
+    floored = "max(pool, baseline, max(k))"
+    # (1) CLI help text
+    assert "--rerank-pool" in help_text
+    assert floored in help_text, (
+        "CLI --rerank-pool help still advertises the retracted formula")
+    # (2) README env-knob table row
+    rows = [ln for ln in readme.splitlines()
+            if ln.startswith("| `TORTOISE_LME_RERANK_POOL`")]
+    assert len(rows) == 1
+    assert floored in rows[0]
+    # (3) README R6 stage prose
+    r6 = readme.split("Optional R6 post-fusion stage", 1)[1][:800]
+    assert floored in r6
+    # the raise-only direction is named on both surfaces (the fix's intent:
+    # the knob can no longer LOWER the depth below the baseline)
+    assert "can only RAISE" in help_text
+    assert "can only RAISE" in readme
+    # the baseline is an OVERRIDE-with-default, never a 120 floor — neither
+    # surface may claim the flat max() form, and the code must keep honouring
+    # a shallower env override (#2992 review, CLAUDE.md-adherence).
+    assert "max(TORTOISE_LME_POOL_SIZE, 120)" not in help_text
+    assert "max(TORTOISE_LME_POOL_SIZE, 120)" not in readme
+    monkeypatch.setenv("TORTOISE_LME_POOL_SIZE", "50")
+    assert resolve_rerank_arm_pool_limit(rerank_pool=40, max_k=20) == 50
+
+
+def test_cap3_only_arm_collapses_into_applied_rerank(monkeypatch):
+    """#2992 (recorded loss): post-fix the pre-registered ``cap3-only`` arm
+    (``--rerank --rerank-cap 3``, no ``--rerank-pool``) resolves to the SAME
+    effective config as ``applied-rerank`` (``--rerank --rerank-pool 120
+    --rerank-cap 3``). The 40-item rerank default is floored at the #1947
+    baseline, so ``applied-rerank``'s explicit ``--rerank-pool 120`` is now
+    redundant and the cap-only isolation it was pre-registered for is no
+    longer reproducible via the arm's own knobs.
+
+    Recorded in ``measure_temporal.ARM_TABLE`` (reach) and runbook limitation
+    6. Pre-fix the two configs DIFFERED (cap3-only fetched 40), so this
+    equality fails on the pre-fix code. A future cap-vs-depth control needs a
+    shallow ``TORTOISE_LME_POOL_SIZE`` baseline or an explicit pool below it.
+    """
+    for _var in ("TORTOISE_LME_POOL_SIZE", "TORTOISE_LME_RERANK_POOL",
+                 "TORTOISE_LME_RERANK", "TORTOISE_LME_RERANK_CAP"):
+        monkeypatch.delenv(_var, raising=False)
+    applied = _resolve_rerank(rerank=True, rerank_pool=120,
+                              per_session_cap=3, rerank_model=None,
+                              mmr_lambda=None, max_k=20)
+    cap3 = _resolve_rerank(rerank=True, rerank_pool=None,
+                           per_session_cap=3, rerank_model=None,
+                           mmr_lambda=None, max_k=20)
+    assert cap3["config"] == applied["config"]
+    assert cap3["config"]["pool_size"] == DEFAULT_POOL_SIZE
 
 
 # ── Task 5: aggregation + checkpoint (three-valued D9) ─────────────────────
@@ -1007,9 +1091,15 @@ def test_checkpoint_resume_pre_r6_refused(tmp_path):
         _run_eval(tmp_path, checkpoint=str(cp))
 
 
-def test_resolve_rerank_baseline_records_max_ks(tmp_path):
+def test_resolve_rerank_baseline_records_max_ks(tmp_path, monkeypatch):
     """A plain baseline run records applied pool max(ks) — never the nominal
-    env default 40 (D9's rerank_pool_applied label)."""
+    env default 40 (D9's rerank_pool_applied label).
+
+    #2992: the RERANK-on config records the depth ``retrieve_for_question``
+    actually fetches — the rerank-pool knob FLOORED at the #1947 baseline
+    (``DEFAULT_POOL_SIZE``), never the bare 40 default.
+    """
+    monkeypatch.delenv("TORTOISE_LME_POOL_SIZE", raising=False)
     rr = _resolve_rerank(rerank=None, rerank_model=None, rerank_pool=None,
                          per_session_cap=None, mmr_lambda=None, max_k=20)
     assert rr["rerank_on"] is False
@@ -1018,8 +1108,34 @@ def test_resolve_rerank_baseline_records_max_ks(tmp_path):
     rr2 = _resolve_rerank(rerank=True, rerank_model=None, rerank_pool=None,
                           per_session_cap=None, mmr_lambda=None, max_k=20)
     assert rr2["rerank_on"] is True
-    assert rr2["config"]["pool_size"] == 40
+    assert rr2["config"]["pool_size"] == DEFAULT_POOL_SIZE
     assert rr2["config"]["per_session_cap"] == 2
+
+
+def test_rerank_arm_never_fetches_below_the_baseline_depth(tmp_path,
+                                                           monkeypatch):
+    """#2992 defect 1 — ``--rerank`` must not collapse 120 -> 40.
+
+    The end-to-end pin: with no ``--rerank-pool`` (bare 40 default) AND with
+    an explicit shallow knob, the fetch depth the run actually requested is
+    floored at the #1947 baseline. The reranker can only reorder what it is
+    handed, so a shallower pool is a strict candidate loss.
+    """
+    monkeypatch.delenv("TORTOISE_LME_POOL_SIZE", raising=False)
+    monkeypatch.delenv("TORTOISE_LME_RERANK_POOL", raising=False)
+    _inject_fake(monkeypatch)
+    sdk = _fresh_sdk(tmp_path)
+    q = _mini()[0]
+    try:
+        ingest_haystack(sdk, q)
+        bare = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20,
+                                     rerank=True)
+        assert bare["pool_depth"]["requested"] >= DEFAULT_POOL_SIZE
+        shallow = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20,
+                                        rerank=True, rerank_pool=40)
+        assert shallow["pool_depth"]["requested"] >= DEFAULT_POOL_SIZE
+    finally:
+        sdk.close()
 
 
 # ── concurrency (OQ6: shared cross-encoder across workers) ─────────────────

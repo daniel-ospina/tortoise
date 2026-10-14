@@ -68,6 +68,14 @@ this paragraph records the amendment.
 > list of what exists *today* is `docs/product/mcp-sdk-surface.md`, rendered from
 > `config/surface-manifest.yml`. This file records what the surface is *approved to become*.
 
+**Amended 2026-10-14** (owner-directed on the **#2104** write-path lane, **PR #8563**): the
+frozen baseline is re-cut for `tortoise_session_capture` because its docstring was corrected
+— the stale gate-order list that named a removed pre-#3892 provider 503 as a pre-write gate
+now records the actual order plus the separate inner extractor-provider 503. **No tool is
+added, removed or renamed; the served schema, parameters and bindings are unchanged** — only
+the description text, and hence the handler digest, changes. status: approved · principal:
+daniel-ospina · PR #8563 · date: 2026-10-14.
+
 ## Principle: reads and writes never share a tool
 
 On the customer-grantable surface, a tool is either **read** or **write** — never both, so

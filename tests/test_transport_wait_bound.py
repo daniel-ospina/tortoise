@@ -865,6 +865,52 @@ def test_mcp_http_sse_path_delivers_the_refusal(
     assert err["data"]["retry_after"] == ma._TRANSPORT_WAIT_RETRY_AFTER_S
 
 
+def test_mcp_sse_wire_refusal_is_recognised_by_the_verdict_contract(
+        fast_bound, mcp_slow_tool, monkeypatch):
+    """#8590 P1: the REAL SSE frame — not a hand-built one — is the shape the
+    verdict contract must recognise.
+
+    The SSE `data:` payload is a JSON-RPC RESPONSE, so the refusal mapping lives
+    at `result.structuredContent.error`, one level down. A detector that probes
+    only the TOP level reads this frame as "not a refusal" and hands it to the
+    caller's own assertion — a false red on a machine-load event, which is the
+    rule-1 violation #5049 exists to remove. Pinning it here, against the frame
+    the product actually emits, is what stops the contract's fixtures from
+    certifying an unemitted shape.
+    """
+    from contextlib import asynccontextmanager
+
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
+    from starlette.testclient import TestClient
+
+    from tests._verdict import is_transport_wait_bound_refusal, require_answered
+    from tortoise import mcp_server as ms
+
+    monkeypatch.setattr(ha, "_track_analytics_event",
+                        lambda org, ev, props: None)
+    app = ms.create_http_app(auth_mode="none")
+
+    @asynccontextmanager
+    async def _lifespan(parent_app):
+        async with app.lifespan(app):
+            yield
+
+    parent = Starlette(lifespan=_lifespan, routes=[Mount("/mcp", app=app)])
+    with TestClient(parent) as client:
+        r = client.post("/mcp", headers=_MCP_HEADERS, json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "_bound_slow", "arguments": {}}})
+    assert r.status_code == 200, r.text
+    body = _parse_sse(r.text)
+    # The frame is JSON-RPC-framed — the property the detector must descend into.
+    assert body["result"]["isError"] is True, r.text
+    assert "error" not in body and "structuredContent" not in body, r.text
+    assert is_transport_wait_bound_refusal(r) is True, r.text
+    with pytest.raises(pytest.skip.Exception):
+        require_answered(r, what="MCP SSE tool call answered")
+
+
 def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(
         mcp_slow_tool_deadline, monkeypatch):
     """#3834 F1: ONE deadline, not two.
@@ -1191,15 +1237,21 @@ async def test_mcp_wait_bound_fast_path_overhead_is_bounded(monkeypatch):
     It is NOT a guard on the waiter: ``wait_for(shield)`` and ``asyncio.wait``
     are cost-neutral (198 µs vs 199 µs p50, same 53.8 µs floor).
 
-    WHAT THIS DOES **NOT** COVER: the CI gate
-    ``tests/test_mcp_telemetry.py::TestOverhead::test_p95_under_5ms`` asserts an
-    ABSOLUTE p95 on a quiet CI host. This guard is a DELTA on a possibly-loaded
-    host — a different statistic against a different baseline — and it neither
-    re-derives nor substitutes for that absolute budget. At load ~150 on this
-    host the absolute p95 is 20–32 ms even on unmodified ``origin/main`` (the raw
-    UNWRAPPED baseline alone 7.6–16.5 ms), so the absolute budget is not
-    reproducible here at all. Median, not mean and not p95: a single scheduler
-    spike must not decide the verdict on a shared box.
+    WHAT THIS DOES **NOT** COVER — renamed and re-scoped by #3678. The absolute
+    ``p95 < 5ms`` gate that used to sit at
+    ``tests/test_mcp_telemetry.py::TestOverhead::test_p95_under_5ms`` is GONE:
+    it was not reproducible on a shared host (at load ~150 here the raw
+    UNWRAPPED baseline ALONE is 7.6–16.5 ms p95, and the gate read 20–32 ms even
+    on unmodified ``origin/main``), so it could not tell a telemetry regression
+    from a busy box. ``TestOverhead`` now asserts the WRAPPER-only quantity
+    against THIS seam as the baseline — zero added event-loop hops
+    (deterministic) plus a median delta of ``mcp.call_tool`` minus
+    ``_await_under_mcp_wait_bound``. This guard is the other pair: wrapped vs
+    UNWRAPPED ``_original_call_tool``, i.e. the seam PLUS the wrapper — a
+    different statistic against a different baseline that contains a different
+    cost. Neither substitutes for the other, and this one neither re-derives
+    nor substitutes for the seam's own budget. Median, not mean and not p95: a
+    single scheduler spike must not decide the verdict on a shared box.
     """
     import statistics
 

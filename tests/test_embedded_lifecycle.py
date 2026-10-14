@@ -4103,18 +4103,24 @@ def test_owner_handoff_failure_keeps_the_in_flight_claim(
             _wait_server_dead(server_pid)
 
 
-def test_owner_handoff_returning_false_keeps_the_claim_and_the_guard(
+def test_owner_handoff_failure_answer_keeps_the_claim_and_the_guard(
         tmp_path, monkeypatch):
-    """#4879 F3 (review): `record_owner` does NOT raise on its documented
-    failures — it RETURNS False (`os.makedirs`/`os.open` OSError,
-    embedded_lifecycle.py). On those paths `_owner_refcounts[key]` is NOT
-    incremented, so the client is LIVE but UNRECORDED and the claim must be
-    KEPT (fail CLOSED), exactly as when the hand-off raises. The sibling test
-    forces the `raise` path, which the never-raise contract makes latent;
-    this one forces the REAL failure mode.
+    """#4879 F3 (review) / #4944: `record_owner` does NOT raise on its
+    documented failures — it answers `OWNER_RECORD_FAILED`
+    (`os.makedirs`/`os.open` OSError, embedded_lifecycle.py). On those paths
+    `_owner_refcounts[key]` is NOT incremented, so the client is LIVE but
+    UNRECORDED and the claim must be KEPT (fail CLOSED), exactly as when the
+    hand-off raises. The sibling test forces the `raise` path, which the
+    never-raise contract makes latent; this one forces the REAL failure mode.
+
+    #4944: the returned VALUE is the answer — `False` is `OWNER_RECORD_JOINED`
+    (the call counted this client), and only `None`
+    (`OWNER_RECORD_FAILED`) means "nothing was written". Pre-#4944 this
+    returned `False`; the assert below pins the failure arm to its own
+    sentinel so the two can never be confused again.
 
     Two assertions, mechanism and verdict:
-    (a) the in-flight claim survives the ignored-failure path, and
+    (a) the in-flight claim survives the failed-write path, and
     (b) the last-client decision (`cotenant_holds_server`) reports the
         unrecorded live client as a co-tenant. The peer's pool is dropped
         first (the client itself stays live) so a raw CLIENT LIST can no
@@ -4147,26 +4153,29 @@ def test_owner_handoff_returning_false_keeps_the_claim_and_the_guard(
 
         def _fail_to_record(_socket_file):
             # The documented failure: nothing written, refcount untouched.
-            return False
+            # `OWNER_RECORD_FAILED` is the failure SENTINEL (#4944) — plain
+            # `False` now means JOINED, i.e. the call DID count this client.
+            return _lifecycle.OWNER_RECORD_FAILED
 
         monkeypatch.setattr(_lifecycle, "record_owner", _fail_to_record)
-        second = TortoiseSDK(db_path=db_path, namespace="handoff-false")
+        second = TortoiseSDK(db_path=db_path, namespace="handoff-failed")
         proj = second._get_proj()
         client = getattr(proj.db, "client", proj.db)
         assert client.ping(), (
             "#4879 F3: a falsy owner hand-off must not break construction")
         # (a) MECHANISM — the claim survives the ignored-failure path.
         assert _lifecycle._in_flight_replays.get(key, 0) >= 1, (
-            "#4879 F3: `record_owner` returned False (nothing written) — the "
-            "in-flight claim must be KEPT; the client is live but unrecorded")
+            "#4879 F3: `record_owner` answered OWNER_RECORD_FAILED (nothing "
+            "written) — the in-flight claim must be KEPT; the client is live "
+            "but unrecorded")
         # ...because no record was written, the refcount branch alone is blind.
         assert _lifecycle._owner_refcounts.get(key, 0) == 1, (
-            "#4879 F3: test setup — the falsy hand-off must leave the "
+            "#4879 F3: test setup — the failed hand-off must leave the "
             "refcount at construction #1's single claim")
         # #4926: the on-disk half of the fail-CLOSED keep. See the sibling
         # raise-path test.
         assert os.path.exists(_lifecycle._inflight_claim_path(key)), (
-            "#4926: a falsy owner hand-off must KEEP the on-disk claim "
+            "#4926: a failed owner hand-off must KEEP the on-disk claim "
             "alongside the in-memory one")
         # (b) VERDICT — isolate the claim from the CLIENT LIST fallback by
         # dropping the peer's connection (the peer object stays live; only
@@ -4193,6 +4202,187 @@ def test_owner_handoff_returning_false_keeps_the_claim_and_the_guard(
         # #4926 review: with the claim gone and `record_owner` monkeypatched,
         # `first.close()` fail-CLOSEDs and does NOT reap — stop the server
         # explicitly (see the capture comment in `try`).
+        if server_pid and _pid_alive(server_pid):
+            _kill_quiet(server_pid)
+        if server_pid:
+            _wait_server_dead(server_pid)
+
+
+# ── #4944: the hand-off reads an ANSWER, never a counter delta ─────────
+#
+# Ownership was inferred from `_owner_refcounts[key] > before`: two reads
+# that are not atomic. A same-process, same-socket concurrent construction
+# whose increment landed between them made a write that wrote NOTHING look
+# recorded, so the in-flight claim was released for a client that is live and
+# UNRECORDED — re-opening the #3653 blind-teardown window and, because
+# `release_claim` also gates the ON-DISK claim's retraction, blinding a peer
+# PROCESS too. `record_owner` now answers CREATED / JOINED / FAILED directly
+# (`OWNER_RECORD_CREATED` / `OWNER_RECORD_JOINED` / `OWNER_RECORD_FAILED`),
+# and the hand-off compares that answer. No read of the counter remains on
+# the hand-off path, so no interleaving can change its verdict.
+
+
+def test_record_owner_answers_created_joined_failed_directly(
+        tmp_path, monkeypatch):
+    """#4944: the three owner hand-off outcomes are DISTINCT answers.
+
+    RED before this fix: the failure arm was `False`, the SAME value as the
+    joined arm, so a caller could only tell them apart by reading the
+    refcount delta — the non-atomic inference #4944 removes. Mutation:
+    collapse the failure arm back onto `False` and the
+    `record_owner(failed_sock) is OWNER_RECORD_FAILED` assertion fails.
+    """
+    import tortoise.embedded_lifecycle as _lifecycle
+    from tortoise.embedded_lifecycle import (
+        OWNER_RECORD_CREATED,
+        OWNER_RECORD_FAILED,
+        OWNER_RECORD_JOINED,
+        _owner_lock_fds,
+        _owner_refcounts,
+        forget_owner,
+        record_owner,
+    )
+
+    assert OWNER_RECORD_FAILED is not OWNER_RECORD_JOINED, (
+        "#4944: the failure answer must be distinguishable from the joined "
+        "answer — a shared `False` is exactly the ambiguity that forced the "
+        "non-atomic refcount-delta inference")
+    assert OWNER_RECORD_CREATED and not OWNER_RECORD_JOINED, (
+        "#4944: `True`/`False` keep the pre-existing truthiness contract")
+    assert not OWNER_RECORD_FAILED, (
+        "#4944: the failure arm stays FALSY, so every `if record_owner(...)` "
+        "caller is unchanged")
+
+    sock = str(tmp_path / "sock" / "redis.socket")
+    key = os.path.abspath(sock)
+    try:
+        assert record_owner(sock) is OWNER_RECORD_CREATED, (
+            "the first claim writes the record and counts this client")
+        assert record_owner(sock) is OWNER_RECORD_JOINED, (
+            "the second claim re-uses this process's record and STILL counts "
+            "the client")
+        assert _owner_refcounts[key] == 2
+    finally:
+        with contextlib.suppress(Exception):
+            forget_owner(sock)
+            forget_owner(sock)
+        _owner_refcounts.pop(key, None)
+        _fd = _owner_lock_fds.pop(key, None)
+        if _fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(_fd)
+
+    # A write that writes nothing counts NOTHING — and that is the ONLY arm
+    # the hand-off must read as "unrecorded".
+    failed_sock = str(tmp_path / "other" / "redis.socket")
+    failed_key = os.path.abspath(failed_sock)
+    monkeypatch.setattr(
+        _lifecycle, "_write_owner_record_file", lambda _sock: False)
+    try:
+        assert record_owner(failed_sock) is OWNER_RECORD_FAILED, (
+            "a failed record write must answer OWNER_RECORD_FAILED, never "
+            "the joined answer")
+        assert _owner_refcounts.get(failed_key, 0) == 0, (
+            "the failure path must leave the count untouched — that is what "
+            "makes `record_owner`'s own answer authoritative")
+        assert record_owner(None) is OWNER_RECORD_FAILED, (
+            "a falsy socket is live-but-UNRECORDED, so it must fail CLOSED "
+            "with the same answer")
+    finally:
+        _owner_refcounts.pop(failed_key, None)
+        _lifecycle._owner_record_pending.discard(failed_key)
+
+
+def test_owner_handoff_counter_move_cannot_mask_a_failed_write(
+        tmp_path, monkeypatch):
+    """#4944: a concurrent same-socket increment must not make a FAILED
+    `record_owner` write look recorded.
+
+    This drives #4944's measured `fail_with_concurrent_increment`
+    interleaving deterministically: the hand-off answers
+    `OWNER_RECORD_FAILED` (nothing written, count untouched by THIS call)
+    while a peer construction's increment lands inside the window. The
+    counter therefore MOVES while this client is unrecorded — the exact state
+    the deleted delta read as "recorded".
+
+    RED (delta inference): the claim is released — `_in_flight_replays` has
+    no entry and the on-disk half is retracted with it, so a co-tenant
+    decision (same process, or a peer process via the on-disk store) is
+    blind to a live, unrecorded client (#3653). GREEN (the direct answer):
+    the claim is KEPT, because the hand-off never reads the counter.
+    """
+    import json as _json
+
+    import tortoise.embedded_lifecycle as _lifecycle
+    from tortoise.embedded_lifecycle import cotenant_holds_server
+    from tortoise.sdk import TortoiseSDK
+
+    db_path = str(tmp_path / "owner_handoff_counter.db")
+    first = TortoiseSDK(db_path=db_path)
+    second = None
+    key = None
+    # #4926 review: initialise BEFORE the `try` so the `finally` can never
+    # raise `UnboundLocalError`; and capture the server for an explicit stop
+    # (see the sibling hand-off tests).
+    server_pid = None
+    try:
+        first.org_create("HandoffCounterCo")
+        sock = _json.loads(
+            Path(db_path + ".settings").read_text())["unixsocket"]
+        key = os.path.abspath(sock)
+        server_pid = _registry_redis_pid(db_path)
+        held_at_entry = _lifecycle._owner_refcounts.get(key, 0)
+
+        def _fail_while_a_peer_joins(_socket_file):
+            # THIS call writes nothing (the documented failure) ...
+            _lifecycle._owner_refcounts[key] = (
+                _lifecycle._owner_refcounts.get(key, 0) + 1)
+            # ... while a same-socket concurrent construction's increment
+            # lands inside the window. The delta read this as "my write
+            # landed"; the answer says otherwise.
+            return _lifecycle.OWNER_RECORD_FAILED
+
+        monkeypatch.setattr(
+            _lifecycle, "record_owner", _fail_while_a_peer_joins)
+        second = TortoiseSDK(db_path=db_path, namespace="handoff-counter")
+        proj = second._get_proj()
+        client = getattr(proj.db, "client", proj.db)
+        assert client.ping(), (
+            "#4944: a failed owner hand-off must not break construction")
+        # SETUP EVIDENCE — the counter DID move, which is what the deleted
+        # delta inferred "recorded" from.
+        assert _lifecycle._owner_refcounts.get(key, 0) == held_at_entry + 1, (
+            "#4944: test setup — the concurrent increment must have landed")
+        # (a) MECHANISM — the claim survives, because the hand-off read the
+        # callee's FAILURE answer rather than the counter.
+        assert _lifecycle._in_flight_replays.get(key, 0) >= 1, (
+            "#4944: a counter move must not release the claim for a client "
+            "that is live and UNRECORDED")
+        # #4926: the on-disk half must survive with it, or a peer PROCESS is
+        # blind to this client even though the in-memory claim held.
+        assert os.path.exists(_lifecycle._inflight_claim_path(key)), (
+            "#4944: the counter move must not retract the on-disk claim")
+        # (b) VERDICT — the last-client decision still reports a co-tenant.
+        proj1 = first._get_proj()
+        peer = getattr(proj1.db, "client", proj1.db)
+        _lifecycle.disconnect_only(peer)
+        assert cotenant_holds_server(client) is True, (
+            "#4944: the last-client decision must read the UNRECORDED live "
+            "client as a co-tenant")
+    finally:
+        with contextlib.suppress(Exception):
+            if second is not None:
+                second.close()
+        # Drop the deliberately-stuck claim BEFORE closing the last client,
+        # and undo the synthetic increment the fake added (it belongs to no
+        # live client, so a real `forget_owner` would never take it back).
+        if key is not None:
+            _lifecycle._in_flight_replays.pop(key, None)
+            with contextlib.suppress(Exception):
+                _lifecycle._retract_inflight_claim(key)
+            _lifecycle._owner_refcounts.pop(key, None)
+        with contextlib.suppress(Exception):
+            first.close()
         if server_pid and _pid_alive(server_pid):
             _kill_quiet(server_pid)
         if server_pid:

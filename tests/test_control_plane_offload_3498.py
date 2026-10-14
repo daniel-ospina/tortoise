@@ -381,6 +381,228 @@ def test_the_offload_metrics_reach_the_metrics_endpoint():
             '{outcome="completed",pool="telemetry"}') in text, (
         "the exported series is not pool/outcome attributed on ONE child"
     )
+    # #5328: the refusal counter has a collector of its OWN (a label added to
+    # the counter above would change that family's series identity), and the
+    # op is a LABEL on it — asserted as ONE exact series because two
+    # independent substrings also pass when the labels sit on different
+    # children, which is precisely the blindness the op dimension removes.
+    monitoring.record_control_plane_offload(
+        "exported-refusal", 0.01, outcome="bound_miss_refused",
+        pool="telemetry")
+    text = generate_latest().decode()
+    assert ('tortoise_control_plane_offload_refusals_total'
+            '{op="exported-refusal",pool="telemetry"}') in text, (
+        "the op-keyed refusal counter is not exported on /metrics"
+    )
+
+
+# ── #5328: a swallowed best-effort refusal is attributable to its OP ──────
+#
+# #5840 made saturation countable at POOL granularity. That answers "is the
+# pool refusing work"; it does not answer "which caller lost its work", and
+# for this seam those need different remediation: the ``best_effort=True``
+# sites share one pool while their consequences differ irreconcilably
+# (``billing_notify`` is unrecoverable, ``data_source_demand_read`` degrades to
+# a 503, the rest are display/telemetry only). These tests pin the op-keyed
+# counter, its negative half (a bound miss that left the work RUNNING is not a
+# refusal), its cardinality bound, and the production READ — not only the
+# write — because a helper nothing publishes is the #3677 defect one layer up.
+
+
+def _refusal_child(op: str, pool: str = "telemetry"):
+    """The op-keyed refusal child for an exact delta assertion."""
+    return monitoring.CONTROL_PLANE_OFFLOAD_REFUSED_COUNT.labels(
+        op=op, pool=pool)
+
+
+def test_a_refusal_is_counted_against_the_op_that_lost_its_work(monkeypatch):
+    """#5328: the refusal is charged to the OP, not only to the pool.
+
+    DELTA-SCOPED per op (this process keeps one registry, and this suite runs
+    other refusals): a bare ``>= 1`` could be satisfied by an earlier call and
+    would stay green if THIS call stopped counting.
+    """
+    tiny = monitoring._SingleSlotWorker("test-cp-5328-op", workers=1,
+                                        max_backlog=1)
+    monkeypatch.setattr(monitoring, "control_plane_worker",
+                        lambda pool="auth": tiny)
+    first_started = threading.Event()
+    gate = threading.Event()
+
+    def _hold():
+        first_started.set()
+        gate.wait()
+
+    refused_child = _refusal_child("5328-refused")
+    completed_child = _refusal_child("5328-completed")
+    pool_child = monitoring.CONTROL_PLANE_OFFLOAD_COUNT.labels(
+        pool="telemetry", outcome="bound_miss_refused")
+    refused_before = refused_child._value.get()
+    completed_before = completed_child._value.get()
+    pool_before = pool_child._value.get()
+    mark = len(monitoring.control_plane_offload_records())
+
+    async def _run():
+        first = asyncio.ensure_future(
+            monitoring.run_control_plane_call(_hold, op="5328-hold",
+                                              pool="telemetry", timeout=None))
+        await asyncio.get_running_loop().run_in_executor(None, first_started.wait)
+        second = asyncio.ensure_future(
+            monitoring.run_control_plane_call(gate.wait, op="5328-hold-2",
+                                              pool="telemetry"))
+        await asyncio.sleep(0)
+        with pytest.raises(monitoring.ControlPlaneOffloadError):
+            await monitoring.run_control_plane_call(
+                gate.wait, op="5328-refused", pool="telemetry")
+        # Release the pool BEFORE the control call, or the control call is
+        # itself refused (the backlog is still saturated) and this test would
+        # measure a refusal instead of the ABSENCE of one.
+        gate.set()
+        with contextlib.suppress(Exception):
+            await asyncio.gather(first, second, return_exceptions=True)
+        # A COMPLETED call on the same pool must not move any refusal child:
+        # the counter is a DROP counter, not an activity counter.
+        await monitoring.run_control_plane_call(
+            lambda: "ok", op="5328-completed", pool="telemetry", timeout=None)
+
+    asyncio.run(_run())
+    outcomes = {r[0]: r[2]
+                for r in monitoring.control_plane_offload_records()[mark:]}
+    assert outcomes.get("5328-refused") == "bound_miss_refused", outcomes
+    assert outcomes.get("5328-completed") == "completed", outcomes
+    assert refused_child._value.get() == refused_before + 1, (
+        "the op-keyed refusal child moved "
+        f"{refused_child._value.get() - refused_before} time(s), expected 1 — "
+        "a refusal is not attributable to the op that lost its work"
+    )
+    assert completed_before == 0 and completed_child._value.get() == 0, (
+        "a COMPLETED offload moved the refusal counter — the metric no longer "
+        "measures drops"
+    )
+    # The #5840 pool counter is untouched and still sees the same event, so the
+    # op dimension is ADDED, not substituted: pool rate and op attribution are
+    # two questions, and #5840's contract must not regress.
+    assert pool_child._value.get() == pool_before + 1
+
+
+def test_a_bound_miss_that_left_the_work_running_is_not_a_refusal(monkeypatch):
+    """The negative half: only a genuine DROP is counted as a refusal.
+
+    ``bound_miss_running`` means the worker that accepted the submission still
+    runs the callable — delivery was preserved. Counting it as a refusal would
+    make the op counter report lost work that was not lost, which is the exact
+    conflation #5840's two outcomes exist to prevent. A mutation that counted
+    every ``ControlPlaneOffloadError`` reddens this test and not the one above.
+    """
+    monkeypatch.setattr(monitoring, "CONTROL_PLANE_OFFLOAD_TIMEOUT_S", 0.05)
+    gate = threading.Event()
+    child = _refusal_child("5328-bound-miss")
+    before = child._value.get()
+
+    async def _run():
+        with pytest.raises(monitoring.ControlPlaneOffloadError):
+            await monitoring.run_control_plane_call(
+                gate.wait, op="5328-bound-miss", pool="telemetry",
+                timeout=0.05)
+
+    try:
+        asyncio.run(_run())
+    finally:
+        gate.set()
+
+    records = monitoring.control_plane_offload_records()
+    assert records[-1][2] == "bound_miss_running", records[-1]
+    assert child._value.get() == before, (
+        "a bound miss that left the callable RUNNING was counted as a refusal "
+        "— the counter now over-reports lost work"
+    )
+
+
+def test_the_op_label_folds_past_the_cap_without_losing_the_record(monkeypatch):
+    """#5328: the op vocabulary is bounded HERE, and the fold is not lossy.
+
+    The writer takes any ``str``, so the child set cannot be trusted to the
+    caller. Past the cap every further op folds into ONE shared child, and the
+    registry never exceeds that cap (``cap + 1`` only on the racing path that
+    admits the shared sentinel). The RECORD keeps the true op — the ring is the
+    forensic artifact, the counter is the measurement — so the fold must not
+    rewrite history.
+    """
+    monkeypatch.setattr(monitoring, "CONTROL_PLANE_OFFLOAD_REFUSED_MAX_OPS", 2)
+    monkeypatch.setattr(monitoring, "_CONTROL_PLANE_REFUSED_OPS", set())
+    fold_child = _refusal_child(
+        monitoring.CONTROL_PLANE_OFFLOAD_REFUSED_OTHER)
+    fold_before = fold_child._value.get()
+
+    for op in ("5328-cap-a", "5328-cap-b", "5328-cap-c", "5328-cap-d"):
+        monitoring.record_control_plane_offload(
+            op, 0.01, outcome="bound_miss_refused", pool="telemetry")
+
+    kept = [r[0] for r in monitoring.control_plane_offload_records()[-4:]]
+    assert kept == ["5328-cap-a", "5328-cap-b", "5328-cap-c", "5328-cap-d"], (
+        f"the record lost the true op at the cap: {kept}"
+    )
+    assert _refusal_child("5328-cap-a")._value.get() == 1
+    assert _refusal_child("5328-cap-b")._value.get() == 1
+    # Both ops PAST the cap land on the SAME child — that is the bound.
+    assert fold_child._value.get() == fold_before + 2, (
+        "ops past the cap did not fold into exactly one shared child: "
+        f"moved {fold_child._value.get() - fold_before}"
+    )
+    assert len(monitoring._CONTROL_PLANE_REFUSED_OPS) <= 2, (
+        "the op registry exceeded the cap: "
+        f"{sorted(monitoring._CONTROL_PLANE_REFUSED_OPS)}"
+    )
+
+
+def test_a_refusal_reaches_the_production_read(monkeypatch):
+    """#5328: the refusal is readable on the surface the FLEET serves.
+
+    ``monitoring.metrics()`` is what ``mcp_server.tortoise_health`` returns (the
+    hosted app exposes no ``/metrics`` route), so a Prometheus collector alone
+    would leave the op attribution unread in production — the #3677 "signal
+    with no channel" this issue is about. Asserted end-to-end through the
+    hosted best-effort seam (``_cp_offload``), not by touching the writer.
+    """
+    monkeypatch.setattr(monitoring, "_sdk", None)  # no graph probe here
+    tiny = monitoring._SingleSlotWorker("test-cp-5328-read", workers=1,
+                                        max_backlog=1)
+    monkeypatch.setattr(monitoring, "control_plane_worker",
+                        lambda pool="auth": tiny)
+    first_started = threading.Event()
+    gate = threading.Event()
+
+    def _hold():
+        first_started.set()
+        gate.wait()
+
+    op = "5328-prod-read"
+    before = monitoring.control_plane_offload_refusal_counts().get(op, {})
+    before_telemetry = before.get("telemetry", 0)
+
+    async def _run():
+        first = asyncio.ensure_future(ha._cp_offload(_hold, op="5328-read-hold"))
+        await asyncio.get_running_loop().run_in_executor(None, first_started.wait)
+        second = asyncio.ensure_future(ha._cp_offload(gate.wait, op="5328-read-hold-2"))
+        await asyncio.sleep(0)
+        result = await ha._cp_offload(lambda: "never", op=op, best_effort=True)
+        gate.set()
+        with contextlib.suppress(Exception):
+            await asyncio.gather(first, second, return_exceptions=True)
+        return result
+
+    assert asyncio.run(_run()) is ha.OFFLOAD_REFUSED, (
+        "the saturated best-effort offload did not report a refusal — the "
+        "counter below would then be measuring nothing"
+    )
+    published = monitoring.metrics()["offload_refusals"]
+    assert published[op]["telemetry"] == before_telemetry + 1, (
+        f"the refusal is not on the production read: {published.get(op)!r}"
+    )
+    # The pool-qualified shape is what makes the op readable on a SHARED pool:
+    # best-effort work is re-routed to ``telemetry`` by ``_cp_offload``, so the
+    # counter reports the pool the submission actually landed on.
+    assert published[op] == {"telemetry": before_telemetry + 1}
 
 
 def test_run_on_daemon_worker_honours_an_explicit_bound():

@@ -1,8 +1,11 @@
 """W5 frozen version-stamped write verb (issue #2104, epic #2080, DM-2/S12).
 
 gbrain MEMORY_VERBS_v1 ADAPT (epic plan §4.4/§6.4): every session->graph
-WRITE-BACK response (the 2xx path — gate rejections are HTTP-level errors,
-not write responses, and keep their HTTP semantics) speaks ``memory_write_v1``:
+WRITE-BACK response (the 2xx path — gate rejections are HTTP-level errors on
+the hosted/MCP surfaces, not write responses, and keep their HTTP semantics;
+on the SDK mirror the dict-returning pre-write rejection (empty/blank)
+likewise carries no verb, since no write-back occurred, while the turn-cap
+rejection raises before any write) speaks ``memory_write_v1``:
 
     protocol_version: "memory_write_v1"   REQUIRED in every write response
     status:            ok | accepted | partial | error
@@ -28,13 +31,14 @@ re-ingests — see tortoise/dedup_classify.py) and report
 resolved to an existing node; when the write-back cannot determine dedup
 state the point stays ``dedup:"new"`` — never fabricated.
 
-Scope note (P3, review): the envelope is wired on the hosted capture
-surface NOW; the self-host SDK mirror (``sdk.capture_session``) still
-returns the legacy dict — its verb wrap lands with the mirror-parity
-phase.  The per-point entries on the capture surface are the ENRICHED raw
-extractor dicts (``id``-keyed, plus additive ``point_id``/``status``/
-``ep_updated``/``dedup``) — ``point_entry`` is the canonical factory for
-write surfaces that build their own point lists.
+Scope note (P3, review; COMPLETED W5 Phase A+B mirror-parity): the
+envelope is wired on the hosted capture surface AND the self-host SDK
+mirror (``sdk.capture_session``) — both speak ``memory_write_v1`` and both
+enrich their per-point entries from ONE post-write graph read. The
+per-point entries are the ENRICHED raw extractor dicts (``id``-keyed, plus
+additive ``point_id``/``status``/``ep_updated``/``dedup``) —
+``point_entry`` is the canonical factory for write surfaces that build
+their own point lists.
 
 Disclosure marker data (W5 Phase E, issue #2104 S11): the capture receipt
 additionally carries an additive ``surfaced`` list built by

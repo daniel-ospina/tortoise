@@ -1,0 +1,4 @@
+=== placement enumeration (shipped reader) ===
+tables: ['event', 'journal_event', 'node_identity', 'object', 'point', 'relation', 'session', 'source', 'subject']
+refused_props_names: {'node_identity': frozenset(), 'journal_event': frozenset(), 'source': frozenset({'__runId', 'previousContentHash', 'reliabilityComponents', 'reliability', 'reliability_derived_at'}), 'event': frozenset({'confidence'}), 'session': frozenset(), 'object': frozenset({'embedding', 'status'}), 'subject': frozenset({'embedding', 'status'}), 'point': frozenset({'ep_dirty_at', '_nid', 'ep_dirty', 'inherited_at', 'baseline_set', 'ep_beta', '_graph_id', 'lastDreamedAt', 'ep_alpha', 'confidence', 'reason', 'version', 'content_hash', 'posterior_beta', 'c_cal', 'posterior_alpha'}), 'relation': frozenset({'msg_beta', 'back_msg_alpha', 'msg_alpha', 'back_msg_beta'})}
+subject refused: ['embedding', 'status']

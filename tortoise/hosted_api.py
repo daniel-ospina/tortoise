@@ -34,7 +34,7 @@ from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Hashable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -80,6 +80,14 @@ from tortoise.capture_receipts import (  # #3809: ONE key definition
 from tortoise.capture_receipts import (
     capture_receipt_key as _capture_receipt_key,
 )
+
+# #7951 review P1: the per-graph journal derivation lives in the lightweight
+# ``tortoise.config`` (no FastAPI import) so the MCP lane can resolve it on a
+# stdio/self-host process WITHOUT importing this module. Re-exported here
+# unchanged so ``hosted_api._resolve_event_log_path`` — the name the hosted
+# lane's callers and `tests/test_hosted_aboutobject_journal_4240.py` use —
+# keeps working, and there is still exactly ONE derivation.
+from tortoise.config import _resolve_event_log_path
 from tortoise.embed_metering import (  # #4488: pure-ASGI encode-work flusher
     EmbedMeteringMiddleware as _EmbedMeteringMiddleware,
 )
@@ -169,7 +177,6 @@ from tortoise.sdk import (
     _capture_turn_id,  # #3551: the ONE offset-aware turn-id derivation
     _capture_turn_role_text,  # #4675: the inverse of the stored turn format
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
-    _derive_graph_name,  # #4240 F2: the ONE namespace/graph_name → graph derivation
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
     _journal_write_failure_warning,  # #4240 F1: the shared "a journal append failed" receipt warning
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
@@ -771,75 +778,6 @@ def _resolve_embedded_db_path() -> str:
         import tempfile
         db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
     return db_path
-
-
-#: #4240 — base dir for the hosted lane's per-graph JSONL rebuild journal.
-#: Unset ⇒ **no journal** (byte-identical to pre-#4240: the lane journals
-#: nothing). Set ⇒ every hosted data SDK is built with an ``event_log_path``,
-#: so the JSONL-only reassembly records (``EntityLinked``, ``SessionRecorded``,
-#: ``ObjectRegistered``, ``PointAdded``, ``EntityMutated``) actually land and
-#: ``rebuild_all`` / ``rebuild`` / ``recover_from_log`` can reconstruct the
-#: capture — closing the #2296 live-only-edge hazard for this lane.
-#: ⚠️ The JSONL is a DOMAIN EVENT LOG, **never the durability mechanism**
-#: (``docs/durability-posture.md``): it makes the derived graph REBUILDABLE,
-#: it does not keep it alive.
-#: ⚠️ Records are fail-soft at the write site (a failed append is counted and
-#: logged, never raised — the graph mutation already succeeded). The deployed
-#: guard is ``entrypoint.sh``'s boot-time WRITABILITY probe (not just
-#: ``mkdir -p``): a base dir that exists but cannot be written fails the boot
-#: loudly for a NON-ROOT uid (mode bits), and for EROFS/ENOSPC on ANY uid
-#: (root cannot bypass those). It does NOT cover a mode-bit failure when the
-#: server runs as root — ``Dockerfile.hosted`` sets no ``USER``, so on Fly the
-#: process is uid 0 and the probe write succeeds on a mode-0500 dir. That case
-#: is covered by the runtime signal, not the boot: a failed append logs at
-#: ERROR, increments ``tortoise_journal_write_failures_total`` and is disclosed
-#: on the capture receipt (``TortoiseSDK._emit_event``). A journal that starts
-#: failing AFTER that probe (the foreseeable trigger is ENOSPC once the journal
-#: grows below the volume's free space) is recorded, not fatal — see #5612 and
-#: ``TortoiseSDK._emit_event``.
-_HOSTED_EVENT_LOG_ENV = "TORTOISE_EVENT_LOG_BASE_DIR"
-
-
-#: The graph-name charset ``TortoiseSDK.__init__`` enforces (namespace and
-#: graph_name alike). The journal key must satisfy it or it can escape base.
-_JOURNAL_KEY_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$")
-
-
-def _resolve_event_log_path(*, namespace: str | None,
-                            graph_name: str | None) -> str | None:
-    """Per-graph JSONL rebuild journal path for the hosted lane (#4240).
-
-    ONE file per graph under ``TORTOISE_EVENT_LOG_BASE_DIR``, so a rebuild of a
-    graph replays exactly its own journal and two orgs can never share one. The
-    key is the SDK's OWN derived graph name (``sdk._derive_graph_name``) — the
-    ONE derivation of namespace/graph_name → graph, so the journal can never
-    name a graph the SDK did not open. A local re-derivation is the divergence
-    class the #4240 review found: the branches are not obvious
-    (``namespace="test-foo"`` opens ``test_foo_tortoise``, NOT ``org_test-foo``).
-
-    Returns ``None`` when the base dir is unset — no journal (the pre-#4240
-    behaviour; embedded/dev/CI stay journal-less) — and for the registry
-    control plane / the unnamed default graph, which are not org data graphs
-    and are never rebuilt from this journal.
-
-    Charset: the key is validated against the SDK's OWN graph-name rule and a
-    violation RAISES. Sanitizing instead would silently key the journal to a
-    directory no graph uses — and the prior guard kept ``.``, so a ``..`` key
-    survived until ``TortoiseSDK.__init__`` rejected it, i.e. the stated
-    anti-traversal guard was dead.
-    """
-    base = os.environ.get(_HOSTED_EVENT_LOG_ENV)
-    if not base:
-        return None
-    if graph_name is None and (not namespace or namespace == "registry"):
-        return None
-    key = _derive_graph_name(namespace=namespace, graph_name=graph_name)
-    if not _JOURNAL_KEY_RE.match(key):
-        raise ValueError(
-            f"refusing to build a journal path for unsafe key {key!r} "
-            f"(namespace={namespace!r}, graph_name={graph_name!r}) — it is not "
-            "a valid graph name and could escape the journal base dir")
-    return os.path.join(base, key, "events.jsonl")
 
 
 def _make_sdk(*, namespace: str | None = None,
@@ -1490,8 +1428,16 @@ def _sweep_events() -> None:
                 proj = sdk._get_proj()
                 purge_expired(proj, retention_days=days)
                 purge_overflow(proj, max_events=cap)
-            except Exception:
-                _logger.debug("event retention sweep skipped for %s", org.get("org_id"))
+            except Exception as exc:
+                # #3007: WARNING, not debug. A per-team retention failure was
+                # invisible here (this is the hosted sweeper), so a silently
+                # unenforced per-team event cap read as a healthy sweep. The
+                # exception is carried in the message; there is no stack
+                # (the loop must continue) but the team and the cause are.
+                _logger.warning(
+                    "event retention sweep skipped for %s: %s",
+                    org.get("org_id"), exc,
+                )
     except Exception as exc:
         _logger.warning("event retention sweep failed: %s", exc)
 
@@ -2976,7 +2922,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 return f"{key}@{path}"
             return key
         if client_host:
-            return f"ip:{client_host}"
+            # #5490: the per-IP fallback aggregates a NATIVE IPv6 address to
+            # its /64 — otherwise one client rotating inside its delegated
+            # /64 mints a fresh general-limit budget per source address.
+            return f"ip:{_ip_bucket_key(client_host)}"
         return None
 
     async def dispatch(self, request: Request, call_next):
@@ -5436,18 +5385,20 @@ async def get_current_org(request: Request) -> dict:
             "MATCH (t:Team {id: $id}) RETURN t.tier, t.max_users, t.max_graphs, "
             "t.max_points, t.max_api_keys, t.max_sessions, t.suspended_at, "
             "t.flagged_at, t.email, t.subscription_status, t.customer_email, "
-            "t.graph_name",
+            "t.graph_name, t.backup_enabled",
             params={"id": org_id},
         )
         row = org.result_set[0] if org.result_set else None
         if row:
             (tier, mu, mg, mp, mak, _ms, t_suspended, t_flagged, t_email,
-             t_sub_status, t_customer_email, t_graph_name) = row
+             t_sub_status, t_customer_email, t_graph_name,
+             t_backup_enabled) = row
         else:
             tier, mu, mg, mp, mak, _ms = ("free", None, None, None, None, None)
             t_suspended = t_flagged = t_email = None
             t_sub_status = t_customer_email = None
             t_graph_name = None
+            t_backup_enabled = None
         # #308 (R5): durable suspension check (registry mode — the
         # MemoryAbuseStore registry_write callback wired in
         # supabase_control.get_abuse_store writes these props).
@@ -5502,6 +5453,12 @@ async def get_current_org(request: Request) -> dict:
                 # /v1/team can render plan state + the dashboard Billing page.
                 "subscription_status": t_sub_status,
                 "customer_email": t_customer_email,
+                # #3376: per-org backup eligibility (the sweep predicate's
+                # second half — see backup_sweep.enumerate_eligible_orgs) so
+                # the dashboard can distinguish "backups are off for this
+                # team" from "enabled but nothing recorded yet". None on a
+                # pre-flag node — the client stays NEUTRAL, never "disabled".
+                "backup_enabled": t_backup_enabled,
                 # #1148: dashboard key-login acceptance. Registry mode
                 # defaults true (selfhost operators control access directly).
                 "dashboard_key_login": True,
@@ -5829,6 +5786,10 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         # plan state from these.
         "subscription_status": row.get("subscription_status"),
         "customer_email": row.get("customer_email"),
+        # #3376: per-org backup eligibility off the orgs row (base 0006
+        # column, in _ORG_BASE_SELECT) so /v1/team can tell the Graphs tab
+        # that backups are OFF for this team rather than merely unrecorded.
+        "backup_enabled": row.get("backup_enabled"),
         # #2475: dashboard_key_login doubles as the UI state the dashboard
         # switch renders (website/apps/dashboard main.jsx: aria-checked /
         # data-on = org.dashboard_key_login !== false) — carry the REAL
@@ -6847,6 +6808,15 @@ class OrgInfoResponse(BaseModel):
     # The Protect-your-account banner + the toggle read this. Registry mode
     # defaults true (selfhost operators control access directly).
     dashboard_key_login: bool = True
+    # #3376: per-org backup eligibility — the second half of the sweep
+    # predicate (backup_sweep.enumerate_eligible_orgs: ``tier != 'free' AND
+    # backup_enabled = true``). Exposed so the Graphs tab's Last-backup column
+    # can state that backups are OFF for this team instead of rendering the
+    # neutral "None recorded" forever (indistinguishable from an eligible team
+    # whose sweep has not run). None when the read could not supply it (a
+    # legacy/override dict) — the client then keeps the NEUTRAL copy rather
+    # than claiming "not enabled".
+    backup_enabled: bool | None = None
     # #1623: billing surface for the dashboard Billing page — subscription
     # state (read off the Org node through the auth dict sources) and
     # catalog-resolved checkout price ids (STRIPE_PRICE_IDS via
@@ -7133,6 +7103,11 @@ def _normalize_mapped_ipv6(ip):
     #3130 found exactly that and worked around it in the DCR path only, whose
     docstring records the shared helper as still defective; normalizing by
     ``ipv4_mapped`` regardless of case/spelling makes that claim true.
+
+    This is only the MAPPED case: a NATIVE IPv6 address passes through
+    unchanged by design. The /64 aggregation that stops a delegated IPv6
+    client from minting a bucket per source address is ``_ip_bucket_key``
+    (#5490), applied at the IP-keyed call sites.
     """
     if not isinstance(ip, str) or ":" not in ip:
         return ip
@@ -7143,192 +7118,104 @@ def _normalize_mapped_ipv6(ip):
         return ip
     return str(mapped) if mapped is not None else ip
 
+# ── Bounded store policy for the shared bucket-store primitive (#3124) ──
+# The policy — owned-key cap, exactly ONE shared overflow bucket per store,
+# reclaim-inactive-only, O(1) hot path — LIVES in ``tortoise/rate_buckets``,
+# with its full record. It moved out of this module because a SECOND lane needs
+# the same policy and cannot import it from here (#5518):
+# ``mcp_auth.MCPRateLimitMiddleware`` carried the same unbounded-store defect on
+# a fully attacker-chosen key space, and importing ``hosted_api`` from
+# ``mcp_auth`` is a cycle that ALSO puts the whole hosted app in ``sys.modules``
+# on every stdio/self-host MCP process — that module's *presence* is the runtime
+# deployment discriminator the self-host branches read (see
+# ``mcp_auth._journal_path_for``; ``tortoise/body_limits.py`` documents the same
+# constraint and the same fix). Imported, never re-defined: exactly ONE
+# implementation, two lanes. This store is pinned by
+# ``tests/test_hosted_api.py::TestBoundedMiddlewareStore`` and the MCP store by
+# ``tests/test_mcp_http.py::TestMcpBoundedMiddlewareStore``.
+from tortoise.rate_buckets import (  # noqa: E402
+    _BUCKET_OVERFLOW_KEY,
+    _bucket_entry_ts,
+    _bucket_owned_count,  # noqa: F401 — re-exported (the #3124 tests read it here)
+    _bucket_prune_window,
+    _bucket_reclaim,
+    _bucket_route,
+    _bucket_touch,
+)
 
-# ── Bounded store policy for the shared per-IP bucket primitive (#3124) ──
-# The primitive (and RateLimitMiddleware) pruned only *stale* buckets, so a
-# fresh-key flood pruned nothing — every bucket was charged inside the window.
-# The store then grew for the whole window_s (up to 86 400 s on the signup
-# limiter) and, once over max_entries, every request scanned the whole store
-# (O(n) per request, O(n^2) under a sustained flood). The policy below mirrors
-# #2866's DCR precedent:
+# ── Per-/prefix aggregation for IPv6 IP-keyed buckets (#5490) ────────────
+# `_normalize_mapped_ipv6` handles only IPv4-MAPPED IPv6. A client on a
+# NATIVE IPv6 address is keyed on its full 128-bit address, so one subscriber
+# with a standard /64 delegation (2**64 addresses) presents a fresh bucket
+# key — and therefore a fresh `limit` budget — on every request: the limiter
+# is defeated by address rotation. The store stays bounded (#3124), but there
+# is no budget PER REAL CLIENT. `_check_oauth_dcr_rate_limit` (#2866) already
+# aggregates this way; #5490 makes the IP-keyed call sites do the same.
 #
-#   owned-key cap .... max_entries (default 10 000) client-keyed buckets
-#   overflow ......... exactly ONE shared bucket per store (reserved key
-#                      _BUCKET_OVERFLOW_KEY), capped at the caller's
-#                      ``limit`` per window
-#   eviction ......... reclaim ONLY buckets whose in-window entries have all
-#                      expired; an ACTIVE key is never evicted
-#   hot path ......... O(1) in store size — no store-wide iteration on any
-#                      check or charge
+# The aggregation is applied at the IP-KEYED CALL SITES, never inside
+# `_check_ip_bucket_rate_limit`: that primitive accepts an OPAQUE Hashable
+# (IP strings, `(ip, op)` tuples, server-side token hashes), so it cannot
+# tell an IP key from a token key — aggregating every malformed string into
+# one constant would merge every token budget in a store.
 #
-# Last-charge ordering (every charge moves its key to the insertion-order
-# tail) makes reclaim O(1) and safe: the head is the least-recently-charged
-# key, so an active head implies every later key is also active. Reclaim stops
-# at the first active head and can never evict an active key — evicting one
-# would reset a victim's consumed budget, the fail-open shape #2866 rejects as
-# alternative C. A NEW key arriving when the owned store is full of active
-# buckets is charged to the shared overflow bucket instead of growing the
-# store; only when that overflow is ALSO at ``limit`` is the request refused
-# (429) — the deliberate, fail-closed store-overflow rejection class. The
-# overflow bucket lives in the SAME caller-owned store (this primitive is
-# polymorphic over 13 call sites, so a second global store cannot be passed
-# without a signature change); capacity counts owned keys only, so the stated
-# bound is owned <= max_entries and len(store) <= max_entries + 1.
-#
-# Per-key overflow attribution (fail-closed, #3124 review). A shared-overflow
-# entry is stored as ``(timestamp, key)``, so routing can tell WHICH key has
-# in-window overflow charges. That one change closes two opposite defects:
-#   * A key that exhausted its budget in the overflow cannot graduate to a
-#     fresh owned bucket while its OWN overflow charges are in-window — it
-#     stays in the overflow until they expire. Without attribution it
-#     graduated as soon as ANY slot freed and got a second full budget (up to
-#     2x its limit in one window — a fail-open regression vs. the pre-#3124
-#     per-key behaviour). Pinned by
-#     ``test_sticky_overflow_blocks_a_second_budget``.
-#   * The stickiness is PER KEY, never store-wide: a key with no overflow
-#     charges takes a free owned slot whenever one exists. A store-wide rule
-#     refused EVERY fresh key for the rest of the window (up to 86 400 s) once
-#     the overflow held any charge — a new-user denial reachable with an empty
-#     owned store. Pinned by
-#     ``test_fresh_key_below_cap_admitted_while_overflow_is_warm``.
-# The overflow still holds at most ``limit`` entries (the ``len >= limit``
-# check is unchanged) and the per-entry scan is O(limit), not O(store).
-#
-# Accepted overflow-regime properties (deliberate, both BOUNDED — a lane must
-# not "fix" either without re-opening the capacity decision):
-#   * Mixed-limit stores. One store may carry keys with different ``limit``s
-#     (``_SENSITIVE_BUCKETS`` is 20/5/5/5 per op; ``RateLimitMiddleware`` is
-#     300/100 per path). The overflow bucket is SHARED, so a high-limit key
-#     class can fill it and a fresh low-limit key then sees ``len >= limit``
-#     and is refused. This can only ever be MORE restrictive than the key's
-#     own budget — never more permissive — so it is fail-closed; it is
-#     reachable only in the genuine store-overflow regime (max_entries active
-#     keys in one window), which is a flood signature. Pinned by
-#     ``test_mixed_limit_overflow_is_fail_closed``.
-#   * ``_forget_bucket_charge`` pops the caller's OWN attributed overflow entry,
-#     so a successful accept refunds exactly its own charge and a forget for a
-#     key that was never charged is a no-op — it cannot refund a FOREIGN
-#     charge. "Successes consume no budget" still holds per store. The ceiling
-#     on the shared bucket is ``limit`` entries of overflow charges shared
-#     across overflow-routed keys; because a success refunds the per-token /
-#     IP / global dimensions, those caps bound FAILED attempts only, and the
-#     real ceiling on "limit + successes" is the outstanding-invite supply (a
-#     success consumes its invite).
-_BUCKET_OVERFLOW_KEY = "\x00overflow"
+# Cross-/prefix cardinality — the stated decision (#5490): aggregating to /64
+# collapses rotation WITHIN one delegation; it does not bound how many
+# delegations a client holds. Unlike #2866, this primitive has NO aggregate
+# dimension (no anonymous global bucket), so N delegated /64s still yield N
+# buckets, each with a full budget. The bound on unbounded cardinality stays
+# #3124's owned-key cap (`max_entries`) plus the ONE shared overflow bucket,
+# which fails CLOSED (once the cap is full, untracked keys share the
+# overflow's single `limit`). Adding a global aggregate dimension here is a
+# separate policy decision and is deliberately not taken in this change.
+_IP_BUCKET_IPV6_PREFIX_DEFAULT = 64
+# A malformed address maps to ONE constant, never to the raw string (D6
+# precedent) — an attacker-chosen garbage address must not mint a bucket.
+_IP_BUCKET_MALFORMED_KEY = "anonymous"
 
 
-def _bucket_entry_ts(entry) -> float:
-    """Timestamp of a bucket entry. Owned buckets and the DCR stores hold bare
-    floats; the shared overflow holds ``(ts, key)`` pairs so routing can
-    attribute each charge to its key (#3124). One accessor for both layouts
-    keeps `_bucket_prune_window` / `_bucket_reclaim` single-implementation."""
-    return entry[0] if isinstance(entry, tuple) else entry
+def _ipv6_aggregation_prefix(env_name: str, default: int) -> int:
+    """Validated /prefix length read AT CALL TIME (no import-time freeze).
+    An out-of-range value falls back to `default` — never to a disabled
+    limiter (a /0 or /129 aggregation is a policy error, not an off switch;
+    the off switch is RATE_LIMIT_DISABLED)."""
+    prefix = _int_env(env_name, default)
+    if not 1 <= prefix <= 128:
+        return default
+    return prefix
 
 
-def _bucket_prune_window(bucket: list, now: float, window_s: int) -> list:
-    """In-window entries of `bucket`. The one implementation of the
-    security-relevant window boundary (``now - _bucket_entry_ts(entry) <
-    window_s``) for the hosted_api limiter family: #2866's
-    ``_dcr_prune_window`` delegates here (#3124). NOT the only copy in the
-    repo — ``tortoise/cimd.py`` keeps its own prune for a different
-    (threading) module — so the claim is scoped to this family.
-
-    `_bucket_entry_ts` reads the timestamp from either layout (a bare float, or the
-    shared overflow's ``(ts, key)`` pair), so this stays the ONE boundary
-    predicate for all of them.
-
-    The D10 parity test (``test_t_window_helper_parity_with_primitive``) can
-    no longer be an INDEPENDENT oracle now that both sides call this function
-    (#3124 review), so it asserts against a literal expected table: a mutation
-    of this boundary still fails it."""
-    return [t for t in bucket if now - _bucket_entry_ts(t) < window_s]
+def _ipv6_network_key(addr, prefix: int) -> str:
+    """The /prefix network string for an IPv6 address — the ONE place the
+    aggregation key is built, shared with the #2866 DCR store key so the two
+    cannot drift."""
+    return str(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
 
 
-def _bucket_owned_count(store) -> int:
-    """Client-keyed buckets in `store` — the one shared overflow bucket (if
-    present) does not count against the owned-key cap."""
-    return len(store) - (1 if _BUCKET_OVERFLOW_KEY in store else 0)
+def _ip_bucket_key(ip):
+    """Bucket identity for a client IP (#5490).
 
+    IPv4 and ANY IPv4-mapped IPv6 spelling → the plain IPv4 address (the
+    #1081 contract, unchanged). A NATIVE IPv6 address → its /prefix network
+    (default /64, ``TORTOISE_IP_BUCKET_IPV6_PREFIX``), so one delegated /64
+    cannot mint 2**64 buckets by rotating within it. A malformed address →
+    ONE constant, never the raw attacker-chosen string. Non-str keys
+    (composite tuples) and None pass through unchanged — this helper is for
+    IP-KEYED call sites only, never for the primitive's opaque keys.
+    """
+    if not isinstance(ip, str):
+        return ip
+    normalized = _normalize_mapped_ipv6(ip)
+    try:
+        addr = ipaddress.ip_address(normalized)
+    except ValueError:
+        return _IP_BUCKET_MALFORMED_KEY
+    if addr.version != 6:
+        return str(addr)
+    return _ipv6_network_key(
+        addr,
+        _ipv6_aggregation_prefix("TORTOISE_IP_BUCKET_IPV6_PREFIX",
+                                 _IP_BUCKET_IPV6_PREFIX_DEFAULT))
 
-def _bucket_touch(store, key) -> None:
-    """Move `key` to the insertion-order tail (last-charge ordering) so
-    `_bucket_reclaim` can stop at the first active head. Works on any
-    insertion-ordered mapping (dict/defaultdict/OrderedDict) — the primitive
-    takes a caller-owned store and must not change its type. O(1)."""
-    if not store or next(reversed(store), None) == key:
-        return
-    store[key] = store.pop(key)
-
-
-def _bucket_reclaim(store, now: float, window_s: int, cap: int,
-                    count=None) -> None:
-    """Pop inactive insertion-order-head buckets until the count is below
-    `cap` or the head is active. O(1) at the hot cap; never evicts an active
-    key (#2866 D3/D4 precedent).
-
-    `count` selects the capacity metric and defaults to ``len`` — a NEUTRAL
-    metric that assumes no reserved key. A caller whose store reserves one
-    (the primitive's shared overflow) passes ``_bucket_owned_count`` so the
-    reserved key does not consume a slot; #2866's separate-store layout counts
-    every key and passes ``len``. The default must not encode one caller's
-    layout: an adopter with a DIFFERENT reserved key would silently inherit
-    the primitive's counting semantics and a wrong cap (#3124 review)."""
-    _count = len if count is None else count
-    while _count(store) >= cap:
-        head_key = next(iter(store), None)
-        if head_key is None:
-            return
-        head = store[head_key]
-        if head and now - _bucket_entry_ts(head[-1]) < window_s:
-            return  # active head ⇒ every later key is active too
-        del store[head_key]
-
-
-def _bucket_route(store, key, now: float, window_s: int, cap: int):
-    """Resolve ``(bucket, on_overflow)`` for a check/charge of `key` under
-    the #3124 capacity policy — the ONE routing implementation shared by
-    `_check_ip_bucket_rate_limit`, `_charge_ip_bucket` and
-    `RateLimitMiddleware.dispatch`.
-
-    Does NOT insert: a fresh key returns a NEW empty list that the caller
-    writes back only when it charges (so a deferred check and a 429 leave no
-    store entry behind, #1719). A tracked key is pruned in place. A new key
-    at a full owned store is routed to the single shared overflow bucket
-    instead of growing the owned key space (#2866 reject-new/overflow), so
-    the owned count can never exceed `cap`. The overflow is STICKY PER KEY:
-    a key with its OWN in-window overflow charges stays in the overflow rather
-    than being handed a second full budget, while a key with none takes a free
-    owned slot (a store-wide rule would deny every fresh key until the whole
-    overflow drained). A key equal to the reserved overflow sentinel is routed
-    to the overflow rather than being allowed to own it."""
-    # A client key must NEVER own the reserved slot (#3124 review). If one
-    # could, its bucket would be stored under `_BUCKET_OVERFLOW_KEY` with bare
-    # float entries, and the next fresh-key scan (`entry[1]` on a float) would
-    # raise TypeError -> 500 for the whole window. Unreachable over HTTP today
-    # (h11's field grammar forbids NUL in a header value, and every other key
-    # is a tuple or an IP string), but the reserved-key boundary must be
-    # structural rather than transport-dependent.
-    if key == _BUCKET_OVERFLOW_KEY:
-        overflow = store.get(_BUCKET_OVERFLOW_KEY)
-        if overflow is None:
-            return [], True
-        overflow[:] = _bucket_prune_window(overflow, now, window_s)
-        return overflow, True
-    bucket = store.get(key)
-    if bucket is not None:
-        bucket[:] = _bucket_prune_window(bucket, now, window_s)
-        return bucket, False
-    _bucket_reclaim(store, now, window_s, cap, count=_bucket_owned_count)
-    # Per-key sticky overflow (see the policy block): entries are (ts, key), so
-    # a key is held in the overflow ONLY while its OWN charges are in-window.
-    overflow = store.get(_BUCKET_OVERFLOW_KEY)
-    if overflow is not None:
-        overflow[:] = _bucket_prune_window(overflow, now, window_s)
-        if any(entry[1] == key for entry in overflow):
-            return overflow, True
-    if _bucket_owned_count(store) >= cap:
-        return (overflow if overflow is not None else []), True
-    return [], False
 
 
 async def _check_ip_bucket_rate_limit(
@@ -7395,11 +7282,18 @@ async def _check_ip_bucket_rate_limit(
         if not request.client or not request.client.host:
             return
         if key is None:
-            key = request.client.host
+            # #5490: THIS arm's key is definitionally an IP
+            # (request.client.host), so aggregate it to the /64 here. A
+            # caller-SUPPLIED key stays OPAQUE — the primitive cannot tell
+            # an IP key from a token key.
+            key = _ip_bucket_key(request.client.host)
     # P2-2 (coherence): normalize IPv4-mapped IPv6 so a dual-stack client
     # cannot present two keys for one address. Handles every spelling/case of
     # the mapped form (::ffff:1.2.3.4, ::ffff:7f00:1, ::FFFF:...,
-    # 0:0:0:0:0:ffff:...) via ipaddress (#3124 review).
+    # 0:0:0:0:0:ffff:...) via ipaddress (#3124 review). An IP-keyed CALL SITE
+    # has already applied `_ip_bucket_key` (#5490), so this is a no-op for an
+    # aggregated `/64` string (not an address) and for the mapped forms it
+    # already collapsed.
     ip = _normalize_mapped_ipv6(key)
     now = time.time()
     async with lock:
@@ -7485,8 +7379,9 @@ async def _check_register_rate_limit(request: Request) -> None:
     await _check_ip_bucket_rate_limit(
         request, buckets=_register_buckets, lock=_register_lock,
         limit=_REGISTER_MAX_PER_HOUR, window_s=3600,
-        key=(getattr(request.state, "client_ip", None)
-             or (request.client.host if request.client else None)),
+        key=_ip_bucket_key(
+            getattr(request.state, "client_ip", None)
+            or (request.client.host if request.client else None)),
         detail="Too many registration attempts. Please try again later.",
         retry_after_s=3600)
 
@@ -7886,7 +7781,11 @@ async def _check_sensitive_op_rate_limit(
     # (#1081 review P4).
     _ip = (getattr(request.state, "client_ip", None)
            or (request.client.host if request.client else None))
-    _ip = _normalize_mapped_ipv6(_ip)
+    # P3-3 (phase-7): aggregate the IP to its bucket identity HERE (a tuple
+    # bypasses the helper's isinstance guard). #5490: `_ip_bucket_key` does
+    # the IPv4-mapped normalization AND the native-IPv6 /64 aggregation, so
+    # one /64 cannot mint a fresh (ip, op) budget per source address.
+    _ip = _ip_bucket_key(_ip)
     # An unknown client has no identity to bucket on, and this composite key
     # must never be built around a None IP. _check_ip_bucket_rate_limit
     # enforces the same requirement for every Request-carrying caller (#5397
@@ -8039,8 +7938,9 @@ async def _check_signup_ip_rate_limit(request: Request) -> None:
         request, buckets=_SIGNUP_BUCKETS, lock=_SIGNUP_LOCK,
         limit=_int_env("TORTOISE_SIGNUP_IP_LIMIT", 2),
         window_s=window_s,
-        key=(getattr(request.state, "client_ip", None)
-             or (request.client.host if request.client else None)),
+        key=_ip_bucket_key(
+            getattr(request.state, "client_ip", None)
+            or (request.client.host if request.client else None)),
         detail={
             "error_code": "over_signup_ip_rate_limit",
             "message": ("Too many anonymous signups from this IP (max 2 per 24h). "
@@ -8092,7 +7992,7 @@ async def _check_recovery_rate_limit(request: Request,
         request, buckets=_RECOVER_BUCKETS, lock=_RECOVER_LOCK,
         limit=_int_env("TORTOISE_RECOVER_IP_LIMIT", 5),
         window_s=_window_env("TORTOISE_RECOVER_IP_WINDOW_S", 86400),
-        key=_request_ip_key(request),
+        key=_ip_bucket_key(_request_ip_key(request)),
         detail={
             "error_code": "over_recovery_ip_rate_limit",
             "message": ("Too many key-recovery attempts from this IP. "
@@ -8206,12 +8106,19 @@ async def _check_claim_rate_limit(request: Request) -> None:
     reclaiming inactive buckets clears it. An IP charged to the overflow
     bucket can later obtain its own bucket, so one IP is bounded by
     `2 * MAX_PER_24H` in the worst case — the same property the #2866 DCR
-    policy accepts, and the bound is what keeps the store finite. No IPv6
-    prefix keying: a client holding a whole IPv6 /64 gets one bucket per
-    address — the /64 gap is filed on #5490 (the shared-primitive issue);
-    this limiter does not use that primitive, so a fix there must cover this
-    site too (the claim budget is per-IP, and collapsing a shared /64 would
-    make unrelated users share one 2/24h budget).
+    policy accepts, and the bound is what keeps the store finite.
+
+    #5490: the bucket key is the /64 network of a NATIVE IPv6 address, not
+    the raw 128-bit address — otherwise one client holding a standard /64
+    delegation (2**64 addresses) mints a fresh `MAX_PER_24H` budget per
+    source address, defeating the limiter by rotation. IPv4 and IPv4-mapped
+    IPv6 key as before; a malformed address maps to one constant. Accepted
+    tradeoff (stated, not implied): two clients inside ONE /64 now SHARE
+    this budget. That is the deliberate consequence of per-/64 client
+    identification (RIPE-690 / Better Auth default) and it is bounded by
+    the same store cap as before; a claim is a one-time human act, so a
+    shared /64 budget is the cost of not being defeatable. The per-token
+    attempt cap and the window are unchanged.
     """
     if os.environ.get("RATE_LIMIT_DISABLED") == "1":
         return
@@ -8222,10 +8129,12 @@ async def _check_claim_rate_limit(request: Request) -> None:
     if not ip:
         return
     # Normalize IPv4-mapped IPv6 so one dual-stack client cannot present two
-    # keys for one address (#1081 review P4). The other per-IP limiters get
-    # this inside `_check_ip_bucket_rate_limit`; this limiter does not use
-    # that helper, so it must apply it here.
-    ip = _normalize_mapped_ipv6(ip)
+    # keys for one address (#1081 review P4), and aggregate a NATIVE IPv6
+    # address to its /64 (#5490) so one delegated /64 cannot mint a fresh
+    # 2/24h budget per source address. The other per-IP limiters get the same
+    # via their own `_ip_bucket_key` call at the key site; this limiter does
+    # not use that helper, so it must apply it here.
+    ip = _ip_bucket_key(ip)
     limit = _int_env("TORTOISE_CLAIM_MAX_PER_24H", _CLAIM_MAX_PER_24H_DEFAULT)
     # #5493: the WINDOW is read through the floored accessor — with a
     # non-positive window the in-window test `now - t < window_s` is never
@@ -8343,7 +8252,7 @@ async def _check_invite_accept_rate_limit(request: Request, token: str) -> None:
     token_key = _hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
     ip = (getattr(request.state, "client_ip", None)
           or (request.client.host if request.client else None))
-    ip = _normalize_mapped_ipv6(ip)
+    ip = _ip_bucket_key(ip)
     detail = {
         "error_code": "over_invite_accept_rate_limit",
         "message": ("Too many invite-accept attempts. Please try again "
@@ -9121,6 +9030,11 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
         # #308 (R7): flagged status rides /v1/team (suspended never reaches
         # here — the auth dependency 403s first; scoping delta 12).
         status="flagged" if org.get("flagged_at") is not None else "active",
+        # #3376: backup eligibility rides the team payload so the Graphs tab's
+        # Last-backup column can name the ineligible state. None (absent from
+        # the resolved dict) is forwarded as None — the client keeps the
+        # neutral empty copy rather than fabricating "not enabled".
+        backup_enabled=org.get("backup_enabled"),
         # max_orgs removed (D1): multi-org is a user capability, not a tier field.
         # OrgInfoResponse.max_orgs is optional — omit rather than KeyError (pre-existing
         # 500 on every /v1/team call, exposed by the zero-email signup verification).
@@ -9239,13 +9153,16 @@ async def session_login(request: Request):
     # prune + 429-check now, charge at the terminal outcome below.
     ip = (getattr(request.state, "client_ip", None)
           or (request.client.host if request.client else None))
-    if ip:
+    # #5490: the BUCKET identity aggregates native IPv6 to its /64; the raw
+    # `ip` is kept for the exchange/audit path below.
+    bucket_ip = _ip_bucket_key(ip)
+    if bucket_ip:
         await _check_ip_bucket_rate_limit(
             request, buckets=_SESSION_BUCKETS, lock=_SESSION_LOGIN_LOCK,
             limit=_SESSION_LOGIN_LIMIT, window_s=_SESSION_LOGIN_WINDOW_S,
             detail={"error_code": "session_login_rate_limited",
                     "message": "Too many session logins. Try again in about an hour."},
-            retry_after_s=_SESSION_LOGIN_WINDOW_S, key=ip,
+            retry_after_s=_SESSION_LOGIN_WINDOW_S, key=bucket_ip,
             defer_charge=True)
 
     # #1719 (Task 5): ONE charge mechanism — the body-wide HTTPException
@@ -9257,15 +9174,15 @@ async def session_login(request: Request):
     try:
         session = await _session_login_exchange(request, token, ip)
     except HTTPException as exc:
-        if exc.status_code in (401, 403) and ip:
+        if exc.status_code in (401, 403) and bucket_ip:
             await _charge_ip_bucket(
-                _SESSION_BUCKETS, _SESSION_LOGIN_LOCK, ip,
+                _SESSION_BUCKETS, _SESSION_LOGIN_LOCK, bucket_ip,
                 limit=_SESSION_LOGIN_LIMIT,
                 window_s=_SESSION_LOGIN_WINDOW_S)
         raise
-    if ip:
+    if bucket_ip:
         await _charge_ip_bucket(
-            _SESSION_BUCKETS, _SESSION_LOGIN_LOCK, ip,
+            _SESSION_BUCKETS, _SESSION_LOGIN_LOCK, bucket_ip,
             limit=_SESSION_LOGIN_LIMIT,
             window_s=_SESSION_LOGIN_WINDOW_S)
     return session
@@ -13250,8 +13167,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         try:
             # #2031: hosted extraction compiles the vocabulary from the
             # tenant's pack view (shared catalog + THIS org's custom packs,
-            # memoized per (graph_identity, pack_config_version) — #1154/
-            # #1350) so the tenant's pack kinds reach the prompts and write
+            # memoized per (graph_identity, pack_config_version) — the key
+            # `pack_manifest_store.tenant_view` is the authority for, whose
+            # `version` also carries the #2714 approval set — #1154/#1350)
+            # so the tenant's pack kinds reach the prompts and write
             # gates. The tenant identity comes from the tenant-scoped sdk
             # (only org["org_id"] is consumed — the MCP tool passes a
             # minimal org dict). Fail-open: a vocab-compile hiccup must
@@ -14160,10 +14079,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # NOTE (documented lane divergence): hosted computes _capture_ok AFTER
         # the post-write enrichment — an enrichment-read failure marks points
         # skipped → verb partial → capture_ok False → retryable. The sdk
-        # computes ok BEFORE its surfaced-verification read and treats a
-        # verification failure as a benign warning (capture_ok True). Both
-        # are internally consistent; the divergence is documented, not
-        # forced-aligned (the sdk surface has no skipped/verb concept).
+        # computes ok BEFORE its enrichment read and treats a
+        # verification failure as a benign warning (capture_ok True), while
+        # its verb status — derived from the SAME facts — is still partial.
+        # Both are internally consistent; the divergence is documented, not
+        # forced-aligned (it is now only the RECORDED retry bit, not the
+        # verb: the sdk mirror speaks memory_write_v1 too, with the same
+        # per-point enrichment).
         # Non-fatal bookkeeping (mirror of the sdk guard): a graph hiccup
         # must NOT 500 a committed capture — and on a FAILED capture a raise
         # would leave capture_ok=None → the next same-session re-POST would
@@ -14854,9 +14776,16 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # :Source) — deterministic id, replay-safe MERGE. NO content on the
     # derived path (§4.1: summary/story_arc/sessionId only); doc_status is
     # retired (§9.5 Q3). ──
+    # #5082 (third writer): `sourceKind='document'` is the document's TYPE
+    # axis beside the `documentKind='transcript'` GENRE axis (ONTOLOGY §4.6
+    # marks `sourceKind` REQUIRED on every `:Source`; #5013 Q2 keeps both).
+    # `coalesce` is CREATE-ONLY (#398's never-overwrite contract): a node an
+    # authoritative writer already stamped — e.g. a `_mint_source_stub` stub
+    # for a non-`session:` doc url — keeps its kind.
     proj.g.query(
         "MERGE (s:Source {url:$did}) "
         "SET s.id=coalesce(s.id, $did), "
+        "    s.sourceKind=coalesce(s.sourceKind, 'document'), "
         "    s.documentKind='transcript', s.title=$title, s.summary=$summary, "
         "    s.story_arc=$arc, s.sessionId=$sid, s.eventId=$eid, "
         "    s.sourcePath=$srcpath, s.is_episodic=true, "
@@ -16667,6 +16596,327 @@ async def activation_cohort(
     return payload
 
 
+# ── #3839 (lane B7): the retention indicator ──────────────────────────────
+# Teams active at day 7 / 15 / 30 / 60 / 90. The definition, the four axes and
+# the honest constraints live in `tortoise/retention_indicator.py` — read that module's
+# docstring first. The load-bearing properties here:
+#
+#   * ENUMERATION IS THE METRIC'S DENOMINATOR, and this is the ONE place that
+#     differs from `activation_cohort` above. That endpoint takes an EXPLICIT
+#     operator-named list; a retention rate needs EVERY team that started N
+#     days ago, churned or not, and a list an operator maintains by hand would
+#     silently omit a team — inflating the rate. So this read enumerates the
+#     fleet itself, and an enumeration that cannot be CERTIFIED complete is a
+#     refusal (`fleet_enumeration_incomplete`), never a partial denominator
+#     (#5388 parity — a lower bound is not a count).
+#   * STILL READ-ONLY and still behind `_check_internal` (`FASTAPI_INTERNAL_KEY`),
+#     the same operator credential that already gates `/v1/internal/backups/*`
+#     (which REWRITE every tenant's graph). A read-only aggregate over rows the
+#     platform already stores is strictly less capability, so no new secret is
+#     introduced. EVERY SERVED 200 payload gets one audit row, on the operator
+#     plane (`org_id=""`), naming the reading — the same shape and the same
+#     fail-open rule as the cohort endpoint above. That includes the refusal
+#     branches, which are the operator actions that read the fleet and went
+#     wrong; only the 422s (malformed/future `as_of`, fleet over the bound) are
+#     not audited, because they serve no payload.
+#   * AGGREGATION, NEVER A RETENTION WINDOW (binding guard D12-b): nothing is
+#     deleted, pruned or purged at any age. `as_of` bounds the READING, not the
+#     stored data.
+
+#: Blast-radius bound on a fleet-wide walk. The endpoint reads every
+#: ENUMERABLE org — live OR soft-deleted/churned — so an unbounded fleet is an
+#: unbounded batch job on the shared control plane; exceeding this is a 422 that
+#: names the bound, never a partial metric. The churned population is IN the
+#: walk on purpose (see `retention_indicator.read_team_starts`): a
+#: `deleted_at IS NULL` filter would drop every churned team from every
+#: denominator and bias the rate upward.
+_RETENTION_MAX_ORGS = 1000
+
+#: Default parallelism for the per-org analytics read. The real bound is the
+#: dedicated pool below (`_RETENTION_WORKERS`), and the request semaphore is
+#: sized FROM that pool so the two can never disagree — a semaphore wider than
+#: the pool would let a read spend its whole timeout queued and return a
+#: self-inflicted `org_read_timeout`. The read is a control-plane HTTP walk of
+#: up to `max_pages` round trips per org, which is the "long / stallable"
+#: class the #3060 doctrine above says must NOT share the loop's default
+#: executor with ~80 other `to_thread` sites and the auth middleware's abuse
+#: hooks.
+_RETENTION_MAX_CONCURRENCY = 4
+
+
+def _retention_worker_count(raw: str | None, default: int) -> int:
+    """Clamp a raw `TORTOISE_RETENTION_WORKERS` value to a usable pool size.
+
+    Pure on purpose: the pool is built at IMPORT time, so a test that
+    recomputes the production expression from the same env read cannot detect
+    a changed clamp. ``raw`` is the env value (``None`` means unset); a
+    missing or non-numeric value falls back to ``default`` (the
+    ``_int_env`` rule), and the result is clamped to ``[1, 8]``.
+    """
+    value = (default if raw is None or not raw.strip().isdigit()
+             else int(raw))
+    return max(1, min(value, 8))
+
+
+#: Dedicated pool for the fleet walk and the per-org activity reads (the
+#: `_SCORECARD_EXECUTOR` precedent above, same #3060 reasoning). It replaces
+#: `asyncio.to_thread` here: the default pool on a 2-vCPU host is
+#: `min(32, cpu+4)` = 6 workers, so four slow orgs would park most of the
+#: shared pool and queue every other `to_thread` tenant behind them.
+#:
+#: LIMITATION, stated because the pool is otherwise read as a guarantee: the
+#: pool SIZE bounds live threads (cancelling the await stops the awaitable,
+#: not the worker — CPython #87185, quoted in `_run_with_close`), but the pool
+#: is module-level and lives ACROSS requests. An abandoned worker runs the
+#: whole `read_org_activity` walk (up to `2 * max_pages` control-plane reads),
+#: not just until the HTTP client's per-request timeout, so four abandoned
+#: walks from concurrent requests can park all four workers for later
+#: requests. What the pool buys is that this cost is confined to the retention
+#: surface and can never starve the shared pool — not that a timeout is free.
+_RETENTION_WORKERS = _retention_worker_count(
+    os.environ.get("TORTOISE_RETENTION_WORKERS"), _RETENTION_MAX_CONCURRENCY)
+_RETENTION_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_RETENTION_WORKERS,
+    thread_name_prefix="retention-cohort")
+
+#: Per-org bound: one hung or unreadable org costs THAT team's cell — it folds
+#: to `unavailable` with the org named, and its exclusion from the denominator
+#: is visible as a `partial` cell. The abandoned worker keeps its pool slot
+#: until its walk returns (see the pool's LIMITATION above).
+_RETENTION_PER_ORG_TIMEOUT_S = 30.0
+
+
+def _parse_as_of(as_of: str | None) -> date:
+    """The reading's UTC day boundary. 422 on a malformed or FUTURE value.
+
+    A future `as_of` would make a day-N mark 'arrive' before it has, which is
+    the one way this reading can fabricate retention — so it is refused rather
+    than clamped. A bare date, a `Z`/offset datetime and a naive datetime are
+    all accepted; a naive one is treated as UTC (unlike a window bound, a
+    reading day has no adversarial ambiguity, and refusing it would break a
+    `curl` with a plain date).
+    """
+    if as_of is None:
+        return datetime.now(UTC).date()
+    text = str(as_of).strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="as_of must not be empty")
+    try:
+        if len(text) == 10:
+            day = date.fromisoformat(text)
+        else:
+            iso = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+            parsed = datetime.fromisoformat(iso)
+            # `.date()` on an AWARE datetime returns the date in that value's
+            # OWN offset — it does not convert. Two encodings of one instant
+            # (`2026-10-01T23:00:00-05:00` and `2026-10-02T04:00:00Z`) then
+            # yield two different reading days, moving which day-N marks have
+            # arrived and contradicting this function's own "UTC day boundary"
+            # and `DEFINITION["day_boundary"]`. `retention_indicator._as_utc`
+            # normalises for exactly this reason; a naive value is treated as
+            # UTC (the `replace`), an aware one is CONVERTED.
+            day = (parsed.astimezone(UTC) if parsed.tzinfo
+                   else parsed.replace(tzinfo=UTC)).date()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"as_of is not a valid ISO-8601 date or timestamp: {as_of!r}",
+        ) from exc
+    if day > datetime.now(UTC).date():
+        raise HTTPException(
+            status_code=422,
+            detail=(f"as_of {day.isoformat()} is in the future — a day-N mark "
+                    "must not be read before day N has arrived"),
+        )
+    return day
+
+
+@app.get("/v1/internal/retention/cohort")
+async def retention_cohort(request: Request, as_of: str | None = None):
+    """The retention indicator over the whole fleet. Operator-only, read-only.
+
+    Returns one row per team (start date plus active-at-day-7/15/30/60/90),
+    the cumulative C(N) as k/n with a Wilson 95% interval, the band drops, the
+    trailing-30-day active count and the distinct-active-days histogram. Every
+    number is computed in `tortoise/retention_indicator.py`; this handler owns auth, the
+    reads and the audit only.
+
+    Fail-soft in the right direction: an unreadable store, an uncertified
+    fleet walk, or a dark analytics write path makes the surface
+    `unavailable` with a REASON — it is never reported as a confident zero. A
+    single team that cannot be measured is excluded and NAMED; the surface
+    reads `partial` when only some teams measured and `unavailable` when NONE
+    did (derived from the rows in `assemble`, not asserted here), and the
+    note names the state the cells actually read.
+    """
+    _check_internal(request)
+
+    from tortoise.activation_scorecard import analytics_write_path_configured
+    from tortoise.retention_indicator import (
+        REASON_FLEET_FAILED,
+        REASON_FLEET_INCOMPLETE,
+        REASON_WRITE_PATH_UNCONFIGURED,
+        STATE_MEASURED,
+        STATE_PARTIAL,
+        STATE_UNAVAILABLE,
+        assemble,
+        build_team_rows,
+        cohort_cell_states,
+        read_org_activity,
+        read_team_starts,
+    )
+
+    as_of_day = _parse_as_of(as_of)
+    log = logging.getLogger("tortoise.api")
+    limits = {
+        "max_orgs": _RETENTION_MAX_ORGS,
+        "max_concurrency": _RETENTION_WORKERS,
+        "per_org_timeout_s": _RETENTION_PER_ORG_TIMEOUT_S,
+        "auth": "internal_key",
+        "read_only": True,
+        "aggregation_only": True,
+    }
+
+    def _unavailable(reason: str) -> dict:
+        return assemble(as_of=as_of_day, team_rows=[],
+                        surface_state=STATE_UNAVAILABLE, surface_reason=reason,
+                        limits=limits)
+
+    async def _serve(payload: dict) -> dict:
+        """Audit a SERVED payload, then return it (fail-open).
+
+        EVERY branch that serves an HTTP 200 goes through here, including the
+        refusal branches — a refusal that walked (or tried to walk) the fleet
+        is exactly the operator action whose accountability record must not be
+        missing. The activation-cohort endpoint this mirrors never serves a
+        200 unaudited. Bookkeeping must never turn a served read into a 500
+        (#1529 precedent), and `_async_audit` already never raises.
+        """
+        try:
+            await _async_audit(
+                request, "", "retention_cohort_read",
+                resource_type="retention_cohort",
+                detail={"as_of": as_of_day.isoformat(),
+                        "state": payload.get("state"),
+                        "teams_total": payload.get("teams_total", 0),
+                        "teams_measured": payload.get("teams_measured", 0)},
+            )
+        except Exception:
+            log.exception("retention cohort audit write failed (non-fatal)")
+        return payload
+
+    # The analytics write path is a LIVE environment check, not a date: a dark
+    # writer makes every absence indistinguishable from "no activity", so the
+    # whole reading refuses rather than reporting a fleet of zeros (#3677).
+    if not analytics_write_path_configured():
+        return await _serve(_unavailable(REASON_WRITE_PATH_UNCONFIGURED))
+
+    try:
+        from tortoise.supabase_control import (
+            get_control_plane,
+            is_supabase_enabled,
+        )
+        if not is_supabase_enabled():
+            return await _serve(_unavailable(REASON_FLEET_FAILED))
+        cp = get_control_plane()
+    except Exception:
+        log.warning("retention cohort: control plane unavailable", exc_info=True)
+        return await _serve(_unavailable(REASON_FLEET_FAILED))
+
+    try:
+        teams, complete, reason = await _run_off_loop(
+            _RETENTION_EXECUTOR, read_team_starts, cp)
+    except Exception as exc:  # pragma: no cover — read_team_starts is total
+        log.warning("retention cohort: fleet read failed: %s",
+                    type(exc).__name__, exc_info=True)
+        return await _serve(_unavailable(REASON_FLEET_FAILED))
+    if teams is None:
+        return await _serve(_unavailable(reason or REASON_FLEET_FAILED))
+    if not complete:
+        return await _serve(_unavailable(REASON_FLEET_INCOMPLETE))
+    if len(teams) > _RETENTION_MAX_ORGS:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"the fleet carries {len(teams)} orgs; this endpoint reads "
+                    f"at most {_RETENTION_MAX_ORGS} per request (a blast-radius "
+                    "bound) — a partial denominator is not a retention rate, "
+                    "so the metric is refused rather than truncated"))
+
+    sem = asyncio.Semaphore(min(_RETENTION_WORKERS, len(teams)))
+
+    async def _one_org(team: dict) -> tuple[str, tuple]:
+        """Read ONE team's activity, total against every store failure.
+
+        The org id is echoed back so a `gather` result cannot be attributed to
+        the wrong team if a future change reorders the work.
+        """
+        async with sem:
+            try:
+                return team["org_id"], await asyncio.wait_for(
+                    _run_off_loop(_RETENTION_EXECUTOR, read_org_activity, cp,
+                                  team["org_id"], since_day=team["start"],
+                                  until_day=as_of_day),
+                    timeout=_RETENTION_PER_ORG_TIMEOUT_S)
+            except TimeoutError:
+                log.warning("retention cohort: org %s exceeded %ss (fail-soft)",
+                            team["org_id"], _RETENTION_PER_ORG_TIMEOUT_S)
+                return team["org_id"], (None, set(), "org_read_timeout")
+            except Exception as exc:
+                # Class NAME only, never `str(exc)`: an exception message can
+                # carry a DSN, a host or a credential fragment.
+                log.warning("retention cohort: org %s read failed: %s",
+                            team["org_id"], type(exc).__name__, exc_info=True)
+                return team["org_id"], (
+                    None, set(), f"org_read_failed:{type(exc).__name__}")
+
+    results = await asyncio.gather(*(_one_org(t) for t in teams))
+    activity = dict(results)
+    rows = build_team_rows(teams=teams, activity=activity, as_of=as_of_day)
+    payload = assemble(as_of=as_of_day, team_rows=rows,
+                       surface_state=STATE_MEASURED, limits=limits)
+    unmeasured = [r["org_id"] for r in rows
+                  if r["state"] != STATE_MEASURED]
+    if unmeasured:
+        # The note must state the state the CELLS ACTUALLY READ, derived from
+        # the cells themselves — not from `payload["state"]`. Keying off the
+        # surface state made `partial` the default for every non-`unavailable`
+        # payload, so an unmeasured team created after the reading day (which
+        # feeds NO cell) was described by prose claiming the cells read
+        # `partial` while every cell read `measured` — the same
+        # prose-contradicts-the-field defect the derivation removed. A refused
+        # surface drops the cohort, and there the surface state IS the only
+        # available signal (`unavailable` is the only state that drops it).
+        cell_states = cohort_cell_states(payload.get("cohort"))
+        if STATE_UNAVAILABLE in cell_states or payload["state"] == STATE_UNAVAILABLE:
+            cells: str | None = STATE_UNAVAILABLE
+        elif STATE_PARTIAL in cell_states:
+            cells = STATE_PARTIAL
+        else:
+            cells = None
+        named = ", ".join(sorted(unmeasured))
+        if cells is None:
+            payload["notes"].append(
+                f"{len(unmeasured)} team(s) could not be measured and are "
+                f"EXCLUDED from every denominator; they feed no cohort cell "
+                f"(no mark or window is old enough to include them). "
+                f"Named in `teams`: {named}")
+        else:
+            payload["notes"].append(
+                f"{len(unmeasured)} team(s) could not be measured and are "
+                f"EXCLUDED from every denominator; the cells they feed read "
+                f"`{cells}`. Named in `teams`: {named}")
+    payload["notes"].append(
+        "This is an AGGREGATION over existing rows, never a data-retention "
+        "window (guard D12-b): no row is deleted, pruned or purged by this "
+        "read at any age.")
+
+    # Audit BEFORE returning, fail-open: every served payload (including the
+    # refusal branches above) gets one operator-plane row. Bookkeeping must
+    # never turn a served read into a 500 (#1529 precedent), and
+    # `_async_audit` already never raises.
+    return await _serve(payload)
+
+
 # #2002 (W6, epic #1976): DELETE /v1/sessions/{session_id} — the Settings
 # Captured-sessions view/delete home (DE2E-11). Removes the Session node +
 # its OWNED graph subgraph (CONTAINS turn/extracted Points, the
@@ -18241,6 +18491,342 @@ async def _apply_graph_recording_override(
     if not written:
         raise HTTPException(status_code=404, detail="Unknown graph")
     return {"graph_id": graph_id, "recording": body.recording}
+
+
+# ── #2728: per-graph pack selection — the management surface ──────────────
+#
+# #2714 gates the compile seams on the graph's installed set; this is the
+# surface that WRITES and READS that set per graph. It clones
+# ``_apply_graph_recording_override``'s shape deliberately (one shared core,
+# dual-lane auth, mode-branch graph resolution) so the two per-graph overrides
+# can never drift on permission or on which graph a name resolves to.
+#
+# Authz (owner recommendation, #2728 open questions 1 / 5 / 11):
+#   * MUTATION — a key carrying ``team:manage`` (or the legacy full-access
+#     class), or an owner/admin session user. A GRAPH-BOUND key is refused
+#     outright: pack selection is the MANAGEMENT plane, and C5 #2114's
+#     boundary (a data-plane key must not rewrite the graph's approved
+#     ontology) is preserved rather than loosened.
+#   * READ — any team member (session) or any key whose binding covers the
+#     graph; a graph-bound key reads ONLY its own graph's packs (its binding
+#     is a boundary, not a hint).
+
+
+class GraphPackEntry(BaseModel):
+    """One entry of the per-graph pack PUT body (#2728).
+
+    ``status`` is the CONFIGURABLE vocabulary only — ``removed`` is a derived
+    tombstone the write core applies to namespaces the caller dropped, so
+    handing one in is refused (``removal is expressed by omission``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    namespace: str
+    status: str = "active"
+
+    @field_validator("namespace")
+    @classmethod
+    def _namespace_non_empty(cls, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("namespace must be a non-empty string")
+        return value.strip()
+
+    @field_validator("status")
+    @classmethod
+    def _status_configurable(cls, value: str) -> str:
+        value = (value or "active").strip()
+        if value not in ("active", "disabled"):
+            raise ValueError("status must be 'active' or 'disabled'")
+        return value
+
+
+class GraphPacksPut(BaseModel):
+    """PUT /v1/graphs/{graph_id}/packs body (#2728) — the FULL desired set.
+
+    ``expected_revision`` is REQUIRED, not optional: a last-write-wins PUT
+    would let two admins silently erase each other's pack set, and the UX's
+    revision-conflict state would have no server-side trigger. A mismatch is
+    a 409 carrying the current revision, so the client can reload and retry.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    packs: list[GraphPackEntry]
+    expected_revision: int
+
+
+def _registry_graph_list(org_id: str) -> list[dict]:
+    """Registry-lane ``graph_list`` in ONE worker hop — SDK construction
+    included (#8648 review P1).
+
+    ``_make_sdk`` is NOT free: in embedded mode it runs the keepalive anchor's
+    probe query and, on a miss, an eager connect that holds the socket
+    (#4660). Building the SDK on the loop and off-loading only the callee
+    (``to_thread(sdk.graph_list, …)``) left that blocking I/O on the event
+    loop — the exact defect ``tests/test_read_routes_loop_responsiveness.py``
+    pins.
+    """
+    return _make_sdk(namespace="registry").graph_list(org_id)
+
+
+async def _resolve_graph_data_namespace(org_id: str, graph_id: str) -> str | None:
+    """#2728 — ``graph_id`` → the graph's PHYSICAL FalkorDB name, both modes.
+
+    ``None`` = unknown / deleted / another team's graph (fail closed). The
+    literal ``"default"`` resolves by KIND, not by id: in registry mode the
+    default node carries a real gid as its id, while in Supabase mode the
+    derived default row's id IS the literal — reading the ``graph_list`` seam
+    makes both lanes agree without a second resolution path.
+    """
+    try:
+        rows = await asyncio.to_thread(_registry_graph_list, org_id)
+    except Exception as _exc:
+        _raise_503_if_cp_outage(_exc)
+        raise
+    for row in rows:
+        if row.get("status") == "deleted":
+            continue
+        if graph_id == "default":
+            if row.get("kind") == "default":
+                return row.get("namespace") or f"org_{org_id}"
+        elif row.get("graph_id") == graph_id:
+            return row.get("namespace")
+    return None
+
+
+def _pack_kind_counts() -> dict[str, int]:
+    """#2728 — namespace → declared kind count, for the Configured-packs view.
+
+    Best-effort: the catalog is read-only for tenants and a registry failure
+    must DEGRADE the view (count omitted), never 503 a read.
+    """
+    try:
+        from tortoise.domain_loader import _get_registry
+        reg = _get_registry()
+        packs = getattr(reg, "packs", None) or {}
+        return {
+            ns: (len(p.object_kinds) + len(p.event_kinds) + len(p.point_kinds))
+            for ns, p in packs.items()
+        }
+    except Exception:
+        return {}
+
+
+def _graph_packs_view(gsdk) -> tuple[dict, list[dict]]:
+    """Read the per-graph state in ONE thread hop (blocking DB reads)."""
+    from tortoise.pack_state import get_tenant_packs, resolved_pack_set
+    return resolved_pack_set(gsdk).to_dict(), get_tenant_packs(gsdk)
+
+
+def _graph_packs_view_for(namespace: str) -> tuple[dict, list[dict]]:
+    """Read a graph's pack state in ONE worker hop — SDK construction
+    included (#8648 review P1).
+
+    Off-loading only the CALLEE (``to_thread(_graph_packs_view,
+    _make_sdk(graph_name=namespace))``) still evaluates ``_make_sdk`` on the
+    event loop, where its embedded-mode anchor probe / eager connect blocks
+    every other request (the app runs one uvicorn worker). The construction
+    belongs INSIDE the off-loaded callable.
+    """
+    return _graph_packs_view(_make_sdk(graph_name=namespace))
+
+
+def _packs_payload(graph_id: str, resolved: dict, packs: list[dict]) -> dict:
+    counts = _pack_kind_counts()
+    for p in packs:
+        p["kind_count"] = counts.get(p["namespace"])
+    return {
+        "graph_id": graph_id,
+        "revision": resolved["revision"],
+        "configured": resolved["configured"],
+        "packs": packs,
+    }
+
+
+async def _graph_packs_read(graph_id: str, org_id: str, key_ctx: dict) -> dict:
+    """SHARED read core for GET /v1/graphs/{graph_id}/packs."""
+    if key_ctx.get("org_id") != org_id:
+        raise HTTPException(status_code=404, detail="Unknown organization")
+    org = await _org_node(org_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="Unknown organization")
+    _ensure_not_suspended(org)
+    # Authz BEFORE graph resolution for the session lane (the house order —
+    # a non-member must not get a graph-existence oracle). The graph-bound key
+    # lane needs the resolved namespace to compare bindings, so it resolves
+    # first and its binding check is fail-closed on a None namespace.
+    session_user_id = key_ctx.get("session_user_id")
+    if session_user_id:
+        membership = await _membership_org(session_user_id, org_id)
+        if membership is None:
+            raise HTTPException(status_code=403, detail="No membership in team")
+    namespace = await _resolve_graph_data_namespace(org_id, graph_id)
+    if namespace is None:
+        raise HTTPException(status_code=404, detail="Unknown graph")
+    if not session_user_id and key_ctx.get("graph_id"):
+        # C5 #2114 cross-graph rule: a graph-bound key's binding is a
+        # boundary. Compare PHYSICAL names, so the default-graph alias
+        # ('default' vs the real gid) cannot be used to slip across — and
+        # reject a binding that resolved to NOTHING (`get_current_org`
+        # fail-closes a graph-bound key to graph_namespace=None; `not bound`
+        # is that refusal, not a pass).
+        bound = key_ctx.get("graph_namespace")
+        if not bound or bound != namespace:
+            raise HTTPException(
+                status_code=403,
+                detail={"error_code": "GRAPH_SCOPED_KEY_CROSS_GRAPH",
+                        "message": "A graph-scoped key can only read its own "
+                                   "graph's packs."})
+    try:
+        resolved, packs = await asyncio.to_thread(
+            _graph_packs_view_for, namespace)
+    except Exception:
+        _logger.exception("pack read failed for team %s graph %s",
+                          org_id, graph_id)
+        raise HTTPException(status_code=503,
+                            detail="Pack catalog unavailable") from None
+    return _packs_payload(graph_id, resolved, packs)
+
+
+@app.get("/v1/graphs/{graph_id}/packs")
+async def get_graph_packs(graph_id: str, org_id: str,
+                          key_ctx: dict = Depends(get_current_org_session)):  # noqa: B008
+    """#2728 — read ONE graph's configured pack set + its catalog metadata.
+
+    Response: ``{graph_id, revision, configured, packs: [{namespace, name,
+    version, tier, description, status, source, installed_at, kind_count}]}``.
+    ``configured=false`` means the graph was never explicitly configured, so
+    ``packs`` reflects the legacy starter/starter-healed state; a configured
+    graph with ``packs == []`` is a deliberate empty set.
+    """
+    return await _graph_packs_read(graph_id, org_id, key_ctx)
+
+
+async def _apply_graph_packs_put(graph_id: str, body: GraphPacksPut,
+                                 org_id: str, key_ctx: dict,
+                                 request: Request) -> dict:
+    """SHARED write core for PUT /v1/graphs/{graph_id}/packs.
+
+    Authz + graph resolution + optimistic concurrency + audit in ONE place,
+    so a future MCP/CLI surface cannot drift on permission or semantics.
+    ``removed`` is never accepted as an input status; omission from ``packs``
+    is what tombstones a namespace (the record survives for audit).
+    """
+    if key_ctx.get("org_id") != org_id:
+        raise HTTPException(status_code=404, detail="Unknown organization")
+    org = await _org_node(org_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="Unknown organization")
+    _ensure_not_suspended(org)
+    # C5 #2114: pack selection is the MANAGEMENT plane — a graph-bound
+    # (data-plane) key never mutates it, whatever scopes it carries.
+    if key_ctx.get("graph_id"):
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "GRAPH_SCOPED_TEAM_SURFACE",
+                    "message": "Graph-scoped keys cannot manage pack "
+                               "selection."})
+    if key_ctx.get("key_id"):
+        scopes = key_ctx.get("scopes") or []
+        if "team:manage" not in scopes and not key_ctx.get("legacy_full_access"):
+            raise HTTPException(status_code=403,
+                                detail="Missing team:manage scope")
+    else:
+        membership = await _membership_org(
+            key_ctx.get("session_user_id") or "", org_id)
+        if membership is None or membership.get("role") not in ("owner", "admin"):
+            raise HTTPException(
+                status_code=403,
+                detail="Requires owner or admin role in team")
+
+    namespace = await _resolve_graph_data_namespace(org_id, graph_id)
+    if namespace is None:
+        raise HTTPException(status_code=404, detail="Unknown graph")
+
+    desired = [entry.model_dump() for entry in body.packs]
+
+    def _write() -> tuple[dict, list[dict]]:
+        gsdk = _make_sdk(graph_name=namespace)
+        from tortoise.pack_state import set_graph_packs
+        set_graph_packs(gsdk, packs=desired,
+                        expected_revision=body.expected_revision,
+                        updated_by=(key_ctx.get("created_by")
+                                    or key_ctx.get("session_user_id")))
+        return _graph_packs_view(gsdk)
+
+    from tortoise.pack_state import (
+        InvalidPackStatus,
+        PackRevisionConflict,
+        UnknownPackNamespace,
+    )
+    try:
+        resolved, packs = await asyncio.to_thread(_write)
+    except PackRevisionConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"error_code": "PACK_SET_REVISION_CONFLICT",
+                    "message": "The graph's pack set changed since you "
+                               "loaded it — reload and retry.",
+                    "current_revision": exc.current}) from None
+    except UnknownPackNamespace as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": "UNKNOWN_PACK_NAMESPACE",
+                    "message": "Unknown pack namespace",
+                    "namespace": exc.namespace}) from None
+    except InvalidPackStatus as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": "INVALID_PACK_STATUS",
+                    "message": str(exc),
+                    "status": exc.status}) from None
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": "INVALID_PACK_SET",
+                    "message": str(exc)}) from None
+    except Exception:
+        _logger.exception("pack write failed for team %s graph %s",
+                          org_id, graph_id)
+        raise HTTPException(status_code=503,
+                            detail="Pack catalog unavailable") from None
+
+    # One audit record per change, mirroring the key-lane convention
+    # (actor = the key's owner, detail.via = 'api_key') so a key-driven write
+    # is attributable and never reads as a human session action.
+    if key_ctx.get("key_id"):
+        actor = key_ctx.get("created_by")
+        detail = {"via": "api_key", "key_id": key_ctx.get("key_id"),
+                  "revision": resolved["revision"],
+                  "packs": [{"namespace": p["namespace"],
+                             "status": p["status"]} for p in packs]}
+    else:
+        actor = key_ctx.get("session_user_id")
+        detail = {"via": "session", "revision": resolved["revision"],
+                  "packs": [{"namespace": p["namespace"],
+                             "status": p["status"]} for p in packs]}
+    await _async_audit(request, org_id, "graph_packs_update",
+                       resource_type="graph", resource_id=graph_id,
+                       actor_user_id=actor, detail=detail)
+    return _packs_payload(graph_id, resolved, packs)
+
+
+@app.put("/v1/graphs/{graph_id}/packs")
+async def put_graph_packs(graph_id: str, body: GraphPacksPut, org_id: str,
+                          request: Request,
+                          key_ctx: dict = Depends(get_current_org_session)):  # noqa: B008
+    """#2728 — replace ONE graph's pack set (full desired state).
+
+    Owner/admin (session) or a key carrying ``team:manage``. Requires
+    ``expected_revision``; a mismatch is 409 with the current revision. An
+    unknown namespace is 422; ``status='removed'`` is 422 (omit the namespace
+    instead). Supersedes the per-graph pack STATE MODEL only — the graph-bound
+    KEY rejection on the org-level ``GET /v1/packs`` / MCP surfaces is
+    preserved verbatim (C5 #2114).
+    """
+    return await _apply_graph_packs_put(graph_id, body, org_id, key_ctx,
+                                        request)
 
 
 @app.patch("/v1/graphs/{graph_id}")
@@ -19968,7 +20554,7 @@ def _forget_invite_accept(request: Request, token: str) -> None:
     token_key = _hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
     ip = (getattr(request.state, "client_ip", None)
           or (request.client.host if request.client else None))
-    ip = _normalize_mapped_ipv6(ip)
+    ip = _ip_bucket_key(ip)
     for buckets, lock, key in (  # noqa: B007
         (_INVITE_ACCEPT_TOKEN_BUCKETS, _INVITE_ACCEPT_TOKEN_LOCK,
          ("invite-accept", "token", token_key)),
@@ -20041,7 +20627,7 @@ async def _check_invite_otp_rate_limit(request: Request, token: str) -> None:
     token_key = _hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
     ip = (getattr(request.state, "client_ip", None)
           or (request.client.host if request.client else None))
-    ip = _normalize_mapped_ipv6(ip)
+    ip = _ip_bucket_key(ip)
     detail = {
         "error_code": "over_invite_otp_rate_limit",
         "message": "Too many verification-code requests. Please try again later.",
@@ -22991,6 +23577,66 @@ def _stored_grace_elapsed(row_deleted_at, row_grace_hours,
     return deleted_dt + timedelta(hours=gh) <= now_dt
 
 
+# #5269: the single-flight guard for the deleted-org purge.
+#
+# THE INVARIANT. ONE logical purge emits exactly ONE `team_delete_purged` row.
+# The audit append is keyed on ROW OBSERVATION — every entry re-reads the same
+# past-grace row — so two entries in flight at once each append for the same
+# purge: a permanent duplicate in an append-only log. (The state effect is
+# benign: the graph drop and the control-plane delete are idempotent — which is
+# also why #3472's quiescing of the test's background callers removed the flake
+# without touching this.)
+#
+# WHY A GUARD, GIVEN TODAY'S TWO CALLERS ALREADY SERIALISE (#5269 re-measured
+# 2026-10-13). Both `_lifespan` callers — the one-shot `_run_boot_sweeps()` and
+# the hourly `_event_retention_loop()` — submit through
+# `run_on_daemon_worker(..., name="tortoise-boot-sweep")`, and
+# `daemon_worker("tortoise-boot-sweep")` is ONE SINGLE-SLOT worker whose loop
+# runs submissions one at a time. So the two purges CANNOT overlap today (the
+# issue's "both can fetch the same row before either deletes it" does not hold)
+# — but they are serialised by an ACCIDENT of two distant call sites agreeing
+# on a string whose documented purpose is the thread NAME (ops recipes match on
+# it), not exclusion, and nothing pins that agreement. A per-caller rename — a
+# plausible, entirely reviewable refactor — would put both sweeps in flight at
+# once and open the duplicate. The invariant belongs at the purge, not in a
+# coincidence between its callers.
+#
+# The duplicate that WAS observed (#3472: `assert ['reg-old', 'reg-old'] ==
+# ['reg-old']`) came from a third, different overlap: the lifespan's background
+# entry racing a DIRECT `_purge_deleted_orgs()` call on the test body's thread,
+# which bypasses the worker entirely (#3511 quiesced the test; the harness
+# pattern is recorded in `tests/test_export_delete._quiesce_testclient_background_work`).
+# No direct caller exists in production, but that IS the shape a future one
+# would take, and the guard holds against it too.
+#
+# WHY A `threading.Lock`. Taken and released INSIDE the worker thread, and
+# never on the event loop, for the reason `_DREAM_LOCKS`/`_CAPTURE_IN_FLIGHT_LOCK`
+# record above: an `asyncio.Lock` binds to the first loop that waits on it,
+# which breaks across the per-test loops. `acquire`/`release` are also the
+# only operations here — nothing under the guard is async, so no `await` can be
+# held across it.
+#
+# WHY NON-BLOCKING. A second entry SKIPS, it does not queue: the in-flight
+# sweep already walks the WHOLE superset (`deleted_at <= now`) for this instant,
+# so a queued duplicate would re-observe rows for no new work — and would still
+# be the duplicate this guard exists to prevent if it then re-fetched. Blocking
+# would instead park a daemon worker for the sweep's entire duration (the
+# #2850 reason these sweeps run on daemon workers at all, so a wedged call can
+# never delay interpreter shutdown). Skipping strands nothing: the periodic
+# caller retries on its next tick and the boot caller has already walked the
+# set.
+#
+# SCOPE — PROCESS-LOCAL, which is this issue's whole surface: both callers are
+# armed by `_lifespan`, in ONE process. A SECOND machine is NOT covered, and
+# none exists today — `fly.toml` pins a single-machine topology for unrelated
+# reasons (single-attach volume, per-process state; `docs/infra-runbook.md`
+# §6). If one were ever added, the fix for THAT shape is the issue's other
+# Indicator branch — the append KEYED ON the control-plane row's deletion, not
+# on row observation — because exclusion cannot cross a process boundary.
+# Recorded here so the residual is never read as covered.
+_PURGE_ORG_IN_FLIGHT_LOCK = threading.Lock()
+
+
 def _purge_deleted_orgs() -> None:
     """Hard-delete orgs past the soft-delete grace window (#302 E2E-6-D).
 
@@ -23013,6 +23659,32 @@ def _purge_deleted_orgs() -> None:
     registry/graph leak past the grace window). Immutable audit_events rows
     survive (no FK). Fail-safe: per-org failures are logged and skipped —
     a purge failure never crashes the loop.
+
+    #5269: SINGLE-FLIGHT — one logical purge emits one ``team_delete_purged``
+    # row; a concurrent second entry returns instead of re-observing the same
+    # past-grace row. See ``_PURGE_ORG_IN_FLIGHT_LOCK`` for why the invariant
+    # is enforced HERE (today's two lifespan callers are already serialised by
+    # a shared single-slot worker — by accident, not by construction) and for
+    # the recorded cross-process residual.
+    """
+    if not _PURGE_ORG_IN_FLIGHT_LOCK.acquire(blocking=False):
+        _logger.info(
+            "deleted-team purge already in flight — skipping this entry")
+        return
+    try:
+        _purge_deleted_orgs_locked()
+    finally:
+        _PURGE_ORG_IN_FLIGHT_LOCK.release()
+
+
+def _purge_deleted_orgs_locked() -> None:
+    """The purge sweep BODY — caller MUST hold ``_PURGE_ORG_IN_FLIGHT_LOCK``.
+
+    Split from :func:`_purge_deleted_orgs` so the lock is released on EVERY
+    exit path with a single ``finally`` (the body has many ``return``/``raise``
+    shapes: the Supabase branch returns early, and the outer ``except``
+    swallows). Nothing here may be called directly — the guard is the only
+    thing making one logical purge emit one ``team_delete_purged`` row.
     """
     try:
         env_grace = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS",
@@ -29219,6 +29891,10 @@ def _analytics_note_success() -> str:
       cleared the episode latch here, so the fresh incident was never resolved
       by this process and the following episode was absorbed into it (cycle-7
       P1).
+    * ``SKIPPED_WINDOW`` — #3146: an incident IS open and the recovery window
+      is not yet satisfied, so it was deliberately left alone. Same handling as
+      ``SKIPPED_FRESH`` (stay pending; unknown is not resolved). The analytics
+      kind declares no window, so this value cannot arise for it today.
     * a raise, or no usable store — the truth is unknown → also stay pending.
       When an incident is already on record the attempt re-arms the window
       (bounded reads); from the process-start UNKNOWN state nothing is armed,
@@ -29305,11 +29981,19 @@ def _analytics_note_success() -> str:
                 if outcome is ResolveOutcome.RESOLVED:
                     _logger.info("analytics sink recovered — %s resolved",
                                  _ANALYTICS_INCIDENT_KIND)
-                elif outcome is ResolveOutcome.SKIPPED_FRESH:
+                elif outcome in (ResolveOutcome.SKIPPED_FRESH,
+                                 ResolveOutcome.SKIPPED_WINDOW):
+                    # #3146: SKIPPED_WINDOW (the recovery window is not yet
+                    # satisfied) leaves the incident open for the same reason
+                    # SKIPPED_FRESH does — it is a kept-open verdict, not a
+                    # resolved one. This kind declares no window, so the value
+                    # cannot arise today; handling it keeps the gate correct
+                    # for any future declaration without a silent gap.
                     _logger.info(
-                        "analytics sink resolve skipped a FRESH %s — it "
-                        "stays open, keeping the resolve pending",
-                        _ANALYTICS_INCIDENT_KIND)
+                        "analytics sink resolve kept %s open (%s) — it "
+                        "stays pending",
+                        _ANALYTICS_INCIDENT_KIND, outcome.value,
+                    )
         except Exception as e:  # best-effort, never raises
             _logger.warning("analytics sink resolve failed: %s", e)
         # The CLEAR is applied only if the fact is not STALE. `armed_at_decision`
@@ -29366,7 +30050,8 @@ def _analytics_note_success() -> str:
                 # (`_analytics_note_degradation`): an uncertainty must not
                 # silence a real episode, so that state retries on the next
                 # delivered write instead.
-                if (outcome is ResolveOutcome.SKIPPED_FRESH
+                if (outcome in (ResolveOutcome.SKIPPED_FRESH,
+                                ResolveOutcome.SKIPPED_WINDOW)
                         or _ANALYTICS_RESOLVE_NOT_BEFORE is not None):
                     _ANALYTICS_RESOLVE_NOT_BEFORE = (
                         time.monotonic() + _ANALYTICS_RESOLVE_BACKOFF_S)
@@ -33599,6 +34284,14 @@ async def backups_rebaseline(request: Request):
     graphs update only their per-graph state. Incident subjects follow the
     graph: bare org for the default, "{org}:{gid}" for customs (the same
     key the sweep routes and the watcher uses).
+
+    #8595 review P1: the write refreshes ``label_counts`` as well as
+    ``node_count``. The #661 per-label drift guard compares the CURRENT
+    per-label counts against the ``label_counts`` in the persisted state, and
+    only the sweep's success path ever wrote that field — so refreshing
+    ``node_count`` alone left the label baseline at its PRE-drop value and the
+    next sweep re-fired the very incident the operator cleared (deleting that
+    run's fresh archive and, by delete-to-resolve, filing a NEW issue).
     """
     _check_internal(request)
     body = await _read_internal_json_body(request, required=True)
@@ -33625,6 +34318,8 @@ async def backups_rebaseline(request: Request):
     from tortoise.backup_sweep import (
         _graph_state_key,
         _write_json,
+        query_label_counts,
+        read_graph_state,
         read_org_state,
         resolve_active_graph,
     )
@@ -33660,14 +34355,34 @@ async def backups_rebaseline(request: Request):
         # never walks a sync helper — so `_OFFLOADED_ASYNC_BODIES`' "no inline
         # seam" check passed VACUOUSLY here. Off-loaded, so the declaration is
         # true.
-        count = await asyncio.to_thread(
-            count_data_nodes, db, row["graph_name"])
+        graph_name = row["graph_name"]
+
+        def _current_counts() -> tuple[int, dict[str, int]]:
+            # #8595 review P1: BOTH reads — the total and the per-label
+            # baseline the #661 guard compares against — in ONE hand-off, so
+            # the label query cannot be left inline on the loop (the same
+            # round-trip class as `count_data_nodes`). A label-read failure
+            # RAISES out of the helper and fails the request: writing
+            # `node_count` with an unrefreshed label baseline would re-fire
+            # the incident this call exists to clear.
+            return (count_data_nodes(db, graph_name),
+                    query_label_counts(db.select_graph(graph_name)))
+
+        count, label_counts = await asyncio.to_thread(_current_counts)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"graph unavailable: {e}")  # noqa: B904
     state = {
+        # The default graph merges the legacy org file (the pre-#2313 mirror);
+        # a custom graph merges its OWN per-graph state, so a re-baseline no
+        # longer drops fields the sweep wrote (pre-fix it merged `{}`, which
+        # also left NO `label_counts` at all — the #8595 review's custom-graph
+        # half, where the guard was skipped for a run because one side was
+        # empty).
         **(read_org_state(storage, org_id)
-          if graph_id == "default" else {}),
+          if graph_id == "default"
+          else read_graph_state(storage, org_id, graph_id)),
         "node_count": count,
+        "label_counts": label_counts,
         "updated_at": datetime.now(UTC).isoformat(),
     }
     _write_json(storage, _graph_state_key(org_id, graph_id), state)
@@ -35423,7 +36138,12 @@ _OAUTH_DCR_ANON_KEY = "\x00anon"
 # separate-store layout counts every key), so the KEY VALUE must not drift
 # (#3124 review).
 _OAUTH_DCR_OVERFLOW_KEY = _BUCKET_OVERFLOW_KEY
-_OAUTH_DCR_MALFORMED_KEY = "anonymous"
+# Alias the shared #5490 malformed-address constant rather than re-declaring
+# the literal: this store and the primitive's stores are DISJOINT dicts, so
+# ONE literal is correct — and a re-declared copy is how the two silently
+# drift apart on the next change (the `_OAUTH_DCR_OVERFLOW_KEY` precedent
+# directly above).
+_OAUTH_DCR_MALFORMED_KEY = _IP_BUCKET_MALFORMED_KEY
 
 _OAUTH_DCR_BUCKETS: OrderedDict[str, list[float]] = OrderedDict()
 _OAUTH_DCR_TRUSTED: OrderedDict[str, list[float]] = OrderedDict()
@@ -35519,11 +36239,12 @@ def _oauth_dcr_store_key(client_ip) -> str:
         return _OAUTH_DCR_MALFORMED_KEY
     if addr.version != 6:
         return str(addr)
-    prefix = _int_env("TORTOISE_OAUTH_DCR_IPV6_PREFIX",
-                      _OAUTH_DCR_IPV6_PREFIX_DEFAULT)
-    if not 1 <= prefix <= 128:
-        prefix = _OAUTH_DCR_IPV6_PREFIX_DEFAULT
-    return str(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
+    # #5490: the /prefix computation is the SHARED `_ipv6_network_key` +
+    # `_ipv6_aggregation_prefix` the per-IP primitive's call sites use, so a
+    # bare-IPv6 bucket is aggregated identically on both surfaces.
+    prefix = _ipv6_aggregation_prefix("TORTOISE_OAUTH_DCR_IPV6_PREFIX",
+                                      _OAUTH_DCR_IPV6_PREFIX_DEFAULT)
+    return _ipv6_network_key(addr, prefix)
 
 
 def _oauth_dcr_reclaim(store: OrderedDict, now: float, window_s: int,

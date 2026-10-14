@@ -1540,14 +1540,37 @@ class TortoiseEP:
         # #2490: terminal claims (status in the terminal vocab OR the legacy
         # outdated flag) are EXCLUDED — their posterior decays to vacuity at
         # the terminalizing write, so include-terminal surfaces must not list
-        # them as contested. Deliberately NO has_ep gate: an unmeasured LIVE
-        # claim (coalesce → Beta(1,1), variance 1/12 > 0.04) MUST list as
-        # contested (test_agent_ops_supersede:169 pin — the post-supersede
-        # unmeasured successor surfaces until a successful dream resolves it).
+        # them as contested.
+        #
+        # #3415: PRIOR-ONLY baselines are excluded too. A #2199 declared
+        # baseline (``baseline_set=true``, no ``posterior_alpha``) is the
+        # canonical 'baseline' state of ``ep_measurement_state`` — its
+        # variance is the WIDTH OF THE DECLARED PRIOR, not a measured
+        # contention, and it reads ``contested=False`` on every other
+        # canonical surface (annotate_ep_batch / why / rankers /
+        # ``sdk._review_prune``). Applying the 0.04 posterior bar to a prior
+        # width listed the same node as contested here while those four read
+        # it unmeasured — the residual #2206/#3276-class disagreement THIS
+        # gate closes (an explicitly declared prior wider than the bar, e.g.
+        # ``set_point_baseline(2, 1)`` Beta(2,1) v=0.0556, used to surface;
+        # the system default Beta(3,1) v=0.0375 stays under the bar either
+        # way — and since #6151 an authored word is one weak body on top of
+        # that default, so ``credibility='low'`` is now Beta(3.1,1)
+        # v=0.03616, also under the bar).
+        #
+        # Deliberately STILL NO measured gate: a genuinely UNMEASURED live
+        # claim (no persisted prior at all -> coalesce to Beta(1,1), v=1/12)
+        # MUST list (test_agent_ops_supersede:169 pin — the post-supersede
+        # unmeasured successor surfaces until a successful dream resolves
+        # it). Only the declared-baseline state is removed; ``unmeasured``
+        # keeps its deliberate listing. See ``sdk._review_prune`` for the
+        # sibling scan that ALSO requires measurement.
+        from .search_engine import ep_prior_only_cypher
         rows = self.g.query(
             "MATCH (n:Point) "
             "WHERE n.is_operator = false "
             f"  AND {_terminal_excluded('n.status')} "
+            f"  AND NOT {ep_prior_only_cypher('n')} "
             "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
             "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
             "WITH n, a, b, (a*b)/((a+b)*(a+b)*(a+b+1)) AS v "

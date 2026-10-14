@@ -71,6 +71,13 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_cohort_cost_cap.py": {"registry": "prod-coupled"},
     "test_cross_tenant_read_isolation.py": {"registry": "prod-coupled"},  # #3663 — registry control-plane seeding for the cross-tenant read proof
     "test_graph_storage.py": {"registry": "prod-coupled"},  # #5331 — the byte-meter fixture seeds an org through the registry namespace (the literal is the namespace PROD resolves; same class as test_cross_tenant_read_isolation)
+    # #2728: `_seed_org` / `_seed_member` seed the Team + Graph/Membership
+    # control-plane nodes through the CANONICAL `registry` namespace the new
+    # per-graph pack routes resolve (`_resolve_graph_data_namespace` reads the
+    # registry graph's `graph_list`), so the literal IS the namespace PROD code
+    # resolves — same `prod-coupled` class as test_github_connect. A `test_*`
+    # rename would seed a DIFFERENT graph than the routes under test read.
+    "test_pack_selection_by_graph.py": {"registry": "prod-coupled"},
     "test_3926_error_prop_guard.py": {"registry": "prod-coupled"},  # #3926 — the literal IS the canonical namespace PROD code resolves
     "test_index_docs_api.py": {"registry": "index-docs"},
     # #3553: the CAS concurrency tests provision + tear down REAL Team nodes in
@@ -158,6 +165,13 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # lane end to end — a `test_*` rename would exercise a namespace prod
     # never resolves.
     "test_onboarding_selfhost_w12.py": {"selfhost": "prod-coupled"},
+    # #8544: same `selfhost` literal class as test_onboarding_selfhost_w12
+    # above. The driver's guard constructs `TortoiseSDK(db_path=…,
+    # namespace="selfhost")` to dump the graph the self-host daemon actually
+    # opens, and `selfhost_graph_name()` must equal `org_<SELFHOST_ORG_ID>` —
+    # a `test_*` rename would archive a graph prod never resolves. The named
+    # equality assertion fails LOUDLY on a decoupling rather than passing.
+    "test_selfhost_backup.py": {"selfhost": "prod-coupled"},
     # #3517 parity: `_provision_org` seeds the registry Team node directly
     # (`_ha._make_sdk(namespace="registry")._get_registry()`) because the
     # onboarding state the surfaces under test write lives ON that node — a
@@ -725,6 +739,30 @@ def test_no_redirect_stems_registry_exact():
         # registered with the PR — this pin reding on the addition is the pin
         # working as designed, so the stem is DECLARED here rather than exempted.
         "test_direction_storage_7852",
+        # #6871: the operator's INPUT set (`idx=0` source, `idx>=1` targets) and
+        # the canonical evidence read that never surfaces a point as its own
+        # supporter. The fixture builds `TortoiseSDK(<tmpfile>)` and the file
+        # carries NO module-level `embedded_only` marker, so the load-bearing
+        # reason it needs the exemption is the REDIRECT, not a skip: a URI-set
+        # lane would connect the construction to the server and the embedded
+        # read under test would certify a lane the file does not target. The
+        # third leg of the three-way mirror: config/ci-surfaces.yml:carve_out and
+        # TEST_NO_REDIRECT_STEMS were registered with the PR — this pin reding
+        # on the addition is the pin working as designed, so the stem is
+        # DECLARED here rather than exempted.
+        "test_6871_operator_input_set",
+        # #8316: the VERBATIM (caller-supplied) embedding read seam. The module
+        # carries module-level `embedded_only` AND drives a real embedded store,
+        # so the exemption's load-bearing reason is the SKIP *and* the REDIRECT:
+        # a URI-set lane would either skip every case, or — for the cases that
+        # construct `TortoiseSDK(<tmpfile>)` — connect the construction to the
+        # server, where the plain-`List` stored shape and the read seam that
+        # tolerates it would certify nothing. The third leg of the three-way
+        # mirror: config/ci-surfaces.yml:carve_out and TEST_NO_REDIRECT_STEMS
+        # were registered with the PR — this pin reding on the addition is the
+        # pin working as designed, so the stem is DECLARED here rather than
+        # exempted.
+        "test_verbatim_embedding_read_8316",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "
