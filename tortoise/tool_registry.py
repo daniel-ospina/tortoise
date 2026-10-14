@@ -710,7 +710,11 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "the same id mints zero new nodes). Only call this when the team has "
                     "session recording enabled (the dashboard 'Memory sources > Agent sessions' "
                     "toggle); if the call fails, tell the user it wasn't filed and do NOT "
-                    "retry. Requires hosted mode — stdio/self-hosted returns an honest error "
+                    "retry. Consent: this tool runs server-side and cannot read the caller's "
+                    "TORTOISE_CAPTURE, so calling it IS the agreement to record the session "
+                    "(#3662, Option 1 — connecting the agent is the agreement); tell the user "
+                    "you are filing the session before you call, so they can decline. Requires "
+                    "hosted mode — stdio/self-hosted returns an honest error "
                     "(no local fallback that bypasses the capture pipeline).",
         annotations=_rw(),
         http_policy=True,

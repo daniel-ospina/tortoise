@@ -1786,8 +1786,11 @@ rows:
     quota; a missing LLM provider key is NOT a refusal — the capture is STORED and only extraction is skipped (extraction_mode
     "no-provider"); 422 for an invalid harness. session_id is the idempotency key (re-filing the same id mints zero
     new nodes). Only call this when the team has session recording enabled (the dashboard ''Memory sources > Agent
-    sessions'' toggle); if the call fails, tell the user it wasn''t filed and do NOT retry. Requires hosted mode
-    — stdio/self-hosted returns an honest error (no local fallback that bypasses the capture pipeline).'
+    sessions'' toggle); if the call fails, tell the user it wasn''t filed and do NOT retry. Consent: this tool runs
+    server-side and cannot read the caller''s TORTOISE_CAPTURE, so calling it IS the agreement to record the session
+    (#3662, Option 1 — connecting the agent is the agreement); tell the user you are filing the session before you
+    call, so they can decline. Requires hosted mode — stdio/self-hosted returns an honest error (no local fallback
+    that bypasses the capture pipeline).'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: agents, tooling, docs

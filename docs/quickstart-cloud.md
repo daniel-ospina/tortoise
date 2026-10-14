@@ -143,9 +143,13 @@ is **per-surface**, not uniform (#3615):
 - **The hosted MCP tool `tortoise_session_capture` is not gated by this
   variable** — it executes on the server, which cannot read the client host's
   `TORTOISE_CAPTURE`. It carries the server-side recording policy
-  (`session_recording`, default-ON) instead. Whether an explicit, agent-invoked
-  capture should also require a *client-carried* consent assertion is an open
-  product question (#3662). `TortoiseSDK.capture_session` is likewise ungated,
+  (`session_recording`, default-ON) instead. This is **decided, not open**
+  (#3662, Option 1): an explicit, agent-invoked capture is itself the agreement
+  to record the session — the client's switch cannot travel with the request,
+  so requiring it here is unanswerable — and the tool description tells the
+  agent to disclose the filing to you before it happens. This is a deliberate
+  departure from the per-session-opt-in default; see the `OVERRIDES:` marker on
+  #3662. `TortoiseSDK.capture_session` is likewise ungated,
   and it is **not** egress-free: it writes the graph backend named by
   `TORTOISE_DB_URI` **and** sends each turn verbatim to the configured BYOK
   extractor provider (BYOK is the documented default), so a remote

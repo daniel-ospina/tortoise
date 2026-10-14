@@ -71,6 +71,53 @@ def _root_row(label, node):
     return [label, props]
 
 
+# ── the identity table (#5448) ────────────────────────
+
+def test_navigation_roots_every_canonical_identity_key():
+    """#5448: `_ROOT_BRANCHES` is a THIRD label→identity table. The canonical
+    declaration is `projection._CANONICAL_ENTITY_ID_PROPS` +
+    `_CANONICAL_ENTITY_SECONDARY_ID_PROPS`, resolved by
+    `FalkorProjection._RESOLVE_BRANCHES`. This one was id-only, so a url-only
+    `:Source` — the shape `create_point(extractedFrom=...)` → `_link_source` →
+    `_mint_source_stub` mints, and the read path has always resolved — could not
+    be a traversal ROOT: `entityProfile`/`tortoise_traverse` answered `{}` for a
+    node `get_entity` resolves. Pin coverage so the two tables cannot drift
+    silently again: every DECLARED identity key must be rootable, and the only
+    addition navigation makes is the documented legacy `Session` root."""
+    from tortoise.navigation import _ROOT_BRANCHES
+    from tortoise.projection import (
+        _CANONICAL_ENTITY_ID_PROPS,
+        _CANONICAL_ENTITY_SECONDARY_ID_PROPS,
+    )
+
+    declared = set(_CANONICAL_ENTITY_ID_PROPS) | set(
+        _CANONICAL_ENTITY_SECONDARY_ID_PROPS)
+    roots = set(_ROOT_BRANCHES)
+    assert declared <= roots, (
+        f"navigation cannot ROOT a declared identity key: "
+        f"{sorted(declared - roots)} — a third identity table has drifted "
+        f"from the canonical declaration (#5448)")
+    assert roots - declared == {("Session", "id")}, (
+        f"unexpected `_ROOT_BRANCHES` additions: {sorted(roots - declared)} — "
+        f"Session is the one deliberate extra root; anything else is drift")
+
+
+def test_hop_query_binds_the_frontier_identity_key():
+    """#5448: the first hop must bind the ROOT's own identity key. A url-only
+    `:Source` root carries no `id`, so the old hardcoded `{id:$eid}` matched
+    nothing and traversal rooted at one returned the root with an EMPTY
+    neighbourhood — the half-fix that made `_ROOT_BRANCHES` alone insufficient.
+    The key is interpolated into query text, so an undeclared key is refused."""
+    from tortoise.navigation import _hop_query
+
+    q = _hop_query("Source", "url")
+    assert "{url:$eid}" in q and "{id:$eid}" not in q
+    # The declared default (and every DISCOVERED neighbour) stays `id`.
+    assert "{id:$eid}" in _hop_query("Source")
+    # Fail-closed on anything outside the bounded key set.
+    assert _hop_query("Source", "url; MATCH (x) DETACH DELETE x") is None
+
+
 # ── entityProfile tests ───────────────────────────────
 
 def test_entity_profile_empty_entity():
