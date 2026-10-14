@@ -42,6 +42,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -3743,8 +3744,14 @@ class CollisionPreflightTest(unittest.TestCase):
         # The table still reports BOTH hits — the fix is about the VERDICT, not
         # about hiding evidence. A mutant that suppressed the hits instead of
         # demoting them would fail here.
-        self.assertIn("open PRs                 HIT", out)
-        self.assertIn("issue assignee/comments  HIT", out)
+        #
+        # ⛔ Matched on the CELL SEPARATION, not a fixed padding: #8629 widened
+        # the SURFACE column to the longest real surface name (31 chars, the
+        # new ADVISORY row) so every row's STATUS/HITS stay aligned, and a
+        # hardcoded 24-char pad would have pinned the cosmetic width instead of
+        # the property this test is about.
+        self.assertRegex(out, r"(?m)^open PRs\s+HIT\s+1")
+        self.assertRegex(out, r"(?m)^issue assignee/comments\s+HIT\s+1")
         self.assertEqual(out.count("(non-blocking)"), 2, out)
 
     def test_collision_count_names_only_blocking_hits(self):
@@ -5128,6 +5135,59 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assert_all_surface_rows(out)
         self.assertIn("8/8 surfaces queried", out)
 
+    def test_the_header_contract_matches_the_surface_set(self):
+        # #8629 review (P2, claim mismatch). This tool states its contract in the
+        # module header, and that header is what the next lane reads before
+        # changing a surface — #8560's own verification checklist is exactly
+        # "the new verdict is in the docstring table and the surface set matches
+        # `ALL_SURFACES`". #8625 added `SURFACE_UNCLOSED_REF` and updated only
+        # the inline `ALL_SURFACES` comment, so the file disagreed with itself
+        # five lines apart about how many surfaces it has, and the new ADVISORY
+        # row was invisible to every reader of the header.
+        cp = _tool_module()
+        doc = cp.__doc__ or ""
+        declared = re.search(r"Surfaces \((\d+) rows", doc)
+        self.assertIsNotNone(declared, "the header must declare the row count")
+        self.assertEqual(
+            int(declared.group(1)), len(cp.ALL_SURFACES),
+            "the header's `Surfaces (N rows)` must equal len(ALL_SURFACES)")
+        for name in cp.ALL_SURFACES:
+            self.assertIn(
+                name, doc,
+                f"surface {name!r} is missing from the header table — a row "
+                "that ships without a contract entry is a contract the next "
+                "reader cannot see")
+        # The ADVISORY marker is the only place a reader learns that a hit on a
+        # row cannot block; every advisory surface must carry one.
+        self.assertEqual(doc.count("· ADVISORY ·"), len(cp.ADVISORY_SURFACES))
+        # The exit-code table may not advertise an arm that cannot reach it:
+        # after #8625 the timeline title arm is an ADVISORY, so only the issue's
+        # own state may be named as a source of exit 4 ("a verdict must not
+        # state a cause it did not observe").
+        self.assertNotIn("or a MERGED PR the paginated", doc)
+
+    def test_the_retired_shipped_kind_is_gone_not_left_as_a_dead_tier(self):
+        # #8629 review (P2). #8625 moved the only producer of the `shipped` hit
+        # kind to the ADVISORY surface (which emits `unclosed`), so the kind and
+        # its branch in `_landed_wording` became unreachable — a described tier
+        # that no code path can produce. The file's own standard at the hit-tag
+        # site refuses exactly this ("a tag entry for it would be dead code that
+        # reads as a live tier").
+        import inspect
+        cp = _tool_module()
+        # The documented vocabulary is the kind entries of `Hit.kind`'s comment
+        # (`#   "<kind>"   — <meaning>`), so prose that MENTIONS a retired kind
+        # cannot satisfy or defeat this.
+        documented = set(re.findall(
+            r'^\s*#\s+"([a-z-]+)"\s+—', inspect.getsource(cp.Hit), re.M))
+        self.assertEqual(
+            documented, {"completed", "not-planned", "closed", "unclosed"},
+            "`Hit.kind`'s documented vocabulary must be exactly the kinds this "
+            "module can produce (no `shipped`: #8625 left it unreachable)")
+        self.assertNotIn(
+            '"shipped"', inspect.getsource(cp._landed_wording),
+            "`_landed_wording` must not branch on the retired `shipped` kind")
+
     # ── #8560: the LANDED answer (authoritative, paginated) ──────────────────
 
     def test_closed_issue_is_landed_never_clean(self):
@@ -5258,6 +5318,25 @@ class CollisionPreflightTest(unittest.TestCase):
         # not prove the landed answer is independent of the advisory sample.
         self.assertIn("gh-unavailable", out)
         self.assertIn("ADVISORY SURFACES", out)
+
+    def test_landed_verdict_names_the_issue_state_as_the_only_authority(self):
+        # #8629 review (P2). The LANDED preamble is printed AT THE POINT OF
+        # REFUSAL to the agent that must act on it, and it used to advertise the
+        # merged-PR timeline arm as an AUTHORITATIVE source of the verdict — an
+        # arm #8625 demoted to an ADVISORY, so on a LANDED verdict (reachable
+        # only from a CLOSED issue) the sentence named a cause it cannot observe
+        # (the #3504 class-2 standard this file's own comments were written to
+        # remove). The replacement must name the issue's own state as the sole
+        # authority AND point at where a title-naming PR is reported instead.
+        self.gh_fixtures(issue=self.issue_payload(state="CLOSED",
+                                                  state_reason="COMPLETED"))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 4, out)
+        self.assertIn("The authority here is the issue's OWN STATE", out)
+        self.assertNotIn("or a MERGED PR the PAGINATED", out)
+        self.assertIn(
+            "reported on the ADVISORY `merged PRs naming an OPEN issue` surface",
+            out)
 
     def test_merged_pr_that_only_body_references_the_issue_is_clean(self):
         # A merged PR that mentions #N only in its BODY is not a landing: the

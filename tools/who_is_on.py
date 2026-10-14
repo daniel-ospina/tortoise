@@ -28,9 +28,9 @@ cannot disagree about what a holder is. It *answers* instead of gating:
 
   rc 0  a COMPLETE answer, with or without holders. A hit is information, not
         a collision; this tool never returns 1. A LANDED issue (#8560 — its own
-        state is CLOSED, or a MERGED PR the paginated timeline ties to it) is
-        answered under LANDED and still exits 0: the question HAS an answer, and
-        that answer is not "nobody".
+        state is CLOSED, and after #8625 a MERGED PR that merely NAMES it is an
+        advisory, never a landing) is answered under LANDED and still exits 0:
+        the question HAS an answer, and that answer is not "nobody".
   rc 2  an INCOMPLETE answer: a surface could not be queried, the target repo
         could not be resolved unambiguously, a local holder's uncommitted state
         could not be read, or (inventory) a worktree's uncommitted state could
@@ -654,8 +654,9 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
         wording = cp._landed_wording({hit.kind for _s, hit in landed})
         lines.append("")
         lines.append("LANDED — " + cp._landed_conclusion([h for _s, h in landed]))
-        lines.append("  (AUTHORITATIVE — the issue's own state, or a MERGED PR the")
-        lines.append("   PAGINATED timeline ties to it; not the advisory closed-PR sample)")
+        lines.append("  (AUTHORITATIVE — the issue's OWN STATE, and nothing else: a")
+        lines.append("   MERGED PR that merely NAMES an issue is a reference, not a")
+        lines.append("   closure (#8625) — reported as an advisory, never as a landing)")
         for surface, hit in landed:
             lines.append(f"  [{_clean(surface.name)}] {_clean(hit.ref)} — "
                          f"{_clean(hit.detail)}")
