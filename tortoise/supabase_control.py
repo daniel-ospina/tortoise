@@ -2815,6 +2815,19 @@ def purge_org_control_plane(cp, org_id: str) -> None:
     deletes the row (review of PR #8179 P2: without this, the erasure
     would fail closed once the journal is populated and the org would
     never be purged).
+
+    ``analytics_events`` is DELIBERATELY absent from this list — do not
+    "complete" the erasure by adding it. The owner decided (#3843,
+    2026-09-17) to keep the per-capture / per-team usage record
+    (``capture_cost`` rows), and ruled (#3853) that product-usage
+    analytics "can't be fully deleted but gets decoupled from your
+    identity (which is fully deleted)". The decoupling IS this identity
+    deletion: ``analytics_events`` has no FK to ``organizations``, so no
+    cascade reaches it, and the hard-deleted ``organizations`` row is what
+    carried the name. The surviving row keeps only a random ``org_id``.
+    Guarded by
+    ``tests/test_retention_promise.py::test_usage_record_is_retained_decoupled_on_purge``;
+    the disposition is recorded in ``docs/retention-and-deletion.md``.
     """
     cp.query("api_keys", method="DELETE", filters=[("org_id", "eq", org_id)])
     cp.query("org_memberships", method="DELETE", filters=[("org_id", "eq", org_id)])
