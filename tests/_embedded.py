@@ -1656,8 +1656,8 @@ def _owned_survivors(journal_names, live_names, default_graph) -> set[str]:
     return _owned_names(journal_names, default_graph) & set(live_names)
 
 
-def _team_sweep_allowed(uri: str) -> bool:
-    """#1686 (review P1-1): may the product-namespace stray pass run on `uri`?
+def _team_sweep_allowed() -> bool:
+    """#1686 (review P1-1): may the product-namespace stray pass run?
 
     The product's own mint namespace (hosted parity: real tenant graphs) is
     the _PRODUCT_GRAPH_PREFIXES family — `org_` since the tenancy rename
@@ -1686,29 +1686,37 @@ def _team_sweep_allowed(uri: str) -> bool:
     reads an empty namespace, gate red). A test-named path on a shared
     server is NOT an ownership record; the explicit opt-in is (CI's
     dedicated docker containers are fresh per job, so nothing accumulates
-    there without the pass)."""
-    # OVERRIDES (#4097): env-truthiness truthy-set parsing ("1"/"true"/"yes"/"on").
-    # This gate requires the exact value "1": it is the SOLE authorization for an
-    # irreversible journal-blind DETACH DELETE + GRAPH.DELETE of the real-tenant
-    # org_*/team_* namespace (the `uri` parameter is dead — the #1884 URI inference
-    # was retracted — so no containment check compensates), and widening a
-    # destructive opt-in surface is not a vocabulary-coherence win. The refusal is
-    # logged with the exact required spelling, so the narrowing is discoverable.
-    # Pinned by tests/test_env_truthy.py::test_team_sweep_gate_is_narrow_by_design.
+    there without the pass).
+
+    #4128: it takes NO uri (the parameter was dead — the #1884 retraction left
+    the env var as the SOLE gate, and a signature still holding a `uri` invites
+    a reader to believe URI containment compensates). Callers that log the
+    target hold the uri themselves; see `_sweep_team_strays`."""
+    # OVERRIDES (#4128): the truthy-set parsing declared in #4097. This gate requires
+    # the exact value "1": it is the SOLE authorization for an irreversible
+    # journal-blind DETACH DELETE + GRAPH.DELETE of the real-tenant org_*/team_*
+    # namespace (the #1884 URI inference was retracted and the `uri` parameter is gone,
+    # so no containment check compensates), and widening a destructive opt-in surface is
+    # not a vocabulary-coherence win. The refusal is logged with the exact required
+    # spelling, so the narrowing is discoverable. Pinned by
+    # tests/test_env_truthy.py::test_team_sweep_gate_is_narrow_by_design.
     return os.environ.get("TORTOISE_TEST_SWEEP_TEAM_STRAYS") == "1"
 
 
 def _sweep_team_strays(proj, uri: str) -> list[str]:
     """Drop journal-blind stray product-namespace graphs (#1686 closure).
 
-    Matches _PRODUCT_GRAPH_PREFIXES. Guarded by _team_sweep_allowed(uri) —
+    Matches _PRODUCT_GRAPH_PREFIXES. Guarded by _team_sweep_allowed() —
     never on a shared/dev docker (explicit opt-in only since #1884; the
     URI-path "test" inference retracted — see _team_sweep_allowed).
     DETACH+DELETE per graph, log-and-continue; returns the dropped names.
     Runs AFTER wipe_server in _leftover_sweep (journaled product-namespace
     names were already dropped by _sweep_drop; this closes the
-    raw-select_graph class)."""
-    if not _team_sweep_allowed(uri):
+    raw-select_graph class).
+
+    `uri` is kept HERE (not in the gate) only for the refusal log, so an
+    operator can see which target was skipped."""
+    if not _team_sweep_allowed():
         logging.getLogger(__name__).info(
             "leftover %s pass SKIPPED — %r (set "
             "TORTOISE_TEST_SWEEP_TEAM_STRAYS=1 to opt in)",

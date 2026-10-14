@@ -114,13 +114,13 @@ _REVOKED_KEY = {
 }
 
 
-def _team_row(tier: str, max_graphs: int | None) -> dict:
+def _team_row(tier: str, max_graphs: int | None, role: str = "owner") -> dict:
     return {
         "org_id": ORG_ID,
         "name": "Graphs Fixture",
         "tier": tier,
         "max_graphs": max_graphs,
-        "role": "owner",  # isOwnerAdmin gate — action assertions non-vacuous
+        "role": role,  # isOwnerAdmin gate — action assertions non-vacuous
     }
 
 
@@ -131,6 +131,7 @@ def _wire_graphs_harness(page: Page, org_row: dict,
                          graph_mint_bodies: list | None = None,
                          key_authed: list | None = None,
                          rename_bodies: list | None = None,
+                         recording_bodies: list | None = None,
                          create_status: int = 201,
                          create_body: dict | None = None) -> None:
     """Layered API mock (keys-table style). team_row carries tier/max_graphs
@@ -146,6 +147,7 @@ def _wire_graphs_harness(page: Page, org_row: dict,
     graph_mint_bodies = graph_mint_bodies if graph_mint_bodies is not None else []
     key_authed = key_authed if key_authed is not None else []
     rename_bodies = rename_bodies if rename_bodies is not None else []
+    recording_bodies = recording_bodies if recording_bodies is not None else []
     user_id = "u-graphs2116"
     create_body = create_body if create_body is not None else {
         "graph": {**CUSTOM_B, "created_at": "2026-09-04T00:00:00.000Z"},
@@ -247,11 +249,22 @@ def _wire_graphs_harness(page: Page, org_row: dict,
                 route.fulfill(status=204)
                 return
             if m and route.request.method == "PATCH":
-                # #2701 rename: body is ONLY {name}; capture it and echo the
-                # updated row so the inline edit's optimistic state reconciles.
+                # #2701 rename: body is ONLY {name}; #2650 recording: body is
+                # ONLY {recording}. Capture both and mutate the fixture row so
+                # the optimistic state reconciles against REAL post-write state.
                 gid = urllib.parse.unquote(m.group(1))
-                rename_bodies.append(route.request.post_data or "")
                 body = json.loads(route.request.post_data or "{}")
+                if "recording" in body:
+                    # #2650: the recording PATCH echoes {graph_id, recording}.
+                    recording_bodies.append(route.request.post_data or "")
+                    for g in current_graphs:
+                        if g["graph_id"] == gid:
+                            g["recording"] = body.get("recording")
+                    route.fulfill(status=200, content_type="application/json",
+                                  body=json.dumps({"graph_id": gid,
+                                                   "recording": body.get("recording")}))
+                    return
+                rename_bodies.append(route.request.post_data or "")
                 for g in current_graphs:
                     if g["graph_id"] == gid:
                         g["name"] = body.get("name", g["name"])
@@ -874,3 +887,89 @@ def test_two_team_graphs_panel_revoke_pins_selected_team(page: Page) -> None:
         "Alpha's key must be untouched by Bravo-pinned writes"
     assert mint_calls == [], f"zero-mint tripwire: POST /v1/session/key fired: {mint_calls}"
     assert key_authed == [], f"no key-authed requests in session mode: {key_authed}"
+
+
+def test_graphs_recording_override_three_state_control(page: Page) -> None:
+    """#2650: the Graphs tab owns the per-graph session-recording override
+    (C6 #2115 / #2302). Owner/admin get a three-state control
+    (Inherit / On / Off) that PATCHes /v1/graphs/{id} with the server's strict
+    body {recording: true|false|null}. The DEFAULT graph is settable too —
+    recording is per-graph, incl. graph 0."""
+    recording_bodies: list = []
+    _open_graphs_tab(
+        page, _team_row("team", None),
+        graphs=[DEFAULT_ROW, CUSTOM_A],
+        graph_keys={},
+        recording_bodies=recording_bodies,
+    )
+    rows = page.locator("table tbody tr")
+    dflt = rows.filter(has_text="default")
+    prod = rows.filter(has_text="prod")
+
+    # The column exists and both rows carry the control, initialised from the
+    # fixture (recording null → 'inherit', never a fabricated on/off).
+    expect(page.locator("th", has_text="Recording")).to_have_count(1)
+    dflt_sel = dflt.get_by_role(
+        "combobox", name="Session recording for graph default")
+    prod_sel = prod.get_by_role(
+        "combobox", name="Session recording for graph prod")
+    expect(dflt_sel).to_have_value("inherit")
+    expect(prod_sel).to_have_value("inherit")
+
+    # off → PATCH {recording: false}.
+    with page.expect_response(
+            lambda r: r.request.method == "PATCH"
+            and "/v1/graphs/g_prod" in r.url, timeout=15_000):
+        prod_sel.select_option("off")
+    expect(prod_sel).to_have_value("off")
+
+    # on → PATCH {recording: true}.
+    with page.expect_response(
+            lambda r: r.request.method == "PATCH"
+            and "/v1/graphs/g_prod" in r.url, timeout=15_000):
+        prod_sel.select_option("on")
+    expect(prod_sel).to_have_value("on")
+
+    # inherit → PATCH {recording: null} (clears the override).
+    with page.expect_response(
+            lambda r: r.request.method == "PATCH"
+            and "/v1/graphs/g_prod" in r.url, timeout=15_000):
+        prod_sel.select_option("inherit")
+    expect(prod_sel).to_have_value("inherit")
+
+    # The DEFAULT graph is settable too (recording is per-graph, incl. 0).
+    with page.expect_response(
+            lambda r: r.request.method == "PATCH"
+            and "/v1/graphs/default" in r.url, timeout=15_000):
+        dflt_sel.select_option("off")
+    expect(dflt_sel).to_have_value("off")
+
+    # The wire bodies are EXACTLY the strict three-state vocabulary — a
+    # regression that loses `inherit` (e.g. sends `{}` or `{recording:false}`)
+    # would silently pin the graph instead of clearing the override.
+    assert recording_bodies == [
+        '{"recording":false}',
+        '{"recording":true}',
+        '{"recording":null}',
+        '{"recording":false}',
+    ], recording_bodies
+
+
+def test_graphs_recording_member_sees_value_not_control(page: Page) -> None:
+    """#2650: the recording write is owner/admin-only server-side, so a member
+    gets the honest read-only value (still returned by GET /v1/graphs) and no
+    control — the UI lock mirrors, never precedes, the API."""
+    recording_bodies: list = []
+    _open_graphs_tab(
+        page, _team_row("team", None, role="member"),
+        graphs=[DEFAULT_ROW, {**CUSTOM_A, "recording": False}],
+        graph_keys={},
+        recording_bodies=recording_bodies,
+    )
+    # No control anywhere for a member.
+    expect(page.locator("select.graph-recording-select")).to_have_count(0)
+    # The stored value is still stated honestly.
+    prod = page.locator("table tbody tr").filter(has_text="prod")
+    expect(prod).to_contain_text("Off")
+    # And no write was attempted.
+    assert recording_bodies == [], recording_bodies

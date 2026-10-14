@@ -34,7 +34,7 @@ from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Hashable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -16594,6 +16594,327 @@ async def activation_cohort(
         # #1529 precedent: bookkeeping must never turn a served read into a 500.
         log.exception("activation cohort audit write failed (non-fatal)")
     return payload
+
+
+# ── #3839 (lane B7): the retention indicator ──────────────────────────────
+# Teams active at day 7 / 15 / 30 / 60 / 90. The definition, the four axes and
+# the honest constraints live in `tortoise/retention_indicator.py` — read that module's
+# docstring first. The load-bearing properties here:
+#
+#   * ENUMERATION IS THE METRIC'S DENOMINATOR, and this is the ONE place that
+#     differs from `activation_cohort` above. That endpoint takes an EXPLICIT
+#     operator-named list; a retention rate needs EVERY team that started N
+#     days ago, churned or not, and a list an operator maintains by hand would
+#     silently omit a team — inflating the rate. So this read enumerates the
+#     fleet itself, and an enumeration that cannot be CERTIFIED complete is a
+#     refusal (`fleet_enumeration_incomplete`), never a partial denominator
+#     (#5388 parity — a lower bound is not a count).
+#   * STILL READ-ONLY and still behind `_check_internal` (`FASTAPI_INTERNAL_KEY`),
+#     the same operator credential that already gates `/v1/internal/backups/*`
+#     (which REWRITE every tenant's graph). A read-only aggregate over rows the
+#     platform already stores is strictly less capability, so no new secret is
+#     introduced. EVERY SERVED 200 payload gets one audit row, on the operator
+#     plane (`org_id=""`), naming the reading — the same shape and the same
+#     fail-open rule as the cohort endpoint above. That includes the refusal
+#     branches, which are the operator actions that read the fleet and went
+#     wrong; only the 422s (malformed/future `as_of`, fleet over the bound) are
+#     not audited, because they serve no payload.
+#   * AGGREGATION, NEVER A RETENTION WINDOW (binding guard D12-b): nothing is
+#     deleted, pruned or purged at any age. `as_of` bounds the READING, not the
+#     stored data.
+
+#: Blast-radius bound on a fleet-wide walk. The endpoint reads every
+#: ENUMERABLE org — live OR soft-deleted/churned — so an unbounded fleet is an
+#: unbounded batch job on the shared control plane; exceeding this is a 422 that
+#: names the bound, never a partial metric. The churned population is IN the
+#: walk on purpose (see `retention_indicator.read_team_starts`): a
+#: `deleted_at IS NULL` filter would drop every churned team from every
+#: denominator and bias the rate upward.
+_RETENTION_MAX_ORGS = 1000
+
+#: Default parallelism for the per-org analytics read. The real bound is the
+#: dedicated pool below (`_RETENTION_WORKERS`), and the request semaphore is
+#: sized FROM that pool so the two can never disagree — a semaphore wider than
+#: the pool would let a read spend its whole timeout queued and return a
+#: self-inflicted `org_read_timeout`. The read is a control-plane HTTP walk of
+#: up to `max_pages` round trips per org, which is the "long / stallable"
+#: class the #3060 doctrine above says must NOT share the loop's default
+#: executor with ~80 other `to_thread` sites and the auth middleware's abuse
+#: hooks.
+_RETENTION_MAX_CONCURRENCY = 4
+
+
+def _retention_worker_count(raw: str | None, default: int) -> int:
+    """Clamp a raw `TORTOISE_RETENTION_WORKERS` value to a usable pool size.
+
+    Pure on purpose: the pool is built at IMPORT time, so a test that
+    recomputes the production expression from the same env read cannot detect
+    a changed clamp. ``raw`` is the env value (``None`` means unset); a
+    missing or non-numeric value falls back to ``default`` (the
+    ``_int_env`` rule), and the result is clamped to ``[1, 8]``.
+    """
+    value = (default if raw is None or not raw.strip().isdigit()
+             else int(raw))
+    return max(1, min(value, 8))
+
+
+#: Dedicated pool for the fleet walk and the per-org activity reads (the
+#: `_SCORECARD_EXECUTOR` precedent above, same #3060 reasoning). It replaces
+#: `asyncio.to_thread` here: the default pool on a 2-vCPU host is
+#: `min(32, cpu+4)` = 6 workers, so four slow orgs would park most of the
+#: shared pool and queue every other `to_thread` tenant behind them.
+#:
+#: LIMITATION, stated because the pool is otherwise read as a guarantee: the
+#: pool SIZE bounds live threads (cancelling the await stops the awaitable,
+#: not the worker — CPython #87185, quoted in `_run_with_close`), but the pool
+#: is module-level and lives ACROSS requests. An abandoned worker runs the
+#: whole `read_org_activity` walk (up to `2 * max_pages` control-plane reads),
+#: not just until the HTTP client's per-request timeout, so four abandoned
+#: walks from concurrent requests can park all four workers for later
+#: requests. What the pool buys is that this cost is confined to the retention
+#: surface and can never starve the shared pool — not that a timeout is free.
+_RETENTION_WORKERS = _retention_worker_count(
+    os.environ.get("TORTOISE_RETENTION_WORKERS"), _RETENTION_MAX_CONCURRENCY)
+_RETENTION_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_RETENTION_WORKERS,
+    thread_name_prefix="retention-cohort")
+
+#: Per-org bound: one hung or unreadable org costs THAT team's cell — it folds
+#: to `unavailable` with the org named, and its exclusion from the denominator
+#: is visible as a `partial` cell. The abandoned worker keeps its pool slot
+#: until its walk returns (see the pool's LIMITATION above).
+_RETENTION_PER_ORG_TIMEOUT_S = 30.0
+
+
+def _parse_as_of(as_of: str | None) -> date:
+    """The reading's UTC day boundary. 422 on a malformed or FUTURE value.
+
+    A future `as_of` would make a day-N mark 'arrive' before it has, which is
+    the one way this reading can fabricate retention — so it is refused rather
+    than clamped. A bare date, a `Z`/offset datetime and a naive datetime are
+    all accepted; a naive one is treated as UTC (unlike a window bound, a
+    reading day has no adversarial ambiguity, and refusing it would break a
+    `curl` with a plain date).
+    """
+    if as_of is None:
+        return datetime.now(UTC).date()
+    text = str(as_of).strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="as_of must not be empty")
+    try:
+        if len(text) == 10:
+            day = date.fromisoformat(text)
+        else:
+            iso = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+            parsed = datetime.fromisoformat(iso)
+            # `.date()` on an AWARE datetime returns the date in that value's
+            # OWN offset — it does not convert. Two encodings of one instant
+            # (`2026-10-01T23:00:00-05:00` and `2026-10-02T04:00:00Z`) then
+            # yield two different reading days, moving which day-N marks have
+            # arrived and contradicting this function's own "UTC day boundary"
+            # and `DEFINITION["day_boundary"]`. `retention_indicator._as_utc`
+            # normalises for exactly this reason; a naive value is treated as
+            # UTC (the `replace`), an aware one is CONVERTED.
+            day = (parsed.astimezone(UTC) if parsed.tzinfo
+                   else parsed.replace(tzinfo=UTC)).date()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"as_of is not a valid ISO-8601 date or timestamp: {as_of!r}",
+        ) from exc
+    if day > datetime.now(UTC).date():
+        raise HTTPException(
+            status_code=422,
+            detail=(f"as_of {day.isoformat()} is in the future — a day-N mark "
+                    "must not be read before day N has arrived"),
+        )
+    return day
+
+
+@app.get("/v1/internal/retention/cohort")
+async def retention_cohort(request: Request, as_of: str | None = None):
+    """The retention indicator over the whole fleet. Operator-only, read-only.
+
+    Returns one row per team (start date plus active-at-day-7/15/30/60/90),
+    the cumulative C(N) as k/n with a Wilson 95% interval, the band drops, the
+    trailing-30-day active count and the distinct-active-days histogram. Every
+    number is computed in `tortoise/retention_indicator.py`; this handler owns auth, the
+    reads and the audit only.
+
+    Fail-soft in the right direction: an unreadable store, an uncertified
+    fleet walk, or a dark analytics write path makes the surface
+    `unavailable` with a REASON — it is never reported as a confident zero. A
+    single team that cannot be measured is excluded and NAMED; the surface
+    reads `partial` when only some teams measured and `unavailable` when NONE
+    did (derived from the rows in `assemble`, not asserted here), and the
+    note names the state the cells actually read.
+    """
+    _check_internal(request)
+
+    from tortoise.activation_scorecard import analytics_write_path_configured
+    from tortoise.retention_indicator import (
+        REASON_FLEET_FAILED,
+        REASON_FLEET_INCOMPLETE,
+        REASON_WRITE_PATH_UNCONFIGURED,
+        STATE_MEASURED,
+        STATE_PARTIAL,
+        STATE_UNAVAILABLE,
+        assemble,
+        build_team_rows,
+        cohort_cell_states,
+        read_org_activity,
+        read_team_starts,
+    )
+
+    as_of_day = _parse_as_of(as_of)
+    log = logging.getLogger("tortoise.api")
+    limits = {
+        "max_orgs": _RETENTION_MAX_ORGS,
+        "max_concurrency": _RETENTION_WORKERS,
+        "per_org_timeout_s": _RETENTION_PER_ORG_TIMEOUT_S,
+        "auth": "internal_key",
+        "read_only": True,
+        "aggregation_only": True,
+    }
+
+    def _unavailable(reason: str) -> dict:
+        return assemble(as_of=as_of_day, team_rows=[],
+                        surface_state=STATE_UNAVAILABLE, surface_reason=reason,
+                        limits=limits)
+
+    async def _serve(payload: dict) -> dict:
+        """Audit a SERVED payload, then return it (fail-open).
+
+        EVERY branch that serves an HTTP 200 goes through here, including the
+        refusal branches — a refusal that walked (or tried to walk) the fleet
+        is exactly the operator action whose accountability record must not be
+        missing. The activation-cohort endpoint this mirrors never serves a
+        200 unaudited. Bookkeeping must never turn a served read into a 500
+        (#1529 precedent), and `_async_audit` already never raises.
+        """
+        try:
+            await _async_audit(
+                request, "", "retention_cohort_read",
+                resource_type="retention_cohort",
+                detail={"as_of": as_of_day.isoformat(),
+                        "state": payload.get("state"),
+                        "teams_total": payload.get("teams_total", 0),
+                        "teams_measured": payload.get("teams_measured", 0)},
+            )
+        except Exception:
+            log.exception("retention cohort audit write failed (non-fatal)")
+        return payload
+
+    # The analytics write path is a LIVE environment check, not a date: a dark
+    # writer makes every absence indistinguishable from "no activity", so the
+    # whole reading refuses rather than reporting a fleet of zeros (#3677).
+    if not analytics_write_path_configured():
+        return await _serve(_unavailable(REASON_WRITE_PATH_UNCONFIGURED))
+
+    try:
+        from tortoise.supabase_control import (
+            get_control_plane,
+            is_supabase_enabled,
+        )
+        if not is_supabase_enabled():
+            return await _serve(_unavailable(REASON_FLEET_FAILED))
+        cp = get_control_plane()
+    except Exception:
+        log.warning("retention cohort: control plane unavailable", exc_info=True)
+        return await _serve(_unavailable(REASON_FLEET_FAILED))
+
+    try:
+        teams, complete, reason = await _run_off_loop(
+            _RETENTION_EXECUTOR, read_team_starts, cp)
+    except Exception as exc:  # pragma: no cover — read_team_starts is total
+        log.warning("retention cohort: fleet read failed: %s",
+                    type(exc).__name__, exc_info=True)
+        return await _serve(_unavailable(REASON_FLEET_FAILED))
+    if teams is None:
+        return await _serve(_unavailable(reason or REASON_FLEET_FAILED))
+    if not complete:
+        return await _serve(_unavailable(REASON_FLEET_INCOMPLETE))
+    if len(teams) > _RETENTION_MAX_ORGS:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"the fleet carries {len(teams)} orgs; this endpoint reads "
+                    f"at most {_RETENTION_MAX_ORGS} per request (a blast-radius "
+                    "bound) — a partial denominator is not a retention rate, "
+                    "so the metric is refused rather than truncated"))
+
+    sem = asyncio.Semaphore(min(_RETENTION_WORKERS, len(teams)))
+
+    async def _one_org(team: dict) -> tuple[str, tuple]:
+        """Read ONE team's activity, total against every store failure.
+
+        The org id is echoed back so a `gather` result cannot be attributed to
+        the wrong team if a future change reorders the work.
+        """
+        async with sem:
+            try:
+                return team["org_id"], await asyncio.wait_for(
+                    _run_off_loop(_RETENTION_EXECUTOR, read_org_activity, cp,
+                                  team["org_id"], since_day=team["start"],
+                                  until_day=as_of_day),
+                    timeout=_RETENTION_PER_ORG_TIMEOUT_S)
+            except TimeoutError:
+                log.warning("retention cohort: org %s exceeded %ss (fail-soft)",
+                            team["org_id"], _RETENTION_PER_ORG_TIMEOUT_S)
+                return team["org_id"], (None, set(), "org_read_timeout")
+            except Exception as exc:
+                # Class NAME only, never `str(exc)`: an exception message can
+                # carry a DSN, a host or a credential fragment.
+                log.warning("retention cohort: org %s read failed: %s",
+                            team["org_id"], type(exc).__name__, exc_info=True)
+                return team["org_id"], (
+                    None, set(), f"org_read_failed:{type(exc).__name__}")
+
+    results = await asyncio.gather(*(_one_org(t) for t in teams))
+    activity = dict(results)
+    rows = build_team_rows(teams=teams, activity=activity, as_of=as_of_day)
+    payload = assemble(as_of=as_of_day, team_rows=rows,
+                       surface_state=STATE_MEASURED, limits=limits)
+    unmeasured = [r["org_id"] for r in rows
+                  if r["state"] != STATE_MEASURED]
+    if unmeasured:
+        # The note must state the state the CELLS ACTUALLY READ, derived from
+        # the cells themselves — not from `payload["state"]`. Keying off the
+        # surface state made `partial` the default for every non-`unavailable`
+        # payload, so an unmeasured team created after the reading day (which
+        # feeds NO cell) was described by prose claiming the cells read
+        # `partial` while every cell read `measured` — the same
+        # prose-contradicts-the-field defect the derivation removed. A refused
+        # surface drops the cohort, and there the surface state IS the only
+        # available signal (`unavailable` is the only state that drops it).
+        cell_states = cohort_cell_states(payload.get("cohort"))
+        if STATE_UNAVAILABLE in cell_states or payload["state"] == STATE_UNAVAILABLE:
+            cells: str | None = STATE_UNAVAILABLE
+        elif STATE_PARTIAL in cell_states:
+            cells = STATE_PARTIAL
+        else:
+            cells = None
+        named = ", ".join(sorted(unmeasured))
+        if cells is None:
+            payload["notes"].append(
+                f"{len(unmeasured)} team(s) could not be measured and are "
+                f"EXCLUDED from every denominator; they feed no cohort cell "
+                f"(no mark or window is old enough to include them). "
+                f"Named in `teams`: {named}")
+        else:
+            payload["notes"].append(
+                f"{len(unmeasured)} team(s) could not be measured and are "
+                f"EXCLUDED from every denominator; the cells they feed read "
+                f"`{cells}`. Named in `teams`: {named}")
+    payload["notes"].append(
+        "This is an AGGREGATION over existing rows, never a data-retention "
+        "window (guard D12-b): no row is deleted, pruned or purged by this "
+        "read at any age.")
+
+    # Audit BEFORE returning, fail-open: every served payload (including the
+    # refusal branches above) gets one operator-plane row. Bookkeeping must
+    # never turn a served read into a 500 (#1529 precedent), and
+    # `_async_audit` already never raises.
+    return await _serve(payload)
 
 
 # #2002 (W6, epic #1976): DELETE /v1/sessions/{session_id} — the Settings
