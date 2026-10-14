@@ -110,7 +110,7 @@ processes in tmux sessions, so a killed worker cannot take the controller down w
 | `candidates.txt` | the dispatch backlog: issue numbers that passed collision pre-flight |
 | `dispatched.txt` | issues already handed to a lane. **Append-only — never expires** (see §7.1) |
 | `checked.txt` | issues whose pre-flight returned **CLEAN** — the one verdict that terminates the issue by **queueing** it. An **errored** pre-flight, a **COLLISION** and a **LANDED** verdict leave no entry (agent-infra#1716, #8560) |
-| `landed.txt` | issues whose pre-flight returned **LANDED** (exit 4): the work already shipped, so they are kept out of the backlog and out of the LIMIT budget — but **not** recorded as checked-forever. The set is printed on every refresh pass and an entry is dropped once its issue is **CLOSED**; see §7.1b (#8560) — reachable since #8625 only when an issue closes between the pool listing and its pre-flight |
+| `landed.txt` | issues whose pre-flight returned **LANDED** (exit 4): the work already shipped, so they are kept out of the backlog and out of the LIMIT budget — but **not** recorded as checked-forever. The set is printed on every refresh pass; an entry is dropped once its issue is **CLOSED**, and **released** once its issue is **OPEN** (a pre-#8625 entry, or one reopened after its close-race landing); only an entry whose state cannot be read is kept. See §7.1b (#8560, #8625, #8629, #8645) — reachable since #8625 only when an issue closes between the pool listing and its pre-flight |
 | `state/mergeclaim-<PR>.lock` | single-owner claim: only one worker may review/record/merge a given PR |
 | `state/needsfix-<PR>-<head>` | "a reviewer found real issues at this exact head" |
 | `state/fixcount-<PR>` | fixer attempts for that PR, capped by `MAX_FIX_TRIES` |
@@ -516,7 +516,15 @@ quoted two lines above the arm itself.
 - the set is echoed on **every** pass (not only when a new verdict arrives), so an operator who asks
   "why is #N never dispatched again?" sees it — alongside the remedy — instead of it vanishing;
 - nothing is queued: only `CLEAN` reaches `candidates.txt`;
-- the reaper drops an entry once its issue is `CLOSED`, so the list drains as decisions are made.
+- the reaper drops an entry once its issue is `CLOSED` **and releases one whose issue is `OPEN`**,
+  so the list drains as decisions are made. The OPEN release is the follow-up to #8629's review
+  (PR #8645) for a durable-store trap:
+  before #8625 the only persistent producer of `LANDED` was the timeline title arm on an **OPEN**
+  issue, so a pre-existing entry names an OPEN issue — exactly the issues the tool now reports
+  `CLEAN` — and the pre-fix prune kept it, permanently suppressing a now-authorized issue in the
+  consumer (the very "no dismissal path" harm #8625 removes). After #8625 an OPEN entry can only be
+  an issue reopened since its close-race landing, which must not suppress either. Only an entry whose
+  state cannot be **read** is kept.
   It does **not** infer CLOSED from absence in the capped `.open_iss` listing: that listing is
   `--limit 500` and this repo has >500 open issues, so it is permanently saturated and absence there
   proves nothing — the earlier `len(open_iss) < 500` guard tripped on every pass and the prune was a
@@ -528,8 +536,9 @@ quoted two lines above the arm itself.
 
 The self-test's `5f`/`5g` blocks pin all of it: the separate file, the absence of a `checked.txt`
 entry, not queued, the set named on a later pass, the targeted per-entry prune dropping a closed
-entry and keeping an open one — including against a **saturated** `.open_iss` that omits it — and
-keeping (with a log line) an entry whose state could not be read.
+entry, **releasing an open one** and keeping (with a log line) an entry whose state could not be
+read — including against a **saturated** `.open_iss` that omits the issue, so the targeted per-entry
+state read is proved to be the authority rather than absence from the capped listing.
 
 ### 7.2 Draft PRs are invisible to the sweep — **FIXED in this PR**
 

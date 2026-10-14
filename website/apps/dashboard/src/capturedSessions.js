@@ -159,10 +159,28 @@ export function kindBadgeClass(kind) {
   return k === 'decision' ? 'kind-decision' : 'kind-statement'
 }
 
-// Confirm copy for the per-row delete (server has no undo — the transcript
-// + its extracted memory nodes are removed). Keeping the copy here (one
-// place) also gives the pure module a stable, testable surface.
-export const DELETE_CONFIRM =
-  "Delete this captured session? Its transcript and extracted memory are " +
-  "removed from this Organization permanently (the tool's capture hook is " +
-  "not affected)."
+// #3885 (e): deleting the RAW requires a DELIBERATE confirmation — the same
+// type-to-confirm gate the product already uses for deleting a whole graph
+// (#2701), not a native `window.confirm`. The owner's requirement covers EVERY
+// storage mode (local / hosted-by-us / the user's own store): the confirmation
+// is about the CONSEQUENCE, not about who holds the bytes. The required word
+// and the consequence lines live here (one place): the modal RENDERS the word
+// from DELETE_CONFIRM_WORD and passes that same constant into the gate
+// (`deleteTypedMatches(typed, DELETE_CONFIRM_WORD)`), and its tripwire reads
+// the constant too — so the word shown, the word required and the word pinned
+// cannot drift apart.
+export const DELETE_CONFIRM_WORD = 'delete'
+
+// What the delete actually does, in the order the user meets it. The last
+// line is the residual the retention promise carries and must NOT be hidden:
+// backups of a deleted session are not actively purged — they age out on the
+// ordinary backup cycle. Its length is stated once, in the canonical policy
+// (docs/retention-and-deletion.md, "Backups"), and linked rather than
+// restated here.
+export const DELETE_CONSEQUENCES = Object.freeze([
+  'The captured transcript is removed from the live service immediately.',
+  'The memory extracted from it goes with it — points owned by this session are deleted.',
+  'There is no Trash and no undo: unlike a deleted graph, a captured session cannot be restored.',
+  "Your machine's capture hook is not affected — only what is already filed is removed.",
+  'Copies in our backups are not actively deleted; they age out on the regular backup cycle.',
+])

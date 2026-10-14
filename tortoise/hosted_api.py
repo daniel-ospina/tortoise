@@ -18172,6 +18172,342 @@ async def _apply_graph_recording_override(
     return {"graph_id": graph_id, "recording": body.recording}
 
 
+# ── #2728: per-graph pack selection — the management surface ──────────────
+#
+# #2714 gates the compile seams on the graph's installed set; this is the
+# surface that WRITES and READS that set per graph. It clones
+# ``_apply_graph_recording_override``'s shape deliberately (one shared core,
+# dual-lane auth, mode-branch graph resolution) so the two per-graph overrides
+# can never drift on permission or on which graph a name resolves to.
+#
+# Authz (owner recommendation, #2728 open questions 1 / 5 / 11):
+#   * MUTATION — a key carrying ``team:manage`` (or the legacy full-access
+#     class), or an owner/admin session user. A GRAPH-BOUND key is refused
+#     outright: pack selection is the MANAGEMENT plane, and C5 #2114's
+#     boundary (a data-plane key must not rewrite the graph's approved
+#     ontology) is preserved rather than loosened.
+#   * READ — any team member (session) or any key whose binding covers the
+#     graph; a graph-bound key reads ONLY its own graph's packs (its binding
+#     is a boundary, not a hint).
+
+
+class GraphPackEntry(BaseModel):
+    """One entry of the per-graph pack PUT body (#2728).
+
+    ``status`` is the CONFIGURABLE vocabulary only — ``removed`` is a derived
+    tombstone the write core applies to namespaces the caller dropped, so
+    handing one in is refused (``removal is expressed by omission``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    namespace: str
+    status: str = "active"
+
+    @field_validator("namespace")
+    @classmethod
+    def _namespace_non_empty(cls, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("namespace must be a non-empty string")
+        return value.strip()
+
+    @field_validator("status")
+    @classmethod
+    def _status_configurable(cls, value: str) -> str:
+        value = (value or "active").strip()
+        if value not in ("active", "disabled"):
+            raise ValueError("status must be 'active' or 'disabled'")
+        return value
+
+
+class GraphPacksPut(BaseModel):
+    """PUT /v1/graphs/{graph_id}/packs body (#2728) — the FULL desired set.
+
+    ``expected_revision`` is REQUIRED, not optional: a last-write-wins PUT
+    would let two admins silently erase each other's pack set, and the UX's
+    revision-conflict state would have no server-side trigger. A mismatch is
+    a 409 carrying the current revision, so the client can reload and retry.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    packs: list[GraphPackEntry]
+    expected_revision: int
+
+
+def _registry_graph_list(org_id: str) -> list[dict]:
+    """Registry-lane ``graph_list`` in ONE worker hop — SDK construction
+    included (#8648 review P1).
+
+    ``_make_sdk`` is NOT free: in embedded mode it runs the keepalive anchor's
+    probe query and, on a miss, an eager connect that holds the socket
+    (#4660). Building the SDK on the loop and off-loading only the callee
+    (``to_thread(sdk.graph_list, …)``) left that blocking I/O on the event
+    loop — the exact defect ``tests/test_read_routes_loop_responsiveness.py``
+    pins.
+    """
+    return _make_sdk(namespace="registry").graph_list(org_id)
+
+
+async def _resolve_graph_data_namespace(org_id: str, graph_id: str) -> str | None:
+    """#2728 — ``graph_id`` → the graph's PHYSICAL FalkorDB name, both modes.
+
+    ``None`` = unknown / deleted / another team's graph (fail closed). The
+    literal ``"default"`` resolves by KIND, not by id: in registry mode the
+    default node carries a real gid as its id, while in Supabase mode the
+    derived default row's id IS the literal — reading the ``graph_list`` seam
+    makes both lanes agree without a second resolution path.
+    """
+    try:
+        rows = await asyncio.to_thread(_registry_graph_list, org_id)
+    except Exception as _exc:
+        _raise_503_if_cp_outage(_exc)
+        raise
+    for row in rows:
+        if row.get("status") == "deleted":
+            continue
+        if graph_id == "default":
+            if row.get("kind") == "default":
+                return row.get("namespace") or f"org_{org_id}"
+        elif row.get("graph_id") == graph_id:
+            return row.get("namespace")
+    return None
+
+
+def _pack_kind_counts() -> dict[str, int]:
+    """#2728 — namespace → declared kind count, for the Configured-packs view.
+
+    Best-effort: the catalog is read-only for tenants and a registry failure
+    must DEGRADE the view (count omitted), never 503 a read.
+    """
+    try:
+        from tortoise.domain_loader import _get_registry
+        reg = _get_registry()
+        packs = getattr(reg, "packs", None) or {}
+        return {
+            ns: (len(p.object_kinds) + len(p.event_kinds) + len(p.point_kinds))
+            for ns, p in packs.items()
+        }
+    except Exception:
+        return {}
+
+
+def _graph_packs_view(gsdk) -> tuple[dict, list[dict]]:
+    """Read the per-graph state in ONE thread hop (blocking DB reads)."""
+    from tortoise.pack_state import get_tenant_packs, resolved_pack_set
+    return resolved_pack_set(gsdk).to_dict(), get_tenant_packs(gsdk)
+
+
+def _graph_packs_view_for(namespace: str) -> tuple[dict, list[dict]]:
+    """Read a graph's pack state in ONE worker hop — SDK construction
+    included (#8648 review P1).
+
+    Off-loading only the CALLEE (``to_thread(_graph_packs_view,
+    _make_sdk(graph_name=namespace))``) still evaluates ``_make_sdk`` on the
+    event loop, where its embedded-mode anchor probe / eager connect blocks
+    every other request (the app runs one uvicorn worker). The construction
+    belongs INSIDE the off-loaded callable.
+    """
+    return _graph_packs_view(_make_sdk(graph_name=namespace))
+
+
+def _packs_payload(graph_id: str, resolved: dict, packs: list[dict]) -> dict:
+    counts = _pack_kind_counts()
+    for p in packs:
+        p["kind_count"] = counts.get(p["namespace"])
+    return {
+        "graph_id": graph_id,
+        "revision": resolved["revision"],
+        "configured": resolved["configured"],
+        "packs": packs,
+    }
+
+
+async def _graph_packs_read(graph_id: str, org_id: str, key_ctx: dict) -> dict:
+    """SHARED read core for GET /v1/graphs/{graph_id}/packs."""
+    if key_ctx.get("org_id") != org_id:
+        raise HTTPException(status_code=404, detail="Unknown organization")
+    org = await _org_node(org_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="Unknown organization")
+    _ensure_not_suspended(org)
+    # Authz BEFORE graph resolution for the session lane (the house order —
+    # a non-member must not get a graph-existence oracle). The graph-bound key
+    # lane needs the resolved namespace to compare bindings, so it resolves
+    # first and its binding check is fail-closed on a None namespace.
+    session_user_id = key_ctx.get("session_user_id")
+    if session_user_id:
+        membership = await _membership_org(session_user_id, org_id)
+        if membership is None:
+            raise HTTPException(status_code=403, detail="No membership in team")
+    namespace = await _resolve_graph_data_namespace(org_id, graph_id)
+    if namespace is None:
+        raise HTTPException(status_code=404, detail="Unknown graph")
+    if not session_user_id and key_ctx.get("graph_id"):
+        # C5 #2114 cross-graph rule: a graph-bound key's binding is a
+        # boundary. Compare PHYSICAL names, so the default-graph alias
+        # ('default' vs the real gid) cannot be used to slip across — and
+        # reject a binding that resolved to NOTHING (`get_current_org`
+        # fail-closes a graph-bound key to graph_namespace=None; `not bound`
+        # is that refusal, not a pass).
+        bound = key_ctx.get("graph_namespace")
+        if not bound or bound != namespace:
+            raise HTTPException(
+                status_code=403,
+                detail={"error_code": "GRAPH_SCOPED_KEY_CROSS_GRAPH",
+                        "message": "A graph-scoped key can only read its own "
+                                   "graph's packs."})
+    try:
+        resolved, packs = await asyncio.to_thread(
+            _graph_packs_view_for, namespace)
+    except Exception:
+        _logger.exception("pack read failed for team %s graph %s",
+                          org_id, graph_id)
+        raise HTTPException(status_code=503,
+                            detail="Pack catalog unavailable") from None
+    return _packs_payload(graph_id, resolved, packs)
+
+
+@app.get("/v1/graphs/{graph_id}/packs")
+async def get_graph_packs(graph_id: str, org_id: str,
+                          key_ctx: dict = Depends(get_current_org_session)):  # noqa: B008
+    """#2728 — read ONE graph's configured pack set + its catalog metadata.
+
+    Response: ``{graph_id, revision, configured, packs: [{namespace, name,
+    version, tier, description, status, source, installed_at, kind_count}]}``.
+    ``configured=false`` means the graph was never explicitly configured, so
+    ``packs`` reflects the legacy starter/starter-healed state; a configured
+    graph with ``packs == []`` is a deliberate empty set.
+    """
+    return await _graph_packs_read(graph_id, org_id, key_ctx)
+
+
+async def _apply_graph_packs_put(graph_id: str, body: GraphPacksPut,
+                                 org_id: str, key_ctx: dict,
+                                 request: Request) -> dict:
+    """SHARED write core for PUT /v1/graphs/{graph_id}/packs.
+
+    Authz + graph resolution + optimistic concurrency + audit in ONE place,
+    so a future MCP/CLI surface cannot drift on permission or semantics.
+    ``removed`` is never accepted as an input status; omission from ``packs``
+    is what tombstones a namespace (the record survives for audit).
+    """
+    if key_ctx.get("org_id") != org_id:
+        raise HTTPException(status_code=404, detail="Unknown organization")
+    org = await _org_node(org_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="Unknown organization")
+    _ensure_not_suspended(org)
+    # C5 #2114: pack selection is the MANAGEMENT plane — a graph-bound
+    # (data-plane) key never mutates it, whatever scopes it carries.
+    if key_ctx.get("graph_id"):
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "GRAPH_SCOPED_TEAM_SURFACE",
+                    "message": "Graph-scoped keys cannot manage pack "
+                               "selection."})
+    if key_ctx.get("key_id"):
+        scopes = key_ctx.get("scopes") or []
+        if "team:manage" not in scopes and not key_ctx.get("legacy_full_access"):
+            raise HTTPException(status_code=403,
+                                detail="Missing team:manage scope")
+    else:
+        membership = await _membership_org(
+            key_ctx.get("session_user_id") or "", org_id)
+        if membership is None or membership.get("role") not in ("owner", "admin"):
+            raise HTTPException(
+                status_code=403,
+                detail="Requires owner or admin role in team")
+
+    namespace = await _resolve_graph_data_namespace(org_id, graph_id)
+    if namespace is None:
+        raise HTTPException(status_code=404, detail="Unknown graph")
+
+    desired = [entry.model_dump() for entry in body.packs]
+
+    def _write() -> tuple[dict, list[dict]]:
+        gsdk = _make_sdk(graph_name=namespace)
+        from tortoise.pack_state import set_graph_packs
+        set_graph_packs(gsdk, packs=desired,
+                        expected_revision=body.expected_revision,
+                        updated_by=(key_ctx.get("created_by")
+                                    or key_ctx.get("session_user_id")))
+        return _graph_packs_view(gsdk)
+
+    from tortoise.pack_state import (
+        InvalidPackStatus,
+        PackRevisionConflict,
+        UnknownPackNamespace,
+    )
+    try:
+        resolved, packs = await asyncio.to_thread(_write)
+    except PackRevisionConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"error_code": "PACK_SET_REVISION_CONFLICT",
+                    "message": "The graph's pack set changed since you "
+                               "loaded it — reload and retry.",
+                    "current_revision": exc.current}) from None
+    except UnknownPackNamespace as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": "UNKNOWN_PACK_NAMESPACE",
+                    "message": "Unknown pack namespace",
+                    "namespace": exc.namespace}) from None
+    except InvalidPackStatus as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": "INVALID_PACK_STATUS",
+                    "message": str(exc),
+                    "status": exc.status}) from None
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": "INVALID_PACK_SET",
+                    "message": str(exc)}) from None
+    except Exception:
+        _logger.exception("pack write failed for team %s graph %s",
+                          org_id, graph_id)
+        raise HTTPException(status_code=503,
+                            detail="Pack catalog unavailable") from None
+
+    # One audit record per change, mirroring the key-lane convention
+    # (actor = the key's owner, detail.via = 'api_key') so a key-driven write
+    # is attributable and never reads as a human session action.
+    if key_ctx.get("key_id"):
+        actor = key_ctx.get("created_by")
+        detail = {"via": "api_key", "key_id": key_ctx.get("key_id"),
+                  "revision": resolved["revision"],
+                  "packs": [{"namespace": p["namespace"],
+                             "status": p["status"]} for p in packs]}
+    else:
+        actor = key_ctx.get("session_user_id")
+        detail = {"via": "session", "revision": resolved["revision"],
+                  "packs": [{"namespace": p["namespace"],
+                             "status": p["status"]} for p in packs]}
+    await _async_audit(request, org_id, "graph_packs_update",
+                       resource_type="graph", resource_id=graph_id,
+                       actor_user_id=actor, detail=detail)
+    return _packs_payload(graph_id, resolved, packs)
+
+
+@app.put("/v1/graphs/{graph_id}/packs")
+async def put_graph_packs(graph_id: str, body: GraphPacksPut, org_id: str,
+                          request: Request,
+                          key_ctx: dict = Depends(get_current_org_session)):  # noqa: B008
+    """#2728 — replace ONE graph's pack set (full desired state).
+
+    Owner/admin (session) or a key carrying ``team:manage``. Requires
+    ``expected_revision``; a mismatch is 409 with the current revision. An
+    unknown namespace is 422; ``status='removed'`` is 422 (omit the namespace
+    instead). Supersedes the per-graph pack STATE MODEL only — the graph-bound
+    KEY rejection on the org-level ``GET /v1/packs`` / MCP surfaces is
+    preserved verbatim (C5 #2114).
+    """
+    return await _apply_graph_packs_put(graph_id, body, org_id, key_ctx,
+                                        request)
+
+
 @app.patch("/v1/graphs/{graph_id}")
 async def patch_graph(graph_id: str, body: GraphPatch,
                      org_id: str,
