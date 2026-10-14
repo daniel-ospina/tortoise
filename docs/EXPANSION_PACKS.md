@@ -82,7 +82,7 @@ The model has two tiers: a small **canonical slot** vocabulary the graph underst
 
 | field | required | meaning |
 |---|---|---|
-| `stages[].id` | ✅ | stable, immutable identity. Anchoring keys on this, never on the label, so a rename never moves an Object. Unique within the pipeline; must not contain `|` (the composite stage key's separator). |
+| `stages[].id` | ✅ | stable, immutable identity. Anchoring keys on this, never on the label, so a rename never moves an Object. Unique within the pipeline; must not contain the composite stage key's separator (`&#124;`). |
 | `stages[].label` | ✅ | the tenant-visible name (renameable). |
 | `stages[].order` | ✅ | integer; the forward/regression judgement for future moves. |
 | `stages[].slot` | ✅ | one of `entry`, `active`, `suspended`, `terminal`. Canonical and fixed. |

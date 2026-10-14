@@ -18,7 +18,7 @@ Pins the lane's acceptance targets:
 Lane: **embedded** (``TORTOISE_TEST_CARVE_OUT=1``) — the state pins drive the
 real ``EntityMutated`` journal + rebuild replay, which the server-side
 bulk-wipe guard refuses on a non-test graph. Registered in
-``config/ci-surfaces.yml`` (``slow_files`` + ``carve_out``), in
+``config/ci-surfaces.yml`` (``core`` + ``slow_files`` + ``carve_out``), in
 ``tests/_embedded.py::TEST_NO_REDIRECT_STEMS``, and the literal in
 ``tests/test_markers.py``.
 """
@@ -128,6 +128,23 @@ class TestDeclarationValidation:
         ]}
         errs = P.validate_pipeline_decl(bad)
         assert any("must not contain" in e for e in errs), errs
+
+    def test_tied_stage_orders_are_refused_in_a_declaration(self):
+        """The forward/regression judgement is ``target.order <
+        cur_stage.order``, so a move BETWEEN two tied stages is neither
+        forward nor backward and was applied with no guard at all.
+        ``reorder_stages`` refuses ties for exactly that reason; the
+        pack-declaration path (the only path a graph that never edits its
+        pipeline takes) must refuse them too."""
+        tie = {"stages": [
+            {"id": "a", "label": "A", "order": 1, "slot": "entry"},
+            {"id": "b", "label": "B", "order": 1, "slot": "active"},
+        ]}
+        errs = P.validate_pipeline_decl(tie)
+        assert any("duplicate stage order" in e for e in errs), errs
+        # A strict order is still valid, and validation must not have been
+        # made vacuous by the new check.
+        assert P.validate_pipeline_decl(DECL) == []
 
 
 class TestPackManifestIntegration:
@@ -437,6 +454,25 @@ class TestStageAdvance:
         finally:
             sdk.close()
 
+    def test_an_object_without_a_namespaced_kind_cannot_be_advanced(
+            self, tmp_path):
+        """The kind binding is not conditional. An Object carrying no
+        ``objectKind`` (reachable via raw Cypher / a legacy import) cannot bind
+        ANY pipeline; pre-fix the guard was ``if kind and kind != ...``, so
+        the binding was skipped entirely and the Object was advanced and then
+        permanently stamped with that pipeline's key."""
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            g.query("CREATE (o:Object {id:'nokind', name:'nokind', "
+                    "status:'live'})")
+            with pytest.raises(ValueError, match="no namespaced objectKind"):
+                P.advance_stage(sdk, "nokind", KEY, "stg_won", declared=DECL)
+            cur = P.current_stage(g, "nokind")
+            assert cur["stageId"] is None and cur["pipelineKey"] is None
+        finally:
+            sdk.close()
+
     def test_a_null_stage_reference_is_a_no_op_not_a_candidate_named_none(
             self, tmp_path):
         """An absent stage reference is not an unrecognised LABEL: it must not
@@ -564,6 +600,50 @@ class TestTerminalAndUnknown:
 
 
 class TestGuardIntegrity:
+    def test_a_current_stage_missing_from_the_declaration_cannot_disarm_the_guards(
+            self, tmp_path):
+        """Declaration drift must fail closed, not skip the guards.
+
+        An Object sits in a stage that resolves in the declaration it was
+        advanced against. A pack release renames/drops that stage id, so the
+        stored ``pipelineStageId`` no longer resolves in the effective
+        pipeline. Pre-fix ``cur_stage`` was then ``None`` and the terminal,
+        regression and stale-time guards were ALL skipped, so a passing later
+        mention reopened a CLOSED Object (and rewrote ``isClosed=False``,
+        journaled durably). The move must be refused with the state untouched.
+        """
+        renamed = {
+            "defaultStage": "stg_contact",
+            "stages": [
+                {"id": "stg_contact", "label": "Contact", "order": 1,
+                 "slot": "entry"},
+                {"id": "stg_closed", "label": "Closed", "order": 3,
+                 "slot": "terminal", "outcome": "won"},
+            ],
+        }
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("deal-drift", objectKind=KEY)
+            P.advance_stage(sdk, "deal-drift", KEY, "stg_won", at="2026-09-04",
+                            declared=DECL)
+            assert P.current_stage(g, "deal-drift")["isClosed"] is True
+            # Control: the same call with the SAME declaration fires the guard.
+            control = P.advance_stage(sdk, "deal-drift", KEY, "stg_contact",
+                                      at="2026-10-01", declared=DECL)
+            assert not control.applied
+            assert control.reason == "terminal-guard"
+            # Drifted declaration: refuse, never resurrect.
+            move = P.advance_stage(sdk, "deal-drift", KEY, "stg_contact",
+                                   at="2026-10-01", declared=renamed)
+            assert not move.applied, move
+            assert move.reason == "unresolvable-current-stage"
+            cur = P.current_stage(g, "deal-drift")
+            assert cur["stageId"] == "stg_won"
+            assert cur["isClosed"] is True
+        finally:
+            sdk.close()
+
     def test_stray_unknown_for_another_pipeline_cannot_disarm_the_guards(
             self, tmp_path):
         """The park must not rewrite the Object's ``pipelineStageKey``.

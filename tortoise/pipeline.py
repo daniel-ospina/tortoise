@@ -156,6 +156,7 @@ def validate_pipeline_decl(decl: Any) -> list[str]:
         return errors
     ids: list[str] = []
     labels: list[str] = []
+    orders: list[int] = []
     for i, stage in enumerate(stages):
         if not isinstance(stage, dict):
             errors.append(f"pipeline.stages[{i}] must be a map")
@@ -186,6 +187,18 @@ def validate_pipeline_decl(decl: Any) -> list[str]:
         order = stage.get("order")
         if not isinstance(order, int) or isinstance(order, bool) or order < 0:
             errors.append(f"pipeline.stages[{i}]: 'order' must be an int >= 0")
+        elif order in orders:
+            # The forward/regression judgement is ``target.order <
+            # cur_stage.order``, so a move BETWEEN two tied stages is neither
+            # forward nor backward and would be applied with no guard at all
+            # — the exact shape ``reorder_stages`` refuses. The pack-default
+            # path is the only path a graph that never edits its pipeline
+            # takes, so the tie must be refused at declaration time too.
+            errors.append(
+                f"pipeline.stages[{i}]: duplicate stage order {order!r} — "
+                "ties make the forward/regression guard non-deterministic")
+        else:
+            orders.append(order)
         slot = stage.get("slot")
         if slot not in PIPELINE_SLOTS:
             errors.append(
@@ -293,6 +306,7 @@ class StageMove:
 
     applied: bool
     reason: str = ""               # "" | no-stage | unknown-stage |
+                                   # unresolvable-current-stage |
                                    # stale-transition | regression-guard |
                                    # terminal-guard
     stage: PipelineStage | None = None
@@ -710,7 +724,11 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
     Guards (the resurrection vector the design names):
     - **kind binding** — the pipeline key must equal the Object's namespaced
       ``objectKind`` (#2767), so no Object can be advanced through a pipeline
-      that is not its own.
+      that is not its own; an Object with no namespaced kind cannot be bound
+      to any pipeline and is refused.
+    - **unresolvable current stage** — an Object whose stored stage does not
+      resolve in the effective pipeline is refused, never advanced: skipping
+      the guards is the resurrection vector.
     - **no stage reported** — a non-string/empty ``stage_ref`` is a no-op (it
       is absence, not an unrecognised label, so it is not parked).
     - **unknown stage** — not resolved by id or label → the raw label is parked
@@ -736,7 +754,15 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
     # pipeline, and a caller's wrong key was accepted silently — the vector
     # that made the P1 resurrection reachable.
     kind = cur.get("objectKind")
-    if kind and kind != pipeline_key:
+    if not isinstance(kind, str) or not kind.strip():
+        # An absent/blank kind cannot bind ANY pipeline, so it must fail
+        # closed rather than skipping the binding (a legacy/raw-Cypher Object
+        # was otherwise advanceable through any pipeline and permanently
+        # stamped with that pipeline's key).
+        raise ValueError(
+            f"{object_ref!r} carries no namespaced objectKind, so no pipeline "
+            f"can be bound to it (refusing {pipeline_key!r})")
+    if kind != pipeline_key:
         raise ValueError(
             f"pipeline {pipeline_key!r} does not apply to {object_ref!r}: its "
             f"kind is {kind!r} (a pipeline keys on the namespaced kind)")
@@ -776,8 +802,20 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
             f"{object_ref!r} is currently on pipeline {cur_key!r}, not "
             f"{pipeline_key!r}; a cross-pipeline move cannot be guarded")
     cur_stage = None
-    if cur.get("stageId") and cur_key == pipeline_key:
-        cur_stage = pipe.by_id(cur["stageId"])
+    if cur.get("stageId"):
+        if cur_key == pipeline_key:
+            cur_stage = pipe.by_id(cur["stageId"])
+        if cur_stage is None:
+            # FAIL CLOSED. An unresolvable current stage (declaration drift:
+            # the pack renamed/dropped the id the Object sits in; a missing
+            # ``pipelineStageKey``; a corrupt/legacy value) must NOT fall
+            # through to the write. Falling through skipped the terminal,
+            # regression and stale-time guards and then rewrote
+            # ``isClosed``, resurrecting a closed Object — the same
+            # resurrection vector the cross-pipeline branch above refuses.
+            # Refuse the move; the persisted state is left untouched.
+            return StageMove(applied=False,
+                             reason="unresolvable-current-stage", stage=target)
     if cur_stage is not None and not correction:
         # Valid-time ordering (the CRM bitemporal shape): a meeting held in
         # January but processed in March must not regress a February close.
