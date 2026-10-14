@@ -86,17 +86,29 @@ def _wire_payload(result) -> dict:
             "text": "".join(getattr(b, "text", "") for b in (result.content or ()))}
 
 
-def _schema_validates_against(payload, output_schema) -> bool:
-    """The client's rule — but only for ENVELOPE-shaped schemas.
+_DECLARED_TYPE_CHECKS = {"array": list, "object": dict, "string": str,
+                        "boolean": bool}
 
-    The envelope's `result` must satisfy whatever the schema declares for it.
-    ⚠️ SCOPE, stated because the sweep's prose used to overstate it: this reads
-    ``properties.result``, so it can only ever fail for a tool that HAS a
-    declared `result` contract — i.e. the 13 wrap-envelope tools. For the 69
-    object-annotated rows (`tortoise_recall`, `tortoise_status`, …) there is no
-    such property and this returns ``True`` unconditionally; those rows are
-    exercised for the refusal's shape and the retry signal, never validated
-    here. A union row (`anyOf`) is likewise accepted by construction.
+
+def _schema_validates_against(payload, output_schema) -> bool:
+    """The client's rule — for envelope rows AND for non-wrap rows.
+
+    Two shapes reach a conforming client, and both are checked here:
+
+    * a **wrap** tool ships ``{"result": …}`` (FastMCP's
+      ``x-fastmcp-wrap-result`` envelope), so the declared contract is the
+      schema's ``properties.result``;
+    * a **non-wrap** tool ships its result ITSELF as ``structuredContent``
+      (no ``result`` property), so the declared top-level ``type`` IS the
+      contract. The sweep used to return ``True`` unconditionally for these
+      rows — a tautology for the 69 object-annotated tools, which the
+      sweep's own prose claimed were validated.
+
+    ⚠️ SCOPE, stated rather than implied: only a *declared* type is checked.
+    A union row (``anyOf``), a schema that declares no top-level ``type``,
+    and violations of nested ``items``/``properties`` rules are accepted by
+    construction — this helper is the envelope guard's mirror, not a general
+    JSON-Schema validator.
     """
     structured = payload["structuredContent"]
     if structured is None:
@@ -106,13 +118,20 @@ def _schema_validates_against(payload, output_schema) -> bool:
         # tool and cannot refuse the payload. Several registry tools are in
         # this form, so the sweep must not read it as a violation.
         return True
-    prop = (output_schema.get("properties") or {}).get("result") or {}
-    value = structured.get("result")
-    if isinstance(prop.get("type"), str):
-        checks = {"array": list, "object": dict, "string": str, "boolean": bool}
-        expected = checks.get(prop["type"])
-        return expected is not None and isinstance(value, expected)
-    return True                            # anyOf / undeclared: not our call
+    prop = (output_schema.get("properties") or {}).get("result")
+    if prop is None:
+        # Non-wrap tool: the payload IS the value the client validates, so its
+        # declared top-level type is the whole contract.
+        declared = output_schema.get("type")
+        if not isinstance(declared, str):
+            return True                    # undeclared: not our call
+        expected = _DECLARED_TYPE_CHECKS.get(declared)
+        return expected is None or isinstance(structured, expected)
+    declared = prop.get("type") if isinstance(prop, dict) else None
+    if not isinstance(declared, str):
+        return True                        # anyOf / undeclared: not our call
+    expected = _DECLARED_TYPE_CHECKS.get(declared)
+    return expected is None or isinstance(structured.get("result"), expected)
 
 
 async def _registered_schema(name: str):
@@ -377,6 +396,68 @@ async def test_no_registry_tool_can_deliver_a_payload_its_schema_rejects(
     assert repaired >= 11 and delivered >= 60, (
         f"sweep saw {repaired} wrap + {delivered} object tools; measured at "
         "11 + 71 when this guard was written")
+
+
+def test_the_sweep_helper_can_reject_a_non_wrap_payload():
+    """Non-vacuity pin for the NON-wrap rows of the sweep.
+
+    The helper used to return ``True`` for every schema with no declared
+    ``result`` property, so no object-annotated row could ever fail it — even
+    though the sweep's prose claimed those rows were validated against their
+    own schema. A non-wrap tool's payload IS the value the client validates,
+    so its declared top-level type is now checked. This pins that the check
+    can fail: a LIST is not an ``object``.
+    """
+    schema = {"type": "object", "additionalProperties": True}
+    accepted = {"structuredContent": {"status": "ok"}, "isError": False,
+                "text": ""}
+    assert _schema_validates_against(accepted, schema) is True
+    # The exact tautology first: a DICT payload against a non-object top-level
+    # type. Pre-fix the helper had no `result` property to read and returned
+    # True here; it must now refuse.
+    assert _schema_validates_against(
+        {"structuredContent": {"status": "ok"}, "isError": False,
+         "text": ""}, {"type": "array"}) is False
+    # And the realistic shape the claim names: a list is not an `object`.
+    refused = {"structuredContent": ["not", "an", "object"],
+               "isError": False, "text": ""}
+    assert _schema_validates_against(refused, schema) is False, (
+        "the helper must be able to reject a payload a conforming client "
+        "would refuse against the tool's own declared top-level type")
+
+
+@pytest.mark.asyncio
+async def test_a_safe_failure_is_repaired_without_rehoming_meta(quiet, stdio):
+    """The RECORDED contract for a `_safe` failure: no `_meta.tortoise_error`.
+
+    `_safe` returns a MAPPING with machine-readable fields (``code``,
+    ``violations``, ``batch_id``), but inside a wrap envelope that mapping sits
+    under ``result``, not at the payload's top level — and the re-home reads
+    ``payload["error"]``. So the mapping is NOT re-homed on ``_meta``; it is
+    dropped from ``structured_content`` and survives VERBATIM as the JSON text
+    in ``content``. `config/surface-manifest.yml` records exactly this, so it
+    is pinned here rather than left asserted only in prose.
+    """
+    code = ms.ERR_QUOTA
+
+    def _quota() -> list[dict]:
+        return ms._SafeError({"error": "quota exceeded", "code": code})
+
+    _probe("_8482_quota", _quota)
+    try:
+        result = await ms.mcp.call_tool("_8482_quota", {})
+    finally:
+        _drop("_8482_quota")
+
+    assert result.is_error is True
+    assert result.structured_content is None
+    assert ms._SCHEMA_ERROR_META_KEY not in (result.meta or {}), (
+        "a `_safe` failure must not claim the `_meta` re-home the manifest "
+        "scopes to the transport wait-bound refusal alone")
+    text = _wire_payload(result)["text"]
+    assert "quota exceeded" in text and str(code) in text, (
+        "the `_safe` mapping must survive verbatim in `content` — that is the "
+        "channel the record points a reader at")
 
 
 @pytest.mark.asyncio
@@ -725,9 +806,12 @@ async def test_a_replaced_component_is_not_served_from_the_memo(quiet):
     back: a union tool's legitimate dict success would be judged against a
     stale ``array`` envelope and repaired into a visible failure.
 
-    Non-vacuity: with ``_local_tool_cache_key`` forced to include only
-    ``component.key`` (the pre-fix form) the second call is repaired and
-    ``is_error`` flips to True.
+    Non-vacuity: the memo is cleared and primed with the ARRAY classification
+    before the replacement registers; reverting ``_local_tool_cache_key`` to
+    the pre-fix ``component.key`` form (dropping the ``id`` half) makes the
+    second call answer from that entry and ``is_error`` flip to True. The
+    address-recycling half of the same property is pinned deterministically in
+    :func:`test_a_removed_and_re_added_component_is_not_served_from_the_memo`.
     """
     def _array() -> list[dict]:
         return [{"id": "p1"}]
@@ -735,7 +819,6 @@ async def test_a_replaced_component_is_not_served_from_the_memo(quiet):
     def _union() -> list[dict] | dict:
         return {"results": [], "total": 0, "hasMore": False}
 
-    clean = ms._local_tool_cache_key
     _probe("_8482_stale", _array)
     try:
         ms._WRAP_ENVELOPE_SCHEMA_CACHE.clear()
@@ -756,7 +839,6 @@ async def test_a_replaced_component_is_not_served_from_the_memo(quiet):
         assert result.structured_content == {
             "result": {"results": [], "total": 0, "hasMore": False}}
     finally:
-        ms._local_tool_cache_key = clean
         ms._WRAP_ENVELOPE_SCHEMA_CACHE.clear()
         _drop("_8482_stale")
 

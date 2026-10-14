@@ -181,8 +181,12 @@ response_fields:
 # output schema cannot carry off `structured_content` and onto the ERROR channel. The
 # status/prose half needs no record (it ships in `content`, which an error result always
 # has). The MACHINE-READABLE half is recorded ONLY for the wait-bound refusal, the one
-# producer whose payload is a `{code, message, data}` mapping — a `_safe` failure carries a
-# bare string, so there is no mapping to re-home and none is claimed. Recorded once per tool that carries a wrap envelope
+# producer whose mapping sits at the payload's TOP LEVEL (`{"error": {code, message,
+# data}}`), which is where `_schema_error_result` reads it. A `_safe` failure DOES carry a
+# mapping (`code`/`violations`/`batch_id`), but inside a wrap envelope it sits under
+# `result` (`{"result": {"error": ...}}`) — the top-level read cannot reach it, so it is
+# repaired off `structured_content` and survives VERBATIM as the JSON text in `content`, and
+# no `_meta` is claimed for it. Recorded once per tool that carries a wrap envelope
 # (`x-fastmcp-wrap-result`) — the 11 typed envelopes plus the 2 union ones, which are
 # repaired only for the wait-bound refusal (their schema admits a dict `result`, so a
 # `_safe` error dict is left exactly as it was). A non-wrap tool is NOT repaired: its

@@ -1083,9 +1083,14 @@ def _schema_error_result(result, name: str, schema: dict) -> ToolResult:
     described a payload that is no longer there — a client that trusted it
     would unwrap a ``None``.
 
-    A dropped error payload that is a MAPPING is re-homed under
+    A dropped payload whose TOP-LEVEL ``error`` is a MAPPING is re-homed under
     ``_SCHEMA_ERROR_META_KEY``, because it carries the machine-readable half of
-    the failure. The producer that matters is the transport wait-bound refusal:
+    the failure. The one producer that meets that condition is the transport
+    wait-bound refusal (`{"error": {code, message, data}}`): a `_safe` failure
+    carries a mapping too (``code``/``violations``/``batch_id``), but inside a
+    wrap envelope it sits under ``result``, so this top-level read does not
+    reach it — it is kept verbatim as the JSON text in ``content`` and NOT
+    re-homed. The refusal:
     its retry delay ships ONLY as ``error.data.retry_after`` (``mcp_auth`` keeps
     the refusal prose digit-free BECAUSE that payload is the delay's one
     source), so dropping it would tell the caller to wait for an advertised
