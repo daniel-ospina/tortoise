@@ -1,0 +1,7 @@
+=== S5 schema placement (schema<->placement pinned) ===
+..........................                                               [100%]
+26 passed in 2.87s
+
+=== S6 identity contract ===
+........                                                                 [100%]
+8 passed in 4.45s

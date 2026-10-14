@@ -1237,15 +1237,21 @@ async def test_mcp_wait_bound_fast_path_overhead_is_bounded(monkeypatch):
     It is NOT a guard on the waiter: ``wait_for(shield)`` and ``asyncio.wait``
     are cost-neutral (198 µs vs 199 µs p50, same 53.8 µs floor).
 
-    WHAT THIS DOES **NOT** COVER: the CI gate
-    ``tests/test_mcp_telemetry.py::TestOverhead::test_p95_under_5ms`` asserts an
-    ABSOLUTE p95 on a quiet CI host. This guard is a DELTA on a possibly-loaded
-    host — a different statistic against a different baseline — and it neither
-    re-derives nor substitutes for that absolute budget. At load ~150 on this
-    host the absolute p95 is 20–32 ms even on unmodified ``origin/main`` (the raw
-    UNWRAPPED baseline alone 7.6–16.5 ms), so the absolute budget is not
-    reproducible here at all. Median, not mean and not p95: a single scheduler
-    spike must not decide the verdict on a shared box.
+    WHAT THIS DOES **NOT** COVER — renamed and re-scoped by #3678. The absolute
+    ``p95 < 5ms`` gate that used to sit at
+    ``tests/test_mcp_telemetry.py::TestOverhead::test_p95_under_5ms`` is GONE:
+    it was not reproducible on a shared host (at load ~150 here the raw
+    UNWRAPPED baseline ALONE is 7.6–16.5 ms p95, and the gate read 20–32 ms even
+    on unmodified ``origin/main``), so it could not tell a telemetry regression
+    from a busy box. ``TestOverhead`` now asserts the WRAPPER-only quantity
+    against THIS seam as the baseline — zero added event-loop hops
+    (deterministic) plus a median delta of ``mcp.call_tool`` minus
+    ``_await_under_mcp_wait_bound``. This guard is the other pair: wrapped vs
+    UNWRAPPED ``_original_call_tool``, i.e. the seam PLUS the wrapper — a
+    different statistic against a different baseline that contains a different
+    cost. Neither substitutes for the other, and this one neither re-derives
+    nor substitutes for the seam's own budget. Median, not mean and not p95: a
+    single scheduler spike must not decide the verdict on a shared box.
     """
     import statistics
 

@@ -48,6 +48,7 @@ pip install git+https://github.com/daniel-ospina/tortoise.git
 
 - **Never** run `pip install tortoise` — the name is taken on PyPI by an unrelated turtle-graphics package. This project is published as `tortoise-graph`.
 - Optional embeddings (vector search): `pip install -e '.[embeddings]'`.
+- **Off-box backup driver** (Option A2's declared target): install the `backups` extra — `pip install -e '.[backups]'`, or `pip install 'tortoise-graph[backups]'` from PyPI. The driver's `R2Storage` needs `boto3`, which ships only in that extra (`Dockerfile.selfhost` and the hosted image both install it). Without it a complete target still validates at boot and then **fails every run** with *"boto3 not installed"* instead of producing an archive.
 - Use a venv: `python3 -m venv .venv && source .venv/bin/activate`. On Homebrew and Ubuntu, PEP 668 blocks bare `pip` installs into the system Python ("externally-managed-environment") — the venv sidesteps that.
 
 ## 2. Choose a database
@@ -75,18 +76,34 @@ Durability is the store's persistence **plus an off-box copy**. On this path AOF
 is on-box, so the off-box copy is a **setup decision you make here** — never a
 silent default. In `docker-compose.yml`, pick exactly one:
 
-- **Declare a target** — fill `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
-  `R2_SECRET_ACCESS_KEY` and `R2_BUCKET` (the repo's backup-target contract), or
+- **Declare a target** — fill **all five**: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
+  `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` (the repo's backup-target contract) and
+  `TORTOISE_BACKUP_KEY` (the base64 32-byte archive key; the archive is
+  unreadable without it). A **partial** target is not a target: the daemon
+  reports it as undecided and names the missing variables, because no
+  restorable archive can be sealed from it, or
 - **Decline explicitly** — set `TORTOISE_OFFBOX_BACKUP_DECLINED=1` and accept
   AOF-only durability.
 
 Leave both unset and the daemon still boots and serves — and **reports the single
 local copy loudly at startup**, so the omission cannot pass unnoticed.
 
-⚠️ **A declared target is an intent, not yet a copy.** The backup sweep's only
-driver is the hosted lane; nothing in the self-host lane runs it yet (#8544), so
-declaring a target does **not** produce an archive today. Do not treat a declared
-target as a recovery guarantee until that driver lands.
+A **complete** declared target also arms the daemon's off-box backup driver: it
+dumps this deployment's graph to the target with the read-back-verified logical
+dump, every `TORTOISE_OFFBOX_BACKUP_INTERVAL_SECONDS` (default **3600 s**, i.e.
+the same hourly cadence as hosted; floor 60 s), and prunes under the shared
+retention triple (24 hourly + 7 daily + 4 weekly).
+
+- **The first archive appears after the first interval** — a declared target is
+  not a copy until a run reports one, and the daemon says so at startup.
+- **A failed run is reported on every attempt** (an unreachable or
+  misconfigured target is a loud error line, never a silent skip) — watch the
+  container log for `selfhost off-box backup`.
+- **Restore** uses the same archive the hosted lane reads
+  (`tortoise-logical-dump-v1` + sha256 manifest + per-object ledger). ⚠️ **It has
+  not been drilled on this lane** — no self-hosted archive has been restored
+  end-to-end yet, which is why the posture doc's self-hosted row is honest about
+  what is *verified* rather than merely *stored*.
 
 ### Option B — Bare container (multi-writer variant) *(requires Docker)*
 

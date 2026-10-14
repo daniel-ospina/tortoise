@@ -9,7 +9,8 @@ Covers the issue's verification checklist:
   '<error_type>:<field>' kind; everything else → exec_error with class name)
 - latency present and measured around the tool execution
 - analytics failure never breaks a tool call (fail-safe emitter)
-- <5ms p95 overhead added by the wrapper on the tool-call path
+- the wrapper's overhead on the tool-call path adds NO event-loop scheduling
+  hop, at any result size, and a bounded incremental cost (#3678)
 
 Runs against the shared module-level mcp instance with tiny test-only tools
 registered per-test and removed afterwards (same pattern as test_tool_registry).
@@ -344,38 +345,193 @@ class TestRealWritePath:
 
 
 class TestOverhead:
-    """Requirement 5: <5ms p95 wrapper overhead on the tool-call path.
+    """Requirement 5: the telemetry wrapper's overhead on the tool-call path.
 
-    With the emitter stubbed to a no-op, the measured call includes the
-    wrapper's own cost (perf_counter, dict build, branch) plus the tool body —
-    the tool body is a trivial echo, so p95 of the total approximates the
-    wrapper+dispatch overhead budget.
+    ⛔ THE ABSOLUTE ``p95 < 5 ms`` WALL-CLOCK BUDGET IS GONE — DELIBERATELY
+    (#3678). It asserted an absolute p95 on the TOTAL of ``mcp.call_tool``,
+    which is dominated by FastMCP's own dispatch, printed with the emitter
+    stubbed to a no-op. That quantity moves with HOST LOAD, not with the
+    instrumentation: measured here (2026-10-13, origin/main ``f5823a6a4``) the
+    unwrapped ``_original_call_tool`` arm is 77% of the asserted total (p95
+    0.543 ms of 0.706 ms; the wrapper's own share 0.163 ms), and the recorded
+    figures for the flake itself are 6.70–8.92 ms on a CLEAN tree (#3678 body,
+    ``docs/plans/2026-10-13-8482-mcp-wrap-envelope-error.md``) against a 5 ms
+    budget — i.e. it exceeded its own budget with ZERO instrumentation involved.
+    On this host at load ~150 the unwrapped baseline ALONE measures 7.6–16.5 ms
+    p95 (recorded at ``test_mcp_wait_bound_fast_path_overhead_is_bounded``). A
+    guard that cannot tell "telemetry got slower" from "the box was busy" is a
+    false-block generator, and its natural workaround — re-run until green —
+    teaches everyone to ignore the signal (#3678).
 
-    ⚠️ This is an ABSOLUTE p95 budget for a quiet CI host. It is NOT the same
-    quantity as the F2 guard in ``tests/test_transport_wait_bound.py::
-    test_mcp_wait_bound_fast_path_overhead_is_bounded``, which measures the
-    seam's INCREMENTAL (delta) median against the unwrapped ``_original_call_tool``
-    and deliberately does not assert p95. Neither substitutes for the other, and
-    on a heavily loaded box the absolute budget is not reproducible: at load ~150
-    the unwrapped ``origin/main`` baseline alone measures 7.6–16.5 ms p95, so a
-    failure here on a shared host is machine load, not necessarily a regression.
+    ⛔ WHAT REPLACES IT, AND WHAT IS *NOT* RE-ADDED. No absolute wall-clock
+    budget returns to this file or to any other. The two guards here:
+
+    * ``test_instrumentation_adds_no_scheduling_hop`` — DETERMINISTIC. It
+      counts event-loop hops on the PUBLIC ``loop.call_soon`` (the entry point
+      every ``Task`` step and ``Future`` callback is scheduled through) and
+      pins that the wrapper adds NONE over the wait-bound seam it wraps, and
+      that the count does not move with the result payload. Load cannot change
+      it: it is a code-path count, not a clock reading.
+    * ``test_instrumentation_cost_is_bounded_relative_to_the_seam`` —
+      LOAD-ROBUST. Same tool, same dispatch and same seam on BOTH arms,
+      position-alternated, asserted on the MEDIAN DELTA, so host contention
+      lands on both arms and cancels. The p95 delta is REPORTED in the failure
+      message and never asserted (on a shared host it is load-dominated).
+
+    ⛔ RELATION TO THE SIBLING GUARD — a different pair, kept deliberately.
+    ``tests/test_transport_wait_bound.py``'s
+    ``test_mcp_wait_bound_fast_path_overhead_is_bounded`` bounds
+    ``mcp.call_tool`` minus the UNWRAPPED ``_original_call_tool`` — the seam
+    PLUS this wrapper, whose own share is invisible inside its 1.5 ms budget.
+    The pair here is ``mcp.call_tool`` minus ``_await_under_mcp_wait_bound``:
+    the seam is on both arms, so the increment IS this wrapper. Neither
+    substitutes for the other.
+
+    ⛔ REJECTED — option 3 of #3678, a dedicated benchmark job. It buys one
+    number at the price of a new CI surface, and it is not where MCP overhead
+    belongs: ``benchmarks/README.md`` is the #316 RETRIEVAL-latency harness
+    (FTS/vector/RRF/TF-IDF vs the 300 ms E2E verdict), so this would be new
+    machinery around behaviour that the two guards above already make
+    trustworthy.
     """
 
     pytestmark = pytest.mark.asyncio
 
+    #: Rounds per arm in the relative guard. 150 both arms ⇒ a median that a
+    #: single scheduler spike cannot decide; the whole test measures ~0.15 s.
+    ROUNDS = 150
 
-    async def test_p95_under_5ms(self, test_tools, monkeypatch):
+    async def test_instrumentation_adds_no_scheduling_hop(self, test_tools,
+                                                          monkeypatch):
+        """DETERMINISTIC (#3678 AC 2): zero added event-loop hops.
+
+        The wrapper's fast path is CPU-only: it must not insert an ``await``
+        that yields to the loop, because each such hop is a full scheduler
+        round-trip whose cost belongs to the request, not to telemetry. A
+        regression that reached I/O, a thread/executor hop or a network call on
+        the per-call path would add one — deterministically, with no timing
+        involved, so this never flakes and never needs re-running.
+
+        ``call_soon`` is patched on the RUNNING LOOP INSTANCE (public
+        ``asyncio`` API, not ``loop._run_once``): every ``Task.__step`` and
+        ``Future`` callback is scheduled through it, so a delivered hop is
+        counted whether it comes from our code or a dependency's. The
+        assertions are COMPARATIVE (wrapped vs seam-only vs large payload), so
+        an incidental change in the absolute count — a new FastMCP internal, an
+        asyncio version — moves all three arms together and does not red here.
+        """
         from tortoise import mcp_server
         monkeypatch.setattr(mcp_server, "_emit_mcp_tool_call_telemetry",
                             lambda *a, **k: None)
-        durations = []
-        for _ in range(300):
-            t0 = time.perf_counter()
-            await mcp_server.mcp.call_tool("_telemetry_echo", {"message": "x"})
-            durations.append((time.perf_counter() - t0) * 1000)
-        durations.sort()
-        p95 = durations[int(len(durations) * 0.95) - 1]
-        assert p95 < 5.0, f"p95 latency {p95:.3f}ms exceeded the 5ms budget"
+
+        loop = asyncio.get_running_loop()
+        original_call_soon = loop.call_soon
+        scheduled = [0]
+
+        def _counting_call_soon(*args, **kwargs):
+            scheduled[0] += 1
+            return original_call_soon(*args, **kwargs)
+
+        monkeypatch.setattr(loop, "call_soon", _counting_call_soon)
+
+        async def _hop_counts(call, rounds):
+            seen = set()
+            for _ in range(rounds):
+                before = scheduled[0]
+                await call()
+                seen.add(scheduled[0] - before)
+            return seen
+
+        seam = await _hop_counts(
+            lambda: mcp_server._await_under_mcp_wait_bound(
+                "_telemetry_echo", {"message": "x"}, version=None,
+                task_meta=None), 10)
+        wrapped = await _hop_counts(
+            lambda: mcp_server.mcp.call_tool(
+                "_telemetry_echo", {"message": "x"}), 10)
+        large = await _hop_counts(
+            lambda: mcp_server.mcp.call_tool(
+                "_telemetry_echo", {"message": "y" * 200_000}), 6)
+
+        for label, seen in (("seam-only", seam), ("wrapped", wrapped),
+                            ("wrapped, 200 KB result", large)):
+            assert len(seen) == 1, (
+                f"the {label} arm scheduled a VARIABLE number of event-loop "
+                f"hops {sorted(seen)} over otherwise identical calls — the "
+                "dispatch path is not determinate, so a hop count cannot "
+                "bound anything here")
+
+        assert wrapped == seam, (
+            f"the telemetry wrapper added an event-loop hop of its own: "
+            f"wrapped {sorted(wrapped)} hops vs seam-only {sorted(seam)}. The "
+            "wrapper's fast path must stay CPU-only — an added hop (I/O, an "
+            "executor/thread round-trip, a retry that yields) is a scheduler "
+            "round-trip charged to every tool call. #3678 pin (deterministic: "
+            "this is a code-path count, not a clock reading)")
+
+        assert large == wrapped, (
+            f"the wrapper's scheduling profile scales with the result payload: "
+            f"{sorted(large)} hops for a 200 KB result vs {sorted(wrapped)} for "
+            "a short one. Per-call instrumenting work must be O(1) in the "
+            "payload — this is the shape of a per-call write/encode/parse of "
+            "the result that would have to yield. #3678")
+
+    async def test_instrumentation_cost_is_bounded_relative_to_the_seam(
+            self, test_tools, monkeypatch):
+        """LOAD-ROBUST (#3678 AC 1): the wrapper's incremental MEDIAN cost.
+
+        Both arms dispatch the SAME tool through the SAME wait-bound seam, so
+        the increment is the wrapper alone (budget check, scope enforcement,
+        read metering, result count, the emitter call) and host load lands on
+        BOTH arms instead of masquerading as wrapper cost. The arms alternate
+        position so neither owns a fixed slot in the loop.
+
+        The budget is a GROSS-REGRESSION alarm, not a tight one: measured p50
+        delta is +0.01 ms (worst |median delta| 0.011 ms over 10 runs of 150
+        samples at load 8-9 on this host, 2026-10-13), so 0.5 ms is ~45x the
+        signal. The exact guard is the hop count above; this one catches an
+        order-of-magnitude CPU regression the hop count cannot see.
+        """
+        import statistics
+
+        from tortoise import mcp_server
+        monkeypatch.setattr(mcp_server, "_emit_mcp_tool_call_telemetry",
+                            lambda *a, **k: None)
+
+        args = {"message": "x"}
+        wrapped: list[float] = []
+        seam: list[float] = []
+
+        async def _wrapped():
+            return await mcp_server.mcp.call_tool("_telemetry_echo", args)
+
+        async def _seam():
+            return await mcp_server._await_under_mcp_wait_bound(
+                "_telemetry_echo", args, version=None, task_meta=None)
+
+        for i in range(self.ROUNDS):
+            order = (((_wrapped, wrapped), (_seam, seam)) if i % 2 == 0
+                     else ((_seam, seam), (_wrapped, wrapped)))
+            for call, bucket in order:
+                t0 = time.perf_counter()
+                await call()
+                bucket.append((time.perf_counter() - t0) * 1000)
+
+        wrapped.sort()
+        seam.sort()
+        w_p50, s_p50 = statistics.median(wrapped), statistics.median(seam)
+        w_p95 = wrapped[int(len(wrapped) * 0.95) - 1]
+        s_p95 = seam[int(len(seam) * 0.95) - 1]
+        delta = w_p50 - s_p50
+        assert delta < 0.5, (
+            f"the telemetry wrapper added {delta:.3f} ms median per call "
+            f"(wrapped {w_p50:.3f} ms, seam-only {s_p50:.3f} ms; p95 delta "
+            f"{w_p95 - s_p95:+.3f} ms — REPORTED, never asserted: on a shared "
+            "host it is load-dominated). Measured p50 ≈ +0.01 ms when this "
+            "budget was set (#3678), so a median this high is a real "
+            "incremental regression, not host load: both arms ran the same "
+            "dispatch through the same seam, interleaved, so a busy box "
+            "cancels out.")
 
 
 class TestSchedulingGuardFailSafe:
