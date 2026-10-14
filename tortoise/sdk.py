@@ -2710,6 +2710,108 @@ _JOURNAL_ENVELOPE_KEYS = (
     "event_id", "ts", "recorded_ts", "initiated_by", "projection_version",
 )
 
+#: Every `_emit_event` ENVELOPE name a caller prop must not be able to set —
+# that is `_JOURNAL_ENVELOPE_KEYS` minus ``id``, which is deliberately absent:
+# the entity create/update doors REJECT a caller ``id`` fail-closed
+# (`_sanitize_props(reject_id=True)` raises), and ``create_point`` instead
+# consumes it as its documented explicit-id path — a sanctioned contract either
+# way, which a silent strip would weaken. Refused at prop INTAKE, not merely
+# stripped from the record, because the collision is invisible from inside
+# `_emit_event` and each name has a distinct failure:
+#
+# * ``recorded_ts`` / ``point`` / ``payload`` are `_emit_event` PARAMETERS, and
+#   Python binds a ``**props`` key to a named parameter AT THE CALL — so any
+#   door that splats caller props into the call turns the prop into that
+#   parameter. ``recorded_ts`` forges the record's envelope ``ts``; ``point``
+#   hands the record a CALLER-AUTHORED node snapshot, which the rebuild then
+#   replays (measured on ``update_point``); ``payload`` is swallowed by the
+#   parameter while the door's own node write still persists it LIVE, so the
+#   value ends up live-only (the #8553 divergence) — and on a graph-event type
+#   it would become the ``:GraphEvent`` payload rather than a node property (no
+#   such type splats caller props today).
+# * ``type`` is the key BOTH the live fold and the journal record dispatch on,
+#   so a prop of that name re-types or silently SUPPRESSES the record
+#   (measured: ``create_document(type="SourceCreated")`` journalled NOTHING,
+#   and ``rebuild_all`` destroyed the node — the #2296 defect itself, reachable
+#   through a caller prop).
+# * ``ts`` / ``event_id`` / ``projection_version`` / ``initiated_by`` land in
+#   ``**extra`` and are applied by ``event.update(extra)`` AFTER the envelope is
+#   built, overwriting it (measured on ``update_point``: a caller ``ts``,
+#   ``event_id`` and ``projection_version`` all reached the record).
+#
+# The set is spelled out rather than derived so an auditor sees it whole; it
+# must stay equal to `_JOURNAL_ENVELOPE_KEYS` minus ``id``.
+_RESERVED_ENVELOPE_PROPS = (
+    "type", "point", "payload", "event_id", "ts", "recorded_ts",
+    "initiated_by", "projection_version",
+)
+
+#: `_emit_event`-owned names that are NOT journal-envelope keys, yet still
+#: collide with a caller prop AT THE CALL — the same fail-open the set above
+#: closes, but invisible to `_journal_record_payload` (neither name is in
+#: `_JOURNAL_ENVELOPE_KEYS`, so nothing else strips them):
+#:
+#: * ``type_`` is `_emit_event`'s FIRST PARAMETER. Every door that splats
+#:   caller props into the call passes the record type positionally, so a prop
+#:   of this name raises ``TypeError: got multiple values for argument
+#:   'type_'`` — AFTER the live write has landed, leaving an unjournalled
+#:   live-only mutation. Measured: ``update_point(pid, type_="X")`` and
+#:   ``create_subject(name, type_="Y")`` both wrote the node and journaled
+#:   nothing; on ``create_source`` the collision is swallowed by that door's
+#:   journal ``try/except``, so the ``:Source`` was live-only and
+#:   ``rebuild_all`` destroyed it — the #2296 defect itself.
+#: * ``new_content`` is passed EXPLICITLY as a keyword by ``update_point``'s
+#:   ``PointRevised`` emit; a caller prop of that name in the same splat raises
+#:   the identical ``TypeError`` after the identical write (measured: the live
+#:   node kept the prop and NO ``PointRevised`` record was written). On the
+#:   ``create_source`` lane there is no call collision, but the name rode into
+#:   the ``SourceCreated`` record as a caller-forged payload key (measured).
+#:
+#: * ``self`` is the FIRST parameter of the bound method, and it is reachable
+#:   through the documented nested-``props`` convention (``_coerce_props``:
+#:   direct SDK callers mirror the MCP tool signature and pass ``props={...}``):
+#:   the nested dict is flattened AFTER the public method's own ``self`` is
+#:   bound, so the outer-call collision does not protect it. Measured:
+#:   ``create_source(url, "document", props={"self": "FORGED"})`` raised inside
+#:   `_emit_event`, that door's journal ``try/except`` swallowed it, and
+#:   ``rebuild_all`` destroyed the live-only ``:Source`` — the #2296 defect
+#:   itself; ``update_point(pid, props={"self": …})`` and
+#:   ``create_entity(..., props={"self": …})`` likewise wrote the node with no
+#:   record. THIS IS WHY THE SET IS NOT HAND-TRUSTED: the test derives the
+#:   required names from ``inspect.signature(TortoiseSDK._emit_event)``, so a
+#:   parameter added to `_emit_event` fails the suite instead of silently
+#:   re-opening this hole.
+#:
+#: Strip it at prop INTAKE like the envelope set above, and ALSO before any
+#: RELAY that forwards a caller bag into another method — the collision is at
+#: the call, so `update_entity` (relays to `_update_entity`) and
+#: `create_subject`/`create_object`/`create_event` (relay to `create_entity`)
+#: drop the reserved names before splatting, and `create_source` — the one door
+#: that bypasses intake — drops them itself. With every relay covered, the
+#: collision is impossible and live == replay.
+_RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self")
+
+
+def _drop_reserved_emit_props(props: dict) -> list[str]:
+    """Drop every `_emit_event`-owned name from ``props``, IN PLACE.
+
+    Returns the dropped names, sorted. Membership is decided here and only here,
+    so the strip cannot drift from the sets (it did, when it was hand-written at
+    each site: `self` stayed open through a RELAY splat).
+
+    Call it wherever a caller bag is about to be SPLATTED into a method, not
+    only at intake: the collision is AT THE CALL, so a relay that forwards
+    ``**props`` must strip first. `_update_entity` and `create_entity` take
+    ``self`` as their first parameter, so a ``self`` key raised ``TypeError`` at
+    the relay — one frame BEFORE `_sanitize_props` could drop it (measured).
+    """
+    _dropped = sorted(
+        _k for _k in props
+        if _k in _RESERVED_ENVELOPE_PROPS or _k in _RESERVED_EMIT_CALL_PROPS)
+    for _k in _dropped:
+        props.pop(_k)
+    return _dropped
+
 #: The canonical record types a live entity door may journal.
 # `DocumentCreated` (#2296) joins the set: the last unjournaled canonical
 # create, now appended by `_create_entity`'s Document arm (`.query`-invisible —
@@ -2729,10 +2831,11 @@ def _journal_record_payload(event: dict) -> dict:
     fold re-derives ``ingestedAt``/``updatedAt`` at replay. For an envelope name
     a write door does NOT drop from the live event, the caller prop survives
     LIVE while this strips it — the live ≠ replay residue tracked as #8553.
-    ``recorded_ts`` is NOT in that residue: it is an `_emit_event` parameter
-    name, stripped at prop INTAKE (``_sanitize_props``) so it can never be bound
-    to that parameter, and popped explicitly by the doors that bypass intake
-    (``create_source``) or emit unconditionally (``_create_entity``).
+    ``_RESERVED_ENVELOPE_PROPS`` is NOT in that residue: every envelope name
+    except ``id`` (which keeps its own fail-closed contract) is stripped at prop
+    INTAKE (``_sanitize_props``) so none of them can reach ``_emit_event`` as a
+    call argument or as the dispatch key, and the door that bypasses intake
+    (``create_source``) drops them — plus the reserved actor keys — itself.
     """
     return {k: v for k, v in event.items() if k not in _JOURNAL_ENVELOPE_KEYS}
 
@@ -2920,24 +3023,34 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
             _logger.warning(
                 "ignoring client-supplied %r on tenant props", _reserved)
             props.pop(_reserved)
-    # #2296 review: `recorded_ts` is `_emit_event`'s own PARAMETER name, and
-    # Python binds a `**props` key to a named parameter AT THE CALL — so every
-    # door that splats caller props into `_emit_event` (`update_point` splats
-    # straight through) turns the prop into the RECORDED instant and forges the
-    # record's envelope `ts`; `_emit_event` cannot see the collision from
-    # inside. Strip it HERE, at the one intake every props surface passes
+    # #2296 review: an `_emit_event`-owned name must never survive as a caller
+    # prop. Python binds a `**props` key to a named parameter (or an explicit
+    # keyword) AT THE CALL, so every door that splats caller props into
+    # `_emit_event` (`update_point` splats straight through) turns the prop
+    # into that argument — and `_emit_event` cannot see the collision from
+    # inside. TWO sets are reserved here, both strip-and-ignore:
+    #   * `_RESERVED_ENVELOPE_PROPS` — the journal ENVELOPE names. A caller
+    #     `recorded_ts` forges the record's envelope `ts`; `point`/`payload`
+    #     bind the snapshot/payload parameters; `type` re-types or SUPPRESSES
+    #     the record; `ts`/`event_id`/`projection_version`/`initiated_by`
+    #     overwrite the built envelope via `event.update(extra)`.
+    #   * `_RESERVED_EMIT_CALL_PROPS` — names that are not envelope keys but
+    #     collide at the CALL (`type_` is `_emit_event`'s first parameter;
+    #     `new_content` is passed explicitly by `update_point`'s emit), which
+    #     raised a `TypeError` AFTER the live write and left the mutation
+    #     live-only.
+    # The strip belongs HERE, at the one intake every props surface passes
     # through (`create_point`/`update_point`/`create_entity`/`update_entity`),
     # rather than at each emitting door — the same fix shape #5196 used for the
     # parameter spelling of the index-merge run token, after a per-door patch
-    # left this class of door open. Strip-and-ignore, matching the doors that
-    # bypass this intake (`create_source` pops the key itself) and the reserved
-    # actor keys above: it is an ENVELOPE name (`_JOURNAL_ENVELOPE_KEYS`), not a
-    # tenant property, so dropping it also keeps live == replay.
-    if "recorded_ts" in props:
+    # left this class of door open. Strip-and-ignore, matching the door that
+    # bypasses this intake (`create_source` pops the sets itself) and the
+    # reserved actor keys above: these are `_emit_event` names, not tenant
+    # properties, so dropping them also keeps live == replay.
+    for _emit_name in _drop_reserved_emit_props(props):
         _logger.warning(
-            "ignoring client-supplied 'recorded_ts' on tenant props "
-            "(reserved journal-envelope name)")
-        props.pop("recorded_ts")
+            "ignoring client-supplied %r on tenant props "
+            "(reserved `_emit_event` name)", _emit_name)
     # #4647: a value the store cannot hold without altering it must fail here,
     # not be silently clamped/rounded by FalkorDB on the way in.
     for _key, _value in props.items():
@@ -5486,9 +5599,10 @@ class TortoiseSDK:
         ``event["ts"]`` — this function cannot observe the collision. The strip
         therefore happens at prop INTAKE (``_sanitize_props``, the one surface
         ``create_point``/``update_point``/``create_entity``/``update_entity``
-        all pass through) and explicitly at the doors that bypass intake
-        (``create_source`` pops it) or emit unconditionally (``_create_entity``)
-        — the same all-labels rule those doors apply to ``point``/``payload``.
+        all pass through) and explicitly at the door that bypasses intake
+        (``create_source``) — see ``_RESERVED_ENVELOPE_PROPS``, which reserves
+        the same way (and for the same call-time-binding reason) this
+        function's other parameter names ``point``/``payload``.
         Measured before the intake strip: ``update_point``'s props splat turned
         the prop into the ``PointRevised`` record's ``ts`` (#2296 review). The
         name is also in ``_JOURNAL_ENVELOPE_KEYS``, so the record strips it
@@ -24267,8 +24381,22 @@ class TortoiseSDK:
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         proj = self._get_proj()
-        # Build event dict
+        # Build event dict. (#2296 review) The ENVELOPE owns `type`: the
+        # `**props` splat would otherwise let a caller prop of that name become
+        # the type BOTH the live fold and the journal record dispatch on —
+        # measured, `create_document(type="SourceCreated")` journalled nothing
+        # and `rebuild_all` destroyed the node. `_sanitize_props` strips it for
+        # every sanitizing caller, and the `_skip_sanitize` door
+        # (`create_source`) drops the name itself. On THIS funnel the line is
+        # also load-bearing: the Object/Subject/Event/Document records are built
+        # from the repaired dict, so the re-assert alone keeps them honest if the
+        # intake strip is removed (measured). It does NOT cover
+        # `create_source`, which journals from its own payload and still records
+        # a caller-forged `type` when its drop is removed (measured) — only that
+        # door's drop keeps it honest. Assigned rather than reordered so the
+        # dict's key order is unchanged.
         event = {"type": event_type, "id": id_val, **props}
+        event["type"] = event_type
         # Normalize field names for projection compatibility
         if label == "Subject" and "subjectKind" in props:
             event["subject_kind"] = props["subjectKind"]
@@ -24307,14 +24435,15 @@ class TortoiseSDK:
             # (Tenant-visible narrowing — see docs/ONTOLOGY.md §4.2/§4.3.)
             event.pop("point", None)
             event.pop("payload", None)
-        # #2296 review: `recorded_ts` is `_emit_event`'s own PARAMETER (it binds
-        # the envelope `ts`), so — like point/payload — a caller prop of that
-        # name must not persist LIVE either. The record strips it
-        # (`_JOURNAL_ENVELOPE_KEYS`), so keeping it here would be the live ≠
-        # replay divergence #8553 tracks. Unconditional (all labels) for the
-        # same reason the block above is: the pop must not depend on journal
-        # config.
-        event.pop("recorded_ts", None)
+        # #2296 review: every reserved `_emit_event` name
+        # (`_RESERVED_ENVELOPE_PROPS`, `_RESERVED_EMIT_CALL_PROPS`) is stripped
+        # at prop intake (`_sanitize_props`) and dropped by the one door that
+        # bypasses that intake (`create_source`), so this funnel needs no
+        # per-name pop of its own. The `point`/`payload` pops just above are
+        # PRE-EXISTING guards for the Event/Object/Subject labels and do NOT
+        # cover the `create_source` lane — that lane reaches this funnel with
+        # `label = "Source"`, so the branch never executes for it;
+        # `create_source`'s own strip is what covers it.
         # (#2194) Journal ObjectRegistered on FIRST canonical registration
         # only — probe the deterministic canonical id + name
         # (obj-<sha26(name)>) before apply. The name conjunct hardens against
@@ -24743,7 +24872,18 @@ class TortoiseSDK:
                            if k not in _ENTITY_MUTATION_RESERVED_KEYS})
         self._emit_event(_ENTITY_MUTATION_RECORD_TYPE, **record)
 
-    def _update_entity(self, id_val: str, **props) -> dict:
+    def _update_entity(self, id_val: str, *, _reserved_supplied: tuple = (), **props) -> dict:
+        # #2296 review: `_reserved_supplied` is the set of reserved names the
+        # CALLER supplied, captured by `update_entity` before it strips them for
+        # the relay — it cannot be captured here, because a `self` key raises at
+        # that relay call, before this line would run. The #3998/D30
+        # closed-surface guard below uses it so an UNDECLARED spelling still gets
+        # the LOUD refusal the raw-body mistake needs, instead of the silent drop
+        # the strip would otherwise leave. The reserved ACTOR keys are never in
+        # it: their contract is strip-and-ignore, never a 4xx (#2600). NOTE: a
+        # reserved name that IS a declared `:Source` property (`event_id`) must
+        # not be pushed into the guard's "undeclared" set — see the subtraction
+        # where that set is built below.
         # #329: id + sourcePath/source_path are server-managed — reject
         props = _sanitize_props(props, reject_id=True,
                                 reject_belief_props=True)
@@ -24756,7 +24896,7 @@ class TortoiseSDK:
         # Measured before this guard: `create_source(...)` then
         # `update_entity(url, text=<2 KB body>)` persisted the body as `s.text`
         # and it SURVIVED `rebuild_all`.
-        if props:
+        if props or _reserved_supplied:
             # The predicate MUST be the one the write below uses. The write
             # resolves a canonical label by its PRIMARY key then its SECONDARY
             # (`secondary_entity_id_props`), so a url-only `:Source` STUB (minted
@@ -24803,9 +24943,21 @@ class TortoiseSDK:
                 # still refuses every OTHER undeclared spelling, which is where
                 # a raw payload would land.
                 _undeclared = sorted(
-                    k for k in props
-                    if k not in _SOURCE_NODE_PROP_NAMES
-                    and k not in self._get_proj()._DOC_RETIRED_KEYS
+                    {k for k in props
+                     if k not in _SOURCE_NODE_PROP_NAMES
+                     and k not in self._get_proj()._DOC_RETIRED_KEYS}
+                    # The reserved names are unioned in because the intake strip
+                    # above already removed them from `props` — the guard must
+                    # still answer them. Subtracting the DECLARED surface keeps
+                    # a reserved name that is ALSO a declared `:Source`
+                    # property (`event_id`) out of the refusal: measured, the
+                    # unsubtracted union refused `update_entity(url,
+                    # event_id=…)` — a write that landed live and survived
+                    # `rebuild_all` before this review change — with a message
+                    # whose own "Declared :Source properties" list names that
+                    # key as settable. Declared reserved names stay
+                    # strip-and-ignore, like the actor keys.
+                    | (set(_reserved_supplied) - _SOURCE_NODE_PROP_NAMES)
                 )
                 if _undeclared:
                     raise ValueError(
@@ -25512,6 +25664,7 @@ class TortoiseSDK:
     def create_subject(self, name: str, subjectKind: str = "other", **props) -> dict:
         """Thin alias for create_entity(type='subject') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
         if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
             raise ValueError(
                 "'is_episodic' is a server-managed field and cannot be set via props.")
@@ -25521,6 +25674,7 @@ class TortoiseSDK:
     def create_object(self, name: str, objectKind: str = "other", **props) -> dict:
         """Thin alias for create_entity(type='object') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
         if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
             raise ValueError(
                 "'is_episodic' is a server-managed field and cannot be set via props.")
@@ -25540,6 +25694,7 @@ class TortoiseSDK:
         rather than stored as string properties.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
         # Second-model gate P2: a single-nested props={"is_episodic": true}
         # flattens here and would splat-bind create_entity's explicit param —
         # reject it; the explicit `is_episodic` param (internal callers) is the
@@ -28130,14 +28285,20 @@ class TortoiseSDK:
                 __import__('datetime').timezone.utc).isoformat(),
             **props,
         }
-        # #2296 review: `recorded_ts` is `_emit_event`'s own PARAMETER (it binds
-        # the envelope `ts`). This door emits its OWN record (`SourceCreated` /
-        # `SourceVersioned`) and does not go through `_journal_entity_event`, so
-        # `_create_entity`'s live pop cannot cover it — a caller prop of that
-        # name would bind the parameter and forge the record's envelope `ts`.
-        # Envelope-reserved: drop it (same semantics as point/payload in
-        # `_create_entity`).
-        ev.pop("recorded_ts", None)
+        # #2296 review: this door bypasses `_sanitize_props`
+        # (`_skip_sanitize=True`), so the shared intake strip cannot cover it —
+        # and these are the names that are `_emit_event` PARAMETERS
+        # (`recorded_ts` binds the record's `ts`; `point`/`payload` bind the
+        # record's snapshot/payload; `type_` is the type parameter) or the
+        # record's dispatch key (`type`), or overwrite the built envelope via
+        # `event.update(extra)` (`ts`/`event_id`/`projection_version`), or ride
+        # into the record as a forged payload key (`new_content`), plus the
+        # reserved ACTOR keys (`initiated_by` and siblings), which the sanitizer
+        # would also have stripped. Drop them all, as `_create_entity` drops
+        # point/payload on its own route.
+        for _emit_name in (*_RESERVED_ENVELOPE_PROPS, *_RESERVED_EMIT_CALL_PROPS,
+                           *_RESERVED_ACTOR_PROPS):
+            ev.pop(_emit_name, None)
         if is_episodic is not None:
             # #1488: server-managed quota discriminator — explicit param only
             # (mirrors create_point). The props passthrough is rejected above.
@@ -29010,7 +29171,20 @@ class TortoiseSDK:
         """Update any entity's properties. Implementation behind
         update(id, ...) — the consolidated Point/entity update (epic #888 W2)."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
-        return self._update_entity(id_val, **props)
+        # #2296 review: strip the `_emit_event`-owned names BEFORE the relay.
+        # `_update_entity`'s first parameter is `self`, so a `self` key (reachable
+        # through the nested props= convention just flattened) raised `TypeError`
+        # AT THIS CALL — one frame before intake could drop it — instead of the
+        # strip-and-ignore every other reserved name gets, and the D30 guard
+        # below could never see the name. The names are passed on so that guard
+        # can still answer the UNDECLARED ones loudly; `_reserved_supplied` is
+        # popped first because it is this relay's own channel, not a tenant
+        # property.
+        props.pop("_reserved_supplied", None)
+        _reserved = sorted(
+            set(_drop_reserved_emit_props(props)) - _RESERVED_ACTOR_PROPS)
+        return self._update_entity(id_val, _reserved_supplied=_reserved,
+                                   **props)
 
     def delete_entity(self, id_val: str) -> bool:
         """Delete any entity by ID. Implementation behind delete(id) — the

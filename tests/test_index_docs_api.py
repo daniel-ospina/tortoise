@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 
 from tests._github_docs_mock import MockGitHubDocsTransport, gh_docs_entry
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import require_answered
 from tortoise.hosted_api import (
     _ALLOWED_STATE_KEYS,
     _INDEX_JOBS,
@@ -211,6 +212,9 @@ def _poll_until(client, job_id: str, status: str, timeout_s: float = 10.0):
     deadline = time.time() + timeout_s
     while True:
         r = client.get(f"/v1/index/docs/{job_id}")
+        # #5049: the poll route is not exempt from the transport wait bound —
+        # a 504 is the product refusing legibly, not an answer.
+        require_answered(r, what=f"GET /v1/index/docs/{job_id} answered")
         assert r.status_code == 200, r.text
         body = r.json()
         if body["status"] == status:
@@ -305,6 +309,9 @@ def test_docs_live_progress_written_during_walk(provisioned, mock_github,
     deadline = time.time() + 12.0
     while time.time() < deadline:
         rp = provisioned.tc.get(f"/v1/index/docs/{job_id}")
+        # #5049: the same non-exempt poll route `_poll_until` converts — a
+        # refusal is a non-answer, not a missing-progress deadline.
+        require_answered(rp, what=f"GET /v1/index/docs/{job_id} answered")
         body = rp.json()
         if (body.get("repos_processed", 0) >= 1
                 and 0 < body.get("progress", 0) < 100):
@@ -370,6 +377,9 @@ def test_docs_live_progress_all_branches_site(provisioned, mock_github,
     deadline = time.time() + 12.0
     while time.time() < deadline:
         rp = provisioned.tc.get(f"/v1/index/docs/{job_id}")
+        # #5049: same non-exempt poll route as `_poll_until` — a bound
+        # refusal must not be read as a missing-progress deadline FAIL.
+        require_answered(rp, what=f"GET /v1/index/docs/{job_id} answered")
         body = rp.json()
         if (body.get("repos_processed", 0) >= 1
                 and 0 < body.get("progress", 0) < 100):
