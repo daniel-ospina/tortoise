@@ -235,17 +235,28 @@ class TestDriverLoop:
         assert driver.runs == 1 and driver.last_error is None
 
     def test_start_is_idempotent_and_stop_joins(self):
-        blocker = threading.Event()
+        """The name claims a JOIN, so assert the join — not the bookkeeping.
+
+        ``stop()`` clears ``self._thread`` *before* it joins
+        (``tortoise/selfhost_backup.py``), so ``assert driver._thread is None``
+        is unconditionally true whether or not a join happened. The default
+        ``sleep`` waits on the driver's own stop event, so a correct ``stop()``
+        releases the parked loop AND joins it — a stop that forgot to signal
+        (or failed to join) leaves this thread alive and the assertion fails.
+        """
         driver = OffboxBackupDriver(
             interval_seconds=60,
             run=lambda: {"status": "backed_up"},
-            sleep=blocker.wait,
         )
         assert driver.start() is True
         assert driver.start() is False, "a second start must not spawn a thread"
-        driver.stop(timeout=2)
+        thread = driver._thread
+        assert thread is not None and thread.is_alive()
+        driver.stop(timeout=5)
+        assert not thread.is_alive(), (
+            "stop() returned while the loop thread was still running — the "
+            "join did not happen")
         assert driver._thread is None
-        blocker.set()
 
 
 class TestLifespanWiring:
@@ -284,9 +295,15 @@ class TestLifespanWiring:
         )
         assert state.off_box_backup_state() == state.OFF_BOX_CONFIGURED
         with tc:
-            assert selfhost_backup._DRIVER is not None, "driver not armed"
-            assert selfhost_backup._DRIVER._thread is not None
+            driver = selfhost_backup._DRIVER
+            assert driver is not None, "driver not armed"
+            thread = driver._thread
+            assert thread is not None
         assert selfhost_backup._DRIVER is None, "shutdown left the driver armed"
+        # ``stop_offbox_backup_driver`` clears ``_DRIVER`` BEFORE it calls
+        # ``driver.stop()``, so the line above is true even if the thread never
+        # stopped. The assertion that can fail is the join's EFFECT.
+        assert not thread.is_alive(), "shutdown left the backup loop running"
 
     def test_partial_target_arms_nothing(self, monkeypatch, tmp_path):
         """A driver with no complete target is an inert enforcer — exactly the
@@ -297,3 +314,83 @@ class TestLifespanWiring:
         assert state.off_box_backup_state() == state.OFF_BOX_ABSENT
         with tc:
             assert selfhost_backup._DRIVER is None
+
+
+class TestProductionSeams:
+    """The production wiring — ``_default_storage()`` + ``_default_sdk()``.
+
+    Every other test injects ``storage=``/``sdk=``, so the two functions that
+    are the ONLY production wiring — and the pairing that must dump the graph
+    the daemon actually opens — were unguarded (#8610 review P3). Here the
+    defaults run: ``R2Storage`` is the production seam patched to an in-memory
+    store, and the SDK comes from ``selfhost_api._sdk()``, the REST door's own
+    resolver. A future change that pointed ``_default_sdk()`` at a second
+    SDK/graph would archive a graph without the seeded Point and this reds.
+    """
+
+    def test_default_seams_dump_the_rest_door_graph(
+            self, monkeypatch, tmp_path):
+        from tortoise import selfhost_api
+        from tortoise.hosted_backup import MemoryStorage, restore_backup
+        from tortoise.sdk import _derive_graph_name
+        from tortoise.selfhost_backup import (
+            _NoControlPlane,
+            run_selfhost_offbox_backup,
+        )
+
+        monkeypatch.setenv("TORTOISE_DB_URI", "")  # embedded mode
+        db_path = str(tmp_path / "prod-defaults.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        store = MemoryStorage()
+        # The production seam, not a double: ``_default_storage()`` imports
+        # ``R2Storage`` at call time and constructs it with no arguments.
+        monkeypatch.setattr("tortoise.hosted_backup.R2Storage", lambda: store)
+
+        sdk = selfhost_api._sdk()  # the REST door's own resolver
+        sdk._get_proj().g.query(
+            "CREATE (n:Point {id:'prod-default', content:'defaults'})")
+        expected = _derive_graph_name(
+            namespace="selfhost", graph_name=None, uri_graph=None)
+        try:
+            result = run_selfhost_offbox_backup()  # NO storage=/sdk= seams
+
+            assert result["graph_name"] == expected == "org_selfhost"
+            assert store.list(f"backups/{result['backup_id']}/"), "no archive"
+            # The archive must hold WHAT THE REST DOOR WROTE: restore it and
+            # find the seeded Point. A ``_default_sdk()`` pointed at a second
+            # graph would archive a graph without this node.
+            drill = "_drill_prod_defaults"
+            restore_backup(
+                sdk._get_proj().db, _NoControlPlane(), store,
+                f"backups/{result['backup_id']}/dump.enc",
+                org_id="selfhost", graph_name=expected,
+                target_graph=drill, drill=True,
+            )
+            rows = sdk._get_proj().db.select_graph(drill).query(
+                "MATCH (p:Point {id:'prod-default'}) RETURN count(p)",
+            ).result_set
+            assert int(rows[0][0]) == 1, (
+                "the production default seams archived the wrong graph")
+        finally:
+            sdk.close()
+            anchor = selfhost_api._SELFHOST_KEEPALIVE.pop(db_path, None)
+            if anchor is not None:
+                anchor.close()
+
+
+class TestSelfhostImageShipsTheDriverDependency:
+    def test_image_installs_the_backups_extra(self):
+        """``_default_storage()`` builds ``R2Storage``, which imports
+        ``boto3`` — shipped only by the ``[backups]`` extra (pyproject). The
+        self-host image must install it, or the RECOMMENDED
+        ``docker compose up -d`` path validates a target and then fails every
+        run at the first upload: the #8544 defect one layer down (a configured
+        deployment that still produces no archive, #8610 review P1)."""
+        from pathlib import Path
+
+        dockerfile = (
+            Path(__file__).resolve().parent.parent / "Dockerfile.selfhost"
+        ).read_text(encoding="utf-8")
+        assert "'.[backups]'" in dockerfile, (
+            "Dockerfile.selfhost must install the [backups] extra (boto3 for "
+            "the self-host off-box driver's R2Storage)")

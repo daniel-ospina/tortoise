@@ -158,6 +158,13 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # lane end to end — a `test_*` rename would exercise a namespace prod
     # never resolves.
     "test_onboarding_selfhost_w12.py": {"selfhost": "prod-coupled"},
+    # #8544: same `selfhost` literal class as test_onboarding_selfhost_w12
+    # above. The driver's guard constructs `TortoiseSDK(db_path=…,
+    # namespace="selfhost")` to dump the graph the self-host daemon actually
+    # opens, and `selfhost_graph_name()` must equal `org_<SELFHOST_ORG_ID>` —
+    # a `test_*` rename would archive a graph prod never resolves. The named
+    # equality assertion fails LOUDLY on a decoupling rather than passing.
+    "test_selfhost_backup.py": {"selfhost": "prod-coupled"},
     # #3517 parity: `_provision_org` seeds the registry Team node directly
     # (`_ha._make_sdk(namespace="registry")._get_registry()`) because the
     # onboarding state the surfaces under test write lives ON that node — a

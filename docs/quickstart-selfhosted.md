@@ -48,6 +48,7 @@ pip install git+https://github.com/daniel-ospina/tortoise.git
 
 - **Never** run `pip install tortoise` — the name is taken on PyPI by an unrelated turtle-graphics package. This project is published as `tortoise-graph`.
 - Optional embeddings (vector search): `pip install -e '.[embeddings]'`.
+- **Off-box backup driver** (Option A2's declared target): install the `backups` extra — `pip install -e '.[backups]'`, or `pip install 'tortoise-graph[backups]'` from PyPI. The driver's `R2Storage` needs `boto3`, which ships only in that extra (`Dockerfile.selfhost` and the hosted image both install it). Without it a complete target still validates at boot and then **fails every run** with *"boto3 not installed"* instead of producing an archive.
 - Use a venv: `python3 -m venv .venv && source .venv/bin/activate`. On Homebrew and Ubuntu, PEP 668 blocks bare `pip` installs into the system Python ("externally-managed-environment") — the venv sidesteps that.
 
 ## 2. Choose a database

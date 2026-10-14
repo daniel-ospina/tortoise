@@ -172,7 +172,10 @@ Point it at a running server (`TORTOISE_MCP_URL`, default `http://localhost:8000
 **Running the server** (self-hosted): Docker compose (`docker compose up -d`) or `pip install tortoise-graph` + `tortoise-serve` — see [docs/quickstart-selfhosted.md](docs/quickstart-selfhosted.md). The `tortoise-graph` package still ships the full SDK surface for server-side power use and local eval. (The bare `tortoise` PyPI name is squatted by an unrelated library — engine = `tortoise-graph`, client = `tortoise-client`, #258/#526.)
 
 ```bash
-pip install tortoise-graph   # server package: engine + daemon + MCP server
+pip install 'tortoise-graph[backups]'   # server package: engine + daemon + MCP server
+#   [backups] is the off-box backup driver's dependency (boto3 for its R2
+#   store, #8544). Leave it off only if you never declare a target: a complete
+#   target with no boto3 validates at boot and then fails every backup run.
 # from source (clone): uv sync --extra embeddings --extra parity && uv run python -m tortoise.selfhost
 #   The explicit --extra list is EXACT: name every extra the env needs in ONE
 #   command (or use --all-extras) — `uv sync --extra embeddings` alone drops parity.
