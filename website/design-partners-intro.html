@@ -122,11 +122,19 @@
       letter-spacing: -0.02em;
       color: #fff;
     }
+    /* The subtitle is the page's one-line positioning statement, not a
+       footnote: at 0.9rem in --text-dim it read as a caption beneath the
+       title. It now renders at subtitle size in the primary text colour —
+       still a clear step below the serif h1, so the hierarchy is unchanged
+       while the claim itself carries weight.
+       KEEP IDENTICAL to the rule on the investor one-pager: these are two
+       documents with two stylesheets, and drift between them is invisible
+       until the two are read side by side. */
     .doc-sub {
-      margin-top: 0.9rem;
-      font-size: 0.9rem;
-      line-height: 1.65;
-      color: var(--text-dim);
+      margin-top: 1rem;
+      font-size: 1.05rem;
+      line-height: 1.6;
+      color: var(--text);
     }
     .doc-sub strong { color: var(--accent); font-weight: 400; }
 
