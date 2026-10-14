@@ -238,6 +238,14 @@ def retrieve_per_strategy(
     TF-IDF is the in-memory fallback (not part of the chain); structural
     returns [] for kind-less queries (honest: it cannot rank text).
 
+    #2678: the ``tfidf`` arm is the SPARSE strategy by definition, so it pins
+    the sklearn TF-IDF leg explicitly (``force_sparse=True``). Routing the
+    dual-mode default made the arm bge semantic cosine whenever the embedder
+    was cached — silently duplicating the ``vector`` arm and diverging from
+    the token-overlap arm the oracle tests prove (which pinned
+    ``EmbeddingModel.get → None`` to get back). The arm must be the same
+    scorer in every environment, or the label lies.
+
     #1348: `depth` is the per-strategy retrieval depth (defaults to `limit`);
     fusion runs over FULL-DEPTH lists (matching production str_limit), then
     metrics truncate to `limit` at the caller. k_sweep=True adds fused@k for
@@ -262,7 +270,8 @@ def retrieve_per_strategy(
         "vector": raw.get("vector", []),
         "structural": raw.get("structural", []),
     }
-    tf = fallback_tfidf(query, tfidf_points, limit=depth or limit)
+    tf = fallback_tfidf(query, tfidf_points, limit=depth or limit,
+                        force_sparse=True)
     out["tfidf"] = [(d["id"], float(d.get("similarity", 0.0))) for d in tf]
 
     chain_lists = [lst for lst in (out["fts"], out["vector"], out["structural"]) if lst]
@@ -838,6 +847,10 @@ def _run_with_sdk(args, sdk) -> dict:
             "10/|target| (~12%), so compare R@10 RELATIVELY across "
             "strategies; the recall diagnostic for retrieval-gap filing is "
             "in the top-50 pool.",
+            "#2678: the 'tfidf' arm is the SPARSE sklearn TF-IDF leg, pinned "
+            "with force_sparse=True — deterministic and embedder-independent. "
+            "It is NEVER the embedder-gated scorer, so it cannot collapse "
+            "into a second semantic arm when the bge embedder is cached.",
             "Authored queries: relevance is subjective → LLM judges + owner "
             "adjudication (judge.py); baseline reports them labels_pending "
             "until the emitted pool is judged and merged via --judge-labels.",

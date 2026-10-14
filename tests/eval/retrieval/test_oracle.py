@@ -34,20 +34,15 @@ def _has_embedded() -> bool:
         return False
 
 
-def _force_sparse_tfidf(monkeypatch: pytest.MonkeyPatch) -> None:
-    """#2573-cached-bge guard: the oracle's ``tfidf`` arm is a TRUE
-    token-overlap strategy (fallback_tfidf → search_points), but with the
-    bge embedder cached, search_points silently upgrades to semantic
-    cosine — breaking both the distractor-surface lock (semantic hits
-    differ from token-overlap hits) and the 300s CI budget (per-query
-    model.encode over 801 texts x 100 queries). Pin EmbeddingModel.get to
-    None so the arm exercises the sklearn TF-IDF path it was written for.
-    The oracle's ``vector`` arm is unaffected (it scores graph vectors via
-    the passed qv, not the embedder)."""
-    from tortoise import embeddings
-    monkeypatch.setattr(embeddings.EmbeddingModel, "get", classmethod(
-        lambda cls, load_timeout=None: None,
-    ))
+# #2678: the oracle's ``tfidf`` arm is the token-overlap strategy, and that is
+# now STRUCTURAL — ``retrieve_per_strategy`` pins the sklearn TF-IDF leg
+# (``force_sparse=True``), so a cached bge embedder cannot silently upgrade it
+# to semantic cosine. The #2573 ``_force_sparse_tfidf`` monkeypatch that used to
+# force the arm honest was removed with the seam that replaced it: a global
+# ``EmbeddingModel.get → None`` pin is the shape that let the divergence hide
+# in the first place (the arm only LOOKED sparse, and only under this pin).
+# The ``vector`` arm was never embedder-dependent — it scores the passed
+# synthetic ``qv``, never bge-encoded.
 
 
 # ── Oracle structure ────────────────────────────────────────────────────────
@@ -279,15 +274,16 @@ def test_near_topic_distractors_are_real():
 
 
 @pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
-def test_tfidf_retrieves_near_topic_distractors_for_hard_queries(tmp_path, monkeypatch):
+def test_tfidf_retrieves_near_topic_distractors_for_hard_queries(tmp_path):
     """DISTRACTOR SURFACE LOCK (review P2.2, retrieval level): a pure
     token-overlap strategy (TF-IDF) must actually retrieve a grade-1
     near-topic distractor into its top-50 for EVERY hard query — the
     bridge/near-core tokens pull real distractors into the ranking (they
-    are not separable by token overlap in practice)."""
-    _force_sparse_tfidf(monkeypatch)  # #2573: the cached bge embedder silently
-    # upgrades search_points to semantic cosine — these oracle arms pin the
-    # TRUE TF-IDF token-overlap path (embedding-independent).
+    are not separable by token overlap in practice).
+
+    #2678: no embedder pin needed — ``retrieve_per_strategy`` force-sparses
+    the arm, so this is the TRUE TF-IDF path in every environment.
+    """
     from tortoise.sdk import TortoiseSDK  # noqa: I001
     from benchmarks.synthetic_corpus import seed_corpus
     from tests.eval.retrieval.run import retrieve_per_strategy
@@ -388,7 +384,7 @@ def _run_strategies_on_mix(corpus_size: int, db_path: str) -> dict:
 
 
 @pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
-def test_oracle_makes_strategies_distinguishable(tmp_path, monkeypatch):
+def test_oracle_makes_strategies_distinguishable(tmp_path):
     """REQUIRED property: the oracle fixes the everything-matches blindness.
 
     At least one strategy must achieve P@5 < 1.0 over the 100-query mix —
@@ -396,7 +392,6 @@ def test_oracle_makes_strategies_distinguishable(tmp_path, monkeypatch):
     measurable. Also sanity: the best strategy is far above chance (real
     signal), so the eval can rank strategies.
     """
-    _force_sparse_tfidf(monkeypatch)  # #2573-cached bge: keep tfidf arm token-overlap
     db = str(tmp_path / "oracle-distinguish.db")
     res = _run_strategies_on_mix(800, db)
 
@@ -411,21 +406,18 @@ def test_oracle_makes_strategies_distinguishable(tmp_path, monkeypatch):
     assert best_ndcg > 0.6, (
         f"best strategy nDCG {best_ndcg:.3f} — corpus carries no signal"
     )
-    # Distinguishable arms: under the sparse pin the tfidf arm is TRUE
-    # token-overlap while the vector arm scores the stored synthetic
-    # topic-centroid vectors via the passed qv (embedder-independent — see
-    # _force_sparse_tfidf; never bge-encoded). The strategies must not be
-    # degenerate-same.
+    # Distinguishable arms: the tfidf arm is TRUE token-overlap
+    # (force-sparsed by retrieve_per_strategy, #2678) while the vector arm
+    # scores the stored synthetic topic-centroid vectors via the passed qv
+    # (never bge-encoded). The strategies must not be degenerate-same.
     assert res["vector_p5"] != pytest.approx(res["tfidf_p5"], abs=0.02)
 
 
 @pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
-def test_hard_tier_punishes_token_match_more_than_easy(tmp_path, monkeypatch):
+def test_hard_tier_punishes_token_match_more_than_easy(tmp_path):
     """Design property: easy-tier queries are near-perfect for the semantic
     arms; hard (ambiguous near-miss) queries pull P@5 down — the graded
     tiers measure different difficulty regimes."""
-    _force_sparse_tfidf(monkeypatch)  # #2573-cached bge: neutral for the vector-arm
-    # assert; keeps the per-query tfidf arm inside the CI time budget.
     db = str(tmp_path / "oracle-tier.db")
     o = build_topic_oracle(42)
     points, _counts = generate_oracle_points(600, o)
