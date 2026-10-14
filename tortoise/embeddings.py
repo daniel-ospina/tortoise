@@ -798,11 +798,25 @@ class EmbeddingModel:
         finally:
             type(self)._one_time_setup_in_progress.clear()
 
-    def encode(self, texts: list[str], batch_size: int = 32):
-        """Encode texts to embeddings. Returns numpy array or None."""
+    def encode(self, texts: list[str], batch_size: int = 32,
+               show_progress_bar: bool = False):
+        """Encode texts to embeddings. Returns numpy array or None.
+
+        ``show_progress_bar`` is accepted and FORWARDED so this signature
+        matches the ``SentenceTransformer.encode`` it delegates to (#5321).
+
+        Callers do NOT reach the encoder through here — they call :meth:`get`,
+        which returns the loaded inner model itself (so their
+        ``show_progress_bar=False`` binds there and the model branch runs).
+        This method is for an explicitly held instance; its previous signature
+        rejected the very kwarg the inner encoder takes, and reading THAT
+        signature is what produced #5321's false "all dense legs degrade to
+        TF-IDF" diagnosis.
+        """
         if self._model is None:
             return None
-        return self._model.encode(texts, batch_size=batch_size, show_progress_bar=False)
+        return self._model.encode(
+            texts, batch_size=batch_size, show_progress_bar=show_progress_bar)
 
 
 def _truncate_for_embedding(content: str, max_tokens: int) -> str:
