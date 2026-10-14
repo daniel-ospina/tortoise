@@ -755,8 +755,11 @@ def test_sdk_mirror_speaks_memory_write_v1_verb(sdk, monkeypatch):
 
     MUTATION THAT REDS THIS TEST: drop the ``build_write_verb`` wrap at the end
     of ``TortoiseSDK.capture_session`` (``tortoise/sdk.py``) — the response
-    then reverts to the legacy dict with no ``protocol_version``/``status``/
-    ``provenance``/``error`` and un-enriched points.
+    then reverts to the legacy dict and the ``protocol_version``/``status``/
+    ``provenance``/``error`` assertions red. The per-point enrichment loop runs
+    BEFORE the wrap, so the points stay enriched under that single mutation;
+    the fail-open edge of that same loop is pinned by
+    ``test_capture_session.py::test_phase_e_sdk_mirror_verification_fail_open_omits_marker``.
     """
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
     conv = [

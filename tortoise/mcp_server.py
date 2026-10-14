@@ -4141,8 +4141,10 @@ def _maybe_onboarding_auto_complete(*,
 # Claude Web (and every harness with an MCP surface) files sessions through
 # this tool. It calls the SAME capture pipeline as POST /v1/sessions
 # (hosted_api._capture_session_impl) so the two surfaces can never drift on
-# gate order: admission 429 (#3060) → session_recording opt-out 409 → empty
-# 422 → quota 402. A missing provider key is NOT a gate (#3892): the capture
+# gate order: boundary 422 → admission 429 (#3060) / in-flight 409 (#3129)
+# → session_recording opt-out 409 → turn cap 400 → empty 422 → quota 402 —
+# the tool docstring below carries the single canonical list.
+# A missing provider key is NOT a gate (#3892): the capture
 # is STORED and only the LLM extraction is skipped, reported as
 # `extraction_mode: "no-provider"`. Stdio/self-host returns an honest "requires
 # hosted mode" error —
@@ -4159,8 +4161,11 @@ def tortoise_session_capture(conversation: list[dict],
 
     Server-enforced gates (identical to POST /v1/sessions — VERIFIED order,
     #2093 S2 amendment): boundary 422 (invalid harness/shape — SessionRequest
-    construction below) -> 409 (recording off) -> 400 (turn cap) -> 422
-    (empty/blank transcript) -> 402 (quota). There is deliberately NO
+    construction below) -> 429 (capture capacity saturated) / 409 (duplicate
+    in-flight capture of the same session_id — both raised by the admission
+    reservation at ``_reserve_capture_slot`` below, #3060/#3129) -> 409
+    (recording off) -> 400 (turn cap) -> 422 (empty/blank transcript) -> 402
+    (quota). There is deliberately NO
     provider gate: since #3892 (owner ruling) a missing provider key STORES
     the capture and skips only the LLM extraction (receipt mode
     "no-provider") — the pre-#3892 docstring here listed a 503 that no longer

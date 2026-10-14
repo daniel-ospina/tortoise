@@ -7918,7 +7918,11 @@ class TortoiseSDK:
         except Exception as e:  # pragma: no cover — never block capture
             _logger.warning("capture_observation emit failed: %s", e)
         # W5 Phase A+B (#2104, S12): the frozen version-stamped write verb —
-        # ``protocol_version`` is REQUIRED on EVERY write response. The hosted
+        # ``protocol_version`` is REQUIRED on every WRITE-BACK response. The
+        # empty/blank gate above returns before any write: it is a pre-write
+        # rejection, not a write-back, and like the hosted surface's HTTP gate
+        # rejections (``write_verb.py`` scope note) it deliberately carries no
+        # verb. The hosted
         # capture surface has always spoken this envelope; the mirror speaks
         # it too now (``tests/eval/write_path/runner.py`` — the W2 gate's own
         # lane — drives THIS surface, so the gate can finally observe the
