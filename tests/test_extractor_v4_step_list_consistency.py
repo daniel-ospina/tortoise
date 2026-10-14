@@ -59,9 +59,11 @@ cite either and revert the decision:
 So the class this file guards is wider than one MERGE: **the v4 design must not
 assert two conflicting things about one operation or one recorded decision.**
 Pinned additionally: (5) no passage sites the mechanical DISCARD on `E7` unless
-it is the reversal record (naming `S2.2b` *and* negating `E7` in the same
-bounded window as the coupling — NOT merely the same physical line, which the
-`#8443` review showed was a fail-open on §15's one-line row);
+the coupling's OWN `E7` token is the reversal record — negated in place
+(`NOT `E7``) or quoted as history — NOT merely sharing a line or a window with
+a reversal mark, which the `#8443` review showed was a fail-open on §15's
+one-line row (a live re-assertion placed next to the record inherited its
+marks and shipped green);
 (6) §15's issue-map row itself states the decided site — named, `E7` negated,
 and the shipped predicate symbols cited — not merely quoting a title that
 mentions both; (7) the retention-floor obligation appears only inside its own
@@ -93,6 +95,12 @@ NOT promised:
    `S2.3`). A THIRD spelling of the gate step (today: `S2.2` in §4.0 and the
    `### S2.2 — VET` heading, `S2.2b` in §4.1/§4.2/§4.3) is not caught — the
    blocks are the pinned artifacts.
+4. Rule (5) exempts a `DISCARD`↔`E7` coupling whose tokens BOTH sit inside one
+   quoted span that is MARKED AS HISTORY (`once said`, `formerly`, `reversed`, …)
+   — the shape §15 uses to record the wording it replaced. A wrong site
+   asserted inside such a marked quotation is therefore not caught; the pin is
+   on live prose, not on history. Every other quoted coupling (the merge-base
+   row's bare quotation of `#5198`'s title, for one) still reds.
 
 Static, stdlib-only, no network / DB / graph.
 """
@@ -253,8 +261,10 @@ def test_the_gate_passage_separates_the_verdict_from_the_action():
 #: The decided site (`#4899` DEC-1; shipped in PR `#5237`). The predicate is
 #: `tortoise/value_gate.py:370` (`mechanical_verdict`), called from
 #: `tortoise/vet_gate.py:469` — Level-2 of `vet_candidates`, before the arbiter
-#: and before S3 RESOLVE (`tortoise/extractor_v2.py:7420`, `_run_vet_pass`,
-#: inside `extract_session_v2`).
+#: and before S3 RESOLVE (`tortoise/extractor_v2.py`, `_run_vet_pass`, inside
+#: `extract_session_v2`). Cited by symbol, not by line: the line number rotted
+#: twice while this branch was open (the `#8443` review), and the document's own
+#: rule is that the symbol is authoritative.
 DISCARD_SITE = "S2.2b"
 
 #: The site DEC-1 reversed. The TOKEN is still legitimate — `E7`
@@ -297,46 +307,99 @@ _WITHDRAWN_REQUIREMENT = re.compile(
 _REVERSAL_WINDOW = 200
 
 #: `DISCARD` and `E7` in one coupling is only legitimate as the reversal
-#: record: it must also name the decided site and negate the rejected one.
-#: That is the form `#5198` left in §15 (*"THE SITE IS `S2.2b`, NOT `E7`"*).
+#: record. That is the form `#5198` left in §15 (*"THE SITE IS `S2.2b`, NOT
+#: `E7`"*): the coupling's OWN `E7` token is the one negated here.
 _NEGATES_REJECTED = re.compile(r"\bnot\b[^.\n]{0,12}`?E7", re.IGNORECASE)
 
 #: How far apart a `DISCARD` token and an `E7` token may sit and still count as
-#: one coupling, and how far either side of that coupling the reversal marks
-#: must appear for it to be exempt. BOUNDING THE EXEMPTION IS THE POINT: §15's
-#: issue-map row is ONE physical line carrying many sentences, so a line-scoped
-#: exemption let an unqualified re-assertion appended to that row inherit the
-#: reversal marks stated earlier on it — the fail-open the `#8443` review found
-#: (#5198). Rule (7) bounds its withdrawal the same way (`_REVERSAL_WINDOW`).
+#: one coupling. The bound keeps two tokens in unrelated clauses from being
+#: read as one claim; it is NOT the exemption's scope (see below).
 _COUPLING_WINDOW = 200
+
+#: How far back the negation may start from the `E7` it rejects (`\bnot\b` plus
+#: up to 12 characters, so this comfortably covers the whole match).
+_REVERSAL_PROXIMITY = 24
+
+#: A coupling is exempt ONLY when its own `E7` token is the reversal record —
+#: never because a reversal mark happens to sit within a window around it. §15's
+#: issue-map row is ONE physical line carrying many sentences, so a window- or
+#: line-scoped exemption let a live re-assertion placed beside the reversal
+#: record inherit its marks and ship green — the fail-open the `#8443` review
+#: reproduced by inserting *"The mechanical `DISCARD` gate runs at `E7`"* right
+#: after *"NOT `E7`"* (#5198). Two shapes are legitimate, and both are tested
+#: against the coupling's own tokens:
+#:   * the NEGATION: this `E7` is the one `not … E7` rejects;
+#:   * the QUOTATION: `DISCARD` and `E7` sit inside ONE `"…"` span that is
+#:     MARKED AS HISTORY (`once said`, `formerly`, `reversed`, …), i.e. the row
+#:     is recording the reverted wording
+#:     (*"the mechanical DISCARD outcome on E7"*) rather than asserting it.
+#:     A quoted coupling with no such mark is still an assertion — which is why
+#:     the merge-base row's bare quotation of `#5198`'s title reds.
+_QUOTE = '"'
+_HISTORICAL_QUOTATION = re.compile(
+    r"once said|formerly|previously|used to|no longer|reversed|superseded|withdrawn",
+    re.IGNORECASE,
+)
+#: How far on either side of a quoted span its history mark may sit.
+_HISTORY_WINDOW = 100
+
+
+def _coupling_is_the_reversal_record(
+    line: str, discard: re.Match, rejected: re.Match
+) -> bool:
+    """True when THIS coupling's own `E7` token is the reversal record.
+
+    The negation must end at this `E7` (not merely appear on the line), and the
+    quotation exemption requires BOTH tokens to sit inside one quoted span that
+    is itself marked as history. A live re-assertion inherits neither, even
+    when it is inserted immediately next to the reversal record.
+    """
+    prefix = line[max(0, rejected.start() - _REVERSAL_PROXIMITY) : rejected.end()]
+    negated = _NEGATES_REJECTED.search(prefix)
+    if negated is not None and negated.end() == len(prefix):
+        return True
+    opening = line.rfind(_QUOTE, 0, discard.start())
+    if opening == -1:
+        return False
+    closing = line.find(_QUOTE, opening + 1)
+    if closing == -1 or rejected.end() > closing:
+        return False
+    surrounding = line[
+        max(0, opening - _HISTORY_WINDOW) : closing + _HISTORY_WINDOW
+    ]
+    return bool(_HISTORICAL_QUOTATION.search(surrounding))
 
 
 def _discard_e7_offenders(text: str) -> list[str]:
     """`DISCARD`↔`E7` couplings that are NOT the reversal record.
 
-    The exemption is decided per COUPLING, over a bounded window around the
-    two tokens — not per physical line. A second, unqualified coupling on the
-    same line (the shape a union-merge that keeps both the old and the new
-    clause produces) therefore reds even when the line also carries the
+    The exemption is decided per COUPLING, on that coupling's own `E7` token —
+    not on a window around the coupling, and not on the physical line. A live
+    re-assertion inserted next to §15's reversal record, or appended to the
+    one-line row, therefore reds even though the line also carries the
     reversal record.
     """
     offenders: list[str] = []
     for number, line in enumerate(text.splitlines(), 1):
-        couplings: list[tuple[int, int]] = []
+        couplings: list[tuple[re.Match, re.Match]] = []
         discards = [m for m in re.finditer(r"discard", line, re.IGNORECASE)]
         rejected = [m for m in re.finditer(re.escape(REJECTED_SITE), line)]
-        for d in discards:
-            for r in rejected:
-                start, end = min(d.start(), r.start()), max(d.end(), r.end())
+        for discard in discards:
+            for candidate in rejected:
+                start, end = min(discard.start(), candidate.start()), max(
+                    discard.end(), candidate.end()
+                )
                 if end - start <= _COUPLING_WINDOW:
-                    couplings.append((start, end))
-        for start, end in couplings:
-            lo = max(0, start - _COUPLING_WINDOW)
-            hi = min(len(line), end + _COUPLING_WINDOW)
-            window = line[lo:hi]
-            if DISCARD_SITE in window and _NEGATES_REJECTED.search(window):
+                    couplings.append((discard, candidate))
+        for discard, candidate in couplings:
+            if _coupling_is_the_reversal_record(line, discard, candidate):
                 continue  # the reversal record: names the rejected site on purpose
-            offenders.append(f"{DOC.name}:{number}: ...{line[lo:hi].strip()[:200]}...")
+            start = min(discard.start(), candidate.start())
+            end = max(discard.end(), candidate.end())
+            offenders.append(
+                f"{DOC.name}:{number}: "
+                f"...{line[max(0, start - 60) : end + 60].strip()[:200]}..."
+            )
             break  # one report per line is enough to red it
     return offenders
 
@@ -347,15 +410,16 @@ def test_no_passage_sites_the_mechanical_discard_on_e7():
     The scan is over the whole document, not the two blocks: §15's issue map
     was where the losing site survived, and a block read cannot see it.
 
-    The exemption is bounded to the coupling it belongs to, NOT the physical
-    line — see `_discard_e7_offenders` and
-    `test_the_reversal_exemption_does_not_cover_a_second_coupling_on_the_row`.
+    The exemption is decided on the coupling's OWN `E7` token, NOT the physical
+    line and NOT a window around the coupling — see `_discard_e7_offenders`
+    and `test_the_reversal_exemption_does_not_cover_a_second_coupling_on_the_row`.
     """
     offenders = _discard_e7_offenders(_document())
     assert not offenders, (
         "a passage couples the mechanical DISCARD with E7 without being the "
-        "reversal record (it must name `S2.2b` AND negate `E7` in the same "
-        "bounded window as the coupling). `#4899`'s DEC-1 moved the gate to "
+        "reversal record (the coupling's own `E7` must be the negated one, or "
+        "`DISCARD` and `E7` must sit inside one quotation of the reverted "
+        "wording). `#4899`'s DEC-1 moved the gate to "
         "S2.2b; E7 stays the home of against-priors consolidation only (§4.2 "
         "constraint 5). A lane citing this line reverts the decision (#5198):\n"
         + "\n".join(offenders)
@@ -363,28 +427,45 @@ def test_no_passage_sites_the_mechanical_discard_on_e7():
 
 
 def test_the_reversal_exemption_does_not_cover_a_second_coupling_on_the_row():
-    """Rule (5) must judge the COUPLING, not the whole line.
+    """Rule (5) must judge the COUPLING's own `E7`, not a window around it.
 
     §15's issue-map row is the exact location `#5198` was filed about, and it
-    is one physical line ending in the reversal record. A line-scoped exemption
-    therefore let a live re-assertion appended to that row ship green — the
-    fail-open the `#8443` review reproduced by appending
-    *"The mechanical `DISCARD` gate runs at `E7`"* to the row (#5198).
+    is one physical line ending in the reversal record. A line-scoped (or
+    window-scoped) exemption therefore let a live re-assertion share the row
+    with the reversal record and ship green. The `#8443` review reproduced two
+    placements, and both must red: an assertion APPENDED to the row, and one
+    inserted immediately ADJACENT to the reversal clause — where a ±window
+    exemption would still see the record's marks (#5198).
     """
     rows = [line for line in _document().splitlines() if "§1 the mechanism" in line]
     assert len(rows) == 1, "§15's §1 row is not uniquely identifiable (#5198)"
     row = rows[0]
     assert not _discard_e7_offenders(row), (
         "the live §15 row must be the reversal record and nothing else — this "
-        "assertion keeps the mutation below from passing trivially (#5198):\n"
+        "assertion keeps the mutations below from passing trivially (#5198):\n"
         + row
     )
-    mutated = row + " ⚠️ **The mechanical `DISCARD` gate runs at `E7`.**"
-    assert _discard_e7_offenders(mutated), (
+    appended = row + " ⚠️ **The mechanical `DISCARD` gate runs at `E7`.**"
+    assert _discard_e7_offenders(appended), (
         "appending a live re-assertion of the E7 site to §15's one-line row "
         "must red rule (5). A line-scoped exemption cannot tell `the row quotes "
         "the losing site in the reversal record` from `the row also asserts "
         "the losing site` — that is the #8443 review's fail-open (#5198)"
+    )
+    # The placement that defeated the FIRST fix (`6790d9b6a`): a ±window
+    # exemption still saw the reversal marks around this insertion, because the
+    # re-assertion itself supplies the coupling the window was drawn around.
+    reversal = "**THE GATE SITE IS `S2.2b`, NOT `E7`**"
+    assert reversal in row, "the reversal clause is not in the row (#5198)"
+    adjacent = row.replace(
+        reversal,
+        reversal + " The mechanical `DISCARD` gate runs at `E7`.",
+    )
+    assert _discard_e7_offenders(adjacent), (
+        "a live re-assertion of the E7 site placed IMMEDIATELY next to the "
+        "reversal clause must red rule (5) — otherwise the exemption is "
+        "window-scoped and the re-assertion inherits the record's marks; this "
+        "is the #8443 review's second fail-open (#5198)"
     )
 
 
@@ -551,10 +632,15 @@ def test_the_reviews_d6_question_carries_a_disposition():
     )
     assert "extract_session_v2" in disposition, (
         "the D6 disposition must name the ENCLOSING function of the pre-S3 "
-        "`_run_vet_pass` call — `extract_session_v2` (def at "
-        "`extractor_v2.py:7226`, call at `:7420`). `execute_embed` runs "
+        "`_run_vet_pass` call — `extract_session_v2`. `execute_embed` runs "
         "AFTER both VET passes (S5), so naming it implies the opposite timing "
         "of the claim (the #8443 review, #5198):\n" + disposition[:600]
+    )
+    assert not re.search(r"extractor_v2\.py:\d", disposition), (
+        "the D6 disposition must cite `extractor_v2.py` by SYMBOL, not by line "
+        "number: the number was wrong at two consecutive heads while this "
+        "branch was open (the #8443 review), and the document's own rule is "
+        "that the symbol is authoritative:\n" + disposition[:600]
     )
     assert "execute_embed" not in disposition, (
         "the D6 disposition names `execute_embed` as the site of the VET pass. "
