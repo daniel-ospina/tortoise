@@ -16624,9 +16624,12 @@ async def activation_cohort(
 #     stored data.
 
 #: Blast-radius bound on a fleet-wide walk. The endpoint reads every
-#: non-deleted org, so an unbounded fleet is an unbounded batch job on the
-#: shared control plane; exceeding this is a 422 that names the bound, never a
-#: partial metric.
+#: ENUMERABLE org — live OR soft-deleted/churned — so an unbounded fleet is an
+#: unbounded batch job on the shared control plane; exceeding this is a 422 that
+#: names the bound, never a partial metric. The churned population is IN the
+#: walk on purpose (see `retention_indicator.read_team_starts`): a
+#: `deleted_at IS NULL` filter would drop every churned team from every
+#: denominator and bias the rate upward.
 _RETENTION_MAX_ORGS = 1000
 
 #: Default parallelism for the per-org analytics read. The real bound is the
@@ -16758,6 +16761,7 @@ async def retention_cohort(request: Request, as_of: str | None = None):
         STATE_UNAVAILABLE,
         assemble,
         build_team_rows,
+        cohort_cell_states,
         read_org_activity,
         read_team_starts,
     )
@@ -16873,16 +16877,34 @@ async def retention_cohort(request: Request, as_of: str | None = None):
     unmeasured = [r["org_id"] for r in rows
                   if r["state"] != STATE_MEASURED]
     if unmeasured:
-        # The note must state the state the surface ACTUALLY produced. Saying
-        # the cells read `partial` when every team failed (the cells read
-        # `unavailable`) is the same state inversion the derived surface state
-        # fixes — prose that contradicts the field beside it.
-        cells = (STATE_UNAVAILABLE if payload["state"] == STATE_UNAVAILABLE
-                 else STATE_PARTIAL)
-        payload["notes"].append(
-            f"{len(unmeasured)} team(s) could not be measured and are EXCLUDED "
-            f"from every denominator; the cells they feed read `{cells}`. "
-            f"Named in `teams`: {', '.join(sorted(unmeasured))}")
+        # The note must state the state the CELLS ACTUALLY READ, derived from
+        # the cells themselves — not from `payload["state"]`. Keying off the
+        # surface state made `partial` the default for every non-`unavailable`
+        # payload, so an unmeasured team created after the reading day (which
+        # feeds NO cell) was described by prose claiming the cells read
+        # `partial` while every cell read `measured` — the same
+        # prose-contradicts-the-field defect the derivation removed. A refused
+        # surface drops the cohort, and there the surface state IS the only
+        # available signal (`unavailable` is the only state that drops it).
+        cell_states = cohort_cell_states(payload.get("cohort"))
+        if STATE_UNAVAILABLE in cell_states or payload["state"] == STATE_UNAVAILABLE:
+            cells: str | None = STATE_UNAVAILABLE
+        elif STATE_PARTIAL in cell_states:
+            cells = STATE_PARTIAL
+        else:
+            cells = None
+        named = ", ".join(sorted(unmeasured))
+        if cells is None:
+            payload["notes"].append(
+                f"{len(unmeasured)} team(s) could not be measured and are "
+                f"EXCLUDED from every denominator; they feed no cohort cell "
+                f"(no mark or window is old enough to include them). "
+                f"Named in `teams`: {named}")
+        else:
+            payload["notes"].append(
+                f"{len(unmeasured)} team(s) could not be measured and are "
+                f"EXCLUDED from every denominator; the cells they feed read "
+                f"`{cells}`. Named in `teams`: {named}")
     payload["notes"].append(
         "This is an AGGREGATION over existing rows, never a data-retention "
         "window (guard D12-b): no row is deleted, pruned or purged by this "

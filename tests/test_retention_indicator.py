@@ -112,6 +112,15 @@ class TestActivityPredicate:
         a possibly-retained team from a confident denominator."""
         assert ri.row_establishes_use(_search(TODAY, -1)) is None
 
+    def test_an_empty_tool_name_is_unclassifiable_not_a_non_use(self):
+        """Parity with ``activation_scorecard._row_tool_name``: an EMPTY name
+        reads as unreadable there (``str(...) or None``), and the two surfaces
+        share the allowlist "so the two cannot disagree about what a use is".
+        The empty string is a ``str``, so an isinstance-only guard let it
+        through as a definite non-use — the same churn reading the negative
+        ``result_count`` rule refuses."""
+        assert ri.row_establishes_use(_search(TODAY, 3, tool="")) is None
+
     def test_a_non_mapping_properties_does_not_raise(self):
         assert ri.row_establishes_use(
             {"event_name": ri.MCP_TELEMETRY_EVENT, "properties": None}) is None
@@ -609,6 +618,39 @@ class TestAssemble:
         assert payload["cohort"] is None
         assert (payload["teams_measured"], payload["teams_total"]) == (0, 2)
 
+    def test_teams_that_produced_no_number_anywhere_refuse_the_surface(self):
+        """A fleet that WAS read can still produce no number at all: every
+        mark left unsettled by a retrieval row written before the forward-only
+        ``result_count`` prop existed (#3675). The cells were already honest
+        (all ``unavailable``), but the derivation only looked at the team rows,
+        so the surface asserted ``measured`` — the field a consumer switches on
+        said "the number is here" while every number was refused, the one
+        state inversion this surface exists to avoid."""
+        start = AS_OF - timedelta(days=120)
+        rows = [_row("a", start, active=set(),
+                     ambiguous={AS_OF - timedelta(days=5)})]
+        assert rows[0]["state"] == ri.STATE_MEASURED   # the team WAS read
+        cohort = ri.cohort_summary(rows, as_of=AS_OF)
+        cells = [*cohort["marks"].values(), *cohort["bands"].values(),
+                 cohort["trailing_30_active"],
+                 cohort["active_days_histogram"]]
+        assert all(cell["state"] != ri.STATE_MEASURED for cell in cells)
+        payload = ri.assemble(as_of=AS_OF, team_rows=rows)
+        assert payload["state"] == ri.STATE_UNAVAILABLE
+        assert payload["reason"] == ri.REASON_NO_CELL_CLASSIFIED
+        assert payload["cohort"] is None
+        assert (payload["teams_measured"], payload["teams_total"]) == (1, 1)
+
+    def test_an_empty_fleet_is_not_measurable_not_measured(self):
+        """Nothing failed and nothing was measurable — the roll-up's
+        `not_measurable` branch (``activation_scorecard.roll_up_cohort``), never
+        a `measured` surface over a fleet of `not_measurable` cells."""
+        payload = ri.assemble(as_of=AS_OF, team_rows=[])
+        assert payload["state"] == ri.STATE_NOT_MEASURABLE
+        assert payload["reason"] == ri.REASON_NO_CELL_MEASURABLE
+        assert payload["cohort"] is not None
+        assert payload["teams_total"] == 0
+
     def test_a_partially_measured_fleet_reads_partial(self):
         start = AS_OF - timedelta(days=40)
         rows = [_row("a", start, active={start + timedelta(days=10)}),
@@ -1010,6 +1052,61 @@ class TestEndpointReading:
         assert body["teams_measured"] == 0
         assert any("read `unavailable`" in note for note in body["notes"])
         assert not any("read `partial`" in note for note in body["notes"])
+
+    def test_a_forward_only_cohort_refuses_instead_of_reading_measured(
+            self, client, internal_key, monkeypatch):
+        """End-to-end half of the derived surface state: one team, read
+        successfully, whose ONLY candidate use is a retrieval row written
+        before `result_count` existed (#3675) — so every mark, band, trailing
+        window and histogram bucket is `unavailable` and no number exists
+        anywhere. The surface must refuse, never read `measured`."""
+        start = AS_OF - timedelta(days=120)
+        cp = FakeCP(
+            [{"id": "org-old", "created_at": _iso(start)}],
+            [_search(AS_OF - timedelta(days=5), None, org="org-old")],
+        )
+        _wire(monkeypatch, cp)
+        body = client.get(PATH, params={"as_of": AS_OF.isoformat()},
+                          headers=internal_key).json()
+        assert body["teams_measured"] == 1
+        assert body["state"] == ri.STATE_UNAVAILABLE
+        assert body["reason"] == ri.REASON_NO_CELL_CLASSIFIED
+        assert body["cohort"] is None
+
+    def test_a_note_never_claims_a_cell_state_the_payload_lacks(
+            self, client, internal_key, monkeypatch):
+        """An unmeasured team created AFTER the reading day feeds no cell, so
+        every cell reads `measured`. Deriving the note's state word from
+        `payload["state"]` made it claim `partial` anyway — prose contradicting
+        the field beside it, the defect the state derivation removes."""
+        as_of = AS_OF - timedelta(days=30)
+        start = as_of - timedelta(days=40)
+
+        class FlakyCP(FakeCP):
+            def query_all(self, table, **kw):
+                if table == "analytics_events" and kw.get("filters") and any(
+                        f[2] == "org-new" for f in kw["filters"]):
+                    raise RuntimeError("store down")
+                return super().query_all(table, **kw)
+
+        cp = FlakyCP(
+            [{"id": "org-old", "created_at": _iso(start)},
+             {"id": "org-new",
+              "created_at": _iso(as_of + timedelta(days=5))}],
+            [])
+        _wire(monkeypatch, cp)
+        body = client.get(PATH, params={"as_of": as_of.isoformat()},
+                          headers=internal_key).json()
+        by_id = {t["org_id"]: t for t in body["teams"]}
+        assert by_id["org-new"]["state"] == ri.STATE_UNAVAILABLE
+        assert body["state"] == ri.STATE_MEASURED
+        assert body["cohort"]["marks"]["7"]["state"] == ri.STATE_MEASURED
+        assert any("they feed no cohort cell" in note
+                   for note in body["notes"])
+        assert not any("read `partial`" in note for note in body["notes"])
+        assert not any("read `unavailable`" in note
+                       for note in body["notes"])
+        assert any("org-new" in note for note in body["notes"])
 
     def test_the_endpoint_audits_one_operator_read(
             self, client, internal_key, monkeypatch):

@@ -107,8 +107,9 @@ SURFACE = "retention"
 #: part of it could not be read. Distinct from `unavailable`: the number exists
 #: but a NAMED subset is missing, so it is a lower bound rather than a count.
 #: The surface state is DERIVED from its members (never asserted by the
-#: caller), so a `measured` surface cannot sit over all-`unavailable` cells: a
-#: consumer switching on `state` is refused exactly when nothing was measured.
+#: caller), so a `measured` surface cannot sit over all-`unavailable` cells —
+#: nor over any cohort in which no cell produced a number: a consumer switching
+#: on `state` is refused exactly when nothing was measured.
 STATE_PARTIAL = "partial"
 
 #: The day-N marks the indicator reports, in ascending order. PINNED as the
@@ -172,6 +173,19 @@ REASON_START_UNREADABLE = "org_start_unreadable"
 #: measured, so no cell carries a number. `assemble` derives this from the
 #: rows rather than trusting a caller to have noticed.
 REASON_NO_TEAM_MEASURED = "no_team_could_be_measured"
+
+#: Whole-surface reason: the teams WERE read, but no cohort cell could be
+#: CLASSIFIED, so no number was produced anywhere. This is the forward-only
+#: ``result_count`` case (#3675) taken to its limit — every mark left
+#: unsettled by a pre-deploy retrieval row — and it must refuse rather than
+#: publish `measured`, the inversion this surface exists to avoid.
+REASON_NO_CELL_CLASSIFIED = "no_cohort_cell_could_be_classified"
+
+#: Whole-surface reason: nothing failed, but no cell had anything to measure
+#: (an empty fleet, or a fleet whose start has not arrived). Mirrors
+#: ``activation_scorecard.roll_up_cohort``'s `no_org_has_a_measurable_value`
+#: branch: an honest `not_measurable`, never a `measured` zero.
+REASON_NO_CELL_MEASURABLE = "no_cohort_cell_has_a_measurable_value"
 
 #: Whole-surface reasons.
 REASON_WRITE_PATH_UNCONFIGURED = "analytics_write_path_unconfigured"
@@ -380,9 +394,15 @@ def row_establishes_use(row: Any) -> bool | None:
         return False
     props = _row_props(row)
     tool = props.get("tool_name")
-    if not isinstance(tool, str):
-        # No readable tool identity: we cannot rule the row out as a retrieval
-        # call, so its day is ambiguous rather than silently "not a use".
+    if not isinstance(tool, str) or not tool:
+        # No readable tool identity, INCLUDING the empty string. Parity with
+        # ``activation_scorecard._row_tool_name``, whose "an empty one reads as
+        # unreadable" rule maps ``""`` to ``None`` (and the row to
+        # ``unclassifiable``): we cannot rule the row out as a retrieval call,
+        # so its day is ambiguous rather than silently "not a use". Publishing
+        # an empty name as a definite non-use would emit exactly the churn
+        # reading the parity rule refuses and would drop a possibly-retained
+        # team from a confident denominator.
         return None
     if tool not in RETRIEVAL_TOOL_ALLOWLIST:
         return False
@@ -705,22 +725,60 @@ def cohort_summary(team_rows: Sequence[dict], *, as_of: date) -> dict:
             "active_days_histogram": histogram}
 
 
-def _cohort_is_partial(cohort: dict | None) -> bool:
-    """Whether any cohort sub-surface measured only PART of its population.
+def cohort_cell_states(cohort: dict | None) -> list[str]:
+    """Every cohort sub-cell's state, in payload order.
 
-    `partial` is the state a cell (or the histogram) carries when a named
-    subset of the teams it feeds could not be read. It is the derived signal
-    `assemble` needs: a surface cannot honestly read `measured` over cells
-    that read `partial`, and the caller must not have to recompute that.
+    The ONE place the set of "cells" is enumerated, so the surface-state
+    derivation below, the endpoint's note about the cells an unmeasured team
+    feeds, and any other consumer cannot disagree about which cells exist.
+    ``[]`` for a refused surface (``cohort is None``). The order is stable
+    (marks, bands, trailing, histogram) but no caller may depend on it beyond
+    iteration: this is a collection of states, not a positional contract.
     """
     if not cohort:
-        return False
+        return []
+    states: list[str] = []
     for group in ("marks", "bands"):
-        if any((cell or {}).get("state") == STATE_PARTIAL
-               for cell in (cohort.get(group) or {}).values()):
-            return True
-    return any((cohort.get(key) or {}).get("state") == STATE_PARTIAL
-               for key in ("trailing_30_active", "active_days_histogram"))
+        states.extend((cell or {}).get("state")
+                      for cell in (cohort.get(group) or {}).values())
+    states.extend((cohort.get(key) or {}).get("state")
+                  for key in ("trailing_30_active", "active_days_histogram"))
+    return [s for s in states if s is not None]
+
+
+def _derive_surface_state(cohort: dict | None) -> tuple[str, str | None]:
+    """The surface state the cohort's OWN cells support: ``(state, reason)``.
+
+    MIRRORS ``activation_scorecard.roll_up_cohort``'s member-derived rule, and
+    closes the one state inversion this surface exists to avoid (see
+    ``STATE_PARTIAL``):
+
+    * some cell carried a number, and no other cell is `partial`/`unavailable`
+      -> ``measured`` (a `not_measurable` cell is NOT a gap: the comparable
+      surface treats "the member answered, and there is nothing to measure" as
+      compatible with a measured cohort);
+    * some cell carried a number while another could not be read -> ``partial``;
+    * NO cell carried a number and something was UNREADABLE -> ``unavailable``
+      with ``REASON_NO_CELL_CLASSIFIED`` — the field a consumer switches on
+      must never say "the number is here" when nothing was produced, which is
+      exactly the all-marks-ambiguous (#3675) and all-teams-failed shapes;
+    * NO cell carried a number and nothing was unreadable (an empty fleet, or a
+      fleet whose start has not arrived) -> ``not_measurable``, never
+      ``measured``: `roll_up_cohort`'s "every member said there is nothing to
+      measure" branch.
+    """
+    states = cohort_cell_states(cohort)
+    if any(s == STATE_PARTIAL for s in states):
+        # A `partial` cell CARRIED a number over a named gap, so the surface
+        # cannot honestly read `measured` over it (the original rule).
+        return STATE_PARTIAL, None
+    if any(s == STATE_MEASURED for s in states):
+        if any(s == STATE_UNAVAILABLE for s in states):
+            return STATE_PARTIAL, None
+        return STATE_MEASURED, None
+    if any(s == STATE_UNAVAILABLE for s in states):
+        return STATE_UNAVAILABLE, REASON_NO_CELL_CLASSIFIED
+    return STATE_NOT_MEASURABLE, REASON_NO_CELL_MEASURABLE
 
 
 def assemble(*, as_of: date, team_rows: Sequence[dict],
@@ -729,26 +787,35 @@ def assemble(*, as_of: date, team_rows: Sequence[dict],
              limits: dict | None = None) -> dict:
     """Compose the retention payload from per-team rows.
 
-    The surface state is DERIVED FROM ITS MEMBERS, never asserted: a reading
-    that measured nothing is `unavailable` (with ``REASON_NO_TEAM_MEASURED``)
-    even though the walk itself succeeded, and a reading that measured only
-    part of the fleet is `partial`. A `measured` surface over all-`unavailable`
-    cells is the one state inversion this surface exists to avoid — the field a
-    consumer switches on would say "the number is here" while no number was
-    produced. `partial` and `unavailable` change which cells exist; a caller
-    passing `surface_state` explicitly still OVERRIDES the derivation for a
-    whole-read failure (fleet enumeration incomplete, analytics writer dark), in
-    which case no cohort cell is computed and no rate is emitted. The per-team
-    rows are still returned when they exist, each carrying its own state, so an
-    operator sees WHAT was and was not measurable rather than a single blank.
+    The surface state is DERIVED FROM ITS MEMBERS, never asserted (see
+    ``_derive_surface_state``):
+
+    * a reading that measured NOTHING is `unavailable` —
+      ``REASON_NO_TEAM_MEASURED`` when no team could be read at all, and
+      ``REASON_NO_CELL_CLASSIFIED`` when every team WAS read but no cell could
+      be classified — even though the walk itself succeeded;
+    * a reading that measured only part of the fleet is `partial`;
+    * a reading in which nothing failed and nothing was measurable (an empty
+      fleet, or a fleet whose start has not arrived) is `not_measurable`.
+
+    A `measured` surface over a cohort that produced no number anywhere is the
+    one state inversion this surface exists to avoid — the field a consumer
+    switches on would say "the number is here" while no number was produced.
+    `not_measurable`, `partial` and `unavailable` change which cells exist; a
+    caller passing `surface_state` explicitly still OVERRIDES the derivation
+    for a whole-read failure (fleet enumeration incomplete, analytics writer
+    dark), in which case no cohort cell is computed and no rate is emitted. The
+    per-team rows are still returned when they exist, each carrying its own
+    state, so an operator sees WHAT was and was not measurable rather than a
+    single blank.
     """
     measured_rows = [t for t in team_rows if t["state"] == STATE_MEASURED]
     state = surface_state
     reason = surface_reason
     cohort = (cohort_summary(team_rows, as_of=as_of)
               if surface_state == STATE_MEASURED else None)
-    if surface_state == STATE_MEASURED and team_rows:
-        if not measured_rows:
+    if surface_state == STATE_MEASURED:
+        if team_rows and not measured_rows:
             # A whole-fleet analytics outage is not a measured reading of zero:
             # refuse the surface the same way a dark write path is refused, and
             # drop the cohort so no consumer can read an empty denominator as a
@@ -756,8 +823,21 @@ def assemble(*, as_of: date, team_rows: Sequence[dict],
             state = STATE_UNAVAILABLE
             reason = REASON_NO_TEAM_MEASURED
             cohort = None
-        elif _cohort_is_partial(cohort):
-            state = STATE_PARTIAL
+        else:
+            # The teams may all have been read and STILL have produced no
+            # number anywhere (every mark left ambiguous by a pre-#3675
+            # retrieval row). Derive the surface state from the cells, not
+            # from the rows: `measured` may only sit over a cohort in which at
+            # least one cell carries a number.
+            derived, derived_reason = _derive_surface_state(cohort)
+            if derived != STATE_MEASURED:
+                state = derived
+                reason = derived_reason
+                if derived == STATE_UNAVAILABLE:
+                    # Same refusal as the all-teams-failed arm above: a surface
+                    # with no number anywhere is dropped, never published as an
+                    # empty denominator.
+                    cohort = None
     payload: dict[str, Any] = {
         "surface": SURFACE,
         "schema_version": SCHEMA_VERSION,
