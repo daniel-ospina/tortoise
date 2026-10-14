@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Investors Presentation — Tortoise</title>
-  <meta name="description" content="Investors presentation — Tortoise, the cognitive layer for agentic organizations.">
+  <title>Investor Presentation — Tortoise</title>
+  <meta name="description" content="Investor presentation — Tortoise, the cognitive layer for agentic organizations.">
   <meta name="theme-color" content="#060b14">
   <!-- noindex, deliberately — same reason as the design-partner one-pager this
        page is forked from. Both are OUTREACH DOCUMENTS delivered by link to
@@ -19,7 +19,7 @@
   <meta name="robots" content="noindex,follow">
   <link rel="canonical" href="https://tortoise.premiselabs.co/investors">
   <link rel="icon" type="image/png" href="/logo.png">
-  <meta property="og:title" content="Investors Presentation — Tortoise">
+  <meta property="og:title" content="Investor Presentation — Tortoise">
   <meta property="og:description" content="Tortoise — the cognitive layer for agentic organizations.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://tortoise.premiselabs.co/investors">
@@ -37,7 +37,7 @@
   <meta property="og:image" content="https://tortoise.premiselabs.co/assets/investors-og.jpg">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Investors Presentation — Tortoise, the cognitive layer for agentic organizations.">
+  <meta property="og:image:alt" content="Investor Presentation — Tortoise, the cognitive layer for agentic organizations.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:image" content="https://tortoise.premiselabs.co/assets/investors-og.jpg">
   <style>
@@ -120,11 +120,19 @@
       letter-spacing: -0.02em;
       color: #fff;
     }
+    /* The subtitle is the page's one-line positioning statement, not a
+       footnote: at 0.9rem in --text-dim it read as a caption beneath the
+       title. It now renders at subtitle size in the primary text colour —
+       still a clear step below the serif h1, so the hierarchy is unchanged
+       while the claim itself carries weight.
+       KEEP IDENTICAL to the rule on the design-partner one-pager: these are
+       two documents with two stylesheets, and drift between them is invisible
+       until the two are read side by side. */
     .doc-sub {
-      margin-top: 0.9rem;
-      font-size: 0.9rem;
-      line-height: 1.65;
-      color: var(--text-dim);
+      margin-top: 1rem;
+      font-size: 1.05rem;
+      line-height: 1.6;
+      color: var(--text);
     }
     .doc-sub strong { color: var(--accent); font-weight: 400; }
 
@@ -217,6 +225,19 @@
     .bullets li { display: flex; gap: 0.7rem; align-items: baseline; font-size: 0.95rem; }
     .bullets li + li { margin-top: 0.4rem; }
     .bullets li::before { content: "·"; color: var(--accent); flex: 0 0 auto; }
+    /* The leading term of a claim is bolded so the parallel gaps are scannable
+       without reading each sentence. */
+    .bullets strong { color: #fff; font-weight: 600; }
+
+    /* ── The why-now shifts ───────────────────────────────────────────────
+       Each item is a before → after claim plus the sentence that supports it.
+       The claim leads on its own line, the sentence sits beneath it in the
+       secondary colour, so the three shifts can be read as pairs rather than
+       as run-on paragraphs. It is the same `.bullets` list and accent dot as
+       everywhere else on the page; the claim's white/600 already comes from
+       `.bullets strong`, so only the line break is declared here. */
+    .shifts .claim { display: block; }
+    .shifts .why { display: block; margin-top: 0.2rem; color: var(--text-dim); }
 
     /* ── The six outcomes ─────────────────────────────────────────────── */
     .outcomes {
@@ -308,7 +329,7 @@
     <div class="doc">
       <div class="wrap doc-grid">
         <div>
-          <h1>Investors presentation</h1>
+          <h1>Investor presentation</h1>
           <p class="doc-sub"><strong>Tortoise</strong> - the cognitive layer for agentic organizations</p>
         </div>
 
@@ -349,25 +370,24 @@
     <section id="problem">
       <div class="wrap">
         <h2>The Problem</h2>
-        <p>Agents can execute independently, but reasoning remains fragmented across agent sessions and across team members.</p>
-        <p>Coordination problems compound at machine speed:</p>
+        <p>Agents can make decisions. They struggle to keep them consistent as things change.</p>
+        <p>More agents, faster execution → More assumptions and dependencies → coordination failures at machine speed:</p>
         <ul class="bullets">
-          <li><span>Silos &amp; Suboptimization</span></li>
-          <li><span>Drift &amp; Duplication</span></li>
-          <li><span>Supervision bottlenecks</span></li>
+          <li><span>Local fixes that create problems elsewhere</span></li>
+          <li><span>Repeated work and outdated decisions</span></li>
+          <li><span>Self-propagating Bureaucracy</span></li>
         </ul>
       </div>
     </section>
 
-    <!-- ══ Market gaps ═════════════════════════════════════════════════ -->
-    <section id="market-gaps">
+    <!-- ══ Why now ═════════════════════════════════════════════════════ -->
+    <section id="why-now">
       <div class="wrap">
-        <h2>Market Gaps</h2>
-        <p>Today's agent infrastructure connects agents, but not their reasoning.</p>
-        <ul class="bullets">
-          <li><span>Harnesses orchestrate execution, but reasoning remains largely agent-local.</span></li>
-          <li><span>Memory systems retrieve information, but rarely model its logical implications.</span></li>
-          <li><span>Enterprise ontologies model business operations and decisions, but require substantial infrastructure and modeling effort.</span></li>
+        <h2>WHY NOW</h2>
+        <ul class="bullets shifts">
+          <li><span><strong class="claim">Large teams → Small teams, enterprise-scale complexity</strong><span class="why">Lean teams operate functions previously requiring entire departments.</span></span></li>
+          <li><span><strong class="claim">Periodic coordination → Continuous adaptation</strong><span class="why">Work moves faster than human coordination cycles.</span></span></li>
+          <li><span><strong class="claim">Human knowledge → Machine-computable understanding</strong><span class="why">Collective reasoning and organizational learning, not just information retrieval.</span></span></li>
         </ul>
       </div>
     </section>
@@ -376,21 +396,34 @@
     <section id="solution">
       <div class="wrap">
         <p class="lede">Tortoise provides an agent-native cognitive layer: reasoning, memory, learning.</p>
-        <p>Connect documents, systems of record, BI, agent sessions, or conversation streams. Tortoise builds a logical model of your organization.</p>
-        <p>Agents receive plug-and-play epistemics (ability to compute over broad organizational context), unlocking autonomy, distributed reasoning, and learning.</p>
+        <p>Connect documents, systems of record, BI, agent sessions, or conversation streams. Tortoise builds a logical model of your organization (plug-and-play epistemics).</p>
+        <p>Agents can compute over broad organizational context, unlocking autonomy, distributed reasoning, and learning. Your organization operates coherently at machine speed.</p>
 
         <div class="outcomes">
           <ul class="up">
-            <li><span class="a">↑</span><span>Outcomes per tokens</span></li>
-            <li><span class="a">↑</span><span>Complex Reasoning</span></li>
+            <li><span class="a">↑</span><span>Successful outcomes per token</span></li>
+            <li><span class="a">↑</span><span>Decision quality</span></li>
             <li><span class="a">↑</span><span>Agent Autonomy</span></li>
           </ul>
           <ul class="down">
-            <li><span class="a">↓</span><span>Coordination noise</span></li>
+            <li><span class="a">↓</span><span>Coordination overhead</span></li>
             <li><span class="a">↓</span><span>Drift &amp; Duplication</span></li>
-            <li><span class="a">↓</span><span>Constant Supervision</span></li>
+            <li><span class="a">↓</span><span>Human supervision</span></li>
           </ul>
         </div>
+      </div>
+    </section>
+
+    <!-- ══ Market gaps ═════════════════════════════════════════════════ -->
+    <section id="market-gaps">
+      <div class="wrap">
+        <h2>Market Gaps</h2>
+        <p>Enterprise-grade reasoning, built for an agent-native world.</p>
+        <ul class="bullets">
+          <li><span><strong>Harnesses</strong> coordinate execution, but reasoning is agent-local.</span></li>
+          <li><span><strong>Memory systems</strong> retrieve information, but don&rsquo;t model its logical implications.</span></li>
+          <li><span><strong>Enterprise Intelligence platforms</strong> model business operations and decisions, but require substantial infrastructure and dedicated teams.</span></li>
+        </ul>
       </div>
     </section>
 
@@ -401,15 +434,16 @@
         <div class="profile">
           <div>
             <h3>Wedge</h3>
-            <p>AI-native startups and developers running multiple agents. They value the addition of epistemics (storing and computing WHY to reduce drift).</p>
+            <p>AI-native startups and developers running multiple agents.</p>
             <ul class="bullets">
-              <li><span>Viral content: 1m+ views single tweet</span></li>
-              <li><span>20+ design partners &amp; beta testers</span></li>
+              <li><span>Viral content: 1m+ views on a single tweet</span></li>
+              <li><span>1 design partner (team) &amp; 20+ beta testers (individuals) waiting</span></li>
             </ul>
           </div>
           <div>
-            <h3>Scalability</h3>
-            <p>Bottom-up organizational adoption =&gt; with permission management layer, ontology customization, &amp; local deploys supported.</p>
+            <h3>Expansion</h3>
+            <p>Agent memory → Shared team reasoning → Organizational cognitive infrastructure.</p>
+            <p>Monetization through managed infrastructure, usage, and enterprise capabilities.</p>
           </div>
         </div>
       </div>
@@ -420,11 +454,11 @@
       <div class="wrap">
         <h2>About us</h2>
         <p><strong>Daniel Ospina</strong> - Founder</p>
-        <p>A decade obsessing over coordination systems:</p>
+        <p>A decade building and studying coordination systems:</p>
         <ul class="bullets">
           <li><span>4 years running RnD Ventures - Venture Studio focused on the future of work</span></li>
           <li><span>Previous AI memory startup (Techstars alumni, $500k revenue)</span></li>
-          <li><span>Trained BCG consultants, Oxford visiting lecturer, author (book on networked organizations, TEDx, HBR)</span></li>
+          <li><span>Trained BCG consultants, Daimler, Oxford visiting lecturer, author (book on networked organizations, TEDx, HBR)</span></li>
         </ul>
       </div>
     </section>
