@@ -2299,6 +2299,13 @@ surfaces:
   # `_EVENT_HANDLED` omission (tortoise/projection/entities.py) carries them
   # onto the node without any fold reading them back as Event state.
   - test_event_state_carrier_2788.py
+  # #2782: money as a flat, currency-safe structural value on an entity. The
+  # subject module `tortoise/money.py` matches no SOURCE_PATTERNS entry and is
+  # not a SHARED_MODULE, so a money.py-only change falls through to `core` —
+  # without this entry the flat-field contract and the sum/ratio arithmetic
+  # would not run on the change that can break them. The prose→value DERIVATION
+  # half is #2817 (`tortoise/value_normalizer.py`), deliberately not pinned here.
+  - test_money_value_2782.py
   # #2814: authoritative-config durability across rebuild_all — the config
   # registry + sidecar section live in tortoise/projection/ (core fallback),
   # and pack_state/pack_manifest_store are the writer modules whose labels
@@ -4626,6 +4633,7 @@ durations:
   test_epic903_mcp.py: 0.1
   test_event_log.py: 0.1
   test_event_state_carrier_2788.py: 2.0  # unmeasured — new in #2788; no sweep has collected it, so it carries the flat default exactly as an absent key would (the `#3419`/`test_venture_pack.py` rule). Do NOT substitute a local timing: the weight is a SHARD-LAYOUT input and only a measured CI junit value models the leg that carries the file.
+  test_money_value_2782.py: 2.0  # unmeasured — new in #2782; no sweep has collected it, so it carries the flat default exactly as an absent key would (the `#3419`/`#2788` rule). Do NOT substitute a local timing: the weight is a SHARD-LAYOUT input and only a measured CI junit value models the leg that carries the file. (A local run's first SDK-constructing test carries a one-time embedder init; it is process-global and amortises across every SDK test in the shard, so it is not this file's weight.)
   test_evidence_assembly.py: 0.2
   test_fake_control_plane.py: 0.1
   test_falkordb_compat.py: 0.1
