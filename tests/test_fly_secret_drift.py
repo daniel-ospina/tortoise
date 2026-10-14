@@ -2126,6 +2126,68 @@ def _runbook_workflow_scope_paragraph() -> str:
     return text[start:end]
 
 
+#: An assignment into the secrets-set payload: `ARGS+=(<NAME>=…`.
+_WORKFLOW_ARG_ASSIGN_RE = re.compile(r"ARGS\+=\(([A-Z][A-Z0-9_]*)=")
+
+
+def _workflow_arg_staging(workflow: Path) -> dict[str, str]:
+    """Classify every ARGS staging in the deploy as `unconditional`/`guarded`.
+
+    A name is UNCONDITIONAL when every path through the `Set all app secrets on
+    Fly.io` step assigns it into `ARGS` (so the next deploy always re-stages
+    it), and GUARDED when some run leaves it out — `BACKUP_SWEEP_ENABLED` is
+    assigned only inside the all-backup-secrets conjunction, so an incomplete
+    secret set skips the assignment and Fly keeps whatever value was there.
+
+    Derived from the workflow's own shell (its `if`/`else` structure and any
+    `&& ARGS+=(…)` inline guard), never from a list kept here, so §2's
+    "re-staged on every run" claim is bound to what the deploy does (#8614
+    review).
+    """
+    frames: list[dict] = []
+    by_id: dict[int, dict] = {}
+    #: name -> one list of enclosing-frame ids per assignment site
+    sites: dict[str, list[list[int]]] = {}
+    for line in workflow.read_text().splitlines():
+        stripped = line.strip()
+        if stripped == "fi":
+            if frames:
+                frames.pop()
+            continue
+        if re.match(r"^(else|elif)\b", stripped):
+            if frames:
+                frames[-1]["branch"] = "else"
+            continue
+        if re.match(r"^if\b", stripped) and re.search(r";\s*then\s*$", stripped):
+            frame = {"branch": "then", "branches": {"then": set(), "else": set()}}
+            frames.append(frame)
+            by_id[id(frame)] = frame
+            continue
+        match = _WORKFLOW_ARG_ASSIGN_RE.search(line)
+        if not match:
+            continue
+        name = match.group(1)
+        inline_guarded = "&&" in line[: match.start()]
+        ids = []
+        for frame in frames:
+            frame["branches"][frame["branch"]].add(name)
+            ids.append(id(frame))
+        sites.setdefault(name, []).append(ids)
+        if inline_guarded:
+            sites[name].append([-1])  # sentinel: inline `&&` guard, never unconditional
+    staging: dict[str, str] = {}
+    for name, id_lists in sites.items():
+        guarded = any(
+            fid == -1
+            or name not in by_id[fid]["branches"]["then"]
+            or name not in by_id[fid]["branches"]["else"]
+            for ids in id_lists
+            for fid in ids
+        )
+        staging[name] = "guarded" if guarded else "unconditional"
+    return staging
+
+
 def test_workflow_names_with_a_github_override_are_not_called_secretless():
     """§2 must not deny the GitHub secret a `workflow` name actually has.
 
@@ -2202,4 +2264,64 @@ def test_workflow_names_with_a_github_override_are_not_called_secretless():
             f"the §2 scope paragraph does not say `{name}` is re-staged by the "
             "deploy — an operator reading it would believe a Fly-only value for "
             "that name survives when the next deploy overwrites it (#8614 review)"
+        )
+
+
+def test_workflow_names_whose_staging_is_conditional_are_not_called_unconditional():
+    """§2 must not claim a conditionally-staged `workflow` name is re-staged.
+
+    The round-4 text said the deploy "still re-stages them on every run", and
+    closed with "a Fly-only value set for a `workflow` name is reverted by the
+    next deploy exactly like a `gh-secret:` one". That is false for
+    `BACKUP_SWEEP_ENABLED`, a `workflow` name the same sentence enumerates: the
+    deploy assigns it only inside the all-backup-secrets conjunction, so an
+    incomplete secret set skips the assignment and Fly keeps the old value
+    (fail-closed, #4259 review / `docs/durability-posture.md`). Derived from
+    the workflow, so the claim is bound to the deploy and this guard fails
+    closed if no `workflow` name is guarded any more (#8614 review).
+    """
+    sources = _manifest_sources(REAL_MANIFEST)
+    workflow_names = {n for n, s in sources.items() if s == "workflow"}
+    assert workflow_names, (
+        "the shipped manifest declares no `workflow` name — the reader is wrong"
+    )
+    staging = _workflow_arg_staging(REAL_WORKFLOW)
+    staged = {n for n in workflow_names if n in staging}
+    assert staged, (
+        "no `workflow` name is assigned into the secrets-set payload — the "
+        "workflow reader is stale, so this guard would pass vacuously"
+    )
+    guarded = {n for n in staged if staging[n] == "guarded"}
+    unconditional = staged - guarded
+    assert guarded, (
+        "no `workflow` name is staged only inside a guard — the workflow reader "
+        "is stale, so the conditional-staging clause §2 must carry would pass "
+        "vacuously"
+    )
+    assert unconditional, (
+        "no `workflow` name is staged unconditionally — the workflow reader is "
+        "stale, so the unconditional half of §2 would pass vacuously"
+    )
+
+    para = _runbook_workflow_scope_paragraph()
+    sentences = re.split(r"(?<=\.)\s+", para)
+    for name in sorted(guarded):
+        touched = [s for s in sentences if name in s]
+        assert touched, (
+            f"§2 does not mention the conditionally-staged `workflow` name `{name}` — "
+            "an operator cannot tell that its staging rule differs (#8614 review)"
+        )
+        assert not any(
+            re.search(r"every run|exactly like a `gh-secret:`", s) for s in touched
+        ), (
+            f"§2 claims `{name}` is re-staged on every run / reverted exactly like "
+            "a `gh-secret:` one, but the deploy assigns it only inside a guard and "
+            "otherwise leaves the Fly value untouched (#8614 review)"
+        )
+        assert any(
+            re.search(r"only when|only if|otherwise|unless", s) for s in touched
+        ), (
+            f"§2 names `{name}` but does not state its staging condition — an "
+            "operator would read a Fly-only value for it as reverted when the "
+            "deploy actually leaves it as-is (#8614 review)"
         )

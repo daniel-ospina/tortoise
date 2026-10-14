@@ -176,13 +176,15 @@ the ruling for the first):
 `fly-only:<issue>` names are out-of-band **by recorded decision** —
 `REGISTRY_STREAM_KEY` (`fly-only:#661`) must never be present in GitHub;
 `fly-toml-env` names are applied from the versioned `fly.toml [env]`; and
-`workflow` names have no GitHub secret *as their declared source*, but the
-deploy still re-stages them on every run — `TORTOISE_GIT_SHA` and
-`BACKUP_SWEEP_ENABLED` from non-secret context (`${GITHUB_SHA}`, a composed
-flag), and `TORTOISE_SESSION_LLM_MODEL` from its GitHub secret when one is
-present, else the versioned default (§4.6). So **a Fly-only value set for a
-`workflow` name is reverted by the next deploy exactly like a `gh-secret:`
-one** — only the source differs, never whether the deploy overwrites it.
+`workflow` names have no GitHub secret *as their declared source*. Two of them
+are re-staged on **every** run — `TORTOISE_GIT_SHA` from non-secret context
+(`${GITHUB_SHA}`) and `TORTOISE_SESSION_LLM_MODEL` from its GitHub secret when
+one is present, else the versioned default (§4.6) — so a Fly-only value for
+either is reverted by the next deploy exactly like a `gh-secret:` one.
+`BACKUP_SWEEP_ENABLED` is the exception: it is staged to `true` **only when**
+the whole backup/R2/DR secret set is present, and otherwise the assignment is
+skipped and any Fly-side value is left as it was (the fail-closed default —
+`docs/durability-posture.md`).
 
 **One value, two homes — generate once, set GitHub first, then apply that same
 value to Fly.** `$(openssl rand …)` re-rolled inside the `fly secrets set` line
