@@ -356,10 +356,16 @@ clear about what is and is not enforced:
 
 - **The reviewer is contained; the fixer is deliberately not.** `merge-one.sh` runs its
   fresh-context reviewer in a **disposable, detached** git worktree of its own
-  (`$O/review/<PR>-<head>`, created outside the repo), and no longer exports the main-edits hatch.
+  (`$O/review/<PR>-<head>`, created outside the repo), and **unsets** the main-edits hatch rather
+  than merely not exporting it — `fix-one.sh` exports the hatch and runs `merge-one.sh` as a child,
+  and an exported variable is inherited, so the unset is what makes the refusal hold on the
+  re-review path that follows every fixer run.
   A commit there moves no branch, a mutation in it cannot reach the reviewed tree, and a reviewer
   that wanders into the shared checkout is **refused by `main-worktree-guard` rather than obeyed**.
-  The tree is removed on exit, and a ref move under the reviewer is logged and refuses to record a
+  The tree is removed on exit, deregistering **only its own** worktree record by name — a repo-wide
+  `git worktree prune` is banned (it deregisters every record whose directory is not stat-able at
+  that instant, orphaning a sibling lane's checkout) — and a move of the **reviewed branch's** refs
+  under the reviewer is logged with the ref and sha that actually moved, and refuses to record a
   verdict (#8484). The **fixer** is the opposite on purpose: `fix-one.sh` runs in the PR's own
   worktree with `AGENT_ALLOW_MAIN_EDITS=1`, because writing to that tree IS its job. Both still run
   with `AGENT_SKIP_REVIEW_GATE=1`, `ELDATO_SKIP_VGATE=1`, `SKILL_ENFORCER_DISABLED=1` and
@@ -589,7 +595,9 @@ because the self-test now drives every one of them:
   carried ~150 by the end of the run. Nothing removes them after their PR merges. The reviewer's
   sandbox is the exception — `merge-one.sh`'s EXIT trap removes it on every exit, normal or
   trapped — but a worker that is SIGKILLed (or the box that dies) leaves one behind, like every
-  other worktree.
+  other worktree. That trap deregisters **only its own** record (the sandbox's own `gitdir:` name);
+  repo-wide pruning is the #1095 reaper's job, because a bare `git worktree prune` deregisters every
+  record whose directory is not stat-able at that instant and can orphan a sibling lane's checkout.
 
 ---
 

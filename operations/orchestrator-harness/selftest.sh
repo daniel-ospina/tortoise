@@ -1328,12 +1328,20 @@ SH
   printf '#!/bin/bash\nfor a in "$@"; do [ "$a" = ".headRefOid" ] && { echo deadbeefdeadbeef; exit 0; }; done\nexit 0\n' > "$GB/gh"
   cat > "$GB/git" <<'SH'
 #!/bin/bash
+# HATCH_ENVF: record what the SHIPPED script's own environment looks like when it runs a command.
+# The main-edits hatch must be UNSET by that point (a caller — fix-one.sh — exports it and runs
+# merge-one.sh as a child); reading it here is host-independent and needs no `pi` to run.
+[ -n "${HATCH_ENVF:-}" ] && printf 'AGENT_ALLOW_MAIN_EDITS=%s ELDATO_ALLOW_MAIN_EDITS=%s\n' "${AGENT_ALLOW_MAIN_EDITS:-unset}" "${ELDATO_ALLOW_MAIN_EDITS:-unset}" >> "$HATCH_ENVF"
 if [ "${3:-}" = "worktree" ] && [ "${4:-}" = "add" ]; then
   prev=""
   for a in "$@"; do
     if [ "$prev" = "--detach" ]; then mkdir -p "$a"; break; fi
     prev="$a"
   done
+  # WMARK makes the CALL visible, not just its effect: the load-gate ordering check asserts a
+  # refused run never got this far, which an absent directory cannot distinguish from a host with
+  # no $O/review at all.
+  [ -n "${WMARK:-}" ] && printf '%s\n' "$a" >> "$WMARK"
   echo "Preparing worktree"
   exit 0
 fi
@@ -1364,8 +1372,8 @@ SH
   #     records a refusal must not leave behind.
   probe() { # probe <script> <load> <O> <args...>
     local script="$1" load="$2" o="$3"; shift 3
-    mkdir -p "$o/logs" "$o/state"; rm -f "$GMARK"
-    ( export PATH="$GB:$PATH" FAKE_LOAD="$load" PI_MARKER="$GMARK" MAX_LOAD=100 \
+    mkdir -p "$o/logs" "$o/state"; rm -f "$GMARK" "$o/wmark"
+    ( export PATH="$GB:$PATH" FAKE_LOAD="$load" PI_MARKER="$GMARK" WMARK="$o/wmark" MAX_LOAD=100 \
              O="$o" LANE_TIMEOUT=1 REVIEW_TIMEOUT=1 FIX_TIMEOUT=1
       bash "$HERE/$script" "$@" ) >/dev/null 2>&1
     PROBE_RC=$?
@@ -1385,15 +1393,52 @@ SH
   probe merge-one.sh 150 "$TMP/pmO" "$TMP/mrepo" owner/repo 1 br
   [ "$PROBE_RC" = "75" ] && [ ! -e "$GMARK" ] && grep -q REFUSED "$TMP/pmO/logs/merge-1.log" && rc=0 || { rc=1; echo "      rc=$PROBE_RC"; }
   ck "merge-one.sh under load 150 (the chain-<N> path): reviewer REFUSES to spawn, exits 75" $rc
-  # #8484: the refusal must also leave NO review sandbox. The gate is consulted before the checkout
-  # is provisioned, so a refused run does no repo-sized work on the box it was refused for.
+  # #8484: the refusal must also leave NO review sandbox. Pin the ORDERING on the CALL that would
+  # provision it — the stub `git` records every `worktree add` into $WMARK — rather than on the
+  # absence of a directory: absent is also what a host with no $O/review at all looks like, which is
+  # why the old assertion could not fail for the reason it named (review finding, PR #8589). A
+  # reordering that provisions before the gate now fails here, and the positive half below pins the
+  # other direction (the pre-fix tree, which has no sandbox at all, fails THAT one).
+  [ ! -e "$TMP/pmO/wmark" ] && rc=0 || { rc=1; echo "      'git worktree add' was invoked: $(tr '\n' ' ' < "$TMP/pmO/wmark" 2>/dev/null)"; }
+  ck "a load-refused reviewer never runs 'git worktree add' (the gate precedes the checkout)" $rc
   [ ! -e "$TMP/pmO/review" ] && rc=0 || { rc=1; echo "      sandbox left: $(ls "$TMP/pmO/review" 2>/dev/null | tr '\n' ' ')"; }
-  ck "a load-refused reviewer creates NO review sandbox (the gate precedes the checkout)" $rc
+  ck "a load-refused reviewer creates NO review sandbox" $rc
   [ -z "$(ls "$TMP/pmO/state" 2>/dev/null | grep '^needsfix-1-')" ] && [ ! -e "$TMP/pmO/state/mergeclaim-1.lock" ] && rc=0 || { rc=1; echo "      state: $(ls "$TMP/pmO/state" 2>/dev/null | tr '\n' ' ')"; }
   ck "a load refusal is NOT a verdict: no needsfix marker, and the PR claim is released" $rc
   probe merge-one.sh 3 "$TMP/pmO2" "$TMP/mrepo" owner/repo 1 br
   [ -e "$GMARK" ] && rc=0 || rc=1
   ck "merge-one.sh under load 3: the reviewer IS spawned" $rc
+  # …and the POSITIVE half of the ordering: a reviewer that DID start really did ask git for its
+  # checkout. Together the two pin "provisioned iff the gate passed" — the pre-fix tree has no
+  # review_sandbox at all and fails THIS one, so the pair is not vacuous.
+  [ -s "$TMP/pmO2/wmark" ] && grep -q "$TMP/pmO2/review/" "$TMP/pmO2/wmark" && rc=0 || { rc=1; echo "      wmark: $(tr '\n' ' ' < "$TMP/pmO2/wmark" 2>/dev/null)"; }
+  ck "a started reviewer DID provision its checkout ('git worktree add' on the review sandbox)" $rc
+  # The ORDERING pinned host-independently: force the gate itself to refuse (MAX_LOAD=0 is numeric
+  # and still flows through can_spawn) and assert the run refused AND never reached
+  # `git worktree add`. The FAKE_LOAD probe above cannot pin this on a host where /proc/loadavg is
+  # readable and the fake load never applies (this file's macOS-only probes), so this one carries
+  # the check everywhere: provisioning before the gate leaves a marker even on Linux.
+  GO="$TMP/pgO"; mkdir -p "$GO/logs" "$GO/state"; rm -f "$GO/wmark" "$GMARK"
+  ( export PATH="$GB:$PATH" MAX_LOAD=0 WMARK="$GO/wmark" PI_MARKER="$GMARK" O="$GO" REVIEW_TIMEOUT=1
+    bash "$HERE/merge-one.sh" "$TMP/mrepo" owner/repo 1 br ) >/dev/null 2>&1
+  grep -q 'REFUSED reviewer' "$GO/logs/merge-1.log" && [ ! -e "$GO/wmark" ] && [ ! -e "$GMARK" ] && rc=0 \
+    || { rc=1; echo "      log: $(tail -2 "$GO/logs/merge-1.log" 2>/dev/null | tr '\n' ' ')"; }
+  ck "a gate-refused run never provisions: the gate's refusal precedes 'git worktree add'" $rc
+  # ⛔ PR #8589 review: merge-one.sh no longer EXPORTS the main-edits hatch, but fix-one.sh:30 does
+  # and then runs merge-one.sh as a CHILD (fix-one.sh:137) — an exported variable is inherited
+  # across `bash <script>`, so the re-review that follows EVERY fixer began with the hatch OPEN and
+  # main-worktree-guard obeyed it. Driven: run the SHIPPED script with the hatch pre-set in the
+  # parent and read the hatch out of a stub command the script itself runs (the `git` stub above).
+  # That observation point is host-independent — it needs no `pi` — and it is AFTER the unset.
+  # Non-vacuous: the pre-fix script has no unset, so the recorded values are 1 and the check fails.
+  HO="$TMP/peO"; mkdir -p "$HO/logs" "$HO/state"; HATCHF="$HO/hatch.txt"; rm -f "$HATCHF" "$GMARK"
+  ( export PATH="$GB:$PATH" FAKE_LOAD=3 HATCH_ENVF="$HATCHF" MAX_LOAD=100 \
+           O="$HO" REVIEW_TIMEOUT=1 AGENT_ALLOW_MAIN_EDITS=1 ELDATO_ALLOW_MAIN_EDITS=1
+    bash "$HERE/merge-one.sh" "$TMP/mrepo" owner/repo 1 br ) >/dev/null 2>&1
+  [ -s "$HATCHF" ] && rc=0 || rc=1
+  ck "the hatch-inheritance probe reached the script's own commands (the hatch was observable)" $rc
+  grep -q 'AGENT_ALLOW_MAIN_EDITS=unset ELDATO_ALLOW_MAIN_EDITS=unset' "$HATCHF" 2>/dev/null && rc=0 || { rc=1; echo "      saw: $(sort -u "$HATCHF" 2>/dev/null | tr '\n' ' ')"; }
+  ck "merge-one.sh UNSETS an inherited main-edits hatch (it is not merely un-exported)" $rc
   # …and the reviewer really was given the sandbox: the EXIT trap must have removed it again, so a
   # leaked mutant cannot survive the run (#8484).
   [ -d "$TMP/pmO2/review" ] && [ ! -e "$TMP/pmO2/review/1-deadbeefdeadbeef" ] && rc=0 || { rc=1; echo "      review dir: $(ls "$TMP/pmO2/review" 2>/dev/null | tr '\n' ' ')"; }
@@ -1900,7 +1945,16 @@ grep -q 'cd "\$SANDBOX"' "$MERGE" && rc=0 || rc=1
 ck "the reviewer's cwd is the sandbox (cd \"\$SANDBOX\")" $rc
 grep -qE '^ *cd \$REPO && git fetch' "$MERGE" && rc=1 || rc=0
 ck "the reviewer prompt no longer sends the reviewer into the shared checkout" $rc
-sed -n '/^review_sandbox() {/,/^}/p;/^review_cleanup() {/,/^}/p;/^ref_shas() {/,/^}/p' "$MERGE" > "$TMP/rfuncs.sh"
+# A bare `git worktree prune` in the EXIT trap is the banned shape (agent-infra docs/ops/load-policy.md:491):
+# it deregisters EVERY record whose directory is not stat-able at that instant, so it can orphan an
+# unrelated sibling lane's checkout. Match CODE only — the comment above legitimately names it.
+grep -vE '^[[:space:]]*#' "$MERGE" | grep -q 'worktree prune' && rc=1 || rc=0
+ck "merge-one.sh runs NO repo-wide 'git worktree prune' (targeted deregistration instead)" $rc
+grep -q 'drop_sandbox_record' "$MERGE" && rc=0 || rc=1
+ck "merge-one.sh deregisters its sandbox's OWN worktree record by name" $rc
+grep -q 'refs/pull/\$PR/head' "$MERGE" && rc=0 || rc=1
+ck "merge-one.sh fetches the PR head ref (a fork PR's head is not on origin)" $rc
+sed -n '/^sandbox_record() {/,/^}/p;/^drop_sandbox_record() {/,/^}/p;/^review_sandbox() {/,/^}/p;/^review_cleanup() {/,/^}/p;/^ref_shas() {/,/^}/p;/^mover_of() {/,/^}/p' "$MERGE" > "$TMP/rfuncs.sh"
 if need "$TMP/rfuncs.sh" "the review-sandbox helpers are extracted from the shipped merge-one.sh"; then
   SB="$TMP/src"; mkdir -p "$SB"
   git -C "$SB" init -q
@@ -1948,6 +2002,71 @@ if need "$TMP/rfuncs.sh" "the review-sandbox helpers are extracted from the ship
   ck "review_cleanup removes the reviewer's checkout (no mutant is left behind)" $rc
   [ "$(git -C "$SB" worktree list 2>/dev/null | wc -l | tr -d ' ')" = "1" ] && rc=0 || rc=1
   ck "review_cleanup leaves no worktree admin entry in the reviewed repo" $rc
+
+  # ── a RECORD WHOSE TREE IS GONE must not brick this head forever (#8589 review) ──
+  # Drive the SHIPPED review_sandbox through the exact state its own comment anticipates: a damaged
+  # tree makes `worktree remove` refuse, the `rm -rf` fallback removes the directory, and the
+  # registration survives. Without the targeted drop the second call gets
+  # "fatal: '<dir>' is a missing but already registered worktree" and prints nothing — merge-one.sh
+  # then exits 6, which writes no needsfix marker, so the head is re-dispatched forever and can
+  # never be reviewed.
+  S2O="$TMP/out2"
+  {
+    echo 'set -u'
+    echo "O='$S2O'"; echo "REPO='$SB'"; echo 'PR=9192'
+    cat "$TMP/rfuncs.sh"
+    echo 'A="$(review_sandbox '"$SHA"')"'
+    echo '[ -n "$A" ] || { echo FIRST_FAILED; exit 1; }'
+    echo 'rm -f "$A/.git"'          # damaged in place: remove refuses, the directory is still there
+    echo 'B="$(review_sandbox '"$SHA"')"'
+    echo 'echo "B=$B"'
+    echo '[ -n "$B" ] || { echo SECOND_FAILED; exit 1; }'
+    echo 'echo "BDET=$(git -C "$B" rev-parse --abbrev-ref HEAD)"'
+    echo 'rm -rf "$B"'              # the directory is simply gone; the record is not
+    echo 'C="$(review_sandbox '"$SHA"')"'
+    echo 'echo "C=$C"'
+    echo '[ -n "$C" ] || { echo THIRD_FAILED; exit 1; }'
+    echo 'SANDBOX="$C"; review_cleanup'
+    echo 'echo "CGONE=$([ -d "$C" ] && echo no || echo yes)"'
+    echo 'echo "CRECORDS=$(git -C "$REPO" worktree list | wc -l | tr -d " ")"'
+  } > "$TMP/sbdrive2.sh"
+  bash -n "$TMP/sbdrive2.sh" && rc=0 || rc=1
+  ck "the dangling-record recovery driver parses" $rc
+  sbout2="$(bash "$TMP/sbdrive2.sh" 2>&1)"
+  case "$sbout2" in *SECOND_FAILED*|*THIRD_FAILED*) rc=1; echo "      $(printf '%s' "$sbout2" | tr '\n' ' ')";; *) rc=0;; esac
+  ck "review_sandbox recovers from a registration whose tree is gone (the head is not bricked)" $rc
+  case "$sbout2" in *'BDET=HEAD'*) rc=0;; *) rc=1;; esac
+  ck "the recovered sandbox is a real detached checkout, not a reused tree" $rc
+  case "$sbout2" in *'CGONE=yes'*'CRECORDS=1'*) rc=0;; *) rc=1; echo "      got: $(printf '%s' "$sbout2" | grep -aE 'CGONE|CRECORDS' | tr '\n' ' ')";; esac
+  ck "the recovered sandbox is cleaned up with its record (nothing left behind)" $rc
+
+  # ── the cleanup is TARGETED: a sibling lane's record survives even when its directory is not
+  # stat-able — exactly the harm of the banned repo-wide prune, which deregisters every such record.
+  SIB="$TMP/sibling"; rm -rf "$SIB"; mkdir -p "$SIB"
+  git -C "$SB" worktree add --detach "$SIB" "$SHA" >/dev/null 2>&1
+  rm -rf "$SIB"   # unmounted volume / permission blip: the directory is not stat-able
+  {
+    echo 'set -u'
+    echo "O='$TMP/out3'"; echo "REPO='$SB'"; echo 'PR=9193'
+    cat "$TMP/rfuncs.sh"
+    echo 'S="$(review_sandbox '"$SHA"')"'
+    echo '[ -n "$S" ] || exit 1'
+    echo 'SANDBOX="$S"; review_cleanup'
+  } > "$TMP/sbtarget.sh"
+  bash "$TMP/sbtarget.sh" >/dev/null 2>&1
+  [ -d "$SB/.git/worktrees/sibling" ] && rc=0 || { rc=1; echo "      a sibling record was deregistered"; }
+  ck "review_cleanup leaves a sibling worktree record alone (no repo-wide prune)" $rc
+  rm -rf "$TMP/sibling"
+
+  # ── the mover the ref-move detector names is the field that ACTUALLY moved (#8589 review) ──
+  # A reviewer that pushes moves `refs/remotes/origin/<br>` but NOT `refs/heads/<br>`; the old
+  # local-first pick therefore logged the UNCHANGED, already-reviewed head.
+  got="$(bash -c ". '$TMP/rfuncs.sh'; mover_of 'aaa bbb' 'aaa ccc' feat/x")"
+  [ "$got" = "refs/remotes/origin/feat/x ccc" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "a remote-only move is attributed to the NEW remote tip, not the unchanged local tip" $rc
+  got="$(bash -c ". '$TMP/rfuncs.sh'; mover_of 'aaa bbb' 'ddd bbb' feat/x")"
+  [ "$got" = "refs/heads/feat/x ddd" ] && rc=0 || { rc=1; echo "      got '$got'"; }
+  ck "a local move is attributed to the new local tip" $rc
 fi
 
 echo

@@ -35,6 +35,13 @@ export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH
 # main-worktree-guard instead of obeyed. fix-one.sh keeps the hatch — a fixer writing to the tree
 # IS its job.
 export AGENT_SKIP_REVIEW_GATE=1 ELDATO_SKIP_VGATE=1
+# ⛔ NOT EXPORTING IS NOT ENOUGH — the hatch is UNSET here, not merely omitted. An exported variable
+# is inherited across `bash <script>`, and fix-one.sh:30 exports the hatch and then runs THIS script
+# as a child (fix-one.sh:137), so on the re-review that follows EVERY fixer run the reviewer started
+# with the hatch OPEN and main-worktree-guard OBEYED it — the containment this script advertises was
+# inert on its most common path (PR #8589 review). The property must belong to this script, not to a
+# caller that happens to be clean.
+unset AGENT_ALLOW_MAIN_EDITS ELDATO_ALLOW_MAIN_EDITS 2>/dev/null || true
 export PI_MCP_SERVERS=none   # headless reviewer uses no MCP servers — saves ~25 processes/run
 export PI_SKIP_VERSION_CHECK=1 SKILL_ENFORCER_DISABLED=1 LOOP_ENFORCER_DISABLED=1 SLACK_BRIDGE_DISABLE=1 VISION_INTERCEPTOR_DISABLED=1
 cd "$REPO" || exit 1
@@ -52,6 +59,41 @@ git fetch origin "$BR" --quiet 2>/dev/null || true   # external (other-machine) 
 # nothing. The tree is created OUTSIDE the repo so nothing it writes lands under the checkout as even
 # an ignored path, and it is removed on exit so a leaked mutation is discarded WITH the tree instead
 # of being swept into someone's commit. The containment is the mount, not the prompt.
+# The ADMIN RECORD that git keeps for OUR sandbox — and never a scan of anyone else's. Two ways to
+# find it: (a) the tree is still on disk and its `.git` file names the record outright; (b) the
+# directory is gone but the record survived, and git names the record after the sandbox basename.
+sandbox_record() { # sandbox_record <sandbox-dir> — print the admin dir, or nothing
+  local d="${1:-}" g gcd
+  [ -n "$d" ] || return 0
+  g="$(sed -n 's/^gitdir: //p' "$d/.git" 2>/dev/null)"
+  if [ -n "$g" ]; then printf '%s' "$g"; return 0; fi
+  gcd="$(git -C "${REPO:-.}" rev-parse --git-common-dir 2>/dev/null)"
+  case "$gcd" in ''|'.') gcd="${REPO:-.}/.git" ;; /*) ;; *) gcd="${REPO:-.}/$gcd" ;; esac
+  [ -d "$gcd/worktrees/${d##*/}" ] && printf '%s' "$gcd/worktrees/${d##*/}"
+  return 0
+}
+
+# Deregister exactly ONE record — OURS — and only after its own `gitdir` file names our sandbox.
+# ⛔ A bare `git worktree prune` is BANNED here (agent-infra docs/ops/load-policy.md:491; repo-wide
+# pruning is the #1095 reaper's job, and skills/code-review/SKILL.md forbids the shape for exactly
+# this reason): it deregisters EVERY record whose directory is not stat-able at that instant
+# (unmounted volume, permission blip, stale network mount), so a routine probe silently orphans an
+# unrelated sibling lane's checkout while its files sit on disk. It is also unnecessary here — the
+# record is ours by name, so it can be removed by name.
+drop_sandbox_record() { # drop_sandbox_record <sandbox-dir>
+  local d="${1:-}" rec g
+  [ -n "$d" ] || return 0
+  rec="$(sandbox_record "$d")"
+  case "$rec" in */worktrees/*) ;; *) return 0 ;; esac
+  # NB: the record's own `gitdir` file holds the path PLAIN (no `gitdir: ` prefix, unlike the
+  # worktree's `.git` file); strip the prefix too in case a future git adds it.
+  g="$(sed -n '1{s/^gitdir: //;p;}' "$rec/gitdir" 2>/dev/null)"
+  [ -n "$g" ] || return 0
+  case "$g" in "$d"/.git|*/"${d##*/}"/.git) ;; *) return 0 ;; esac
+  rm -rf "$rec"
+  return 0
+}
+
 review_sandbox() { # review_sandbox <ref|sha> — print the sandbox path, or nothing on failure
   [ -n "${1:-}" ] || return 1
   local base slug dir
@@ -68,19 +110,32 @@ review_sandbox() { # review_sandbox <ref|sha> — print the sandbox path, or not
   if [ -e "$dir" ]; then
     git -C "$REPO" worktree remove --force "$dir" >/dev/null 2>&1 || rm -rf "$dir"
   fi
-  git -C "$REPO" worktree add --detach "$dir" "$base" >/dev/null 2>&1 || { rm -rf "$dir"; return 1; }
+  # ⛔ A RECORD WITHOUT ITS TREE BRICKS THIS HEAD FOREVER. A registration keyed to this same sandbox
+  # name survives a crashed run, and with the directory gone `worktree add` refuses ("missing but
+  # already registered worktree") — measured with the shipped helper. review_sandbox then prints
+  # nothing, merge-one.sh exits 6, and exit 6 writes NO needsfix marker, so the controller
+  # re-dispatches a PR that can never be reviewed, every cycle, with no terminal state. Clear OUR OWN
+  # record first — by name, never a repo-wide prune (see drop_sandbox_record).
+  drop_sandbox_record "$dir"
+  git -C "$REPO" worktree add --detach "$dir" "$base" >/dev/null 2>&1 || { rm -rf "$dir"; drop_sandbox_record "$dir"; return 1; }
   printf '%s' "$dir"
 }
 
 # The reviewer's checkout must never outlive this run. `worktree remove` drops git's admin entry AND
 # the tree, but its exit status is NOT trusted and neither step is conditional on the other: a
 # sandbox that survives the run is the leak this exists to prevent, whatever git reported. (A tree
-# the reviewer deleted or damaged makes `remove` refuse — hence the rm + prune behind it.)
+# the reviewer deleted or damaged makes `remove` refuse — hence the rm + the TARGETED deregistration
+# behind it.) It runs in the EXIT trap of a script that fires on every merge, on the shared checkout,
+# so it may not touch any record that is not its own: a bare `git worktree prune` here was a P1
+# finding and is BANNED (agent-infra docs/ops/load-policy.md:491, skills/code-review/SKILL.md).
 review_cleanup() {
   [ -n "${SANDBOX:-}" ] || return 0
   git -C "${REPO:-.}" worktree remove --force "$SANDBOX" >/dev/null 2>&1
   [ -e "$SANDBOX" ] && rm -rf "$SANDBOX"
-  git -C "${REPO:-.}" worktree prune >/dev/null 2>&1
+  # `remove` drops the admin entry when it succeeds. When it refused (a damaged tree) the record
+  # survives the rm -rf above and would brick the next provisioning at this head — so drop OURS, by
+  # name. Never a repo-wide prune: see drop_sandbox_record.
+  drop_sandbox_record "$SANDBOX"
   return 0
 }
 
@@ -91,6 +146,20 @@ ref_shas() { # ref_shas <branch> — "<local> <remote>", "-" for an absent ref
   printf '%s %s' \
     "$(git -C "$REPO" rev-parse -q --verify "refs/heads/$1" 2>/dev/null || echo -)" \
     "$(git -C "$REPO" rev-parse -q --verify "refs/remotes/origin/$1" 2>/dev/null || echo -)"
+}
+
+# WHICH of the two sampled refs actually moved, and its sha. Taking the LOCAL field first (the
+# pre-#8589 shape) mis-attributes the mover: a reviewer that pushes updates
+# `refs/remotes/origin/<br>` but NOT `refs/heads/<br>`, so the local field is the UNCHANGED tip that
+# was already under review — the log then named the wrong commit and the wrong actor. Diagnostic
+# only (the refusal itself was right), but a mis-attribution is worse than none when the whole point
+# is to name who moved the branch.
+mover_of() { # mover_of <pre "<local> <remote>"> <post> <branch> — "<ref> <sha>"
+  local pre_l pre_r post_l post_r
+  pre_l="${1%% *}"; pre_r="${1##* }"
+  post_l="${2%% *}"; post_r="${2##* }"
+  if [ "$post_l" != "$pre_l" ]; then printf 'refs/heads/%s %s' "$3" "$post_l"; return 0; fi
+  printf 'refs/remotes/origin/%s %s' "$3" "$post_r"
 }
 
 # ── single-owner claim ────────────────────────────────────────────────────────
@@ -133,6 +202,13 @@ fi
 
 HEAD="$(gh pr view "$PR" --repo "$OR" --json headRefOid --jq .headRefOid 2>/dev/null)"
 echo "[merge $PR] start $(date) head=$HEAD branch=$BR" > "$L.log"
+# ⛔ THE HEAD OID MAY NOT EXIST IN THE LOCAL OBJECT STORE. A FORK PR's branch is not on `origin` at
+# all, so the tolerant `git fetch origin "$BR"` above cannot find it and `worktree add <oid>` then
+# fails hard (`fatal: invalid reference`). Not fetched = this PR can NEVER be reviewed: exit 6 writes
+# no needsfix marker, so broad mode re-dispatches it every cycle, forever (PR #8589 review).
+# `refs/pull/<N>/head` is where GitHub publishes a fork PR's head, and fetching it is the one call
+# that makes the oid present.
+[ -n "${HEAD:-}" ] && git -C "$REPO" fetch origin "refs/pull/$PR/head" --quiet 2>/dev/null || true
 
 # The reviewer's cwd: an ISOLATED, detached checkout of the head being reviewed (#8484). A failure
 # to provision is NOT fallen back to the shared checkout — that fallback would restore exactly the
@@ -140,6 +216,15 @@ echo "[merge $PR] start $(date) head=$HEAD branch=$BR" > "$L.log"
 SANDBOX="$(review_sandbox "${HEAD:-refs/heads/$BR}")"
 if [ -z "$SANDBOX" ]; then
   echo "[merge $PR] ABORT: could not provision an isolated review checkout for ${HEAD:-refs/heads/$BR} — refusing to run the reviewer in the shared checkout (#8484)" >> "$L.log"
+  # ⛔ AN UNREVIEWABLE HEAD MUST NOT BE AN UNBOUNDED PER-CYCLE RE-DISPATCH. A bare exit 6 writes no
+  # marker, so the controller falls through to the re-record branch every cycle with no terminal
+  # state and no escalation. When the head oid genuinely is not in the local store even after the
+  # `refs/pull/<N>/head` fetch above, PARK it at this head: orch-loop.sh skips a PR whose
+  # `parked-<PR>` equals its head, and a later push re-arms it (the marker is head-bound).
+  if [ -n "${HEAD:-}" ] && ! git -C "$REPO" cat-file -e "${HEAD}^{commit}" 2>/dev/null; then
+    echo "$HEAD" > "$O/state/parked-$PR"
+    echo "[merge $PR] ⛔ PARKED at head=$HEAD: the head object is not in the local object store even after fetching refs/pull/$PR/head — a human must push or fetch it; no verdict was recorded" >> "$L.log"
+  fi
   exit 6
 fi
 echo "[merge $PR] review sandbox=$SANDBOX (detached at ${HEAD:-refs/heads/$BR})" >> "$L.log"
@@ -182,8 +267,11 @@ run_agent "${REVIEW_TIMEOUT:-1800}" "$L.log" "$L-reviewer.txt" "reviewer for PR 
 POST_REFS="$(ref_shas "$BR")"
 if [ "$POST_REFS" != "$PRE_REFS" ]; then
   echo "[merge $PR] ⛔ UNREQUESTED REF MOVE while the reviewer ran: refs/heads/$BR + refs/remotes/origin/$BR were '$PRE_REFS' before it started, now '$POST_REFS'" >> "$L.log"
-  mover="${POST_REFS%% *}"
-  [ "$mover" = "-" ] && mover="$(printf '%s' "$POST_REFS" | awk '{print $2}')"
+  # Name the field that ACTUALLY moved (mover_of): a push from the sandbox moves only the
+  # remote-tracking ref, so a local-first pick logged the unchanged, already-reviewed head.
+  mover_info="$(mover_of "$PRE_REFS" "$POST_REFS" "$BR")"
+  moved="${mover_info%% *}"; mover="${mover_info##* }"
+  echo "[merge $PR] ⛔ the moved ref is $moved" >> "$L.log"
   [ "$mover" != "-" ] && git -C "$REPO" log --no-walk --format="[merge $PR] mover: author=%an <%ae> committer=%cn <%ce> %h %s" "$mover" >> "$L.log" 2>&1
   echo "[merge $PR] ⛔ NOT recording a verdict — the reviewed head is gone; the controller re-dispatches on the new head" >> "$L.log"
   exit 5
