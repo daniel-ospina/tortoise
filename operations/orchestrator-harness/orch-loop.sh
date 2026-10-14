@@ -3,18 +3,53 @@
 # Fast, non-blocking cycle: heartbeat -> merge sweep -> capacity-gated dispatch -> background refresh.
 set -u
 OR="${OR:-daniel-ospina/tortoise}"
-REPO="${REPO:-/Users/home/eldato/tortoise}"
+# ⛔ THE OLD DEFAULT POINTED AT A PATH THAT DOES NOT EXIST ON THIS BOX
+# (/Users/home/eldato/tortoise). Under the shipped launchd job this is only a FALLBACK --
+# install.sh renders its own REPO into the plist via __REPO__, and that value overrides this one.
+# It still matters for every REPO-less run (manual starts, the runbook, a re-install without env),
+# and there a missing path is indistinguishable from "nothing to do" -- the same class as the
+# gh-shim failure (#8246). Corrected, and made to fail LOUD rather than run against a path with
+# nothing in it. (Corrected after a fresh-context verifier showed the original comment misstated
+# the mechanism -- see the review on this PR.)
+REPO="${REPO:-/Users/danielospina/Documents/GitHub/tortoise}"
+if [ ! -d "$REPO" ]; then echo "orch-loop: FATAL REPO=$REPO does not exist" >&2; exit 78; fi
 O="${O:-$HOME/orchestrator}"
 export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH
 export AGENT_SKIP_REVIEW_GATE=1 ELDATO_SKIP_VGATE=1
+# The ONE load gate and the ONE `pi` invocation live in the shared helper (agent-infra#1720), so
+# the controller's decision sites here and the workers' actual spawns cannot drift apart. Sourced
+# AFTER the PATH export because the helper resolves MAX_LOAD from the core count (sysctl), exactly
+# as it did here before, and BEFORE the limits below so an env MAX_LOAD (the plist) still wins.
+# Fail LOUD if it is missing: the controller's whole capacity discipline is in there, and a silent
+# degradation would spawn every worker ungated (see README §9 on syncing $O).
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SELF/spawn-gate.sh" || { echo "orch-loop: FATAL: $SELF/spawn-gate.sh missing — refusing to run the controller without its load gate" >&2; exit 78; }
 
 MAX_FIX="${MAX_FIX:-3}"
 MAX_FIX_TRIES="${MAX_FIX_TRIES:-3}"
-MAX_LOAD="${MAX_LOAD:-16}"
+# ⛔ MAX_LOAD IS A SANITY CEILING, NOT A THROUGHPUT TARGET -- and 16 was too tight for this box.
+# Measured 2026-10-13 over 3940 log lines of the live harness: 103 were
+# `[dispatch] skipped (load=N>=max_load=16)` and 96 were merge-priority. The gate DID open when
+# load dipped below 16 (13 `[dispatch] load=` lines exist in that window), so the accurate claim is
+# that it is too tight for a 17-workspace fleet on 10 cores -- NOT that it never opened. The box
+# merged 25 PRs in a day at load 17-52 and has been observed functioning at ~100; a ceiling at 16
+# leaves the dispatcher off for most of the day.
+# (Corrected after a fresh-context verifier counted the dispatch lines the first claim ignored.)
+# The REAL capacity constraint is the machine (available RAM / swap) -- see the gate chain below.
+# MAX_LOAD itself is resolved in the sourced helper (spawn-gate.sh) — NOT here — because the
+# WORKERS read it too: one definition, so the ceiling the controller's decision applies and the
+# ceiling the spawn that actually starts an agent applies cannot diverge (agent-infra#1720).
+# The helper derives the core count PORTABLY (`sysctl` → `nproc` → `getconf`, #1702: `sysctl -n
+# hw.ncpu` is macOS-only, so `|| echo 4` silently pinned every Linux cell to MAX_LOAD=40) and
+# coerces a non-numeric `_NCPU`/`MAX_LOAD` rather than letting `[ -ge ]` fail OPEN. `is_num`, which
+# the coercions below use, is defined there too — this file has sourced it a few lines up.
 MAX_LANES="${MAX_LANES:-4}"
 MAX_REVIEW="${MAX_REVIEW:-4}"   # keep in sync with install.sh's default and README §4
 MERGE_PRIORITY_AT="${MERGE_PRIORITY_AT:-10}"   # above this many open PRs, drain before dispatching
 MIN_SWAP_FREE="${MIN_SWAP_FREE:-600}"
+# Available memory = free + inactive. macOS shows memory pressure as COMPRESSION with swap flat,
+# so a swap-only gate does not see it. See the gate chain below.
+MIN_MEM_FREE_MB="${MIN_MEM_FREE_MB:-512}"
 BATCH="${BATCH:-2}"
 CYC="${CYC:-240}"
 REQ="ai-review-gate python-ci-gate docs test-isolation license-surface legal-e2e pricing-artifact"
@@ -33,7 +68,88 @@ safe_ref() {
   case "${1:-}" in ''|*[!A-Za-z0-9._/-]*) return 1 ;; esac
   git -C "$REPO" check-ref-format --branch "$1" >/dev/null 2>&1
 }
+# The same predicate spawn-gate.sh defines (and uses for the ceiling). Kept here as well because the
+# self-test extracts this file's functions STANDALONE (a `sed` block into a scratch file), so a
+# function this file calls must be resolvable from this file alone. Identical by construction; the
+# sourcing order (helper first) makes the redefinition a no-op at runtime.
 is_num() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+# A non-numeric threshold makes `[ -le ]` ERROR -- which returns false, and a false test in the gate
+# chain OPENS the gate. So a typo in the plist env (MIN_MEM_FREE_MB=abc) would silently remove the very
+# back-pressure these gates exist to apply. Coerce to the documented default instead of failing open.
+is_num "${MIN_SWAP_FREE:-600}"   || MIN_SWAP_FREE=600
+is_num "${MIN_MEM_FREE_MB:-512}" || MIN_MEM_FREE_MB=512
+
+# ── portable OS primitives ─────────────────────────────────────────────────────
+# This harness runs on macOS (the operator's box, launchd) AND on a Linux cell
+# (cloud-cell-supervisor.sh), so every probe below carries both a Linux and a macOS path.
+# Found the hard way (#1702): `stat -f '%m'`, `sysctl -n vm.loadavg` and `sysctl -n vm.swapusage`
+# are BSD/macOS-only. On GNU coreutils `stat -f '%m' F` prints the FILESYSTEM LISTING on STDOUT and
+# exits 1 — so `$(stat -f '%m' F 2>/dev/null || echo $(date +%s))` captured the listing PLUS the
+# fallback, the arithmetic failed, `age` was left unset, and under `set -u` the next
+# `[ "$age" -gt ... ]` aborted the whole controller. Reachable ~1 cycle after the first dispatch on
+# every cell (each lane/merge/fix writes the log the reaper stats). Reproduced on GNU coreutils 9.7
+# (debian:stable-slim): `age: unbound variable`, rc=1, no cycle completes.
+# GNU first, BSD second — deliberately NOT the other way round, and this is why the obvious
+# `stat -f '%m' F || stat -c '%Y' F` ladder is wrong: on GNU the FIRST form does not fail quietly,
+# it writes the listing to stdout before exiting 1, and `||` cannot discard stdout. In this order
+# `stat -c '%Y'` is a clean failure on BSD (empty stdout, rc 1), so exactly one numeric line results.
+file_mtime_epoch() { # <file> -> mtime as epoch seconds; NON-ZERO rc when unreadable (never a guess)
+  local m
+  m="$(stat -c '%Y' "$1" 2>/dev/null || stat -f '%m' "$1" 2>/dev/null)" || return 1
+  is_num "$m" || return 1
+  printf '%s\n' "$m"
+}
+# `load1` lives in spawn-gate.sh with the rest of the shared gate: the controller's decision sites
+# and the workers MUST read the same load probe (a /proc-based one on Linux cells, the sysctl field
+# on macOS), or the two gates would disagree about what load is. It is sourced at the top of this
+# file; do not re-declare it here.
+# Swap as MB. Linux reports kB in /proc/meminfo; macOS prints `total = 2048.00M ... free = ...`.
+# Echoes "<free_mb> <total_mb>"; NON-ZERO rc when unmeasurable, so the caller can tell "no swap
+# configured" (total 0 — the documented allow) from "we could not read it". An unreadable probe is
+# NOT treated as pressure: that decision is argued at the gate chain, where the value is consumed.
+# The argument is a TEST SEAM (the call site passes nothing).
+swap_usage_mb() { # [<meminfo-file>]
+  local p="${1:-/proc/meminfo}"
+  if [ -r "$p" ]; then
+    awk '/^SwapTotal:/{t=$2} /^SwapFree:/{f=$2}
+         END {if (t=="" || f=="") exit 1; printf "%d %d\n", f/1024, t/1024}' "$p" 2>/dev/null
+  else
+    sysctl -n vm.swapusage 2>/dev/null | awk '
+      {for(i=1;i<=NF;i++){if($i=="total")t=$(i+2); if($i=="free")f=$(i+2)}}
+      END {if (t=="" || f=="") exit 1; printf "%d %d\n", f, t}'
+  fi
+}
+# Available memory as MB. Linux: /proc/meminfo MemAvailable, falling back to MemFree+Cached on a
+# kernel too old to expose it; macOS: `free` + `inactive` vm_stat pages (top's "unused" PhysMem is a
+# different figure, and macOS shows pressure as COMPRESSION with swap flat). NON-ZERO rc when
+# unmeasurable, and the CALLER MUST keep treating that as UNKNOWN -> do not add work: unlike load and
+# swap this probe is deliberately FAIL-CLOSED ("UNKNOWN, not ample"), and that ruling is not this
+# function's to change. Before #1702 there was no Linux path at all, so on a cell the probe yielded
+# empty, MEM_UNKNOWN was set every cycle, and the capacity gate named `mem_probe_failed` forever —
+# the controller completed cycles and dispatched nothing, which is the false green #1702 exists to
+# remove. The macOS page size is derived from vm_stat's own header (16 KiB is Apple silicon; Intel
+# Macs are supported and a hardcoded 16384 over-reports memory 4x -- the unsafe direction).
+# The argument is a TEST SEAM (the call site passes nothing).
+mem_avail_mb() { # [<meminfo-file>]
+  local p="${1:-/proc/meminfo}" mb
+  if [ -r "$p" ]; then
+    mb="$(awk '
+      /^MemAvailable:/ {a=$2}
+      /^MemFree:/ {f=$2}
+      /^Cached:/ {c=$2}
+      END {if (a!="") v=a; else if (f!="" && c!="") v=f+c; else exit 1
+           printf "%d", v/1024}' "$p" 2>/dev/null)" || return 1
+  else
+    mb="$(vm_stat 2>/dev/null | awk '
+      /page size of/ {ps=$8}
+      /Pages free/ {gsub(/[.]/,"",$3); f=$3}
+      /Pages inactive/ {gsub(/[.]/,"",$3); i=$3}
+      END {if (ps=="") ps=16384; if (f=="" || i=="") exit 1
+           printf "%d", (f+i)*ps/1048576}')" || return 1
+  fi
+  is_num "$mb" || return 1
+  printf '%s\n' "$mb"
+}
 # $O is operator config, not attacker input, but a quote or metacharacter here would break every
 # spawn (the tmux command string is executed via sh -c). Fail loudly instead of failing mysteriously.
 case "$O" in
@@ -59,7 +175,22 @@ if ! acq; then
   rm -f "$LOCKF"
   acq || { echo "[orch-loop] lock race — exiting"; exit 0; }
 fi
-trap 'rm -f "$LOCKF"' EXIT INT TERM
+# ⛔ THE SIGNAL HANDLERS ONLY TERMINATE — THE LOCK IS RELEASED BY THE `EXIT` TRAP ALONE.
+# Was `trap 'rm -f "$LOCKF"' EXIT INT TERM`, and for INT/TERM a handler that RETURNS does NOT
+# terminate: bash RESUMES the interrupted command loop, so the documented stop path
+# (`pkill -f orch-loop.sh`, README §6) deleted the lock while the controller kept sweeping,
+# reviewing and merging — the next start then passed acq() and two autonomous controllers ran one
+# PR queue, which §5.2/§5.3 promise cannot happen (agent-infra#1715).
+# Measured on /bin/bash 3.2.57 — the interpreter the rendered launchd plist invokes — with a stub
+# loop: the returning trap printed and left the loop alive with the lock already gone; `exit 143`
+# from a TERM handler terminated the shell (rc=143) AND still ran the EXIT trap; an UNTRAPPED TERM
+# also stopped the loop, but an untrapped INT is IGNORED outright (still alive after 3s), so INT is
+# trapped rather than dropped. Releasing from EXIT only makes "the lock is gone" and "the process
+# is gone" the same event; a signal arriving after the handler fired leaves the lock in place
+# (measured), which is fail-closed — `acq()` reclaims a dead pid.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'rm -f "$LOCKF"' EXIT
 
 # A worker whose log has not grown in this many minutes is hung. `pi -p` has no internal
 # timeout and a runaway child it spawns (a reviewer's `find /` ran for 8 hours on 2026-10-12)
@@ -71,11 +202,16 @@ STALE_MIN="${STALE_MIN:-40}"
 # the operator's own shell or any process outside the harness. The PR is re-dispatched by the
 # normal sweep on the next cycle (the claim_live() check then sees a dead owner and frees it).
 reap_stale_workers() {
-  local s f age pid
+  local s f age pid m
   for s in $(tmux ls -F '#{session_name}' 2>/dev/null | grep -E '^(merge|lane|fix)-'); do
     f="$O/logs/$s.log"
     [ -f "$f" ] || continue
-    age=$(( $(date +%s) - $(stat -f '%m' "$f" 2>/dev/null || echo "$(date +%s)") ))
+    # An unreadable mtime means the age is UNKNOWN, and unknown is not evidence of a hang: skip the
+    # session rather than reap it. Never let the probe's failure escape as an arithmetic error — on
+    # a Linux cell that is exactly what aborted the controller one cycle after the first dispatch
+    # (#1702): set -u turned the unassigned `age` into `File: unbound variable`.
+    m="$(file_mtime_epoch "$f")" || continue
+    age=$(( $(date +%s) - m ))
     [ "$age" -gt $((STALE_MIN * 60)) ] || continue
     pid="$(tmux list-panes -t "=$s" -F '#{pane_pid}' 2>/dev/null | head -1)"
     echo "[reap-worker] $s silent ${age}s -> killing session (pane_pid=${pid:-?})" >> "$LOG"
@@ -90,17 +226,24 @@ reap_stale_workers() {
 }
 
 heartbeat() { date +%s > "$O/heartbeat"; }
-load1() { sysctl -n vm.loadavg 2>/dev/null | awk '{print int($2)}'; }
 # Exact session-name test. `tmux has-session -t <name>` prefix-matches, so a guard for PR #82
 # would report "in flight" because `fix-820` exists — starving #82 while that worker lives.
 sess() { tmux ls -F '#{session_name}' 2>/dev/null | grep -qx "$1"; }
-# Spawning an agent during a load spike makes the spike worse. A Mac reboot lands in an indexing
-# storm (Spotlight, PerfPowerServices, duetexpertd) that the LANE dispatch gate already respects
+# Spawning a worker during a load spike makes the spike worse. A Mac reboot lands in an indexing
+# storm (Spotlight, PerfPowerServices, duetexpertd) that the LANE dispatch gate already respected
 # while the merge sweep did not — so a fresh boot got six reviewers piled onto it. The cheap actions
 # (gh pr merge / ready / run rerun) stay ungated, so merges keep flowing while the spike passes.
 # Nothing is starved: a held-back spawn retries next cycle, because the marker that authorises it
-# (needsfix-<PR>-<head>, fixcount-<PR>) is only written on a SUCCESSFUL spawn.
-can_spawn() { [ "${L:-0}" -lt "$MAX_LOAD" ]; }
+# (needsfix-<PR>-<head>, fixcount-<PR>) is only written on a SUCCESSFUL spawn. A fixer session whose
+# AGENT the load gate refuses refunds fixcount-<PR> and keeps needsfix-<PR>-<head> (fix-one.sh), so
+# "consumed" means an agent actually started — not merely that tmux created a session (#1720).
+#
+# `can_spawn` itself is in spawn-gate.sh so that the WORKERS' own spawns use the same predicate
+# (agent-infra#1720). These four sites pass the reading cached for this cycle ($L) so the `[cap]`
+# line below and the gate can never disagree about which load was consulted.
+# ⚠️ These four sites gate the DECISION to create a session. They are not the invariant: the agent
+# itself is gated in run_agent(), which is the only place `pi` is invoked. A worker spawned here on
+# a quiet cycle whose PR appears 90 minutes later is refused at spawn time by that gate.
 
 # Merge priority: a merge backlog means the box's scarce capacity belongs to review+merge, not to
 # opening more PRs. These two functions hold the rule so it is directly testable (and so a
@@ -111,6 +254,37 @@ mp_reason() { # <open_prs> <lanes>
   if [ "${1:-0}" -gt "$MERGE_PRIORITY_AT" ] && [ "${2:-0}" -ge 1 ]; then
     echo "merge-priority (${1} open PRs — draining before opening more)"
   fi
+}
+res_line() {
+  local idle pmem f i w cmp avail swapfree swaptotal dline duse procs runnable svcs rate _sw
+  # CPU
+  local cpu; cpu="$(top -l 2 -n 0 2>/dev/null | awk '/CPU usage/{c=$0} END{sub(/^CPU usage: /,"",c); print c}')"
+  # RAM (16 KiB pages on Apple silicon; compute from the header rather than hardcoding)
+  pmem="$(vm_stat 2>/dev/null | awk '
+    /page size of/ {ps=$8}
+    /Pages free/ {gsub(/[.]/,"",$3); f=$3}
+    /Pages inactive/ {gsub(/[.]/,"",$3); i=$3}
+    /Pages wired/ {gsub(/[.]/,"",$4); w=$4}
+    /occupied by compressor/ {gsub(/[.]/,"",$5); c=$5}
+    END {if (ps=="") ps=16384; printf "%.2fG free/%.2fG inactive/%.2fG wired/%.2fG comp/%.2fG avail", f*ps/1e9, i*ps/1e9, w*ps/1e9, c*ps/1e9, (f+i)*ps/1e9}')"
+  # swap + disk + processes (swap via the portable helper: a macOS-only probe logged '?' on a cell,
+  # which is how the gate's absence stayed invisible in the logs — #1702)
+  swapfree=""; swaptotal=""
+  if _sw="$(swap_usage_mb)"; then swapfree="${_sw%% *}M"; swaptotal="${_sw##* }M"; fi
+  dline="$(df -g /System/Volumes/Data 2>/dev/null | awk 'NR==2{printf "%dG free/%d%% used",$4,$5}')"
+  procs="$(ps -Ao pid= 2>/dev/null | wc -l | tr -d ' ')"
+  runnable="$(ps -Ao stat= 2>/dev/null | grep -c '^R')"
+  # the macOS service sinks that have burned this box before, and kernel_task (thermal/I-O)
+  svcs="$(ps -Ao pcpu=,comm= 2>/dev/null | awk '
+    /opendirectoryd/ {o+=$1}
+    /automountd/ {a+=$1}
+    /kernel_task/ {k+=$1}
+    /fseventsd/ {f+=$1}
+    /mds_stores|mds$/ {m+=$1}
+    END {printf "opendirectoryd=%.0f%% automountd=%.0f%% kernel_task=%.0f%% fseventsd=%.0f%% mds=%.0f%%", o,a,k,f,m}')"
+  # GitHub API ceiling — a capacity limit that is NOT on this machine
+  rate="$(gh api rate_limit --jq '.resources.graphql | "\(.remaining)/\(.limit)"' 2>/dev/null)"
+  echo "[res] cpu(${cpu:-?}) | mem(${pmem:-?}) | swap(${swapfree:-?}/${swaptotal:-?}) | disk(${dline:-?}) | procs=$procs runnable=$runnable | svc(${svcs:-?}) | gh_gql=${rate:-?}" >> "$LOG"
 }
 review_slots() { # <open_prs>
   if [ "${1:-0}" -gt "$MERGE_PRIORITY_AT" ]; then echo $((MAX_REVIEW + 2)); else echo "$MAX_REVIEW"; fi
@@ -172,6 +346,7 @@ open_pr_count() { # -> echoes the open-PR count; never 0 on failure
 
 while true; do
   heartbeat
+  res_line   # MEASURE every resource; decide nothing from it
   reap_stale_workers
   L="$(load1)"
   echo "=== $(date) load=$L lanes=$(tmux ls 2>/dev/null | grep -c '^lane-') backlog=$(wc -l < "$O/candidates.txt" | tr -d ' ') ===" >> "$LOG"
@@ -225,22 +400,72 @@ while true; do
     HEAD_N="$(gh pr view "$PR" --repo "$OR" --json headRefOid --jq .headRefOid 2>/dev/null)"
     # parked = the fixer cap was reached at THIS head; a later push re-arms the PR.
     [ -n "${HEAD_N:-}" ] && [ "$(cat "$O/state/parked-$PR" 2>/dev/null)" = "$HEAD_N" ] && continue
-    V="$(gh pr checks "$PR" --repo "$OR" --json name,state 2>/dev/null | python3 -c "
+    V="$(gh pr checks "$PR" --repo "$OR" --json name,state,workflow 2>/dev/null | python3 -c "
 import sys,json
 try: d=json.load(sys.stdin)
 except Exception: print('NOCHECKS'); raise SystemExit
-m={c['name']:c['state'] for c in d}
+# The source is either the check-runs API shape (an object carrying a check_runs list) or the flat
+# list \`gh pr checks --json\` prints. Both normalise to one row list; anything else is unreadable.
+rows=d.get('check_runs') if isinstance(d,dict) else d
+if not isinstance(rows,list): print('NOCHECKS'); raise SystemExit
 want='$REQ'.split()
-bad=lambda s: s in ('FAILURE','ERROR','CANCELLED','TIMED_OUT','ACTION_REQUIRED')
-ok=lambda s: s in ('SUCCESS','FAILURE','ERROR','CANCELLED','TIMED_OUT','ACTION_REQUIRED','SKIPPED','NEUTRAL')
-# ai-review-gate IS the merge authority, so it must be an explicit SUCCESS. SKIPPED/NEUTRAL
-# there means no signed review exists; reading that as satisfied would merge without evidence.
-gate=m.get('ai-review-gate','')
-if gate != 'SUCCESS' and not bad(gate):
-    print('FAILED:ai-review-gate'); raise SystemExit
-fail=[n for n in want if bad(m.get(n,''))]
-pend=[n for n in want if not ok(m.get(n,''))]
-print(('FAILED:'+','.join(fail)) if fail else (('PENDING:'+','.join(pend)) if pend else 'GREEN'))
+# ⛔ ALLOW-LISTS, NEVER A DENY-LIST (agent-infra#1714). A conclusion is NON-RED only if it is NAMED
+# here - the identical five spellings admin-merge.sh (NON_RED_CONC) and record-review.sh
+# (target_head_red) use, so the harness and the merge rail cannot disagree. 'not in the red set' is
+# not a synonym for non-red: a token this code has never seen (a vendor adds a conclusion, GitHub
+# returns a newer spelling, the value is null) must FAIL CLOSED, so it is RED. The deny-list this
+# replaced named the red tokens and filed EVERYTHING ELSE as PENDING, so an unrecognised or NULL
+# conclusion reached \`gh pr merge --auto\` instead of blocking - the fail-open the issue is about.
+NONRED=('success','neutral','skipped','cancelled','stale')
+# IN FLIGHT means a status the API NAMES as in flight - the same five the rail uses. Any OTHER
+# non-completed spelling is judged by its CONCLUSION under the allow-list, so an unrecognised status
+# with a null conclusion is RED, not pending (the rail's #1353 fail-open shape, closed the same
+# way). \`expected\` is deliberately NOT here: it is not a named in-flight spelling, so a check
+# GitHub has announced but not reported reads RED - the fail-closed direction, matching the rule.
+INFLIGHT=('queued','in_progress','waiting','requested','pending')
+# One entry per (app, name) - NOT per name: a same-named check under two apps must not let one
+# app's result mask the other's (agent-infra#1714). \`app.slug\` when the source supplies it (the
+# check-runs API), otherwise the workflow name (\`gh pr checks\` exposes no app field), and the
+# NEWEST attempt by id when the source supplies one. Ties, and sources with no id at all, take the
+# last row seen - all the information \`gh pr checks\` carries.
+groups={}
+for c in rows:
+    if not isinstance(c,dict): continue
+    name=str(c.get('name') or '')
+    app=c.get('app')
+    if isinstance(app,dict): app=app.get('slug') or ''
+    if not app: app=c.get('workflow') or ''
+    try: cid=int(c.get('id') or c.get('databaseId') or 0)
+    except Exception: cid=0
+    if 'status' in c or 'conclusion' in c:
+        status=str(c.get('status') or '').lower(); concl=str(c.get('conclusion') or '').lower()
+    else:
+        st=str(c.get('state') or '').lower()
+        status,concl=(st,'') if st in INFLIGHT else ('completed',st)
+    k=(str(app),name)
+    prev=groups.get(k)
+    if prev is None or cid>=prev[0]: groups[k]=(cid,status,concl)
+rank={'nonred':0,'pending':1,'red':2}
+named={}
+gate=[]
+for k in groups:
+    status=groups[k][1]; concl=groups[k][2]
+    v='pending' if status in INFLIGHT else ('nonred' if concl in NONRED else 'red')
+    if k[1]=='ai-review-gate': gate.append((v,concl))
+    if k[1] not in named or rank[v]>rank[named[k[1]]]: named[k[1]]=v
+# ai-review-gate IS the merge authority, so it must be an explicit SUCCESS. SKIPPED/NEUTRAL there
+# means no signed review exists; reading that as satisfied would merge without evidence. This is
+# also why GREEN always carries at least one MEASURING success: a surface of nothing but
+# cancelled/stale/skipped/neutral rows can never read green - those are non-red, never green.
+gate_ok=len(gate)>0 and all(v=='nonred' and c=='success' for v,c in gate)
+# Read it in this order: RED if any required check is red (a completed red is final - nothing in
+# flight can un-fail it); otherwise NOT YET KNOWN while any is in flight or never reported;
+# otherwise GREEN. An EMPTY surface is NOCHECKS, never GREEN - a missing check is not a green check,
+# and NOCHECKS reaches neither the merge nor the fixer arm below.
+fail=[n for n in want if named.get(n)=='red']
+pend=[n for n in want if named.get(n)=='pending' or n not in named]
+if 'ai-review-gate' in want and not gate_ok and 'ai-review-gate' not in fail: fail.insert(0,'ai-review-gate')
+print('NOCHECKS' if not groups else ('FAILED:'+','.join(fail) if fail else ('PENDING:'+','.join(pend) if pend else ('GREEN' if want else 'NOCHECKS'))))
 " 2>/dev/null)"
     # A CONFLICTING PR can never merge: `gh pr merge` fails every cycle and the queue looks stuck
     # while nothing changes. Route it to the fixer, which integrates origin/main and resolves the
@@ -255,8 +480,11 @@ print(('FAILED:'+','.join(fail)) if fail else (('PENDING:'+','.join(pend)) if pe
             [ -f "$O/state/parked-$PR" ] || { echo "${HEAD_N:-}" > "$O/state/parked-$PR"; echo "#$PR PARKED (still CONFLICTING after $NFC fixes)" >>"$LOG"; }
           elif claim_live "$PR" || sess "fix-$PR" || sess "merge-$PR"; then
             : # a worker is already rebasing it
-          elif [ "$(tmux ls 2>/dev/null | grep -c '^fix-')" -lt "${MAX_FIX:-3}" ] && can_spawn; then
-            printf '%s\n' "$REPO" "$OR" "$PR" "$BR" > "$O/state/argv-$PR"
+          elif [ "$(tmux ls 2>/dev/null | grep -c '^fix-')" -lt "${MAX_FIX:-3}" ] && can_spawn "$L"; then
+            # The 5th line is the head this attempt is booked against: fix-one.sh needs it to
+            # consume the findings marker once the agent starts, and to refund the attempt if the
+            # load gate refuses (see its refusal path). A refused fixer is not an attempt.
+            printf '%s\n' "$REPO" "$OR" "$PR" "$BR" "${HEAD_N:-}" > "$O/state/argv-$PR"
             if tmux new-session -d -s "fix-$PR" "bash '$O/fix-one.sh' --argv '$O/state/argv-$PR'" 2>/dev/null; then
               echo $((NFC + 1)) > "$CF"
               echo "#$PR CONFLICTING -> fixer attempt $((NFC + 1))" >>"$LOG"
@@ -284,17 +512,22 @@ print(('FAILED:'+','.join(fail)) if fail else (('PENDING:'+','.join(pend)) if pe
             # otherwise the gate is probably just missing evidence -> re-record (fresh review).
             if [ -n "${HEAD_N:-}" ] && [ -f "$O/state/needsfix-$PR-$HEAD_N" ] \
                && [ "$NF" -lt "${MAX_FIX_TRIES:-3}" ] \
-               && can_spawn \
+               && can_spawn "$L" \
                && [ "$(tmux ls 2>/dev/null | grep -c '^fix-')" -lt "${MAX_FIX:-3}" ]; then
               # Spawn FIRST, bookkeep only on success: recording the attempt before the spawn
-              # means a killed/failed spawn consumes one of MAX_FIX_TRIES and deletes the
-              # findings marker, so no fixer ever runs and the findings are lost.
+              # means a killed/failed spawn consumes one of MAX_FIX_TRIES, so no fixer ever runs.
+              # ⛔ The findings marker is NOT deleted here. This site used to `rm -f
+              # needsfix-$PR-$HEAD` on session creation, which is upstream of the load gate inside
+              # fix-one.sh: a REFUSED fixer then deleted the reviewer's findings and left the loop
+              # to re-record a full fresh-context review of a head nobody fixed (agent-infra#1720).
+              # fix-one.sh consumes the marker only once the agent has actually started, so a
+              # refusal leaves it intact and the next cycle re-dispatches rather than re-reviews.
               # Args travel in a file, not interpolated into the tmux command string, so no
               # PR-derived value can reach `sh -c`. Only $O (validated at startup) and the
-              # numeric $PR are embedded.
-              printf '%s\n' "$REPO" "$OR" "$PR" "$BR" > "$O/state/argv-$PR"
+              # numeric $PR are embedded. The 5th line is HEAD_N (see the CONFLICTING site).
+              printf '%s\n' "$REPO" "$OR" "$PR" "$BR" "${HEAD_N:-}" > "$O/state/argv-$PR"
               if tmux new-session -d -s "fix-$PR" "bash '$O/fix-one.sh' --argv '$O/state/argv-$PR'" 2>/dev/null; then
-                echo $((NF + 1)) > "$FIXN"; rm -f "$O/state/needsfix-$PR-$HEAD_N"
+                echo $((NF + 1)) > "$FIXN"
                 echo "#$PR fixer attempt $((NF + 1))" >>"$LOG"
               else
                 echo "#$PR fixer spawn FAILED (attempt not consumed, marker kept)" >>"$LOG"
@@ -304,7 +537,7 @@ print(('FAILED:'+','.join(fail)) if fail else (('PENDING:'+','.join(pend)) if pe
               # every cycle: an unfixable PR would burn a full fresh-context review forever.
               echo "${HEAD_N:-}" > "$O/state/parked-$PR"
               echo "#$PR PARKED after $NF fixes at head=${HEAD_N:-?} — needs a human" >>"$LOG"
-            elif [ "$(tmux ls 2>/dev/null | grep -c '^merge-')" -lt "$MR" ] && can_spawn; then
+            elif [ "$(tmux ls 2>/dev/null | grep -c '^merge-')" -lt "$MR" ] && can_spawn "$L"; then
               printf '%s\n' "$REPO" "$OR" "$PR" "$BR" > "$O/state/argv-$PR"
               tmux new-session -d -s "merge-$PR" "bash '$O/merge-one.sh' --argv '$O/state/argv-$PR'" 2>/dev/null \
                 && echo "#$PR re-record" >>"$LOG"
@@ -322,8 +555,8 @@ print(('FAILED:'+','.join(fail)) if fail else (('PENDING:'+','.join(pend)) if pe
             [ -f "$O/state/parked-$PR" ] || { echo "${HEAD_N:-}" > "$O/state/parked-$PR"; echo "#$PR PARKED (CI still red after $NFC2 fixes: $V)" >>"$LOG"; }
           elif claim_live "$PR" || sess "fix-$PR" || sess "merge-$PR"; then
             : # a worker is already on it
-          elif [ "$(tmux ls 2>/dev/null | grep -c '^fix-')" -lt "${MAX_FIX:-3}" ] && can_spawn; then
-            printf '%s\n' "$REPO" "$OR" "$PR" "$BR" > "$O/state/argv-$PR"
+          elif [ "$(tmux ls 2>/dev/null | grep -c '^fix-')" -lt "${MAX_FIX:-3}" ] && can_spawn "$L"; then
+            printf '%s\n' "$REPO" "$OR" "$PR" "$BR" "${HEAD_N:-}" > "$O/state/argv-$PR"
             if tmux new-session -d -s "fix-$PR" "bash '$O/fix-one.sh' --argv '$O/state/argv-$PR'" 2>/dev/null; then
               echo $((NFC2 + 1)) > "$O/state/fixcount-$PR"
               echo "#$PR CI-red ($V) -> fixer attempt $((NFC2 + 1))" >>"$LOG"
@@ -354,11 +587,33 @@ open(sys.argv[1],"w").write("\n".join(keep)+("\n" if keep else ""))
 PY
   fi
   L="$(load1)"; LANES="$(tmux ls 2>/dev/null | grep -c '^lane-')"
-  SWFREE="$(sysctl -n vm.swapusage 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="free"){print int($(i+2)); exit}}')"
-  SWTOTAL="$(sysctl -n vm.swapusage 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="total"){print int($(i+2)); exit}}')"
-  : "${SWFREE:=9999}"; : "${SWTOTAL:=0}"
-  echo "[cap] lanes=$LANES swap_free=${SWFREE}M swap_total=${SWTOTAL}M load=$L max_load=$MAX_LOAD" >> "$LOG"
-  # Three gates. swap_total=0 => swap uninitialised (fresh boot), NOT pressure — allow.
+  # A load reading that is empty or non-numeric is the DOCUMENTED FAIL-OPEN (can_spawn() defaults it
+  # to 0). Kept deliberately (#1702): both supported platforms are measurable now, and failing CLOSED
+  # on an unreadable probe would convert "no load back-pressure" into a permanent controller outage on
+  # a host with no procfs and no sysctl — a worse and less recoverable failure than the gate it guards.
+  # The remaining gates (MAX_LANES, memory, merge-priority) still bound dispatch. Coerced here as well
+  # so the gate chain cannot emit "integer expression expected", and so the logged value IS the value
+  # the gate used.
+  is_num "${L:-}" || L=0
+  # swap_total=0 => swap uninitialised (fresh boot), NOT pressure — allow. An UNREADABLE probe is
+  # UNKNOWN and takes that same allow, for the reason above; unlike 0 it is a distinguishable state
+  # (swap_usage_mb returns non-zero), so a future decision to fail closed there has a seam to use.
+  SWFREE=9999; SWTOTAL=0
+  if _sw="$(swap_usage_mb)"; then SWFREE="${_sw%% *}"; SWTOTAL="${_sw##* }"; fi
+  is_num "$SWFREE" || SWFREE=9999
+  is_num "$SWTOTAL" || SWTOTAL=0
+  # Available memory through the portable helper: /proc/meminfo (MemAvailable, else MemFree+Cached)
+  # on a cell; `free`+`inactive` vm_stat pages on macOS. It fails CLOSED (rc != 0 -> UNKNOWN -> do
+  # not add work) -- before #1702 the probe was vm_stat-only and therefore failed closed on EVERY
+  # Linux cell, which is the false green (cycles complete, nothing ever dispatches) this PR removes.
+  if MEMAVAIL_MB="$(mem_avail_mb)"; then
+    MEM_UNKNOWN=0
+  else
+    # The probe itself failed. UNKNOWN, not ample: we cannot see capacity, so we do not add work.
+    MEMAVAIL_MB=0; MEM_UNKNOWN=1
+  fi
+  echo "[cap] load=$L/$MAX_LOAD lanes=$LANES/$MAX_LANES mem_avail=${MEMAVAIL_MB}M/${MIN_MEM_FREE_MB}M swap_free=${SWFREE}M/${MIN_SWAP_FREE}M" >> "$LOG"
+  # Four gates. swap_total=0 => swap uninitialised (fresh boot), NOT pressure — allow.
   # Name the binding gate: an earlier version logged "skipped (load=…)" while load was never
   # consulted, so a lanes-bound or swap-bound stall looked like a load stall.
   GATE_WHY="$(mp_reason "${OPEN_N:-0}" "$LANES")"
@@ -366,6 +621,12 @@ PY
   elif [ "$L" -ge "$MAX_LOAD" ]; then GATE_WHY="load=$L>=max_load=$MAX_LOAD"
   elif [ "$LANES" -ge "$MAX_LANES" ]; then GATE_WHY="lanes=$LANES>=max_lanes=$MAX_LANES"
   elif [ "$SWTOTAL" -ne 0 ] && [ "$SWFREE" -le "${MIN_SWAP_FREE:-600}" ]; then GATE_WHY="swap_free=${SWFREE}M<=min_swap_free=${MIN_SWAP_FREE:-600}M"
+  # "A failed probe is UNKNOWN, not ample" is only true if MEM_UNKNOWN can be SET, and it is set
+  # from mem_avail_mb()'s EXIT STATUS (its awk `exit 1`s on absent fields) rather than from an empty
+  # string: awk's END block always ran, so `printf "%d"` yielded 0 for unset fields and a test for
+  # an empty MEMAVAIL_MB could never be true. The helper is therefore tested on its own, above.
+  elif [ "${MEM_UNKNOWN:-0}" = "1" ]; then GATE_WHY="mem_probe_failed (capacity unknown -> do not add work)"
+  elif [ "$MEMAVAIL_MB" -le "$MIN_MEM_FREE_MB" ]; then GATE_WHY="mem_avail=${MEMAVAIL_MB}M<=min_mem_free_mb=${MIN_MEM_FREE_MB}M"
   fi
   if [ -z "$GATE_WHY" ]; then
     : > "$O/.batch"; K=0
@@ -396,5 +657,9 @@ PY
     fi
   fi
 
-  sleep "$CYC"
+  # `& wait`, not a bare sleep: bash runs a trap only AFTER the current foreground command
+  # completes, so `sleep 240` deferred the stop for up to a whole cycle — measured 5.07s of a 6s
+  # sleep, vs 0.09s with the background form. The lock is held either way, but "kill -TERM ends
+  # the process" (agent-infra#1715's indicator) is then true in ~0.1s, not in four minutes.
+  sleep "$CYC" & wait $!
 done

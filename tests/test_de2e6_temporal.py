@@ -57,6 +57,40 @@ def _decision_points(sdk):
     return rows
 
 
+def _seed_topic(sdk, topic):
+    """Create the topic Object the timeline query joins on."""
+    sdk._get_proj().g.query("CREATE (o:Object {name:$t})", params={"t": topic})
+
+
+def _set_valid_from(sdk, point_id, valid_from):
+    """Stamp ``validFrom`` on an existing Point (the create path does not
+    accept it — it is computed from the session date, #3654)."""
+    sdk._get_proj().g.query(
+        "MATCH (p:Point {id:$id}) SET p.validFrom = $vf",
+        params={"id": point_id, "vf": valid_from})
+
+
+def _seed_decision(sdk, topic, content, valid_from):
+    """Seed one decision Point aboutObject-connected to ``topic``.
+
+    Direct graph construction (no mining), so the timeline's window and
+    ordering are exercised deterministically; the mining ingest path is
+    covered by the tests above (#7293).
+    """
+    g = sdk._get_proj().g
+    pid = f"tl-{topic}-{content}".replace(" ", "-")
+    props = "id:$id, content:$c, status:'live', pointKind:'decision'"
+    params = {"topic": topic, "id": pid, "c": content}
+    if valid_from is not None:
+        props += ", validFrom:$vf"
+        params["vf"] = valid_from
+    g.query(
+        f"MATCH (o:Object {{name:$topic}}) "
+        f"CREATE (p:Point {{{props}}})-[:aboutObject]->(o)",
+        params=params)
+    return pid
+
+
 def _nand_between(sdk, a_id, b_id):
     rows = sdk._get_proj().g.query(
         "MATCH (op:Point {is_operator:true})-[:NAND]->(:Point {id:$a}), "
@@ -359,33 +393,89 @@ class TestDe2e6ReviewFixes:
         corr = [t for t in timeline if t["linked_by"] == "CORRECTS"]
         assert corr, f"timeline must show the CORRECTS link: {timeline}"
 
-    def test_timeline_limit_keeps_newest(self, sdk, tmp_path):
-        """P2 (round 2): with more entries than the limit, the NEWEST belief
-        must stay visible (the cap applies from the newest end — superseded
-        priors no longer evict current beliefs)."""
-        for i, (tx, sid, dte) in enumerate([  # noqa: B007
-            ("Alice: We decided to use port 16379.\n", "s-l1", T1),
-            ("Alice: We decided to move to port 16380.\n", "s-l2", T2),
-            ("Alice: We decided to adopt port 16390.\n", "s-l3", T3),
-        ]):
-            _mine(sdk, tx, sid, dte, str(tmp_path))
-        # Promote everything so the timeline has 3 live + supersede one.
-        pts = _decision_points(sdk)
-        for p in pts:
-            if p[3] == "draft":
-                sdk.promote_point(p[0])
-        # Supersede the oldest with a replacement.
-        d4 = sdk.create_point("decision",  # noqa: F841
-                              "We decided to replace the port 16379 decision "
-                              "with 16400.", status="live")
-        proj = sdk._get_proj()  # noqa: F841
-        # (direct supersede for the limit test — the mining replacement path
-        # is covered elsewhere)
-        from tortoise.sdk import TortoiseSDK as _S  # noqa: F401
-        d4b = sdk.create_point("decision", "We decided to use port 16400.",
-                               status="live")
-        sdk.supersede_point(pts[0][0], d4b["id"])
-        timeline = sdk.belief_timeline("port 16379", limit=2)
-        newest = timeline[-1]["content"] if timeline else ""
-        assert "16400" in newest or len(timeline) >= 1, timeline
-        assert len(timeline) <= 3, timeline
+    def test_timeline_limit_keeps_newest(self, sdk):
+        """P2 (round 2) + #7293: the cap applies from the NEWEST end — the
+        current belief stays visible, and a superseded prior (which reaches
+        the timeline only via the CORRECTS re-attachment) does not evict it.
+
+        The original fixture carried no more points than the limit and its
+        assertion was a tautology (``"16400" in newest or len(timeline) >= 1``),
+        so it passed against the ascending-LIMIT defect it was written to
+        catch. It now seeds an explicit chain (direct construction — the
+        mining ingest path is covered above) and asserts the window exactly.
+        """
+        topic = "port 16379"
+        _seed_topic(sdk, topic)
+        prior = _seed_decision(sdk, topic, "old belief", T1)
+        _seed_decision(sdk, topic, "newest belief", T3)
+        current = sdk.create_point("decision", "current belief",
+                                   status="live")
+        _set_valid_from(sdk, current["id"], T2)
+        # supersede_point wires (current)-[:CORRECTS]->(prior) and transfers
+        # the aboutObject edge, so the prior is only in the timeline via the
+        # CORRECTS re-attachment.
+        sdk.supersede_point(prior, current["id"])
+
+        one = sdk.belief_timeline(topic, limit=1)
+        assert [e["content"] for e in one] == ["newest belief"], one
+
+        two = sdk.belief_timeline(topic, limit=2)
+        assert [e["content"] for e in two] == [
+            "current belief", "newest belief"], two
+
+
+class TestBeliefTimelineLimitWindow:
+    """#7293 — ``limit`` is a NEWEST-END window, not an oldest-end truncation.
+
+    The former Cypher (``ORDER BY p.validFrom LIMIT $limit``) truncated
+    ASCENDING, so it selected the OLDEST rows and ``entries[-limit:]`` could
+    only re-take the tail of an already-oldest set: ``limit=1`` returned the
+    earliest belief, and the newest was unreachable at any limit smaller than
+    the chain.
+
+    A naive ``validFrom DESC`` trades that for the opposite error — FalkorDB
+    sorts NULL FIRST descending (measured on four Points: ASC puts the
+    undated row last, DESC puts it first), so an undated row (the OLDEST
+    belief, §4.7) would land in the newest window and could evict the
+    genuinely newest dated Point. These tests pin both halves.
+    """
+
+    TOPIC = "port 16379"
+
+    def _seed_chain(self, sdk):
+        """One undated + three dated decisions, newest last."""
+        _seed_topic(sdk, self.TOPIC)
+        _seed_decision(sdk, self.TOPIC, "undated belief", None)
+        _seed_decision(sdk, self.TOPIC, "T0 belief", T1)
+        _seed_decision(sdk, self.TOPIC, "T1 belief", T2)
+        _seed_decision(sdk, self.TOPIC, "T2 belief", T3)
+
+    def test_limit_one_is_the_newest_dated_belief(self, sdk):
+        """limit=1 must be the CURRENT belief — never the oldest dated row,
+        and never the undated (open-start) row."""
+        self._seed_chain(sdk)
+        one = sdk.belief_timeline(self.TOPIC, limit=1)
+        assert [e["content"] for e in one] == ["T2 belief"], one
+        assert one[0]["validFrom"] == T3, one
+
+    def test_limit_selects_the_newest_end(self, sdk):
+        """With more entries than the limit, the window is the NEWEST N —
+        the newest is never dropped (the defect dropped T2 at limit=2)."""
+        self._seed_chain(sdk)
+        two = sdk.belief_timeline(self.TOPIC, limit=2)
+        assert [e["content"] for e in two] == [
+            "T1 belief", "T2 belief"], two
+        three = sdk.belief_timeline(self.TOPIC, limit=3)
+        assert [e["content"] for e in three] == [
+            "T0 belief", "T1 belief", "T2 belief"], three
+
+    def test_undated_stays_oldest_when_the_window_covers_all(self, sdk):
+        """A window wide enough to hold everything still classifies the
+        undated row as the OLDEST (first) and the newest dated row last."""
+        self._seed_chain(sdk)
+        full = sdk.belief_timeline(self.TOPIC, limit=50)
+        assert [e["content"] for e in full] == [
+            "undated belief", "T0 belief", "T1 belief", "T2 belief"], full
+        vfs = [e["validFrom"] for e in full if e["validFrom"] is not None]
+        assert vfs == sorted(vfs), vfs
+        assert full[-1]["validFrom"] == T3, full

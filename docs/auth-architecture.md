@@ -309,9 +309,11 @@ a database outage to the user as "you are signed out".
    only affects data hydration, never first paint.
 3. **Authorization is server-side** (the API validates Bearer tokens) —
    correct per §1.2. The client gates are routing conveniences only.
-4. **Stale legacy localStorage sessions** after a dashboard sign-out are a
-   narrow transient (migrateLegacySession clears them on first load) — no
-   security boundary (server-side revocation governs).
+4. **Stale legacy localStorage sessions** after a dashboard sign-out are inert
+   residue: the bridge that read and cleared them was deleted (#3559), and the
+   dashboard and `/auth` no longer read any session from web storage (#3748
+   pinned the fallback) — no security boundary (server-side revocation governs).
+   The consent page's separate legacy-COOKIE acceptance is §2.1.
 
 ## 5. #1511 — auth unification: one page, strict validity, key→session exchange
 

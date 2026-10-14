@@ -10,7 +10,7 @@
 #   1. deliberately off (measured-fresh pool)              → exit 0, silent
 #   2. off because config broken (config_error non-null)   → incident + RED
 #   3. off while the pool goes stale (age > driver-down)   → incident + RED
-#   4. off because storage is down (storage_error)         → R2_DOWN + RED
+#   4. off because storage is down (storage_error)         → R2_UNLISTABLE + RED
 #   5. enabled but 0 teams backed up while R2 has teams    → incident + RED
 #      (the #2823 shape) — and it must NOT self-heal WATCHER_DOWN
 #   6. enabled, 0 teams, R2 pool also empty (pre-beta)     → exit 0, silent
@@ -20,7 +20,8 @@
 #  10. dedup repeat:    412 + object with an OPEN issue → adopts (no duplicate)
 #  11. R2 listing fails  → pool UNKNOWN, never read as empty/fresh
 #  12. R2 listing fails while OFF → SWEEP_OFF_STALE + RED (unconfirmed pause)
-#  13. R2 preflight down + 0 teams → R2_DOWN stays OPEN (no self-close loop)
+#  13. R2 preflight down + 0 teams → R2_DOWN stays OPEN (no self-close loop);
+#      R2_DOWN is WATCHER-owned (#3147), so the driver can never self-close it
 #  14. lock held + stale last_sweep → SWEEP_NO_COVERAGE + RED
 #  15. lock held + fresh last_sweep → healthy, silent
 #  16. no_work + empty R2 pool → silent (pre-beta)
@@ -49,11 +50,12 @@
 #  38. held lock + UNMEASURED pool → SWEEP_NO_COVERAGE (review P1)
 #  39. redaction of DSN/URI/Basic/lowercase/numbered secrets (security review)
 #  40. the purge failure body is redacted (security review)
-#  41. storage_error while ENABLED is loud, and blocks R2_DOWN self-heal
+#  41. storage_error while ENABLED is loud, and blocks R2_UNLISTABLE self-heal
 #  42. no_work with graph_totals.backed_up>0 is not a coverage gap
 #  43. APP_DOWN is RED (any filing is RED)
 #  44. an index read failure is unmeasured, not "no index"
-#  45. a measured-fresh off pool resolves a stale R2_DOWN
+#  45. a measured-fresh off pool resolves a stale R2_UNLISTABLE (#3147) but
+#      leaves a WATCHER-owned R2_DOWN untouched
 #  46. SWEEP_NO_COVERAGE self-heals on a degraded/backed_up sweep
 #  47. a per-team STALE filed while ENABLED also makes the run RED
 #  48. `enum_failed` is the catch-all family → SWEEP_NO_COVERAGE + RED
@@ -61,8 +63,8 @@
 #  50. redaction: prefixed/newline-split/schemeless-DSN shapes; no false
 #      positives on `compatible:`/`patch:`/`author:`/graph ids/`TimeoutError`
 #  51. the success branch backfills the R2 object with its issue_number (F7)
-#  52. a failed listing blocks the R2_DOWN self-heal (F2)
-#  53. a failed legacy-flat listing is unmeasured (R2_DOWN + RED)
+#  52. a failed listing blocks the R2_UNLISTABLE self-heal (F2)
+#  53. a failed legacy-flat listing is unmeasured (R2_UNLISTABLE + RED)
 #  54. an unparseable archive timestamp is never read as fresh
 #  55. a stale watcher AGE alone (running=true, age>30) files WATCHER_DOWN
 #  56. the measurable-empty lock branch is the silent one
@@ -92,7 +94,8 @@
 #      (#2844), so the alias does not swallow a recurrence
 #  66. the driver's OWNERSHIP refusal in `resolve_global` is pinned (#3127): a
 #      watcher-owned kind is refused (no search, no close); a driver-owned
-#      kind resolves normally
+#      kind resolves normally. #3147 exercises it on the tier split: R2_DOWN is
+#      refused (watcher-owned) and R2_UNLISTABLE resolves (driver-owned)
 #  67. `alert_key` canonicalizes the EMPTY (subject-less) id ONLY: a real
 #      subject literally named `global`/`_` keeps its own single key and is
 #      never an alias set — the round-7 P2 that otherwise gave one real team
@@ -405,7 +408,7 @@ case "$url" in
           emit "$STUB_GH_SEARCH_BODY" "${STUB_SEARCH_CODE:-200}"
         else
           items="[]"
-          for kind in SWEEP_CONFIG_ERROR SWEEP_OFF_STALE SWEEP_NO_COVERAGE WATCHER_DOWN APP_DOWN R2_DOWN POOL_STALE STALE PURGE_FAILED RECONCILE_FAILED; do
+          for kind in SWEEP_CONFIG_ERROR SWEEP_OFF_STALE SWEEP_NO_COVERAGE WATCHER_DOWN APP_DOWN R2_DOWN R2_UNLISTABLE POOL_STALE STALE PURGE_FAILED RECONCILE_FAILED; do
             var="GH_ISSUE_$kind"
             val="${!var:-}"
             if [ -n "$val" ] && grep -q "$kind" <<<"$url"; then
@@ -534,7 +537,7 @@ reset_case() {
         GH_SEARCH_JSON GH_NEW_ISSUE R2_TEAMS R2_DEFAULT_LIST R2_FLAT_LIST \
         R2_DEFAULT_LIST_Z R2_DEFAULT_LIST_A \
         GH_ISSUE_SWEEP_CONFIG_ERROR GH_ISSUE_SWEEP_OFF_STALE GH_ISSUE_SWEEP_NO_COVERAGE \
-        GH_ISSUE_WATCHER_DOWN GH_ISSUE_APP_DOWN GH_ISSUE_R2_DOWN GH_ISSUE_STALE \
+        GH_ISSUE_WATCHER_DOWN GH_ISSUE_APP_DOWN GH_ISSUE_R2_DOWN GH_ISSUE_R2_UNLISTABLE GH_ISSUE_STALE \
         GH_ISSUE_POOL_STALE \
         GH_ISSUE_PURGE_FAILED GH_ISSUE_RECONCILE_FAILED \
         STUB_COMMENTS_JSON STUB_COMMENT_FAIL STUB_COMMENT_CODE \
@@ -599,14 +602,19 @@ assert_eq "$RC" 1 "3. off-while-stale exits RED (1)"
 assert_filed "$(cat "$LOG")" SWEEP_OFF_STALE "3. off-while-stale files SWEEP_OFF_STALE"
 assert_contains "$OUT" "newest archive" "3. direct leg still reports the measured age"
 
-# ── 4. off because storage is down → R2_DOWN + RED ──────────────────────────
+# ── 4. off because storage is down → R2_UNLISTABLE + RED ────────────────────
+# #3147: the app ANSWERED and reports broken storage — the listing/measurement
+# tier, not unreachability. (The reachability tier, R2_DOWN, is filed only by
+# the head-bucket preflight — case 13.)
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
 export STUB_STATUS_BODY="$(status_body false null '"bucket unreachable"')"
 run_driver
 assert_eq "$RC" 1 "4. storage-broken off exits RED (1)"
-assert_filed "$(cat "$LOG")" R2_DOWN "4. storage-broken files R2_DOWN"
+assert_filed "$(cat "$LOG")" R2_UNLISTABLE "4. storage-broken files R2_UNLISTABLE"
+assert_not_match "$(cat "$LOG")" 'GH POST .*/issues .*\[DR\] R2_DOWN' \
+  "4. the reachability kind is not filed for an app-reported storage error"
 
 # ── 5. enabled but 0 teams backed up while R2 has teams → SWEEP_NO_COVERAGE ─
 reset_case
@@ -1065,17 +1073,20 @@ assert_match "$OUT" "<redacted>" "40. the purge failure body is redacted in the 
 assert_filed "$(cat "$LOG")" PURGE_FAILED "40. the purge failure files PURGE_FAILED"
 assert_not_contains "$(cat "$LOG")" "TESTONLYTOKENAbCdEfGhIjKlMnOpQrSt" "40. the secret is NOT in the create POST"
 
-# ── 41. storage_error while ENABLED is loud and blocks R2_DOWN self-heal ───
+# ── 41. storage_error while ENABLED is loud and blocks R2_UNLISTABLE self-heal ─
+# #3147: the app-reported storage error is the LISTING tier, so it files
+# R2_UNLISTABLE and cannot self-close on a sweep that claims success while
+# `/status` still reports broken storage.
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
 export STUB_STATUS_BODY="$(status_body true null '"heartbeat read: boom"')"
 export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
-export GH_ISSUE_R2_DOWN=88
+export GH_ISSUE_R2_UNLISTABLE=88
 run_driver
 assert_eq "$RC" 1 "41. storage_error while enabled exits RED (1)"
-assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/_.json" "41. storage_error while enabled records R2_DOWN"
-assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/88" "41. R2_DOWN is NOT closed while storage_error is set"
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_UNLISTABLE/_.json" "41. storage_error while enabled records R2_UNLISTABLE"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/88" "41. R2_UNLISTABLE is NOT closed while storage_error is set"
 
 # ── 42. no_work with graph_totals.backed_up>0 is not a coverage gap ───────
 reset_case
@@ -1115,15 +1126,19 @@ assert_eq "$RC" 1 "44. an unreadable flat index while OFF exits RED (1)"
 assert_contains "$OUT" "legacy-flat index read FAILED" "44. the failed index read is surfaced"
 assert_filed "$(cat "$LOG")" SWEEP_OFF_STALE "44. unreadable index is unmeasured → no confirmed pause"
 
-# ── 45. a measured-fresh off pool resolves a stale R2_DOWN ────────────────
+# ── 45. a measured-fresh off pool resolves a stale R2_UNLISTABLE, and leaves
+#        the WATCHER-owned R2_DOWN untouched (#3147) ─────────────────────────
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
 export STUB_STATUS_BODY="$(status_body false null null)"
-export GH_ISSUE_R2_DOWN=88
+export GH_ISSUE_R2_UNLISTABLE=88
+export GH_ISSUE_R2_DOWN=99
 run_driver
 assert_eq "$RC" 0 "45. recovered storage exits 0"
-assert_match "$(cat "$LOG")" "GH PATCH .*/issues/88" "45. R2_DOWN self-heals once storage answers while OFF"
+assert_match "$(cat "$LOG")" "GH PATCH .*/issues/88" "45. R2_UNLISTABLE self-heals once the whole pool is measured while OFF"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/99" \
+  "45. the watcher-owned R2_DOWN is never cleared by the driver"
 
 # ── 46. SWEEP_NO_COVERAGE self-heals on a degraded/backed_up sweep ────────
 reset_case
@@ -1208,17 +1223,17 @@ assert_eq "$RC" 1 "51. a fresh config incident exits RED (1)"
 assert_match "$(cat "$LOG")" "GH POST .*/issues \{" "51. the incident is created"
 assert_match "$(cat "$LOG")" "AWS put-object body=\{\"kind\":\"SWEEP_CONFIG_ERROR\",\"issue_number\":[0-9]" "51. the object is rewritten with a real issue number"
 
-# ── 52. a failed listing blocks the R2_DOWN self-heal (F2) ──────────────
+# ── 52. a failed listing blocks the R2_UNLISTABLE self-heal (F2) ──────────
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
 export STUB_LIST_FAIL=1
 export STUB_STATUS_BODY="$(status_body true null null)"
 export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
-export GH_ISSUE_R2_DOWN=88
+export GH_ISSUE_R2_UNLISTABLE=88
 run_driver
 assert_eq "$RC" 1 "52. a backed_up sweep with a failed listing exits RED (1)"
-assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/88" "52. R2_DOWN is NOT closed while the pool is unmeasured"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/88" "52. R2_UNLISTABLE is NOT closed while the pool is unmeasured"
 
 # ── 53. a failed legacy-flat listing is unmeasured ──────────────────────
 reset_case
@@ -1264,8 +1279,9 @@ assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*SWEEP_NO_COVERAGE" "56. no
 # #3659: S3 omits `Contents` on an empty listing, so `sort_by()` raised and the
 # CLI exited non-zero — an EMPTY prefix set the GLOBAL R2_LIST_OK=0 and filed a
 # platform-wide R2_DOWN while the top-level listing had succeeded. It must be
-# a measured result instead: no R2_DOWN, and the honest "prefix present but no
-# default archive" branch (which exists for exactly this) is reached.
+# a measured result instead: no R2_DOWN / R2_UNLISTABLE, and the honest "prefix
+# present but no default archive" branch (which exists for exactly this) is
+# reached.
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST=""          # prefix exists, zero objects under default/
@@ -1275,6 +1291,7 @@ export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
 run_driver
 assert_eq "$RC" 0 "57. an empty default prefix is a healthy measured pool (exit 0)"
 assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*R2_DOWN" "57. an empty prefix files NO R2_DOWN"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*R2_UNLISTABLE" "57. an empty prefix files NO R2_UNLISTABLE"
 assert_not_contains "$OUT" "storage is only partially reachable" "57. the pool is not called partially reachable"
 assert_contains "$OUT" "team teamA: team prefix present but no default archive" "57. the measured-empty branch is reached"
 
@@ -1298,7 +1315,7 @@ assert_contains "$OUT" "default-archive listing FAILED" "58. the genuine call fa
 # ── 59. a genuine listing failure surfaces the CLI stderr ────────────────
 # #3659 defect 4: both listings redirected stderr to /dev/null, so the run log
 # could not distinguish an empty prefix from an AccessDenied. The failure must
-# still be a real R2_DOWN AND its cause must be visible.
+# still be a real R2_UNLISTABLE AND its cause must be visible.
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export STUB_LIST_FAIL_TEAM=1
@@ -1306,7 +1323,7 @@ export STUB_STATUS_BODY="$(status_body true null null)"
 export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
 run_driver
 assert_eq "$RC" 1 "59. a genuine failed listing exits RED (1)"
-assert_filed "$(cat "$LOG")" R2_DOWN "59. a genuine call failure is still a real R2_DOWN"
+assert_filed "$(cat "$LOG")" R2_UNLISTABLE "59. a genuine call failure is still a real R2_UNLISTABLE"
 assert_contains "$OUT" "AccessDenied" "59. the CLI stderr is captured, not discarded"
 
 # ── 60. an empty top-level pool is measured-EMPTY, not "None" ──────────
@@ -1335,7 +1352,7 @@ assert_contains "$OUT" "team None: newest archive" "60b. the 'None' team is meas
 # botocore returns the literal `null` for an absent Contents; the driver must
 # normalize it to the empty list, otherwise it routes into flat classification
 # and an index-read error blanks a MEASURED default archive and files a false
-# R2_DOWN.
+# R2_UNLISTABLE.
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"   # default leg MEASURED fresh
@@ -1345,7 +1362,7 @@ export STUB_STATUS_BODY="$(status_body true null null)"
 export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
 run_driver
 assert_eq "$RC" 0 "61. a null flat listing with a measured default is healthy (exit 0)"
-assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*R2_DOWN" "61. no false R2_DOWN from a null flat listing"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*R2_UNLISTABLE" "61. no false R2_UNLISTABLE from a null flat listing"
 assert_not_contains "$OUT" "legacy-flat index read FAILED" "61. the null flat listing never enters flat classification"
 
 # ── 62. an unparseable top-level listing is UNKNOWN, not an empty pool ──
@@ -1360,7 +1377,7 @@ export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
 run_driver
 assert_eq "$RC" 1 "62. an unparseable top-level listing exits RED (1)"
 assert_contains "$OUT" "R2 top-level listing UNPARSEABLE" "62. the unparseable listing is surfaced"
-assert_filed "$(cat "$LOG")" R2_DOWN "62. unknown is never read as a measured-empty pool"
+assert_filed "$(cat "$LOG")" R2_UNLISTABLE "62. unknown is never read as a measured-empty pool"
 
 # ── 63. the top-level listing stderr is captured, not discarded ──────────
 reset_case
@@ -1568,7 +1585,9 @@ assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/_.json" "65.
 # driver cannot reach this path (every call site is driver-owned BY CONTRACT,
 # pinned by test_kind_owner_contract_with_driver), so the real functions are
 # extracted and driven directly with stubbed I/O. Extract from the SHIPPING
-# script, never a copy, so deleting the block fails this case.
+# script, never a copy, so deleting the block fails this case. #3147 exercises
+# the split directly: R2_DOWN is now WATCHER-owned (refused) while the new
+# R2_UNLISTABLE is driver-owned (resolved).
 reset_case
 RESOLVE_EXT="$(mktemp)"
 RESOLVE_LOG="$(mktemp)"
@@ -1590,6 +1609,11 @@ run_resolve() { # kind — real kind_owner/resolve_global + stubbed log/gh/r2
 assert_contains "$(run_resolve STALE)" "refusing to close" "66. a watcher-owned kind is refused"
 assert_not_contains "$(run_resolve STALE)" "FIND" "66. the refusal never searches for an issue"
 assert_not_contains "$(run_resolve STALE)" "CLOSE" "66. the refusal never closes one"
+assert_contains "$(run_resolve R2_DOWN)" "refusing to close" "66. R2_DOWN (#3147) is watcher-owned and refused"
+assert_not_contains "$(run_resolve R2_DOWN)" "FIND" "66. the R2_DOWN refusal never searches for an issue"
+assert_contains "$(run_resolve R2_UNLISTABLE)" "FIND" "66. R2_UNLISTABLE (#3147) is driver-owned and searched"
+assert_contains "$(run_resolve R2_UNLISTABLE)" "CLOSE" "66. the driver-owned listing tier closes its incident"
+assert_not_contains "$(run_resolve R2_UNLISTABLE)" "refusing to close" "66. the listing tier does not refuse"
 assert_contains "$(run_resolve WATCHER_DOWN)" "FIND" "66. a driver-owned kind searches for the incident"
 assert_contains "$(run_resolve WATCHER_DOWN)" "CLOSE" "66. a driver-owned kind closes the incident"
 assert_not_contains "$(run_resolve WATCHER_DOWN)" "refusing to close" "66. the driver-owned path does not refuse"
@@ -2478,11 +2502,11 @@ export GH_ISSUE_STATE=open
 export STUB_GET_BODY='{"kind":"POOL_STALE","issue_number":77,"filed_at":"2026-09-19T00:00:00Z"}'
 run_driver
 assert_eq "$RC" 0 "110. a measured-fresh pool with an open POOL_STALE stays green (1)"
-assert_contains "$OUT" "POOL_STALE measured-fresh reading 1/2" \
+assert_contains "$OUT" "POOL_STALE healthy reading 1/2" \
   "110. the FIRST fresh reading does not clear the incident"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/77" \
   "110. a single fresh reading never resolves (no close)"
-assert_match "$(cat "$LOG")" 'AWS put-object body=.*"fresh_streak":1' \
+assert_match "$(cat "$LOG")" 'AWS put-object body=.*"healthy_streak":1' \
   "110. the streak is persisted on the incident object"
 
 # …the SECOND consecutive fresh reading DOES clear it (and delete-to-resolve
@@ -2516,7 +2540,7 @@ run_driver
 assert_eq "$RC" 1 "110. a stale run between two fresh readings is RED (1)"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/77" \
   "110. a stale run never resolves the incident"
-assert_match "$(cat "$LOG")" 'AWS put-object body=.*"fresh_streak":0' \
+assert_match "$(cat "$LOG")" 'AWS put-object body=.*"healthy_streak":0' \
   "110. the interleaved stale run RESETS the recovery count"
 
 # …an UNMEASURABLE pool is not freshness: no resolve, and the count resets.
@@ -2531,7 +2555,7 @@ export STUB_GET_BODY='{"kind":"POOL_STALE","issue_number":77,"fresh_streak":1}'
 run_driver
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/77" \
   "110. an unmeasurable pool never resolves the incident"
-assert_match "$(cat "$LOG")" 'AWS put-object body=.*"fresh_streak":0' \
+assert_match "$(cat "$LOG")" 'AWS put-object body=.*"healthy_streak":0' \
   "110. an unmeasurable pool resets the recovery count (no evidence, no credit)"
 
 # …and the threshold is a KNOB (BACKUP_POOL_RESOLVE_STREAK), so N=2 is a start
@@ -2563,7 +2587,7 @@ run_driver
 assert_filed "$(cat "$LOG")" POOL_STALE "111. measured-stale tenants are still named on a partial listing"
 assert_match "$(cat "$LOG")" 'GH POST .*/issues .*listing did NOT complete' \
   "111. the body says the list is not the whole pool"
-assert_filed "$(cat "$LOG")" R2_DOWN "111. the storage fault is filed as its own incident"
+assert_filed "$(cat "$LOG")" R2_UNLISTABLE "111. the storage fault is filed as its own incident"
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

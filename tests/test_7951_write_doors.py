@@ -165,8 +165,15 @@ _DOORS: dict[tuple[str, str], tuple[str, int]] = {
     # `backfill_legacy_closed` routes through `sdk._apply_and_journal` whenever
     # an SDK is supplied, which production always does
     # (`hosted_api._run_indexing`). The `sdk is None` arm is a TEST HELPER's
-    # seam (tests/test_github_indexer.py drives the indexer directly); it folds
-    # without journalling and is pinned as that, not claimed as a live door.
+    # seam (tests/test_github_indexer.py drives the indexer directly) that
+    # falls back to a bare `proj.apply`. It is NOT "pinned as folding without
+    # journalling": on a JOURNAL-BACKED projection §17.1's guard now REFUSES
+    # it (`DirectCacheWriteRefused`) and the journal stays untouched —
+    # `test_indexer_sdk_less_fallback_fails_closed_on_a_journal_backed_projection`
+    # pins exactly that. It folds only where there is no journal to derive from
+    # (a journal-less projection, outside §17.1's reach), which is why the
+    # production route is pinned to pass an explicit `sdk=`
+    # (`test_indexer_production_backfill_route_passes_an_sdk`).
     ("tortoise/indexer/github_indexer.py", "GitHubIndexer.backfill_legacy_closed"):
         ("exempt:test-seam", 1),
 
@@ -871,42 +878,67 @@ _LEGACY_CREATED = {
 }
 
 
-def test_indexer_sdk_less_fallback_folds_without_journalling(sdk_with_journal):
-    """Pin the SHAPE of the test seam, behaviourally: with no SDK the backfill
-    still folds (the helpers that drive it directly depend on that) but appends
-    nothing to the journal. This is the code, not the prose — a status
-    change from 'test seam' to 'live door' would have to change it."""
+def _seed_legacy_created(proj, rec: dict) -> None:
+    """Seed a PRE-FIX node WITHOUT a journal record.
+
+    A pre-fix binary wrote this node through the raw graph handle with no
+    journal bound, so `_seed_legacy_created` issues the equivalent raw write.
+    It cannot use `proj.apply` any more: §17.1's guard (this lane) refuses a
+    direct fold on a journal-backed projection — which is the point, and the
+    raw handle it uses instead is the surface that guard does not yet cover
+    (recorded as still-open on #7951). The thing under test here — the
+    backfill's JOURNALING — is unaffected by which path seeded the node.
+    """
+    proj.g.query(
+        "CREATE (e:Event {eventId:$eventId, eventKind:$eventKind, "
+        "subject:$subject, object:$object, startedAt:$startedAt, "
+        "endedAt:$endedAt, source:$source, sourceKind:$sourceKind})",
+        params={k: rec[k] for k in (
+            "eventId", "eventKind", "subject", "object",
+            "startedAt", "endedAt", "source", "sourceKind")},
+    )
+
+
+def test_indexer_sdk_less_fallback_fails_closed_on_a_journal_backed_projection(
+        sdk_with_journal):
+    """The sdk-less arm is a TEST SEAM and §17.1 now makes that true by force.
+
+    It falls back to the bare `proj.apply` the pre-#7951 signature exposed —
+    NOT routed through `_apply_and_journal`, so it neither appends nor proves
+    a record. On a JOURNAL-BACKED projection that is exactly a direct cache
+    write, so `#7951`'s guard refuses it (`DirectCacheWriteRefused`) and the
+    journal stays untouched. FAILS IF the arm starts folding silently again —
+    a production caller that forgot `sdk=` would then write the cache with no
+    record, which is the hole the AST pin above only catches lexically.
+    """
     from tortoise.indexer.github_indexer import GitHubIndexer
+    from tortoise.projection import DirectCacheWriteRefused
 
     sdk = sdk_with_journal
     proj = sdk._get_proj()
     journal = sdk._journal_path_for_test
     # Seed the legacy node WITHOUT journalling (the pre-fix binary's state).
-    proj.apply(dict(_LEGACY_CREATED))
+    _seed_legacy_created(proj, _LEGACY_CREATED)
     before = _journal_line_types(journal)
 
-    minted = GitHubIndexer(token="t").backfill_legacy_closed(proj)
+    with pytest.raises(DirectCacheWriteRefused):
+        GitHubIndexer(token="t").backfill_legacy_closed(proj)
 
-    assert minted == 1, "the sdk-less arm must still mint (the test seam)"
-    rows = proj.g.query(
-        "MATCH (e:Event) WHERE e.eventId ENDS WITH '-closed' RETURN e.eventId"
-    ).result_set
-    assert [r[0] for r in rows] == ["github-issue-a/b-1-closed"]
     assert _journal_line_types(journal) == before, (
-        "the sdk-less arm journalled — it has no journal handle, so this can "
-        "only be a test double; the seam's shape changed"
+        "the sdk-less arm wrote the journal — it has no journal handle, so "
+        "this can only be a test double; the seam's shape changed"
     )
 
 
 def test_indexer_backfill_with_sdk_reaches_the_journal(sdk_with_journal):
     """The sdk-bearing arm — the one production uses — DOES append, through
-    `_apply_and_journal`. FAILS IF the production route stops journeying the
+    `_apply_and_journal`. FAILS IF the production route stops journaling the
     mint, which is what makes the sdk-less arm the only unjournaled one."""
     from tortoise.indexer.github_indexer import GitHubIndexer
 
     sdk = sdk_with_journal
     proj = sdk._get_proj()
-    proj.apply(dict(_LEGACY_CREATED))
+    _seed_legacy_created(proj, _LEGACY_CREATED)
 
     minted = GitHubIndexer(token="t").backfill_legacy_closed(proj, sdk=sdk)
 
@@ -946,10 +978,14 @@ def test_mining_emit_is_journal_first():
 
 
 def test_create_entity_deviation_is_documented_in_the_contract():
-    """`_create_entity` is apply-first, and that is a RECORDED deviation in the
-    module-top contract, not a silent door. FAILS IF the documentation is
-    deleted while the code stays apply-first — the deviation would become
-    undeclared, which §17.1 forbids."""
+    """`_create_entity` is a MIXED-order funnel: its Object/Subject/Event
+    blocks fold apply-first, while the #2296 `DocumentCreated` arm journals
+    FIRST. Both orders are a RECORDED deviation in the module-top contract,
+    not a silent door. FAILS IF the documentation is deleted, if the
+    Object/Subject/Event blocks stop folding first, or if the Document arm's
+    journal call stops preceding the fold (a reorder — this scan is
+    ORDER-ONLY; that the arm actually selects `DocumentCreated` is pinned
+    behaviourally by tests/test_2296_document_created_journal.py)."""
     server = REPO_ROOT / "tortoise" / "sdk.py"
     source = server.read_text(encoding="utf-8")
     head = source[:source.index("_JOURNAL_ENVELOPE_KEYS")]
@@ -959,7 +995,7 @@ def test_create_entity_deviation_is_documented_in_the_contract():
     deviation = head.split("KNOWN DEVIATIONS", 1)[1]
     assert "_create_entity" in deviation, (
         "`_create_entity` is no longer named as a known deviation although it "
-        "still folds apply-first"
+        "still folds its Object/Subject/Event blocks apply-first"
     )
     assert "apply-first" in deviation, (
         "the `_create_entity` deviation no longer states its form (apply-first)"
@@ -968,25 +1004,43 @@ def test_create_entity_deviation_is_documented_in_the_contract():
         assert ref in deviation, (
             f"the deviation no longer records {ref} as the work it rides"
         )
-    # The claim is CONDITIONAL — "while the code stays apply-first" — so pin
-    # the CODE ORDER too: documentation presence alone cannot tell whether the
-    # deviation is current, and a stale deviation is exactly the "records a past
-    # state and is never revalidated" failure class.
+    # The #2296 Document arm is the OTHER order in the same funnel, and the
+    # contract says so. Without this, the arm could revert to live-only while
+    # the deviation's "Object/Subject/Event" scoping stayed true and BOTH the
+    # text and the code-order check below stayed green (the false negative
+    # this assertion closes).
+    assert "DocumentCreated" in deviation and "#2296" in deviation, (
+        "the deviation no longer records the #2296 DocumentCreated arm's "
+        "journal-first order"
+    )
+    # The claim is CONDITIONAL on the CODE ORDER, so pin BOTH orders:
+    # documentation presence alone cannot tell whether the deviation is
+    # current, and a stale deviation is exactly the "records a past state and
+    # is never revalidated" failure class.
     tree = ast.parse(source)
     fn = next((n for n in ast.walk(tree)
                if isinstance(n, ast.FunctionDef) and n.name == "_create_entity"),
               None)
     assert fn is not None, "`_create_entity` no longer exists"
-    applies = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
-               and isinstance(n.func, ast.Attribute) and n.func.attr == "apply"]
-    emits = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
-             and isinstance(n.func, ast.Attribute)
-             and n.func.attr == "_emit_event"]
-    assert applies and emits, (
-        "`_create_entity` no longer both folds and journals — revisit whether "
-        "it is still a deviation"
+
+    def _calls(attr: str) -> list:
+        return [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute) and n.func.attr == attr]
+
+    applies = _calls("apply")
+    emits = _calls("_emit_event")
+    journal_first = _calls("_journal_entity_event")
+    assert applies and emits and journal_first, (
+        "`_create_entity` no longer folds, emits AND journal-first-creates — "
+        "revisit whether the KNOWN DEVIATIONS entry is still current"
     )
-    assert min(a.lineno for a in applies) < min(e.lineno for e in emits), (
-        "`_create_entity` is no longer apply-first — the KNOWN DEVIATIONS "
-        "entry is stale and must be removed"
+    first_fold = min(a.lineno for a in applies)
+    assert first_fold < min(e.lineno for e in emits), (
+        "`_create_entity`'s Object/Subject/Event blocks are no longer "
+        "apply-first — the KNOWN DEVIATIONS entry is stale and must be removed"
+    )
+    assert min(j.lineno for j in journal_first) < first_fold, (
+        "`_create_entity`'s DocumentCreated arm is no longer ordered "
+        "journal-first (a reorder) — the deviation's 'DocumentCreated arm "
+        "DOES append first' claim is false for this call site"
     )

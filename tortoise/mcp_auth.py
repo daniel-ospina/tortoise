@@ -1,9 +1,12 @@
 """MCP HTTP transport auth, rate limit, security headers, SDK resolution (#236).
 
 Serves as the auth/rate-limit boundary for the MCP Streamable HTTP endpoint
-mounted at /mcp on the hosted FastAPI app. Imports ONLY tortoise.sdk +
-starlette + tortoise.body_limits (starlette-only by design) — mcp_server
-imports from here (one-directional; no circular import).
+mounted at /mcp on the hosted FastAPI app. Imports ONLY starlette plus
+``tortoise`` modules that carry no hosted app (``sdk``, ``body_limits``,
+``rate_buckets``, ``tool_registry``) — mcp_server imports from here
+(one-directional; no circular import). ⛔ Never import ``hosted_api`` here: it
+is a cycle, and its *presence* in ``sys.modules`` is the runtime deployment
+discriminator the self-host branches read (see ``_journal_path_for``).
 
 Design: per-request org-scoped SDK via ContextVar. OrgResolutionMiddleware
 validates the Bearer tt_/tk_ token (API_KEY_PREFIXES) against the control
@@ -23,7 +26,7 @@ import ipaddress
 import os
 import re
 import time
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict
 from contextvars import ContextVar
 from typing import Any
 
@@ -32,6 +35,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from tortoise.body_limits import BodyTooLargeError, read_capped_body
+from tortoise.rate_buckets import (
+    _BUCKET_OVERFLOW_KEY,
+    _bucket_route,
+    _bucket_touch,
+)
 from tortoise.sdk import TortoiseSDK
 
 # ── ContextVars ─────────────────────────────────────────────────────────────
@@ -76,6 +84,39 @@ def _get_base_sdk() -> TortoiseSDK:
 
 
 # ── Org-scoped SDK (D2) ────────────────────────────────────────────────────
+def _journal_path_for(namespace: str | None,
+                      graph_name: str | None) -> str | None:
+    """The per-graph JSONL journal path for an MCP-lane SDK (`#7951` P0).
+
+    Delegates to ``config._resolve_event_log_path`` — the ONE derivation
+    of namespace/graph_name → ``<base>/<graph>/events.jsonl`` (#4240) — so an
+    MCP-lane SDK can never key its journal to a graph the SDK does not open.
+    Inventing a second derivation here is exactly the #4240 review's
+    divergence class (``namespace='test-foo'`` opens
+    ``test_foo_tortoise``, NOT ``org_test-foo``).
+
+    Returns ``None`` when ``TORTOISE_EVENT_LOG_BASE_DIR`` is unset (the
+    journal-less lanes stay byte-identical) AND for the unnamed default /
+    registry graphs, which are not org data graphs — the same boundary
+    ``hosted_api._make_sdk`` draws. A ``None`` here means the SDK is NOT
+    journal-backed, so `#7951`'s guard has nothing to enforce (there is no
+    truth store for its cache to be ahead of) — not that the gate was
+    forgotten.
+
+    ⛔ The derivation lives in ``tortoise.config`` (no FastAPI import), NOT in
+    ``hosted_api``. Importing ``hosted_api`` here put the whole hosted app in
+    ``sys.modules`` on EVERY stdio/self-host MCP process — and that module's
+    *presence* is the runtime deployment discriminator the self-host branches
+    read (``mcp_server.tortoise_pack_install``'s HOSTED-only stub,
+    ``operator_alert.alert_store``'s light leg, the fast-path invariant at the
+    top of ``mcp_server``). The import also cost ~1 s on a lane whose result is
+    usually ``None``. Re-exported from ``hosted_api`` for its own callers, so
+    there is still exactly ONE derivation (#7951 review P1).
+    """
+    from tortoise.config import _resolve_event_log_path
+    return _resolve_event_log_path(namespace=namespace, graph_name=graph_name)
+
+
 def _get_org_sdk() -> TortoiseSDK:
     """Request-scoped SDK: org namespace in HTTP mode, base SDK in stdio.
 
@@ -88,15 +129,50 @@ def _get_org_sdk() -> TortoiseSDK:
     keys (C3) — a deleted graph's key fails resolution (401), so no
     per-call re-probe (REST's _data_sdk probe is defense-in-depth for the
     resolve→open window; MCP's resolve→open window is the same request).
-    Org-wide keys / OAuth / selfhost → the default graph (unchanged)."""
+    Org-wide keys / OAuth / selfhost → the default graph (unchanged).
+
+    #7951 P0: every SDK built here is handed its per-graph JSONL journal
+    (``_journal_path_for``), so ``TortoiseSDK._get_proj`` binds it and §17.1's
+    single-writer guard is ARMED on this lane. Before this, no MCP-lane SDK
+    carried an ``event_log_path`` and the guard was inert on the surface
+    agents actually write through.
+
+    ⛔ BOUNDARY, corrected so it is not over-read: the guard is armed on the
+    ORG-SCOPED lane — including the SELF-HOST lane (``SELFHOST_ORG_ID`` →
+    ``namespace='selfhost'`` → ``<base>/org_selfhost/events.jsonl`` when
+    ``TORTOISE_EVENT_LOG_BASE_DIR`` is set). It is the BASE/stdio lane
+    (``_get_base_sdk``, no org) that is journal-less and therefore unarmed;
+    that lane's journal resolves to ``None`` by construction and is not this
+    function's concern. So the earlier claim that the self-host lane "could
+    not be armed" was wrong: it is armed whenever the journal base dir is
+    set."""
     org_id = _current_org_id.get()
     if org_id is None:
         return _get_base_sdk()
+    if org_id == SELFHOST_ORG_ID:
+        # #8497: arm the self-host deployment's default journal BEFORE the path
+        # is resolved. `tortoise.selfhost` arms it for the docker daemon, but
+        # `tortoise serve --http` is a documented self-host daemon that never
+        # imports that module — so without this the self-host MCP door resolved
+        # a `None` journal and wrote an UNRECORDED org_selfhost graph.
+        # Memoized in `config` — the probe runs once per base dir per process,
+        # so this is a lookup after the first call.
+        from tortoise.config import ensure_selfhost_event_log
+
+        ensure_selfhost_event_log()
     gid = _current_graph_id.get()
     ns = _current_graph_namespace.get()
     if gid and ns:
-        return TortoiseSDK(graph_name=ns)
-    sdk = TortoiseSDK(namespace=org_id)
+        # #7951 P0: pass the journal so `_get_proj`'s `_bind_journal` ARMS
+        # §17.1's guard on THIS lane. Without it the MCP surface built a
+        # journal-backed-intent SDK with no `event_log_path`, so the guard was
+        # inert exactly where agents write (the reviewer's reproduction).
+        return TortoiseSDK(
+            graph_name=ns,
+            event_log_path=_journal_path_for(namespace=None, graph_name=ns))
+    sdk = TortoiseSDK(
+        namespace=org_id,
+        event_log_path=_journal_path_for(namespace=org_id, graph_name=None))
     if org_id == SELFHOST_ORG_ID:
         # #2007 (W12): the selfhost SDK-init seam — the selfhost MCP transport
         # (`tortoise/selfhost.py`'s mounted /mcp, and `serve --http --auth
@@ -972,17 +1048,45 @@ class MCPRateLimitMiddleware(BaseHTTPMiddleware):
     limit_get=True (parent app / #525): rate-limits GETs too — /v1/* endpoints
     accept the static key and would otherwise be an unthrottled brute-force
     surface. The /mcp sub-app keeps the default (GET = metadata/SSE only).
+
+    #5518: the store is BOUNDED (owned-key cap + exactly ONE shared overflow
+    bucket) and the hot path is O(1) in store size, via the SAME capacity
+    policy the REST lanes use (``tortoise/rate_buckets`` — the neutral home
+    this module can import without pulling in ``hosted_api``). This lane's key
+    space is FULLY attacker-chosen (``key_id = auth[7:]`` accepts ANY
+    ``Bearer <string>`` — no ``tt_``/``tk_`` prefix gate, unlike the hosted
+    limiter), so the old arrangement was the defect, not a bound: a
+    rotating-key flood pruned nothing (every bucket was charged inside the
+    window), and the 60 s wholesale sweep was O(n) over that growing store.
+    ``_bucket_route`` never inserts, so a 429 leaves NO bucket behind. The
+    old read ``self._buckets[key_id]`` on a ``defaultdict`` inserted the bucket
+    on the LOOKUP path (#1719's insertion-discipline defect) — but that is not
+    a per-429 leak: a fresh key's bucket is empty, so it is under any
+    ``max_per_minute >= 1`` and the pre-insert is always followed by a charge.
+    Only the degenerate ``max_per_minute == 0`` config (the off switch is
+    ``RATE_LIMIT_DISABLED=1``) could refuse a key the lookup had just created.
+    The sweep is gone entirely; the deadline attribute with it.
     """
 
+    #: Hard cap on OWNED (client-keyed) buckets. Mirrors
+    #: ``hosted_api.RateLimitMiddleware.MAX_BUCKETS`` — the two lanes must not
+    #: drift; ``len(store) <= MAX_BUCKETS + 1`` (the shared overflow).
+    MAX_BUCKETS = 10_000
+
     def __init__(self, app, max_per_minute: int = 100, limit_get: bool = False,
-                 paths_prefix: tuple[str, ...] = ()):
+                 paths_prefix: tuple[str, ...] = (),
+                 max_buckets: int | None = None):
         super().__init__(app)
         self.max_per_minute = max_per_minute
         self._limit_get = limit_get
         self._paths_prefix = paths_prefix
-        self._buckets: dict[str, list[float]] = defaultdict(list)
+        self.max_buckets = (
+            self.MAX_BUCKETS if max_buckets is None else max_buckets)
+        # A PLAIN dict, never a ``defaultdict``: `_bucket_route` resolves a
+        # fresh key WITHOUT inserting (#1719), and the write-back below is the
+        # only charge path — so a 429 leaves no entry behind.
+        self._buckets: dict[str, list] = {}
         self._lock = asyncio.Lock()
-        self._last_cleanup = time.time()
         self._disabled = os.environ.get("RATE_LIMIT_DISABLED") == "1"
 
     async def dispatch(self, request: Request, call_next):
@@ -1001,30 +1105,24 @@ class MCPRateLimitMiddleware(BaseHTTPMiddleware):
             key_id = f"ip:{ip}"
         now = time.time()
         async with self._lock:
-            # Periodic cleanup: filter stale timestamps from ALL buckets, then
-            # prune empty ones (code-review fix; prevents one-off-IP bucket
-            # growth). NOTE #3124/#5518: this is NO LONGER the hosted_api
-            # pattern — hosted_api's RateLimitMiddleware now caps its key space
-            # and has no periodic sweep. This store is still unbounded (and
-            # `self._buckets[key_id]` below still pre-inserts before the 429
-            # check) on a fully attacker-chosen key space: see #5518.
-            if now - self._last_cleanup > 60:
-                stale = []
-                for k, v in list(self._buckets.items()):
-                    v[:] = [t for t in v if now - t < 60]
-                    if not v:
-                        stale.append(k)
-                for k in stale:
-                    del self._buckets[k]
-                self._last_cleanup = now
-            bucket = self._buckets[key_id]
-            bucket[:] = [t for t in bucket if now - t < 60]
+            # #5518: bounded key space + O(1) hot path, via the SAME
+            # `_bucket_route` policy as the REST lanes. Inactive
+            # insertion-order-head buckets are reclaimed ONLY on the new-key
+            # path (a tracked key is pruned in place and never scans the
+            # store); a new key at a full store is charged to the one shared
+            # overflow bucket (capped at this lane's limit) instead of growing
+            # the store. Replaces the old 60 s wholesale O(n) prune.
+            bucket, on_overflow = _bucket_route(
+                self._buckets, key_id, now, 60, self.max_buckets)
             if len(bucket) >= self.max_per_minute:
                 resp = _jsonrpc_error(ERR_RATE_LIMIT, "Rate limit exceeded",
                                       {"retry_after": 30}, status=429)
                 resp.headers["Retry-After"] = "30"
                 return resp
-            bucket.append(now)
+            bucket.append((now, key_id) if on_overflow else now)
+            dest = _BUCKET_OVERFLOW_KEY if on_overflow else key_id
+            self._buckets[dest] = bucket
+            _bucket_touch(self._buckets, dest)
         return await call_next(request)
 
 

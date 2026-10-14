@@ -52,6 +52,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Lock
 
+from tortoise._gate_memo import GateMemo
 from tortoise.sdk import TortoiseSDK
 
 log = logging.getLogger(__name__)
@@ -365,6 +366,107 @@ _KIND_PROP_KEYS: tuple[str, ...] = (
     "documentKind", "subjectKind", "actionKind", "kind",
 )
 
+#: The kind properties whose BARE values may be attributed back to a declaring
+#: pack (#5184). Exactly ONE — ``eventKind``:
+#:
+#: * it is the leg #1933's FIX-A strips to bare form in the extraction payload
+#:   (``extractor_v2``: ``ekind.rsplit(":", 1)[-1]``), so it is the one kind
+#:   family that reaches the graph WITHOUT a namespace and is still
+#:   attributable. No bare *pack* point kind is ever written (the classifier's
+#:   "points" section is core-only — ``_minted_kind_report``: "pack point
+#:   kinds are never writable"), and the pack ``sourceTypes`` in the catalog
+#:   are core spellings the core leg already admits;
+#: * ``objectKind``/``subjectKind`` are DELIBERATELY absent: ``POST
+#:   /v1/objects`` / ``POST /v1/subjects`` persist those spellings UNGATED
+#:   (#5475). Attributing a bare value from them would make the approval set
+#:   writable again through the very door #5475 closed — one bare write would
+#:   add its declaring namespace, and the door would be self-widening again.
+_ATTRIBUTABLE_BARE_KIND_KEYS: tuple[str, ...] = ("eventKind",)
+
+#: Memo for ``bare_event_kind_owners``, keyed by the RESOLVED packs dir (packs
+#: are static per process per dir — the ``value_extractor._KIND_SPEC_CACHE``
+#: precedent). Bounded + LRU + thread-safe via ``GateMemo``.
+_BARE_KIND_OWNERS = GateMemo()
+
+
+def bare_event_kind_owners(packs_dir: str | os.PathLike | None = None
+                           ) -> dict[str, frozenset[str]]:
+    """``{bare event kind: the namespaces declaring it}``, from the catalog.
+
+    The lookup #5184's attribution needs: a bare ``eventKind`` value found in
+    the graph's data is mapped back to the pack(s) that declare it.
+    ``PackRegistry`` is the loader ``compile_vocab`` reads, so the map and the
+    write gate agree on what a pack declares; a manifest that fails to load
+    contributes nothing (``load_all`` keeps healthy packs only) — the map
+    NARROWS on a broken manifest, never widens.
+
+    Keys are the kind as DECLARED, compared RAW (the gate compares kinds raw
+    — #5339 review P2 — so a case-folded lookup would attribute a spelling the
+    gate will never accept), and only bare declarations are keys: a namespaced
+    value already carries its namespace. Memoized per resolved packs dir.
+    """
+    if packs_dir is None:
+        from tortoise.pack_registry import default_packs_dir
+        packs_dir = default_packs_dir()
+    cache_key = str(packs_dir)
+    cached = _BARE_KIND_OWNERS.get(cache_key)
+    if cached is not None:
+        return cached
+    from tortoise.pack_registry import PackRegistry
+    registry = PackRegistry(packs_dir)
+    registry.load_all()
+    owners: dict[str, set[str]] = {}
+    for ns, pack in registry.packs.items():
+        for kind in pack.event_kinds:
+            owners.setdefault(str(kind), set()).add(ns)
+    return _BARE_KIND_OWNERS.put_if_absent(
+        cache_key, {k: frozenset(v) for k, v in owners.items()})
+
+
+def _bare_event_kind_namespaces(bare: set[str]) -> frozenset[str]:
+    """The namespaces attributable from the graph's BARE event kinds (#5184).
+
+    A bare value is attributed only when BOTH hold:
+
+    * **it is not core event vocabulary** (``commit_schema.EVENT_KINDS``). The
+      core leg of the write gate is never gated, so a core spelling is no
+      evidence that any pack was ever installed — attributing it would let a
+      bare core-named write widen the approval set. (No pack declares a core
+      event kind today; the guard is what keeps a future one from becoming a
+      silent widening vector.)
+    * **exactly ONE catalog pack declares it.** A bare name that two packs
+      declare cannot name a pack — the registry's own rule is that an
+      ambiguous bare reference is an error (``PackRegistry._resolve_kind_ref``)
+      — so the union never guesses. Pinned by
+      ``test_live_catalog_declares_no_ambiguous_bare_event_kind``, which is
+      what makes this bound lossless against today's catalog.
+
+    ⚠️ FAILURE DIRECTION — NARROWING, like every other leg here: a catalog
+    read that raises contributes NOTHING (logged at WARNING) and must never
+    escape, because ``graph_installed_namespaces`` does not catch it — an
+    escape would abort the approval-set read rather than narrow it. Pinned by
+    ``test_bare_kind_attribution_failure_narrows_never_widens``.
+    """
+    try:
+        from tortoise.commit_schema import EVENT_KINDS
+        candidates = {v for v in bare if v and v not in EVENT_KINDS}
+        if not candidates:
+            # The common case (a graph whose bare event kinds are core, e.g.
+            # ``AgentSession``): no catalog read at all.
+            return frozenset()
+        owners = bare_event_kind_owners()
+        out: set[str] = set()
+        for value in candidates:
+            declaring = owners.get(value)
+            if declaring is not None and len(declaring) == 1:
+                out.update(declaring)
+        return frozenset(out)
+    except Exception as e:  # noqa: BLE001, RUF100
+        log.warning("pack_state: bare-event-kind attribution failed — the "
+                    "bare event kinds contribute no namespace to the "
+                    "back-compat union: %s", e)
+        return frozenset()
+
 
 def graph_kind_namespaces(g) -> frozenset[str]:
     """Namespaces already PRESENT IN THE GRAPH'S DATA (the back-compat union).
@@ -376,8 +478,25 @@ def graph_kind_namespaces(g) -> frozenset[str]:
     the graph already contains would make old data un-updatable (#2714
     indicator 2).
 
-    Un-namespaced kind values (legacy/core forms) contribute nothing: only a
-    ``ns:kind`` string names a pack to keep alive.
+    Two legs, both required:
+
+    * **A ``ns:kind`` value names its pack directly** — the prefix is the
+      namespace that keeps the pack alive.
+    * **A BARE pack EVENT kind is attributed back to its declaring pack**
+      (#5184). #1933's FIX-A strips the namespace off an event kind before the
+      payload is built (``extractor_v2``: ``ekind.rsplit(":", 1)[-1]``), so
+      ``agent-ops:ruleRevised`` reaches the graph as bare ``ruleRevised`` and
+      the prefix leg cannot see it. Without this leg a graph whose
+      ``:PackInstall`` records do not include that pack — but whose data
+      carries the pack's events — drops the namespace from the approval set,
+      and a NEW write of a kind the graph already holds is 422'd: #2714
+      indicator 2 inverted. Only ``eventKind`` is attributable (see
+      ``_ATTRIBUTABLE_BARE_KIND_KEYS`` and ``_bare_event_kind_namespaces``).
+
+    Un-namespaced kind values outside that one leg (legacy/core forms, bare
+    object/subject/point kinds) contribute nothing: a bare value the CORE leg
+    of the write gate admits names no pack, and a bare value no pack declares
+    names nothing at all.
 
     ⚠️ COST: one property scan per key (8) — a whole-graph read. The
     caller's memo does NOT shelter it: ``tenant_view`` folds the approval set
@@ -385,12 +504,17 @@ def graph_kind_namespaces(g) -> frozenset[str]:
     300 nodes, and O(nodes) in the graph's size). The gate is a compile-time
     decision, not a render-time one — the cost is per capture, not per prompt
     render. An index on the kind properties, or a cheap data-version signal
-    feeding the key, is the optimization.
+    feeding the key, is the optimization. The #5184 attribution adds a catalog
+    read ONLY when the data holds a non-core bare event kind (a graph whose
+    event kinds are all namespaced or core pays nothing), and that read is
+    memoized per resolved packs dir (``bare_event_kind_owners``).
 
     ⚠️ FAILURE DIRECTION — NARROWING, not widening. A property scan that
     raises omits that key's namespaces (logged at WARNING) and the loop
     continues, so the returned union can only be SMALLER than a complete
-    scan — never larger. The consequence is deliberate and bounded: a
+    scan — never larger. The bare-event attribution narrows the same way: a
+    failed catalogue read contributes no namespaces (logged at WARNING) and
+    never escapes this function. The consequence is deliberate and bounded: a
     namespace discoverable ONLY through the failed key drops out of the
     back-compat union, so historical data using it could be refused at the
     write gate until a later successful scan. The record leg (the inline
@@ -401,6 +525,7 @@ def graph_kind_namespaces(g) -> frozenset[str]:
     fix. Pinned by ``test_kind_scan_failure_narrows_never_widens``.
     """
     out: set[str] = set()
+    bare_attributable: set[str] = set()
     for key in _KIND_PROP_KEYS:
         try:
             rows = g.query(
@@ -416,10 +541,19 @@ def graph_kind_namespaces(g) -> frozenset[str]:
         try:
             for row in rows:
                 val = row[0] if row else None
-                if isinstance(val, str) and ":" in val:
+                if not isinstance(val, str):
+                    continue
+                if ":" in val:
                     ns = val.split(":", 1)[0].strip()
                     if ns:
                         out.add(ns)
+                elif key in _ATTRIBUTABLE_BARE_KIND_KEYS:
+                    # #5184: a BARE attributable kind carries no prefix, so
+                    # the branch above cannot name its pack. Collected here
+                    # and resolved after the scans (below).
+                    bare = val.strip()
+                    if bare:
+                        bare_attributable.add(bare)
         except Exception as e:  # noqa: BLE001, RUF100
             # The DECODE is inside the same NARROWING guard as the scan: a
             # row we cannot decode (a non-subscriptable row, a None
@@ -432,6 +566,10 @@ def graph_kind_namespaces(g) -> frozenset[str]:
                         "%s — the remaining rows for that key are omitted "
                         "from the back-compat union: %s", key, e)
             continue
+    # #5184: the bare-event leg, resolved AFTER the scans so a failed scan
+    # still contributes whatever the other keys found — narrowing, never
+    # widening (the FAILURE DIRECTION contract above).
+    out |= _bare_event_kind_namespaces(bare_attributable)
     return frozenset(out)
 
 
@@ -506,7 +644,11 @@ def kind_namespace_is_approved(kind: str,
 
     * a BARE kind (no ``:``) names no pack, cannot widen the set, and is
       admitted — the core/legacy leg is never gated (``compile_vocab`` gates
-      only its pack legs);
+      only its pack legs). That holds for the kind fields THIS constraint
+      guards: #5184's bare-kind attribution reads ``eventKind`` only and
+      deliberately excludes objectKind/subjectKind (see
+      ``_ATTRIBUTABLE_BARE_KIND_KEYS``), so a bare write through these doors
+      still cannot widen the approval set;
     * an empty namespace (``":kind"``) contributes nothing to
       ``graph_kind_namespaces`` either, so it is admitted on the same grounds;
     * ``approved is None`` is the MEANINGFUL back-compat answer, not an empty

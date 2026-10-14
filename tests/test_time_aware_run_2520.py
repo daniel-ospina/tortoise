@@ -117,7 +117,7 @@ def test_outcome_projection_carries_arm_and_stats():
 
 def _falkordb_available() -> bool:
     uri = os.environ.get(
-        "TORTOISE_DB_URI",
+        "TORTOISE_DB_URI",  # empty-uri-default-ok: #2815 skip declared; converting flips the tier-2 lane
         _live_utils.docker_uri("tortoise_test_matrix")).rstrip("/")
     old = os.environ.get("TORTOISE_DB_URI")
     try:

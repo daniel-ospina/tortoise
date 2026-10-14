@@ -133,6 +133,7 @@ import pytest
 
 from tortoise.consistency import check_consistency
 from tortoise.log import EventLog
+from tortoise.projection import _replay_write_scope  # #7951: replay folds need the scope
 from tortoise.sdk import TortoiseSDK
 
 
@@ -250,8 +251,14 @@ def test_the_tag_survives_on_every_replay_arm(env):
     pid = sdk.create_point("statement", "the sky is blue", tags=["alpha"])["id"]
     proj = sdk._get_proj()
 
+    def _apply_arm() -> list:
+        # #7951 §17.1: the `apply(ev)` arm IS a replay of the journal, so it
+        # declares the replay scope (the same scope the two engines open).
+        with _replay_write_scope():
+            return [proj.apply(e) for e in _journal(events)]
+
     arms = {
-        "apply()": lambda: [proj.apply(e) for e in _journal(events)],
+        "apply()": _apply_arm,
         "rebuild(EventLog)": lambda: proj.rebuild(
             EventLog(str(events / "events.jsonl")), confirm_destructive=True),
         "rebuild_all(dir)": lambda: proj.rebuild_all(

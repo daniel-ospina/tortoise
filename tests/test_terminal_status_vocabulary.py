@@ -394,3 +394,134 @@ def test_live_predicate_and_set_agree_on_both_axes() -> None:
         assert live.is_terminal_status(status) is False
         assert live.is_terminal_status(status, True) is True  # legacy flag
     assert live.is_terminal_status(None) is False  # legacy/absent == live
+
+
+# ── 5. #7075 — builder is the keep-filter's exact negation, on every value ─
+
+#: Values a hand-edited / pre-#2491 graph can actually hold on ``outdated``.
+#: The dual invariant must hold for every one of them, including the values
+#: where it does not coincide with the Python mirror's ``bool()`` — the
+#: divergence is stated by mechanism on ``_terminal_expression`` and exercised
+#: by ``_FALSY_NON_BOOLEAN_RESIDUALS`` below.
+_OUTDATED_PROBE_VALUES = [True, False, None, 1, 0, 2, "true", "false", ""]
+
+
+def _terminal_and_keep(proj, pid: str) -> tuple:
+    """``(terminal?, keep-filter-kept?)`` for one node id, from the engine."""
+    rows = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN "
+        f"{live._terminal_expression('n')} AS terminal, "
+        f"{live._terminal_excluded('n.status')} AS kept",
+        params={"id": pid},
+    ).result_set
+    assert rows, pid
+    return rows[0][0], rows[0][1]
+
+
+def test_terminal_expression_is_the_keep_filters_exact_negation(sdk) -> None:
+    """#7075 indicator 2: ``_terminal_expression == NOT _terminal_excluded``.
+
+    They are the positive/negative halves of ONE terminal vocabulary, and the
+    builder's docstring has always claimed its partner's bare negation is safe
+    to use. Before #7075 the flag half was ``= true``, which is not the
+    negation of ``= false`` under FalkorDB's strict type comparison, so a
+    non-boolean ``outdated`` made a node BOTH not-terminal and not-live — an
+    excluded middle. Asserted against the live engine, on a live-status
+    Point, for every probe value (including numeric ``0`` and the empty string
+    ``""``, the examples of the falsy non-boolean divergence).
+    """
+    proj = sdk._get_proj()
+    for value in _OUTDATED_PROBE_VALUES:
+        pid = _mk_point(sdk, f"dual {value!r}", status="live", outdated=value)
+        terminal, kept = _terminal_and_keep(proj, pid)
+        assert terminal is not kept, (
+            f"excluded middle for outdated={value!r}: builder={terminal}, "
+            f"keep-filter={kept} — a value cannot be both non-terminal and "
+            "non-live"
+        )
+
+
+def test_boolean_and_null_flag_semantics_are_unchanged(sdk) -> None:
+    """``= true`` -> ``<> false`` is a NO-OP on the contract domain.
+
+    Every in-repo writer emits a boolean (the fold enforces the type), so the
+    #7075 change must not move any in-contract graph: booleans and NULL read
+    exactly as the old expression read them.
+    """
+    proj = sdk._get_proj()
+    for value, expected in ((True, True), (False, False), (None, False)):
+        pid = _mk_point(sdk, f"bool {value!r}", status="live", outdated=value)
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN "
+            f"{live._terminal_expression('n')}, "
+            "coalesce(n.outdated, false) = true, "
+            f"{live._terminal_excluded('n.status')}",
+            params={"id": pid},
+        ).result_set
+        terminal, legacy_form, kept = rows[0]
+        assert terminal is expected, value
+        assert terminal == legacy_form, (
+            f"in-contract boolean {value!r} changed meaning: "
+            f"new={terminal}, pre-#7075 form={legacy_form}"
+        )
+        assert kept is (not expected), value
+
+
+@pytest.mark.parametrize("value", [1, "true", "false"])
+def test_builder_and_python_mirror_agree_on_non_boolean_flags(sdk, value) -> None:
+    """#7075 indicator 1: on a live-status Point, the Cypher builder and its
+    Python mirror return the same answer for a non-boolean ``outdated``.
+
+    All three values are truthy in Python and now terminal in Cypher, so the
+    Phase-1 dedup guard and its two Phase-2 counterparts agree on them.
+    """
+    pid = _mk_point(sdk, f"mirror {value!r}", status="live", outdated=value)
+    terminal, _kept = _terminal_and_keep(sdk._get_proj(), pid)
+    mirror = is_terminal_status("live", value)
+    assert terminal is True and mirror is True, (
+        f"Cypher={terminal} but Python mirror={mirror} for outdated={value!r}"
+    )
+
+
+#: Falsy non-boolean values where the two predicates diverge (the residual the
+#: docstrings state by mechanism, these being the practical examples): the
+#: builder (and ``_terminal_excluded``) read them as the ``<> false`` half
+#: (terminal), while the Python mirror's ``bool()`` reads them live.
+_FALSY_NON_BOOLEAN_RESIDUALS = [0, 0.0, ""]
+
+
+@pytest.mark.parametrize("value", _FALSY_NON_BOOLEAN_RESIDUALS)
+def test_documented_residual_class_is_falsy_non_boolean(sdk, value) -> None:
+    """The docstrings' residual, made executable: for each falsy non-boolean
+    value probed here the Cypher builder calls the node terminal while the
+    Python mirror calls it live.
+
+    It pins the example values ``0``/``0.0``/``""`` — the pre-fix prose named
+    only numeric ``0`` and omitted the empty string. Fails on the pre-fix
+    ``= true`` builder, where such a node read NOT terminal and was separately
+    non-live (the excluded middle this PR removes).
+    """
+    pid = _mk_point(sdk, f"residual {value!r}", status="live", outdated=value)
+    terminal, kept = _terminal_and_keep(sdk._get_proj(), pid)
+    mirror = is_terminal_status("live", value)
+    assert terminal is True, (
+        f"Cypher builder should read falsy non-boolean {value!r} as terminal "
+        f"(keep-filter dual); got {terminal}"
+    )
+    assert kept is False, value  # the keep-filter agrees it is terminal
+    assert mirror is False, (
+        f"Python mirror should still read {value!r} live (the documented "
+        f"residual); got {mirror}"
+    )
+
+
+def test_python_mirror_truthiness_of_non_boolean_flags() -> None:
+    """The Python half of indicator 1, without a graph: the mirror's own
+    answers on the probe set — the contract the Cypher half must meet wherever
+    Python truthiness is expressible in Cypher."""
+    assert is_terminal_status("live", 1) is True
+    assert is_terminal_status("live", "true") is True
+    assert is_terminal_status("live", "false") is True  # non-empty string
+    assert is_terminal_status("live", 0) is False  # falsy residual: numeric
+    assert is_terminal_status("live", "") is False  # falsy residual: empty str
+    assert is_terminal_status("live", None) is False

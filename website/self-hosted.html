@@ -56,7 +56,7 @@
   </header>
 
   <div class="card">
-    <p><strong>What you get:</strong> a durable FalkorDB graph (multi-writer safe) behind the daemon, the MCP server, and the same Tortoise onboarding instructions your agent reads. The MCP tool names are identical to hosted — only the transport differs (self-hosted HTTP vs Streamable HTTP).</p>
+    <p><strong>What you get:</strong> a multi-writer-safe FalkorDB graph (AOF on the sidecar) behind the daemon, the MCP server, and the same Tortoise onboarding instructions your agent reads. The MCP tool names are identical to hosted — only the transport differs (self-hosted HTTP vs Streamable HTTP).</p>
   </div>
 
   <h2><span class="n">1</span>Install</h2>
@@ -69,12 +69,14 @@
 
   <h2><span class="n">2</span>Run the daemon (Docker, recommended)</h2>
   <div class="card">
-    <p>The repo's <code>docker-compose.yml</code> starts the daemon <strong>plus a FalkorDB sidecar</strong> (AOF on, named volume, healthcheck) — the durable multi-writer path for teams and production:</p>
+    <p>The repo's <code>docker-compose.yml</code> starts the daemon <strong>plus a FalkorDB sidecar</strong> (AOF on, named volume, healthcheck) — the multi-writer path for teams and production:</p>
     <pre><span class="cmd">docker compose up -d</span>
 
 <span class="out">✔ daemon ready → http://localhost:8000 (MCP at /mcp)
 ✔ FalkorDB sidecar healthy (127.0.0.1:6379, requirepass)</span></pre>
     <p class="dim">Set a strong <code>TORTOISE_API_KEY</code> in <code>docker-compose.yml</code> before exposing beyond localhost. Host-side tools can reach the sidecar directly with <code>TORTOISE_DB_URI=docker://:falkordb@localhost:6379/tortoise</code>.</p>
+    <p><strong>Durability, plainly:</strong> AOF on the sidecar survives a process or container crash (<strong>≤1&nbsp;s</strong> of lost writes) — it does <strong>not</strong> survive losing the volume or the host. Durability is the store's persistence <strong>plus an off-box copy</strong>, so the off-box backup target is a <strong>setup decision</strong>, not a silent default: in <code>docker-compose.yml</code>, fill <code>R2_ACCOUNT_ID</code>&nbsp;/&nbsp;<code>R2_ACCESS_KEY_ID</code>&nbsp;/&nbsp;<code>R2_SECRET_ACCESS_KEY</code>&nbsp;/&nbsp;<code>R2_BUCKET</code> to declare a target, or set <code>TORTOISE_OFFBOX_BACKUP_DECLINED=1</code> to decline one explicitly. Leave both unset and the daemon still serves — and reports the single local copy loudly at startup. The full posture, with what has actually been verified: <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/durability-posture.md">docs/durability-posture.md</a>.</p>
+    <p class="dim">⚠️ A declared target is an intent, not yet a copy: the backup sweep's only driver is the hosted lane, and nothing in the self-host lane runs it yet (<a href="https://github.com/daniel-ospina/tortoise/issues/8544">#8544</a>), so declaring a target does not produce an archive today.</p>
   </div>
 
   <h2><span class="n">3</span>Onboard (5 steps)</h2>
@@ -127,10 +129,16 @@ Next: connect your agent (step 4)
     <table>
       <tr><th>You are…</th><th>Use…</th><th>Why</th></tr>
       <tr><td>One agent, experimenting / laptop eval</td><td><strong>Embedded</strong> (no Docker, <code>tortoise init</code>)</td><td>Zero deps, single-writer only — safe for one agent</td></tr>
-      <tr><td>A team / multiple agents</td><td><strong>Docker compose sidecar</strong> (step 2)</td><td>Durable multi-writer: concurrent agents never lose writes</td></tr>
-      <tr><td>Production / HA</td><td><strong>Docker compose</strong> or <strong>managed Cloud</strong></td><td>AOF + backups + ops; embedded is eval only</td></tr>
+      <tr><td>A team / multiple agents</td><td><strong>Docker compose sidecar</strong> (step 2)</td><td>Multi-writer: concurrent agents never lose writes</td></tr>
+      <tr><td>Production / HA</td><td><strong>Docker compose</strong> or <strong>managed Cloud</strong></td><td>AOF + a declared off-box target + ops; embedded is eval only</td></tr>
     </table>
     <p class="dim">Embedded FalkorDBLite is AOF-durable for a single process since #915, but <strong>concurrent writers lose data</strong> — that is the boundary, and it is not negotiable for team deployments.</p>
+  </div>
+
+  <h2><span class="n">7</span>Capacity and limits</h2>
+  <div class="card">
+    <p>What each path actually sustains — write concurrency, request rate limits, graph-size caps, retrieval latency, storage footprint per element, and belief-propagation cost. Every published number names the committed artifact or code symbol it comes from, and dimensions we have not measured are listed as unmeasured rather than estimated.</p>
+    <p class="dim">Measured today: the Docker path is verified to <strong>5 concurrent writer processes on one graph with no lost writes</strong>; embedded is single-writer; the hosted per-key limit is <strong>100 requests/min</strong>. The full page, with sources: <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/capacity.md">docs/capacity.md</a>.</p>
   </div>
 
   <div class="note">

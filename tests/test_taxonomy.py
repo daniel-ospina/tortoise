@@ -1,10 +1,12 @@
 """Tests for tortoise.taxonomy — P0-5/6/7 read-only entity counting tools."""
 from __future__ import annotations
 
+import inspect
 import os
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -37,6 +39,44 @@ class TestTaxonomy:
         # :Source, so the label set carries ``Source``, not ``Document``.
         for label in ("Point", "Event", "Subject", "Object", "Source"):
             assert label in result
+        # No negative ``assert "Document" not in result`` here: ``taxonomy()``'s
+        # keys come from the hard-coded label tuple in ``tortoise/taxonomy.py``,
+        # which this change does not touch, so that assertion would pass on the
+        # pre-fix code too. The real pin is
+        # ``test_published_keys_match_the_counted_labels`` below, which reads the
+        # registry prose and does fail pre-fix.
+
+    def test_published_keys_match_the_counted_labels(self, sdk):
+        """The MCP description's key set must BE what taxonomy() counts.
+
+        A consumer that codes to the keys in the description gets ``KeyError``
+        when they disagree — the exact defect D10 left (the description kept
+        ``Document`` after the label retired, #5121). Read the keys out of the
+        registry description and pin them to what ``taxonomy()`` actually
+        returns, so a future label retirement cannot re-stale the prose
+        silently.
+
+        The entry lives in ``RETIRED_TOOL_REGISTRY`` (the name was folded into
+        ``tortoise_overview(section="taxonomy")``, #3883) — it is not a live
+        advertised tool, so this is NOT a live published contract. It is pinned
+        because the retired name's warning shim still serves that description to
+        any caller that uses the old name, and it was the description D10
+        re-staled. It is read through both registries rather than assumed live.
+        """
+        import re
+
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+
+        entries = [
+            e for e in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY)
+            if e.id == "surface.taxonomy"
+        ]
+        assert len(entries) == 1, f"expected exactly one surface.taxonomy entry, got {len(entries)}"
+        block = re.search(r"\{([^}]*)\}", entries[0].description)
+        assert block, f"no {{Key: N}} block in the description: {entries[0].description!r}"
+        published = {part.split(":")[0].strip() for part in block.group(1).split(",")}
+        assert published == set(sdk.taxonomy().keys())
+        assert "Document" not in published
 
     def test_counts_points(self, sdk):
         result = sdk.taxonomy()
@@ -49,6 +89,59 @@ class TestTaxonomy:
         assert result["Subject"] == 0
         assert result["Object"] == 0
         assert result["Source"] == 0
+
+
+# ── the retired :Document label outside the MCP registry (#5121) ──────
+
+class TestRetiredDocumentLabelClaims:
+    """#5121: D10 retires ``:Document`` — a document is a ``:Source``.
+
+    The MCP registry descriptions were the enumerated sites, but the same claim
+    also lived in the CLI help, the public SDK docstring and the self-hosted
+    quickstart. These read the real artifact (the parsed CLI help, the shipped
+    docstring, the doc text) so the claim cannot come back un-noticed.
+    """
+
+    def test_create_entity_docstring_does_not_claim_a_document_node(self):
+        from tortoise.sdk import TortoiseSDK
+
+        doc = inspect.getdoc(TortoiseSDK.create_entity) or ""
+        assert "Document node" not in doc, doc
+        # Positive half: a merely deleted sentence would satisfy the negative
+        # alone, so the docstring must also say what the document IS.
+        assert "document ``:Source``" in doc, doc
+
+    def test_file_human_approval_docstring_names_the_document_source(self):
+        from tortoise.sdk import TortoiseSDK
+
+        doc = inspect.getdoc(TortoiseSDK.file_human_approval) or ""
+        assert "Object/Document id" not in doc, doc
+        # Positive half: the MCP handler's copy of this parameter was already
+        # corrected, so the SDK's copy must carry the same phrasing rather
+        # than a deleted sentence.
+        assert "url of the document Source" in doc, doc
+
+    def test_index_directory_help_does_not_claim_a_document_node(self, capsys):
+        from tortoise.__main__ import main
+
+        with pytest.raises(SystemExit):
+            main(["index", "--help"])
+        # argparse hard-wraps help at the terminal width, so collapse whitespace
+        # before matching the phrase.
+        out = " ".join(capsys.readouterr().out.split())
+        assert "Events/Documents" not in out, out
+        assert "Sources + Events" in out, out
+
+    def test_quickstart_keeps_the_file_source_and_the_document_distinct(self):
+        text = (Path(__file__).resolve().parent.parent
+                / "docs" / "quickstart-selfhosted.md").read_text()
+        # The false collapse (#5121 P2): the file Source and the document are
+        # distinct nodes — the document is a :Source keyed by its documentId
+        # and linked from the file Source — so this claim must be gone.
+        assert "the file's document *is* that Source" not in text
+        assert "Sources/Events/Documents" not in text
+        # Positive half: the corrected description must still be present.
+        assert "`documentKind`" in text, "the corrected §4b description is missing"
 
 
 # ── list_pointkinds (replaces list_domains, #49) ─────────────────────────

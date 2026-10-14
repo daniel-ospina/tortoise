@@ -14,16 +14,25 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 O="${O:-$HOME/orchestrator}"
-REPO="${REPO:-/Users/home/eldato/tortoise}"
+REPO="${REPO:-/Users/danielospina/Documents/GitHub/tortoise}"
 OR="${OR:-daniel-ospina/tortoise}"
 
-MAX_LOAD="${MAX_LOAD:-16}"
+# sanity ceiling only; the swap/RAM gates below are the real constraint.
+# Portable core count, IDENTICAL to orch-loop.sh's line. install.sh itself refuses to run off macOS
+# (it renders a launchd plist), but selftest §7 EVALUATES this assignment on whatever host runs the
+# suite and compares it with the loop's — so on a Linux host a divergence here would resolve
+# MAX_LOAD=40 against the loop's cores*10 and fail a check for a difference with no runtime effect.
+# sysctl -n hw.ncpu is a macOS-only key and sysctl is absent from a minimal Linux userland
+# (debian:stable-slim ships no procps): in the LOOP that silently pinned _NCPU=4, MAX_LOAD=40 (#1702).
+_NCPU="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
+MAX_LOAD="${MAX_LOAD:-$(( _NCPU * 10 ))}"
 MAX_LANES="${MAX_LANES:-4}"
 MAX_REVIEW="${MAX_REVIEW:-4}"
 MERGE_PRIORITY_AT="${MERGE_PRIORITY_AT:-10}"
 MAX_FIX="${MAX_FIX:-3}"
 MAX_FIX_TRIES="${MAX_FIX_TRIES:-3}"
 MIN_SWAP_FREE="${MIN_SWAP_FREE:-600}"
+MIN_MEM_FREE_MB="${MIN_MEM_FREE_MB:-512}"
 BATCH="${BATCH:-2}"
 CYC="${CYC:-240}"
 
@@ -240,6 +249,7 @@ sed \
   -e "s|__MAX_FIX__|$MAX_FIX|g" \
   -e "s|__MAX_FIX_TRIES__|$MAX_FIX_TRIES|g" \
   -e "s|__MIN_SWAP_FREE__|$MIN_SWAP_FREE|g" \
+  -e "s|__MIN_MEM_FREE_MB__|$MIN_MEM_FREE_MB|g" \
   -e "s|__BATCH__|$BATCH|g" \
   -e "s|__CYC__|$CYC|g" \
   "$TEMPLATE" > "$PLIST"
@@ -250,7 +260,7 @@ ok "plist valid"
 # invokes, not just orch-loop.sh. A drift here is silent and serious: a fix applied only to the
 # shipped copy (e.g. the fail-closed ai-review-gate classifier) would never reach the running box.
 DRIFTED=""
-for f in orch-loop.sh dispatch-merge.sh lane.sh chain-merge.sh merge-one.sh fix-one.sh refresh-candidates.sh adopt-fix.sh; do
+for f in orch-loop.sh dispatch-merge.sh lane.sh chain-merge.sh merge-one.sh fix-one.sh refresh-candidates.sh adopt-fix.sh spawn-gate.sh; do
   [ -f "$O/$f" ] || { DRIFTED="$DRIFTED $f(missing)"; continue; }
   diff -q "$HERE/$f" "$O/$f" >/dev/null 2>&1 || DRIFTED="$DRIFTED $f"
 done
@@ -267,7 +277,7 @@ cat <<EOF
   harness   $O
   repo      $REPO   ($OR)
   limits    lanes=$MAX_LANES review=$MAX_REVIEW fix=$MAX_FIX fix_tries=$MAX_FIX_TRIES
-            max_load=$MAX_LOAD min_swap_free=${MIN_SWAP_FREE}M batch=$BATCH cycle=${CYC}s
+            max_load=$MAX_LOAD min_swap_free=${MIN_SWAP_FREE}M min_mem_free_mb=${MIN_MEM_FREE_MB}M batch=$BATCH cycle=${CYC}s
             merge_priority_at=${MERGE_PRIORITY_AT} open PRs
 
 The loop is NOT running. To start it:

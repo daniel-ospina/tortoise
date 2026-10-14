@@ -11,9 +11,9 @@ aboutObjects: EXTRACTOR-V4-ARCHITECTURE.md, extractor pipeline, S2.2 VET, entity
 
 # Extractor v4 — Architecture
 
-**Status:** design in progress, 2026-09-23. **Home:** `#4894` (write-path redesign). **Predecessor:** `#1509` (extractor v3, approved 2026-08-20, never built).
+**Status:** design in progress, 2026-09-23. **Home:** `#4894` (write-path redesign). **Predecessor:** `#1509` (extractor v3, approved 2026-08-20; ⚠️ **epic CLOSED `NOT_PLANNED` 2026-10-10 — the v4 design does not wait on it. ⚠️ But v3 was NOT wholly unbuilt: parts LANDED and are load-bearing here** — E2's carve-out (`#1534` CLOSED `COMPLETED` → `STATE_VALUE_CARVE_OUT`) and E4 (`merge_embed_lists`) are live; only the *remaining* v3 work is cancelled). **This document states target state** — decisions, issue states and code facts are stated as they are **now**, with their authority (`#N`, PR, or `file:line`), never as a record of how a passage changed; history lives in git and the tracker. **Legacy drift narrative in sections not yet re-read is removed as each is reached (`#8542`).**
 
-**⚠️ Code citations — revision pin.** Every `file.py:NNNN` reference here is pinned to commit **`c79ba1cf2`**. Line numbers drift as the code moves; **the symbol name is authoritative and the line number is a convenience.** Verify against the symbol, not the number.
+**⚠️ Code citations — revision pin.** Every `file.py:NNNN` reference here is pinned to commit **`c79ba1cf2`** — **except where a passage names a later pin.** ⚠️ **Every citation added to this document on 2026-10-13 is pinned to `4c801fb18`**: the **S4 drift marker** (⚠️ *not* under any "§S4" heading — no such section exists, because the document's position is *"There is no S4"*; the marker lives under the **`### S2.2 — VET`** heading), its §7 `value_gate` lines, the **`packs/_template/manifest.yaml:260` citation** — which sits in this document's §S2.2 "the pack stops being prose" paragraph at **`:506`** (⚠️ **`506` is the *document's* line number; the manifest citation is `:260`** — do not read it as `manifest.yaml:506`), and the **§4.3 G1 row's `docs_miner.py` line**. Those are **not verifiable at the older pin** — `tortoise/docs_miner.py` does not exist at `c79ba1cf2`, and `packs/_template/manifest.yaml` was only 190 lines there (so a `:260` citation is out of range). ⚠️ **The reverse also happens: `kind_classifier.py:93` (§S2.3's `KindClassifier` row, `:934`) is correct ONLY at the DEFAULT pin `c79ba1cf2`** (it is `llm_tail: bool = True` there); at `4c801fb18` that line is `lam: float = LAMBDA`. Line numbers drift as the code moves; **the symbol name is authoritative and the line number is a convenience.** Verify against the symbol, not the number. **A third pin, `7d348d351`, covers the citations re-pointed by the `#8506` correction** — §S0/§9's D10, T6 and Q3/Q5 passages, §S2.3's Jev row, §7's `:Subject`/`:Object` fix, and the §D table's middle cell. ⚠️ §7's `VALUE_FIDELITY_RULE` / `_s2s4_rules()` / `_granularity_text()` numbers are **default-pin** numbers, not `7d348d351` ones. **`tests/test_extractor_v4_citation_rot.py`** resolves the document's quoted-symbol citations against the tree and pins the landed-state claims those passages now make, so a re-rotation reds a test instead of being discovered.
 **Related:** `docs/architecture/STORAGE-ARCHITECTURE.md` · `#1026` (pack slots) · `#2281` (ask/answer over distilled knowledge) · `#2730` (entity attachment) · `#4333` (volume/economics) · `#4240` (edge durability) · `#4911` (secret redaction) · `#4899` (the gate). **Full issue map: §15.**
 
 ---
@@ -89,10 +89,10 @@ Production graph: **~25,000 quota nodes in 3–4 active days** (~27 per emitting
 | | the question it answers | effect on volume |
 |---|---|---|
 | **v2** (live) | did we extract it? | baseline |
-| **v3** (approved, unbuilt) | did we extract it **correctly**? (dates, verbatim state values, atomic points, supersession) | ⬆️ **increases it** — E2 preserves more, E3 splits into more |
+| **v3** (approved; ⚠️ **epic CLOSED `NOT_PLANNED` 2026-10-10 — the remainder is cancelled, but E2/E4 LANDED and are live**) | did we extract it **correctly**? (dates, verbatim state values, atomic points, supersession) | ⬆️ **increases it** — E2 preserves more, E3 splits into more |
 | **v4** (this document) | should we have extracted it **at all**? | ⬇️ **reduces it** |
 
-**v3 has no discard, trim or gate anywhere.** It is a fidelity workstream. **v4 is a selection workstream — and it must land with, or before, v3's volume-increasing parts (E2, E3).**
+**v3 has no discard, trim or gate anywhere.** It is a fidelity workstream. **v4 is a selection workstream.** ⚠️ **The ordering obligation this passage used to state — *"it must land with, or before, v3's volume-increasing parts (E2, E3)"* — is VOID: the v3 epic is `CLOSED NOT_PLANNED` (2026-10-10), so no FURTHER v3 work is coming. ⚠️ That does NOT mean v3 is absent from the tree: E2's carve-out (`#1534` CLOSED `COMPLETED` → `STATE_VALUE_CARVE_OUT`) and E4 (`merge_embed_lists`, `:4845`) LANDED, and this document depends on them** (see §15's `§1 v2 → v3 → v4` row).
 
 ⚠️ **Part of v3 has already landed.** Its E4 (`"S4 merges, not replaces"`) is live — `merge_embed_lists(embed_list, s4)` runs at `extractor_v2.py:4845` and S2 is preserved. **v3's premise there is stale; re-check the epic's status before building from it.**
 
@@ -110,27 +110,27 @@ Production graph: **~25,000 quota nodes in 3–4 active days** (~27 per emitting
 
 | tier | what it is | **where it lives** | cost | retrievable? | lossy? |
 |---|---|---|---|---|---|
-| **Raw** | the verbatim turns / source material | **Supabase storage — NOT the graph** | expensive (13.8 MB of our 140 MB) | only verbatim, via its `Source` | not at all |
-| **Narrative** | the S1 summary — *"what changed"* | **Supabase storage — NOT the graph** | cheap (a few KB per session) | **yes, full-text** | yes |
+| **Raw** | the verbatim turns / source material | **Postgres — NOT the graph** | expensive (13.8 MB of our 140 MB) | only verbatim, via its `Source` | not at all |
+| **Narrative** | the S1 summary — *"what changed"* | **Postgres — NOT the graph** | cheap (a few KB per session) | **yes, full-text** | yes |
 | **Entities** | **everything the graph holds** — `Source`, `Object`, `Subject`, `Event`, `Point` (+ operators) | **the graph** (record layer for `Source`/`Event`; derived layer for `Object`/`Subject`/`Point`) | the thing we must reduce | yes — and the claims are **arguable** | claims: intentionally. `Source`/`Event`: they are the truth |
 
 ⚠️ **Correction (owner, 2026-09-23): the third tier is `Entities`, not "Claims".** Calling it "Claims" hid the fact that the graph also holds `Source`, `Object`, `Subject` and `Event` — and that **only some of those grow without bound.** The tiers are **Raw / Narrative / Entities**, and the column that matters is **where each physically lives**, because that is where the cost is.
 
 ### ⚠️ Storage rule for the first two tiers — they are OUTSIDE the graph (owner, 2026-09-23)
 
-**Neither raw nor narrative belongs in the graph. Both live in Supabase storage.**
+**Neither raw nor narrative belongs in the graph. Both live in Postgres.** ⚠️ **The owner's wording is *"store in supabase"* — and *"supabase" there means the DATABASE, not the object bucket.** The destination was **CORRECTED 2026-10-09** (`STORAGE-ARCHITECTURE.md` §9.1, *"the owner's own answer, one day after the §2.0 ruling"*), with the note that the overload *"has already caused a real misreading"*. This document previously said *"Supabase storage"*, which is the same overload — do not read either document's *"supabase"* as the object bucket.**
 > *"the narrative is not something we're suggesting to store in the graph (same as raw) but store in supabase."*
 
 **Why this is not a detail:**
 
 - **A narrative in the graph is a narrative in RAM.** The graph is the RAM-resident layer (`STORAGE-ARCHITECTURE.md` §2), so putting prose there pays memory prices forever for text that is only ever **read**, never **argued about**. **The narrative is a searchable string, not a belief** — it has no confidence, is not `NAND`-able, and takes part in no operator.
-- **The graph keeps a reference, not the text.** The `Source` entity stays in the graph — it is the provenance anchor every claim points at — while the **heavy text** (turns and narrative) stays in Supabase, reached through it.
+- **The graph keeps a reference, not the text.** The `Source` entity stays in the graph — it is the provenance anchor every claim points at — while the **heavy text** (turns and narrative) stays in Postgres — the owner's *"supabase"*, meaning the DATABASE, not the object bucket — reached through it.
 - **It is far cheaper than the graph** — the storage research measured **~580× on disk-resident data** (⚠️ **not the *"~1,000×"* an earlier draft stated — that number was unsourced; 580× applies to the disk-resident leg, not to the vector index).** ⚠️ **And *"carries most of the retrieval value"* is NOT measured and is REMOVED** — §10 of this document itself says *"No head-to-head measurement exists."* **The claim to keep is the one that IS supported: the narrative is the middle ground that makes raw turns droppable.**
 - **It is the middle ground** that makes raw turns droppable without losing *"what happened in this session?"*
 - **It is connected by construction** (§4, S1) — so it links to Objects/Events/Points rather than being an island.
 - It directly serves `#2281`: *"ask/answer surface reads ingest-time-distilled knowledge … with raw-turn fallback."* **The narrative IS that distilled layer.**
 
-**⇒ D1 restated, correctly:** the narrative is **not a graph node and not graph metadata** — it is **Supabase-stored text referenced by its `Source`.** It must never be a `Point` (it is not a claim) and never a `Document` node (it is not a discovered document). §9 carries the corrected D1.
+**⇒ D1 restated, correctly:** the narrative is **not a graph node and not graph metadata** — it is **Postgres-stored text referenced by its `Source`** (the owner's *"supabase"* is the DATABASE, not the object bucket; destination corrected 2026-10-09). It must never be a `Point` (it is not a claim) and never a `Document` node (it is not a discovered document). §9 carries the corrected D1.
 
 ### 2.4 A FOURTH layer — the verbatim raw fact (owner, 2026-09-23)
 >
@@ -138,7 +138,7 @@ Production graph: **~25,000 quota nodes in 3–4 active days** (~27 per emitting
 
 **The problem it solves:** extraction **rephrases**. A `Point` is the model's rendering of what was said, not what was said. During the LongMemEval work, **raw facts were being deformed** — and that deformation is silently baked into the belief layer, where nothing downstream can detect it.
 
-**The layer:** the **minimal verbatim span** each `Point` was derived from, kept **verbatim in raw storage (Supabase), not in the graph**, and **linked to the `Point`/`Object` it supports**. Distinct from the other three by granularity and purpose:
+**The layer:** the **minimal verbatim span** each `Point` was derived from, kept **verbatim in Postgres (the owner's *"supabase"* = the DATABASE, not the object bucket)**, not in the graph, and **linked to the `Point`/`Object` it supports**. Distinct from the other three by granularity and purpose:
 
 | layer | what it is | granularity | purpose |
 |---|---|---|---|
@@ -197,7 +197,7 @@ Production graph: **~25,000 quota nodes in 3–4 active days** (~27 per emitting
 
 **⚠️ COORDINATION NOT TO MISS (reviewer B2.23): §2.4 WIDENS `#2684`'s scope** — from *value-bearing* `Point`s to *all* `Point`s — **without recording it.** It is a deliberate widening, but **`#2684` is the other issue's scope and the change must be recorded there, not only here.**
 
-**⚠️ Storage consequence, harmonised with `STORAGE-ARCHITECTURE.md`:** the raw fact is **Supabase storage, not the graph**, joined to its `Point` by a reference — exactly the pattern §9.1 uses for the narrative. **If the belief layer carries the span, it stops being cheap; if it carries a reference, the fidelity is free.** That is the design rule this layer depends on.
+**⚠️ Storage consequence, harmonised with `STORAGE-ARCHITECTURE.md` §9.1:** the raw fact is **Postgres text, not a graph node** (the owner's *"supabase"* = the DATABASE, not the object bucket; destination corrected 2026-10-09), joined to its `Point` by a reference — exactly the pattern §9.1 uses for the narrative. **If the belief layer carries the span, it stops being cheap; if it carries a reference, the fidelity is free.** That is the design rule this layer depends on.
 
 #### 2.4.1 ⭐ Why the LINK is the load-bearing half — and the pattern has a name (2026-09-24)
 
@@ -213,7 +213,7 @@ The mechanism is **parent-document retrieval** / **small-to-big**: *embed the sm
 | # | rule | why |
 |---|---|---|
 | **1** | **Every committed `Point`/`Object` must carry a reachable link to its `Source` span.** A node that cannot walk up cannot be served as evidence | **the link is how the evidence reaches the model** — without it, the 15.9-pt finding is unreachable and all we can serve is the derived claim |
-| **2** | **A `Source` MAY additionally carry one summary vector** (the S1 narrative, kept in Supabase) | it buys one query class nothing else serves — *"which SOURCE is about X"*. Framework practice, **not** a measurement. Storage §9.4 |
+| **2** | **A `Source` MAY additionally carry one summary vector** (the S1 narrative, kept in Postgres) | it buys one query class nothing else serves — *"which SOURCE is about X"*. Framework practice, **not** a measurement. Storage §9.4 |
 
 **And what is explicitly NOT the mechanism:** *"are these two sources the same?"* is **never** answered by a vector — similarity detects the same **topic**, not the same **document**. Identity is **canonicalised URL + content hash** (storage §9.4 ③).
 
@@ -235,7 +235,7 @@ The mechanism is **parent-document retrieval** / **small-to-big**: *embed the sm
 Point (graph — carries live / superseded / draft, EP confidence, operators)
    │  span reference  (point_id → source_turn_id + char span)
    ▼
-raw fact (Supabase — immutable text. Carries NO status. Ever.)
+raw fact (Postgres — immutable text. Carries NO status. Ever.)
 ```
 
 **Three consequences that follow, and each is a rule:**
@@ -391,20 +391,20 @@ Normalises the shape **and applies the declared field→type mapping** (§3). Pa
 
 **⭐ CORRECTED 2026-09-24 (owner): a document is a SOURCE, not a graph node.** *"I am suggesting making them sources so our entity layer can be extracted from them… That way our entity layer becomes a proper abstraction over documents, code, meeting transcripts (all sources) — that's the reasoning/knowledge layer."*
 
-**⇒ S0's input is a source FILE, uniformly, whatever it is.** ⚠️ **CORRECTED 2026-09-24 — an earlier version of this line said *"There is no `:Document` node in the graph to read from, and none is created"*. THAT IS FALSE ABOUT THE CODE.** The `:Document` label **exists, is written and is read**: `projection/entities.py:1527` (`_upsert_document`) emits `MERGE (d:Document {id:$id})` at `:1572`/`:1740`; `ingest.py:188/266/307/412` `MATCH (d:Document …)`; **and `quota.py:524` counts `MATCH (d:Document)` as a COUNTED quota resource (`#1726`).** `docs/ONTOLOGY.md` §4.4 still declares *"Graph label is `:Document`"*.
-**⇒ The accurate statement: D10 folds `:Document` into `:Source`, AND THAT MIGRATION HAS NOT LANDED.** Today the label is real, writable and **metered**. *(Production currently holds 0 such nodes because the commit lane has never run — a **data** fact, not a code fact, and **not** grounds for calling the change free.)* **The consequence for the extractor stands: nothing downstream is document-specific.** A spec, a repo file and a call transcript differ only in their **mapping**, never in their treatment. **Full shape: `STORAGE-ARCHITECTURE.md` §9.3. ⭐ The ontology half HAS now landed: `ONTOLOGY.md` v3.15 (PR #5022, issue #5013)** — but the **code** migration has not, and it is bounded by `#2489`: the replay key moves `coalesce(title, name)` → `url`, and rebuild does NOT repair pre-existing graphs.
+**⇒ S0's input is a source FILE, uniformly, whatever it is.**
+**⇒ D10 is LANDED — both halves.** *Ontology:* `ONTOLOGY.md` v3.15 (PR `#5022`, issue `#5013`). *Code:* PR `#5127` retired the `:Document` NODE label, and the `:Source` replay key is `url` (`tortoise/projection/edges.py:153`). **The consequence for the extractor stands: nothing downstream is document-specific.** A spec, a repo file and a call transcript differ only in their **mapping**, never in their treatment. **Full shape: `STORAGE-ARCHITECTURE.md` §9.3.** **One constraint survives the landing:** rebuild does not repair pre-existing graphs (`#2489`).
 
 **⭐ The five consequences of D10 — ruled 2026-09-24, and the reasons they matter to the EXTRACTOR (full analysis: `STORAGE-ARCHITECTURE.md` §9.5).**
 
 | # | ruling | why the extractor cares |
 |---|---|---|
-| **Q1** | **`aboutDocument` is KEPT; only its target label moves** (`:Document` → `:Source`) | ⛔ **It is NOT collapsed into `aboutSource`.** `aboutDocument` is in `DERIVABLE_STRUCTURAL_RELS` (`#2489`) and is resurrected at the old point by pass-2b; `aboutSource` is deliberately excluded. **Merging them would silently delete that rebuild guarantee.** Its **replay key** must move `coalesce(title, name)` → `url` **in the same step as the label**, or the rebuilt edge resolves to nothing |
+| **Q1** | **`aboutDocument` is KEPT; only its target label moves** (`:Document` → `:Source`) | ⛔ **It is NOT collapsed into `aboutSource`.** `aboutDocument` is in `DERIVABLE_STRUCTURAL_RELS` (`#2489`) and is resurrected at the old point by pass-2b; `aboutSource` is deliberately excluded. **Merging them would silently delete that rebuild guarantee.** Its **replay key** is `url` — the label and the key changed together, because a label retarget with an unchanged key resolves to nothing and **silently mis-points the rebuilt edge** |
 | **Q2** | **Two classification axes, kept separate:** `sourceKind` (*what kind of source*) + `documentKind` (*what genre of document*) | **This is S2.3's target vocabulary.** ⚠️ An intermediate reading wrongly concluded D10 killed `documentKind` — **it does not.** It stops being an Object-subclass vocabulary and becomes a **GENRE axis over `sourceKind: document`.** **S2.3 assigns against the pack's declared kinds; the axes are not interchangeable, and `sourceKind: document` must not be treated as a genre** |
-| **Q3** | `doc_status` **⛔ dropped**; `format` moves to `:Source`; `documentKind`/`title`/`topics`/`summary` kept; `content` leaves the graph | **Dropping `doc_status` removes an unjournalled raw-`SET` write** (`ingest.py:262-266`) — one of only two in the system. **It is also a real extractor input today**, so anything reading it must switch to the read-the-entities lookup. `content` leaving the graph is the S0 input contract (§3) |
+| **Q3** | `doc_status` is **RETIRED** (`tortoise/api.py:458`); `format` lives on `:Source`; `documentKind`/`title`/`topics`/`summary` kept; `content` leaves the graph | Retiring `doc_status` removes an unjournalled raw-`SET` write (`ingest.py:262-266`). Anything that read it switches to the read-the-entities lookup. `content` leaving the graph is the S0 input contract (§3) |
 | **Q4** | The `documents` cap is **re-pointed at `:Source`** — not retired, not folded into the node cap | a `:Source` is **equally invisible to the main node cap**, so the reason the cap exists does not expire; retiring it **ungates `/v1/index/docs`** |
-| **Q5** | Fold + change the replay key + migrate — **free TODAY, and that expires** | **zero `:Document` nodes and the commit lane has never run** ⇒ the migration is free now. **It cannot be deferred past this extractor's first COMMIT run** (`#2489`: rebuild does not repair pre-existing graphs) |
+| **Q5** | Fold + change the replay key + migrate — **✅ DONE 2026-09-25** (`#5026`/PR `#5127`) | The window closed as predicted and the work landed inside it: **zero `:Document` nodes** and **the commit lane had never run**, so the fold together with the `coalesce(title, name)` → `url` rekey were free. ⚠️ **This row is now history, not a live option** — the lesson to keep is that *"free TODAY"* is a **deadline**, not a state. |
 
-**⚠️ And one finding that is NOT about D10 — T6, and it touches S6 COMMIT directly.** While checking the above, a separate defect surfaced: **a `:Source` mutates in place** — `_upsert_source` bumps `updatedAt`/`version`/`contentHash` on a hash-differing `ON MATCH`, and the hosted commit path flips a status, **and neither is journalled.** **That breaks `derived = replay(journal)` and contradicts our own D7** (and the field's append-only evidence rule: *changes are handled by new correction events, not in-place edits*). **A re-fetched source that has changed is a NEW VERSION, not an edit.** Reasoned in `STORAGE-ARCHITECTURE.md` §9.5 and §9.6; belongs to that doc's §3, and is tracked separately.
+**A re-fetched source that has changed is a NEW VERSION, not an edit.** `_upsert_source` bumps `updatedAt`/`version`/`contentHash` on a hash-differing `ON MATCH`; that transition is **journalled as `SourceVersioned`** (`#5024`, `tortoise/log.py:155`), whose fold delegates to the same `_upsert_source` fold `SourceCreated` rides — so `derived = replay(journal)` holds. **This is T6, and it carries S6 COMMIT's extractor-side obligation** (`STORAGE-ARCHITECTURE.md` §9.6: record `sourceVersion` on the extraction link).
 
 #### ⭐ The version model — and the one thing S6 must do (owner ruling, 2026-09-24)
 
@@ -426,7 +426,7 @@ Normalises the shape **and applies the declared field→type mapping** (§3). Pa
 
 **⭐ The policy is B — mark stale now, supersede on re-inference (owner).** A re-fetched source's entities are **marked stale immediately** and **superseded only when re-inference produces their successors**. **Not A (immediate supersession)**: A withdraws the belief *before* producing its successor, so between the source changing and re-inference running the graph asserts **nothing** about a subject it previously had a position on — strictly worse than a stale-but-present belief. **`stale ≠ wrong`:** supersession is **additive**, never a delete.
 
-**⚠️ Interval-closing is part of the WRITE, not a later repair.** An unclosed `validTo` reads as *"still true"* indefinitely — the field names this as **the #1 production bug** in temporal knowledge graphs, and it is exactly what T6 produces today. **And document-level alone would not answer the owner's question**: if you supersede only the document, the **facts are untouched** — *"what did we believe before?"* is a question about **facts**, which is why the version belongs on the **link**. Tracked: `#5038` · `#5024` · `#5025` · `#5026`.
+**⚠️ Interval-closing is part of the WRITE, not a later repair.** An unclosed `validTo` reads as *"still true"* indefinitely — the field names this as **the #1 production bug** in temporal knowledge graphs. **And document-level alone would not answer the owner's question**: if you supersede only the document, the **facts are untouched** — *"what did we believe before?"* is a question about **facts**, which is why the version belongs on the **link**. Tracked: **`#5038`** (open). D10 code-half work done: `#5024`, `#5025`, `#5026`.
 
 ### S1 — NARRATE
 
@@ -487,7 +487,7 @@ Normalises the shape **and applies the declared field→type mapping** (§3). Pa
 
 This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 
-**✅ FINDING (2026-09-23) — the live code ALREADY hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py` ~4789) — **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 is not a proposed change; it is the status quo.** The narrative is a **focus**, and the raw is present too.
+**✅ FINDING (2026-09-23) — the live code ALREADY hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py` **:4779** at `c79ba1cf2`; **:7314** at `4c801fb18`) — **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 is not a proposed change; it is the status quo.** The narrative is a **focus**, and the raw is present too.
 
 > ⚠️ **What this does to D3.** The open question is no longer *"may extraction consult the raw?"* — it already does. It becomes the much smaller **"what does the narrative add that the raw does not?"** It also means the measurement (§10) must compare **narrative + raw** against **raw alone**, not narrative against raw.
 
@@ -503,7 +503,7 @@ This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 2. **Atomicity:** is this ONE claim, or several fused together? *(Atomicity is a property of the item — this is where it belongs, not on the narrative.)*
 3. **Worth keeping — judged against THE PACK (`#1026`'s `valueGate`).** Not a generic value judgment: **is this durable, per the pack's own declaration?**
 
-> **This is where the pack stops being prose.** `packs/dev/manifest.yaml` already declares `memory_granularity` — *"Durable: problem-family reasoning … Ephemeral: issue/PR numbers, CI status, test counts, commit hashes, tool workarounds, sprint mechanics."* Today that string is **rendered into the S1 prompt and not enforced** (`_granularity_text()`). **S2.2 is the step where the declaration becomes a gate** — the missing `valueGate` slot of `#1026`, realised as an adversarial question. See `#4899`.
+> **This is where the pack stops being prose.** `packs/dev/manifest.yaml` already declares `memory_granularity` — *"Durable: problem-family reasoning … Ephemeral: issue/PR numbers, CI status, test counts, commit hashes, tool workarounds, sprint mechanics."* Today that string is **rendered into the S1 prompt and not enforced** (`_granularity_text()`). **S2.2 is the step where the declaration becomes a gate** — the `valueGate` slot `#1026` declared (⚠️ **nothing reads it yet** — `packs/_template/manifest.yaml:260`, and `tests/test_pack_extraction_slots_v31.py` pins only its shape), realised as an adversarial question. ⚠️ **The mechanical half SHIPPED:** `tortoise/value_gate.py` (`#4899` CLOSED `COMPLETED`) — but it is **OFF by default** (`TORTOISE_VALUE_GATE` unset ⇒ *"the predicate never runs"*) and **subordinate to VET**. So the open work is a **default and a subordination, not a missing slot**.
 
 #### Level 2 — per-batch: did this batch come out right? (a batch verdict, not a per-item one)
 
@@ -537,6 +537,37 @@ This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 
 **⚠️ There is no S4 — do not restore one.** A previous draft listed a separate *"S4 — granularity review"* and folded it back in here. **It is not a step**: its purpose was identical to question 2 above. **The step list is the EIGHT steps of §4.1: S0, S1, S2.1, S2.2, S2.3, S3, S5, S6 — there is no S4 and no pre-load step; the lookup lives in S3 (§4.2).** ⚠️ **An earlier version of this line said "seven" and omitted S2.3 — §4.0 and §4.1 say eight, and eight is correct.**
 
+> **⛔ DRIFT MARKER — this sentence is about the v4 PROPOSAL, not the shipped code (checked 2026-10-13).**
+> A lane reading *"do not restore one"* while looking at `run_s4` will conclude the stage is vestigial and
+> delete it. **It is not vestigial: the live pipeline runs S4 whenever a story exists.**
+>
+> | | this design (v4) | shipped code |
+> |---|---|---|
+> | S4 | *"There is no S4"* | `merge_embed_lists(s2, s4)` def `extractor_v2.py:2673`, **consumed at `:7414`**; `run_s4` called **`:7396`** |
+> | gating | removed from the design | the call sits under `if story:` with **no flag gate** — S4 runs whenever a story exists |
+> | the S4 flag | — | ⚠️ `TORTOISE_S4_DELTA` selects the **delta vs complete-list contract of S4's OUTPUT**, **not** whether S4 runs (`:689-710`) |
+> | stage order | the eight steps above | `run_s1` `:7290` → `run_s2` `:7314` → `S2.2 VET` `:7331` → `S3 search_graph` `:7375` → **`run_s4` `:7396`** → `S5` |
+>
+> **⚠️ `TORTOISE_S4_DELTA=0` does NOT disable S4** — it selects the legacy complete-list contract. There is **no S4-specific off switch**: S4 is reached whenever the v2 pipeline runs a story, and it is skipped only as a **side effect of something else**. ⚠️ **Three such paths, none of them an "S4 switch":** (i) **`TORTOISE_EXTRACTOR=v1`** routes to the legacy `value_extractor.extract_session` path, which has no S4 stage at all (`sdk.py:6767`; `_commit_session_v1` defined at `:6881`); (ii) **passing `summary=`** takes that same v1 dispatch — `sdk.py:6767` reads `if extractor == "v1" or summary is not None:`; (iii) **an empty conversation** returns before S1 at `:7258` (`if not edus: return {...}`, with `degraded: True`), so S4 is never reached. ⚠️ **An earlier version of this marker said S4 could be bypassed only by leaving the v2 pipeline entirely. That was an over-claim** — it contradicted its own `if story:` row directly above, and missed paths (ii) and (iii).
+>
+> **Removing `run_s4` is a v4 migration deliverable, not a cleanup** — it is §4.3 **G5**'s S4 clause,
+> tracked at **`#8500`**. ⚠️ **Not `#5333`**: that issue's own body scopes it to the deletion/relocation
+> half and states it *must not absorb* other work, and it contains no reference to `S4`. **Never delete
+> `run_s4` on the strength of this document alone.**
+>
+> **On the step *names*:** the code's own stages are **S1–S5** (`[S1] STORY SUMMARY` … `[S5] EMBED`, module
+> docstring `:10-29`), with `S2.2 VET` present in the production path (`:7331`). **`S0` and `S6` have no code
+> counterpart** — those two are v4 design names. ⚠️ **`S2.3` DOES have one; it is DISABLED, not absent:** the
+> classify pass is `kind_classifier.classify_items` (`kind_classifier.py:189`), wired at
+> `extractor_v2.py:7356-7358` / `:7487`, gated by `TORTOISE_CLASSIFY_LATER` — **unset today = "the LEGACY
+> pipeline"**. ⚠️ **An earlier version of this marker said `S2.3` had no code counterpart because the
+> *string* `S2.3` is absent from `extractor_v2.py`. The string is absent; the mechanism is not.** ⚠️ **An earlier version of this marker claimed
+> `S3` and `S5` were absent from the code as well; that was wrong** — `S3` and `S5` appear 51 and 22 times
+> in `extractor_v2.py`, including as production stage comments.
+>
+> **⚠️ Currency of these line numbers:** the figures above are pinned to **`4c801fb18`** (the `origin/main` this edit was based on) — pin them so they can be re-verified. This document's other citations are pinned to `c79ba1cf2` and **some are stale at the later pin** — e.g. `merge_embed_lists` is cited here as def `:2284` / called `:4845`, but at `4c801fb18` it is `:2673` / `:7414`. The header's rule
+> stands: *the symbol name is authoritative and the line number is a convenience.*
+
 **Why Jev fits:** it is a **decision-only** model — it cannot return a value outside the supplied schema, so it cannot invent an entity or a name. Three primitives, **mixable in one call**: *Choice* (pick from a list), *Score*, *Noul* (0–1 probability). Doc: `https://jevtypesafeai.com/docs#apis`. ⚠️ Measured **$0.000243/item at 3 questions** (~$6/month at 25k items) — **~4–7× cheaper than a frontier LLM, not the vendor's claimed 40–400×** (self-tested).
 
 **Fail-open on uncertainty** (keep, don't drop) — a wrong keep is noise; a wrong drop is memory loss.
@@ -554,7 +585,7 @@ This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 | **A mechanical kNN fast path** → margin gate → `nearMisses` rerank → **batched LLM only for the low-margin tail** | `#1695` |
 | **The deferred pass** — `_collect_classify_items(embed_list)` → `classify_items` → `_apply_classify_kinds` | `extractor_v2.py:4467` / `:4492`, called at `:4803` and `:4888` |
 | **The flag** — `TORTOISE_CLASSIFY_LATER`, unset today = *"the LEGACY pipeline"* | `extractor_v2.py:512`, `:4656` |
-| **The seam for Jev** — `llm_tail` is already a constructor parameter | `kind_classifier.py:522` |
+| **Jev requires an adapter, a prompt and a parser** — `llm_tail` is a **boolean** switch (`kind_classifier.py:93`), and the ambiguity tail is resolved by a hardcoded prompt plus a JSON parser | `kind_classifier.py:93`, `:309` |
 
 **⇒ So the answer is: we HAVE it, it is `TORTOISE_CLASSIFY_LATER=1`, and it is OFF.** Three things are wrong with its current state, and they are the actual work:
 
@@ -586,7 +617,7 @@ S2.1 EXTRACT  → S2.2 VET (gate) → S2.3 CLASSIFY → S3 RESOLVE → S5 CONNEC
 
 ⚠️ **Owner confirmation pending** — *"maybe part of S2.2? or not sure if we already have it"* — **the evidence says: we have it, it should not be a substep, and it belongs after the gate.**
 
-### 4.2 The ordering — cheapest first, subject to correctness
+### 4.2 The ordering — cost per unit of SAFE rejection, NOT "cheapest first"
 
 **Owner, 2026-09-23:** *"the point is that Jev could likely do the classification way cheaper, no? so fine if it's its own step. Although not sure if we should mechanically dedup first as that can reduce the set further? anyhow, check the ordering makes most sense."*
 
@@ -617,7 +648,7 @@ Resolved by call graph, not by line number:
 1. **Losslessness outranks cost** — a stage that discards nothing can run anywhere; and
 2. ⛔ **A stage runs behind an audit gate, and its admissible actions are `KEEP` / `NOOP` / `DISCARD` / `MERGE`** — **merged only when nothing distinguishing is lost** (§16.4). ⚠️ **A FUSE rule was previously forbidden here; the owner authorised merging near-duplicates on 2026-09-24, with Jev as arbiter (O4).** **What did NOT change: a merge must never cross a difference in a number, a name, a negation, or a condition, and both sides' evidence survives.**
 
-**⚠️ And recall compounds MULTIPLICATIVELY.** Two stages that each keep 95% silently lose ~10% of the durable set. **A volume target with no recall floor is gameable** — you can always hit a node count by writing nothing. **Any reduction target must be paired with a measured retention floor (→ §16).**
+**⚠️ And recall compounds MULTIPLICATIVELY.** Two stages that each keep 95% silently lose ~10% of the durable set. **A change that discards claims must therefore be measured for what it discarded** — `STORAGE-ARCHITECTURE.md` §15 lists **M6 — *"How many durable claims did we keep?"***. **This is a quality check, not a volume gate: no node-count target exists anywhere in this document.** §4.2's own objective (the safe-rejection cost rule, `:638`) is what stands.
 
 #### ⭐ THE BIGGEST LEVER IS MISSING FROM THIS DIAGRAM ENTIRELY — and it runs BEFORE S1
 
@@ -688,7 +719,7 @@ S6  COMMIT
 
 **And the doc's "classify once" also fixes a double-classification**: today `:4803` and `:4888` both run, because the set is re-classified after S4's merge. **One pass, after the gate, on survivors.**
 
-#### ✅ Jev for classification is cheap, and the seam already exists
+#### ✅ Jev for classification is cheap — but ⚠️ the seam does NOT yet exist
 
 **Classification is exactly ONE question** — a `Choice` over the supplied kinds. Measured Jev cost: **$0.000144 at 1 question** (`$0.000194` at 2q, `$0.000243` at 3q) — **~4–7× cheaper than a frontier model**, not the vendor's claimed 40–400×.
 
@@ -699,21 +730,23 @@ S6  COMMIT
 
 **⚠️ And the "structural enforcement" argument is weaker than it reads.** `closed_vocab_rejects` **already exists** (the closed vocabulary is enforced today), so Jev's `Choice` does not add a new guarantee the pipeline lacks — it removes a class of **malformed / off-vocabulary** emission. And a repo-wide search for `entityCues` returns **no READER** — #1026 Stage 2 made the slot declarable, but nothing consumes it yet, so do not cite it as an implemented classifier surface.
 
-**⚠️ And a hard constraint this ordering must respect:** ⚠️ **`#4899`'s Phase-1 mechanical DISCARD has known false positives** — *"a bare `#\d{3,}` in a working note is discardable; **a PR number a decision turned on is not**"* — and **only the lookup or a semantic judgment can tell them apart.** Phase 1 runs before the lookup deliberately, which is why `#4899` **gates it behind a flag, records every discard with its rule id, and requires the counterfactual to be recoverable.** **Any reordering that moves the gate earlier must preserve those three.**
+**⚠️ And a hard constraint this ordering must respect:** ⚠️ **`#4899`'s Phase-1 mechanical DISCARD has known false positives** — *"a bare `#\d{3,}` in a working note is discardable; **a PR number a decision turned on is not**"* ⚠️ **that quoted `#\d{3,}` is `#4899`'s *proposal*, not the shipped predicate — the shipped one is `value_gate._REFERENCE = r"#\d{1,6}(?!\d)"` with a whole-residue test (§15's `§1 mechanism` row). ⚠️ It differs in BOTH directions from the quoted pattern: `#12` and `See #12` ARE discarded, while a 7-digit run is NOT. Do not implement from this quotation** — and **only the lookup or a semantic judgment can tell them apart.** Phase 1 runs before the lookup deliberately, which is why `#4899` **gates it behind a flag, records every discard with its rule id, and requires the counterfactual to be recoverable.** **Any reordering that moves the gate earlier must preserve those three.**
 
 ### 4.3 ⚠️ What the steps above do NOT yet cover (review-provided, all unaddressed)
 
-**The step list is the SHAPE, not a complete specification.** Five gaps were identified by review and are recorded here rather than silently implied by the diagram. **None is a decision; all must be closed before implementation.**
+**The step list is the SHAPE, not a complete specification.** Five gaps were identified by review and are recorded here rather than silently implied by the diagram. **These are gaps to close, not designs already settled — but two of the filed issues ask the *owner* for a ruling** (`#5333` for G5's deletion/relocation half; **`#8500` for G5's S4 clause**, whose own body closes on *"Which is authoritative until the migration lands?"*), **and a third (`#8496`, G4's immutability-vs-redaction reconciliation) requires a stated design choice** — it asks for that choice and its reason to be *stated, not implied*, but requests no owner ruling. **So closing G4 and G5 means obtaining a decision; G1, G2 and G3 are steps to WRITE, not decisions to obtain — G2's decision is already made (`STORAGE-ARCHITECTURE.md` §12.2a) and only its step is missing.** ✅ **All five are now filed** — the issue reference is in each row (revalidated 2026-10-13; G3 and G4 had no tracker entry before that, and are `#8495` / `#8496`).
 
 | # | the gap | why it matters |
 |---|---|---|
-| **G1** | **No step PERSISTS the narrative or the raw-fact span.** S6 is *"write entities + connections + metadata/lifecycle"*. §4.0 has no persistence purpose beyond S6. | ⛔ **D1 and §2.4 are not implementable from the steps as written.** If the narrative and the span are not written by a named step, they are not written. **Needs an explicit persistence step (or an explicit S6 sub-job).** |
-| **G2** | **No EMBEDDING-DECISION step.** `STORAGE-ARCHITECTURE.md` §12.2a **decides** the `EMBED` gate exists (*"a row can be worth KEEPING but not worth EMBEDDING"*, *"the lever is what gets an embedding"*) — **and this document never mentions it.** S2.3's kNN path **silently assumes every candidate is embedded.** | ⛔ **The two documents would ship contradictory designs.** The `EMBED` gate and the `KEEP` gate **share one rule set and enforce at TWO points** (§12.2a) — so the second enforcement point needs a home in this step list. |
-| **G3** | **No per-step FAILURE POLICY.** Only S2.2 (*"fail-open — keep"*) and S2.3 (*"never raises"*) state one. | **The S3 failure is the dangerous one: the natural fail-open marks candidates `new` — MANUFACTURING DUPLICATES, the exact failure S3 exists to prevent.** Also: partial S6 has no transaction/retry boundary vs `#4240`/`#4716`; and **re-narrate has no tie-break** for a worse second narrative. |
-| **G4** | ⛔ **`#4911` (no secret redaction) + an append-only immutable raw layer = IMMORTAL SECRETS.** | **`#4911` is listed in §15 as an unrelated capture-path issue. It is not unrelated** — §2.4.2 makes the raw layer **append-only by design**, so **a secret captured once is a secret retained forever.** Redaction must be designed *with* the layer, or the layer's immutability becomes a liability. |
-| **G5** | **No migration or backfill for the ~25k existing nodes.** | No backfill, no re-extraction path, and **no decision on the ~4,900 `the <X>` Objects.** Also unaddressed: **what happens to the live S4 `merge_embed_lists` when S4 leaves the step list** — the code and the design must not disagree. |
+| **G1** → `#5064` (open remainder; `#5007` CLOSED `COMPLETED` via PR `#5108` — the schema + passthrough **shipped**, but **`extractor_v2.py` emits no `span_start`** (the repo's *document* extractor does — `docs_miner.py:373`)) · `#4894` (narrative) | **No step PERSISTS the narrative or the raw-fact span.** S6 is *"write entities + connections + metadata/lifecycle"*. §4.0 has no persistence purpose beyond S6. | ⛔ **D1 and §2.4 are not implementable from the steps as written.** If the narrative and the span are not written by a named step, they are not written. **Needs an explicit persistence step (or an explicit S6 sub-job).** |
+| **G2** → `#5008` | **No EMBEDDING-DECISION step.** `STORAGE-ARCHITECTURE.md` §12.2a **decides** the `EMBED` gate exists (*"a row can be worth KEEPING but not worth EMBEDDING"*, *"the lever is what gets an embedding"*) — **and this document never mentions it.** S2.3's kNN path **silently assumes every candidate is embedded.** | ⛔ **The two documents would ship contradictory designs.** The `EMBED` gate and the `KEEP` gate **share one rule set and enforce at TWO points** (§12.2a) — so the second enforcement point needs a home in this step list. |
+| **G3** → `#8495` | **No per-step FAILURE POLICY.** Only S2.2 (*"fail-open — keep"*) and S2.3 (*"never raises"*) state one. | **The S3 failure is the dangerous one: the natural fail-open marks candidates `new` — MANUFACTURING DUPLICATES, the exact failure S3 exists to prevent.** Also: partial S6 has no transaction/retry boundary vs `#4240` / `#4716` (both CLOSED `COMPLETED` — the step-level policy was never written, whatever those fixes landed); and **re-narrate has no tie-break** for a worse second narrative. |
+| **G4** → `#8496` | ⛔ **`#4911` (no secret redaction) + an append-only immutable raw layer = IMMORTAL SECRETS.** | ⚠️ **Earlier revisions listed `#4911` in §15 as an *unrelated* capture-path issue; as of 2026-10-13 §15 links them explicitly (`#4911` → "its *v4 raw-layer* consequence is `#8496`"). The two are not unrelated** — §2.4.2 makes the raw layer **append-only by design**, so **a secret captured once is a secret retained forever.** Redaction must be designed *with* the layer, or the layer's immutability becomes a liability. |
+| **G5** → `#5333` · `#5059` · `#8500` (the S4 clause) | **No migration or backfill for the ~25k existing nodes.** | No backfill, no re-extraction path, and **no decision on the ~4,900 `the <X>` Objects.** Also unaddressed: **what happens to the live S4 `merge_embed_lists` when S4 leaves the step list** — the code and the design must not disagree. |
 
 **⚠️ And G2 is where the two documents bind:** `STORAGE-ARCHITECTURE.md` §12.2a's decided rule (*one rule set, two enforcement points*) **requires a step to hold the second point.** Until G2 is closed, **the storage doc's central lever has no implementation site.**
+
+**Where the five gaps live in the tracker** (checked 2026-10-13): **G1** `#5064` (the open remainder — `#5007` closed `COMPLETED` via PR `#5108`, which **shipped** the span schema + passthrough; what is still missing is that *`extractor_v2.py` emits no `span_start`* — the repo's document extractor does (`docs_miner.py:373`), so this is scoped to the session/extraction pipeline, not the whole product, so the gap is **partly landed, not "never built"**) + `#4894` (narrative placement) · **G2** `#5008` · **G3** `#8495` · **G4** `#8496` · **G5** `#5333` + `#5059` + `#8500` (the S4 clause). The owning epic is **`#5087`** (E1 — the selective write path) under tracking **`#5086`**; end-to-end acceptance is capstone **`#7949`**. ⚠️ **G4's original issue `#4911` is CLOSED `COMPLETED` (2026-09-26)** — redaction landed for the capture path that exists today, but the raw-fact layer does not exist yet, so the *design-level* consequence (append-only + no redaction = immortal secrets) needed its own home. That is why `#8496` is filed rather than `#4911` reopened. ⚠️ **G5's S4 clause needed `#8500` because neither `#5333` (whose own body scopes it to the deletion/relocation half and says it must not absorb other work) nor `#5059` covers** *"what happens to the live S4 `merge_embed_lists`"*.
 
 ### S3 — RESOLVE (find what exists · disambiguate · attach)
 
@@ -851,9 +884,9 @@ Points X, Y, Z   ← the reasons. Carry "why".
 
 **Owner, 2026-09-23:** *"we need to have the right granularity for Points to be logical. If we have many arguments mixed together, it's not possible to NAND/IMPL nor modulate relevance."*
 
-**Operators connect only epistemic targets** (any of `:Point`/`:Subject`/`:Object`/`:Event`; see `ONTOLOGY.md` §8 `OVERRIDES`) — you cannot `NAND` a paragraph. ⚠️ The `:Subject`/`:Object` operator endpoints are **spec-only until #7902** — the write path admits `:Point`/`:Event` only. EP confidence propagates over a **factor graph of atomic claims**; a fused claim gives one confidence number to several distinct beliefs.
+**Operators connect only epistemic targets** (any of `:Point`/`:Subject`/`:Object`/`:Event`; see `ONTOLOGY.md` §8 `OVERRIDES`) — you cannot `NAND` a paragraph. The `:Subject`/`:Object` operator endpoints are live (`#7902`) — the write path admits all four. EP confidence propagates over a **factor graph of atomic claims**; a fused claim gives one confidence number to several distinct beliefs.
 
-**⇒ Volume reduction must come from *not writing* claims — never from *fusing* them.** v3's move to atomic Points (`E3`) is a **requirement of the epistemic layer**.
+**⇒ Volume is not the metric — quality is.** v3's move to atomic Points (`E3`) is a **requirement of the epistemic layer**: operators act on individual claims. **De-duplication is authorised** — near-duplicate `MERGE`, arbitrated by Jev over the claim plus its narrative/raw data, with the admissible set `KEEP` / `NOOP` / `DISCARD` / `MERGE` (§16.4). **Aggregation is forbidden** — `FUSE` (combining two *distinct* claims into one new claim) would give a single confidence number to several distinct beliefs, which is what the belief layer exists to avoid. **No volume target exists in this document.**
 
 ### State values and numeric facts — the carve-out is NARROWER than it looks
 
@@ -861,28 +894,28 @@ v3's **E2** requires state-value facts be preserved verbatim (*"personal best 5K
 
 **⇒ Any mechanical filter MUST carry this carve-out, or it will drop the facts users care about most.** See `STORAGE-ARCHITECTURE.md` §7 for the low-cost storage question.
 
-#### ⚠️ But the existing carve-out does NOT cover decision-relevant numbers — measured (`#2453`)
+#### ✅ The carve-out DID NOT cover decision-relevant numbers — measured, and FIXED (`#2453`, PR `#2456`)
 
-`#2453` root-caused this: the carve-out is scoped to **user-personal state** (personal bests, schedules, preferences) and **explicitly tells the mapper to DROP process metrics as "mechanics tokens"** — *"counts/logistics are ephemeral"*. **That policy is right for personalisation memory and starving for engineering-decision memory**: on a number-dense session (latencies, durations, counts) it drops exactly the values the decision turns on.
+`#2453` root-caused this: the carve-out is scoped to **user-personal state** (personal bests, schedules, preferences) and **explicitly tells the mapper to DROP process metrics as "mechanics tokens"** — *"counts/logistics are ephemeral"*. **That policy is right for personalisation memory and starving for engineering-decision memory**: on a number-dense session (latencies, durations, counts) it drops exactly the values the decision turns on. ⚠️ **That was the scope BEFORE the fix — as the table below records, `#2453` landed and `STATE_VALUE_CARVE_OUT` was extended to retain operational values, so the carve-out is no longer as described in this sentence.**
 
-**⇒ There are TWO value classes, and today's policy keeps one and discards the other:**
+**⇒ There are TWO value classes. ⚠️ At the time of measurement the policy kept one and discarded the other; the table below records that this was FIXED (commit `4a690d0be`, 2026-09-07, PR `#2456`):**
 
 | class | example | today | must be |
 |---|---|---|---|
 | **Personal state** | *"personal best 5K = 27:12"* | retained (E2 carve-out — **`#1534`**, now CLOSED) | retained |
 | **Operational / decision values** | *"p99 latency 480 ms at 3k rps"* | ⚠️ **RETAINED — THE FIX ALREADY LANDED** (commit `4a690d0be`, 2026-09-07, PR `#2456`) | retained |
 
-**⚠️ THIS ROW WAS WRONG, AND THE ERROR WOULD HAVE DRIVEN A BAD DISCARD.** An earlier draft said operational values are *"DROPPED as a mechanics token (`#2453`)"*. **`#2453` landed.** `STATE_VALUE_CARVE_OUT` was **extended** (`extractor_v2.py:145-171`) with an operational-value paragraph — *"a concrete value that is the SUBJECT of a decision, observation, or plan is DURABLE too… Measurements, deadlines/freezes, thresholds/TTLs, versions, and counts are carried VERBATIM"* — using the **very examples the draft called dropped** (*"the p95 hit 4.2 seconds"*, *"a ten minute TTL"*). It is **rendered, not merely defined**: a `VALUE_FIDELITY_RULE` (`:230`) goes into the S2/S4 `{anti_routine}` slot, and `_granularity_text()` (`:732-744`) appends it to S1.
+**Operational values are DURABLE.** `#2453` landed and **extended** `STATE_VALUE_CARVE_OUT` (`extractor_v2.py:145-171`) with an operational-value paragraph — *"a concrete value that is the SUBJECT of a decision, observation, or plan is DURABLE too… Measurements, deadlines/freezes, thresholds/TTLs, versions, and counts are carried VERBATIM"* — covering *"the p95 hit 4.2 seconds"* and *"a ten minute TTL"*. It is **rendered, not merely defined**: a `VALUE_FIDELITY_RULE` (`:230`) goes into the S2/S4 `{anti_routine}` slot via `_s2s4_rules()` (`:299`), and `_granularity_text()` (`:732-744`) appends `STATE_VALUE_CARVE_OUT` to S1.
 
-**⇒ What is actually missing is MECHANICAL ENFORCEMENT.** The rule is **prompt-only** — `valueGate` still does not exist in code. **That is the real gap, and it is `#4899`'s**, not a value that is being thrown away.
+**⇒ What is actually missing is ENFORCEMENT BY DEFAULT — not the mechanism.** ⚠️ **CORRECTED 2026-10-13: this paragraph previously read *"`valueGate` still does not exist in code"* and pointed at `#4899`. Both halves were wrong.** `#4899` is **CLOSED `COMPLETED`** (2026-09-25) and **`tortoise/value_gate.py` ships**, imported by `extractor_v2.py:72` as *"#4899: the S2.2b identifier-only predicate"*, with the toggle at `_value_gate_enabled()` (`:724`). **What remains is that it is OFF unless asked:** `TORTOISE_VALUE_GATE` is unset by default — its own docstring: *"Unset/0 ⇒ the predicate never runs"* — and the predicate is **subordinate to VET** (`_value_gate_enabled()` folds into `vet_enabled`), so it fires only when VET runs. ⛔ **The gap is a default and a subordination, not a missing mechanism — do not build `valueGate`.**
 
-**⚠️ And a new mechanical DISCARD (`#4899`, §16) would previously have inherited this bug** — had it been defined against the *old*, stale reading, it would have discarded operational values harder. **It now inherits the CORRECT policy instead** (`#2453`'s landed carve-out protects them), so the DISCARD must be defined **against the two-class table above**, not against the prompt string alone — **and the surviving gap is enforcement, not policy.**
+**⚠️ And the mechanical DISCARD (`#4899`, §16 — ✅ **LANDED**, `value_gate.py`) would previously have inherited this bug** — had it been defined against the *old*, stale reading, it would have discarded operational values harder. **It inherits the CORRECT policy instead** (`#2453`'s landed carve-out protects them), so the DISCARD is defined **against the two-class table above**, not against the prompt string alone — **and the surviving gap is enforcement-by-default, not policy.**
 
 #### Where numeric facts should live (owner, 2026-09-23) — structured, so they are never re-processed
 >
 > *"getting numeric facts stored somehow in a table and available for search so they're not re-processed … an optimisation pattern for better recall that relates to the extractor and needs to be harmonised here."*
 
-**The proposal:** numeric facts (amounts, durations, counts, measurements) are stored as **structured rows** — subject + attribute + value + unit + date — **rather than only as prose inside a claim.** They stay searchable, and **a query never has to re-read prose or re-run extraction to recover a number.**
+**⚠️ PLACEMENT IS DECIDED (owner, 2026-10-06): a state/numeric value is a STRUCTURAL FIELD ON AN ENTITY, not a `Point`** (`STORAGE-ARCHITECTURE.md` **§7**, whose head reads *"RETAIN is decided and landed; PLACEMENT is DECIDED (2026-10-06)"* and which marks the structured-rows sketch *"Superseded proposal … kept as reasoning, not as an open option"*). **The sketch below is therefore reasoning, not a proposal:** numeric facts (amounts, durations, counts, measurements) are stored as **structured rows** — subject + attribute + value + unit + date — **rather than only as prose inside a claim.** They stay searchable, and **a query never has to re-read prose or re-run extraction to recover a number.**
 
 - It compounds with **D8** (state values → structural storage, testing whether embeddings can be skipped).
 - It is **the same question `STORAGE-ARCHITECTURE.md` §7 raises from the storage side** — the two sections must be read together.
@@ -898,8 +931,8 @@ v3's **E2** requires state-value facts be preserved verbatim (*"personal best 5K
 |---|---|
 | **`Projection`** — a **two-method** event-sourced Protocol (`apply`, `rebuild`) with `InMemoryProjection` as an existing second implementation | `tortoise/projection/__init__.py` |
 | **`classify_consolidation`** — pure, no LLM, no graph I/O, post-extraction/pre-write; emits `noops`/`deletions` on a channel not written to the graph | `tortoise/extractor_v2.py` (E7/`#1539`) |
-| **`KindClassifier`** — kNN top-5 → margin gate → `nearMisses` rerank (no LLM) → batched LLM for the low-margin tail → fail-open + census. **Jev replaces its LLM tail.** | `tortoise/kind_classifier.py` (`#1695`) |
-| **S2/S4 merge** | `merge_embed_lists` (def `extractor_v2.py:2284`; **called at `:4845`** — ⚠️ an earlier draft cited `:4838`, which is `stage_stats`) |
+| **`KindClassifier`** — kNN top-5 → margin gate → `nearMisses` rerank (no LLM) → batched LLM for the low-margin tail → fail-open + census. ⚠️ **Jev does NOT slot into its LLM tail**: the tail is a **hardcoded prompt + a JSON parser** and `llm_tail` is a **boolean** (`kind_classifier.py:93`), so the swap needs **an adapter, a prompt, and a parser** (§4.2). | `tortoise/kind_classifier.py` (`#1695`) |
+| **S2/S4 merge** | `merge_embed_lists` (def `extractor_v2.py:2284`; **called at `:4845`** — ⚠️ an earlier draft cited `:4838`, which is `try:` (`stage_stats` is `:4837`)) |
 | **Pack enforcement machinery** — `chains` with `enforcement` levels, `nearMisses`, `subclassOf`, `equivalentTo`, `extraction.sourceTypes` | `packs/*/manifest.yaml`; 20+ files reference each |
 | **The narrative prompt slot** — S1's granularity rule is already injected | `_granularity_text()` |
 
@@ -909,16 +942,16 @@ v3's **E2** requires state-value facts be preserved verbatim (*"personal best 5K
 
 | # | decision | status |
 |---|---|---|
-| **D1** | The narrative lives in **Supabase storage, referenced by its `Source`** — **NOT in the graph**, not a `Document` node, not a `Point`. **Amended 2026-09-23:** *"metadata on its `Source`"* was too loose — the graph keeps the **reference**; the **text** stays out of the graph, and therefore out of RAM. | **DECIDED (amended)** |
+| **D1** | The narrative lives in **Postgres, referenced by its `Source`** — **NOT in the graph**, not a `Document` node, not a `Point`. ⚠️ **The owner's *"supabase"* means the DATABASE, not the object bucket; the destination was CORRECTED 2026-10-09** (`STORAGE-ARCHITECTURE.md` §9.1). **Amended 2026-09-23:** *"metadata on its `Source`"* was too loose — the graph keeps the **reference**; the **text** stays out of the graph, and therefore out of RAM. | **DECIDED (amended)** |
 | **D2** | A GitHub PR is **an `Object` (WorkItem) + its merge is an `Event` + its body is a `Source`.** A completed task is a **lifecycle `Event` whose status is the fold** — not a second node. | **DECIDED** |
 | **D3** | The narrative's abstraction level → **Option 4: the narrative is a *focus*, the raw text is the *source*** (extraction may consult raw). Chosen *for now*, pending a measurement. | **PROVISIONAL** |
 | **D4** | **Salience is relational.** One **entity-keyed neighbourhood lookup**, consumed by **the judgment** (salience) **and by S3** (resolution). **⚠️ NARROWED 2026-09-23:** extraction no longer consumes it. | **DECIDED (narrowed)** |
 | **D5** | One adversarial reviewer — **one step, two questions, one artifact**: item validity **+ coverage**, both at **S2.2**. | **DECIDED** |
 | **D6** | **Two distinct connection sets** — within-batch and to-graph, both **proposed by the model** (*"LLM proposed good"*). | **DECIDED (confirmed)** |
 | **D7** | **Lifecycle = appended Events + folded status**, the PR *as* the Event. | **DECIDED** |
-| **D8** | **State values → structural storage**, testing whether embeddings can be skipped. ⚠️ **`#1534` CLOSED and `#2453` LANDED (`4a690d0be`) — the RETAIN half is done; the ENFORCEMENT half is `#4899`'s.** | **DECIDED (retain half landed)** |
+| **D8** | **State values → structural storage**, testing whether embeddings can be skipped. ⚠️ **`#1534` CLOSED and `#2453` LANDED (`4a690d0be`) — the RETAIN half is done. The ENFORCEMENT half LANDED TOO: `#4899` CLOSED `COMPLETED`, `tortoise/value_gate.py` ships — but it is OFF by default (`TORTOISE_VALUE_GATE`) and subordinate to VET.** | **DECIDED (both halves landed; the mechanical gate ships OFF by default)** |
 | **D9** | **The lookup follows extraction.** **S3 owns it** — keyed on candidates, narrative as disambiguation context. **No pre-load, no S1.5.** ⚠️ **S3's scope overlaps `#2730`'s — reconcile before building.** | **DECIDED** |
-| **D10** ⭐ | **A document is a SOURCE, not a graph node.** `:Document` folds into `:Source`; content moves to raw storage; **liveness is a READ of its entities** (high confidence, not superseded, not NANDed). The entity layer becomes **uniform over documents, code and transcripts.** *"that's the reasoning/knowledge layer."* **⭐ The ontology half is LANDED: `ONTOLOGY.md` v3.15, PR #5022 (29 sites).** **⚠️ The code half has NOT landed, and it is bounded by `#2489`** (replay key `coalesce(title,name)` → `url`; rebuild does not repair pre-existing graphs). **Five consequences ruled 2026-09-24 — see the §S0 block above and `STORAGE §9.5`:** **Q1** `aboutDocument` kept, label retargeted only (**NOT** collapsed into `aboutSource` — that would delete a rebuild guarantee); **Q2** two axes kept (`sourceKind` + `documentKind`); **Q3** `doc_status` dropped, `format` moves, `content` leaves the graph; **Q4** the `documents` cap re-pointed at `:Source`; **Q5** fold + rekey + migrate — **free today, expires when the commit lane first runs**. | **DECIDED 2026-09-24** |
+| **D10** ⭐ | **A document is a SOURCE, not a graph node.** `:Document` folds into `:Source`; content moves to raw storage; **liveness is a READ of its entities** (high confidence, not superseded, not NANDed). The entity layer becomes **uniform over documents, code and transcripts.** *"that's the reasoning/knowledge layer."* **⭐ LANDED, both halves:** `ONTOLOGY.md` v3.15, PR `#5022` (29 sites); the `:Document` NODE label retired by PR `#5127`; the `:Source` replay key is `url` (`projection/edges.py:153`). **A surviving constraint:** rebuild does not repair pre-existing graphs (`#2489`). **Five consequences ruled 2026-09-24 — see the §S0 block above and `STORAGE §9.5`:** **Q1** `aboutDocument` kept, label retargeted only (**NOT** collapsed into `aboutSource` — that would delete a rebuild guarantee); **Q2** two axes kept (`sourceKind` + `documentKind`); **Q3** `doc_status` RETIRED, `format` moves, `content` leaves the graph; **Q4** the `documents` cap re-pointed at `:Source`; **Q5** fold + rekey + migrate — **DONE 2026-09-25**. | **DECIDED 2026-09-24** |
 | **D11** ⭐ | **Stay on hosted FalkorDB; optimisation deferred.** Revisit with users; price **self-hosting** first (SSPLv1 — same engine, no rewrite). | **DECIDED 2026-09-24** |
 | **D12** ⭐ | **Near-duplicate MERGE is authorised**, with **Jev as arbiter** over the claim plus narrative/raw data. ⛔ **Supersedes the `OVERRIDES:` on `#4899`** (*"never merging two claims into one"*) — **the owner reversing their own earlier ruling.** ⚠️ High bar; never across a differing number, name, negation or condition — **the list has since grown: §16.4 carries the current never-across classes** (it adds language, date/scope, and the pair-read load-bearing connective, `#5139`, and the pair-read role inversion, `#5131`; the authoritative predicate there is `_boundary`). | **DECIDED 2026-09-24** |
 | **D13** ⭐ | **The working method for each step is draft → run → look → refine → repeat**, *"until good."* Replaces the sample-vs-deterministic debate. | **DECIDED 2026-09-24** |
@@ -1151,9 +1184,9 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 | **S5 CONNECT — two sets, within-batch *and* to-graph** (D6, decided) | LLM does **within-batch only**, max 2, backwards; **to-graph is mechanical** (ANN + entity join) | ⚠️ **A direct challenge to D6.** Not a contradiction of a *recorded* decision — D6 **is** the recorded decision, and it is the newer one — so this is evidence for the owner, **not** a change we may make. |
 | **S3 MATCH → AND ATTACH** | entity resolution is a **join key**, and the link rows were deleted as pure storage cost | ✅ **consistent** — and it says our attach step should cost little. |
 | **minting an `Object` per entity** | entities are extracted to **link facts** (*"Extract anything that could help link related facts together"*) and kept in a mapping table | ⚠️ **The strongest available support for the `^the <X>` finding.** Their entity extraction *purpose* is linking; ours has become node creation. |
-| **connection fan-out** | bounded everywhere, with a timeout that drops an arm | ⚠️ **We bound nothing today** — `the plan doc` (63) and `config/ci-surfaces.yml` (123) are unbounded. |
+| **connection fan-out** | bounded everywhere, with a timeout that drops an arm | ✅ **Cap adopted AND implemented** — `PER_ENTITY_FANOUT_CAP = 200` (`tortoise/fanout.py`), consumed by `assembly.py` / `subgraph.py`; **`#5010` CLOSED** (PR `#5057`). ⚠️ **The earlier row here read *"We bound nothing today … are unbounded"* — that is no longer true.** The cap sits above our current worst hub (123), so it binds nothing today and cannot lose data now. |
 
-**⇒ Two of the three questions this raises are still the owner's; the third (question 2) is measured, ruled and deferred — see it below:**
+**⇒ One of the three questions below is still the owner's (question 1). Question 2 is measured, ruled and deferred; question 3 was adopted and is CLOSED — `#5010` (`PER_ENTITY_FANOUT_CAP = 200`) — see below:**
 
 1. **Should the LLM be allowed to propose connections to the graph at all**, or should cross-batch connection be mechanical (embedding + entity) with the model confined to within-batch, as Hindsight confines it?
 2. **Should `aboutObject` be a stored edge or a derived join?** ✅ **MEASURED 2026-09-23 — the answer is split; RULED (owner, 2026-09-23): KEEP the stored edge; DEFERRED to post-launch (not open). Record: `#7948`.** The primary search path does **not** read it (`grep -in aboutObject tortoise/retrieval.py tortoise/search_engine.py tortoise/session_reinjection.py` → exit 1, case-insensitive) — so Hindsight's premise holds *there*. **On the traversal sample, FOUR sites are customer-callable** (all pinned to `c79ba1cf2`): `belief_timeline` (`sdk.py:6411`; MCP `tortoise_belief_timeline`, `tool_registry.py:391`) · `topic_summarize` (`topic_summarization.py:174`; SDK `sdk.py:7516` + hosted REST `hosted_api.py:6294` ⚠️ **its MCP twin `tortoise_topic_summarize` (`mcp_server.py:2354`) is registered nowhere and never served — filed as `#7988`; the capability survives on the SDK + REST doors**) · `recall_subgraph` — `ranking.SubgraphExpander._neighbors` (`ranking.py:1195`/`:1206`), whose default `completeness="full"` walks **every** relationship type via `MATCH (n)-[r]->(m)`, so it reads the edge **without naming it** and is therefore invisible to any grep-based enumeration · `search(order_by="graph")` (`ranking.py:461`, `ranking.py:714`; MCP `tortoise_search`). **Two more are default-ON on the ingestion path:** `extractor_v2._enrich_point_priors` (`extractor_v2.py:1934`) and `mining._temporal_wire` (`mining.py:477`, **2-hop, and it mints a NAND**). **Off by default:** `_entity_key_expansion_pass` (`sdk.py:14744`; `entity_key_expansion: bool = False`, `sdk.py:13777`) and the connected-assembly reads (`assembly.py:573`/`:789`/`:809`; `TORTOISE_ASK_CONNECTED_ASSEMBLY` default OFF). **36 test files assert the edge at the pin** (41 at HEAD, 2026-10-10). ⚠️ **The *"four default-ON sites, two customer-callable"* phrasing this bullet carried before is WRONG on both counts, and the correction is the load-bearing part: `recall_subgraph` and `search(order_by="graph")` were missing** (review finding B2.7, `REVIEW-CONSOLIDATED-2026-09-23.md`). **Deleting the edge would silently break FOUR customer-callable surfaces → the comparable's conclusion does NOT transfer.** The structural door stays open though: **no** `aboutObject` edge carries any property (the write path emits `MERGE (s)-[:aboutObject]->(t)` and never a `SET` — `projection/edges.py:344`). ⚠️ **And deriving is what creates the fan-out problem** — a join on a hub with ~1,200 claims yields ~1,200 rows *per anchor*, which is exactly why Hindsight carries a `LIMIT 200` and a timeout that drops the whole arm. **See `STORAGE-ARCHITECTURE.md` §13 for the full classification and the durability finding, and §11 for why the connection layer is cheap to keep.**
@@ -1176,32 +1209,53 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 
 | section | issue(s) | what the issue takes from here |
 |---|---|---|
-| §1 the mechanism (`^the <X>`, 62.3% of Objects) | **`#4899`** · `#4894` | the **mechanical DISCARD outcome on E7** — the `valueGate` slot, no LLM, flag-gated |
-| §1 v2 → v3 → v4 | `#1509` (epic) · `#4894` | **v3 increases volume; v4 must land with or before v3's E2/E3** — and v3's **E4 has already landed** (`merge_embed_lists`, `extractor_v2.py:4845`), so its premise is stale |
+| §1 the mechanism — **two halves**: the `^the <X>` definite-description class (62.3% of Objects) **and** the `#\d{1,6}(?!\d)` *identifier* DISCARD | **`#4899`** (CLOSED `COMPLETED`) · `#4894` | ⚠️ **`#4899` is the *identifier-only* DISCARD** (`value_gate._REFERENCE` / `identifier_only()`), shipped in `tortoise/value_gate.py` and **OFF by default**. **It deliberately does NOT cover `the <X>` definite descriptions** — `value_gate.py`'s docstring: *"a definite description is left to the arbiter, and is reported, not dropped"* — **so the 62.3% `the <X>` class is not owned by this row.** ⚠️ **Nor by the `§4 S2.2 VET` row below** — that row records Jev's *cost* measurement, not the arbiter. This class is the **arbiter / pre-lookup half of S2.2**, and **the mechanism that would decide it has no production caller**: `tortoise/vet_gate.py` — *"No production caller injects an arbiter yet … the step decides nothing."* ⚠️ **Owned by `#5198`** — *"the mechanical DISCARD gate site is asserted twice (S2.2b pre-lookup vs E7 post-lookup) and the code matches neither"* — which records this placement as *"still unowned"* |
+| §1 v2 → v3 → v4 | `#1509` (epic — ⚠️ **CLOSED `NOT_PLANNED`**, 2026-10-10) · `#4894` | **v3 increases volume; v4 must land with or before v3's E2/E3** — ⚠️ **but that ordering obligation is now VOID: the v3 epic is not planned**, so there is no v3 work left to land before. v3's **E4 has already landed** (`merge_embed_lists`, `extractor_v2.py:4845`), so its premise is stale regardless |
 | §2 three tiers | `#2281` | the **narrative is the ingest-time-distilled layer** with raw-turn fallback |
-| §2 narrative placement (D1) | `#4894` | narrative = `Source` metadata, **not** a `Document` node |
-| §3 source-varying steps | `#2714` · `#1844` | source types declare a **field→type mapping** that configures S0/S1/S2/S5; structured sources are exact and cheap |
-| §4 S0–S6 | `#4894` · `#1509` | the step architecture itself |
+| §2 narrative placement (D1) | `#4894` | ⚠️ **the narrative is Postgres text REFERENCED BY its `Source`** (the owner's *"supabase"* = the DATABASE, not the object bucket; destination corrected 2026-10-09) — **the graph keeps the *reference*; the text stays out of the graph** (§9 D1, **amended 2026-09-23**: *"metadata on its `Source`"* was **too loose**). **Not a `Document` node, not graph metadata, not a `Point`** |
+| §3 source-varying steps | `#2714` (⚠️ **CLOSED `COMPLETED`** — this row records the landed design, not open work) · `#1844` | source types declare a **field→type mapping** that configures S0/S1/S2/S5; structured sources are exact and cheap |
+| §4 S0–S6 | `#4894` · `#1509` (⚠️ **CLOSED `NOT_PLANNED`**) | the step architecture itself |
 | §4 S3 RESOLVE (was S1.5) | `#4511` (**CLOSED** — now just a fixed bug, no longer a dependency) · `#2730` | **entity attachment** is the mechanism; the lookup is keyed on candidates and disambiguated by the narrative |
-| §4 S2.2 VET + §6 Jev | **`#1026`** (the `valueGate` slot) · `#4899` | Jev as the **decision-only** mechanism; measured **$0.000243/item at 3 questions**, **~4–7× cheaper than frontier, not 40–400×** |
+| §4 S2.2 VET + §6 Jev | **`#1026`** (CLOSED — the `valueGate` slot it declared) · `#4899` (CLOSED — the S2.2b predicate that ships) | Jev as the **decision-only** mechanism; measured **$0.000243/item at 3 questions**, **~4–7× cheaper than frontier, not 40–400×** |
 | §4 S3 MATCH | `#2730` | find **and attach** — Jev as a `Choice` over supplied candidates |
-| §4 S5 CONNECT + §5 lifecycle (D6/D7) | **`#2552`** · **`#4716`** | operator edges are **not wired or persisted** (measured **0/4** on the planted-operator corpus); the mint bypasses E7 and endpoint refs are never remapped |
-| §5 lifecycle events | `#4240` | lifecycle is **appended Events + folded status** — which is why the missing journal is a durability bug |
+| §4 S5 CONNECT + §5 lifecycle (D6/D7) | **`#2552`** · **`#4716`** (both CLOSED `COMPLETED`) | the measured **0/4** on the planted-operator corpus — operator edges **were not wired or persisted**, the mint bypassed E7, and endpoint refs were never remapped |
+| §5 lifecycle events | `#4240` (CLOSED `COMPLETED`) | lifecycle is **appended Events + folded status** — which is why the **then-missing** journal was a durability bug |
 | §7 atomicity + §7 state values | **`#2453`** (LANDED) · `#2820` · `#4432` | the `STATE_VALUE_CARVE_OUT` must survive any filter; `'extraction emits statement only'` is contradicted by the live rule extractor. ⚠️ **The former "`#1509` (E2, E3)" citation was wrong — `#1509` has no §9 and no E2**; **E2 is `#1534`'s slot** (CLOSED) |
-| §8 already in code | `#1026` · `#2714` | packs already declare `chains`/`nearMisses`/`subclassOf`/`sourceTypes` — **the work is enforcement, not design** |
+| §8 already in code | `#1026` (⚠️ **CLOSED `COMPLETED`**) · `#2714` (⚠️ **CLOSED `COMPLETED`**) | packs already declare `chains`/`nearMisses`/`subclassOf`/`sourceTypes` — **the work is enforcement, not design** |
 | §9 decisions D1–D13 | `#4917` | the handoff record |
 | §10–§12 research | `#2730` · `#4333` | the Hindsight checks |
 | §13 connections & relevance | **`#2730`** · **`#1026`** · `#4240` | cross-batch connection is **mechanical** in the nearest comparable; entity edges were **deleted** at 53% of link rows |
 | §13.6–§13.8 `aboutObject` stored edge vs derived join | **`#7948`** (the filed record: measured SPLIT · ruled **KEEP** · deferred) · `#5010` (the cap, CLOSED) | the measured, classified read-site enumeration — and the finding that the comparable's conclusion does **NOT** transfer |
 | §14 not established | `#4894` | the small-sample-first measurement list |
-| **capture-path issues (same pipeline, not steps)** | `#4897` · `#4911` · `#4714` · `#4614` | mid-word truncation at 5,000 chars · **no secret redaction** · **2 of 4 harnesses 404** · invisible quota refusals |
+| **capture-path issues (same pipeline, not steps)** | `#4897` · `#4911` · `#4714` · `#4614` | ✅ **ALL FOUR CLOSED `COMPLETED`** (2026-10-04 · 2026-09-26 · 2026-09-24 · 2026-09-25) — mid-word truncation at 5,000 chars · no secret redaction (its *v4 raw-layer* consequence is `#8496`, §4.3 G4) · 2 of 4 harnesses 404 · invisible quota refusals. **Listed as the record of a defect CLASS this pipeline produced, not as a live defect list** |
 
-**Two of the three questions this document raises** (§13.8) belong to **D6** and are the owner's: cross-batch connection by LLM or mechanically; and hard fan-out caps. **The third — `aboutObject` as edge or join — is measured, ruled and deferred, NOT open** (§13.8 question 2, §16): the measurement is SPLIT, the owner ruled **KEEP the stored edge** on 2026-09-23, and `#7948` is the filed record.
+**One of the three questions this document raises** (§13.8) remains the owner's: **cross-batch connection — by LLM or mechanically.** The other two are settled: **hard fan-out caps** are **CLOSED** (`#5010` — adopted at 200, `PER_ENTITY_FANOUT_CAP`, §13.8 question 3), and **`aboutObject` as edge or join** is measured, ruled (**KEEP** the stored edge, 2026-09-23) and deferred — **`#7948`** is the filed record (§13.8 question 2, §16).
 
-**Not yet filed from this document (candidates, not decisions):**
+**Filed status — revalidated 2026-10-13 against the tracker.**
 
-- **The raw-vs-narrative measurement** (D3's falsifier, §10) — the next real work, and the one that settles whether Option 4 stays provisional.
-- **Fan-out caps** — mirrored in `STORAGE-ARCHITECTURE.md` §13, because it is a storage decision as much as an extraction one. ⚠️ **Filed and CLOSED: `#5010`** (the cap landed query-side — `tortoise/fanout.py`, `PER_ENTITY_FANOUT_CAP = 200`, PR `#5057`). **The `aboutObject` join-vs-edge question is no longer a candidate here — it is measured, ruled and deferred, and it IS filed (`#7948`); the earlier *"still owner-pending"* note contradicted §13.8 question 2 and §16.**
+This block previously read *"Not yet filed from this document (candidates, not decisions)"* and listed
+items that **have since been filed.** It is corrected rather than deleted, because a stale *"not yet
+filed"* claim is what causes duplicate filing — the same failure the §4.3 gap table had.
+
+| item | issue | state |
+|---|---|---|
+| **The raw-vs-narrative measurement** (D3's falsifier, §10) — *"the next real work"*, settles whether Option 4 stays provisional | **`#7947`** | ✅ **FILED** — this block said *not yet filed* |
+| **Fan-out caps** (mirrored in `STORAGE-ARCHITECTURE.md` §13) | **`#5010`** | ✅ **CLOSED** — cap landed query-side (`tortoise/fanout.py`, `PER_ENTITY_FANOUT_CAP = 200`, PR `#5057`) |
+| **`aboutObject` join-vs-edge** | **`#7948`** | ✅ **FILED** — measured SPLIT, owner ruled **KEEP**, deferred. ⚠️ **The *issue* is `OPEN`; what is not open is the §13.8 question 2 / §16 matter — that is settled and deferred** |
+| **G1** — narrative + raw-fact span persistence | **`#5064`** (open remainder; `#5007` CLOSED `COMPLETED` via PR `#5108`) · **`#4894`** (narrative) | ✅ filed |
+| **G2** — the EMBED gate | **`#5008`** | ✅ filed |
+| **G3** — per-step failure policy | **`#8495`** | ✅ filed |
+| **G4** — redaction designed with the append-only layer | **`#8496`** | ✅ filed (`#4911` is CLOSED; its design-level consequence was unowned) |
+| **G5** — migration / backfill / the live S4 | **`#5333`** · **`#5059`** · **`#8500`** (the S4 clause) | ✅ filed |
+
+**⇒ There are no longer any unfiled candidates in this document.** G1–G5 were recorded in §4.3 as gaps to close before
+implementation begins, and **two** of them (`#8495`, `#8496`) had no tracker entry until
+2026-10-13 — those two are among the newly filed ones. **G5's S4 clause** also needed its own home and got one
+the same day, because `#5333` explicitly refuses to absorb it and `#5059` covers a different half: it is
+**`#8500`**. (That is a scope boundary, not a closed-issue reopen — both `#5333` and `#5059` are OPEN. The
+closed-issue reopen rationale belongs to **G4**, where `#4911` is CLOSED `COMPLETED` and its design-level
+consequence is `#8496`.) The owning epic is **`#5087`** (E1) under tracking **`#5086`**, with end-to-end
+acceptance in capstone **`#7949`**.
 
 ---
 
@@ -1212,10 +1266,10 @@ Each open decision was run through the mandated sequence: **contradiction test f
 | decision | contradiction test | needs the owner? | artifact / action |
 |---|---|---|---|
 | **Keep contention + EP confidence** (ruled Option 1) | **No contradiction** — it *is* the recorded decision (`ONTOLOGY.md` §3.1). The field converges **against** it. | ruled | ✅ **`OVERRIDES:` posted on `#2730`** — the field's default is resolve/erase; we hold in tension |
-| **Granularity: never fuse claims** | **No contradiction** — owner ruling. GraphRAG's consolidation contradicts it. | ruled | ✅ **`OVERRIDES:` posted on `#4899`** — the field consolidates |
+| **Granularity** | The **merge-ban** was withdrawn (O4, §16.3); **the fuse prohibition was re-affirmed** by the same owner comment. ⚠️ **GraphRAG's consolidation STILL contradicts that position** — §9 REFUSES it (*"Directly destructive of the epistemic layer"*), and §16.4 authorises `MERGE` only *"when nothing distinguishing is lost"* and **never across a negation or a condition**, which is exactly what *"resolve the contradictions and provide a single, coherent summary"* does. | **merge-ban withdrawn**; **fuse re-affirmed** | ⛔ **The `OVERRIDES:` on `#4899` is WITHDRAWN** (comment `2026-09-24T04:33:23Z`); **near-duplicate `MERGE` is authorised** (bounded by §16.4, arbitrated by Jev) — and **`FUSE` REMAINS FORBIDDEN**: the admissible set is `KEEP` / `NOOP` / `DISCARD` / `MERGE` |
 | **D6: LLM proposes to-graph connections** | **Contradiction** — Hindsight's mechanical cross-batch contradicts D6, so **not adoptable**. Route = reopen. | **still open** | reopen in front of the owner (§13.8). **No `OVERRIDES:`** — LLM edge extraction *is* the field default, so D6 is not against the grain |
 | **`aboutObject`: stored edge vs derived join** | No contradiction — no decision mandates materialization | **no** | ✅ **MEASURED + RULED: KEEP the stored edge.** The primary search path **does not** read it, but **four CUSTOMER-CALLABLE sites do** (`belief_timeline`, `topic_summarize`, `recall_subgraph`, `search(order_by="graph")` — §13.8 question 2) plus two default-ON ingestion sites → deriving would silently break four public surfaces. **Owner 2026-09-23: the remaining unknown — *are those tools ever called?* — is unanswerable pre-launch, so the question is DEFERRED, not decided.** Keep for now; optimise with users. |
-| **Fan-out caps** | No contradiction; field converges (Hindsight caps at **200** *and* carries a timeout that drops the whole arm); aligns with our volume goal | **no** | ✅ **ADOPTED at 200** (owner, 2026-09-23: *"fine on adding the cap"*). **Above our current worst hub (123), so it binds nothing today and cannot lose data now** — a guard rail against runaway fan-out, **not** an optimisation. Refine with real usage. See `STORAGE-ARCHITECTURE.md` §11.5. |
+| **Fan-out caps** | No contradiction; the field converges (Hindsight caps at **200** *and* carries a timeout that drops the whole arm); ⚠️ **the bound is explicit rather than implicit** | **no** | ✅ **ADOPTED at 200** (owner, 2026-09-23: *"fine on adding the cap"*). **Above our current worst hub (123), so it binds nothing today and cannot lose data now** — a guard rail against runaway fan-out, **not** an optimisation. Refine with real usage. See `STORAGE-ARCHITECTURE.md` §11.5. |
 | **Keep the epistemic + entity connection layer** | No contradiction — it *is* the product. The field's cost-driven default (Hindsight derives instead of storing) points the other way. | ruled | ✅ **KEPT — owner, 2026-09-23.** Cheap because edges are **property-free** and Postgres holds them **on disk** (~3 MB ≈ $0.0004/mo). **`OVERRIDES:` posted on `#4333`** — never cut this layer to save money. See `STORAGE-ARCHITECTURE.md` §11. |
 | **D3: raw vs narrative** | No contradiction (D3 is provisional) | **no** | ✅ The owner already approved the measurement. **The measurement decides** — not a gate |
 
@@ -1225,7 +1279,7 @@ Each open decision was run through the mandated sequence: **contradiction test f
 
 ### 16.1 The review cycle — outcome recorded (2026-09-23)
 
-**Two fresh-context reviewers per document, complementary lenses; full consolidation in `REVIEW-CONSOLIDATED-2026-09-23.md` (6 P0 · 34 P1 · 18 P2).** This section records **what was done with each category**, so a later lane can tell a correction from an omission.
+**Two fresh-context reviewers per document, complementary lenses; full consolidation in `REVIEW-CONSOLIDATED-2026-09-23.md` (that review's own summary: 6 P0 · 34 P1 · 18 P2).** This section records **what was done with each category**, so a later lane can tell a correction from an omission.
 
 | category | count | disposition |
 |---|---|---|
@@ -1244,7 +1298,7 @@ Each open decision was run through the mandated sequence: **contradiction test f
 |---|---|---|
 | *"`#3011`'s thresholds were embellished 3 of 3; REMOVED"* | the frozen doc **carries all three** (`H1 ≥15`, `H2 ≥10`, `H3 −5`) | **cycle-1 B2.18** — conflated *"also in H4 / also in the falsifiers"* with *"not in H1/H3"* |
 | *"the lookup does not need kinds → constraint 4 evaporates"* | `_find_existing_entity` **uses `kind` as its exact-match key** | **cycle-1 B2.1** — read the query builder and called it the lookup |
-| *"there is no `:Document` node and none is created"* | `:Document` is written, read, **and quota-counted** (`quota.py:524`, `#1726`) | not from cycle 1 — a **lane inference** from "D30 puts raw outside the graph" |
+| *"there is no `:Document` node and none is created"* | ✅ **NOW TRUE** — the `:Document` NODE label is **retired** (PR `#5127`, D10); the **`documents` cap** counts document-bearing `:Source` nodes (the node cap does not) | not from cycle 1 — a **lane inference** from "D30 puts raw outside the graph" |
 | *"All 6 P0s corrected in place"* | **at the time, A4 was NOT corrected** — `MERGE-INTO-EXISTING` was still in VET's outputs, so the VET/S3 circularity stood | **cycle-1 A4's disposition was claimed, not verified** · **✅ NOW FIXED** — `MERGE-INTO-EXISTING` is removed from VET's outputs (§S2.2) and §16.1 is corrected |
 | *"the narrowing is PROPOSED… ✅ Recorded as such in §9 (D4)"* | §9 D4 says **`DECIDED (narrowed)`** | **cycle-1 B2.20** — the "fix" replaced one two-ways status with another · **✅ NOW FIXED** — the ⚠️ pending line is deleted and §S3 states `DECIDED (narrowed)` |
 
@@ -1266,9 +1320,9 @@ Each open decision was run through the mandated sequence: **contradiction test f
 | # | ✅ ANSWER | what changes in THIS document |
 |---|---|---|
 | **O1** | **The conflict was mine.** `#2826` **A2** (the real decision row) recommended the journal be authoritative; `#2881` reversed it by recommendation; the doc recorded the reversal and flagged *"the row is the owner's to answer."* **The two questions are different and both hold: DURABILITY = the store's backup; REBUILDABILITY = the journal.** | **No reopen.** The wording is scoped: *the journal is the derived layer's rebuild source; it is not a durability mechanism.* ⚠️ **`rebuild_all` already treats an incomplete log as the authority — that is a defect, and it gets its own issue.** |
-| **O2** | ⛔ **WITHDRAWN — the owner rejected the framing:** *"we're not optimising stupidly for a number… this is not a corporate OKR setting exercise. We need to balance multiple things at each step of the pipeline and on each architecture decision."* | **No volume target, no recall floor, no node budget anywhere in this document.** The objective is **great recall and reasoning at an affordable cost**; the method is **manual, step-by-step review** until a calibration set exists. **§4.2's objective is re-stated accordingly — see below.** |
+| **O2** | ⛔ **WITHDRAWN — the owner rejected the framing:** *"we're not optimising stupidly for a number… this is not a corporate OKR setting exercise. We need to balance multiple things at each step of the pipeline and on each architecture decision."* | **No volume target, no recall floor, no node budget anywhere in this document.** The objective is **great recall and reasoning at an affordable cost**; the method is **manual, step-by-step review** until a calibration set exists. ⚠️ **O2 withdrew the *volume-target* framing, not §4.2's ordering objective.** An earlier version of this cell claimed §4.2's objective was *"re-stated accordingly — see below"*; **nothing in this document restates it, because it needs no restatement — §4.2 states its own objective at `:638`**: *"The rule is NOT 'cheapest first' — it is **cost per unit of SAFE rejection**"* (§4.2 heading, `:620`). O2's withdrawal does not touch that. |
 | **O3** | ✅ **ADOPTED — emit the DECLARED outcome word (`DISCARD`), matching the engine's existing classifier.** | S2.2's outputs use the declared vocabulary. |
-| **O4** | ✅ **Merge IS authorised — with Jev as arbiter over the claim plus narrative/raw data.** ⛔ **This supersedes the `OVERRIDES:` ruling on `#4899`** (*"never merging two claims into one"*). | ⚠️ **`FUSE` becomes an ADMISSIBLE action**, so §4.2's *"NEVER `FUSE`"* rule is replaced: **`KEEP` / `NOOP` / `DISCARD` / `MERGE`**, where MERGE is bounded (below). |
+| **O4** | ✅ **Merge IS authorised — with Jev as arbiter over the claim plus narrative/raw data.** ⛔ **This supersedes the `OVERRIDES:` ruling on `#4899`** (*"never merging two claims into one"*). | The admissible set is **`KEEP` / `NOOP` / `DISCARD` / `MERGE`** (MERGE bounded below). ⚠️ **`FUSE` — combining two distinct claims into one new claim — REMAINS FORBIDDEN**, per the same owner comment on `#4899` (`2026-09-24T04:33:23Z`). |
 | **O5** | ✅ **Neither — draft and iterate:** *"we draft something (a prompt, a step of the extraction workflow, etc) and run it and see the result then refine and run again, until good."* | **The working method for every step in §4.1: draft → run → look → refine → repeat.** Replaces the sample-vs-deterministic debate. |
 | **O6** | ✅ **A document is a SOURCE** — *"making them sources so our entity layer can be extracted from them… that's the reasoning/knowledge layer."* | **S0 reads a SOURCE, not a `Document` node.** Documents, code files, meeting transcripts and conversations are **the same kind of input**; the entity layer is uniform over them. **Document liveness is a READ of its entities, never a stored field.** See `STORAGE-ARCHITECTURE.md` §9.3. |
 

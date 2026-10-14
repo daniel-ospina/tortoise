@@ -18,6 +18,10 @@ Environment:
   TORTOISE_PORT          8000
   TORTOISE_RATE_LIMIT    100 req/min per IP (MCP SSE bursts ~5-10 req/call)
   TORTOISE_ALLOWED_ORIGINS  comma-separated (default http://localhost:8000)
+  R2_* / BACKUP_SWEEP_ENABLED    the off-box backup TARGET (declare one), or
+  TORTOISE_OFFBOX_BACKUP_DECLINED=1  decline one EXPLICITLY (#8543). Unset on
+                         both sides is ABSENT and is reported loudly at boot —
+                         never silently treated as "declined".
 """
 from __future__ import annotations
 
@@ -34,6 +38,10 @@ from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 
+# #8543: the declared truthiness contract (#4097) — the off-box backup decision
+# is a tri-state (declared / declined / absent), so read flags through this
+# rather than a bespoke `== "1"`.
+from tortoise.env_truthy import is_truthy
 from tortoise.mcp_server import create_http_app
 
 # #2988/#3243: the shared liveness primitive and the shared refresh-period
@@ -529,13 +537,20 @@ def _probe_sdk():
     """
     from tortoise.sdk import TortoiseSDK  # lazy — liveness stays cheap
 
+    # #8497: probe through the SAME journaled construction the doors use — a
+    # read-only probe on an UNARMED projection of the shared org_selfhost graph
+    # is the "same server, two guard states" divergence the REST anchor was
+    # armed to remove.
+    from tortoise.selfhost_api import selfhost_journal_path
+
     key = _probe_sdk_key()
     with _PROBE_SDK_LOCK:
         cached = _PROBE_SDK_CACHE.get("sdk")
         if cached is not None and _PROBE_SDK_CACHE.get("key") == key:
             return cached
         old = cached
-        sdk = TortoiseSDK(namespace="selfhost")
+        sdk = TortoiseSDK(namespace="selfhost",
+                          event_log_path=selfhost_journal_path())
         _PROBE_SDK_CACHE["sdk"] = sdk
         _PROBE_SDK_CACHE["key"] = key
         # #4608: a target change displaces ``old``; close it only when no probe
@@ -731,6 +746,150 @@ if not os.environ.get("TORTOISE_DB_URI"):
     print(f"tortoise selfhost: {EMBEDDED_EVAL_BANNER}", file=sys.stderr)
     _logger.warning(EMBEDDED_EVAL_BANNER)
 
+
+# ── #8543: the off-box backup target is a SETUP-PATH DECISION, never silent ──
+#
+# Owner decision 2026-10-13 (durability PARITY with hosted): an off-box copy is
+# part of the durability promise, so a self-host deployment must either DECLARE
+# a target or EXPLICITLY DECLINE one. Silence is the defect — the 2026-08-05
+# incident (#101) was already an instance believed durable with no off-box copy,
+# and AOF protects a process/container crash, never a lost volume or host.
+#
+# WHY A TRISTATE, AND WHY IT IS NOT BASED ON ``backup_config.load_config``:
+# ``BACKUP_SWEEP_ENABLED`` is fail-closed (default off) precisely so a deploy
+# without the secrets still boots — which makes an UNPLANNED absence read exactly
+# like a deliberate "no backups wanted". #8543 exists to split those two, so
+# ABSENT stays distinguishable from DECLINED. This resolver never raises and
+# never imports the backup subsystem: it is a boot-time READ of the decision.
+#
+# HONESTY BOUND (#8544): declaring a target does NOT yet produce an archive on
+# this lane. ``backup_sweep.run_backup_sweep`` has exactly one production caller
+# — the hosted app's ``POST /v1/internal/backups/sweep`` (``hosted_api.py``);
+# nothing in the self-host lane runs it. So ``configured`` means "target
+# DECLARED", never "copy exists", and the signal says so rather than implying a
+# copy. The driver gap is tracked on #8544 and is NOT built here.
+OFF_BOX_CONFIGURED = "configured"
+OFF_BOX_DECLINED = "declined"
+OFF_BOX_ABSENT = "absent"
+
+# The off-box TARGET vocabulary is the repo's existing backup env contract
+# (``tortoise/backup_config.py``): the bucket is the target and the account/keys
+# are its access. ``BACKUP_SWEEP_ENABLED`` is the hosted driver switch and also
+# counts as a declared target (an operator who flips it has decided to have one).
+_OFF_BOX_TARGET_ENVS = (
+    "R2_BUCKET",
+    "R2_ACCOUNT_ID",
+    "R2_ACCESS_KEY_ID",
+    "R2_SECRET_ACCESS_KEY",
+)
+_OFF_BOX_DECLINE_ENV = "TORTOISE_OFFBOX_BACKUP_DECLINED"
+
+
+def off_box_backup_state(env: dict | None = None) -> str:
+    """Resolve the self-host off-box backup decision.
+
+    Returns ``OFF_BOX_CONFIGURED`` when the deployment (or its env) declares an
+    off-box target, ``OFF_BOX_DECLINED`` when it explicitly declines one, and
+    ``OFF_BOX_ABSENT`` when neither is true — the state #8543 exists to make
+    loud. A declared target wins over a decline flag so a half-switched
+    deployment reports the target it is actually configured with (the flag is a
+    boolean, so both-set is a config error, not a normal state).
+
+    ``env`` defaults to the process environment (whole mapping, no merge), so a
+    caller — a test, or a preflight — can resolve a hypothetical decision
+    without mutating the process.
+    """
+    e = os.environ if env is None else env
+
+    declared = [n for n in _OFF_BOX_TARGET_ENVS if (e.get(n) or "").strip()]
+    if is_truthy(e.get("BACKUP_SWEEP_ENABLED")):
+        declared.append("BACKUP_SWEEP_ENABLED")
+    if declared:
+        return OFF_BOX_CONFIGURED
+    if is_truthy(e.get(_OFF_BOX_DECLINE_ENV)):
+        return OFF_BOX_DECLINED
+    return OFF_BOX_ABSENT
+
+
+def off_box_backup_signal(state: str | None = None) -> str:
+    """The one-line setup/startup signal for a resolved off-box state.
+
+    The message never asserts a store MECHANISM (AOF/RDB): the resolver reads
+    only the backup env vars, so it cannot observe the store, and the mechanism
+    is INVERTED across the two self-host paths — embedded has AOF OFF by
+    default (``TORTOISE_EMBEDDED_AOF``; RDB is the mechanism) while compose has
+    AOF `everysec` on. A mode-specific claim here is the #101 incident shape
+    (a deployment believed durable on a mechanism it did not have), so every
+    branch instead SCOPES the local-copy claim to the store paths where it
+    holds and never claims an off-box copy is present. The configured branch
+    names the #8544 driver gap for the same reason (#8552 review).
+    """
+    state = off_box_backup_state() if state is None else state
+    if state == OFF_BOX_CONFIGURED:
+        return (
+            "off-box backup target DECLARED (R2_*/BACKUP_SWEEP_ENABLED), but this "
+            "lane has NO archive driver yet — no self-host process runs the sweep "
+            "(#8544), so NO off-box copy is being produced. Treat the target as "
+            "declared, not as a copy."
+        )
+    if state == OFF_BOX_DECLINED:
+        return (
+            "off-box backup EXPLICITLY DECLINED — this deployment produces no "
+            "off-box copy, so durability rests on the store it points at: on the "
+            "compose and embedded paths that is a SINGLE LOCAL COPY (a "
+            "process-crash window at best; losing that volume or host is TOTAL "
+            "LOSS)."
+        )
+    return (
+        "NO off-box backup target declared and none declined — this deployment "
+        "produces no off-box copy. On the compose and embedded paths the store "
+        "is a SINGLE LOCAL COPY, so a lost volume or host is TOTAL LOSS; a "
+        "remote store's durability is its vendor's, not one this deployment "
+        "arranges. Declare an R2_* target, or set "
+        f"{_OFF_BOX_DECLINE_ENV}=1 to decline explicitly."
+    )
+
+
+def emit_off_box_backup_signal(env: dict | None = None) -> str:
+    """Emit the boot-time off-box backup signal; return the resolved state.
+
+    Printed to stderr (the deploy ladder ``docker compose up`` shows) so the
+    decision is visible in setup output, and logged so it reaches the container
+    log aggregator. Returns the state so a caller can branch on it.
+    """
+    state = off_box_backup_state(env)
+    message = off_box_backup_signal(state)
+    print(f"tortoise selfhost: {message}", file=sys.stderr)
+    _logger.warning("selfhost off-box backup: %s", message)
+    return state
+
+
+# #8543: fire it at boot — the module is the daemon entry point for the image
+# CMD (`uvicorn tortoise.selfhost:app`), which never passes through the CLI.
+emit_off_box_backup_signal()
+
+# #8497: arm the self-host deployment's per-graph JSONL REBUILD journal.
+#
+# Both self-host write doors derive it from TORTOISE_EVENT_LOG_BASE_DIR
+# (mcp_auth._get_org_sdk for the MCP door, selfhost_api._sdk for REST) — but
+# only the HOSTED lane's entrypoint.sh ever set that variable, so a shipped
+# self-hosted instance was journal-less by construction: no record, nothing for
+# `tortoise rebuild --dir` to replay, and §17.1's single-writer guard inert.
+# Arming here (module import = daemon start, the shape the hosted entrypoint
+# has) sets the deployment default from a PERSISTENT /data volume; it logs
+# loudly and stays journal-less rather than pretending to record when the
+# default cannot be written. The journal is the REBUILD source, never the
+# durability mechanism (docs/durability-posture.md).
+from tortoise.config import ensure_selfhost_event_log  # noqa: E402
+
+_selfhost_journal = ensure_selfhost_event_log()
+if _selfhost_journal:
+    _logger.info(
+        "selfhost journal armed: %s — derived = replay(journal) holds for the "
+        "org_selfhost graph; durability is unchanged (the store's backup authorises)",
+        _selfhost_journal,
+    )
+
 # #2203: this module is the daemon entry point for BOTH the docker image CMD
 # (`uvicorn tortoise.selfhost:app`) and `python -m tortoise.selfhost` — neither
 # funnels through tortoise.__main__.main(), so the daemon must install the
@@ -901,8 +1060,10 @@ async def health_ready():
     # snapshot (#2988) and hands off to nothing at all.
     def _probe() -> None:
         from tortoise.sdk import TortoiseSDK  # lazy — liveness stays cheap
+        from tortoise.selfhost_api import selfhost_journal_path  # #8497 — same journal
 
-        sdk = TortoiseSDK(namespace="selfhost")
+        sdk = TortoiseSDK(namespace="selfhost",
+                          event_log_path=selfhost_journal_path())
         _run_bounded(sdk._get_proj, _ready_probe_inner_bound_s())
 
     try:

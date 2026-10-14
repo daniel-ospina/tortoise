@@ -24,6 +24,8 @@ import {
   keywordsFor,
   primaryKeyword,
   resolvePrimaryKeyword,
+  allKeywords,
+  canonicalKeyword,
   ensureKeyword,
   containsKeyword,
 } from "../_shared/seo-keywords.ts";
@@ -82,7 +84,7 @@ Rules:
 - tags: 3-5 relevant terms from this vocabulary if they fit: agent-memory, epistemic-memory, knowledge-graph, semantic-memory, episodic-memory, mcp, self-hosting, retrieval, belief-propagation, sessions, memory-systems, provenance. Free-form tags allowed but keep them concrete.
 - meta_title: under 60 chars INCLUDING " | Tortoise" — front-load the search term.
 - meta_description: under 155 chars, active voice, include one concrete benefit.
-Return ONLY a JSON object with keys: slug, excerpt, tags, meta_title, meta_description.`;
+Return ONLY a JSON object with keys: slug, excerpt, tags, meta_title, meta_description, primary_keyword.`;
 
 function buildUserPrompt(title: string, body: string, tags: string[], primary: string | null): string {
   const kw = injectKeywords(tags);
@@ -90,10 +92,28 @@ function buildUserPrompt(title: string, body: string, tags: string[], primary: s
   // different instruction from a bag of suggestions to "weave in", which is what
   // the previous prompt said. Best practice is one main keyword per article —
   // asking for nine is what pushes a model toward stuffing.
+  //
+  // When the CALLER supplied no tags there is no tag-derived primary, and the old
+  // line here ("No mapped keywords — derive terms from the content itself") left
+  // the model with nothing to aim at: it wrote a fluent title, and the repair
+  // then bolted the keyword on the front as `"<keyword>: <title>"` and truncated
+  // it (#8445). Asking for a keyword we never showed the model is not possible,
+  // so the candidates are seeded here instead.
+  // ⛔ The candidate list is seeded on EXACTLY the condition that later honours
+  // the model's choice ("the caller supplied no tags"). Seeding it more widely —
+  // e.g. whenever no MAPPED tag exists — would ask the model to choose a keyword
+  // and then discard the choice, and it would let a free-form caller tag (an
+  // unmapped "kubernetes") still have a keyword forced into the generated title.
+  const tagless = tags.length === 0;
+  const candidates = tagless ? allKeywords() : [];
   const kwLine = primary
     ? `PRIMARY keyword: "${primary}". It MUST appear verbatim in meta_title and meta_description.\n` +
       `Other keywords — use naturally in tags or the excerpt, never stuffed: ${kw.filter((k) => k !== primary).join(", ") || "(none)"}`
-    : "No mapped keywords — derive terms from the content itself.";
+    : tagless
+      ? candidates.length > 0
+        ? `PRIMARY keyword: choose exactly ONE of these researched keywords — the one that best matches the article — and make it appear verbatim and as EARLY as possible in meta_title and meta_description, written as a natural phrase rather than prefixed with a colon. Return the exact keyword you used as "primary_keyword".\nCandidates: ${candidates.join(", ")}`
+        : "No candidate keywords are available — derive terms from the content itself, and return primary_keyword as null."
+      : "The supplied tags do not map to a researched keyword. The caller's tags stay authoritative, so there is no primary keyword to verify against: derive terms from the content itself.";
   const bodyPreview = body.slice(0, MAX_BODY_PREVIEW);
   return `Title: ${title}\n\nTags (comma-separated): ${tags.join(", ") || "(none)"}\n\n${kwLine}\n\nArticle content:\n${bodyPreview}`;
 }
@@ -216,8 +236,28 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   }
   const title = typeof input.title === "string" ? input.title.trim() : "";
   const body = typeof input.body === "string" ? input.body : "";
+  // ⛔ A present-but-malformed `tags` must be REFUSED, not silently coerced to
+  // `[]`. `[]` is not "no opinion" here — it is the tagless path, which seeds the
+  // model with the whole vocabulary and lets its own choice become the keyword the
+  // response is verified against. So `tags: "agent-memory"` (a string) used to
+  // walk a caller holding a position straight into the path reserved for callers
+  // holding none, and the caller could not tell from the response. `undefined`
+  // legitimately means "no tags"; anything else must be an array of strings.
+  if (input.tags !== undefined && !Array.isArray(input.tags)) {
+    return json({ error: "validation", message: "tags must be an array of strings" }, 400);
+  }
+  // ⛔ EVERY element must be a string, not merely the container an array. The
+  // first version refused a non-array and then FILTERED non-strings out — so
+  // `["agent-memory", 123]` silently became `["agent-memory"]` and `[123]`
+  // became `[]`, which is the tagless path. The refusal was therefore only half
+  // closed: junk tags still earned the model its own verified keyword. A caller
+  // sending the wrong SHAPE and a caller sending the wrong ELEMENTS are the same
+  // mistake and get the same answer.
+  if (Array.isArray(input.tags) && input.tags.some((t) => typeof t !== "string")) {
+    return json({ error: "validation", message: "tags must be an array of strings" }, 400);
+  }
   const tags = Array.isArray(input.tags)
-    ? input.tags.filter((t): t is string => typeof t === "string").slice(0, 10).map((t) => t.slice(0, 40))
+    ? input.tags.slice(0, 10).map((t) => t.slice(0, 40))
     : [];
   if (!title) return json({ error: "validation", message: "title required" }, 400);
   if (!body.trim()) return json({ error: "validation", message: "body required" }, 400);
@@ -260,7 +300,71 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   // Prefer the caller's tags when they exist (they are an explicit statement of
   // intent); otherwise use the model's own tags, which describe what the article
   // is actually about. Deterministic, so the repair below is reproducible.
-  const primary = resolvePrimaryKeyword(tags, enforced.tags);
+  //
+  // The model's own CHOICE wins ONLY when the caller supplied NO TAGS AT ALL —
+  // the pipeline's normal shape, and the path the prompt seeds a candidate list
+  // on. There we ask the model to return the exact keyword it used, so verifying
+  // that string checks the keyword it was actually asked for, instead of
+  // inferring one from tags it wrote for a different purpose.
+  //
+  // ⛔ The condition is `tags.length === 0`, NOT `promptPrimary === null`. Those
+  // differ for a caller-supplied FREE-FORM tag (`["kubernetes"]`): it maps to
+  // nothing, so `promptPrimary` is null, but the caller HAS expressed intent and
+  // the prompt does not offer them a candidate list. Gating on `promptPrimary`
+  // therefore let the model's keyword be forced into the generated title on a
+  // path the caller controls, and reported it as an earned guarantee.
+  //
+  // ⛔ And on the TAG-SUPPLIED path the override must NOT apply: there the
+  // prompt names the CALLER's keyword, and the caller's intent is authoritative
+  // (the contract `resolvePrimaryKeyword` documents).
+  //
+  // ⛔ The claim is honoured only when the model's OWN OUTPUT contains it.
+  // Vocabulary membership alone proves only that the string is one of ours — it
+  // says nothing about whether the model USED it. A model returning a valid
+  // keyword it never wrote would otherwise become the value the repair
+  // force-prefixes, reproducing the exact #8445 symptom
+  // (`"<keyword>: <its title>"`) while reporting `keyword_ok: true` (#8446
+  // review, P1). Presence in either generated field counts as "used", so a
+  // keyword the model placed in one field never becomes a SECOND keyword through
+  // a different fallback.
+  // The model's choice is honoured when its own generated text uses it. This is
+  // an OR over the two fields, deliberately, and is NOT the same predicate as
+  // `keyword_ok` below (which ANDs them): the model placing the keyword in only
+  // one field still used it, and treating that as "unused" would fall back to a
+  // DIFFERENT keyword and repair the title with it — two keywords in one post,
+  // one of them unverified (#8445's fix direction). The two fields therefore
+  // differ exactly when the model filled one field and not the other, which is
+  // intended and tested; do not "fix" one to match the other.
+  const rawTitle = typeof result.json.meta_title === "string" ? result.json.meta_title : "";
+  const rawDescription = typeof result.json.meta_description === "string" ? result.json.meta_description : "";
+  // A raw field longer than its cap WILL be shortened by the length contract —
+  // `metaTitle` truncates to the cap before appending the suffix, so
+  // `length <= cap` means the cap did not shorten the model's words. (The
+  // contract may still normalise trailing punctuation or remove a brand suffix
+  // the model wrote; `keyword_ok` does not claim otherwise — see its comment.)
+  const titleTruncated = rawTitle.trim().length > META_TITLE_MAX;
+  const descriptionTruncated = rawDescription.trim().length > META_DESCRIPTION_MAX;
+  // Bounded by REJECTING an over-long claim, not by slicing it — slicing before
+  // validation (an earlier attempt) cut "epistemic" + dots + "memory" down to
+  // "epistemic", which is not a vocabulary term, so a padded claim was rejected
+  // for the wrong reason and the real guard was untestable. A vocabulary term
+  // cannot exceed `TAG_LEN_MAX`, so `canonicalKeyword` below returning non-null
+  // is what actually bounds this value.
+  const chosen =
+    typeof result.json.primary_keyword === "string" ? result.json.primary_keyword.trim() : "";
+  // Canonicalise to the RESEARCHED spelling before use. The model returns its own
+  // casing/spacing/punctuation (`"LONG-TERM MEMORY FOR AI AGENTS"`), and
+  // `primary_keyword` is documented as the keyword the response was VERIFIED
+  // against — callers compare it against `TAG_KEYWORDS`/tags, so echoing the raw
+  // claim would not match anything lookupable, and one keyword could be returned
+  // in two spellings. Canonicalising also bounds the length (a vocabulary term is
+  // at most `TAG_LEN_MAX`), so no separate cap is needed.
+  const canonicalChosen = chosen === "" ? null : canonicalKeyword(chosen);
+  const chosenUsed =
+    tags.length === 0 &&
+    canonicalChosen !== null &&
+    (containsKeyword(rawTitle, chosen) || containsKeyword(rawDescription, chosen));
+  const primary = chosenUsed ? canonicalChosen : resolvePrimaryKeyword(tags, enforced.tags);
 
   // VERIFY, DON'T HOPE (#8293). The prompt above ASKS for the primary keyword;
   // a prompt is a request, not a guarantee, and the previous behaviour never
@@ -273,16 +377,31 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   // 200 carrying a keyword-only title — the `generation_incomplete` 502 below
   // would stop firing for the meta fields. The repair exists to make a
   // *generated* title carry the keyword, not to invent one from nothing.
+  // ⛔ Hold the repair in its OWN variables. "Did the repair fire?" must be
+  // answered by comparing the repair's output to its input, NOT by re-enforcing
+  // and comparing the two ENFORCE passes — those are different questions, and
+  // conflating them produced a false `keyword_ok: false` (found by the verifier
+  // in round 10).
+  //
+  // `metaTitle` cannot be perfectly idempotent: truncation can EXPOSE a
+  // mid-title punctuation-led "Tortoise" ("… knowledge graphs — Tortoise
+  // explained" cut to "… knowledge graphs — Tortoise"), and a second pass has no
+  // way to tell that exposed tail from a brand suffix the model wrote, so it
+  // strips it. Re-enforcing therefore reported "the repair fired" for a request
+  // where it did not — for a title the model wrote itself, nothing truncated —
+  // and flipped a green verdict to `false`. The repair is now measured directly,
+  // so the verdict no longer depends on a property the length contract cannot
+  // hold in general.
+  const repairedTitle = enforced.meta_title
+    ? ensureKeyword(enforced.meta_title, primary, META_TITLE_MAX)
+    : "";
+  const repairedDescription = enforced.meta_description
+    ? ensureKeyword(enforced.meta_description, primary, META_DESCRIPTION_MAX)
+    : "";
+  const repairFired =
+    repairedTitle !== enforced.meta_title || repairedDescription !== enforced.meta_description;
   const repaired = constraints.enforce(
-    {
-      ...enforced,
-      meta_title: enforced.meta_title
-        ? ensureKeyword(enforced.meta_title, primary, META_TITLE_MAX)
-        : "",
-      meta_description: enforced.meta_description
-        ? ensureKeyword(enforced.meta_description, primary, META_DESCRIPTION_MAX)
-        : "",
-    },
+    { ...enforced, meta_title: repairedTitle, meta_description: repairedDescription },
     title,
   );
 
@@ -294,17 +413,57 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   return json(
     {
       ...repaired,
-      // `null` means "no primary keyword could be derived, so nothing was
-      // verified" — NOT success. Reporting `true` there was the vacuity #8320
-      // fixed; a caller that needs a guarantee must read a non-null value.
-      // `false` still means the field limits won the tie over the repair, which
-      // is a real signal rather than a silent miss.
+      // ⛔ `keyword_ok` is a GUARANTEE and is deliberately CONSERVATIVE. It is
+      // true only when the returned meta fields are the MODEL'S OWN TEXT with
+      // the keyword in them — untouched by the repair AND unshortened by the
+      // length contract:
+      //
+      //   • `containsKeyword(enforced.*)` — the repair did not have to fire.
+      //   • `!truncated` — the length contract did not cut the model's words.
+      //
+      // Both halves are needed, and the second was missing until the round-5
+      // review. Checking the repaired fields made it a TAUTOLOGY (ensureKeyword
+      // guarantees presence); checking `enforced.*` alone verified a PROXY —
+      // "the keyword survived truncation" — which is not the artifact. The
+      // prompt tells the model to front-load the keyword, so a model that
+      // overshoots the cap keeps its keyword through the cut and the verdict
+      // stayed GREEN on a title cut mid-phrase:
+      //
+      //   returned    : "Epistemic memory explains why a belief changed in | Tortoise"
+      //   keyword_ok  : true        repair fired: no        contract truncated: YES
+      //
+      // Measured at 68% of green verdicts on randomised input. A consumer gating
+      // on `keyword_ok` (the field #8293 tells callers to read) would PUBLISH
+      // that, which is #8445 indicator 1 violated behind a passing verdict.
+      //
+      // So `true` means: the model's own text carried the keyword into both
+      // returned fields, and the length caps did not shorten either of them.
+      // `false` means the model omitted the keyword, or a cap cut its text — a
+      // needless regeneration is cheap, publishing a truncated or bolted-on
+      // title is not. `null` = no primary keyword could be derived, so nothing
+      // was verified (never a positive claim).
+      //
+      // ⛔ It does NOT promise the returned field is byte-identical to the raw
+      // model output: the contract legitimately normalises trailing punctuation
+      // and removes a brand suffix the model wrote (a 60-char title ending "!"
+      // comes back without the "!"). Claiming "untouched" was wrong and was
+      // called out in review; the two things this field guarantees are the two
+      // above.
       primary_keyword: primary,
+      // ⛔ Each clause is load-bearing and independently falsifiable — which is
+      // why the `containsKeyword(repaired.*)` pair is GONE. Given `!repairFired`,
+      // `repaired === enforced` and `ensureKeyword` returned its input unchanged,
+      // which happens exactly when the field already carried the keyword — so
+      // both `containsKeyword` calls were REDUNDANT (a mutation deleting the
+      // description one left the suite green). A clause no test can distinguish
+      // reads as coverage while providing none, so state the precise thing once:
+      // `!repairFired` IS "both returned fields already carried the keyword, in
+      // the model's own words". The remaining clauses bound it: no cap cut either
+      // field, and a keyword existed to verify against at all.
       keyword_ok:
         primary === null
           ? null
-          : containsKeyword(repaired.meta_title, primary) &&
-            containsKeyword(repaired.meta_description, primary),
+          : !titleTruncated && !descriptionTruncated && !repairFired,
       provider: result.provider,
       input_tokens: result.inputTokens,
       output_tokens: result.outputTokens,

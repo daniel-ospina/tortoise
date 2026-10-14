@@ -28,6 +28,7 @@ its fullest statement, though it is itself incomplete.
 
 import ast
 import inspect
+import re
 import textwrap
 
 import pytest
@@ -215,4 +216,66 @@ def test_the_point_ddl_interpolates_the_declared_label() -> None:
     assert "_POINT_RANGE_INDEX_LABEL" in interpolated, (
         f"the Point DDL does not interpolate the declared label; it "
         f"interpolates {sorted(interpolated)}"
+    )
+
+
+# ── The docstring's "in full" RANGE enumeration vs the DDL sites ─────────
+#
+# #8527 review: ``_ensure_indexes`` opened with a bullet claiming to list its
+# range indexes "in full" while naming only ``Point``. The same body also
+# issues range indexes for ``Subject``/``Object``/``Event``/``Source`` (via
+# ``_RANGE_INDEX_LABEL_PROPS``) and two ``Session`` keys, and that bullet is the
+# line lane L2 (#5094) reads as evidence the gap was intended rather than
+# drift — so an under-description there is a claim mismatch, not a taste issue.
+# This is the anti-drift falsifier: the enumeration is checked against the DDL
+# sites that produce it, so neither half can move alone.
+
+
+def _range_ddl_labels() -> frozenset:
+    """Labels the RANGE ``CREATE INDEX`` sites in ``_ensure_indexes`` cover.
+
+    Derived from the code, not re-typed: the two declaration-driven sets plus
+    the literal labels of every standalone ``CREATE INDEX FOR (...:Label)``
+    statement in the body (the two ``:Session`` keys today).
+    """
+    source = inspect.getsource(FalkorProjection._ensure_indexes)
+    declared = ({_POINT_RANGE_INDEX_LABEL}
+                | {label for label, _ in _RANGE_INDEX_LABEL_PROPS})
+    literal = set(re.findall(
+        r"CREATE INDEX FOR \(\w+:([A-Za-z_]\w*)\)", source))
+    return frozenset(declared | literal)
+
+
+def _docstring_range_bullet() -> str:
+    """The RANGE bullet of ``_ensure_indexes``'s summary, and only it.
+
+    Scoped to the bullet so a label named in ANOTHER family's bullet — the
+    FULL-TEXT bullet names ``Subject``/``Object``/``Event``/``Source`` too —
+    cannot satisfy a RANGE enumeration claim.
+    """
+    doc = inspect.getdoc(FalkorProjection._ensure_indexes) or ""
+    for chunk in re.split(r"\n\s*\*\s+", doc):
+        if chunk.lstrip().startswith("RANGE"):
+            return chunk
+    raise AssertionError(
+        "the _ensure_indexes docstring has no RANGE bullet to check"
+    )
+
+
+def test_docstring_range_bullet_names_every_range_ddl_label() -> None:
+    labels = _range_ddl_labels()
+    # Vacuity guard: the oracle must actually see the literal ``:Session``
+    # sites, or the pre-fix bullet (which names only ``Point``) would satisfy
+    # the assertion below. Without this the test could pass while measuring
+    # nothing.
+    assert "Session" in labels, (
+        "the RANGE-DDL oracle found no literal label — the extractor is broken, "
+        "so the check below cannot redden on the pre-fix bullet"
+    )
+    bullet = _docstring_range_bullet()
+    missing = sorted(label for label in labels if label not in bullet)
+    assert not missing, (
+        f"the _ensure_indexes RANGE bullet claims to list the range indexes "
+        f"'in full' but does not name {missing}. Name every RANGE label the DDL "
+        f"sites cover, or drop the 'in full' claim."
     )
