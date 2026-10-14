@@ -364,6 +364,14 @@ surfaces:
   # `core` fallback — a one-surface registration would skip the suite whenever
   # the other half of the diff changed.
   - test_activation_scorecard.py
+  # #3839 (lane B7): the retention indicator (GET /v1/internal/retention/cohort).
+  # Registered under `api` AND `core` for the same reason as
+  # test_activation_scorecard.py above: the endpoint lives in
+  # tortoise/hosted_api.py (selects `api`) while tortoise/retention_indicator.py
+  # matches no named pattern and falls to the `core` fallback — a one-surface
+  # registration would skip the suite whenever the other half of the diff
+  # changed.
+  - test_retention_indicator.py
   - test_audit.py
   # #2938: the eight battery members previously dual-registered here (arms,
   # cli, config, determinism, enums, run, runner, setup) were verified per
@@ -1034,6 +1042,16 @@ surfaces:
   # falls through to `core`, so without this entry the declaration's guard
   # never runs on the change that can delete it.
   - test_7856_goal_state.py
+  # #4030: `supabase/config.toml` is TRACKED and resolves its providers by
+  # `env(NAME)`, so every one of those names is required by a file in this
+  # repo — and `.env.example` is the contract an operator reads to find it. The
+  # guard asserts the config's full `env()` set is declared there (parsing
+  # `enabled = false` instead would be the wrong polarity: flipping a provider
+  # ON is exactly the change that makes an undocumented name required). It is
+  # registered under `core`, and `supabase/config.toml` is claimed in CORE_ALSO
+  # (`tools/ci_selection.py`) so a CONFIG-ONLY change selects the surface that
+  # runs it — without that arm the guard never ran on the file it holds.
+  - test_env_contract_covers_supabase_config.py
   # #8497 / PR #8526 review P2-2: DUAL-REGISTERED with `api` (above). The
   # arming seam this file pins lives in `tortoise/config.py`, which matches no
   # SOURCE_PATTERNS entry and is not a SHARED_MODULE, so it falls through to
@@ -1427,6 +1445,7 @@ surfaces:
   - test_about_event_untangle.py
   - test_action_endpoints_dual_auth.py
   - test_activation_scorecard.py   # #B7: activation scorecard (with the `api` half — see there)
+  - test_retention_indicator.py   # #3839: retention indicator (with the `api` half — see there)
   - test_agent_ops_pack.py
   - test_agent_ops_supersede.py
   - test_alert_store.py
@@ -2030,21 +2049,41 @@ surfaces:
   # diff takes `select()`'s early return, so `tier1` is where it must live;
   # `core` is its home for the code diffs that can re-rotate a passage.
   - test_extractor_v4_citation_rot.py
-  # #8495: the FOURTH guard over the same document — §4.4's per-step failure
+  # #8500: the FOURTH guard over the same document — the S4 divergence. The doc
+  # says *"There is no S4"*, the shipped pipeline runs one whenever a story
+  # exists, and the drift marker recording that (#8498) is PROSE: nothing failed
+  # when the code changed, so its behavioural claims were free to rot — and its
+  # citations had already moved by the time the marker landed (it cited
+  # `4c801fb18` figures the tree no longer had). #8506's citation-rot guard checks
+  # that a quoted SYMBOL exists; it checks no behavioural claim at all. This file
+  # resolves, with `ast`, the claims a lane would act on destructively: the
+  # `if story:` call gate (no flag gate), `TORTOISE_S4_DELTA` as the OUTPUT
+  # contract rather than an off switch, the consumed `merge_embed_lists` union
+  # (assigned AND still the value that reaches `result["embed_list"]`), and the
+  # three side-effect bypass paths on the route into `extract_session_v2` (the
+  # `sdk.py` v1/`summary=` arm is pinned as a ROUTING to the S4-less path, not
+  # just as a predicate) — plus the module docstring's
+  # `G5 record — the live S4 stage (#8500)`, the record the S4 call site names
+  # (before this change it named a record that did not exist). Same docs-only
+  # reason as the three guards above: a `docs/`-only diff takes `select()`'s early
+  # return, so `tier1` is where it must live; `core` is its home for the code
+  # diffs that can falsify a claim.
+  - test_extractor_v4_s4_stage_claims.py
+  # #8495: the FIFTH guard over the same document — §4.4's per-step failure
   # policy. Pins that every §4.0 canonical step keeps a declared direction, that
   # the three invariants and the re-narrate tie-break survive, and that `HOLD` is
-  # not silently added to `vet_gate.OUTCOMES`. Same docs-only reason as the three
+  # not silently added to `vet_gate.OUTCOMES`. Same docs-only reason as the
   # guards above: a `docs/`-only diff takes `select()`'s early return, so `tier1`
   # is where it must live; `core` is its home for the code diffs (a fixed
   # `_render_search_results`, or a new step) that can re-rot the passage.
   - test_extractor_v4_failure_policy.py
-  # #8496: the FOURTH guard over the same document — the G4 reconciliation
+  # #8496: the SIXTH guard over the same document — the G4 reconciliation
   # (append-only raw layer vs credential redaction). Pins the stated design
   # choice (R1–R4: redact BEFORE the append, retention-erasure for the
   # already-persisted case, `(scanned, total)` coverage, Postgres home) AND the
   # code ground it rests on (`redact_secrets` marker + idempotence, and
   # `_capture_turn_texts` storing the marker). Same docs-only reason as the
-  # three guards above: a `docs/`-only diff takes `select()`'s early return, so
+  # guards above: a `docs/`-only diff takes `select()`'s early return, so
   # `tier1` is where it must live; `core` is its home for the code diffs that
   # can revert the scrub the ruling assumes.
   - test_extractor_v4_redaction_reconciliation.py
@@ -2286,6 +2325,12 @@ surfaces:
   - test_pack_extraction_slots_v31.py  # #1026 Stage 2: manifest v3.1 extraction behaviour slots (entityCues resolution, refused entityPatterns) — registered late; its absence reddened manifest-integrity on main from #5647 (9c4788400-era) until this line
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
+  # #2728: the per-graph pack SELECTION state model + management surface
+  # (`tortoise/pack_state.py`'s `:PackSelection` marker / `resolved_pack_set`
+  # / `set_graph_packs`, and `GET`+`PUT /v1/graphs/{graph_id}/packs`).
+  # Registered beside its sibling pack tests (#2714's
+  # test_vocab_gating_by_graph.py owns the compile-time gate this one feeds).
+  - test_pack_selection_by_graph.py
   - test_pack_manifest_store.py
   - test_pack_manifest_store_extraction.py
   - test_pack_shipping.py
@@ -2314,6 +2359,13 @@ surfaces:
   # `_EVENT_HANDLED` omission (tortoise/projection/entities.py) carries them
   # onto the node without any fold reading them back as Event state.
   - test_event_state_carrier_2788.py
+  # #2782: money as a flat, currency-safe structural value on an entity. The
+  # subject module `tortoise/money.py` matches no SOURCE_PATTERNS entry and is
+  # not a SHARED_MODULE, so a money.py-only change falls through to `core` —
+  # without this entry the flat-field contract and the sum/ratio arithmetic
+  # would not run on the change that can break them. The prose→value DERIVATION
+  # half is #2817 (`tortoise/value_normalizer.py`), deliberately not pinned here.
+  - test_money_value_2782.py
   # #2814: authoritative-config durability across rebuild_all — the config
   # registry + sidecar section live in tortoise/projection/ (core fallback),
   # and pack_state/pack_manifest_store are the writer modules whose labels
@@ -3535,6 +3587,10 @@ tier1:
 # and the same docs-only PR is exactly the change that can re-introduce a
 # retracted passage.
 - test_extractor_v4_citation_rot.py
+# #8500: the same document's S4-divergence guard (`core` above) — same no-DB,
+# `ast`-only shape, and the same docs-only PR is exactly the change that can
+# falsify a claim it pins (or tidy the marker away).
+- test_extractor_v4_s4_stage_claims.py
 # #8495: the same document's per-step FAILURE-POLICY guard (`core` above) — same
 # no-DB shape, and the same docs-only PR is exactly the change that can drop or
 # contradict the declared policy.
@@ -4235,6 +4291,7 @@ durations:
   test_value_extractor.py: 4.8
   test_venture_pack.py: 2.0  # unmeasured — new in #3419; no sweep has collected it, so it carries the flat default exactly as an absent key would, which is main's own weight for it. Do NOT substitute a local timing here: a measured-on-this-box 67.2 was recorded first, and it is a SHARD-LAYOUT input, so it moved tests/test_tortoise_search.py into the same shard as tests/test_subject_layer_read_surfaces_4889.py and exposed a pre-existing embedded-lane isolation leak (#3750 family) that main's grouping keeps apart. A weight that does not model CI must not be used to decide what runs together.
   test_pack_state.py: 5.1
+  test_pack_selection_by_graph.py: 2.0  # unmeasured — new in #2728; no sweep has collected it, so it carries the flat default exactly as an absent key would. Do NOT substitute a local timing here: the weight is a SHARD-LAYOUT input, and the #3419 venture-pack precedent (a local 67.2 that re-grouped unrelated files and exposed a pre-existing embedded-lane isolation leak) is why an unmeasured new file stays at the flat default until a junit sweep measures it.
   test_skip_guard.py: 16.0
   test_admin_return_to.py: 2.7
   test_admin_origin_redirect.py: 3.1
@@ -4530,6 +4587,7 @@ durations:
   test_extractor_v4_step_list_consistency.py: 0.1  # #5092: two fenced blocks + one paragraph read; measured 0.01s of test body (session setup excluded)
   test_extractor_v4_doc_citations.py: 0.1  # #8498 review P2: one row + two module assertions; same no-DB shape as the step-list guard
   test_extractor_v4_citation_rot.py: 0.1  # #8506: doc-text scans + a handful of file reads; same no-DB shape as the two guards above
+  test_extractor_v4_s4_stage_claims.py: 0.1  # #8500: `ast` walks over two source files + doc-text scans; no DB, same shape as the three v4 guards above
   test_extractor_v4_failure_policy.py: 0.1  # #8495: §4.4 doc-text scan + two module reads; same no-DB shape as the three guards above
   test_extractor_v4_redaction_reconciliation.py: 0.3  # #8496: one section read + a marker/idempotence check; the `tortoise.sdk` import (~0.12s) is the only cost
   test_entity_attachment_brief_claims.py: 0.1  # #8639 review P1: doc-text scan + three regex block reads; same no-DB shape as the extractor-v4 guards above
@@ -4672,6 +4730,7 @@ durations:
   test_epic903_mcp.py: 0.1
   test_event_log.py: 0.1
   test_event_state_carrier_2788.py: 2.0  # unmeasured — new in #2788; no sweep has collected it, so it carries the flat default exactly as an absent key would (the `#3419`/`test_venture_pack.py` rule). Do NOT substitute a local timing: the weight is a SHARD-LAYOUT input and only a measured CI junit value models the leg that carries the file.
+  test_money_value_2782.py: 2.0  # unmeasured — new in #2782; no sweep has collected it, so it carries the flat default exactly as an absent key would (the `#3419`/`#2788` rule). Do NOT substitute a local timing: the weight is a SHARD-LAYOUT input and only a measured CI junit value models the leg that carries the file. (A local run's first SDK-constructing test carries a one-time embedder init; it is process-global and amortises across every SDK test in the shard, so it is not this file's weight.)
   test_evidence_assembly.py: 0.2
   test_fake_control_plane.py: 0.1
   test_falkordb_compat.py: 0.1
@@ -4922,6 +4981,7 @@ durations:
   test_reaper_orphan.py: 0.1  # unmeasured
   test_redis_guard.py: 0.5  # unmeasured
   test_rest_surface_inventory.py: 4.8  # unmeasured (new file, #3875 — no CI junit yet)
+  test_retention_indicator.py: 3.0  # unmeasured (new file, #3839 — no CI junit yet; hermetic: pure fold + a fake control plane, one embedded TestClient boot)
   test_resume_gate_parity.py: 0.1  # unmeasured
   test_sdk.py: 7.9  # unmeasured
   test_sdk_group3.py: 2.7  # unmeasured
@@ -5049,11 +5109,23 @@ durations:
   test_7951_write_doors.py: 6.3
   test_audit_fallback_home_isolation.py: 2.4
   test_ci_stall_identify.py: 16.0  # #5035: the 1.8 predated this PR's subprocess-launching tests. A quiet-machine estimate (measured 12.3, 14.8, 16.3 s; 25.9 s under moderate load and 34-40 s at fleet load 67-79 — the file spawns pytest children, so it tracks box load hard). `tools/ci_timing.py --refresh-durations` is the canonical (CI-measured) writer; this line is a local estimate until it next runs.
+  test_env_contract_covers_supabase_config.py: 2.0  # #4030: appended by hand so the entry exists at all — main sat only just above the guard's floor (764/848 fast files = 90.09%), and this new fast file tipped `duration_coverage_issues()` below it (764/849 = 89.99%, formatted as the `90.0%` in that error). Local estimate: 3.24 s measured for this file plus its paired pin in test_ci_selection.py, most of it one conftest import. `tools/ci_timing.py --refresh-durations` replaces it with the CI-measured value.
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
 # A file here is excluded from EVERY pre-merge leg (fast halves, slow, carve-
-# out). It is run only by `.github/workflows/evals-on-demand.yml`
-# (`workflow_dispatch`), which is the point.
+# out). It runs from the on-demand RUNNERS — `.github/workflows/
+# evals-on-demand.yml` and, for the perf lane, `.github/workflows/perf-lane.yml`
+# (both `workflow_dispatch`; the perf lane is also nightly) — and that is the
+# point.
+#
+# KNOWN AND DELIBERATE, recorded because it is a real surface: `post-merge-
+# validation.yml` ignores only `slow_files` + `tests/e2e`, so it COLLECTS this
+# lane on every merge to main (it provisions the embedder, so it is not the
+# evals-lane dense-leg failure). That is accepted, not overlooked: post-merge is
+# warn-only (no gate impact) and is the only place a lane file would otherwise
+# never run without a human dispatch, while the dedicated perf lane stays the
+# SLO's owner. The cost accepted: a shared-runner wall-clock red can appear on
+# main-validation WITHOUT the perf lane's 2-attempt retry.
 #
 # WHY A LANE AND NOT JUST DELETING IT FROM slow_files: `fast_pool()` is
 # defined as "everything not slow / env-broken / carve-out", so removing a
@@ -5076,8 +5148,19 @@ durations:
 #
 #   The genuinely cheap eval unit tests (schema / metrics / grading, all
 #   sub-second) stay in the merge path — they are real contracts.
+#
+#   tests/test_perf_lane_volunteer_context.py — the DEDICATED PERF LANE (#3992).
+#   The #2080 plan assigns the hard wall-clock SLO for POST /v1/context
+#   ("assert <= 300 ms p95", median of 3 runs of 50) to a dedicated perf lane
+#   and says in the same sentence that the lane is "generously margined,
+#   retry-tolerant" while the BLOCKING CI assertions are the MECHANISM ones
+#   (fail-open degraded_reason, zero-LLM read path). A wall-clock assertion on
+#   a shared runner is exactly what this lane exists to keep OFF the merge
+#   gate — and before #3992 the lane the plan named did not exist at all, so
+#   the SLO was unverifiable. It runs from .github/workflows/perf-lane.yml.
 on_demand:
   - eval/retrieval/test_integration.py
+  - test_perf_lane_volunteer_context.py
 
 # ── #6133: DECLARED SLEEP IS NOT GATE COST, AND NOT THE FLOOR ──
 #

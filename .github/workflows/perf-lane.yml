@@ -1,0 +1,172 @@
+# Dedicated perf lane — the wall-clock SLO owner for POST /v1/context (#3992)
+#
+# WHY THIS WORKFLOW EXISTS
+# The #2080 plan names a *dedicated perf lane* as the owner of the hard
+# wall-clock latency assertion for `POST /v1/context` and pins the measurement
+# METHOD — "assert <= 300 ms p95", warm-up, a fixed request-mix table, a
+# client-observed keep-alive round-trip, median of 3 runs of 50. The plan also
+# says the lane is "generously margined, retry-tolerant" and that the BLOCKING
+# CI assertions are the MECHANISM ones (fail-open `degraded_reason`, zero-LLM
+# read path) — so a wall-clock number must never gate a merge on a shared
+# runner. Until #3992 the lane the plan named did not exist: the SLO was
+# written down, the method was written down, and nothing ran it. This workflow
+# is that lane.
+#
+# WHERE THE LANE ITSELF LIVES
+# `tests/test_perf_lane_volunteer_context.py` — registered in
+# `config/ci-surfaces.yml`'s `on_demand:` lane, so it is excluded from every
+# pre-merge leg by `tools/ci_selection.py::on_demand_files`. The test file is
+# the instrument; this workflow is its runner. Do not move the file onto a
+# surface: a wall-clock assertion on the merge path is the flake class the plan
+# deliberately separated out.
+#
+# WHY IT DOES NOT HARDCODE ITS FILE
+# The guard step below reads `on_demand_files()` and refuses to run if the perf
+# lane is no longer in the lane — a file that is excluded from the gate and
+# claimed by nothing runs NOWHERE, which is the exact defect (#3992) this
+# workflow exists to fix. A runner that silently stops running is worse than no
+# runner, because it reads as coverage.
+#
+# RETRY-TOLERANT, ON PURPOSE
+# The lane runs up to two attempts. A wall-clock SLO on a shared runner can be
+# perturbed by a co-tenant; the plan's "retry-tolerant" allowance is implemented
+# here (a second attempt) rather than by loosening the 300 ms assertion in the
+# test, which would have silently re-baselined a recorded decision.
+#
+# MANUAL INVOCATION (acceptance criterion 4)
+#   gh workflow run perf-lane.yml            # dispatch from any ref
+# Locally (recorded 2026-10-14):
+#   TORTOISE_DB_URI= TORTOISE_TEST_CARVE_OUT=1 \
+#     .venv/bin/python -m pytest tests/test_perf_lane_volunteer_context.py \
+#     -q -p no:cacheprovider
+
+name: Dedicated perf lane
+
+on:
+  # Manual: the primary invocation the plan asks to be documented (AC 4).
+  workflow_dispatch:
+  # Nightly: a wall-clock SLO that is never measured is documentation. Runs at
+  # 06:20 UTC — off the hour, so it does not contend with the other cron lanes.
+  schedule:
+    - cron: '20 6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  # An expensive, measurement-sensitive job: never let two stack up (a
+  # co-tenant would corrupt the very number this lane exists to measure).
+  group: perf-lane-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The embedded carve-out backend — the lane the epic's E2E legs ran on.
+  # TORTOISE_DB_URI is DELIBERATELY empty: the redirect would flip these tests
+  # onto the server lane, and the repo conftest refuses a run aimed at the
+  # canonical fleet store.
+  TORTOISE_DB_URI: ''
+  TORTOISE_TEST_CARVE_OUT: '1'
+  TORTOISE_SECRET_PEPPER: test-static-pepper
+  TORTOISE_FAST_ATEXIT: '1'
+  # NB: HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are NOT workflow-level. They are
+  # scoped to "Run the dedicated perf lane" only — `huggingface_hub` latches
+  # HF_HUB_OFFLINE into a module constant AT IMPORT, so setting it for the whole
+  # job would make the embedder-provisioning step's download fallback dead and
+  # turn a self-inflicted cache miss into a "couldn't connect" red (#2573).
+
+jobs:
+  perf-lane:
+    runs-on: ubuntu-latest
+    # Generously margined (the plan's word): the measured arm is 160 requests
+    # plus boot, and the in-test timeout is 900 s. The cap bounds a hang; it is
+    # not the measurement.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'   # pyproject requires-python >= 3.12
+
+      - uses: ./.github/actions/install-cpu-torch
+
+      - name: Install package + test extras
+        run: pip install -e '.[test,embeddings]'
+
+      - name: Cache HF embedder
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-embedding-cache-v2-${{ runner.os }}
+          restore-keys: |
+            hf-embedding-cache-v2-
+
+      - name: Embedding model REQUIRED (BAAI/bge-small-en-v1.5) — dense retrieval leg
+        # The lane FAILS CLOSED on a keyword-only read path (the test calls
+        # `require_hybrid_retrieval`), so the pinned model must be PRESENT
+        # before the offline measurement — otherwise the lane refuses for a
+        # reason that reads like a code regression. Same provisioner, attempts
+        # and backoff as the carve-out job (the embedded lane it mirrors).
+        #
+        # This step deliberately does NOT inherit the offline pair below: the
+        # download fallback only runs when HF_HUB_OFFLINE is unset at import.
+        env:
+          # #7359: the watchdog only DUMPS (exit=False) — it cannot fail a run.
+          # Above the worst-case retry sleep (attempts 5 x backoff 10 = 100s),
+          # below the 10-minute cap, so the dump lands before the runner's kill.
+          TORTOISE_EMBEDDER_WATCHDOG_S: "570"
+        timeout-minutes: 10
+        run: |
+          exec python3 tools/embedder_provision.py --attempts 5 --backoff 10
+
+      - name: Resolve the lane
+        id: lane
+        run: |
+          python3 - > /tmp/lane.txt <<'PY'
+          import sys
+          sys.path.insert(0, 'tools')
+          from ci_selection import load_manifest, on_demand_files
+          target = 'test_perf_lane_volunteer_context.py'
+          lane = on_demand_files(load_manifest())
+          if target not in lane:
+              # Fail loudly: the file would then be unregistered (its
+              # `--integrity` check is a PR gate, but this runner must not
+              # proceed to measure something the manifest does not claim).
+              sys.exit(f"{target} is NOT in the on_demand lane of "
+                       f"config/ci-surfaces.yml (lane: {sorted(lane)}) — "
+                       "refusing to report a green run for an unregistered lane")
+          print(f"tests/{target}")
+          PY
+          if [ ! -s /tmp/lane.txt ]; then
+            echo "::error::resolved an EMPTY file list — refusing to run."
+            exit 1
+          fi
+          cat /tmp/lane.txt
+
+      - name: Run the dedicated perf lane
+        # Two attempts: the plan's "retry-tolerant" allowance, implemented on
+        # the RUNNER rather than by loosening the SLO assertion. `-s` surfaces
+        # the measurement the test prints, so the number lands in the log even
+        # on a green run.
+        env:
+          # No network embedder fetch mid-measurement: a download would put a
+          # multi-second stall inside the sample. The cache step above pre-warms
+          # it; the provision step resolved any miss while still online.
+          # STEP-scoped on purpose — see the provision step's comment.
+          HF_HUB_OFFLINE: '1'
+          TRANSFORMERS_OFFLINE: '1'
+        run: |
+          set +e
+          for attempt in 1 2; do
+            echo "=== perf lane attempt ${attempt} of 2 ==="
+            pytest $(tr '\n' ' ' < /tmp/lane.txt) -v -s -p no:cacheprovider \
+              --timeout=900 --durations=10
+            rc=$?
+            if [ "$rc" -eq 0 ]; then
+              echo "perf lane GREEN (attempt ${attempt})"
+              exit 0
+            fi
+            echo "perf lane attempt ${attempt} FAILED (rc=${rc})"
+          done
+          echo "::error::perf lane failed on both attempts"
+          exit 1

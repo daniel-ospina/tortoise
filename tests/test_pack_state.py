@@ -236,7 +236,12 @@ class TestGetTenantPacks:
                 self._fail_next = True
 
             def query(self, *a, **kw):
-                if self._fail_next:
+                # #2728/#8648: fail the first PackInstall MERGE specifically —
+                # `ensure_tenant_packs` now READS the ``:PackSelection`` marker
+                # first, and a bare "first query" failure would trip that read
+                # instead of the namespace activation this test is about.
+                cypher = str(a[0]) if a else str(kw.get("cypher", ""))
+                if self._fail_next and "MERGE" in cypher:
                     self._fail_next = False
                     raise RuntimeError("simulated MERGE failure")
                 return self._g.query(*a, **kw)

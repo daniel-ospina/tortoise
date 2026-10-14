@@ -70,6 +70,49 @@ export function isDefaultGraph(g) {
   return !!(g && g.kind === 'default')
 }
 
+// ── #2650: per-graph session-recording override (C6 #2115 / #2302) ─────────
+//
+// GET /v1/graphs rows carry `recording: true | false | null`:
+//   true  → this graph records even when the team default is off
+//   false → this graph never records
+//   null  → no override — inherit the team default
+//     (onboarding_state.session_recording, the #1927 flag)
+// The write surface is PATCH /v1/graphs/{graph_id} with the strict body
+// `{recording: true|false|null}` (team:manage key or owner/admin session),
+// and `tortoise_graph_set_recording` is its MCP twin (both share
+// `_apply_graph_recording_override`). A null/absent field on an older row
+// payload reads as 'inherit' — never as a fabricated 'off'.
+//
+// The state vocabulary is deliberately three-valued and lives HERE (pure,
+// node --test-covered) so the label, the select value and the PATCH body can
+// never drift into a two-state reading that loses the inherit case.
+export const GRAPH_RECORDING_STATES = Object.freeze(['inherit', 'on', 'off'])
+
+export function graphRecordingState(g) {
+  if (!g) return 'inherit'
+  if (g.recording === true) return 'on'
+  if (g.recording === false) return 'off'
+  return 'inherit'
+}
+
+// The human label for the read-only (non-owner/admin) cell. 'Inherit' states
+// the absence of an override; it never claims the team flag is on or off.
+export function graphRecordingLabel(g) {
+  switch (graphRecordingState(g)) {
+    case 'on': return 'On'
+    case 'off': return 'Off'
+    default: return 'Inherit'
+  }
+}
+
+// Select value → PATCH body. `null` is the override-CLEAR (inherit) value;
+// the server's strict-bool validator accepts exactly true/false/null.
+export function graphRecordingBody(state) {
+  if (state === 'on') return { recording: true }
+  if (state === 'off') return { recording: false }
+  return { recording: null }
+}
+
 // ── #2784: per-graph "last backup" for the Graphs table ─────────────────
 // Pure, node --test-able. The dashboard derives the column from the
 // GET /backups payload it already fetches (`loadBackups` retains the array)
@@ -303,11 +346,21 @@ export function trashEraseLabel(deletedAt, nowIso) {
 }
 
 // ── #2701 delete-modal derivations (pure) ────────────────────────────────
-// The type-to-confirm gate: the user must literally TYPE the word "delete"
-// (case-insensitive after trim) before the destructive Confirm enables — a
-// strong accidental-delete deterrent on top of the 7-day Trash window.
-export function deleteTypedMatches(typed) {
-  return (typed || '').trim().toLowerCase() === 'delete'
+// The type-to-confirm gate: the user must literally TYPE the word the dialog
+// DISPLAYS (case-insensitive after trim) before the destructive Confirm
+// enables — a strong accidental-delete deterrent on top of the 7-day Trash
+// window. The word is a PARAMETER (default 'delete', the graph modal's
+// literal) rather than a second hardcoded literal, so a dialog that renders
+// its required word from a shared constant can pass that same constant here
+// (#3885 e). Two independent literals — one rendered, one required — can drift,
+// and a drift silently makes the destructive path unreachable: the dialog
+// tells the user to type one word while the gate demands another.
+export function deleteTypedMatches(typed, word = 'delete') {
+  // A word must be PROVIDED and non-empty: silently falling back to the graph
+  // modal's literal would let an emptied constant keep passing here while the
+  // dialog renders no instruction at all (review P3-3).
+  if (!word) return false
+  return (typed || '').trim().toLowerCase() === String(word).trim().toLowerCase()
 }
 
 // #2307 (post-#2083 C7 review): role-aware [Keys] panel empty copy ─────────

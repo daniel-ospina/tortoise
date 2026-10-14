@@ -1436,7 +1436,8 @@ def test_leftover_team_strays_refused_on_test_matrix_uri(uri_env, monkeypatch):
         "fixture URI must carry the test-named path (the eval's shared container)"
     monkeypatch.delenv("TORTOISE_TEST_SWEEP_TEAM_STRAYS", raising=False)
     # the retracted inference: the URI path says "test" but the gate refuses
-    assert _team_sweep_allowed(eval_uri) is False, \
+    # (#4128: the gate no longer even takes the uri for that reason)
+    assert _team_sweep_allowed() is False, \
         "URI-path 'test' inference must be retracted (#1884)"
     stray = f"org_ws_eval_stray_{uuid.uuid4().hex[:8]}"
     proj = FalkorProjection.from_uri(

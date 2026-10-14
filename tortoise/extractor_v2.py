@@ -33,6 +33,52 @@ raw conversation
      dependency order (entities → events → points → operators).
 ```
 
+G5 record — the live S4 stage (#8500)
+-------------------------------------
+The v4 design (``docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md``) removes S4
+from its step list — *"There is no S4 — do not restore one"*; its eight steps
+are S0·S1·S2.1·S2.2·S2.3·S3·S5·S6. That is the v4 TARGET STATE. This module runs
+a stage under the S4 slot number, and the two must not be read as one stage:
+
+  * the design's removed *"S4 — granularity review"* was folded into S2.2/S2.3
+    by §4.0's purpose test;
+  * THIS module's ``run_s4`` is the GAP REVIEWER — a second extraction pass over
+    (story + S3 search results + S2 embed list) whose output is unioned with
+    S2's by ``merge_embed_lists`` (E4 — "S4 merges, not replaces", #1536).
+
+Measured at HEAD (symbols are authoritative, line numbers a convenience — this
+module's numbering moves): ``tests/test_extractor_v4_s4_stage_claims.py``
+resolves the call-site, flag and consumption claims below against the tree, so a
+change that falsifies one of them reds a test instead of being discovered; the
+``merge_embed_lists`` collision semantics are pinned by the E4 tests in
+``tests/test_extractor_v2.py``:
+
+  * S4 runs whenever a story exists — the ``run_s4`` call sits under
+    ``if story:`` with NO flag gate.
+  * ``TORTOISE_S4_DELTA`` (``_s4_delta_enabled``) selects the delta vs
+    complete-list contract of S4's OUTPUT, NOT whether S4 runs. ``=0`` does not
+    disable S4. There is no S4-specific off switch.
+  * On the route that reaches ``extract_session_v2``, S4 is skipped only as a
+    SIDE EFFECT of three other paths, none of them an "S4 switch": (i)
+    ``TORTOISE_EXTRACTOR=v1``; (ii) passing ``summary=`` — both take the v1
+    dispatch (``sdk.py``); (iii) an empty conversation, which returns before S1.
+    Other ``capture_session`` lanes never enter this extractor at all — the
+    keyless/no-provider branch, the already-captured replay branch, and the
+    ``TORTOISE_SESSION_EXTRACTOR=m2`` branch (``_extract_session_llm``) — so
+    they are not S4 skips of this route.
+  * ``merge_embed_lists``'s union IS consumed: S2 items S4 omitted are
+    preserved, and S4 wins on identity-key collision. Dropping it without a
+    successor loses the E4 property, not merely a function.
+
+ORDERING OBLIGATION (§4.3 G5's S4 clause, tracked at **#8500**): removing
+``run_s4`` is a v4 MIGRATION DELIVERABLE, not a cleanup — it must not leave the
+step list before its successor lands, or the pipeline loses gap-filling and the
+E4 merge property in the gap. **Which side is authoritative until that migration
+lands is #8500's OPEN QUESTION — this record does not decide it.** What this
+record does state is the measured shipped state: ``run_s4`` is what runs today,
+so it must not be deleted on the strength of the design doc alone; a lane that
+needs the precedence settled asks the owner on **#8500**.
+
 Owner confirmations honored (issue #1350): flash runs 4 prompts (S1-S4), S5
 is execution; temperature 0.0 (via tests.model_adapters MODELS); S3 reads the
 REAL backend; chains warn + repair, hard-block never; solar-pro4 parked;
@@ -3134,6 +3180,100 @@ def _source_turn_overlap(turn: str, quote: str) -> float:
     if not ta or not tb:
         return 0.0
     return len(ta & tb) / min(len(ta), len(tb))
+
+
+def _verbatim_span_in_turn(turn_text: str, quote: str) -> tuple[int, int] | None:
+    """#2684: the CHARACTER OFFSETS of ``quote`` inside ``turn_text`` — the
+    ADDRESS half of the E3 verbatim anchor.
+
+    ``_resolve_source_turn`` proves a quote is *in* a turn (matching on the
+    whitespace-collapsed, lowercased text); this returns *where*, in the
+    turn's OWN coordinates, so the value can be re-read/re-fetched instead of
+    re-searched (the E4 #5007 pointer, whose offsets address the Source's raw
+    text). Deliberately tolerant of whitespace RUNS and case — exactly the
+    normalisations the anchor test applies — so the two cannot disagree on
+    which occurrences are verbatim. ``None`` when the quote is not
+    verbatim-present (the >=0.6 overlap band): a paraphrase has no address,
+    and saying so is the honest answer.
+    """
+    q = str(quote or "").strip()
+    t = str(turn_text or "")
+    if not q or not t:
+        return None
+    tokens = q.split()
+    if not tokens:
+        return None
+    pattern = r"\s+".join(re.escape(tok) for tok in tokens)
+    m = re.search(pattern, t, flags=re.IGNORECASE)
+    if m is None:
+        return None
+    return (m.start(), m.end())
+
+
+def _carries_value(*texts: object) -> bool:
+    """#2684: True when any text carries a value-shaped token — a number, a
+    count, a price, a quantity+unit, a clock, a version, a concrete date.
+
+    Reuses the PRODUCTION value engine (``_value_bindings``, live on the
+    E5/E7 contradiction + consolidation path) rather than minting a second
+    canonicaliser: a parallel value layer is the explicitly forbidden shape
+    (``docs/epics/2026-08-20-1509-extractor-v3/00-scope.md``, owner — ``never
+    create a parallel layer doing the same thing with redundant machinery``;
+    ``vet_gate`` cites the same line). Its measured limits are the reason the
+    SPAN is the deliverable: ``_value_bindings`` sees ``twelve million`` as
+    ``12`` (no magnitude) and misses ``1,234`` — detection is enough here,
+    because the span carries the value VERBATIM.
+    """
+    return any(_value_bindings(str(t)) for t in texts if t)
+
+
+def _turn_text_by_index(edus: list[dict] | None, index: int) -> str:
+    """The raw text of the transcript turn carrying ``index`` ("" when the
+    turn does not exist). Resolved by INDEX VALUE, not list position — see
+    ``_resolve_source_turn`` on why those can diverge."""
+    if not edus:
+        return ""
+    return next((str(e.get("text") or "") for e in edus
+                 if e.get("index") == index), "")
+
+
+def _value_verbatim_span(content: str, quote: str, turn_idx: int | None,
+                         edus: list[dict] | None,
+                         *, warnings: list[str]) -> tuple[int, int] | None:
+    """#2684: the verbatim source span of a VALUE-BEARING point — the offsets
+    of the point's own ``quote`` inside the resolved source turn, so any
+    consumer can re-read the exact value rather than trusting (or
+    re-searching) a distillation.
+
+    Only a VERBATIM anchor yields a span. The >=0.6 token-overlap band proves
+    a turn is *about* the claim, never that the claim's words are in it — so a
+    band-resolved value has no address, and that absence is REPORTED. The
+    warning is the point of this branch: the band route is otherwise SILENT
+    (``_resolve_source_turn`` returns a turn and says nothing), and the route
+    misses by construction exactly when the value was REWRITTEN —
+    ``"12M events for Halcyon"`` against a turn holding ``"twelve million
+    events for Halcyon"`` scores 0.50 and resolves to no turn while the
+    verbatim quote scores 0.80 and resolves (#2817 scoping, measured). A
+    silent band pass would leave no trace of the aggregate-numerator class
+    this slice exists to protect.
+
+    ⚠️ Reach: the span reaches a consumer only where the read path carries
+    point provenance. The eval lane does (#2684 wired it); the PRODUCT ask
+    lane's hits carry no ``quote``/``source_turn_id`` at all, so neither the
+    span nor Slice A's own-source legs can fire there — measured and filed as
+    #8658, deliberately not fixed here.
+    """
+    if not _carries_value(content, quote):
+        return None
+    if turn_idx is None:
+        return None          # the anchor failure already warned
+    span = _verbatim_span_in_turn(_turn_text_by_index(edus, turn_idx), quote)
+    if span is None and quote:
+        warnings.append(
+            f"value-bearing point '{str(content)[:60]}' resolved to turn "
+            f"{turn_idx} by the token-overlap band, not a verbatim anchor — "
+            "it carries no source span (the value cannot be re-read verbatim)")
+    return span
 
 
 def _content_id(prefix: str, content: str) -> str:
@@ -6514,6 +6654,17 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "search_keys": search_keys,
             "source_turn_id": turn_idx,
         }
+        # #2684 (Slice B): a VALUE-BEARING point carries the verbatim source
+        # SPAN — the offsets of its own quote inside the resolved turn — so a
+        # consumer can re-read the exact value instead of re-deriving it from
+        # a distillation (the aggregation-numerator class: "300 vs 100",
+        # "$60 vs $12"). Only a VERBATIM anchor yields one; absent = the point
+        # has no address, never a fabricated offset (#5007's all-or-nothing
+        # contract, validated at the commit boundary).
+        _span = _value_verbatim_span(content, quote, turn_idx, edus,
+                                     warnings=warnings)
+        if _span is not None:
+            pt_entry["span_start"], pt_entry["span_end"] = _span
         # E2 (#1534): Tier-A state-value marker — classification hint,
         # A-only emission (absence = Tier-B default → zero-diff payloads for
         # non-Tier-A sessions). Fail-loud guard: a Tier-A point without a
@@ -6741,9 +6892,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                     f"minted endpoint ({where}) has no transcript anchor — "
                     "left unquoted (no source_turn_id)")
             else:
-                _turn_text = next(
-                    (str(e.get("text") or "") for e in edus
-                     if e.get("index") == _turn), "")
+                _turn_text = _turn_text_by_index(edus, _turn)
                 _anchor = re.sub(r"\s+", " ", content[:200].strip().lower())
                 _verbatim = bool(_anchor) and re.sub(
                     r"\s+", " ", _turn_text.lower()).find(_anchor) >= 0
@@ -7569,8 +7718,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
 
     # ── S2.2 VET — post-S4 union pass (#5005), the authoritative one. S4 is a
     # second extraction pass (the live ``run_s4`` gap-filler — distinct from
-    # the design's REMOVED "S4 — granularity review"; see the G5 record in the
-    # module docstring), so VET runs again on the union to gate what S4 added.
+    # the design's REMOVED "S4 — granularity review"; see the ``G5 record — the
+    # live S4 stage (#8500)`` in the module docstring), so VET runs again on the
+    # union to gate what S4 added.
     # ``vet_s2_pool`` carries the S2 pass's removals forward: without it, an
     # operator S4 re-added against an S2-discarded item would be re-minted by
     # execute_embed, and an entity S4 started referencing would 422 the
