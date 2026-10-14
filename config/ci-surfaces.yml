@@ -1210,6 +1210,17 @@ surfaces:
   - test_6131_operator_mutation_vocabulary.py
   - test_comove_dispatch_3627.py
   - test_fleet_state.py
+  # #7957/#parent-P0: the fail-closed guard for `queue-dispatch.py`'s lane read. DB-free, no
+  # network, no cmux, no dispatch -- every live source is a stub under a throwaway HOME, so it
+  # belongs on `core` (hermetic, sub-second). NOTE: the registration ALONE does not select the
+  # surface -- `tools/` is a flat NON_PYTHON_PREFIXES entry and a tools-only diff selects NO
+  # surface, so a `core` name only runs once `core` is already selected. `tools/agent-infra-queue-
+  # dispatch.py` is therefore listed in `CORE_ALSO` (`tools/ci_selection.py`), which is what makes
+  # a tool-only change select `core` and run this guard (PR #8594 review P2; the same
+  # #1349/#3332/#3616 silent-drop class as `tools/queue_resweep.py`). The file it exercises is a
+  # review copy of the out-of-repo live tool; the test binds to the copy at
+  # `tools/agent-infra-queue-dispatch.py`.
+  - test_queue_dispatch_fail_closed.py
   - test_graph_script_provenance.py
   - test_heavy_import_guard.py
   # #7655: the suite-wide guard that refuses an in-process `signal.alarm` /
@@ -4819,6 +4830,9 @@ durations:
   # the `# unmeasured` marker until a CI junit artifact carries a measured weight,
   # so it cannot mis-balance the LPT pack.
   test_queue_resweep.py: 2.0  # unmeasured
+  # #8594 review P3: the fail-closed dispatcher guard enters at the flat default
+  # (#3400/#4221 convention) until a CI junit artifact carries its measured weight.
+  test_queue_dispatch_fail_closed.py: 2.0  # unmeasured
   test_docs_lint_baseline.py: 2.7
   test_docs_lint_gate.py: 2.0  # unmeasured (#5476: registered under core)
   # #6137: register the fast pool's unmeasured files. Registering them is

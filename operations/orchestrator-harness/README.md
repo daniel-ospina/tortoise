@@ -95,7 +95,7 @@ processes in tmux sessions, so a killed worker cannot take the controller down w
 |---|---|---|---|
 | `lane-<N>` | `lane.sh` | `.worktrees/tm-<N>` on `feat/<N>-tm` | implement issue #N → commit → push → open PR |
 | `chain-<N>` | `chain-merge.sh` | — | wait for the lane's PR, then delegate to `merge-one.sh` |
-| `merge-<PR>` | `merge-one.sh` | — | fresh review → signed record → wait green → squash-merge |
+| `merge-<PR>` | `merge-one.sh` | — (the reviewer gets its OWN disposable checkout, see §5.3) | fresh review → signed record → wait green → squash-merge |
 | `fix-<PR>` | `fix-one.sh` | the PR's worktree | repair findings **or a failing required check**, push, re-run the merge chain |
 
 ### State files (`$O/`)
@@ -116,6 +116,7 @@ processes in tmux sessions, so a killed worker cannot take the controller down w
 | `state/merged-<PR>.done` | merge confirmation |
 | `state/last-open-n` | the last SUCCESSFUL open-PR count; reused only when positive if a later count fails — a failure never reads as 0 |
 | `logs/` | one log per worker: `lane-*.log`, `chain-*.log`, `merge-*.log`, `fix-*.log`, `orch-loop.log` |
+| `review/<PR>-<head>/` | the reviewer's disposable detached worktree at the head it is reviewing (#8484). Created outside the repo, removed by the EXIT trap; its parent directory is the only thing left behind |
 | `wip/` | dirty-worktree captures taken before a shutdown (see §6) |
 
 ### Why the *reviewer* is a separate process from the *controller*
@@ -125,6 +126,13 @@ lane's reasoning. It reads the changed files at the PR head (`git show origin/<b
 rather than only diff hunks, and posts its verdict as a PR comment. That comment is the
 evidence the `record-review.sh` signature points at, so the merge gate is auditable after
 the fact: the PR body names the comment it was signed against.
+
+The reviewer runs in its **own** checkout, not the controller's: `merge-one.sh` provisions a
+**detached** worktree at the head under review and cds the agent into it. Detached is the point —
+a commit there moves no branch — and the tree is disposable, so a leaked mutation leaves with it
+(§5.3, #8484). The controller's `refs/heads/<branch>` and `refs/remotes/origin/<branch>` are sampled
+before and after the reviewer; a move the controller did not request is logged with its author and
+refuses to record a verdict, because a review marker is head-bound.
 
 ---
 
@@ -346,10 +354,24 @@ off macOS (it renders a launchd plist) — the portability that matters is `orch
 This harness passes **attacker-controlled text** to language-model agents with shell access. Be
 clear about what is and is not enforced:
 
-- **Not sandboxed.** The spawned reviewer and fixer run with `AGENT_SKIP_REVIEW_GATE=1`,
-  `ELDATO_SKIP_VGATE=1`, `AGENT_ALLOW_MAIN_EDITS=1`, `SKILL_ENFORCER_DISABLED=1` and
-  `LOOP_ENFORCER_DISABLED=1`, with `bash` and `gh` on `PATH`. "Do NOT merge" and "do not touch the
-  main checkout" are **prompt instructions, not controls**.
+- **The reviewer is contained; the fixer is deliberately not.** `merge-one.sh` runs its
+  fresh-context reviewer in a **disposable, detached** git worktree of its own
+  (`$O/review/<PR>-<head>`, created outside the repo), and **unsets** the main-edits hatch rather
+  than merely not exporting it — `fix-one.sh` exports the hatch and runs `merge-one.sh` as a child,
+  and an exported variable is inherited, so the unset is what makes the refusal hold on the
+  re-review path that follows every fixer run.
+  A commit there moves no branch, a mutation in it cannot reach the reviewed tree, and a reviewer
+  that wanders into the shared checkout is **refused by `main-worktree-guard` rather than obeyed**.
+  The tree is removed on exit, deregistering **only its own** worktree record by name — a repo-wide
+  `git worktree prune` is banned (it deregisters every record whose directory is not stat-able at
+  that instant, orphaning a sibling lane's checkout) — and a move of the **reviewed branch's** refs
+  under the reviewer is logged with the ref and sha that actually moved, and refuses to record a
+  verdict (#8484). The **fixer** is the opposite on purpose: `fix-one.sh` runs in the PR's own
+  worktree with `AGENT_ALLOW_MAIN_EDITS=1`, because writing to that tree IS its job. Both still run
+  with `AGENT_SKIP_REVIEW_GATE=1`, `ELDATO_SKIP_VGATE=1`, `SKILL_ENFORCER_DISABLED=1` and
+  `LOOP_ENFORCER_DISABLED=1`, with `bash` and `gh` on `PATH`. **"Do NOT merge" remains a prompt
+  instruction, not a control** — the harness's own gate (§5.1) is what stops an agent merging
+  through this path.
 - **Prompt injection is possible.** `fix-one.sh` reads the PR's comments into the fixer prompt as
   the authoritative review, and `merge-one.sh` feeds the reviewer the PR title, body and diff. A
   malicious PR body can therefore attempt to steer an agent that has shell access.
@@ -570,7 +592,12 @@ because the self-test now drives every one of them:
   is to end every script on an explicit status — `exit "$rc"` where a caller reads it (as here),
   `exit 0` where the last line is only reporting.
 - **Worktree reaping.** Every dispatch and every foreign-branch fixer adds a worktree; the box
-  carried ~150 by the end of the run. Nothing removes them after their PR merges.
+  carried ~150 by the end of the run. Nothing removes them after their PR merges. The reviewer's
+  sandbox is the exception — `merge-one.sh`'s EXIT trap removes it on every exit, normal or
+  trapped — but a worker that is SIGKILLed (or the box that dies) leaves one behind, like every
+  other worktree. That trap deregisters **only its own** record (the sandbox's own `gitdir:` name);
+  repo-wide pruning is the #1095 reaper's job, because a bare `git worktree prune` deregisters every
+  record whose directory is not stat-able at that instant and can orphan a sibling lane's checkout.
 
 ---
 

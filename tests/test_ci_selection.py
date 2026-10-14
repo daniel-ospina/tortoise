@@ -1339,6 +1339,29 @@ def test_orchestrator_harness_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_queue_dispatch_and_fleet_state_change_select_core_not_tier1():
+    # PR #8594 review P2: tools/agent-infra-queue-dispatch.py owns
+    # tests/test_queue_dispatch_fail_closed.py and tools/fleet_state.py owns
+    # tests/test_fleet_state.py — both `core`-registered. `tools/` is a flat
+    # NON_PYTHON_PREFIXES entry and neither path matches a SOURCE_PATTERNS row,
+    # so each one's own change came back with `changed == []` and took the
+    # docs-only early return — `select()` returned NO surface and the guard never
+    # ran on the file it guards (the #1349/#3332/#3616 silent-drop class).
+    #
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: both guards are
+    # hermetic and sub-second, so selecting `core` runs them at the lowest CI cost.
+    # Mutation check: removing either CORE_ALSO entry fails its assert below.
+    for path, guard in (
+        ("tools/agent-infra-queue-dispatch.py", "test_queue_dispatch_fail_closed.py"),
+        ("tools/fleet_state.py", "test_fleet_state.py"),
+    ):
+        r = _sel([path])
+        assert r["full"] is False, (path, r)
+        assert "core" in r["surfaces"], (path, r)
+        assert guard in r["test_files"], (path, r)
+        assert set(r["test_files"]) != _tier1(), (path, r)
+
+
 def test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1():
     # tools/install-queue-reconcile-schedule.sh owns
     # tests/test_install_queue_reconcile_schedule.py (hermetic cases pinning

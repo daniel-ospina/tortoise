@@ -1006,7 +1006,21 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # silent-drop class), the same shape as tools/queue_resweep.py and
              # tools/drift-guard.py above. Pinned by
              # tests/test_ci_selection.py::test_orchestrator_harness_change_selects_core_not_tier1.
-             "operations/orchestrator-harness/")
+             "operations/orchestrator-harness/",
+             # PR #8594 review P2: the fail-closed dispatcher's review copy
+             # (tools/agent-infra-queue-dispatch.py) owns
+             # tests/test_queue_dispatch_fail_closed.py, and tools/fleet_state.py
+             # owns tests/test_fleet_state.py — BOTH `core`-registered. `tools/` is a
+             # flat NON_PYTHON_PREFIXES entry and neither path matches a
+             # SOURCE_PATTERNS row, so each one's own change came back with
+             # `changed == []`, took the docs-only early return and fell back to
+             # tier-1 smoke: the guards pinning the lane-read fail-closed and the
+             # registry-provenance refusals never ran on the very files that can
+             # weaken them. Same #1349/#3332/#3616 silent-drop class as
+             # tools/queue_resweep.py above. Pinned by
+             # tests/test_ci_selection.py::test_queue_dispatch_and_fleet_state_change_select_core_not_tier1.
+             "tools/agent-infra-queue-dispatch.py",
+             "tools/fleet_state.py")
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
 NON_PYTHON_PREFIXES = (
