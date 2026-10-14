@@ -89,6 +89,7 @@ Point Tortoise at it with `TORTOISE_DB_URI=docker://:falkordb@localhost:6379/tor
 |---|---|---|
 | `TORTOISE_DB_URI` | Docker (Option A/B) | `docker://:falkordb@localhost:6379/tortoise` |
 | `TORTOISE_DB_PATH` | Embedded (Option C) | `~/.tortoise/tortoise.db` (the default) |
+| `TORTOISE_EVENT_LOG_BASE_DIR` | Rebuild journal (daemon) | `/data/events` — set by `docker-compose.yml`; the daemon also defaults it when `/data` is a mount. Per-graph JSONL: `derived = replay(journal)`, so `tortoise rebuild --dir` can reconstruct the graph. It is the **REBUILD source, not the durability mechanism** — see [docs/durability-posture.md](durability-posture.md) |
 
 ⚠️ Set these in your **MCP client's `env` block** (step 5) — **not** in a `.env` file. A repo-root `.env` is only auto-loaded for editable installs; the CLI reads the process environment only. (With the compose daemon, the URI is already wired inside compose — host-side clients only need it if they talk to the sidecar directly.)
 
@@ -338,8 +339,9 @@ what actually carries the new order to an existing install.
 ### How to restore (backup → wipe → rebuild → re-index)
 
 1. Back up: (1) the corpus files (source of truth), (2) the FULL `events/`
-   JSONL directory (the sole replay source for Sources/Events/Documents),
-   (3) the db file.
+   JSONL directory — the sole replay source for Sources/Events/Documents; on
+   the compose daemon this is the `tortoise-data` volume at `/data/events`
+   (`TORTOISE_EVENT_LOG_BASE_DIR`); (3) the db file.
 2. Restore onto a fresh graph — `rebuild_all` is line-tolerant (a torn
    trailing line from a crash is skipped, never fatal). The rebuild wipes the
    target graph first, so it requires an explicit per-call opt-in (#2944) —

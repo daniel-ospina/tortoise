@@ -141,6 +141,17 @@ def _get_org_sdk() -> TortoiseSDK:
     org_id = _current_org_id.get()
     if org_id is None:
         return _get_base_sdk()
+    if org_id == SELFHOST_ORG_ID:
+        # #8497: arm the self-host deployment's default journal BEFORE the path
+        # is resolved. `tortoise.selfhost` arms it for the docker daemon, but
+        # `tortoise serve --http` is a documented self-host daemon that never
+        # imports that module — so without this the self-host MCP door resolved
+        # a `None` journal and wrote an UNRECORDED org_selfhost graph.
+        # Memoized in `config` — the probe runs once per base dir per process,
+        # so this is a lookup after the first call.
+        from tortoise.config import ensure_selfhost_event_log
+
+        ensure_selfhost_event_log()
     gid = _current_graph_id.get()
     ns = _current_graph_namespace.get()
     if gid and ns:
