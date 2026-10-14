@@ -2680,28 +2680,42 @@ _GRAPH_EVENT_TYPES = frozenset({
 # KNOWN DEVIATIONS in this tree (recorded, not concealed):
 # `TortoiseSDK._create_entity`'s Object/Subject/Event registration blocks are
 # apply-first although their payload (`event`) is fully built BEFORE the fold,
-# so they qualify for neither exception; they also fold after a FAILED append
-# (`_emit_event` is best-effort). They are left as-is in this increment because
-# reordering them rides the #2194/#2295/#2309 first-registration hardening and
-# its pinned tests; `create_point`'s payload is genuinely post-apply
-# (exception 2). The chokepoint's atomic write removes both windows by
-# construction. Every OTHER live door reaches the journal FIRST and treats the
-# append as the commit point (`_apply_and_journal` does).
+# so they qualify for neither exception; they also fold regardless of a FAILED
+# append (`_emit_event` is best-effort). They are left as-is in this increment
+# because reordering them rides the #2194/#2295/#2309 first-registration
+# hardening and its pinned tests; `create_point`'s payload is genuinely
+# post-apply (exception 2). The `DocumentCreated` arm (#2296) DOES append
+# first (its record is a plain id-keyed entity create, and its append is
+# replay-healable)
+# but shares the fail-soft half: one funnel applies once for every arm, and
+# its Object/Subject/Event blocks pin `test_object_registered_journal.py::
+# test_log_append_failure_warns_and_keeps_live` (an append failure must not
+# crash the create), so a fail-closed arm inside the same function would be a
+# second, contradictory convention. The chokepoint's atomic write removes both
+# windows by construction. Every OTHER live door reaches the journal FIRST and
+# treats the append as the commit point (`_apply_and_journal` does).
 # ═══════════════════════════════════════════════════════════════════════════
 
 # #7951: the envelope keys ``_emit_event`` OWNS. A record that is journalled
 # from an already-built event dict must not carry its own copy of these — a
 # caller prop of the same name would shadow the envelope on replay (see
 # ``_emit_event``'s ``event.update(extra)``). Kept as one tuple so the live
-# entity doors cannot drift from each other.
+# entity doors cannot drift from each other. `recorded_ts` (#5048) is the
+# NAMED-PARAMETER twin of `ts` and is owned the same way: without it here, a
+# caller prop of that name binds the timestamp parameter and forges the
+# record's envelope `ts` (#2296 review). The caller-prop live/replay residue
+# for these names generally is #8553.
 _JOURNAL_ENVELOPE_KEYS = (
     "type", "id", "point", "payload",
-    "event_id", "ts", "initiated_by", "projection_version",
+    "event_id", "ts", "recorded_ts", "initiated_by", "projection_version",
 )
 
 #: The canonical record types a live entity door may journal.
+# `DocumentCreated` (#2296) joins the set: the last unjournaled canonical
+# create, now appended by `_create_entity`'s Document arm (`.query`-invisible —
+# it folds through `proj.apply`, so no raw-Cypher scan catches it).
 _JOURNALED_ENTITY_EVENT_TYPES = (
-    "ObjectRegistered", "SubjectAdded", "EventRecorded",
+    "ObjectRegistered", "SubjectAdded", "EventRecorded", "DocumentCreated",
 )
 
 
@@ -2709,8 +2723,16 @@ def _journal_record_payload(event: dict) -> dict:
     """``event``'s payload minus the keys ``_emit_event`` owns.
 
     THE single source of the rule every entity-door journal call uses
-    (``_create_entity`` and ``_journal_entity_event``), so live and replay
-    fold a byte-identical record — ``derived = replay(journal)``.
+    (``_create_entity`` and ``_journal_entity_event``), so the record's PAYLOAD
+    is byte-identical to the live event's payload. The RECORD is not: the
+    envelope keys above are added by ``_emit_event`` after this call, and the
+    fold re-derives ``ingestedAt``/``updatedAt`` at replay. For an envelope name
+    a write door does NOT drop from the live event, the caller prop survives
+    LIVE while this strips it — the live ≠ replay residue tracked as #8553.
+    ``recorded_ts`` is NOT in that residue: it is an `_emit_event` parameter
+    name, stripped at prop INTAKE (``_sanitize_props``) so it can never be bound
+    to that parameter, and popped explicitly by the doors that bypass intake
+    (``create_source``) or emit unconditionally (``_create_entity``).
     """
     return {k: v for k, v in event.items() if k not in _JOURNAL_ENVELOPE_KEYS}
 
@@ -2898,6 +2920,24 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
             _logger.warning(
                 "ignoring client-supplied %r on tenant props", _reserved)
             props.pop(_reserved)
+    # #2296 review: `recorded_ts` is `_emit_event`'s own PARAMETER name, and
+    # Python binds a `**props` key to a named parameter AT THE CALL — so every
+    # door that splats caller props into `_emit_event` (`update_point` splats
+    # straight through) turns the prop into the RECORDED instant and forges the
+    # record's envelope `ts`; `_emit_event` cannot see the collision from
+    # inside. Strip it HERE, at the one intake every props surface passes
+    # through (`create_point`/`update_point`/`create_entity`/`update_entity`),
+    # rather than at each emitting door — the same fix shape #5196 used for the
+    # parameter spelling of the index-merge run token, after a per-door patch
+    # left this class of door open. Strip-and-ignore, matching the doors that
+    # bypass this intake (`create_source` pops the key itself) and the reserved
+    # actor keys above: it is an ENVELOPE name (`_JOURNAL_ENVELOPE_KEYS`), not a
+    # tenant property, so dropping it also keeps live == replay.
+    if "recorded_ts" in props:
+        _logger.warning(
+            "ignoring client-supplied 'recorded_ts' on tenant props "
+            "(reserved journal-envelope name)")
+        props.pop("recorded_ts")
     # #4647: a value the store cannot hold without altering it must fail here,
     # not be silently clamped/rounded by FalkorDB on the way in.
     for _key, _value in props.items():
@@ -5440,11 +5480,24 @@ class TortoiseSDK:
         ``ObjectSuperseded``. Promoting the name to a named parameter silently
         REMOVES it from that payload — a client-visible change to a durable
         artifact (``poll_events`` returns the payload verbatim), invisible to
-        every existing test. ``recorded_ts`` collides with no caller key, so
-        the default path is additive in the strict sense: every existing
-        caller's envelope, graph payload and JSONL record are byte-identical.
-        A caller that passes BOTH keeps the old ``event.update(extra)``
-        precedence.
+        every existing test. The name is RESERVED, and the reservation cannot be
+        enforced HERE: Python binds a ``**props`` key to a named parameter AT
+        THE CALL, so a caller prop of that name becomes *recorded_ts* and forges
+        ``event["ts"]`` — this function cannot observe the collision. The strip
+        therefore happens at prop INTAKE (``_sanitize_props``, the one surface
+        ``create_point``/``update_point``/``create_entity``/``update_entity``
+        all pass through) and explicitly at the doors that bypass intake
+        (``create_source`` pops it) or emit unconditionally (``_create_entity``)
+        — the same all-labels rule those doors apply to ``point``/``payload``.
+        Measured before the intake strip: ``update_point``'s props splat turned
+        the prop into the ``PointRevised`` record's ``ts`` (#2296 review). The
+        name is also in ``_JOURNAL_ENVELOPE_KEYS``, so the record strips it
+        regardless, and ``_ENTITY_MUTATION_RESERVED_KEYS`` already reserved it
+        for the entity-mutation record. With the prop gone before the call, the
+        default path is additive in the strict sense: every existing caller's
+        envelope, graph payload and JSONL record are byte-identical. A caller
+        that passes the parameter explicitly AND a prop named ``ts`` keeps the
+        old ``event.update(extra)`` precedence.
         """
         # ── Graph event store (#432) ──────────────────────────────
         if type_ in _GRAPH_EVENT_TYPES:
@@ -10871,23 +10924,32 @@ class TortoiseSDK:
         sorts FIRST — before every dated entry — never as the newest belief
         (#3654).
 
-        NOTE: ``limit`` currently truncates on an ASCENDING window
-        (``ORDER BY p.validFrom LIMIT``), so it selects the OLDEST rows and a
-        small ``limit`` will NOT return the current belief. That is a
-        pre-existing defect tracked separately (#7293), not a property this
-        ordering guarantees — the order below is not a promise of a
-        newest-end window.
+        ``limit`` is a NEWEST-END window: it returns at most the newest
+        ``limit`` entries of the chain — the current belief is the last of
+        them — never the oldest (#7293).
         """
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
         proj = self._get_proj()
+        # The DB window MUST be taken from the NEWEST end (#7293). The former
+        # `ORDER BY p.validFrom LIMIT` was ASCENDING, so it truncated to the
+        # OLDEST rows and the `entries[-limit:]` tail below could only re-take
+        # the tail of an already-oldest set — `limit=1` returned the earliest
+        # belief, not the current one.
+        #
+        # FalkorDB orders NULL LAST ascending and FIRST descending (measured
+        # on four points, #7293): a bare `validFrom DESC` would pull an undated
+        # row — the OLDEST belief per §4.7 — into a small window and could
+        # evict the genuinely newest dated point. `(p.validFrom IS NULL)` sorts
+        # `false` (dated) before `true` (undated), so this DESC window is
+        # newest-dated first, undated last, matching the Python global sort.
         rows = proj.g.query(
             "MATCH (p:Point {pointKind:'decision'})-[:aboutObject]->"
             "(o:Object) "
             "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
             "AND (o.name = $topic OR o.canonical_name = $topic) "
             "RETURN p.id, p.content, p.validFrom, p.status, p.outdated "
-            "ORDER BY p.validFrom LIMIT $limit",
+            "ORDER BY (p.validFrom IS NULL), p.validFrom DESC LIMIT $limit",
             params={"topic": topic, "limit": limit},
         ).result_set
         entries = [list(r) for r in rows]
@@ -24011,9 +24073,11 @@ class TortoiseSDK:
         via ``_emit_event`` (#2061); SDK-created Objects journal
         ``ObjectRegistered`` on first canonical registration (probe-gated,
         #2194 — a canonical re-mention never double-journals); SDK-created
-        Subjects journal ``SubjectAdded`` the same way (probe-gated, #2295 —
-        the #2296 durability audit tracks the remaining Document surface;
-        Source already journals via create_source's own emit).
+        Subjects journal ``SubjectAdded`` the same way (probe-gated, #2295);
+        Documents journal ``DocumentCreated`` on EVERY create (#2296 —
+        emit-on-every-write, since each create mints a fresh ulid and
+        ``_upsert_document`` MERGEs by that id). Source journals via
+        create_source's own emit.
 
         ``_skip_sanitize=True`` (epic #900 T3, create_source's sanctioned
         source_path route): the caller has already extracted the server-
@@ -24084,6 +24148,14 @@ class TortoiseSDK:
             # (Tenant-visible narrowing — see docs/ONTOLOGY.md §4.2/§4.3.)
             event.pop("point", None)
             event.pop("payload", None)
+        # #2296 review: `recorded_ts` is `_emit_event`'s own PARAMETER (it binds
+        # the envelope `ts`), so — like point/payload — a caller prop of that
+        # name must not persist LIVE either. The record strips it
+        # (`_JOURNAL_ENVELOPE_KEYS`), so keeping it here would be the live ≠
+        # replay divergence #8553 tracks. Unconditional (all labels) for the
+        # same reason the block above is: the pop must not depend on journal
+        # config.
+        event.pop("recorded_ts", None)
         # (#2194) Journal ObjectRegistered on FIRST canonical registration
         # only — probe the deterministic canonical id + name
         # (obj-<sha26(name)>) before apply. The name conjunct hardens against
@@ -24176,6 +24248,29 @@ class TortoiseSDK:
             # base behavior.
             from .ids import now_iso
             event["createdAt"] = now_iso()
+        # (#2296) SDK-created Documents journal `DocumentCreated` — the last
+        # unjournaled canonical create. `create_document` and
+        # `create_entity(type='document')` both funnel through here (the label
+        # is normalised to "Source" above, so this arm is keyed on the EVENT
+        # TYPE, not the label); before this they folded live-only, so
+        # `rebuild_all` destroyed every Document they created — disclosed as
+        # #2296's residual by tests/test_unjournaled_mutation_class.py.
+        # NO first-registration probe (unlike Object/Subject, #2194/#2295): the
+        # id is a fresh ulid and `_upsert_document` MERGEs by id, so every
+        # create is a new node. That is what earns the emit-on-every-write
+        # cadence on its own terms — each call mints a distinct id, so there is
+        # no re-check on an existing Document for a probe to be silent about.
+        # `create_source`'s cadence is NOT this one: since #5024 (T6) it is
+        # per-OUTCOME (`SourceCreated` on create/stub-completion,
+        # `SourceVersioned` on a real hash transition, NOTHING on a provable
+        # no-op re-check), and this door deliberately differs by construction
+        # — its id is fresh per call and can never address an existing node.
+        # The append PRECEDES the fold (the module-top ordering contract) so a
+        # crash between the two is replay-healable; the append itself stays
+        # best-effort (an append failure leaves the Document live-only, as the
+        # Object/Subject/Event blocks already do — see KNOWN DEVIATIONS).
+        if event_type == "DocumentCreated":
+            self._journal_entity_event(event)
         # Apply through projection (writes to FalkorDB)
         # #7951 §17.1: the live-write scope. `_create_entity` is the recorded
         # apply-first deviation (its Object/Subject/Event registration blocks
@@ -24983,8 +25078,9 @@ class TortoiseSDK:
 
                     if matched:
                         # #2296 residual, deliberately NOT promised away here: if
-                        # this label's CREATION was never journaled (a `Document`
-                        # made by `_create_entity`), `rebuild_all` does not merely
+                        # this label's CREATION was never journaled (an `Object`
+                        # minted by `_connect_issue_objects`' bare live MERGE,
+                        # which emits no record), `rebuild_all` does not merely
                         # revert the `name`, it DESTROYS the node. The warning
                         # below therefore claims only what the deferred rename
                         # does — it does not promise the node or its siblings
@@ -27875,6 +27971,14 @@ class TortoiseSDK:
                 __import__('datetime').timezone.utc).isoformat(),
             **props,
         }
+        # #2296 review: `recorded_ts` is `_emit_event`'s own PARAMETER (it binds
+        # the envelope `ts`). This door emits its OWN record (`SourceCreated` /
+        # `SourceVersioned`) and does not go through `_journal_entity_event`, so
+        # `_create_entity`'s live pop cannot cover it — a caller prop of that
+        # name would bind the parameter and forge the record's envelope `ts`.
+        # Envelope-reserved: drop it (same semantics as point/payload in
+        # `_create_entity`).
+        ev.pop("recorded_ts", None)
         if is_episodic is not None:
             # #1488: server-managed quota discriminator — explicit param only
             # (mirrors create_point). The props passthrough is rejected above.

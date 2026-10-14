@@ -351,11 +351,17 @@ unset -f tmux
 awk '/^n=0$/{f=1} f{print} /^done < /{f=0}' "$REFRESH" > "$TMP/refreshloop.sh"
 if need "$TMP/refreshloop.sh" "the refresh loop body is extracted from the shipped refresh-candidates.sh"; then
   RL="$TMP/refresh"; mkdir -p "$RL/fakesc/.venv/bin"
+  # The pool the SHIPPED producer writes: bare numbers, one per line (severity lives in the
+  # sort, not in the file). A tier prefix leaking back into `.pool` is a malformed argument
+  # to the loop below, so the stub FAILS on a non-numeric issue number instead of matching
+  # `*10*` inside `0 10` and letting a broken producer look green (#8469 review P2).
   printf '10\n20\n30\n40\n50\n' > "$RL/.pool"
   : > "$RL/checked.txt"; : > "$RL/candidates.txt"; : > "$RL/dispatched.txt"
   cat > "$RL/fakesc/.venv/bin/python" <<'PY'
 #!/bin/bash
-# stand-in for the scout's venv python: every candidate pre-flights CLEAN
+# stand-in for the scout's venv python: every candidate pre-flights CLEAN.
+# Argv is `collision_preflight.py <N> --repo .`, so the issue number is $2.
+case "$2" in *[!0-9]*|"") echo "MALFORMED_ARG $2" >&2; exit 3;; esac
 echo "VERDICT: CLEAN"
 PY
   chmod +x "$RL/fakesc/.venv/bin/python"
@@ -368,6 +374,47 @@ PY
   cands="$(tr '\n' ' ' < "$RL/candidates.txt")"
   case "$cands" in *10*20*30*) rc=0;; *) rc=1;; esac
   ck "shipped refresh loop: the pre-flighted CLEAN candidates reach the backlog" $rc
+
+  # ── the no-verdict arm must not starve the entries behind it, and must be bounded (#8469
+  # review P2). Counting every entry against LIMIT let a few persistently non-answering entries
+  # at the head re-spend the whole pass, so the CLEAN entries behind them were never reached.
+  RL2="$TMP/refresh2"; mkdir -p "$RL2/fakesc/.venv/bin"
+  printf '10\n20\n30\n40\n' > "$RL2/.pool"
+  : > "$RL2/checked.txt"; : > "$RL2/candidates.txt"; : > "$RL2/dispatched.txt"
+  cat > "$RL2/fakesc/.venv/bin/python" <<'PY'
+#!/bin/bash
+# 10 and 20 ERROR (no VERDICT line); 30 and 40 are CLEAN. Argv is
+# `collision_preflight.py <N> --repo .`, so the issue number is $2.
+case "$2" in
+  10|20) echo 'boom: TypeError' >&2; exit 1;;
+  *[!0-9]*|"") exit 3;;
+esac
+echo 'VERDICT: CLEAN'
+PY
+  chmod +x "$RL2/fakesc/.venv/bin/python"
+  O="$RL2" LIMIT=2 SC="$RL2/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/refresh2.out" 2>&1
+  c2="$(tr '\n' ' ' < "$RL2/checked.txt")"
+  case "$c2" in *30*40*) rc=0;; *) rc=1;; esac
+  ck "shipped refresh loop: a non-verdict head does not starve the CLEAN entries behind it" $rc
+  case "$c2" in *10*|*20*) rc=1;; *) rc=0;; esac
+  ck "shipped refresh loop: a failed pre-flight is still not blacklisted on attempt 1" $rc
+
+  # A permanently non-answering entry must eventually leave the candidate set: after RETRY_MAX
+  # consecutive attempts it is marked checked, so the cursor advances past it.
+  RL3="$TMP/refresh3"; mkdir -p "$RL3/fakesc/.venv/bin"
+  printf '10\n' > "$RL3/.pool"
+  : > "$RL3/checked.txt"; : > "$RL3/candidates.txt"; : > "$RL3/dispatched.txt"
+  cat > "$RL3/fakesc/.venv/bin/python" <<'PY'
+#!/bin/bash
+case "$2" in *[!0-9]*|"") exit 3;; esac
+echo 'boom: no verdict' >&2; exit 1
+PY
+  chmod +x "$RL3/fakesc/.venv/bin/python"
+  for _pass in 1 2 3; do
+    O="$RL3" LIMIT=2 RETRY_MAX=3 SC="$RL3/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/refresh3.out" 2>&1
+  done
+  if grep -q 'marked checked after 3 attempts' "$TMP/refresh3.out" && [ "$(tr '\n' ' ' < "$RL3/checked.txt")" = "10 " ]; then rc=0; else rc=1; fi
+  ck "shipped refresh loop: a persistently non-verdict entry is retried then bounded (RETRY_MAX)" $rc
 
   # ── 5c) a pre-flight that produced NO verdict must not blacklist the issue ───────────────────
   # Same loop, but the stub python now fails the way a broken scout venv / API failure does: it
@@ -546,7 +593,7 @@ rc=0
 # either file actually uses agree", not "any conceivable bash file agrees".
 #
 # Only lines that assign a KNOWN limit var (or _NCPU, below) are evaluated -- never the whole script.
-_LIMITS="MAX_LOAD MAX_LANES MAX_REVIEW MERGE_PRIORITY_AT MAX_FIX MAX_FIX_TRIES MIN_SWAP_FREE MIN_MEM_FREE_MB BATCH CYC"
+_LIMITS="MAX_LOAD MAX_LANES MAX_REVIEW MERGE_PRIORITY_AT P0_BYPASS_MERGE_PRIORITY MAX_FIX MAX_FIX_TRIES MIN_SWAP_FREE MIN_MEM_FREE_MB BATCH CYC"
 # _NCPU is evaluated but not printed: MAX_LOAD is derived from it, so pinning it here (as an earlier
 # version did) would hide a divergence in the one input the derived ceiling depends on.
 _EVAL_VARS="$_LIMITS _NCPU"
@@ -582,7 +629,7 @@ else
   diff "$TMP/da.txt" "$TMP/db.txt" 2>/dev/null | sed 's/^/        /'
   rc=1
 fi
-ck "orch-loop.sh (+ the helper it sources) and install.sh resolve the same effective defaults for all 10 limits" $rc
+ck "orch-loop.sh (+ the helper it sources) and install.sh resolve the same effective defaults for all 11 limits" $rc
 
 # ── 8) the dispatch gate consults load and names the binding gate ────────────────
 # MAX_LOAD was rendered into the plist and documented, but never compared to anything.
@@ -600,8 +647,8 @@ grep -q 'resolving the conflict IS the task' "$HERE/fix-one.sh" && rc=0 || rc=1
 ck "the fixer prompt treats a conflict as the task" $rc
 # Drive the shipped rule rather than grepping for a comment: a regression that dropped the
 # 'lanes >= 1' exception or the headroom arithmetic must fail here.
-sed -n '/^mp_reason() {/,/^}/p;/^review_slots() {/,/^}/p' "$LOOP" > "$TMP/mp.sh"
-if need "$TMP/mp.sh" "mp_reason()/review_slots() are extracted from the shipped loop"; then
+sed -n '/^mp_reason() {/,/^}/p;/^review_slots() {/,/^}/p;/^p0_merge_priority_override() {/,/^}/p' "$LOOP" > "$TMP/mp.sh"
+if need "$TMP/mp.sh" "mp_reason()/review_slots()/p0_merge_priority_override() are extracted from the shipped loop"; then
   MERGE_PRIORITY_AT=10; MAX_REVIEW=4
   # shellcheck disable=SC1090
   . "$TMP/mp.sh"
@@ -615,6 +662,25 @@ if need "$TMP/mp.sh" "mp_reason()/review_slots() are extracted from the shipped 
   ck "shipped review_slots(): backlog raises reviewer headroom to MAX_REVIEW+2" $rc
   [ "$(review_slots 10)" = "4" ] && rc=0 || rc=1
   ck "shipped review_slots(): below the threshold, headroom is MAX_REVIEW" $rc
+  # BP0 (#8468): DRIVE the shipped override, not a grep for its text. Deleting the block, or
+  # changing its `-F'\t'` key, must fail here — a comment grep stayed green through both mutations.
+  _po="$TMP/p0"; mkdir -p "$_po"
+  O="$_po"; LOG="$TMP/p0.log"; : > "$LOG"
+  _why="merge-priority (19 open PRs)"
+  printf '7951\n' > "$_po/candidates.txt"; printf '7951\t0\n' > "$_po/.prio"
+  [ -z "$(p0_merge_priority_override "$_why" 19)" ] && rc=0 || rc=1
+  ck "shipped p0 override: a tier-0 backlog head clears the merge-priority gate" $rc
+  grep -q 'OVERRIDDEN for a P0-blocker' "$LOG" && rc=0 || rc=1
+  ck "shipped p0 override: the override is logged" $rc
+  printf '8039\t1\n' > "$_po/.prio"
+  [ "$(p0_merge_priority_override "$_why" 19)" = "$_why" ] && rc=0 || rc=1
+  ck "shipped p0 override: a tier-1 head leaves the gate closed" $rc
+  printf '7951\t0\n' > "$_po/.prio"
+  [ "$(P0_BYPASS_MERGE_PRIORITY=0 p0_merge_priority_override "$_why" 19)" = "$_why" ] && rc=0 || rc=1
+  ck "shipped p0 override: P0_BYPASS_MERGE_PRIORITY=0 restores the gate" $rc
+  rm -f "$_po/.prio"
+  [ "$(p0_merge_priority_override "$_why" 19)" = "$_why" ] && rc=0 || rc=1
+  ck "shipped p0 override: a missing .prio suppresses the override (fail-safe)" $rc
 fi
 grep -qE 'case "\$\{PR_ST:-\}" in MERGED\|CLOSED\)' "$LOOP" && rc=0 || rc=1
 ck "sweep skips CLOSED as well as MERGED" $rc
@@ -1273,17 +1339,29 @@ ck "every retired script that invokes pi carries the 'not load-gated' banner" $R
 # REAL pipeline from the shipped script and drive it with a fixture; re-implementing the sort here
 # would pass on the broken copy too. Verified non-vacuous: the pre-fix extraction yields `sort -n -u`,
 # whose output is `0 7951 1 8039 2 1120` and fails this assertion.
-POOL_SORT="$(grep -E '^\} \| sort ' "$REFRESH" | sed -e 's/^} | //' -e 's/ > "\$O\/\.pool"$//')"
-if [ -n "$POOL_SORT" ]; then
+#
+# #8469: the producer writes TWO files from one sort — `.prio` (`<number>TAB<tier>`, the map
+# orch-loop.sh's P0 merge-priority override reads) and `.pool` (bare numbers, the contract the loop
+# below reads; `cut -f1` derives it). The assertion pins BOTH: a tier leaking back into `.pool` is a
+# malformed argument to the loop (`read -r N` takes the WHOLE line, so nothing is pre-flighted and
+# the backlog never refills), and a missing `.prio` silently disables the override. Neither is
+# visible from the sort alone.
+POOL_SORT="$(grep -E '^\} \| sort ' "$REFRESH" | sed -e 's/^} | //' -e 's/ > "\$O\/\.prio"$//')"
+if [ -n "$POOL_SORT" ] && grep -q '^cut -f1 "\$O/\.prio" > "\$O/\.pool"$' "$REFRESH"; then
   # The within-tier pairs are MIXED WIDTH on purpose. With every number four digits, `sort -n`
   # happens to agree with `sort -k1,1n -k2,2n` on this fixture, so a copy that dropped the key spec
   # stayed green (verified 2026-10-13). 900/1000 separate them — keyed puts 900 first, a bare
   # `sort -n` puts 1000 first — and tortoise is about to cross issue 10000.
-  pool_got="$(printf '2 1120\n1 8039\n0 7951\n2 3147\n1 7936\n0 7846\n2 3329\n1 8039\n0 3846\n1 900\n1 1000\n' \
-              | sh -c "$POOL_SORT" | tr '\n' ' ' | sed 's/ *$//')"
-  [ "$pool_got" = "3846 7846 7951 900 1000 7936 8039 1120 3147 3329" ] && rc=0 || rc=1
+  # Run the shipped pipeline ONCE and assert BOTH artefacts it feeds: `.prio` = number<TAB>tier,
+  # and `.pool` = the `cut -f1` derivation this file's loop reads.
+  pool_out="$(printf '2 1120\n1 8039\n0 7951\n2 3147\n1 7936\n0 7846\n2 3329\n1 8039\n0 3846\n1 900\n1 1000\n' \
+              | sh -c "$POOL_SORT")"
+  prio_got="$(printf '%s\n' "$pool_out" | tr '\t' ':' | tr '\n' ' ' | sed 's/ *$//')"
+  pool_got="$(printf '%s\n' "$pool_out" | cut -f1 | tr '\n' ' ' | sed 's/ *$//')"
+  { [ "$prio_got" = "3846:0 7846:0 7951:0 900:1 1000:1 7936:1 8039:1 1120:2 3147:2 3329:2" ] && \
+    [ "$pool_got" = "3846 7846 7951 900 1000 7936 8039 1120 3147 3329" ]; } && rc=0 || rc=1
 else rc=1; fi
-ck "refresh-candidates.sh orders the pool severity-first (P0<P1<P2), age second, dedup by number" $rc
+ck "refresh-candidates.sh orders .prio severity-first (P0<P1<P2), age second, dedup by number, and cut-derives a bare-number .pool" $rc
 
 # The pipeline above cannot see the TIER->RANK half. A copy that emitted the SAME rank for every
 # tier still sorts "correctly" and still starves the P0s — #8465 itself. So assert the label->rank

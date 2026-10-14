@@ -116,6 +116,11 @@ touch "$O/checked.txt" "$O/candidates.txt"
 # and every worker the harness ran was a P2 (#8465). The tier is a RANK, not a label.
 # Dedupe on the NUMBER, keeping the lowest tier: the sort already put an issue's best tier first, so
 # `!seen[$2]++` drops the later, weaker duplicate rather than letting one issue occupy two slots.
+# `.prio` is `<number>TAB<tier>` — the map orch-loop.sh's P0 merge-priority override reads. `.pool`
+# is then the BARE NUMBERS that map is keyed by, which is the contract this file's loop reads.
+# ⛔ Two files from one sort on purpose: writing the tier INTO `.pool` made every line a malformed
+# argument to the loop (`read -r N` takes the WHOLE line), so nothing was ever pre-flighted or
+# queued and the backlog could never refill (#8469 review P1).
 {
   gh issue list --repo "$OR" --state open --limit 300 --label P0-blocker --json number,assignees,title \
     --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|lane|OWNER DECISION|decision|analysis|investigation)";"i")|not)|"0 \(.number)"' 2>/dev/null
@@ -123,33 +128,62 @@ touch "$O/checked.txt" "$O/candidates.txt"
     --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|OWNER DECISION)";"i")|not)|"1 \(.number)"' 2>/dev/null
   gh issue list --repo "$OR" --state open --limit 200 --label P2-moderate --json number,assignees,title \
     --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|OWNER DECISION)";"i")|not)|"2 \(.number)"' 2>/dev/null
-} | sort -k1,1n -k2,2n | awk '!seen[$2]++ {print $2}' > "$O/.pool"
+} | sort -k1,1n -k2,2n | awk '!seen[$2]++ {print $2"\t"$1}' > "$O/.prio"
+cut -f1 "$O/.prio" > "$O/.pool"
 
 n=0
 while read -r N; do
   [ -z "${N:-}" ] && continue
   grep -qx "$N" "$O/checked.txt" 2>/dev/null && continue
   grep -qx "$N" "$O/dispatched.txt" 2>/dev/null && continue
-  n=$((n+1)); [ "$n" -gt "$LIMIT" ] && break
-  # ⛔ A pre-flight that ERRORED is not a verdict — and a COLLISION is not terminal. `echo "$N" >>
-  # checked.txt` used to run BEFORE the verdict was read, so a pre-flight that produced no VERDICT
-  # line (API failure, missing venv, timeout) blacklisted the issue forever, invisibly: checked.txt
-  # suppresses it, and the reaper above only walks dispatched.txt, so nothing ever removed the entry.
-  # A COLLISION was permanent the same way, though a collision is transient by nature (the colliding
-  # work lands). checked.txt is therefore written ONLY on the verdict that terminates the issue —
-  # CLEAN, which is queued. Everything else is left unchecked, so the next pass re-attempts it.
-  # (agent-infra#1716)
+  # ⛔ THE PASS BUDGET COUNTS *ANSWERED* CANDIDATES, not entries walked. Counting every entry
+  # (the pre-fix `n=$((n+1))` that used to sit here) let a few persistently non-answering entries
+  # at the head re-spend the whole `LIMIT` on every pass, so the entries BEHIND them were never
+  # examined and the backlog could never refill (#8469 review P2). A no-verdict entry costs
+  # nothing against `LIMIT`; it is bounded by `RETRY_MAX` in the `*)` arm below instead.
+  [ "$n" -ge "$LIMIT" ] && break
+  # ⛔ A pre-flight that ERRORED is not a verdict. Mark the issue checked only on a real CLEAN
+  # answer: an empty VERDICT line (API failure, missing venv, timeout) used to be written to
+  # checked.txt just the same, consuming the issue permanently and invisibly.
+  # checked.txt=63 against candidates.txt=9 on 2026-10-13 is what that leak looks like. A
+  # COLLISION is likewise transient — the colliding work lands — so it too is retried rather than
+  # blacklisted forever (agent-infra#1716 / #8515).
   PRE="$("$SC/.venv/bin/python" tools/collision_preflight.py "$N" --repo . 2>&1)"
-  V="$(printf '%s\n' "$PRE" | grep -E '^VERDICT' | head -1 | sed -E 's/.*VERDICT: (CLEAN|COLLISION).*/\1/')"
+  # INCOMPLETE (exit 2, some surfaces unqueried) is a REAL verdict, not a missing one — capture
+  # it so the log names what happened instead of calling it "no verdict".
+  V="$(printf '%s\n' "$PRE" | grep -E '^VERDICT' | head -1 | sed -E 's/.*VERDICT: (CLEAN|COLLISION|INCOMPLETE).*/\1/')"
   case "$V" in
     CLEAN)
+      n=$((n+1))
       echo "$N" >> "$O/checked.txt"
+      rm -f "$O/state/pretry-$N"
       echo "$N" >> "$O/candidates.txt"
       echo "[refresh] +#$N CLEAN -> backlog" ;;
     COLLISION)
+      # A peer's work is in flight; a collision is transient by nature, so leave the issue
+      # unchecked and re-attempt it next pass rather than consuming it permanently.
+      n=$((n+1))
+      rm -f "$O/state/pretry-$N"
       echo "[refresh] =#$N collision — a peer owns it, retried next pass" ;;
     *)
-      echo "[refresh] ?#$N no verdict from the pre-flight — left unchecked for the next pass" ;;
+      # No verdict (empty) or an INCOMPLETE one (unqueryable surfaces). Leave the issue for the
+      # next pass — a transient failure must NOT blacklist it — but BOUND the retries: a
+      # persistently non-answering entry at the pool head must eventually leave the candidate set,
+      # or the cursor can never advance past it and the entries behind it are starved forever
+      # (#8469 review P2). `RETRY_MAX` consecutive attempts marks it checked; the log names the
+      # attempt so this is never silent.
+      mkdir -p "$O/state"
+      pf="$O/state/pretry-$N"
+      pa="$(cat "$pf" 2>/dev/null || echo 0)"; case "$pa" in ''|*[!0-9]*) pa=0;; esac
+      pa=$((pa+1))
+      if [ "$pa" -ge "${RETRY_MAX:-3}" ]; then
+        echo "$N" >> "$O/checked.txt"
+        rm -f "$pf"
+        echo "[refresh] ?#$N ${V:-no verdict} — marked checked after ${RETRY_MAX:-3} attempts"
+      else
+        echo "$pa" > "$pf"
+        echo "[refresh] ?#$N ${V:-no verdict} — left unchecked for the next pass (attempt $pa/${RETRY_MAX:-3})"
+      fi ;;
   esac
 done < "$O/.pool"
 # Dedupe WITHOUT re-sorting. orch-loop.sh consumes this file top-down and dispatches the first

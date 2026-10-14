@@ -667,24 +667,11 @@ def test_about_document_title_keyed_resolution(sup):
     in `url` (D10, ONTOLOGY v3.15 §4.4): live auto-detect matches a
     document-bearing Source by url OR title, while the replay descriptor is
     keyed `url`. X-[:aboutDocument]->(Source title-only) follows the
-    successor. create_document does NOT journal DocumentCreated (the #2296
-    durability audit tracks that surface) — the fixture journals the line the
-    way the document-index path does, so the rebuild can re-create the
-    document :Source."""
-    import datetime
-    import json
+    successor. ``create_document`` journals ``DocumentCreated`` itself (#2296),
+    so the rebuild re-creates the document ``:Source`` from the SDK's own
+    record — no fixture-supplied line is needed."""
     _, events, sdk = sup
-    doc = sdk.create_document("DocTitleOnly", "report")
-    with open(events / "events.jsonl", "a") as fh:
-        line = {
-            "event_id": sdk.ulid(),
-            "ts": datetime.datetime.now(datetime.UTC).isoformat(),
-            "type": "DocumentCreated", "initiated_by": "sdk",
-            "projection_version": 2, "id": doc["id"],
-            "title": "DocTitleOnly", "document_kind": "report",
-            "objectKind": "document", "status": "draft",
-        }
-        fh.write(json.dumps(line) + "\n")
+    sdk.create_document("DocTitleOnly", "report")
     x = sdk.create_point("statement", "X", status="live",
                          aboutEntities=["DocTitleOnly"])["id"]
     succ = sdk.create_point("statement", "X'", status="live")["id"]

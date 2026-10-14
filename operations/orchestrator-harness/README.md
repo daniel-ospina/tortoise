@@ -40,6 +40,10 @@ without a human in the loop:
   itself instead of thrashing. Above `MERGE_PRIORITY_AT` open PRs (10) the balance shifts to
   **draining**: new lanes stop being dispatched and reviewer headroom rises, because a merge
   backlog means the scarce capacity belongs to review and merge, not to opening more PRs.
+  The one exception is a `P0-blocker` at the **head of the backlog**, which the merge-priority
+  gate does not hold back while `P0_BYPASS_MERGE_PRIORITY` is `1` (the shipped default): draining
+  a backlog and starting the highest-severity work are not in conflict there. Only that gate is
+  bypassed — load, lanes, swap and memory still bind, so no extra lane can open.
 - **Self-healing:** a PR whose reviewer reports real findings is routed to a *fixer*, fixed,
   and re-reviewed — rather than being left red forever (this is the bug that stranded ~15
   PRs before it was fixed; see §7).
@@ -196,7 +200,8 @@ secret into a world-readable plist, and launchd inherits no shell environment �
 | `MAX_LOAD` | `cores*10` (100 on a 10-core box; sanity ceiling) | dispatch **and every agent spawn** stop above this 1-min load (resolved in `spawn-gate.sh`, rendered into the plist by `install.sh`, asserted equal by the self-test) |
 | `MAX_LANES` | `4` | concurrent implementation lanes |
 | `MAX_REVIEW` | `4` | concurrent `merge-<PR>` reviewers |
-| `MERGE_PRIORITY_AT` | `10` | above this many open PRs, **merging takes priority**: dispatch of new lanes stops (unless none are running) and reviewer headroom rises to `MAX_REVIEW+2` |
+| `MERGE_PRIORITY_AT` | `10` | above this many open PRs, **merging takes priority**: dispatch of new lanes stops (unless none are running, or a `P0-blocker` is at the backlog head — see `P0_BYPASS_MERGE_PRIORITY`) and reviewer headroom rises to `MAX_REVIEW+2` |
+| `P0_BYPASS_MERGE_PRIORITY` | `1` | when `1`, a `P0-blocker` at the **head of the backlog** is dispatched even above `MERGE_PRIORITY_AT` — only that gate is bypassed (load/lanes/swap/memory still bind); `0` restores the unconditional gate |
 | `MAX_FIX` | `3` | concurrent `fix-<PR>` fixers |
 | `MAX_FIX_TRIES` | `3` | per-PR fixer attempts before it is left alone |
 | `MIN_SWAP_FREE` | `600` | MB; with `MAX_LOAD` raised this and `MIN_MEM_FREE_MB` are the binding gates in practice |
@@ -577,6 +582,7 @@ algorithmic advantage. The claim worth evaluating is *utilisation*, not *efficie
 | `merge-one.sh` | fresh review → signed record → wait green → merge; marks `needsfix-*` |
 | `fix-one.sh` | fixes a reviewer's findings, pushes, re-runs the merge chain |
 | `refresh-candidates.sh` | pre-flights issues (collision check) into the backlog |
+| `merged-not-closed.sh` | reports open issues that already have a MERGED PR (VERIFY-then-close; never auto-closes) |
 | `selftest.sh` | offline checks; each one drives the shipped code. Not part of the loop |
 
 **Manual utility:** `adopt-fix.sh` — run `fix-one.sh` against a specific PR by hand.

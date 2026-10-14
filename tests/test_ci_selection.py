@@ -1302,6 +1302,30 @@ def test_queue_resweep_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_orchestrator_harness_change_selects_core_not_tier1():
+    # operations/orchestrator-harness/*.sh own tests/test_orchestrator_harness.py
+    # (`core`): the shipped-block pins for lane.sh's heredoc, merged-not-closed.sh's
+    # paged enumeration, refresh-candidates.sh's pool/checked contract and
+    # orch-loop.sh's P0 merge-priority override.
+    #
+    # #8469 review P1: `operations/` is a flat NON_PYTHON_PREFIXES entry and no
+    # SOURCE_PATTERNS row matches the harness scripts, so an operations-only diff
+    # came back with `changed == []` and took the docs-only early return — the
+    # guard never ran on the file it guards. Registering the test under `core` is
+    # NOT sufficient: a name in a surface's test_files only runs when that surface
+    # is already selected, and an operations-only diff selects none.
+    #
+    # Measured before the CORE_ALSO entry: `_sel(["operations/orchestrator-harness/
+    # lane.sh"])` -> surfaces=[], full=False, test_files 33, harness test absent.
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the suite is
+    # hermetic and sub-second, so selecting `core` runs it at the lowest CI cost.
+    # Mutation check: removing the CORE_ALSO entry fails assert 1 below.
+    r = _sel(["operations/orchestrator-harness/merged-not-closed.sh"])
+    assert "core" in r["surfaces"], r
+    assert "test_orchestrator_harness.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1():
     # tools/install-queue-reconcile-schedule.sh owns
     # tests/test_install_queue_reconcile_schedule.py (hermetic cases pinning
