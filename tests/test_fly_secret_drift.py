@@ -96,6 +96,9 @@ FLY_TOML = _fixture("fly.toml", _FLY_TOML)
 REAL_MANIFEST = REPO_ROOT / ".github" / "scripts" / "fly-managed-secrets.txt"
 REAL_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-hosted.yml"
 REAL_FLY_TOML = REPO_ROOT / "fly.toml"
+#: The orientation table an operator reads before §2's rotation recipes. Its
+#: GitHub Actions column is a CLAIM about the manifest's `gh-secret:` names.
+REAL_RUNBOOK = REPO_ROOT / "docs" / "infra-runbook.md"
 
 
 def _secrets_file(names: list[str], name: str) -> Path:
@@ -113,6 +116,44 @@ def _declared_gh_names(manifest: Path) -> set[str]:
         if len(parts) == 2 and parts[1].startswith("gh-secret:"):
             names.add(parts[1].split(":", 1)[1])
     return names
+
+
+def _manifest_sources(manifest: Path) -> dict[str, str]:
+    """`{Fly variable: source token}` for every declaration in the manifest.
+
+    The Fly NAME is the key (not the `gh-secret:<GH_NAME>` payload): a doc row
+    names the Fly variable, and for `GITHUB_CLIENT_ID ← gh-secret:GH_CLIENT_ID`
+    the two differ — keying on the payload would silently skip that row.
+    """
+    sources: dict[str, str] = {}
+    for line in manifest.read_text().splitlines():
+        parts = line.split("#", 1)[0].split()
+        if len(parts) == 2:
+            sources[parts[0]] = parts[1]
+    return sources
+
+
+#: A Secrets Matrix row: `| NAME | tortoise-y4mjjq | FalkorDB Cloud | GitHub |`.
+_SECRETS_MATRIX_ROW_RE = re.compile(
+    r"^\|\s*([A-Z][A-Z0-9_]*)\s*\|([^|]*)\|([^|]*)\|([^|]*)\|\s*$",
+    re.MULTILINE,
+)
+
+
+def _secrets_matrix_rows() -> list[tuple[str, str, str, str]]:
+    """(name, fly, falkordb, github) for the runbook's Secrets Matrix rows.
+
+    Scoped to the section, so a table elsewhere in the 2k-line runbook cannot
+    satisfy (or fail) this test by accident.
+    """
+    text = REAL_RUNBOOK.read_text()
+    section = text.split("## Secrets Matrix", 1)
+    assert len(section) == 2, "docs/infra-runbook.md has no `## Secrets Matrix` section"
+    body = section[1].split("\n## ", 1)[0]
+    return [
+        (name, fly.strip(), falkordb.strip(), github.strip())
+        for name, fly, falkordb, github in _SECRETS_MATRIX_ROW_RE.findall(body)
+    ]
 
 
 def _referenced_secret_names(workflow: Path) -> set[str]:
@@ -1989,3 +2030,45 @@ def test_fly_only_ref_hash_is_not_treated_as_a_comment():
         ),
     )
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_secrets_matrix_github_column_agrees_with_the_manifest():
+    """A `gh-secret:` name must not be shown as having NO GitHub home.
+
+    The Secrets Matrix is the orientation table an operator reads before §2's
+    rotation recipes; `.github/scripts/fly-managed-secrets.txt` is the declared
+    inventory the deploy's drift gate enforces. A row whose **GitHub Actions**
+    column reads "—" while the manifest declares `gh-secret:` for that Fly name
+    states the opposite of the gate — and it is not cosmetic: until the #8614
+    review finding, `FASTAPI_INTERNAL_KEY` and `TORTOISE_SECRET_PEPPER` were
+    printed that way, so the Fly-only rotation recipe looked CORRECT for exactly
+    those two names (a Fly-only rotation is silently reverted by the next
+    deploy). `BILLING_FROM_EMAIL` read the same way.
+
+    Derived from the manifest on every run — never from a list maintained here —
+    so a new `gh-secret:` declaration that lands with a "—" row fails at review
+    time instead of misleading an operator mid-rotation.
+    """
+    sources = _manifest_sources(REAL_MANIFEST)
+    gh_names = {n for n, s in sources.items() if s.startswith("gh-secret:")}
+    assert gh_names, "the shipped manifest declares no gh-secret: name — the reader is wrong"
+
+    rows = _secrets_matrix_rows()
+    # Non-vacuity: a parser that found no rows would pass this test forever.
+    assert len(rows) >= 10, f"parsed only {len(rows)} Secrets Matrix rows"
+    seen = {name for name, *_ in rows}
+    # A row DELETED to silence this test must not pass it either.
+    for required in ("FASTAPI_INTERNAL_KEY", "TORTOISE_SECRET_PEPPER"):
+        assert required in seen, f"{required} is missing from the Secrets Matrix"
+
+    offenders = [
+        f"{name}: manifest says {sources[name]!r} but the GitHub Actions column "
+        f"reads {github!r}"
+        for name, _fly, _fdb, github in rows
+        if name in gh_names and "—" in github
+    ]
+    assert not offenders, (
+        "the Secrets Matrix tells an operator these names have no GitHub Actions "
+        "home, while the manifest declares them `gh-secret:` (and §2 rotates them "
+        "GitHub-first):\n  " + "\n  ".join(offenders)
+    )
