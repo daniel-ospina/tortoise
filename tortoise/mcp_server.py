@@ -2120,10 +2120,10 @@ def tortoise_compute_confidence(factors: Any = None,
     unbounded on a multi-tenant surface).
     """
     # #395 (delta C): HTTP no-arg is the disable-contract — a fresh
-    # request-scoped SDK (mcp_auth.py:69) always has empty _dirty_roots, so
+    # request-scoped SDK (mcp_auth.py:120) always has empty _dirty_roots, so
     # the no-arg path would silently return {} where today it runs whole-
     # graph EP (the #7288 timeout surface). Transport-aware branch lives in
-    # the handler (precedent: _transport_mode checks at mcp_server.py:962).
+    # the handler (precedent: _transport_mode checks at mcp_server.py:1304).
     # #1163: the graph is now the dirty-state source of truth — hydrate the
     # request-scoped SDK's persisted dirty roots; the diagnostic only fires
     # when the graph is TRULY clean (no persisted dirty state).
@@ -4154,8 +4154,11 @@ def _maybe_onboarding_auto_complete(*,
 # Claude Web (and every harness with an MCP surface) files sessions through
 # this tool. It calls the SAME capture pipeline as POST /v1/sessions
 # (hosted_api._capture_session_impl) so the two surfaces can never drift on
-# gate order: admission 429 (#3060) → session_recording opt-out 409 → empty
-# 422 → quota 402. A missing provider key is NOT a gate (#3892): the capture
+# gate order: boundary 422 → admission 429 (#3060) / in-flight 409 (#3129)
+# → session_recording opt-out 409 → turn cap 400 → empty 422 → quota 402;
+# the tool docstring below carries the full list, including the inner
+# extractor-provider 503 that can follow them.
+# A missing provider key is NOT a gate (#3892): the capture
 # is STORED and only the LLM extraction is skipped, reported as
 # `extraction_mode: "no-provider"`. Stdio/self-host returns an honest "requires
 # hosted mode" error —
@@ -4171,13 +4174,26 @@ def tortoise_session_capture(conversation: list[dict],
     """File an agent session into the graph (T3 workflows prompt surface).
 
     Server-enforced gates (identical to POST /v1/sessions — VERIFIED order,
-    #2093 S2): boundary 422 (invalid harness/shape — SessionRequest
-    construction below) -> 409 (recording off) -> 503 (no provider) -> 400
-    (turn cap) -> 422 (empty/blank transcript) -> 402 (quota). Returns the
+    #2093 S2 amendment): boundary 422 (invalid harness/shape — SessionRequest
+    construction below) -> 429 (capture capacity saturated) / 409 (duplicate
+    in-flight capture of the same session_id — both raised by the admission
+    reservation at ``_reserve_capture_slot`` below, #3060/#3129) -> 409
+    (recording off) -> 400 (turn cap) -> 422 (empty/blank transcript) -> 402
+    (quota). The pre-#3892 "503 (no provider)" entry in that list is removed:
+    a MISSING provider key is no longer a gate — since #3892 (owner ruling)
+    the capture is STORED and only the LLM extraction is skipped (receipt mode
+    "no-provider"). A provider refusal can still surface as a 503 from INSIDE
+    extraction — after the gates above, with the turns already stored — when
+    the configured provider selection cannot be satisfied (#1468/#1530); it is
+    not part of the pre-write gate order above. Returns the
     capture result (a memory_write_v1 envelope, #2104) on success, or an
-    honest error dict on failure (the per-harness last-error state key is
-    recorded on non-2xx EXCEPT the #3060 capacity 429 — a server condition —
-    and cleared on 2xx; same receipt semantics as the REST path).
+    honest error dict on failure. Per-harness last-error bookkeeping (same on
+    the REST path): the key is SET on a non-2xx EXCEPT the #3060 capacity 429
+    and the #3129 in-flight 409 (both server conditions), and is not written
+    for the payload-boundary 422 above, which returns before the capture
+    pipeline just as REST's Pydantic 422 does; on 2xx the shared pipeline
+    clears the key for a fully processed capture and SETS it when extraction
+    was attempted but did not complete (#3520).
     """
     from tortoise.mcp_auth import (  # noqa: I001
         SELFHOST_ORG_ID,
@@ -4193,7 +4209,7 @@ def tortoise_session_capture(conversation: list[dict],
     if not org_id or org_id == SELFHOST_ORG_ID:
         # stdio / self-host HTTP: no hosted state plane, no receipts — the
         # honest error (matching the onboarding-tool precedent), never a
-        # local fallback that bypasses the 409/402/503 gates.
+        # local fallback that bypasses the server-enforced capture gates.
         return {"error": "session capture requires hosted mode — the "
                           "tortoise_session_capture tool files to Tortoise "
                           "Cloud (server-enforced recording + receipts); "

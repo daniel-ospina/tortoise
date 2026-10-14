@@ -997,6 +997,7 @@ surfaces:
   - test_5051_capture_receipt_key_registry.py
   - test_5089_operator_prop_parity.py
   - test_5089_operator_status_parity.py
+  - test_6239_promote_after_supersede.py
   - test_7369_journal_param_boundary.py
   - test_7809_hosted_prewarm_warmup_flag.py
   - test_7767_restore_rollback.py
@@ -1632,7 +1633,7 @@ surfaces:
   # session fixture unless `TORTOISE_TEST_CARVE_OUT=1`.
   - test_3817_tags_rebuild_durability.py
   - test_vecf32_overwrite_seams_4524.py  # #4524: the remaining embedded-engine vecf32 overwrite seams (Subject/Object/Document/Event) — one mutation-proven read-back guard per seam; runs in the carve-out lane (carve_out + embedded_only)
-  - test_4521_revise_point_embedding.py  # #4521: `_revise_point` must write `vecf32($embedding)`, not a plain List — a bare List node is not in the HNSW index at all (#8429), so the write seam keeps it the typed shape; the READ boundary now normalises a right-width List (#8316), so only a wrong WIDTH still aborts the MATCH (#8430) (embedded_only + carve_out)
+  - test_4521_revise_point_embedding.py  # #4521: `_revise_point` must write `vecf32($embedding)`, not a plain List — a bare List node is not in the HNSW index at all (#8429), so the write seam keeps it the typed shape; the READ boundary now normalises a right-width List (#8316), so only a wrong-width or NON-NUMERIC value still aborts the MATCH (#8430) (embedded_only + carve_out)
   - test_update_point_derived_embedding_4520.py  # #4520 residual: `update_point(content=…)`'s DERIVED embedding must go through the clear-then-set seam, not the bare `+=` merge (a bare List node is not in the HNSW index — #8429 — and a small-Δ `vecf32` overwrite is silently discarded on the embedded engine); the caller-supplied branch stays verbatim (PR #3018), and the read boundary normalises a right-width List (#8316) — embedded_only + carve_out
   - test_verbatim_embedding_read_8316.py  # #8316: a caller-supplied embedding stays VERBATIM (PR #3018) but the dense READ must normalise the plain-List shape at its own boundary — one verbatim node otherwise aborts the whole MATCH and degrades every node to FTS-only recall (embedded_only + carve_out)
   # #5004: the journal must carry a Point's embedding (the design's largest
@@ -2196,6 +2197,13 @@ surfaces:
   - test_subject_supersession_1423.py
   - test_open_kinds.py
   - test_operator_annotator_rebuild.py   # #3689 journaled OperatorAnnotated + PointRevised annotator dims survive rebuild_all
+  # #7551: the operator-label declared vocabulary. Registered under `core` so it
+  # is CLASSIFIED at all (manifest-integrity refuses an unregistered test file)
+  # AND selected on the regression vector it exists for: `tortoise/sdk.py`,
+  # `tortoise/pack_registry.py` and `tortoise/enforcement.py` each select `core`
+  # (verified with `tools/ci_selection.py --changed-files <path>`), and without
+  # this arm the guard would never run on the write path it holds.
+  - test_operator_label_vocabulary.py
   - test_operator_source_search.py
   - test_operator_source_unit.py
   - test_ops_safety.py

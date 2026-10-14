@@ -51,7 +51,7 @@ must NOT be routed into it:
   vector**: the guard REMOVES the property and the ``SET`` then reads the
   property the clear just removed. ``graph-scripts/backfill_embeddings.py``
   holds one, ``_repair_legacy_event_embeddings`` (the pre-#244 plain-``List``
-  → ``VectorF32`` repair), named as out of scope at its definition.
+  → ``Vectorf32`` repair), named as out of scope at its definition.
 * **NULL wipe** — a write whose incoming vector is NULL sets the property to
   NULL rather than replacing its value; the seam's guarantee (that a new vector
   LANDS) does not govern it. Writers that ALSO overwrite still route their
@@ -64,18 +64,23 @@ must NOT be routed into it:
 ``List``. Two branches, with different dispositions:
 
 * **Derived — CLOSED.** ``update_point(content=…)`` re-encodes the content
-  (#4208) and the bare SET used to store the new embedding as a ``List``.
-  Measured: ``create_point`` stores ``Vectorf32``, the content edit flips
-  ``typeof`` to ``List``, and the failure surfaces on the next dense READ,
-  where ``vec.euclideanDistance`` raises ``Type mismatch: expected Null or
-  VectorF32 but was List`` — so ONE content edit degraded the whole Point dense
-  leg to FTS-only. The DERIVED vector is now routed through this seam: the
-  ``embedding`` key is stripped from the verbatim merge and written with
+  (#4208) and the bare SET used to store the new embedding as a ``List``,
+  which flipped ``typeof`` from ``Vectorf32`` to ``List`` on ONE content
+  edit. The DERIVED vector is now routed through this seam: the ``embedding``
+  key is stripped from the verbatim merge and written with
   :func:`clear_then_set_prefix` + :func:`set_embedding_clause`
   (``preserve_on_null=False``), exactly as ``_revise_point`` is, while every
   other key keeps the caller-supplied-patch ``SET n += $props`` semantics. Both
-  halves are required: the ``vecf32()`` cast fixes the type, and the clear
-  lands the small-Δ overwrite the embedded engine would otherwise DISCARD.
+  halves are required: the ``vecf32()`` cast keeps a server-owned value in the
+  typed shape every other SERVER-OWNED writer produces (the caller-supplied
+  branch below deliberately stores a plain ``List`` — PR #3018) — a bare
+  ``List`` node is absent from the Point HNSW index cohort (#8429) — and the
+  clear lands the small-Δ
+  overwrite the embedded engine would otherwise DISCARD. (Before #8316 that
+  flip also made the next dense READ raise ``Type mismatch: expected Null or
+  Vectorf32 but was List``; the read boundary now normalises a right-width
+  ``List``, so only a wrong width or a non-numeric value still aborts the
+  MATCH — #8430.)
 * **Caller-supplied — WRITE verbatim, READ normalised.** The verbatim
   ``embedding`` prop (``update_point`` with an explicit vector, and the
   ``update_entity`` Point branch, which never derives) still passes the
@@ -89,7 +94,7 @@ must NOT be routed into it:
   The defect that verbatim write used to cause is fixed at the READ boundary
   instead (:func:`stored_embedding_vector_expr`, #8316): the stored plain
   ``List`` made ``vec.euclideanDistance`` raise ``Type mismatch: expected Null
-  or VectorF32 but was List`` for the WHOLE ``MATCH``, so ONE caller-vectored
+  or Vectorf32 but was List`` for the WHOLE ``MATCH``, so ONE caller-vectored
   Point degraded the entire dense leg — every other Point included — to
   FTS-only recall. The stored value is untouched (the decision stands); only
   the distance expression normalises the shape it reads.
@@ -221,7 +226,7 @@ def stored_embedding_vector_expr(alias: str) -> str:
     * a plain ``List`` — the VERBATIM caller-owned value (PR #3018's recorded
       decision) — is cast once through ``vecf32()``; a read spelled
       ``<alias>.embedding`` would raise ``Type mismatch: expected Null or
-      VectorF32 but was List`` and abort the WHOLE ``MATCH``, so one such node
+      Vectorf32 but was List`` and abort the WHOLE ``MATCH``, so one such node
       would degrade the entire dense leg to FTS-only recall (#8316);
     * a ``Vectorf32`` — every server-computed embedding — is returned
       unchanged.
