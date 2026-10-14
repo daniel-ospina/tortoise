@@ -1769,7 +1769,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_session_capture
-  served_from: tortoise/mcp_server.py:5aac73bc86e8a8a1
+  served_from: tortoise/mcp_server.py:d877e36cde199530
   served_attributes: a1b8417f6b1ea4c9
   family: sessions
   family_rank: 4

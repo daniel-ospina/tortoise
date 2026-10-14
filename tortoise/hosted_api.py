@@ -14071,10 +14071,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # NOTE (documented lane divergence): hosted computes _capture_ok AFTER
         # the post-write enrichment — an enrichment-read failure marks points
         # skipped → verb partial → capture_ok False → retryable. The sdk
-        # computes ok BEFORE its surfaced-verification read and treats a
-        # verification failure as a benign warning (capture_ok True). Both
-        # are internally consistent; the divergence is documented, not
-        # forced-aligned (the sdk surface has no skipped/verb concept).
+        # computes ok BEFORE its enrichment read and treats a
+        # verification failure as a benign warning (capture_ok True), while
+        # its verb status — derived from the SAME facts — is still partial.
+        # Both are internally consistent; the divergence is documented, not
+        # forced-aligned (it is now only the RECORDED retry bit, not the
+        # verb: the sdk mirror speaks memory_write_v1 too, with the same
+        # per-point enrichment).
         # Non-fatal bookkeeping (mirror of the sdk guard): a graph hiccup
         # must NOT 500 a committed capture — and on a FAILED capture a raise
         # would leave capture_ok=None → the next same-session re-POST would
