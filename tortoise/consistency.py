@@ -827,23 +827,36 @@ def _graph_fingerprint(graph_by_id: dict,
 # deployment shape, and the journal is the reconstruction source the invariant
 # names.
 _PROJECTION_STATE_SUFFIX = ".projection-state.json"
-# v2 (#2897): the per-point canonical view widened by `tags`. It left
+# The format HISTORY, oldest first. `_PROJECTION_STATE_FORMAT` is its LAST
+# entry; every earlier one is a KNOWN PREDECESSOR the migration below
+# re-baselines instead of refusing for ever.
+#
+# ⛔ BUMPING THE FORMAT MEANS APPENDING HERE. A new format whose predecessor is
+# not appended makes that predecessor an UNKNOWN format, which falls back to the
+# pre-migration reading (UNTRUSTED, baseline inert for ever) — the fail-safe
+# direction, and the suite's `_PROJECTION_STATE_FORMAT - 1` predecessor fixture
+# reds loudly when it happens, so the omission cannot ship silently.
+#
+# v1 → v2 (#2897): the per-point canonical view widened by `tags`. It left
 # `_UNCARRIED_CONTENT_PROPS` so the field-aware comparison would SEE it, and the
 # same view feeds `_graph_fingerprint` — so `projection_hash_sha256` MOVES for
-# every existing baseline whose graph holds a tag. The sidecar has no migration
-# (an untrusted/differing state is never re-recorded), so a v1 baseline must be
-# read as UNTRUSTED — adoption plus a `state_error` naming the format — rather
-# than as a graph that moved while the journal did not. That second reading is
-# `unrecorded-mutation`, whose `action` sends the operator hunting a phantom
-# unjournalled writer for a digest this change moved deliberately.
-# ⚠️ This bump is the PRECURSOR only, and it is the change the file's own note on
-# the `(label, id)` re-key says must come first. The MIGRATION that retires the
-# untrusted state (recognising a known-old format and re-baselining it, instead
-# of refusing it for ever) is owned by **#8268** ("a superseded projection-state
-# format_version disables the baseline for ever — format migration is
-# unreachable"), whose residual this is; #7936 is the parent that widened the
-# digest (the tags trigger is a SECOND, landed one — note it on #8268).
-_PROJECTION_STATE_FORMAT = 2
+# every existing baseline whose graph holds a tag. Without a migration the next
+# run would find `journal_moved=False, graph_moved=True` and report
+# `unrecorded-mutation` on a healthy graph — an `action` telling the operator to
+# hunt an unjournalled writer that does not exist.
+#
+# #8268/#7936: the bump ALONE was the precursor, and it was not enough. A
+# superseded format was read as untrusted, and `record_projection_state` is
+# gated on `state_error is None` — so the baseline half stayed INERT for ever
+# and the migration was unreachable. Recognising a well-formed predecessor and
+# re-baselining it is what makes a digest widening landable at all, and it is
+# the prerequisite #7936's `(label, id)` re-key names: that is a SECOND widening
+# of the same digest and needs `_PROJECTION_STATE_FORMAT` → 3 (append `3`; `2`
+# then migrates too, exactly like `1` does now).
+_PROJECTION_STATE_FORMAT_HISTORY: tuple[int, ...] = (1, 2)
+_PROJECTION_STATE_FORMAT: int = _PROJECTION_STATE_FORMAT_HISTORY[-1]
+_PROJECTION_STATE_SUPERSEDED_FORMATS: frozenset[int] = frozenset(
+    _PROJECTION_STATE_FORMAT_HISTORY[:-1])
 
 
 def projection_state_path(log_path) -> str:
@@ -856,21 +869,44 @@ def baseline_warning(result: dict, log_path) -> str | None:
     """The operator-visible warning for a STRANDED baseline, or ``None``.
 
     #2897 review round 2: ``check_consistency`` can return ``ok=True`` while the
-    BASELINE half of the invariant is inert. An untrusted sidecar — a
-    predecessor format after a digest-shape change, a torn file, a planted
-    FIFO/symlink — makes :func:`read_projection_state` error, so ``stored`` is
-    ``None`` and every run ADOPTS. ``state_recorded`` is gated on
-    ``state_error is None`` (deliberately: recording over an untrusted state
-    would destroy the only evidence of what the graph looked like before), so
-    the state is never replaced either. The green verdict says nothing about any
-    of that, which is how an inert guard reads as a healthy graph — so the
-    surface names it, with the recovery, instead of leaving it to a field the
-    CLI never printed.
+    BASELINE half of the invariant is inert. An untrusted sidecar — a torn file,
+    a planted FIFO/symlink, a malformed watermark — makes
+    :func:`read_projection_state` error, so ``stored`` is ``None`` and every run
+    ADOPTS. ``state_recorded`` is gated on ``state_error is None``
+    (deliberately: recording over an untrusted state would destroy the only
+    evidence of what the graph looked like before), so the state is never
+    replaced either. The green verdict says nothing about any of that, which is
+    how an inert guard reads as a healthy graph — so the surface names it, with
+    the recovery, instead of leaving it to a field the CLI never printed.
+
+    #8268/#7936: a WELL-FORMED predecessor format is no longer in that class —
+    it is MIGRATED (re-baselined at the current format) on a healthy recording
+    run, so it is reported as the migration it is, not as an inert/stranded
+    guard. The only remaining inert case is a read-only run
+    (``record_state=False``), where the predecessor is still awaiting its
+    re-baseline.
 
     A function rather than inline prose in ``__main__`` so the surface is
     PINNED by a test without needing a live URI (the CLI's ``--db`` resolves
     only ``docker``/``redis``/``rediss``).
     """
+    superseded = result.get("state_superseded_format")
+    if superseded is not None and not result.get("state_error"):
+        if result.get("state_recorded"):
+            return (
+                f"projection baseline MIGRATED (format {superseded} -> "
+                f"{_PROJECTION_STATE_FORMAT}) — the recorded digest was written "
+                "by an older format, so it was re-baselined on this healthy "
+                "run. A graph write that bypassed the journal BEFORE this run "
+                "cannot be seen by the new baseline."
+            )
+        return (
+            f"projection baseline SUPERSEDED (format {superseded} -> "
+            f"{_PROJECTION_STATE_FORMAT}) and the baseline half is INERT until a "
+            "RECORDING run re-baselines it — a graph write that bypasses the "
+            "journal cannot be detected while it is inert. Re-run with recording "
+            "enabled to migrate it."
+        )
     error = result.get("state_error")
     if not error:
         return None
@@ -886,10 +922,36 @@ def baseline_warning(result: dict, log_path) -> str | None:
 def read_projection_state(log_path) -> tuple[dict | None, str | None]:
     """Read ``(state, error)`` for a journal.
 
-    ``(None, None)`` means "never baselined" — the ADOPTION case, which is
-    normal. ``(None, "<why>")`` means a baseline exists but cannot be trusted;
-    the caller must not treat that as a divergence, and must not silently adopt
+    ``(None, None)`` means "no TRUSTED baseline" — never baselined (the normal
+    ADOPTION case), OR a well-formed predecessor format awaiting migration
+    (:func:`read_projection_state_detail` reports that predecessor separately;
+    this view collapses it to "no trusted baseline" so a caller that cannot
+    migrate still adopts rather than mistaking version skew for corruption).
+    ``(None, "<why>")`` means a baseline exists but cannot be trusted; the
+    caller must not treat that as a divergence, and must not silently adopt
     over it either, so the reason is reported.
+    """
+    state, error, superseded = read_projection_state_detail(log_path)
+    if superseded is not None:
+        return None, None
+    return state, error
+
+
+def read_projection_state_detail(
+        log_path) -> tuple[dict | None, str | None, int | None]:
+    """``(state, error, superseded_format)`` for a journal.
+
+    The third element is the format of a WELL-FORMED predecessor sidecar
+    (#8268/#7936) — version skew, not evidence of corruption. It is reported so
+    ``check_consistency`` can MIGRATE it (re-baseline at the current format on
+    the next healthy run) instead of reading it as untrusted and leaving the
+    baseline half of the invariant inert for ever.
+
+    A malformed sidecar (a bad watermark/digest, a FIFO, a symlink, a torn
+    file, an UNKNOWN format) keeps ``superseded_format = None`` and stays
+    exactly as untrusted as it was: "never overwrite a baseline we could not
+    read" is unchanged for anything that is not a known, well-formed
+    predecessor.
     """
     path = projection_state_path(log_path)
     try:
@@ -899,23 +961,42 @@ def read_projection_state(log_path) -> tuple[dict | None, str | None]:
         # writable), and both are cheap to refuse.
         st = os.lstat(path)
     except FileNotFoundError:
-        return None, None
+        return None, None, None
     except OSError as e:
-        return None, f"projection state unreadable: {e}"
+        return None, f"projection state unreadable: {e}", None
     if not stat.S_ISREG(st.st_mode):
-        return None, "projection state is not a regular file"
+        return None, "projection state is not a regular file", None
     try:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
     except Exception as e:  # any unreadable sidecar is untrusted
-        return None, f"projection state unreadable: {e}"
+        return None, f"projection state unreadable: {e}", None
     if not isinstance(data, dict):
-        return None, "projection state is not a JSON object"
+        return None, "projection state is not a JSON object", None
     seq = data.get("last_applied_seq")
     digest = data.get("projection_hash_sha256")
-    if data.get("format_version") != _PROJECTION_STATE_FORMAT:
-        return None, (f"projection state format {data.get('format_version')!r} "
-                      f"is not {_PROJECTION_STATE_FORMAT}")
+    fmt = data.get("format_version")
+    # The FORMAT gate runs first so its message is the one reported, but a known
+    # predecessor is NOT thereby exempt from the structural gate below:
+    # `superseded_format` is a verdict on a WELL-FORMED older sidecar, never a
+    # bypass of the malformed/tampered checks. An unknown format (0, 99, a
+    # string, `true`, `1.0`, a FUTURE version written by newer code) is
+    # untrusted — an older build must never overwrite a newer baseline.
+    #
+    # `isinstance(fmt, bool)`/`not isinstance(fmt, int)` FIRST, before the
+    # membership test: `_PROJECTION_STATE_SUPERSEDED_FORMATS` is a frozenset of
+    # ints and `in` binds by `==`/`hash`, so `True in frozenset({1})` and
+    # `1.0 in frozenset({1})` are BOTH True. Without the type check a boolean
+    # or float `format_version` is coerced into the known-predecessor set and
+    # MIGRATED (re-baselined and OVERWRITTEN) instead of refused — the one
+    # class the docstring above promises is still treated as untrusted. Same
+    # strict-bool rule as the watermark and `_values_equal`, on the path that
+    # reads operator-planted sidecars.
+    if isinstance(fmt, bool) or not isinstance(fmt, int) \
+            or (fmt != _PROJECTION_STATE_FORMAT
+                and fmt not in _PROJECTION_STATE_SUPERSEDED_FORMATS):
+        return None, (f"projection state format {fmt!r} "
+                      f"is not {_PROJECTION_STATE_FORMAT}"), None
     # `isinstance(seq, bool)` first: `isinstance(True, int)` is true, so a
     # boolean watermark would otherwise be accepted as a valid baseline (and
     # `True == 1` would then trust it against a 1-event journal). Same strict
@@ -924,13 +1005,16 @@ def read_projection_state(log_path) -> tuple[dict | None, str | None]:
     if isinstance(seq, bool) or not isinstance(seq, int) \
             or not isinstance(digest, str) \
             or not re.fullmatch(r"[0-9a-f]{64}", digest):
-        return None, f"projection state malformed (seq={seq!r})"
+        return None, f"projection state malformed (seq={seq!r})", None
+    if fmt != _PROJECTION_STATE_FORMAT:
+        return None, (f"projection state format {fmt!r} is a superseded "
+                      f"predecessor of {_PROJECTION_STATE_FORMAT}"), fmt
     return {
         "last_applied_seq": seq,
         "content_hash": digest,
-        "format_version": data.get("format_version"),
+        "format_version": fmt,
         "updatedAt": data.get("updatedAt"),
-    }, None
+    }, None, None
 
 
 def record_projection_state(log_path, *, last_applied_seq: int,
@@ -1398,10 +1482,11 @@ _NAME_MERGE_LABELS: frozenset[str] = frozenset({"Object", "Subject"})
 #: The ``db_hash`` baseline is deliberately NOT widened to cover it: the digest
 #: covers the Point view, and folding the entity view into it would move
 #: ``content_hash`` for every existing baseline, which the check reports as an
-#: ``unrecorded-mutation`` and — because it never re-records over an
-#: untrusted/differing baseline — would report for ever. Widening the digest
-#: needs a baseline-format migration (#8268 owns the unreachable-migration class;
-#: #7936 is the parent that widened the digest).
+#: ``unrecorded-mutation``. That is no longer a dead end (#8268/#7936): widening
+#: the digest needs a ``format_version`` bump — append the new format to
+#: ``_PROJECTION_STATE_FORMAT_HISTORY`` — and the old format then becomes a KNOWN
+#: PREDECESSOR that is MIGRATED (re-baselined) on the next healthy recording run
+#: instead of reporting for ever.
 _ENTITY_BELIEF_FIELDS: tuple[str, ...] = tuple(BELIEF_PROPS) + tuple(
     BELIEF_BOOL_PROPS)
 
@@ -2026,6 +2111,16 @@ def check_consistency(log_path: str, projection, *,
                                           cannot be trusted (distinct from
                                           "never baselined"); reported, never
                                           treated as a divergence
+      state_superseded_format           — the format of a WELL-FORMED
+                                          predecessor baseline this run
+                                          OBSERVED (#8268/#7936); version skew,
+                                          not corruption — so it is NOT a
+                                          divergence and NOT a state_error.
+                                          The migration is APPLIED only when
+                                          `state_recorded` is True: a read-only
+                                          or non-healthy run reports the
+                                          predecessor and leaves the
+                                          re-baseline to the next recording run
       excluded_fields                   — {key: reason} for every field the
                                           comparison did NOT decide but saw
       one_sided_fields                  — {key: reason} for a field present on
@@ -2096,8 +2191,11 @@ def check_consistency(log_path: str, projection, *,
     # The `(label, id)` re-key of THIS Point view and of `db_hash` — one index
     # deriving `log_points`/`db_points`/`_compare_views`/the fingerprint — stays
     # open on #7936: widening the digest moves `content_hash` for every existing
-    # baseline and the sidecar has no migration (an untrusted/differing state is
-    # never re-recorded), so it needs a baseline-format change first.
+    # baseline, so it needs a `format_version` bump first — append the new format
+    # to `_PROJECTION_STATE_FORMAT_HISTORY`. That is no longer a dead end
+    # (#8268/#7936): a known predecessor is MIGRATED (re-baselined at the current
+    # format) on the next healthy recording run, so the re-key is landable
+    # without stranding the baseline.
     count_rows = projection.query("MATCH (n:Point) RETURN count(n)").result_set
     db_count = 0
     if count_rows and len(count_rows[0]) > 0:
@@ -2138,7 +2236,20 @@ def check_consistency(log_path: str, projection, *,
     # itself is the field-aware comparison above, never a digest equality.
     db_hash = _digest(_graph_fingerprint(graph_by_id, uncarried))
 
-    stored, state_error = read_projection_state(log_path)
+    stored, state_error, state_superseded_format = (
+        read_projection_state_detail(log_path))
+    # #8268/#7936: a WELL-FORMED predecessor format is version skew, not
+    # corruption — so it must NOT keep reading as `state_error`. The gate below
+    # (`state_recorded = ... and state_error is None`) is what made the
+    # migration unreachable: a predecessor sidecar raised the error on EVERY
+    # run, so the re-record was refused for ever and the baseline half stayed
+    # INERT. Clearing the error here lets THIS healthy run re-baseline at the
+    # current format, and `state_superseded_format` on the verdict reports what
+    # was migrated. The MALFORMED/tampered case still sets `state_error`, so
+    # "never overwrite a baseline we could not read" is unchanged where the
+    # state is evidence rather than skew.
+    if state_superseded_format is not None:
+        state_error = None
     # Both halves of the invariant are checked. The field-aware comparison
     # catches a graph that disagrees with the journal; the BASELINE catches a
     # graph that moved while the journal did NOT — the case the field-aware
@@ -2178,7 +2289,10 @@ def check_consistency(log_path: str, projection, *,
     # Adoption is a property of the RUN, not of whether we were allowed to write
     # the baseline: a read-only probe against a pre-existing graph is still the
     # first healthy sighting of it.
-    adopted = ok and stored is None
+    # A MIGRATED predecessor is a re-baseline of a graph we already knew about,
+    # not a first sighting — so it is not "adopted" (`adopted` stays the
+    # first-healthy-run signal); `state_superseded_format` names it instead.
+    adopted = ok and stored is None and state_superseded_format is None
     state_recorded = False
     if ok and record_state and state_error is None:
         # Never overwrite a baseline we could not read: recording over a
@@ -2269,6 +2383,14 @@ def check_consistency(log_path: str, projection, *,
         "adopted": adopted,
         "state_recorded": state_recorded,
         "state_error": state_error,
+        # #8268/#7936: the format of a WELL-FORMED predecessor baseline this
+        # run OBSERVED (None when there was none). `state_recorded` says whether
+        # the migration was APPLIED (a read-only run, or a non-healthy run —
+        # `state_recorded` is gated on `ok` — reports the predecessor and leaves
+        # the re-baseline to the next recording healthy run). Distinct from
+        # `state_error`, which now only ever names an UNTRUSTED
+        # (malformed/tampered/unknown-format) sidecar.
+        "state_superseded_format": state_superseded_format,
         "excluded_fields": excluded_seen,
         "one_sided_fields": one_sided_seen,
         "uncarried_journal_fields": sorted(

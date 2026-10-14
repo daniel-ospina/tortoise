@@ -6191,9 +6191,13 @@ def fold_with_entities(events: list[dict]) -> tuple[dict[str, dict], dict]:
     durable step — one ``(label, id)`` index deriving ``log_points`` /
     ``db_points`` / ``_compare_views`` / the fingerprint from a single view —
     stays open on #7936 and is deliberately NOT smuggled in here: re-keying the
-    digest would move ``content_hash`` for every existing baseline, and the
-    sidecar has no format-migration path (a bumped ``format_version`` is
-    untrusted forever and the baseline is never re-recorded).
+    digest would move ``content_hash`` for every existing baseline, which
+    entails a ``format_version`` bump — and since #8268/#7936 that is no longer
+    a dead end. A predecessor format appended to
+    ``consistency._PROJECTION_STATE_FORMAT_HISTORY`` is MIGRATED: the next
+    healthy recording run re-baselines at the current format and reports
+    ``state_superseded_format``. Only an UNKNOWN or FUTURE ``format_version``
+    stays untrusted and is never re-recorded.
 
     ``entities`` is a BATCH/replay view: it is built from the journal's ordered
     existence boundary, which the one-record incremental path does not have.
