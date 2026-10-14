@@ -6985,7 +6985,12 @@ class TortoiseSDK:
         ``conversation`` is a list of {"role", "content"} dicts. Returns
         {"session_id", "turns", "extracted", "points": [...],
         "extraction_mode", "extraction_provider", "ok", "errors",
-        "warnings"} — the v2 path reports "extraction_mode": "llm:<route>"
+        "warnings"} plus additive keys (e.g. "surfaced", "diagnostics",
+        "stats", "capture_redactions") — and, on a write-back response, the
+        frozen ``memory_write_v1`` envelope keys "protocol_version"/"status"/
+        "provenance"/"error" (#2104; a pre-write gate rejection such as the
+        empty/blank gate carries no verb). The v2 path reports
+        "extraction_mode": "llm:<route>"
         (e.g. "llm:deepseek-direct") and the configured
         "extraction_provider" (#1530 D8). P1 #1529 fail-closed contract:
         "ok" is the success signal (never "extracted" — extracted > 0 can

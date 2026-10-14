@@ -4166,15 +4166,13 @@ def tortoise_session_capture(conversation: list[dict],
     in-flight capture of the same session_id — both raised by the admission
     reservation at ``_reserve_capture_slot`` below, #3060/#3129) -> 409
     (recording off) -> 400 (turn cap) -> 422 (empty/blank transcript) -> 402
-    (quota). Provider-key handling is NOT a pre-write gate since #3892 (owner
-    ruling): a MISSING provider key stores the capture and skips only the LLM
-    extraction (receipt mode "no-provider") — the pre-#3892 no-provider 503
-    the old docstring listed is gone. An inner extractor-provider gate DOES
-    remain and fails closed with a 503 when a key is configured but not
-    routing-usable (a non-routing key such as OPENAI_API_KEY alone, or an
-    explicit TORTOISE_EXTRACTOR_PROVIDER naming an absent key, #1468/#1530) —
-    that refusal follows the gates above, with the turns already stored.
-    Returns the
+    (quota). The pre-#3892 "503 (no provider)" entry in that list is removed:
+    a MISSING provider key is no longer a gate — since #3892 (owner ruling)
+    the capture is STORED and only the LLM extraction is skipped (receipt mode
+    "no-provider"). A provider refusal can still surface as a 503 from INSIDE
+    extraction — after the gates above, with the turns already stored — when
+    the configured provider selection cannot be satisfied (#1468/#1530); it is
+    not part of the pre-write gate order above. Returns the
     capture result (a memory_write_v1 envelope, #2104) on success, or an
     honest error dict on failure. Per-harness last-error bookkeeping (same on
     the REST path): the key is SET on a non-2xx EXCEPT the #3060 capacity 429
