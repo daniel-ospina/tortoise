@@ -4173,8 +4173,10 @@ def tortoise_session_capture(conversation: list[dict],
     capture result (a memory_write_v1 envelope, #2104) on success, or an
     honest error dict on failure (the per-harness last-error state key is
     recorded on non-2xx EXCEPT the #3060 capacity 429 and the #3129
-    in-flight 409 — both server conditions — and cleared on 2xx; same
-    receipt semantics as the REST path).
+    in-flight 409 — both server conditions — and cleared on a fully
+    processed 2xx; a 2xx whose extraction was attempted but did not
+    complete SETS the key instead (#3520); same receipt semantics as the
+    REST path).
     """
     from tortoise.mcp_auth import (  # noqa: I001
         SELFHOST_ORG_ID,
