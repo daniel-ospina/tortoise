@@ -141,7 +141,10 @@ UNVERIFIABLE_SITES = {
 # touched. A key count is a measurement too: re-derive it, do not restate it from memory.
 TRAILING_HOLE_SITES = {
     ("api", "/v1/backups", "GET"): 1,
-    ("api", "/v1/graphs", "PATCH"): 1,
+    # #2650: the dashboard's per-graph recording control PATCHes the EXISTING
+    # endpoint (main.jsx `setGraphRecording`), adding a 2nd ambiguous
+    # trailing-hole call site at this path — a deliberate +1, not a new route.
+    ("api", "/v1/graphs", "PATCH"): 2,
     ("api", "/v1/index/docs", "POST"): 1,
     ("api", "/v1/index/github/re-poll", "POST"): 1,
     ("api", "/v1/onboarding/github/connect", "POST"): 1,

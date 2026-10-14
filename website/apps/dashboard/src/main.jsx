@@ -101,6 +101,9 @@ import {
   graphKeyPanelEmptyLine,
   graphKeysSuppressed,
   graphMintBody,
+  graphRecordingBody,
+  graphRecordingLabel,
+  graphRecordingState,
   graphsMeter,
   sortedGraphRows,
   sortedTrashRows,
@@ -6313,6 +6316,50 @@ function claimIntentInFlight() {
     }
   }
 
+  // #2650: per-graph session-recording override — the human Graphs-tab surface
+  // for the C6 #2115 / #2302 setting. Mirrors renameGraph's contract: PATCH
+  // /v1/graphs/{id} with ONLY {recording} (never echo stale row fields — a
+  // recording change must not touch the name/auth state), optimistic local
+  // update with revert-on-error into the page-level banner, and the #2230
+  // team pin captured at call (a mid-flight switch must not flip the new
+  // team's row nor land the error under the wrong header). Server: session
+  // owner/admin or a team:manage key; the body is strict true|false|null
+  // (null = clear the override and inherit the team default).
+  async function setGraphRecording(graphId, nextState) {
+    const _teamAtCall = currentOrgId
+    setError('')
+    const cur = graphs.find((g2) => g2.graph_id === graphId)
+    if (!cur) return
+    // Optimistic update in the server's own value space (bool | null).
+    const next = graphRecordingBody(nextState).recording
+    const prevState = graphRecordingState(cur)
+    const prev = prevState === 'inherit' ? null : prevState === 'on'
+    if (prev === next) return
+    setGraphs((gs) => gs.map((x) => x.graph_id === graphId ? { ...x, recording: next } : x))
+    try {
+      const q = (sessionTokenRef.current && _teamAtCall) ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
+      const updated = await api(`/v1/graphs/${encodeURIComponent(graphId)}${q}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        useSession: true, // recording is owner/admin-managed (session JWT — mirror rename/key management)
+        body: JSON.stringify({ recording: next }),
+      })
+      if (orgIdRef.current !== _teamAtCall) return // stale switch — don't touch the new team's state
+      // Reconcile with the server echo. The recording-only PATCH keeps the
+      // pre-#2701 {graph_id, recording} shape, so `recording` is authoritative
+      // when present (a false/absent field must not be read as success).
+      if (updated && updated.graph_id === graphId && 'recording' in updated) {
+        const echoed = updated.recording === true ? true
+          : updated.recording === false ? false : null
+        setGraphs((gs) => gs.map((x) => x.graph_id === graphId ? { ...x, recording: echoed } : x))
+      }
+    } catch (e) {
+      if (orgIdRef.current !== _teamAtCall) return // stale switch — error belongs to the old team
+      setGraphs((gs) => gs.map((x) => x.graph_id === graphId ? { ...x, recording: prev } : x))
+      setError((e && e.message) || 'Couldn\'t change recording for this graph — try again.')
+    }
+  }
+
   // Delete a CUSTOM graph (indicator 4). The default graph row never shows
   // the action (graphs.js graphCanDelete — its 🗑 renders disabled) and the
   // server 403s the default as a code guard. #2701: the row's 🗑 opens a
@@ -10608,12 +10655,12 @@ function claimIntentInFlight() {
             )}
             <div className="graphs-table-wrap">
             <table>
-              <thead><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Status</th><th scope="col">Keys</th><th scope="col">Last backup</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
+              <thead><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Status</th><th scope="col">Keys</th><th scope="col">Last backup</th><th scope="col">Recording</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
               <tbody>
-                {graphsStatus === 'loading' && authMode === 'session' && <tr><td colSpan="6" className="dim">Loading graphs…</td></tr>}
-                {graphsStatus === 'denied' && <tr><td colSpan="6" className="dim">Graph list is only visible to members.</td></tr>}
-                {graphsStatus === 'error' && <tr><td colSpan="6" className="dim">Couldn't load graphs — check your connection and try again.</td></tr>}
-                {graphsStatus === 'ok' && graphs.length === 0 && <tr><td colSpan="6" className="dim">No graphs yet — create your first one above.</td></tr>}
+                {graphsStatus === 'loading' && authMode === 'session' && <tr><td colSpan="7" className="dim">Loading graphs…</td></tr>}
+                {graphsStatus === 'denied' && <tr><td colSpan="7" className="dim">Graph list is only visible to members.</td></tr>}
+                {graphsStatus === 'error' && <tr><td colSpan="7" className="dim">Couldn't load graphs — check your connection and try again.</td></tr>}
+                {graphsStatus === 'ok' && graphs.length === 0 && <tr><td colSpan="7" className="dim">No graphs yet — create your first one above.</td></tr>}
                 {graphsStatus === 'ok' && sortedGraphRows(graphs).map((g) => (
                   <tr key={g.graph_id} className={confirmDeleteId === g.graph_id ? 'graph-delete-arm' : undefined}>
                     <td>
@@ -10679,6 +10726,36 @@ function claimIntentInFlight() {
                       )}
                     </td>
                     <GraphBackupCell g={g} summary={graphBackups} status={backupsStatus} backupsEnabled={teamBackupsEnabled(team)} />
+                    {/* #2650: per-graph session-recording override. Owner/admin
+                        get the three-state control (on / off / inherit — the
+                        server's strict true|false|null body); every member
+                        sees the honest read-only value. The server 403s a
+                        non-owner write, so the control is gated by the same
+                        role the PATCH requires — the UI lock mirrors, never
+                        precedes, the API. The default graph is settable too
+                        (recording is per-graph, incl. graph 0). */}
+                    <td>
+                      {isOwnerAdmin ? (
+                        <select
+                          className="graph-recording-select"
+                          value={graphRecordingState(g)}
+                          data-recording-state={graphRecordingState(g)}
+                          aria-label={`Session recording for graph ${g.name || g.graph_id}`}
+                          onChange={(e) => setGraphRecording(g.graph_id, e.target.value)}
+                        >
+                          <option value="inherit">Inherit</option>
+                          <option value="on">On</option>
+                          <option value="off">Off</option>
+                        </select>
+                      ) : (
+                        <span
+                          className="dim small"
+                          title="Only owners and admins can change per-graph session recording."
+                        >
+                          {graphRecordingLabel(g)}
+                        </span>
+                      )}
+                    </td>
                     <td className="graph-actions">
                       {canManageGraphKeys(g) && (
                         <button
