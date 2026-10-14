@@ -2049,21 +2049,41 @@ surfaces:
   # diff takes `select()`'s early return, so `tier1` is where it must live;
   # `core` is its home for the code diffs that can re-rotate a passage.
   - test_extractor_v4_citation_rot.py
-  # #8495: the FOURTH guard over the same document — §4.4's per-step failure
+  # #8500: the FOURTH guard over the same document — the S4 divergence. The doc
+  # says *"There is no S4"*, the shipped pipeline runs one whenever a story
+  # exists, and the drift marker recording that (#8498) is PROSE: nothing failed
+  # when the code changed, so its behavioural claims were free to rot — and its
+  # citations had already moved by the time the marker landed (it cited
+  # `4c801fb18` figures the tree no longer had). #8506's citation-rot guard checks
+  # that a quoted SYMBOL exists; it checks no behavioural claim at all. This file
+  # resolves, with `ast`, the claims a lane would act on destructively: the
+  # `if story:` call gate (no flag gate), `TORTOISE_S4_DELTA` as the OUTPUT
+  # contract rather than an off switch, the consumed `merge_embed_lists` union
+  # (assigned AND still the value that reaches `result["embed_list"]`), and the
+  # three side-effect bypass paths on the route into `extract_session_v2` (the
+  # `sdk.py` v1/`summary=` arm is pinned as a ROUTING to the S4-less path, not
+  # just as a predicate) — plus the module docstring's
+  # `G5 record — the live S4 stage (#8500)`, the record the S4 call site names
+  # (before this change it named a record that did not exist). Same docs-only
+  # reason as the three guards above: a `docs/`-only diff takes `select()`'s early
+  # return, so `tier1` is where it must live; `core` is its home for the code
+  # diffs that can falsify a claim.
+  - test_extractor_v4_s4_stage_claims.py
+  # #8495: the FIFTH guard over the same document — §4.4's per-step failure
   # policy. Pins that every §4.0 canonical step keeps a declared direction, that
   # the three invariants and the re-narrate tie-break survive, and that `HOLD` is
-  # not silently added to `vet_gate.OUTCOMES`. Same docs-only reason as the three
+  # not silently added to `vet_gate.OUTCOMES`. Same docs-only reason as the
   # guards above: a `docs/`-only diff takes `select()`'s early return, so `tier1`
   # is where it must live; `core` is its home for the code diffs (a fixed
   # `_render_search_results`, or a new step) that can re-rot the passage.
   - test_extractor_v4_failure_policy.py
-  # #8496: the FOURTH guard over the same document — the G4 reconciliation
+  # #8496: the SIXTH guard over the same document — the G4 reconciliation
   # (append-only raw layer vs credential redaction). Pins the stated design
   # choice (R1–R4: redact BEFORE the append, retention-erasure for the
   # already-persisted case, `(scanned, total)` coverage, Postgres home) AND the
   # code ground it rests on (`redact_secrets` marker + idempotence, and
   # `_capture_turn_texts` storing the marker). Same docs-only reason as the
-  # three guards above: a `docs/`-only diff takes `select()`'s early return, so
+  # guards above: a `docs/`-only diff takes `select()`'s early return, so
   # `tier1` is where it must live; `core` is its home for the code diffs that
   # can revert the scrub the ruling assumes.
   - test_extractor_v4_redaction_reconciliation.py
@@ -3561,6 +3581,10 @@ tier1:
 # and the same docs-only PR is exactly the change that can re-introduce a
 # retracted passage.
 - test_extractor_v4_citation_rot.py
+# #8500: the same document's S4-divergence guard (`core` above) — same no-DB,
+# `ast`-only shape, and the same docs-only PR is exactly the change that can
+# falsify a claim it pins (or tidy the marker away).
+- test_extractor_v4_s4_stage_claims.py
 # #8495: the same document's per-step FAILURE-POLICY guard (`core` above) — same
 # no-DB shape, and the same docs-only PR is exactly the change that can drop or
 # contradict the declared policy.
@@ -4551,6 +4575,7 @@ durations:
   test_extractor_v4_step_list_consistency.py: 0.1  # #5092: two fenced blocks + one paragraph read; measured 0.01s of test body (session setup excluded)
   test_extractor_v4_doc_citations.py: 0.1  # #8498 review P2: one row + two module assertions; same no-DB shape as the step-list guard
   test_extractor_v4_citation_rot.py: 0.1  # #8506: doc-text scans + a handful of file reads; same no-DB shape as the two guards above
+  test_extractor_v4_s4_stage_claims.py: 0.1  # #8500: `ast` walks over two source files + doc-text scans; no DB, same shape as the three v4 guards above
   test_extractor_v4_failure_policy.py: 0.1  # #8495: §4.4 doc-text scan + two module reads; same no-DB shape as the three guards above
   test_extractor_v4_redaction_reconciliation.py: 0.3  # #8496: one section read + a marker/idempotence check; the `tortoise.sdk` import (~0.12s) is the only cost
   test_entity_attachment_brief_claims.py: 0.1  # #8639 review P1: doc-text scan + three regex block reads; same no-DB shape as the extractor-v4 guards above

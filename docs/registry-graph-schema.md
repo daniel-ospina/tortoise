@@ -101,14 +101,18 @@ as `graphs.deleted_at / purged_at / purged_residual` (migration
                      // team_<org_id>_<gid> — the graph SWITCHER/contexts
                      // ride this)
   status: string,    // "active" | "deleted" (tombstone; list filters)
-  recording: boolean?,  // C6 #2115 / #2302 session_recording override — true/false
-                     // = per-graph override; NULL = inherit the team default.
-                     // Writable via PATCH /v1/graphs/{graph_id} AND the
-                     // tortoise_graph_set_recording MCP tool (team:manage
-                     // scope / owner-admin); read-back in GET /v1/graphs.
-                     // The team default lives on onboarding_state.session_recording
-                     // (the #1927 flag) — a NULL override inherits it and a
-                     // per-graph override NEVER re-enables a team OFF.
+  recording: boolean?,  // C6 #2115 / #2302 / #2650 session_recording override —
+                     // true/false = per-graph override; NULL = inherit the
+                     // team default. Writable via PATCH /v1/graphs/{graph_id},
+                     // the tortoise_graph_set_recording MCP tool (both
+                     // team:manage scope / owner-admin), and the dashboard
+                     // Graphs tab's per-graph three-state control
+                     // (Inherit/On/Off — hidden behind the same owner/admin
+                     // render gate the PATCH enforces); read-back in
+                     // GET /v1/graphs. The team default lives on
+                     // onboarding_state.session_recording (the #1927 flag) —
+                     // a NULL override inherits it and a per-graph override
+                     // NEVER re-enables a team OFF.
   created_at: datetime
 })
 ```
