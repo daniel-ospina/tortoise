@@ -57,15 +57,33 @@ PIPELINE_OUTCOMES: tuple[str, ...] = ("won", "lost", "withdrawn", "completed")
 STAGE_ACTIVE = "active"
 STAGE_RETIRED = "retired"
 
-#: Object props the fold writes. One home so ``advance_stage`` and
-#: ``current_stage`` cannot drift.
+#: Object props the fold maintains. One home so ``advance_stage`` (the write)
+#: and ``current_stage`` (the read) cannot drift: ``current_stage`` builds its
+#: projection from this tuple, through ``_STAGE_READ_KEYS``.
 STAGE_PROPS: tuple[str, ...] = (
     "pipelineStageId", "pipelineSlot", "pipelineOutcome",
     "pipelineStageSince", "pipelineStageKey", "isClosed",
 )
+#: The public read key ``current_stage`` returns each ``STAGE_PROPS`` member
+#: under. The keys are the read contract; the props are the storage.
+_STAGE_READ_KEYS: dict[str, str] = {
+    "pipelineStageId": "stageId",
+    "pipelineSlot": "slot",
+    "pipelineOutcome": "outcome",
+    "pipelineStageSince": "since",
+    "pipelineStageKey": "pipelineKey",
+    "isClosed": "isClosed",
+}
 #: Raw (unrecognised) stage label parked on the Object for review — the
 #: open-world capture of indicator 4 (never dropped, never auto-adopted).
 PENDING_PROP = "pipelineStagePending"
+#: WHICH pipeline reported the pending label. A SEPARATE prop on purpose:
+#: ``pipelineStageKey`` names the pipeline of the Object's *current* stage, and
+#: overwriting it with the reporter's key is exactly what disarmed every guard
+#: (#2792 review, P1) — one stray unknown observation for another pipeline made
+#: ``cur_stage`` unresolvable, so terminal / regression / stale-time were all
+#: skipped. The pending pair is written and cleared together.
+PENDING_KEY_PROP = "pipelineStagePendingKey"
 
 _TERMINAL_SLOT = "terminal"
 
@@ -107,6 +125,7 @@ def validate_pipeline_decl(decl: Any) -> list[str]:
         errors.append("'pipeline.stages' must be a non-empty list")
         return errors
     ids: list[str] = []
+    labels: list[str] = []
     for i, stage in enumerate(stages):
         if not isinstance(stage, dict):
             errors.append(f"pipeline.stages[{i}] must be a map")
@@ -125,6 +144,14 @@ def validate_pipeline_decl(decl: Any) -> list[str]:
         label = stage.get("label")
         if not isinstance(label, str) or not label.strip():
             errors.append(f"pipeline.stages[{i}]: 'label' must be a non-empty string")
+        elif label.strip().casefold() in labels:
+            # A label is a stage *reference* (``Pipeline.resolve``), so two
+            # stages sharing one makes the reference ambiguous.
+            errors.append(
+                f"pipeline.stages[{i}]: duplicate stage label {label!r} "
+                "(a label is a stage reference, so it must be unique)")
+        else:
+            labels.append(label.strip().casefold())
         order = stage.get("order")
         if not isinstance(order, int) or isinstance(order, bool) or order < 0:
             errors.append(f"pipeline.stages[{i}]: 'order' must be an int >= 0")
@@ -206,7 +233,12 @@ class Pipeline:
         return None
 
     def resolve(self, ref: str) -> PipelineStage | None:
-        """Resolve a stage by id (exact) or label (case-insensitive)."""
+        """Resolve a stage by id (exact) or label (case-insensitive).
+
+        A label is a stage reference, so labels are unique within a pipeline
+        (enforced on declaration and by every mutator) and the first match is
+        the only match.
+        """
         if not isinstance(ref, str) or not ref.strip():
             return None
         probe = ref.strip()
@@ -229,7 +261,9 @@ class StageMove:
     """Outcome of one stage-transition attempt."""
 
     applied: bool
-    reason: str = ""               # "" | unknown-stage | regression-guard | terminal-guard
+    reason: str = ""               # "" | no-stage | unknown-stage |
+                                   # stale-transition | regression-guard |
+                                   # terminal-guard
     stage: PipelineStage | None = None
     pending: str | None = None     # raw label parked for review (unknown-stage)
 
@@ -264,7 +298,7 @@ def _read_override(graph, pipeline_key: str) -> Pipeline | None:
     srows = graph.query(
         "MATCH (s:PipelineStage {pipelineKey:$k}) "
         "RETURN s.stageId, s.label, s.order, s.slot, s.outcome, s.status, "
-        "s.retiredAt",
+        "s.retiredAt ORDER BY s.order, s.stageId",
         params={"k": pipeline_key}).result_set
     stages = [_row_to_stage({
         "stageId": r[0], "label": r[1], "order": r[2], "slot": r[3],
@@ -311,21 +345,27 @@ def list_stages(graph, pipeline_key: str, *, declared: dict | None = None,
 
 
 def current_stage(graph, object_ref: str) -> dict:
-    """The Object's current stage state (one answer, no chain-walking)."""
+    """The Object's current stage state (one answer, no chain-walking).
+
+    The projection is built from ``STAGE_PROPS``, so a prop the fold writes is
+    a prop this read returns — the two cannot drift.
+    """
+    cols = ", ".join(f"o.{p}" for p in STAGE_PROPS)
     rows = graph.query(
-        "MATCH (o:Object) WHERE o.name = $n OR o.id = $n "
-        "RETURN o.name, o.pipelineStageId, o.pipelineSlot, o.pipelineOutcome, "
-        "o.pipelineStageSince, o.isClosed, o.pipelineStagePending "
-        "LIMIT 1",
+        f"MATCH (o:Object) WHERE o.name = $n OR o.id = $n "
+        f"RETURN o.name, {cols}, o.{PENDING_PROP} LIMIT 1",
         params={"n": object_ref}).result_set
     if not rows:
         return {}
     r = rows[0]
-    return {
-        "name": r[0], "stageId": r[1], "slot": r[2], "outcome": r[3] or None,
-        "since": r[4], "isClosed": bool(r[5]) if r[5] is not None else False,
-        "pending": r[6],
-    }
+    out: dict[str, Any] = {"name": r[0]}
+    for i, prop in enumerate(STAGE_PROPS, start=1):
+        out[_STAGE_READ_KEYS[prop]] = r[i]
+    out["outcome"] = out["outcome"] or None
+    out["isClosed"] = (bool(out["isClosed"])
+                       if out["isClosed"] is not None else False)
+    out["pending"] = r[len(STAGE_PROPS) + 1]
+    return out
 
 
 def unknown_stage_candidates(graph, *, pipeline_key: str | None = None) -> list[dict]:
@@ -336,16 +376,19 @@ def unknown_stage_candidates(graph, *, pipeline_key: str | None = None) -> list[
     (journaled with the write) and surfaced here; it is NEVER auto-adopted.
     """
     if pipeline_key:
+        # The reporter's key is ``pipelineStagePendingKey`` — NOT
+        # ``pipelineStageKey``, which names the pipeline of the Object's
+        # *current* stage and stays untouched by a park (P1).
         rows = graph.query(
             "MATCH (o:Object) WHERE o.pipelineStagePending IS NOT NULL "
-            "AND o.pipelineStageKey = $k "
+            "AND o.pipelineStagePendingKey = $k "
             "RETURN o.name, o.pipelineStagePending, o.pipelineStagePendingAt",
             params={"k": pipeline_key}).result_set
     else:
         rows = graph.query(
             "MATCH (o:Object) WHERE o.pipelineStagePending IS NOT NULL "
             "RETURN o.name, o.pipelineStagePending, o.pipelineStagePendingAt, "
-            "o.pipelineStageKey").result_set
+            "o.pipelineStagePendingKey").result_set
     if pipeline_key:
         return [{"name": r[0], "rawLabel": r[1], "seenAt": r[2]}
                 for r in rows]
@@ -423,11 +466,39 @@ def seed_pipeline(graph, pipeline_key: str, declared: dict, *,
 
 def _require_override(graph, pipeline_key: str, declared: dict | None,
                       *, actor: str) -> Pipeline:
+    """The graph's override to edit.
+
+    An override already in the graph is editable WITHOUT the pack declaration:
+    the pack may be unloaded or renamed, and refusing then made every mutator
+    unusable on a graph that owned a perfectly editable pipeline — with a
+    message that misstated the reason. The declaration is only required to
+    CREATE an override (copy-on-write).
+    """
+    existing = _read_override(graph, pipeline_key)
+    if existing is not None:
+        return existing
     if declared is None:
         raise ValueError(
             f"no pipeline is declared for {pipeline_key!r} and the graph has "
             "no override — nothing to edit")
     return seed_pipeline(graph, pipeline_key, declared, actor=actor)
+
+
+def _label_owner(pipe: Pipeline, label: str, *,
+                 exclude_stage_id: str | None = None) -> PipelineStage | None:
+    """The stage already carrying ``label`` (case-insensitive), if any.
+
+    A label is a stage reference (``Pipeline.resolve``), so two stages sharing
+    one makes the reference ambiguous — and the winner used to depend on the
+    store's row order.
+    """
+    low = label.strip().casefold()
+    for s in pipe.stages:
+        if s.stage_id == exclude_stage_id:
+            continue
+        if s.label.strip().casefold() == low:
+            return s
+    return None
 
 
 def add_stage(graph, pipeline_key: str, *, stage_id: str, label: str,
@@ -449,6 +520,12 @@ def add_stage(graph, pipeline_key: str, *, stage_id: str, label: str,
     pipe = _require_override(graph, pipeline_key, declared, actor=actor)
     if pipe.by_id(stage_id) is not None:
         raise ValueError(f"stage id {stage_id!r} already exists in {pipeline_key!r}")
+    dup = _label_owner(pipe, label)
+    if dup is not None:
+        raise ValueError(
+            f"label {label!r} is already used by stage {dup.stage_id!r} in "
+            f"{pipeline_key!r}; a label is a stage reference, so it must be "
+            "unique")
     if order is None:
         order = max((s.order for s in pipe.stages), default=0) + 1
     stage = PipelineStage(stage_id=stage_id, label=label, order=order,
@@ -468,6 +545,12 @@ def rename_stage(graph, pipeline_key: str, stage_id: str, label: str, *,
     stage = pipe.by_id(stage_id) or pipe.resolve(stage_id)
     if stage is None:
         raise ValueError(f"unknown stage {stage_id!r} in {pipeline_key!r}")
+    dup = _label_owner(pipe, label, exclude_stage_id=stage.stage_id)
+    if dup is not None:
+        raise ValueError(
+            f"label {label!r} is already used by stage {dup.stage_id!r} in "
+            f"{pipeline_key!r}; a label is a stage reference, so it must be "
+            "unique")
     graph.query(
         "MATCH (s:PipelineStage {stageKey:$sk}) SET s.label=$label",
         params={"sk": _stage_key(pipeline_key, stage.stage_id), "label": label})
@@ -541,14 +624,14 @@ def _resolve_object(graph, ref: str) -> tuple[str, dict] | None:
     rows = graph.query(
         "MATCH (o:Object) WHERE o.name = $n OR o.id = $n "
         "RETURN o.id, o.name, o.pipelineStageId, o.pipelineSlot, "
-        "o.pipelineStageSince, o.pipelineStageKey LIMIT 1",
+        "o.pipelineStageSince, o.pipelineStageKey, o.objectKind LIMIT 1",
         params={"n": ref}).result_set
     if not rows:
         return None
     r = rows[0]
     return r[0] or r[1], {
         "name": r[1], "stageId": r[2], "slot": r[3], "since": r[4],
-        "pipelineKey": r[5]}
+        "pipelineKey": r[5], "objectKind": r[6]}
 
 
 def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
@@ -562,8 +645,14 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
     the history is the dated record sequence.
 
     Guards (the resurrection vector the design names):
+    - **kind binding** — the pipeline key must equal the Object's namespaced
+      ``objectKind`` (#2767), so no Object can be advanced through a pipeline
+      that is not its own.
+    - **no stage reported** — a non-string/empty ``stage_ref`` is a no-op (it
+      is absence, not an unrecognised label, so it is not parked).
     - **unknown stage** — not resolved by id or label → the raw label is parked
-      on ``pipelineStagePending`` for review and the state is NOT changed.
+      on ``pipelineStagePending`` for review and the current stage state is NOT
+      changed (``pipelineStageKey`` is left alone — see ``PENDING_KEY_PROP``).
     - **terminal guard** — a terminal Object is not reopened by a passing
       mention; only an explicit ``reopen=True`` to a non-terminal stage moves it.
     - **regression guard** — a backward move is recorded as history but not
@@ -579,6 +668,16 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
         raise ValueError(f"no Object named or identified by {object_ref!r}")
     oid, cur = resolved
 
+    # A pipeline keys on the NAMESPACED kind (#2767), so the Object's kind is
+    # the binding. Without it, any Object could be advanced through any
+    # pipeline, and a caller's wrong key was accepted silently — the vector
+    # that made the P1 resurrection reachable.
+    kind = cur.get("objectKind")
+    if kind and kind != pipeline_key:
+        raise ValueError(
+            f"pipeline {pipeline_key!r} does not apply to {object_ref!r}: its "
+            f"kind is {kind!r} (a pipeline keys on the namespaced kind)")
+
     pipe = effective_pipeline(graph, pipeline_key, declared=declared)
     if not pipe.stages:
         # A MISSING pipeline is a configuration error, distinct from an
@@ -587,21 +686,34 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
         raise ValueError(
             f"no pipeline is configured for {pipeline_key!r} — declare one in "
             "the pack or override one on this graph before advancing stages")
+    if not isinstance(stage_ref, str) or not stage_ref.strip():
+        # "No stage reported" is NOT an unrecognised label: coercing it with
+        # ``str()`` parked a review candidate literally named "None". The
+        # queue is only trustworthy if it holds labels a human could act on.
+        return StageMove(applied=False, reason="no-stage")
+
     target = pipe.resolve(stage_ref)
     if target is None or target.status != STAGE_ACTIVE:
         # Open-world capture: park the RAW reported label, never drop it and
-        # never auto-adopt it as a stage.
-        raw = str(stage_ref).strip()
-        if raw:
-            sdk.update_entity(oid, pipelineStagePending=raw,
-                              pipelineStagePendingAt=stage_ts,
-                              pipelineStageKey=pipeline_key)
-        return StageMove(applied=False, reason="unknown-stage", pending=raw or None)
+        # never auto-adopt it as a stage. The park writes ONLY the pending
+        # pair — ``pipelineStageKey`` stays the pipeline of the CURRENT stage,
+        # or the guards below could not be evaluated against it (P1).
+        raw = stage_ref.strip()
+        sdk.update_entity(oid, pipelineStagePending=raw,
+                          pipelineStagePendingAt=stage_ts,
+                          pipelineStagePendingKey=pipeline_key)
+        return StageMove(applied=False, reason="unknown-stage", pending=raw)
 
+    cur_key = cur.get("pipelineKey")
+    if cur.get("stageId") and cur_key and cur_key != pipeline_key:
+        # Reached only for an Object whose kind could not bind it: a stage id
+        # from another pipeline must not be read as this one's current stage,
+        # and silently skipping the guards is the resurrection vector.
+        raise ValueError(
+            f"{object_ref!r} is currently on pipeline {cur_key!r}, not "
+            f"{pipeline_key!r}; a cross-pipeline move cannot be guarded")
     cur_stage = None
-    if cur.get("stageId") and cur.get("pipelineKey") == pipeline_key:
-        # Only the SAME pipeline's current stage can gate a move; a stage id
-        # from another pipeline must not be read as this one's current stage.
+    if cur.get("stageId") and cur_key == pipeline_key:
         cur_stage = pipe.by_id(cur["stageId"])
     if cur_stage is not None and not correction:
         # Valid-time ordering (the CRM bitemporal shape): a meeting held in
@@ -624,6 +736,7 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
         "pipelineStageKey": pipeline_key,
         "isClosed": target.is_terminal,
         PENDING_PROP: None,
+        PENDING_KEY_PROP: None,
         "pipelineStagePendingAt": None,
     }
     if source:

@@ -110,6 +110,14 @@ class TestDeclarationValidation:
         errs = P.validate_pipeline_decl({"stages": DECL["stages"], "extra": 1})
         assert any("unknown key" in e for e in errs)
 
+    def test_duplicate_labels_are_refused_in_a_declaration(self):
+        bad = {"stages": [
+            {"id": "a", "label": "Alpha", "order": 1, "slot": "entry"},
+            {"id": "b", "label": "alpha", "order": 2, "slot": "active"},
+        ]}
+        errs = P.validate_pipeline_decl(bad)
+        assert any("duplicate stage label" in e for e in errs), errs
+
 
 class TestPackManifestIntegration:
     def test_pipeline_key_is_accepted_by_kinddef_validation(self):
@@ -255,6 +263,52 @@ class TestEffectivePipeline:
         finally:
             sdk.close()
 
+    def test_a_graph_override_is_editable_without_the_pack_declaration(
+            self, tmp_path):
+        """An override the graph already owns is editable even when the pack
+        cannot be resolved (unloaded/renamed) — only CREATING one needs the
+        declaration. Pre-fix every mutator refused, misstating the reason."""
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            P.seed_pipeline(g, KEY, DECL)
+            P.rename_stage(g, KEY, "stg_discussion", "Diligence", declared=None)
+            assert [s.label for s in P.list_stages(g, KEY, declared=None)] == [
+                "Contact", "Diligence", "Won"]
+            P.add_stage(g, KEY, stage_id="stg_x", label="X", slot="active",
+                        declared=None)
+            assert [s.stage_id for s in P.list_stages(g, KEY, declared=None)] == [
+                "stg_contact", "stg_discussion", "stg_won", "stg_x"]
+        finally:
+            sdk.close()
+
+    def test_editing_a_pipeline_that_neither_declares_nor_overrides_is_refused(
+            self, tmp_path):
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            with pytest.raises(ValueError, match="nothing to edit"):
+                P.rename_stage(g, "venture:none", "stg_x", "Y", declared=None)
+        finally:
+            sdk.close()
+
+    def test_override_stages_are_read_in_declared_order_not_row_order(
+            self, tmp_path):
+        """``_read_override`` orders its rows, so the read is deterministic
+        and a resolver cannot depend on the store's row yield order."""
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            P.seed_pipeline(g, KEY, DECL)
+            P.reorder_stages(g, KEY,
+                             ["stg_won", "stg_discussion", "stg_contact"],
+                             declared=DECL)
+            assert [s.stage_id for s in
+                    P.effective_pipeline(g, KEY, declared=DECL).stages] == [
+                        "stg_won", "stg_discussion", "stg_contact"]
+        finally:
+            sdk.close()
+
 
 # ── Movement: advance → current-stage read, history retained ──────────────
 
@@ -322,6 +376,37 @@ class TestStageAdvance:
             fixed = P.advance_stage(sdk, "deal-stale", KEY, "stg_contact",
                                     at="2026-09-01", correction=True, declared=DECL)
             assert fixed.applied
+        finally:
+            sdk.close()
+
+    def test_pipeline_key_must_match_the_objects_namespaced_kind(self, tmp_path):
+        """A pipeline keys on the namespaced kind (#2767), so no Object can be
+        advanced through a pipeline that is not its own."""
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("client-x", objectKind="core:client")
+            with pytest.raises(ValueError, match="does not apply"):
+                P.advance_stage(sdk, "client-x", KEY, "stg_won", declared=DECL)
+            assert P.current_stage(g, "client-x")["stageId"] is None
+        finally:
+            sdk.close()
+
+    def test_a_null_stage_reference_is_a_no_op_not_a_candidate_named_none(
+            self, tmp_path):
+        """An absent stage reference is not an unrecognised LABEL: it must not
+        park a review candidate literally named ``None``."""
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("deal-null", objectKind=KEY)
+            for absent in (None, "", "   ", 7):
+                move = P.advance_stage(sdk, "deal-null", KEY, absent,
+                                       declared=DECL)
+                assert not move.applied and move.reason == "no-stage"
+                assert move.pending is None
+            assert P.unknown_stage_candidates(g, pipeline_key=KEY) == []
+            assert P.current_stage(g, "deal-null")["stageId"] is None
         finally:
             sdk.close()
 
@@ -426,6 +511,109 @@ class TestTerminalAndUnknown:
                             at="2026-09-07", declared=DECL)
             assert P.unknown_stage_candidates(g, pipeline_key=KEY) == []
             assert P.current_stage(g, "deal-clear")["pending"] is None
+        finally:
+            sdk.close()
+
+
+# ── Guard integrity (the P1 resurrection vector) ──────────────────────────
+
+
+class TestGuardIntegrity:
+    def test_stray_unknown_for_another_pipeline_cannot_disarm_the_guards(
+            self, tmp_path):
+        """The park must not rewrite the Object's ``pipelineStageKey``.
+
+        Pre-fix, one unknown-label observation carrying a different pipeline
+        key overwrote the Object's real key, so every later call for the
+        Object's real pipeline saw no current stage and skipped the terminal /
+        regression / stale-time guards — a closed Object was resurrected.
+        """
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("deal-arm", objectKind=KEY)
+            P.advance_stage(sdk, "deal-arm", KEY, "stg_won",
+                            at="2026-09-04", declared=DECL)
+            other_key = "venture:invest"
+            # The stray observation is refused (kind binding) ...
+            with pytest.raises(ValueError, match="does not apply"):
+                P.advance_stage(sdk, "deal-arm", other_key, "some other stage",
+                                at="2026-09-05", declared=DECL)
+            # ... and the guards still fire for the Object's real pipeline.
+            move = P.advance_stage(sdk, "deal-arm", KEY, "stg_contact",
+                                   at="2026-10-01", declared=DECL)
+            assert not move.applied and move.reason == "terminal-guard"
+            cur = P.current_stage(g, "deal-arm")
+            assert cur["stageId"] == "stg_won" and cur["isClosed"] is True
+            assert cur["pipelineKey"] == KEY
+        finally:
+            sdk.close()
+
+    def test_a_park_reports_the_label_without_touching_the_pipeline_key(
+            self, tmp_path):
+        """The park's write is the pending PAIR only — pinned directly, since
+        with kind binding active the different-key call above is refused and
+        this rewrite is the residual vector."""
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("deal-park", objectKind=KEY)
+            calls: list[dict] = []
+            real = sdk.update_entity
+
+            def _spy(oid, **kw):
+                calls.append(kw)
+                return real(oid, **kw)
+
+            sdk.update_entity = _spy
+            P.advance_stage(sdk, "deal-park", KEY, "vendor diligence",
+                            at="2026-09-06", declared=DECL)
+            assert calls, "the park must journal through the generic write"
+            assert "pipelineStageKey" not in calls[0]
+            assert calls[0]["pipelineStagePendingKey"] == KEY
+            assert calls[0]["pipelineStagePending"] == "vendor diligence"
+            assert P.unknown_stage_candidates(g, pipeline_key=KEY)[0][
+                "rawLabel"] == "vendor diligence"
+        finally:
+            sdk.close()
+
+    def test_duplicate_labels_are_refused_so_a_label_resolves_to_one_stage(
+            self, tmp_path):
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            P.seed_pipeline(g, KEY, DECL)
+            with pytest.raises(ValueError, match="already used"):
+                P.rename_stage(g, KEY, "stg_won", "Discussion", declared=DECL)
+            with pytest.raises(ValueError, match="already used"):
+                P.add_stage(g, KEY, stage_id="stg_dup", label="discussion",
+                            slot="active", declared=DECL)
+            assert P.effective_pipeline(g, KEY, declared=DECL).resolve(
+                "Discussion").stage_id == "stg_discussion"
+        finally:
+            sdk.close()
+
+    def test_current_stage_reads_every_prop_the_fold_maintains(self, tmp_path):
+        """``STAGE_PROPS`` is load-bearing: the read covers the write."""
+        assert set(P.STAGE_PROPS) == set(P._STAGE_READ_KEYS)
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("deal-props", objectKind=KEY)
+            written: dict = {}
+            real = sdk.update_entity
+
+            def _spy(oid, **kw):
+                written.update(kw)
+                return real(oid, **kw)
+
+            sdk.update_entity = _spy
+            P.advance_stage(sdk, "deal-props", KEY, "stg_discussion",
+                            declared=DECL)
+            cur = P.current_stage(g, "deal-props")
+            for prop, key in P._STAGE_READ_KEYS.items():
+                assert prop in written, f"the write omits {prop}"
+                assert key in cur, f"the read omits {key}"
         finally:
             sdk.close()
 

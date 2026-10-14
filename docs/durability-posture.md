@@ -121,7 +121,7 @@ build whose read set excludes it refuses on a retired file until it is deleted.
 | `:PackInstall` | `namespace` |
 | `:PackManifest` | `namespace` |
 | `:Pipeline` | `pipelineKey` |
-| `:PipelineStage` | `stageKey` (composite `pipelineKey|stageId` — the declared `stageId` is pack-local, so two pipelines may share one) |
+| `:PipelineStage` | `stageKey` (composite `pipelineKey\|stageId` — the declared `stageId` is pack-local, so two pipelines may share one) |
 | `:Meta{key:'calibration_milestone'}` | `key` |
 | `:Meta{key:'config_reset'}` | `key` |
 | `:Meta{key:'residency'}` | `key` |
