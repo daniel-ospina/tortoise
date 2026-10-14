@@ -1,0 +1,7 @@
+=== read-frequency instruments in tortoise/ ===
+tortoise/hosted_api.py:2497:    work item on the queue BEFORE ``_adjust_thread_count()`` can raise "can't
+tortoise/hosted_api.py:2545:    submit`` puts the work item on the queue BEFORE ``_adjust_thread_count()``
+(exit=0)
+
+=== query/access log tables in migrations ===
+(exit=1)

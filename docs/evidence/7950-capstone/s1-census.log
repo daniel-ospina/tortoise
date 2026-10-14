@@ -1,0 +1,5 @@
+population: tortoise/**/*.py
+mutating `.query(` sites: 442  files: 38
+first-verb tally: {'SET': 172, 'MERGE': 129, 'CREATE': 56, 'DETACH DELETE': 44, 'DELETE': 29, 'REMOVE': 12}
+raw-handle sites (`.g.query` / `.g._g.query`): 288 of 442
+raw-handle mutating sites (independent regex): 283 files: 23
