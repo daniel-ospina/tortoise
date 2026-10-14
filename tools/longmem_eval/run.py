@@ -6120,8 +6120,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rerank-pool", type=_positive_int, default=None,
                    help="rerank pool depth (env TORTOISE_LME_RERANK_POOL; "
                         "default 40; honored with rerank OFF too — the "
-                        "pool-only isolation arm, OQ5; >= 1; the effective "
-                        "applied pool is max(pool, max(k)))")
+                        "pool-only isolation arm, OQ5; >= 1; with rerank ON "
+                        "the applied pool is max(pool, baseline, max(k)) "
+                        "with baseline = max(TORTOISE_LME_POOL_SIZE, 120) — "
+                        "the knob can only RAISE the depth; the rerank-OFF "
+                        "pool-only arm is max(pool, max(k)))")
     p.add_argument("--rerank-cap", type=_positive_int, default=None,
                    help="per-session MMR cap (env TORTOISE_LME_RERANK_CAP; "
                         "default 2; >= 1; E2E-10 caps per-session context "

@@ -32,6 +32,7 @@ from tools.longmem_eval.retrieve import (  # noqa: E402, RUF100
 from tools.longmem_eval.run import (  # noqa: E402, RUF100
     CheckpointStaleError,
     _build_fingerprint,  # noqa: E402, RUF100
+    _build_parser,
     _resolve_rerank,
     run_evaluation,
     run_main,
@@ -874,6 +875,39 @@ def test_runner_env_hermeticity(tmp_path, monkeypatch):
         assert ret["rerank_pass"]["applied"] is True
     finally:
         sdk.close()
+
+
+def test_rerank_pool_user_docs_state_the_floored_applied_pool():
+    """#2992 defect 1 (docs-staleness P2): the user-facing descriptions of the
+    rerank-pool knob must state the SAME resolution the code applies.
+
+    Pre-fix these three surfaces advertised the retracted formula
+    ``max(pool, max(k))``, so with ``--rerank`` and no ``--rerank-pool`` a lane
+    was told the applied pool was 40 while ``retrieve_for_question`` fetched
+    ``DEFAULT_POOL_SIZE`` = 120. The knob is a raise-only FLOOR now; every
+    description must say so, and keep the rerank-OFF pool-only arm distinct.
+    """
+    readme = (Path(__file__).resolve().parent.parent
+              / "tools" / "longmem_eval" / "README.md").read_text(
+                  encoding="utf-8")
+    help_text = _build_parser().format_help()
+    floored = "max(pool, baseline, max(k))"
+    # (1) CLI help text
+    assert "--rerank-pool" in help_text
+    assert floored in help_text, (
+        "CLI --rerank-pool help still advertises the retracted formula")
+    # (2) README env-knob table row
+    rows = [ln for ln in readme.splitlines()
+            if ln.startswith("| `TORTOISE_LME_RERANK_POOL`")]
+    assert len(rows) == 1
+    assert floored in rows[0]
+    # (3) README R6 stage prose
+    r6 = readme.split("Optional R6 post-fusion stage", 1)[1][:800]
+    assert floored in r6
+    # the raise-only direction is named on both surfaces (the fix's intent:
+    # the knob can no longer LOWER the depth below the baseline)
+    assert "can only RAISE" in help_text
+    assert "can only RAISE" in readme
 
 
 # ── Task 5: aggregation + checkpoint (three-valued D9) ─────────────────────
