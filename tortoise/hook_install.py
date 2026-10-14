@@ -1765,7 +1765,11 @@ def _invokes_script(command: str, script_name: str,
     (``command -- -p <hook>`` executes ``-p``); and any other option is a usage
     error that executes nothing.  A query's exit status makes a following
     ``&&`` (runs when it succeeds) or ``||`` (runs when it fails) conditional,
-    with ``!`` inverting the two.
+    with ``!`` inverting the two.  That status is a property of the query's
+    OPERAND, so it is decided there: the conditional RHS is ours only when the
+    operand resolves to our installed hook (which is what makes ``command -v``
+    succeed) and the operator is the one that then runs; an operand whose
+    resolution cannot be proved leaves the whole AND-OR list foreign.
 
     A BARE filename is rejected because it resolves to the project root, and an
     absolute path is accepted only when it resolves to THIS project's hook.  A
@@ -1802,6 +1806,16 @@ def _invokes_script(command: str, script_name: str,
     # status makes a following ``&&`` (runs when it succeeds) or ``||`` (runs when
     # it fails) CONDITIONAL.  ``None`` until a query is recognised.
     query: str | None = None  # "plain" | "negated"
+    # The query's exit status is a property of its OPERAND, not of the operator,
+    # so the operand is classified too.  ``query_operand_pending`` marks the
+    # single token that IS that operand, and ``query_list_status`` then carries
+    # the status of the current AND-OR list: ``None`` while the list holds no
+    # query (a plain ``&&``/``||`` list keeps its pre-existing unconditional
+    # re-arm), ``"success"``/``"failure"`` when the query's operand PROVES it,
+    # and ``"unknown"`` when it cannot be proved.  A conditional RHS that
+    # actually RUNS has an unknowable status, so it resets the list to unknown.
+    query_operand_pending = False
+    query_list_status: str | None = None
     for tok, quoted, lead_single in tokens:
         if heredoc is not None:
             if tok == heredoc:
@@ -1810,16 +1824,41 @@ def _invokes_script(command: str, script_name: str,
         if not quoted and (tok in _SEPARATORS or tok in _GROUP
                            or tok == "`"):
             # A QUERY's exit status makes ``&&``/``||`` conditional: ``command -v
-            # <hook> && <hook>`` runs the second (the query SUCCEEDS for a hook
-            # that exists) while ``command -v <hook> || <hook>`` runs NOTHING
-            # (bash never reaches the RHS).  ``!`` inverts both.  Re-arming
-            # executable position unconditionally judged that dead RHS ours — a
-            # fail-open — so the run/skip decision is keyed to which side actually
-            # executes.  ``;``/``|``/``&`` and a group/substitution boundary are
+            # <hook> && <hook>`` runs the second (the query SUCCEEDS for the hook
+            # it names) while ``command -v <hook> || <hook>`` runs NOTHING (bash
+            # never reaches the RHS).  ``!`` inverts both.  Re-arming executable
+            # position unconditionally judged that dead RHS ours — a fail-open —
+            # so the run/skip decision is keyed to which side actually executes.
+            # ``;``/``|``/``&`` and a group/substitution boundary are
             # unconditional and always re-arm.
-            run_rhs = (query is None or tok not in _SEPARATORS
-                       or tok in (";", "|", "&")
-                       or (tok == "&&") == (query == "plain"))
+            #
+            # The query's exit status belongs to its OPERAND, never to the
+            # operator: ``command -v <pathname>`` succeeds because the file
+            # exists and is executable, while ``command -v nosuchtool`` FAILS,
+            # so that ``&&`` RHS never runs.  Reading success out of the operator
+            # alone judged ``command -v nosuchtool && <hook>`` ours — the same
+            # silent no-capture.  Only an operand that resolves to OUR installed
+            # hook PROVES success (``query_list_status == "success"``); any other
+            # operand is unknowable, and an unknown status keeps EVERY
+            # conditional RHS of the AND-OR list foreign (fail closed — a false
+            # "missing" only appends a duplicate registration).
+            conditional = tok in ("&&", "||")
+            if not conditional:
+                run_rhs = True
+                query_list_status = None
+            elif query_list_status is None:
+                # No query in this AND-OR list: a plain ``&&``/``||`` keeps its
+                # pre-existing unconditional re-arm.
+                run_rhs = True
+            elif query_list_status == "unknown":
+                run_rhs = False
+            else:
+                run_rhs = ((tok == "&&")
+                           == (query_list_status == "success"))
+            if query_list_status is not None and conditional and run_rhs:
+                # The RHS ran, but ITS exit status is not known, so the list's
+                # own status is no longer provable.
+                query_list_status = "unknown"
             expect_cmd = run_rhs
             skip_next = False
             skip_operand = False
@@ -1827,6 +1866,7 @@ def _invokes_script(command: str, script_name: str,
             launcher_word = None
             builtin_reachable = True
             query = None
+            query_operand_pending = False
             continue
         if tok.startswith("<<") and not tok.startswith("<<<"):
             heredoc = tok[2:].lstrip("-")
@@ -1840,6 +1880,19 @@ def _invokes_script(command: str, script_name: str,
             continue
         if skip_operand:
             skip_operand = False
+            continue
+        if query_operand_pending:
+            # The token after a recognised ``command -v``/``-V`` flag is its
+            # OPERAND.  ``command -v`` succeeds for a pathname that exists and is
+            # executable — which is exactly the case where the operand is OUR
+            # installed hook — and fails for a name it cannot resolve.  Only the
+            # former is provable here; any other operand leaves the status
+            # unknowable, and a conditional RHS behind it is judged foreign.
+            query_operand_pending = False
+            if _token_is_our_script(tok, script_name, hooks_dir, root,
+                                    lead_single=lead_single):
+                query_list_status = ("failure" if query == "negated"
+                                     else "success")
             continue
         if not expect_cmd:
             continue
@@ -1907,6 +1960,8 @@ def _invokes_script(command: str, script_name: str,
                     expect_cmd = False
                     launcher_word = None
                     query = "negated" if command_negated else "plain"
+                    query_operand_pending = True
+                    query_list_status = "unknown"
                     continue
                 # An all-``p`` cluster (``-p``, ``-pp``, ``-ppp``) is BOOLEAN:
                 # the command word still follows.

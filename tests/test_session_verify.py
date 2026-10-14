@@ -372,9 +372,12 @@ def _hook_byte_sources(harness: str, root: Path, command: str) -> list[Path]:
 
     The file a registered command names is resolved through the installer's
     OWN classifier — ``hook_install._invokes_script``, the same predicate
-    ``detect_install``/``registered_commands`` use.  A token the classifier
-    matched by its ``$VAR`` suffix form is NOT resolvable here, so it
-    contributes no source either.
+    ``detect_install``/``registered_commands`` use.  A ``$VAR``-prefixed token
+    still contributes no source: this helper does not expand variables, so it
+    cannot name the file a shell would run.  The classifier DOES resolve
+    ``$PWD``/``$CLAUDE_PROJECT_DIR`` to ``root`` (any other variable is
+    rejected), so such a hit is knowingly not contributed here rather than
+    unclassifiable.
     """
     import tortoise.hook_install as hook_install
 

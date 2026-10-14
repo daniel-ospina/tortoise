@@ -2248,6 +2248,18 @@ class TestDeclaredThreatSurface:
         # Unconditional separators always re-arm (the case this PR fixed).
         ("command -v {rel}; {rel}", True),
         ("command -v {rel} | {rel}", True),
+        # The query's exit status belongs to its OPERAND, not to the operator:
+        # a name it cannot resolve makes the query FAIL, so the ``&&`` RHS of
+        # these NEVER runs.  Reading success out of the operator alone judged
+        # the dead RHS ours — a silent no-capture (`upgrade_install` leaves the
+        # installation current while bash captures nothing).
+        ("command -v nosuchtool12345 && {rel}", False),
+        ("command -V nosuchtool12345 && {rel}", False),
+        ("! command -v nosuchtool12345 || {rel}", False),
+        # The RHS a conditional DID run has an unknowable status of its own, so
+        # the list's status is no longer provable and the following ``||`` must
+        # not be read as reaching the hook.
+        ("command -v {rel} && true || {rel}", False),
     ])
     def test_query_conditional_rhs_matches_bash_ground_truth(
             self, tmp_path, command, executes):
@@ -2263,12 +2275,22 @@ class TestDeclaredThreatSurface:
         ``False`` for this line (the old hard stop), so the new block
         introduced it.
 
+        The status is a property of the query's OPERAND, never of the operator.
+        ``command -v nosuchtool && <hook>`` was judged ours because the query
+        was ASSUMED to succeed; bash fails the query and runs nothing.  Only an
+        operand that resolves to OUR installed hook proves success, so the
+        operand is classified and any unprovable status keeps the whole AND-OR
+        list foreign (fail closed — a false "missing" only appends a duplicate
+        registration).
+
         Ground-truthed by EXECUTING the form (the hook touches a marker).
 
-        MUTATION: re-arm unconditionally at every separator (drop the
-        ``run_rhs`` computation) → the ``||`` and ``! … &&`` params turn ours →
-        RED; never re-arming at ``&&`` likewise REDs the ``&&`` / ``! … ||``
-        params.
+        MUTATION: assume the query succeeds from the operator alone (drop the
+        operand classification) → the ``nosuchtool &&`` params and the
+        ``&& true ||`` chain turn ours → RED; re-arm unconditionally at every
+        separator (drop the ``run_rhs`` computation) → the ``||`` and
+        ``! … &&`` params turn ours → RED; never re-arming at ``&&`` likewise
+        REDs the ``&&`` / ``! … ||`` params.
         """
         rel = ".claude/hooks/session-end.sh"
         root = tmp_path / "project"
