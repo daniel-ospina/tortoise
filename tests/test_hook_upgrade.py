@@ -2260,6 +2260,23 @@ class TestDeclaredThreatSurface:
         # the list's status is no longer provable and the following ``||`` must
         # not be read as reaching the hook.
         ("command -v {rel} && true || {rel}", False),
+        # The DEAD-RHS state must survive a BOUNDARY.  The skipped RHS can be a
+        # group (``(`` / ``{`` / command substitution / backtick) or continue
+        # after a newline; re-arming at the opener discarded the dead state and
+        # read the WHOLE group as executed — bash never entered it, so the entry
+        # is dead while the matcher said ours (a silent no-capture).
+        ("command -v nosuchtool12345 && ( {rel} )", False),
+        ("command -v nosuchtool12345 && {{ {rel}; }}", False),
+        ("command -v nosuchtool12345 && $({rel})", False),
+        ("command -v nosuchtool12345 && `{rel}`", False),
+        # A dead group stays dead INSIDE: an internal ``;`` is unconditional in a
+        # group that RUNS, but this one never runs.
+        ("command -v nosuchtool12345 && ( nosuchtool12345 ; {rel} )", False),
+        ("command -v {rel} || ( {rel} )", False),
+        ("! command -v {rel} && ( {rel} )", False),
+        # A newline after ``&&`` CONTINUES the list (it is not a ``;``): the
+        # second command is the conditional RHS, which the failing query skips.
+        ("command -v nosuchtool12345 &&\n{rel}", False),
     ])
     def test_query_conditional_rhs_matches_bash_ground_truth(
             self, tmp_path, command, executes):
@@ -2283,14 +2300,22 @@ class TestDeclaredThreatSurface:
         list foreign (fail closed — a false "missing" only appends a duplicate
         registration).
 
+        That dead state must also SURVIVE a boundary: ``&& ( <hook> )`` skips
+        the group, so a group opener inherits the current execution state (and a
+        closer restores the enclosing one) instead of resetting to executable,
+        and an unquoted newline after ``&&`` continues the list rather than
+        separating it.
+
         Ground-truthed by EXECUTING the form (the hook touches a marker).
 
         MUTATION: assume the query succeeds from the operator alone (drop the
         operand classification) → the ``nosuchtool &&`` params and the
         ``&& true ||`` chain turn ours → RED; re-arm unconditionally at every
         separator (drop the ``run_rhs`` computation) → the ``||`` and
-        ``! … &&`` params turn ours → RED; never re-arming at ``&&`` likewise
-        REDs the ``&&`` / ``! … ||`` params.
+        ``! … &&`` params turn ours → RED; reset the execution state at a group
+        opener (drop the ``dead_groups`` inheritance) → the group/newline params
+        turn ours → RED; never re-arming at ``&&`` likewise REDs the ``&&`` /
+        ``! … ||`` params.
         """
         rel = ".claude/hooks/session-end.sh"
         root = tmp_path / "project"
@@ -2381,7 +2406,7 @@ class TestDeclaredThreatSurface:
 
         Ground-truthed by EXECUTING each form.
 
-        MUTATION: drop ``lead_single`` from the token (or ignore it in
+        MUTATION: drop ``lead_literal`` from the token (or ignore it in
         :func:`_token_is_our_script`) → the single-quoted params are judged
         ours → RED.
         """
@@ -2403,6 +2428,112 @@ class TestDeclaredThreatSurface:
             f"(stderr={completed.stderr!r})")
         assert hook_install._invokes_script(
             command, "session-end.sh", ".claude/hooks", root) is executes
+
+    @pytest.mark.parametrize("command,executes", [
+        ('"\\$PWD/{rel}"', False),   # escaped inside double quotes: LITERAL
+        ("\\$PWD/{rel}", False),     # unquoted escape: pin (see docstring)
+        ('"$PWD/{rel}"', True),      # unescaped double quotes: expands
+        ("$PWD/{rel}", True),        # unescaped bare: expands
+    ])
+    def test_escaped_dollar_var_path_is_literal(self, tmp_path, command,
+                                                executes):
+        """An escaped ``$`` inside DOUBLE quotes is literal to bash:
+        ``"\\$PWD/.claude/hooks/session-end.sh"`` is the literal filename
+        ``$PWD/…`` (no expansion), so bash runs nothing — but the matcher
+        stripped the backslash in ``_split_command`` and resolved the ``$VAR``,
+        judging the dead entry ours.
+
+        This is the same axis as the single-quote spelling (bash expands the
+        ``$`` or it does not), so a leading escaped ``$`` marks the token's
+        ``$`` as literal rather than merely carrying the quote kind.
+        Ground-truthed by EXECUTING each form.
+
+        The UNQUOTED escape param is a regression pin, not signal: the splitter
+        already emits the unquoted backslash as its own token (which consumes
+        executable position), so it is fail-closed before and after this fix.
+
+        MUTATION: drop the escaped-``$`` literal flag from ``_split_command``
+        (or ignore ``lead_literal`` in :func:`_token_is_our_script`) → the
+        double-quoted escaped param is judged ours → RED.
+        """
+        rel = ".claude/hooks/session-end.sh"
+        root = tmp_path / "project"
+        hook = root / Path(rel)
+        hook.parent.mkdir(parents=True)
+        marker = root / "MARKER"
+        hook.write_text(f"#!/bin/bash\ntouch {shlex.quote(str(marker))}\n")
+        hook.chmod(0o755)
+        command = command.format(rel=rel)
+        env = dict(os.environ)
+        env["CLAUDE_PROJECT_DIR"] = str(root)
+        completed = subprocess.run(
+            ["bash", "-c", command], capture_output=True, text=True,
+            timeout=30, cwd=str(root), env=env)
+        assert marker.exists() is executes, (
+            f"ground truth changed: {command!r} did not behave as expected "
+            f"(stderr={completed.stderr!r})")
+        assert hook_install._invokes_script(
+            command, "session-end.sh", ".claude/hooks", root) is executes
+
+    @pytest.mark.parametrize("command,executes", [
+        # ``command`` has NO argument-taking option: an invalid one is a USAGE
+        # ERROR that aborts the simple command (exit 2), so a following ``&&``
+        # is skipped while ``||`` runs.
+        ("command -o X {rel} && {rel}", False),
+        ("command -p -o X {rel} && {rel}", False),
+        ("command -P X {rel} && {rel}", False),
+        ("command - -v {rel} && {rel}", False),
+        ("command -o X {rel} || {rel}", True),
+        ("command -o X {rel}; {rel}", True),
+        # The isolated form stays dead (the abort itself).
+        ("command -o X {rel}", False),
+        ("command -p -o X {rel}", False),
+    ])
+    def test_command_usage_error_status_matches_bash_ground_truth(
+            self, tmp_path, command, executes):
+        """A ``command`` usage error is an EXIT STATUS, not just a dead word: a
+        following ``&&`` RHS is skipped and a ``||`` RHS runs.  The new
+        invalid-option arm modelled the abort but not its status, so
+        ``command -o X <hook> && <hook>`` re-armed unconditionally and read the
+        dead RHS as ours — the silent no-capture this module exists to prevent.
+        The usage error now records a PROVEN list failure, so ``&&`` is skipped
+        and ``||`` still runs.
+
+        Ground-truthed by EXECUTING each form (the hook touches a marker).
+
+        MUTATION: drop ``list_status = "failure"`` from the invalid-option arm →
+        the four ``&&`` params turn ours → RED (the ``||`` and ``;`` params are
+        regression pins: they agree with bash before and after).
+        """
+        rel = ".claude/hooks/session-end.sh"
+        root = tmp_path / "project"
+        hook = root / Path(rel)
+        hook.parent.mkdir(parents=True)
+        marker = root / "MARKER"
+        hook.write_text(f"#!/bin/bash\ntouch {shlex.quote(str(marker))}\n")
+        hook.chmod(0o755)
+        command = command.format(rel=rel)
+        completed = subprocess.run(
+            ["bash", "-c", command], capture_output=True, text=True,
+            timeout=30, cwd=str(root))
+        assert marker.exists() is executes, (
+            f"ground truth changed: {command!r} did not behave as expected "
+            f"(stderr={completed.stderr!r})")
+        assert hook_install._invokes_script(
+            command, "session-end.sh", ".claude/hooks", root) is executes
+
+        if executes:
+            return
+        # The observable consequence: the dead entry is reported missing and a
+        # REAL registration is appended instead of the install reading current.
+        doc = {"hooks": {"SessionEnd": [{"matcher": "", "hooks": [
+            {"type": "command", "command": command, "timeout": 60}]}]}}
+        installed = _old_install(tmp_path, settings=doc)
+        assert any(
+            f.kind == "missing-hook-entry" and f.script == "session-end.sh"
+            for f in detect_install(installed))
+        upgrade_install(installed)
+        assert len(_settings(installed)["hooks"]["SessionEnd"]) == 2
 
     @pytest.mark.parametrize("command", [
         "/bin/bash {abs}",
