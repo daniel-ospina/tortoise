@@ -278,6 +278,16 @@ routes:
   - method: POST
     path: /v1/internal/reconcile
     class: control-plane
+  # #3839 (lane B7): the retention indicator over the WHOLE fleet, behind
+  # `_check_internal` (FASTAPI_INTERNAL_KEY). Control-plane because the
+  # denominator IS the fleet — it enumerates every ENUMERABLE org (live OR
+  # soft-deleted/churned: churned teams are IN the denominator, and a
+  # `deleted_at IS NULL` filter would bias the rate upward), which a tenant key
+  # cannot do — and it is read-only aggregation, never a data-retention window
+  # (binding guard D12-b).
+  - method: GET
+    path: /v1/internal/retention/cohort
+    class: control-plane
   - method: GET
     path: /v1/invites
     class: tenant
