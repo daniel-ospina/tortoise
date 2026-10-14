@@ -28,12 +28,22 @@
        as a link, which makes the social/chat preview one of its primary
        surfaces — a card with no artwork is the first thing the reader sees.
        The card is a NEW owned asset, not the design-partner one: an outreach
-       link must not preview as a different document. It is the 1200x630 brand
-       mark (same triangle geometry and Georgia/Menlo type stack as the
-       design-partner card), not a video frame, so the two cannot drift in
-       layout. Absolute URL required: OG consumers do not resolve relative
-       paths. The VIDEO and its POSTER are the design-partner ones, reused —
-       they are page-agnostic ("Tortoise / 1-minute introduction"). -->
+       link must not preview as a different document. It is the same family of
+       1200x630 brand mark as the design-partner card — a nested-triangle mark
+       beside a serif title over a mono sub-line — not a video frame, so the
+       two previews read as related documents rather than as two unrelated
+       ones.
+       The two cards were rendered separately, though, and they have drifted
+       measurably — so do NOT describe them as identical or as unable to drift.
+       Measured off both JPEGs: the design-partner mark draws THREE nested
+       outlines sharing the outer base line where this card draws TWO with the
+       inner outline inset above it (at y=400 it has 6 stroke crossings to this
+       card's 2); its title cap-height is 60px against this card's 54px; and
+       this card's URL string renders 318px wide against 262px. #8630 tracks
+       rendering both from one generator. Absolute URL required: OG consumers
+       do not resolve relative paths. The VIDEO and its POSTER are the
+       design-partner ones, reused — they are page-agnostic
+       ("Tortoise / 1-minute introduction"). -->
   <meta property="og:image" content="https://tortoise.premiselabs.co/assets/investors-og.jpg">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -220,9 +230,18 @@
     /* ── Plain bulleted lists ─────────────────────────────────────────────
        For the parallel one-line claims (the coordination problems, the market
        gaps) and for the GTM proof points and biography lines. The marker is
-       the accent dot, at the same visual weight as the ↑/↓ markers below. */
+       the accent dot, at the same visual weight as the ↑/↓ markers below.
+       `text-wrap: pretty` re-breaks a paragraph to avoid ending it on a short
+       lone word, which this copy does easily: the third market gap ended on
+       "teams." alone — 55px against a 591px measure — and now ends at 146px.
+       It is declared once, with no `.profile` exception, because the trade it
+       makes is not one a wider measure fixes — the Wedge proof point's middle
+       line holds ~156px of ink whether the measure is 262px or 272px — so a
+       narrower column reset would buy nothing. Line count and element height
+       are unchanged for all 14 items across the page's 5 `.bullets` lists,
+       from 320px to 1600px. */
     .bullets { list-style: none; margin-top: 1.15rem; }
-    .bullets li { display: flex; gap: 0.7rem; align-items: baseline; font-size: 0.95rem; }
+    .bullets li { display: flex; gap: 0.7rem; align-items: baseline; font-size: 0.95rem; text-wrap: pretty; }
     .bullets li + li { margin-top: 0.4rem; }
     .bullets li::before { content: "·"; color: var(--accent); flex: 0 0 auto; }
     /* The leading term of a claim is bolded so the parallel gaps are scannable
