@@ -194,9 +194,6 @@
     p { max-width: 68ch; }
     p + p { margin-top: 1.15rem; }
 
-    /* The two claims the page turns on. */
-    .hl { color: var(--accent); }
-
     /* ── The solution block's opening sentence ────────────────────────────
        The source copy titles every block EXCEPT this one ("Tortoise provides an
        agent-native cognitive layer: reasoning, memory, learning." has no
@@ -243,6 +240,12 @@
     }
     .profile p { font-size: 0.9rem; }
     .profile p strong { color: #fff; font-weight: 600; }
+    /* The `.bullets` base size is 0.95rem, which is right under the 15px body
+       copy but wrong inside this grid: a `.profile` cell's own text is
+       `.profile p` at 0.9rem, so an unscoped list made the Wedge column's
+       proof points render LARGER than the sentence they support and broke the
+       uniformity every other cell in this grid has. Match the cell. */
+    .profile .bullets li { font-size: 0.9rem; }
 
     /* ── Footer ───────────────────────────────────────────────────────── */
     /* `footer.wrap`, NOT a bare `footer`: the element also carries `.wrap`, whose
