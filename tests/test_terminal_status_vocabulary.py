@@ -377,10 +377,11 @@ def test_read_surface_exclude_set_is_derived_from_the_object_vocabulary() -> Non
     """#3308: ``TortoiseSDK.STATE_EXCLUDED_STATUS`` must not drift from the
     canonical OBJECT declaration.
 
-    It is a hand-written literal in ``sdk.py``, and the read surface's own
-    comment forbids re-literalising a vocabulary ("a copy is how the read
-    surface drifts from search"). The literal is deliberately the Object set
-    MINUS ``archived``, so the expectation is *computed* from
+    It is DERIVED in ``sdk.py`` (#4058: ``TERMINAL_EXCLUDED_STATUSES -
+    {"outdated", "archived"}``), not a hand-written literal, and the read
+    surface's own comment forbids re-literalising a vocabulary ("a copy is how
+    the read surface drifts from search"). The derived set is deliberately the
+    Object set MINUS ``archived``, so the expectation is *computed* from
     ``OBJECT_TERMINAL_STATUSES`` — never restated, so re-typing it cannot pass.
     """
     expected = OBJECT_TERMINAL_STATUSES - _ARCHIVED_VISIBLE_ON_READ
@@ -765,6 +766,40 @@ def _function_docstring(source: str, name: str) -> str:
     raise AssertionError(f"{name} not found in the scanned source")
 
 
+#: Reader-facing prose that documents the canonical terminal predicate. The
+#: #8662 review found these still enumerating the PRE-#4058 four-member set
+#: (``deprecated`` omitted) while the code path they describe excludes it.
+#: Registering them turns "the next instance is found by review" into "found by
+#: CI". ``review_connections`` is pinned separately — its bullet-scoped check is
+#: stricter than this whole-docstring one — so it is not duplicated here.
+_TERMINAL_CONTRACT_DOCSTRINGS = {
+    "TortoiseSDK.query": (_REPO_ROOT / "tortoise" / "sdk.py", "query"),
+    "TortoiseSDK.paginated_query": (
+        _REPO_ROOT / "tortoise" / "sdk.py", "paginated_query"),
+    "analyze._derived_live_operators": (
+        _REPO_ROOT / "tortoise" / "analyze.py", "_derived_live_operators"),
+    "FalkorProjection.extract_svbp_factors": (
+        _REPO_ROOT / "tortoise" / "projection" / "__init__.py",
+        "extract_svbp_factors"),
+}
+
+
+def _terminal_contract_statuses_missing(doc: str) -> list[str]:
+    """Canonical terminal statuses ``doc`` neither names nor cites.
+
+    Empty when the prose cites ``TERMINAL_EXCLUDED_STATUSES`` (the reader can
+    follow the constant) or names every member. The statuses are matched
+    against ``live.TERMINAL_EXCLUDED_STATUSES`` itself — never against the set
+    the prose happens to describe — so an enumeration that silently drops a
+    member (the #8662 defect: the code excluded five, the prose named four)
+    REDs. Whitespace is normalised, so a re-wrapped enumeration is still seen.
+    """
+    normalized = re.sub(r"\s+", " ", doc)
+    if "TERMINAL_EXCLUDED_STATUSES" in normalized:
+        return []
+    return sorted(s for s in TERMINAL_EXCLUDED_STATUSES if s not in normalized)
+
+
 def test_review_connections_contract_names_every_stale_status() -> None:
     """#8662 P2 — the contract text must name every member of the set.
 
@@ -801,6 +836,53 @@ def test_review_connections_contract_names_every_stale_status() -> None:
         "stale. Name every member of STALE_TERMINAL_STATUSES in the docstring, "
         "or cite STALE_TERMINAL_STATUSES itself."
     )
+
+
+@pytest.mark.parametrize("label", sorted(_TERMINAL_CONTRACT_DOCSTRINGS))
+def test_terminal_contract_docstring_names_every_canonical_status(
+        label: str) -> None:
+    """#8662 P3 — every reader-facing enumeration must name the full set.
+
+    Each registered docstring describes a code path that excludes
+    ``live.TERMINAL_EXCLUDED_STATUSES``. The pre-fix prose named four of the
+    five (the legacy ``deprecated`` omitted), so an agent reading
+    ``TortoiseSDK.query`` was told a ``deprecated`` Point is served while the
+    predicate excludes it. The review's suggestion — a
+    ``_PREDICATE_CONSUMERS``-style registry — is what this test enforces, so
+    the next understated enumeration is caught rather than found by review.
+    """
+    path, name = _TERMINAL_CONTRACT_DOCSTRINGS[label]
+    doc = _function_docstring(path.read_text(encoding="utf-8"), name)
+    missing = _terminal_contract_statuses_missing(doc)
+    assert not missing, (
+        f"{label}: the reader-facing enumeration omits {missing} — the code "
+        "path excludes them, so the contract tells a reader a non-current "
+        "status IS served. Name every member of "
+        "live.TERMINAL_EXCLUDED_STATUSES, or cite the constant."
+    )
+
+
+@pytest.mark.parametrize("doc,expected", [
+    # the #8662 defect shape: the pre-#4058 four-member enumeration
+    ("terminal statuses (retracted, superseded, outdated, archived)",
+     ["deprecated"]),
+    # the fixed shape — every member named, comma-separated
+    ("terminal statuses "
+     "(retracted, superseded, outdated, archived, deprecated)", []),
+    # the fixed shape — every member named, slash-separated
+    ("terminal (retracted/superseded/outdated/archived/deprecated)", []),
+    # citing the constant is an accepted alternative to enumerating
+    ("excluded by live.TERMINAL_EXCLUDED_STATUSES", []),
+])
+def test_contract_checker_detects_an_understated_enumeration(
+        doc: str, expected: list[str]) -> None:
+    """The registry checker itself is pinned, so the guard is not vacuous.
+
+    Detection is formatting-insensitive (both separators are covered) and the
+    set it iterates is the CANONICAL one, so an omitted member is caught even
+    when the prose set was previously accurate — the #8662 defect.
+    """
+    assert _terminal_contract_statuses_missing(doc) == expected
 
 
 def test_state_excluded_status_derives_from_the_canonical_exclusion() -> None:

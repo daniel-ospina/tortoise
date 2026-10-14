@@ -12251,10 +12251,10 @@ class TortoiseSDK:
         for full-scan mode with EP annotation.
 
         #1391: the default exclusion now covers ALL terminal statuses
-        (retracted, superseded, outdated, archived) — stale claims are not
-        served as current. include_retracted (name kept for compat) surfaces
-        them for audit. Use a raw Cypher query via proj.g.query() to inspect
-        tombstones.
+        (``live.TERMINAL_EXCLUDED_STATUSES``: retracted, superseded, outdated,
+        archived, deprecated) — stale claims are not served as current.
+        include_retracted (name kept for compat) surfaces them for audit. Use
+        a raw Cypher query via proj.g.query() to inspect tombstones.
         """
         proj = self._get_proj()
         clauses = self._operator_scope_clauses(kind)
@@ -12307,7 +12307,8 @@ class TortoiseSDK:
         #432 Task 2: retracted points (status='retracted') are EXCLUDED by
         default — pass include_retracted=True, or an explicit status= filter,
         to surface tombstones. #1391: the default exclusion now covers ALL
-        terminal statuses (retracted, superseded, outdated, archived).
+        terminal statuses (``live.TERMINAL_EXCLUDED_STATUSES``: retracted,
+        superseded, outdated, archived, deprecated).
         """
         # #1914: invalid pagination params fail cleanly instead of looping
         # (limit=0 → hasMore = skip + 0 < total always True on non-empty
