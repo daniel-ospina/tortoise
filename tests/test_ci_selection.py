@@ -134,9 +134,11 @@ def test_docs_scanning_gates_stay_in_tier1():
 def test_fly_secret_drift_gate_runs_on_a_runbook_only_diff():
     """#8614 review (P2): the runbook's own guards must run on the runbook.
 
-    `tests/test_fly_secret_drift.py` binds two prose claims in
-    `docs/infra-runbook.md` (the Secrets Matrix GitHub column, and §1/§2 never
-    giving a `gh-secret:` name a value minted on Fly). `docs/` is in
+    `tests/test_fly_secret_drift.py` binds prose claims in
+    `docs/infra-runbook.md` (the Secrets Matrix GitHub column, §1/§2 never
+    giving a `gh-secret:` name a value minted on Fly, and §2's account of which
+    `workflow` names the deploy re-stages — the set grows with the file, so this
+    names the binding rather than counting it). `docs/` is in
     NON_PYTHON_PREFIXES and `docs/infra-runbook.md` matches no SOURCE_PATTERNS
     entry, so a runbook-only diff filtered to `changed == []` and took the
     docs-only early return — tier1 ONLY. Registered in `core` but not in

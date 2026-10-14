@@ -139,13 +139,38 @@ _SECRETS_MATRIX_ROW_RE = re.compile(
     re.MULTILINE,
 )
 
+#: A Secrets Matrix GitHub Actions cell declares a GitHub home only when it
+#: carries the matrix's home marker (`✅`). Everything else — the em dash, ASCII
+#: `-`, `n/a`, `none`, an empty cell, or the dash with a trailing note — tells an
+#: operator the same thing as `—` does, and for a `gh-secret:` name that is
+#: false. Requiring the POSITIVE marker is fail-closed: the earlier `"—" in
+#: github` substring test let every other no-home spelling slip through (#8614
+#: review, P2), and an unrecognised cell now reds instead of passing by
+#: omission. Pinned by
+#: `test_the_secrets_matrix_guard_rejects_every_no_home_spelling`.
+_GITHUB_HOME_MARKER = "✅"
+
+
+def _declares_github_home(github_cell: str) -> bool:
+    """True when a Secrets Matrix GitHub Actions cell names a GitHub home."""
+    return _GITHUB_HOME_MARKER in github_cell
+
 #: A `fly secrets set <NAME>=<value>` whose value is a COMMAND SUBSTITUTION.
 #: For a `gh-secret:` name that value cannot be the GitHub secret's (it did not
 #: exist when the line ran), so the next deploy re-stages GitHub's value over it.
 #: Only `$(…)` is matched — `fly secrets set NAME="$NEW"` (a value first written
 #: to GitHub) is the correct shape and must not trip this.
+#:
+#: The COMMAND is matched in every equivalent spelling the runbook itself uses:
+#: `fly` and `flyctl` (`docs/infra-runbook.md` documents the deploy's own call as
+#: `flyctl secrets set --stage … --app tortoise-y4mjjq`), and any flags between
+#: `set` and the assignment (`--stage`, `-a <app>`, …). The earlier
+#: `set\s+([A-Z…])=` anchor crossed neither, so `flyctl secrets set NAME=$(…)`
+#: and `fly secrets set --stage NAME=$(…)` both passed the guard named for them
+#: (#8614 review, P2 — the silent-revert class). The widening is itself pinned by
+#: `test_the_fly_minted_guard_rejects_every_equivalent_spelling`.
 _INLINE_GENERATED_SECRET_RE = re.compile(
-    r"\bfly\s+secrets\s+set\s+([A-Z][A-Z0-9_]*)\s*=\s*\"?\$\(([^)]*)\)"
+    r"\bfly(?:ctl)?\s+secrets\s+set\b[^\n]*?([A-Z][A-Z0-9_]*)\s*=\s*\"?\$\("
 )
 
 
@@ -2055,8 +2080,12 @@ def test_secrets_matrix_github_column_agrees_with_the_manifest():
     deploy). `BILLING_FROM_EMAIL` read the same way.
 
     Derived from the manifest on every run — never from a list maintained here —
-    so a new `gh-secret:` declaration that lands with a "—" row fails at review
-    time instead of misleading an operator mid-rotation.
+    so a new `gh-secret:` declaration that lands with a no-home GitHub cell
+    fails at review time instead of misleading an operator mid-rotation. The
+    "no home" test is the CELL: a row declares a GitHub home only by carrying
+    the matrix's `✅` marker, so `—`, ASCII `-`, `n/a`, `none`, an empty cell and
+    the dash with a trailing note all red alike (#8614 review, P2 — matching only
+    the em dash let the other spellings merge green).
     """
     sources = _manifest_sources(REAL_MANIFEST)
     gh_names = {n for n, s in sources.items() if s.startswith("gh-secret:")}
@@ -2074,7 +2103,7 @@ def test_secrets_matrix_github_column_agrees_with_the_manifest():
         f"{name}: manifest says {sources[name]!r} but the GitHub Actions column "
         f"reads {github!r}"
         for name, _fly, _fdb, github in rows
-        if name in gh_names and "—" in github
+        if name in gh_names and not _declares_github_home(github)
     ]
     assert not offenders, (
         "the Secrets Matrix tells an operator these names have no GitHub Actions "
@@ -2083,15 +2112,89 @@ def test_secrets_matrix_github_column_agrees_with_the_manifest():
     )
 
 
+def _runbook_with_matrix_github_cell(name: str, cell: str) -> str:
+    """The runbook with `name`'s Secrets Matrix GitHub Actions cell set to `cell`.
+
+    Used to prove the matrix guard reds on each no-home spelling; the row is
+    located through the same parser the guard uses, and a missing name raises
+    rather than returning an unmutated runbook (which would make the probe
+    vacuous).
+    """
+    lines = REAL_RUNBOOK.read_text().splitlines()
+    for i, line in enumerate(lines):
+        row = _SECRETS_MATRIX_ROW_RE.match(line)
+        if row and row.group(1) == name:
+            lines[i] = (
+                f"| {name} | {row.group(2).strip()} | {row.group(3).strip()} | {cell} |"
+            )
+            return "\n".join(lines)
+    raise AssertionError(f"{name} is not in the Secrets Matrix — the probe is stale")
+
+
+def test_the_secrets_matrix_guard_rejects_every_no_home_spelling(monkeypatch):
+    """The widened "no GitHub home" test must red on every equivalent spelling.
+
+    #8614 review (P2): the guard matched only the em dash, so a `gh-secret:` row
+    whose GitHub Actions column read ASCII `-`, `n/a`, `none` or nothing said
+    the same false thing and merged green. This pins the widening end-to-end —
+    the real guard, run against the runbook with that one cell changed — so
+    going back to a substring/regex test reds here. The same run asserts a real
+    GitHub home (`✅`) does NOT red, so the cell test cannot be satisfied by
+    flagging every row.
+    """
+    module = sys.modules[__name__]
+    for index, cell in enumerate(
+        ("—", "-", "–", "n/a", "N/A", "none", "", "— (not managed)")
+    ):
+        fixture = _fixture(
+            f"runbook-matrix-{index}.md",
+            _runbook_with_matrix_github_cell("FASTAPI_INTERNAL_KEY", cell),
+        )
+        monkeypatch.setattr(module, "REAL_RUNBOOK", fixture)
+        try:
+            test_secrets_matrix_github_column_agrees_with_the_manifest()
+        except AssertionError:
+            continue
+        raise AssertionError(
+            f"a `gh-secret:` row whose GitHub Actions column reads {cell!r} was "
+            "not caught — the offender still merges green (#8614 review, P2)"
+        )
+    # Control: the real shape (`✅`) is a GitHub home, not an offence.
+    control = _fixture(
+        "runbook-matrix-home.md",
+        _runbook_with_matrix_github_cell("FASTAPI_INTERNAL_KEY", "✅"),
+    )
+    monkeypatch.setattr(module, "REAL_RUNBOOK", control)
+    test_secrets_matrix_github_column_agrees_with_the_manifest()
+
+
+def _fly_minted_offenders(runbook_text: str, gh_names: set[str]) -> list[str]:
+    """Runbook lines that set a `gh-secret:` name on Fly from a value minted there.
+
+    Factored out of the guard so the recipe matcher can be pinned against every
+    equivalent spelling (`fly`/`flyctl`, flags before the assignment) and against
+    the correct shape, which must stay unflagged.
+    """
+    offenders = []
+    for lineno, line in enumerate(runbook_text.splitlines(), 1):
+        match = _INLINE_GENERATED_SECRET_RE.search(line)
+        if match and match.group(1) in gh_names:
+            offenders.append(f"line {lineno}: {line.strip()}")
+    return offenders
+
+
 def test_no_gh_secret_name_is_given_a_value_generated_only_on_fly():
     """A `gh-secret:` name must never be set on Fly from a value minted there.
 
-    `fly secrets set NAME=$(openssl rand -hex 32)` writes a value only Fly holds:
-    the GitHub secret is not touched, and the next `deploy-hosted` run re-stages
-    GitHub's value over it — a rotation that silently reverts. This was the #8614
-    review finding in BOTH places it occurs (§1's provisioning block and §2's
-    rotation recipes), so the two are bound together here rather than corrected
-    one at a time.
+    Any spelling of `fly secrets set NAME=$(openssl rand -hex 32)` — `flyctl`,
+    flags before the assignment — writes a value only Fly holds: the GitHub
+    secret is not touched, and the next `deploy-hosted` run re-stages GitHub's
+    value over it — a rotation that silently reverts. This was the #8614 review
+    finding in BOTH places it occurs (§1's provisioning block and §2's rotation
+    recipes), so the two are bound together here rather than corrected one at a
+    time. The runbook's own deploy command is the `flyctl secrets set --stage …`
+    spelling, so the recipe matcher accepts it (see
+    `test_the_fly_minted_guard_rejects_every_equivalent_spelling`).
 
     Only names the manifest declares `gh-secret:` are checked — the premise is
     the manifest, never a list maintained in this test — and a name with another
@@ -2102,16 +2205,57 @@ def test_no_gh_secret_name_is_given_a_value_generated_only_on_fly():
     gh_names = {n for n, s in sources.items() if s.startswith("gh-secret:")}
     assert gh_names, "the shipped manifest declares no gh-secret: name — the reader is wrong"
 
-    offenders = []
-    for lineno, line in enumerate(REAL_RUNBOOK.read_text().splitlines(), 1):
-        match = _INLINE_GENERATED_SECRET_RE.search(line)
-        if match and match.group(1) in gh_names:
-            offenders.append(f"line {lineno}: {line.strip()}")
+    offenders = _fly_minted_offenders(REAL_RUNBOOK.read_text(), gh_names)
     assert not offenders, (
         "these lines give a `gh-secret:` name a value that exists only on Fly — the "
         "GitHub secret is not updated, so the next deploy reverts the rotation:\n  "
         + "\n  ".join(offenders)
     )
+
+
+def test_the_fly_minted_guard_rejects_every_equivalent_spelling(monkeypatch):
+    """The runbook recipe matcher must red on every equivalent spelling.
+
+    #8614 review (P2): the pattern anchored the name immediately after
+    `fly secrets set`, so `flyctl secrets set NAME=$(…)` and
+    `fly secrets set --stage NAME=$(…)` — the very defect the guard is named for,
+    in spellings the runbook itself uses (`flyctl secrets set --stage …` is
+    documented as the deploy's own command) — both passed. This runs the real
+    guard against the real runbook with each recipe appended, and asserts the
+    correct shape (`NAME="$NEW"`, the value written to GitHub first by the `NEW=…`
+    line §2 teaches) is NOT flagged, so a matcher widened into a false positive
+    fails here too.
+    """
+    sources = _manifest_sources(REAL_MANIFEST)
+    gh_names = {n for n, s in sources.items() if s.startswith("gh-secret:")}
+    assert gh_names, "the shipped manifest declares no gh-secret: name — the reader is wrong"
+    name = "FASTAPI_INTERNAL_KEY"
+    assert name in gh_names, f"{name} is no longer a gh-secret: name — the probe is stale"
+
+    runbook = REAL_RUNBOOK.read_text()
+    module = sys.modules[__name__]
+    for spelling in (
+        f"fly secrets set {name}=$(openssl rand -hex 32) -a tortoise-y4mjjq",
+        f"flyctl secrets set {name}=$(openssl rand -hex 32) -a tortoise-y4mjjq",
+        f"fly secrets set --stage {name}=$(openssl rand -hex 32) -a tortoise-y4mjjq",
+        f"flyctl secrets set --stage {name}=$(openssl rand -hex 32) -a tortoise-y4mjjq",
+    ):
+        fixture = _fixture("runbook-fly-minted.md", runbook + "\n" + spelling + "\n")
+        monkeypatch.setattr(module, "REAL_RUNBOOK", fixture)
+        try:
+            test_no_gh_secret_name_is_given_a_value_generated_only_on_fly()
+        except AssertionError:
+            continue
+        raise AssertionError(
+            f"this spelling sets a `gh-secret:` name on Fly from a value minted "
+            f"there but the guard does not match it — the silent revert it exists "
+            f"to catch merges green (#8614 review, P2): {spelling!r}"
+        )
+
+    # Control: the correct recipe (§2's `NEW=…` then `NAME="$NEW"`) must pass.
+    correct = runbook + f'\nfly secrets set {name}="$NEW" --stage -a tortoise-y4mjjq\n'
+    monkeypatch.setattr(module, "REAL_RUNBOOK", _fixture("runbook-correct.md", correct))
+    test_no_gh_secret_name_is_given_a_value_generated_only_on_fly()
 
 
 def _runbook_workflow_scope_paragraph() -> str:
