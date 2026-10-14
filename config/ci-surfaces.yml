@@ -3442,6 +3442,19 @@ tier1:
 - test_ep_draft_filter.py
 - test_ep_operatorless.py
 - test_event_store.py
+# #8614 review (P2): `test_fly_secret_drift.py` reads `docs/infra-runbook.md`
+# (the Secrets Matrix + the §1/§2 rotation recipes), but `docs/` is in
+# NON_PYTHON_PREFIXES and the runbook matches no SOURCE_PATTERNS entry, so a
+# runbook-only diff filtered to `changed == []` and took the docs-only early
+# return — which runs tier1 ONLY. Registered in `core` but not here, the two
+# doc-bound guards were asleep on the one change that can break them: a
+# re-introduced `—` in a `gh-secret:` row, or a
+# `fly secrets set <gh-secret>=$(openssl rand …)` recipe, would merge green
+# and only red `main` post-merge (the #1349/#3332/#3616/#4309 silent-drop
+# class). Same fast, no-DB file-scan shape as `test_durability_posture.py`
+# above, so tier1 is the correct lane. Pinned by
+# tests/test_ci_selection.py::test_fly_secret_drift_gate_runs_on_a_runbook_only_diff.
+- test_fly_secret_drift.py
 - test_guard.py
 - test_harness_mcp_config.py
 - test_ids.py

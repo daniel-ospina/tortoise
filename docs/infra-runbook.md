@@ -176,8 +176,11 @@ the ruling for the first):
 `fly-only:<issue>` names are out-of-band **by recorded decision** —
 `REGISTRY_STREAM_KEY` (`fly-only:#661`) must never be present in GitHub;
 `fly-toml-env` names are applied from the versioned `fly.toml [env]`; and
-`workflow` names are set from non-secret context (`${GITHUB_SHA}`, a composed
-flag). None of them has a GitHub Actions secret to update.
+`workflow` names are set by the workflow from non-secret context (`${GITHUB_SHA}`,
+a composed flag) — no `workflow` name has a GitHub secret *as its declared
+source*, and none is re-staged the way a `gh-secret:` name is. The one
+`workflow` override is `TORTOISE_SESSION_LLM_MODEL`, whose GitHub secret replaces
+the versioned default when it is present (§4.6).
 
 **One value, two homes — generate once, set GitHub first, then apply that same
 value to Fly.** `$(openssl rand …)` re-rolled inside the `fly secrets set` line

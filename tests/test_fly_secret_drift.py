@@ -2112,3 +2112,58 @@ def test_no_gh_secret_name_is_given_a_value_generated_only_on_fly():
         "GitHub secret is not updated, so the next deploy reverts the rotation:\n  "
         + "\n  ".join(offenders)
     )
+
+
+def _runbook_workflow_scope_paragraph() -> str:
+    """The §2 paragraph that scopes which names GitHub manages.
+
+    Anchored on its opening sentence, not a line number, so the guard keeps
+    reading the same paragraph as the runbook grows around it.
+    """
+    text = REAL_RUNBOOK.read_text()
+    start = text.index("The scope is the `gh-secret:` token")
+    end = text.index("**One value, two homes", start)
+    return text[start:end]
+
+
+def test_workflow_names_with_a_github_override_are_not_called_secretless():
+    """§2 must not deny the GitHub secret a `workflow` name actually has.
+
+    The round-2 scoping paragraph replaced "every secret on Fly is managed from
+    GitHub" with per-token statements — but ended with "None of them has a
+    GitHub Actions secret to update", which is the same false universal for the
+    `workflow` token: the manifest's own comment above
+    `TORTOISE_SESSION_LLM_MODEL` (the only `workflow` name with a GitHub
+    counterpart) says "a GitHub secret may still override it",
+    `deploy-hosted.yml` reads exactly such a secret, and §4.6 of this same
+    document documents that override. Derived from the manifest + the real
+    workflow, never from a list kept here, so a future `workflow` name the
+    deploy reads from `secrets.X` fails this at review time instead of
+    misleading an operator (#8614 review).
+    """
+    sources = _manifest_sources(REAL_MANIFEST)
+    workflow_names = {n for n, s in sources.items() if s == "workflow"}
+    assert workflow_names, (
+        "the shipped manifest declares no `workflow` name — the reader is wrong"
+    )
+    workflow_text = REAL_WORKFLOW.read_text()
+    overridden = {
+        n for n in workflow_names if re.search(rf"secrets\.{re.escape(n)}\b", workflow_text)
+    }
+    assert overridden, (
+        "no `workflow` name is read from a GitHub secret in deploy-hosted.yml — "
+        "the manifest reader or this rule is stale, so the guard would pass vacuously"
+    )
+
+    para = _runbook_workflow_scope_paragraph()
+    for name in sorted(overridden):
+        assert name in para, (
+            f"§2 tells an operator the `workflow` names have no GitHub secret, but "
+            f"`{name}` is read from `secrets.{name}` by the deploy — name the override "
+            f"(or drop the absolute) so the two statements cannot be read as alternatives"
+        )
+    assert "None of them has a GitHub Actions secret to update" not in para, (
+        "the §2 scope paragraph asserts no `workflow` name has a GitHub Actions "
+        f"secret to update, while the manifest + deploy define one for {sorted(overridden)} "
+        "(#8614 review)"
+    )
