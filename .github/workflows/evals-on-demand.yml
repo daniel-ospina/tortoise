@@ -1,10 +1,20 @@
 # On-demand evals — the pipeline-running tests that must NOT gate a merge
 #
 # WHY THIS WORKFLOW EXISTS
-# `config/ci-surfaces.yml` `on_demand:` lists test files that execute the real
-# retrieval/write-path harness rather than assert a contract. They are
-# excluded from EVERY pre-merge leg (fast halves, slow, carve-out) by
-# `tools/ci_selection.py::on_demand_files`, and run only here.
+# `config/ci-surfaces.yml` `on_demand:` lists test files that must not gate a
+# merge. They are excluded from EVERY pre-merge leg (fast halves, slow,
+# carve-out) by `tools/ci_selection.py::on_demand_files`, and run from here.
+#
+# ⚠️ `on_demand:` NOW HAS TWO RUNNERS, and this is only one of them: the
+# dedicated perf lane (`tests/test_perf_lane_volunteer_context.py`, #3992) is
+# run by `.github/workflows/perf-lane.yml`, because the plan names it in its own
+# right. The lane membership is what keeps both off the gate. Running the whole
+# lane from here as well is supported — a blank `files` input runs every entry —
+# and it is why this workflow now PROVISIONS the pinned dense model below: the
+# perf file fails closed on a keyword-only read path
+# (`battery/runner/retrieval_preflight.require_hybrid_retrieval`, #2985), so an
+# unprovisioned job would red on a missing embedder that reads like a code
+# regression. Do not read this workflow as the lane's sole owner.
 #
 # The file this lane was created for, `eval/retrieval/test_integration.py`,
 # was 25.4 min — 24.9% of ALL measured test time in this repo, and 24.9 of the
@@ -15,7 +25,7 @@
 # customer; it is a calibration instrument for the retrieval pipeline.
 #
 # It still has to RUN — a calibration instrument that is never run is
-# documentation. Hence this workflow, which is the lane's ONLY runner.
+# documentation. Hence this workflow.
 #
 # WHY NOT JUST DROP IT FROM slow_files
 # `fast_pool()` is "every classified file that is not slow / env-broken /
@@ -61,10 +71,11 @@ env:
   TORTOISE_TEST_CARVE_OUT: '1'
   TORTOISE_SECRET_PEPPER: test-static-pepper
   TORTOISE_FAST_ATEXIT: '1'
-  # The real embedder must not reach huggingface.co mid-run: shared runner IPs
-  # get rate-limited into flaky failures. The cache step below pre-warms it.
-  HF_HUB_OFFLINE: '1'
-  TRANSFORMERS_OFFLINE: '1'
+  # NB: HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are NOT workflow-level. They are
+  # scoped to "Run the lane" only — `huggingface_hub` latches HF_HUB_OFFLINE
+  # into a module constant AT IMPORT, so a workflow-level pair would make the
+  # embedder-provisioning step's download fallback dead and turn a cache miss
+  # into a self-inflicted "couldn't connect" red (#2573).
 
 jobs:
   evals:
@@ -89,7 +100,30 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+          # The SHARED v2 key (python-ci's), not a workflow-private one: the
+          # previous `hf-<os>-<pyproject hash>` key had no restore-keys and no
+          # other writer, so it could never hold the model it named.
+          key: hf-embedding-cache-v2-${{ runner.os }}
+          restore-keys: |
+            hf-embedding-cache-v2-
+
+      - name: Embedding model REQUIRED (BAAI/bge-small-en-v1.5) — dense retrieval leg
+        # The `on_demand:` lane now includes `test_perf_lane_volunteer_context.py`
+        # (#3992), which FAILS CLOSED on a keyword-only read path
+        # (`require_hybrid_retrieval`, #2985). A blank dispatch therefore runs a
+        # file that needs the dense model PRESENT, or the lane reds for a reason
+        # that reads like a code regression. Same provisioner, attempts and
+        # backoff as the long-running python-ci jobs and the carve-out lane.
+        # This step must stay OUTSIDE the offline pair below: the download
+        # fallback only runs when HF_HUB_OFFLINE is unset at import.
+        env:
+          # #7359: the watchdog only DUMPS (exit=False) — it cannot fail a run.
+          # Above the worst-case retry sleep (attempts 5 x backoff 10 = 100s),
+          # below the 10-minute cap, so the dump lands before the runner's kill.
+          TORTOISE_EMBEDDER_WATCHDOG_S: "570"
+        timeout-minutes: 10
+        run: |
+          exec python3 tools/embedder_provision.py --attempts 5 --backoff 10
 
       - name: Resolve the lane
         id: lane
@@ -134,6 +168,12 @@ jobs:
           cat /tmp/lane.txt
 
       - name: Run the lane
+        env:
+          # The real embedder must not reach huggingface.co mid-run: shared
+          # runner IPs get rate-limited into flaky failures. STEP-scoped, not
+          # workflow-level, so the provision step above keeps its download path.
+          HF_HUB_OFFLINE: '1'
+          TRANSFORMERS_OFFLINE: '1'
         run: |
           # Paths are passed explicitly so a file that no longer exists FAILS
           # (pytest exits 4 on a nonexistent path) instead of the lane being

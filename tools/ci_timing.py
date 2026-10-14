@@ -672,8 +672,9 @@ def _classified_test_keys(manifest_text: str) -> set[str]:
     without them it resolved by basename onto whatever surface member shared its
     basename (#6092 review, F3).
 
-    `on_demand` is deliberately not unioned in: it runs only under
-    `evals-on-demand.yml`, so a python-ci collector log cannot carry one, and
+    `on_demand` is deliberately not unioned in: it runs only under the on-demand
+    runners (`evals-on-demand.yml`, and `perf-lane.yml` for the perf lane), never
+    in a python-ci leg, so a python-ci collector log cannot carry one, and
     treating a stray `on_demand` measurement as registered would hide the drift.
     `uri_requiring` is not unioned either, because it is not a leg list: every
     one of its members is an exact `surfaces:` member in this manifest, so

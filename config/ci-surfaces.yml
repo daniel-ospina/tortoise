@@ -5076,8 +5076,19 @@ durations:
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
 # A file here is excluded from EVERY pre-merge leg (fast halves, slow, carve-
-# out). It is run only by `.github/workflows/evals-on-demand.yml`
-# (`workflow_dispatch`), which is the point.
+# out). It runs from the on-demand RUNNERS — `.github/workflows/
+# evals-on-demand.yml` and, for the perf lane, `.github/workflows/perf-lane.yml`
+# (both `workflow_dispatch`; the perf lane is also nightly) — and that is the
+# point.
+#
+# KNOWN AND DELIBERATE, recorded because it is a real surface: `post-merge-
+# validation.yml` ignores only `slow_files` + `tests/e2e`, so it COLLECTS this
+# lane on every merge to main (it provisions the embedder, so it is not the
+# evals-lane dense-leg failure). That is accepted, not overlooked: post-merge is
+# warn-only (no gate impact) and is the only place a lane file would otherwise
+# never run without a human dispatch, while the dedicated perf lane stays the
+# SLO's owner. The cost accepted: a shared-runner wall-clock red can appear on
+# main-validation WITHOUT the perf lane's 2-attempt retry.
 #
 # WHY A LANE AND NOT JUST DELETING IT FROM slow_files: `fast_pool()` is
 # defined as "everything not slow / env-broken / carve-out", so removing a
@@ -5100,8 +5111,19 @@ durations:
 #
 #   The genuinely cheap eval unit tests (schema / metrics / grading, all
 #   sub-second) stay in the merge path — they are real contracts.
+#
+#   tests/test_perf_lane_volunteer_context.py — the DEDICATED PERF LANE (#3992).
+#   The #2080 plan assigns the hard wall-clock SLO for POST /v1/context
+#   ("assert <= 300 ms p95", median of 3 runs of 50) to a dedicated perf lane
+#   and says in the same sentence that the lane is "generously margined,
+#   retry-tolerant" while the BLOCKING CI assertions are the MECHANISM ones
+#   (fail-open degraded_reason, zero-LLM read path). A wall-clock assertion on
+#   a shared runner is exactly what this lane exists to keep OFF the merge
+#   gate — and before #3992 the lane the plan named did not exist at all, so
+#   the SLO was unverifiable. It runs from .github/workflows/perf-lane.yml.
 on_demand:
   - eval/retrieval/test_integration.py
+  - test_perf_lane_volunteer_context.py
 
 # ── #6133: DECLARED SLEEP IS NOT GATE COST, AND NOT THE FLOOR ──
 #
