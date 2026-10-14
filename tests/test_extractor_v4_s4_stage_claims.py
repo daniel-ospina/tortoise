@@ -36,7 +36,11 @@ WHAT THIS PINS
      call's `delta` OUTPUT-contract kwarg — not used as a call gate;
    * `merge_embed_lists`'s union is ASSIGNED (consumed), not discarded;
    * the three side-effect bypass paths exist (the `sdk.py` v1/`summary=`
-     dispatch and the empty-conversation early return before S1).
+     dispatch and the empty-conversation early return before S1);
+4. and — the NEGATIVE half — `extract_session_v2` has no early `return`/`raise`
+   before the S4 call site other than the enumerated empty-conversation one, so
+   a FOURTH bypass reds the guard instead of landing invisibly (the #8601
+   review proved a new early return left the positive checks above green).
 
 NOT promised: line numbers. The doc's own rule is that the symbol is
 authoritative and the number a convenience; this file resolves symbols and
@@ -76,15 +80,21 @@ def _call_name(node: ast.expr) -> str:
     return ""
 
 
-def _flat_doc() -> str:
-    """The design doc with its hard wraps and `> ` quote markers removed.
+def _flatten(text: str) -> str:
+    """`> ` quote markers and hard wraps removed, so a literal phrase check
+    pins MEANING rather than layout.
 
     The marker's sentences wrap across lines, so a literal phrase check against
     the raw text would red on a reflow that changed nothing — the same
     brittleness `test_extractor_v4_citation_rot.py` avoids by pinning meaning,
     not layout.
     """
-    return re.sub(r"\s+", " ", DOC.read_text(encoding="utf-8").replace("\n> ", " "))
+    return re.sub(r"\s+", " ", text.replace("\n> ", " "))
+
+
+def _flat_doc() -> str:
+    """The design doc through `_flatten`."""
+    return _flatten(DOC.read_text(encoding="utf-8"))
 
 
 def _env_flag_default_true(call: ast.expr) -> bool:
@@ -104,21 +114,35 @@ def _env_flag_default_true(call: ast.expr) -> bool:
     )
 
 
+def _comparison_kind(node: ast.expr) -> str:
+    """Label one operand of the sdk v1 dispatch, or `""` for anything else."""
+    if not isinstance(node, ast.Compare) or not isinstance(node.left, ast.Name):
+        return ""
+    if len(node.comparators) != 1:
+        return ""
+    comparator = node.comparators[0]
+    if (
+        node.left.id == "extractor"
+        and isinstance(comparator, ast.Constant)
+        and comparator.value == "v1"
+    ):
+        return "extractor_v1"
+    if node.left.id == "summary":
+        return "summary_not_none"
+    return ""
+
+
 def _is_v1_dispatch(test: ast.expr) -> bool:
-    """`extractor == "v1" or summary is not None` — the sdk v1 route."""
+    """`extractor == "v1" or summary is not None` — the sdk v1 route.
+
+    Order-insensitive: the operands are matched as a SET, because swapping the
+    two logically-equivalent comparisons is behaviour-preserving and must not
+    red the guard (the #8601 review proved the positional match did).
+    """
     if not isinstance(test, ast.BoolOp) or not isinstance(test.op, ast.Or):
         return False
-    left, right = test.values[:2]
-    return (
-        isinstance(left, ast.Compare)
-        and isinstance(left.left, ast.Name)
-        and left.left.id == "extractor"
-        and isinstance(left.comparators[0], ast.Constant)
-        and left.comparators[0].value == "v1"
-        and isinstance(right, ast.Compare)
-        and isinstance(right.left, ast.Name)
-        and right.left.id == "summary"
-    )
+    kinds = {_comparison_kind(value) for value in test.values}
+    return kinds == {"extractor_v1", "summary_not_none"}
 
 
 def _function(tree: ast.Module, name: str) -> ast.FunctionDef:
@@ -166,11 +190,77 @@ class _StageScan(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def _scan() -> _StageScan:
-    tree = ast.parse(EXTRACTOR.read_text(encoding="utf-8"))
+def _scan(source: str | None = None) -> _StageScan:
+    text = EXTRACTOR.read_text(encoding="utf-8") if source is None else source
     scan = _StageScan()
-    scan.visit(_function(tree, "extract_session_v2"))
+    scan.visit(_function(ast.parse(text), "extract_session_v2"))
     return scan
+
+
+def _own_exits(body: list[ast.stmt]) -> list[ast.stmt]:
+    """Every `return`/`raise` in THIS statement list, ignoring nested defs.
+
+    A `return` inside a nested function is not an exit from the entry point.
+    """
+    exits: list[ast.stmt] = []
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(node, (ast.Return, ast.Raise)):
+            exits.append(node)
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if isinstance(block, list):
+                exits.extend(_own_exits(block))
+        for handler in getattr(node, "handlers", []) or []:
+            exits.extend(_own_exits(handler.body))
+    return exits
+
+
+def _own_ifs(body: list[ast.stmt]) -> list[ast.If]:
+    """Every `If` in THIS statement list, ignoring nested defs."""
+    found: list[ast.If] = []
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(node, ast.If):
+            found.append(node)
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if isinstance(block, list):
+                found.extend(_own_ifs(block))
+        for handler in getattr(node, "handlers", []) or []:
+            found.extend(_own_ifs(handler.body))
+    return found
+
+
+def _empty_conversation_returns(fn: ast.FunctionDef) -> list[ast.stmt]:
+    """The `if not edus: return {...}` early exit — the marker's bypass (iii)."""
+    returns: list[ast.stmt] = []
+    for node in _own_ifs(fn.body):
+        if ast.unparse(node.test) == "not edus":
+            returns.extend(n for n in node.body if isinstance(n, ast.Return))
+    return returns
+
+
+def _undocumented_exits(source: str) -> list[ast.stmt]:
+    """Early `return`/`raise` in `extract_session_v2` BEFORE the S4 call that
+    the record does not enumerate — i.e. an undocumented way to skip S4.
+
+    Documented here: (iii) the empty-conversation return. Documents elsewhere
+    and therefore not an early exit of THIS function: (i)/(ii) the `sdk.py` v1
+    dispatch, which never enters `extract_session_v2`; and a falsy `story`,
+    which does not leave the function at all.
+    """
+    fn = _function(ast.parse(source), "extract_session_v2")
+    s4 = _scan(source).s4_call
+    if s4 is None:
+        return []
+    documented = {node.lineno for node in _empty_conversation_returns(fn)}
+    return [
+        node for node in _own_exits(fn.body)
+        if node.lineno < s4.lineno and node.lineno not in documented
+    ]
 
 
 # ── the divergence is RECORDED ─────────────────────────────────────────────
@@ -178,10 +268,13 @@ def _scan() -> _StageScan:
 
 def test_the_design_still_states_its_position_and_the_marker_naming_8500():
     """The marker must not be tidied away: it is what stops *"there is no S4"*
-    from being read as an instruction about the shipped tree."""
-    text = DOC.read_text(encoding="utf-8")
+    from being read as an instruction about the shipped tree.
+
+    Resolved through `_flat_doc()` — the #8601 review proved a RAW-text check
+    here reds on a pure reflow that changed nothing.
+    """
     flat = _flat_doc()
-    assert DESIGN_POSITION in text, (
+    assert DESIGN_POSITION in flat, (
         "the v4 design's position on S4 changed — if S4 was re-admitted to the "
         "step list, this issue's whole premise moved and the guard must be "
         "re-derived, not deleted."
@@ -191,7 +284,7 @@ def test_the_design_still_states_its_position_and_the_marker_naming_8500():
         "document's authority alone is gone — a lane reading only this document "
         "would then delete a live stage."
     )
-    assert "#8500" in text, (
+    assert "#8500" in flat, (
         "the marker must name the issue that owns the S4 clause (#8500), so the "
         "decision has a home a reader can reach."
     )
@@ -297,8 +390,9 @@ def test_the_e4_union_is_consumed_not_discarded():
 
 def test_the_three_side_effect_bypass_paths_exist():
     """The marker states these are the ONLY skips, and that none is an S4 switch.
-    If one disappears the marker's enumeration is wrong — and if a NEW one
-    appears, S4 has an off switch nobody documented."""
+    If one disappears the marker's enumeration is wrong; the NEGATIVE half — a
+    fourth, undocumented bypass — is pinned by
+    `test_no_undocumented_early_exit_skips_s4`."""
     sdk_tree = ast.parse(SDK.read_text(encoding="utf-8"))
     dispatch = [
         node.test
@@ -312,11 +406,11 @@ def test_the_three_side_effect_bypass_paths_exist():
 
     scan = _scan()
     assert scan.s4_call is not None
+    fn = _function(
+        ast.parse(EXTRACTOR.read_text(encoding="utf-8")), "extract_session_v2")
     empty_guards = [
-        node
-        for node in ast.walk(_function(ast.parse(EXTRACTOR.read_text(encoding="utf-8")),
-                                       "extract_session_v2"))
-        if isinstance(node, ast.If) and ast.unparse(node.test) == "not edus"
+        node for node in _own_ifs(fn.body)
+        if ast.unparse(node.test) == "not edus"
     ]
     assert empty_guards, (
         "the empty-conversation early return (the marker's bypass path (iii)) is "
@@ -331,3 +425,87 @@ def test_the_three_side_effect_bypass_paths_exist():
         "the empty-conversation early return must report `degraded: True` — the "
         "marker's path (iii) describes that degraded return, not a silent `{}`."
     )
+
+
+def test_no_undocumented_early_exit_skips_s4():
+    """NEGATIVE half of the bypass enumeration (#8601 review finding 2).
+
+    The positive checks above only prove the three NAMED paths still exist; a
+    FOURTH bypass was invisible to all of them. This asserts that the only way
+    `extract_session_v2` can leave BEFORE the S4 call is the enumerated
+    empty-conversation return.
+    """
+    undocumented = _undocumented_exits(EXTRACTOR.read_text(encoding="utf-8"))
+    assert not undocumented, (
+        "a new early `return`/`raise` now skips S4 without being enumerated in "
+        "the G5 record and the design marker. Either route it through a "
+        "documented path or extend the marker's bypass list (and this guard): "
+        f"{[(n.lineno, ast.unparse(n)) for n in undocumented]}"
+    )
+
+
+def test_the_undocumented_exit_scan_is_not_vacuous():
+    """Non-vacuity for the negative half: the fourth-bypass shape the #8601
+    review proved landed invisibly must red `_undocumented_exits`."""
+    source = EXTRACTOR.read_text(encoding="utf-8")
+    anchor = (
+        "    # ── S4: review gaps → complete embed list (E4: merges-not-replaces) ───"
+    )
+    assert anchor in source, (
+        "the S4 section anchor moved — re-point this non-vacuity fixture"
+    )
+    injected = (
+        "    if story and not _s4_wanted(story):\n"
+        "        return {'session_id': session_id, 'story_arc': story,"
+        " 'embed_list': embed_list}\n"
+    )
+    mutated = source.replace(anchor, injected + anchor, 1)
+    assert mutated != source, "the injection did not apply — fixture is stale"
+    baseline = _undocumented_exits(source)
+    assert not baseline, (
+        "the unmutated tree already has an undocumented exit — this fixture "
+        "cannot attribute the detection to the injection"
+    )
+    undocumented = _undocumented_exits(mutated)
+    assert undocumented, (
+        "the scan failed to see a new early return before the S4 call, so the "
+        "negative half of the guard is vacuous"
+    )
+    assert any(
+        "'story_arc': story" in ast.unparse(node) for node in undocumented
+    ), f"the injected early return was not the one detected: {undocumented}"
+
+
+def test_the_design_position_check_survives_an_honest_reflow():
+    """#8601 review finding 1 — a literal check against the RAW doc reds when the
+    position sentence is re-wrapped (a no-op layout change). `_flatten` must make
+    the check layout-insensitive; the sample is the exact reflow the review used.
+    """
+    reflowed = (
+        "**⚠️ There is no S4 —\n"
+        "> do not restore one.**\n"
+        "\n"
+        "> tracked at **`#8500`**, pinned by\n"
+        "> `test_extractor_v4_s4_stage_claims.py`.\n"
+    )
+    assert DESIGN_POSITION not in reflowed, (
+        "the fixture must actually be reflowed, or this proves nothing about "
+        "layout-insensitivity"
+    )
+    flat = _flatten(reflowed)
+    assert DESIGN_POSITION in flat
+    assert "#8500" in flat
+    assert GUARD_NAME in flat
+
+
+def test_the_v1_dispatch_match_is_order_insensitive():
+    """#8601 review finding 1, second instance — operand order in the `sdk.py`
+    dispatch is behaviour-preserving; matching positionally red the guard."""
+    canonical = ast.parse('if extractor == "v1" or summary is not None:\n    pass\n')
+    swapped = ast.parse('if summary is not None or extractor == "v1":\n    pass\n')
+    assert _is_v1_dispatch(canonical.body[0].test) is True
+    assert _is_v1_dispatch(swapped.body[0].test) is True, (
+        "the logically-equivalent operand swap must not red the guard"
+    )
+    unrelated = ast.parse("if other or extra:\n    pass\n")
+    assert _is_v1_dispatch(unrelated.body[0].test) is False
