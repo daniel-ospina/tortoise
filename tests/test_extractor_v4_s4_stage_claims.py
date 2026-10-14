@@ -23,9 +23,10 @@ S4 off and silently shipping the legacy contract to production instead.
 
 WHAT THIS PINS
 --------------
-1. The design's position is unchanged, its marker still names `#8500`, and it
-   still tells a reader not to delete `run_s4` on the document's authority
-   alone — i.e. the divergence is RECORDED, not tidied away.
+1. The design's position is unchanged, its marker — read as a SCOPED block —
+   still names `#8500`, and it still tells a reader not to delete `run_s4` on
+   the document's authority alone: the divergence is RECORDED, not tidied
+   away. (A document-wide read is vacuous; the marker passage is what counts.)
 2. `extractor_v2.py`'s module docstring carries the `G5 record — the live S4
    stage (#8500)` block the S4 call site points at (before this change the call
    site named a record that did not exist).
@@ -69,6 +70,15 @@ RECORD_ANCHOR = "G5 record — the live S4 stage (#8500)"
 DESIGN_POSITION = "There is no S4 — do not restore one."
 MARKER_NEVER_DELETE = "Never delete `run_s4` on the strength of this document alone."
 GUARD_NAME = "test_extractor_v4_s4_stage_claims.py"
+#: The unique opening of the design's S4 drift marker — the blockquote whose own
+#: tracker reference the guard must pin. Scoping matters: `#8500` (and the
+#: never-delete sentence) also occur elsewhere in the document, so a
+#: document-wide membership check cannot fail when THIS passage loses them.
+MARKER_START = "⛔ DRIFT MARKER"
+#: The marker's OWN tracker reference. Pinned verbatim (through `_flatten`, so a
+#: reflow is fine): `#8500` also occurs in the record-anchor sentence inside the
+#: same blockquote, so a plain `"#8500" in marker` would still be vacuous.
+MARKER_TRACKER_REF = "tracked at **`#8500`**"
 
 
 def _call_name(node: ast.expr) -> str:
@@ -97,6 +107,31 @@ def _flat_doc() -> str:
     return _flatten(DOC.read_text(encoding="utf-8"))
 
 
+def _marker_block(text: str | None = None) -> str:
+    """The drift marker's blockquote, flattened — the PASSAGE, not the document.
+
+    A document-wide check for the marker's claims is vacuous: `#8500` occurs at
+    several other places, so rewriting only the marker's own tracker line left
+    `"#8500" in doc` green (the #8601 review proved it). This scopes the read to
+    the marker blockquote.
+    """
+    source = DOC.read_text(encoding="utf-8") if text is None else text
+    lines = source.splitlines()
+    start = next((i for i, line in enumerate(lines) if MARKER_START in line), None)
+    if start is None:
+        raise AssertionError(
+            "the design's DRIFT MARKER blockquote is gone — the divergence is no "
+            "longer recorded where a reader of the step list will find it."
+        )
+    block: list[str] = []
+    for line in lines[start:]:
+        if line.startswith(">"):
+            block.append(line)
+        elif block:
+            break
+    return _flatten("\n".join(block))
+
+
 def _env_flag_default_true(call: ast.expr) -> bool:
     """`env_flag("TORTOISE_S4_DELTA", True)` — as a structure, not a spelling.
 
@@ -115,19 +150,32 @@ def _env_flag_default_true(call: ast.expr) -> bool:
 
 
 def _comparison_kind(node: ast.expr) -> str:
-    """Label one operand of the sdk v1 dispatch, or `""` for anything else."""
+    """Label one operand of the sdk v1 dispatch, or `""` for anything else.
+
+    The OPERATOR is part of the label. An operator-blind match accepted the
+    semantics-inverting rewrites `extractor != "v1"` and `summary is None`,
+    which would leave the marker's bypass paths (i)/(ii) false while the guard
+    reported clean (the #8601 review proved it).
+    """
     if not isinstance(node, ast.Compare) or not isinstance(node.left, ast.Name):
         return ""
-    if len(node.comparators) != 1:
+    if len(node.comparators) != 1 or len(node.ops) != 1:
         return ""
+    op = node.ops[0]
     comparator = node.comparators[0]
     if (
         node.left.id == "extractor"
+        and isinstance(op, ast.Eq)
         and isinstance(comparator, ast.Constant)
         and comparator.value == "v1"
     ):
         return "extractor_v1"
-    if node.left.id == "summary":
+    if (
+        node.left.id == "summary"
+        and isinstance(op, ast.IsNot)
+        and isinstance(comparator, ast.Constant)
+        and comparator.value is None
+    ):
         return "summary_not_none"
     return ""
 
@@ -212,6 +260,8 @@ def _own_exits(body: list[ast.stmt]) -> list[ast.stmt]:
             block = getattr(node, field, None)
             if isinstance(block, list):
                 exits.extend(_own_exits(block))
+        for case in getattr(node, "cases", []) or []:
+            exits.extend(_own_exits(case.body))
         for handler in getattr(node, "handlers", []) or []:
             exits.extend(_own_exits(handler.body))
     return exits
@@ -229,6 +279,8 @@ def _own_ifs(body: list[ast.stmt]) -> list[ast.If]:
             block = getattr(node, field, None)
             if isinstance(block, list):
                 found.extend(_own_ifs(block))
+        for case in getattr(node, "cases", []) or []:
+            found.extend(_own_ifs(case.body))
         for handler in getattr(node, "handlers", []) or []:
             found.extend(_own_ifs(handler.body))
     return found
@@ -279,16 +331,19 @@ def test_the_design_still_states_its_position_and_the_marker_naming_8500():
         "step list, this issue's whole premise moved and the guard must be "
         "re-derived, not deleted."
     )
-    assert MARKER_NEVER_DELETE in flat, (
+    marker = _marker_block()
+    assert MARKER_NEVER_DELETE in marker, (
         "the S4 drift marker's instruction not to delete `run_s4` on the "
         "document's authority alone is gone — a lane reading only this document "
         "would then delete a live stage."
     )
-    assert "#8500" in flat, (
-        "the marker must name the issue that owns the S4 clause (#8500), so the "
-        "decision has a home a reader can reach."
+    assert MARKER_TRACKER_REF in marker, (
+        "the marker must name the issue that owns the S4 clause (#8500) in its "
+        "own tracker line, so the decision has a home a reader can reach. "
+        "Pinned verbatim: a plain `#8500` membership test is satisfied by the "
+        "record-anchor mention in the same block, not by the tracker."
     )
-    assert GUARD_NAME in flat, (
+    assert GUARD_NAME in marker, (
         f"the marker must name its guard ({GUARD_NAME}) — an unguarded marker "
         "is the stale claim this file exists to prevent."
     )
@@ -509,3 +564,73 @@ def test_the_v1_dispatch_match_is_order_insensitive():
     )
     unrelated = ast.parse("if other or extra:\n    pass\n")
     assert _is_v1_dispatch(unrelated.body[0].test) is False
+
+
+def test_the_v1_dispatch_match_is_operator_sensitive():
+    """#8601 review finding — the label asserted semantics the code never checked.
+
+    An operator-blind `_comparison_kind` accepted these semantics-inverting
+    rewrites, so the marker's bypass paths (i)/(ii) could go false while the
+    guard reported clean. Each of these must red.
+    """
+    inverted = (
+        'extractor != "v1" or summary is not None',
+        'extractor == "v1" or summary is None',
+        'extractor is not "v1" or summary is not None',
+    )
+    for source in inverted:
+        test = ast.parse(f"if {source}:\n    pass\n").body[0].test
+        assert _is_v1_dispatch(test) is False, (
+            "a comparison operator was ignored — the dispatch match accepted the "
+            f"semantics-inverting form: {source}"
+        )
+
+
+def test_the_marker_tracker_check_is_scoped_to_the_marker():
+    """#8601 review finding (P3) — `"#8500" in doc` was vacuous.
+
+    The string occurs at several places in the document, so rewriting only the
+    marker's OWN tracker line kept the document-wide check green. The scoped
+    `_marker_block()` read must red on exactly that mutation.
+    """
+    source = DOC.read_text(encoding="utf-8")
+    mutated = source.replace(MARKER_TRACKER_REF, "tracked at **`#9999`**", 1)
+    assert mutated != source, "the marker's tracker line moved — re-point this fixture"
+    assert "#8500" in _flatten(mutated), (
+        "the mutation must leave `#8500` elsewhere in the document, or it would "
+        "not exercise the vacuity this test exists to close"
+    )
+    assert MARKER_TRACKER_REF not in _marker_block(mutated), (
+        "the scoped marker read still found the tracker reference after it was "
+        "rewritten — the check is still vacuous"
+    )
+
+
+def test_the_undocumented_exit_scan_sees_a_match_case_body():
+    """#8601 review finding (P3) — `_own_exits` did not recurse into `match`.
+
+    A `return` inside an `ast.Match` case is an exit from `extract_session_v2`,
+    but the scan could not see it, so a fourth bypass of that shape would land
+    invisibly while the design marker claims it is caught.
+    """
+    source = EXTRACTOR.read_text(encoding="utf-8")
+    anchor = (
+        "    # ── S4: review gaps → complete embed list (E4: merges-not-replaces) ───"
+    )
+    assert anchor in source, "the S4 section anchor moved — re-point this fixture"
+    injected = (
+        "    match story:\n"
+        "        case None:\n"
+        "            return {'session_id': session_id}\n"
+    )
+    mutated = source.replace(anchor, injected + anchor, 1)
+    assert mutated != source, "the injection did not apply — fixture is stale"
+    assert not _undocumented_exits(source), (
+        "the unmutated tree already has an undocumented exit — this fixture "
+        "cannot attribute the detection to the injection"
+    )
+    undocumented = _undocumented_exits(mutated)
+    assert undocumented, (
+        "the exit scan missed a `return` inside a `match` case body, so a fourth "
+        "bypass of this shape would land invisibly"
+    )
