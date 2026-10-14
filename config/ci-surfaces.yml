@@ -2449,6 +2449,19 @@ surfaces:
   # DUAL-REGISTERED with `api` (above) for the hosted /v1/search field.
   - test_residency_marker.py
   - test_reconciliation.py
+  # #7950 (capstone S2 evidence) / PR #8609 review finding 3: the end-to-end
+  # chain probe's RECONCILIATION READERS must map the REAL property sets. They
+  # originally returned `{}` per key, which made `field_mismatches`
+  # structurally zero — `reconcile_views` compares two per-key MAPPINGS field
+  # by field and two empty mappings always agree — so the committed log proved
+  # key-set agreement only and a value-only second-writer signature was
+  # unmeasurable. DB-free: the reader mapping is pure, so this runs in the
+  # docker legs and the embedded carve-out alike (deliberately NOT
+  # carve_out-registered). `core` is the arm: the probe's subject is
+  # `tortoise/reconciliation.py`, which matches no SOURCE_PATTERNS entry and
+  # falls through to `core` — the same placement argument as the #7952 block
+  # above.
+  - test_7950_capstone_probe.py
   - test_stop_writes.py
   - test_structural_leg_r4.py
   - test_subjectadded_journal.py        # #2295 SubjectAdded journaling (docker lane)
@@ -3977,6 +3990,7 @@ durations:
   test_session_capture_status.py: 2.0  # #3520: same #3400 flat default — a file that never ran cannot appear in a junit artifact, so this is NOT a measurement. Required for the durations half as well as the surface half (#4348 trap): an unregistered new test file reds `integrity_problems`. Refresh from the first post-merge main run that includes it.
   test_license_surface_consumer.py: 0.3
   test_7818_plan_record_5362.py: 2.0  # #7818/#5362: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. Hermetic (one plan-doc read, no fixture/DB); refresh from the first post-merge run that includes it. Required for the durations half as well as the surface half (#4348 trap): without this row the durations coverage fell to 89.9% and `tools/ci_selection.py --integrity` red, which is how this row was found.
+  test_7950_capstone_probe.py: 2.0  # #7950: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. MEASURED this turn: WITHOUT this row the durations coverage fell to 89.9% (760/845 fast files) and `tools/ci_selection.py --integrity` red — the surface entry alone does not cover it, and the file itself is DB-free pure-function work (<0.01s per test; the local session total is conftest/DB setup). Refresh from the first post-merge run that includes it.
   test_installer_preserves_foreign_skill_content.py: 0.6
   test_backup_watcher_health.py: 0.2
   eval/retrieval/test_integration.py: 1523.4

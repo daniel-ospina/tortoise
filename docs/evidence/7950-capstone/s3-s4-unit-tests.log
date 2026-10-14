@@ -1,0 +1,15 @@
+=== S3 residency marker ===
+..........................................................               [100%]
+58 passed in 6.72s
+
+=== S3 cache projection (unit) ===
+..............................                                           [100%]
+30 passed in 5.09s
+
+=== S3 cache projection (live) ===
+.....                                                                    [100%]
+5 passed in 3.65s
+
+=== S4 residency router ===
+..............................                                           [100%]
+30 passed in 3.26s
