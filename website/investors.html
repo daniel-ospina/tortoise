@@ -28,12 +28,17 @@
        as a link, which makes the social/chat preview one of its primary
        surfaces — a card with no artwork is the first thing the reader sees.
        The card is a NEW owned asset, not the design-partner one: an outreach
-       link must not preview as a different document. It is the 1200x630 brand
-       mark (same triangle geometry and Georgia/Menlo type stack as the
-       design-partner card), not a video frame, so the two cannot drift in
-       layout. Absolute URL required: OG consumers do not resolve relative
-       paths. The VIDEO and its POSTER are the design-partner ones, reused —
-       they are page-agnostic ("Tortoise / 1-minute introduction"). -->
+       link must not preview as a different document. It is the same kind of
+       1200x630 brand mark as the design-partner card — the same nested-triangle
+       mark and the same Georgia/Menlo type stack — not a video frame, so the
+       two previews read as one system rather than as two unrelated documents.
+       Those two cards were rendered separately, though, and their type scales
+       are close but not identical (this card's title measures ~56px
+       cap-height against the design-partner card's ~65px, and its URL ~21%
+       wider); #8630 tracks collapsing both onto one generator. Absolute URL
+       required: OG consumers do not resolve relative paths. The VIDEO and its
+       POSTER are the design-partner ones, reused — they are page-agnostic
+       ("Tortoise / 1-minute introduction"). -->
   <meta property="og:image" content="https://tortoise.premiselabs.co/assets/investors-og.jpg">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -220,9 +225,14 @@
     /* ── Plain bulleted lists ─────────────────────────────────────────────
        For the parallel one-line claims (the coordination problems, the market
        gaps) and for the GTM proof points and biography lines. The marker is
-       the accent dot, at the same visual weight as the ↑/↓ markers below. */
+       the accent dot, at the same visual weight as the ↑/↓ markers below.
+       `text-wrap: pretty` lets the browser avoid a final line holding one
+       orphaned word, which these prose items otherwise produce: at 1280px the
+       third market gap ended on "teams." alone (55px against a 591px measure,
+       9% fill) and is now 146px. It changes only the last couple of lines, so
+       it is declared here and NOT on the narrow `.profile` columns below. */
     .bullets { list-style: none; margin-top: 1.15rem; }
-    .bullets li { display: flex; gap: 0.7rem; align-items: baseline; font-size: 0.95rem; }
+    .bullets li { display: flex; gap: 0.7rem; align-items: baseline; font-size: 0.95rem; text-wrap: pretty; }
     .bullets li + li { margin-top: 0.4rem; }
     .bullets li::before { content: "·"; color: var(--accent); flex: 0 0 auto; }
     /* The leading term of a claim is bolded so the parallel gaps are scannable
@@ -266,7 +276,13 @@
        `.profile p` at 0.9rem, so an unscoped list made the Wedge column's
        proof points render LARGER than the sentence they support and broke the
        uniformity every other cell in this grid has. Match the cell. */
-    .profile .bullets li { font-size: 0.9rem; }
+    /* …but back to natural wrapping while this grid is two-column, the one
+       place `pretty` costs more than the orphan it removes: the Wedge cell is
+       ~262px wide above the 620px breakpoint, and avoiding the orphan there
+       left a half-empty middle line (measured 262 / 199 / 156 / 182px against
+       262 / 251 / 225 / 61px unwrapped). The narrow block below turns it back
+       on once this grid is a single column. */
+    .profile .bullets li { font-size: 0.9rem; text-wrap: auto; }
 
     /* ── Footer ───────────────────────────────────────────────────────── */
     /* `footer.wrap`, NOT a bare `footer`: the element also carries `.wrap`, whose
@@ -294,6 +310,10 @@
       .video { width: 100%; max-width: 232px; margin: 0 auto; }
       .video figcaption { text-align: center; }
       .outcomes, .profile { grid-template-columns: 1fr; gap: 1.9rem; }
+      /* One column from here down, so these lists are wide again and the
+         orphan-avoidance above starts paying: at 390px it takes the Wedge
+         proof point's last line from 43px (the word "tweet" alone) to 104px. */
+      .profile .bullets li { text-wrap: pretty; }
       .outcomes { gap: 0.6rem; }
     }
 
