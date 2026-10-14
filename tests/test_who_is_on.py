@@ -766,6 +766,27 @@ exec {self.gh} "$@"
         self.assertNotIn("ANSWER: nobody", out)
         self.assertNotIn("do NOT dispatch onto shipped work", out)
 
+    def test_a_closed_issue_with_an_unknown_reason_makes_no_shipment_claim(self):
+        """#8560 review: `CLOSED` with an unavailable / unrecognised
+        `stateReason` is TERMINAL, but the tool did not OBSERVE a shipment.
+        The gate's own `_landed_conclusion` stays neutral for it, and this verb
+        must not re-introduce the claim the gate refuses to make — the tail
+        line and the ANSWER line are part of the same terminal fact (this
+        mirrors the gate's
+        `test_closed_with_an_unknown_reason_makes_no_shipment_claim`)."""
+        self._closed_issue(state_reason=None)
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("LANDED — the work item is TERMINAL (closed)", out)
+        self.assertNotIn("ALREADY SHIPPED", out)
+        # The two extra claim lines the gate does NOT print on this input.
+        self.assertNotIn("do NOT dispatch onto shipped work", out)
+        self.assertIn("do NOT dispatch onto a terminal work item", out)
+        self.assertIn("ANSWER: already closed —", out)
+        self.assertNotIn("ANSWER: already landed", out)
+        self.assertNotIn("(not planned)", out)
+        self.assertNotIn("ANSWER: nobody", out)
+
     def test_landed_surface_failure_answers_incomplete(self):
         """The landed surface is BLOCKING: an unqueryable timeline must answer
         INCOMPLETE (rc 2) naming `issue landed` — never "nobody". The gate's

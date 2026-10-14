@@ -290,14 +290,15 @@ Exit codes
                         is the open-PR refusal" MISROUTES this one. Remedy: pass
                         `--repo owner/name`.
     3  usage / internal error
-    4  LANDED       the issue's own state is CLOSED, or a MERGED PR the
-                    paginated timeline ties to this issue names it — the work
-                    has ALREADY SHIPPED, so this is NOT free work (do NOT
-                    dispatch). A landed issue is never reachable as CLEAN, and
-                    this code takes precedence over 1 and 2 (a terminal signal
-                    is decisive). It is DISTINCT from 1 because the remedy
-                    differs — verify and close the issue, not coordinate with a
-                    lane — and from 2 because there is nothing to re-run.
+    4  LANDED       the issue's own state is CLOSED (worded from its closure
+                    reason), or a MERGED PR the paginated timeline ties to
+                    this issue names it — a TERMINAL fact, so this is NOT free
+                    work (do NOT dispatch). A landed issue is never reachable
+                    as CLEAN, and this code takes precedence over 1 and 2 (a
+                    terminal signal is decisive). It is DISTINCT from 1 because
+                    the remedy differs — verify and close the issue, not
+                    coordinate with a lane — and from 2 because there is
+                    nothing to re-run.
 
 Env seams (tests point these at stubs; production defaults are the real tools)
     COLLISION_PREFLIGHT_GH                gh binary        (default: gh)
@@ -4380,6 +4381,30 @@ def _merged_reference(event: dict) -> tuple[int, str] | None:
     return number, title
 
 
+def _landed_wording(kinds: set[str]) -> str:
+    """Classify landed hit kinds into the ONE claim both verbs may make.
+
+    The single source of truth for the terminal wording (#8560 review): the
+    gate's verdict AND `tools/who_is_on.py`'s answer derive from this, so the
+    two verbs cannot describe the same input differently.
+
+      * ``shipment``   — a merged timeline PR (`shipped`) or a `COMPLETED`
+                         closure WAS observed; the only class that may say the
+                         work shipped.
+      * ``not-planned``— the only observed fact is a `NOT_PLANNED` closure
+                         (declined or superseded); the work did not ship.
+      * ``terminal``   — a CLOSED issue whose ``stateReason`` is unavailable or
+                         unrecognised. The refusal (do NOT dispatch) holds, but
+                         no shipment may be claimed: the tool did not observe
+                         one.
+    """
+    if kinds <= {"not-planned"}:
+        return "not-planned"
+    if "shipped" in kinds or "completed" in kinds:
+        return "shipment"
+    return "terminal"
+
+
 def _landed_conclusion(landed_hits: list[Hit]) -> str:
     """The closing clause of the LANDED verdict, worded from the TERMINAL FACT.
 
@@ -4390,14 +4415,14 @@ def _landed_conclusion(landed_hits: list[Hit]) -> str:
     that sends a human looking for a merge that does not exist. A merged
     timeline PR (kind `shipped`) or a `COMPLETED` closure IS a shipment.
     """
-    kinds = {hit.kind for hit in landed_hits}
-    if kinds <= {"not-planned"}:
+    wording = _landed_wording({hit.kind for hit in landed_hits})
+    if wording == "not-planned":
         return (
             "the issue was CLOSED AS NOT PLANNED (superseded or declined) — "
             "the work did not ship, but it is TERMINAL and never free work; "
             "do NOT dispatch"
         )
-    if "shipped" in kinds or "completed" in kinds:
+    if wording == "shipment":
         return "the work appears ALREADY SHIPPED — do NOT dispatch"
     return "the work item is TERMINAL (closed) — do NOT dispatch"
 

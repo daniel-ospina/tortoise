@@ -646,8 +646,12 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
         # The conclusion is the GATE's own (`_landed_conclusion`), so the two
         # verbs cannot drift into describing the same terminal fact differently
         # — and a `NOT_PLANNED` closure is never rendered as ``already shipped``
-        # (#8560 review).
-        landed_kinds = {hit.kind for _s, hit in landed}
+        # (#8560 review). The tail line and the ANSWER: line are worded from the
+        # SAME classification (`cp._landed_wording`), not from a second,
+        # narrower `not-planned` test: a CLOSED issue whose closure reason is
+        # unavailable (kind `closed`) is terminal, and claiming a shipment for
+        # it would invent the merge the gate refuses to name (#8560 review).
+        wording = cp._landed_wording({hit.kind for _s, hit in landed})
         lines.append("")
         lines.append("LANDED — " + cp._landed_conclusion([h for _s, h in landed]))
         lines.append("  (AUTHORITATIVE — the issue's own state, or a MERGED PR the")
@@ -656,8 +660,8 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
             lines.append(f"  [{_clean(surface.name)}] {_clean(hit.ref)} — "
                          f"{_clean(hit.detail)}")
         lines.append("  These are NOT holders — do NOT dispatch onto "
-                     + ("a terminal work item." if landed_kinds <= {"not-planned"}
-                        else "shipped work."))
+                     + ("shipped work." if wording == "shipment"
+                        else "a terminal work item."))
     if weak and not holders:
         lines.append("")
         lines.append(f"WEAK SIGNALS (non-blocking — prose is not work): {len(weak)} "
@@ -721,7 +725,10 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
         lines.append(
             ("ANSWER: already closed (not planned) — the artifacts above are "
              "TERMINAL, not a holder. "
-             if landed_kinds <= {"not-planned"}
+             if wording == "not-planned"
+             else "ANSWER: already closed — the artifacts above are TERMINAL, "
+                  "not a holder. "
+             if wording == "terminal"
              else "ANSWER: already landed — the artifacts above are TERMINAL, not "
                   "a holder. ")
             + "Verify the issue body against the named artifact before "

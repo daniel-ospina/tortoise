@@ -212,8 +212,10 @@ while read -r N; do
   # whole line and control fell to `*)` — logged as "no verdict" and re-pre-flighted on EVERY pass.
   # Nothing is dispatched for it (only CLEAN is queued), but a terminal fact read as an error is a
   # false diagnosis. INCOMPLETE (exit 2, some surfaces unqueried) is likewise a REAL verdict, not a
-  # missing one — the sed captures it so the log names what happened instead of "no verdict"; both
-  # are settled answers and count against the pass budget exactly like CLEAN and COLLISION.
+  # missing one — the sed captures it so the log names what happened instead of "no verdict".
+  # LANDED is a settled answer and counts against the pass budget like CLEAN and COLLISION (its arm
+  # below increments `n`); INCOMPLETE keeps the existing rule — it costs nothing against LIMIT and is
+  # bounded by RETRY_MAX in the `*)` arm (#8469 review P2).
   #
   # ⛔ LANDED IS NOT TERMINAL HERE, so it does NOT go in checked.txt. The pool is built from
   # `gh issue list --state open`, so the pre-flight's state-CLOSED arm is unreachable from this loop:
