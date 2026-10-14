@@ -23,9 +23,10 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
-import psycopg2
+from tortoise.cache_projection import KEY_PROPERTY, RecordView, declared_key
 
 ROOT = Path(__file__).resolve().parents[4]  # repo root
 FIXTURE = ROOT / "supabase/tests/fixtures/record_projection_journal.jsonl"
@@ -43,7 +44,39 @@ ORG, GRAPH = "cap7950-org", "cap7950-graph"
 CACHE_GRAPH = "test_cap7950_e2e"
 
 
+def record_key_map(view: RecordView) -> dict[str, dict]:
+    """`{declared key: {property: value}}` — the record's REAL property maps.
+
+    A reader that returned `{}` for every key makes `field_mismatches`
+    STRUCTURALLY zero: `reconcile_views` compares two per-key MAPPINGS field by
+    field, and two empty mappings always agree. A second writer that modified
+    an existing node's property would then be invisible, and the count would
+    prove key-set agreement only. The maps must be the actual field sets.
+    """
+    return {declared_key(n.label, n.key): dict(n.props) for n in view.nodes}
+
+
+def cache_key_map(
+        rows_by_label: Mapping[str, Iterable[Mapping]]) -> dict[str, dict]:
+    """`{declared key: {property: value}}` from the cache's own property maps.
+
+    ``rows_by_label`` is ``{label: [properties(n), ...]}`` — the caller runs
+    the read, this function does the keying, so the values are what the cache
+    actually holds rather than a placeholder.
+    """
+    out: dict[str, dict] = {}
+    for label, rows in rows_by_label.items():
+        key_prop = KEY_PROPERTY[label]
+        for props in rows:
+            props = dict(props or {})
+            key = props.get(key_prop)
+            if key:
+                out[declared_key(label, key)] = props
+    return out
+
+
 def main() -> int:
+    import psycopg2  # the optional `postgres` extra; the probe runs with it
     conn = psycopg2.connect(DSN)
     try:
         # ── 1. journal -> Postgres ─────────────────────────────────────────
@@ -123,23 +156,30 @@ def main() -> int:
             c2 = psycopg2.connect(DSN)
             try:
                 v = cp.read_record_view(c2, org_id=ORG, graph_id=GRAPH)
-                return {declared_key(n.label, n.key): {} for n in v.nodes}
+                return record_key_map(v)
             finally:
                 c2.close()
 
         def _cache_keys() -> dict:
-            out = {}
-            for lab, tbl in cp.NODE_TABLES.items():
-                kp = cp.KEY_PROPERTY[lab]
+            rows_by_label: dict[str, list] = {}
+            for lab in cp.NODE_TABLES:
                 rows = proj.query(
-                    f"MATCH (n:{lab}) RETURN n.{kp}").result_set
-                for r in rows:
-                    if r and r[0]:
-                        out[declared_key(lab, r[0])] = {}
-            return out
+                    f"MATCH (n:{lab}) RETURN properties(n)").result_set
+                rows_by_label[lab] = [r[0] for r in rows if r]
+            return cache_key_map(rows_by_label)
 
         # full rebuild first, so the two sides should agree
         proj.rebuild_from_record(view, confirm_destructive=True)
+        # Non-vacuity guard: `reconcile_views` compares two per-key MAPPINGS
+        # field by field, and two `{}` values always agree — so a reader that
+        # returned a placeholder for every key would make `field_mismatches`
+        # structurally zero and the count would prove key-set agreement only
+        # (the #8609 review, finding 3). Refuse to report such a comparison.
+        if not any(_record_keys().values()) or not any(_cache_keys().values()):
+            print("RECONCILE STOP: a reader returned EMPTY property maps — the "
+                  "field comparison would be structurally zero, so the count "
+                  "proves key-set agreement only")
+            return 4
         rep = reconcile(_record_keys, _cache_keys)
         print(f"RECONCILE (after a record-sourced rebuild): {rep.render()}")
 
@@ -159,6 +199,26 @@ def main() -> int:
         rep2 = reconcile(_record_keys, _cache_keys)
         print(f"RECONCILE (after a DIRECT raw-handle cache write): {rep2.render()}")
         print(f"second-writer signature -> extra_in_cache={rep2.extra_in_cache}")
+
+        # ── 5c. a second writer that MUTATES an existing node ─────────────
+        # A key-set comparison cannot see this at all, and a `{}`-valued map
+        # makes it structurally invisible even to the field comparison — so
+        # this is the signature the REAL property maps exist to surface
+        # (finding 3: a value-only divergence was previously unmeasurable).
+        tgt = view.nodes[0]
+        kp = cp.KEY_PROPERTY[tgt.label]
+        proj.g.query(
+            f"MATCH (n:{tgt.label} {{{kp}: $key}}) SET n += $props",
+            {"key": tgt.key,
+             "props": {"second_writer_marker": "direct-cache-write"}})
+        print(f"ARMED RAW HANDLE MUTATION:        {declared_key(tgt.label, tgt.key)} "
+              f"gained an unauthorized property "
+              f"({tgt.label}.second_writer_marker)")
+        rep3 = reconcile(_record_keys, _cache_keys)
+        print("RECONCILE (after a DIRECT raw-handle property WRITE): "
+              f"{rep3.render()}")
+        print("field-mutation signature -> "
+              f"field_mismatches={rep3.field_mismatches}")
 
         print("CHAIN RESULT: journal -> record -> cache COMPLETED with the shipped modules")
         return 0

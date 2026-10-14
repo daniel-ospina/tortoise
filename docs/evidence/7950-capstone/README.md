@@ -11,9 +11,10 @@ aboutObjects: "#7950, epic #7879, STORAGE-ARCHITECTURE.md §17, Postgres record,
 
 # Capstone evidence — `#7950` (S1–S6)
 
-**Measured at:** `cap/7950-capstone-proof@6a57eca6cfab965268253f7495aeb86572ff0fc6` on 2026-10-14
-(worktree dirty: **only** the `docs/evidence/7950-capstone/**` files this run adds; the product
-source under `tortoise/` is unmodified at that commit).
+**Measured at:** `cap/7950-capstone-proof` merged with `origin/main@1f83eaab8` (merge commit
+`98ab7ae7b`) on 2026-10-14 (worktree dirty: the `docs/evidence/7950-capstone/**` files this run
+adds plus `tests/test_7950_capstone_probe.py`; the product source under `tortoise/` is unmodified
+at that commit). The end-to-end log and the S2 census are measured at this head.
 
 **Lane:** private docker FalkorDB `fdb-lane-deba02cbc2` on `127.0.0.1:16436`
 (`uv run python tools/test_lane.py uri`). **Postgres:** a throwaway `postgres:16` container
@@ -35,7 +36,7 @@ property that makes it safe is **`derived = replay(journal)`**. **§17** is the 
 | # | criterion | verdict | deciding artifact | homed |
 |---|---|---|---|---|
 | **S1** | every write goes to the truth store first; the cache is projected from it | ⛔ **NOT-GREEN** | `s1-bypass-probe.log`: an **armed** journal-backed projection refuses `apply` but lets `proj.g.query` write the cache directly (0 journal records) | **`#7951`** (OPEN) |
-| **S2** | truth↔cache divergence is OBSERVED, not assumed | ⛔ **NOT-GREEN** | `s2-wiring-census.log`: `reconcile` / `record_projection.replay` / `read_record_view` / `rebuild_from_record` all have **0 production call sites** | **`#7951`** + **`#7970`** (OPEN) |
+| **S2** | truth↔cache divergence is OBSERVED, not assumed | ⛔ **NOT-GREEN** | `s2-wiring-census.log`: `reconcile` / `record_projection.replay` / `read_record_view` / `rebuild_from_record` all have **0 production call sites**; and `e2e-chain-probe.log`: a clean record-sourced rebuild is `field_mismatches=1` (the `vecf32` narrowing — `#8615`) | **`#7951`** + **`#7970`** + **`#8615`** (OPEN) |
 | **S3** | ⭐ the completeness marker works | ✅ **GREEN** | `s3-s4-named-tests.log` + live bounded rebuild in `e2e-chain-probe.log` (`Point:p1` → `not-hot`) | `#7952` (CLOSED) |
 | **S4** | a residency miss is not an insufficiency | ✅ **GREEN** | `s3-s4-unit-tests.log`: 30 router tests; residency outranks sufficiency | `#7953` (CLOSED) |
 | **S5** | derived/volatile fields are NOT in the system of record | ✅ **GREEN** | `s5-s6-pglite-validate.log` (`20261012000001_record_schema.sql PASSED`, incl. the `subject.props.status` refusal) | `#8263` (CLOSED) |
@@ -59,7 +60,7 @@ The previous comment recorded that *"the capstone's premise — run the two-stor
 workload — has never been executed."* **It has now been executed, with the shipped modules**, on a
 real Postgres + a real FalkorDB:
 
-```
+```console
 $ TORTOISE_DB_URI=<private lane> uv run --with psycopg2-binary \
     python docs/evidence/7950-capstone/probes/e2e_chain_probe.py
 journal records read: 39
@@ -72,11 +73,14 @@ cache node counts (live read): [('Event', 1), ('Meta', 1), ('Object', 1), ('Poin
 hot read for Point 'p1': [['p1']]
 bounded rebuild declaration: coverage=partial
 unwritten record key 'Point:p1' covered-by-declaration=False → residency=not-hot
-RECONCILE (after a record-sourced rebuild): record vs cache: 0 divergent of 7 checked (missing_in_cache=0, extra_in_cache=0, field_mismatches=0)
+RECONCILE (after a record-sourced rebuild): record vs cache: 1 divergent of 7 checked (missing_in_cache=0, extra_in_cache=0, field_mismatches=1)
 ARMED FOLD (proj.apply):          refused (DirectCacheWriteRefused)
 ARMED RAW HANDLE (proj.g.query):  SUCCEEDED (direct cache write)
-RECONCILE (after a DIRECT raw-handle cache write): record vs cache: 1 divergent of 8 checked (missing_in_cache=0, extra_in_cache=1, field_mismatches=0)
+RECONCILE (after a DIRECT raw-handle cache write): record vs cache: 2 divergent of 8 checked (missing_in_cache=0, extra_in_cache=1, field_mismatches=1)
 second-writer signature -> extra_in_cache=1
+ARMED RAW HANDLE MUTATION:        Point:p1 gained an unauthorized property (Point.second_writer_marker)
+RECONCILE (after a DIRECT raw-handle property WRITE): record vs cache: 2 divergent of 8 checked (missing_in_cache=0, extra_in_cache=1, field_mismatches=2)
+field-mutation signature -> field_mismatches=2
 CHAIN RESULT: journal -> record -> cache COMPLETED with the shipped modules
 ```
 
@@ -87,14 +91,26 @@ headline block above.
 
 **Raw output:** `e2e-chain-probe.log`; bootstrap: `probes/e2e_postgres_bootstrap.py`.
 
+**The reconciliation readers return the real property maps, so the field half is a real count.** A
+reader that returned `{}` for every key would make `field_mismatches` **structurally zero** —
+`reconcile_views` compares two per-key mappings field by field, and two empty mappings always agree
+— leaving the run proving key-set agreement only. With the actual maps the field half is measurable,
+and it reports a real divergence (see S2).
+
 **What this proves, and what it does not.**
 
 - ✅ The two projections **work end to end**: journal (39 records) → Postgres record (60 mutations,
   7 `node_identity` rows) → `read_record_view` → `rebuild_from_record` → FalkorDB (node counts
   match the record exactly), and a bounded rebuild declares `partial` and marks an unwritten key
   `not-hot`.
-- ✅ `reconciliation.reconcile` **detects a second writer on real data**: after a direct
-  raw-handle cache write it reports `extra_in_cache=1` — the §17.1-violation signature.
+- ✅ `reconciliation.reconcile` **detects a second writer on real data**, on both halves: a direct
+  raw-handle node write reports `extra_in_cache=1` (the §17.1 key-set signature) and a direct
+  raw-handle **property** write reports `field_mismatches=2` (the value signature).
+- ⛔ A **clean** record-sourced rebuild is **not** zero-divergence: `field_mismatches=1` — the
+  `vecf32` narrowing of `Point:p1.embedding` (record `[0.1, 0.2]` float64, cache
+  `[0.10000000149011612, 0.20000000298023224]` float32). This is a **comparison-rule decision the
+  module defers**, not a wiring gap; recorded on **`#8615`**. It is why S2 stays NOT-GREEN even
+  after the wiring lands.
 - ⛔ It is **driven by hand**. In the product, neither `record_projection.replay`, nor
   `read_record_view`, nor `rebuild_from_record`, nor `reconcile` has a single production caller
   (`s2-wiring-census.log`). The chain is **built**, not **wired**.
@@ -113,7 +129,7 @@ headline block above.
 But the raw handle is not one of them. `docs/evidence/7950-capstone/probes/s1_bypass_probe.py`
 creates a **journal-backed** SDK (guard armed) and attempts three writes:
 
-```
+```text
 journal_backed (guard armed): True
 FOLD LANE (proj.apply):          refused (DirectCacheWriteRefused)
 PUBLIC RAW LANE (proj.query):    refused (DirectCacheWriteRefused)
@@ -138,7 +154,7 @@ afterwards — **cache ahead of truth**, §17.1's ordering contract exception 2.
 Census (`probes/s1_census.py`, `s1-census.log`; population `tortoise/**/*.py`, method = test-design
 §9: paren-balanced read of every `.query(` argument, first mutating Cypher verb):
 
-```
+```text
 mutating `.query(` sites: 442  files: 38
 first-verb tally: {'SET': 172, 'MERGE': 129, 'CREATE': 56, 'DETACH DELETE': 44, 'DELETE': 29, 'REMOVE': 12}
 raw-handle sites (`.g.query` / `.g._g.query`): 288 of 442
@@ -163,7 +179,7 @@ DECISION`), not a defect. It must not be carried as an S1 blocker.
 **Fails if:** divergence is merely *recoverable*. The mechanism is *checkable*; it is **not
 observed**, because nothing in the product calls it.
 
-```
+```console
 $ uv run pytest tests/test_reconciliation.py -q
 27 passed in 6.09s                                       (s2-reconciliation-tests.log)
 
@@ -177,14 +193,25 @@ production population: ['tortoise', 'tools', 'scripts']/**/*.py
 ```
 
 The mechanism itself is sound, and the end-to-end run proves it **on real data** — after a direct
-raw-handle cache write it reports `extra_in_cache=1` (the second-writer signature, §17.2). But a
-check that is never run observes nothing. `reconcile()`'s own docstring names the dependency:
+raw-handle cache write it reports `extra_in_cache=1` (the second-writer signature, §17.2) and after
+a direct raw-handle property write it reports `field_mismatches` (the value-divergence signature).
+But a check that is never run observes nothing. `reconcile()`'s own docstring names the dependency:
 *"until the record's own read path exists (#7970) and the cache is projected one way from it
 (#7971)."* There is no scheduled/continuous runner.
 
+**A second, independent reason S2 cannot go green — the field half.** With readers carrying the real
+property maps, a **clean** record-sourced rebuild reports `field_mismatches=1`: `Point:p1.embedding`
+is `[0.1, 0.2]` (float64) in the record and `[0.10000000149011612, 0.20000000298023224]` in the
+cache, because `node_statement` writes a non-verbatim embedding as `vecf32` (`#5004`) while
+`reconciliation._canonical` compares numbers **exactly, by design** (its docstring defers a tolerance
+to "a separate decision with its own recorded bounds"). So `reconcile()` can never report a clean
+cache for a node carrying a non-verbatim embedding, and a genuine vector-field divergence is
+indistinguishable from that narrowing. **This is a decision the module defers, not a wiring gap**
+— recorded and homed on **`#8615`**.
+
 **Missing:** a running reconciliation — the record reader and its wiring. **Homed: `#7951`**
 (the chokepoint the reconciliation is evidence for) and **`#7970`** (the record read path,
-OPEN/deferred by §2.0).
+OPEN/deferred by §2.0). The comparison rule for vector-valued properties is homed on **`#8615`**.
 
 ---
 
@@ -192,10 +219,10 @@ OPEN/deferred by §2.0).
 
 **Fails if:** an empty result is returned where `not-hot` is required.
 
-```
-$ uv run pytest tests/test_residency_marker.py -q      → 58 passed
-$ uv run pytest tests/test_cache_projection.py -q      → 30 passed
-$ uv run pytest tests/test_cache_projection_live.py -q → 5 passed  (live FalkorDB)
+```console
+uv run pytest tests/test_residency_marker.py -q      → 58 passed
+uv run pytest tests/test_cache_projection.py -q      → 30 passed
+uv run pytest tests/test_cache_projection_live.py -q → 5 passed  (live FalkorDB)
 ```
 
 Named load-bearing tests (`s3-s4-named-tests.log`, all PASSED):
@@ -225,7 +252,7 @@ deferral, not an absence. The per-key node-naming read path that would drive it 
 
 ## S4 — a residency miss is not an insufficiency — ✅ GREEN
 
-```
+```console
 $ uv run pytest tests/test_residency_router.py -q
 30 passed in 3.26s                                       (s3-s4-unit-tests.log)
 ```
@@ -247,7 +274,7 @@ migration `20261014000001_record_subject_props_no_derived.sql` (`#8263`, CLOSED 
 Ship the shipped harness — it applies **every** migration in `supabase/migrations` in filename
 order, then runs the SQL assertion suites with `ON_ERROR_STOP`:
 
-```
+```console
 $ npm --prefix supabase/tests/pglite run validate
 ...
 ✅ 20261012000001_record_schema.sql PASSED (no exceptions)
@@ -261,7 +288,7 @@ it inserts `subject.props {"status":"superseded"}` and requires a `check_violati
 sentinel that fails the suite on the **specific** assertion if the CHECK does not fire (so a mere
 `PASSED` means the refusal fired). The shipped Python reader agrees:
 
-```
+```console
 $ uv run python -c "...record_projection.refused_props_names()..."
 subject refused: ['embedding', 'status']                  (s5-placement-enumeration.log)
 ```
@@ -269,7 +296,7 @@ subject refused: ['embedding', 'status']                  (s5-placement-enumerat
 Every node table carries a `props` refusal CHECK, and `tests/test_record_schema_placement.py`
 pins schema↔placement **both directions**:
 
-```
+```console
 $ uv run pytest tests/test_record_schema_placement.py -q
 26 passed in 2.87s                                        (s5-s6-unit-tests.log)
 ```
@@ -284,7 +311,7 @@ journal fixture.
 
 ## S6 — a canonical id exists — ✅ GREEN (contract); live formats NOT normalised
 
-```
+```console
 $ uv run pytest tests/test_identity_contract.py -q
 8 passed in 4.45s                                         (s5-s6-unit-tests.log)
 $ npm --prefix supabase/tests/pglite run validate         → 20261012000001_record_schema.sql PASSED
@@ -318,9 +345,9 @@ truncated property-name sample the cap truncates). **W1b has no issue home** (se
   nothing measures that (`s2-read-ledger-census.log`; population `tortoise/**/*.py` and
   `supabase/migrations/*.sql`):
 
-```
-$ grep -rniE "last_read|read_count|access_count|hot_fraction|read_ledger|query_telemetry" tortoise/  → 0 relevant
-$ grep -rniE "query_log|query_telemetry|read_ledger|access_log|node_read" supabase/migrations/*.sql → 0
+```console
+grep -rniE "last_read|read_count|access_count|hot_fraction|read_ledger|query_telemetry" tortoise/  → 0 relevant
+grep -rniE "query_log|query_telemetry|read_ledger|access_log|node_read" supabase/migrations/*.sql → 0
 ```
 
 So `f` is a **policy** variable (what we choose to keep), not a **measured** one. The artifact that
@@ -357,7 +384,7 @@ Recorded here because the proof touches the affected surface.
 | # | blocker |
 |---|---|
 | **S1** | enforcement on the raw-handle lane (`proj.g.query`) + the atomic write → **`#7951`** (OPEN) |
-| **S2** | a running reconciliation: the record reader + the chokepoint wiring → **`#7951`** + **`#7970`** (OPEN) |
+| **S2** | a running reconciliation: the record reader + the chokepoint wiring → **`#7951`** + **`#7970`** (OPEN); the comparison rule for vector-valued properties (a clean rebuild reports `field_mismatches=1`) → **`#8615`** (OPEN) |
 | **S6 caveat** | live legacy-id normalisation (W1b) → **no issue home** |
 
 Not blocking, recorded: the marker is off by default under a `complete` declaration (§2.0's

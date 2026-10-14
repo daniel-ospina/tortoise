@@ -66,7 +66,7 @@ def main() -> int:
         sql = (MIG_DIR / name).read_text()
         try:
             cur.execute(sql)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             print(f"FAILED applying {name}: {exc}")
             return 1
         print(f"applied {name}")

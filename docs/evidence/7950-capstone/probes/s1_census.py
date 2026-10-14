@@ -45,7 +45,7 @@ def sites_for(pattern: re.Pattern[str]):
 
 def main() -> None:
     sites, files, first, raw = sites_for(MUT)
-    print(f"population: tortoise/**/*.py")
+    print("population: tortoise/**/*.py")
     print(f"mutating `.query(` sites: {sites}  files: {len(files)}")
     print(f"first-verb tally: {dict(first.most_common())}")
     print(f"raw-handle sites (`.g.query` / `.g._g.query`): {raw} of {sites}")

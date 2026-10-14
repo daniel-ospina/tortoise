@@ -56,7 +56,7 @@ def main() -> int:
             proj.g.query("CREATE (:S1Probe {id: 'raw-handle'})")
             raw_ok = True
             print("RAW HANDLE LANE (proj.g.query):   SUCCEEDED (write reached the cache)")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             print(f"RAW HANDLE LANE (proj.g.query):   refused ({type(exc).__name__}: {exc})")
 
         # Did the raw-handle write land? (read it back)
@@ -73,7 +73,7 @@ def main() -> int:
             try:
                 ev = json.loads(ln)
                 print(f"  journal event: {ev.get('type')}")
-            except Exception:  # noqa: BLE001
+            except Exception:
                 print(f"  journal raw: {ln[:120]}")
 
         verdict = "BYPASS CONFIRMED" if (raw_ok and not jlines) else "no bypass observed"
