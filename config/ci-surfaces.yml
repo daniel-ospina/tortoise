@@ -2024,6 +2024,23 @@ surfaces:
   # diff takes `select()`'s early return, so `tier1` is where it must live;
   # `core` is its home for the code diffs that can re-rotate a passage.
   - test_extractor_v4_citation_rot.py
+  # #8500: the FOURTH guard over the same document — the S4 divergence. The doc
+  # says *"There is no S4"*, the shipped pipeline runs one whenever a story
+  # exists, and the drift marker recording that (#8498) is PROSE: nothing failed
+  # when the code changed, so its behavioural claims were free to rot — and its
+  # citations had already moved by the time the marker landed (it cited
+  # `4c801fb18` figures the tree no longer had). #8506's citation-rot guard checks
+  # that a quoted SYMBOL exists; it checks no behavioural claim at all. This file
+  # resolves, with `ast`, the claims a lane would act on destructively: the
+  # `if story:` call gate (no flag gate), `TORTOISE_S4_DELTA` as the OUTPUT
+  # contract rather than an off switch, the consumed `merge_embed_lists` union,
+  # and the three side-effect bypass paths — plus the module docstring's
+  # `G5 record — the live S4 stage (#8500)`, the record the S4 call site names
+  # (before this change it named a record that did not exist). Same docs-only
+  # reason as the three guards above: a `docs/`-only diff takes `select()`'s early
+  # return, so `tier1` is where it must live; `core` is its home for the code
+  # diffs that can falsify a claim.
+  - test_extractor_v4_s4_stage_claims.py
   - test_falkordb_compat.py
   # #7076: the degraded-fallback snapshot's OWN guard. test_fallback_snapshot.py
   # was registered only under `api`, while the module it guards
@@ -3457,6 +3474,10 @@ tier1:
 # and the same docs-only PR is exactly the change that can re-introduce a
 # retracted passage.
 - test_extractor_v4_citation_rot.py
+# #8500: the same document's S4-divergence guard (`core` above) — same no-DB,
+# `ast`-only shape, and the same docs-only PR is exactly the change that can
+# falsify a claim it pins (or tidy the marker away).
+- test_extractor_v4_s4_stage_claims.py
 slow_files:
 - test_3311_multilabel_status_vocab.py
 - test_about_edges.py
@@ -4428,6 +4449,7 @@ durations:
   test_extractor_v4_step_list_consistency.py: 0.1  # #5092: two fenced blocks + one paragraph read; measured 0.01s of test body (session setup excluded)
   test_extractor_v4_doc_citations.py: 0.1  # #8498 review P2: one row + two module assertions; same no-DB shape as the step-list guard
   test_extractor_v4_citation_rot.py: 0.1  # #8506: doc-text scans + a handful of file reads; same no-DB shape as the two guards above
+  test_extractor_v4_s4_stage_claims.py: 0.1  # #8500: `ast` walks over two source files + doc-text scans; no DB, same shape as the three v4 guards above
   test_file_indexer.py: 0.7
   test_open_kinds.py: 0.3
   test_postmerge_verdict.py: 0.4

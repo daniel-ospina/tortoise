@@ -33,6 +33,43 @@ raw conversation
      dependency order (entities → events → points → operators).
 ```
 
+G5 record — the live S4 stage (#8500)
+-------------------------------------
+The v4 design (``docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md``) removes S4
+from its step list — *"There is no S4 — do not restore one"*; its eight steps
+are S0·S1·S2.1·S2.2·S2.3·S3·S5·S6. That is the v4 TARGET STATE. This module runs
+a stage under the S4 slot number, and the two must not be read as one stage:
+
+  * the design's removed *"S4 — granularity review"* was folded into S2.2/S2.3
+    by §4.0's purpose test;
+  * THIS module's ``run_s4`` is the GAP REVIEWER — a second extraction pass over
+    (story + S3 search results + S2 embed list) whose output is unioned with
+    S2's by ``merge_embed_lists`` (E4 — "S4 merges, not replaces", #1536).
+
+Measured at HEAD (symbols are authoritative, line numbers a convenience — this
+module's numbering moves; ``tests/test_extractor_v4_s4_stage_claims.py``
+resolves every claim below against the tree, so a change that falsifies this
+record reds a test instead of being discovered):
+
+  * S4 runs whenever a story exists — the ``run_s4`` call sits under
+    ``if story:`` with NO flag gate.
+  * ``TORTOISE_S4_DELTA`` (``_s4_delta_enabled``) selects the delta vs
+    complete-list contract of S4's OUTPUT, NOT whether S4 runs. ``=0`` does not
+    disable S4. There is no S4-specific off switch.
+  * S4 is skipped only as a SIDE EFFECT of three other paths, none of them an
+    "S4 switch": (i) ``TORTOISE_EXTRACTOR=v1``; (ii) passing ``summary=`` — both
+    take the v1 dispatch (``sdk.py``); (iii) an empty conversation, which returns
+    before S1.
+  * ``merge_embed_lists``'s union IS consumed: S2 items S4 omitted are
+    preserved, and S4 wins on identity-key collision. Dropping it without a
+    successor loses the E4 property, not merely a function.
+
+ORDERING OBLIGATION (§4.3 G5's S4 clause, tracked at **#8500**): removing
+``run_s4`` is a v4 MIGRATION DELIVERABLE, not a cleanup — it must not leave the
+step list before its successor lands, or the pipeline loses gap-filling and the
+E4 merge property in the gap. **Until that migration lands the shipped code is
+authoritative; never delete ``run_s4`` on the strength of the design doc alone.**
+
 Owner confirmations honored (issue #1350): flash runs 4 prompts (S1-S4), S5
 is execution; temperature 0.0 (via tests.model_adapters MODELS); S3 reads the
 REAL backend; chains warn + repair, hard-block never; solar-pro4 parked;
@@ -7569,8 +7606,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
 
     # ── S2.2 VET — post-S4 union pass (#5005), the authoritative one. S4 is a
     # second extraction pass (the live ``run_s4`` gap-filler — distinct from
-    # the design's REMOVED "S4 — granularity review"; see the G5 record in the
-    # module docstring), so VET runs again on the union to gate what S4 added.
+    # the design's REMOVED "S4 — granularity review"; see the ``G5 record — the
+    # live S4 stage (#8500)`` in the module docstring), so VET runs again on the
+    # union to gate what S4 added.
     # ``vet_s2_pool`` carries the S2 pass's removals forward: without it, an
     # operator S4 re-added against an S2-discarded item would be re-minted by
     # execute_embed, and an entity S4 started referencing would 422 the
