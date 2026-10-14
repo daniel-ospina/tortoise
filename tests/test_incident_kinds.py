@@ -258,6 +258,149 @@ def test_every_runbook_row_is_declared_and_every_kind_has_a_row():
         f"declared kinds with no runbook row: {sorted(ik.KIND_NAMES - set(rows))}")
 
 
+def test_the_sweep_module_docstring_points_at_the_triage_row():
+    """The #661 guard's in-code documentation must name its runbook triage row.
+
+    ``tortoise/backup_sweep.py`` documents the per-label drift guard and its
+    thresholds, but a reader who arrives from the CODE has no path to the
+    operator disposition for the incident the guard fires — that lives in the
+    runbook's ``DATA_LOSS_CANDIDATE`` triage row. The #8595 review found the PR
+    description claiming this cross-reference while the artifact did not carry
+    it (P3 claim-mismatch), which is exactly the drift this pins shut: a guard
+    documented without its disposition is only half a contract.
+
+    RED (pre-fix): the docstring documents the guard with no reference to
+    ``docs/ops/registry-backup-dr.md``.
+    """
+    src = (ROOT / "tortoise/backup_sweep.py").read_text(encoding="utf-8")
+    docstring = ast.get_docstring(ast.parse(src)) or ""
+    assert docstring, "tortoise/backup_sweep.py lost its module docstring"
+    # Derive the path from ``RUNBOOK`` — the single declaration site — rather
+    # than re-typing it: a second literal would let the runbook be renamed
+    # while this pin stayed green, leaving the docstring pointing at a file
+    # that no longer exists (the #8595 review's P3).
+    runbook_rel = str(RUNBOOK.relative_to(ROOT))
+    assert runbook_rel in docstring, (
+        f"the module docstring must link the runbook row that gives the #661 "
+        f"guard's firing a disposition ({runbook_rel}) — a reader from the "
+        f"code otherwise has no triage path")
+    # …and the link target must be real, so the reference cannot rot silently.
+    # The assertion is on the PARSED triage table, not on a substring of the
+    # whole file: the kind token appears in several other runbook passages, so
+    # ``"DATA_LOSS_CANDIDATE" in RUNBOOK.read_text()`` would still pass after
+    # the linked row was deleted (the #8595 review noted it as redundant).
+    assert "DATA_LOSS_CANDIDATE" in _runbook_rows(), (
+        "the runbook lost the DATA_LOSS_CANDIDATE triage row the docstring links")
+
+
+def test_the_data_loss_row_does_not_read_repetition_as_loss():
+    """#8595 review P1: the disposition cell must not claim a repeating drop is loss.
+
+    The old cell ended "⚠️ A drop that repeats every run is NOT a false
+    positive — re-baselining it hides the loss". Repetition carries NO
+    information: a fire does not advance the persisted baseline
+    (``test_backup_sweep.py`` pins "State was NOT updated (guard ordering — no
+    write on fire)"), so an unresolved drop re-fires IDENTICALLY every run,
+    and the only fire that does not repeat is one whose count recovered back to
+    the frozen baseline — the case where nothing was lost. The rule also
+    contradicted its own preceding sentence (churn removes nodes durably, so a
+    churn drop repeats too) and AC11 of ``docs/plans/2026-08-08-596-plan.md``,
+    whose re-baseline remedy works precisely because it MOVES the baseline.
+
+    RED (pre-fix): at `origin/main` the cell prescribes a bare "verify +
+    re-baseline or restore" and never explains why repetition is
+    uninformative, so the second assertion reds. The first assertion guards an
+    **intra-PR course correction**: the "repeats every run is NOT a false
+    positive" wording was introduced and removed inside this PR
+    (`654bd247b` → `bd75f03a1`), never on `origin/main`, so it is not a
+    base-commit RED.
+    """
+    row = _runbook_rows()["DATA_LOSS_CANDIDATE"]
+    assert "repeats every run is NOT a false positive" not in row
+    assert "does not advance the persisted baseline" in row, (
+        "the cell must say WHY repetition is uninformative — the fire does not "
+        "advance the baseline — or a reader re-derives the old rule")
+
+
+def test_the_manual_close_rollup_names_the_measured_headline_range():
+    """#8595 review P2: the roll-up must not narrow the label-path class to a
+    "single-digit" headline.
+
+    Two of the four incidents the row cites (#4133/#4134) carry an
+    ``overall_drop_pct`` of **12.5%** — not a single-digit figure — and are
+    still ``DATA_LOSS_CANDIDATE``, because the discriminator is the
+    ``label_breaches`` entry, not the headline magnitude. A roll-up that scopes
+    the class to "single-digit" tells the operator that a 12.5% headline is a
+    different kind, which is the dismissal the row exists to correct.
+
+    The LAST ``**Manual close only**`` is the §roll-up; the earlier one is the
+    triage-table cell, which never carried the qualifier.
+
+    RED (pre-fix): the roll-up says "still this kind at a single-digit
+    headline" and names no measured figure.
+    """
+    text = RUNBOOK.read_text(encoding="utf-8")
+    rollup = text[text.rindex("**Manual close only**"):]
+    assert "single-digit" not in rollup, (
+        "the roll-up narrows the #661 label-path class to a 'single-digit' "
+        "headline, but #4133/#4134 read 12.5% overall and are still this kind "
+        "— state the measured range instead (#8595 review P2)")
+    assert "6.2 / 12.5 / 12.5 / 7.1%" in rollup, (
+        "the roll-up must name the measured overall_drop_pct range of the four "
+        "cited incidents, so the label-path class is not narrowed below it")
+
+
+def test_the_data_loss_row_documents_the_recurring_baseline_transition():
+    """#8595 review P3: the post-deploy transition must be on the operator's copy.
+
+    Baselines persisted before the per-label read began excluding the
+    projection's bookkeeping can carry any label the predicate now skips —
+    ``EpMeta`` / ``GraphEventMeta`` / ``TeamMeta``, or a ``Meta`` node keyed
+    ``point_fts_v2`` / ``event_fts_v2``. On the next sweep after the change
+    each reads ``n → 0``, which fires this kind for a label below
+    ``REGISTRY_LABEL_FLOOR`` (and ``_delete_uploaded`` deletes that run's
+    archive), so the row must state the transition and its disposition rather
+    than leave it to a PR description an operator never reads.
+
+    ⚠️ It must state the transition as RECURRING, not as a single fire: a fire
+    does not advance the persisted baseline (the sweep returns before the
+    ``state.json`` write), so the same breach re-fires every sweep until an
+    operator re-baselines. The first version of this sentence said
+    "one such fire" two sentences after the same cell said the opposite — the
+    reviewer caught the contradiction and this pin now holds the re-fire
+    wording, so the understatement cannot come back.
+
+    RED (pre-fix): the row names no transition and none of the skipped labels.
+    """
+    row = _runbook_rows()["DATA_LOSS_CANDIDATE"]
+    assert "Post-deploy transition" in row, (
+        "the row must name the post-deploy baseline transition, or an operator "
+        "meets the first post-deploy fire with no disposition (#8595 review P3)")
+    assert all(lbl in row for lbl in ("EpMeta", "GraphEventMeta", "TeamMeta")), (
+        "the transition can fire on any label the predicate excludes, so the "
+        "row must name them rather than only `Meta`")
+    # NOT `"re-baseline" in row` — the disposition cell already contains that
+    # word, so it would pass without this sentence. The discriminating clause is
+    # the REPETITION: it is the part a reader gets wrong, and the part that
+    # decides whether one re-baseline is enough.
+    assert "NOT a single fire" in row and "every" in row, (
+        "the row must say the transition re-fires every sweep until a "
+        "re-baseline — a single-fire reading understates the cost and is what "
+        "the #8595 review rejected")
+    # The claim lives in TWO passages — the triage row and the "Manual close
+    # only" prose below it — and the first version of this correction fixed only
+    # the row, leaving the prose stating the rejected single-fire wording so the
+    # document contradicted itself. Pin the ABSENCE document-wide instead, so a
+    # third copy cannot reintroduce it either.
+    whole = RUNBOOK.read_text(encoding="utf-8")
+    for banned in ("One-sweep transition", "one such fire",
+                   "fire once on the first sweep"):
+        assert banned not in whole, (
+            f"the runbook still states the transition as a SINGLE fire "
+            f"({banned!r}); it recurs every sweep until a re-baseline "
+            f"(#8595 review P3)")
+
+
 def test_manual_close_kinds_document_the_dedup_close_procedure():
     """``manual_close`` kinds must carry the close-then-delete procedure — and only they.
 
