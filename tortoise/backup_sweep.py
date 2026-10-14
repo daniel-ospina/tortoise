@@ -27,7 +27,9 @@ per-GRAPH — state, dumps, and retention are graph-scoped, #2313):
 - Label-level drift guard (#661): per-label node-count checks with
   absolute-count-aware thresholds — a <50% wipe of a low-count label
   (e.g. Invitation) that passes the overall >50% guard still fires
-  DATA_LOSS_CANDIDATE.
+  DATA_LOSS_CANDIDATE. Triage and disposition for it: the
+  ``DATA_LOSS_CANDIDATE`` row of docs/ops/registry-backup-dr.md — read
+  ``label_breaches``, never ``overall_drop_pct`` alone.
 - Enumeration-delta guard: a prior org count > 0 → 0 fires an incident (a
   wiped enumeration source must not degrade silently to chronic NO_ORGS).
 - Per-org serialization via the caller's lock factory.

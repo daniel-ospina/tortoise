@@ -258,6 +258,33 @@ def test_every_runbook_row_is_declared_and_every_kind_has_a_row():
         f"declared kinds with no runbook row: {sorted(ik.KIND_NAMES - set(rows))}")
 
 
+def test_the_sweep_module_docstring_points_at_the_triage_row():
+    """The #661 guard's in-code documentation must name its runbook triage row.
+
+    ``tortoise/backup_sweep.py`` documents the per-label drift guard and its
+    thresholds, but a reader who arrives from the CODE has no path to the
+    operator disposition for the incident the guard fires — that lives in the
+    runbook's ``DATA_LOSS_CANDIDATE`` triage row. The #8595 review found the PR
+    description claiming this cross-reference while the artifact did not carry
+    it (P3 claim-mismatch), which is exactly the drift this pins shut: a guard
+    documented without its disposition is only half a contract.
+
+    RED (pre-fix): the docstring documents the guard with no reference to
+    ``docs/ops/registry-backup-dr.md``.
+    """
+    src = (ROOT / "tortoise/backup_sweep.py").read_text(encoding="utf-8")
+    docstring = ast.get_docstring(ast.parse(src)) or ""
+    assert docstring, "tortoise/backup_sweep.py lost its module docstring"
+    assert "docs/ops/registry-backup-dr.md" in docstring, (
+        "the module docstring must link the runbook row that gives the #661 "
+        "guard's firing a disposition — a reader from the code otherwise has "
+        "no triage path")
+    # …and the link target must be real, so the reference cannot rot silently.
+    doc = RUNBOOK.read_text(encoding="utf-8")
+    assert "DATA_LOSS_CANDIDATE" in doc, (
+        "the runbook lost the DATA_LOSS_CANDIDATE row the docstring links")
+
+
 def test_manual_close_kinds_document_the_dedup_close_procedure():
     """``manual_close`` kinds must carry the close-then-delete procedure — and only they.
 
