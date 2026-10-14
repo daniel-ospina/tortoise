@@ -592,7 +592,8 @@ def test_the_tls_refusal_does_not_override_an_explicit_endpoint(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_URI", "rediss://g.example.com:6380/t")
     seen = {}
     monkeypatch.setattr(e, "probe_graph",
-                        lambda h, p, t: seen.update(host=h, port=p) or {"ok": True})
+                        lambda h, p, t, **k: seen.update(host=h, port=p)
+                        or {"ok": True})
     rc = e.main(["--host", "1.2.3.4", "--port", "1111", "--no-docker",
                  "--timeout", "1"])
     assert seen == {"host": "1.2.3.4", "port": 1111}, seen
@@ -629,7 +630,7 @@ def test_the_endpoint_main_probes_is_the_one_the_uri_names(monkeypatch):
     """
     seen = {}
     monkeypatch.setattr(e, "probe_graph",
-                        lambda h, p, t: seen.update(host=h, port=p, timeout=t)
+                        lambda h, p, t, **k: seen.update(host=h, port=p, timeout=t)
                         or {"ok": True})
 
     # URI only -> the URI's endpoint, and --timeout is plumbed through.
@@ -748,7 +749,8 @@ def test_an_unresolvable_uri_still_yields_to_both_flags(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:16x00/t")
     seen = {}
     monkeypatch.setattr(e, "probe_graph",
-                        lambda h, p, t: seen.update(host=h, port=p) or {"ok": True})
+                        lambda h, p, t, **k: seen.update(host=h, port=p)
+                        or {"ok": True})
     rc = e.main(["--no-docker", "--host", "10.0.0.9", "--port", "2222",
                  "--timeout", "1"])
     assert rc == 0, rc
@@ -1065,7 +1067,7 @@ def test_redis_port_is_not_taken_from_a_colon_that_is_not_a_port(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@[::1]/tortoise")
     assert e.graph_target_from_env() == {
         "host": "127.0.0.1", "port": 16379, "ssl": False,
-        "uri": "docker://:pw@[::1]/tortoise"}
+        "uri": "docker://:pw@[::1]/tortoise", "graph_name": "tortoise"}
     # a malformed port is NOT defaulted: it refuses
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:16x00/tortoise")
     try:
@@ -1092,3 +1094,232 @@ def test_the_engine_probe_tool_keeps_its_ci_carveout():
     assert "tools/engine_probe.py" in cs.TOOL_CARVEOUTS
     sel = cs.select(["tools/engine_probe.py"], "pull_request", cs.load_manifest())
     assert sel["full"], "an engine_probe-only diff must fail closed to the full matrix"
+
+
+# ==========================================================================
+# #7235 — a PING is a FALSE GREEN during a wedge: the port answers while the
+# engine completes nothing. The probe must issue a REAL READ and must not call
+# that state GRAPH_UP. Measured 2026-10-04/05 on the shared fleet graph: PING
+# returned True (0.48 s) while a single-node read and `count(n)` both timed
+# out; every PING-keyed health check called that healthy for ~7 h.
+# ==========================================================================
+
+#: A real `GRAPH.RO_QUERY tortoise "RETURN 1"` reply, byte-for-byte as the
+#: pinned FalkorDB emits it (captured from the canonical instance).
+_RO_REPLY = (
+    b"*3\r\n*1\r\n$1\r\n1\r\n*1\r\n*1\r\n:1\r\n*3\r\n$19\r\n"
+    b"Cached execution: 0\r\n$52\r\nQuery internal execution time: 0.02 ms\r\n"
+    b"$16\r\nGraph version: 0\r\n"
+)
+
+
+def _two_step_server(pong: bytes, read_reply: bytes | None):
+    """Accept ONE connection: answer the PING with `pong`, then READ the second
+    command (recording it) and, when `read_reply` is not None, answer it.
+
+    Returns `(server, seen, done)`. `done` is set after the second command has
+    been read, so a test can assert what was (or was NOT) sent without racing
+    the server thread. `read_reply=None` models a wedged engine: the socket is
+    accepted and open, and the read is simply never answered.
+    """
+    import time
+
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    seen: list[bytes] = []
+    done = threading.Event()
+
+    def serve():
+        try:
+            conn, _ = server.accept()
+            with conn:
+                seen.append(conn.recv(64))
+                conn.sendall(pong)
+                second = conn.recv(256)
+                seen.append(second)
+                done.set()
+                if read_reply is None:
+                    # The wedge: the connection stays OPEN and the read is never
+                    # answered, so the PROBE's own bound is what ends it (a
+                    # close here would answer with EOF, a different signal).
+                    conn.recv(1)
+                else:
+                    time.sleep(0.02)
+                    conn.sendall(read_reply)
+        except OSError:
+            pass
+        finally:
+            server.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return server, seen, done
+
+
+def test_a_graph_that_answers_ping_but_not_a_read_is_wedged_not_up():
+    """(a) FAILS if `probe_graph` treats a PING success as sufficient, so
+    `classify` returns GRAPH_UP for an engine that completed nothing — the
+    false green #7235 measured, and the reason a PING-keyed "is it back yet?"
+    poll stays green through a multi-hour wedge.
+    (b) Reachable: the shared graph on 2026-10-05 — PING True (0.48 s) while a
+    one-node read and `MATCH (n) RETURN count(n)` both timed out.
+    """
+    server, seen, done = _two_step_server(b"+PONG\r\n", None)
+    port = server.getsockname()[1]
+    try:
+        result = e.probe_graph("127.0.0.1", port, timeout=0.6, graph="tortoise")
+    finally:
+        done.wait(2.0)
+        server.close()
+    assert result["ok"] is True, result
+    assert result["read_ok"] is False, result
+    assert result["read_error"] == "read-timeout", result
+    assert e.classify(result, {"status": e.ENGINE_OK}) == e.GRAPH_WEDGED
+    assert b"GRAPH.RO_QUERY tortoise" in seen[1], seen
+
+
+def test_a_completed_read_is_reported_graph_up():
+    """(a) FAILS if the happy path is unreachable — a probe that can never say
+    GRAPH_UP is useless, and the read leg must not read a real reply as failure.
+    (b) Reachable: the canonical instance, healthy.
+    """
+    server, seen, done = _two_step_server(b"+PONG\r\n", _RO_REPLY)
+    port = server.getsockname()[1]
+    try:
+        result = e.probe_graph("127.0.0.1", port, timeout=1.5, graph="tortoise")
+    finally:
+        done.wait(2.0)
+        server.close()
+    assert result["read_ok"] is True, result
+    assert e.classify(result, {"status": e.ENGINE_OK}) == e.GRAPH_UP
+    # RO_QUERY, not QUERY: a QUERY against a MISSING graph MINTS it (measured),
+    # so the read-only verb is what keeps a diagnostic from writing.
+    assert b"GRAPH.RO_QUERY tortoise" in seen[1], seen
+    assert b"GRAPH.QUERY" not in seen[1], seen
+
+
+def test_an_error_reply_to_the_read_is_unverified_not_wedged():
+    """(a) FAILS if an ERROR reply is read as a completed read (a green with no
+    read behind it) OR as a wedge (a false red on a healthy engine that simply
+    does not have the named graph). Only a MISSING reply is a wedge.
+    (b) Reachable: `GRAPH.RO_QUERY <missing> "RETURN 1"` answers `-ERR Invalid
+    graph operation on empty key` on the canonical instance (measured).
+    """
+    server, _seen, done = _two_step_server(
+        b"+PONG\r\n", b"-ERR Invalid graph operation on empty key\r\n")
+    port = server.getsockname()[1]
+    try:
+        result = e.probe_graph("127.0.0.1", port, timeout=1.5, graph="tortoise")
+    finally:
+        done.wait(2.0)
+        server.close()
+    assert result["ok"] is True, result
+    assert result["read_ok"] is None, result
+    assert "unverified" in (result["read_error"] or ""), result
+    assert e.classify(result, {"status": e.ENGINE_OK}) == e.GRAPH_UP
+
+
+def test_a_pre_auth_ping_skips_the_read_rather_than_calling_it_wedged():
+    """(a) FAILS if the read is attempted after a `-NOAUTH` PING: the probe
+    does not AUTH, so it cannot be admitted to run a query, and treating the
+    inevitable refusal as a wedge would red a credential-bearing instance —
+    the #4844/#7017 misdiagnosis inverted.
+    (b) Reachable: this repo's canonical URI is credential-bearing.
+    """
+    server, seen, done = _two_step_server(
+        b"-NOAUTH Authentication required.\r\n", None)
+    port = server.getsockname()[1]
+    try:
+        result = e.probe_graph("127.0.0.1", port, timeout=0.6, graph="tortoise")
+    finally:
+        done.wait(2.0)
+        server.close()
+    assert result["ok"] is True, result
+    assert result["read_ok"] is None, result
+    assert e.classify(result, {"status": e.ENGINE_OK}) == e.GRAPH_UP
+    # no query was sent that the server had not admitted us to run
+    assert b"GRAPH.RO_QUERY" not in seen[1], seen
+
+
+def test_the_real_read_is_skipped_when_no_graph_name_is_known():
+    """(a) FAILS if the read is attempted without a name (it would address
+    nothing) or if its absence is recorded as a measured wedge. `None` means
+    "not issued", which is unverified, never False.
+    (b) Reachable: a direct `probe_graph(host, port, timeout)` call, the
+    pre-#7235 signature, and any caller that has only an endpoint.
+    """
+    server = _one_shot_server(b"+PONG\r\n")
+    port = server.getsockname()[1]
+    result = e.probe_graph("127.0.0.1", port, timeout=1.0)
+    assert result["ok"] is True, result
+    assert result["read_ok"] is None, result
+    assert e.classify(result, None) == e.GRAPH_UP
+
+
+def test_an_unaddressable_graph_name_skips_the_read_rather_than_guessing():
+    """(a) FAILS if a name carrying whitespace or a quote is interpolated into
+    the inline protocol: whitespace splits the command and a quote/backslash
+    re-parses it, so the probe would query a DIFFERENT graph (or a second
+    command) than the URI named.
+    (b) Reachable: `--graph 'my graph'`, or a percent-encoded URI path.
+    """
+    server = _one_shot_server(b"+PONG\r\n")
+    port = server.getsockname()[1]
+    result = e.probe_graph("127.0.0.1", port, timeout=1.0, graph="bad name")
+    assert result["ok"] is True, result
+    assert result["read_ok"] is None, result
+    assert result["read_error"] == "unaddressable-graph-name", result
+
+
+def test_main_exits_two_and_names_the_wedge(monkeypatch, capsys):
+    """(a) FAILS if the wedge exits 0, which is exactly how a caller gating on
+    the exit code (a heartbeat, a retry loop, a lane's pre-flight) is told the
+    graph is healthy while it completes nothing.
+    (b) Reachable: a PING-answering, read-timing-out endpoint — the #7235 state.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    server, _seen, done = _two_step_server(b"+PONG\r\n", None)
+    port = server.getsockname()[1]
+    try:
+        rc = e.main(["--no-docker", "--graph", "tortoise",
+                     "--port", str(port), "--timeout", "0.6"])
+    finally:
+        done.wait(2.0)
+        server.close()
+    out = capsys.readouterr().out
+    assert rc == 2, (rc, out)
+    assert "VERDICT: GRAPH_WEDGED" in out, out
+    assert "PING is NOT a health check" in out, out
+
+
+def test_main_exits_zero_only_when_the_read_completed(monkeypatch, capsys):
+    """(a) FAILS if the healthy path is not reachable end to end, or if the
+    read outcome is not surfaced (an operator cannot tell a completed read from
+    a skipped one).
+    (b) Reachable: a healthy canonical graph.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    server, _seen, done = _two_step_server(b"+PONG\r\n", _RO_REPLY)
+    port = server.getsockname()[1]
+    try:
+        rc = e.main(["--no-docker", "--graph", "tortoise",
+                     "--port", str(port), "--timeout", "1.5"])
+    finally:
+        done.wait(2.0)
+        server.close()
+    out = capsys.readouterr().out
+    assert rc == 0, (rc, out)
+    assert "VERDICT: GRAPH_UP" in out, out
+    assert 'GRAPH.RO_QUERY tortoise "RETURN 1" -> completed' in out, out
+
+
+def test_the_uri_path_supplies_the_graph_name_the_read_uses(monkeypatch):
+    """(a) FAILS if `main` falls back to the literal `tortoise` when the URI
+    names a different graph: the read would probe a graph the caller never
+    named (and could mint it on a multi-tenant instance).
+    (b) Reachable: a per-tenant URI, e.g. `.../team_graph` (#7886).
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:pw@127.0.0.1:16379/team_graph")
+    assert e.graph_target_from_env()["graph_name"] == "team_graph"
