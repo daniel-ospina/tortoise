@@ -445,6 +445,55 @@ def test_update_entity_source_refuses_reserved_props_loudly(env):
     sdk.update_entity(url, initiated_by="FORGED-ACTOR")
 
 
+def test_a_relay_door_strips_the_reserved_names_before_splatting(env):
+    """A door that SPLATS the caller bag onward must strip BEFORE the relay.
+
+    ``update_entity`` relays to ``_update_entity``, and ``create_subject`` /
+    ``create_object`` / ``create_event`` relay to ``create_entity`` — every one of
+    those callees takes ``self`` as its FIRST parameter and ``type`` as its
+    next, so a ``self``/``type`` key (reachable through the documented nested
+    ``props={...}`` convention) raised ``TypeError`` AT THE RELAY, one frame
+    before the intake strip could drop it. Measured before the fix:
+    ``create_subject(name, props={"self": …})`` raised ``TypeError``, and the
+    ingest bundle's Phase-2 relay aborted AFTER an earlier section had already
+    committed.
+
+    FAILS IF a relay forwards a reserved name un-stripped — the call raises
+    instead of dropping the name — or if the D30 ``:Source`` refusal stops
+    answering an undeclared reserved name that arrives this way.
+    """
+    sdk, _events = env
+    poisoned = {"self": "FORGED", "type": "FORGED", "type_": "X",
+                "new_content": "FORGED", "point": {"forged": True}}
+    for door, args in ((sdk.create_subject, ("relay-subject",)),
+                       (sdk.create_object, ("relay-object",)),
+                       (sdk.create_event, ("relay-event", "meeting"))):
+        node = door(*args, props=dict(poisoned))
+        assert node.get("id"), f"{door.__name__} relay dropped the write"
+        live = sdk._get_proj().g.query(
+            "MATCH (n {id:$i}) RETURN properties(n)",
+            params={"i": node["id"]}).result_set[0][0]
+        for name in poisoned:
+            assert name not in live, (
+                f"{door.__name__}: a reserved {name!r} prop reached the node "
+                "through the relay splat")
+    # `update_entity` relays to `_update_entity` (same `self` hazard). On a
+    # POINT the reserved names are strip-and-ignore, so the legitimate co-supplied
+    # `summary` must land; on a `:Source` the same undeclared name keeps the LOUD
+    # D30 refusal it has through every other path.
+    pt = sdk.create_point("statement", "relay point")
+    sdk.update_entity(pt["id"], props={"self": "FORGED", "summary": "relayed"})
+    pt_live = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$i}) RETURN properties(n)",
+        params={"i": pt["id"]}).result_set[0][0]
+    assert pt_live.get("summary") == "relayed" and "self" not in pt_live, (
+        f"the update_entity relay mishandled a reserved prop: {pt_live!r}")
+    url = "https://example.com/relay-source"
+    sdk.create_source(url, "document")
+    with pytest.raises(ValueError, match="cannot be set on a :Source"):
+        sdk.update_entity(url, props={"self": "FORGED"})
+
+
 def test_document_mutation_survives_rebuild(env):
     """The creation fix also makes a later document MUTATION durable.
 

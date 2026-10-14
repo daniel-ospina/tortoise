@@ -2782,10 +2782,35 @@ _RESERVED_ENVELOPE_PROPS = (
 #:   parameter added to `_emit_event` fails the suite instead of silently
 #:   re-opening this hole.
 #:
-#: Reserved at prop INTAKE like the envelope set above (and dropped by the one
-#: door that bypasses intake, ``create_source``), so the collision is
-#: impossible and live == replay.
+#: Strip it at prop INTAKE like the envelope set above, and ALSO before any
+#: RELAY that forwards a caller bag into another method — the collision is at
+#: the call, so `update_entity` (relays to `_update_entity`) and
+#: `create_subject`/`create_object`/`create_event` (relay to `create_entity`)
+#: drop the reserved names before splatting, and `create_source` — the one door
+#: that bypasses intake — drops them itself. With every relay covered, the
+#: collision is impossible and live == replay.
 _RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self")
+
+
+def _drop_reserved_emit_props(props: dict) -> list[str]:
+    """Drop every `_emit_event`-owned name from ``props``, IN PLACE.
+
+    Returns the dropped names, sorted. Membership is decided here and only here,
+    so the strip cannot drift from the sets (it did, when it was hand-written at
+    each site: `self` stayed open through a RELAY splat).
+
+    Call it wherever a caller bag is about to be SPLATTED into a method, not
+    only at intake: the collision is AT THE CALL, so a relay that forwards
+    ``**props`` must strip first. `_update_entity` and `create_entity` take
+    ``self`` as their first parameter, so a ``self`` key raised ``TypeError`` at
+    the relay — one frame BEFORE `_sanitize_props` could drop it (measured).
+    """
+    _dropped = sorted(
+        _k for _k in props
+        if _k in _RESERVED_ENVELOPE_PROPS or _k in _RESERVED_EMIT_CALL_PROPS)
+    for _k in _dropped:
+        props.pop(_k)
+    return _dropped
 
 #: The canonical record types a live entity door may journal.
 # `DocumentCreated` (#2296) joins the set: the last unjournaled canonical
@@ -3022,12 +3047,10 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # bypasses this intake (`create_source` pops the sets itself) and the
     # reserved actor keys above: these are `_emit_event` names, not tenant
     # properties, so dropping them also keeps live == replay.
-    for _emit_name in (*_RESERVED_ENVELOPE_PROPS, *_RESERVED_EMIT_CALL_PROPS):
-        if _emit_name in props:
-            _logger.warning(
-                "ignoring client-supplied %r on tenant props "
-                "(reserved `_emit_event` name)", _emit_name)
-            props.pop(_emit_name)
+    for _emit_name in _drop_reserved_emit_props(props):
+        _logger.warning(
+            "ignoring client-supplied %r on tenant props "
+            "(reserved `_emit_event` name)", _emit_name)
     # #4647: a value the store cannot hold without altering it must fail here,
     # not be silently clamped/rounded by FalkorDB on the way in.
     for _key, _value in props.items():
@@ -24815,21 +24838,18 @@ class TortoiseSDK:
                            if k not in _ENTITY_MUTATION_RESERVED_KEYS})
         self._emit_event(_ENTITY_MUTATION_RECORD_TYPE, **record)
 
-    def _update_entity(self, id_val: str, **props) -> dict:
-        # #2296 review: the intake strip below removes caller props that collide
-        # with an `_emit_event` name. On a `:Source` most of those names are
-        # UNDECLARED, and the #3998/D30 closed-surface guard below exists so that
-        # undeclared spelling gets the LOUD refusal the raw-body mistake needs —
-        # not a silent drop. Capture them BEFORE the strip so that guard can
-        # still fire for the target it owns. The reserved ACTOR keys are NOT
-        # captured: their contract is strip-and-ignore, never a 4xx (#2600).
-        # NOTE: a reserved name that IS a declared `:Source` property
-        # (`event_id`) must not be pushed into the guard's "undeclared" set —
-        # see the subtraction where that set is built below.
-        _reserved_supplied = sorted(
-            k for k in props
-            if (k in _RESERVED_ENVELOPE_PROPS or k in _RESERVED_EMIT_CALL_PROPS)
-            and k not in _RESERVED_ACTOR_PROPS)
+    def _update_entity(self, id_val: str, *, _reserved_supplied: tuple = (), **props) -> dict:
+        # #2296 review: `_reserved_supplied` is the set of reserved names the
+        # CALLER supplied, captured by `update_entity` before it strips them for
+        # the relay — it cannot be captured here, because a `self` key raises at
+        # that relay call, before this line would run. The #3998/D30
+        # closed-surface guard below uses it so an UNDECLARED spelling still gets
+        # the LOUD refusal the raw-body mistake needs, instead of the silent drop
+        # the strip would otherwise leave. The reserved ACTOR keys are never in
+        # it: their contract is strip-and-ignore, never a 4xx (#2600). NOTE: a
+        # reserved name that IS a declared `:Source` property (`event_id`) must
+        # not be pushed into the guard's "undeclared" set — see the subtraction
+        # where that set is built below.
         # #329: id + sourcePath/source_path are server-managed — reject
         props = _sanitize_props(props, reject_id=True,
                                 reject_belief_props=True)
@@ -25610,6 +25630,7 @@ class TortoiseSDK:
     def create_subject(self, name: str, subjectKind: str = "other", **props) -> dict:
         """Thin alias for create_entity(type='subject') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
         if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
             raise ValueError(
                 "'is_episodic' is a server-managed field and cannot be set via props.")
@@ -25619,6 +25640,7 @@ class TortoiseSDK:
     def create_object(self, name: str, objectKind: str = "other", **props) -> dict:
         """Thin alias for create_entity(type='object') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
         if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
             raise ValueError(
                 "'is_episodic' is a server-managed field and cannot be set via props.")
@@ -25638,6 +25660,7 @@ class TortoiseSDK:
         rather than stored as string properties.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
         # Second-model gate P2: a single-nested props={"is_episodic": true}
         # flattens here and would splat-bind create_entity's explicit param —
         # reject it; the explicit `is_episodic` param (internal callers) is the
@@ -29114,7 +29137,20 @@ class TortoiseSDK:
         """Update any entity's properties. Implementation behind
         update(id, ...) — the consolidated Point/entity update (epic #888 W2)."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
-        return self._update_entity(id_val, **props)
+        # #2296 review: strip the `_emit_event`-owned names BEFORE the relay.
+        # `_update_entity`'s first parameter is `self`, so a `self` key (reachable
+        # through the nested props= convention just flattened) raised `TypeError`
+        # AT THIS CALL — one frame before intake could drop it — instead of the
+        # strip-and-ignore every other reserved name gets, and the D30 guard
+        # below could never see the name. The names are passed on so that guard
+        # can still answer the UNDECLARED ones loudly; `_reserved_supplied` is
+        # popped first because it is this relay's own channel, not a tenant
+        # property.
+        props.pop("_reserved_supplied", None)
+        _reserved = sorted(
+            set(_drop_reserved_emit_props(props)) - _RESERVED_ACTOR_PROPS)
+        return self._update_entity(id_val, _reserved_supplied=_reserved,
+                                   **props)
 
     def delete_entity(self, id_val: str) -> bool:
         """Delete any entity by ID. Implementation behind delete(id) — the
