@@ -1919,8 +1919,8 @@ retained as prior history — there is NO unsupersede path that recovers the
 old claim's posterior, so the retained prior is the SOLE recovery vector.
 Every contested computation (annotate_ep_batch, rankers, `get_contested_claims`,
 `_review_prune`, why, analyze) excludes terminal claims via the shared
-live.py predicate (status ∈ {retracted, superseded, outdated, archived} OR
-`outdated=true`).
+live.py predicate (status ∈ {retracted, superseded, outdated, archived,
+deprecated} OR `outdated=true`).
 
 **#2488 merge-blocker:** the rebuild-side fold decay applies to the *supersede*
 fold only. The `PointInvalidated` rebuild fold (`_fold_point_invalidated`) ships

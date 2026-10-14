@@ -146,15 +146,20 @@ _PREDICATE_CONSUMERS = {
 }
 
 
-def _executable_string_constants(path: Path) -> list[tuple[int, str]]:
+def _executable_string_constants_from_source(
+        source: str) -> list[tuple[int, str]]:
     """String constants a module can put into a query — docstrings excluded.
 
     A re-declared status subset is a *code* literal; a prose mention in a
     docstring is not. Distinguishing them by AST (rather than by line-splitting
     on ``#``) makes the guard immune to formatting: a collection rendered one
     literal per line is still caught.
+
+    Takes SOURCE (not a path) so a guard can be exercised against a synthetic
+    snippet — the detector's own coverage is then pinned, not just its run
+    over one file.
     """
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(source)
     docstrings = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
@@ -170,6 +175,12 @@ def _executable_string_constants(path: Path) -> list[tuple[int, str]]:
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
         and id(node) not in docstrings
     ]
+
+
+def _executable_string_constants(path: Path) -> list[tuple[int, str]]:
+    """``_executable_string_constants_from_source`` over a file on disk."""
+    return _executable_string_constants_from_source(
+        path.read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("label", sorted(_PREDICATE_CONSUMERS))
@@ -592,24 +603,102 @@ def test_sdk_admits_every_current_status_through_the_canonical_builder() -> None
     assert "x.status IS NULL" in clause
 
 
-def test_no_sdk_query_re_declares_the_current_status_allow_list() -> None:
-    """The exact #2901-mirror shape cannot reappear in ``sdk.py``.
+# An inline `IN [...]` list — its member tokens are extracted from the span, so
+# order, quote style and whitespace cannot evade the guard (the review of #8662
+# measured the old single-spelling regex being bypassed by `IN ['live',
+# 'draft']`, `IN ["draft", "live"]` and `IN ['draft','live']`).
+_INLINE_LIST = re.compile(r"\bIN\s*\[([^\]]*)\]", re.IGNORECASE)
+_QUOTED_TOKEN = re.compile(r"""['\"]([^'\"]+)['\"]""")
 
-    An inline ``IN ['draft', 'live']`` in a query body is the allow-list
-    re-declaration #4058 removes — it drops a future current status with no
-    edit anywhere. Only the canonical builder (which renders the literal) may
-    contain it.
+
+def _current_status_allow_list_redeclarations(
+        source: str) -> list[tuple[int, str, list[str]]]:
+    """Inline ``IN [...]`` enumerations of the CURRENT Point vocabulary.
+
+    The #2901-mirror shape is an inline allow-list of current statuses; the
+    canonical ``live._current_status_clause`` owns it now. Detection is
+    formatting-INSENSITIVE by construction: the list is located as a span and
+    its quoted tokens extracted, so member order, quote style and spacing
+    cannot hide a re-declaration, and a partial drop (``IN ['draft']``) is
+    caught too — a list that names any subset of the current vocabulary is the
+    same defect shape. Only executable (non-docstring) string constants are
+    scanned, so a prose mention is not an offender, and a list whose members
+    are not statuses (``IN ['Point', 'Object']``) is not either.
+    """
+    offenders: list[tuple[int, str, list[str]]] = []
+    for lineno, value in _executable_string_constants_from_source(source):
+        for match in _INLINE_LIST.finditer(value):
+            members = _QUOTED_TOKEN.findall(match.group(1))
+            if members and set(members) <= set(CURRENT_POINT_STATUS_VALUES):
+                offenders.append((lineno, value, members))
+    return offenders
+
+
+def test_no_sdk_query_re_declares_the_current_status_allow_list() -> None:
+    """The #2901-mirror shape cannot reappear in ``sdk.py`` — in ANY spelling.
+
+    An inline ``IN [...]`` of current statuses in a query body is the
+    allow-list re-declaration #4058 removes — it drops a future current status
+    with no edit anywhere. Only the canonical builder (which renders the
+    literal) may contain it. The scan is formatting-insensitive (order, quote
+    style and spacing), not a single-spelling line regex: the review of #8662
+    measured the old regex missing ``IN ['live', 'draft']``,
+    ``IN ["draft", "live"]`` and ``IN ['draft','live']``.
     """
     source = (_REPO_ROOT / "tortoise" / "sdk.py").read_text(encoding="utf-8")
-    offenders = [
-        (lineno, line.strip())
-        for lineno, line in enumerate(source.splitlines(), start=1)
-        if re.search(r"IN \['draft', 'live'\]", line)
-    ]
+    offenders = _current_status_allow_list_redeclarations(source)
     assert not offenders, (
         "sdk.py re-declares the current-status allow-list: call "
         f"live._current_status_clause instead — {offenders}"
     )
+
+
+@pytest.mark.parametrize("literal", [
+    "IN ['draft', 'live']",          # the pre-fix spelling
+    "IN ['live', 'draft']",          # order differs
+    'IN ["draft", "live"]',          # double quotes
+    "IN ['draft','live']",           # no space after the comma
+    "IN [ 'draft' , 'live' ]",       # extra whitespace
+    "IN [\n                    'draft',\n                    'live',\n                ]",
+    "IN ['draft']",                    # a member silently dropped
+])
+def test_inline_current_allow_list_is_caught_in_every_spelling(literal: str) -> None:
+    """The guard is formatting-insensitive, not one exact spelling.
+
+    Each variant is a real evasion of the pre-#8662 line regex (the last is a
+    silent member drop). This pins the detector's coverage, so a revert to the
+    single-spelling regex REDs here.
+    """
+    source = (
+        "def q():\n"
+        "    return " + repr(f"MATCH (n:Point) WHERE {literal} RETURN n") + "\n"
+    )
+    assert _current_status_allow_list_redeclarations(source), literal
+
+
+@pytest.mark.parametrize("literal", [
+    "IN ['Point', 'Object']",          # node labels — a different question
+    "IN ['retracted', 'superseded']",  # terminal deny-list, not the allow-list
+    "IN [$ids]",                        # bound parameter, no literal members
+])
+def test_inline_list_without_current_vocabulary_is_not_flagged(literal: str) -> None:
+    """The guard does not fire on lists that are not the current allow-list."""
+    source = (
+        "def q():\n"
+        "    return " + repr(f"MATCH (n) WHERE n.x {literal} RETURN n") + "\n"
+    )
+    assert not _current_status_allow_list_redeclarations(source), literal
+
+
+def test_docstring_mention_of_the_allow_list_is_not_an_offender() -> None:
+    """A prose mention is not a re-declaration — the scan is over code only."""
+    source = (
+        "def q():\n"
+        '    """Legacy code once used IN [\'draft\', \'live\']."""\n'
+        "    return 1\n"
+    )
+    assert not _current_status_allow_list_redeclarations(source)
+
 
 
 # ── 7. #8662 review — the contract text and the DERIVATION, not just ────────
