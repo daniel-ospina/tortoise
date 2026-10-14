@@ -210,6 +210,12 @@ routes:
   - method: PATCH
     path: /v1/graphs/{graph_id}
     class: tenant
+  - method: GET
+    path: /v1/graphs/{graph_id}/packs
+    class: tenant
+  - method: PUT
+    path: /v1/graphs/{graph_id}/packs
+    class: tenant
   - method: POST
     path: /v1/index/docs
     class: tenant

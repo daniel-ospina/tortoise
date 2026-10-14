@@ -178,6 +178,58 @@ With `TORTOISE_CLASSIFY_LATER=1` the pack vocabulary and the chains leave the S2
 
 Resolution order for a kind: `kindDefs[].enforcement` → `extraction.enforcement.kinds` → `extraction.enforcement.default` → `warn`.
 
+## Per-graph pack selection (#2728)
+
+Which packs a graph allows is **per graph**, and stored graph-natively: one
+`(:PackInstall {namespace, version, status, source})` per namespace, plus one
+`(:PackSelection {revision})` marker whose **presence** means "deliberately
+configured". The marker is the whole point — without it an explicit *empty* set
+is indistinguishable from "never configured", which is what made "remove all"
+unreachable before #2728.
+
+- **Statuses.** `active` = approved and enforced; `disabled` = approved but
+extraction-off; `removed` = a tombstone — absent from the introspection list,
+kept for audit. **Removal is expressed by omitting the namespace from the
+desired set**, never by a status the caller sends.
+- **Resolution contract** (`pack_state.resolved_pack_set`): no marker → the
+catalog union (the back-compat fallback — every pre-#318, self-hosted and
+restored graph, #2714 indicator 3); marker present → the `active` records **∪**
+the namespaces already in the graph's data. The data leg is what keeps
+historical points writable after a pack is disabled.
+- **`set_graph_packs` is the only path that moves the revision.** Every seeding
+path (`get_tenant_packs`'s self-heal *and* `ensure_tenant_packs` — the
+provision retry, the Supabase control plane, and
+`graph-scripts/backfill_pack_installs.py`) skips a graph that carries a marker,
+so a re-run cannot resurrect a pack the user removed or disabled.
+  ⚠️ **Still open — out-of-band writers change the configurable set WITHOUT
+  moving the marker.** `POST /v1/packs/manifests`
+  (`pack_manifest_store.upsert_tenant_manifest`, widens) and
+  `hosted_api._apply_import_pack_config` (re-activates on restore — the
+export/import gap the PR body names) write `:PackInstall` directly. On a graph
+that has both a `:PackSelection` marker and one of these writers, a `PUT`
+holding revision `N` can therefore still return `200` while erasing a
+namespace added after its read. Until they route through `set_graph_packs` (or
+bump the marker under `_pack_selection_lock`), `revision` is not a *complete*
+change signal, and *"no write path may alter the configurable set without
+moving the marker"* is the target these paths must meet — not a property that
+holds today. (`pack_manifest_store.delete_tenant_manifest` narrows the set the
+same way, but it currently has NO caller and no route — a latent writer to bind
+when a delete surface is added, not a live gap.)
+- **Concurrency:** both the first configuration and every later one move the
+marker with a conditional compare-and-swap (`_cas_first_selection` /
+`_bump_selection`) *before* any install record is written, so a worker that
+loses a race gets a `409` and has written nothing.
+- **Management surface:** `GET` / `PUT /v1/graphs/{graph_id}/packs`. Owner/admin
+(session) or a key carrying `team:manage`; a graph-bound key is refused on
+mutation, so C5 #2114's boundary holds. `PUT` is a full desired-state replace
+and **requires** `expected_revision` — a mismatch is a `409` with the current
+revision, so two admins cannot silently erase each other's set. Each change
+writes one audit record.
+
+> The dashboard Settings → **Configured packs** view (the modal that lists,
+> adds, disables and removes packs per graph) is #2728's remaining product
+> surface. The state model and the REST surface above are what it renders.
+
 ## Chains
 
 A chain is an ordered kind path the extractor respects when connecting `about_entities`. Example: the agent-ops `ruleLifecycle` chain `[rule, rationale, ruleRevised]` — a rule must be grounded in its rationale. The chain enforcer rewires reverse-order pairs deterministically (never invents, never drops) and warns on violations. Steps resolve to your pack's kinds, core kinds, or exactly-one other pack's kinds (ambiguous bare names are validation errors — use `ns:kind`).

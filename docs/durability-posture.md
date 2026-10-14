@@ -519,6 +519,13 @@ gate in `tests/test_durability_posture.py` fails the build if a
 `log`/`journal`/`jsonl`/`event stream` is bound to `source of truth` — or to
 `is [the] truth` — outside this file.
 
+**The gate matches a CLAIM SHAPE, not durability claims in general.** It fires on
+a `log`/`journal`/`jsonl`/`event stream` bound to `source of truth` / `is [the]
+truth`; a *mechanism promise* — e.g. a managed store "provides AOF durability" —
+does not match it, and is corrected by hand (`docs/infra-runbook.md` §1 did this
+under **#2968**). That seam is not this gate's to close: the general binding from
+a written claim to the system it describes is **#5063**.
+
 ## Open items
 
 - **#2814 residual** — the preserved set is a **declared** registry, not a
@@ -642,10 +649,6 @@ gate in `tests/test_durability_posture.py` fails the build if a
   verified as a WRITE (ledger read-back) and not as a RECOVERY.** `README.md`
   and `docs/quickstart-selfhosted.md` state the AOF-scoped guarantee and link
   this document.
-- **#2968** — `docs/infra-runbook.md:29` still states "FalkorDB Cloud (managed)
-  — provides AOF durability", the exact claim this document marks CONTESTED.
-  Tracked there; the gate's pattern does not match an `AOF … durability` claim,
-  so it is not silently tolerated, it is a named residual.
 - **`graph-scripts/`** — `add_convergence_evidence.py` and `baseline_scan.py`
   still describe the JSONL as the "source of truth" for graph convergence. This
   document's gate is scoped to the contract surfaces (`tortoise/`, the five
