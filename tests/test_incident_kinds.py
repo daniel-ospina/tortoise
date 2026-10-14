@@ -280,9 +280,12 @@ def test_the_sweep_module_docstring_points_at_the_triage_row():
         "guard's firing a disposition — a reader from the code otherwise has "
         "no triage path")
     # …and the link target must be real, so the reference cannot rot silently.
-    doc = RUNBOOK.read_text(encoding="utf-8")
-    assert "DATA_LOSS_CANDIDATE" in doc, (
-        "the runbook lost the DATA_LOSS_CANDIDATE row the docstring links")
+    # The assertion is on the PARSED triage table, not on a substring of the
+    # whole file: the kind token appears in several other runbook passages, so
+    # ``"DATA_LOSS_CANDIDATE" in RUNBOOK.read_text()`` would still pass after
+    # the linked row was deleted (the #8595 review noted it as redundant).
+    assert "DATA_LOSS_CANDIDATE" in _runbook_rows(), (
+        "the runbook lost the DATA_LOSS_CANDIDATE triage row the docstring links")
 
 
 def test_manual_close_kinds_document_the_dedup_close_procedure():
