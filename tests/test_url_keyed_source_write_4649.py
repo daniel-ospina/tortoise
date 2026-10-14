@@ -207,6 +207,153 @@ class TestUrlKeyedSourceIsRootable:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# The url-keyed Source must be visible as a NEIGHBOUR (#8538)
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestUrlKeyedSourceIsVisibleAsNeighbour:
+    """#8538: the NEIGHBOUR-side sibling of #5448. The hop's dedupe filter was
+    `NOT m.id IN $visited`, which evaluates to NULL — hence false in Cypher's
+    WHERE — for a url-only `:Source`, so the ENGINE dropped the row: the node
+    existed, the edge existed, `get_entity(url)` resolved it, and navigation
+    never surfaced it as a neighbour. Fixing the filter alone is NOT enough:
+    the BFS also assumed every DISCOVERED node is id-keyed, so a hop THROUGH
+    the Source bound `{id:$eid}` and matched nothing. Both halves are pinned.
+
+    Reachability: the neighbour is the `create_point(extractedFrom=...)` stub
+    (`id` ABSENT) minted through `_link_source`/`_mint_source_stub` — the same
+    production shape the premise and rootability tests use.
+    """
+
+    URL = "https://example.com/nav-neighbour"
+
+    def test_entity_profile_sees_the_url_keyed_source_as_a_neighbour(
+            self, env):
+        """(1) The failing value is the neighbour list — empty pre-fix, because
+        the engine dropped the row on `m.id`; (2) the fixture is the
+        production-minted url-only stub, asserted to carry no `id`."""
+        from tortoise.navigation import entityProfile
+
+        sdk, _ = env
+        point = sdk.create_point("statement", "the claim",
+                                 extractedFrom=self.URL)
+        proj = sdk._get_proj()
+        assert _stub(proj, self.URL)[0] is None, (
+            "fixture minted an id-carrying Source — it does not exercise the "
+            "url-only identity this suite is about")
+
+        profile = entityProfile(proj.db, proj.graph_name, point["id"], hops=1)
+        neighbours = [n for ns in profile["connected"].values() for n in ns]
+
+        assert [n.get("url") for n in neighbours] == [self.URL], (
+            "the url-keyed Source is invisible as a neighbour — the hop filter "
+            "compared `m.id`, which is NULL for it (#8538)")
+        assert neighbours[0]["_relationship"] == "extractedFrom"
+
+    def test_tortoise_traverse_sees_the_url_keyed_source_as_a_neighbour(
+            self, env):
+        """The same defect through the traverse surface. (1) Failing value is
+        `nodes == []`; (2) same production-minted stub."""
+        from tortoise.navigation import tortoise_traverse
+
+        sdk, _ = env
+        point = sdk.create_point("statement", "the claim",
+                                 extractedFrom=self.URL)
+        proj = sdk._get_proj()
+
+        result = tortoise_traverse(proj.db, proj.graph_name, point["id"],
+                                   max_hops=1)
+
+        assert [(n["node"].get("url"), n["relationship"])
+                for n in result["nodes"]] == [(self.URL, "extractedFrom")], (
+            "tortoise_traverse did not surface the url-keyed Source (#8538)")
+
+    def test_the_surfaced_id_is_the_url_not_an_internal_handle(self, env):
+        """The read-surface decision #8538 asks for: a url-only `:Source`'s
+        `id` is its `url` — the same value `_resolve_root` and `get_entity`
+        address it by — never the internal FalkorDB numeric handle (#44). It
+        must be addressable: feeding the surfaced `id` back to the read path
+        resolves the node.
+
+        (1) Pre-fix the neighbour is ABSENT (so this is moot) and the naive
+        filter-only fix would surface `str(node.id)` — the internal handle;
+        (2) reachable through the `extractedFrom` stub."""
+        from tortoise.navigation import tortoise_traverse
+
+        sdk, _ = env
+        point = sdk.create_point("statement", "the claim",
+                                 extractedFrom=self.URL)
+        proj = sdk._get_proj()
+
+        node = tortoise_traverse(proj.db, proj.graph_name, point["id"],
+                                 max_hops=1)["nodes"][0]["node"]
+
+        assert node["id"] == self.URL, node
+        assert not str(node["id"]).isdigit(), (
+            "the internal FalkorDB handle leaked as the public id (#44)")
+        assert sdk.get_entity(node["id"]).get("url") == self.URL, (
+            "the surfaced id is not addressable through the read path")
+
+    def test_a_hop_through_the_url_keyed_source_binds_its_url_key(self, env):
+        """The SECOND half of #8538, and the one a filter-only fix misses. A
+        DISCOVERED node's next hop must bind the key its identity came from,
+        not `id`. Graph: Point -[extractedFrom]-> Source(url) -[related]->
+        Point2. The far Point is reached ONLY if the frontier carried the
+        Source's `url` key; with the filter fixed but the frontier still
+        assuming `id`, the second hop matches nothing and the far Point stays
+        invisible even though its own id is a plain string.
+
+        (1) Failing value is the unreached `far` id; (2) the Source is the
+        production `extractedFrom` stub and the Source->Point2 edge is written
+        through the public `create_edge` (whose SOURCE OR-set includes
+        `Source.url` — the same addressing this hop must use).
+        """
+        from tortoise.navigation import entityProfile, tortoise_traverse
+
+        sdk, _ = env
+        point = sdk.create_point("statement", "the claim",
+                                 extractedFrom=self.URL)
+        far = sdk.create_point("statement", "beyond the source")
+        proj = sdk._get_proj()
+        assert _stub(proj, self.URL)[0] is None
+        assert proj.create_edge(self.URL, far["id"], "related") is True
+
+        profile = entityProfile(proj.db, proj.graph_name, point["id"], hops=2)
+        reached = {n.get("id")
+                   for ns in profile["connected"].values() for n in ns}
+        assert far["id"] in reached, (
+            "the hop through the url-keyed Source bound the wrong identity "
+            "key — its neighbour is unreachable (#8538)")
+
+        nodes = tortoise_traverse(proj.db, proj.graph_name, point["id"],
+                                  max_hops=2)["nodes"]
+        assert {n["node"].get("id") for n in nodes} == {
+            self.URL, far["id"]}, nodes
+
+    def test_the_root_carries_the_same_public_identity_as_a_neighbour(self, env):
+        """The read-surface decision applies on BOTH sides of the hop. The root
+        of a url-only `:Source` is addressed by `url`, so its `entity` bag
+        carries `id = url` — the same shape a discovered neighbour has — rather
+        than omitting an addressable id while its neighbours carry one.
+
+        (1) Failing value is `id` ABSENT from the root bag (pre-fix) or the
+        internal handle (a filter-only fix); (2) reachable through the
+        production `extractedFrom` stub."""
+        from tortoise.navigation import entityProfile
+
+        sdk, _ = env
+        sdk.create_point("statement", "the claim", extractedFrom=self.URL)
+        proj = sdk._get_proj()
+        assert _stub(proj, self.URL)[0] is None
+
+        root = entityProfile(proj.db, proj.graph_name, self.URL,
+                             hops=1)["entity"]
+
+        assert root.get("id") == self.URL, root
+        assert not str(root["id"]).isdigit(), (
+            "the internal FalkorDB handle leaked as the root's id (#44)")
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # The defect — the write paths ignored the url identity (RED pre-fix)
 # ══════════════════════════════════════════════════════════════════════════
 
