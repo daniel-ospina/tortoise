@@ -636,6 +636,58 @@ def test_gate_output_renders_decision_tables_and_reach(tmp_path):
     assert "pre-registered reach" in text
 
 
+def test_gate_output_retracts_the_vacuous_pool_only_arm(tmp_path):
+    """#2992 defect 2: ``pool-only-isolation`` is a NO-OP against the
+    baseline, so its conclusion is RETRACTED in the generated gate output —
+    never reported as a null result. The retraction is emitted ONLY for a run
+    whose arm stats actually carry the arm (a rebuild without it must not
+    assert anything about it)."""
+    prereg = mt.write_preregistration(
+        mt.load_census(CENSUS)["rows"], tmp_path / "prereg.json")
+    qid_to_cls = {"q1": "ordering/compare"}
+    baseline = [_tot("q1", True)]
+    stats = {"A-default": {"refusal_rate": 0.1, "mean_context_tokens": 94.9},
+             "pool-only-isolation": {"refusal_rate": 0.1,
+                                     "mean_context_tokens": 94.9}}
+    text = mt.gate_output(
+        issue="2578", prereg=prereg, qid_to_cls=qid_to_cls,
+        baseline_verdicts=baseline,
+        arm_verdicts={"pool-only-isolation": [_tot("q1", True)]},
+        arm_stats=stats)
+    assert "pool-only-isolation" in mt.RETRACTED_ARMS
+    assert "Retracted arms" in text
+    # the reach table also flags the row, so the claim cannot be read as live
+    assert "⛔ RETRACTED (#2992)" in text
+
+    text2 = mt.gate_output(
+        issue="2578", prereg=prereg, qid_to_cls=qid_to_cls,
+        baseline_verdicts=baseline,
+        arm_verdicts={"tr_top_k16": [_tot("q1", True)]},
+        arm_stats={"A-default": {"refusal_rate": 0.1,
+                                 "mean_context_tokens": 10},
+                   "tr_top_k16": {"refusal_rate": 0.1,
+                                  "mean_context_tokens": 10}})
+    assert "Retracted arms" not in text2
+
+
+def test_committed_gate_output_is_reproducible_and_carries_the_retraction(
+        tmp_path):
+    """The committed #2578 gate output is GENERATED from the committed raw
+    reports — regeneration must be byte-identical (modulo the repo's trailing
+    newline) AND must carry the #2992 retraction. A hand-edited gate output
+    cannot pass this."""
+    repo = Path(__file__).resolve().parent.parent.parent
+    committed = (repo / "docs" / "runbook" / "2578-gate-output.md")
+    out = tmp_path / "gate.md"
+    mt.rebuild_from_reports(
+        reports_dir=repo / "docs" / "runbook" / "2578-reports",
+        out_md=out)
+    regenerated = out.read_text(encoding="utf-8")
+    assert regenerated == committed.read_text(encoding="utf-8")
+    assert "Retracted arms" in regenerated
+    assert "| pool-only-isolation |" in regenerated
+
+
 def test_gate_output_enforces_reader_constancy_when_meta_supplied(
         tmp_path):
     """The gate output is the comparison record — a mixed-reader arm set

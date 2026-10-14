@@ -900,6 +900,8 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
     observed_bands = _observed_gold_bands(baseline_verdicts)
     for arm_id, s in arm_stats.items():
         reach = prereg_arms.get(arm_id, {}).get("reach", "(unregistered)")
+        if arm_id in RETRACTED_ARMS:
+            reach = f"⛔ RETRACTED (#2992) — {reach}"
         reach_lines.append(f"| {arm_id} | {s.get('mean_context_tokens', '—')} "
                            f"| {observed_bands} | {reach} |")
     from tools.longmem_eval.report import wilson_ci as _wilson
@@ -995,6 +997,22 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
            "(pool_depth, baseline) | pre-registered reach |",
            "| --- | --- | --- | --- |"]
     md += reach_lines
+    # #2992 defect 2: name every arm whose committed config is a NO-OP
+    # against the baseline — its conclusion is retracted, never reported as
+    # a null result. Gated on the arm being present in THIS run's stats
+    # (a rebuild that omits the arm must not assert anything about it).
+    _retracted = {a: why for a, why in RETRACTED_ARMS.items()
+                  if a in arm_stats}
+    if _retracted:
+        md += ["", "## ⛔ Retracted arms — no isolation evidence", "",
+               "An arm listed here is a NO-OP against the baseline: its "
+               "applied fetch depth equals the baseline's, so it cannot "
+               "isolate the knob it was pre-registered to test. Its "
+               "published conclusion is RETRACTED — the lever is "
+               "UNTESTED on this slice, NOT null.", "",
+               "| arm | why retracted |", "| --- | --- |"]
+        for _arm, _why in sorted(_retracted.items()):
+            md.append(f"| {_arm} | {_why} |")
     _misses = sum(1 for vs in [baseline_verdicts,
                                *arm_verdicts.values()] for v in vs
                   if "refusal-classifier-miss" in (v.get("flags") or []))
@@ -1061,6 +1079,29 @@ ARM_POOL_LIMIT: dict[str, int] = {
     # reranker can actually promote from ranks 25-120.)
     "pool-only-isolation": 40,
     "cap3-only": 40,
+}
+
+#: #2992 defect 2: arms whose committed configuration is a NO-OP against
+#: the baseline, so the arm cannot isolate the knob it was pre-registered to
+#: test and its published conclusion is RETRACTED. ``pool-only-isolation``
+#: was pre-registered as the depth control (``--rerank-pool 120``, rerank
+#: OFF) intended to WIDEN the pool, but since #1947 the baseline ALREADY
+#: fetches 120: the committed outcomes are byte-identical to ``A-default``
+#: (``pool_depth.requested`` 120 on both arms, identical ``gold_admitted``
+#: vector, ``context_tokens`` mean 94.9). The pool-depth lever is UNTESTED on
+#: this slice, NOT null — a valid control needs a shallow baseline
+#: (``TORTOISE_LME_POOL_SIZE`` below the arm) or an arm deeper than the
+#: baseline (e.g. 240). Values are the retraction reason emitted by
+#: :func:`gate_output`; the arm must ALSO be present in the run's arm stats
+#: for the retraction to render (a rebuild without the arm cannot claim it).
+RETRACTED_ARMS: dict[str, str] = {
+    "pool-only-isolation": (
+        "#2992: byte-identical to A-default on the committed receipts "
+        "(pool_depth.requested 120 on both arms, identical gold_admitted "
+        "vector, context_tokens mean 94.9) — the baseline already fetches "
+        "120 since #1947, so 'widening the pool WITHOUT reranking changes "
+        "nothing' carries no evidence. The depth lever is UNTESTED on this "
+        "slice, not null."),
 }
 
 #: The arm that supplies the baseline 2x2 (optionally overridden).
@@ -1276,7 +1317,10 @@ def rebuild_from_reports(*, reports_dir, census_path=CENSUS_DEFAULT,
         reader_model=m0.get("reader_model_spec", "pinned (see methodology)"),
         judge_model=m0.get("judge_model", "pinned"), arms_meta=arm_meta)
     if out_md:
-        Path(out_md).write_text(text, encoding="utf-8")
+        # a generated artifact that is byte-reproducible from committed
+        # inputs (the repository's files carry a trailing newline)
+        Path(out_md).write_text(text if text.endswith("\n") else text + "\n",
+                                encoding="utf-8")
     if out_jsonl:
         with Path(out_jsonl).open("w", encoding="utf-8") as fh:
             for arm in (BASELINE_ARM, *[a for a in verdicts

@@ -154,9 +154,18 @@ pairs, 6–0), with admission-attributed failures 52 → 30, refusal rate
 also lifts (answerable 0 → 5 of 52; p=0.0625, 5–0) — it is the same
 rerank family with the pool left at 40. `tr_top_k` 16, `tr_top_k20`, `c2-on`
 and `pool-only-isolation` are all null on answerable-correct (0/52).
-`pool-only-isolation` is the clean isolation result — widening the pool
-WITHOUT reranking changes nothing, answerable-correct byte-identical to
-baseline (0/52). `tr_top_k24` sits at the edge: 1/52 answerable-correct
+⛔ **`pool-only-isolation` is NOT a clean isolation result — its conclusion
+is RETRACTED (#2992 defect 2).** Since #1947 the baseline already fetches 120,
+so the arm's pre-registered depth control (`--rerank-pool 120`, rerank OFF)
+is byte-identical to `A-default`: same `pool_depth.requested` (120), same
+`gold_admitted` vector, same `context_tokens` mean (94.9). "Widening the pool
+WITHOUT reranking changes nothing" therefore carries **no evidence** — the
+pool-depth lever is *untested on this slice*, not null. A valid depth control
+needs a baseline at a shallower fetch depth (`TORTOISE_LME_POOL_SIZE` below
+the arm) or an arm deeper than the baseline (e.g. 240). The generated
+gate output carries the retraction in its "⛔ Retracted arms" section, and
+`tests/longmem_eval/test_temporal_admission_trace.py` pins the vacuity.
+`tr_top_k24` sits at the edge: 1/52 answerable-correct
 (one question), 1 discordant pair, p=1.0000 — reported as a single-question
 movement, not an effect.
 
@@ -189,6 +198,19 @@ movement, not an effect.
 5. Conversion is NOT observable in the 133-Q baseline: gold was admitted
    on 0 of 133 questions, so the channel is empty by construction (0
    conv-refusal / 0 conv-wrong is "not measurable", not "not binding").
+6. ⛔ **`cap3-only`'s fetch depth was 40, not the baseline 120 (#2992
+   defect 1 — FIXED at HEAD).** The committed `cap3-only` receipt (rerank
+   ON, no explicit `--rerank-pool`) shows `pool_depth.requested = 40`
+   because the rerank branch replaced the #1947 baseline with the 40-item
+   rerank default instead of taking `max(rerank_pool, baseline)`. The arm's
+   own pre-registered intent was "per-session rerank cap 2→3 at pool 40",
+   so its published result stands, but the defect is real for ANY
+   reranker-on configuration that omits `--rerank-pool`: it silently
+   discarded the deepened pool. Fixed by flooring the arm at the resolved
+   baseline (`tools/longmem_eval/retrieve.py::resolve_rerank_arm_pool_limit`;
+   `tools/longmem_eval/run.py::_resolve_rerank` records the SAME floored
+   depth, so methodology == actual == fingerprint). The committed receipts
+   are historical and are NOT regenerated.
 
 ## 0/13 annotation
 
