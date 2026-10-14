@@ -132,6 +132,18 @@ def _marker_block(text: str | None = None) -> str:
     return _flatten("\n".join(block))
 
 
+def _dict_constant(expr: ast.expr, key: str) -> ast.expr | None:
+    """The value bound to `key` in the first dict in `expr`'s subtree that has
+    it. Structural, so `"degraded" in body` cannot pass for `degraded: False`."""
+    for node in ast.walk(expr):
+        if not isinstance(node, ast.Dict):
+            continue
+        for k, v in zip(node.keys, node.values, strict=True):
+            if isinstance(k, ast.Constant) and k.value == key:
+                return v
+    return None
+
+
 def _env_flag_default_true(call: ast.expr) -> bool:
     """`env_flag("TORTOISE_S4_DELTA", True)` — as a structure, not a spelling.
 
@@ -215,6 +227,7 @@ class _StageScan(ast.NodeVisitor):
         self.s4_guards: list[ast.expr] = []
         self.merge_call: ast.Call | None = None
         self.merge_target: str | None = None
+        self.result_embed_list: ast.expr | None = None
         self.assignments: dict[str, ast.expr] = {}
 
     def visit_If(self, node: ast.If) -> None:
@@ -226,6 +239,15 @@ class _StageScan(ast.NodeVisitor):
         targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
         for target in targets:
             self.assignments[target] = node.value
+        for target in node.targets:
+            if (
+                isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "result"
+                and isinstance(target.slice, ast.Constant)
+                and target.slice.value == "embed_list"
+            ):
+                self.result_embed_list = node.value
         if isinstance(node.value, ast.Call):
             called = _call_name(node.value.func)
             if called == "run_s4" and self.s4_call is None:
@@ -362,6 +384,13 @@ def test_the_module_docstring_carries_the_record_the_call_site_points_at():
         "the record must state the removal-ordering obligation: `run_s4` is a "
         "v4 migration deliverable, not a cleanup."
     )
+    assert "OPEN QUESTION" in text, (
+        "the record must leave #8500's precedence question OPEN — which side is "
+        "authoritative until the migration lands is the OWNER's ruling, not an "
+        "agent-authored claim (the #8601 review flagged the previous 'shipped "
+        "code is authoritative' sentence as answering a question #8500 reserves "
+        "to the owner)."
+    )
 
 
 # ── the shipped-code facts ─────────────────────────────────────────────────
@@ -441,6 +470,15 @@ def test_the_e4_union_is_consumed_not_discarded():
         "that is computed and thrown away loses the capability just as surely "
         "as deleting it."
     )
+    output = scan.result_embed_list
+    assert isinstance(output, ast.Name) and output.id == scan.merge_target, (
+        "the union is ASSIGNED but never reaches the function's output — "
+        "`result[\"embed_list\"]` must carry the merged list, or S2 items S4 "
+        "omitted are silently dropped (the E4 capability loss the marker claims "
+        "is guarded). Output is "
+        f"{ast.unparse(output) if output is not None else '<no result[embed_list] assignment>'} "
+        f"but the merge target is {scan.merge_target!r}."
+    )
 
 
 def test_the_three_side_effect_bypass_paths_exist():
@@ -475,10 +513,17 @@ def test_the_three_side_effect_bypass_paths_exist():
         "the empty-conversation return must run BEFORE the S4 call, or it is not "
         "a bypass of S4 at all."
     )
-    body = " ".join(ast.unparse(node) for node in empty_guards[0].body)
-    assert "degraded" in body, (
-        "the empty-conversation early return must report `degraded: True` — the "
-        "marker's path (iii) describes that degraded return, not a silent `{}`."
+    returns = [n for n in empty_guards[0].body if isinstance(n, ast.Return)]
+    assert returns, (
+        "the empty-conversation guard no longer returns — path (iii) is gone"
+    )
+    degraded = _dict_constant(returns[0].value, "degraded")
+    assert isinstance(degraded, ast.Constant) and degraded.value is True, (
+        "the empty-conversation early return must report the VALUE `degraded: "
+        "True` — the marker's path (iii) describes that degraded return, not a "
+        "silent `{}` and not `degraded: False` (a substring check cannot tell "
+        "them apart, which is what the #8601 review proved). Found "
+        f"{ast.unparse(degraded) if degraded is not None else '<no degraded key>'}"
     )
 
 
@@ -634,3 +679,48 @@ def test_the_undocumented_exit_scan_sees_a_match_case_body():
         "the exit scan missed a `return` inside a `match` case body, so a fourth "
         "bypass of this shape would land invisibly"
     )
+
+
+def test_the_union_consumption_check_reds_when_the_merge_does_not_reach_output():
+    """#8601 review finding — `merge_target is not None` stayed green when the
+    merge was renamed away or the output bypassed it. Both mutations must be
+    visible to the scan, or the marker's `union IS consumed` claim is unguarded."""
+    source = EXTRACTOR.read_text(encoding="utf-8")
+    output_bypassed = source.replace(
+        '    result["embed_list"] = complete_list\n',
+        '    result["embed_list"] = embed_list\n',
+        1,
+    )
+    assert output_bypassed != source, "fixture is stale (output assignment moved)"
+    scan = _scan(output_bypassed)
+    assert scan.merge_target == "complete_list"
+    assert not (
+        isinstance(scan.result_embed_list, ast.Name)
+        and scan.result_embed_list.id == scan.merge_target
+    ), "the scan cannot see that the merged list is no longer the output"
+
+    merge_discarded = source.replace(
+        "                complete_list = merge_embed_lists(embed_list, s4)\n",
+        "                _discarded_union = merge_embed_lists(embed_list, s4)\n",
+        1,
+    )
+    assert merge_discarded != source, "fixture is stale (merge assignment moved)"
+    scan2 = _scan(merge_discarded)
+    assert scan2.merge_target == "_discarded_union"
+    assert not (
+        isinstance(scan2.result_embed_list, ast.Name)
+        and scan2.result_embed_list.id == scan2.merge_target
+    ), "a merge renamed away from the output must red the consumption check"
+
+
+def test_the_degraded_check_pins_the_value_not_the_word():
+    """#8601 review finding — `assert "degraded" in body` passed for
+    `degraded: False`; the VALUE must be pinned."""
+    false_arm = ast.parse(
+        '{"search": {"mode": "m", "degraded": False}}', mode="eval"
+    ).body
+    true_arm = ast.parse(
+        '{"search": {"mode": "m", "degraded": True}}', mode="eval"
+    ).body
+    assert _dict_constant(false_arm, "degraded").value is False
+    assert _dict_constant(true_arm, "degraded").value is True

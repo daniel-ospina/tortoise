@@ -67,8 +67,11 @@ record reds a test instead of being discovered):
 ORDERING OBLIGATION (§4.3 G5's S4 clause, tracked at **#8500**): removing
 ``run_s4`` is a v4 MIGRATION DELIVERABLE, not a cleanup — it must not leave the
 step list before its successor lands, or the pipeline loses gap-filling and the
-E4 merge property in the gap. **Until that migration lands the shipped code is
-authoritative; never delete ``run_s4`` on the strength of the design doc alone.**
+E4 merge property in the gap. **Which side is authoritative until that migration
+lands is #8500's OPEN QUESTION — this record does not decide it.** What this
+record does state is the measured shipped state: ``run_s4`` is what runs today,
+so it must not be deleted on the strength of the design doc alone; a lane that
+needs the precedence settled asks the owner on **#8500**.
 
 Owner confirmations honored (issue #1350): flash runs 4 prompts (S1-S4), S5
 is execution; temperature 0.0 (via tests.model_adapters MODELS); S3 reads the
