@@ -40,6 +40,36 @@ _ROOT_BRANCHES = (
 #: never reach it.
 _HOP_KEYS = frozenset({"id", "eventId", "url"})
 
+#: The canonical identity keys in PRIORITY order — the order a node's identity is
+#: resolved in when it carries more than one. Mirrors the coalesce the SDK's own
+#: endpoint resolver uses (``sdk._fetch_endpoint_info``:
+#: ``coalesce(n.id, n.url, n.eventId)``) and the declaration at
+#: ``projection._CANONICAL_ENTITY_ID_PROPS`` (``id`` per canonical label,
+#: ``eventId`` for a legacy id-less ``:Event``) plus
+#: ``_CANONICAL_ENTITY_SECONDARY_ID_PROPS`` (``url`` — a ``:Source``'s secondary
+#: identity, #4649). The SET is pinned equal to ``_HOP_KEYS`` and a superset of
+#: every declared identity key by
+#: ``tests/test_navigation.py::test_identity_key_order_covers_every_declared_identity_key``,
+#: so a fourth identity key cannot be added to the canonical tables and silently
+#: left out of the traversal identity here.
+_IDENTITY_KEY_ORDER = ("id", "url", "eventId")
+
+
+def _node_identity(props: dict) -> tuple[Any, str | None]:
+    """A node's canonical identity as ``(value, key)``, or ``(None, None)``.
+
+    ``key`` is the property the value came from, so the next hop can bind THAT
+    property (``{key:$eid}``) instead of assuming ``id``. The assumption is the
+    defect #8538 fixes: a url-keyed ``:Source`` carries no ``id``, so a hop that
+    bound ``{id:$eid}`` off it matched nothing and the node was unreachable for
+    every hop after the one that discovered it.
+    """
+    for key in _IDENTITY_KEY_ORDER:
+        value = props.get(key)
+        if value:
+            return value, key
+    return None, None
+
 
 def _resolve_root(g: Any, entity_id: str) -> tuple[str | None, dict, str | None]:
     """Index-backed root lookup: returns (label, properties, key) or (None, {}, None).
@@ -77,6 +107,14 @@ def _resolve_root(g: Any, entity_id: str) -> tuple[str | None, dict, str | None]
         # is not a guarantee, so the root takes the same filter as its
         # neighbours.
         parsed = _filter_source_props(parsed)
+    # #8538: the ROOT carries the same public identity as a discovered
+    # neighbour. `key` is a public, addressable key (a url-only `:Source`'s
+    # `url` is also the value the caller passed), so surfacing it as `id` keeps
+    # the node shape identical on both sides of the hop and keeps this surface
+    # free of the internal FalkorDB handle `_parse_node` would otherwise
+    # synthesise (#44). An id-carrying node is unchanged.
+    if not parsed.get("id"):
+        parsed["id"] = entity_id
     parsed["type"] = label
     return label, parsed, key
 
@@ -91,19 +129,32 @@ _SAFE_LABEL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: Per-hop frontier-node match: label AND identity key on the SOURCE side in
 #: BOTH directions. (Verified: `MATCH (n:Point)<-[r]-(m)` -> Index Scan; the
 #: neighbor-labeled form `MATCH (n)<-[r]-(m:Point)` degrades to All Node Scan —
-#: the trap.) The key is the one the frontier node was found by (#5448): ``id``
-#: for every DISCOVERED neighbour, and the root's own key (``url`` for a
-#: url-only `:Source`) for the root.
+#: the trap.) The key is the one the frontier node was found by: the root's own
+#: key (``url`` for a url-only `:Source`, #5448), and for a DISCOVERED neighbour
+#: the property its identity came from (#8538 — assuming ``id`` left a url-keyed
+#: `:Source` unreachable for every hop after the one that found it).
 def _hop_query(label: str, key: str = "id") -> str | None:
     if not _SAFE_LABEL_RE.match(label or "") or key not in _HOP_KEYS:
         # Unknown label -> no nodes match (legacy behavior: the property-id
         # lookup matched nothing for labels without an id property).
         return None
+    # #8538: the dedupe filter compares the NEIGHBOUR's canonical identity, not
+    # `m.id` alone. A url-keyed `:Source` has no `id` property, so `NOT m.id IN
+    # $visited` evaluated to NULL for it and Cypher's WHERE dropped the row —
+    # the node existed, `get_entity` resolved it, and navigation never saw it.
+    # `coalesce(m.id, m.url, m.eventId)` is the same order `_node_identity`
+    # resolves (and the same coalesce `sdk._fetch_endpoint_info` uses), so the
+    # value compared here is exactly the value `_parse_node_with_identity`
+    # records in `visited` and binds on the next hop. A node carrying NONE of
+    # the three still coalesces to NULL and is skipped — unchanged, and
+    # deliberate: it has no public identity any read path could address.
     return (
         f"MATCH (n:{label} {{{key}:$eid}})-[r]->(m) "
-        f"WHERE NOT m.id IN $visited RETURN m, type(r), r.idx UNION "
+        f"WHERE NOT coalesce(m.id, m.url, m.eventId) IN $visited "
+        f"RETURN m, type(r), r.idx UNION "
         f"MATCH (n:{label} {{{key}:$eid}})<-[r]-(m) "
-        f"WHERE NOT m.id IN $visited RETURN m, type(r), r.idx"
+        f"WHERE NOT coalesce(m.id, m.url, m.eventId) IN $visited "
+        f"RETURN m, type(r), r.idx"
     )
 
 
@@ -135,8 +186,9 @@ def entityProfile(
     #    key); the per-hop query binds the frontier node's label AND identity key
     #    on the SOURCE side so every hop uses a range index (issue #327). The root
     #    carries the key `_resolve_root` matched it by (a url-only `:Source` root
-    #    has no `id`); a discovered neighbour carries "id" — the pre-#5448
-    #    behavior, unchanged.
+    #    has no `id`); a discovered neighbour carries ITS OWN key (#8538) — the
+    #    property its identity came from — so a hop THROUGH a url-keyed `:Source`
+    #    binds `{url:$eid}` instead of the `{id:$eid}` that matches nothing.
     visited: set[str] = {entity_id}
     frontier: list[tuple[str, str, str]] = [(entity_id, root_label, root_key)]
     connected: list[dict] = []
@@ -148,19 +200,18 @@ def entityProfile(
             rows = (g.query(hq, params={"eid": fid, "visited": list(visited)})
                     .result_set if hq else [])
             for row in rows:
-                node = _parse_node(row[0])
+                node, nid, nkey = _parse_node_with_identity(row[0])
                 rel_type = row[1] if len(row) > 1 else None
                 # #6101: same edge metadata as tortoise_traverse — idx 0 = the
                 # operator's SOURCE, >= 1 = a TARGET, None on non-operator edges.
                 edge_idx = row[2] if len(row) > 2 else None
-                nid = node.get("id")
                 nlabel = node.get("type")
                 if nid and nid not in visited:
                     node["_relationship"] = rel_type
                     node["_idx"] = edge_idx
                     connected.append(node)
                     visited.add(nid)
-                    next_frontier.append((nid, nlabel, "id"))
+                    next_frontier.append((nid, nlabel, nkey))
         frontier = next_frontier
 
     # 3. Categorize by label, apply filters
@@ -227,8 +278,8 @@ def tortoise_traverse(
     # BFS with depth tracking; frontier carries (id, label, key, depth) so each
     # per-hop query can bind the source label AND identity key for index-backed
     # lookups. The root keeps the key `_resolve_root` matched it by (#5448: a
-    # url-only `:Source` root has no `id`); discovered neighbours use "id", the
-    # pre-#5448 behavior.
+    # url-only `:Source` root has no `id`); a discovered neighbour carries its
+    # OWN key (#8538), so a hop through a url-keyed `:Source` binds `{url:$eid}`.
     visited: set[str] = {entity_id}
     frontier: list[tuple[str, str, str, int]] = (
         [(entity_id, root_label, root_key, 0)] if root_label else [])
@@ -241,13 +292,12 @@ def tortoise_traverse(
             rows = (g.query(hq, params={"eid": fid, "visited": list(visited)})
                     .result_set if hq else [])
             for row in rows:
-                node = _parse_node(row[0])
+                node, nid, nkey = _parse_node_with_identity(row[0])
                 rel_type = row[1] if len(row) > 1 else None
                 # #6101: the hop's edge idx rides along (0 = operator SOURCE,
                 # >= 1 = TARGET). Absent on non-operator edges and on legacy
                 # edges written before idx existed.
                 edge_idx = row[2] if len(row) > 2 else None
-                nid = node.get("id")
                 nlabel = node.get("type")
                 if nid and nid not in visited:
                     nodes.append({
@@ -257,13 +307,51 @@ def tortoise_traverse(
                         "depth": depth + 1,
                     })
                     visited.add(nid)
-                    next_frontier.append((nid, nlabel, "id", depth + 1))
+                    next_frontier.append((nid, nlabel, nkey, depth + 1))
         frontier = next_frontier
 
     return {"entity": root, "nodes": nodes}
 
 
 # ── Shared helper ──────────────────────────────────────
+
+def _parse_node_with_identity(node: Any) -> tuple[dict, Any, str]:
+    """Parse FalkorDB Node → ``(flat dict, identity value, identity key)``.
+
+    The identity is resolved from the RAW property map, BEFORE the public
+    ``id`` is synthesised. That order is load-bearing (#8538): a url-keyed
+    ``:Source`` given ``id = url`` and then asked for its identity would report
+    key ``id``, and the next hop would bind ``{id:$eid}`` — matching nothing.
+    Resolving first keeps the key the node is ACTUALLY addressable by.
+
+    The public ``id`` is the node's canonical identity (``id`` | ``url`` |
+    ``eventId``), so a url-keyed ``:Source`` surfaces as ``id = url``: the same
+    value ``_resolve_root``/``get_entity``/``_RESOLVE_BRANCHES`` resolve it by,
+    and never the internal FalkorDB numeric handle (#44).
+    """
+    if hasattr(node, 'properties'):
+        props = dict(node.properties)
+        labels = list(node.labels or [])
+        raw_id = str(node.id)
+    else:
+        # Raw list form: [id, [labels], [[k, v], ...]]
+        props = {k: v for k, v in node[2]}
+        labels = list(node[1] or [])
+        raw_id = str(node[0])
+    if "Source" in labels:
+        props = _filter_source_props(props)
+    value, key = _node_identity(props)
+    if value is None:
+        # No public identity at all: the internal handle is the only dedupe key
+        # available (test mocks, and a corrupt node). Such a node is
+        # unreachable through every read path AND is skipped by `_hop_query`'s
+        # coalesce filter (NULL there too), so in production this value never
+        # leaves the BFS's own `visited` set.
+        value, key = raw_id, "id"
+    props["id"] = value
+    props["type"] = labels[0] if labels else "unknown"
+    return props, value, key
+
 
 def _parse_node(node: Any) -> dict:
     """Parse FalkorDB Node → flat dict {id, type, ...properties}.
@@ -272,27 +360,13 @@ def _parse_node(node: Any) -> dict:
 
     Prefers the public ``id`` property (ULID) from node properties over the
     internal FalkorDB numeric node ID.  Falls back to the internal ID only
-    when nodes lack an ``id`` property (edge case, typically test mocks).
-    See #44: traverse was leaking internal IDs downstream.
+    when nodes lack any public identity property (``id`` | ``url`` |
+    ``eventId``) — edge case, typically test mocks.  See #44: traverse was
+    leaking internal IDs downstream; see #8538: a url-keyed ``:Source`` has no
+    ``id``, and its public identity is its ``url``, so that is what ``id``
+    becomes.
     """
-    if hasattr(node, 'properties'):
-        props = dict(node.properties)
-        labels = list(node.labels or [])
-        if "Source" in labels:
-            props = _filter_source_props(props)
-        if "id" not in props:
-            props["id"] = str(node.id)
-        props["type"] = labels[0] if labels else "unknown"
-        return props
-    # Raw list form: [id, [labels], [[k, v], ...]]
-    props = {k: v for k, v in node[2]}
-    labels = list(node[1] or [])
-    if "Source" in labels:
-        props = _filter_source_props(props)
-    if "id" not in props:
-        props["id"] = str(node[0])
-    props["type"] = labels[0] if labels else "unknown"
-    return props
+    return _parse_node_with_identity(node)[0]
 
 
 def _filter_source_props(props: dict) -> dict:
