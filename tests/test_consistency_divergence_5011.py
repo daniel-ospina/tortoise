@@ -618,6 +618,32 @@ def test_unreadable_baseline_is_reported_not_treated_as_divergence(
     assert r2["state_error"] and "format" in r2["state_error"], r2
     assert r2["state_recorded"] is False
 
+    # #8268/#7936 review: a BOOLEAN or FLOAT `format_version` is MALFORMED, not
+    # a known predecessor. `_PROJECTION_STATE_SUPERSEDED_FORMATS` is a frozenset
+    # of ints and `in` binds by `==`/`hash`, so `True in frozenset({1})` and
+    # `1.0 in frozenset({1})` are both True: without a strict-int gate the
+    # sidecar is read as a predecessor and MIGRATED (re-baselined and
+    # OVERWRITTEN), the exact opposite of "never overwrite what we cannot read".
+    # Written as RAW JSON, not via `_state_json`: `fmt=True` would render the
+    # capital `True`, which `json.load` refuses for an unrelated reason (the
+    # case would then pass vacuously).
+    for raw in (
+        '{"format_version": true, "last_applied_seq": 1, '
+        '"projection_hash_sha256": "' + "0" * 64 + '"}',
+        '{"format_version": 1.0, "last_applied_seq": 1, '
+        '"projection_hash_sha256": "' + "0" * 64 + '"}',
+    ):
+        with open(sidecar, "w", encoding="utf-8") as fh:
+            fh.write(raw)
+        r3 = check_consistency(log_path, proj)
+        assert r3["state_error"], (raw, r3)
+        assert r3["state_recorded"] is False, (raw, r3)
+        assert r3["state_superseded_format"] is None, (raw, r3)
+        with open(sidecar, encoding="utf-8") as fh:
+            assert fh.read() == raw, (
+                "a malformed sidecar was overwritten instead of refused: "
+                + raw)
+
 
 def test_record_state_false_is_read_only(proj, tmp_path):
     """``record_state=False`` must not write a baseline — a caller running the

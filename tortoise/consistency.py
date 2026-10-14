@@ -980,10 +980,21 @@ def read_projection_state_detail(
     # predecessor is NOT thereby exempt from the structural gate below:
     # `superseded_format` is a verdict on a WELL-FORMED older sidecar, never a
     # bypass of the malformed/tampered checks. An unknown format (0, 99, a
-    # string, `true`, a FUTURE version written by newer code) is untrusted —
-    # an older build must never overwrite a newer baseline.
-    if fmt != _PROJECTION_STATE_FORMAT \
-            and fmt not in _PROJECTION_STATE_SUPERSEDED_FORMATS:
+    # string, `true`, `1.0`, a FUTURE version written by newer code) is
+    # untrusted — an older build must never overwrite a newer baseline.
+    #
+    # `isinstance(fmt, bool)`/`not isinstance(fmt, int)` FIRST, before the
+    # membership test: `_PROJECTION_STATE_SUPERSEDED_FORMATS` is a frozenset of
+    # ints and `in` binds by `==`/`hash`, so `True in frozenset({1})` and
+    # `1.0 in frozenset({1})` are BOTH True. Without the type check a boolean
+    # or float `format_version` is coerced into the known-predecessor set and
+    # MIGRATED (re-baselined and OVERWRITTEN) instead of refused — the one
+    # class the docstring above promises is still treated as untrusted. Same
+    # strict-bool rule as the watermark and `_values_equal`, on the path that
+    # reads operator-planted sidecars.
+    if isinstance(fmt, bool) or not isinstance(fmt, int) \
+            or (fmt != _PROJECTION_STATE_FORMAT
+                and fmt not in _PROJECTION_STATE_SUPERSEDED_FORMATS):
         return None, (f"projection state format {fmt!r} "
                       f"is not {_PROJECTION_STATE_FORMAT}"), None
     # `isinstance(seq, bool)` first: `isinstance(True, int)` is true, so a

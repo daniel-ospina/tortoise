@@ -11202,12 +11202,14 @@ def main(argv: list[str] | None = None) -> int:
         if result["ok"]:
             print(f"\u2713 Consistent: {result['log_points']} points in both log and graph")
             # #2897 review round 2: a green verdict says nothing about the
-            # BASELINE half of the invariant. An untrusted sidecar (a
-            # predecessor format after a digest-shape change, a torn file, a
-            # planted FIFO/symlink) makes `read_projection_state` error, so
+            # BASELINE half of the invariant. An untrusted sidecar (a torn
+            # file, a malformed watermark/digest, a planted FIFO/symlink, an
+            # UNKNOWN or FUTURE format) makes `read_projection_state` error, so
             # every run ADOPTS and `state_recorded` stays False — the baseline
             # check is silently INERT. Printing only the green tick hid that;
-            # `baseline_warning` names it and the recovery.
+            # `baseline_warning` names it and the recovery. A KNOWN predecessor
+            # format is no longer in that class (#8268/#7936): it is MIGRATED
+            # (re-baselined here) rather than inert, and warned as such.
             from tortoise.consistency import baseline_warning
             _warn = baseline_warning(result, args.log)
             if _warn:
