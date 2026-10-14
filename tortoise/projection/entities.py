@@ -1069,6 +1069,13 @@ class _EntityHandlers:
         # `_event_guarded_merge`), and `backfill_sources` reads it back — the
         # connector content fields ride `itemState` instead of the envelope.
         "itemState", "labels", "assignees",
+        # #8010: the Slack/Linear connectors' full-text hash. It is an EDIT
+        # SIGNAL, not node content — the raw text it hashes must not reach the
+        # graph, and an undeclared digest string would be a persistable prop
+        # (the open passthrough the #3998 note below closes for :Source).
+        # Declared here so it rides the version digest without growing the
+        # Event surface.
+        "textDigest",
         # name / eventStatus / createdAt are intentionally NOT here —
         # they were historically dropped by the fixed-field MERGE and
         # are now persisted as arbitrary props via _persist_extra_props.

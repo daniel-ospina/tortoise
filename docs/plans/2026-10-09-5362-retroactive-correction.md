@@ -506,7 +506,7 @@ temporal properties of both points (reachable through the SDK, MCP and the hoste
 
 | # | Residual | Polarity | Silent mis-read possible? |
 |---|---|---|---|
-| RES-1 | `t = vP` reads `ambiguous` (one instant per correction, §3.3) | fail-safe **only if the consumer tests `ambiguous`** — the branch omits `found` (§3.3) and the reader is SDK-only | **Yes**, for `.get("found")` consumers; recorded on **#7818** |
+| RES-1 | `t = vP` reads `ambiguous` (one instant per correction, §3.3) | fail-safe **only if the consumer tests `status`** — ✅ the `found` omission is **fixed by #7818**: the `ambiguous` branch now sets `found=True` with `valid_point` absent, and every reply carries `status` (`found`/`ambiguous`/`absent`) | **No** since #7818 for a `status`-aware consumer (branch on `status`, never on `found` alone); a `.get("found")`-only consumer still cannot tell two candidates from one — the `t = vP` ambiguity itself remains flagged, not silent |
 | RES-2 | both-refuse inputs (§2) | fail-safe (refuse; escape named) | no |
 | RES-3 | no automated trip for "#5362 never lands" | process | n/a |
 | RES-4 | `audit.py:665` flags only strict `k_to < k_from`, so the collapse is audit-invisible (and it never counted overlapping candidates) | fail-safe but **under-reports** | "audit clean" ≠ "no ambiguity" |
@@ -515,8 +515,8 @@ temporal properties of both points (reachable through the SDK, MCP and the hoste
 | RES-7 | the hosted path 422s and ingest warn-skips a retroactive record | fail-closed / visible skip, but the capability is unreachable there | filed **#7821** |
 
 **Explicitly OUT of scope:** any concurrent mutation between the validating read and the write
-(single-writer assumption) — the per-node write is what makes this safe against *inversion*; the
-`found`-omission in the ambiguous branch (**#7818**); a mid-chain target (unreachable by the guard); a
+(single-writer assumption) — the per-node write is what makes this safe against *inversion*; a
+mid-chain target (unreachable by the guard); a
 partial/middle-span correction (not expressible); duplicate-id **mixed-status** endpoints
 (**#7822**); legacy inverted windows already persisted (#5361); the hosted/ingest **routing**
 (**#7821**).
