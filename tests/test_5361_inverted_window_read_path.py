@@ -200,15 +200,18 @@ def test_zero_length_window_is_not_flagged(sdk):
     assert out["found"] is False and "malformed" not in out, out
 
 
-# ── The found path is untouched ───────────────────────────────────
+# ── The absence-branch flag does not fire on the found path ─────────────────
 
 def test_covering_window_reply_is_unchanged(sdk):
-    """When a window covers, the reply must be exactly as before — no new key.
+    """When a window covers, the ABSENCE-branch flag does not fire.
 
     Value that makes it fail: a date INSIDE the planted window
     ('2020-06-01'..'2030-06-01' at '2025-01-01'), where ``found`` is True and
-    ``valid_point`` is returned. The fixture reaches it. The flag is scoped to
-    the absence branch precisely so this reply does not change shape.
+    ``valid_point`` is returned. The fixture reaches it. ``malformed`` is
+    scoped to the absence branch so this reply does not gain THAT key — but it
+    is not "exactly as before": every reply, this one included, also carries
+    the uniform ``status`` key added by #7818, so "no new key" is no longer
+    the invariant.
     """
     pid = _plant(sdk, valid_from="2020-06-01", valid_to="2030-06-01")
     out = sdk.get_historical_knowledge(pid, "2025-01-01")
