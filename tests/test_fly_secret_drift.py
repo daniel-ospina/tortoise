@@ -139,6 +139,15 @@ _SECRETS_MATRIX_ROW_RE = re.compile(
     re.MULTILINE,
 )
 
+#: A `fly secrets set <NAME>=<value>` whose value is a COMMAND SUBSTITUTION.
+#: For a `gh-secret:` name that value cannot be the GitHub secret's (it did not
+#: exist when the line ran), so the next deploy re-stages GitHub's value over it.
+#: Only `$(…)` is matched — `fly secrets set NAME="$NEW"` (a value first written
+#: to GitHub) is the correct shape and must not trip this.
+_INLINE_GENERATED_SECRET_RE = re.compile(
+    r"\bfly\s+secrets\s+set\s+([A-Z][A-Z0-9_]*)\s*=\s*\"?\$\(([^)]*)\)"
+)
+
 
 def _secrets_matrix_rows() -> list[tuple[str, str, str, str]]:
     """(name, fly, falkordb, github) for the runbook's Secrets Matrix rows.
@@ -2071,4 +2080,35 @@ def test_secrets_matrix_github_column_agrees_with_the_manifest():
         "the Secrets Matrix tells an operator these names have no GitHub Actions "
         "home, while the manifest declares them `gh-secret:` (and §2 rotates them "
         "GitHub-first):\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_no_gh_secret_name_is_given_a_value_generated_only_on_fly():
+    """A `gh-secret:` name must never be set on Fly from a value minted there.
+
+    `fly secrets set NAME=$(openssl rand -hex 32)` writes a value only Fly holds:
+    the GitHub secret is not touched, and the next `deploy-hosted` run re-stages
+    GitHub's value over it — a rotation that silently reverts. This was the #8614
+    review finding in BOTH places it occurs (§1's provisioning block and §2's
+    rotation recipes), so the two are bound together here rather than corrected
+    one at a time.
+
+    Only names the manifest declares `gh-secret:` are checked — the premise is
+    the manifest, never a list maintained in this test — and a name with another
+    declared source is a different contract (§8.3), so it is out of scope by
+    construction.
+    """
+    sources = _manifest_sources(REAL_MANIFEST)
+    gh_names = {n for n, s in sources.items() if s.startswith("gh-secret:")}
+    assert gh_names, "the shipped manifest declares no gh-secret: name — the reader is wrong"
+
+    offenders = []
+    for lineno, line in enumerate(REAL_RUNBOOK.read_text().splitlines(), 1):
+        match = _INLINE_GENERATED_SECRET_RE.search(line)
+        if match and match.group(1) in gh_names:
+            offenders.append(f"line {lineno}: {line.strip()}")
+    assert not offenders, (
+        "these lines give a `gh-secret:` name a value that exists only on Fly — the "
+        "GitHub secret is not updated, so the next deploy reverts the rotation:\n  "
+        + "\n  ".join(offenders)
     )

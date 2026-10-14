@@ -45,8 +45,20 @@ there is no `tortoise-api` app:
 
 ```bash
 fly apps create tortoise-y4mjjq   # or use the existing app
-fly secrets set FASTAPI_INTERNAL_KEY=$(openssl rand -hex 32)
-fly secrets set TORTOISE_SECRET_PEPPER=$(openssl rand -hex 32)
+
+# The two `gh-secret:` credentials are seeded in GitHub FIRST (§2): a value set
+# only on Fly is reverted by the next deploy, and `deploy-hosted` fails closed
+# when they are absent from GitHub Actions secrets (deploy-hosted.yml).
+FASTAPI_KEY=$(openssl rand -hex 32)
+gh secret set FASTAPI_INTERNAL_KEY --body "$FASTAPI_KEY"
+fly secrets set FASTAPI_INTERNAL_KEY="$FASTAPI_KEY"
+
+# ⚠️ Set ONCE here — every later rotation of this one invalidates all tenant
+# API key hashes (§2).
+PEPPER=$(openssl rand -hex 32)
+gh secret set TORTOISE_SECRET_PEPPER --body "$PEPPER"
+fly secrets set TORTOISE_SECRET_PEPPER="$PEPPER"
+
 # Set FALKORDB_CLOUD_URI in GitHub Actions secrets (deploy workflow sets it on Fly):
 #   docker://tortoise:<password>@<instance-endpoint>:53171/tortoise
 fly deploy
