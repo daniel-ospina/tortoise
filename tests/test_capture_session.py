@@ -6668,10 +6668,12 @@ def test_phase_e_sdk_mirror_verification_fail_open_omits_marker(sdk, monkeypatch
     real_query = raw.query
 
     def failing_query(query, params=None, timeout=None):
-        # Only the Phase E verification read (exact text) fails — every
+        # Only the post-write enrichment/verification read fails — every
         # other capture write/read proceeds, so the capture commits and the
-        # marker is the ONLY degraded surface.
-        if query == "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id":
+        # marker + verb enrichment are the ONLY degraded surfaces. Matched by
+        # prefix (the read is shared by Phase E's marker and the memory_write_v1
+        # verb's per-point enrichment, #2104 S12).
+        if query.startswith("MATCH (n:Point) WHERE n.id IN $ids RETURN n.id"):
             raise RuntimeError("simulated verification read failure")
         return real_query(query, params=params, timeout=timeout)
 
@@ -6680,7 +6682,14 @@ def test_phase_e_sdk_mirror_verification_fail_open_omits_marker(sdk, monkeypatch
     assert res["points"], "the capture itself commits"
     assert res["surfaced"] == [], (
         "a failed verification read must omit the marker, never fabricate it")
-    assert any("marker omitted" in w for w in res["warnings"]), res["warnings"]
+    assert any("write-verb enrichment read failed" in w for w in res["warnings"]), \
+        res["warnings"]
+    # The verb (S12) survives a failed enrichment read: un-enriched points are
+    # reported honestly and the status downgrades to partial — never a
+    # fabricated live/new claim (anti-gaming).
+    assert res["protocol_version"] == "memory_write_v1", res
+    assert res["status"] == "partial", res
+    assert all("ep_updated" not in p for p in res["points"]), res["points"]
 
 
 # ── W5 Phase F (#2104): concurrent session_id idempotency ──────────────────

@@ -7633,11 +7633,15 @@ class TortoiseSDK:
         # no-op — the stored True/None stays untouched). The empty/blank
         # gate returns before the Session MERGE, so nothing to record there.
         # NOTE (documented lane divergence, mirror of hosted): sdk computes ok
-        # BEFORE the surfaced-verification read (~3260) — a post-write
-        # verification failure appends a warning only, capture_ok stays True.
-        # Hosted computes _capture_ok AFTER its enrichment and downgrades to
-        # partial (retryable) when points are skipped. Both internally
-        # consistent; not forced-aligned (no skipped/verb concept here).
+        # BEFORE the write-verb enrichment read (sdk.py:7874). A failed or
+        # partial post-write read therefore leaves capture_ok True while the
+        # returned memory_write_v1 verb is reported partial with the affected
+        # points left un-enriched; hosted additionally logs a per-point warning
+        # that the sdk does not. Hosted computes _capture_ok AFTER its
+        # enrichment and downgrades to partial (retryable) when points are
+        # skipped. Both internally consistent: the two now share the skipped
+        # counter and the memory_write_v1 verb, and diverge only in the ORDER
+        # ok is computed — not in whether the concept exists here.
         # #3892: what THIS attempt RECORDS on the Session. A keyed attempt
         # records its real outcome + lane, exactly as before. A KEYLESS
         # attempt records capture_ok=False + lane "none": no extraction lane
@@ -7848,28 +7852,62 @@ class TortoiseSDK:
         # rephrase_linked folds added no item — the canonical pre-existed
         # with its original provenance). A failed verification read yields []
         # plus an additive warning — never a fabricated marker count.
-        verified_ids: set[str] = set()
+        # W5 Phase A+B mirror-parity (#2104, S12) + Phase E (#2104, S11):
+        # ONE post-write verification read serves BOTH the frozen
+        # ``memory_write_v1`` verb's per-point enrichment AND the disclosure
+        # marker — byte-parity with ``hosted_api._capture_session_impl``
+        # (same query, same anti-gaming rules: graph truth only, a missing
+        # node is never fabricated live/new, and a missing node's seam
+        # verdict is dropped so it cannot ride a fabricated dedup
+        # classification).
+        from tortoise.write_verb import (
+            DEDUP_NEW,
+            STATUS_OK,
+            STATUS_PARTIAL,
+            build_write_verb,
+            surfaced_marker,
+        )
+        skipped = 0
+        facts: dict = {}
         if extracted:
             try:
                 rows = proj.g.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id",
+                    "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
+                    "coalesce(n.pointKind, 'statement'), "
+                    "coalesce(n.status, 'live'), "
+                    "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL)",
                     params={"ids": [p["id"] for p in extracted]},
                 ).result_set
-                verified_ids = {r[0] for r in rows}
+                facts = {r[0]: (r[1] or "statement", r[2] or "live", bool(r[3]))
+                         for r in rows}
             except Exception:  # noqa: BLE001, RUF100 — fail-open, mirror
                 # hosted's enrichment-read posture (additive warning, never
                 # raise over a committed capture).
                 _logger.warning(
-                    "capture_session: surfaced disclosure verification read "
+                    "capture_session: write-verb enrichment read "
                     "failed (non-fatal) for session %s", session_id,
                     exc_info=True,
                 )
                 extraction_warnings.append(
-                    "surfaced disclosure verification read failed — "
-                    "marker omitted")
-        from tortoise.write_verb import surfaced_marker
+                    "write-verb enrichment read failed (non-fatal)")
+        for p in extracted:
+            pid = p.get("id")
+            if pid not in facts:
+                # A swept/deleted point (delete race) or a failed write is
+                # NEVER fabricated as live/new (anti-gaming): the entry stays
+                # un-enriched, its seam verdict is dropped, and the verb
+                # downgrades to partial below.
+                skipped += 1
+                p.pop("dedup", None)
+                continue
+            kind, status, has_ep = facts[pid]
+            p["kind"] = kind  # graph truth wins over the extractor's claim
+            p.setdefault("point_id", p.get("id"))
+            p["status"] = status
+            p["ep_updated"] = has_ep
+            p["dedup"] = p.get("dedup", DEDUP_NEW)
         resp["surfaced"] = surfaced_marker(
-            extracted, verified_ids=verified_ids)
+            extracted, verified_ids=set(facts))
         # #2335 WI-1d: the observation leg — one structured line per capture
         # at the shared assembly (mode covers v2/m2/replayed/error/no-provider/
         # extraction-disabled — empty returns pre-emit).
@@ -7879,7 +7917,35 @@ class TortoiseSDK:
                 mode=effective_mode, turns=len(conversation), meta=meta)
         except Exception as e:  # pragma: no cover — never block capture
             _logger.warning("capture_observation emit failed: %s", e)
-        return resp
+        # W5 Phase A+B (#2104, S12): the frozen version-stamped write verb —
+        # ``protocol_version`` is REQUIRED on EVERY write response. The hosted
+        # capture surface has always spoken this envelope; the mirror speaks
+        # it too now (``tests/eval/write_path/runner.py`` — the W2 gate's own
+        # lane — drives THIS surface, so the gate can finally observe the
+        # contract it gates). Additive over the legacy keys (``extra=resp``):
+        # the protocol-owned keys win, the legacy ``points`` list is preferred
+        # as the verb's per-point array, and a legacy key can never silently
+        # corrupt ``protocol_version``/``status``/``provenance``/``error``.
+        #
+        # Deliberate lane divergence, preserved (``hosted_api.py`` documents
+        # it too): the SESSION-recorded ``capture_ok`` (``ok`` above) keeps
+        # its pre-enrichment value — a verification-read failure is a benign
+        # warning here, whereas hosted folds ``skipped`` into ``capture_ok``
+        # and makes the capture retryable. The verb's ``status`` is derived
+        # from the SAME facts on both surfaces (``partial`` on
+        # errors/skipped); only the recorded retry bit differs, so a later
+        # capture of a session whose verification read failed is REPLAYED on
+        # the mirror instead of re-attempted. Changing that would change
+        # fleet-wide retry semantics — out of scope for the verb wrap.
+        return build_write_verb(
+            source_session=session_id,
+            source_harness=harness or "unknown",
+            ingested_at=now,
+            status=(STATUS_PARTIAL if (extraction_errors or skipped)
+                    else STATUS_OK),
+            error=None,
+            extra=resp,
+        )
 
     @phased("extract")
     def _extract_session_llm(

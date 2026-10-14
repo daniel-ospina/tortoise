@@ -739,6 +739,53 @@ def test_hosted_and_mirror_reingest_parity(client):
     )
 
 
+def test_sdk_mirror_speaks_memory_write_v1_verb(sdk, monkeypatch):
+    """W5 Phase A+B mirror-parity (#2104, indicator 2 / S12): the SDK capture
+    mirror speaks the SAME frozen ``memory_write_v1`` write verb as the hosted
+    surface — ``protocol_version`` on EVERY write response, a REQUIRED
+    provenance block, and per-point ``status``/``ep_updated``/``point_id``
+    enriched from GRAPH truth (never fabricated).
+
+    Why this is not a duplicate of the hosted verb test: the W2 write-path CI
+    gate drives THIS surface (`tests/eval/write_path/runner.py` calls
+    ``sdk.capture_session``), so before this the gate's own lane could not
+    observe the frozen verb at all — ``protocol_version`` was absent because
+    the envelope was wired on the hosted capture surface only. A field on an
+    existing approved method, not a surface change.
+
+    MUTATION THAT REDS THIS TEST: drop the ``build_write_verb`` wrap at the end
+    of ``TortoiseSDK.capture_session`` (``tortoise/sdk.py``) — the response
+    then reverts to the legacy dict with no ``protocol_version``/``status``/
+    ``provenance``/``error`` and un-enriched points.
+    """
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    conv = [
+        {"role": "user",
+         "content": "The auth dead-end is the top issue because it blocks "
+                    "every deploy."},
+        {"role": "assistant",
+         "content": "Therefore we should ship serve --http first."},
+    ]
+    res = sdk.capture_session(conv, session_id="w5-verb-mirror", harness="pi")
+    # S12: the frozen verb speaks on the mirror, not only on hosted.
+    assert res["protocol_version"] == "memory_write_v1", res
+    assert res["status"] in ("ok", "partial"), res
+    assert res["provenance"]["source_session"] == "w5-verb-mirror", res
+    assert res["provenance"]["source_harness"] == "pi", res
+    assert res["provenance"]["ingested_at"], res
+    assert res["error"] is None, res
+    # Indicator 3 on the mirror: per-point facts read from the graph AFTER
+    # the ingest EP pass — the wired m2 claim pair is live + calibrated.
+    assert res["points"], res
+    for p in res["points"]:
+        assert p["point_id"] == p["id"], p
+        assert p["status"] == "live", p
+        assert p["ep_updated"] is True, p
+    # The disclosure marker rides the same graph-verified ids (never wider).
+    assert {e["point_id"] for e in res["surfaced"]} <= {p["id"] for p in res["points"]}, \
+        res["surfaced"]
+
+
 def test_hosted_capture_promotes_operator_with_no_ep_target(client, monkeypatch):
     """#1088: the HOSTED capture mirror promotes a capture's own operator even
     when there is no EP target — the byte-parity half of

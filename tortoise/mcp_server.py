@@ -4158,9 +4158,13 @@ def tortoise_session_capture(conversation: list[dict],
     """File an agent session into the graph (T3 workflows prompt surface).
 
     Server-enforced gates (identical to POST /v1/sessions — VERIFIED order,
-    #2093 S2): boundary 422 (invalid harness/shape — SessionRequest
-    construction below) -> 409 (recording off) -> 503 (no provider) -> 400
-    (turn cap) -> 422 (empty/blank transcript) -> 402 (quota). Returns the
+    #2093 S2 amendment): boundary 422 (invalid harness/shape — SessionRequest
+    construction below) -> 409 (recording off) -> 400 (turn cap) -> 422
+    (empty/blank transcript) -> 402 (quota). There is deliberately NO
+    provider gate: since #3892 (owner ruling) a missing provider key STORES
+    the capture and skips only the LLM extraction (receipt mode
+    "no-provider") — the pre-#3892 docstring here listed a 503 that no longer
+    exists. Returns the
     capture result (a memory_write_v1 envelope, #2104) on success, or an
     honest error dict on failure (the per-harness last-error state key is
     recorded on non-2xx EXCEPT the #3060 capacity 429 — a server condition —
