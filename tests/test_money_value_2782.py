@@ -34,6 +34,7 @@ from tortoise.money import (
     AMOUNT_MINOR,
     AS_OF,
     CURRENCY,
+    ISO_4217_MINOR_UNITS,
     MINOR_UNIT_EXPONENT,
     MONEY_VALUE_FIELDS,
     VERBATIM,
@@ -75,6 +76,34 @@ def _node_props(sdk: TortoiseSDK, label: str, key: str, value: str) -> dict:
 
 # ── representation: the five flat sibling fields ───────────────────────────
 
+class TestIso4217Table:
+    """The pinned `(currency, exponent)` table (design OD2 / T4) — the table is
+    the version pin, so its shape is asserted rather than left implicit."""
+
+    def test_every_key_is_an_alpha3_code(self):
+        assert all(len(c) == 3 and c.isupper() and c.isalpha()
+                   for c in ISO_4217_MINOR_UNITS)
+
+    def test_the_pinned_population_matches_the_standard(self):
+        # ISO 4217 active codes at the pinned revision: 139 at the 2-digit
+        # default, 17 at 0, 7 at 3, 2 at 4, and 13 with no minor unit.
+        counts = {}
+        for exponent in ISO_4217_MINOR_UNITS.values():
+            counts[exponent] = counts.get(exponent, 0) + 1
+        assert counts == {0: 17, 2: 139, 3: 7, 4: 2, None: 13}
+        assert len(ISO_4217_MINOR_UNITS) == 178
+
+    def test_the_anchors_the_design_names(self):
+        assert ISO_4217_MINOR_UNITS["JPY"] == 0
+        assert ISO_4217_MINOR_UNITS["USD"] == 2
+        assert ISO_4217_MINOR_UNITS["BRL"] == 2
+        assert ISO_4217_MINOR_UNITS["KWD"] == 3
+        assert ISO_4217_MINOR_UNITS["BHD"] == 3
+        assert ISO_4217_MINOR_UNITS["CLF"] == 4
+        assert ISO_4217_MINOR_UNITS["UYW"] == 4
+        assert ISO_4217_MINOR_UNITS["XAU"] is None
+
+
 class TestMoneyProps:
     def test_builds_the_five_declared_flat_fields(self):
         props = money_props(
@@ -103,20 +132,47 @@ class TestMoneyProps:
         with pytest.raises(MoneyValueError):
             money_props(True, "USD", minor_unit_exponent=2)
 
-    @pytest.mark.parametrize("bad", ["usd", "US", "US1", "", None, 840])
+    @pytest.mark.parametrize("bad", ["usd", "US", "US1", "", None, 840,
+                                    "USD\n", " USD", "USD ", "U\nD"])
     def test_currency_must_be_iso_4217_alpha3(self, bad):
         with pytest.raises(MoneyValueError):
             money_props(100, bad, minor_unit_exponent=2)
+
+    def test_currency_must_be_in_the_pinned_iso_4217_table(self):
+        # three uppercase letters is not enough: the code must be one this
+        # module's pinned table declares, or its scale cannot be checked.
+        with pytest.raises(MoneyValueError, match="pinned table"):
+            money_props(100, "ZZZ", minor_unit_exponent=2)
 
     @pytest.mark.parametrize("bad", [-1, 5, 2.0, "2", True, None])
     def test_exponent_is_a_bounded_int(self, bad):
         with pytest.raises(MoneyValueError):
             money_props(100, "USD", minor_unit_exponent=bad)
 
-    @pytest.mark.parametrize("exp", [0, 1, 2, 3, 4])
-    def test_every_iso_exponent_range_is_accepted(self, exp):
-        assert money_props(100, "USD", minor_unit_exponent=exp)[
-            MINOR_UNIT_EXPONENT] == exp
+    @pytest.mark.parametrize("currency,exponent", [
+        ("JPY", 0), ("KRW", 0), ("CLP", 0), ("XOF", 0),
+        ("USD", 2), ("BRL", 2), ("EUR", 2),
+        ("BHD", 3), ("KWD", 3), ("TND", 3),
+        ("CLF", 4), ("UYW", 4),
+    ])
+    def test_the_pinned_pair_is_accepted(self, currency, exponent):
+        assert money_props(100, currency, minor_unit_exponent=exponent)[
+            MINOR_UNIT_EXPONENT] == exponent
+
+    @pytest.mark.parametrize("currency,wrong", [
+        ("JPY", 2), ("KRW", 2), ("USD", 0), ("USD", 1), ("USD", 3),
+        ("KWD", 2), ("KWD", 4), ("CLF", 2), ("UYW", 3), ("BHD", 2),
+    ])
+    def test_a_mis_scaled_pair_is_refused(self, currency, wrong):
+        # A (currency, exponent) pair the pinned table contradicts is a
+        # silent unit error: JPY at exponent 2 is a 100x mis-scale.
+        with pytest.raises(MoneyValueError, match="ISO 4217"):
+            money_props(100, currency, minor_unit_exponent=wrong)
+
+    @pytest.mark.parametrize("currency", ["XAU", "XAG", "XDR", "XXX", "XTS"])
+    def test_a_currency_with_no_minor_unit_is_refused(self, currency):
+        with pytest.raises(MoneyValueError, match="no ISO 4217 minor unit"):
+            money_props(100, currency, minor_unit_exponent=2)
 
     def test_verbatim_must_be_non_empty_when_present(self):
         with pytest.raises(MoneyValueError):
@@ -125,10 +181,25 @@ class TestMoneyProps:
     def test_as_of_must_be_an_iso_date(self):
         with pytest.raises(MoneyValueError):
             money_props(100, "USD", minor_unit_exponent=2, as_of="next tuesday")
-        # a prefix is accepted exactly as Point._iso_date_prefix accepts it
+        # a non-empty prefix is accepted exactly as Point._iso_date_prefix
+        # accepts it — and nothing looser: trailing junk is not a date.
+        with pytest.raises(MoneyValueError):
+            money_props(100, "USD", minor_unit_exponent=2,
+                        as_of="2026-06-30junk")
+        with pytest.raises(MoneyValueError):
+            money_props(100, "USD", minor_unit_exponent=2, as_of="2026-6-30")
+        with pytest.raises(MoneyValueError):
+            money_props(100, "USD", minor_unit_exponent=2, as_of="")
         assert money_props(
             100, "USD", minor_unit_exponent=2,
             as_of="2026-06-30T00:00:00Z")[AS_OF] == "2026-06-30T00:00:00Z"
+        assert money_props(
+            100, "USD", minor_unit_exponent=2,
+            as_of="2026-06-30 12:00")[AS_OF] == "2026-06-30 12:00"
+        # Point strips before matching; so does this (same acceptance set).
+        assert money_props(
+            100, "USD", minor_unit_exponent=2,
+            as_of=" 2026-06-30 ")[AS_OF] == " 2026-06-30 "
 
 
 # ── reading one value out of a mixed record set ────────────────────────────
@@ -150,6 +221,18 @@ class TestReadMoneyValue:
         with pytest.raises(MoneyValueError):
             read_money_value({AMOUNT_MINOR: 10, CURRENCY: "USD"})
 
+    def test_a_mis_scaled_record_is_refused(self):
+        # The read boundary is as strict as the build boundary: a JPY record
+        # at exponent 2 must not be summed as if the scale were 2.
+        with pytest.raises(MoneyValueError, match="ISO 4217"):
+            read_money_value({AMOUNT_MINOR: 100, CURRENCY: "JPY",
+                              MINOR_UNIT_EXPONENT: 2})
+
+    def test_a_record_with_an_unknown_currency_is_refused(self):
+        with pytest.raises(MoneyValueError, match="pinned table"):
+            read_money_value({AMOUNT_MINOR: 100, CURRENCY: "ZZZ",
+                              MINOR_UNIT_EXPONENT: 2})
+
 
 # ── consumption: sum per currency, never mixed ─────────────────────────────
 
@@ -170,15 +253,22 @@ class TestTotalMinor:
         # two currency keys, never one merged 200 — amounts are not fungible.
         assert total_minor(records) == {"USD": 100, "BRL": 100}
 
-    def test_mixed_exponent_for_one_currency_is_refused(self):
-        # 1.00 and 1.000 are not the same unit — summing them silently would
-        # be a 10x error.
+    def test_a_mis_scaled_record_cannot_be_summed(self):
+        # 1.000 USD is not a declared USD scale, so it is refused at the
+        # record boundary — it can never be silently summed with 1.00 USD.
         records = [
             {AMOUNT_MINOR: 100, CURRENCY: "USD", MINOR_UNIT_EXPONENT: 2},
             {AMOUNT_MINOR: 1000, CURRENCY: "USD", MINOR_UNIT_EXPONENT: 3},
         ]
-        with pytest.raises(MoneyValueError, match="mixed"):
+        with pytest.raises(MoneyValueError, match="ISO 4217"):
             total_minor(records)
+
+    def test_a_mis_scaled_whole_currency_is_refused(self):
+        # JPY is exponent 0; a set of JPY-at-2 records is a 100x error and
+        # must raise instead of producing a confidently wrong total.
+        with pytest.raises(MoneyValueError, match="ISO 4217"):
+            total_minor([{AMOUNT_MINOR: 100, CURRENCY: "JPY",
+                          MINOR_UNIT_EXPONENT: 2}])
 
     def test_different_currencies_may_hold_different_exponents(self):
         records = [
