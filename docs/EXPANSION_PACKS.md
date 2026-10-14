@@ -178,6 +178,35 @@ With `TORTOISE_CLASSIFY_LATER=1` the pack vocabulary and the chains leave the S2
 
 Resolution order for a kind: `kindDefs[].enforcement` → `extraction.enforcement.kinds` → `extraction.enforcement.default` → `warn`.
 
+## Per-graph pack selection (#2728)
+
+Which packs a graph allows is **per graph**, and stored graph-natively: one
+`(:PackInstall {namespace, version, status, source})` per namespace, plus one
+`(:PackSelection {revision})` marker whose **presence** means "deliberately
+configured". The marker is the whole point — without it an explicit *empty* set
+is indistinguishable from "never configured", which is what made "remove all"
+unreachable before #2728.
+
+- **Statuses.** `active` = approved and enforced; `disabled` = approved but
+extraction-off; `removed` = a tombstone — absent from the introspection list,
+kept for audit. **Removal is expressed by omitting the namespace from the
+desired set**, never by a status the caller sends.
+- **Resolution contract** (`pack_state.resolved_pack_set`): no marker → the
+catalog union (the back-compat fallback — every pre-#318, self-hosted and
+restored graph, #2714 indicator 3); marker present → the `active` records **∪**
+the namespaces already in the graph's data. The data leg is what keeps
+historical points writable after a pack is disabled.
+- **Management surface:** `GET` / `PUT /v1/graphs/{graph_id}/packs`. Owner/admin
+(session) or a key carrying `team:manage`; a graph-bound key is refused on
+mutation, so C5 #2114's boundary holds. `PUT` is a full desired-state replace
+and **requires** `expected_revision` — a mismatch is a `409` with the current
+revision, so two admins cannot silently erase each other's set. Each change
+writes one audit record.
+
+> The dashboard Settings → **Configured packs** view (the modal that lists,
+> adds, disables and removes packs per graph) is #2728's remaining product
+> surface. The state model and the REST surface above are what it renders.
+
 ## Chains
 
 A chain is an ordered kind path the extractor respects when connecting `about_entities`. Example: the agent-ops `ruleLifecycle` chain `[rule, rationale, ruleRevised]` — a rule must be grounded in its rationale. The chain enforcer rewires reverse-order pairs deterministically (never invents, never drops) and warns on violations. Steps resolve to your pack's kinds, core kinds, or exactly-one other pack's kinds (ambiguous bare names are validation errors — use `ns:kind`).
