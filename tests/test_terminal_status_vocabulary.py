@@ -525,3 +525,88 @@ def test_python_mirror_truthiness_of_non_boolean_flags() -> None:
     assert is_terminal_status("live", 0) is False  # falsy residual: numeric
     assert is_terminal_status("live", "") is False  # falsy residual: empty str
     assert is_terminal_status("live", None) is False
+
+
+# ── 6. #4058 — the remaining sdk.py re-declarations are bound to the ────────
+#          canonical sets (the #2901 mirror: a reader re-deriving its own
+#          subset, and the allow-list omitting a future current status).
+
+def test_stale_terminal_statuses_is_the_canonical_point_exclusion() -> None:
+    """#4058 residual 1 — ``review_connections(mode=prune)``'s staleness set.
+
+    It used to be a by-value copy of ``TERMINAL_STATUS_VALUES``, so it omitted
+    the legacy ``deprecated``: a connection to a deprecated Point was not
+    flagged stale although every read surface excluded that Point. It must be
+    the canonical exclusion itself (not merely equal to it) so the
+    ``deprecated`` member cannot drift out again.
+    """
+    from tortoise.sdk import STALE_TERMINAL_STATUSES
+
+    assert STALE_TERMINAL_STATUSES is TERMINAL_EXCLUDED_STATUSES
+    assert "deprecated" in STALE_TERMINAL_STATUSES
+    assert is_terminal_status("deprecated") is True
+
+
+def test_state_excluded_status_cannot_name_a_current_point_status() -> None:
+    """#4058 residual 2 — the state view's additional filter.
+
+    It is a NARROWING of the canonical Point exclusion, so it may never name a
+    status the vocabulary calls CURRENT (that would hide a live claim), and
+    every member it omits must be a Point-vocabulary TERMINAL status — i.e.
+    one the canonical retrieval layer excludes before this narrower filter is
+    ever applied. Anything else would be a status the state view silently
+    leaks.
+    """
+    excluded = TortoiseSDK.STATE_EXCLUDED_STATUS
+    assert excluded <= TERMINAL_EXCLUDED_STATUSES, (
+        "the state view excludes a status the canonical Point exclusion does "
+        f"not: {sorted(excluded - TERMINAL_EXCLUDED_STATUSES)}"
+    )
+    assert not (excluded & CURRENT_POINT_STATUS_VALUES), (
+        "the state view would hide a CURRENT status: "
+        f"{sorted(excluded & CURRENT_POINT_STATUS_VALUES)}"
+    )
+    assert (TERMINAL_EXCLUDED_STATUSES - excluded) <= TERMINAL_STATUS_VALUES
+    # The legacy member #2901 ruled must be excluded is still excluded.
+    assert "deprecated" in excluded
+
+
+def test_sdk_admits_every_current_status_through_the_canonical_builder() -> None:
+    """#4058 residual 3 — the allow-list half of the partition.
+
+    Three Point pools in ``sdk.py`` hand-wrote ``IN ['draft', 'live']``, so a
+    status added to ``POINT_STATUS_VALUES`` and classified current by the
+    parity test above would have been silently DROPPED by them. The canonical
+    builder must admit exactly the current vocabulary (and, being an
+    allow-list, drop an unknown status).
+    """
+    from tortoise.live import _current_status_clause
+
+    clause = _current_status_clause("x.status")
+    admitted = set(re.findall(r"'([^']+)'", clause))
+    assert admitted == set(CURRENT_POINT_STATUS_VALUES)
+    assert "outdated" not in admitted
+    assert is_terminal_status("outdated") is True
+    # An absent status is current (legacy nodes) — the allow-list keeps the
+    # NULL branch the hand-written literal carried.
+    assert "x.status IS NULL" in clause
+
+
+def test_no_sdk_query_re_declares_the_current_status_allow_list() -> None:
+    """The exact #2901-mirror shape cannot reappear in ``sdk.py``.
+
+    An inline ``IN ['draft', 'live']`` in a query body is the allow-list
+    re-declaration #4058 removes — it drops a future current status with no
+    edit anywhere. Only the canonical builder (which renders the literal) may
+    contain it.
+    """
+    source = (_REPO_ROOT / "tortoise" / "sdk.py").read_text(encoding="utf-8")
+    offenders = [
+        (lineno, line.strip())
+        for lineno, line in enumerate(source.splitlines(), start=1)
+        if re.search(r"IN \['draft', 'live'\]", line)
+    ]
+    assert not offenders, (
+        "sdk.py re-declares the current-status allow-list: call "
+        f"live._current_status_clause instead — {offenders}"
+    )

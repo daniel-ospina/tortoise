@@ -224,6 +224,29 @@ def _alive_flag(clause: str) -> str:
     return f"(CASE WHEN {_terminal_expression(clause)} THEN false ELSE true END)"
 
 
+def _current_status_clause(clause: str) -> str:
+    """Cypher predicate: the node's status is CURRENT (or absent).
+
+    The ALLOW-LIST half of the #2901 partition — the exact counterpart of
+    ``_terminal_excluded``'s deny-list — derived from
+    ``CURRENT_POINT_STATUS_VALUES``. A status added to the Point vocabulary and
+    classified current by the parity test in
+    ``tests/test_terminal_status_vocabulary.py`` is admitted here with no second
+    edit; a hand-written ``IN ['draft', 'live']`` at a call site silently DROPS
+    it (the mirror image of the #2901 defect — three such literals lived in
+    ``tortoise/sdk.py`` until #4058).
+
+    An ABSENT status is current (legacy nodes — the same NULL handling as
+    ``_terminal_excluded``). The allow-list is deliberately NOT the negation of
+    the deny-list: an UNKNOWN status (neither declared current nor terminal) is
+    dropped here but admitted by ``NOT _terminal_excluded``, so the two are not
+    interchangeable — a caller that wants "not terminal" must call
+    ``_terminal_excluded``.
+    """
+    members = ", ".join(f"'{s}'" for s in sorted(CURRENT_POINT_STATUS_VALUES))
+    return f"({clause} IS NULL OR {clause} IN [{members}])"
+
+
 def is_draft_status(status) -> bool:
     """True when ``status`` is the staged (not-yet-published) status.
 
