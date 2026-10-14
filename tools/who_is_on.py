@@ -715,7 +715,7 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
             n_surfaces = len({s.name for s, _ in holders})
             lines.append(
                 f"NOTE: {len(holders)} holder(s) are ALSO present across "
-                f"{n_surfaces} surface(s) — the work appears shipped AND another "
+                f"{n_surfaces} surface(s) — the work item is TERMINAL AND another "
                 "lane appears to be on it."
             )
         lines.append(

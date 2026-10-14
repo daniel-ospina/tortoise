@@ -5526,7 +5526,7 @@ def format_report(
         if strong:
             lines.append(
                 f"  ({len(strong)} BLOCKING collision hit(s) are ALSO present — "
-                "the work appears shipped AND another lane appears to be on it.)"
+                "the work item is TERMINAL AND another lane appears to be on it.)"
             )
         return "\n".join(lines) + "\n", EXIT_LANDED
     if strong:

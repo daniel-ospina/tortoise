@@ -5400,6 +5400,24 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("VERDICT: COLLISION", out)
         self.assertIn("ALSO present", out)
 
+    def test_not_planned_with_a_coexisting_holder_makes_no_shipment_claim(self):
+        # The coexisting-holder parenthetical is part of the LANDED verdict, so
+        # it must not reintroduce the shipment claim a NOT_PLANNED closure
+        # already avoided (#8560 review).
+        self.gh_fixtures(
+            issue=self.issue_payload(state="CLOSED", state_reason="NOT_PLANNED"),
+            open_prs=[{
+                "number": 9999, "title": f"fix: guard retrieval (#{ISSUE})",
+                "body": "", "headRefName": "fix/guard",
+            }],
+        )
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 4, out)
+        self.assertIn("ALSO present", out)
+        self.assertIn("the work item is TERMINAL AND another lane", out)
+        self.assertNotIn("ALREADY SHIPPED", out)
+        self.assertNotIn("appears shipped AND", out)
+
     def test_closed_issue_landed_arm_does_not_need_the_timeline(self):
         # A decisive state answer must not depend on (or pay for) the timeline.
         # GH_STUB_TIMELINE_FAIL proves the timeline was NOT consulted: the
