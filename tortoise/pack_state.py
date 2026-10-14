@@ -166,8 +166,11 @@ class PackSelection:
     """The per-graph ``:PackSelection`` marker (#2728).
 
     ``revision`` increments on every EFFECTIVE mutation of the graph's
-    configurable pack set (and starts at 1 when the marker is first written);
-    it is the optimistic-concurrency token and the cache-invalidation signal.
+    configurable pack set **made through ``set_graph_packs``** (and starts at 1
+    when the marker is first written); it is the optimistic-concurrency token
+    and the cache-invalidation signal. Writes that bypass that path — see
+    ``docs/EXPANSION_PACKS.md`` §"Per-graph pack selection (#2728)" — do not yet
+    move it.
     ``configured_at`` is stamped once, on the first explicit configuration.
     """
 
@@ -434,8 +437,7 @@ def ensure_tenant_packs(sdk: TortoiseSDK, *, starter: list[str] | tuple[str, ...
         log.info(
             "pack_state: graph %s is deliberately configured (revision %s) — "
             "starter activation skipped (a configured graph is never "
-            "re-seeded; the configurable set only moves through "
-            "set_graph_packs)",
+            "re-seeded by this path; only set_graph_packs moves the revision)",
             lock_graph, selection.revision)
         return []
     now = datetime.now(timezone.utc).isoformat()  # noqa: UP017

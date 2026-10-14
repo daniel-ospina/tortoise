@@ -201,11 +201,9 @@ path (`get_tenant_packs`'s self-heal *and* `ensure_tenant_packs` — the
 provision retry, the Supabase control plane, and
 `graph-scripts/backfill_pack_installs.py`) skips a graph that carries a marker,
 so a re-run cannot resurrect a pack the user removed or disabled.
-  ⚠️ **Still open — three out-of-band writers change the configurable set
-  WITHOUT moving the marker.** `POST /v1/packs/manifests`
-  (`pack_manifest_store.upsert_tenant_manifest`, widens),
-  `DELETE /v1/packs/manifests/{namespace}`
-  (`pack_manifest_store.delete_tenant_manifest`, narrows), and
+  ⚠️ **Still open — out-of-band writers change the configurable set WITHOUT
+  moving the marker.** `POST /v1/packs/manifests`
+  (`pack_manifest_store.upsert_tenant_manifest`, widens) and
   `hosted_api._apply_import_pack_config` (re-activates on restore — the
 export/import gap the PR body names) write `:PackInstall` directly. On a graph
 that has both a `:PackSelection` marker and one of these writers, a `PUT`
@@ -213,8 +211,10 @@ holding revision `N` can therefore still return `200` while erasing a
 namespace added after its read. Until they route through `set_graph_packs` (or
 bump the marker under `_pack_selection_lock`), `revision` is not a *complete*
 change signal, and *"no write path may alter the configurable set without
-moving the marker"* is the target those three paths must meet — not a property
-that holds today.
+moving the marker"* is the target these paths must meet — not a property that
+holds today. (`pack_manifest_store.delete_tenant_manifest` narrows the set the
+same way, but it currently has NO caller and no route — a latent writer to bind
+when a delete surface is added, not a live gap.)
 - **Concurrency:** both the first configuration and every later one move the
 marker with a conditional compare-and-swap (`_cas_first_selection` /
 `_bump_selection`) *before* any install record is written, so a worker that
