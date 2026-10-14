@@ -176,9 +176,11 @@ pip install 'tortoise-graph[backups]'   # server package: engine + daemon + MCP 
 #   [backups] is the off-box backup driver's dependency (boto3 for its R2
 #   store, #8544). Leave it off only if you never declare a target: a complete
 #   target with no boto3 validates at boot and then fails every backup run.
-# from source (clone): uv sync --extra embeddings --extra parity && uv run python -m tortoise.selfhost
+# from source (clone): uv sync --extra embeddings --extra parity --extra backups
+#   && uv run python -m tortoise.selfhost
 #   The explicit --extra list is EXACT: name every extra the env needs in ONE
-#   command (or use --all-extras) — `uv sync --extra embeddings` alone drops parity.
+#   command (or use --all-extras) — `uv sync --extra embeddings` alone drops
+#   parity, and dropping `backups` leaves a declared target failing every run.
 ```
 
 Full split mechanics (build, version coupling, license boundary): [docs/client-server-split.md](docs/client-server-split.md).

@@ -67,6 +67,16 @@ MIN_INTERVAL_SECONDS = 60
 #: Operator override for the cadence.
 INTERVAL_ENV = "TORTOISE_OFFBOX_BACKUP_INTERVAL_SECONDS"
 
+#: The prune-window knobs the HOSTED sweep reads (``backup_config._load_from_env``;
+#: documented in ``.env.example``). The self-host driver resolves the SAME three
+#: so a window an operator configured for one lane applies to the other — the
+#: ``BackupConfig`` class attributes are only the fallback, never a second copy.
+RETENTION_ENVS = (
+    ("BACKUP_RETENTION_HOURLY", "retention_hourly"),
+    ("BACKUP_RETENTION_DAILY", "retention_daily"),
+    ("BACKUP_RETENTION_WEEKLY", "retention_weekly"),
+)
+
 
 class SelfhostBackupError(RuntimeError):
     """A self-host off-box backup run failed (no archive is durable)."""
@@ -104,6 +114,44 @@ def offbox_backup_interval_seconds(env: dict | None = None) -> int:
     if value < MIN_INTERVAL_SECONDS:
         return MIN_INTERVAL_SECONDS
     return value
+
+
+def selfhost_retention(env: dict | None = None) -> tuple[int, int, int]:
+    """Resolve ``(hourly, daily, weekly)`` exactly as the hosted sweep does.
+
+    ``run_backup_sweep`` prunes with a ``BackupConfig`` built by
+    ``backup_config._load_from_env``, which reads the ``BACKUP_RETENTION_*``
+    knobs. Pruning with the bare class attributes instead silently ignored an
+    operator's configured window on this lane (#8610 review P2): a raised
+    window was pruned back to the default (fewer recovery points than the
+    operator asked for) and a lowered one was not applied either.
+
+    ``load_config()`` is deliberately NOT used to resolve them: it fail-closes
+    to a DISABLED config when ``BACKUP_SWEEP_ENABLED`` is unset — exactly the
+    hosted switch this lane removed from its target set. A malformed value
+    falls back to the ``BackupConfig`` default with a warning rather than
+    raising, because a retention typo must not be able to stop the archive this
+    driver exists to write.
+    """
+    from tortoise.backup_config import BackupConfig
+
+    source = env if env is not None else os.environ
+    counts: list[int] = []
+    for var, attr in RETENTION_ENVS:
+        fallback = int(getattr(BackupConfig, attr))
+        raw = str(source.get(var, "") or "").strip()
+        if not raw:
+            counts.append(fallback)
+            continue
+        try:
+            counts.append(int(raw))
+        except ValueError:
+            _logger.warning(
+                "selfhost off-box backup: %s=%r is not an integer — pruning "
+                "with the default %d", var, raw, fallback,
+            )
+            counts.append(fallback)
+    return counts[0], counts[1], counts[2]
 
 
 def selfhost_graph_name() -> str:
@@ -156,7 +204,6 @@ def run_selfhost_offbox_backup(*, storage=None, sdk=None, now=None,
     The SDK is held in a local for the whole call: its pooled connection must
     outlive the dump (a collected SDK closes on GC — the #3718/#3750 shape).
     """
-    from tortoise.backup_config import BackupConfig
     from tortoise.hosted_backup import create_backup, prune_backups
     from tortoise.mcp_auth import SELFHOST_ORG_ID
 
@@ -171,16 +218,20 @@ def run_selfhost_offbox_backup(*, storage=None, sdk=None, now=None,
         org_id=org_id, graph_name=graph_name,
     )
     if prune:
-        # Same retention triple the hosted sweep uses (the ONE authority is
-        # ``BackupConfig``; docs/retention-and-deletion.md states the horizon).
-        # Pruning the SAME pool we just wrote is what bounds the bucket — an
-        # unbounded bucket is a cost defect, not a durability one.
+        # Same retention triple the hosted sweep uses — the ONE default
+        # authority is ``BackupConfig`` (docs/retention-and-deletion.md states
+        # the horizon), resolved from the same ``BACKUP_RETENTION_*`` knobs the
+        # hosted lane reads so a configured window is not silently ignored
+        # (#8610 review P2). Pruning the SAME pool we just wrote is what bounds
+        # the bucket — an unbounded bucket is a cost defect, not a durability
+        # one.
+        keep_hourly, keep_daily, keep_weekly = selfhost_retention()
         try:
             prune_backups(
                 store, org_id,
-                keep_daily=BackupConfig.retention_daily,
-                keep_weekly=BackupConfig.retention_weekly,
-                keep_hourly=BackupConfig.retention_hourly,
+                keep_daily=keep_daily,
+                keep_weekly=keep_weekly,
+                keep_hourly=keep_hourly,
             )
         except Exception as exc:
             # The archive IS durable — a prune failure must not fail the run

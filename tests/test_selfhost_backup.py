@@ -172,6 +172,11 @@ class TestRunOnce:
         from tortoise.backup_config import BackupConfig
         from tortoise.hosted_backup import MemoryStorage
 
+        # Pin the DEFAULTS: an ambient BACKUP_RETENTION_* override is a
+        # different test's subject now that the driver honours those knobs.
+        for var, _attr in selfhost_backup.RETENTION_ENVS:
+            monkeypatch.delenv(var, raising=False)
+
         seen: dict = {}
 
         def _fake_prune(storage, org_id, **kw):
@@ -202,6 +207,71 @@ class TestRunOnce:
         result = selfhost_backup.run_selfhost_offbox_backup(
             storage=MemoryStorage(), sdk=embedded_sdk)
         assert result["status"] == "backed_up"
+
+
+class TestRetentionWindow:
+    """The prune window must come from the knobs the hosted sweep reads.
+
+    ``run_backup_sweep`` prunes with a ``BackupConfig`` built by
+    ``backup_config._load_from_env`` (``BACKUP_RETENTION_*``), so pruning with
+    the bare class attributes silently ignored an operator's configured window
+    on this lane — both narrowing a raised window and not applying a lowered
+    one (#8610 review P2).
+    """
+
+    def test_env_override_reaches_the_prune(self, embedded_sdk, monkeypatch):
+        """A configured ``BACKUP_RETENTION_*`` window is the window used.
+
+        Fails on the pre-fix code: it prunes with the class defaults (7/24/4)
+        while these knobs say 30/48/12.
+        """
+        from tortoise import selfhost_backup
+        from tortoise.hosted_backup import MemoryStorage
+
+        monkeypatch.setenv("BACKUP_RETENTION_HOURLY", "48")
+        monkeypatch.setenv("BACKUP_RETENTION_DAILY", "30")
+        monkeypatch.setenv("BACKUP_RETENTION_WEEKLY", "12")
+
+        seen: dict = {}
+        monkeypatch.setattr(
+            "tortoise.hosted_backup.prune_backups",
+            lambda storage, org_id, **kw: seen.update(kw) or [],
+        )
+        selfhost_backup.run_selfhost_offbox_backup(
+            storage=MemoryStorage(), sdk=embedded_sdk)
+
+        assert seen["keep_hourly"] == 48
+        assert seen["keep_daily"] == 30
+        assert seen["keep_weekly"] == 12
+
+    def test_defaults_are_the_backupconfig_attributes(self):
+        """With nothing configured, the fallback is the ONE default authority,
+        not a second literal copied into this module."""
+        from tortoise.backup_config import BackupConfig
+        from tortoise.selfhost_backup import selfhost_retention
+
+        assert selfhost_retention({}) == (
+            BackupConfig.retention_hourly,
+            BackupConfig.retention_daily,
+            BackupConfig.retention_weekly,
+        )
+
+    def test_a_malformed_value_warns_and_falls_back(self, caplog):
+        """A retention typo must not stop the archive this driver exists to
+        write — it degrades to the default and says so."""
+        from tortoise.backup_config import BackupConfig
+        from tortoise.selfhost_backup import selfhost_retention
+
+        with caplog.at_level("WARNING"):
+            counts = selfhost_retention({"BACKUP_RETENTION_DAILY": "soon"})
+
+        assert counts == (
+            BackupConfig.retention_hourly,
+            BackupConfig.retention_daily,
+            BackupConfig.retention_weekly,
+        )
+        assert any("BACKUP_RETENTION_DAILY" in r.getMessage()
+                   for r in caplog.records), caplog.records
 
 
 class TestDriverLoop:
