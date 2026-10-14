@@ -43,7 +43,7 @@ A product of [Premise Labs](https://premiselabs.co).
 New to Tortoise? There are two ways to run it:
 
 - **Hosted (managed)** — no install, just connect your agent: [docs/quickstart-cloud.md](docs/quickstart-cloud.md)
-- **Self-hosted — durable (recommended): Docker compose.** Runs the daemon
+- **Self-hosted — multi-writer (recommended): Docker compose.** Runs the daemon
   plus a FalkorDB sidecar (AOF, named volume, healthcheck) from the repo root:
 
   ```bash
@@ -51,9 +51,15 @@ New to Tortoise? There are two ways to run it:
   docker compose up -d          # daemon on http://localhost:8000 (MCP at /mcp)
   ```
 
-  Durable multi-writer: the compose sidecar is the supported team/production
-  path. For a single-agent eval without Docker, use the pip path below —
-  embedded FalkorDBLite is SINGLE-WRITER / EVAL-ONLY (concurrent writers lose data).
+  The compose sidecar is the supported team/production path — AOF (`everysec`)
+  survives a process or container crash (≤1 s), **not** a lost volume or host.
+  Durability is that persistence **plus an off-box copy**, so the off-box backup
+  target is a setup step: declare an `R2_*` target or set
+  `TORTOISE_OFFBOX_BACKUP_DECLINED=1` (see
+  [docs/durability-posture.md](docs/durability-posture.md) — the one authority
+  for durability claims). For a single-agent eval without Docker, use the pip
+  path below — embedded FalkorDBLite is SINGLE-WRITER / EVAL-ONLY (concurrent
+  writers lose data).
 
 - **Eval substrate only — embedded, no Docker (NOT a way to run the product):**
   This is what evals and parity runs execute on; a deployment is the compose

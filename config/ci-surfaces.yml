@@ -1649,6 +1649,18 @@ surfaces:
   # fix needs to stay green, and the `encode_for_store` seam.
   # DUAL-REGISTERED with `eval`, which owns `tortoise/embeddings.py`.
   - test_update_point_content_embedding_4208.py
+  # #5240: `update_point(id, content=None)` must be a NO-OP — the None
+  # boundary is "absent", decided once before the derived hash, the derived
+  # vector, the write and the `PointRevised` record all read it — and
+  # `content=""` stays a real edit. `core` owns it: the fix is
+  # `tortoise/sdk.py` (a SHARED_MODULE, so an sdk diff selects the full
+  # matrix), and the live==rebuild half of the file pins the
+  # `tortoise/projection/` replay fold, which matches no named surface and
+  # falls through to `core` (#2795 class). NOT dual-registered with `eval`:
+  # the file patches `compute_embedding` and never reaches the
+  # `encode_for_store` seam an `embeddings.py` diff would need to select —
+  # the sibling #4208 file above already carries that dual registration.
+  - test_update_point_none_content_5240.py
   - test_onboarding_truth_surface.py  # #3670/#3671/#3681: dual-registered (api+core) — pins tortoise/hosted_api.py
   # #2007 (W12): the self-hosted onboarding path. Load-bearing HERE because the
   # two SDK-init seams it pins (`tortoise/selfhost_api.py` `_sdk`,
@@ -4733,6 +4745,7 @@ durations:
   test_embedding_model_required.py: 0.5  # unmeasured
   test_journal_embedding_5004.py: 24.0  # unmeasured
   test_update_point_content_embedding_4208.py: 9.6  # #4208: 9 tests, docker FalkorDB; locally measured (junit testcase/@time sum, max of 4 runs)
+  test_update_point_none_content_5240.py: 2.0  # #5240: 6 tests; measured 9.5s locally on the embedded carve-out lane (@time sum, max of 3 runs), entered at the flat default per the #3400/#4221 convention below until a CI junit artifact carries the weight
   test_helpers.py: 0.0  # unmeasured
   # #3400/#4221 convention: a new file enters at the flat 2.0s default and keeps
   # the `# unmeasured` marker until a CI junit artifact carries a measured weight,
