@@ -1236,13 +1236,6 @@ _REDIRECT_RE = re.compile(r"^[0-9]*(?:&?>>?|&?>&|<>)")
 #: ends at ``)``/``}``.
 _GROUP = frozenset({"(", ")", "{", "}"})
 
-#: Tokens after which an unquoted NEWLINE continues the same list rather than
-#: separating it.  ``cmd &&\n cmd`` is the ``&&`` RHS, ``( cmd\n cmd )`` is one
-#: subshell — bash does not end the list there, so neither may the splitter.
-_LINE_CONTINUATIONS = frozenset({
-    "&&", "||", "|", "&", "|&", "(", "{", "`",
-})
-
 #: Options that take a SEPARATE argument, keyed by the launcher's basename —
 #: the following token is the option's VALUE, never the executed command.
 #:
@@ -1524,41 +1517,40 @@ def _split_command(command: str) -> list[tuple[str, bool, bool]] | None:
 
     Unquoted ``(``/``)``/``;``/``&&``/``|``/backtick become their own tokens so
     executable position can be tracked; an unquoted newline is a command
-    separator EXCEPT where it continues an AND-OR list or a group: after an
-    unquoted ``&&``/``||``/``|``/``&`` or an opener ``(``/``{``/backtick the
-    list carries on, so no separator is emitted (rewriting it to ``;``
-    re-armed a DEAD conditional RHS and judged a no-op entry ours).  A token
-    that had ANY quoted span is marked ``quoted`` — a quoted ``'('`` or
-    ``';'`` is an ARGUMENT, never a boundary (treating it as one is how
-    ``grep -e '(' .claude/hooks/session-end.sh`` was mistaken for an executed
-    hook).  ``lead_literal`` is True when the token's FIRST character is a
-    ``$`` that bash will NOT expand: either it came from inside SINGLE quotes
-    or it was backslash-escaped INSIDE double quotes (an unquoted ``\\$`` is
-    already fail-closed here, because the outer loop emits the backslash as
-    its own token and that token consumes executable position).  Such a token is
+    separator, EXCEPT directly after a separator, where bash CONTINUES the same
+    list (``cmd &&\nnext`` is one AND-OR list, not two commands).  A token that
+    had ANY quoted span is marked ``quoted`` — a
+    quoted ``'('`` or ``';'`` is an ARGUMENT, never a boundary (treating it as
+    one is how ``grep -e '(' .claude/hooks/session-end.sh`` was mistaken for an
+    executed hook).  ``lead_literal`` is True when the token's FIRST character
+    is a ``$`` that bash will NOT expand: either it came from inside SINGLE
+    quotes, or it was backslash-escaped INSIDE double quotes.  Such a token is
     a literal filename, never our hook — accepting it judged
     ``'$PWD/.claude/hooks/session-end.sh'`` and ``"\\$PWD/…"`` ours while bash
     ran nothing.  A single ``quoted`` flag cannot tell the expanding spelling
-    from the literal one, because ``"$PWD/…"`` DOES expand and every spelling
-    arrives here with the quotes stripped.  ``${VAR}`` is consumed atomically
-    (its braces are not grouping punctuation) and a ``$((…))`` arithmetic
-    expansion is dropped — its contents are operands, never executed commands
-    (a ``$(…)`` command substitution, by contrast, keeps its ``(`` so its
-    contents are).  Returns ``None`` for an unterminated quote or expansion —
-    a command bash would reject executes nothing.
+    from the literal one, because ``"$PWD/…"`` DOES expand and both spellings
+    arrive here with the quotes stripped.  ``${VAR}`` is consumed atomically
+    (its braces are not
+    grouping punctuation) and a ``$((…))`` arithmetic expansion is dropped —
+    its contents are operands, never executed commands (a ``$(…)`` command
+    substitution, by contrast, keeps its ``(`` so its contents are).  Returns
+    ``None`` for an unterminated quote or expansion — a command bash would
+    reject executes nothing.
     """
     tokens: list[tuple[str, bool, bool]] = []
     i, n = 0, len(command)
     while i < n:
         c = command[i]
         if c == "\n":
-            # A newline after a list-continuation token does not separate: bash
-            # treats ``cmd &&\n cmd`` as the ``&&`` RHS (conditional on ``cmd``),
-            # not as ``cmd && ; cmd``.  Emitting ``;`` there re-armed a dead RHS.
-            if tokens and tokens[-1][0] in _LINE_CONTINUATIONS:
-                i += 1
-                continue
-            tokens.append((";", False, False))
+            # A newline directly AFTER an unquoted separator is a CONTINUATION
+            # of the same list, not a new command: ``command -v nosuchtool &&\n
+            # <hook>`` is the dead ``&&`` RHS, not a fresh executable position.
+            # (After a real ``;``/``|``/``&`` the newline is redundant whitespace,
+            # so skipping it changes no verdict.)  A newline that ENDS a command
+            # (``cmd\nnext``) is still a separator.
+            if not (tokens and not tokens[-1][1]
+                    and tokens[-1][0] in _SEPARATORS):
+                tokens.append((";", False, False))
             i += 1
             continue
         if c.isspace():
@@ -1789,24 +1781,28 @@ def _invokes_script(command: str, script_name: str,
     ``-v``/``-V`` (or any cluster containing one) is a QUERY whose operands are
     arguments; ``--`` ends its options, so the next word is the command NAME
     (``command -- -p <hook>`` executes ``-p``); and any other option is a usage
-    error that executes nothing AND carries a proven failure status.  A query's
-    exit status makes a following ``&&`` (runs when it succeeds) or ``||``
-    (runs when it fails) conditional, with ``!`` inverting the two.  That status
-    is a property of the query's OPERAND, so it is decided there: the
-    conditional RHS is ours only when the operand resolves to our installed hook
-    (which is what makes ``command -v`` succeed) and the operator is the one
-    that then runs; an operand whose resolution cannot be proved leaves the
-    whole AND-OR list foreign.  A RHS that is not reached stays DEAD across a
-    group opener (``command -v nosuchtool && ( <hook> )`` runs nothing) and
-    across a continuation newline, so the state is inherited by ``(``/``{``/
-    backtick and restored by the closer.
+    error that executes nothing AND carries a proven failure status, so a
+    following ``&&`` is skipped while ``||`` runs.  A query's exit status makes
+    a following
+    ``&&`` (runs when it succeeds) or ``||`` (runs when it fails) conditional,
+    with ``!`` inverting the two.  That status is a property of the query's
+    OPERAND, so it is decided there: the conditional RHS is ours only when the
+    operand resolves to our installed hook (which is what makes ``command -v``
+    succeed) and the operator is the one that then runs; an operand whose
+    resolution cannot be proved leaves the whole AND-OR list foreign.  A
+    boundary that only opens or closes a grouping construct (``(``/``{``, a
+    command substitution's ``(``, a backtick, ``)``/``}``) CONTINUES the current
+    position, so an RHS bash never entered stays dead inside it —
+    ``command -v nosuchtool && ( <hook> )`` (and its ``{ …; }``/``$( … )``/
+    backtick/newline-continuation spellings) executes nothing.
 
     A BARE filename is rejected because it resolves to the project root, and an
     absolute path is accepted only when it resolves to THIS project's hook.  A
     ``$VAR``-prefixed path is accepted only when ``VAR`` is itself the project
-    root (``$CLAUDE_PROJECT_DIR``/``$PWD``) AND the ``$`` is EXPANDED — bash
-    expands nothing inside single quotes or after an escaping backslash, so
-    there the token is a literal filename; any other variable is foreign,
+    root (``$CLAUDE_PROJECT_DIR``/``$PWD``) AND the ``$`` is EXPANDED — the
+    literal spellings (inside single quotes, or backslash-escaped inside double
+    quotes) name a file that does not exist, so they are foreign;
+    any other variable is foreign,
     because its value is unknowable and a directory-suffix match on it judged a
     FOREIGN hook ours (a silent no-capture).  Each
     false positive would suppress our own registration while reporting a healthy
@@ -1838,26 +1834,31 @@ def _invokes_script(command: str, script_name: str,
     query: str | None = None  # "plain" | "negated"
     # The query's exit status is a property of its OPERAND, not of the operator,
     # so the operand is classified too.  ``query_operand_pending`` marks the
-    # single token that IS that operand, and ``list_status`` then carries the
-    # status of the current AND-OR list: ``None`` while the list holds no known
-    # status (a plain ``&&``/``||`` list keeps its pre-existing unconditional
-    # re-arm), ``"success"``/``"failure"`` when something PROVES it (a query's
-    # operand, or a ``command`` usage error), and ``"unknown"`` when it cannot
-    # be proved.  A conditional RHS that actually RUNS has an unknowable status,
-    # so it resets the list to unknown.
+    # single token that IS that operand, and ``query_list_status`` then carries
+    # the status of the current AND-OR list: ``None`` while the list holds no
+    # query (a plain ``&&``/``||`` list keeps its pre-existing unconditional
+    # re-arm), ``"success"``/``"failure"`` when the query's operand PROVES it,
+    # and ``"unknown"`` when it cannot be proved.  A conditional RHS that
+    # actually RUNS has an unknowable status, so it resets the list to unknown.
     query_operand_pending = False
-    list_status: str | None = None
-    # A conditional RHS that did not run is DEAD: its tokens never execute, and
-    # the state must SURVIVE a boundary (``(``/``{``/backtick and a continuation
-    # newline) so a group reached through a skipped conditional stays dead
-    # inside too — re-arming at ``(`` judged ``command -v nosuch && ( <hook> )``
-    # ours while bash never entered the group.  ``dead`` is the current list;
-    # ``dead_groups`` stacks the enclosing state at each opener so a closer
-    # restores it.  Only an UNCONDITIONAL separator re-arms a list, and never
-    # inside a group that is itself dead.
-    dead = False
-    dead_groups: list[bool] = []
-    backtick_open = False
+    query_list_status: str | None = None
+    # The current AND-OR list's RHS was NOT entered (a conditional ``&&``/``||``
+    # whose side bash does not take, or a query whose status cannot be proved).
+    # ``list_dead`` is scoped to the current grouping level and survives a
+    # conditional operator and a boundary OPENER for as long as the branch is
+    # not entered; only an unconditional separator starts a fresh, live
+    # position.  ``expect_cmd`` alone cannot carry this: a boundary opener must
+    # tell "dead list" from "a token like ``$`` merely ended the current
+    # command".
+    list_dead = False
+    # Grouping levels.  ``group_dead`` carries, per level, whether the level
+    # itself was entered (``command -v nosuchtool && ( <hook> )`` never enters
+    # the group, so EVERY ``;``-separated command inside it is dead too);
+    # ``saved_list_dead`` restores the enclosing list's state at the closer and
+    # ``open_groups`` matches closers to openers (a backtick is its own closer).
+    group_dead: list[bool] = [False]
+    saved_list_dead: list[bool] = []
+    open_groups: list[str] = []
     for tok, quoted, lead_literal in tokens:
         if heredoc is not None:
             if tok == heredoc:
@@ -1871,9 +1872,13 @@ def _invokes_script(command: str, script_name: str,
             # never reaches the RHS).  ``!`` inverts both.  Re-arming executable
             # position unconditionally judged that dead RHS ours — a fail-open —
             # so the run/skip decision is keyed to which side actually executes.
-            # ``;``/``|``/``&`` are unconditional and always re-arm; a GROUP
-            # opener or a continuation newline INHERITS the current state, so a
-            # skipped conditional's group stays dead.
+            # ``;``/``|``/``&`` always re-arm.  A group / command-substitution /
+            # backtick boundary is NOT a separator: it CONTINUES the current
+            # position, so a conditional RHS that was not entered must stay dead
+            # INSIDE it — ``command -v nosuch && ( <hook> )`` (also ``{ …; }``,
+            # ``$( … )``, backtick) is a boundary-opener spelling of the same
+            # dead RHS, and re-arming there judged it ours while bash never
+            # enters the group.
             #
             # The query's exit status belongs to its OPERAND, never to the
             # operator: ``command -v <pathname>`` succeeds because the file
@@ -1881,48 +1886,75 @@ def _invokes_script(command: str, script_name: str,
             # so that ``&&`` RHS never runs.  Reading success out of the operator
             # alone judged ``command -v nosuchtool && <hook>`` ours — the same
             # silent no-capture.  Only an operand that resolves to OUR installed
-            # hook PROVES success (``list_status == "success"``); any other
+            # hook PROVES success (``query_list_status == "success"``); any other
             # operand is unknowable, and an unknown status keeps EVERY
             # conditional RHS of the AND-OR list foreign (fail closed — a false
             # "missing" only appends a duplicate registration).
+            # A ``command -v``/``-V``/``-pv`` QUERY whose next token is a
+            # boundary has NO operand, and bash's ``command -v`` with no
+            # operand exits 0 — the query SUCCEEDS.  Decide the conditional
+            # from that instead of leaving it unknowable (which would report a
+            # working ``command -v && <hook>`` as foreign).
+            if query_operand_pending:
+                query_operand_pending = False
+                query_list_status = ("failure" if query == "negated"
+                                     else "success")
             conditional = tok in ("&&", "||")
-            if tok in ("(", "{") or (tok == "`" and not backtick_open):
-                # An opener inherits the enclosing list's execution state, and
-                # a closer restores it: a group reached through a conditional
-                # that did not run is dead, and so is everything inside it.
-                dead_groups.append(dead)
-                if tok == "`":
-                    backtick_open = True
-            elif tok in (")", "}") or tok == "`":
-                if tok == "`":
-                    backtick_open = False
-                if dead_groups:
-                    dead = dead_groups.pop()
-            else:
-                # An unconditional or conditional SEPARATOR.  Inside a group
-                # that is itself dead, nothing here may re-arm.
-                skip_all = any(dead_groups)
-                if skip_all:
-                    run_rhs = False
-                elif not conditional:
+            if conditional:
+                if query_list_status is None:
+                    # No query in this AND-OR list: a plain ``&&``/``||`` keeps
+                    # its pre-existing unconditional re-arm.
                     run_rhs = True
-                    list_status = None
-                elif list_status is None:
-                    # No known status in this AND-OR list: a plain ``&&``/``||``
-                    # keeps its pre-existing unconditional re-arm.
-                    run_rhs = True
-                elif list_status == "unknown":
+                elif query_list_status == "unknown":
                     run_rhs = False
                 else:
                     run_rhs = ((tok == "&&")
-                               == (list_status == "success"))
-                if (list_status is not None and conditional and run_rhs
-                        and not skip_all):
+                               == (query_list_status == "success"))
+                # A dead position stays dead: nothing reached through a
+                # ``&&``/``||`` of a branch that was not entered can execute.
+                run_rhs = run_rhs and not (group_dead[-1] or list_dead)
+                if query_list_status is not None and run_rhs:
                     # The RHS ran, but ITS exit status is not known, so the
                     # list's own status is no longer provable.
-                    list_status = "unknown"
-                dead = skip_all or not run_rhs
-            expect_cmd = not dead
+                    query_list_status = "unknown"
+                list_dead = not run_rhs
+                expect_cmd = run_rhs
+            elif tok in (";", "|", "&"):
+                # An UNCONDITIONAL separator starts a fresh command position
+                # that always executes — unless the whole enclosing group was
+                # never entered, in which case it is dead too.
+                list_dead = False
+                query_list_status = None
+                expect_cmd = not group_dead[-1]
+            elif tok in ("(", "{") or (
+                    tok == "`" and not (open_groups
+                                        and open_groups[-1] == "`")):
+                # A group / command-substitution / backtick OPENER does not
+                # start a new command position: it CONTINUES the current one, so
+                # it is entered only when that position is alive.  When the
+                # branch was not entered the whole group is dead, and stays dead
+                # across every ``;`` inside it.
+                open_groups.append(tok)
+                saved_list_dead.append(list_dead)
+                group_dead.append(group_dead[-1] or list_dead)
+                list_dead = False
+                query_list_status = None
+                expect_cmd = not group_dead[-1]
+            else:
+                # A group CLOSER (``)`` / ``}`` / a matching backtick) ends the
+                # grouping level and restores the enclosing list's state; a
+                # following ``;``/``|``/``&`` re-arms from there.  A closer with
+                # no matching opener is the bash syntax error that executes
+                # nothing.
+                want = "`" if tok == "`" else ("(" if tok == ")" else "{")
+                if open_groups and open_groups[-1] == want:
+                    open_groups.pop()
+                    group_dead.pop()
+                    list_dead = saved_list_dead.pop()
+                else:
+                    list_dead = True
+                query_list_status = None
+                expect_cmd = not (group_dead[-1] or list_dead)
             skip_next = False
             skip_operand = False
             recurse_next = False
@@ -1954,8 +1986,8 @@ def _invokes_script(command: str, script_name: str,
             query_operand_pending = False
             if _token_is_our_script(tok, script_name, hooks_dir, root,
                                     lead_literal=lead_literal):
-                list_status = ("failure" if query == "negated"
-                               else "success")
+                query_list_status = ("failure" if query == "negated"
+                                     else "success")
             continue
         if not expect_cmd:
             continue
@@ -2024,7 +2056,7 @@ def _invokes_script(command: str, script_name: str,
                     launcher_word = None
                     query = "negated" if command_negated else "plain"
                     query_operand_pending = True
-                    list_status = "unknown"
+                    query_list_status = "unknown"
                     continue
                 # An all-``p`` cluster (``-p``, ``-pp``, ``-ppp``) is BOOLEAN:
                 # the command word still follows.
@@ -2040,7 +2072,7 @@ def _invokes_script(command: str, script_name: str,
             # ``command -o X <hook> && <hook>`` was re-armed and read as ours.
             expect_cmd = False
             launcher_word = None
-            list_status = "failure"
+            query_list_status = "failure"
             continue
         launcher = _as_launcher(tok, quoted, root)
         if launcher is not None:

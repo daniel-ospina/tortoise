@@ -2260,23 +2260,6 @@ class TestDeclaredThreatSurface:
         # the list's status is no longer provable and the following ``||`` must
         # not be read as reaching the hook.
         ("command -v {rel} && true || {rel}", False),
-        # The DEAD-RHS state must survive a BOUNDARY.  The skipped RHS can be a
-        # group (``(`` / ``{`` / command substitution / backtick) or continue
-        # after a newline; re-arming at the opener discarded the dead state and
-        # read the WHOLE group as executed — bash never entered it, so the entry
-        # is dead while the matcher said ours (a silent no-capture).
-        ("command -v nosuchtool12345 && ( {rel} )", False),
-        ("command -v nosuchtool12345 && {{ {rel}; }}", False),
-        ("command -v nosuchtool12345 && $({rel})", False),
-        ("command -v nosuchtool12345 && `{rel}`", False),
-        # A dead group stays dead INSIDE: an internal ``;`` is unconditional in a
-        # group that RUNS, but this one never runs.
-        ("command -v nosuchtool12345 && ( nosuchtool12345 ; {rel} )", False),
-        ("command -v {rel} || ( {rel} )", False),
-        ("! command -v {rel} && ( {rel} )", False),
-        # A newline after ``&&`` CONTINUES the list (it is not a ``;``): the
-        # second command is the conditional RHS, which the failing query skips.
-        ("command -v nosuchtool12345 &&\n{rel}", False),
     ])
     def test_query_conditional_rhs_matches_bash_ground_truth(
             self, tmp_path, command, executes):
@@ -2300,11 +2283,9 @@ class TestDeclaredThreatSurface:
         list foreign (fail closed — a false "missing" only appends a duplicate
         registration).
 
-        That dead state must also SURVIVE a boundary: ``&& ( <hook> )`` skips
-        the group, so a group opener inherits the current execution state (and a
-        closer restores the enclosing one) instead of resetting to executable,
-        and an unquoted newline after ``&&`` continues the list rather than
-        separating it.
+        The boundary spellings of that dead RHS — a group, command substitution,
+        backtick or a newline continuation — are pinned separately by
+        :meth:`test_query_conditional_rhs_boundary_matches_bash_ground_truth`.
 
         Ground-truthed by EXECUTING the form (the hook touches a marker).
 
@@ -2312,10 +2293,97 @@ class TestDeclaredThreatSurface:
         operand classification) → the ``nosuchtool &&`` params and the
         ``&& true ||`` chain turn ours → RED; re-arm unconditionally at every
         separator (drop the ``run_rhs`` computation) → the ``||`` and
-        ``! … &&`` params turn ours → RED; reset the execution state at a group
-        opener (drop the ``dead_groups`` inheritance) → the group/newline params
-        turn ours → RED; never re-arming at ``&&`` likewise REDs the ``&&`` /
-        ``! … ||`` params.
+        ``! … &&`` params turn ours → RED; never re-arming at ``&&`` likewise
+        REDs the ``&&`` / ``! … ||`` params.
+        """
+        rel = ".claude/hooks/session-end.sh"
+        root = tmp_path / "project"
+        hook = root / Path(rel)
+        hook.parent.mkdir(parents=True)
+        marker = root / "MARKER"
+        hook.write_text(f"#!/bin/bash\ntouch {shlex.quote(str(marker))}\n")
+        hook.chmod(0o755)
+        command = command.format(rel=rel)
+        completed = subprocess.run(
+            ["bash", "-c", command], capture_output=True, text=True,
+            timeout=30, cwd=str(root))
+        assert marker.exists() is executes, (
+            f"ground truth changed: {command!r} did not behave as expected "
+            f"(stderr={completed.stderr!r})")
+        assert hook_install._invokes_script(
+            command, "session-end.sh", ".claude/hooks", root) is executes
+
+        # The observable consequence for the DEAD-entry forms: they are
+        # reported missing and REPAIRED, instead of the install being read as
+        # current while bash never runs the hook.
+        if executes:
+            return
+        doc = {"hooks": {"SessionEnd": [{"matcher": "", "hooks": [
+            {"type": "command", "command": command, "timeout": 60}]}]}}
+        installed = _old_install(tmp_path, settings=doc)
+        assert any(
+            f.kind == "missing-hook-entry" and f.script == "session-end.sh"
+            for f in detect_install(installed))
+        upgrade_install(installed)
+        assert len(_settings(installed)["hooks"]["SessionEnd"]) == 2
+
+    @pytest.mark.parametrize("command,executes", [
+        # A boundary OPENER (a subshell, a brace group, a command substitution,
+        # a backtick) does not START a new command position — it CONTINUES the
+        # one before it.  An RHS bash never entered therefore stays dead INSIDE
+        # the group: re-arming executable position at the opener judged the
+        # group's contents ours while bash never entered it (a silent
+        # no-capture).
+        ("command -v nosuch12345 && ( {rel} )", False),
+        ("command -v nosuch12345 && {{ {rel}; }}", False),
+        ("command -v nosuch12345 && $({rel})", False),
+        ("command -v nosuch12345 && `{rel}`", False),
+        ("command -v {rel} || ( {rel} )", False),
+        ("command -v {rel} || {{ {rel}; }}", False),
+        ("! command -v {rel} && ( {rel} )", False),
+        # A newline after an operator is a CONTINUATION of the same list, not a
+        # fresh command position (`_split_command` used to rewrite it to `;`).
+        ("command -v nosuch12345 &&\n{rel}", False),
+        # A ``;`` INSIDE a group bash never entered is dead too — the group is
+        # the RHS, so nothing inside it runs, however it is separated.
+        ("command -v nosuch12345 && ( nosuch12345 ; {rel} )", False),
+        ("command -v nosuch12345 && ( ( {rel} ) )", False),
+        ("command -v nosuch12345 && ( {rel} || {rel} )", False),
+        # ... while a group the command line DOES enter still executes ours.
+        ("( {rel} )", True),
+        ("{{ {rel}; }}", True),
+        ("command -v {rel} && ( {rel} )", True),
+        ("command -v {rel} && {{ {rel}; }}", True),
+        ("command -v {rel} && $({rel})", True),
+        ("command -v {rel} && `{rel}`", True),
+        ("command -v {rel} ; ( {rel} )", True),
+        ("command -v {rel} &&\n{rel}", True),
+        ("command -v {rel} && ( nosuch12345 ; {rel} )", True),
+    ])
+    def test_query_conditional_rhs_boundary_matches_bash_ground_truth(
+            self, tmp_path, command, executes):
+        """The RHS a ``command -v``/``-V`` query did NOT enter must stay dead
+        across a boundary OPENER.
+
+        ``command -v nosuchtool && ( <hook> )`` is the same dead RHS as
+        ``command -v nosuchtool && <hook>``, spelled with a subshell/brace /
+        command-substitution / backtick boundary (or a newline continuation).
+        Re-arming executable position at such a boundary judged the group's
+        contents ours, so ``detect_install`` emitted no ``missing-hook-entry``
+        while bash never entered the group — the silent no-capture this module
+        exists to prevent.  A ``;`` INSIDE the unentered group is dead too, so
+        the state is scoped to the grouping level rather than reset at every
+        separator.
+
+        Ground-truthed by EXECUTING each form (the hook touches a marker).
+
+        MUTATION: re-arm unconditionally at a group / substitution boundary
+        (drop the ``group_dead``/``list_dead`` opener handling and reset
+        ``expect_cmd = True`` there) → the ``False`` params turn ours → RED;
+        rewrite a newline after an operator to ``;`` again (drop the
+        continuation check in ``_split_command``) → the ``&&\n`` params turn
+        ours → RED.  The ``True`` params are regression pins: a group the line
+        DOES enter must still execute ours.
         """
         rel = ".claude/hooks/session-end.sh"
         root = tmp_path / "project"
