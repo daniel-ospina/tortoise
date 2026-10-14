@@ -33,6 +33,14 @@ from __future__ import annotations
 # then served as the CURRENT statement. Import ``TERMINAL_EXCLUDED_STATUSES``
 # from HERE instead.
 #
+# The partition has TWO canonical halves, and BOTH are imported, never
+# re-spelled: the terminal DENY-list (``TERMINAL_EXCLUDED_STATUSES`` /
+# ``_terminal_excluded``) and the CURRENT allow-list
+# (``CURRENT_POINT_STATUS_VALUES`` / ``_current_status_clause``). A hand-written
+# ``IN ['draft', 'live']`` at a call site is the allow-list's mirror of the same
+# defect — a status added to the vocabulary is silently DROPPED — and three
+# such literals lived in ``tortoise/sdk.py`` until #4058.
+#
 # live.py is the LEAF status module: ``tortoise/sdk.py`` imports it (sdk.py:
 # ``from .live import TERMINAL_EXCLUDED_STATUSES``), so the module can be
 # imported by every consumer without a cycle. Because it is below sdk.py it

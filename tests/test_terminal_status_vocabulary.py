@@ -603,47 +603,87 @@ def test_sdk_admits_every_current_status_through_the_canonical_builder() -> None
     assert "x.status IS NULL" in clause
 
 
+def test_current_status_clause_derives_from_the_canonical_vocabulary() -> None:
+    """#8662 P3 — pin the builder's DERIVATION, not only its rendered value.
+
+    ``_current_status_clause`` renders the identical string whether it iterates
+    ``CURRENT_POINT_STATUS_VALUES`` or hardcodes the two members, so the value
+    assertion above cannot see a re-literalisation of ``live.py`` — the one file
+    that is supposed to be the single source of truth. Mirror the
+    ``STATE_EXCLUDED_STATUS`` derivation pin: the body must ITERATE the
+    canonical vocabulary, so a hand-written allow-list REDs even when its value
+    happens to match today.
+    """
+    source = (_REPO_ROOT / "tortoise" / "live.py").read_text(encoding="utf-8")
+    fn = next((n for n in ast.walk(ast.parse(source))
+               if isinstance(n, ast.FunctionDef)
+               and n.name == "_current_status_clause"), None)
+    assert fn is not None, "_current_status_clause not found in live.py"
+    derives = any(
+        any(isinstance(n, ast.Name) and n.id == "CURRENT_POINT_STATUS_VALUES"
+            for n in ast.walk(comp.iter))
+        for comp in ast.walk(fn) if isinstance(comp, ast.comprehension)
+    )
+    assert derives, (
+        "_current_status_clause must DERIVE from CURRENT_POINT_STATUS_VALUES "
+        "(iterate it), not re-literalise the allow-list — a hand-written list "
+        "drops a status added to the vocabulary: "
+        f"{ast.unparse(fn)[:200]}"
+    )
+
+
 # An inline `IN [...]` list — its member tokens are extracted from the span, so
-# order, quote style and whitespace cannot evade the guard (the review of #8662
-# measured the old single-spelling regex being bypassed by `IN ['live',
-# 'draft']`, `IN ["draft", "live"]` and `IN ['draft','live']`).
-_INLINE_LIST = re.compile(r"\bIN\s*\[([^\]]*)\]", re.IGNORECASE)
+# order, quote style, whitespace and a wrapping `(...)` cannot evade the guard
+# (the review of #8662 measured the old single-spelling regex being bypassed by
+# `IN ['live', 'draft']`, `IN ["draft", "live"]` and `IN ['draft','live']`).
+_INLINE_LIST = re.compile(r"\bIN\s*\(?\s*\[([^\]]*)\]", re.IGNORECASE)
 _QUOTED_TOKEN = re.compile(r"""['\"]([^'\"]+)['\"]""")
 
 
 def _current_status_allow_list_redeclarations(
         source: str) -> list[tuple[int, str, list[str]]]:
-    """Inline ``IN [...]`` enumerations of the CURRENT Point vocabulary.
+    """Inline ``IN [...]`` enumerations of the FULL CURRENT Point vocabulary.
 
-    The #2901-mirror shape is an inline allow-list of current statuses; the
-    canonical ``live._current_status_clause`` owns it now. Detection is
-    formatting-INSENSITIVE by construction: the list is located as a span and
-    its quoted tokens extracted, so member order, quote style and spacing
-    cannot hide a re-declaration, and a partial drop (``IN ['draft']``) is
-    caught too — a list that names any subset of the current vocabulary is the
-    same defect shape. Only executable (non-docstring) string constants are
-    scanned, so a prose mention is not an offender, and a list whose members
-    are not statuses (``IN ['Point', 'Object']``) is not either.
+    The #2901-mirror shape is an inline allow-list that names EVERY current
+    status; the canonical ``live._current_status_clause`` owns it now.
+    Detection is formatting-INSENSITIVE by construction: the list is located as
+    a span and its quoted tokens extracted, so member order, quote style,
+    whitespace and a wrapping ``(...)`` cannot hide a re-declaration.
+
+    The polarity is SUPERSET-of-the-canonical-vocabulary, deliberately: the
+    defect is a literal that enumerates ALL current statuses, so a status later
+    added to the vocabulary is silently dropped. A list naming a PROPER SUBSET
+    (``IN ['live']`` — published-only; ``IN ['draft']`` — drafts-only) is a
+    different, legitimate question the canonical builder does NOT answer, so it
+    must not be flagged — and neither is a list whose members are not statuses
+    (``IN ['Point', 'Object']``).
+
+    Only executable (non-docstring) string constants are scanned, and only a
+    list literal contained in ONE constant — a list split across an f-string
+    interpolation is outside this guard's scope (named, not silently claimed).
     """
+    canonical = set(CURRENT_POINT_STATUS_VALUES)
     offenders: list[tuple[int, str, list[str]]] = []
     for lineno, value in _executable_string_constants_from_source(source):
         for match in _INLINE_LIST.finditer(value):
             members = _QUOTED_TOKEN.findall(match.group(1))
-            if members and set(members) <= set(CURRENT_POINT_STATUS_VALUES):
+            if canonical <= set(members):
                 offenders.append((lineno, value, members))
     return offenders
 
 
 def test_no_sdk_query_re_declares_the_current_status_allow_list() -> None:
-    """The #2901-mirror shape cannot reappear in ``sdk.py`` — in ANY spelling.
+    """The #2901-mirror shape cannot reappear in ``sdk.py`` in any spelling.
 
-    An inline ``IN [...]`` of current statuses in a query body is the
+    An inline ``IN [...]`` that enumerates EVERY current status is the
     allow-list re-declaration #4058 removes — it drops a future current status
     with no edit anywhere. Only the canonical builder (which renders the
     literal) may contain it. The scan is formatting-insensitive (order, quote
-    style and spacing), not a single-spelling line regex: the review of #8662
-    measured the old regex missing ``IN ['live', 'draft']``,
-    ``IN ["draft", "live"]`` and ``IN ['draft','live']``.
+    style, whitespace, a wrapping ``(...)``), not a single-spelling line regex:
+    the review of #8662 measured the old regex missing ``IN ['live', 'draft']``,
+    ``IN ["draft", "live"]`` and ``IN ['draft','live']``. A list naming a
+    PROPER SUBSET of the vocabulary (``IN ['live']``) is a different, legitimate
+    question and is not flagged.
     """
     source = (_REPO_ROOT / "tortoise" / "sdk.py").read_text(encoding="utf-8")
     offenders = _current_status_allow_list_redeclarations(source)
@@ -660,14 +700,17 @@ def test_no_sdk_query_re_declares_the_current_status_allow_list() -> None:
     "IN ['draft','live']",           # no space after the comma
     "IN [ 'draft' , 'live' ]",       # extra whitespace
     "IN [\n                    'draft',\n                    'live',\n                ]",
-    "IN ['draft']",                    # a member silently dropped
+    "IN (['draft', 'live'])",        # parenthesised list expression
+    "IN ['draft', 'live', 'retracted']",  # SUPERSET — still names every current
+    "IN ['archived', 'live', 'draft']",   # superset, unordered
 ])
 def test_inline_current_allow_list_is_caught_in_every_spelling(literal: str) -> None:
     """The guard is formatting-insensitive, not one exact spelling.
 
-    Each variant is a real evasion of the pre-#8662 line regex (the last is a
-    silent member drop). This pins the detector's coverage, so a revert to the
-    single-spelling regex REDs here.
+    Every variant is a real evasion of the pre-#8662 line regex; the two
+    superset cases are the ones the FIRST cut of the AST guard missed (its
+    subset polarity flagged only an exact-or-smaller list). This pins the
+    detector's coverage, so a revert to the single-spelling regex REDs here.
     """
     source = (
         "def q():\n"
@@ -680,9 +723,17 @@ def test_inline_current_allow_list_is_caught_in_every_spelling(literal: str) -> 
     "IN ['Point', 'Object']",          # node labels — a different question
     "IN ['retracted', 'superseded']",  # terminal deny-list, not the allow-list
     "IN [$ids]",                        # bound parameter, no literal members
+    "IN ['live']",                      # PROPER SUBSET — published-only filter
+    "IN ['draft']",                     # PROPER SUBSET — drafts-only filter
 ])
 def test_inline_list_without_current_vocabulary_is_not_flagged(literal: str) -> None:
-    """The guard does not fire on lists that are not the current allow-list."""
+    """The guard does not fire on lists that are not the FULL current allow-list.
+
+    A proper subset is a deliberate narrower question (``IN ['live']`` /
+    ``IN ['draft']``) the canonical builder does NOT answer — it also admits the
+    other current status — so flagging it would demand a fix that silently
+    WIDENS the predicate.
+    """
     source = (
         "def q():\n"
         "    return " + repr(f"MATCH (n) WHERE n.x {literal} RETURN n") + "\n"
@@ -787,10 +838,23 @@ def test_state_excluded_status_derives_from_the_canonical_exclusion() -> None:
         "hand-written set drifts when the vocabulary grows: "
         f"{ast.unparse(rhs)[:160]}"
     )
-    assert isinstance(rhs.left, ast.Name) \
-        and rhs.left.id == "TERMINAL_EXCLUDED_STATUSES", ast.unparse(rhs)
-    assert isinstance(rhs.right, ast.Set), ast.unparse(rhs)
-    deliberately_visible = {elt.value for elt in rhs.right.elts}
+    assert (isinstance(rhs.left, ast.Name)
+            and rhs.left.id == "TERMINAL_EXCLUDED_STATUSES") \
+        or (isinstance(rhs.left, ast.Attribute)
+            and rhs.left.attr == "TERMINAL_EXCLUDED_STATUSES"), ast.unparse(rhs)
+    rhs_set = rhs.right
+    # Accept the set literal or its set(...)/frozenset(...) spelling — the
+    # invariant is "subtract the canonical exclusion", not one syntax.
+    if (isinstance(rhs_set, ast.Call) and isinstance(rhs_set.func, ast.Name)
+            and rhs_set.func.id in {"set", "frozenset"}
+            and len(rhs_set.args) == 1):
+        rhs_set = rhs_set.args[0]
+    assert isinstance(rhs_set, ast.Set), ast.unparse(rhs)
+    assert all(isinstance(elt, ast.Constant) for elt in rhs_set.elts), (
+        "STATE_EXCLUDED_STATUS may only subtract a set of string literals: "
+        f"{ast.unparse(rhs_set)}"
+    )
+    deliberately_visible = {elt.value for elt in rhs_set.elts}
     assert deliberately_visible == {"outdated", "archived"}, (
         "the state view may only drop the members it deliberately keeps "
         f"visible (the #3308 pin): {sorted(deliberately_visible)}"
