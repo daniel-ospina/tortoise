@@ -1482,10 +1482,11 @@ _NAME_MERGE_LABELS: frozenset[str] = frozenset({"Object", "Subject"})
 #: The ``db_hash`` baseline is deliberately NOT widened to cover it: the digest
 #: covers the Point view, and folding the entity view into it would move
 #: ``content_hash`` for every existing baseline, which the check reports as an
-#: ``unrecorded-mutation`` and — because it never re-records over an
-#: untrusted/differing baseline — would report for ever. Widening the digest
-#: needs a baseline-format migration (#8268 owns the unreachable-migration class;
-#: #7936 is the parent that widened the digest).
+#: ``unrecorded-mutation``. That is no longer a dead end (#8268/#7936): widening
+#: the digest needs a ``format_version`` bump — append the new format to
+#: ``_PROJECTION_STATE_FORMAT_HISTORY`` — and the old format then becomes a KNOWN
+#: PREDECESSOR that is MIGRATED (re-baselined) on the next healthy recording run
+#: instead of reporting for ever.
 _ENTITY_BELIEF_FIELDS: tuple[str, ...] = tuple(BELIEF_PROPS) + tuple(
     BELIEF_BOOL_PROPS)
 
@@ -2382,12 +2383,13 @@ def check_consistency(log_path: str, projection, *,
         "adopted": adopted,
         "state_recorded": state_recorded,
         "state_error": state_error,
-        # #8268/#7936: the format of a WELL-FORMED predecessor baseline that
-        # this healthy run re-baselined at the current format (None when there
-        # was none). `state_recorded` says whether the migration was APPLIED
-        # (a read-only run reports the predecessor but leaves it to the next
-        # recording run). Distinct from `state_error`, which now only ever
-        # names an UNTRUSTED (malformed/tampered/unknown-format) sidecar.
+        # #8268/#7936: the format of a WELL-FORMED predecessor baseline this
+        # run OBSERVED (None when there was none). `state_recorded` says whether
+        # the migration was APPLIED (a read-only run, or a non-healthy run —
+        # `state_recorded` is gated on `ok` — reports the predecessor and leaves
+        # the re-baseline to the next recording healthy run). Distinct from
+        # `state_error`, which now only ever names an UNTRUSTED
+        # (malformed/tampered/unknown-format) sidecar.
         "state_superseded_format": state_superseded_format,
         "excluded_fields": excluded_seen,
         "one_sided_fields": one_sided_seen,
