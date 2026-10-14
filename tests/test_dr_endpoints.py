@@ -1531,6 +1531,52 @@ def test_the_runbook_documents_both_producers_of_incidents_unresolved():
         "the no-channel branch the runbook documents is gone from hosted_api")
 
 
+def test_the_runbook_names_the_live_production_restore_not_a_501():
+    """#3880: the "Restore / drill" section claimed production restore was out of
+    scope (501) while ``POST /backups/restore`` shipped live.
+
+    The claim was false from the commit that wrote it: 62d8477dc (#680) added
+    BOTH the runbook line and ``@app.post("/backups/restore")``. The route is a
+    real destructive surface — ``restore_backup(drill=False)`` is pre-restore
+    safety copy → delete live → ``GRAPH.COPY`` temp→live — so an operator
+    reasoning from the runbook would understate what production can do and would
+    not look for its 409/503 failure modes on a real restore.
+
+    The runbook names the route and its handler by SYMBOL, never by line
+    number: this issue's own target cited ``hosted_api.py:21422``, which had
+    already moved by the time a lane read it (#5063's "identity by position").
+
+    The code half is asserted against the source so the doc claim keeps a
+    referent: deleting the route makes this fail rather than leave the runbook
+    describing a surface that is gone.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    doc = (root / "docs/ops/registry-backup-dr.md").read_text(encoding="utf-8")
+    section = doc[doc.index("## Restore / drill"):]
+    next_heading = section.find("\n## ", 1)
+    if next_heading != -1:
+        section = section[:next_heading]
+    para = " ".join(section.split())
+
+    assert "NOT in scope (501)" not in para, (
+        "the runbook must not claim production restore is out of scope — "
+        "POST /backups/restore is a live destructive surface")
+    assert "/backups/restore" in para, (
+        "the runbook must name the live production-restore route: " + para)
+    assert "backups_restore" in para, (
+        "the runbook must name the route's handler by SYMBOL (a line citation "
+        "rots — this issue's :21422 had moved): " + para)
+
+    # Code half: the route + handler the runbook names really exist, live.
+    src = (root / "tortoise/hosted_api.py").read_text(encoding="utf-8")
+    assert '@app.post("/backups/restore")' in src, (
+        "the route the runbook documents is gone from hosted_api")
+    assert "async def backups_restore(" in src, (
+        "the handler the runbook names is gone from hosted_api")
+
+
 class TestDrDrill:
     def test_drill_requires_params(self, client, dr_env, mem_storage):
         r = client.post("/v1/internal/backups/drill", headers=INTERNAL_HEADERS, json={})
