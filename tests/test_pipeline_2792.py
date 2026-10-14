@@ -354,6 +354,38 @@ class TestEffectivePipeline:
         finally:
             sdk.close()
 
+    def test_add_stage_refuses_a_tied_or_negative_explicit_order(self, tmp_path):
+        """An explicit ``order`` carries the same constraint as a declared one.
+
+        The forward/regression judgement is ``target.order < cur_stage.order``,
+        so a tie makes a move between the two stages neither forward nor
+        backward and it is applied with NO guard at all — the shape
+        ``validate_pipeline_decl`` and ``reorder_stages`` both refuse. The
+        tenant EDIT path's explicit ``order`` accepted it, re-creating the tie
+        the declaration path had just been hardened against.
+        """
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            P.seed_pipeline(g, KEY, DECL)  # orders 1, 2, 3
+            with pytest.raises(ValueError, match="already used"):
+                P.add_stage(g, KEY, stage_id="stg_x", label="Xs",
+                            slot="active", order=2, declared=DECL)
+            with pytest.raises(ValueError, match="int >= 0"):
+                P.add_stage(g, KEY, stage_id="stg_neg", label="Neg",
+                            slot="active", order=-5, declared=DECL)
+            assert [s.stage_id for s in P.list_stages(g, KEY, declared=DECL)] == [
+                "stg_contact", "stg_discussion", "stg_won"]
+            # A free explicit order is still accepted, so the check did not
+            # simply disable the parameter.
+            added = P.add_stage(g, KEY, stage_id="stg_x", label="Xs",
+                                slot="active", order=4, declared=DECL)
+            assert added.order == 4
+            assert [s.order for s in P.list_stages(g, KEY, declared=DECL)] == [
+                1, 2, 3, 4]
+        finally:
+            sdk.close()
+
     def test_override_stages_are_read_in_declared_order_not_row_order(
             self, tmp_path):
         """``_read_override`` orders its rows, so the read is deterministic
@@ -641,6 +673,81 @@ class TestGuardIntegrity:
             cur = P.current_stage(g, "deal-drift")
             assert cur["stageId"] == "stg_won"
             assert cur["isClosed"] is True
+        finally:
+            sdk.close()
+
+    def test_a_slot_reclassification_cannot_resurrect_a_closed_object(
+            self, tmp_path):
+        """Stickiness keys on the Object's durable ``isClosed`` marker, not on
+        the effective declaration's live ``slot``.
+
+        A graph that never overrides its pipeline reads the pack default on
+        the fly, so a pack release that reclassifies the stage the Object sits
+        in from ``terminal`` to an active slot takes effect immediately. Keying
+        the terminal guard off the resolved slot alone then skipped it, and the
+        next mention rewrote ``isClosed=True`` to ``False`` — durable,
+        journaled, and exactly the resurrection the guard exists to stop.
+        """
+        reclassified = {
+            "defaultStage": "stg_contact",
+            "stages": [
+                {"id": "stg_contact", "label": "Contact", "order": 1,
+                 "slot": "entry"},
+                {"id": "stg_won", "label": "Won", "order": 3,
+                 "slot": "active"},
+                {"id": "stg_post", "label": "Post", "order": 4,
+                 "slot": "active"},
+            ],
+        }
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("deal-slot-drift", objectKind=KEY)
+            P.advance_stage(sdk, "deal-slot-drift", KEY, "stg_won",
+                            at="2026-09-04", declared=DECL)
+            assert P.current_stage(g, "deal-slot-drift")["isClosed"] is True
+            move = P.advance_stage(sdk, "deal-slot-drift", KEY, "stg_post",
+                                   at="2026-10-01", declared=reclassified)
+            assert not move.applied and move.reason == "terminal-guard", move
+            cur = P.current_stage(g, "deal-slot-drift")
+            assert cur["stageId"] == "stg_won" and cur["isClosed"] is True
+            # The explicit reopen still moves it: the guard is a gate, not a
+            # dead end.
+            revived = P.advance_stage(sdk, "deal-slot-drift", KEY, "stg_post",
+                                      at="2026-11-01", reopen=True,
+                                      reason="deal revived",
+                                      declared=reclassified)
+            assert revived.applied, revived
+            assert P.current_stage(g, "deal-slot-drift")["isClosed"] is False
+        finally:
+            sdk.close()
+
+    def test_reopen_does_not_bypass_the_regression_guard_on_a_live_object(
+            self, tmp_path):
+        """``reopen`` is the TERMINAL guard's escape hatch, not a general
+        regression opt-out.
+
+        Pre-fix the regression condition read ``not correction and not
+        reopen``, so an explicit ``reopen=True`` silently disabled the
+        backwards-move guard on an Object that was never closed, where
+        "reopen" has no meaning at all.
+        """
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("deal-live-reopen", objectKind=KEY)
+            P.advance_stage(sdk, "deal-live-reopen", KEY, "stg_discussion",
+                            at="2026-09-02", declared=DECL)
+            move = P.advance_stage(sdk, "deal-live-reopen", KEY, "stg_contact",
+                                   at="2026-09-03", reopen=True, declared=DECL)
+            assert not move.applied and move.reason == "regression-guard", move
+            assert P.current_stage(g, "deal-live-reopen")["stageId"] == (
+                "stg_discussion")
+            # ``correction`` remains the documented backward-move opt-out.
+            fixed = P.advance_stage(sdk, "deal-live-reopen", KEY, "stg_contact",
+                                    at="2026-09-04", correction=True,
+                                    declared=DECL)
+            assert fixed.applied, fixed
         finally:
             sdk.close()
 

@@ -589,6 +589,21 @@ def add_stage(graph, pipeline_key: str, *, stage_id: str, label: str,
             "unique")
     if order is None:
         order = max((s.order for s in pipe.stages), default=0) + 1
+    else:
+        # An explicit ``order`` carries the SAME constraint as a declared one.
+        # The forward/regression judgement is ``target.order <
+        # cur_stage.order``, so a tie makes a move between the two stages
+        # neither forward nor backward and it is applied with no guard at all
+        # — the shape ``validate_pipeline_decl`` and ``reorder_stages`` both
+        # refuse. Without this check the tenant EDIT path re-created the very
+        # tie the declaration path had just been hardened against.
+        if isinstance(order, bool) or not isinstance(order, int) or order < 0:
+            raise ValueError(f"order must be an int >= 0, got {order!r}")
+        if any(s.order == order for s in pipe.stages):
+            raise ValueError(
+                f"order {order!r} is already used by another stage in "
+                f"{pipeline_key!r}; ties make the forward/regression guard "
+                "non-deterministic")
     stage = PipelineStage(stage_id=stage_id, label=label, order=order,
                           slot=slot, outcome=outcome)
     _write_stage(graph, pipeline_key, stage)
@@ -701,14 +716,14 @@ def _resolve_object(graph, ref: str) -> tuple[str, dict] | None:
     rows = graph.query(
         "MATCH (o:Object {id:$oid}) "
         "RETURN o.id, o.name, o.pipelineStageId, o.pipelineSlot, "
-        "o.pipelineStageSince, o.pipelineStageKey, o.objectKind",
+        "o.pipelineStageSince, o.pipelineStageKey, o.objectKind, o.isClosed",
         params={"oid": oid}).result_set
     if not rows:
         return None
     r = rows[0]
     return r[0] or oid, {
         "name": r[1], "stageId": r[2], "slot": r[3], "since": r[4],
-        "pipelineKey": r[5], "objectKind": r[6]}
+        "pipelineKey": r[5], "objectKind": r[6], "isClosed": r[7]}
 
 
 def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
@@ -728,16 +743,23 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
       to any pipeline and is refused.
     - **unresolvable current stage** — an Object whose stored stage does not
       resolve in the effective pipeline is refused, never advanced: skipping
-      the guards is the resurrection vector.
+      the guards is the resurrection vector. The refusal has no public
+      escape hatch (a repair verb is #2728); a drifted Object is repaired at
+      the configuration level, not by forcing the move through.
     - **no stage reported** — a non-string/empty ``stage_ref`` is a no-op (it
       is absence, not an unrecognised label, so it is not parked).
     - **unknown stage** — not resolved by id or label → the raw label is parked
       on ``pipelineStagePending`` for review and the current stage state is NOT
       changed (``pipelineStageKey`` is left alone — see ``PENDING_KEY_PROP``).
-    - **terminal guard** — a terminal Object is not reopened by a passing
-      mention; only an explicit ``reopen=True`` to a non-terminal stage moves it.
+    - **terminal guard** — a closed Object is not reopened by a passing
+      mention. "Closed" is the Object's durable ``isClosed`` marker **or** a
+      terminal current stage, so a pack release that reclassifies the stage's
+      slot cannot resurrect it; only an explicit ``reopen=True`` to a
+      non-terminal stage moves it.
     - **regression guard** — a backward move is recorded as history but not
-      applied unless ``correction=True``.
+      applied unless ``correction=True``. ``reopen`` opts out only for a move
+      OUT of a terminal stage (a reopen is inherently backward); it is not a
+      regression opt-out for a live Object.
     - **stale-transition guard** — a transition whose valid time precedes the
       Object's current ``pipelineStageSince`` is not applied (out-of-order
       processing), unless ``correction=True``.
@@ -823,10 +845,26 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
         if prev_t is not None and in_t is not None and in_t < prev_t:
             return StageMove(applied=False, reason="stale-transition", stage=target)
     if cur_stage is not None:
-        if cur_stage.is_terminal and not (
+        # The durable closed marker is the Object's ``isClosed`` prop, NOT the
+        # effective declaration's slot. A graph that has not overridden its
+        # pipeline reads the pack default on the fly, so a pack release that
+        # reclassifies the stage the Object sits in from ``terminal`` to an
+        # active slot takes effect immediately; keying stickiness off the
+        # resolved slot alone then skipped this guard and the write rewrote
+        # ``isClosed=True`` to ``False`` — a durable, journaled resurrection.
+        # The two sources must AGREE: an Object the graph records as closed
+        # stays closed, whatever the live declaration now says about its slot.
+        was_closed = bool(cur.get("isClosed"))
+        if (cur_stage.is_terminal or was_closed) and not (
                 reopen and not target.is_terminal):
             return StageMove(applied=False, reason="terminal-guard", stage=target)
-        if target.order < cur_stage.order and not correction and not reopen:
+        # ``reopen`` is the TERMINAL guard's escape hatch, not a general
+        # regression opt-out: on a live (non-terminal) Object it dropped this
+        # guard too and applied a silent backward move. The regression guard's
+        # documented opt-out is ``correction``; a reopen still has to travel
+        # FROM a terminal stage to be a reopen at all.
+        if target.order < cur_stage.order and not correction and not (
+                reopen and cur_stage.is_terminal):
             return StageMove(applied=False, reason="regression-guard", stage=target)
 
     props: dict[str, Any] = {
