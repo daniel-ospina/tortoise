@@ -69,7 +69,10 @@ and the shipped predicate symbols cited — not merely quoting a title that
 mentions both; (7) the retention-floor obligation appears only inside its own
 withdrawal (**a FORWARD guard**: `main` had already removed the live obligation,
 so this half cannot red on the merge base) and the recall-arithmetic paragraph
-carries O2's withdrawal verbatim (**the regression pin that does**); (8) the
+carries O2's withdrawal verbatim **plus the present-tense no-floor fact and O2
+as its authority** (**the regression pin that does** — it is on the FACT, not on
+the change-history phrasing a `#8529`-compliant rewrite drops, which is the
+`#8443` review's finding 3); (8) the
 review's `D6` carries a disposition naming the decided site, the shipped commit,
 and the symbol of the pass it cites.
 
@@ -85,8 +88,12 @@ NOT promised:
    floor"` reds only while it is live, and a newly-worded equivalent an editor
    invents does not. Rule (7a) is a FORWARD guard — `main` had already removed
    the live obligation before the merge base, so it cannot red there; rule (7b)
-   — the recall paragraph must carry O2's withdrawal verbatim — is the
-   structural half, and the non-vacuous pin, that survives rewording.
+   — the recall paragraph must state the no-floor FACT together with O2's
+   verbatim withdrawal and name §16.3 O2 as its authority — is the
+   structural half, and the non-vacuous pin, that survives rewording. The
+   7b pin is deliberately NOT on the withdrawal *phrasing*: a target-state
+   rewrite that keeps the fact and the authority but drops the change-history
+   clause must stay green (the `#8443` review's finding 3).
 2. Rule 3 is deliberately FAIL-CLOSED and slightly over-broad: a pre-gate row
    that merely *mentions* `MERGE` in a parenthetical reds too. That is the safe
    direction — the flag belongs to the gate's row — but a legitimate future
@@ -99,8 +106,13 @@ NOT promised:
    quoted span that is MARKED AS HISTORY (`once said`, `formerly`, `reversed`, …)
    — the shape §15 uses to record the wording it replaced. A wrong site
    asserted inside such a marked quotation is therefore not caught; the pin is
-   on live prose, not on history. Every other quoted coupling (the merge-base
-   row's bare quotation of `#5198`'s title, for one) still reds.
+   on live prose, not on history. Every other quoted coupling (a bare quotation
+   of `#5198`'s title, for one) still reds. Quotes are paired positionally per
+   line, so the exemption is the span, not the prose between two spans.
+5. Rule (5)'s coupling scan is BOUNDED: a `DISCARD` token and an `E7` token more
+   than `_COUPLING_WINDOW` (200) characters apart on one line are not read as a
+   coupling, so a claim split across a long line is a NAMED gap rather than a
+   caught one. Both tokens are matched case-insensitively and as whole words.
 
 Static, stdlib-only, no network / DB / graph.
 """
@@ -301,6 +313,18 @@ _WITHDRAWN_REQUIREMENT = re.compile(
     re.IGNORECASE,
 )
 
+#: Rule (7b)'s pin is the target-state FACT plus O2 as its authority, NOT the
+#: change-history phrasing (*"an earlier version of this line read …"*) the
+#: document's status line bans (`#8529`/`#8542`). The fact is that no retention
+#: floor / recall floor / node budget is owed; a compliant rewrite states it in
+#: the present tense and drops the withdrawal clause (the `#8443` review,
+#: finding 3).
+_NO_FLOOR_FACT = re.compile(
+    r"no\s+retention\s+floor|no\s+recall\s+floor|no\s+node[- ]?budget|"
+    r"not\s+a\s+floor",
+    re.IGNORECASE,
+)
+
 #: How far after an obligation occurrence its own withdrawal may sit on the
 #: line. A bounded window stops a re-assertion appended to the far end of a
 #: one-line paragraph from inheriting an earlier reversal's mark.
@@ -309,15 +333,29 @@ _REVERSAL_WINDOW = 200
 #: `DISCARD` and `E7` in one coupling is only legitimate as the reversal
 #: record. That is the form `#5198` left in §15 (*"THE SITE IS `S2.2b`, NOT
 #: `E7`"*): the coupling's OWN `E7` token is the one negated here.
-_NEGATES_REJECTED = re.compile(r"\bnot\b[^.\n]{0,12}`?E7", re.IGNORECASE)
+#: The negation must ATTACH to the token it negates — `\bnot\s+`?E7` — because a
+#: looser `\bnot\b[^.\n]{0,12}E7` read *"not only E7"* as a negation and
+#: exempted a passage that asserts `E7` **is** a site (the `#8443` review).
+_NEGATES_REJECTED = re.compile(r"\bnot\s+`?E7\b", re.IGNORECASE)
+
+#: The rejected site token, matched CASE-INSENSITIVELY and as a whole word. The
+#: `discard` scan and `_NEGATES_REJECTED` were already case-insensitive while
+#: this scan was not, so `` `e7` `` escaped rule (5) entirely; the word
+#: boundaries keep a hex-digest substring (`ae7b`) from being read as the site
+#: (the `#8443` review).
+_REJECTED_TOKEN = re.compile(
+    rf"(?<![A-Za-z0-9_]){re.escape(REJECTED_SITE)}(?![A-Za-z0-9_])", re.IGNORECASE
+)
 
 #: How far apart a `DISCARD` token and an `E7` token may sit and still count as
 #: one coupling. The bound keeps two tokens in unrelated clauses from being
-#: read as one claim; it is NOT the exemption's scope (see below).
+#: read as one claim; it is NOT the exemption's scope (see below), and it is a
+#: NAMED gap (module docstring, "NOT promised" 5): a pair farther apart than
+#: this on one line is not scanned.
 _COUPLING_WINDOW = 200
 
-#: How far back the negation may start from the `E7` it rejects (`\bnot\b` plus
-#: up to 12 characters, so this comfortably covers the whole match).
+#: How far back the negation may start from the `E7` it rejects (`\bnot\s+` plus
+#: the optional backtick, so this comfortably covers the whole match).
 _REVERSAL_PROXIMITY = 24
 
 #: A coupling is exempt ONLY when its own `E7` token is the reversal record —
@@ -344,30 +382,56 @@ _HISTORICAL_QUOTATION = re.compile(
 _HISTORY_WINDOW = 100
 
 
+def _quoted_spans(line: str) -> list[tuple[int, int]]:
+    """The `"…"` spans of one line, quotes paired positionally (0-1, 2-3, …).
+
+    Pairing left to right is what makes the exemption span-accurate.
+    `rfind(quote, 0, discard.start())` resolves to the CLOSING quote when the
+    text before the coupling ends a quotation, and `find(quote, opening + 1)`
+    then resolves to the NEXT OPENING one — so the ordinary prose BETWEEN two
+    quotations was read as "inside a quotation", and a live assertion in that
+    gap inherited the record's history mark (the `#8443` review).
+    """
+    positions = [m.start() for m in re.finditer(re.escape(_QUOTE), line)]
+    return [
+        (positions[index], positions[index + 1])
+        for index in range(0, len(positions) - 1, 2)
+    ]
+
+
 def _coupling_is_the_reversal_record(
     line: str, discard: re.Match, rejected: re.Match
 ) -> bool:
     """True when THIS coupling's own `E7` token is the reversal record.
 
     The negation must end at this `E7` (not merely appear on the line), and the
-    quotation exemption requires BOTH tokens to sit inside one quoted span that
+    quotation exemption requires BOTH tokens to sit inside ONE quoted span that
     is itself marked as history. A live re-assertion inherits neither, even
-    when it is inserted immediately next to the reversal record.
+    when it is inserted immediately next to the reversal record or in the gap
+    between two quotations. The span is found by pairing quotes positionally,
+    and `E7` must start after the span opens as well as end before it closes —
+    an `E7` to the LEFT of the quotation its `DISCARD` sits inside is not
+    covered by it (the `#8443` review).
     """
     prefix = line[max(0, rejected.start() - _REVERSAL_PROXIMITY) : rejected.end()]
     negated = _NEGATES_REJECTED.search(prefix)
     if negated is not None and negated.end() == len(prefix):
         return True
-    opening = line.rfind(_QUOTE, 0, discard.start())
-    if opening == -1:
-        return False
-    closing = line.find(_QUOTE, opening + 1)
-    if closing == -1 or rejected.end() > closing:
-        return False
-    surrounding = line[
-        max(0, opening - _HISTORY_WINDOW) : closing + _HISTORY_WINDOW
-    ]
-    return bool(_HISTORICAL_QUOTATION.search(surrounding))
+    for opening, closing in _quoted_spans(line):
+        # BOTH tokens fully inside THIS span — not merely "to the left of a
+        # closing quote" (which is what the old rfind/find pair resolved to).
+        if not (
+            opening <= discard.start()
+            and discard.end() <= closing
+            and opening <= rejected.start()
+            and rejected.end() <= closing
+        ):
+            continue
+        surrounding = line[
+            max(0, opening - _HISTORY_WINDOW) : closing + _HISTORY_WINDOW
+        ]
+        return bool(_HISTORICAL_QUOTATION.search(surrounding))
+    return False
 
 
 def _discard_e7_offenders(text: str) -> list[str]:
@@ -383,7 +447,7 @@ def _discard_e7_offenders(text: str) -> list[str]:
     for number, line in enumerate(text.splitlines(), 1):
         couplings: list[tuple[re.Match, re.Match]] = []
         discards = [m for m in re.finditer(r"discard", line, re.IGNORECASE)]
-        rejected = [m for m in re.finditer(re.escape(REJECTED_SITE), line)]
+        rejected = list(_REJECTED_TOKEN.finditer(line))
         for discard in discards:
             for candidate in rejected:
                 start, end = min(discard.start(), candidate.start()), max(
@@ -427,15 +491,19 @@ def test_no_passage_sites_the_mechanical_discard_on_e7():
 
 
 def test_the_reversal_exemption_does_not_cover_a_second_coupling_on_the_row():
-    """Rule (5) must judge the COUPLING's own `E7`, not a window around it.
+    """Rule (5) must judge the COUPLING's own `E7`, not a span of the line.
 
     §15's issue-map row is the exact location `#5198` was filed about, and it
     is one physical line ending in the reversal record. A line-scoped (or
     window-scoped) exemption therefore let a live re-assertion share the row
-    with the reversal record and ship green. The `#8443` review reproduced two
-    placements, and both must red: an assertion APPENDED to the row, and one
-    inserted immediately ADJACENT to the reversal clause — where a ±window
-    exemption would still see the record's marks (#5198).
+    with the reversal record and ship green. The `#8443` review reproduced four
+    placements, and all must red: an assertion APPENDED to the row, one
+    inserted immediately ADJACENT to the reversal clause, one placed in the GAP
+    between two quoted spans, and one whose `E7` sits OUTSIDE the quotation its
+    `DISCARD` is inside (and to its left). The last two defeated the earlier
+    exemption because it paired its quotes with `rfind`/`find` — which resolves
+    to a closing quote followed by the next opening quote — and never required
+    the rejected token to start after the span opened.
     """
     rows = [line for line in _document().splitlines() if "§1 the mechanism" in line]
     assert len(rows) == 1, "§15's §1 row is not uniquely identifiable (#5198)"
@@ -466,6 +534,57 @@ def test_the_reversal_exemption_does_not_cover_a_second_coupling_on_the_row():
         "reversal clause must red rule (5) — otherwise the exemption is "
         "window-scoped and the re-assertion inherits the record's marks; this "
         "is the #8443 review's second fail-open (#5198)"
+    )
+    # THE QUOTE GAP (`#8443` review finding 1, first shape): a live, unquoted
+    # coupling placed BETWEEN two quoted spans. `rfind` resolved to the CLOSING
+    # quote of the first span and `find` to the OPENING quote of the second, so
+    # the ordinary prose between them was read as one quotation and inherited
+    # the history mark.
+    quote_gap = (
+        'the reversed record read *"the old E7 wording"*; '
+        "**The mechanical `DISCARD` gate runs at `E7`.** "
+        'the docstring says *"a definite description is left to the arbiter"*'
+    )
+    assert _discard_e7_offenders(quote_gap), (
+        "a live re-assertion of the E7 site placed between two quoted spans "
+        "must red rule (5) — otherwise the exemption reads the prose between "
+        "quotations as if it were inside one; this is the #8443 review's "
+        "quote-gap fail-open (#5198)"
+    )
+    # LEFT OF THE SPAN (`#8443` review finding 1, second shape): `DISCARD`
+    # inside a quoted, history-marked span, but the coupled `E7` OUTSIDE it and
+    # to its left. The old code bounded only `rejected.end() > closing`, so an
+    # `E7` before the opening quote inherited the span's exemption.
+    left_of_span = (
+        "The gate site E7 was reversed — "
+        'this row records *"the mechanical DISCARD outcome"* as history.'
+    )
+    assert _discard_e7_offenders(left_of_span), (
+        "a coupling whose `E7` sits OUTSIDE the quotation its `DISCARD` is "
+        "inside must red rule (5) — otherwise the exemption never requires "
+        "the rejected token to be inside the span; this is the #8443 review's "
+        "left-of-span fail-open (#5198)"
+    )
+    # THE NEGATION MUST ATTACH (`#8443` review finding 2): `not only E7`
+    # asserts `E7` IS a site; the old `\bnot\b[^.]{0,12}E7` read it as a
+    # reversal and exempted the coupling.
+    not_only = (
+        "**THE GATE SITE IS `S2.2b`.** "
+        "The gate site is not only E7, where the mechanical DISCARD runs."
+    )
+    assert _discard_e7_offenders(not_only), (
+        "a coupling negated as `not only E7` still asserts that `E7` carries "
+        "the gate, so it must red rule (5) — the negation must attach to the "
+        "token it negates (the #8443 review's negation fail-open, #5198)"
+    )
+    # THE TOKEN SCAN IS CASE-INSENSITIVE (`#8443` review finding 2): the
+    # `discard` scan already was, while the `E7` scan was not, so a lowercase
+    # `e7` escaped rule (5) entirely.
+    lower_case = "The mechanical `DISCARD` gate runs at `e7`."
+    assert _discard_e7_offenders(lower_case), (
+        "a lowercase `e7` coupling must red rule (5) — the `discard` scan was "
+        "case-insensitive while the `E7` scan was not, an undocumented "
+        "asymmetry (the #8443 review, #5198)"
     )
 
 
@@ -568,7 +687,14 @@ def test_the_recall_arithmetic_paragraph_carries_o2s_withdrawal():
     Rule 3 above would pass on a document that deleted the sentence and said
     nothing — leaving the arithmetic looking like a floor nobody has stated.
     The paragraph that makes the multiplicative-recall claim must carry O2's
-    withdrawal verbatim, so the next reader is told which governs (#5198).
+    withdrawal verbatim, NAME O2/§16.3 as the authority, and state the
+    target-state fact, so the next reader is told which governs (#5198).
+
+    The pin is on the FACT plus its authority, deliberately NOT on the
+    change-history phrasing (*"an earlier version … THAT REQUIREMENT IS
+    WITHDRAWN"*): the document's status line bans the change-history shape
+    (`#8529`/`#8542`), so a rewrite that keeps the fact and the authority but
+    drops that clause must stay green (the `#8443` review, finding 3).
     """
     text = _document()
     marker = "recall compounds MULTIPLICATIVELY"
@@ -589,9 +715,18 @@ def test_the_recall_arithmetic_paragraph_carries_o2s_withdrawal():
         "next lane cites it to demand a retention floor (#5198):\n"
         + paragraph[:600]
     )
-    assert _WITHDRAWN_REQUIREMENT.search(paragraph), (
-        "the paragraph does not mark the old requirement itself as withdrawn — "
-        "it reads as a live obligation again (#5198)"
+    assert "§16.3" in paragraph and "O2" in paragraph, (
+        "the paragraph states a withdrawal without naming its authority — it "
+        "must cite §16.3 O2 (owner, 2026-09-24). A fact with no authority is "
+        "what let the floor framing be cited as a live rule (#5198):\n"
+        + paragraph[:600]
+    )
+    assert _NO_FLOOR_FACT.search(paragraph), (
+        "the paragraph does not state the target-state FACT — that no "
+        "retention floor, no recall floor and no node budget is owed by this "
+        "pipeline. The pin is on the fact plus its authority, not on the "
+        "change-history phrasing a `#8529`-compliant rewrite drops (#8443):\n"
+        + paragraph[:600]
     )
 
 
