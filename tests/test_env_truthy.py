@@ -445,10 +445,10 @@ def test_team_sweep_gate_is_narrow_by_design(monkeypatch):
 
     for raw in ("1",):
         _set(monkeypatch, "TORTOISE_TEST_SWEEP_TEAM_STRAYS", raw)
-        assert _team_sweep_allowed("x") is True, raw
+        assert _team_sweep_allowed() is True, raw
     for raw in ("true", "TRUE", "yes", "on", "ON", " 1 ", "", "garbage", None):
         _set(monkeypatch, "TORTOISE_TEST_SWEEP_TEAM_STRAYS", raw)
-        assert _team_sweep_allowed("x") is False, raw
+        assert _team_sweep_allowed() is False, raw
 
 
 # ── 4. The non-divergence guard ────────────────────────────────────────────
@@ -464,8 +464,10 @@ _LEDGER_LITERAL_OWNERS: dict[str, tuple[int, str]] = {
     "tortoise/embedded_reaper.py": (
         1, "pinned mirror — the reaper must stay standalone-importable"),
     "tortoise/backup_sweep.py": (
-        1, "deferred to #4128: `=on` would suppress the ENUM_DELTA incident guard, so its "
-           "widening needs its own decision"),
+        1, "OVERRIDES (#4128): #4097's truthy-set parsing — the vocabulary stays at V3 "
+           "{\"1\",\"true\",\"yes\"} rather than the contract because the truthy value "
+           "SUPPRESSES the ENUM_DELTA data-loss incident guard for the #669 flip window, so "
+           "`=on` must not gain the power to silence it"),
     "tortoise/hermes-plugin/__init__.py": (
         1, "pinned mirror — the Hermes plugin is copied OUT of the package and loaded "
            "by the HOST interpreter from its PATH, so `tortoise` need not be importable "
@@ -479,8 +481,19 @@ _LEDGER_LITERAL_OWNERS: dict[str, tuple[int, str]] = {
 #: THE GOVERNING RULE: the ledger shrinks by DEFAULT — adding an entry requires its own
 #: recorded decision (`OVERRIDES:`) and is itself a change to this contract. A new
 #: `(module, name)` pair reds; an EXTRA read of a listed pair reds (the count); a pair
-#: with ZERO sites left reds as closed and must be deleted, and deleting it is part of
-#: closing #4128.
+#: with ZERO sites left reds as closed and must be deleted.
+#:
+#: #4128 DECIDED EVERY DEFERRED ENTRY BELOW, and the disposition is KEEP NARROW for all
+#: of them: each truthy value relaxes a guard, grants trust, or silences a protective
+#: mechanism, and our own deploy surfaces write the exact `"1"` (`fly.toml`,
+#: `.env.example`, `.github/workflows/deploy-hosted.yml`), so widening buys no measured
+#: coherence while adding a fail-open surface — and a widening is a security-posture
+#: change, which is the owner's decision, not a lane's. Each entry therefore carries the
+#: AGENTS.md `OVERRIDES:` form, naming the default it departs from and the consequence of
+#: relaxing it; `test_no_ledger_entry_is_left_pending_a_decision` holds that form so a
+#: future lane cannot re-tag these as unfinished "finish the wide set" work and widen a
+#: destructive interlock. NO entry was deleted by #4128: deleting one means the read was
+#: widened, and no name's disposition was widen.
 #:
 #: THE DELIBERATE EXCEPTIONS — the ledger has GROWN twice, both under a recorded
 #: `OVERRIDES` (not by accident): the tenant-namespace opt-in pinned above
@@ -499,29 +512,68 @@ _KNOWN_NARROW_READS: dict[tuple[str, str], tuple[int, str]] = {
     ("tests/_embedded.py", "TORTOISE_TEST_SWEEP_LEGACY"):
         (1, "OVERRIDES (#3634) — sole authorization for an irreversible journal-blind "
             "residue delete"),
-    ("tortoise/sdk.py", "TORTOISE_ALLOW_PRODUCTION"): (1, "#4128 — grants production access"),
-    ("tortoise/mcp_server.py", "TORTOISE_ALLOW_EMBEDDED"): (1, "#4128 — grants embedded mode"),
+    ("tortoise/sdk.py", "TORTOISE_ALLOW_PRODUCTION"):
+        (1, "OVERRIDES (#4128): #4097's truthy-set parsing — this is the SOLE override of "
+            "the interlock that blocks DETACH DELETE on the production graph, so a `=true` "
+            "written for legibility would authorise unrecoverable data loss"),
+    ("tortoise/mcp_server.py", "TORTOISE_ALLOW_EMBEDDED"):
+        (1, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value replaces a "
+            "hard `sys.exit(1)` on a missing DB target with a silently EMPTY embedded "
+            "graph, so widening turns a loud misconfiguration into a wrong-result state"),
     ("tortoise/projection/__init__.py", "TORTOISE_ALLOW_NONSTANDARD_PATH"):
-        (2, "#4128 — relaxes path containment"),
+        (2, "OVERRIDES (#4128): #4097's truthy-set parsing — this read admits a "
+            "non-canonical/`~` DB target, which mints a per-directory embedded server "
+            "outside the canonical path (the #176 Category-3 leak)"),
     ("tortoise/projection/__init__.py", "TORTOISE_TEST_ALLOW_REMOTE"):
-        (1, "#4128 — relaxes the remote-URI guard"),
+        (1, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value lifts the "
+            "non-loopback refusal so a test session WRITES `test_*` graphs on a remote "
+            "server; `tests/conftest.py:423` mirrors this exact predicate, so widening one "
+            "copy alone would diverge the mirror and a probe from its own gate"),
     ("tortoise/projection/__init__.py", "TORTOISE_TEST_MODE"):
-        (3, "#4128 — relaxes path/remote guards"),
-    ("tortoise/pack_state.py", "TORTOISE_TEST_MODE"): (2, "#4128 — relaxes path/remote guards"),
+        (3, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value fires the "
+            "test-session redirect and the session-journal append, so a leaked `=true` in "
+            "a production process would mint and journal `test_*` graphs"),
+    ("tortoise/pack_state.py", "TORTOISE_TEST_MODE"):
+        (2, "OVERRIDES (#4128): #4097's truthy-set parsing — HERE the truthy value switches "
+            "graph-name DERIVATION on, which in a leaked production env targets phantom "
+            "`test_*` graphs instead of the real `org_<name>` (the corruption the "
+            "`URI set, no TEST_MODE` invariant exists to prevent)"),
     ("tortoise/hosted_api.py", "TORTOISE_TRUST_FLY_CLIENT_IP"):
-        (2, "#4128 — trusts a caller-supplied header"),
+        (2, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value makes the app "
+            "trust a caller-supplied `Fly-Client-IP`, resetting every per-IP limiter key "
+            "and the R8 tracker whenever the Fly proxy is not the only ingress"),
     ("tortoise/hosted_api.py", "TORTOISE_TRUST_X_FORWARDED_PROTO"):
-        (1, "#4128 — trusts a caller-supplied header"),
-    ("tortoise/hosted_api.py", "RATE_LIMIT_DISABLED"): (8, "#4128 — disables rate limiting"),
-    ("tortoise/mcp_auth.py", "RATE_LIMIT_DISABLED"): (1, "#4128 — disables rate limiting"),
-    ("tortoise/abuse.py", "TORTOISE_ABUSE_DISABLED"): (1, "#4128 — disables abuse detection"),
-    ("tortoise/hosted_api.py", "BACKUP_WATCHER_DISABLED"): (1, "#4128 — disables backup watching"),
-    ("tortoise/pack_state.py", "PACK_STATE_DISABLE_SELF_HEAL"): (1, "#4128 — disables self-heal"),
-    ("tortoise/sdk.py", "TORTOISE_SESSION_LLM_MOCK"): (2, "#4128 — swaps the LLM for a mock"),
+        (1, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value makes "
+            "redirect schemes trust a client-settable `X-Forwarded-Proto`"),
+    ("tortoise/hosted_api.py", "RATE_LIMIT_DISABLED"):
+        (8, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value disables "
+            "every throttling limiter (signup 2/24h, OTP, invitation, sensitive-op), i.e. "
+            "the abuse exposure this ledger exists to freeze"),
+    ("tortoise/mcp_auth.py", "RATE_LIMIT_DISABLED"):
+        (1, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value disables the "
+            "key-lookup throttle, the abuse exposure this ledger exists to freeze"),
+    ("tortoise/abuse.py", "TORTOISE_ABUSE_DISABLED"):
+        (1, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value disables "
+            "abuse detection and suspension"),
+    ("tortoise/hosted_api.py", "BACKUP_WATCHER_DISABLED"):
+        (1, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value silences the "
+            "backup-staleness monitor whose silent absence hid an incident for ~31 days "
+            "(#2922)"),
+    ("tortoise/pack_state.py", "PACK_STATE_DISABLE_SELF_HEAL"):
+        (1, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value disables the "
+            "read-path self-heal (a test-only escape hatch already documented as such)"),
+    ("tortoise/sdk.py", "TORTOISE_SESSION_LLM_MOCK"):
+        (2, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value swaps the "
+            "real LLM for a deterministic mock, i.e. fabricated extraction on a deployed "
+            "app (deploy-hosted.yml sets this seam on the hosted e2e app)"),
     ("tortoise/hosted_api.py", "TORTOISE_SESSION_LLM_MOCK"):
-        (1, "#4128 — swaps the LLM for a mock"),
+        (1, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value swaps the "
+            "real LLM for a deterministic mock, hiding provider failure behind fabricated "
+            "output"),
     ("tortoise/__main__.py", "TORTOISE_SESSION_LLM_MOCK"):
-        (1, "#4128 — swaps the LLM for a mock"),
+        (1, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value swaps the "
+            "real LLM for a deterministic mock; this site is the refusal that keeps the "
+            "seam out of hosted mode"),
 }
 
 def _module_string_constants(tree: ast.Module) -> dict[str, str]:
@@ -795,13 +847,119 @@ def test_narrow_env_reads_are_the_frozen_ledger():
     assert not grown, (
         "new narrow env read site(s) outside the declared contract (#4097) — use "
         "tortoise.env_truthy, or raise the ledger entry with a reason: " + repr(grown)
-        + "   (widening a listed name is #4128's decision, not a drive-by edit)"
+        + "   (every listed name already carries a recorded keep-narrow decision — "
+          "widening one REVERSES a decision and is a reopen of #4128, not a drive-by edit)"
     )
     closed = sorted(key for key in _KNOWN_NARROW_READS if key not in seen)
     assert not closed, (
         "closed _KNOWN_NARROW_READS entr(ies) — the read is gone, delete the entry so the "
-        "ledger keeps shrinking by default (#4128): " + ", ".join(f"{r}::{n}" for r, n in closed)
+        "ledger keeps shrinking by default: " + ", ".join(f"{r}::{n}" for r, n in closed)
     )
+
+
+def test_no_ledger_entry_is_left_pending_a_decision():
+    """#4128: every kept-narrow read carries its recorded `OVERRIDES:` decision.
+
+    The failure this prevents is the one #4128 was filed for. An entry whose reason
+    still reads as "decided later" is exactly what invites the next lane holding a
+    "finish the wide set" chore to WIDEN a destructive interlock — a fail-open change,
+    and one no reviewer would recognise as a reversal, because the record said the
+    question was still open. #4128 closed it the other way (keep narrow), so the form is
+    now machine-held: an entry that drops the marker or the reason reds here, and the red
+    names the reopen route instead of leaving the narrowing readable as an accident.
+    """
+    for (module, name), (_count, why) in _KNOWN_NARROW_READS.items():
+        assert why.startswith("OVERRIDES"), (
+            f"{module}::{name} carries no recorded OVERRIDES decision (reason={why!r}) — "
+            "#4128 decided every deferred read as KEEP NARROW; a widening is a reopen of "
+            "#4128 (evidence in front of the owner), never a ledger edit"
+        )
+        assert " — " in why, (
+            f"{module}::{name} must follow the AGENTS.md form "
+            "'OVERRIDES: <the default, named concretely> — <reason>' "
+            f"(reason={why!r})"
+        )
+    assert _LEDGER_LITERAL_OWNERS["tortoise/backup_sweep.py"][1].startswith("OVERRIDES"), (
+        "`TORTOISE_SUPPRESS_ENUM_DELTA` is #4128's third deferred owner and must carry "
+        "its recorded keep-narrow decision like every other entry"
+    )
+
+
+#: The truthy spellings the CONTRACT accepts but these interlocks must NOT: everything
+#: a narrow `== "1"` rejects. `_NARROW_REJECTED_PADDED` adds the whitespace-trimmed `"1"`
+#: forms, which the sites that do NOT strip also reject — so each pin states its own
+#: normalization cell rather than assuming one.
+_NARROW_REJECTED = ("true", "TRUE", "yes", "on", "ON", "garbage", "0", "", None)
+_NARROW_REJECTED_PADDED = ("true", "TRUE", "yes", "on", "ON", "garbage", " 1 ", "1 ",
+                          "0", "", None)
+
+
+def test_production_guard_is_narrow_by_design(monkeypatch):
+    """#4128 keep-narrow: `TORTOISE_ALLOW_PRODUCTION` requires the exact value `"1"`.
+
+    `sdk.TortoiseSDK.test_guard` is the last thing standing between a stray teardown
+    helper and `DETACH DELETE` on the real `tortoise` graph, so an `=true` written for
+    legibility must NOT authorise it.
+    """
+    import types
+
+    from tortoise.sdk import TortoiseSDK
+
+    prod_graph = types.SimpleNamespace(graph_name="tortoise")
+    stub = types.SimpleNamespace(_get_proj=lambda: prod_graph)
+
+    _set(monkeypatch, "TORTOISE_ALLOW_PRODUCTION", "1")
+    assert TortoiseSDK.test_guard(stub) is None
+    for raw in _NARROW_REJECTED_PADDED:
+        _set(monkeypatch, "TORTOISE_ALLOW_PRODUCTION", raw)
+        with pytest.raises(RuntimeError, match="SAFETY GUARD"):
+            TortoiseSDK.test_guard(stub)
+
+
+def test_abuse_kill_switch_is_narrow_by_design(monkeypatch):
+    """#4128 keep-narrow: `TORTOISE_ABUSE_DISABLED` requires the exact value `"1"`."""
+    from tortoise.abuse import abuse_disabled
+
+    _set(monkeypatch, "TORTOISE_ABUSE_DISABLED", "1")
+    assert abuse_disabled() is True
+    for raw in _NARROW_REJECTED_PADDED:
+        _set(monkeypatch, "TORTOISE_ABUSE_DISABLED", raw)
+        assert abuse_disabled() is False, raw
+
+
+def test_enum_delta_suppression_is_narrow_by_design(monkeypatch):
+    """#4128 keep-narrow: the ENUM_DELTA guard's kill switch keeps the V3 vocabulary.
+
+    It strips+cases (so `" 1 "` works), but NOT the contract's `on`: the truthy value
+    silences a data-loss incident guard for the #669 flip window, so `=on` must not be
+    able to suppress it.
+    """
+    from tortoise.backup_sweep import _enum_delta_suppressed
+
+    for raw in ("1", " 1 ", "true", "TRUE", "yes"):
+        _set(monkeypatch, "TORTOISE_SUPPRESS_ENUM_DELTA", raw)
+        assert _enum_delta_suppressed() is True, raw
+    for raw in ("on", "ON", "0", "false", "no", "off", "garbage", "", None):
+        _set(monkeypatch, "TORTOISE_SUPPRESS_ENUM_DELTA", raw)
+        assert _enum_delta_suppressed() is False, raw
+
+
+def test_session_llm_mock_seam_is_narrow_by_design(monkeypatch):
+    """#4128 keep-narrow: the LLM test seam requires the exact value `"1"`.
+
+    The site normalizes (strip+lower) so the four sibling gates cannot diverge on a
+    padded value — that is why `" 1 "` is deliberately True here while the contract's
+    other truthy spellings are not: a mock seam that a `=true` could switch on would
+    silently fabricate extraction on a deployed app.
+    """
+    from tortoise.sdk import _session_llm_mock_enabled
+
+    for raw in ("1", " 1 ", "1\t"):
+        _set(monkeypatch, "TORTOISE_SESSION_LLM_MOCK", raw)
+        assert _session_llm_mock_enabled() is True, raw
+    for raw in _NARROW_REJECTED:
+        _set(monkeypatch, "TORTOISE_SESSION_LLM_MOCK", raw)
+        assert _session_llm_mock_enabled() is False, raw
 
 
 def test_guard_is_registered_in_every_surface_that_owns_a_scanned_module():
