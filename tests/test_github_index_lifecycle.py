@@ -1249,9 +1249,12 @@ def test_index_onboarding_writes_run_on_the_dedicated_pool(client, tmp_path,
     """#4709 review P2: the ``_update_onboarding_state`` hand-offs ride the
     index job's OWN pool, never the loop's SHARED default executor.
 
-    The pre-fix shape (``asyncio.to_thread``) submitted to the default pool,
-    whose threads are named ``asyncio_*``; the fix routes each write through
-    ``_run_off_loop(_INDEX_EXECUTOR, ...)``, whose threads carry the
+    The pre-#4709 shape ran the writes INLINE on the loop (thread name
+    ``MainThread`` through the TestClient portal), and an intermediate revision
+    of this PR routed them through ``asyncio.to_thread`` — the loop's SHARED
+    default executor, whose threads are named ``asyncio_*``. The assertion
+    below (`tortoise-index`` prefix) falsifies BOTH. The fix routes each write
+    through ``_run_off_loop(_INDEX_EXECUTOR, ...)``, whose threads carry the
     ``tortoise-index`` prefix. A walk holds a default worker for a whole job,
     so the writes competing for the same ``min(32, cpu+4)`` workers is exactly
     the starvation #3060's doctrine excludes.
@@ -1291,8 +1294,9 @@ def test_index_onboarding_writes_run_on_the_dedicated_pool(client, tmp_path,
         f"the off-loop seam; saw {write_threads} — this run proves nothing")
     assert all(n.startswith(_INDEX_THREAD_PREFIX) for n in write_threads), (
         f"an onboarding write rode a pool that is not the index job's own "
-        f"({write_threads}) — the pre-fix shape submitted to the loop's "
-        f"SHARED default executor (`asyncio_*`), which the walk starves "
+        f"({write_threads}) — the pre-#4709 shape wrote INLINE on the loop "
+        f"(a `MainThread` name), and `asyncio.to_thread` would name the loop's "
+        f"SHARED default executor (`asyncio_*`); both are falsified here "
         f"(#4709)")
 
 
