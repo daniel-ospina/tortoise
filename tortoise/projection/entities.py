@@ -216,6 +216,62 @@ def _terminal_object_statuses() -> list:
 
     return list(OBJECT_TERMINAL_STATUSES)
 
+
+def _status_fold_index():
+    """#2729: the compiled pack-declared fold surface, or an EMPTY index.
+
+    Reads the process pack registry (``domain_loader._get_registry``) at CALL
+    time — a function-level import keeps the projection free of a module-level
+    cycle, and a registry that is unavailable (packs missing, load degraded)
+    yields an empty index so the built-in compatibility folds keep working
+    rather than raising on the write/replay hot path.
+
+    Never raises: the fold is a state cache and a pack-resolution failure must
+    not take down an event write (the #1930 ponytail contract).
+    """
+    from tortoise.status_folds import StatusFoldIndex
+
+    try:
+        from tortoise.domain_loader import _get_registry
+
+        reg = _get_registry()
+        if reg is None:
+            return StatusFoldIndex()
+        return reg.status_fold_index
+    except Exception as e:  # fail-open: pack resolution never breaks a write
+        # Warn-ONCE (#1930): this runs per event, and an unavailable registry
+        # must not spam the log on the write/replay hot path.
+        from tortoise.pack_registry import _warn_packs_once
+
+        _warn_packs_once(
+            ("status-fold-index", "unavailable"),
+            "status-fold index unavailable; built-in folds only: %s", e)
+        return StatusFoldIndex()
+
+
+def _emit_fold_violation(target_kind: str, event_kind: str, name: str) -> None:
+    """#2729: a declared fold fired but no Object of the declaring kind exists.
+
+    Reported at the kind's #1934 enforcement level (``warn | retry | block``)
+    through the shared ``enforcement`` seam. The projection has no retry loop of
+    its own — ``retry`` marks the miss for the extractor's bounded re-attempt,
+    exactly as ``enforcement.resolve_enforcement`` documents. Fail-open: the
+    reporter never raises into the fold.
+    """
+    try:
+        from tortoise.enforcement import emit_violation, resolve_enforcement
+
+        level = resolve_enforcement(kind=target_kind)
+        emit_violation(
+            code="status_fold_unapplied",
+            kind=target_kind,
+            detail=(f"declared fold for event kind {event_kind!r} on Object "
+                    f"{name!r} found no Object of kind {target_kind!r} "
+                    f"(enforcement={level})"),
+        )
+    except Exception:  # a report never breaks the fold
+        logger.debug("status-fold violation reporting failed", exc_info=True)
+
 # #2894: FalkorDB stores scalars and arbitrarily NESTED arrays of scalars (a
 # tuple is encoded as an array); a map/dict-valued property — including an
 # array that contains one at any depth — raises on `SET n += $extra`.
@@ -4019,6 +4075,70 @@ class _EntityHandlers:
         # ── MEETING GUARD path (cycle-12/13/17/18; the ONLY guard consumer) ──
         return self._event_guarded_merge(inner, eid, props, guard_source_file)
 
+    def _fold_object_status(self, name: str, event_kind: str) -> None:
+        """#2729 — THE ONE Object-status fold dispatcher.
+
+        Two halves, applied in this order:
+
+        1. **Pack-declared folds** for this event kind. Each is guarded to the
+           Object whose ``objectKind`` is the DECLARING pack's namespaced kind
+           (``venture:tranche``) — dispatching on the namespaced kind is what
+           stops two packs that share a bare kind name from colliding at the
+           fold, and it is why the fold needs no per-event ``if``.
+        2. **The built-in connector compatibility fold**
+           (``status_folds.BUILTIN_CONNECTOR_FOLDS``), guarded to Objects whose
+           kind declares NO lifecycle. A kind that declares ``statuses`` OWNS
+           its state: ``github.issue.closed`` must not silently re-label a
+           venture Object with the connector's ``completed`` (#2725 conflict
+           check).
+
+        The terminal-status guard is unchanged in both halves (#2164/#3309):
+        a superseded / deprecated / archived / retracted Object is never
+        resurrected into ``recall_state``'s default view.
+
+        A declared fold that finds no Object of its kind is a real signal (a
+        mis-named object in the event, or a kind that drifted) — it is emitted
+        at the kind's #1934 enforcement level rather than swallowed.
+        """
+        index = _status_fold_index()
+        from tortoise.status_folds import builtin_fold_status
+
+        excluded = _terminal_object_statuses()
+        declared = index.folds_for_event(event_kind)
+        for target_kind, status in declared:
+            rows = self.g.query(
+                "MATCH (o:Object {name:$n}) "
+                "WHERE o.objectKind = $kind "
+                "  AND (o.status IS NULL OR NOT (o.status IN $excluded)) "
+                "SET o.status = $status "
+                "RETURN count(o) AS n",
+                params={"n": name, "kind": target_kind, "status": status,
+                        "excluded": excluded},
+            ).result_set
+            if rows and rows[0][0]:
+                continue
+            # No write: either the terminal guard refused (correct, silent) or
+            # no Object of the declaring kind exists (a fold violation).
+            present = self.g.query(
+                "MATCH (o:Object {name:$n}) "
+                "WHERE o.objectKind = $kind "
+                "RETURN count(o) AS n",
+                params={"n": name, "kind": target_kind},
+            ).result_set
+            if not (present and present[0][0]):
+                _emit_fold_violation(target_kind, event_kind, name)
+        builtin_status = builtin_fold_status(event_kind)
+        if builtin_status is not None:
+            self.g.query(
+                "MATCH (o:Object {name:$n}) "
+                "WHERE (o.objectKind IS NULL OR NOT (o.objectKind IN $declared)) "
+                "  AND (o.status IS NULL OR NOT (o.status IN $excluded)) "
+                "SET o.status=$status",
+                params={"n": name, "status": builtin_status,
+                        "declared": sorted(index.lifecycle_kinds),
+                        "excluded": excluded},
+            )
+
     def _event_plain_merge(self, eid: str, props: dict, embedding,
                            inner: dict) -> None:
         """The legacy single-statement Event MERGE (+ edges + extra props)."""
@@ -4149,19 +4269,16 @@ class _EntityHandlers:
         # Imported at function level for the same reason the supersede fold
         # does it (#2242): no module-level cycle, and ONE source of truth —
         # never a restated literal.
-        if _obj_name and _wk in ("pm:cardCreated", "github.issue.open",
-                                 "github.issue.reopened"):
-            self.g.query(
-                "MATCH (o:Object {name:$n}) "
-                "WHERE (o.status IS NULL OR NOT (o.status IN $excluded)) "
-                "SET o.status='in_progress'",
-                params={"n": _obj_name, "excluded": _terminal_object_statuses()})
-        elif _obj_name and _wk in ("pm:cardCompleted", "github.issue.closed"):
-            self.g.query(
-                "MATCH (o:Object {name:$n}) "
-                "WHERE (o.status IS NULL OR NOT (o.status IN $excluded)) "
-                "SET o.status='completed'",
-                params={"n": _obj_name, "excluded": _terminal_object_statuses()})
+        #
+        # #2729: the fold vocabulary is no longer a hand-typed ``if/elif``.
+        # Both halves — the built-in connector compatibility folds AND every
+        # pack-declared per-kind fold — dispatch through `_fold_object_status`,
+        # which compiles its index from `status_folds.py` (the ONE home). The
+        # built-in behaviour is preserved VERBATIM for any Object whose kind
+        # declares no lifecycle; a kind that declares one OWNS its state and
+        # the connector fold no longer applies to it.
+        if _obj_name and _wk:
+            self._fold_object_status(_obj_name, _wk)
         # Event -[:uses]-> Object (input entities, #122; #125 structured dicts)
         uses = inner.get("uses")
         if uses:

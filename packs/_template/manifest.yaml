@@ -71,15 +71,23 @@ ontology:
   #                   entity; eventKinds → event) — review P2, PR #978
   #   - enforcement:  warn|retry|block — overrides the pack-wide default
   # Example:
-  #   kindDefs:
-  #     concept:
-  #       description: "A reusable idea the domain cares about"
-  #       synonyms: ["notion"]
-  #       examples: ["..."]
-  #       nearMisses: [otherKind]
-  #       extractable: true
-  #       storeAs: entity
-  #       enforcement: retry
+  #     kindDefs:
+  #       concept:
+  #         description: "A reusable idea the domain cares about"
+  #         synonyms: ["notion"]
+  #         examples: ["..."]
+  #         nearMisses: [otherKind]
+  #         extractable: true
+  #         storeAs: entity
+  #         enforcement: retry
+  #         # #2729 per-kind state lifecycle: the kind's closed status
+  #         # vocabulary, plus the event kinds THAT THIS PACK declares which
+  #         # fold the status. A kind with `statuses` owns its Object state:
+  #         # the built-in connector fold no longer applies to it.
+  #         statuses: [draft, active, retired]
+  #         folds:
+  #           - event: otherKindApproved   # bare or self-ns (`mydomain:...`)
+  #             status: active           # must be one of `statuses`
   kindDefs: {}
 
   # ── memory_granularity (epic #1891 #1931) ──────────────────────────────

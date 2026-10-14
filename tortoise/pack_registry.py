@@ -21,6 +21,11 @@ from typing import Any
 import yaml
 
 from .source_credibility import SOURCE_KIND_DEFAULTS
+from .status_folds import (
+    StatusFoldIndex,
+    build_status_fold_index,
+    validate_status_decl,
+)
 
 log = logging.getLogger(__name__)
 
@@ -160,9 +165,13 @@ LEGACY_KIND_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 # kindDefs value keys (R6 §3.1/§3.5)
+# `statuses`/`folds` are the #2729 lifecycle declaration: a pack declares a
+# kind's status vocabulary and the event kinds that drive it (see
+# `tortoise/status_folds.py` — the ONE home of the fold contract).
 VALID_KINDDEF_KEYS = frozenset({
     "description", "synonyms", "examples", "nearMisses",
     "extractable", "storeAs", "enforcement",
+    "statuses", "folds",
 })
 
 # storeAs values — what stream bucket a kind belongs to (R6 §3.1)
@@ -816,6 +825,9 @@ class PackRegistry:
     """
 
     def __init__(self, packs_dir: Path | str):
+        # #2729: warnings collected during `_validate` (which runs before the
+        # PackManifest exists) and published in `load_all`. Reset per load.
+        self._pending_lifecycle_warnings: dict[str, list[str]] = {}
         self.packs_dir = Path(packs_dir)
         self.packs: dict[str, PackManifest] = {}
         self.errors: dict[str, list[str]] = {}  # namespace → error messages
@@ -827,6 +839,15 @@ class PackRegistry:
         # than "warnings" because the hosted install path reads it as a
         # FAIL-CLOSED refusal (see pack_manifest_store.validate_manifest).
         self.unresolved_refs: dict[str, list[str]] = {}
+        # #2729: namespace → NON-BLOCKING lifecycle declarations. A pack whose
+        # declared `statuses` reuses a word from the shared/connector
+        # vocabulary loads (the kind owns its own state — see
+        # `status_folds.SHARED_CONNECTOR_STATUS_WORDS`), but the overlap must
+        # be visible rather than silent. Errors (unknown fold status, orphan
+        # fold event, malformed lists) still isolate the pack via `errors`.
+        self.lifecycle_warnings: dict[str, list[str]] = {}
+        # #2729: lazily compiled `StatusFoldIndex` (invalidated on reload).
+        self._status_fold_index = None
         # #1930: set by domain_loader._get_registry when the TORTOISE_PACKS_DIR
         # leg was unusable (0 valid packs / load failure) and the registry
         # fell back to the default catalog — a queryable diagnostic for ops.
@@ -874,6 +895,9 @@ class PackRegistry:
         self.packs = {}
         self.errors = {}
         self.unresolved_refs = {}
+        self.lifecycle_warnings = {}
+        self._pending_lifecycle_warnings = {}
+        self._status_fold_index = None
         count = 0
         for manifest_path in sorted(self.packs_dir.glob("*/manifest.yaml")):
             ns = manifest_path.parent.name
@@ -903,6 +927,30 @@ class PackRegistry:
             for ns in [ns for ns, pack in self.packs.items() if ns in self.errors]:
                 del self.packs[ns]
                 count -= 1
+        # #2729: publish the non-blocking lifecycle warnings for SURVIVING
+        # packs only (a pack isolated for a hard error has its warnings
+        # dropped with it). `_pending_lifecycle_warnings` is the channel
+        # `_validate` writes into — the PackManifest does not exist yet at
+        # validation time.
+        self.lifecycle_warnings = {
+            ns: list(msgs)
+            for ns, msgs in self._pending_lifecycle_warnings.items()
+            if ns in self.packs
+        }
+        if self.lifecycle_warnings:
+            _warn_packs_once(
+                ("lifecycle-vocabulary", str(self.packs_dir),
+                 tuple(sorted((ns, tuple(msgs))
+                              for ns, msgs in self.lifecycle_warnings.items()))),
+                "pack registry %s: %d pack(s) declare a lifecycle status that "
+                "reuses a shared/connector vocabulary word — the pack owns its "
+                "kind's state (the built-in fold no longer applies to it), but "
+                "the overlap is ambiguous to a reader (see "
+                "registry.lifecycle_warnings): %s",
+                self.packs_dir, len(self.lifecycle_warnings),
+                "; ".join(f"{ns}: {msgs[0]}"
+                          for ns, msgs in sorted(self.lifecycle_warnings.items())),
+            )
         self._build_kind_expansions()
         # #1930 (epic #1891 WF-2 / E2E-2): a pack isolated by R-16 must never
         # be silent — every consumer surfaces the startup warning (registry.errors
@@ -933,6 +981,20 @@ class PackRegistry:
                     for ns, msgs in sorted(self.unresolved_refs.items())),
             )
         return count
+
+    @property
+    def status_fold_index(self) -> StatusFoldIndex:
+        """#2729: the compiled pack-declared ``event kind → status`` surface.
+
+        Lazily built from the loaded (R-16-filtered) packs and cached on the
+        registry; ``load_all`` resets the cache. Consumed by the projection's
+        Object-status fold (``projection/entities.py::_fold_object_status``) —
+        the ONE reader, so live writes and rebuild replay compile the same
+        index from the same pack set.
+        """
+        if self._status_fold_index is None:
+            self._status_fold_index = build_status_fold_index(self.packs)
+        return self._status_fold_index
 
     def _load_one(self, path: Path) -> PackManifest:
         raw = yaml.safe_load(path.read_text()) or {}
@@ -1306,6 +1368,23 @@ class PackRegistry:
                             f"{', '.join(sorted(VALID_ENFORCEMENT_LEVELS))}, "
                             f"got {spec['enforcement']!r}"
                         )
+                    # #2729: the per-kind lifecycle declaration. Errors isolate
+                    # the pack (unknown fold status / orphan fold event /
+                    # malformed shape); the shared-vocabulary overlap is a
+                    # warning stashed in `_pending_lifecycle_warnings` and
+                    # published by `load_all` into `lifecycle_warnings` (the
+                    # PackManifest does not exist yet at this point).
+                    if "statuses" in spec or "folds" in spec:
+                        _decl_errors, _decl_warnings = validate_status_decl(
+                            kind, spec,
+                            namespace=ns,
+                            declared_event_kinds=set(ont.get("eventKinds", [])),
+                            declared_object_kinds=set(ont.get("objectKinds", [])),
+                        )
+                        errors.extend(_decl_errors)
+                        if _decl_warnings:
+                            self._pending_lifecycle_warnings.setdefault(
+                                ns, []).extend(_decl_warnings)
                     # nearMisses targets resolve post-load (cross-pack pass)
 
             # ── Manifest v3 (R6 §3.2/§3.5): chains validation ────────────

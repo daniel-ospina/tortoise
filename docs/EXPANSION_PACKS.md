@@ -39,6 +39,10 @@ ontology:
       description: A commercial agreement between parties
       synonyms: [deal, agreement]
       nearMisses: [standard]   # confusable kinds → classifier guidance
+      statuses: [draft, signed, terminated]   # this kind's status vocabulary (#2729)
+      folds:                  # event kind → status (must be in `statuses`)
+        - event: contractSigned
+          status: signed
   relations:                 # epistemic edge declarations (IMPL/NAND)
     - predicate: groundedIn
       mechanism: IMPL
@@ -177,6 +181,59 @@ With `TORTOISE_CLASSIFY_LATER=1` the pack vocabulary and the chains leave the S2
 - **retry** — the kind classifier retries (bounded) on a near-miss before accepting a fallback classification. Use for kinds that are important and confusable (e.g. `rule` vs `standard`).
 
 Resolution order for a kind: `kindDefs[].enforcement` → `extraction.enforcement.kinds` → `extraction.enforcement.default` → `warn`.
+
+## Per-kind status folds — pack-declared Object state (#2729)
+
+An Object has a current state (`Object.status`), folded from the lifecycle events that name it.
+Before #2729 the fold vocabulary was a hand-typed producer→status map in the engine
+(`github.issue.open`/`reopened` → `in_progress`; `github.issue.closed`/`pm:cardCompleted` →
+`completed`), so a domain pack could not declare its own kind's lifecycle. A pack now declares it:
+
+```yaml
+kindDefs:
+  tranche:
+    statuses: [pending, conditions-met, released, denied]   # closed vocabulary
+    folds:
+      - event: disbursement      # a bare event kind of THIS pack (or self_ns:event)
+        status: released         # must be one of `statuses`
+```
+
+The rules (`tortoise/status_folds.py` is the single implementation; `tortoise/pack_registry.py`
+validates it at load):
+
+- **`statuses`** is a non-empty list of unique strings — the kind's closed status vocabulary.
+  The declaration is machine-read by the fold dispatcher and by `PackRegistry.status_fold_index`.
+- **`folds`** is a non-empty list of `{event, status}`. `status` must be in the same kind's
+  `statuses`; `event` must be an event kind **this pack declares** (bare `disbursement` or
+  self-namespaced `mydomain:disbursement`). An unknown status or an orphan event (a fold key no
+  pack declares) is a validation **error** — the pack is isolated, exactly as for an undeclared
+  `kindDefs` key.
+- **A kind that declares `statuses` owns its state.** The built-in connector folds still apply to
+  every Object whose kind declares **no** lifecycle (so a pack-less graph behaves exactly as
+  before), but they are **suppressed** for a lifecycle-declaring kind. This is deliberate: the
+  connector vocabulary already spells `open`→`in_progress` and `closed`→`completed`, so a new kind
+  reusing those words would otherwise silently inherit the wrong lifecycle.
+- **Dispatch is on the namespaced kind** (`mydomain:tranche`), never the bare name, so two packs
+  declaring the same bare kind name cannot collide at the fold.
+- **Reusing a shared vocabulary word is DETECTED.** If `statuses` contains `open`, `closed`,
+  `active`, `pending`, `in_progress` or `completed`, the registry records an explicit
+  **warning** (`PackRegistry.lifecycle_warnings`) — not an error, because an owner-approved
+  lifecycle may legitimately reuse the spelling with a different meaning, and the kind owns its
+  state either way. Rename the status, or record why the overlap is intended.
+- **A declared fold that fires on no Object of its kind is reported** through the #1934
+  enforcement seam (`resolve_enforcement(kind=…)` → warn/retry) with code
+  `status_fold_unapplied`, rather than silently doing nothing.
+
+**Scope of the declaration.** The fold index is compiled from the process **catalog** (every
+loaded pack), not from a graph's `:PackInstall` approval set. That is deliberate: a kind already
+stored in a graph keeps folding even if the pack's approval is later revoked, because the
+declaration describes the kind's lifecycle and a status fold is a cache over the events that name
+the Object — stranding existing state would be a data bug, not a security win. The graph's approved
+pack set still gates **extraction** (which kinds may be minted), unchanged.
+
+The terminal-status guard is unchanged: a `superseded`/`deprecated`/`archived`/`retracted` Object is
+never resurrected by any fold (#2164/#3309). Objects are name-keyed, so a state change that is a
+**new** thing is a supersession, not a fold.
 
 ## Chains
 
