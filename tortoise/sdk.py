@@ -2767,10 +2767,25 @@ _RESERVED_ENVELOPE_PROPS = (
 #:   ``create_source`` lane there is no call collision, but the name rode into
 #:   the ``SourceCreated`` record as a caller-forged payload key (measured).
 #:
+#: * ``self`` is the FIRST parameter of the bound method, and it is reachable
+#:   through the documented nested-``props`` convention (``_coerce_props``:
+#:   direct SDK callers mirror the MCP tool signature and pass ``props={...}``):
+#:   the nested dict is flattened AFTER the public method's own ``self`` is
+#:   bound, so the outer-call collision does not protect it. Measured:
+#:   ``create_source(url, "document", props={"self": "FORGED"})`` raised inside
+#:   `_emit_event`, that door's journal ``try/except`` swallowed it, and
+#:   ``rebuild_all`` destroyed the live-only ``:Source`` — the #2296 defect
+#:   itself; ``update_point(pid, props={"self": …})`` and
+#:   ``create_entity(..., props={"self": …})`` likewise wrote the node with no
+#:   record. THIS IS WHY THE SET IS NOT HAND-TRUSTED: the test derives the
+#:   required names from ``inspect.signature(TortoiseSDK._emit_event)``, so a
+#:   parameter added to `_emit_event` fails the suite instead of silently
+#:   re-opening this hole.
+#:
 #: Reserved at prop INTAKE like the envelope set above (and dropped by the one
 #: door that bypasses intake, ``create_source``), so the collision is
 #: impossible and live == replay.
-_RESERVED_EMIT_CALL_PROPS = ("type_", "new_content")
+_RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self")
 
 #: The canonical record types a live entity door may journal.
 # `DocumentCreated` (#2296) joins the set: the last unjournaled canonical
@@ -24315,13 +24330,14 @@ class TortoiseSDK:
         # measured, `create_document(type="SourceCreated")` journalled nothing
         # and `rebuild_all` destroyed the node. `_sanitize_props` strips it for
         # every sanitizing caller, and the `_skip_sanitize` door
-        # (`create_source`) drops the name itself. This line is NOT a substitute
-        # for either: it repairs the dispatch key of THIS local dict, which is
-        # what the live fold consumes — the RECORD `create_source` journals is
-        # built from that door's own payload, so with its drop removed the
-        # journaled type is still caller-forged (measured) and only the strip
-        # keeps it honest. Assigned rather than reordered so the dict's key
-        # order is unchanged.
+        # (`create_source`) drops the name itself. On THIS funnel the line is
+        # also load-bearing: the Object/Subject/Event/Document records are built
+        # from the repaired dict, so the re-assert alone keeps them honest if the
+        # intake strip is removed (measured). It does NOT cover
+        # `create_source`, which journals from its own payload and still records
+        # a caller-forged `type` when its drop is removed (measured) — only that
+        # door's drop keeps it honest. Assigned rather than reordered so the
+        # dict's key order is unchanged.
         event = {"type": event_type, "id": id_val, **props}
         event["type"] = event_type
         # Normalize field names for projection compatibility

@@ -25,6 +25,7 @@ and ``test_create_entity_document_journals_and_survives_rebuild`` (the
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import sys
@@ -243,6 +244,23 @@ def test_a_reserved_envelope_prop_cannot_forge_or_suppress_the_record(env):
         "`_RESERVED_EMIT_CALL_PROPS` is for names that are NOT envelope keys; "
         "an envelope key belongs in `_RESERVED_ENVELOPE_PROPS`")
     _all_reserved = (*_RESERVED_ENVELOPE_PROPS, *_RESERVED_EMIT_CALL_PROPS)
+    # Every parameter `_emit_event` owns is a name a caller prop can bind at the
+    # call, so the reserved sets must COVER its signature — DERIVED here rather
+    # than hand-listed, because the hand-listed set drifted and left `self` open
+    # (measured: `create_source(url, "document", props={"self": …})` raised
+    # inside `_emit_event`, that door's journal try/except swallowed it, and
+    # `rebuild_all` destroyed the live-only `:Source`). `**extra` is the
+    # documented passthrough, and `id` is deliberately excluded (the entity
+    # doors reject it fail-closed; `create_point` consumes it as its explicit-id
+    # path).
+    _owned = {n for n, p in inspect.signature(
+        TortoiseSDK._emit_event).parameters.items()
+        if p.kind is not inspect.Parameter.VAR_KEYWORD} - {"id"}
+    assert not (_owned - set(_all_reserved)), (
+        f"`_emit_event` owns {sorted(_owned - set(_all_reserved))!r} but no "
+        "reserved set covers them: a caller prop of such a name binds that "
+        "parameter at the call — after the live write — and `_emit_event` "
+        "cannot see the collision from inside")
     # The record side: every ENVELOPE name must be stripped from EVERY
     # entity-door payload, not only from the one call this test happens to
     # drive. (`_RESERVED_EMIT_CALL_PROPS` are not envelope keys, so
@@ -346,8 +364,13 @@ def test_a_reserved_envelope_prop_cannot_forge_or_suppress_the_record(env):
     _bypass: dict[str, str] = {}
     for i, name in enumerate(n for n in _all_reserved if n not in _loud_d30):
         url = f"https://example.com/bypass-{i}"
-        sdk.create_source(url, "document",
-                          **{name: _forged_prop_value(name, forged)})
+        _value = _forged_prop_value(name, forged)
+        # `self` cannot be passed as a direct kwarg — Python rejects it at THIS
+        # call — but it is reachable exactly the way a caller reaches it:
+        # through the documented nested-`props` convention (`_coerce_props`),
+        # which is flattened before the names are splatted into `_emit_event`.
+        _kw = {"props": {name: _value}} if name == "self" else {name: _value}
+        sdk.create_source(url, "document", **_kw)
         _bypass[url] = name
     _src = {e.get("id"): e for e in _journal(events)
             if e.get("type") == "SourceCreated"}
