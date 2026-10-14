@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### A url-keyed `:Source` is a visible neighbour, identified by its url (#8538)
+
+`tortoise_entity_profile` and `tortoise_traverse` dropped every url-keyed
+`:Source` from their results: the hop's dedupe filter compared `m.id`, which is
+NULL on such a node, and Cypher's `WHERE` reads NULL as false — so the engine
+removed the row. The node existed, the edge existed, and `get_entity(url)`
+resolved it; only navigation could not see it.
+
+- **Same graph, one more neighbour.** The filter now compares the node's
+  canonical identity (`coalesce(m.id, m.url, m.eventId)`), and a hop *through* a
+  url-keyed `:Source` binds its `url` rather than the `id` it does not have — so
+  the nodes beyond it are reachable too.
+- **A url-keyed `:Source` reports `id = url`.** That is the identity the read
+  path resolves it by, and it replaces the internal FalkorDB numeric handle the
+  BFS had been synthesising as `id` (the leak class #44 closed). A root and its
+  neighbours now carry the same shape, and the surfaced `id` is addressable
+  through `get_entity`.
+
 ### A completed connector OAuth now leaves the connector row it promised (#4685)
 
 `POST /v1/connectors/{source_type}/auth` returned an authorize URL whose
