@@ -52,8 +52,8 @@ MARKETING = "marketing"
 _U1 = "9f2c1a40-0000-4a00-8000-000000000009"
 
 
-def _sdk(tmp_path, namespace: str) -> TortoiseSDK:
-    return TortoiseSDK(db_path=str(tmp_path / f"{namespace}.db"),
+def _sdk(tmp_path, namespace: str, *, db: str | None = None) -> TortoiseSDK:
+    return TortoiseSDK(db_path=str(tmp_path / f"{db or namespace}.db"),
                        namespace=namespace)
 
 
@@ -294,11 +294,22 @@ class TestResolvedPackSet:
     def test_changes_are_isolated_to_their_graph(self, tmp_path):
         """A change on graph A must leave graph B untouched.
 
-        FAIL-ON: graph B is seeded with ``marketing``; a leak would show it
-        losing the namespace when A is narrowed.
+        Both graphs live in ONE embedded database (#8648 review P2). The
+        original fixture put them in two separate ``.db`` FILES, which share no
+        graph at all — the assertion was satisfied by construction and no
+        cross-graph leak was observable. The two preconditions below pin the
+        discriminating setup: ONE db, TWO distinct physical graphs.
+
+        FAIL-ON: graph B is seeded with ``marketing`` in the SAME db; a leak —
+        a resolver or writer that ignored the scoped graph — would show B
+        losing the namespace when A is narrowed, which the two-DB fixture
+        could never surface.
         """
-        a = _sdk(tmp_path, "test_sel_a")
-        b = _sdk(tmp_path, "test_sel_b")
+        a = _sdk(tmp_path, "test_sel_a", db="test_sel_shared")
+        b = _sdk(tmp_path, "test_sel_b", db="test_sel_shared")
+        # The setup must be able to discriminate (same store, distinct graphs).
+        assert a._db_path == b._db_path
+        assert ps._resolved_graph_name(a, None) != ps._resolved_graph_name(b, None)
         ensure_tenant_packs(b, starter=[MARKETING])
         set_graph_packs(a, packs=[{"namespace": DEV}], expected_revision=0)
         assert resolved_pack_set(a).namespaces == frozenset({DEV})

@@ -196,12 +196,25 @@ catalog union (the back-compat fallback — every pre-#318, self-hosted and
 restored graph, #2714 indicator 3); marker present → the `active` records **∪**
 the namespaces already in the graph's data. The data leg is what keeps
 historical points writable after a pack is disabled.
-- **The marker is the only write path to the configurable set.** Every seeding
+- **`set_graph_packs` is the only path that moves the revision.** Every seeding
 path (`get_tenant_packs`'s self-heal *and* `ensure_tenant_packs` — the
 provision retry, the Supabase control plane, and
 `graph-scripts/backfill_pack_installs.py`) skips a graph that carries a marker,
-so a re-run cannot resurrect a pack the user removed or disabled. A change to
-the set only ever happens through `set_graph_packs`, which moves the revision.
+so a re-run cannot resurrect a pack the user removed or disabled.
+  ⚠️ **Still open — three out-of-band writers change the configurable set
+  WITHOUT moving the marker.** `POST /v1/packs/manifests`
+  (`pack_manifest_store.upsert_tenant_manifest`, widens),
+  `DELETE /v1/packs/manifests/{namespace}`
+  (`pack_manifest_store.delete_tenant_manifest`, narrows), and
+  `hosted_api._apply_import_pack_config` (re-activates on restore — the
+export/import gap the PR body names) write `:PackInstall` directly. On a graph
+that has both a `:PackSelection` marker and one of these writers, a `PUT`
+holding revision `N` can therefore still return `200` while erasing a
+namespace added after its read. Until they route through `set_graph_packs` (or
+bump the marker under `_pack_selection_lock`), `revision` is not a *complete*
+change signal, and *"no write path may alter the configurable set without
+moving the marker"* is the target those three paths must meet — not a property
+that holds today.
 - **Concurrency:** both the first configuration and every later one move the
 marker with a conditional compare-and-swap (`_cas_first_selection` /
 `_bump_selection`) *before* any install record is written, so a worker that

@@ -407,9 +407,13 @@ def ensure_tenant_packs(sdk: TortoiseSDK, *, starter: list[str] | tuple[str, ...
     Supabase control plane) re-activating every starter namespace with
     ``status='active'`` — silently resurrecting packs a user had removed or
     disabled, and WITHOUT moving the revision, so a client holding
-    ``revision=1`` could not even detect the widening. The invariant is:
-    **no write path may alter the configurable set without moving the
-    marker**; activation therefore skips (with a log line) and returns ``[]``.
+    ``revision=1`` could not even detect the widening. Activation therefore
+    skips (with a log line) and returns ``[]`` — a configured graph is never
+    re-seeded by THIS path. (The rule this PR enforces is the seed-side one:
+    every path that can re-seed a configured graph skips it. It is NOT yet
+    true that every ``:PackInstall`` writer moves the marker — the
+    tenant-manifest and import paths are named `Still open` in
+    ``docs/EXPANSION_PACKS.md`` §"Per-graph pack selection (#2728)".)
     """
     catalog = _resolve_catalog()
     g = _target_graph(sdk, graph_name)
