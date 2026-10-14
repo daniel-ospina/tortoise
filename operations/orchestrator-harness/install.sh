@@ -260,7 +260,7 @@ ok "plist valid"
 # invokes, not just orch-loop.sh. A drift here is silent and serious: a fix applied only to the
 # shipped copy (e.g. the fail-closed ai-review-gate classifier) would never reach the running box.
 DRIFTED=""
-for f in orch-loop.sh dispatch-merge.sh lane.sh chain-merge.sh merge-one.sh fix-one.sh refresh-candidates.sh adopt-fix.sh; do
+for f in orch-loop.sh dispatch-merge.sh lane.sh chain-merge.sh merge-one.sh fix-one.sh refresh-candidates.sh adopt-fix.sh spawn-gate.sh; do
   [ -f "$O/$f" ] || { DRIFTED="$DRIFTED $f(missing)"; continue; }
   diff -q "$HERE/$f" "$O/$f" >/dev/null 2>&1 || DRIFTED="$DRIFTED $f"
 done

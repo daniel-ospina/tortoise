@@ -54,7 +54,8 @@ passing merely because no run had a budget.
   The guard stops the ordinary in-process `signal` call; it does not stop code
   that deliberately reaches around the `signal` module.
 - A GIL-holding C call that makes SIGALRM undeliverable is #7649's domain.
-- `--timeout-func-only` runs are not covered (pytest-timeout arms during the
+- `timeout_func_only = true` (ini) or `pytest.mark.timeout(func_only=True)` runs are not covered
+  (there is no `--timeout-func-only` flag; pytest-timeout arms during the
   call phase; the repo uses none).
 - Fail-closed by design: *every* in-process SIGALRM use is refused — including a
   correct save/restore — so a library that arms SIGALRM must run in a

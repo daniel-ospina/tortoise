@@ -91,6 +91,19 @@ nor are consumed by the 100/min general budget. The limiter charges **once per
 request** in `RateLimitMiddleware.dispatch`; the unit is called "points/minute"
 in its own docstring and in the 429 body, and it is one charge per request.
 
+Every per-IP bucket (the unauthenticated fallback above, plus register / signup /
+recovery / claim / sensitive-op / session-login / invite buckets) identifies a
+client by its **IPv6 /64 network** (default; knob
+`TORTOISE_IP_BUCKET_IPV6_PREFIX`), never by its full 128-bit address — otherwise
+one subscriber holding a delegated /64 would rotate addresses within it and mint
+a fresh budget on every request (`#5490`). IPv4 and every IPv4-mapped IPv6
+spelling key as the plain IPv4 address, so a dual-stack client cannot double its
+budget; a malformed address maps to one shared `"anonymous"` bucket. Two clients
+inside ONE /64 therefore share that bucket — the deliberate tradeoff of per-/64
+identification (RIPE-690 / Better Auth default). Cross-/64 cardinality is
+unchanged by this rule: it stays bounded by the 10,000-bucket store cap plus its
+single shared overflow bucket, which fails closed.
+
 **Convert requests to tool calls before you size anything.** One MCP tool call
 can emit roughly 5–10 SSE requests, so the default 100 requests/min is closer to
 **10–20 tool calls/min** per key in practice. That ratio is documented next to

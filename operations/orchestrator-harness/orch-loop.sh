@@ -16,6 +16,14 @@ if [ ! -d "$REPO" ]; then echo "orch-loop: FATAL REPO=$REPO does not exist" >&2;
 O="${O:-$HOME/orchestrator}"
 export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH
 export AGENT_SKIP_REVIEW_GATE=1 ELDATO_SKIP_VGATE=1
+# The ONE load gate and the ONE `pi` invocation live in the shared helper (agent-infra#1720), so
+# the controller's decision sites here and the workers' actual spawns cannot drift apart. Sourced
+# AFTER the PATH export because the helper resolves MAX_LOAD from the core count (sysctl), exactly
+# as it did here before, and BEFORE the limits below so an env MAX_LOAD (the plist) still wins.
+# Fail LOUD if it is missing: the controller's whole capacity discipline is in there, and a silent
+# degradation would spawn every worker ungated (see README §9 on syncing $O).
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SELF/spawn-gate.sh" || { echo "orch-loop: FATAL: $SELF/spawn-gate.sh missing — refusing to run the controller without its load gate" >&2; exit 78; }
 
 MAX_FIX="${MAX_FIX:-3}"
 MAX_FIX_TRIES="${MAX_FIX_TRIES:-3}"
@@ -28,22 +36,13 @@ MAX_FIX_TRIES="${MAX_FIX_TRIES:-3}"
 # leaves the dispatcher off for most of the day.
 # (Corrected after a fresh-context verifier counted the dispatch lines the first claim ignored.)
 # The REAL capacity constraint is the machine (available RAM / swap) -- see the gate chain below.
-# Derive the ceiling from the core count so it scales, and keep the env override.
-# sysctl -n hw.ncpu is macOS-only: on a Linux cell sysctl may be absent entirely (Debian's procps
-# does not ship it any more — verified in debian:stable-slim) and hw.ncpu is a macOS key regardless,
-# so the fallback silently pinned _NCPU=4 for EVERY cell and MAX_LOAD=40 with it (#1702).
-is_num() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
-_NCPU="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
-# Coerce HERE — immediately before the ONLY reads of _NCPU and MAX_LOAD, not in the input-validation
-# block 30 lines below. A guard placed THERE guarded nothing (#1702 review): MAX_LOAD is derived on
-# the next line, a non-numeric _NCPU already made `$(( _NCPU * 10 ))` fail, and under `set -u` the
-# loop then aborted at the first `[ "$L" -ge "$MAX_LOAD" ]` — the same failure class this PR fixes.
-# MAX_LOAD gets the same coercion for the same reason every other threshold below does: it is
-# supplied by the launchd plist, and a typo there would open the load gate rather than close it
-# (`[ -ge ]` on a non-number is FALSE, and a false test in the gate chain ALLOWS dispatch).
-is_num "${_NCPU:-}"    || _NCPU=4
-MAX_LOAD="${MAX_LOAD:-$(( _NCPU * 10 ))}"
-is_num "${MAX_LOAD:-}" || MAX_LOAD=$(( _NCPU * 10 ))
+# MAX_LOAD itself is resolved in the sourced helper (spawn-gate.sh) — NOT here — because the
+# WORKERS read it too: one definition, so the ceiling the controller's decision applies and the
+# ceiling the spawn that actually starts an agent applies cannot diverge (agent-infra#1720).
+# The helper derives the core count PORTABLY (`sysctl` → `nproc` → `getconf`, #1702: `sysctl -n
+# hw.ncpu` is macOS-only, so `|| echo 4` silently pinned every Linux cell to MAX_LOAD=40) and
+# coerces a non-numeric `_NCPU`/`MAX_LOAD` rather than letting `[ -ge ]` fail OPEN. `is_num`, which
+# the coercions below use, is defined there too — this file has sourced it a few lines up.
 MAX_LANES="${MAX_LANES:-4}"
 MAX_REVIEW="${MAX_REVIEW:-4}"   # keep in sync with install.sh's default and README §4
 MERGE_PRIORITY_AT="${MERGE_PRIORITY_AT:-10}"   # above this many open PRs, drain before dispatching
@@ -69,6 +68,11 @@ safe_ref() {
   case "${1:-}" in ''|*[!A-Za-z0-9._/-]*) return 1 ;; esac
   git -C "$REPO" check-ref-format --branch "$1" >/dev/null 2>&1
 }
+# The same predicate spawn-gate.sh defines (and uses for the ceiling). Kept here as well because the
+# self-test extracts this file's functions STANDALONE (a `sed` block into a scratch file), so a
+# function this file calls must be resolvable from this file alone. Identical by construction; the
+# sourcing order (helper first) makes the redefinition a no-op at runtime.
+is_num() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 # A non-numeric threshold makes `[ -le ]` ERROR -- which returns false, and a false test in the gate
 # chain OPENS the gate. So a typo in the plist env (MIN_MEM_FREE_MB=abc) would silently remove the very
 # back-pressure these gates exist to apply. Coerce to the documented default instead of failing open.
@@ -95,19 +99,10 @@ file_mtime_epoch() { # <file> -> mtime as epoch seconds; NON-ZERO rc when unread
   is_num "$m" || return 1
   printf '%s\n' "$m"
 }
-# 1-min load average. THE FIELD DIFFERS: /proc field 1 IS the 1-min load, while macOS
-# `sysctl vm.loadavg` prints `{ 1.70 1.90 2.00 }`, so field 2 is. One shared awk would therefore
-# read the wrong field on one of the two platforms — the bug this function's test pins.
-# The argument is a TEST SEAM (the call site passes nothing), the same idiom as mp_reason() /
-# review_slots(): without it the Linux branch could only be exercised on a Linux host.
-load1() { # [<loadavg-file>]
-  local p="${1:-/proc/loadavg}"
-  if [ -r "$p" ]; then
-    awk '{printf "%d\n", $1}' "$p" 2>/dev/null
-  else
-    sysctl -n vm.loadavg 2>/dev/null | awk '{print int($2)}'
-  fi
-}
+# `load1` lives in spawn-gate.sh with the rest of the shared gate: the controller's decision sites
+# and the workers MUST read the same load probe (a /proc-based one on Linux cells, the sysctl field
+# on macOS), or the two gates would disagree about what load is. It is sourced at the top of this
+# file; do not re-declare it here.
 # Swap as MB. Linux reports kB in /proc/meminfo; macOS prints `total = 2048.00M ... free = ...`.
 # Echoes "<free_mb> <total_mb>"; NON-ZERO rc when unmeasurable, so the caller can tell "no swap
 # configured" (total 0 — the documented allow) from "we could not read it". An unreadable probe is
@@ -234,13 +229,21 @@ heartbeat() { date +%s > "$O/heartbeat"; }
 # Exact session-name test. `tmux has-session -t <name>` prefix-matches, so a guard for PR #82
 # would report "in flight" because `fix-820` exists — starving #82 while that worker lives.
 sess() { tmux ls -F '#{session_name}' 2>/dev/null | grep -qx "$1"; }
-# Spawning an agent during a load spike makes the spike worse. A Mac reboot lands in an indexing
-# storm (Spotlight, PerfPowerServices, duetexpertd) that the LANE dispatch gate already respects
+# Spawning a worker during a load spike makes the spike worse. A Mac reboot lands in an indexing
+# storm (Spotlight, PerfPowerServices, duetexpertd) that the LANE dispatch gate already respected
 # while the merge sweep did not — so a fresh boot got six reviewers piled onto it. The cheap actions
 # (gh pr merge / ready / run rerun) stay ungated, so merges keep flowing while the spike passes.
 # Nothing is starved: a held-back spawn retries next cycle, because the marker that authorises it
-# (needsfix-<PR>-<head>, fixcount-<PR>) is only written on a SUCCESSFUL spawn.
-can_spawn() { [ "${L:-0}" -lt "$MAX_LOAD" ]; }
+# (needsfix-<PR>-<head>, fixcount-<PR>) is only written on a SUCCESSFUL spawn. A fixer session whose
+# AGENT the load gate refuses refunds fixcount-<PR> and keeps needsfix-<PR>-<head> (fix-one.sh), so
+# "consumed" means an agent actually started — not merely that tmux created a session (#1720).
+#
+# `can_spawn` itself is in spawn-gate.sh so that the WORKERS' own spawns use the same predicate
+# (agent-infra#1720). These four sites pass the reading cached for this cycle ($L) so the `[cap]`
+# line below and the gate can never disagree about which load was consulted.
+# ⚠️ These four sites gate the DECISION to create a session. They are not the invariant: the agent
+# itself is gated in run_agent(), which is the only place `pi` is invoked. A worker spawned here on
+# a quiet cycle whose PR appears 90 minutes later is refused at spawn time by that gate.
 
 # Merge priority: a merge backlog means the box's scarce capacity belongs to review+merge, not to
 # opening more PRs. These two functions hold the rule so it is directly testable (and so a
@@ -477,8 +480,11 @@ print('NOCHECKS' if not groups else ('FAILED:'+','.join(fail) if fail else ('PEN
             [ -f "$O/state/parked-$PR" ] || { echo "${HEAD_N:-}" > "$O/state/parked-$PR"; echo "#$PR PARKED (still CONFLICTING after $NFC fixes)" >>"$LOG"; }
           elif claim_live "$PR" || sess "fix-$PR" || sess "merge-$PR"; then
             : # a worker is already rebasing it
-          elif [ "$(tmux ls 2>/dev/null | grep -c '^fix-')" -lt "${MAX_FIX:-3}" ] && can_spawn; then
-            printf '%s\n' "$REPO" "$OR" "$PR" "$BR" > "$O/state/argv-$PR"
+          elif [ "$(tmux ls 2>/dev/null | grep -c '^fix-')" -lt "${MAX_FIX:-3}" ] && can_spawn "$L"; then
+            # The 5th line is the head this attempt is booked against: fix-one.sh needs it to
+            # consume the findings marker once the agent starts, and to refund the attempt if the
+            # load gate refuses (see its refusal path). A refused fixer is not an attempt.
+            printf '%s\n' "$REPO" "$OR" "$PR" "$BR" "${HEAD_N:-}" > "$O/state/argv-$PR"
             if tmux new-session -d -s "fix-$PR" "bash '$O/fix-one.sh' --argv '$O/state/argv-$PR'" 2>/dev/null; then
               echo $((NFC + 1)) > "$CF"
               echo "#$PR CONFLICTING -> fixer attempt $((NFC + 1))" >>"$LOG"
@@ -506,17 +512,22 @@ print('NOCHECKS' if not groups else ('FAILED:'+','.join(fail) if fail else ('PEN
             # otherwise the gate is probably just missing evidence -> re-record (fresh review).
             if [ -n "${HEAD_N:-}" ] && [ -f "$O/state/needsfix-$PR-$HEAD_N" ] \
                && [ "$NF" -lt "${MAX_FIX_TRIES:-3}" ] \
-               && can_spawn \
+               && can_spawn "$L" \
                && [ "$(tmux ls 2>/dev/null | grep -c '^fix-')" -lt "${MAX_FIX:-3}" ]; then
               # Spawn FIRST, bookkeep only on success: recording the attempt before the spawn
-              # means a killed/failed spawn consumes one of MAX_FIX_TRIES and deletes the
-              # findings marker, so no fixer ever runs and the findings are lost.
+              # means a killed/failed spawn consumes one of MAX_FIX_TRIES, so no fixer ever runs.
+              # ⛔ The findings marker is NOT deleted here. This site used to `rm -f
+              # needsfix-$PR-$HEAD` on session creation, which is upstream of the load gate inside
+              # fix-one.sh: a REFUSED fixer then deleted the reviewer's findings and left the loop
+              # to re-record a full fresh-context review of a head nobody fixed (agent-infra#1720).
+              # fix-one.sh consumes the marker only once the agent has actually started, so a
+              # refusal leaves it intact and the next cycle re-dispatches rather than re-reviews.
               # Args travel in a file, not interpolated into the tmux command string, so no
               # PR-derived value can reach `sh -c`. Only $O (validated at startup) and the
-              # numeric $PR are embedded.
-              printf '%s\n' "$REPO" "$OR" "$PR" "$BR" > "$O/state/argv-$PR"
+              # numeric $PR are embedded. The 5th line is HEAD_N (see the CONFLICTING site).
+              printf '%s\n' "$REPO" "$OR" "$PR" "$BR" "${HEAD_N:-}" > "$O/state/argv-$PR"
               if tmux new-session -d -s "fix-$PR" "bash '$O/fix-one.sh' --argv '$O/state/argv-$PR'" 2>/dev/null; then
-                echo $((NF + 1)) > "$FIXN"; rm -f "$O/state/needsfix-$PR-$HEAD_N"
+                echo $((NF + 1)) > "$FIXN"
                 echo "#$PR fixer attempt $((NF + 1))" >>"$LOG"
               else
                 echo "#$PR fixer spawn FAILED (attempt not consumed, marker kept)" >>"$LOG"
@@ -526,7 +537,7 @@ print('NOCHECKS' if not groups else ('FAILED:'+','.join(fail) if fail else ('PEN
               # every cycle: an unfixable PR would burn a full fresh-context review forever.
               echo "${HEAD_N:-}" > "$O/state/parked-$PR"
               echo "#$PR PARKED after $NF fixes at head=${HEAD_N:-?} — needs a human" >>"$LOG"
-            elif [ "$(tmux ls 2>/dev/null | grep -c '^merge-')" -lt "$MR" ] && can_spawn; then
+            elif [ "$(tmux ls 2>/dev/null | grep -c '^merge-')" -lt "$MR" ] && can_spawn "$L"; then
               printf '%s\n' "$REPO" "$OR" "$PR" "$BR" > "$O/state/argv-$PR"
               tmux new-session -d -s "merge-$PR" "bash '$O/merge-one.sh' --argv '$O/state/argv-$PR'" 2>/dev/null \
                 && echo "#$PR re-record" >>"$LOG"
@@ -544,8 +555,8 @@ print('NOCHECKS' if not groups else ('FAILED:'+','.join(fail) if fail else ('PEN
             [ -f "$O/state/parked-$PR" ] || { echo "${HEAD_N:-}" > "$O/state/parked-$PR"; echo "#$PR PARKED (CI still red after $NFC2 fixes: $V)" >>"$LOG"; }
           elif claim_live "$PR" || sess "fix-$PR" || sess "merge-$PR"; then
             : # a worker is already on it
-          elif [ "$(tmux ls 2>/dev/null | grep -c '^fix-')" -lt "${MAX_FIX:-3}" ] && can_spawn; then
-            printf '%s\n' "$REPO" "$OR" "$PR" "$BR" > "$O/state/argv-$PR"
+          elif [ "$(tmux ls 2>/dev/null | grep -c '^fix-')" -lt "${MAX_FIX:-3}" ] && can_spawn "$L"; then
+            printf '%s\n' "$REPO" "$OR" "$PR" "$BR" "${HEAD_N:-}" > "$O/state/argv-$PR"
             if tmux new-session -d -s "fix-$PR" "bash '$O/fix-one.sh' --argv '$O/state/argv-$PR'" 2>/dev/null; then
               echo $((NFC2 + 1)) > "$O/state/fixcount-$PR"
               echo "#$PR CI-red ($V) -> fixer attempt $((NFC2 + 1))" >>"$LOG"
