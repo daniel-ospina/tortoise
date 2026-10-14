@@ -37,6 +37,8 @@ from tortoise.hosted_api import (  # noqa: I001
 )
 from tortoise.sdk import SESSION_READ_FIELDS, TortoiseSDK
 
+from tests._verdict import require_answered
+
 # The autouse ``_reset_health_probe`` fixture replaces
 # ``hosted_api._health_probe_interval`` with a near-infinite lambda for EVERY
 # test in this module (so the background refresher cannot overwrite a test's
@@ -2814,7 +2816,12 @@ class TestDreamEndpoint:
     """POST /v1/dream — trigger EP stabilization (#85)."""
 
     def test_dream_incremental(self, client):
-        r = client.post("/v1/dream")
+        # #5049: `POST /v1/dream` is not exempt from the transport wait bound.
+        # A 504 refusal is a non-answer (the handler may still complete), so the
+        # verdict is INCONCLUSIVE — this was one of the four reds #8122 measured
+        # as `assert 504 == 200` at a full-file run.
+        r = require_answered(client.post("/v1/dream"),
+                             what="POST /v1/dream answered")
         assert r.status_code == 200, r.text
         body = r.json()
         assert "converged" in body

@@ -5731,30 +5731,66 @@ def _resolve_superseded(ref: str, search: dict, *, kind: str = "") -> dict | Non
 
 
 def _resolve_retraction(ref: dict, search: dict,
-                        *, warnings: list[str]) -> dict | None:
-    """D5: resolve an embed-list retraction ref to an S3 prior POINT using
-    the never-guess discipline: by id (unique), else normalized-content
-    match; 0 or >1 matches → None (the caller warns + fails open). S3 only
-    returns live priors (terminal excluded at the search layer, #1391), so
-    a resolved deletion target is live by construction."""
+                        *, warnings: list[str],
+                        session_points: list[dict] | None = None) -> dict | None:
+    """D5: resolve an embed-list retraction ref to a POINT using the
+    never-guess discipline: by id (unique), else normalized-content match;
+    0 or >1 matches → None (the caller warns + fails open).
+
+    Resolution runs against the S3 search results FIRST (priors that existed
+    BEFORE this capture's writes) and then, additively, against the points
+    THIS session is about to emit (``session_points`` — #8039): the embed
+    list's own ``retractions`` contract says "the exact prior claim" and the
+    prompt's example is "scratch that", so a withdrawal of a fact first
+    stated in THIS conversation is in-contract — but such a fact has no S3
+    prior, so without the same-session leg the ref fail-opened and the fact
+    was written and never retracted (the exact staleness E7 exists to
+    prevent). S3-first ordering keeps a CROSS-session retraction resolving to
+    the S3 prior, byte-identical to the pre-#8039 behaviour.
+
+    This is NOT the F2 supersede boundary: F2 governs the CORRECTS channel
+    (same-session REVERSALS are state/validity semantics, never a point
+    supersede — see ``_resolve_point_supersede``), and a retraction is a
+    DELETE-soft tombstone, not a CORRECTS record. The two are separate
+    channels and the prompt already restricts only ``supersedes`` to
+    cross-session.
+
+    S3 returns live priors only (terminal excluded at the search layer,
+    #1391); same-session points are live by construction (they are being
+    written by this payload), so a resolved deletion target is live by
+    construction on both legs."""
     rid = str(ref.get("id") or "").strip()
     content = str(ref.get("content") or "").strip()
     points = [p for p in (search or {}).get("points", []) or []
               if isinstance(p, dict) and p.get("id")]
+    session = [p for p in (session_points or []) or []
+               if isinstance(p, dict) and p.get("id")]
     if rid:
         for p in points:
             if str(p.get("id")) == rid:
                 return p
-        warnings.append(f"retraction id={rid!r} matches no S3 prior — "
-                        "skipped (fail-open)")
+        for p in session:
+            if str(p.get("id")) == rid:
+                return p
+        warnings.append(f"retraction id={rid!r} matches no S3 prior or "
+                        "same-session point — skipped (fail-open)")
         return None
     if content:
         norm = _norm(content)
+        # S3 priors FIRST (cross-session behaviour unchanged); only when no
+        # prior matches does the same-session list answer. The session leg
+        # is 0-or-1 by construction (`execute_embed` dedupes payload points on
+        # `_norm(content)`), so it can never introduce an ambiguity the S3
+        # leg's never-guess guard has to resolve.
         matches = [p for p in points
                    if _norm(str(p.get("content") or "")) == norm]
         if not matches:
+            matches = [p for p in session
+                       if _norm(str(p.get("content") or "")) == norm]
+        if not matches:
             warnings.append(f"retraction content {content[:60]!r} matches no "
-                            "S3 prior — skipped (fail-open)")
+                            "S3 prior or same-session point — skipped "
+                            "(fail-open)")
             return None
         if len(matches) > 1:
             warnings.append(f"retraction content {content[:60]!r} is "
@@ -6887,12 +6923,17 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # Never from content alone: only the embed list's additive `retractions`
     # refs (resolved with the never-guess discipline) produce deletions.
     # Records stay RESULT-level (D8) — the Layer-1 payload does not grow.
+    # #8039: `payload_points` (the points THIS session emits, final ids, post
+    # repair/NOOP/prune) is the same-session resolution leg, so a retraction
+    # of a fact first stated in this conversation resolves instead of
+    # fail-opening.
     deletions: list[dict] = []
     for ref in embed_list.get("retractions", []) or []:
         if not isinstance(ref, dict):
             warnings.append(f"non-dict retraction ref {ref!r} skipped")
             continue
-        prior = _resolve_retraction(ref, search, warnings=warnings)
+        prior = _resolve_retraction(ref, search, warnings=warnings,
+                                    session_points=payload_points)
         if prior is None:
             continue
         rid = str(prior.get("id") or "").strip()

@@ -46,6 +46,7 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import require_answered
 from tortoise.commit_schema import (
     compute_client_commit_id,
     point_content_id,
@@ -264,9 +265,16 @@ def _finalize(raw: dict) -> dict:
 
 
 def _commit(client, raw: dict) -> dict:
-    """Finalize + POST /v1/sessions/commit."""
+    """Finalize + POST /v1/sessions/commit.
+
+    #5049: the route is not exempt from the transport wait bound, so a request
+    that outlives it is answered with the legible 504 refusal rather than an
+    answer. `require_answered` turns that non-answer into an INCONCLUSIVE skip
+    naming the bound; every other response — including the 4xx refusals this
+    file's callers assert on — is returned unchanged.
+    """
     r = client.post("/v1/sessions/commit", json=_finalize(raw))
-    return r
+    return require_answered(r, what="POST /v1/sessions/commit answered")
 
 
 def _inject_session_state(session_id: str, *, value_nodes_created: int = 0,
@@ -1709,7 +1717,9 @@ class TestFailedWriteRetry4704:
         raw = _finalize(_raw_payload(8, session_id=self._SESSION))
         calls = self._fail_the_first_point_write(monkeypatch)
 
-        first = client.post("/v1/sessions/commit", json=raw)
+        first = require_answered(
+            client.post("/v1/sessions/commit", json=raw),
+            what="POST /v1/sessions/commit answered")
         assert first.status_code == 500, first.text
         assert calls["n"] == 1
         # the counters landed BEFORE the failure; the record stays `partial`
@@ -1720,7 +1730,9 @@ class TestFailedWriteRetry4704:
         assert rec is not None and rec[0] == "partial"
         assert _commit_record_declared(raw["client_commit_id"]) == self._NET_NEW
 
-        second = client.post("/v1/sessions/commit", json=raw)
+        second = require_answered(
+            client.post("/v1/sessions/commit", json=raw),
+            what="POST /v1/sessions/commit answered")
         assert second.status_code == 200, (
             f"the retry must complete the payload: got {second.status_code} "
             f"{second.text}")
@@ -1749,7 +1761,9 @@ class TestFailedWriteRetry4704:
         assert rec[3] is False  # budget_warn — the clean verdict, not the retry's
 
         # the fix must not disturb L1: a further replay is still a duplicate
-        third = client.post("/v1/sessions/commit", json=raw)
+        third = require_answered(
+            client.post("/v1/sessions/commit", json=raw),
+            what="POST /v1/sessions/commit answered")
         assert third.status_code == 200 and third.json()["duplicate"] is True
         assert _session_counter(self._SESSION, "value_nodes_created") == (
             self._PRIOR + self._NET_NEW)
@@ -2532,20 +2546,26 @@ class TestLayer1:
     def test_missing_required_field_400(self, client):
         raw = _raw_payload(1)
         del raw["session_id"]
-        r = client.post("/v1/sessions/commit", json=_finalize(raw))
+        r = require_answered(
+            client.post("/v1/sessions/commit", json=_finalize(raw)),
+            what="POST /v1/sessions/commit answered")
         assert r.status_code == 400
         assert "session_id" in r.json()["detail"]
 
     def test_missing_client_commit_id_400(self, client):
         raw = _raw_payload(1)
         del raw["client_commit_id"]
-        r = client.post("/v1/sessions/commit", json=raw)
+        r = require_answered(
+            client.post("/v1/sessions/commit", json=raw),
+            what="POST /v1/sessions/commit answered")
         assert r.status_code == 400
 
     def test_commit_id_mismatch_422(self, client):
         raw = _finalize(_raw_payload(1))
         raw["client_commit_id"] = "0" * 64  # wrong hash
-        r = client.post("/v1/sessions/commit", json=raw)
+        r = require_answered(
+            client.post("/v1/sessions/commit", json=raw),
+            what="POST /v1/sessions/commit answered")
         assert r.status_code == 422
         body = r.json()["detail"]
         assert body.get("code") == "commit_id_mismatch"
@@ -2604,9 +2624,11 @@ class TestLayer1:
         assert any("source_ref" in k for k in r.json()["detail"]), r.json()["detail"]
 
     def test_401_unauthenticated(self, client_no_auth):
-        r = client_no_auth.post(
-            "/v1/sessions/commit", json=_finalize(_raw_payload(1)),
-            headers={"Authorization": "Bearer tt_badkey0000000000000000"})
+        r = require_answered(
+            client_no_auth.post(
+                "/v1/sessions/commit", json=_finalize(_raw_payload(1)),
+                headers={"Authorization": "Bearer tt_badkey0000000000000000"}),
+            what="POST /v1/sessions/commit answered")
         assert r.status_code == 401
 
     def test_500_fail_closed_redacted(self, client, monkeypatch):
@@ -3053,26 +3075,61 @@ class TestCommitBodySweepCap:
         first). The 413 must NOT be remapped into the 400 catch-all."""
         import tortoise.hosted_api as ha_mod
         monkeypatch.setattr(ha_mod, "_COMMIT_SESSION_MAX_BYTES", 8192)
-        r = client.post(
-            "/v1/sessions/commit", content=_oversized_chunked(),
-            headers={"content-type": "application/json"})
+        r = require_answered(
+            client.post(
+                "/v1/sessions/commit", content=_oversized_chunked(),
+                headers={"content-type": "application/json"}),
+            what="POST /v1/sessions/commit answered")
         assert r.status_code == 413
         assert r.json()["detail"] == ha_mod._COMMIT_SESSION_413_DETAIL
 
     def test_commit_malformed_400_preserved(self, client):
         """Malformed JSON → 400 'Request body must be a JSON object'
         (unchanged — empty body lands here too, via json.loads(b''))."""
-        r = client.post(
-            "/v1/sessions/commit", content=b"{",
-            headers={"content-type": "application/json"})
+        r = require_answered(
+            client.post(
+                "/v1/sessions/commit", content=b"{",
+                headers={"content-type": "application/json"}),
+            what="POST /v1/sessions/commit answered")
         assert r.status_code == 400
         assert r.json()["detail"] == "Request body must be a JSON object"
 
     def test_commit_empty_400_preserved(self, client):
         """Empty body → 400 (unchanged — Starlette's request.json() raises on
         empty; json.loads(b'') raises the same class into the same catch)."""
-        r = client.post(
-            "/v1/sessions/commit", content=b"",
-            headers={"content-type": "application/json"})
+        r = require_answered(
+            client.post(
+                "/v1/sessions/commit", content=b"",
+                headers={"content-type": "application/json"}),
+            what="POST /v1/sessions/commit answered")
         assert r.status_code == 400
         assert r.json()["detail"] == "Request body must be a JSON object"
+
+
+def test_commit_seam_is_inconclusive_on_a_transport_bound_refusal():
+    """#5049: `_commit`'s route is not exempt from the transport wait bound.
+
+    Deterministic (no load, no server): the seam's own request is answered by
+    the product's refusal. Removing `require_answered` from `_commit` makes this
+    go RED with `DID NOT RAISE pytest.skip.Exception` — the pre-fix `_commit`
+    returned the refusal, and each caller's bare `assert 504 == 200` (or `500`)
+    was the FAIL this conversion deletes.
+    """
+
+    class _BoundRefusalClient:
+        status_code = 504
+
+        def __init__(self) -> None:
+            from tortoise import mcp_auth
+
+            self.text = mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE
+
+        def post(self, *_args, **_kwargs):
+            return self
+
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        _commit(
+            _BoundRefusalClient(),
+            _raw_payload(0, session_id="sRefusal", points=[], entities=[],
+                         provenance_refs=[]))
+    assert "INCONCLUSIVE [#5049]" in str(excinfo.value)

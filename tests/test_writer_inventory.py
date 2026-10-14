@@ -35,6 +35,7 @@ from tortoise.auth import lookup_hash  # noqa: I001
 from tortoise.hosted_api import app, get_current_org, get_current_user
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import require_answered
 from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
 from tests.test_supabase_control import FREE_TEAM, TOKEN, _key_row, _membership_row  # noqa: F401
 from datetime import UTC
@@ -573,7 +574,8 @@ class TestAgentSignup:
         RPC with NULL user_id + identity + the signup-token hash;
         teams/membership/api_keys/token rows land; key resolves."""
         tc, fake, _ = client
-        r = tc.post("/v1/agent/signup", json={})
+        r = require_answered(tc.post("/v1/agent/signup", json={}),
+                             what="POST /v1/agent/signup answered")
         assert r.status_code == 200, r.text
         body = r.json()
         key, org_id, identity = body["key"], body["org_id"], body["identity"]
@@ -1080,8 +1082,10 @@ class TestGraphSurface:
         fake.tables["organizations"][0]["tier"] = "pro"
         fake.tables["organizations"][0]["max_graphs"] = None
         fake.seed("org_memberships", [_owner_membership()])
-        r = tc.post("/v1/graphs", json={
-            "org_id": "team-free-001", "name": "research"})
+        r = require_answered(
+            tc.post("/v1/graphs", json={
+                "org_id": "team-free-001", "name": "research"}),
+            what="POST /v1/graphs answered")
         assert r.status_code == 201, r.text
         body = r.json()
         # The nested 201 envelope (additive for the dashboard caller)

@@ -42,6 +42,7 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import require_answered
 from tests.fake_control_plane import FakeControlPlane  # noqa: E402, RUF100
 from tortoise import hosted_api as _ha_mod  # noqa: E402, RUF100
 from tortoise.hosted_api import (  # noqa: E402, F401, I001, RUF100
@@ -2058,11 +2059,13 @@ class TestMcpBoundary:
         mcp_tc = self._mcp(cp)
         mcp_tc.headers.update(_mcp_headers(access))
         with mcp_tc:
-            rr = mcp_tc.post("/mcp", json={
-                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": {"name": "tortoise_create_point",
-                            "arguments": {"kind": "statement",
-                                           "content": content}}})
+            rr = require_answered(
+                mcp_tc.post("/mcp", json={
+                    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "tortoise_create_point",
+                                "arguments": {"kind": "statement",
+                                               "content": content}}}),
+                what="MCP tools/call tortoise_create_point answered")
             assert rr.status_code == 200, rr.text
             body = _parse_sse_json(rr)
             assert "result" in body, body

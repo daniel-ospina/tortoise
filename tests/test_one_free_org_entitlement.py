@@ -28,6 +28,7 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
+from tests._verdict import require_answered
 from tests.fake_control_plane import FakeControlPlane
 from tests.test_billing import FIXTURE_SUB, VALID_CATALOG
 from tests.test_supabase_control import FREE_TEAM, _membership_row
@@ -151,8 +152,10 @@ def _post_signed(tc, event: dict):
     sig = hmac_mod.new(
         _WEBHOOK_SECRET.encode(), f"{ts}.".encode() + raw,
         hashlib.sha256).hexdigest()
-    return tc.post("/webhooks/stripe", content=raw,
-                   headers={"stripe-signature": f"t={ts},v1={sig}"})
+    return require_answered(
+        tc.post("/webhooks/stripe", content=raw,
+                headers={"stripe-signature": f"t={ts},v1={sig}"}),
+        what="POST /webhooks/stripe answered")
 
 
 # ── POST /v1/billing/checkout/new-org ───────────────────────────────────────

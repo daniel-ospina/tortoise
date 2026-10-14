@@ -1,9 +1,8 @@
 """#2296 — a Document created through the SDK survives ``rebuild_all``.
 
-The epic's own Indicator-2 gap list (scope hook from #2295) and
-``tests/test_unjournaled_mutation_class.py`` both name this as the *last
-unjournaled canonical create*: ``create_document`` / ``create_entity(type=
-"document")`` route ``_create_entity("Document", <ulid>, …, "DocumentCreated")``
+The epic's own Indicator-2 gap list (scope hook from #2295) named this the
+*last unjournaled canonical create* — that is the PRE-#2296 state, recorded as
+closed in ``tests/test_unjournaled_mutation_class.py``. ``create_document`` / ``create_entity(type="document")`` route ``_create_entity("Document", <ulid>, …, "DocumentCreated")``
 and emitted **no journal record** on that route. ``DocumentCreated`` is a
 fold the replay engines honour (``_upsert_document``), but with no record to
 replay a journal-enabled SDK's Documents were live-only — every
@@ -26,6 +25,7 @@ and ``test_create_entity_document_journals_and_survives_rebuild`` (the
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import sys
@@ -60,6 +60,25 @@ def _document_created(events) -> list[dict]:
 def _sources(proj, url: str):
     return proj.g.query("MATCH (s:Source {url:$u}) RETURN properties(s)",
                         params={"u": url}).result_set
+
+
+def _forged_prop_value(name: str, forged_ts: str):
+    """A caller value that WOULD forge the record if the name were not dropped."""
+    if name in ("point", "payload"):
+        return {"forged": True}
+    if name == "type":
+        return "SourceVersioned"  # would re-type/suppress the create record
+    if name == "projection_version":
+        return 99
+    if name == "event_id":
+        return "FORGED-EVENT-ID"
+    if name == "initiated_by":
+        return "FORGED-ACTOR"
+    if name == "type_":
+        return "X"
+    if name == "new_content":
+        return "FORGED"
+    return forged_ts  # ts / recorded_ts
 
 
 def test_create_document_journals_and_survives_rebuild(env):
@@ -121,17 +140,16 @@ def test_the_record_carries_the_applied_payload(env):
     map (not just the three payload keys), so a NEW unintended divergence
     fails here instead of passing silently.
 
-    NOT COVERED HERE: a caller ``props`` key that collides with an envelope
-    key (``event_id``, ``ts``, ``point``, …) reaches the live node but is
-    stripped from the record by ``_journal_record_payload`` (or shadowed by
-    the envelope value), so live ≠ replay for that key. That is the
-    pre-existing envelope-key class — also reachable via ``create_source``'s
-    ``**props`` splat — not introduced by #2296, tracked as #8553, and not
-    asserted here. ``recorded_ts`` is EXCLUDED by the code rather than left to
-    #8553: it is the name of an ``_emit_event`` PARAMETER, so a caller prop of
-    it would bind that parameter and forge the record's envelope ``ts``; it is
-    in ``_JOURNAL_ENVELOPE_KEYS`` and popped from the live event in
-    ``_create_entity``.
+    NOT COVERED HERE: an envelope key the caller also supplies as a ``props``
+    key. Those no longer reach this record at all — ``_RESERVED_ENVELOPE_PROPS``
+    (every ``_JOURNAL_ENVELOPE_KEYS`` name but ``id``) is stripped at prop
+    INTAKE by ``_sanitize_props``, and ``create_source`` — which bypasses that
+    intake — drops the same set plus the reserved actor keys, so the caller's
+    value reaches neither the live node nor the record. That refusal, and the
+    ``type``-suppression path it closes, are asserted in
+    ``test_a_reserved_envelope_prop_cannot_forge_or_suppress_the_record``.
+    ``id`` is the one envelope name not in that set: it keeps its own
+    fail-closed ``ValueError`` contract instead.
     """
     sdk, events = env
     doc = sdk.create_document("Payload Doc", "report")
@@ -172,30 +190,88 @@ def test_the_record_carries_the_applied_payload(env):
         "survive the replay")
 
 
-def test_a_recorded_ts_prop_cannot_forge_the_envelope(env):
-    """A caller ``recorded_ts`` prop is an ``_emit_event`` PARAMETER name, not
-    a domain prop. It must not bind the envelope ``ts`` (the record's ts is
-    minted by ``_emit_event``), and it must not persist live either — the
-    record strips it, so keeping it live would be the #8553 live ≠ replay
-    divergence. Every emitter that can turn the prop into an envelope ``ts`` is
-    checked: ``create_document`` (via ``_create_entity``'s live pop),
-    ``create_source`` (which emits its own ``SourceCreated`` and needs its own
-    drop), and ``update_point`` (which splats caller props straight into
-    ``_emit_event`` — the shared intake strip in ``_sanitize_props`` is what
-    covers it). FAILS IF ``recorded_ts`` leaves ``_JOURNAL_ENVELOPE_KEYS`` (the
-    record's ``ts`` becomes caller-controlled), or the intake strip / either
-    door's live drop is removed."""
+def test_a_reserved_envelope_prop_cannot_forge_or_suppress_the_record(env):
+    """An ``_emit_event``-owned name must never reach it as a caller prop.
+
+    Two families are reserved, and this test drives BOTH through the doors that
+    can carry a caller prop:
+
+    * ``_RESERVED_ENVELOPE_PROPS`` — the journal ENVELOPE names (measured on
+      ``update_point``: a caller ``recorded_ts`` forges the record's ``ts``,
+      ``point`` hands the record the node snapshot a rebuild then replays,
+      ``ts``/``event_id``/``projection_version`` overwrite the built envelope
+      via ``event.update(extra)``).
+    * ``_RESERVED_EMIT_CALL_PROPS`` — names that are NOT envelope keys but
+      collide at the CALL: ``type_`` is `_emit_event`'s first parameter and
+      ``new_content`` is passed explicitly by ``update_point``'s emit, so
+      either raised ``TypeError`` AFTER the live write had landed — the
+      mutation stayed live-only and was destroyed by ``rebuild_all``.
+
+    ``type`` is the key the live fold and the record BOTH dispatch on, so a prop
+    of that name re-types or silently SUPPRESSES the record: measured,
+    ``create_document(type="SourceCreated")`` journalled nothing and
+    ``rebuild_all`` destroyed the node — the #2296 defect itself.
+
+    Both sets are stripped at prop intake (``_sanitize_props``), the one surface
+    ``create_point``/``update_point``/``create_entity``/``update_entity`` all
+    pass through; ``create_source`` bypasses that intake and drops both sets —
+    plus the reserved actor keys — itself, and that lane is driven here for
+    EVERY reserved name, because a name that survives it raises inside a
+    swallowed ``try/except`` and produces no record at all.
+
+    FAILS IF ``_RESERVED_ENVELOPE_PROPS`` drifts from ``_JOURNAL_ENVELOPE_KEYS``
+    minus ``id``, IF the two reserved sets overlap, IF any name is left out of
+    the intake strip, or IF any name is left out of ``create_source``'s drop."""
     sdk, events = env
     forged = "1999-01-01T00:00:00+00:00"
-    # The record side: `recorded_ts` is an `_emit_event` PARAMETER name, so it
-    # must be stripped from EVERY entity-door payload (the tuple entry), not
-    # only from the one call this test happens to drive.
-    from tortoise.sdk import _journal_record_payload
-    assert "recorded_ts" not in _journal_record_payload(
-        {"type": "DocumentCreated", "id": "x", "recorded_ts": forged}), (
-        "`recorded_ts` is an `_emit_event` parameter name and must be stripped "
-        "from every entity-door record payload — leaving it in lets a caller "
-        "prop bind the `recorded_ts` parameter and forge the envelope `ts`")
+    from tortoise.sdk import (
+        _JOURNAL_ENVELOPE_KEYS,
+        _RESERVED_EMIT_CALL_PROPS,
+        _RESERVED_ENVELOPE_PROPS,
+        _journal_record_payload,
+    )
+    # The invariant the change rests on, asserted rather than promised in a
+    # comment: the reserved set IS the envelope vocabulary minus `id`, and the
+    # two sets never overlap (a call name belongs in exactly one place). A name
+    # ADDED to `_JOURNAL_ENVELOPE_KEYS` without a reservation is the drift this
+    # test exists to catch — the loop below cannot see it, because it iterates
+    # the reserved set itself.
+    assert set(_RESERVED_ENVELOPE_PROPS) == set(_JOURNAL_ENVELOPE_KEYS) - {"id"}, (
+        "`_RESERVED_ENVELOPE_PROPS` must equal `_JOURNAL_ENVELOPE_KEYS` minus "
+        "`id`: an envelope name reserved in one place and not the other "
+        "re-opens the caller-prop collision this test closes")
+    assert not (set(_RESERVED_EMIT_CALL_PROPS) & set(_JOURNAL_ENVELOPE_KEYS)), (
+        "`_RESERVED_EMIT_CALL_PROPS` is for names that are NOT envelope keys; "
+        "an envelope key belongs in `_RESERVED_ENVELOPE_PROPS`")
+    _all_reserved = (*_RESERVED_ENVELOPE_PROPS, *_RESERVED_EMIT_CALL_PROPS)
+    # Every parameter `_emit_event` owns is a name a caller prop can bind at the
+    # call, so the reserved sets must COVER its signature — DERIVED here rather
+    # than hand-listed, because the hand-listed set drifted and left `self` open
+    # (measured: `create_source(url, "document", props={"self": …})` raised
+    # inside `_emit_event`, that door's journal try/except swallowed it, and
+    # `rebuild_all` destroyed the live-only `:Source`). `**extra` is the
+    # documented passthrough, and `id` is deliberately excluded (the entity
+    # doors reject it fail-closed; `create_point` consumes it as its explicit-id
+    # path).
+    _owned = {n for n, p in inspect.signature(
+        TortoiseSDK._emit_event).parameters.items()
+        if p.kind is not inspect.Parameter.VAR_KEYWORD} - {"id"}
+    assert not (_owned - set(_all_reserved)), (
+        f"`_emit_event` owns {sorted(_owned - set(_all_reserved))!r} but no "
+        "reserved set covers them: a caller prop of such a name binds that "
+        "parameter at the call — after the live write — and `_emit_event` "
+        "cannot see the collision from inside")
+    # The record side: every ENVELOPE name must be stripped from EVERY
+    # entity-door payload, not only from the one call this test happens to
+    # drive. (`_RESERVED_EMIT_CALL_PROPS` are not envelope keys, so
+    # `_journal_record_payload` is not the seam that strips those — the intake
+    # strip below is.)
+    for name in _RESERVED_ENVELOPE_PROPS:
+        assert name not in _journal_record_payload(
+            {"type": "DocumentCreated", "id": "x", name: forged}), (
+            f"{name!r} is an `_emit_event` envelope name and must be stripped "
+            "from every entity-door record payload — leaving it in lets a "
+            "caller prop bind that parameter or re-type the record")
     doc = sdk.create_document("Forged", "report", recorded_ts=forged)
     rec = _document_created(events)[0]
     assert rec["ts"] != forged, (
@@ -204,30 +280,218 @@ def test_a_recorded_ts_prop_cannot_forge_the_envelope(env):
     assert "recorded_ts" not in live, (
         "a caller `recorded_ts` prop persisted live while the record strips "
         "it — the #8553 live != replay divergence")
-    # The Source door emits its OWN record (`SourceCreated`) and does not route
-    # through `_journal_entity_event`, so it needs its own drop.
+    # The Source door emits its OWN record (`SourceCreated`), bypasses the
+    # intake strip, and drops the reserved names itself — including the ACTOR
+    # keys, which the sanitizer would otherwise have taken.
     sdk.create_source("https://example.com/rt", "document",
-                      recorded_ts=forged, summary="rt")
+                      recorded_ts=forged, initiated_by="FORGED-ACTOR",
+                      summary="rt")
     src_rec = next(e for e in _journal(events)
                    if e.get("type") == "SourceCreated")
     assert src_rec["ts"] != forged, (
         "a caller `recorded_ts` prop forged the SourceCreated record's ts")
-    # The generic update door: `update_point` splats caller props into
-    # `_emit_event` directly, so before the intake strip a prop of this name
-    # bound the `recorded_ts` PARAMETER and forged the `PointRevised` record's
-    # `ts` (measured). `_sanitize_props` is the shared intake it passes through.
-    pt = sdk.create_point("note", "a point")
-    sdk.update_point(pt["id"], recorded_ts=forged, summary="rt")
+    assert src_rec.get("initiated_by") == "sdk", (
+        "a caller `initiated_by` prop forged the SourceCreated record's actor")
+    # The generic update door splats caller props straight into `_emit_event`,
+    # so before the intake strip each of these bound its own parameter or
+    # overwrote the built envelope via `event.update(extra)`.
+    pt = sdk.create_point("statement", "a point")
+    # `type_` and `new_content` are the CALL-collision names: pre-fix either of
+    # them in this splat raises `TypeError` AFTER the live write, with no
+    # `PointRevised` record (so this call itself errors before any assertion).
+    sdk.update_point(pt["id"], recorded_ts=forged, type="PointAdded",
+                     point={"id": "forged"}, payload={"forged": True},
+                     ts=forged, event_id="FORGED-EVENT-ID",
+                     projection_version=99, initiated_by="FORGED-ACTOR",
+                     type_="X", new_content="FORGED", summary="rt")
     rev = next(e for e in _journal(events)
                if e.get("type") == "PointRevised")
     assert rev["ts"] != forged, (
-        "a caller `recorded_ts` prop forged the PointRevised record's ts")
+        "a caller `recorded_ts`/`ts` prop forged the record's envelope ts")
+    # `point` is the non-vacuous half: it is an `_emit_event` PARAMETER, so a
+    # surviving prop would put the caller's snapshot on the record. `payload`
+    # is deliberately NOT asserted — it is also a parameter, so it can never
+    # appear as a record key and `.get("payload")` could not fail on any
+    # version (an assertion that reads as a pin but is a tautology).
+    assert rev.get("point") is None, (
+        "a caller `point` prop became the record's snapshot — the rebuild "
+        "replays it onto the node")
+    assert (rev.get("event_id") != "FORGED-EVENT-ID"
+            and rev.get("projection_version") == 2
+            and rev.get("initiated_by") == "sdk"), (
+        "a caller prop overwrote a built envelope field via "
+        "`event.update(extra)`")
     pt_live = sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) RETURN properties(n)",
         params={"id": pt["id"]}).result_set[0][0]
-    assert "recorded_ts" not in pt_live, (
-        "a caller `recorded_ts` prop persisted live on the Point while the "
+    for name in _all_reserved:
+        assert name not in pt_live, (
+            f"a caller {name!r} prop persisted live on the Point while the "
+            "record strips it — the #8553 live != replay divergence")
+    # A `type` prop must not suppress a Document's record: with it suppressed
+    # the node is live-only and `rebuild_all` destroys it.
+    n_before = len(_document_created(events))
+    doc2 = sdk.create_document("Forged2", "report", type="SourceCreated")
+    recs = _document_created(events)
+    # Two SEPARATE assertions: `recs` is `_document_created(events)`, already
+    # filtered to `type == "DocumentCreated"`, so a `recs[-1].get("type") ==
+    # ...` conjunct inside an `and` could never fail. The id match is the real
+    # second pin.
+    assert len(recs) == n_before + 1, (
+        "a caller `type` prop re-typed or suppressed the DocumentCreated "
+        f"record: journal={[e.get('type') for e in _journal(events)]}")
+    assert recs[-1].get("id") == doc2["id"], (
+        "the new DocumentCreated record does not belong to the document whose "
+        "create passed the `type` prop")
+    # The `_skip_sanitize` door (`create_source`) drops BOTH sets itself. Drive
+    # EVERY reserved name through it: a name that survives makes the journal
+    # emit raise inside create_source's swallowed `try/except`, so the caller
+    # gets a success response, NO record is written, and the `:Source` is
+    # live-only — destroyed by the next rebuild (#2296).
+    #
+    # `payload` is the one name TWO contracts claim, and the LOUDER one wins:
+    # D30/#3998 refuses that spelling on a `:Source` BEFORE the reserved strip
+    # runs, because it is also the common raw-body mistake that guard exists to
+    # answer with an actionable error rather than a silent drop. That refusal
+    # is correct, so it is asserted separately here — driving it through the
+    # strip loop below would assert the wrong contract (the record is never
+    # written because the call raises, not because the name was dropped).
+    _loud_d30 = {"payload"}
+    for name in sorted(_loud_d30 & set(_all_reserved)):
+        with pytest.raises(ValueError, match="raw payload"):
+            sdk.create_source(f"https://example.com/d30-{name}", "document",
+                              **{name: _forged_prop_value(name, forged)})
+    _bypass: dict[str, str] = {}
+    for i, name in enumerate(n for n in _all_reserved if n not in _loud_d30):
+        url = f"https://example.com/bypass-{i}"
+        _value = _forged_prop_value(name, forged)
+        # `self` cannot be passed as a direct kwarg — Python rejects it at THIS
+        # call — but it is reachable exactly the way a caller reaches it:
+        # through the documented nested-`props` convention (`_coerce_props`),
+        # which is flattened before the names are splatted into `_emit_event`.
+        _kw = {"props": {name: _value}} if name == "self" else {name: _value}
+        sdk.create_source(url, "document", **_kw)
+        _bypass[url] = name
+    _src = {e.get("id"): e for e in _journal(events)
+            if e.get("type") == "SourceCreated"}
+    for url, name in _bypass.items():
+        src = _src.get(url)
+        assert src is not None, (
+            f"`create_source` wrote no `SourceCreated` record for a caller "
+            f"{name!r} prop: it survived the door's strip, the emit raised "
+            f"inside the swallowed try/except, and the :Source is live-only "
+            f"(#2296)")
+        assert (src["ts"] != forged
+                and src["event_id"] != "FORGED-EVENT-ID"
+                and src["projection_version"] == 2
+                and src.get("initiated_by") == "sdk"
+                and src.get("point") is None
+                and src.get("new_content") is None), (
+            f"a caller {name!r} prop was not dropped by the create_source "
+            f"door's strip: {src!r}")
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    for _id in (doc["id"], doc2["id"], *_bypass):
+        assert _sources(sdk._get_proj(), _id), (
+            "a Document/Source was live-only: `rebuild_all` destroyed it "
+            "(#2296)")
+
+
+def test_update_entity_source_refuses_reserved_props_loudly(env):
+    """The intake strip must not silence the #3998/D30 ``:Source`` refusal.
+
+    ``_update_entity`` strips the reserved names at intake, BEFORE its
+    target-aware ``:Source`` guard. On a ``:Source`` an undeclared key is the
+    COMMON raw-body mistake that guard exists to answer LOUDLY and
+    key-naming — and a `props` bag of ONLY reserved names would otherwise
+    leave nothing for the guard's ``if props:`` gate and return a
+    success-shaped no-op with the write discarded.
+
+    RED without the pre-strip capture: ``update_entity(<Source>, payload=...)``
+    returned normally (measured at the pre-fix head).
+
+    ``event_id`` is deliberately EXCLUDED from that loop: it is both a reserved
+    envelope name and a DECLARED `:Source` property, so the reservation drops it
+    while the update must still LAND — see the assertions below.
+    """
+    sdk, _events = env
+    url = "https://example.com/refuse"
+    sdk.create_source(url, "document")
+    # UNDECLARED reserved names: the loud D30 refusal still fires even though the
+    # intake strip already removed them from `props` — the pre-strip capture is
+    # what keeps the guard answerable.
+    for name in ("payload", "point", "type", "ts",
+                 "projection_version", "type_", "new_content"):
+        with pytest.raises(ValueError, match="cannot be set on a :Source"):
+            sdk.update_entity(url, **{name: {"k": "v"}})
+    # `event_id` is the one reserved name that is ALSO declared on a `:Source`,
+    # so it must not be pushed into the guard's undeclared set: measured, the
+    # unsubtracted union refused the WHOLE update — the legitimate co-supplied
+    # `summary` was lost — with a message whose own "Declared :Source
+    # properties" list names `event_id` as settable. The update must land, and
+    # the name must not persist (the envelope owns it; a live-only `event_id`
+    # would be the #8553 live != replay divergence).
+    sdk.update_entity(url, event_id="FORGED-EVENT-ID", summary="kept")
+    live = sdk._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.summary, s.event_id",
+        params={"u": url}).result_set[0]
+    assert live[0] == "kept", (
+        "a declared reserved prop (`event_id`) refused the whole update: the "
+        "legitimate co-supplied `summary` was discarded")
+    assert live[1] is None, (
+        "a caller `event_id` prop persisted live on the :Source while the "
         "record strips it — the #8553 live != replay divergence")
+    # The reserved ACTOR keys keep their strip-and-ignore contract (#2600):
+    # never a 4xx — the server owns attribution.
+    sdk.update_entity(url, initiated_by="FORGED-ACTOR")
+
+
+def test_a_relay_door_strips_the_reserved_names_before_splatting(env):
+    """A door that SPLATS the caller bag onward must strip BEFORE the relay.
+
+    ``update_entity`` relays to ``_update_entity``, and ``create_subject`` /
+    ``create_object`` / ``create_event`` relay to ``create_entity`` — every one of
+    those callees takes ``self`` as its FIRST parameter and ``type`` as its
+    next, so a ``self``/``type`` key (reachable through the documented nested
+    ``props={...}`` convention) raised ``TypeError`` AT THE RELAY, one frame
+    before the intake strip could drop it. Measured before the fix:
+    ``create_subject(name, props={"self": …})`` raised ``TypeError``, and the
+    ingest bundle's Phase-2 relay aborted AFTER an earlier section had already
+    committed.
+
+    FAILS IF a relay forwards a reserved name un-stripped — the call raises
+    instead of dropping the name — or if the D30 ``:Source`` refusal stops
+    answering an undeclared reserved name that arrives this way.
+    """
+    sdk, _events = env
+    poisoned = {"self": "FORGED", "type": "FORGED", "type_": "X",
+                "new_content": "FORGED", "point": {"forged": True}}
+    for door, args in ((sdk.create_subject, ("relay-subject",)),
+                       (sdk.create_object, ("relay-object",)),
+                       (sdk.create_event, ("relay-event", "meeting"))):
+        node = door(*args, props=dict(poisoned))
+        assert node.get("id"), f"{door.__name__} relay dropped the write"
+        live = sdk._get_proj().g.query(
+            "MATCH (n {id:$i}) RETURN properties(n)",
+            params={"i": node["id"]}).result_set[0][0]
+        for name in poisoned:
+            assert name not in live, (
+                f"{door.__name__}: a reserved {name!r} prop reached the node "
+                "through the relay splat")
+    # `update_entity` relays to `_update_entity` (same `self` hazard). On a
+    # POINT the reserved names are strip-and-ignore, so the legitimate co-supplied
+    # `summary` must land; on a `:Source` the same undeclared name keeps the LOUD
+    # D30 refusal it has through every other path.
+    pt = sdk.create_point("statement", "relay point")
+    sdk.update_entity(pt["id"], props={"self": "FORGED", "summary": "relayed"})
+    pt_live = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$i}) RETURN properties(n)",
+        params={"i": pt["id"]}).result_set[0][0]
+    assert pt_live.get("summary") == "relayed" and "self" not in pt_live, (
+        f"the update_entity relay mishandled a reserved prop: {pt_live!r}")
+    url = "https://example.com/relay-source"
+    sdk.create_source(url, "document")
+    with pytest.raises(ValueError, match="cannot be set on a :Source"):
+        sdk.update_entity(url, props={"self": "FORGED"})
 
 
 def test_document_mutation_survives_rebuild(env):
