@@ -282,7 +282,7 @@ function keyRowDisclosure(row, fallbackName) {
 // capturedSessions.test.js) for the Settings Captured-sessions home.
 import {
   removeSession, sessionRowMeta, transcriptModel,
-  turnRoleClass, kindBadgeClass, DELETE_CONFIRM,
+  turnRoleClass, kindBadgeClass, DELETE_CONFIRM_WORD, DELETE_CONSEQUENCES,
 } from './capturedSessions.js'
 // #2001 (W5): the Setup-guide card mirror — ONE shared derivation
 // (setupGuide.js, node --test) of the graph-held FLOW state. Renders the
@@ -545,6 +545,13 @@ function SettingsTab(props) {
   // mirrors the App-level sessionDetail/selectedSessionId (kept in the App
   // so team switches + logouts clear it in one place).
   const openSessionId = selectedSessionId ? String(selectedSessionId) : null
+  // #3885 (e): deleting the RAW transcript is armed by a TYPE-TO-CONFIRM
+  // modal — the same gate the product uses to delete a whole graph (#2701) —
+  // not a native window.confirm. State is per-row and validated against the
+  // live `sessions` list: a successful DELETE removes the row and closes the
+  // dialog, a failed one leaves it armed (the reason renders under the list).
+  const [confirmSessionId, setConfirmSessionId] = React.useState(null)
+  const [sessionConfirmTyped, setSessionConfirmTyped] = React.useState('')
   return (
     <section className="settings" aria-label="Settings">
       <h2>Settings</h2>
@@ -743,8 +750,10 @@ function SettingsTab(props) {
                         style={{ color: 'var(--red,#f87171)' }}
                         disabled={!!deletingSessionId}
                         onClick={() => {
-                          if (!window.confirm(DELETE_CONFIRM)) return
-                          onDeleteSession(s.id)
+                          // #3885 (e): arm the type-to-confirm modal — the
+                          // deletion itself only runs from the gated dialog.
+                          setConfirmSessionId(sid)
+                          setSessionConfirmTyped('')
                         }}>
                         {deleting ? 'Deleting…' : 'Delete'}
                       </button>
@@ -769,6 +778,56 @@ function SettingsTab(props) {
                 onClose={onClearSessionDetail}
               />
             )}
+            {/* #3885 (e): the raw-delete confirmation. Owner requirement:
+                deleting the raw needs STRONG confirmation, consistent with
+                the graph-delete pattern (#2701) and applying to EVERY storage
+                mode — the gate is about the consequence, not about who holds
+                the bytes. Same `.graph-delete-modal` CSS vocabulary and the
+                same `deleteTypedMatches` gate as the graph modal; the required
+                word and the consequence lines come from capturedSessions.js so
+                copy, gate and tripwire cannot drift. The dialog renders only
+                while its session is still listed, so a successful DELETE
+                closes it and a failed one keeps it armed. */}
+            {confirmSessionId && (() => {
+              const ds = sessions.find((x) => String(x.id) === confirmSessionId)
+              if (!ds) return null
+              const sessionTypedOk = deleteTypedMatches(sessionConfirmTyped)
+              const sessionBusy = deletingSessionId === confirmSessionId
+              return (
+                <div className="modal-backdrop" onClick={() => { if (!sessionBusy) { setConfirmSessionId(null); setSessionConfirmTyped('') } }}>
+                  <div className="modal graph-delete-modal session-delete-modal" role="dialog" aria-modal="true" aria-label="Delete captured session" onClick={(e) => e.stopPropagation()}>
+                    <h3>Delete this captured session?</h3>
+                    <p className="danger-note">This cannot be undone — think before you confirm.</p>
+                    <ul className="dim small">
+                      {DELETE_CONSEQUENCES.map((line) => <li key={line}>{line}</li>)}
+                    </ul>
+                    <p className="dim small" style={{ margin: '0.6rem 0 0.4rem' }}>
+                      Type <code>{DELETE_CONFIRM_WORD}</code> to confirm:
+                    </p>
+                    <input
+                      autoFocus
+                      className="delete-confirm-input"
+                      value={sessionConfirmTyped}
+                      aria-label={`Type ${DELETE_CONFIRM_WORD} to confirm`}
+                      onChange={(e) => setSessionConfirmTyped(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && sessionTypedOk && !sessionBusy) { e.preventDefault(); onDeleteSession(ds.id) }
+                        if (e.key === 'Escape' && !sessionBusy) { setConfirmSessionId(null); setSessionConfirmTyped('') }
+                      }}
+                    />
+                    <div className="new-key-actions" style={{ marginTop: '0.8rem' }}>
+                      <button type="button" className="ghost" disabled={sessionBusy} onClick={() => { setConfirmSessionId(null); setSessionConfirmTyped('') }}>Cancel</button>
+                      <button
+                        type="button"
+                        className="danger"
+                        disabled={!sessionTypedOk || sessionBusy}
+                        onClick={() => onDeleteSession(ds.id)}
+                      >{sessionBusy ? 'Deleting…' : 'Delete session'}</button>
+                    </div>
+                  </div>
+                </div>
+              )
+            })()}
           </>
         )}
       </section>
