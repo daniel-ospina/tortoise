@@ -204,6 +204,10 @@ DEFINITION: dict[str, Any] = {
     ),
     "retrieval_tools": sorted(RETRIEVAL_TOOL_ALLOWLIST),
     "marks": list(RETENTION_MARKS),
+    "mark_kind": {
+        str(n): ("activation" if n < 30 else "retention")
+        for n in RETENTION_MARKS
+    },
     "bands": [f"{a}->{b}" for a, b in BAND_PAIRS],
     "trailing_active_days": TRAILING_ACTIVE_DAYS,
     "histogram_days": ACTIVITY_HISTOGRAM_DAYS,
@@ -256,8 +260,15 @@ LIMITATIONS: tuple[str, ...] = (
     "qualifying day. Every other absence is `unavailable` with its reason.",
     "The chart is a rate over a SMALL cohort (n in the tens). It is reported "
     "as k/n plus a Wilson interval and must not be read as a precise point "
-    "estimate, a trend between two readings, or a population figure: a beta "
-    "self-selects, which biases retention UPWARD.",
+    "estimate, a trend between two readings, a population figure, or a claim "
+    "of statistical significance: a beta self-selects, which biases retention "
+    "UPWARD.",
+    "D7 and D15 are ACTIVATION-class signals, not retention (#3839 "
+    "correction 2). Retention language is only defensible from D30 onward: a "
+    "day-7 or day-15 reading says a team came back once, not that it is "
+    "retained, and reading the early marks as retention overstates what the "
+    "data supports in the flattering direction. `definition.mark_kind` labels "
+    "each mark activation (7/15) or retention (30/60/90).",
 )
 
 
@@ -575,11 +586,14 @@ def cohort_summary(team_rows: Sequence[dict], *, as_of: date) -> dict:
     DENOMINATOR RULE: a mark's denominator is every team that could be
     CLASSIFIED for it — its start is at least N days before ``as_of``, and its
     day-N window either carries a definite use or carries no ambiguous day.
-    Teams that are not active are IN the denominator; teams whose day has not
-    arrived, teams that failed to read, and teams whose day-N mark an
-    ambiguous day left UNSETTLED are excluded and counted in
-    ``unmeasured_teams``, which makes the cell ``partial`` rather than a
-    confident rate over a silently smaller set.
+    Teams that are not active are IN the denominator. Teams that failed to
+    read, and teams whose day-N mark an ambiguous day left UNSETTLED, are
+    excluded and counted in ``unmeasured_teams``, which makes the cell
+    ``partial`` rather than a confident rate over a silently smaller set. A
+    team whose day has NOT YET ARRIVED is a different case: it is too young to
+    be classified at all, so it is in neither the denominator nor
+    ``unmeasured_teams``, and its cell is ``not_measurable`` (never
+    ``partial``).
     """
     measured = [t for t in team_rows if t["state"] == STATE_MEASURED]
 

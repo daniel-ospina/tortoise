@@ -1030,6 +1030,68 @@ class TestEndpointReading:
         assert recorded[0]["org_id"] == ""
         assert recorded[0]["detail"]["teams_total"] == 1
 
+    def test_a_dark_write_path_refusal_is_audited(
+            self, client, internal_key, monkeypatch):
+        """A served refusal is an operator action too. Six early returns used
+        to serve a 200 with no audit row — two of them AFTER the fleet walk —
+        so an operator read of the registry could go unlogged exactly on the
+        paths where it went wrong."""
+        import tortoise.hosted_api as ha
+        recorded: list[dict] = []
+
+        async def _spy(request, org_id, operation, **kw):
+            recorded.append({"org_id": org_id, "operation": operation, **kw})
+
+        monkeypatch.setattr(ha, "_async_audit", _spy)
+        _wire(monkeypatch, FakeCP([], []), write_path=False)
+        body = client.get(PATH, params={"as_of": AS_OF.isoformat()},
+                          headers=internal_key).json()
+        assert body["reason"] == ri.REASON_WRITE_PATH_UNCONFIGURED
+        assert len(recorded) == 1
+        assert recorded[0]["operation"] == "retention_cohort_read"
+        assert recorded[0]["detail"]["state"] == ri.STATE_UNAVAILABLE
+
+    def test_an_uncertified_fleet_refusal_is_audited(
+            self, client, internal_key, monkeypatch):
+        """This one is reached only AFTER `read_team_starts` walked the
+        organizations registry — the read that most needs a record."""
+        import tortoise.hosted_api as ha
+        recorded: list[dict] = []
+
+        async def _spy(request, org_id, operation, **kw):
+            recorded.append({"org_id": org_id, "operation": operation, **kw})
+
+        monkeypatch.setattr(ha, "_async_audit", _spy)
+        start = AS_OF - timedelta(days=40)
+        cp = FakeCP([{"id": "org-a", "created_at": _iso(start)}], [],
+                    fleet_complete=False)
+        _wire(monkeypatch, cp)
+        body = client.get(PATH, params={"as_of": AS_OF.isoformat()},
+                          headers=internal_key).json()
+        assert body["reason"] == ri.REASON_FLEET_INCOMPLETE
+        assert len(recorded) == 1
+        assert recorded[0]["detail"]["state"] == ri.STATE_UNAVAILABLE
+
+
+class TestServedContractCarriesTheRequiredCaveats:
+    """#3839's settled definition carries three research corrections. The
+    frequency-blindness and small-n/self-selection ones already ride on the
+    payload; these two must too, because the served DEFINITION/LIMITATIONS are
+    what an operator reading the number actually gets."""
+
+    def test_early_marks_are_labelled_activation_not_retention(self):
+        assert ri.DEFINITION["mark_kind"]["7"] == "activation"
+        assert ri.DEFINITION["mark_kind"]["15"] == "activation"
+        assert ri.DEFINITION["mark_kind"]["30"] == "retention"
+        assert ri.DEFINITION["mark_kind"]["60"] == "retention"
+        assert ri.DEFINITION["mark_kind"]["90"] == "retention"
+        assert any("ACTIVATION-class" in line for line in ri.LIMITATIONS)
+        assert any("D30" in line for line in ri.LIMITATIONS)
+
+    def test_no_statistical_significance_claim_is_required(self):
+        assert any("statistical significance" in line
+                   for line in ri.LIMITATIONS)
+
 
 class TestRetentionReadsDoNotShareTheDefaultExecutor:
     """#3060 doctrine: long or stallable blocking work must NOT ride the loop's

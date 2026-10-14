@@ -16613,9 +16613,12 @@ async def activation_cohort(
 #     the same operator credential that already gates `/v1/internal/backups/*`
 #     (which REWRITE every tenant's graph). A read-only aggregate over rows the
 #     platform already stores is strictly less capability, so no new secret is
-#     introduced. ONE audit row per request, on the operator plane
-#     (`org_id=""`), naming the reading — the same shape and the same
-#     fail-open rule as the cohort endpoint above.
+#     introduced. EVERY SERVED 200 payload gets one audit row, on the operator
+#     plane (`org_id=""`), naming the reading — the same shape and the same
+#     fail-open rule as the cohort endpoint above. That includes the refusal
+#     branches, which are the operator actions that read the fleet and went
+#     wrong; only the 422s (malformed/future `as_of`, fleet over the bound) are
+#     not audited, because they serve no payload.
 #   * AGGREGATION, NEVER A RETENTION WINDOW (binding guard D12-b): nothing is
 #     deleted, pruned or purged at any age. `as_of` bounds the READING, not the
 #     stored data.
@@ -16775,11 +16778,34 @@ async def retention_cohort(request: Request, as_of: str | None = None):
                         surface_state=STATE_UNAVAILABLE, surface_reason=reason,
                         limits=limits)
 
+    async def _serve(payload: dict) -> dict:
+        """Audit a SERVED payload, then return it (fail-open).
+
+        EVERY branch that serves an HTTP 200 goes through here, including the
+        refusal branches — a refusal that walked (or tried to walk) the fleet
+        is exactly the operator action whose accountability record must not be
+        missing. The activation-cohort endpoint this mirrors never serves a
+        200 unaudited. Bookkeeping must never turn a served read into a 500
+        (#1529 precedent), and `_async_audit` already never raises.
+        """
+        try:
+            await _async_audit(
+                request, "", "retention_cohort_read",
+                resource_type="retention_cohort",
+                detail={"as_of": as_of_day.isoformat(),
+                        "state": payload.get("state"),
+                        "teams_total": payload.get("teams_total", 0),
+                        "teams_measured": payload.get("teams_measured", 0)},
+            )
+        except Exception:
+            log.exception("retention cohort audit write failed (non-fatal)")
+        return payload
+
     # The analytics write path is a LIVE environment check, not a date: a dark
     # writer makes every absence indistinguishable from "no activity", so the
     # whole reading refuses rather than reporting a fleet of zeros (#3677).
     if not analytics_write_path_configured():
-        return _unavailable(REASON_WRITE_PATH_UNCONFIGURED)
+        return await _serve(_unavailable(REASON_WRITE_PATH_UNCONFIGURED))
 
     try:
         from tortoise.supabase_control import (
@@ -16787,11 +16813,11 @@ async def retention_cohort(request: Request, as_of: str | None = None):
             is_supabase_enabled,
         )
         if not is_supabase_enabled():
-            return _unavailable(REASON_FLEET_FAILED)
+            return await _serve(_unavailable(REASON_FLEET_FAILED))
         cp = get_control_plane()
     except Exception:
         log.warning("retention cohort: control plane unavailable", exc_info=True)
-        return _unavailable(REASON_FLEET_FAILED)
+        return await _serve(_unavailable(REASON_FLEET_FAILED))
 
     try:
         teams, complete, reason = await _run_off_loop(
@@ -16799,11 +16825,11 @@ async def retention_cohort(request: Request, as_of: str | None = None):
     except Exception as exc:  # pragma: no cover — read_team_starts is total
         log.warning("retention cohort: fleet read failed: %s",
                     type(exc).__name__, exc_info=True)
-        return _unavailable(REASON_FLEET_FAILED)
+        return await _serve(_unavailable(REASON_FLEET_FAILED))
     if teams is None:
-        return _unavailable(reason or REASON_FLEET_FAILED)
+        return await _serve(_unavailable(reason or REASON_FLEET_FAILED))
     if not complete:
-        return _unavailable(REASON_FLEET_INCOMPLETE)
+        return await _serve(_unavailable(REASON_FLEET_INCOMPLETE))
     if len(teams) > _RETENTION_MAX_ORGS:
         raise HTTPException(
             status_code=422,
@@ -16862,20 +16888,11 @@ async def retention_cohort(request: Request, as_of: str | None = None):
         "window (guard D12-b): no row is deleted, pruned or purged by this "
         "read at any age.")
 
-    # Audit BEFORE returning, fail-open: one row for one operator action on the
-    # operator plane. Bookkeeping must never turn a served read into a 500
-    # (#1529 precedent), and `_async_audit` already never raises.
-    try:
-        await _async_audit(
-            request, "", "retention_cohort_read",
-            resource_type="retention_cohort",
-            detail={"as_of": as_of_day.isoformat(),
-                    "teams_total": payload["teams_total"],
-                    "teams_measured": payload["teams_measured"]},
-        )
-    except Exception:
-        log.exception("retention cohort audit write failed (non-fatal)")
-    return payload
+    # Audit BEFORE returning, fail-open: every served payload (including the
+    # refusal branches above) gets one operator-plane row. Bookkeeping must
+    # never turn a served read into a 500 (#1529 precedent), and
+    # `_async_audit` already never raises.
+    return await _serve(payload)
 
 
 # #2002 (W6, epic #1976): DELETE /v1/sessions/{session_id} — the Settings
