@@ -38,11 +38,13 @@ THE ANSWERS, AND WHY UNMEASURABLE IS ONE OF THEM
                      of the instance, NOT of the client.
     GRAPH_UP       — a PING on the graph port returned PONG, the engine is not
                      wedged, AND — when the read was actually ISSUED — a real
-                     read completed inside the bound. A `-NOAUTH` PING and an
-                     error reply to the read (an unknown graph) stay green
-                     deliberately: the probe cannot be admitted without
-                     credentials, and a missing graph is not a wedge. A graph
-                     name the caller NAMED that cannot be addressed is
+                     read completed inside the bound. A credential-bearing URI
+                     (`.env.example`) admits the probe, so the read IS issued
+                     there. A `-NOAUTH` PING with no usable credential, an
+                     `AUTH` the instance REFUSED, and an error reply to the
+                     read (an unknown graph) stay green deliberately: the probe
+                     could not be admitted, and a missing graph is not a wedge.
+                     A graph name the caller NAMED that cannot be addressed is
                      UNMEASURABLE, never green — that read never verified it.
 
 EVERY PROBE IS BOUNDED. A probe that can hang is not a probe: the 2026-10-03
@@ -86,7 +88,11 @@ USAGE
 
 EXIT CONTRACT
     0  GRAPH_UP (and, when probed, the engine answered; and, when a graph name
-       is known, a real read completed inside the bound)
+       is known, a real read completed inside the bound — EXCEPT the named
+       credential carve-outs where the instance refused admission to the
+       probe: a `-NOAUTH` PING with no usable password, or an `AUTH` the
+       instance rejected. The report names that skipped read; a caller that
+       requires a VERIFIED read must read the report, not only the exit code)
     2  not usable: ENGINE_WEDGED, GRAPH_DOWN or GRAPH_WEDGED — a caller that
        must not proceed on a broken substrate can gate on this without parsing
        prose
@@ -179,6 +185,11 @@ READ_PRE_AUTH_PING = "pre-auth-ping"
 #: keeps. A skipped read of the caller's own graph is the #7235 false green one
 #: layer up, and `--graph 'bad name'` reaches it.
 READ_UNADDRESSABLE = "unaddressable-graph-name"
+#: The instance refused the AUTH the URI's credential was presented for. The
+#: probe cannot be admitted, so the read is skipped — the documented pre-auth
+#: carve-out, green. Recorded so the report NAMES the refusal rather than
+#: leaving a read that never happened looking like a completed one.
+READ_AUTH_REFUSED = "auth-refused"
 
 
 def _resolve_within_bound(host: str, port: int, timeout: float):
@@ -211,16 +222,16 @@ def _resolve_within_bound(host: str, port: int, timeout: float):
 
 
 def probe_graph(host: str, port: int, timeout: float,
-                graph: str | None = None) -> dict:
+                graph: str | None = None,
+                username: str | None = None,
+                password: str | None = None) -> dict:
     """Bounded TCP connect + Redis PING, then a REAL graph read. Never raises.
 
     `ok` is True only when the endpoint SPEAKS REDIS — a `+PONG`, or any other
     protocol line. That second half matters: a server that answers
     `-NOAUTH Authentication required.` is demonstrably UP, and this repo's own
     canonical URI is credential-bearing (`.env.example`), so requiring `PONG`
-    reported a reachable graph as GRAPH_DOWN — the misdiagnosis inverted. The
-    probe does not AUTH: it is asking whether the substrate answers, not whether
-    this client is authorised.
+    reported a reachable graph as GRAPH_DOWN — the misdiagnosis inverted.
 
     `graph` names the graph the READ is issued against. When it is given, a
     successful PING is NOT sufficient for `ok`: the probe then sends
@@ -233,15 +244,24 @@ def probe_graph(host: str, port: int, timeout: float,
                   GRAPH_WEDGED, never GRAPH_UP.
       * `None`  — no read was issued, so it verifies nothing: no graph name was
                   known, the graph name is not safely addressable in the inline
-                  protocol, or the pre-AUTH PING was itself a `-` error
-                  (`-NOAUTH`). `read_error` ALWAYS records which of these it
-                  was, so a skipped read is visible in the report rather than
-                  reading as a green. The unaddressable case is UNMEASURABLE in
-                  `classify` — the caller named a graph that was never read;
-                  `-NOAUTH` and an error reply stay GRAPH_UP deliberately. A
-                  server that refused the PING cannot be asked to run a query
-                  without credentials, and an error reply can never be read as
-                  a completed read.
+                  protocol, or the instance refused admission (a `-` PING that
+                  no supplied credential could get past, or an `AUTH` the
+                  instance rejected). `read_error` ALWAYS records which of
+                  these it was, so a skipped read is visible in the report
+                  rather than reading as a green. The unaddressable case is
+                  UNMEASURABLE in `classify` — the caller named a graph that
+                  was never read; a refused admission stays GRAPH_UP
+                  deliberately. A server that refused the PING cannot be asked
+                  to run a query without credentials, and an error reply can
+                  never be read as a completed read.
+
+    When the caller supplies a `password` (the URI carried one), a PING the
+    auth gate refused (`-NOAUTH`) is followed by `AUTH`, and the read is issued
+    only once the instance admits the probe. A REFUSED `AUTH` is the same
+    documented pre-auth carve-out as no credential at all (green); an `AUTH`
+    that gets NO answer is the #7235 wedge one command earlier. Without a
+    credential the probe does not AUTH: it asks whether the substrate answers,
+    not whether this client is authorised.
 
     A `read_ok` of False deliberately does NOT propagate to this function's
     `ok`/`error` fields: `ok=False` means "the port is unreachable" (recovery:
@@ -340,10 +360,31 @@ def probe_graph(host: str, port: int, timeout: float,
             result["read_error"] = READ_NO_PING
         elif graph is None:
             result["read_error"] = READ_NO_GRAPH_NAME
-        elif text.startswith("-"):
-            result["read_error"] = READ_PRE_AUTH_PING
         elif not _addressable_graph_name(graph):
+            # The caller's OWN name is unaddressable: the read could not verify
+            # it whatever the credential state, so this outranks the pre-auth
+            # skip — a caller that named an unreadable graph must not be told
+            # "green" just because the instance also refused admission.
             result["read_error"] = READ_UNADDRESSABLE
+        elif text.startswith("-"):
+            # The auth gate refused the PING. The URI carried the caller's
+            # credential, so being admitted is possible — and only an admitted
+            # connection can say anything about the engine. A REFUSED AUTH is
+            # the documented pre-auth carve-out (green — the probe cannot be
+            # admitted); an AUTH that gets NO answer is the #7235 wedge one
+            # command earlier, because the loop that just answered the PING
+            # stopped answering.
+            if not password:
+                result["read_error"] = READ_PRE_AUTH_PING
+            else:
+                auth = _authenticate(sock, username, password)
+                if auth["ok"]:
+                    result.update(_probe_graph_read(sock, graph))
+                elif auth["answered"]:
+                    result["read_error"] = auth["error"]
+                else:
+                    result["read_ok"] = False
+                    result["read_error"] = auth["error"]
         else:
             result.update(_probe_graph_read(sock, graph))
         result["elapsed_s"] = round(time.monotonic() - started, 3)
@@ -383,6 +424,48 @@ def _addressable_graph_name(graph: str) -> bool:
     return bool(graph) and not any(
         ch.isspace() or ch in '"\\' for ch in graph
     )
+
+
+def _authenticate(sock: socket.socket, username: str | None,
+                  password: str) -> dict:
+    """Send `AUTH` on an already-connected socket. Never raises.
+
+    RESP framing (`*N\\r\\n$<len>\\r\\n<field>\\r\\n`) rather than the inline
+    protocol the PING and the read use: a password may contain whitespace,
+    quotes or backslashes, and the inline protocol would split or re-parse it
+    into a DIFFERENT credential. The exact bytes the caller's URI carried are
+    the bytes presented to the instance.
+
+    ``answered`` separates "the instance REFUSED us" (an error reply — the
+    documented pre-auth carve-out, green) from "the instance did not answer"
+    (a timeout or a bare close — the #7235 wedge signature, never green). A
+    refusal is not a completed command, and silence is not a refusal.
+    """
+    fields = [b"AUTH"]
+    if username:
+        fields.append(username.encode())
+    fields.append(password.encode())
+    payload = (b"*%d\r\n" % len(fields)
+               + b"".join(f"${len(f)}\r\n".encode() + f + b"\r\n"
+                          for f in fields))
+    try:
+        sock.sendall(payload)
+        reply = sock.recv(256)
+    except TimeoutError:
+        return {"ok": False, "answered": False, "reply": None,
+                "error": "auth-timeout"}
+    except OSError as exc:
+        return {"ok": False, "answered": False, "reply": None,
+                "error": type(exc).__name__}
+    text = reply.decode("utf-8", "replace").strip()
+    if not text:
+        return {"ok": False, "answered": False, "reply": None,
+                "error": "empty-reply"}
+    if text[0] == "+":
+        return {"ok": True, "answered": True, "reply": text[:160],
+                "error": None}
+    return {"ok": False, "answered": True, "reply": text[:160],
+            "error": f"auth-refused:{text[:80]}"}
 
 
 def _probe_graph_read(sock: socket.socket, graph: str) -> dict:
@@ -548,6 +631,7 @@ def graph_target_from_env() -> dict | None:
     # FalkorDB has been observed there. The canonical instance is 127.0.0.1.
     host = "127.0.0.1" if ep.host in ("localhost", "::1") else ep.host
     return {"host": host, "port": ep.port, "ssl": ep.ssl, "uri": uri,
+            "username": ep.username, "password": ep.password,
             "graph_name": ep.graph_name}
 
 
@@ -611,9 +695,31 @@ def main(argv: list | None = None) -> int:
 
     # The read names the graph the URI named (its path), defaulting to the
     # canonical `tortoise` — the same assumption the DEFAULT_PORT already makes.
-    graph_name = (args.graph if args.graph is not None
-                  else (target["graph_name"] if target else None)) or "tortoise"
-    graph = probe_graph(host, port, args.timeout, graph=graph_name)
+    # An explicit `--graph` is ALWAYS used, including an EMPTY one: the trailing
+    # `or "tortoise"` this replaces swallowed `--graph ''` (and the URI path
+    # with it), so `--graph "$UNSET_VAR"` silently read `tortoise` — a name
+    # neither the URI nor the flag named — and certified it GRAPH_UP. An empty
+    # flag now reaches `_addressable_graph_name("")` → UNMEASURABLE, and the
+    # hard-coded default applies ONLY when nothing named a graph at all.
+    if args.graph is not None:
+        graph_name = args.graph
+    elif target is not None:
+        graph_name = target["graph_name"] or "tortoise"
+    else:
+        graph_name = "tortoise"
+
+    # The URI's credential admits the probe to the read leg, so a
+    # credential-bearing instance (`.env.example`) is actually READ rather than
+    # reported green off a PING (#7235). It is presented ONLY to the endpoint
+    # the URI names: a `--host`/`--port` override points at a DIFFERENT
+    # endpoint, and sending the URI's password there would leak a credential to
+    # a host the caller never configured it for.
+    username = password = None
+    if target is not None and host == target["host"] and port == target["port"]:
+        username, password = target["username"], target["password"]
+
+    graph = probe_graph(host, port, args.timeout, graph=graph_name,
+                        username=username, password=password)
     engine = None if args.no_docker else probe_engine(args.timeout)
     verdict = classify(graph, engine)
     # A non-bool `ok` means the endpoint was never reached, so the report must
