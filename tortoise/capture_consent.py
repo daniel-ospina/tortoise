@@ -35,15 +35,20 @@ Consumers:
     directly. Two ENFORCEMENT points, one predicate — the verdict string comes
     from ``capture_declined_reason`` below.
 
-NOT gated here — recorded, not settled, and NOT the complete list (the two Pi
-surfaces are ungated too; every enumeration lives in the docs' seam lists, #3662):
+NOT gated here — the MCP door is SETTLED by owner ruling (#3662, Option 1),
+and this is NOT the complete list (the two Pi surfaces are ungated too; every
+enumeration lives in the docs' seam lists, #3662):
   * ``tortoise/mcp_server.py::tortoise_session_capture`` executes SERVER-side
     (it answers "session capture requires hosted mode" for stdio/self-host),
     so the client host's ``TORTOISE_CAPTURE`` is unreadable there. Its gate is
     the server policy ``session_recording`` — default-ON, ToS-covered, an
-    off-switch and explicitly NOT a consent gate (#1927). Gating this surface
-    needs a CLIENT-CARRIED signal (an MCP request header) and is an open
-    product question, not a client-side predicate (see #3662).
+    off-switch and explicitly NOT a consent gate (#1927). A client-side
+    predicate cannot reach it; gating it would need a CLIENT-CARRIED signal
+    (an MCP request header). That is a **decided deliberate departure, not an
+    open question** (#3662, Option 1, owner ruling 2026-10-13): the explicit
+    agent invocation IS the agreement, and the §6 disclosure obligation lives
+    in the tool description the recording agent reads, not in this comment.
+    OVERRIDES the per-session-opt-in default; the marker is on #3662.
   * ``TortoiseSDK.capture_session`` writes to the GRAPH (embedded, or
     ``TORTOISE_DB_URI``) AND sends each turn to the configured BYOK extractor
     provider. It is out of scope here because gating it would also refuse pure

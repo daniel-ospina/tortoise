@@ -96,7 +96,13 @@ def test_faulthandler_timeout_is_armed_below_the_per_test_budget():
         "no kill to precede, so a stall dumps a frame and runs on"
     )
     budgets.append(int(float(ini["timeout"])))
-    assert budgets, "no workflow arms pytest-timeout (`--timeout=`)"
+    # Snapshot the workflow budgets BEFORE appending the ini value, or this check
+    # is unreachable-false (the list always has the ini value in it) — a
+    # decorative assertion whose message promised something it never tested.
+    assert len(budgets) > 1, (
+        "no workflow arms pytest-timeout (`--timeout=`): only the config default "
+        f"was found ({budgets})"
+    )
     assert 0 < float(configured) < min(budgets), (
         f"faulthandler_timeout={configured} must fire before pytest-timeout's "
         f"smallest --timeout={min(budgets)}, or the dump timer is cancelled first"
@@ -231,15 +237,18 @@ def _main_gate_budget() -> int:
 
 
 def test_the_config_arms_a_terminating_timeout_without_a_cli_flag(pytestconfig):
-    """The config KEY must be present, above the dump, and equal to CI's budget.
+    """The config FILE's KEY must be present, above the dump, and equal to CI's budget.
 
-    ``pytestconfig.getini`` is the resolver's own view of
-    ``[tool.pytest.ini_options]`` — not a re-read of the file — so this REDs the
-    moment the key goes away. pytest-timeout registers the ini option with an
+    ``pytestconfig.getini`` proves the key is REGISTERED and present; the file is
+    then read directly (``tomllib``) for the value checks, because ``getini``
+    reflects ``-o timeout=…`` and would otherwise false-RED every legitimate
+    command-line override of the very value this test exists to pin — while
+    ``pytest --timeout=600``, the equivalent and sanctioned form, stayed green
+    (round-2 review, third pass). pytest-timeout registers the ini option with an
     EMPTY default and resolves CLI flag (including one injected by ``addopts``)
-    -> ``PYTEST_TIMEOUT`` env -> this value
-    (``pytest_timeout.get_env_settings``), so an unset key means a bare
-    ``pytest`` has no bound at all; that is the incident's exact command.
+    -> ``PYTEST_TIMEOUT`` env -> this value (``pytest_timeout.get_env_settings``),
+    so an unset key means a bare ``pytest`` has no bound at all; that is the
+    incident's exact command and its exact failure mode.
 
     This test pins the KEY. The RESOLVED bound — which a higher-priority source
     can defeat while this reads 300 — is pinned by
@@ -249,15 +258,16 @@ def test_the_config_arms_a_terminating_timeout_without_a_cli_flag(pytestconfig):
     ``[tool.pytest.ini_options]``. ``getini("timeout")`` then returns ``""`` and
     the first assertion fires.
     """
+    _require_pytest_timeout(pytestconfig)
     ini = pytestconfig.getini("timeout")
     assert ini not in ("", None), (
         "no `timeout` in [tool.pytest.ini_options] (#5035): a pytest run that "
         "passes no --timeout flag — the incident's command — arms NO per-test "
         "killer; faulthandler_timeout only dumps a frame and lets it run on"
     )
-    budget = float(ini)
     with PYPROJECT.open("rb") as fh:
         ini_block = tomllib.load(fh)["tool"]["pytest"]["ini_options"]
+    budget = float(ini_block["timeout"])
     dump_at = float(ini_block["faulthandler_timeout"])
     assert budget > dump_at, (
         f"timeout={budget} must exceed faulthandler_timeout={dump_at}, or the "
@@ -362,6 +372,21 @@ def test_the_resolved_bound_from_the_repo_config_is_the_ci_budget(tmp_path):
     )
 
 
+def _require_pytest_timeout(pytestconfig) -> None:
+    """Fail with the reason, not with a bare ``ValueError``, when the plugin is gone.
+
+    ``-p no:timeout`` (or ``PYTEST_ADDOPTS='-p no:timeout'``) is the most direct
+    way to have no per-test killer at all, and ``getini("timeout")`` then raises
+    ``unknown configuration value: 'timeout'`` — a message that names neither the
+    flag nor #5035 (round-2 review, fifth pass).
+    """
+    assert pytestconfig.pluginmanager.hasplugin("timeout"), (
+        "pytest-timeout is not loaded (``-p no:timeout``), so this run has NO "
+        "per-test killer at all — the flag that removes the plugin also removes "
+        "the bound this config default exists to arm (#5035)"
+    )
+
+
 def _bound_from_the_sanctioned_sources(pytestconfig) -> float:
     """What pytest-timeout SHOULD resolve: CLI -> env -> ini, its own order.
 
@@ -371,11 +396,10 @@ def _bound_from_the_sanctioned_sources(pytestconfig) -> float:
     ``getini`` reflects ``-o`` overrides, so that form is covered too.
     """
     args = _sanctioned_cli_args(pytestconfig)
-    for i, arg in enumerate(args):
-        if arg == "--timeout" and i + 1 < len(args):
-            return float(args[i + 1])
-        if arg.startswith("--timeout="):
-            return float(arg.split("=", 1)[1])
+    _require_pytest_timeout(pytestconfig)
+    cli = _last_flag_value(args, "--timeout")
+    if cli is not None:
+        return float(cli)
     env = os.environ.get("PYTEST_TIMEOUT")
     if env:
         return float(env)
@@ -387,32 +411,117 @@ def _bound_from_the_sanctioned_sources(pytestconfig) -> float:
     return float(ini)
 
 
+def _parsed_argv(pytestconfig) -> list[str]:
+    """The argv pytest PARSED, for a SKIP DECISION — never a live env re-read.
+
+    ``invocation_params.args`` is the command line as pytest saw it at startup.
+    It deliberately excludes ``PYTEST_ADDOPTS`` (verified: pytest's parser merges
+    that separately), because that variable is process-global and a
+    ``tests/conftest.py`` can write it AFTER the real argv was parsed — which is
+    how a repo-writable value reached the skip and hid a disarmed run
+    (round-2 review, sixth and seventh passes).
+
+    Consequence, deliberate and documented rather than silent: the FLAG spelling of
+    an env-supplied opt-out (``PYTEST_ADDOPTS='--timeout=0'``, ``PYTEST_ADDOPTS=
+    '--timeout-method=thread'``) is REFUSED, the same way ``PYTEST_TIMEOUT=0`` is —
+    pass the flag on the command line. An ``-o``/ini override is still honoured
+    wherever it is written (``PYTEST_ADDOPTS='-o timeout=0'`` skips): pytest
+    applies those at parse time, before any conftest can run, so they are not
+    runtime-repo-writable.
+    """
+    return list(pytestconfig.invocation_params.args)
+
+
 def _sanctioned_cli_args(pytestconfig) -> list[str]:
-    """The argv a user actually passed: ``invocation_params`` plus ``PYTEST_ADDOPTS``.
+    """CLI args for VALUE resolution only: ``PYTEST_ADDOPTS`` first, then argv.
 
     ``invocation_params.args`` does NOT carry ``PYTEST_ADDOPTS`` while
-    ``config.getvalue`` does, so scanning it alone made an equivalent invocation
+    ``config.getvalue`` does, so scanning argv alone made an equivalent invocation
     (``PYTEST_ADDOPTS='--timeout=7'``) read as a disagreement and false-red
     (round-2 review, second pass).
+
+    ⚠️ Use this for what the VALUE compares against; for anything that decides a
+    SKIP, use :func:`_parsed_argv`, or repo-writable env state can hide a disarmed
+    run (round-2 review, seventh pass).
     """
     extra = os.environ.get("PYTEST_ADDOPTS", "")
-    return list(pytestconfig.invocation_params.args) + shlex.split(extra)
+    # ENV FIRST: pytest inserts PYTEST_ADDOPTS at the FRONT of argv
+    # (``args[:] = shlex.split(env_addopts) + args`` in ``_pytest/config``), so
+    # argv is the later source and wins a last-occurrence scan. Appending it
+    # instead made ``PYTEST_ADDOPTS='--timeout=100' pytest --timeout=300`` read
+    # 100 while the run resolved 300 — a false red (round-2 review, fifth pass).
+    return shlex.split(extra) + list(pytestconfig.invocation_params.args)
+
+
+def _last_flag_value(args: list[str], *names: str) -> str | None:
+    """The LAST value given for any of ``names``, or ``None``.
+
+    Last, not first: argparse is last-occurrence-wins, so ``--timeout=300
+    --timeout=600`` resolves to 600 and taking the first match reported a
+    disagreement that did not exist (round-2 review, third pass). A flag present
+    with no value is a loud error here rather than a silent fall-through to the
+    next source, since pytest would reject it anyway.
+    """
+    found: str | None = None
+    for i, arg in enumerate(args):
+        for name in names:
+            if arg == name:
+                assert i + 1 < len(args), f"{name} was passed with no value: {args}"
+                found = args[i + 1]
+            elif arg.startswith(name + "="):
+                found = arg.split("=", 1)[1]
+    return found
 
 
 def _method_from_the_sanctioned_sources(pytestconfig) -> str:
-    """The method a user asked for: ``--timeout-method`` -> ini -> the default.
+    """The method the USER asked for: parsed argv -> ini -> the default.
 
     Same reasoning as :func:`_bound_from_the_sanctioned_sources`: a conftest can
     move ``config.option.timeout_method``, so the guard must not read the value it
-    is checking from the thing being checked.
+    is checking from the thing being checked. Both the modern spelling and the
+    deprecated ``--timeout_method`` alias are accepted — pytest-timeout registers
+    both onto the same dest, and matching only the modern one reported a
+    disagreement for a run that resolved exactly what it asked for (round-2
+    review, third pass).
+
+    Reads :func:`_parsed_argv`, NOT the env-inclusive scan: this feeds a SKIP, and
+    the env-inclusive form let repo code reach the skip through the METHOD branch
+    after the value branch had been closed (round-2 review, seventh pass).
     """
-    args = _sanctioned_cli_args(pytestconfig)
-    for i, arg in enumerate(args):
-        if arg == "--timeout-method" and i + 1 < len(args):
-            return args[i + 1]
-        if arg.startswith("--timeout-method="):
-            return arg.split("=", 1)[1]
+    args = _parsed_argv(pytestconfig)
+    cli = _last_flag_value(args, "--timeout-method", "--timeout_method")
+    if cli is not None:
+        return cli
     return str(pytestconfig.getini("timeout_method") or "signal")
+
+
+def _explicit_optout(pytestconfig) -> str | None:
+    """Why the USER asked for no signal timer, or ``None`` (the timer must be armed).
+
+    Only sources repo CODE cannot write: the argv pytest PARSED
+    (:func:`_parsed_argv` — notably NOT a live re-read of
+    ``os.environ['PYTEST_ADDOPTS']``, for BOTH the value and the method branch,
+    because a ``tests/conftest.py`` can write that variable while pytest has
+    already parsed the real one; an earlier revision closed only the value branch
+    and the method branch still let repo code reach the skip) and the ini file or
+    its ``-o`` override. ``os.environ['PYTEST_TIMEOUT']`` is deliberately NOT one
+    of them either: it is process-global, so a conftest setting it to ``0`` at
+    import time used to satisfy the old ``expected <= 0`` skip while arming
+    nothing at all. A run that genuinely wants no bound says so on the command
+    line — ``--timeout=0`` — which is also what the failure message below tells
+    the reader.
+    """
+    cli = _last_flag_value(_parsed_argv(pytestconfig), "--timeout")
+    if cli is not None and float(cli) == 0:
+        return "the command line asked for --timeout=0"
+    if float(pytestconfig.getini("timeout") or 0) == 0:
+        return "the ini value (or its -o override) is 0"
+    method = _method_from_the_sanctioned_sources(pytestconfig)
+    if method != "signal":
+        return f"the requested timeout method is {method!r}"
+    if pytestconfig.getini("timeout_func_only"):
+        return "timeout_func_only is set (fixtures would be unbounded)"
+    return None
 
 
 def test_the_resolved_bound_matches_the_sanctioned_sources(pytestconfig):
@@ -431,7 +540,7 @@ def test_the_resolved_bound_matches_the_sanctioned_sources(pytestconfig):
     This reads the value from the OUTER config, which HAS loaded the real
     conftest chain, and compares it to the same resolution recomputed from the
     sanctioned sources. Comparing against the sources rather than against the
-    CI budget keeps a legitimate ``--timeout=0``/``PYTEST_TIMEOUT=0`` run green
+    CLI budget keeps a legitimate ``--timeout=0`` (command line) run green
     (the value then IS what the sources say) while still catching an
     in-process overwrite — so the guard is not vacuous on the CI legs that pass
     ``--timeout=300``.
@@ -449,7 +558,87 @@ def test_the_resolved_bound_matches_the_sanctioned_sources(pytestconfig):
     )
 
 
-def test_the_per_test_timer_is_actually_armed(pytestconfig, request):
+def _assert_arming_hooks_are_pytest_timeouts_own(pytestconfig) -> None:
+    """No plugin but pytest-timeout may implement the FIRSTRESULT arming hooks.
+
+    ``pytest_timeout_set_timer``/``pytest_timeout_cancel_timer`` are firstresult:
+    the first non-None return wins the call. One extra implementation that
+    short-circuits for a SUBSET of nodeids (everything except the guard's own
+    file) leaves those items with ``ITIMER_REAL == 0.0`` while every resolved
+    value — and the guard's own per-item read — still say 300. Asserting the
+    implementation SET closes that scope and the unconditional form in one line.
+    """
+    for hook_name in ("pytest_timeout_set_timer", "pytest_timeout_cancel_timer"):
+        plugins = [
+            getattr(impl, "plugin_name", "?")
+            for impl in getattr(pytestconfig.pluginmanager.hook, hook_name).get_hookimpls()
+        ]
+        assert plugins == ["timeout"], (
+            f"{hook_name} is implemented by {plugins}, not just pytest-timeout: "
+            "that hook is FIRSTRESULT, so the first non-None return wins and any "
+            "extra implementation can arm nothing (or cancel an armed timer) for "
+            "a subset of items while every resolved value still reads 300 — the "
+            "incident's shape, per-file (#5035)"
+        )
+
+
+def _assert_no_collected_item_is_unbounded(items) -> None:
+    """EVERY collected item needs a positive bound, not just the guard's own.
+
+    The door closed in an earlier pass was a per-item marker, and a per-item
+    exemption scoped to OTHER files (`pytest_collection_modifyitems` marking
+    everything except the guard's own node) beat the guard while its own item
+    stayed bounded — the incident's `tests/test_cohort_cost_cap.py` can be the
+    exempted file. A POSITIVE explicit marker is a legitimate tighter bound; a
+    missing or non-positive one is the #5035 exposure.
+    """
+    unbounded = [
+        item.nodeid
+        for item in items
+        if pytest_timeout._get_item_settings(item).timeout is None
+        or float(pytest_timeout._get_item_settings(item).timeout) <= 0
+    ]
+    assert not unbounded, (
+        f"{len(unbounded)} collected item(s) have no terminating per-test bound "
+        f"(e.g. {unbounded[:5]}): a bare `pytest` run in this checkout can hang "
+        "any of them forever — the incident's shape (#5035, 43h48m). Raise the "
+        "bound (a `pytest.mark.timeout(N)` marker) rather than removing it; a "
+        "run that deliberately wants no bound passes `--timeout=0`."
+    )
+
+
+@pytest.fixture(scope="session")
+def timeout_guard_end_of_session_audit(pytestconfig, request):
+    """Re-run both audits at SESSION END, not only while the guard item runs.
+
+    The checks above are one-shot: they sample the plugin manager and the item
+    list at the moment the guard executes. A plugin registered AFTER that moment
+    (an order-aware conftest can register from
+    ``pytest_runtest_logreport`` once the guard file's last item has torn down)
+    would implement the firstresult arming hook for every later item while the
+    guard had already passed — reproduced by a reviewer on this PR's previous
+    head: `11 passed` with the later items' ``ITIMER_REAL == 0.0``. This fixture
+    is requested by the guard test, so its teardown runs after the last item of
+    the session and re-audits both facts.
+
+    A registration made during the FINAL teardown of the session is not
+    observable by anything; that is the floor of what a test can assert, and it
+    is stated here rather than implied.
+    """
+    yield
+    if not pytestconfig.pluginmanager.hasplugin("timeout"):
+        # The test body already failed with the actionable message; calling
+        # getini here would add a second, opaque `unknown configuration value`
+        # error to a run that is already correctly red (round-2 review, seventh
+        # pass).
+        return
+    if _explicit_optout(pytestconfig) is not None:
+        return
+    _assert_arming_hooks_are_pytest_timeouts_own(pytestconfig)
+    _assert_no_collected_item_is_unbounded(request.node.items)
+
+
+def test_the_per_test_timer_is_actually_armed(pytestconfig, request, timeout_guard_end_of_session_audit):
     """Round-2 review, third door: a SOURCE value is not an ARM.
 
     ``get_env_settings`` proves what pytest-timeout *would* use, not that
@@ -466,14 +655,15 @@ def test_the_per_test_timer_is_actually_armed(pytestconfig, request):
     without one, with all 15 tests of this file plus
     ``test_timeout_not_disarmable`` passing.
 
-    So this pins the MECHANISM rather than the number: the ITEM's own resolved
-    settings (``_get_item_settings`` — what the runtest protocol will actually arm
-    with, marker priority included) must be a positive bound, the ``signal``
-    method and no ``func_only`` exemption; AND the harness's own ``ITIMER_REAL``
-    must actually be running while this item runs — the same read the
-    ``harness_sigalrm_integrity`` fixture uses. It is SKIPPED when the run itself
-    asks for no timer (``--timeout=0``, ``PYTEST_TIMEOUT=0``) or a non-``signal``
-    method, because an unarmed ITIMER is then the request, not a defect.
+    So this pins the MECHANISM rather than the number: EVERY collected item's
+    resolved settings (``_get_item_settings`` — what the runtest protocol will
+    actually arm with, marker priority included) must be a positive bound; this
+    item's must additionally be ``signal`` with no ``func_only`` exemption; and
+    the harness's own ``ITIMER_REAL`` must actually be running while this item
+    runs — the same read the ``harness_sigalrm_integrity`` fixture uses. It is
+    SKIPPED only when the USER asks for no signal timer on the command line or in
+    the ini file; see :func:`_explicit_optout` for why a process-global
+    ``PYTEST_TIMEOUT=0`` is deliberately not an opt-out.
 
     Both halves are needed, and neither is a duplicate of the other:
 
@@ -489,10 +679,13 @@ def test_the_per_test_timer_is_actually_armed(pytestconfig, request):
       ``pytest_timeout_set_timer`` (the previous pass's door), which leaves the
       resolved settings untouched.
 
-    The skip is on an EXACT ``0`` (and on an explicitly requested non-``signal``
-    method), not on ``<= 0``: a negative or unset bound is a defect, not an
-    opt-out, and ``os.environ['PYTEST_TIMEOUT'] = '-1'`` set from a conftest used
-    to satisfy a ``<= 0`` skip while arming nothing at all.
+    The skip is on a source repo code cannot write (the user's argv, or the ini
+    file), not on the resolved value: that value is derived from sources a
+    conftest can poison, and an earlier revision that skipped on ``expected <= 0``
+    went green with NO timer at all once a conftest set
+    ``os.environ['PYTEST_TIMEOUT'] = '-1'`` (round-2 review, third pass). The
+    same poison with ``'0'`` is the reason ``PYTEST_TIMEOUT`` is not accepted as
+    an opt-out at all.
 
     Mutations that make this RED (verified): append a
     ``pytest_timeout_set_timer`` implementation returning ``True``, or a
@@ -500,13 +693,13 @@ def test_the_per_test_timer_is_actually_armed(pytestconfig, request):
     ``pytest.mark.timeout(func_only=True)``, to ``tests/conftest.py``.
     """
     expected = _bound_from_the_sanctioned_sources(pytestconfig)
-    method = _method_from_the_sanctioned_sources(pytestconfig)
-    if expected == 0 or method != "signal" or pytestconfig.getini("timeout_func_only"):
-        pytest.skip(
-            f"this run asks for no signal timer (bound={expected}, method={method!r}, "
-            f"func_only={pytestconfig.getini('timeout_func_only')!r}): an unarmed "
-            "ITIMER_REAL is the request, not a defect"
-        )
+    optout = _explicit_optout(pytestconfig)
+    if optout is not None:
+        pytest.skip(f"this run asks for no signal timer: {optout}")
+    # The two session-wide audits; they run again from the session-scoped
+    # fixture above, because a one-shot sample can be beaten by registering later.
+    _assert_arming_hooks_are_pytest_timeouts_own(pytestconfig)
+    _assert_no_collected_item_is_unbounded(request.session.items)
     item_settings = pytest_timeout._get_item_settings(request.node)
     assert item_settings.timeout is not None and float(item_settings.timeout) == expected, (
         f"the per-item bound for this test is {item_settings.timeout!r}, but the "
@@ -519,7 +712,10 @@ def test_the_per_test_timer_is_actually_armed(pytestconfig, request):
         f"func_only={item_settings.func_only!r} although the sanctioned sources say "
         "`signal` with no func_only exemption: `thread` starves on a GIL-holding "
         "stall (#7649), and func_only leaves SETUP/TEARDOWN unbounded while this "
-        "check's ITIMER read (call phase) stays green"
+        "check's ITIMER read (call phase) stays green. If this was intentional, "
+        "pass `--timeout-method=` on the COMMAND LINE: the flag spelling of an "
+        "opt-out supplied through `PYTEST_ADDOPTS`/`PYTEST_TIMEOUT` is refused, "
+        "because repo code can write those at runtime and hide a disarmed run."
     )
     remaining = harness_alarm_remaining()
     assert remaining > 0, (

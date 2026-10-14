@@ -4836,7 +4836,7 @@ durations:
   test_5388_org_enumeration_completeness.py: 2.5
   test_7951_write_doors.py: 6.3
   test_audit_fallback_home_isolation.py: 2.4
-  test_ci_stall_identify.py: 16.0  # #5035: the 1.8 predated this PR's subprocess-launching tests. LOCAL measurements at head after the round-2 fixes: 12.3, 14.8, 16.3 s, with 25.9 s observed under fleet load — recorded at the top of that band so a slow shard is not under-weighted. `tools/ci_timing.py --refresh-durations` is the canonical (CI-measured) writer; this line is a local estimate until it next runs.
+  test_ci_stall_identify.py: 16.0  # #5035: the 1.8 predated this PR's subprocess-launching tests. A quiet-machine estimate (measured 12.3, 14.8, 16.3 s; 25.9 s under moderate load and 34-40 s at fleet load 67-79 — the file spawns pytest children, so it tracks box load hard). `tools/ci_timing.py --refresh-durations` is the canonical (CI-measured) writer; this line is a local estimate until it next runs.
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
 # A file here is excluded from EVERY pre-merge leg (fast halves, slow, carve-
