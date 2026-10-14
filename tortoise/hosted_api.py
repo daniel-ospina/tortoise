@@ -23064,6 +23064,66 @@ def _stored_grace_elapsed(row_deleted_at, row_grace_hours,
     return deleted_dt + timedelta(hours=gh) <= now_dt
 
 
+# #5269: the single-flight guard for the deleted-org purge.
+#
+# THE INVARIANT. ONE logical purge emits exactly ONE `team_delete_purged` row.
+# The audit append is keyed on ROW OBSERVATION — every entry re-reads the same
+# past-grace row — so two entries in flight at once each append for the same
+# purge: a permanent duplicate in an append-only log. (The state effect is
+# benign: the graph drop and the control-plane delete are idempotent — which is
+# also why #3472's quiescing of the test's background callers removed the flake
+# without touching this.)
+#
+# WHY A GUARD, GIVEN TODAY'S TWO CALLERS ALREADY SERIALISE (#5269 re-measured
+# 2026-10-13). Both `_lifespan` callers — the one-shot `_run_boot_sweeps()` and
+# the hourly `_event_retention_loop()` — submit through
+# `run_on_daemon_worker(..., name="tortoise-boot-sweep")`, and
+# `daemon_worker("tortoise-boot-sweep")` is ONE SINGLE-SLOT worker whose loop
+# runs submissions one at a time. So the two purges CANNOT overlap today (the
+# issue's "both can fetch the same row before either deletes it" does not hold)
+# — but they are serialised by an ACCIDENT of two distant call sites agreeing
+# on a string whose documented purpose is the thread NAME (ops recipes match on
+# it), not exclusion, and nothing pins that agreement. A per-caller rename — a
+# plausible, entirely reviewable refactor — would put both sweeps in flight at
+# once and open the duplicate. The invariant belongs at the purge, not in a
+# coincidence between its callers.
+#
+# The duplicate that WAS observed (#3472: `assert ['reg-old', 'reg-old'] ==
+# ['reg-old']`) came from a third, different overlap: the lifespan's background
+# entry racing a DIRECT `_purge_deleted_orgs()` call on the test body's thread,
+# which bypasses the worker entirely (#3511 quiesced the test; the harness
+# pattern is recorded in `tests/test_export_delete._quiesce_testclient_background_work`).
+# No direct caller exists in production, but that IS the shape a future one
+# would take, and the guard holds against it too.
+#
+# WHY A `threading.Lock`. Taken and released INSIDE the worker thread, and
+# never on the event loop, for the reason `_DREAM_LOCKS`/`_CAPTURE_IN_FLIGHT_LOCK`
+# record above: an `asyncio.Lock` binds to the first loop that waits on it,
+# which breaks across the per-test loops. `acquire`/`release` are also the
+# only operations here — nothing under the guard is async, so no `await` can be
+# held across it.
+#
+# WHY NON-BLOCKING. A second entry SKIPS, it does not queue: the in-flight
+# sweep already walks the WHOLE superset (`deleted_at <= now`) for this instant,
+# so a queued duplicate would re-observe rows for no new work — and would still
+# be the duplicate this guard exists to prevent if it then re-fetched. Blocking
+# would instead park a daemon worker for the sweep's entire duration (the
+# #2850 reason these sweeps run on daemon workers at all, so a wedged call can
+# never delay interpreter shutdown). Skipping strands nothing: the periodic
+# caller retries on its next tick and the boot caller has already walked the
+# set.
+#
+# SCOPE — PROCESS-LOCAL, which is this issue's whole surface: both callers are
+# armed by `_lifespan`, in ONE process. A SECOND machine is NOT covered, and
+# none exists today — `fly.toml` pins a single-machine topology for unrelated
+# reasons (single-attach volume, per-process state; `docs/infra-runbook.md`
+# §6). If one were ever added, the fix for THAT shape is the issue's other
+# Indicator branch — the append KEYED ON the control-plane row's deletion, not
+# on row observation — because exclusion cannot cross a process boundary.
+# Recorded here so the residual is never read as covered.
+_PURGE_ORG_IN_FLIGHT_LOCK = threading.Lock()
+
+
 def _purge_deleted_orgs() -> None:
     """Hard-delete orgs past the soft-delete grace window (#302 E2E-6-D).
 
@@ -23086,6 +23146,32 @@ def _purge_deleted_orgs() -> None:
     registry/graph leak past the grace window). Immutable audit_events rows
     survive (no FK). Fail-safe: per-org failures are logged and skipped —
     a purge failure never crashes the loop.
+
+    #5269: SINGLE-FLIGHT — one logical purge emits one ``team_delete_purged``
+    # row; a concurrent second entry returns instead of re-observing the same
+    # past-grace row. See ``_PURGE_ORG_IN_FLIGHT_LOCK`` for why the invariant
+    # is enforced HERE (today's two lifespan callers are already serialised by
+    # a shared single-slot worker — by accident, not by construction) and for
+    # the recorded cross-process residual.
+    """
+    if not _PURGE_ORG_IN_FLIGHT_LOCK.acquire(blocking=False):
+        _logger.info(
+            "deleted-team purge already in flight — skipping this entry")
+        return
+    try:
+        _purge_deleted_orgs_locked()
+    finally:
+        _PURGE_ORG_IN_FLIGHT_LOCK.release()
+
+
+def _purge_deleted_orgs_locked() -> None:
+    """The purge sweep BODY — caller MUST hold ``_PURGE_ORG_IN_FLIGHT_LOCK``.
+
+    Split from :func:`_purge_deleted_orgs` so the lock is released on EVERY
+    exit path with a single ``finally`` (the body has many ``return``/``raise``
+    shapes: the Supabase branch returns early, and the outer ``except``
+    swallows). Nothing here may be called directly — the guard is the only
+    thing making one logical purge emit one ``team_delete_purged`` row.
     """
     try:
         env_grace = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS",
