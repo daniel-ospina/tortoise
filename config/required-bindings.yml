@@ -251,6 +251,14 @@ projects:
           update-password), api/session.ts, api/profile.ts, api/provision.ts
           and api/v1/[[path]].ts. Every one of them answers
           `503 session_store_unavailable` when it is absent.
+          #4161 adds ONE reader that deliberately does NOT: `_shared/auth/
+          mail-throttle.ts` (table `auth_mail_throttle`, bootstrapped at runtime
+          like the rest) charges the email-request budget for /auth/reset and
+          /auth/resend, and FAILS OPEN when the binding is absent — a
+          throttle-store gap must not become a mail outage, and the routes'
+          non-enumeration fold is unchanged either way. So this binding's
+          absence is still a hard failure for every reader above, and a silent
+          loss of throttling for those two routes.
 
       - name: SUPABASE_URL
         kind: required

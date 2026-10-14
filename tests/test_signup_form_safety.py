@@ -255,6 +255,34 @@ def test_rate_limit_lockout_guards_present() -> None:
     # above, which is now the single login surface.
 
 
+# ── #4161: a 200 must never claim an email was sent ────────────────────────
+
+
+def test_the_accepted_copy_never_claims_delivery() -> None:
+    """#4161: the reset/resend SUCCESS copy must be CONDITIONAL, not a delivery claim.
+
+    A 200 on these routes means "accepted", never "delivered": GoTrue answers 200
+    for an address with no account (its own non-enumeration defense) and the BFF
+    folds a provider refusal into the same 200 (#4104). So "Reset link sent" /
+    "Resent" asserted delivery the page could not know — and a throttled user
+    waited for an email that was never sent. The conditional shape is the only one
+    TRUE in every case, and it is the copy the recovery flow already uses.
+
+    Both halves are pinned: the conditional literal is present, and the two
+    unconditional claims it replaced are GONE. Absence alone would pass on a page
+    that dropped the copy entirely, and presence alone would pass with the old
+    claim left beside it.
+    """
+    code = _strip_html_comments(SIGNUP)
+    assert "If an account exists for that email, a reset link is on its way" in code
+    assert "If your address still needs confirming, a new link is on its way" in code
+    for claimed_sent in ("Reset link sent —", "Resent — check your inbox"):
+        assert claimed_sent not in code, (
+            f"signup.html still claims delivery with {claimed_sent!r} on a 200 — a 200 "
+            "means accepted, not sent (#4161)"
+        )
+
+
 def test_recovery_flow_present() -> None:
     """#863: the recovery request-link flow — now on the single auth page's
     login modal (email + forgot-password, POST /auth/v1/recover surface via

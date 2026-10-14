@@ -1862,7 +1862,13 @@
           return;
         }
         const note = document.getElementById("modal-note");
-        note.textContent = "Reset link sent — check your inbox (and spam).";
+        // #4161: NEVER claim an email was sent. A 200 here means "accepted" —
+        // GoTrue answers 200 for an address with no account (its own
+        // non-enumeration defense), and the BFF folds a provider refusal into
+        // the same 200. Conditional copy is the only shape that is TRUE in every
+        // case, and it is the same copy the recovery flow already uses.
+        note.textContent =
+          "If an account exists for that email, a reset link is on its way. Check your inbox (and spam).";
       } catch (e) {
         showModalError((e && e.message) || "Something went wrong — try again.");
       } finally {
@@ -1959,7 +1965,10 @@
           document.getElementById("resend-note").textContent = "Could not resend — try again shortly.";
           return;
         }
-        document.getElementById("resend-note").textContent = "Resent — check your inbox (limit applies).";
+        // #4161: same rule as the reset modal — a 200 is "accepted", not
+        // "delivered", so the copy must not assert that an email arrived.
+        document.getElementById("resend-note").textContent =
+          "If your address still needs confirming, a new link is on its way. Check your inbox (and spam).";
       } catch (e) {
         document.getElementById("resend-note").textContent = "Could not resend — try again shortly.";
       } finally {
