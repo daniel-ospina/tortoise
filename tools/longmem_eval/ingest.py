@@ -352,14 +352,20 @@ def point_props_for_hits(proj, point_ids: list[str]) -> dict[str, dict[str, Any]
         "       coalesce(n.content, ''), "  # #1349 vector arm: hits carry no content
         "       coalesce(n.quote, ''), coalesce(n.search_keys, []), "
         "       coalesce(n.source_turn_id, ''), coalesce(n.speaker, ''), "
-        "       coalesce(n.pointKind, '')",
+        "       coalesce(n.pointKind, ''), "
+        # #2684 (Slice B): the verbatim span POINTER — the offsets of the
+        # point's own quote in its source turn. Read RAW (not coalesced):
+        # a spanless point must expose None so the annotated surface can omit
+        # the key entirely, keeping it byte-identical.
+        "       n.span_start, n.span_end",
         params={"ids": point_ids},
     ).result_set
     return {row[0]: {"session_id": row[1], "has_answer": bool(row[2]),
                      "lme_session_index": row[3], "content": row[4],
                      "quote": row[5], "search_keys": row[6],
                      "source_turn_id": row[7], "speaker": row[8],
-                     "point_kind": row[9]}
+                     "point_kind": row[9],
+                     "span_start": row[10], "span_end": row[11]}
             for row in rows}
 
 

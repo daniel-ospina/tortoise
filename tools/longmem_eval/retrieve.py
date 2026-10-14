@@ -764,7 +764,7 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
         spk = (p.get("speaker") or ""
                or (props.get(turn_ref, {}).get("speaker") or ""
                    if turn_ref else ""))
-        annotated.append({
+        entry: dict = {
             "id": h["id"],
             "content": h["content"],
             # M7 (#1527, D2): the leg that produced this hit is never empty —
@@ -777,6 +777,9 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
             "has_answer": p.get("has_answer", False),
             # E3: quote/search_keys pass through (R2 consumer); source_turn_id
             # + speaker are the derivation surface the reader decoration uses.
+            # #2684 (Slice B): the verbatim span pointer (#5007's
+            # ``span_start``/``span_end``) rides the same surface, added below
+            # only when present so a spanless hit's key set is unchanged.
             "quote": p.get("quote", ""),
             "search_keys": p.get("search_keys") or [],
             "source_turn_id": turn_ref,
@@ -796,14 +799,25 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
             # (``retract_point`` writes status='retracted' and no window and
             # no CORRECTS edge). Sourced from the search PAYLOAD (which
             # carries it), never from ``point_props_for_hits`` (which does
-            # not fetch it). Additive key — the annotated key set is 18.
+            # not fetch it). Additive key — the annotated key set is 18, or 20
+            # when the point carries a verbatim span (#2684, added below).
             "status": h.get("status") or "",
             # E6 (#1538) D7: promoted validity-window fields — additive,
             # only when present (undated hits render no [valid …] marker).
             "valid_from": h.get("valid_from") or "",
             "valid_to": h.get("valid_to") or "",
             "expired_at": h.get("expired_at") or "",
-        })
+        }
+        # #2684 (Slice B): the value-bearing verbatim SPAN — the offsets of
+        # the point's own quote inside its source turn, surfaced WITH the
+        # point. It is what lets ``package_evidence_pool`` and every
+        # downstream consumer re-read the exact value instead of re-deriving
+        # it from the distillation (the aggregation-numerator class).
+        # Additive, all-or-nothing: a spanless point emits neither key.
+        if p.get("span_start") is not None and p.get("span_end") is not None:
+            entry["span_start"] = p["span_start"]
+            entry["span_end"] = p["span_end"]
+        annotated.append(entry)
     return annotated
 
 
