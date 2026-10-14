@@ -159,7 +159,7 @@ response_fields:
   emitted_when: 'the row is a Point with status `draft` — present only when true (the #1353 D8 / #2294 additive
     rule), so every live hit is byte-identical. It is the machine-readable badge: the status vocabulary is not something
     a consumer should have to know to see that a row is staged. tortoise_recall mode=state and mode=custom (both
-    serve recall_state); mode=gaps has its own ranker'
+    serve recall_state); mode=gaps has its OWN ranker and carries the `gaps_ranking.*` trio instead (below)'
   unchanged_when_off: yes — not flag-gated; the key is ABSENT on every non-draft row
 - response: tortoise_recall
   field: recall_ranking.confidence
@@ -182,6 +182,31 @@ response_fields:
     without knowing the status vocabulary
   unchanged_when_off: NO for an unmeasured draft, yes for everything else — the same scoping as recall_ranking.confidence;
     every live row keeps its "posterior"/"neutral" verdict
+- response: tortoise_recall
+  field: gaps_ranking.draft
+  emitted_when: 'mode=gaps ONLY: the row is a Point with status `draft` — present only when true (the #1353 D8 / #2294
+    additive rule), so every live gap is byte-identical. `recall_gaps` does not exclude drafts (a draft is CURRENT,
+    not terminal — live.py), so the gaps ranker is a second surface that can return one; the recall_ranking.draft entry
+    above is state/custom-only, which is why this is its own field'
+  unchanged_when_off: yes — not flag-gated; the key is ABSENT on every non-draft gap
+- response: tortoise_recall
+  field: gaps_ranking.confidence
+  emitted_when: 'mode=gaps ONLY: the same rows as gaps_ranking.draft, and only when EP has NOT measured the claim
+    (no persisted posterior, and no non-baseline legacy ep_alpha — the #3276 measured predicate): confidence becomes
+    null. Rationale is the one the state/custom entry states — a draft is EP-inert, so no belief is computed for it,
+    and the neutral 0.5 it used to report reads as a measurement. A draft gap that DOES carry a persisted posterior
+    keeps its measured number: the number is real, only the staging is the news. A draft gap also sorts after every
+    live gap (an explicit status tiebreaker — its structural score is not an acceptable basis for placing it first)'
+  unchanged_when_off: 'NO for an unmeasured draft, yes for everything else — deliberately not flag-gated. Live gaps:
+    identical number, identical key set, identical order. Uncalibrated LIVE gaps keep the documented #898 neutral
+    0.5 + "neutral" (a recorded decision this change does not reopen)'
+- response: tortoise_recall
+  field: gaps_ranking.confidence_source
+  emitted_when: the same rows as gaps_ranking.confidence becomes null — the source reads "uncomputed" instead of
+    "neutral", so a consumer can tell "no belief was computed for this staged row" from "a live gap nobody measured"
+    without knowing the status vocabulary
+  unchanged_when_off: NO for an unmeasured draft, yes for everything else — the same scoping as gaps_ranking.confidence;
+    every live gap keeps its "posterior"/"neutral" verdict
 - response: sdk:create_operator
   field: direction_basis
   emitted_when: 'always, on every operator created through the #7852 W1 write path — the basis the recorded direction

@@ -22503,6 +22503,12 @@ class TortoiseSDK:
 
         Returns the SearchResult shape (list of dicts), each annotated with
         ``entity_type`` and ``gaps_ranking`` (score breakdown).
+
+        #2598: a DRAFT is not excluded from the candidate pool (a draft is
+        CURRENT, not terminal), so a returned draft gap is rendered HONESTLY —
+        ``gaps_ranking.draft: True``, ``confidence: None`` +
+        ``confidence_source: "uncomputed"`` (never the fabricated neutral 0.5),
+        and sorted after every live gap.
         """
         from .ranking import GapsRanker
 
