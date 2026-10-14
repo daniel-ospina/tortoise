@@ -32,7 +32,10 @@ WHAT THIS PINS
    site named a record that did not exist).
 3. The shipped-code facts, resolved with `ast` so whitespace reformatting
    cannot red them:
-   * `run_s4` is called under `if story:` and under NO flag guard;
+   * `run_s4` is called under `if story:` and under NO OTHER guard at all —
+     an ALLOW-LIST over the enclosing `If` tests, not a deny-list of flag
+     spellings (a nested `if s4_delta:` makes `TORTOISE_S4_DELTA=0` a real
+     off switch while a spelling check reports clean);
    * `_s4_delta_enabled()` defaults True, and its value is threaded as the
      call's `delta` OUTPUT-contract kwarg — not used as a call gate;
    * `merge_embed_lists`'s union is ASSIGNED (consumed), not discarded;
@@ -267,6 +270,39 @@ def _scan(source: str | None = None) -> _StageScan:
     return scan
 
 
+def _s4_call_gate_violations(source: str) -> list[str]:
+    """Every reason `run_s4`'s call site is not gated ONLY by `if story:`.
+
+    POLARITY, not another deny-list (the #8601 review proved the four-spelling
+    deny-list let a NESTED gate through): a bare `story` name survived in the
+    guard stack and `s4_delta` was not one of the spellings, so
+    ``if s4_delta: s4 = run_s4(...)`` kept the guard green while making
+    ``TORTOISE_S4_DELTA=0`` a real S4 off switch — the destructive misreading
+    this file exists to prevent. The property is an ALLOW-LIST: EVERY `If`
+    test enclosing the call must be exactly the bare ``Name('story')``.
+    """
+    scan = _scan(source)
+    if scan.s4_call is None:
+        return ["`run_s4` is no longer called from `extract_session_v2`"]
+    violations: list[str] = []
+    if not any(
+        isinstance(test, ast.Name) and test.id == "story"
+        for test in scan.s4_guards
+    ):
+        violations.append(
+            "the S4 call is no longer guarded by the bare `if story:` — "
+            f"enclosing guards: {[ast.unparse(t) for t in scan.s4_guards]}"
+        )
+    for test in scan.s4_guards:
+        if not (isinstance(test, ast.Name) and test.id == "story"):
+            violations.append(
+                "the S4 call is gated by "
+                f"`{ast.unparse(test)}`, not the bare `if story:` the record "
+                "states — a flag gate here is an S4 OFF SWITCH"
+            )
+    return violations
+
+
 def _own_exits(body: list[ast.stmt]) -> list[ast.stmt]:
     """Every `return`/`raise` in THIS statement list, ignoring nested defs.
 
@@ -397,27 +433,25 @@ def test_the_module_docstring_carries_the_record_the_call_site_points_at():
 
 
 def test_run_s4_is_called_under_if_story_with_no_flag_gate():
-    scan = _scan()
-    assert scan.s4_call is not None, (
+    """The record states S4 has NO off switch; this is an ALLOW-LIST over the
+    guards enclosing the call, not a deny-list of flag spellings (#8601 review).
+
+    A deny-list is satisfied by any spelling it does not enumerate — the review
+    proved a nested `if s4_delta:` gate made `TORTOISE_S4_DELTA=0` disable S4
+    while every check here stayed green.
+    """
+    source = EXTRACTOR.read_text(encoding="utf-8")
+    assert _scan(source).s4_call is not None, (
         "`run_s4` is no longer called from `extract_session_v2`. If the stage "
         "was genuinely migrated out, DELETE this guard together with the marker "
         "and the docstring record — do not let them describe a stage that is gone."
     )
-    guard_text = [ast.unparse(test) for test in scan.s4_guards]
-    assert any(
-        isinstance(test, ast.Name) and test.id == "story" for test in scan.s4_guards
-    ), (
-        "the S4 call is no longer guarded by `if story:` — re-verify the marker's "
-        f"'runs whenever a story exists' claim. Enclosing guards: {guard_text}"
+    violations = _s4_call_gate_violations(source)
+    assert not violations, (
+        "an S4 call gate was added. The marker states S4 has NO flag gate and "
+        "that the only skips are side effects of other paths; either the code "
+        "or the marker is now false. " + "; ".join(violations)
     )
-    joined = " ".join(guard_text)
-    for flag_ish in ("TORTOISE_S4_DELTA", "environ", "env_flag", "_s4_delta_enabled"):
-        assert flag_ish not in joined, (
-            "an S4 call gate was added. The marker states S4 has NO flag gate "
-            "and that the only skips are side effects of other paths; either the "
-            "code or the marker is now false. "
-            f"Flag-ish token {flag_ish!r} found in guards: {guard_text}"
-        )
 
 
 def test_the_s4_flag_selects_the_output_contract_not_whether_s4_runs():
@@ -724,3 +758,42 @@ def test_the_degraded_check_pins_the_value_not_the_word():
     ).body
     assert _dict_constant(false_arm, "degraded").value is False
     assert _dict_constant(true_arm, "degraded").value is True
+
+
+def test_a_nested_flag_gate_reds_the_off_switch_check():
+    """#8601 review finding — the four-spelling deny-list let a NESTED gate
+    through, and a nested gate is behaviourally an off switch.
+
+    The review's proof, reproduced as a fixture: wrapping the live call in
+    ``if s4_delta:`` made `TORTOISE_S4_DELTA=0` disable S4, while the bare
+    `story` name in the guard stack satisfied the old check and `s4_delta` was
+    not one of the four denied spellings. The allow-list must red here.
+    """
+    source = EXTRACTOR.read_text(encoding="utf-8")
+    call = (
+        "            s4 = run_s4(model, story, search, embed_list, master,\n"
+        "                        session_date=session_date, edus=edus,\n"
+        "                        stats=stage_stats,\n"
+        "                        core_only=classify_later, delta=s4_delta)"
+    )
+    assert call in source, "the S4 call text moved — re-point this fixture"
+    assert _s4_call_gate_violations(source) == [], (
+        "the unmutated tree already reds the off-switch check — this fixture "
+        "cannot attribute the detection to the injection"
+    )
+    nested = (
+        "            s4 = None\n"
+        "            if s4_delta:\n"
+        + "\n".join("    " + line for line in call.splitlines())
+        + "\n"
+    )
+    mutated = source.replace(call, nested, 1)
+    assert mutated != source, "the injection did not apply — fixture is stale"
+    violations = _s4_call_gate_violations(mutated)
+    assert violations, (
+        "the off-switch check cannot see a nested `if s4_delta:` gate, so "
+        "`TORTOISE_S4_DELTA=0` would disable S4 while the guard reported clean"
+    )
+    assert any("s4_delta" in v for v in violations), (
+        f"the nested gate was not the violation reported: {violations}"
+    )
