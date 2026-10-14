@@ -797,15 +797,17 @@ exec {self.gh} "$@"
         self.assertIn("issue landed", out)
         self.assertNotIn("ANSWER: nobody", out)
 
-    def test_a_merged_timeline_pr_answers_landed(self):
-        """The timeline arm through this verb: an OPEN issue whose merged PR
-        names it in the title is landed, not free."""
+    def test_a_merged_timeline_pr_on_an_open_issue_is_an_advisory(self):
+        """#8625: an OPEN issue whose merged PR names it in the title is NOT
+        landed — a reference is not a closure. The verb reports the advisory and
+        still answers "nobody": a merged PR is not a holder either."""
         self._merged_timeline_pr()
         rc, out = self.run_tool(ISSUE)
         self.assertEqual(rc, 0, out)
-        self.assertIn("ANSWER: already landed", out)
+        self.assertIn("[merged PRs naming an OPEN issue]", out)
         self.assertIn("PR #777", out)
-        self.assertNotIn("ANSWER: nobody", out)
+        self.assertIn("ANSWER: nobody", out)
+        self.assertNotIn("ANSWER: already landed", out)
 
     def test_landed_with_a_coexisting_holder_names_both(self):
         """A terminal signal and a live holder CAN coexist. The gate says so
