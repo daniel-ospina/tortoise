@@ -234,9 +234,12 @@ _LABEL_COUNT_QUERY = (
 def query_label_counts(graph) -> dict[str, int]:
     """Per-label node counts for a graph handle — the #661 drift guard's input.
 
-    A server-side AGGREGATE, like
-    :func:`tortoise.hosted_backup.count_data_nodes`: one row, so it is immune to
-    FalkorDB's ``RESULTSET_SIZE`` cap. It counts that function's node set — the
+    A server-side AGGREGATE grouped by label, like
+    :func:`tortoise.hosted_backup.count_data_nodes` but NOT the same shape: it
+    returns **one row per distinct label**, not one row, so its result is
+    bounded by the label count rather than the node count — that is what keeps
+    it clear of FalkorDB's ``RESULTSET_SIZE`` cap. It counts that function's
+    node set — the
     content set, with the projection's bookkeeping excluded — because the #661
     guard compares labels across runs and a marker that appears or disappears
     with a projection is not data loss.

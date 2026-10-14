@@ -1193,6 +1193,15 @@ class TestDrRebaseline:
         for i in range(3):
             g.query("CREATE (o:OnboardingStep {id:$id})",
                     params={"id": f"os-{i}"})
+        # Create the projection's own bookkeeping marker EXPLICITLY instead of
+        # relying on the endpoint to materialise one mid-request. The marker is
+        # the thing this test exists to prove is excluded: with no bookkeeping
+        # node in the graph, the assertions below hold even when
+        # `_LABEL_COUNT_QUERY` is reverted to a bare `MATCH (n)` — the read has
+        # nothing to include — so the pin was vacuous (#8595 review P2). Seeding
+        # it makes the read genuinely discriminating and removes the race.
+        # `point_fts_v2` is one of `hosted_api._EXPORT_SKIP_META_KEYS`.
+        g.query("MERGE (m:Meta {key:'point_fts_v2'})")
         live = query_label_counts(g)
         assert live == {"OnboardingStep": 3, "Point": 3}, live
 

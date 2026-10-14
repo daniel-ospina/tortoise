@@ -307,7 +307,13 @@ def test_the_data_loss_row_does_not_read_repetition_as_loss():
     churn drop repeats too) and AC11 of ``docs/plans/2026-08-08-596-plan.md``,
     whose re-baseline remedy works precisely because it MOVES the baseline.
 
-    RED (pre-fix): the cell carries "repeats every run is NOT a false positive".
+    RED (pre-fix): at `origin/main` the cell prescribes a bare "verify +
+    re-baseline or restore" and never explains why repetition is
+    uninformative, so the second assertion reds. The first assertion guards an
+    **intra-PR course correction**: the "repeats every run is NOT a false
+    positive" wording was introduced and removed inside this PR
+    (`654bd247b` → `bd75f03a1`), never on `origin/main`, so it is not a
+    base-commit RED.
     """
     row = _runbook_rows()["DATA_LOSS_CANDIDATE"]
     assert "repeats every run is NOT a false positive" not in row
@@ -342,6 +348,31 @@ def test_the_manual_close_rollup_names_the_measured_headline_range():
     assert "6.2 / 12.5 / 12.5 / 7.1%" in rollup, (
         "the roll-up must name the measured overall_drop_pct range of the four "
         "cited incidents, so the label-path class is not narrowed below it")
+
+
+def test_the_data_loss_row_documents_the_one_sweep_baseline_transition():
+    """#8595 review P3: the post-deploy transition must be on the operator's copy.
+
+    Baselines persisted before the per-label read began excluding the
+    projection's bookkeeping can carry any label the predicate now skips —
+    ``EpMeta`` / ``GraphEventMeta`` / ``TeamMeta``, or a ``Meta`` node keyed
+    ``point_fts_v2`` / ``event_fts_v2``. On the first sweep after the change
+    each reads ``n → 0``, which fires this kind for a label below
+    ``REGISTRY_LABEL_FLOOR`` (and ``_delete_uploaded`` deletes that run's
+    archive), so the row must state the transition and its disposition rather
+    than leave it to a PR description an operator never reads.
+
+    RED (pre-fix): the row names no transition and none of the skipped labels.
+    """
+    row = _runbook_rows()["DATA_LOSS_CANDIDATE"]
+    assert "One-sweep transition" in row, (
+        "the row must name the one-sweep baseline transition, or an operator "
+        "meets the first post-deploy fire with no disposition (#8595 review P3)")
+    assert all(lbl in row for lbl in ("EpMeta", "GraphEventMeta", "TeamMeta")), (
+        "the transition can fire on any label the predicate excludes, so the "
+        "row must name them rather than only `Meta`")
+    assert "re-baseline" in row, (
+        "the transition's disposition is the existing verify + re-baseline")
 
 
 def test_manual_close_kinds_document_the_dedup_close_procedure():
