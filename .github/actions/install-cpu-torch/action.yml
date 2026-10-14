@@ -37,10 +37,10 @@ description: >
   PyPI — measured: with `--index-url` the branch job ended on `setuptools 78.1.0`
   where main ends on `84.0.0`. This command is linux-only because PyTorch
   publishes no `+cpu`-SUFFIXED macOS wheel (the index does carry macOS wheels,
-  under their plain version names), and one `workflow_dispatch` caller does use
-  this action (`evals-on-demand.yml`), which is fine on its `ubuntu-latest`
-  runner; a future caller on macOS would fail loudly here rather than silently
-  install CUDA.
+  under their plain version names), and two `workflow_dispatch` callers use
+  this action (`evals-on-demand.yml` and `perf-lane.yml`, #3992), which is fine
+  on their `ubuntu-latest` runners; a future caller on macOS would fail loudly
+  here rather than silently install CUDA.
 
   `--no-deps` is deliberately NOT used: with torch already satisfied, the later
   extras install would not pull torch's own dependencies back in, and
