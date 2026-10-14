@@ -38,9 +38,14 @@ WHAT THIS PINS
      off switch while a spelling check reports clean);
    * `_s4_delta_enabled()` defaults True, and its value is threaded as the
      call's `delta` OUTPUT-contract kwarg — not used as a call gate;
-   * `merge_embed_lists`'s union is ASSIGNED (consumed), not discarded;
-   * the three side-effect bypass paths exist (the `sdk.py` v1/`summary=`
-     dispatch and the empty-conversation early return before S1);
+   * `merge_embed_lists`'s union is ASSIGNED and is STILL the merged value when
+     it reaches `result["embed_list"]` — no bare rebinding of the merge target,
+     and no clearing of the S4 result, in between (assignment to a name with a
+     matching spelling alone left a replace-not-merge green; #8601 review);
+   * the three side-effect bypass paths exist ON THE ROUTE THAT REACHES
+     `extract_session_v2` (the `sdk.py` v1/`summary=` dispatch — pinned as a
+     ROUTING to the S4-less path, not merely as a predicate — and the
+     empty-conversation early return before S1);
 4. and — the NEGATIVE half — a SOURCE-ORDER scan of `extract_session_v2`:
    no early `return`/`raise` appears before the S4 call site other than the
    enumerated empty-conversation one, so a fourth exit on the entry→call path
@@ -78,9 +83,13 @@ DESIGN_POSITION = "There is no S4 — do not restore one."
 MARKER_NEVER_DELETE = "Never delete `run_s4` on the strength of this document alone."
 GUARD_NAME = "test_extractor_v4_s4_stage_claims.py"
 #: The unique opening of the design's S4 drift marker — the blockquote whose own
-#: tracker reference the guard must pin. Scoping matters: `#8500` (and the
-#: never-delete sentence) also occur elsewhere in the document, so a
-#: document-wide membership check cannot fail when THIS passage loses them.
+#: tracker reference the guard must pin. Scoping matters: the bare string
+#: `#8500` occurs many times in the document (the pinned literals here are each
+#: unique today), so a document-wide membership check can be satisfied by an
+#: unrelated mention while THIS passage loses its tracker line — the #8601
+#: review rewrote only the marker's tracker line and the document-wide check
+#: stayed green. The scoping itself is proven by
+#: `test_the_marker_tracker_check_is_scoped_to_the_marker`.
 MARKER_START = "⛔ DRIFT MARKER"
 #: The marker's OWN tracker reference. Pinned verbatim (through `_flatten`, so a
 #: reflow is fine): `#8500` also occurs in the record-anchor sentence inside the
@@ -227,6 +236,173 @@ def _is_v1_dispatch(test: ast.expr) -> bool:
     return kinds == {"extractor_v1", "summary_not_none"}
 
 
+#: The callee each arm of the v1 dispatch MUST route to. The `v1`/`summary=`
+#: arm is bypass (i)/(ii): it must land on the S4-less v1 path, and the
+#: fall-through on the S4-running v2 path. Pinned because the #8601 review
+#: swapped them and every test stayed green while the bypass claims went false.
+V1_BYPASS_CALLEE = "_commit_session_v1"
+V2_FALLTHROUGH_CALLEE = "_commit_session_v2"
+
+
+def _iter_stmt_lists(node: ast.AST) -> list[list[ast.stmt]]:
+    """Every statement list inside `node`, NOT descending into nested defs.
+
+    Needed because `ast.walk` gives no parent: to read the statement that
+    FOLLOWS the dispatch `If` (the v2 fall-through) it must be located inside
+    its own sibling list.
+    """
+    lists: list[list[ast.stmt]] = []
+    for field in ("body", "orelse", "finalbody"):
+        block = getattr(node, field, None)
+        if isinstance(block, list) and block and isinstance(block[0], ast.stmt):
+            lists.append(block)
+    for handler in getattr(node, "handlers", []) or []:
+        lists.extend(_iter_stmt_lists(handler))
+    for case in getattr(node, "cases", []) or []:
+        lists.extend(_iter_stmt_lists(case))
+    for block in list(lists):
+        for stmt in block:
+            if isinstance(
+                stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ):
+                continue
+            lists.extend(_iter_stmt_lists(stmt))
+    return lists
+
+
+def _enclosing_stmt_list(
+    tree: ast.Module, node: ast.If
+) -> tuple[list[ast.stmt], int] | None:
+    """The statement list holding `node`, and `node`'s index in it."""
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef):
+            continue
+        if not (fn.lineno <= node.lineno <= (fn.end_lineno or fn.lineno)):
+            continue
+        for body in _iter_stmt_lists(fn):
+            if node in body:
+                return body, body.index(node)
+    return None
+
+
+def _return_callee(stmts: list[ast.stmt]) -> str:
+    """The callee of the first `return <call>(...)` in this statement list.
+
+    `""` when there is no such return, so the caller reports a missing route
+    rather than silently accepting it.
+    """
+    for stmt in stmts:
+        if isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Call):
+            return _call_name(stmt.value.func)
+    return ""
+
+
+def _v1_dispatch_routing_violations(source: str) -> list[str]:
+    """Every reason the `v1`/`summary=` dispatch is not a BYPASS of S4.
+
+    The #8601 review proved that matching only the PREDICATE left the ROUTING
+    unconstrained: swapping the two callees at `sdk.py:6934` sent
+    ``TORTOISE_EXTRACTOR=v1`` and ``summary=`` into the S4-RUNNING pipeline
+    while every test in this file stayed green — falsifying the record's bypass
+    paths (i)/(ii). So the branch bodies are pinned, not just the condition.
+    """
+    tree = ast.parse(source)
+    matches = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.If) and _is_v1_dispatch(node.test)
+    ]
+    if not matches:
+        return [
+            "the `v1` / `summary=` dispatch (the record's bypass paths (i) and "
+            "(ii)) is gone or was rewritten — re-derive the record's bypass list."
+        ]
+    if len(matches) > 1:
+        return [
+            f"{len(matches)} `v1` / `summary=` dispatch sites exist — the record "
+            "names one route, so re-derive the bypass list rather than letting "
+            "an unrelated look-alike satisfy the pin"
+        ]
+    node = matches[0]
+    site = _enclosing_stmt_list(tree, node)
+    if site is None:
+        return ["the `v1` / `summary=` dispatch is no longer inside a function body"]
+    body, index = site
+    violations: list[str] = []
+    bypass = _return_callee(node.body)
+    if bypass != V1_BYPASS_CALLEE:
+        violations.append(
+            "the `v1` / `summary=` arm routes to "
+            f"`{bypass or '<no return>'}` instead of `{V1_BYPASS_CALLEE}` — "
+            "`TORTOISE_EXTRACTOR=v1` / `summary=` would reach the S4-RUNNING path"
+        )
+    fallthrough = _return_callee(body[index + 1:])
+    if fallthrough != V2_FALLTHROUGH_CALLEE:
+        violations.append(
+            "the fall-through after the `v1` / `summary=` arm routes to "
+            f"`{fallthrough or '<no return>'}` instead of "
+            f"`{V2_FALLTHROUGH_CALLEE}` — the S4-RUNNING v2 route moved"
+        )
+    return violations
+
+
+def _mentions_name(call: ast.Call, name: str) -> bool:
+    """`name` appears as a bare Name anywhere in `call`'s arguments."""
+    for arg in [*call.args, *(kw.value for kw in call.keywords)]:
+        if any(
+            isinstance(sub, ast.Name) and sub.id == name
+            for sub in ast.walk(arg)
+        ):
+            return True
+    return False
+
+
+def _union_consumption_violations(source: str) -> list[str]:
+    """Every reason the E4 union is NOT the value that reaches the output.
+
+    The #8601 review proved that pinning NAME IDENTITY (`merge_target` is not
+    None and `result["embed_list"]` reads a name with the same spelling) stays
+    green when the merged value is REBOUND on the way out:
+
+      * `complete_list = s4` — replace-not-merge; S2 items S4 omitted are
+        dropped, exactly the state the assertion's own message names;
+      * `complete_list = embed_list` — union computed, then discarded;
+      * `s4 = {}` after the call — the S4 half of the union emptied.
+
+    The property pinned here is the EDGE, not the spelling: between the merge
+    and the output, every rebinding of the merge target must be a CALL that
+    still reads the merge value (the VET / entity-resolution / chain passes do
+    exactly that), and the S4 result must not be rebound before the merge.
+    """
+    scan = _scan(source)
+    if scan.merge_call is None:
+        return ["`merge_embed_lists` is no longer called"]
+    if not scan.merge_target or scan.result_embed_list_lineno is None:
+        return [
+            "the union or the `result[\"embed_list\"]` output assignment is gone"
+        ]
+    merge_line = scan.merge_call.lineno
+    output_line = scan.result_embed_list_lineno
+    s4_line = scan.s4_call.lineno if scan.s4_call is not None else -1
+    violations: list[str] = []
+    for name, lineno, value in scan.assignment_sites:
+        if name == scan.s4_result and s4_line < lineno < merge_line:
+            violations.append(
+                f"`{name}` is REBOUND at line {lineno} after `run_s4` and before "
+                "the merge, so the union consumes a value that is not S4's output"
+            )
+        if name != scan.merge_target or not (merge_line < lineno < output_line):
+            continue
+        if not isinstance(value, ast.Call) or not _mentions_name(
+            value, scan.merge_target
+        ):
+            violations.append(
+                f"`{scan.merge_target}` is rebound at line {lineno} to "
+                f"`{ast.unparse(value)}` before the output — the merged list does "
+                "not reach `result[\"embed_list\"]`"
+            )
+    return violations
+
+
 def _function(tree: ast.Module, name: str) -> ast.FunctionDef:
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == name:
@@ -253,7 +429,13 @@ class _StageScan(ast.NodeVisitor):
         self.merge_call: ast.Call | None = None
         self.merge_target: str | None = None
         self.result_embed_list: ast.expr | None = None
+        self.result_embed_list_lineno: int | None = None
         self.assignments: dict[str, ast.expr] = {}
+        #: Every `name = value` site, so a REBINDING between two anchors is
+        #: visible. The #8601 review proved name identity is not consumption:
+        #: `complete_list = s4` after the merge kept both spellings equal while
+        #: the union went dead, so the check must see the rebinding itself.
+        self.assignment_sites: list[tuple[str, int, ast.expr]] = []
 
     def visit_If(self, node: ast.If) -> None:
         self.guard_stack.append(node.test)
@@ -272,6 +454,7 @@ class _StageScan(ast.NodeVisitor):
         targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
         for target in targets:
             self.assignments[target] = node.value
+            self.assignment_sites.append((target, node.lineno, node.value))
         for target in node.targets:
             if (
                 isinstance(target, ast.Subscript)
@@ -281,6 +464,7 @@ class _StageScan(ast.NodeVisitor):
                 and target.slice.value == "embed_list"
             ):
                 self.result_embed_list = node.value
+                self.result_embed_list_lineno = node.lineno
         if isinstance(node.value, ast.Call):
             called = _call_name(node.value.func)
             if called == "run_s4" and self.s4_call is None:
@@ -470,6 +654,13 @@ def test_the_module_docstring_carries_the_record_the_call_site_points_at():
         "code is authoritative' sentence as answering a question #8500 reserves "
         "to the owner)."
     )
+    assert "never enter this extractor at all" in doc, (
+        "the record must SCOPE its bypass enumeration to the route that reaches "
+        "`extract_session_v2`, and name the other `capture_session` lanes that "
+        "never enter it (keyless/no-provider, already-captured replay, "
+        "`TORTOISE_SESSION_EXTRACTOR=m2`). The unqualified 'three paths' claim "
+        "was contradicted by those lanes, which the #8601 review proved."
+    )
 
 
 def test_the_docstring_scope_check_reds_when_the_record_leaves_the_docstring():
@@ -559,6 +750,15 @@ def test_the_s4_flag_selects_the_output_contract_not_whether_s4_runs():
 
 
 def test_the_e4_union_is_consumed_not_discarded():
+    """The union must be what REACHES the output, not merely assigned to a name
+    with a matching spelling.
+
+    The #8601 review proved name identity is not consumption: `complete_list =
+    s4` (replace-not-merge) and `complete_list = embed_list` (union discarded)
+    inserted after the merge kept every assertion here green. The
+    consumption-edge check below closes that, and
+    `test_the_union_consumption_check_sees_a_rebinding` pins its non-vacuity.
+    """
     scan = _scan()
     assert scan.merge_call is not None, (
         "`merge_embed_lists` is no longer called — the E4 'merges, not replaces' "
@@ -587,22 +787,32 @@ def test_the_e4_union_is_consumed_not_discarded():
         f"{ast.unparse(output) if output is not None else '<no result[embed_list] assignment>'} "
         f"but the merge target is {scan.merge_target!r}."
     )
+    violations = _union_consumption_violations(EXTRACTOR.read_text(encoding="utf-8"))
+    assert not violations, (
+        "the merged list is REBOUND on its way to the output — a "
+        "replace-not-merge (`complete_list = s4`) drops every S2 item S4 "
+        "omitted, which is the E4 capability loss this test exists to catch; "
+        "a name-spelling check cannot see it (the #8601 review proved that). "
+        + "; ".join(violations)
+    )
 
 
 def test_the_three_side_effect_bypass_paths_exist():
-    """The marker states these are the ONLY skips, and that none is an S4 switch.
-    If one disappears the marker's enumeration is wrong; the NEGATIVE half — a
-    fourth, undocumented bypass — is pinned by
-    `test_no_undocumented_early_exit_skips_s4`."""
-    sdk_tree = ast.parse(SDK.read_text(encoding="utf-8"))
-    dispatch = [
-        node.test
-        for node in ast.walk(sdk_tree)
-        if isinstance(node, ast.If)
-    ]
-    assert any(_is_v1_dispatch(test) for test in dispatch), (
-        "the `v1` / `summary=` dispatch (the marker's bypass paths (i) and (ii)) "
-        "is gone or was rewritten — re-derive the marker's bypass list."
+    """The record states these are the ONLY skips ON THE ROUTE THAT REACHES
+    `extract_session_v2`, and that none is an S4 switch. If one disappears the
+    record's enumeration is wrong; the NEGATIVE half — a fourth, undocumented
+    bypass — is pinned by `test_no_undocumented_early_exit_skips_s4`.
+
+    The `sdk.py` arm is pinned as a ROUTING, not merely as a predicate: the
+    #8601 review swapped the two callees and every test stayed green while
+    bypass paths (i)/(ii) went false.
+    """
+    routing = _v1_dispatch_routing_violations(SDK.read_text(encoding="utf-8"))
+    assert not routing, (
+        "the `v1` / `summary=` dispatch (the record's bypass paths (i) and (ii)) "
+        "is gone, was rewritten, or no longer BYPASSES S4 — the predicate alone "
+        "is not the bypass, the routing must reach the S4-less path. "
+        + "; ".join(routing)
     )
 
     scan = _scan()
@@ -614,8 +824,8 @@ def test_the_three_side_effect_bypass_paths_exist():
         if ast.unparse(node.test) == "not edus"
     ]
     assert empty_guards, (
-        "the empty-conversation early return (the marker's bypass path (iii)) is "
-        "gone — S4 can now be reached with no content, contradicting the marker."
+        "the empty-conversation early return (the record's bypass path (iii)) is "
+        "gone — S4 can now be reached with no content, contradicting the record."
     )
     assert min(node.lineno for node in empty_guards) < scan.s4_call.lineno, (
         "the empty-conversation return must run BEFORE the S4 call, or it is not "
@@ -742,12 +952,65 @@ def test_the_v1_dispatch_match_is_operator_sensitive():
         )
 
 
+def test_the_v1_dispatch_routing_is_pinned():
+    """#8601 review finding (P2) — the guard pinned the PREDICATE, not the bypass.
+
+    Swapping the two callees at `sdk.py:6934` (`_commit_session_v1` <->
+    `_commit_session_v2`) sends `TORTOISE_EXTRACTOR=v1` and `summary=` into the
+    S4-RUNNING pipeline while the predicate is untouched — falsifying the
+    record's bypass paths (i)/(ii) behind a green guard. The ROUTING, not just
+    the condition, must be pinned.
+    """
+
+    def synthetic(bypass: str, fallthrough: str) -> str:
+        return (
+            "class S:\n"
+            "    def commit_session(self, extractor, summary, conversation):\n"
+            '        extractor = (extractor or "v2").lower()\n'
+            '        if extractor == "v1" or summary is not None:\n'
+            f"            return self.{bypass}(conversation)\n"
+            f"        return self.{fallthrough}(conversation)\n"
+        )
+
+    clean = synthetic(V1_BYPASS_CALLEE, V2_FALLTHROUGH_CALLEE)
+    assert _v1_dispatch_routing_violations(clean) == [], (
+        "the unmutated dispatch shape must stay clean — or this fixture proves "
+        "nothing"
+    )
+    swapped = synthetic(V2_FALLTHROUGH_CALLEE, V1_BYPASS_CALLEE)
+    violations = _v1_dispatch_routing_violations(swapped)
+    assert violations, (
+        "a routing inversion (the v1 arm landing on the S4-RUNNING path, and "
+        "the `v1` / `summary=` bypass becoming false) must red the guard — "
+        "pinning only the predicate let it through"
+    )
+    assert any("S4-RUNNING" in v for v in violations), (
+        f"the routing inversion was not the violation reported: {violations}"
+    )
+
+    gone = (
+        "class S:\n"
+        "    def commit_session(self, extractor, conversation):\n"
+        "        return self._commit_session_v2(conversation)\n"
+    )
+    assert _v1_dispatch_routing_violations(gone), (
+        "a missing `v1` dispatch must red — the record's bypass list would be "
+        "false"
+    )
+
+
 def test_the_marker_tracker_check_is_scoped_to_the_marker():
-    """#8601 review finding (P3) — `"#8500" in doc` was vacuous.
+    """#8601 review finding (P3) — `"#8500" in doc` was vacuous, and the
+    scoping the earlier fixture claimed to prove was itself unfalsifiable.
 
     The string occurs at several places in the document, so rewriting only the
-    marker's OWN tracker line kept the document-wide check green. The scoped
-    `_marker_block()` read must red on exactly that mutation.
+    marker's OWN tracker line kept the document-wide check green. But the
+    earlier fixture rewrote the pinned literal GLOBALLY, so its negative
+    assertion (`MARKER_TRACKER_REF not in _marker_block(mutated)`) was
+    satisfied by ANY read of ANY scope — replacing `_marker_block()` with a
+    whole-document read still passed. The synthetic two-blockquote source below
+    is the positive half: it carries a SECOND blockquote with a DIFFERENT
+    tracker reference, which only a genuinely scoped read excludes.
     """
     source = DOC.read_text(encoding="utf-8")
     mutated = source.replace(MARKER_TRACKER_REF, "tracked at **`#9999`**", 1)
@@ -759,6 +1022,21 @@ def test_the_marker_tracker_check_is_scoped_to_the_marker():
     assert MARKER_TRACKER_REF not in _marker_block(mutated), (
         "the scoped marker read still found the tracker reference after it was "
         "rewritten — the check is still vacuous"
+    )
+
+    two_blocks = (
+        f"> {MARKER_START} — the S4 divergence\n"
+        f"> {MARKER_TRACKER_REF}\n"
+        "\n"
+        "> a later, unrelated blockquote still says #8500 and `#9999`\n"
+    )
+    scoped = _marker_block(two_blocks)
+    assert MARKER_TRACKER_REF in scoped, (
+        "the scoped read must return the marker block itself"
+    )
+    assert "#9999" not in scoped, (
+        "the marker read is still document-wide: it picked up a SECOND "
+        "blockquote, so the scoping the guard claims is not what the check does"
     )
 
 
@@ -822,6 +1100,52 @@ def test_the_union_consumption_check_reds_when_the_merge_does_not_reach_output()
         isinstance(scan2.result_embed_list, ast.Name)
         and scan2.result_embed_list.id == scan2.merge_target
     ), "a merge renamed away from the output must red the consumption check"
+
+
+def test_the_union_consumption_check_sees_a_rebinding():
+    """#8601 review finding (P2) — name identity is not consumption.
+
+    The review's three mutations each left every test in this file green: a
+    replace-not-merge (`complete_list = s4`), a discard (`complete_list =
+    embed_list`), and S4's output cleared after the call (`s4 = {}`). The first
+    is precisely the state `test_the_e4_union_is_consumed_not_discarded`'s own
+    failure message names (S2 items S4 omitted silently dropped). All three
+    must red the consumption-edge check.
+    """
+    source = EXTRACTOR.read_text(encoding="utf-8")
+    merge = "                complete_list = merge_embed_lists(embed_list, s4)\n"
+    assert merge in source, "the merge assignment moved — re-point this fixture"
+    assert _union_consumption_violations(source) == [], (
+        "the unmutated tree already reds the consumption check — this fixture "
+        "cannot attribute the detection to the mutation"
+    )
+    for label, insertion in (
+        ("replace-not-merge", "                complete_list = s4\n"),
+        ("discard-the-union", "                complete_list = embed_list\n"),
+    ):
+        mutated = source.replace(merge, merge + insertion, 1)
+        assert mutated != source, f"the {label} injection did not apply"
+        violations = _union_consumption_violations(mutated)
+        assert violations, (
+            f"the consumption check cannot see a `{label}` rebinding, so the "
+            "record's `union IS consumed` claim is unguarded"
+        )
+        assert any("complete_list" in v for v in violations), (
+            f"the `{label}` rebinding was not the violation reported: {violations}"
+        )
+
+    s4_call_end = "                        core_only=classify_later, delta=s4_delta)\n"
+    assert s4_call_end in source, "the S4 call tail moved — re-point this fixture"
+    cleared = source.replace(s4_call_end, s4_call_end + "            s4 = {}\n", 1)
+    assert cleared != source, "the s4-clearing injection did not apply"
+    violations = _union_consumption_violations(cleared)
+    assert violations, (
+        "the consumption check cannot see S4's output cleared after the call, "
+        "so the S4 half of the union can be emptied while the guard is green"
+    )
+    assert any("REBOUND" in v for v in violations), (
+        f"the S4 rebinding was not the violation reported: {violations}"
+    )
 
 
 def test_the_degraded_check_pins_the_value_not_the_word():

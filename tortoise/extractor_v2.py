@@ -47,19 +47,25 @@ a stage under the S4 slot number, and the two must not be read as one stage:
     S2's by ``merge_embed_lists`` (E4 — "S4 merges, not replaces", #1536).
 
 Measured at HEAD (symbols are authoritative, line numbers a convenience — this
-module's numbering moves; ``tests/test_extractor_v4_s4_stage_claims.py``
-resolves every claim below against the tree, so a change that falsifies this
-record reds a test instead of being discovered):
+module's numbering moves): ``tests/test_extractor_v4_s4_stage_claims.py``
+resolves the call-site, flag and consumption claims below against the tree, so a
+change that falsifies one of them reds a test instead of being discovered; the
+``merge_embed_lists`` collision semantics are pinned by the E4 tests in
+``tests/test_extractor_v2.py``:
 
   * S4 runs whenever a story exists — the ``run_s4`` call sits under
     ``if story:`` with NO flag gate.
   * ``TORTOISE_S4_DELTA`` (``_s4_delta_enabled``) selects the delta vs
     complete-list contract of S4's OUTPUT, NOT whether S4 runs. ``=0`` does not
     disable S4. There is no S4-specific off switch.
-  * S4 is skipped only as a SIDE EFFECT of three other paths, none of them an
-    "S4 switch": (i) ``TORTOISE_EXTRACTOR=v1``; (ii) passing ``summary=`` — both
-    take the v1 dispatch (``sdk.py``); (iii) an empty conversation, which returns
-    before S1.
+  * On the route that reaches ``extract_session_v2``, S4 is skipped only as a
+    SIDE EFFECT of three other paths, none of them an "S4 switch": (i)
+    ``TORTOISE_EXTRACTOR=v1``; (ii) passing ``summary=`` — both take the v1
+    dispatch (``sdk.py``); (iii) an empty conversation, which returns before S1.
+    Other ``capture_session`` lanes never enter this extractor at all — the
+    keyless/no-provider branch, the already-captured replay branch, and the
+    ``TORTOISE_SESSION_EXTRACTOR=m2`` branch (``_extract_session_llm``) — so
+    they are not S4 skips of this route.
   * ``merge_embed_lists``'s union IS consumed: S2 items S4 omitted are
     preserved, and S4 wins on identity-key collision. Dropping it without a
     successor loses the E4 property, not merely a function.

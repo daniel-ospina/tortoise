@@ -2058,8 +2058,11 @@ surfaces:
   # that a quoted SYMBOL exists; it checks no behavioural claim at all. This file
   # resolves, with `ast`, the claims a lane would act on destructively: the
   # `if story:` call gate (no flag gate), `TORTOISE_S4_DELTA` as the OUTPUT
-  # contract rather than an off switch, the consumed `merge_embed_lists` union,
-  # and the three side-effect bypass paths — plus the module docstring's
+  # contract rather than an off switch, the consumed `merge_embed_lists` union
+  # (assigned AND still the value that reaches `result["embed_list"]`), and the
+  # three side-effect bypass paths on the route into `extract_session_v2` (the
+  # `sdk.py` v1/`summary=` arm is pinned as a ROUTING to the S4-less path, not
+  # just as a predicate) — plus the module docstring's
   # `G5 record — the live S4 stage (#8500)`, the record the S4 call site names
   # (before this change it named a record that did not exist). Same docs-only
   # reason as the three guards above: a `docs/`-only diff takes `select()`'s early
