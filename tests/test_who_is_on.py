@@ -768,9 +768,15 @@ exec {self.gh} "$@"
             "who_is_on_landed_contract", TOOL)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
+        # ⛔ #8629 review (F5): normalize BEFORE matching. These phrases pin the
+        # docstring's MEANING, but `assertIn("its own\n        state is CLOSED",
+        # …)` pinned an exact line wrap, so a meaning-preserving rewrap turned it
+        # RED — and this repo has already had a commit whose only job was
+        # rewrapping a paragraph (1bbaad59f). Flatten first; assert on phrases.
+        flat_doc = " ".join((mod.__doc__ or "").split())
         self.assertNotIn("or a MERGED PR the paginated timeline ties to it",
-                         mod.__doc__ or "")
-        self.assertIn("its own\n        state is CLOSED", mod.__doc__ or "")
+                         flat_doc)
+        self.assertIn("its own state is CLOSED", flat_doc)
         self._closed_issue()
         rc, out = self.run_tool(ISSUE)
         self.assertEqual(rc, 0, out)
