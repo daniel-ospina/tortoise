@@ -1076,9 +1076,22 @@ class _EntityHandlers:
         # Declared here so it rides the version digest without growing the
         # Event surface.
         "textDigest",
-        # name / eventStatus / createdAt are intentionally NOT here —
-        # they were historically dropped by the fixed-field MERGE and
-        # are now persisted as arbitrary props via _persist_extra_props.
+        # #2788: `name` / `eventStatus` / `createdAt` are deliberately NOT in
+        # this skip set — the omission is what lets `_persist_extra_props`
+        # carry them onto the node (its skip is `_META_KEYS |
+        # _EVENT_HANDLED`). This is a PROP lane, never a STATE lane: an Event
+        # is a dated fact (§4.5), so no fold reads any of the three back into
+        # Event state — there is no Event analogue of the Object/Subject
+        # `status` column, and `eventStatus` sits outside the consistency
+        # gate's belief/status comparison. Of the three, only `name` has a
+        # reader (`sdk.backfill_about_entities` matches an Event against a
+        # Point's content); `eventStatus` is an INGEST marker (`scheduled` →
+        # `completed`, written by the session/meeting indexers), not a state
+        # read. The typed commit path cannot populate the lane at all —
+        # `CommitEvent` is `extra="forbid"` (`commit_schema.py`) — so only
+        # in-tree SDK/indexer writers reach it. The pack-declared fold
+        # generalization is Object-scoped and does NOT extend to Events
+        # (#2729); #2725 answered the Event-carries-state question "no".
     })
     # #3998 (D30): the DECLARED extra-property surface of a :Source. The graph
     # is the INDEX of the raw, not its store — so this is a CLOSED set, not an
