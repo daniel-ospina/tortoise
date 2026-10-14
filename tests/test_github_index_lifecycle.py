@@ -499,6 +499,10 @@ def test_live_progress_written_during_walk(provisioned, mock_github, monkeypatch
     deadline = time.time() + 10.0
     while time.time() < deadline:
         rp = provisioned.tc.get(f"/v1/index/github/{job_id}")
+        # #5049: the same non-exempt poll route `_poll_until` converts — a
+        # refusal here is a non-answer, so the loop must not read its
+        # `{"detail": ...}` body as a missing-progress deadline FAIL.
+        require_answered(rp, what=f"GET /v1/index/github/{job_id} answered")
         body = rp.json()
         if (body.get("repos_processed", 0) >= 1
                 and 0 < body.get("progress", 0) < 100):

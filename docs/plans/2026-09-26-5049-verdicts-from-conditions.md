@@ -300,10 +300,10 @@ caller behind them):
 
 | Site / seam | Covers |
 |---|---|
-| `test_commit_endpoint.py::_commit` | every `/v1/sessions/commit` POST in the file (#4627's own reproducer) |
-| `test_github_index_lifecycle.py::_poll_until` | the file's whole poll path |
-| `test_index_docs_api.py::_poll_until` | the file's whole poll path |
-| `test_capture_loop_responsiveness.py::_measure_on_loop_graph_work` | the measured `#3086` capture |
+| `test_commit_endpoint.py::_commit` | every hosted-app `/v1/sessions/commit` POST in the file — the seam plus the direct posts in `test_failed_write_retry_applies_the_counters_once`, `TestLayer1`, the 401 and body-cap sites (#4627's own reproducer) |
+| `test_github_index_lifecycle.py::_poll_until` | the file's whole `_poll_until` path, plus the pump-and-observe poll in `test_live_progress_written_during_walk` |
+| `test_index_docs_api.py::_poll_until` | the file's whole `_poll_until` path, plus the pump-and-observe polls in `test_docs_live_progress_written_during_walk` and `test_docs_live_progress_all_branches_site` |
+| `test_capture_loop_responsiveness.py::_measure_capture_graph_work` | the measured `#3086` capture through **both** callers (`_measure_on_loop_graph_work` and the direct schema-bootstrap caller) — the LOWER seam, not the wrapper |
 | `test_one_free_org_entitlement.py::_post_signed` | the `/webhooks/stripe` seam |
 | `test_activation_scorecard.py::test_default_window_is_24h` | `#5049`'s `KeyError: 'window'` instance |
 | `test_pack_state.py::TestGetV1Packs` (2) | `#4883`/`#4816`'s measured GETs |
@@ -316,6 +316,12 @@ files `test_hosted_api.py`, `test_dr_endpoints.py`, `test_invites_http.py`). The
 one mechanism and one fix — route the response through `require_answered` — so the next
 lane converts the seam, not the leaf. `test_hosted_api.py`'s other three `#8122` nodeids
 are left to that issue's own retry-class handling.
+
+**Scope of the closure (recorded so the tracker does not read rule 1 as globally closed):**
+this increment closes rule 1 for the **transport-bound** path — every route and seam named
+in the table above — not for the ≈1.7k bare status reads behind no shared seam. The
+residual is tracked as **#8582** (the no-seam class), not an endorsement that the class is
+exhausted; `#5049` stays open until #8582 lands.
 
 ### Rule-1 driver inventory (the `wait_for` family the contract unifies)
 

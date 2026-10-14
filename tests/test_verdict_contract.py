@@ -129,15 +129,19 @@ def test_the_transport_bound_refusal_skips_and_names_the_product_bound():
     assert f"{transport_wait_bound_s():g}" in message
 
 
-def test_sabotage_the_pre_fix_shape_fails_the_same_refusal():
-    """The shape #5049 replaces: `assert r.status_code == 200` on the refusal.
+def test_the_inconclusive_diagnosis_names_no_surface_status():
+    """The refusal rides a 504 on REST and a 200 on the MCP arm.
 
-    The same canned refusal that now SKIPs used to FAIL with `assert 504 == 200`.
-    This is the must-fail leg proving the conversion changes the verdict.
+    The diagnosis is the artifact a lane reads when a site skips, so it must
+    not send that reader hunting for a REST-only status that never occurred on
+    the MCP surface (the detector's own docstring forbids assuming one).
     """
-    with pytest.raises(AssertionError):
-        response = _refusal_response()
-        assert response.status_code == 200, response.text
+    for status in (504, 200):
+        with pytest.raises(pytest.skip.Exception) as excinfo:
+            require_answered(_refusal_response(status=status), what="a probe")
+        message = str(excinfo.value)
+        assert "(HTTP 504)" not in message, message
+        assert "#3834" in message, message
 
 
 def test_an_unrelated_504_is_returned_to_the_caller():
@@ -147,7 +151,7 @@ def test_an_unrelated_504_is_returned_to_the_caller():
     assert require_answered(response, what="a probe") is response
 
 
-def test_the_product_message_alone_is_not_a_refusal():
+def test_the_product_message_alone_is_enough_without_a_504_status():
     """The MCP arm's refusal rides a 200, so the STATUS cannot be the gate.
 
     `mcp_server._await_under_mcp_wait_bound` answers a breach with a

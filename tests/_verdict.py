@@ -215,9 +215,10 @@ def require_answered(response: Any, *, what: str) -> Any:
             what,
             deadline_s=transport_wait_bound_s(),
             diagnosis=(
-                "The hosted API's transport wait bound refused the request "
-                "(HTTP 504) instead of answering it (#3834); the property under "
-                "test was never observed."
+                "The product's transport wait bound refused the request instead "
+                "of answering it (#3834); the refusal's status differs by "
+                "surface (REST 504, MCP 200 with an isError result), so it is "
+                "named by neither — the property under test was never observed."
             ),
         )
     return response

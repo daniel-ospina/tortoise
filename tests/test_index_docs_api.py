@@ -309,6 +309,9 @@ def test_docs_live_progress_written_during_walk(provisioned, mock_github,
     deadline = time.time() + 12.0
     while time.time() < deadline:
         rp = provisioned.tc.get(f"/v1/index/docs/{job_id}")
+        # #5049: the same non-exempt poll route `_poll_until` converts — a
+        # refusal is a non-answer, not a missing-progress deadline.
+        require_answered(rp, what=f"GET /v1/index/docs/{job_id} answered")
         body = rp.json()
         if (body.get("repos_processed", 0) >= 1
                 and 0 < body.get("progress", 0) < 100):
@@ -374,6 +377,9 @@ def test_docs_live_progress_all_branches_site(provisioned, mock_github,
     deadline = time.time() + 12.0
     while time.time() < deadline:
         rp = provisioned.tc.get(f"/v1/index/docs/{job_id}")
+        # #5049: same non-exempt poll route as `_poll_until` — a bound
+        # refusal must not be read as a missing-progress deadline FAIL.
+        require_answered(rp, what=f"GET /v1/index/docs/{job_id} answered")
         body = rp.json()
         if (body.get("repos_processed", 0) >= 1
                 and 0 < body.get("progress", 0) < 100):
