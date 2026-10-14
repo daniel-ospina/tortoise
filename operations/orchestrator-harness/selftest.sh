@@ -521,6 +521,15 @@ PY
   ck "shipped refresh loop: the landed set is STILL reported on a later pass" $rc
   [ "$(wc -l < "$RL2/fakesc/.venv/bin/.calls" | tr -d ' ')" = "1" ] && rc=0 || rc=1
   ck "shipped refresh loop: a recorded LANDED issue is not re-pre-flighted on the next pass" $rc
+  # ⛔ CANARY, not decoration: the comment above says the arm is reachable ONLY through a close race
+  # because #8625 routed a title-naming OPEN-issue PR to the advisory `SURFACE_UNCLOSED_REF`
+  # surface. A comment cannot fail, so pin the producer half executably: if that routing is reverted,
+  # the timeline title arm regains authority, the close-race claim in §7.1b becomes false, and this
+  # check goes red. The tool lives two levels up from this script (repo root / tools).
+  HARNESS_TOOL="$HERE/../../tools/collision_preflight.py"
+  if grep -q 'SURFACE_UNCLOSED_REF' "$HARNESS_TOOL" 2>/dev/null \
+     && grep -q 'unclosed\.add(' "$HARNESS_TOOL" 2>/dev/null; then rc=0; else rc=1; fi
+  ck "shipped refresh loop: LANDED is a close-race arm — the tool routes a title-naming OPEN-issue PR to an ADVISORY surface (#8625)" $rc
   # a landed entry is recorded but does not consume a slot on LATER passes: the pool is 10 (LANDED
   # once) then 20 (CLEAN), LIMIT=1. Pass 1 spends the single pre-flight slot on 10; pass 2 filters
   # the landed entry BEFORE the LIMIT counter, so 20 is pre-flighted and queued. Pre-fix (before
