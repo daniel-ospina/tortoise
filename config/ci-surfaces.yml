@@ -669,6 +669,12 @@ surfaces:
   - test_docs_miner.py
   - test_redis_guard.py
   - test_selfhost.py
+  # #8544: the self-host off-box backup DRIVER (`tortoise/selfhost_backup.py`,
+  # an `api` SOURCE_PATTERN) — the execution half of the #8543 setup-path
+  # decision. Registered here so a selfhost_backup.py-only change selects the
+  # guard that pins it instead of falling through to `core`, where it is not
+  # registered (the #2938/#3154 silent-drop class).
+  - test_selfhost_backup.py
   - test_selfhost_rest.py
   - test_attribution_actor.py   # #2600: session→human actor stamp + event backstop + forged-claim strip (docker lane)
   - test_attribution_machine_model.py   # #2599: additive session machine_id + model attribution (docker lane)
@@ -4035,6 +4041,11 @@ durations:
   test_battery_r1_seed.py: 27.5
   test_onboarding_w6_member_authz.py: 3.0
   test_selfhost.py: 3.7
+  # #8544: measured locally with `pytest --durations` on the embedded lane
+  # (`TORTOISE_TEST_CARVE_OUT=1`, 17 tests, 7.9s wall) — a hand entry, NOT a
+  # junit re-derivation, because the file is new in this change. Replace it in
+  # the next sweep.
+  test_selfhost_backup.py: 8.0
   test_epic903_warmstart.py: 32.0
   test_epic903_modes.py: 15.1
   test_import_endpoint.py: 19.7

@@ -54,7 +54,8 @@ New to Tortoise? There are two ways to run it:
   The compose sidecar is the supported team/production path — AOF (`everysec`)
   survives a process or container crash (≤1 s), **not** a lost volume or host.
   Durability is that persistence **plus an off-box copy**, so the off-box backup
-  target is a setup step: declare an `R2_*` target or set
+  target is a setup step: declare the complete `R2_*` + `TORTOISE_BACKUP_KEY`
+  target — which arms the daemon's hourly backup driver — or set
   `TORTOISE_OFFBOX_BACKUP_DECLINED=1` (see
   [docs/durability-posture.md](docs/durability-posture.md) — the one authority
   for durability claims). For a single-agent eval without Docker, use the pip
