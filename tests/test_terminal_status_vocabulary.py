@@ -399,11 +399,10 @@ def test_live_predicate_and_set_agree_on_both_axes() -> None:
 # ── 5. #7075 — builder is the keep-filter's exact negation, on every value ─
 
 #: Values a hand-edited / pre-#2491 graph can actually hold on ``outdated``.
-#: The FALSY NON-BOOLEAN values (``0`` and ``""``) are where Cypher
-#: type-strictness and Python ``bool()`` cannot agree (see
-#: ``_terminal_expression``'s docstring) — they are asserted explicitly like
-#: the rest, because the DUAL invariant must hold for them even though the
-#: Python mirror cannot.
+#: The dual invariant must hold for every one of them, including the values
+#: where it does not coincide with the Python mirror's ``bool()`` — the
+#: divergence is stated by mechanism on ``_terminal_expression`` and exercised
+#: by ``_FALSY_NON_BOOLEAN_RESIDUALS`` below.
 _OUTDATED_PROBE_VALUES = [True, False, None, 1, 0, 2, "true", "false", ""]
 
 
