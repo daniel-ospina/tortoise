@@ -10783,8 +10783,14 @@ function claimIntentInFlight() {
                                 carries — Points INCLUDING operators, Session
                                 nodes, capture receipts — minus the three
                                 export-skip bookkeeping labels. That is NOT the
-                                memory count, which is the non-operator Point
-                                count (team.point_count) behind the Memories card.
+                                memory count: the Memories card reads
+                                team.point_count, the :Point-only, demo-excluded
+                                count, which INCLUDES operator Points (operators
+                                ARE :Point; the non-operator filter belongs to
+                                the separate "Nodes used" metric, #4331). That
+                                the card therefore counts operators as
+                                "Memories" is a separate observation, filed as
+                                #8573 — not settled by this decision.
                                 Relabelling would assert a number that is not the
                                 memory count — the exact false-equivalence the
                                 billing cards already avoid (Nodes used from the
