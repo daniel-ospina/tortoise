@@ -7105,6 +7105,63 @@ def test_the_lane_has_a_real_runner_and_reads_the_lane_from_config():
         "hardcoding a second list here lets the two drift")
 
 
+def test_the_perf_lane_runner_is_off_the_gate_and_reads_the_lane_from_config():
+    # #3992: `on_demand:` gained a SECOND runner — the dedicated perf lane
+    # (`tests/test_perf_lane_volunteer_context.py`, the file the #2080 plan
+    # names). The property the first runner is pinned for holds for the second
+    # one too, and for the same reason: a wall-clock SLO assertion must never
+    # gate a merge (the plan keeps the MECHANISM assertions blocking and the
+    # p95 in the dedicated lane), and a runner that hardcodes its file has a
+    # second list to forget.
+    #
+    # The failure this prevents, named: a future edit adding `pull_request:`
+    # to perf-lane.yml would silently put a shared-runner wall-clock number on
+    # every PR — the flake class the lane exists to separate out.
+    perf = "test_perf_lane_volunteer_context.py"
+    wf = (REPO / ".github/workflows/perf-lane.yml").read_text()
+    import yaml
+    doc = yaml.safe_load(wf)
+    triggers = doc.get("on", doc.get(True))
+    assert "pull_request" not in triggers, (
+        "the dedicated perf lane must never gate a PR — a shared-runner "
+        "wall-clock assertion on the merge path is the exact flake class "
+        "#3992's plan separates out")
+    assert "workflow_dispatch" in triggers, (
+        "the lane's manual invocation is an acceptance criterion (#3992 AC 4)")
+    assert on_demand_files.__name__ in wf, (
+        "the perf-lane workflow must resolve the lane through "
+        "on_demand_files(); a hardcoded path is a second list to forget")
+    assert perf in on_demand_files(load_manifest()), (
+        "the perf lane runs from the on_demand lane — without membership it "
+        "is excluded from the gate and claimed by nothing")
+    # `fast_pool()` returns `.py`-SUFFIXED entries, and the set below strips the
+    # suffix, so the comparison must use the bare name. The pre-fix form
+    # compared `perf` (WITH `.py`) against bare names — a value that can never
+    # be in that set — so it was satisfied by construction and the mutation it
+    # names (the file re-entering `fast_pool`) left this test green.
+    bare = perf[:-3] if perf.endswith(".py") else perf
+    assert bare not in {f[:-3] for f in fast_pool(load_manifest())}, (
+        "the lane must be filtered out of fast_pool, or the wall-clock "
+        "assertion is back on the merge gate")
+    # Non-vacuity control, ASSERTED (the sibling duration test's pattern): move
+    # the file back onto a surface and off the lane, and the assertion above
+    # must go red. This is the discriminator between the fixed form and the
+    # dead one — with `perf` (suffixed) this control passes vacuously too.
+    m = load_manifest()
+    first_surface = next(iter(m["surfaces"]))
+    on_gate = {
+        **m,
+        "on_demand": [f for f in m.get("on_demand") or [] if f != perf],
+        "surfaces": {
+            **m["surfaces"],
+            first_surface: [*m["surfaces"][first_surface], perf],
+        },
+    }
+    assert bare in {f[:-3] for f in fast_pool(on_gate)}, (
+        "control: with the file back on a surface it IS in fast_pool — if this "
+        "fails, the assertion above cannot fail for the regression it names")
+
+
 def test_the_lane_files_duration_key_is_classified_not_drift():
     # `duration_issues()` requires every `durations` key to be a CLASSIFIED
     # test file. The lane file is classified into a LANE rather than a surface,
