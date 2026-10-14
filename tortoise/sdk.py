@@ -12471,11 +12471,13 @@ class TortoiseSDK:
 
         Returns [{url, sourceKind, points}]. D10 (ONTOLOGY v3.15 §4.4): a
         run-endpoint `doc_<rel>` document is also a `:Source`, but it is NOT a
-        provenance source — it carries `documentKind` and NO `sourceKind`, so
-        including it would (a) add a `sourceKind=None` row to a
-        `sourceKind`-keyed vocabulary and (b) double-count every indexed file
-        (its corpus Source AND its document node). Filtering keeps the
-        pre-D10 observable row set byte-identical (see #5082).
+        provenance source — it carries `documentKind` (and, since #5082,
+        `sourceKind='document'`; the TYPE axis, §4.6), so including it would
+        (a) add a second `document` row to a `sourceKind`-keyed vocabulary and
+        (b) double-count every indexed file (its corpus Source AND its document
+        node). The `documentKind IS NULL` partition — not `sourceKind` — is what
+        separates the two, and #5082 does not remove the need for it; filtering
+        keeps the pre-D10 observable row set byte-identical.
         """
         proj = self._get_proj()
         rows = proj.g.query(
@@ -15577,6 +15579,13 @@ class TortoiseSDK:
         and explicitly-registered kinds count; unregistered kinds stay
         neutral). Bounded to the CROSS_LENS_POOL_CAP most-recently-updated
         points so the per-cycle scan stays proportional to new data.
+
+        Since #5082 a document `:Source` carries `sourceKind='document'`
+        (§4.6; registered and NEUTRAL), so Points extracted from documents are
+        now eligible here — intended under D3, which counts registered kinds of
+        ANY tier. Before the write their `sourceKind` was NULL and the gate
+        excluded them. Recorded at ONTOLOGY §4.6 (the `#8525` review asked for
+        this unstated output change to be named).
         """
         from tortoise.source_credibility import SOURCE_KIND_DEFAULTS
 
@@ -17899,6 +17908,12 @@ class TortoiseSDK:
             label is only ever present on a baseline written by a WORD input
             (`create_point(credibility=…)` / `mitigate_operator` /
             `_stamp_authored_word`), never by an explicit `set_point_baseline`;
+            and the un-freeze requires a body for the word to displace, i.e. at
+            least one RESOLVED tier source or an ORIGINATING `agentSession`
+            (#5082 review P1: a purely NEUTRAL source — a document `:Source`
+            with `sourceKind='document'`, no tier — resolves no group, so
+            recomputing would re-label `set-by-author` as
+            `inherited-from-source` with nothing inherited);
             inherited baselines
             (baseline_source='inherited-from-source')
             recompute per run subject to the per-point time gate
@@ -18270,6 +18285,29 @@ class TortoiseSDK:
             # assertion, never a re-opened explicit baseline. #7951 owns
             # the single write chokepoint.
             is_word_point = pid in author_word
+            # #5082 review P1: the ONE exception is a DERIVATION, so it needs
+            # something to derive FROM. `author_word` is populated from any
+            # admitted row — including a purely NEUTRAL source (a document
+            # `:Source` carries `sourceKind='document'`, which is registered
+            # NEUTRAL, and no `credibilityTier`). A neutral source resolves no
+            # tier, so it contributes NO group to the aggregate: the rewrite
+            # would carry the author's own word alone and still re-label the
+            # baseline `set-by-author` -> `inherited-from-source` — inventing
+            # an inheritance that never happened. Measured on the #5082 head
+            # before this guard: a `create_point(credibility=…)` Point
+            # extracted from a document flipped its token, stamped
+            # `inherited_at` (un-freezing it forever), and made
+            # `calibrate_summary` report "inherited from its source's trust
+            # rating" for a source that carries no rating (the number itself
+            # was unchanged: 1.1 -> 1.1, so only the provenance moved).
+            # The un-freeze is therefore granted only when at least one REAL
+            # evidence body resolved: a tiered source (`sources`, i.e. the
+            # non-neutral rows) or an ORIGINATING `agentSession`, whose weak
+            # body IS the evidence for an agent assertion (#398/#6151).
+            # `point_extra_support` holds exactly those originating sessions,
+            # so a key's presence is the signal (it is a defaultdict — use
+            # `in`, never `[]`).
+            has_resolved_evidence = bool(sources) or pid in point_extra_support
             # #6151 review round 6 P2: the polarity is “freeze everything that
             # is NOT a derivation”. The old allow-list
             # (`bl_src in (set-by-author, system-default)`) let an
@@ -18291,7 +18329,8 @@ class TortoiseSDK:
             if (bl_src is None and bl_set) or (
                 bl_src not in (None, BASELINE_SOURCE_INHERITED)
                 and not (bl_src == BASELINE_SOURCE_SET_BY_AUTHOR
-                         and is_word_point)
+                         and is_word_point
+                         and has_resolved_evidence)
             ):
                 continue
 
