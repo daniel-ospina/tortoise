@@ -32,9 +32,18 @@ Captured **2026-10-11 (UTC)** from `daniel-ospina/tortoise`.
 (`poll_raw_issues` / `_poll_issues` / `_poll_prs`).
 
     gh issue view <N> --repo daniel-ospina/tortoise \
-        --json number,title,state,createdAt,closedAt,url,labels,assignees,author,milestone
+        --json number,title,state,createdAt,closedAt,url,labels,assignees,author,milestone,body
     gh pr view <N> --repo daniel-ospina/tortoise \
-        --json number,title,state,createdAt,closedAt,mergedAt,url,labels,assignees
+        --json number,title,state,createdAt,closedAt,mergedAt,url,labels,assignees,body
+
+> **#8010:** `body` was added to the field list (the connector now requests it)
+> and to these four captures. Each `body` here is the live `gh … --json body`
+> value, verified byte-identical on 2026-10-14 to the `body` in the matching
+> `rest_*.json` / `webhook_*.json` capture of the SAME item — which is what lets
+> the producer-agreement test hold one digest across the three shapes. The
+> other fields are the original 2026-10-11 capture and were deliberately NOT
+> re-fetched: `#8037`'s labels have since changed, and re-capturing would have
+> moved the three shapes off one snapshot.
 
 `webhook_*.json` — the **webhook** payload `_webhook_to_event` receives. There
 is no live webhook configured on this repo, so the two halves are each real and

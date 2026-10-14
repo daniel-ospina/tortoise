@@ -268,7 +268,15 @@ class SlackConnector:
             "eventId": f"slack-msg-{channel}-{ts.replace('.', '-')}",
             "eventKind": "slack.message.thread_reply" if parent_ts else "slack.message",
             "subject": f"slack:{channel}:{user}",
+            # #8010: the stored `object` is capped at 200 chars for display, but
+            # the VERSION must not be: a text edit past char 200 left the digest
+            # (which reads the payload) untouched, so the `:Source` version did
+            # not move and every derived Event read `current` — a false
+            # `current`, the one direction ONTOLOGY §4.6 forbids. `textDigest`
+            # is the full text's hash, so the edit is detected and nothing raw
+            # is copied (`_EVENT_HANDLED` keeps it off the node).
             "object": text[:200],
+            "textDigest": hashlib.sha256(text.encode("utf-8")).hexdigest(),
             "startedAt": _ts_to_iso(ts),
             "endedAt": None,
             "source": f"slack:{channel}",
