@@ -217,11 +217,15 @@ while read -r N; do
   # below increments `n`); INCOMPLETE keeps the existing rule — it costs nothing against LIMIT and is
   # bounded by RETRY_MAX in the `*)` arm (#8469 review P2).
   #
-  # ⛔ LANDED IS NOT TERMINAL HERE, so it does NOT go in checked.txt. The pool is built from
-  # `gh issue list --state open`, so the pre-flight's state-CLOSED arm is unreachable from this loop:
-  # 100% of the LANDED verdicts written below come from the TIMELINE arm on an OPEN issue — and that
-  # landing may belong to a multi-PR issue that still needs work (the gate's own #4886 caveat, whose
-  # remedy is "verify it … if it still needs work, state the REMAINING scope before dispatch").
+  # ⛔ LANDED IS NOT TERMINAL HERE, so it does NOT go in checked.txt. Since #8625 the ONLY source of
+  # `VERDICT: LANDED` is the issue's OWN STATE being CLOSED (the timeline title arm lost its
+  # authority — a merged PR that merely names an issue is an ADVISORY on `merged PRs naming an OPEN
+  # issue`, and a CLEAN verdict now follows). This pool is built from `gh issue list --state open`,
+  # so the arm below is reachable ONLY through a CLOSE RACE: an issue listed as open by the pool
+  # queries, then closed before its pre-flight runs. It is kept for exactly that race. A
+  # landed-but-OPEN issue (the #7174 shape) is NOT suppressed any more: it parses as CLEAN and flows
+  # to candidates.txt, which is #8625's accepted cost — a wasted dispatch is recoverable, a false
+  # LANDED is not (measured on #7951: three merged increments that each said the issue stays open).
   # checked.txt is never pruned for an issue the reaper did not dispatch, and a landed issue is never
   # dispatched, so writing it there removed an OPEN work item from the backlog permanently and
   # silently — the exact failure class #8515 removed. landed.txt instead keeps it out of the backlog
@@ -239,6 +243,8 @@ while read -r N; do
     LANDED)
       # Counts against the pass budget like every other ANSWERED verdict: without this the loop
       # would walk past the LIMIT hunting for more entries on every pass a landed issue appears.
+      # Reachable only via a close race since #8625 — see the block comment above; the arm is kept
+      # for that race, not for the (removed) timeline arm.
       n=$((n+1))
       rm -f "$O/state/pretry-$N"
       echo "$N" >> "$O/landed.txt"

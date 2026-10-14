@@ -71,18 +71,32 @@ Design contract
    merged PR #7403 fell outside the 100-PR sample, and #5035) and each time a
    lane was dispatched to re-implement shipped code. The landed answer is
    therefore its OWN surface, BLOCKING (an unqueryable one is INCOMPLETE, never
-   CLEAN), fed by two targeted sources: the issue's own state (a CLOSED issue is
-   decisive) and a PAGINATED timeline query that reaches a merged PR older than
-   any sample could — a merged PR whose TITLE names this issue. It exits 4
-   (LANDED), a NEW code: every existing consumer stops on ANY non-zero exit, and
-   a caller that reads the code alone can still tell a landing from a collision
-   or an unqueryable surface.
+   CLEAN), fed by ONE authoritative source: the issue's own state — a CLOSED
+   issue is decisive. It exits 4 (LANDED), a NEW code: every existing consumer
+   stops on ANY non-zero exit, and a caller that reads the code alone can still
+   tell a landing from a collision or an unqueryable surface.
 
-Surfaces (7 rows, ALL hit-capable)
+   ⚠️ #8625: the PAGINATED timeline query is STILL run for an OPEN issue (an
+   unreadable timeline is INCOMPLETE, never CLEAN), but a MERGED PR whose TITLE
+   names the issue is now EVIDENCE, NOT A VERDICT. GitHub closes an issue only
+   on a closing keyword — "a plain issue reference does not automatically close
+   the issue" — so a reference is not a closure, and reading one as terminal
+   re-created #4886's "a MERGED follow-up PR naming the issue blocks that issue
+   forever" defect on a new surface (measured: three merged increments — #8127,
+   #8315, #8389 — refused dispatch on #7951, none of them closing it). Those
+   hits are reported LOUDLY on the ADVISORY surface `merged PRs naming an OPEN
+   issue`; they can never decide a verdict.
+
+Surfaces (8 rows, ALL hit-capable)
 ----------------------------------------------------------------------------
-  issue landed              issue state (gh issue view) +  (CLOSED issue;
-  · AUTHORITATIVE ·         gh api --paginate --slurp        merged PR naming
-                            /issues/N/timeline               this issue)
+  issue landed              issue state (gh issue view)       (CLOSED issue —
+                                                             the ONLY source
+                                                             of a landing)
+  merged PRs naming an      gh api --paginate --slurp        (MERGED PR whose
+  OPEN issue                /issues/N/timeline               TITLE names an
+  · ADVISORY ·                                               OPEN issue; a
+                                                             reference, not a
+                                                             closure — #8625)
   open PRs                  gh pr list --state open   (title / headRef;
                                                          body closing
                                                          reference;
@@ -98,10 +112,11 @@ Surfaces (7 rows, ALL hit-capable)
   issue assignee/comments   gh issue view N (assignee + claim comments)
 
 The `issue keywords` row was removed with the lexical arm (#3504): a row that
-can only report a guess does not become honest by being listed. The seventh row
-today is a DIFFERENT one — `issue landed` (#8560), which answers a question the
-tool never had an authoritative source for — so do not read "7 rows" as the
-deleted keyword row returning.
+can only report a guess does not become honest by being listed. The eighth row
+today is a DIFFERENT one — `merged PRs naming an OPEN issue` (#8625), the
+advisory home of the title-reference arm that used to be an authoritative source
+of `LANDED` — so do not read "8 rows" as the deleted keyword row returning, and
+do not read this ADVISORY row as a landing.
 
 NOT PRESENT: a fleet-session surface. #1233 asked for one wired to
 `map-sessions.py`, and it was built and measured for this change — then left
@@ -291,14 +306,15 @@ Exit codes
                         `--repo owner/name`.
     3  usage / internal error
     4  LANDED       the issue's own state is CLOSED (worded from its closure
-                    reason), or a MERGED PR the paginated timeline ties to
-                    this issue names it — a TERMINAL fact, so this is NOT free
-                    work (do NOT dispatch). A landed issue is never reachable
-                    as CLEAN, and this code takes precedence over 1 and 2 (a
-                    terminal signal is decisive). It is DISTINCT from 1 because
-                    the remedy differs — verify and close the issue, not
+                    reason) — a TERMINAL fact, so this is NOT free work (do
+                    NOT dispatch). A landed issue is never reachable as CLEAN,
+                    and this code takes precedence over 1 and 2 (a terminal
+                    signal is decisive). It is DISTINCT from 1 because the
+                    remedy differs — verify and close the issue, not
                     coordinate with a lane — and from 2 because there is
-                    nothing to re-run.
+                    nothing to re-run. ⚠️ #8625: a MERGED PR that merely NAMES
+                    this issue is NOT authoritative and can NEVER produce this
+                    code; it is reported on the ADVISORY surface.
 
 Env seams (tests point these at stubs; production defaults are the real tools)
     COLLISION_PREFLIGHT_GH                gh binary        (default: gh)
@@ -449,6 +465,17 @@ SURFACE_ISSUE = "issue assignee/comments"
 # BLOCKING, so a failure to read it is INCOMPLETE rather than a silent CLEAN.
 SURFACE_LANDED = "issue landed"
 
+# #8625: a MERGED PR whose TITLE names an OPEN issue is NOT a landing.
+# GitHub's own semantics make the issue's STATE authoritative — "a plain issue
+# reference does not automatically close the issue; automatic closure requires a
+# supported closing keyword" — so a reference is not a closure. Reading one as
+# terminal re-creates #4886's defect ("a MERGED follow-up PR naming the issue
+# blocks that issue forever … no dismissal path") on a new surface; #4886 is
+# CLOSED, and #8560's own rationale says its answer "preserves #4886's rule that
+# a terminal PR must not block forever". The title-arm therefore moves here:
+# reported loudly, never blocking.
+SURFACE_UNCLOSED_REF = "merged PRs naming an OPEN issue"
+
 # The complete, ordered surface list. `_assert_all_surfaces` proves the run
 # evaluated every row — a partial run is an internal error (exit 3), never a
 # silently-narrower CLEAN.
@@ -460,9 +487,10 @@ SURFACE_LANDED = "issue landed"
 # it is gone rather than kept as a decorative CLEAN line. Surface counts read
 # 6/6 after that deletion. `issue landed` (#8560) is a DIFFERENT seventh row: it
 # is not the deleted keyword row returning, it answers a question the tool never
-# had an authoritative source for. Counts read 7/7.
+# had an authoritative source for. Counts read 8/8 (#8625 added `SURFACE_UNCLOSED_REF`).
 ALL_SURFACES = (
     SURFACE_LANDED,
+    SURFACE_UNCLOSED_REF,
     SURFACE_OPEN_PRS,
     SURFACE_CLOSED_PRS,
     SURFACE_LOCAL_BRANCHES,
@@ -474,7 +502,7 @@ ALL_SURFACES = (
 # Surfaces whose hits and failures CANNOT affect the verdict (#5251). They are
 # still queried and still reported; they just cannot block a dispatch or force
 # INCOMPLETE. Membership here is the ONE place the demotion is expressed.
-ADVISORY_SURFACES = frozenset({SURFACE_CLOSED_PRS})
+ADVISORY_SURFACES = frozenset({SURFACE_CLOSED_PRS, SURFACE_UNCLOSED_REF})
 
 # ── target-repo resolution (#4027) ───────────────────────────────────────────
 # `--repo` accepts `owner/name` OR a directory path. The slug is what every
@@ -652,16 +680,22 @@ class Hit:
     ref: str
     detail: str
     strength: str  # "strong" (issue number / closing reference) | "weak"
-    # What KIND of terminal fact produced a `issue landed` hit (#8560 review).
-    # Only the landed surface sets this; every other surface leaves the
-    # default. `format_report` and `who_is_on.py` word their answers from it, so
-    # a `CLOSED` issue parked as NOT_PLANNED is never described as "already
+    # What KIND of fact produced a hit (#8560 review, #8625). The `issue landed`
+    # surface sets every kind but `unclosed`; the ADVISORY `merged PRs naming an
+    # OPEN issue` surface sets that one; every other surface leaves the default.
+    # `format_report` and `who_is_on.py` word their answers from it, so a
+    # `CLOSED` issue parked as NOT_PLANNED is never described as "already
     # shipped" — the refusal direction is identical (do NOT dispatch), but the
     # terminal fact is not a merge.
-    #   "shipped"      — the work landed (a merged PR names this issue)
-    #   "completed"    — the issue was closed as COMPLETED
+    #   "completed"    — the issue was closed as COMPLETED (a shipment)
     #   "not-planned"  — closed as NOT_PLANNED (declined/superseded)
     #   "closed"       — closed, reason unavailable/unrecognised
+    #   "unclosed"     — a MERGED PR names an OPEN issue (#8625): evidence of a
+    #                    REFERENCE, never of a closure; advisory-only
+    # ⛔ There is no "shipped" kind: #8625 removed the timeline title arm's
+    # authority, so the branch that read it became unreachable — and the file's
+    # own standard at the hit-tag site ("a tag entry for it would be dead code
+    # that reads as a live tier") refuses to keep one.
     kind: str = "collision"
 
 
@@ -4388,9 +4422,15 @@ def _landed_wording(kinds: set[str]) -> str:
     gate's verdict AND `tools/who_is_on.py`'s answer derive from this, so the
     two verbs cannot describe the same input differently.
 
-      * ``shipment``   — a merged timeline PR (`shipped`) or a `COMPLETED`
-                         closure WAS observed; the only class that may say the
-                         work shipped.
+    ⛔ Only `SURFACE_LANDED` hits reach this function, and after #8625 that
+    surface is fed by the issue's own state ALONE — so the reachable kinds are
+    the closure reasons below. A merged timeline PR is NOT one of them: it is an
+    ADVISORY (`merged PRs naming an OPEN issue`) and never gets here. The former
+    ``shipped`` kind was removed with that arm; classifying it here again would
+    be dead code that reads as a live tier.
+
+      * ``shipment``   — a `COMPLETED` closure WAS observed; the only class that
+                         may say the work shipped.
       * ``not-planned``— the only observed fact is a `NOT_PLANNED` closure
                          (declined or superseded); the work did not ship.
       * ``terminal``   — a CLOSED issue whose ``stateReason`` is unavailable or
@@ -4400,7 +4440,7 @@ def _landed_wording(kinds: set[str]) -> str:
     """
     if kinds <= {"not-planned"}:
         return "not-planned"
-    if "shipped" in kinds or "completed" in kinds:
+    if "completed" in kinds:
         return "shipment"
     return "terminal"
 
@@ -4412,8 +4452,10 @@ def _landed_conclusion(landed_hits: list[Hit]) -> str:
     in every case — do NOT dispatch — but the verdict must not state a cause it
     did not observe. `NOT_PLANNED` means the issue was declined or superseded;
     the work did not ship, and "appears ALREADY SHIPPED" is a false diagnosis
-    that sends a human looking for a merge that does not exist. A merged
-    timeline PR (kind `shipped`) or a `COMPLETED` closure IS a shipment.
+    that sends a human looking for a merge that does not exist. A `COMPLETED`
+    closure IS a shipment. A merged timeline PR is not a candidate at all since
+    #8625: it is an ADVISORY (a reference, not a closure), so it cannot reach
+    this function and cannot be named as the cause of a LANDED verdict.
     """
     wording = _landed_wording({hit.kind for hit in landed_hits})
     if wording == "not-planned":
@@ -4427,7 +4469,8 @@ def _landed_conclusion(landed_hits: list[Hit]) -> str:
     return "the work item is TERMINAL (closed) — do NOT dispatch"
 
 
-def scan_landed_surface(surface: Surface, issue: int, issue_data: dict,
+def scan_landed_surface(surface: Surface, unclosed: Surface, issue: int,
+                        issue_data: dict,
                         events: list[dict] | None) -> None:
     """The authoritative "is #N already landed?" answer (#8560).
 
@@ -4440,6 +4483,11 @@ def scan_landed_surface(surface: Surface, issue: int, issue_data: dict,
          issue number (boundary-exact, `number_present`). `#7174`'s PR #7403
          is exactly this shape. The timeline is paginated, so an older merge is
          reachable where the closed-PR sample is not.
+
+    ⚠️ #8625: source (2) is EVIDENCE, NOT A VERDICT. When the issue is OPEN, a
+    merged title-naming PR is reported on `SURFACE_UNCLOSED_REF` (advisory) and
+    never decides `LANDED` — a reference is not a closure, and #4886 already
+    records that a merged follow-up PR must not block an issue forever.
 
     `events is None` means the timeline was NOT fetched (state was terminal, so
     it was unnecessary, or the query failed and the caller already marked this
@@ -4531,14 +4579,24 @@ def scan_landed_surface(surface: Surface, issue: int, issue_data: dict,
         if number_present(title, issue):
             naming.append((number, title))
     for number, title in naming:
-        surface.add(
+        # #8625: NOT a landing. The issue is OPEN and a reference is not a
+        # closure — GitHub closes an issue only on a closing keyword.
+        unclosed.add(
             f"PR #{number}",
-            "MERGED PR cross-references this issue and NAMES IT IN ITS TITLE — "
-            f"the work appears already shipped: {_one_line(title, 90)}",
+            "MERGED PR names this issue in its TITLE while the issue is still "
+            "OPEN — a reference is not a closure, so this is NOT a landing: "
+            "verify against the artifact, then either close the issue or state "
+            f"its remaining scope: {_one_line(title, 90)}",
             "strong",
-            "shipped",
+            "unclosed",
         )
-    if not surface.hits:
+    if naming:
+        surface.note = (
+            f"issue state=OPEN; {len(naming)} merged PR(s) name this issue in "
+            "their title — a reference is not a closure; reported as an advisory "
+            f"on `{SURFACE_UNCLOSED_REF}`, NOT as a landing"
+        )
+    elif not surface.hits:
         surface.note = (
             f"issue state=OPEN; {len(events)} timeline event(s), "
             f"{merged_refs} merged cross-reference(s), none naming #{issue} "
@@ -4827,7 +4885,8 @@ def run_preflight(
         # the gh-unavailable reason with a generic "timeline unmeasured" note,
         # and the report would blame the wrong thing.
         if landed_surface.status != STATUS_INCOMPLETE:
-            scan_landed_surface(landed_surface, issue, issue_data, timeline)
+            scan_landed_surface(landed_surface, surfaces[SURFACE_UNCLOSED_REF],
+                                issue, issue_data, timeline)
 
     # NOTE: the issue surface (assignee + claim comments) is scanned LATER,
     # after the git surfaces — see the #8175 note at its call site. The claim
@@ -5379,7 +5438,8 @@ def format_report(
         "else COLLISION-uncertain; JEV-unavailable degrades to the regex, fail-closed)"
     )
     lines.append("")
-    lines.append(f"{'SURFACE':<24} {'STATUS':<11} {'HITS':<5} NOTE")
+    surface_width = max(len("SURFACE"), *(len(s) for s in ALL_SURFACES))
+    lines.append(f"{'SURFACE':<{surface_width}} {'STATUS':<11} {'HITS':<5} NOTE")
     for surface in ordered:
         note = surface.note or ""
         if surface.truncated:
@@ -5389,7 +5449,8 @@ def format_report(
                 else "⚠ TRUNCATED — list is partial"
             )
         status = "ADVISORY" if surface.authority == AUTHORITY_ADVISORY else surface.status
-        lines.append(f"{surface.name:<24} {status:<11} {len(surface.hits):<5} {note}")
+        lines.append(f"{surface.name:<{surface_width}} "
+                     f"{status:<11} {len(surface.hits):<5} {note}")
     if hits:
         lines.append("")
         lines.append("HITS")
@@ -5528,18 +5589,19 @@ def format_report(
         )
         # The remedy is the point of a DISTINCT verdict: a landed issue needs
         # verification and closure, not coordination (COLLISION) and no re-run
-        # (INCOMPLETE). The #4886 tension is named honestly: a merged PR that
-        # names an issue can belong to a multi-PR issue that still needs work,
-        # so the bar is "verify, then re-state the remaining scope" — never
-        # "treat the issue as free".
+        # (INCOMPLETE). ⚠️ #8625: LANDED is now produced by the issue's own
+        # CLOSED state ALONE — a merged PR that merely names the issue is an
+        # ADVISORY (a reference, not a closure) and cannot reach this branch, so
+        # the preamble below names the state as the sole authority.
         lines.append(
-            "  These are AUTHORITATIVE, not the bounded ADVISORY closed-PR "
-            "sample: the issue's own state, or a MERGED PR the PAGINATED "
-            "timeline ties to this issue by name. There is no dismissal switch — "
-            "verify the named artifact against the issue body. If the issue is "
-            "genuinely complete, close it (or record why it was left open); if "
-            "it still needs work, its REMAINING scope must be stated before "
-            "dispatch, so the next lane does not re-implement shipped code."
+            "  The authority here is the issue's OWN STATE, and nothing else. A "
+            "MERGED PR that merely NAMES an issue is a reference, not a closure "
+            "(#8625), so it is reported on the ADVISORY `merged PRs naming an "
+            "OPEN issue` surface and can never produce this verdict. There is no "
+            "dismissal switch — verify the closure against the issue body. If it "
+            "still needs work, state its REMAINING scope and re-open the issue "
+            "before dispatch, so the next lane does not re-implement shipped "
+            "code."
         )
         if incomplete:
             lines.append(

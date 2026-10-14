@@ -224,6 +224,11 @@ LANDED_STATEMENTS_IN_SIBLINGS: tuple[tuple[Path, str, str], ...] = (
         "the trace now records the mechanism (`index` / `scan` / `scan_fallback`)",
     ),
     (
+        STORAGE,
+        "STORAGE homes the embeddings ruling on the open V1 decision",
+        "the open **V1/§12.1c** decision (measured and filed as `#4997`, now CLOSED `COMPLETED`)",
+    ),
+    (
         ONTOLOGY,
         "ONTOLOGY tracks the direction-sourcing gap as `#7852`",
         "tracked as `#7852` (`#7813` is CLOSED `COMPLETED`)",

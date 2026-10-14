@@ -6376,6 +6376,46 @@ class RebuildDroppedEpisodicPoints(RuntimeError):
     """
 
 
+class WipePreconditionRefused(RuntimeError):
+    """#3044: ``rebuild_all(require_empty=True)`` found the graph non-empty.
+
+    The auto-recovery route (``tortoise.consistency.recover_from_log``)
+    reaches its destructive ``rebuild_all`` branch only after proving the graph
+    held 0 nodes — but that probe runs in another module, BEFORE the whole
+    journal parse. Emptiness is therefore a claim about the past by the time
+    the statement that depends on it is issued, and nothing re-validated it at
+    the wipe itself.
+
+    This is that re-validation. With ``require_empty=True`` the caller asserts
+    "there is nothing here to destroy"; the wipe refuses if the assertion no
+    longer holds. It is raised BEFORE the #2943 sidecar is written and before
+    any destructive statement, so the store is untouched and any pre-existing
+    rescue file is preserved.
+
+    It exists because ``rebuild_all``'s wipe is unconditional over EVERY label
+    while its pre-wipe snapshot covers only the sections ``_SNAPSHOT_SECTIONS``
+    names (graph-only ``:Point``, ``:Batch``, ``:Session``, the onboarding
+    pair, the config registry, the ``:GraphEventMeta`` high-water mark and
+    ``:TeamMeta``; the journal-replayable labels are re-created by the replay
+    itself). The residual is therefore ``:GraphEvent`` rows — the raw event
+    log, which no replay pass recreates (#4664) — plus any label outside that
+    tuple. A node from either group that appears between the emptiness probe
+    and the wipe would be destroyed with no record of it anywhere.
+    """
+
+    def __init__(self, *args, db_points: int | None = None):
+        super().__init__(*args)
+        # #3044 review (P2): the MEASUREMENT this refusal was raised on travels
+        # WITH the exception, because ``recover_from_log`` reports it to the
+        # operator as ``db_points``. Re-deriving that count at the caller with
+        # ``_node_count()`` would flatten the very absent/NULL count row this
+        # guard refuses on to ``0`` — telling the operator the store is EMPTY
+        # in the same message that says its count could not be MEASURED. `None`
+        # here therefore means UNMEASURABLE, and a refusal raised without the
+        # field (e.g. a test double) reports `None` rather than a fabricated 0.
+        self.db_points = db_points
+
+
 # #3947 review: the journal event types whose replay CREATES a Point/Operator
 # node (an `_upsert` / `_upsert_point_props` MERGE). Kept next to the exception
 # so the pre-wipe proof and `apply()`'s branches are read together — omitting a
@@ -7527,9 +7567,39 @@ class FalkorProjection(
                     # rolled back by `recover_from_log`, so this really is an
                     # empty DB here rather than a half-built one that a later
                     # open would serve as "already has nodes".
-                    logger.warning(
-                        "empty embedded DB not auto-recovered: %s",
-                        result.get("reason"))
+                    #
+                    # #3044 review: NOT every decline leaves an empty store.
+                    # The #7929 rollback is itself REFUSED when the sidecar is
+                    # already retired, and the #3044 pre-wipe refusal never ran
+                    # a replay to roll back — both leave the nodes they found
+                    # in place. `db_points` is the field that says which shape
+                    # the operator is looking at, so describe the store from
+                    # the MEASURED count: telling them it is "empty" at the
+                    # moment they must not lose what is in it is the same lie
+                    # about the store #7929 removed from the count.
+                    # #3044 review: `db_points is None` is UNMEASURABLE, not
+                    # empty — `recover_from_log` passes `None` through on a dead
+                    # backend (a count that raises, or a post-replay count the
+                    # backend never answered), and calling that store "empty"
+                    # tells the operator to ignore nodes that are in fact still
+                    # there. Three shapes, three messages.
+                    measured = result.get("db_points")
+                    if measured is None:
+                        logger.warning(
+                            "embedded DB NOT auto-recovered and its node "
+                            "count is UNMEASURABLE (left untouched, NOT "
+                            "verified empty): %s",
+                            result.get("reason"))
+                    elif measured:
+                        logger.warning(
+                            "embedded DB NOT auto-recovered with %s node(s) "
+                            "still in the store (left untouched, NOT empty): "
+                            "%s",
+                            measured, result.get("reason"))
+                    else:
+                        logger.warning(
+                            "empty embedded DB not auto-recovered: %s",
+                            result.get("reason"))
 
     def _recover_or_raise(self, events_dir: str) -> None:
         """Run recover_from_log, fail loud if it did not recover.
@@ -8540,7 +8610,8 @@ class FalkorProjection(
     @_fail_closed("rebuild_all")
     @tolerates_altered_numbers
     def rebuild_all(self, log_dir: str, *,
-                    confirm_destructive: bool = False) -> dict:
+                    confirm_destructive: bool = False,
+                    require_empty: bool = False) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.
 
         #3585 (R8/R9): the whole fold runs inside the non-folded-event
@@ -8552,6 +8623,17 @@ class FalkorProjection(
         the wipe on an explicit per-call opt-in — the caller MUST pass
         ``confirm_destructive=True`` (default refuses). L2 still refuses a
         non-disposable server graph even with the token.
+
+        ``require_empty=True`` (#3044) adds a second, independent precondition
+        for callers that only know the graph was empty EARLIER (the
+        ``consistency.recover_from_log`` auto-recovery route proves 0 nodes
+        before a journal parse that can take seconds): the wipe re-validates
+        that claim immediately before the sidecar write and the destructive
+        statement, and refuses with :class:`WipePreconditionRefused` if the
+        graph gained nodes since. The check precedes the #2943 sidecar write,
+        so a refusal leaves no rescue file behind (the existing pre-wipe-guard
+        convention). Default ``False``: an operator rebuild legitimately runs
+        on a populated graph.
 
         Two-pass: creates all Point nodes first (pass 1), then operator edges
         and all other event types second (pass 2), so cross-file operator→Point
@@ -8586,6 +8668,15 @@ class FalkorProjection(
         or a refused wipe all abort BEFORE the wipe. See
         ``_PREWIPE_SNAPSHOT_FILENAME``.
         """
+        # #3044 review (P1): the recovery route's caller
+        # (`consistency.recover_from_log`) has to tell a PRE-wipe failure from
+        # a post-wipe one. `_roll_back_declined_replay` is sound only once the
+        # destructive statement has been issued; before it, a node a writer
+        # landed in the #3044 window is still present, and rolling back would
+        # destroy exactly what `require_empty` refuses to. Reset before
+        # anything that can fail, so an early return can never inherit a stale
+        # value from a previous call.
+        self._rebuild_wiped = False
         import os  # noqa: I001
         from tortoise.log import EventLog
 
@@ -9244,6 +9335,58 @@ class FalkorProjection(
         self._assert_test_graph(
             "REFUSING to run bulk DETACH DELETE on non-test graph")
 
+        # #3044: the recovery route's emptiness claim, re-validated AT the
+        # operation that depends on it. `recover_from_log` proves 0 nodes
+        # before a journal parse that can take seconds; this re-checks just
+        # before the wipe (and before the sidecar write, so a refusal strands
+        # no rescue file — see the convention above). Opt-in only: a rebuild
+        # an operator asked for runs on a populated graph by design, so this
+        # must never be unconditional. The refusal is raised before ANY
+        # destructive statement, so the store is untouched.
+        if require_empty:
+            _rows = self.g.query("MATCH (n) RETURN count(n)").result_set
+            # #3044 review: an ABSENT/NULL count row is UNMEASURABLE, not zero.
+            # This is deliberately STRICTER than the probe it re-validates:
+            # `_node_count` (consistency.py) flattens the SAME shape to 0 and
+            # reserves `None` for a query that RAISED, so the two readers of
+            # one query disagree here on purpose. The probe's 0 is exactly the
+            # claim this guard exists to re-validate, so a count row the guard
+            # never received is no evidence of emptiness — flattening it to 0
+            # here would let a wipe proceed on a store the guard never
+            # actually saw as empty. That is the fail-closed choice. A query
+            # that RAISES was already fail-closed (the exception propagates).
+            # The measurement this refusal was raised on travels ON the
+            # exception, so `recover_from_log` reports the guard's own answer
+            # instead of re-querying with the flattening helper.
+            _measured = (int(_rows[0][0])
+                         if _rows and _rows[0][0] is not None else None)
+            if _measured is None:
+                raise WipePreconditionRefused(
+                    "rebuild_all was called with require_empty=True, but the "
+                    "graph's node count could not be MEASURED — refusing to "
+                    "wipe (#3044). An unmeasurable store is not an empty "
+                    "one: the caller proved this graph EMPTY before the "
+                    "journal parse, and a wipe issued on an unverified count "
+                    "is exactly the destruction that guard exists to "
+                    "prevent. Re-run recovery once the backend responds, or "
+                    "rebuild explicitly with `tortoise rebuild --dir <dir>`.",
+                    db_points=_measured,
+                )
+            if _measured:
+                raise WipePreconditionRefused(
+                    f"rebuild_all was called with require_empty=True, but the "
+                    f"graph holds {_measured} node(s) — refusing to wipe "
+                    f"(#3044). The caller proved this graph EMPTY before the "
+                    f"journal parse; a node appearing since then would be "
+                    f"destroyed with no record — the pre-wipe snapshot "
+                    f"covers only the labels in _SNAPSHOT_SECTIONS, so "
+                    f":GraphEvent rows and any label outside that set are "
+                    f"lost. Re-run recovery when no writer is "
+                    f"active, or rebuild explicitly with "
+                    f"`tortoise rebuild --dir <dir>`.",
+                    db_points=_measured,
+                )
+
         # Persist immediately before the destructive wipe: after DETACH DELETE
         # these nodes exist nowhere else, so replay must be able to recover
         # them from disk even if THIS process dies. A write failure aborts the
@@ -9400,6 +9543,10 @@ class FalkorProjection(
             episodic_before | recovered_session_turns, events,
             snapshot_ids=snapshot_ids)
 
+        # The destructive statement is about to be issued: from here a failure
+        # can land on a partially wiped graph, which is the #7929 rollback
+        # shape the recovery route is allowed to undo (#3044 review, P1).
+        self._rebuild_wiped = True
         self._wipe_all_nodes(confirm_destructive=confirm_destructive,
                              operation="rebuild_all")
 
