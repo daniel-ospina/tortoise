@@ -2140,6 +2140,14 @@ def test_workflow_names_with_a_github_override_are_not_called_secretless():
     workflow, never from a list kept here, so a future `workflow` name the
     deploy reads from `secrets.X` fails this at review time instead of
     misleading an operator (#8614 review).
+
+    The same paragraph must not deny that re-staging either: the head under
+    review said "none is re-staged the way a `gh-secret:` name is", which the
+    deploy contradicts for the very name the paragraph is about — it assigns
+    `TORTOISE_SESSION_LLM_MODEL` into the same `flyctl secrets set --stage`
+    payload every `gh-secret:` name rides, so an operator would read a Fly-side
+    change to it as surviving when the next deploy reverts it (the #4126
+    confusion in the opposite direction).
     """
     sources = _manifest_sources(REAL_MANIFEST)
     workflow_names = {n for n, s in sources.items() if s == "workflow"}
@@ -2167,3 +2175,31 @@ def test_workflow_names_with_a_github_override_are_not_called_secretless():
         f"secret to update, while the manifest + deploy define one for {sorted(overridden)} "
         "(#8614 review)"
     )
+
+    # The deploy RE-STAGES a `workflow` name when it assigns it into the
+    # secrets-set payload — the same `flyctl secrets set --stage "${ARGS[@]}"` a
+    # `gh-secret:` name rides. So §2 must not tell an operator a Fly-only value
+    # for one of those names survives. Derived from the workflow (both branches
+    # of the model conditional use the same `ARGS+=(<NAME>=` shape), so a name
+    # that stops being re-staged drops out instead of making this vacuous.
+    restaged = {
+        n for n in overridden if re.search(rf"ARGS\+=\({re.escape(n)}=", workflow_text)
+    }
+    assert restaged, (
+        "no overridden `workflow` name is assigned into the secrets-set payload — "
+        "the workflow reader is stale, so this half of the guard would pass vacuously"
+    )
+    assert "none is re-staged the way a `gh-secret:` name is" not in para, (
+        "the §2 scope paragraph says no `workflow` name is re-staged the way a "
+        f"`gh-secret:` name is, but the deploy assigns {sorted(restaged)} into the "
+        "same `flyctl secrets set --stage` payload — a Fly-only value for one of "
+        "them is reverted by the next deploy exactly like a `gh-secret:` one "
+        "(#8614 review)"
+    )
+    sentences = re.split(r"(?<=\.)\s+", para)
+    for name in sorted(restaged):
+        assert any(name in s and "re-stag" in s for s in sentences), (
+            f"the §2 scope paragraph does not say `{name}` is re-staged by the "
+            "deploy — an operator reading it would believe a Fly-only value for "
+            "that name survives when the next deploy overwrites it (#8614 review)"
+        )
