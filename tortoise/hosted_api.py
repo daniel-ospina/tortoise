@@ -33520,6 +33520,14 @@ async def backups_rebaseline(request: Request):
     graphs update only their per-graph state. Incident subjects follow the
     graph: bare org for the default, "{org}:{gid}" for customs (the same
     key the sweep routes and the watcher uses).
+
+    #8595 review P1: the write refreshes ``label_counts`` as well as
+    ``node_count``. The #661 per-label drift guard compares the CURRENT
+    per-label counts against the ``label_counts`` in the persisted state, and
+    only the sweep's success path ever wrote that field — so refreshing
+    ``node_count`` alone left the label baseline at its PRE-drop value and the
+    next sweep re-fired the very incident the operator cleared (deleting that
+    run's fresh archive and, by delete-to-resolve, filing a NEW issue).
     """
     _check_internal(request)
     body = await _read_internal_json_body(request, required=True)
@@ -33546,6 +33554,8 @@ async def backups_rebaseline(request: Request):
     from tortoise.backup_sweep import (
         _graph_state_key,
         _write_json,
+        query_label_counts,
+        read_graph_state,
         read_org_state,
         resolve_active_graph,
     )
@@ -33581,14 +33591,34 @@ async def backups_rebaseline(request: Request):
         # never walks a sync helper — so `_OFFLOADED_ASYNC_BODIES`' "no inline
         # seam" check passed VACUOUSLY here. Off-loaded, so the declaration is
         # true.
-        count = await asyncio.to_thread(
-            count_data_nodes, db, row["graph_name"])
+        graph_name = row["graph_name"]
+
+        def _current_counts() -> tuple[int, dict[str, int]]:
+            # #8595 review P1: BOTH reads — the total and the per-label
+            # baseline the #661 guard compares against — in ONE hand-off, so
+            # the label query cannot be left inline on the loop (the same
+            # round-trip class as `count_data_nodes`). A label-read failure
+            # RAISES out of the helper and fails the request: writing
+            # `node_count` with an unrefreshed label baseline would re-fire
+            # the incident this call exists to clear.
+            return (count_data_nodes(db, graph_name),
+                    query_label_counts(db.select_graph(graph_name)))
+
+        count, label_counts = await asyncio.to_thread(_current_counts)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"graph unavailable: {e}")  # noqa: B904
     state = {
+        # The default graph merges the legacy org file (the pre-#2313 mirror);
+        # a custom graph merges its OWN per-graph state, so a re-baseline no
+        # longer drops fields the sweep wrote (pre-fix it merged `{}`, which
+        # also left NO `label_counts` at all — the #8595 review's custom-graph
+        # half, where the guard was skipped for a run because one side was
+        # empty).
         **(read_org_state(storage, org_id)
-          if graph_id == "default" else {}),
+          if graph_id == "default"
+          else read_graph_state(storage, org_id, graph_id)),
         "node_count": count,
+        "label_counts": label_counts,
         "updated_at": datetime.now(UTC).isoformat(),
     }
     _write_json(storage, _graph_state_key(org_id, graph_id), state)
