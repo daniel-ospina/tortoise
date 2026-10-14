@@ -3136,6 +3136,100 @@ def _source_turn_overlap(turn: str, quote: str) -> float:
     return len(ta & tb) / min(len(ta), len(tb))
 
 
+def _verbatim_span_in_turn(turn_text: str, quote: str) -> tuple[int, int] | None:
+    """#2684: the CHARACTER OFFSETS of ``quote`` inside ``turn_text`` — the
+    ADDRESS half of the E3 verbatim anchor.
+
+    ``_resolve_source_turn`` proves a quote is *in* a turn (matching on the
+    whitespace-collapsed, lowercased text); this returns *where*, in the
+    turn's OWN coordinates, so the value can be re-read/re-fetched instead of
+    re-searched (the E4 #5007 pointer, whose offsets address the Source's raw
+    text). Deliberately tolerant of whitespace RUNS and case — exactly the
+    normalisations the anchor test applies — so the two cannot disagree on
+    which occurrences are verbatim. ``None`` when the quote is not
+    verbatim-present (the >=0.6 overlap band): a paraphrase has no address,
+    and saying so is the honest answer.
+    """
+    q = str(quote or "").strip()
+    t = str(turn_text or "")
+    if not q or not t:
+        return None
+    tokens = q.split()
+    if not tokens:
+        return None
+    pattern = r"\s+".join(re.escape(tok) for tok in tokens)
+    m = re.search(pattern, t, flags=re.IGNORECASE)
+    if m is None:
+        return None
+    return (m.start(), m.end())
+
+
+def _carries_value(*texts: object) -> bool:
+    """#2684: True when any text carries a value-shaped token — a number, a
+    count, a price, a quantity+unit, a clock, a version, a concrete date.
+
+    Reuses the PRODUCTION value engine (``_value_bindings``, live on the
+    E5/E7 contradiction + consolidation path) rather than minting a second
+    canonicaliser: a parallel value layer is the explicitly forbidden shape
+    (``docs/epics/2026-08-20-1509-extractor-v3/00-scope.md``, owner — ``never
+    create a parallel layer doing the same thing with redundant machinery``;
+    ``vet_gate`` cites the same line). Its measured limits are the reason the
+    SPAN is the deliverable: ``_value_bindings`` sees ``twelve million`` as
+    ``12`` (no magnitude) and misses ``1,234`` — detection is enough here,
+    because the span carries the value VERBATIM.
+    """
+    return any(_value_bindings(str(t)) for t in texts if t)
+
+
+def _turn_text_by_index(edus: list[dict] | None, index: int) -> str:
+    """The raw text of the transcript turn carrying ``index`` ("" when the
+    turn does not exist). Resolved by INDEX VALUE, not list position — see
+    ``_resolve_source_turn`` on why those can diverge."""
+    if not edus:
+        return ""
+    return next((str(e.get("text") or "") for e in edus
+                 if e.get("index") == index), "")
+
+
+def _value_verbatim_span(content: str, quote: str, turn_idx: int | None,
+                         edus: list[dict] | None,
+                         *, warnings: list[str]) -> tuple[int, int] | None:
+    """#2684: the verbatim source span of a VALUE-BEARING point — the offsets
+    of the point's own ``quote`` inside the resolved source turn, so any
+    consumer can re-read the exact value rather than trusting (or
+    re-searching) a distillation.
+
+    Only a VERBATIM anchor yields a span. The >=0.6 token-overlap band proves
+    a turn is *about* the claim, never that the claim's words are in it — so a
+    band-resolved value has no address, and that absence is REPORTED. The
+    warning is the point of this branch: the band route is otherwise SILENT
+    (``_resolve_source_turn`` returns a turn and says nothing), and the route
+    misses by construction exactly when the value was REWRITTEN —
+    ``"12M events for Halcyon"`` against a turn holding ``"twelve million
+    events for Halcyon"`` scores 0.50 and resolves to no turn while the
+    verbatim quote scores 0.80 and resolves (#2817 scoping, measured). A
+    silent band pass would leave no trace of the aggregate-numerator class
+    this slice exists to protect.
+
+    ⚠️ Reach: the span reaches a consumer only where the read path carries
+    point provenance. The eval lane does (#2684 wired it); the PRODUCT ask
+    lane's hits carry no ``quote``/``source_turn_id`` at all, so neither the
+    span nor Slice A's own-source legs can fire there — measured and filed as
+    #8658, deliberately not fixed here.
+    """
+    if not _carries_value(content, quote):
+        return None
+    if turn_idx is None:
+        return None          # the anchor failure already warned
+    span = _verbatim_span_in_turn(_turn_text_by_index(edus, turn_idx), quote)
+    if span is None and quote:
+        warnings.append(
+            f"value-bearing point '{str(content)[:60]}' resolved to turn "
+            f"{turn_idx} by the token-overlap band, not a verbatim anchor — "
+            "it carries no source span (the value cannot be re-read verbatim)")
+    return span
+
+
 def _content_id(prefix: str, content: str) -> str:
     from tortoise.ids import content_hash
     return f"{prefix}_{content_hash(content)[:62]}"
@@ -6514,6 +6608,17 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "search_keys": search_keys,
             "source_turn_id": turn_idx,
         }
+        # #2684 (Slice B): a VALUE-BEARING point carries the verbatim source
+        # SPAN — the offsets of its own quote inside the resolved turn — so a
+        # consumer can re-read the exact value instead of re-deriving it from
+        # a distillation (the aggregation-numerator class: "300 vs 100",
+        # "$60 vs $12"). Only a VERBATIM anchor yields one; absent = the point
+        # has no address, never a fabricated offset (#5007's all-or-nothing
+        # contract, validated at the commit boundary).
+        _span = _value_verbatim_span(content, quote, turn_idx, edus,
+                                     warnings=warnings)
+        if _span is not None:
+            pt_entry["span_start"], pt_entry["span_end"] = _span
         # E2 (#1534): Tier-A state-value marker — classification hint,
         # A-only emission (absence = Tier-B default → zero-diff payloads for
         # non-Tier-A sessions). Fail-loud guard: a Tier-A point without a
@@ -6741,9 +6846,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                     f"minted endpoint ({where}) has no transcript anchor — "
                     "left unquoted (no source_turn_id)")
             else:
-                _turn_text = next(
-                    (str(e.get("text") or "") for e in edus
-                     if e.get("index") == _turn), "")
+                _turn_text = _turn_text_by_index(edus, _turn)
                 _anchor = re.sub(r"\s+", " ", content[:200].strip().lower())
                 _verbatim = bool(_anchor) and re.sub(
                     r"\s+", " ", _turn_text.lower()).find(_anchor) >= 0
