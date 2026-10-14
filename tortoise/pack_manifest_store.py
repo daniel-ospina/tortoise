@@ -82,9 +82,15 @@ def _tenant_fold_declarations(raw: dict) -> list[str]:
     kind_defs = ont.get("kindDefs")
     if not isinstance(kind_defs, dict):
         return []
+    # `key=str`: a YAML map may carry a non-string key (`1:`), and `sorted()`
+    # over a mixed key set raises `TypeError` — out of a helper that runs
+    # BEFORE the shared validator, so the raise would replace its diagnostic
+    # (and surface as an unhandled error on the tenant upload route). The
+    # shared validator reports the offending key by name.
     return sorted(
-        k for k, spec in kind_defs.items()
-        if isinstance(spec, dict) and ("statuses" in spec or "folds" in spec)
+        (k for k, spec in kind_defs.items()
+         if isinstance(spec, dict) and ("statuses" in spec or "folds" in spec)),
+        key=str,
     )
 
 # ── Tenant-view memoization (#1154 + #1350) ────────────────────────────────

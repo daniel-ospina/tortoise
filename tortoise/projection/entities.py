@@ -4164,12 +4164,21 @@ class _EntityHandlers:
             for about in about_names or ():
                 if isinstance(about, str) and about and about != name:
                     targets.append((about, False))
+            # #2729 review P2: the event-kind key is form-widened (namespaced
+            # AND bare), so two packs that declare the same bare event name
+            # share it. A declared target that MISSES because its kind has no
+            # such Object is only a real signal when NO declared fold for this
+            # event folded anything — otherwise it is a false
+            # `status_fold_unapplied` for a correctly-folding write (the other
+            # pack's kind simply is not this Object's kind).
+            matched_any = False
+            missed: list[tuple[str, str]] = []
             for target_name, report in targets:
                 for target_kind, status in declared:
                     kinds = index.kind_forms_for(target_kind)
                     rows = self.g.query(
                         "MATCH (o:Object {name:$n}) "
-                        "WHERE toLower(o.objectKind) IN $kinds "
+                        "WHERE toLower(toStringOrNull(o.objectKind)) IN $kinds "
                         "  AND (o.status IS NULL OR NOT (o.status IN $excluded)) "
                         "SET o.status = $status "
                         "RETURN count(o) AS n",
@@ -4177,6 +4186,7 @@ class _EntityHandlers:
                                 "status": status, "excluded": excluded},
                     ).result_set
                     if rows and rows[0][0]:
+                        matched_any = True
                         continue
                     if not report:
                         continue
@@ -4185,18 +4195,31 @@ class _EntityHandlers:
                     # fold violation).
                     present = self.g.query(
                         "MATCH (o:Object {name:$n}) "
-                        "WHERE toLower(o.objectKind) IN $kinds "
+                        "WHERE toLower(toStringOrNull(o.objectKind)) IN $kinds "
                         "RETURN count(o) AS n",
                         params={"n": target_name, "kinds": kinds},
                     ).result_set
                     if not (present and present[0][0]):
-                        _emit_fold_violation(target_kind, event_kind,
-                                             target_name)
+                        missed.append((target_kind, target_name))
+            if not matched_any:
+                for target_kind, target_name in missed:
+                    _emit_fold_violation(target_kind, event_kind, target_name)
         builtin_status = builtin_fold_status(event_kind)
         if builtin_status is not None and name:
+            # `toStringOrNull` (not `toLower` on the raw property) so a
+            # payload-supplied non-string `objectKind` (an int, an array —
+            # `create_entity(objectKind=...)`, `uses[].kind`) cannot raise
+            # `Type mismatch` and abort the whole event write. Pre-#2729 the
+            # built-in fold never read `objectKind` at all, so it tolerated
+            # any value; the ownership guard must not regress that. A
+            # non-string can never be a declared lifecycle kind, so the
+            # coercion is exact: null/absent -> apply; non-string/null-able
+            # -> `IS NULL` -> apply; a string -> the case-folded set test.
             self.g.query(
                 "MATCH (o:Object {name:$n}) "
-                "WHERE (o.objectKind IS NULL OR NOT (toLower(o.objectKind) IN $declared)) "
+                "WHERE (o.objectKind IS NULL "
+                "       OR toStringOrNull(o.objectKind) IS NULL "
+                "       OR NOT (toLower(toStringOrNull(o.objectKind)) IN $declared)) "
                 "  AND (o.status IS NULL OR NOT (o.status IN $excluded)) "
                 "SET o.status=$status",
                 params={"n": name, "status": builtin_status,

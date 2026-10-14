@@ -893,17 +893,25 @@ _ALLOWED_KEYED = {
         # and the terminal guard (below) is carried into the same predicate.
         # Owned by S3 with the connector folds it generalizes; the pre-#2729
         # literal built-in statements it replaced are REMOVED, not left stale.
-        'rows = self.g.query( "MATCH (o:Object {name:$n}) " "WHERE toLower(o.objectKind) IN $kinds " " AND (o.status IS NULL OR NOT (o.status IN $excluded)) " "SET o.status = $status " "RETURN count(o) AS n", params={"n": target_name, "kinds": kinds, "status": status, "excluded": excluded}, ).result_set': 1,
+        #
+        # #2729 review P1: the kind comparison goes through `toStringOrNull`
+        # (NOT `toLower` on the raw property) because a payload-supplied
+        # non-string `objectKind` made `toLower` raise `Type mismatch` and
+        # abort the whole event write — a failure mode the pre-#2729 built-in
+        # fold never had (it never read `objectKind`). Same sites, same S3
+        # ownership; only the coercion is new.
+        'rows = self.g.query( "MATCH (o:Object {name:$n}) " "WHERE toLower(toStringOrNull(o.objectKind)) IN $kinds " " AND (o.status IS NULL OR NOT (o.status IN $excluded)) " "SET o.status = $status " "RETURN count(o) AS n", params={"n": target_name, "kinds": kinds, "status": status, "excluded": excluded}, ).result_set': 1,
         # The companion MISS probe (distinguishes "the terminal guard refused"
         # from "no Object of the declaring kind exists", which is reported as
         # `status_fold_unapplied`). Same name-keyed MATCH, same disposition.
-        'present = self.g.query( "MATCH (o:Object {name:$n}) " "WHERE toLower(o.objectKind) IN $kinds " "RETURN count(o) AS n", params={"n": target_name, "kinds": kinds}, ).result_set': 1,
+        'present = self.g.query( "MATCH (o:Object {name:$n}) " "WHERE toLower(toStringOrNull(o.objectKind)) IN $kinds " "RETURN count(o) AS n", params={"n": target_name, "kinds": kinds}, ).result_set': 1,
         # The built-in connector compatibility half — parametrized by #2729
         # (was the two literal `SET o.status='in_progress'`/`'completed'`
         # statements this PR replaced). Same name-keyed coordinate, same S3
         # ownership; the `$declared` guard is what makes a declared-lifecycle
-        # kind own its state.
-        'self.g.query( "MATCH (o:Object {name:$n}) " "WHERE (o.objectKind IS NULL OR NOT (toLower(o.objectKind) IN $declared)) " " AND (o.status IS NULL OR NOT (o.status IN $excluded)) " "SET o.status=$status", params={"n": name, "status": builtin_status, "declared": sorted(index.kind_forms), "excluded": excluded}, )': 1,
+        # kind own its state. The `IS NULL` disjuncts keep the pre-#2729
+        # tolerance for an absent OR non-string `objectKind` (#2729 review P1).
+        'self.g.query( "MATCH (o:Object {name:$n}) " "WHERE (o.objectKind IS NULL " " OR toStringOrNull(o.objectKind) IS NULL " " OR NOT (toLower(toStringOrNull(o.objectKind)) IN $declared)) " " AND (o.status IS NULL OR NOT (o.status IN $excluded)) " "SET o.status=$status", params={"n": name, "status": builtin_status, "declared": sorted(index.kind_forms), "excluded": excluded}, )': 1,
         'result = self.g.query( "MATCH (o:Object {name:$name}) " + live, params={"name": name, **common_params})': 2,
         'self.g.query( "MATCH (s:Subject {name:$name}), (e:Event {eventId:$eid}) " "MERGE (s)-[:performs]->(e)", params={"name": subj, "eid": eid}, )': 1,
         'self.g.query( "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) " "MERGE (e)-[:produces]->(o)", params={"name": obj, "eid": eid}, )': 1,

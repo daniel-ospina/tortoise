@@ -649,7 +649,121 @@ class TestOwnershipSurvivesRegistryOutage:
             sdk.close()
 
 
-# ── 8. The hosted (graph-native) route refuses the declaration ───────────
+# ── 8. Non-string object kinds and multi-pack key sharing (#2729 review) ──
+
+
+class TestFoldQueryTypeSafety:
+    """#2729 review P1: the ownership guard must not ADD a failure mode to a
+    query that previously tolerated any ``objectKind``.
+
+    Pre-#2729 the built-in fold never read ``objectKind``; the guard compares
+    it, and a raw ``toLower`` raises ``Type mismatch`` on a non-string value
+    (``create_entity(objectKind=…)`` / ``uses[].kind`` are payload-supplied),
+    which aborted the WHOLE event write. ``toStringOrNull`` coerces an integer
+    and nulls an array, so the fold degrades instead of raising.
+    """
+
+    def test_integer_object_kind_does_not_break_the_builtin_fold(self):
+        sdk = _fresh_sdk()
+        try:
+            sdk.create_entity("object", "N1", objectKind=5)
+            sdk.create_event("closed", "github.issue.closed", object="N1")
+            assert _object_status(sdk, "N1") == "completed"
+        finally:
+            sdk.close()
+
+    def test_array_object_kind_does_not_break_the_builtin_fold(self):
+        sdk = _fresh_sdk()
+        try:
+            sdk.create_entity("object", "N2", objectKind=["a", "b"])
+            sdk.create_event("closed", "github.issue.closed", object="N2")
+            assert _object_status(sdk, "N2") == "completed"
+        finally:
+            sdk.close()
+
+    def test_integer_object_kind_does_not_abort_a_declared_fold_write(self):
+        """The declared half reads the kind too; a non-string must be a
+        non-match, not an exception that loses the event."""
+        sdk = _fresh_sdk()
+        try:
+            sdk.create_entity("object", "N3", objectKind=5)
+            sdk.create_event("released", "venture:disbursement", object="N3")
+            assert _object_status(sdk, "N3") == "live"
+            # The write itself landed (the Event exists) rather than raising
+            # and losing the whole write.
+            rows = sdk._get_proj().g.query(
+                "MATCH (e:Event) RETURN count(e) AS n",
+                params={}).result_set
+            assert rows and rows[0][0] == 1
+        finally:
+            sdk.close()
+
+
+class TestMultiPackEventKeySharing:
+    """#2729 review P2: two packs declaring the same BARE event kind share the
+    form-widened key, so the non-matching pack's kind reports a miss for a
+    write that folded correctly. A miss is only a real signal when NO declared
+    fold for the event folded anything."""
+
+    class _Pack:
+        def __init__(self, object_kinds, kind_defs):
+            self.object_kinds = object_kinds
+            self.kind_defs = kind_defs
+
+    def test_other_packs_kind_miss_is_not_reported_when_one_target_matched(
+            self, monkeypatch, caplog):
+        import logging
+
+        from tortoise.projection import entities as ents
+
+        idx = build_status_fold_index({
+            "a": self._Pack(["thing"], {"thing": {
+                "statuses": ["a-done"],
+                "folds": [_decl("thingDone", "a-done")]}}),
+            "b": self._Pack(["thing"], {"thing": {
+                "statuses": ["b-done"],
+                "folds": [_decl("thingDone", "b-done")]}}),
+        })
+        assert len(idx.folds_for_event("thingDone")) == 2
+        monkeypatch.setattr(ents, "_status_fold_index", lambda: idx)
+        sdk = _fresh_sdk()
+        try:
+            sdk.create_entity("object", "X1", objectKind="a:thing")
+            with caplog.at_level(logging.WARNING):
+                sdk.create_event("done", "thingDone", object="X1")
+            assert _object_status(sdk, "X1") == "a-done"
+            assert not any("status_fold_unapplied" in r.getMessage()
+                           for r in caplog.records), [
+                r.getMessage() for r in caplog.records]
+        finally:
+            sdk.close()
+
+    def test_a_lone_declared_fold_miss_is_still_reported(
+            self, monkeypatch, caplog):
+        """Parity control for the suppression: exactly one declared target
+        and no Object of its kind must still report."""
+        import logging
+
+        from tortoise.projection import entities as ents
+
+        idx = build_status_fold_index({
+            "a": self._Pack(["thing"], {"thing": {
+                "statuses": ["a-done"],
+                "folds": [_decl("thingDone", "a-done")]}}),
+        })
+        monkeypatch.setattr(ents, "_status_fold_index", lambda: idx)
+        sdk = _fresh_sdk()
+        try:
+            sdk.create_entity("object", "Y1", objectKind="dev:issue")
+            with caplog.at_level(logging.WARNING):
+                sdk.create_event("done", "thingDone", object="Y1")
+            assert any("status_fold_unapplied" in r.getMessage()
+                       for r in caplog.records)
+        finally:
+            sdk.close()
+
+
+# ── 9. The hosted (graph-native) route refuses the declaration ───────────
 
 
 _TENANT_MANIFEST = """namespace: tenantx
@@ -692,3 +806,26 @@ class TestHostedTenantRouteRefusesFolds:
         """Parity control — the refusal is scoped to the fold declaration."""
         r = validate_manifest(_TENANT_MANIFEST_NO_FOLDS)
         assert r.ok is True, r.errors
+
+    def test_mixed_type_kinddefs_keys_return_a_diagnostic_not_a_crash(self):
+        """#2729 review P2: the pre-refusal helper must be total. A YAML map
+        with a non-string key made ``sorted`` raise ``TypeError`` BEFORE the
+        shared validator ran, replacing the diagnostic with an internal
+        exception string on the tenant upload route."""
+        manifest = """namespace: tenantx
+name: Tenant X
+version: 0.1.0
+tier: free
+ontology:
+  extends: core
+  objectKinds: [tranche]
+  eventKinds: [disbursement]
+  kindDefs:
+    1:
+      statuses: [pending, released]
+    tranche:
+      statuses: [pending, released]
+"""
+        r = validate_manifest(manifest)  # must not raise
+        assert r.ok is False
+        assert r.errors, "a malformed declaration must carry a diagnostic"
