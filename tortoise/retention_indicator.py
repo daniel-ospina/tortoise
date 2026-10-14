@@ -54,11 +54,14 @@ THE THREE HONEST CONSTRAINTS
 3. **The ``result_count`` prop is FORWARD-ONLY** (#3675, merged 2026-10-11). A
    retrieval row written before it carries no readable count, so a day whose
    ONLY candidate use is such a row cannot be classified. Such a day makes the
-   team's activity set a LOWER BOUND, and a lower bound is not a count: the
-   team is reported ``unavailable`` with the reason, named in the payload, and
-   EXCLUDED from the denominator — never quietly counted as inactive. The
-   cohort cell then reads ``partial``. (The conservative direction is
-   deliberate: an unclassifiable day must not be published as churn.)
+   activity set a LOWER BOUND, and a lower bound is not a count. The ambiguity
+   is applied PER MARK and only where it is DECISIVE: a mark whose window the
+   ambiguous day leaves unsettled reads ``null`` and is listed in
+   ``unclassifiable_marks``, while a mark a definite use has already settled
+   stays ``true``. The team stays ``measured`` (its row carries
+   ``REASON_UNCLASSIFIABLE_USE_DAY``), its settled marks stay in their
+   denominators, and the cell built from the unsettled marks reads
+   ``partial`` — never a lower bound published as churn.
 
 THIS IS AN AGGREGATION, NEVER A RETENTION WINDOW (binding guard D12-b)
 ---------------------------------------------------------------------
@@ -207,9 +210,12 @@ LIMITATIONS: tuple[str, ...] = (
     "The activity predicate's retrieval leg depends on the forward-only "
     f"`{RESULT_COUNT_PROP}` prop (#3675, shipped 2026-10-11). A retrieval row "
     "written before it carries no readable count, so a day whose only "
-    "candidate use is such a row is UNCLASSIFIABLE: the team is reported "
-    "`unavailable` and named, never counted as inactive. A cohort cell that "
-    "depends on such teams reads `partial`.",
+    "candidate use is such a row is UNCLASSIFIABLE. The ambiguity is applied "
+    "PER MARK: a mark it leaves UNSETTLED reads `null` and is listed in the "
+    "row's `unclassifiable_marks`; the team stays `measured` and its settled "
+    "marks stay in their denominators, while a cohort cell built from the "
+    "unsettled marks reads `partial`. A definite use is never turned into an "
+    "unknown by an ambiguous day in the same window.",
     "The analytics read is bounded by a page walk that FAILS CLOSED: a walk "
     "that cannot be certified complete makes its team `unavailable` rather "
     "than publishing a lower bound as a count (#4038 parity).",
@@ -413,7 +419,10 @@ def team_row(*, org_id: str, start: str | None, state: str,
     days, so a definite use at/after day N settles the mark ``True`` whatever
     else the window holds. Only a mark with NO definite use at/after day N and
     at least one ambiguous day there is ``None`` and listed in
-    ``unclassifiable_marks``.
+    ``unclassifiable_marks``. ``active_within_30`` is the same disjunction
+    over the trailing window and follows the same rule; ``active_days_90`` is
+    a COUNT, so it stays ``None`` whenever an ambiguous day falls in its
+    window (the ambiguity changes the number, not just its classification).
     """
     row: dict[str, Any] = {
         "org_id": org_id,
@@ -457,16 +466,25 @@ def team_row(*, org_id: str, start: str | None, state: str,
     first30 = as_of - timedelta(days=TRAILING_ACTIVE_DAYS - 1)
     w90_first = max(first90, start_dt)
     w30_first = max(first30, start_dt)
+    # `active_days_90` is a COUNT, not a disjunction: an ambiguous day inside
+    # the window genuinely changes the number, so the window stays
+    # unclassifiable (`None`) whatever the definite days say.
     if any(w90_first <= d <= as_of for d in amb):
         row["active_days_90"] = None
     else:
         row["active_days_90"] = active_days_in_window(
             active_days, first=w90_first, last=as_of)
-    if any(w30_first <= d <= as_of for d in amb):
+    # `active_within_30` is the SAME disjunction as a mark ("at least one
+    # active day in the trailing window"), so the mark rule applies: a
+    # definite use settles it `True`, and only an unsettled window is `None`.
+    # Consulting the ambiguity first would report a provably-warm team as
+    # unmeasured and drop it from the trailing denominator.
+    if active_days_in_window(active_days, first=w30_first, last=as_of) > 0:
+        row["active_within_30"] = True
+    elif any(w30_first <= d <= as_of for d in amb):
         row["active_within_30"] = None
     else:
-        row["active_within_30"] = active_days_in_window(
-            active_days, first=w30_first, last=as_of) > 0
+        row["active_within_30"] = False
     return row
 
 
@@ -596,11 +614,16 @@ def cohort_summary(team_rows: Sequence[dict], *, as_of: date) -> dict:
         1 for t in measured if started(t) and t["active_days_90"] is None)
     histogram = {
         # `_cell`'s rule applies here too: a denominator with an unmeasured
-        # team behind it is `partial`, never a confident reading. `n` and the
-        # buckets are computed over `hist_elig` alone, so `state` is the only
-        # signal a consumer switching on it has that a team is missing.
+        # team behind it is `partial`, never a confident reading, and a
+        # zero-denominator surface with a team behind it is `unavailable`
+        # rather than `not_measurable` — the same two-way mapping `_cell`
+        # performs. `n` and the buckets are computed over `hist_elig` alone,
+        # so `state` is the only signal a consumer switching on it has that a
+        # team is missing.
         "state": ("partial" if hist_elig and hist_unmeasured
-                  else STATE_MEASURED if hist_elig else STATE_NOT_MEASURABLE),
+                  else STATE_MEASURED if hist_elig
+                  else STATE_UNAVAILABLE if hist_unmeasured
+                  else STATE_NOT_MEASURABLE),
         "n": len(hist_elig) if hist_elig else None,
         "buckets": hist,
         "unmeasured_teams": hist_unmeasured,

@@ -270,6 +270,42 @@ class TestMarks:
                           active_days={AS_OF - timedelta(days=5)}, as_of=AS_OF)
         assert row["active_within_30"] is True
 
+    def test_a_definite_trailing_use_settles_the_window_despite_an_ambiguity(
+            self):
+        """`active_within_30` is the SAME disjunction as a mark: a definite use
+        in the trailing window settles it `True`, and an ambiguous day there
+        cannot un-make it. Regression: the window check consulted the
+        ambiguity first, so a provably-warm team read `None` and was dropped
+        from the headline trailing denominator."""
+        start = AS_OF - timedelta(days=40)
+        row = ri.team_row(org_id="o", start=start.isoformat(),
+                          state=ri.STATE_MEASURED, reason=None,
+                          active_days={AS_OF - timedelta(days=5)},
+                          ambiguous_days={AS_OF - timedelta(days=3)},
+                          as_of=AS_OF)
+        assert row["active_within_30"] is True
+
+    def test_an_unsettled_trailing_window_is_none_not_false(self):
+        start = AS_OF - timedelta(days=40)
+        row = ri.team_row(org_id="o", start=start.isoformat(),
+                          state=ri.STATE_MEASURED, reason=None,
+                          active_days=set(),
+                          ambiguous_days={AS_OF - timedelta(days=3)},
+                          as_of=AS_OF)
+        assert row["active_within_30"] is None
+
+    def test_the_90_day_count_stays_none_under_ambiguity(self):
+        """`active_days_90` is a COUNT, not a disjunction: an ambiguous day in
+        its window changes the number, so it stays `None` even when another
+        day in the window is a definite use."""
+        start = AS_OF - timedelta(days=40)
+        row = ri.team_row(org_id="o", start=start.isoformat(),
+                          state=ri.STATE_MEASURED, reason=None,
+                          active_days={AS_OF - timedelta(days=5)},
+                          ambiguous_days={AS_OF - timedelta(days=3)},
+                          as_of=AS_OF)
+        assert row["active_days_90"] is None
+
 
 # ══ pure: the cohort fold ══════════════════════════════════════════════════
 
@@ -354,6 +390,29 @@ class TestCohortSummary:
         cell = ri.cohort_summary(rows, as_of=AS_OF)["trailing_30_active"]
         assert (cell["k"], cell["n"]) == (1, 2)
 
+    def test_a_definite_trailing_use_stays_in_the_trailing_denominator(self):
+        """Regression at the cohort level: a team with a definite use in the
+        trailing window must stay in the trailing denominator even when an
+        ambiguous day sits there too — otherwise a provably-warm team is
+        dropped from the headline number."""
+        start = AS_OF - timedelta(days=40)
+        rows = [_row("a", start, active={AS_OF - timedelta(days=5)},
+                     ambiguous={AS_OF - timedelta(days=3)})]
+        cell = ri.cohort_summary(rows, as_of=AS_OF)["trailing_30_active"]
+        assert cell["state"] == ri.STATE_MEASURED
+        assert (cell["k"], cell["n"], cell["unmeasured_teams"]) == (1, 1, 0)
+        assert cell["reason"] is None
+
+    def test_an_unsettled_trailing_window_is_excluded_and_counted(self):
+        """The over-fix guard: with no definite trailing use, an ambiguous day
+        still leaves the window unclassifiable and the team unmeasured."""
+        start = AS_OF - timedelta(days=40)
+        rows = [_row("a", start, active=set(),
+                     ambiguous={AS_OF - timedelta(days=3)})]
+        cell = ri.cohort_summary(rows, as_of=AS_OF)["trailing_30_active"]
+        assert cell["state"] == ri.STATE_UNAVAILABLE
+        assert cell["unmeasured_teams"] == 1
+
     def test_a_fully_measured_trailing_cell_does_not_claim_a_refusal(self):
         """``reason`` is a refusal label. Emitting it on a fully measured cell
         says the number is partial when it is not — the inverse of the module's
@@ -408,6 +467,20 @@ class TestCohortSummary:
         assert hist["state"] == "partial"
         assert hist["n"] == 1
 
+    def test_a_zero_eligible_histogram_with_a_team_behind_it_is_unavailable(
+            self):
+        """The zero-denominator branch must mirror `_cell`: a surface with no
+        measurable team but an unmeasured one behind it is `unavailable`, not
+        `not_measurable`, so a consumer switching on `state` gets the same
+        answer from the histogram and the trailing cell for one population."""
+        start = AS_OF - timedelta(days=40)
+        rows = [_row("a", start, active=set(),
+                     ambiguous={AS_OF - timedelta(days=3)})]
+        cohort = ri.cohort_summary(rows, as_of=AS_OF)
+        assert cohort["active_days_histogram"]["n"] is None
+        assert (cohort["active_days_histogram"]["state"]
+                == cohort["trailing_30_active"]["state"]
+                == ri.STATE_UNAVAILABLE)
     def test_histogram_buckets_separate_cadences(self):
         start = AS_OF - timedelta(days=200)
         daily = {AS_OF - timedelta(days=i) for i in range(12)}
@@ -435,6 +508,24 @@ class TestBuildTeamRows:
         assert by_id["a"]["state"] == ri.STATE_MEASURED
         assert by_id["b"]["state"] == ri.STATE_UNAVAILABLE
         assert by_id["b"]["reason"] == ri.REASON_ANALYTICS_UNREACHABLE
+
+    def test_an_ambiguous_day_does_not_make_the_team_unavailable(self):
+        """The ambiguity rule is PER MARK: an unclassifiable day leaves the
+        team `measured` (with the reason named on its row) and only the marks
+        it leaves unsettled read `null`. The module docstring and LIMITATIONS
+        used to claim the team was reported `unavailable` — which the code has
+        never done, and which would drop its sound marks from the denominator."""
+        start = AS_OF - timedelta(days=40)
+        rows = ri.build_team_rows(
+            teams=[{"org_id": "a", "start": start}],
+            activity={"a": ({start + timedelta(days=20)},
+                             {start + timedelta(days=10)}, None)},
+            as_of=AS_OF)
+        row = rows[0]
+        assert row["state"] == ri.STATE_MEASURED
+        assert row["reason"] == ri.REASON_UNCLASSIFIABLE_USE_DAY
+        assert row["active_at"]["7"] is True      # settled by the day-20 use
+        assert row["unclassifiable_marks"] == []
 
 
 class TestAssemble:
@@ -776,9 +867,23 @@ class TestRetentionReadsDoNotShareTheDefaultExecutor:
         assert all(e is ha._RETENTION_EXECUTOR for e in seen)
         assert ha._RETENTION_EXECUTOR is not ha._SCORECARD_EXECUTOR
 
-    def test_the_worker_pool_is_sized_to_the_documented_bound(self):
+    def test_the_worker_count_clamp_is_pinned_by_explicit_inputs(self):
+        """Pin the CLAMP, not the production expression re-evaluated from the
+        same env read (which is a tautology): the pool is built at import time,
+        so this is the only way to detect a changed floor/ceiling."""
         import tortoise.hosted_api as ha
-        assert (ha._RETENTION_EXECUTOR._max_workers
-                == max(1, min(ha._int_env("TORTOISE_RETENTION_WORKERS",
-                                          ha._RETENTION_MAX_CONCURRENCY), 8)))
-        assert ha._RETENTION_EXECUTOR._max_workers <= 8
+        assert ha._retention_worker_count(None, 4) == 4    # unset -> default
+        assert ha._retention_worker_count("", 4) == 4      # empty -> default
+        assert ha._retention_worker_count("abc", 4) == 4   # non-numeric -> default
+        assert ha._retention_worker_count("3", 4) == 3
+        assert ha._retention_worker_count("0", 4) == 1     # floor
+        assert ha._retention_worker_count("99", 4) == 8    # ceiling
+        assert ha._retention_worker_count("4", 2) == 4     # raw wins over default
+
+    def test_the_pool_and_the_semaphore_read_the_same_bound(self):
+        """A semaphore wider than the pool would let a read burn its whole
+        timeout queued, then report a self-inflicted `org_read_timeout`."""
+        import tortoise.hosted_api as ha
+        assert ha._RETENTION_EXECUTOR._max_workers == ha._RETENTION_WORKERS
+        assert ha._RETENTION_WORKERS >= 1
+        assert ha._RETENTION_WORKERS <= 8

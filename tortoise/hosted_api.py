@@ -16626,33 +16626,59 @@ async def activation_cohort(
 #: partial metric.
 _RETENTION_MAX_ORGS = 1000
 
-#: Bounded parallelism for the per-org analytics read. ENFORCED BY THE POOL,
-#: not by a bare semaphore: the read is a control-plane HTTP walk of up to
-#: `max_pages` round trips per org, which is the "long / stallable" class the
-#: #3060 doctrine above says must NOT share the loop's default executor with
-#: ~80 other `to_thread` sites and the auth middleware's abuse hooks.
+#: Default parallelism for the per-org analytics read. The real bound is the
+#: dedicated pool below (`_RETENTION_WORKERS`), and the request semaphore is
+#: sized FROM that pool so the two can never disagree — a semaphore wider than
+#: the pool would let a read spend its whole timeout queued and return a
+#: self-inflicted `org_read_timeout`. The read is a control-plane HTTP walk of
+#: up to `max_pages` round trips per org, which is the "long / stallable"
+#: class the #3060 doctrine above says must NOT share the loop's default
+#: executor with ~80 other `to_thread` sites and the auth middleware's abuse
+#: hooks.
 _RETENTION_MAX_CONCURRENCY = 4
 
-#: Dedicated pool for the per-org activity read (the `_SCORECARD_EXECUTOR`
-#: precedent above, same #3060 reasoning; four workers because the walk is
-#: network-bound). It replaces `asyncio.to_thread` here: the default pool on a
-#: 2-vCPU host is `min(32, cpu+4)` = 6 workers, so four slow orgs would park
-#: most of the shared pool and queue every other `to_thread` tenant behind
-#: them. The pool SIZE is also what bounds live threads: cancelling the await
-#: stops the awaitable, not the worker (CPython #87185, quoted in
-#: `_run_with_close`), so a timed-out org keeps its worker until the HTTP
-#: client gives up — an abandoned thread can never exceed this pool, which a
-#: semaphore over the shared pool could not promise.
+
+def _retention_worker_count(raw: str | None, default: int) -> int:
+    """Clamp a raw `TORTOISE_RETENTION_WORKERS` value to a usable pool size.
+
+    Pure on purpose: the pool is built at IMPORT time, so a test that
+    recomputes the production expression from the same env read cannot detect
+    a changed clamp. ``raw`` is the env value (``None`` means unset); a
+    missing or non-numeric value falls back to ``default`` (the
+    ``_int_env`` rule), and the result is clamped to ``[1, 8]``.
+    """
+    if raw is None or not raw.strip().isdigit():
+        value = default
+    else:
+        value = int(raw)
+    return max(1, min(value, 8))
+
+
+#: Dedicated pool for the fleet walk and the per-org activity reads (the
+#: `_SCORECARD_EXECUTOR` precedent above, same #3060 reasoning). It replaces
+#: `asyncio.to_thread` here: the default pool on a 2-vCPU host is
+#: `min(32, cpu+4)` = 6 workers, so four slow orgs would park most of the
+#: shared pool and queue every other `to_thread` tenant behind them.
+#:
+#: LIMITATION, stated because the pool is otherwise read as a guarantee: the
+#: pool SIZE bounds live threads (cancelling the await stops the awaitable,
+#: not the worker — CPython #87185, quoted in `_run_with_close`), but the pool
+#: is module-level and lives ACROSS requests. An abandoned worker runs the
+#: whole `read_org_activity` walk (up to `2 * max_pages` control-plane reads),
+#: not just until the HTTP client's per-request timeout, so four abandoned
+#: walks from concurrent requests can park all four workers for later
+#: requests. What the pool buys is that this cost is confined to the retention
+#: surface and can never starve the shared pool — not that a timeout is free.
+_RETENTION_WORKERS = _retention_worker_count(
+    os.environ.get("TORTOISE_RETENTION_WORKERS"), _RETENTION_MAX_CONCURRENCY)
 _RETENTION_EXECUTOR = ThreadPoolExecutor(
-    max_workers=max(1, min(_int_env("TORTOISE_RETENTION_WORKERS",
-                                    _RETENTION_MAX_CONCURRENCY), 8)),
+    max_workers=_RETENTION_WORKERS,
     thread_name_prefix="retention-cohort")
 
-#: Per-org bound: one hung or unreadable org costs THAT team's cell and
-#: nothing else — it folds to `unavailable` with the org named, and its
-#: exclusion from the denominator is visible as a `partial` cell. A timed-out
-#: org keeps its `_RETENTION_EXECUTOR` worker until the HTTP client returns,
-#: so it can cost that ONE pool slot for the request — never the shared pool.
+#: Per-org bound: one hung or unreadable org costs THAT team's cell — it folds
+#: to `unavailable` with the org named, and its exclusion from the denominator
+#: is visible as a `partial` cell. The abandoned worker keeps its pool slot
+#: until its walk returns (see the pool's LIMITATION above).
 _RETENTION_PER_ORG_TIMEOUT_S = 30.0
 
 
@@ -16727,7 +16753,7 @@ async def retention_cohort(request: Request, as_of: str | None = None):
     log = logging.getLogger("tortoise.api")
     limits = {
         "max_orgs": _RETENTION_MAX_ORGS,
-        "max_concurrency": _RETENTION_MAX_CONCURRENCY,
+        "max_concurrency": _RETENTION_WORKERS,
         "per_org_timeout_s": _RETENTION_PER_ORG_TIMEOUT_S,
         "auth": "internal_key",
         "read_only": True,
@@ -16776,7 +16802,7 @@ async def retention_cohort(request: Request, as_of: str | None = None):
                     "bound) — a partial denominator is not a retention rate, "
                     "so the metric is refused rather than truncated"))
 
-    sem = asyncio.Semaphore(min(_RETENTION_MAX_CONCURRENCY, len(teams)))
+    sem = asyncio.Semaphore(min(_RETENTION_WORKERS, len(teams)))
 
     async def _one_org(team: dict) -> tuple[str, tuple]:
         """Read ONE team's activity, total against every store failure.
