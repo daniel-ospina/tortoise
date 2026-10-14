@@ -56,9 +56,10 @@ if ! gh pr list --repo "$OR" --state all --limit 500 --json headRefName --jq '.[
   rm -f "$O/.pr_brs"
   echo "[refresh] WARN: PR listing FAILED — reaping pass will be skipped (an unreadable listing is not an empty one)"
 fi
-python3 - "$O" <<'PY'
-import os, re, subprocess, sys
+python3 - "$O" "$OR" <<'PY'
+import json, os, re, subprocess, sys
 O = sys.argv[1]
+OR = sys.argv[2] if len(sys.argv) > 2 else ""
 def lines(name):
     p = os.path.join(O, name)
     return [l.strip() for l in open(p)] if os.path.exists(p) else []
@@ -107,29 +108,58 @@ if reaped:
 # same invisible permanent suppression checked.txt was, and the only escape would be hand-editing the
 # file. A still-OPEN entry is left in place and reported by the loop on every pass, because it is
 # exactly the case the operator must act on: verify and close, or re-state the remaining scope.
-# This pass is skipped with the rest of the reaper when a listing is unreadable (the guard above
-# raised first) — never prune a list against a listing that was not read.
+#
+# ⛔ THE PRUNE READS THE ENTRY'S OWN STATE — it does NOT infer CLOSED from ABSENCE in the capped
+# `.open_iss` listing (#8560 review). `.open_iss` is `gh issue list --limit 500`, and this repo has
+# >500 open issues, so that listing is PERMANENTLY saturated: the earlier `len(open_iss) < 500`
+# guard tripped on every pass and the prune was a no-op, so landed.txt could only ever be cleared by
+# hand. Absence from a saturated listing proves nothing, and widening the shared listing is not the
+# fix either — `.pr_brs` is capped the same way, so a longer open list would expose the reaper's
+# `has_pr` to more false negatives (duplicate dispatch, a worse failure than a stale entry). The
+# targeted, UNCAPPED `gh issue view <N> --json state` answers the actual question.
+#
+# ⛔ FAIL CLOSED PER ENTRY: an entry whose state cannot be read is KEPT — a failed read never drops a
+# suppression that is still owed. This is the landed list's own fail-closed rule, named in the log so
+# it is never silent.
 lp = os.path.join(O, "landed.txt")
 landed_entries = [l for l in lines("landed.txt") if l]
-# Absence from `.open_iss` proves CLOSED only while that listing is COMPLETE — the capture above caps
-# it (`gh issue list --limit 500`). A truncated listing would make a still-open landed issue look
-# closed, drop a suppression that is still owed, and degrade straight back into the every-pass
-# re-pre-flight this list exists to stop. So prune only when the listing is provably complete; the
-# reaper's treatment of `dispatched.txt` has the same polarity (`n in open_iss` → reap, absence →
-# keep), and a check that must not fail open is never measured against a capped read.
-OPEN_LISTING_LIMIT = 500
-if landed_entries and len(open_iss) < OPEN_LISTING_LIMIT:
-    still_landed = [l for l in landed_entries if l in open_iss]
-    settled = [l for l in landed_entries if l not in open_iss]
+
+def landed_issue_state(n):
+    """The issue's own state, straight from gh — UNCAPPED, and None on ANY
+    failure (which the caller reads as "keep the entry", never "closed")."""
+    if not OR:
+        return None
+    try:
+        r = subprocess.run(["gh", "issue", "view", n, "--repo", OR,
+                            "--json", "state"], capture_output=True, text=True)
+        if r.returncode != 0:
+            return None
+        state = json.loads(r.stdout).get("state")
+    except Exception:
+        return None
+    if not isinstance(state, str):
+        return None
+    return state.strip().upper() or None
+
+if landed_entries:
+    still_landed, settled, unreadable = [], [], []
+    for n in landed_entries:
+        state = landed_issue_state(n)
+        if state == "CLOSED":
+            settled.append(n)
+        else:
+            still_landed.append(n)
+            if state != "OPEN":
+                unreadable.append(n)
     if os.path.exists(lp):
         with open(lp, "w") as fh:
             fh.write("\n".join(still_landed) + ("\n" if still_landed else ""))
     if settled:
         print("[reap] landed list: decision made (issue CLOSED), dropped: %s"
               % " ".join(sorted(settled, key=int)))
-elif landed_entries:
-    print("[reap] landed list: open-issue listing hit the %d cap — not pruning (a truncated listing "
-          "cannot prove an issue is CLOSED)" % OPEN_LISTING_LIMIT)
+    if unreadable:
+        print("[reap] landed list: %d entr(ies) could not be re-read — KEPT, not assumed "
+              "closed: %s" % (len(unreadable), " ".join(sorted(unreadable, key=int))))
 PY
 for f in "$O/.open_iss" "$O/.pr_brs"; do rm -f "$f"; done
 
@@ -144,6 +174,11 @@ touch "$O/checked.txt" "$O/candidates.txt" "$O/landed.txt"
 # and every worker the harness ran was a P2 (#8465). The tier is a RANK, not a label.
 # Dedupe on the NUMBER, keeping the lowest tier: the sort already put an issue's best tier first, so
 # `!seen[$2]++` drops the later, weaker duplicate rather than letting one issue occupy two slots.
+# `.prio` is `<number>TAB<tier>` — the map orch-loop.sh's P0 merge-priority override reads. `.pool`
+# is then the BARE NUMBERS that map is keyed by, which is the contract this file's loop reads.
+# ⛔ Two files from one sort on purpose: writing the tier INTO `.pool` made every line a malformed
+# argument to the loop (`read -r N` takes the WHOLE line), so nothing was ever pre-flighted or
+# queued and the backlog could never refill (#8469 review P1).
 {
   gh issue list --repo "$OR" --state open --limit 300 --label P0-blocker --json number,assignees,title \
     --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|lane|OWNER DECISION|decision|analysis|investigation)";"i")|not)|"0 \(.number)"' 2>/dev/null
@@ -151,7 +186,8 @@ touch "$O/checked.txt" "$O/candidates.txt" "$O/landed.txt"
     --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|OWNER DECISION)";"i")|not)|"1 \(.number)"' 2>/dev/null
   gh issue list --repo "$OR" --state open --limit 200 --label P2-moderate --json number,assignees,title \
     --jq '.[]|select((.assignees|length)==0)|select(.title|test("^(epic|OWNER DECISION)";"i")|not)|"2 \(.number)"' 2>/dev/null
-} | sort -k1,1n -k2,2n | awk '!seen[$2]++ {print $2}' > "$O/.pool"
+} | sort -k1,1n -k2,2n | awk '!seen[$2]++ {print $2"\t"$1}' > "$O/.prio"
+cut -f1 "$O/.prio" > "$O/.pool"
 
 n=0
 while read -r N; do
@@ -159,20 +195,25 @@ while read -r N; do
   grep -qx "$N" "$O/checked.txt" 2>/dev/null && continue
   grep -qx "$N" "$O/landed.txt" 2>/dev/null && continue
   grep -qx "$N" "$O/dispatched.txt" 2>/dev/null && continue
-  n=$((n+1)); [ "$n" -gt "$LIMIT" ] && break
-  # ⛔ A pre-flight that ERRORED is not a verdict — and a COLLISION is not terminal. `echo "$N" >>
-  # checked.txt` used to run BEFORE the verdict was read, so a pre-flight that produced no VERDICT
-  # line (API failure, missing venv, timeout) blacklisted the issue forever, invisibly: checked.txt
-  # suppresses it, and the reaper above only walks dispatched.txt, so nothing ever removed the entry.
-  # A COLLISION was permanent the same way, though a collision is transient by nature (the colliding
-  # work lands). checked.txt is therefore written ONLY on a verdict that TERMINATES the issue —
-  # CLEAN, which is the one verdict that terminates it by QUEUEING it. Everything else is left
-  # unchecked, so the next pass re-attempts it. (agent-infra#1716)
+  # ⛔ THE PASS BUDGET COUNTS *ANSWERED* CANDIDATES, not entries walked. Counting every entry
+  # (the pre-fix `n=$((n+1))` that used to sit here) let a few persistently non-answering entries
+  # at the head re-spend the whole `LIMIT` on every pass, so the entries BEHIND them were never
+  # examined and the backlog could never refill (#8469 review P2). A no-verdict entry costs
+  # nothing against `LIMIT`; it is bounded by `RETRY_MAX` in the `*)` arm below instead.
+  [ "$n" -ge "$LIMIT" ] && break
+  # ⛔ A pre-flight that ERRORED is not a verdict. Mark the issue checked only on a real CLEAN
+  # answer: an empty VERDICT line (API failure, missing venv, timeout) used to be written to
+  # checked.txt just the same, consuming the issue permanently and invisibly.
+  # checked.txt=63 against candidates.txt=9 on 2026-10-13 is what that leak looks like. A
+  # COLLISION is likewise transient — the colliding work lands — so it too is retried rather than
+  # blacklisted forever (agent-infra#1716 / #8515).
   #
   # LANDED must be matched explicitly: it did not exist before #8560, so the sed below dropped the
-  # whole line and control fell to `*)` — logged as "no verdict" and re-pre-flighted on EVERY pass,
-  # consuming a LIMIT slot forever. Nothing is dispatched for it (only CLEAN is queued), but a
-  # terminal fact read as an error is a false diagnosis and a permanent capacity leak.
+  # whole line and control fell to `*)` — logged as "no verdict" and re-pre-flighted on EVERY pass.
+  # Nothing is dispatched for it (only CLEAN is queued), but a terminal fact read as an error is a
+  # false diagnosis. INCOMPLETE (exit 2, some surfaces unqueried) is likewise a REAL verdict, not a
+  # missing one — the sed captures it so the log names what happened instead of "no verdict"; both
+  # are settled answers and count against the pass budget exactly like CLEAN and COLLISION.
   #
   # ⛔ LANDED IS NOT TERMINAL HERE, so it does NOT go in checked.txt. The pool is built from
   # `gh issue list --state open`, so the pre-flight's state-CLOSED arm is unreachable from this loop:
@@ -185,19 +226,46 @@ while read -r N; do
   # WITHOUT hiding it: the pool filter above spares the LIMIT slot, and the pass summary below names
   # the set on every pass. The reaper drops an entry once the issue is CLOSED (#8560 review).
   PRE="$("$SC/.venv/bin/python" tools/collision_preflight.py "$N" --repo . 2>&1)"
-  V="$(printf '%s\n' "$PRE" | grep -E '^VERDICT' | head -1 | sed -E 's/.*VERDICT: (CLEAN|COLLISION|LANDED).*/\1/')"
+  V="$(printf '%s\n' "$PRE" | grep -E '^VERDICT' | head -1 | sed -E 's/.*VERDICT: (CLEAN|COLLISION|LANDED|INCOMPLETE).*/\1/')"
   case "$V" in
     CLEAN)
+      n=$((n+1))
       echo "$N" >> "$O/checked.txt"
+      rm -f "$O/state/pretry-$N"
       echo "$N" >> "$O/candidates.txt"
       echo "[refresh] +#$N CLEAN -> backlog" ;;
     LANDED)
+      # Counts against the pass budget like every other ANSWERED verdict: without this the loop
+      # would walk past the LIMIT hunting for more entries on every pass a landed issue appears.
+      n=$((n+1))
+      rm -f "$O/state/pretry-$N"
       echo "$N" >> "$O/landed.txt"
       echo "[refresh] =#$N landed — work already shipped; verify/close, NOT queued, NOT checked" ;;
     COLLISION)
+      # A peer's work is in flight; a collision is transient by nature, so leave the issue
+      # unchecked and re-attempt it next pass rather than consuming it permanently.
+      n=$((n+1))
+      rm -f "$O/state/pretry-$N"
       echo "[refresh] =#$N collision — a peer owns it, retried next pass" ;;
     *)
-      echo "[refresh] ?#$N no verdict from the pre-flight — left unchecked for the next pass" ;;
+      # No verdict (empty) or an INCOMPLETE one (unqueryable surfaces). Leave the issue for the
+      # next pass — a transient failure must NOT blacklist it — but BOUND the retries: a
+      # persistently non-answering entry at the pool head must eventually leave the candidate set,
+      # or the cursor can never advance past it and the entries behind it are starved forever
+      # (#8469 review P2). `RETRY_MAX` consecutive attempts marks it checked; the log names the
+      # attempt so this is never silent.
+      mkdir -p "$O/state"
+      pf="$O/state/pretry-$N"
+      pa="$(cat "$pf" 2>/dev/null || echo 0)"; case "$pa" in ''|*[!0-9]*) pa=0;; esac
+      pa=$((pa+1))
+      if [ "$pa" -ge "${RETRY_MAX:-3}" ]; then
+        echo "$N" >> "$O/checked.txt"
+        rm -f "$pf"
+        echo "[refresh] ?#$N ${V:-no verdict} — marked checked after ${RETRY_MAX:-3} attempts"
+      else
+        echo "$pa" > "$pf"
+        echo "[refresh] ?#$N ${V:-no verdict} — left unchecked for the next pass (attempt $pa/${RETRY_MAX:-3})"
+      fi ;;
   esac
 done < "$O/.pool"
 # Dedupe WITHOUT re-sorting. orch-loop.sh consumes this file top-down and dispatches the first

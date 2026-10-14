@@ -29,6 +29,10 @@ MAX_LOAD="${MAX_LOAD:-$(( _NCPU * 10 ))}"
 MAX_LANES="${MAX_LANES:-4}"
 MAX_REVIEW="${MAX_REVIEW:-4}"
 MERGE_PRIORITY_AT="${MERGE_PRIORITY_AT:-10}"
+# 1 = a P0-blocker at the backlog head is dispatched even above MERGE_PRIORITY_AT; 0 restores the
+# unconditional gate. Rendered into the plist like every other tunable: launchd gives no shell env,
+# so an env-only kill switch is unreachable on the installed box (README §4).
+P0_BYPASS_MERGE_PRIORITY="${P0_BYPASS_MERGE_PRIORITY:-1}"
 MAX_FIX="${MAX_FIX:-3}"
 MAX_FIX_TRIES="${MAX_FIX_TRIES:-3}"
 MIN_SWAP_FREE="${MIN_SWAP_FREE:-600}"
@@ -246,6 +250,7 @@ sed \
   -e "s|__MAX_LANES__|$MAX_LANES|g" \
   -e "s|__MAX_REVIEW__|$MAX_REVIEW|g" \
   -e "s|__MERGE_PRIORITY_AT__|$MERGE_PRIORITY_AT|g" \
+  -e "s|__P0_BYPASS_MERGE_PRIORITY__|$P0_BYPASS_MERGE_PRIORITY|g" \
   -e "s|__MAX_FIX__|$MAX_FIX|g" \
   -e "s|__MAX_FIX_TRIES__|$MAX_FIX_TRIES|g" \
   -e "s|__MIN_SWAP_FREE__|$MIN_SWAP_FREE|g" \
@@ -260,7 +265,7 @@ ok "plist valid"
 # invokes, not just orch-loop.sh. A drift here is silent and serious: a fix applied only to the
 # shipped copy (e.g. the fail-closed ai-review-gate classifier) would never reach the running box.
 DRIFTED=""
-for f in orch-loop.sh dispatch-merge.sh lane.sh chain-merge.sh merge-one.sh fix-one.sh refresh-candidates.sh adopt-fix.sh spawn-gate.sh; do
+for f in orch-loop.sh dispatch-merge.sh lane.sh chain-merge.sh merge-one.sh fix-one.sh refresh-candidates.sh adopt-fix.sh merged-not-closed.sh spawn-gate.sh; do
   [ -f "$O/$f" ] || { DRIFTED="$DRIFTED $f(missing)"; continue; }
   diff -q "$HERE/$f" "$O/$f" >/dev/null 2>&1 || DRIFTED="$DRIFTED $f"
 done
@@ -278,7 +283,7 @@ cat <<EOF
   repo      $REPO   ($OR)
   limits    lanes=$MAX_LANES review=$MAX_REVIEW fix=$MAX_FIX fix_tries=$MAX_FIX_TRIES
             max_load=$MAX_LOAD min_swap_free=${MIN_SWAP_FREE}M min_mem_free_mb=${MIN_MEM_FREE_MB}M batch=$BATCH cycle=${CYC}s
-            merge_priority_at=${MERGE_PRIORITY_AT} open PRs
+            merge_priority_at=${MERGE_PRIORITY_AT} open PRs   p0_bypass_merge_priority=${P0_BYPASS_MERGE_PRIORITY}
 
 The loop is NOT running. To start it:
 

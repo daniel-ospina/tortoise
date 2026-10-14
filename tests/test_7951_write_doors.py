@@ -978,10 +978,14 @@ def test_mining_emit_is_journal_first():
 
 
 def test_create_entity_deviation_is_documented_in_the_contract():
-    """`_create_entity` is apply-first, and that is a RECORDED deviation in the
-    module-top contract, not a silent door. FAILS IF the documentation is
-    deleted while the code stays apply-first — the deviation would become
-    undeclared, which §17.1 forbids."""
+    """`_create_entity` is a MIXED-order funnel: its Object/Subject/Event
+    blocks fold apply-first, while the #2296 `DocumentCreated` arm journals
+    FIRST. Both orders are a RECORDED deviation in the module-top contract,
+    not a silent door. FAILS IF the documentation is deleted, if the
+    Object/Subject/Event blocks stop folding first, or if the Document arm's
+    journal call stops preceding the fold (a reorder — this scan is
+    ORDER-ONLY; that the arm actually selects `DocumentCreated` is pinned
+    behaviourally by tests/test_2296_document_created_journal.py)."""
     server = REPO_ROOT / "tortoise" / "sdk.py"
     source = server.read_text(encoding="utf-8")
     head = source[:source.index("_JOURNAL_ENVELOPE_KEYS")]
@@ -991,7 +995,7 @@ def test_create_entity_deviation_is_documented_in_the_contract():
     deviation = head.split("KNOWN DEVIATIONS", 1)[1]
     assert "_create_entity" in deviation, (
         "`_create_entity` is no longer named as a known deviation although it "
-        "still folds apply-first"
+        "still folds its Object/Subject/Event blocks apply-first"
     )
     assert "apply-first" in deviation, (
         "the `_create_entity` deviation no longer states its form (apply-first)"
@@ -1000,25 +1004,43 @@ def test_create_entity_deviation_is_documented_in_the_contract():
         assert ref in deviation, (
             f"the deviation no longer records {ref} as the work it rides"
         )
-    # The claim is CONDITIONAL — "while the code stays apply-first" — so pin
-    # the CODE ORDER too: documentation presence alone cannot tell whether the
-    # deviation is current, and a stale deviation is exactly the "records a past
-    # state and is never revalidated" failure class.
+    # The #2296 Document arm is the OTHER order in the same funnel, and the
+    # contract says so. Without this, the arm could revert to live-only while
+    # the deviation's "Object/Subject/Event" scoping stayed true and BOTH the
+    # text and the code-order check below stayed green (the false negative
+    # this assertion closes).
+    assert "DocumentCreated" in deviation and "#2296" in deviation, (
+        "the deviation no longer records the #2296 DocumentCreated arm's "
+        "journal-first order"
+    )
+    # The claim is CONDITIONAL on the CODE ORDER, so pin BOTH orders:
+    # documentation presence alone cannot tell whether the deviation is
+    # current, and a stale deviation is exactly the "records a past state and
+    # is never revalidated" failure class.
     tree = ast.parse(source)
     fn = next((n for n in ast.walk(tree)
                if isinstance(n, ast.FunctionDef) and n.name == "_create_entity"),
               None)
     assert fn is not None, "`_create_entity` no longer exists"
-    applies = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
-               and isinstance(n.func, ast.Attribute) and n.func.attr == "apply"]
-    emits = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
-             and isinstance(n.func, ast.Attribute)
-             and n.func.attr == "_emit_event"]
-    assert applies and emits, (
-        "`_create_entity` no longer both folds and journals — revisit whether "
-        "it is still a deviation"
+
+    def _calls(attr: str) -> list:
+        return [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute) and n.func.attr == attr]
+
+    applies = _calls("apply")
+    emits = _calls("_emit_event")
+    journal_first = _calls("_journal_entity_event")
+    assert applies and emits and journal_first, (
+        "`_create_entity` no longer folds, emits AND journal-first-creates — "
+        "revisit whether the KNOWN DEVIATIONS entry is still current"
     )
-    assert min(a.lineno for a in applies) < min(e.lineno for e in emits), (
-        "`_create_entity` is no longer apply-first — the KNOWN DEVIATIONS "
-        "entry is stale and must be removed"
+    first_fold = min(a.lineno for a in applies)
+    assert first_fold < min(e.lineno for e in emits), (
+        "`_create_entity`'s Object/Subject/Event blocks are no longer "
+        "apply-first — the KNOWN DEVIATIONS entry is stale and must be removed"
+    )
+    assert min(j.lineno for j in journal_first) < first_fold, (
+        "`_create_entity`'s DocumentCreated arm is no longer ordered "
+        "journal-first (a reorder) — the deviation's 'DocumentCreated arm "
+        "DOES append first' claim is false for this call site"
     )
