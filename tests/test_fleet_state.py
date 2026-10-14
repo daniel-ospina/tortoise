@@ -1381,6 +1381,58 @@ def test_roster_derived_answers_refuse_an_unreadable_registry(
     )
 
 
+def test_lane_and_bind_never_assert_absence_from_an_unreadable_registry(
+    monkeypatch, capsys
+) -> None:
+    """PR #8594 review P2: the LAST two roster-derived readers must refuse too.
+
+    `cmd_lane`'s `no lane matching ...` is an EXISTENCE verdict and `cmd_bind --all`'s
+    `nothing to bind` is an all-clear. Both search `state["lanes"]`, which an unread
+    registry leaves empty -- so both answered a negative from a read that never happened.
+    This is the repro shape of the review: an unreadable registry enumerates ZERO lanes.
+    """
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: _unread_registry_state(lanes=[]))
+    rc = fs.cmd_lane(argparse.Namespace(lane="HANG", json=False))
+    cap = capsys.readouterr()
+    assert rc == 2, f"`lane` answered from an unread roster: {cap.out!r}"
+    assert "UNREADABLE" in cap.err and "lane-registry" in cap.err
+    assert "no lane matching" not in (cap.out + cap.err), (
+        "`lane` manufactured an existence verdict from an unread roster"
+    )
+
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: _unread_registry_state(lanes=[]))
+    rc = fs.cmd_bind(argparse.Namespace(
+        all=True, json=False, dry_run=True, workspace=None, session=None,
+        label=None, cwd=None, pi=None,
+    ))
+    cap = capsys.readouterr()
+    assert rc == 2, f"`bind --all` answered from an unread roster: {cap.out!r}"
+    assert "UNREADABLE" in cap.err and "lane-registry" in cap.err
+    assert "nothing to bind" not in (cap.out + cap.err), (
+        "`bind --all` reported an all-clear from an unread roster"
+    )
+
+
+def test_lane_and_bind_still_answer_from_a_measured_empty_roster(monkeypatch, capsys) -> None:
+    """OVER-FIX GUARD: a roster that was READ and has zero lanes is a real answer."""
+    empty = _unread_registry_state(lanes=[])
+    empty["reconciliation"]["registry_measured"] = True
+    empty["reconciliation"]["registry_error"] = ""
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: empty)
+    rc = fs.cmd_lane(argparse.Namespace(lane="HANG", json=False))
+    assert rc == 1, "a measured empty roster still means 'no such lane'"
+    assert "no lane matching" in capsys.readouterr().err
+
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: empty)
+    rc = fs.cmd_bind(argparse.Namespace(
+        all=True, json=False, dry_run=True, workspace=None, session=None,
+        label=None, cwd=None, pi=None,
+    ))
+    cap = capsys.readouterr()
+    assert rc == 0, f"a measured empty roster has nothing to bind: {cap.out!r}"
+    assert "nothing to bind" in cap.out
+
+
 def test_build_refuses_to_cache_a_state_with_an_unreadable_registry(tmp_path, monkeypatch,
                                                                    capsys) -> None:
     """A cached zero-lane state would be served as a FRESH fleet for the whole TTL."""

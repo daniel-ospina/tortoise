@@ -260,3 +260,98 @@ def test_healthy_read_still_works(sut, fake_home, capsys):
     r = _run_sut_as_process(fake_home, "--status")
     assert r.returncode == 0, f"a healthy read must not abort\n{r.stdout}\n{r.stderr}"
     assert "lanes READ  : 1" in r.stdout
+
+
+# ---------------------------------------------------------------------------
+# the last-turn classifier is a DEPENDENCY: a failed load is not a lane verdict
+# (PR #8594 review P2)
+# ---------------------------------------------------------------------------
+
+def test_missing_classifier_sibling_is_a_named_load_failure(sut, tmp_path, monkeypatch):
+    """A failed DEPENDENCY LOAD must be a named refusal, not a per-lane WITHHOLD.
+
+    The loader resolves `turn-classify.py` beside the script. Here it is absent by
+    construction (the copy lives in an empty temp dir), which is exactly the in-repo
+    copy's real shape -- the live `turn-classify.py` is in `~/.pi/agent/scripts/`.
+    Pre-fix this raised an anonymous FileNotFoundError; the suite names the type.
+    """
+    sut._TC_MODULE = None
+    monkeypatch.setattr(sut, "__file__", str(tmp_path / "queue-dispatch-copy.py"))
+    with pytest.raises(sut.ClassifierLoadError) as ei:
+        sut._turn_classify()
+    assert "turn-classify.py" in str(ei.value)
+    assert "NOT beside this script" in str(ei.value)
+
+
+def test_classify_last_turn_propagates_a_load_failure_not_a_verdict(
+    sut, tmp_path, monkeypatch
+):
+    """`classify_last_turn` must RAISE on a failed load, never return `(None, ...)`.
+
+    `choice is None` is main()'s per-lane WITHHOLD branch: folding a failed import into it
+    printed `WITHHOLD <lane>: last-turn unreadable` for the whole fleet, then
+    `dispatched 0` and exit 0.
+    """
+    sut._TC_MODULE = None
+    monkeypatch.setattr(sut, "__file__", str(tmp_path / "queue-dispatch-copy.py"))
+    with pytest.raises(sut.ClassifierLoadError):
+        sut.classify_last_turn({"lane": "x", "sid": "a" * 36})
+
+
+def _roster_with_one_idle_lane(fake_home: Path) -> None:
+    """A roster the pass WOULD dispatch from: one assigned DONE-IDLE lane, no WIP signals."""
+    _stub_lane_status(
+        fake_home,
+        "import json; print(json.dumps(["
+        "{'lane': 'idle-lane', 'ws': 'WS-IDLE', 'verdict': 'DONE-IDLE', 'grew': False,"
+        " 'spinner': False, 'child': None, 'declared': None, 'stale_s': 9999}]))\n",
+    )
+    a = fake_home / ".pi" / "agent" / "state" / "queues" / "LANE-ASSIGNMENTS.tsv"
+    a.write_text("lane\tclass\nidle-lane\tland\n")
+
+
+def _sut_with_classifier_sibling(tmp_path: Path) -> Path:
+    """A copy of the SUT with a stub `turn-classify.py` BESIDE it (the live dir's shape)."""
+    d = tmp_path / "copy"
+    d.mkdir()
+    copy = d / "queue-dispatch.py"
+    copy.write_text(DEFAULT_SUT.read_text())
+    (d / "turn-classify.py").write_text(
+        "def session_file_for(sid):\n    return None\n"
+        "def last_turn_text(path):\n    return ''\n"
+        "def jev_choice(turn):\n    return None, {}\n"
+    )
+    return copy
+
+
+def test_process_aborts_when_the_classifier_cannot_load(fake_home):
+    """THE REVIEW'S REPRO: a failed dependency load must make the PROCESS non-zero.
+
+    Pre-fix: every lane printed `WITHHOLD <lane>: last-turn unreadable`, the pass printed
+    `dispatched 0` and exited 0 -- identical to a healthy, fed fleet. Post-fix: the pass
+    aborts with exit 3 and a summary that names the dependency.
+    """
+    _roster_with_one_idle_lane(fake_home)
+    r = _run_sut_as_process(fake_home)
+    assert r.returncode == 3, (
+        f"a failed dependency load must abort (exit 3), got {r.returncode}\n"
+        f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}")
+    assert "DISPATCH DEPENDENCY UNREADABLE" in r.stdout
+    assert "turn-classify.py" in r.stdout
+    assert "last-turn unreadable" not in r.stdout, "a failed load is not a lane reading"
+    assert "dispatched 0" not in r.stdout
+    assert "Traceback" not in r.stderr
+
+
+def test_process_does_not_abort_when_the_classifier_sibling_exists(fake_home, tmp_path):
+    """OVER-FIX GUARD: with `turn-classify.py` present the pass classifies, never aborts."""
+    _roster_with_one_idle_lane(fake_home)
+    copy = _sut_with_classifier_sibling(tmp_path)
+    env = os.environ.copy()
+    env["HOME"] = str(fake_home)
+    env["QUEUE_DISPATCH_SCAN_TIMEOUT"] = "15"
+    r = subprocess.run([sys.executable, str(copy)], capture_output=True, text=True,
+                       timeout=120, env=env)
+    assert "DISPATCH DEPENDENCY UNREADABLE" not in r.stdout, r.stdout
+    assert "last-turn unreadable" not in r.stdout, r.stdout
+    assert "LAST-TURN idle-lane: finished_the_work" in r.stdout, r.stdout

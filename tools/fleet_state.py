@@ -1917,9 +1917,9 @@ def _registry_readable(state: Mapping[str, Any], cmd: str, what: str) -> bool:
 
     ``load_registry`` used to swallow an ``OSError`` into ``[]``, which made an
     unreadable registry indistinguishable from a fleet with no lanes: every command
-    that asserts "no free lane", "no lane holds it", "no ownership conflicts" or
-    "no orphans" answered from a read that never happened. Same polarity as
-    ``_board_readable`` (#7957 H5).
+    that asserts "no free lane", "no lane holds it", "no ownership conflicts",
+    "no orphans", "no lane matching that name" or "nothing to bind" answered from a
+    read that never happened. Same polarity as ``_board_readable`` (#7957 H5).
     """
     rp = registry_provenance(state)
     if rp["measured"]:
@@ -2216,6 +2216,14 @@ def _find_lane(state: Mapping[str, Any], needle: str) -> dict[str, Any] | None:
 
 def cmd_lane(args: argparse.Namespace) -> int:
     state = _load_or_build(args)
+    # A NEGATIVE LANE LOOKUP IS ROSTER-DERIVED, so an unreadable roster must refuse
+    # BEFORE the search. `state["lanes"]` is built solely from the registry rows, so an
+    # unread roster enumerates zero lanes and `no lane matching ...` is an existence
+    # verdict manufactured from a read that never happened (PR #8594 review P2).
+    if not _registry_readable(
+        state, "lane", f"cannot say whether a lane named {args.lane!r} exists"
+    ):
+        return 2
     lane = _find_lane(state, args.lane)
     if lane is None:
         print(f"no lane matching {args.lane!r}", file=sys.stderr)
@@ -2360,6 +2368,15 @@ def cmd_bind(args: argparse.Namespace) -> int:
     than none. ``--all`` repairs every live lane whose binding is missing.
     """
     state = _load_or_build(args)
+    # `--all` repairs every live lane whose binding is missing: it is derived ENTIRELY from
+    # the roster. An unread roster enumerates zero lanes, so the old code printed
+    # `nothing to bind` and exited 0 -- "no lane needed repair" from a read that never
+    # happened (PR #8594 review P2). A non-`--all` bind takes an explicit workspace/session
+    # and does not read the roster, so it is left alone.
+    if args.all and not _registry_readable(
+        state, "bind", "cannot repair the lanes whose session binding is missing"
+    ):
+        return 2
     targets: list[tuple[str, str, str, str, Path]] = []
     results: list[dict[str, Any]] = []
     if args.all:

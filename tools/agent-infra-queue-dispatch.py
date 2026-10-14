@@ -37,6 +37,16 @@ USAGE
     python3 queue-dispatch.py                 # dry run: say what it WOULD do
     python3 queue-dispatch.py --apply         # actually dispatch
     python3 queue-dispatch.py --status        # assignments + queue counts only
+
+NOTE (the in-repo copy is NOT self-contained)
+    `tools/agent-infra-queue-dispatch.py` is the REVIEWABLE copy of the live
+    `~/.pi/agent/scripts/queue-dispatch.py` (which is outside every repo and is resynced with
+    this one). Its sibling `turn-classify.py` (the last-turn gate) lives in the live scripts
+    directory, so running the in-repo copy directly aborts with exit 3 (`DISPATCH DEPENDENCY
+    UNREADABLE`) unless a `turn-classify.py` sits beside it. THAT ABORT IS DELIBERATE: a
+    dependency that failed to load is not a verdict about any lane, so it must never read as
+    "every lane's last turn is unreadable" -- which dispatched nothing and exited 0, the same
+    pass-succeeded-but-did-nothing signature the roster and queue errors exist to refuse.
 """
 from __future__ import annotations
 
@@ -437,6 +447,29 @@ def _abort_unreadable(exc: Exception) -> int:
     return 3
 
 
+def _abort_dependency(exc: Exception, dispatched: int = 0) -> int:
+    """Refuse the pass when a dispatch DEPENDENCY could not be loaded (exit 3).
+
+    A dependency that failed to load is not a verdict about any lane: the old `main()`
+    caught it as `choice = None` and printed `WITHHOLD <lane>: last-turn unreadable` for the
+    whole fleet, then `dispatched 0` and exit 0 -- indistinguishable from a healthy pass
+    with nothing to do (PR #8594 review P2). Exit 3 is the SAME polarity `_abort_unreadable`
+    uses, so a supervisor that already distinguishes an unread roster from success needs no
+    new convention.
+    """
+    print("=" * 78)
+    print("ABORT — DISPATCH DEPENDENCY UNREADABLE. The pass did NOT run to completion.")
+    print("  · Reason      : a dependency could not be loaded, not a per-lane reading")
+    if dispatched:
+        print(f"  · dispatched  : {dispatched} sent before the abort; no further lane was acted on")
+    else:
+        print("  · dispatched  : 0 — no claim was taken and nothing was sent")
+    print(f"  · reason      : {exc}")
+    print("  · A failed load is never spent as 'every lane's last turn is unreadable'.")
+    print("=" * 78)
+    return 3
+
+
 
 def assignments():
     """lane -> class, from a durable file. Absent file = nothing to dispatch."""
@@ -518,16 +551,48 @@ def claim_next(lane_id: str, queue_file: str):
 _TC_MODULE = None
 
 
+class ClassifierLoadError(RuntimeError):
+    """The LAST-TURN CLASSIFIER could not be LOADED. NOT 'this turn is unreadable'.
+
+    Same polarity as `LaneReadError`/`QueueReadError`: a failed DEPENDENCY LOAD is a refusal,
+    not a per-lane verdict. Folding it into `choice = None` printed `WITHHOLD <lane>: last-turn
+    unreadable` for EVERY lane and exited 0 with `dispatched 0` -- the identical
+    "the pass succeeded but did nothing" signature the roster and queue errors exist to
+    refuse, reached through a failed import instead of a failed read (PR #8594 review P2).
+    Measured 2026-10-14 on the in-repo copy: it has no `turn-classify.py` sibling, so this path
+    is not hypothetical for anyone who runs the copy the way its own docstring documents.
+    """
+
+
 def _turn_classify():
     """turn-classify.py has a HYPHEN, so `import turn_classify` fails. Load it by
-    path once and cache: one implementation of turn classification everywhere."""
+    path once and cache: one implementation of turn classification everywhere.
+
+    A LOAD FAILURE RAISES `ClassifierLoadError` -- never `None`, never a silently unreadable
+    turn. The #8594 review found the old `except Exception` in `main()` spent this as a
+    per-lane WITHHOLD for the whole fleet (exit 0, `dispatched 0`), so the missing sibling is
+    now named at the point that detects it. The in-repo copy is a REVIEWABLE COPY, not a
+    self-contained program: the live `turn-classify.py` lives in `~/.pi/agent/scripts/`, so
+    running the copy directly aborts here by design rather than withholding every lane.
+    """
     global _TC_MODULE
     if _TC_MODULE is None:
         import importlib.util
         _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "turn-classify.py")
-        _spec = importlib.util.spec_from_file_location("turn_classify", _p)
-        _mod = importlib.util.module_from_spec(_spec)
-        _spec.loader.exec_module(_mod)
+        if not os.path.exists(_p):
+            raise ClassifierLoadError(
+                f"turn-classify.py is NOT beside this script ({_p}) -- the last-turn gate "
+                f"cannot run, so NO lane was dispatched or evaluated; this copy is not "
+                f"self-contained (the live turn-classify.py lives in ~/.pi/agent/scripts/). "
+                f"A failed dependency load is never read as 'every lane's turn is unreadable'."
+            )
+        try:
+            _spec = importlib.util.spec_from_file_location("turn_classify", _p)
+            _mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+        except Exception as exc:
+            raise ClassifierLoadError(
+                f"turn-classify.py at {_p} could not be loaded: {exc!r}") from exc
         _TC_MODULE = _mod
     return _TC_MODULE
 
@@ -808,6 +873,24 @@ def main():
     if args.status:
         return
 
+    # ── THE LAST-TURN CLASSIFIER IS A DEPENDENCY: LOAD IT BEFORE ANY LANE IS ACTED ON ────
+    # MEASURED 2026-10-14 (PR #8594 review P2): the in-repo copy resolves `turn-classify.py`
+    # beside ITSELF, which does not exist there, so `_turn_classify()` raised
+    # FileNotFoundError. The per-lane `except Exception` spent that as `choice = None` and
+    # printed `WITHHOLD <lane>: last-turn unreadable` for EVERY lane, then `dispatched 0`,
+    # exit 0 -- the same "pass succeeded but did nothing" signature this file exists to
+    # remove, reached through a failed IMPORT instead of a failed scan. Loading it ONCE here
+    # refuses before a lane is examined, so a dependency failure can never produce a partial
+    # pass either.
+    # Gated on a lane that WOULD be classified (it has an assignment): with no assignments
+    # the tool's own contract calls this "nothing to dispatch; the safe state", and a pass
+    # that examines nothing must not abort on a dependency it never needed.
+    if any(a.get(norm(r.get("lane", ""))) for r in idle):
+        try:
+            _turn_classify()
+        except ClassifierLoadError as exc:
+            return _abort_dependency(exc)
+
     print()
     acted = 0
     for r in idle:
@@ -828,6 +911,11 @@ def main():
         # not a new item, so nothing is claimed and no queue item is burned on it.
         try:
             choice, meta = classify_last_turn(r)
+        except ClassifierLoadError as exc:
+            # BACKSTOP: the preflight above already loaded the classifier, so this is only
+            # reachable if the module somehow became unavailable mid-pass. Even then a failed
+            # load must refuse the pass, never WITHHOLD every remaining lane.
+            return _abort_dependency(exc, dispatched=acted)
         except Exception as exc:
             choice, meta = None, {"error": str(exc)[:80]}
         conf = meta.get("confidence") if isinstance(meta, dict) else None
