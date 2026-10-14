@@ -773,15 +773,29 @@ def _function_docstring(source: str, name: str) -> str:
 #: CI". ``review_connections`` is pinned separately — its bullet-scoped check is
 #: stricter than this whole-docstring one — so it is not duplicated here.
 _TERMINAL_CONTRACT_DOCSTRINGS = {
+    # The canonical module's own docstring — the first place a reader meets
+    # the predicate.
+    "live module docstring": (_REPO_ROOT / "tortoise" / "live.py", None),
     "TortoiseSDK.query": (_REPO_ROOT / "tortoise" / "sdk.py", "query"),
     "TortoiseSDK.paginated_query": (
         _REPO_ROOT / "tortoise" / "sdk.py", "paginated_query"),
+    "TortoiseSDK._raise_update_point_status_error": (
+        _REPO_ROOT / "tortoise" / "sdk.py",
+        "_raise_update_point_status_error"),
     "analyze._derived_live_operators": (
         _REPO_ROOT / "tortoise" / "analyze.py", "_derived_live_operators"),
     "FalkorProjection.extract_svbp_factors": (
         _REPO_ROOT / "tortoise" / "projection" / "__init__.py",
         "extract_svbp_factors"),
 }
+
+
+def _contract_docstring(source: str, name: str | None) -> str:
+    """The named function's docstring, or the MODULE docstring when ``name``
+    is ``None`` (``live.py``'s module docstring is itself contract text)."""
+    if name is None:
+        return ast.get_docstring(ast.parse(source), clean=True) or ""
+    return _function_docstring(source, name)
 
 
 def _terminal_contract_statuses_missing(doc: str) -> list[str]:
@@ -852,7 +866,7 @@ def test_terminal_contract_docstring_names_every_canonical_status(
     the next understated enumeration is caught rather than found by review.
     """
     path, name = _TERMINAL_CONTRACT_DOCSTRINGS[label]
-    doc = _function_docstring(path.read_text(encoding="utf-8"), name)
+    doc = _contract_docstring(path.read_text(encoding="utf-8"), name)
     missing = _terminal_contract_statuses_missing(doc)
     assert not missing, (
         f"{label}: the reader-facing enumeration omits {missing} — the code "

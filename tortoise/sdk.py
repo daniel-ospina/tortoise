@@ -2887,8 +2887,9 @@ def _raise_update_point_status_error(proj, id: str) -> None:
 
     #1088: an already-LIVE point is short-circuited in ``update_point``
     (idempotent no-op), so the only statuses that reach this error are the
-    TERMINAL ones (retracted / superseded / outdated / archived) — a terminal
-    point is never resurrected by update_point.
+    TERMINAL ones (``live.TERMINAL_EXCLUDED_STATUSES``: retracted /
+    superseded / outdated / archived / deprecated) — a terminal point is never
+    resurrected by update_point.
     """
     exists = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN count(n)", params={"id": id},

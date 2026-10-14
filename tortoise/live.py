@@ -6,11 +6,13 @@ factor-extraction time EP would propagate drafts into live posteriors
 (nuclear-risk mitigation R1/R7/R8, insight-mining epic §4.5).
 
 Terminal Points (``retracted`` / ``superseded`` / ``archived`` / ``outdated``
-status, or the legacy ``outdated=true`` flag that ``invalidate_point`` writes
-without touching status) must NEVER contribute — a dead claim's ghost must
-not vote (eval-spec P6.3; ontology §5 terminal states; #2422). The terminal
-exclusion is UNCONDITIONAL: ``include_draft=True`` re-includes DRAFTS only,
-never terminal points.
+status, the legacy ``deprecated`` status, or the legacy ``outdated=true`` flag
+that ``invalidate_point`` writes without touching status) must NEVER
+contribute — a dead claim's ghost must not vote (eval-spec P6.3; ontology §5
+terminal states; #2422). The canonical set is ``TERMINAL_EXCLUDED_STATUSES``
+(``TERMINAL_STATUS_VALUES | {"deprecated"}``). The terminal exclusion is
+UNCONDITIONAL: ``include_draft=True`` re-includes DRAFTS only, never terminal
+points.
 
 The predicate is shared across ALL FOUR call sites so ``include_draft=True``
 re-includes drafts identically everywhere:
