@@ -2051,7 +2051,10 @@ surfaces:
   # #8639 review P1: the entity-attachment brief's §6.7 must not name a REFUSED
   # pack slot as an existing declaration surface. Pins the retracted sentence as
   # ABSENT, the corrected passage (the `ontology.kindDefs.<kind>.synonyms` read
-  # home + the `#1026` "no name patterns" refusal) as PRESENT, and the code facts
+  # home + the `#1026` "no name patterns" refusal) as PRESENT **within the §6.7
+  # section** — the §5 row carries the same literals, so a file-wide membership
+  # test cannot red on §6.7's silent deletion (#8639 review, test-scope). Also
+  # pins the code facts
   # behind it (`REFUSED_EXTRACTION_KEYS` refuses `entityPatterns`/
   # `excludePatterns`; they are NOT in `VALID_EXTRACTION_KEYS`; and
   # `compile_kind_index_spec` still renders kindDefs synonyms/examples). Same

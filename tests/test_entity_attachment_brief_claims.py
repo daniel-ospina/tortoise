@@ -33,7 +33,10 @@ WHAT THIS PINS
    pre-fix document, so this file is red on it.
 2. `test_the_corrected_passage_names_the_read_surface` — the repaired §6.7 must
    positively name the read surface *and* state the refusal; a revert of the
-   wording reds.
+   wording reds. The PRESENT check is scoped to the §6.7 *section*, not the
+   whole file: both literals are also carried by the §5 contradiction row, so a
+   whole-file membership test stays green when §6.7 is silently DELETED — the
+   exact mutation this guard's own message names (PR #8639 review, test-scope).
 3. `test_the_code_still_agrees_with_the_corrected_passage` — the refusal set
    still refuses both keys, `entityCues` is still the *declarable* slot, and
    the read surface is still the one `compile_kind_index_spec` READS from the
@@ -79,6 +82,19 @@ def _brief_text() -> str:
     return BRIEF.read_text(encoding="utf-8")
 
 
+def _block(source: str, pattern: str, what: str) -> str:
+    match = re.search(pattern, source, re.S)
+    assert match, f"{what} has been renamed or removed — re-verify §6.7"
+    return match.group(1)
+
+
+#: §6.7's body up to the next level-2 heading. The guard's PRESENT assertions are
+#: scoped to THIS slice: the retracted sentence's replacement is §6.7's job, and
+#: both LANDED literals are also carried by the §5 contradiction row, so a
+#: whole-file check cannot tell "§6.7 corrected" from "§6.7 deleted".
+_SECTION_67 = r"### 6\.7 Alias resolution(.*?)(?=\n## )"
+
+
 def test_the_retracted_passage_does_not_reappear():
     assert RETRACTED not in _brief_text(), (
         "§6.7 names refused name-pattern keys as existing declaration surfaces. "
@@ -92,19 +108,14 @@ def test_the_retracted_passage_does_not_reappear():
 
 
 def test_the_corrected_passage_names_the_read_surface():
-    text = _brief_text()
-    missing = [literal for literal in LANDED if literal not in text]
+    section = _block(_brief_text(), _SECTION_67, "§6.7")
+    missing = [literal for literal in LANDED if literal not in section]
     assert not missing, (
-        "the #8639 repair made these claims and the brief no longer carries "
-        "them — a passage was reverted or silently deleted rather than "
-        "corrected:\n  - " + "\n  - ".join(missing)
+        "the #8639 repair made these claims in §6.7 and that passage no longer "
+        "carries them — it was reverted or silently deleted rather than "
+        "corrected (the §5 contradiction row carrying the same literals is not "
+        "a substitute for §6.7):\n  - " + "\n  - ".join(missing)
     )
-
-
-def _block(source: str, pattern: str, what: str) -> str:
-    match = re.search(pattern, source, re.S)
-    assert match, f"{what} has been renamed or removed — re-verify §6.7"
-    return match.group(1)
 
 
 def test_the_code_still_agrees_with_the_corrected_passage():
