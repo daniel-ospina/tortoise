@@ -41,10 +41,14 @@ WHAT THIS PINS
    * `merge_embed_lists`'s union is ASSIGNED (consumed), not discarded;
    * the three side-effect bypass paths exist (the `sdk.py` v1/`summary=`
      dispatch and the empty-conversation early return before S1);
-4. and — the NEGATIVE half — `extract_session_v2` has no early `return`/`raise`
-   before the S4 call site other than the enumerated empty-conversation one, so
-   a FOURTH bypass reds the guard instead of landing invisibly (the #8601
-   review proved a new early return left the positive checks above green).
+4. and — the NEGATIVE half — a SOURCE-ORDER scan of `extract_session_v2`:
+   no early `return`/`raise` appears before the S4 call site other than the
+   enumerated empty-conversation one, so a fourth exit on the entry→call path
+   reds the guard instead of landing invisibly (the #8601 review proved a new
+   early return left the positive checks above green). This is a source-order
+   scan, NOT a reachability analysis: an exit on the `not story` side of the
+   call's own `if story:` guard is deliberately outside it, because S4 is
+   already gated off on that path and the exit is therefore not an S4 bypass.
 
 NOT promised: line numbers. The doc's own rule is that the symbol is
 authoritative and the number a convenience; this file resolves symbols and
@@ -365,13 +369,20 @@ def _empty_conversation_returns(fn: ast.FunctionDef) -> list[ast.stmt]:
 
 
 def _undocumented_exits(source: str) -> list[ast.stmt]:
-    """Early `return`/`raise` in `extract_session_v2` BEFORE the S4 call that
-    the record does not enumerate — i.e. an undocumented way to skip S4.
+    """Early `return`/`raise` in `extract_session_v2` BEFORE the S4 call IN
+    SOURCE ORDER that the record does not enumerate — an undocumented exit on
+    the entry→call path.
 
     Documented here: (iii) the empty-conversation return. Documents elsewhere
     and therefore not an early exit of THIS function: (i)/(ii) the `sdk.py` v1
-    dispatch, which never enters `extract_session_v2`; and a falsy `story`,
-    which does not leave the function at all.
+    dispatch, which never enters `extract_session_v2`.
+
+    Deliberately NOT a reachability analysis (the #8601 review proved the older
+    wording over-claimed it). An exit on the `not story` side of the call's own
+    `if story:` guard is textually AFTER the call and so is never returned here;
+    it is not a missed S4 bypass either, because S4 is already gated off on that
+    path — the record's 'runs whenever a story exists' claim is about a truthy
+    `story`, and the call's guard already encodes it.
     """
     fn = _function(ast.parse(source), "extract_session_v2")
     s4 = _scan(source).s4_call
@@ -576,9 +587,12 @@ def test_no_undocumented_early_exit_skips_s4():
     """NEGATIVE half of the bypass enumeration (#8601 review finding 2).
 
     The positive checks above only prove the three NAMED paths still exist; a
-    FOURTH bypass was invisible to all of them. This asserts that the only way
-    `extract_session_v2` can leave BEFORE the S4 call is the enumerated
-    empty-conversation return.
+    FOURTH exit on the entry→call path was invisible to all of them. This
+    asserts that the only way `extract_session_v2` leaves BEFORE the S4 call in
+    SOURCE ORDER is the enumerated empty-conversation return. It is not a
+    reachability analysis — an exit on the `not story` side of the call's own
+    guard is after the call and is not an S4 bypass (S4 is already gated off
+    there); see `_undocumented_exits`.
     """
     undocumented = _undocumented_exits(EXTRACTOR.read_text(encoding="utf-8"))
     assert not undocumented, (
