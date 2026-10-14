@@ -220,7 +220,10 @@ class _StageScan(ast.NodeVisitor):
 
     Guards are tracked as a stack of `If` test expressions so the assertion is
     structural: a future `if <flag> and story:` reds because a flag test appears
-    in the stack, not because a line of text moved.
+    in the stack, not because a line of text moved. The `orelse` branch is
+    visited with the test NEGATED, because a call there is gated by `not story`
+    (the #8601 review proved that visiting it with the positive test made
+    `if story: … else: s4 = run_s4(…)` report clean).
     """
 
     def __init__(self) -> None:
@@ -235,7 +238,15 @@ class _StageScan(ast.NodeVisitor):
 
     def visit_If(self, node: ast.If) -> None:
         self.guard_stack.append(node.test)
-        self.generic_visit(node)
+        for child in node.body:
+            self.visit(child)
+        self.guard_stack.pop()
+        # The `orelse` branch is gated by the NEGATION of the test: a call in
+        # `else:` sits under `if (not story):`, not under `if story:`. Pushing
+        # the positive test again would report it as the documented gate.
+        self.guard_stack.append(ast.UnaryOp(op=ast.Not(), operand=node.test))
+        for child in node.orelse:
+            self.visit(child)
         self.guard_stack.pop()
 
     def visit_Assign(self, node: ast.Assign) -> None:
@@ -298,7 +309,7 @@ def _s4_call_gate_violations(source: str) -> list[str]:
             violations.append(
                 "the S4 call is gated by "
                 f"`{ast.unparse(test)}`, not the bare `if story:` the record "
-                "states — a flag gate here is an S4 OFF SWITCH"
+                "states — a non-`story` gate is an S4 OFF SWITCH"
             )
     return violations
 
@@ -796,4 +807,40 @@ def test_a_nested_flag_gate_reds_the_off_switch_check():
     )
     assert any("s4_delta" in v for v in violations), (
         f"the nested gate was not the violation reported: {violations}"
+    )
+
+
+def test_an_else_branch_call_reds_the_off_switch_check():
+    """#8601 review finding — `visit_If` kept the POSITIVE test on the stack for
+    BOTH branches, so a call in the `else:` of `if story:` — gated by
+    `not story` — read as the documented `if story:` gate and stayed clean.
+
+    That rewrite runs S4 exactly when there is NO story, falsifying the record's
+    "runs whenever a story exists" claim while the guard reported green.
+    """
+    positive = (
+        "def extract_session_v2(story, embed_list):\n"
+        "    if story:\n"
+        "        s4 = run_s4(story, embed_list)\n"
+        "    else:\n"
+        "        s4 = {}\n"
+        "    return s4\n"
+    )
+    assert _s4_call_gate_violations(positive) == [], (
+        "the positive `if story:` shape must stay clean — or this fixture "
+        "proves nothing"
+    )
+    negated = (
+        "def extract_session_v2(story, embed_list):\n"
+        "    if story:\n"
+        "        s4 = {}\n"
+        "    else:\n"
+        "        s4 = run_s4(story, embed_list)\n"
+        "    return s4\n"
+    )
+    violations = _s4_call_gate_violations(negated)
+    assert violations, (
+        "a call in the `else:` of `if story:` is gated by `not story`, but the "
+        "scan reports it as the documented gate — S4 could run only when there "
+        "is no story while the off-switch check stayed green"
     )
