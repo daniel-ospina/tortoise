@@ -21,7 +21,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: eebc5bad027393a5e6e5942cd7650b967699e5ec
+cut_at_commit: c14a2ca3bdc93a9cc8414e08a5fb7cb4c014f2d9
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1750,7 +1750,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_session_capture
-  served_from: tortoise/mcp_server.py:5aac73bc86e8a8a1
+  served_from: tortoise/mcp_server.py:d877e36cde199530
   served_attributes: a1b8417f6b1ea4c9
   family: sessions
   family_rank: 4
