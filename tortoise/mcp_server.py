@@ -2110,7 +2110,7 @@ def tortoise_compute_confidence(factors: Any = None,
     unbounded on a multi-tenant surface).
     """
     # #395 (delta C): HTTP no-arg is the disable-contract — a fresh
-    # request-scoped SDK (mcp_auth.py:69) always has empty _dirty_roots, so
+    # request-scoped SDK (mcp_auth.py:79) always has empty _dirty_roots, so
     # the no-arg path would silently return {} where today it runs whole-
     # graph EP (the #7288 timeout surface). Transport-aware branch lives in
     # the handler (precedent: _transport_mode checks at mcp_server.py:1294).

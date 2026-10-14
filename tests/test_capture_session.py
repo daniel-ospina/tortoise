@@ -3025,8 +3025,8 @@ def test_apply_supersessions_chain_three_link_reverse(sdk):
 def test_apply_supersessions_chain_mixed_id_name_forms(sdk):
     """#2249: chains are naturally MIXED-FORM — the extractor emits the
     superseded side as the graph ID when the object pre-exists
-    (extractor_v2.py:3021) while supersedes_by is always the NAME
-    (commit_schema.py:476). So the chain records are X.supersedes_by = name
+    (extractor_v2.py:5759) while supersedes_by is always the NAME
+    (commit_schema.py:776). So the chain records are X.supersedes_by = name
     'mx-B' (id-form-free) and Y.superseded = B's canonical id
     obj-<sha26('mx-B')>. Reverse emission must STILL converge. This test
     forces the fold-order pre-pass to resolve BOTH sides against the graph
@@ -3057,7 +3057,7 @@ def test_apply_supersessions_chain_mixed_id_name_forms(sdk):
 def test_apply_supersessions_chain_legacy_noncanonical_mid_node(sdk):
     """#2249: a chain whose middle node carries a NON-canonical id (legacy
     raw-Cypher write with an explicit pre-canonical id — the
-    test_status_projection.py:304 registration-id class) must still
+    test_status_projection.py:399 registration-id class) must still
     converge. This discriminates PROBE-based fold-order resolution from
     canonical-id MATH (obj-<sha26(name)>): math would fail to see the edge
     (actual id != computed id) and the reverse-order divergence would
