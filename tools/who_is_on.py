@@ -26,7 +26,10 @@ resolution) and `_git_refs` / `_worktree_blocks` (git enumeration) — so the tw
 cannot disagree about what a holder is. It *answers* instead of gating:
 
   rc 0  a COMPLETE answer, with or without holders. A hit is information, not
-        a collision; this tool never returns 1.
+        a collision; this tool never returns 1. A LANDED issue (#8560 — its own
+        state is CLOSED, or a MERGED PR the paginated timeline ties to it) is
+        answered under LANDED and still exits 0: the question HAS an answer, and
+        that answer is not "nobody".
   rc 2  an INCOMPLETE answer: a surface could not be queried, the target repo
         could not be resolved unambiguously, a local holder's uncommitted state
         could not be read, or (inventory) a worktree's uncommitted state could
@@ -556,8 +559,23 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
     # consider: #3504 deleted the lexical arm, and with it the `keyword`
     # strength and the per-surface `blind` flag (only the keywords surface
     # could ever set it), so neither can occur here and neither is reported.
-    strong = [(s, h) for s in surfaces for h in s.hits if h.strength == "strong"]
-    weak = [(s, h) for s in surfaces for h in s.hits if h.strength == "weak"]
+    strong = [
+        (s, h) for s in surfaces for h in s.hits
+        if h.strength == "strong" and s.name != cp.SURFACE_LANDED
+    ]
+    weak = [
+        (s, h) for s in surfaces for h in s.hits
+        if h.strength == "weak" and s.name != cp.SURFACE_LANDED
+    ]
+    # #8560: the `issue landed` surface's hits decide the GATE's EXIT_LANDED.
+    # They are NOT holders — a landed issue has nobody working on it — so they
+    # are separated out here (mirroring the gate's own separation) and reported
+    # under their own heading. Counting them as holders would answer "1 holder"
+    # on a fixture where the gate refuses, and "already done" is the opposite
+    # of "someone is on it".
+    landed = [
+        (s, h) for s in surfaces for h in s.hits if s.name == cp.SURFACE_LANDED
+    ]
     # An ADVISORY surface's hit cannot hold work: the gate filters advisory out of
     # its blocking set structurally ("advisory — cannot block"), so counting one
     # here answers "1 holder" at rc 0 where the gate answers CLEAN — and the
@@ -597,8 +615,15 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
     for surface in surfaces:
         if surface.name in local_surfaces or not surface.hits:
             continue
+        if surface.name == cp.SURFACE_LANDED:
+            # Reported in its own LANDED section below, not as a holder.
+            continue
         remote_any = True
         lines.extend(_hit_lines(surface))
+    if landed:
+        # A landed signal IS a remote answer, so the "no remote …" absence line
+        # must not print beside it.
+        remote_any = True
     if not remote_any:
         # The same rule as the LOCAL block above: "(no …)" asserts ABSENCE, so it
         # may only be printed for surfaces READ IN FULL. A blocking remote surface
@@ -616,6 +641,15 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
                 + " could NOT be read in full — see below)")
         else:
             lines.append("  (no remote branch, open/closed PR, assignee or claim comment)")
+    if landed:
+        lines.append("")
+        lines.append("LANDED — the issue's work appears ALREADY SHIPPED")
+        lines.append("  (AUTHORITATIVE — the issue's own state, or a MERGED PR the")
+        lines.append("   PAGINATED timeline ties to it; not the advisory closed-PR sample)")
+        for surface, hit in landed:
+            lines.append(f"  [{_clean(surface.name)}] {_clean(hit.ref)} — "
+                         f"{_clean(hit.detail)}")
+        lines.append("  These are NOT holders — do NOT dispatch onto shipped work.")
     if weak and not holders:
         lines.append("")
         lines.append(f"WEAK SIGNALS (non-blocking — prose is not work): {len(weak)} "
@@ -646,12 +680,30 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
         if unknown_detail:
             blame.append(f"{len(unknown_detail)} local holder(s) had unreadable worktree "
                          f"state ({', '.join(unknown_detail)})")
+        if landed:
+            lines.append(
+                "NOTE: this issue is ALSO reported as LANDED (see the LANDED "
+                "section above) — but a surface could not be read, so this "
+                "answer is still INCOMPLETE."
+            )
         lines.append(
             f"ANSWER INCOMPLETE: {len(holders)} local/remote signal(s) found, but "
             + "; ".join(blame)
             + ". This is NOT \"nobody\" — fix the cause and re-run."
         )
         return "\n".join(lines) + "\n", EXIT_INCOMPLETE
+    if landed:
+        # #8560: the question HAS an answer, and it is not "nobody". This is a
+        # complete answer (rc 0), reported distinctly from both "nobody" and a
+        # holder — the parity the two verbs promise (the gate exits non-zero on
+        # the SAME input, and this verb names the same terminal fact).
+        lines.append("")
+        lines.append(
+            "ANSWER: already landed — the artifacts above are TERMINAL, not a "
+            "holder. Verify the issue body against the named artifact before "
+            "dispatching; if it still needs work, state the remaining scope."
+        )
+        return "\n".join(lines) + "\n", EXIT_ANSWERED
     if holders:
         n_surfaces = len({s.name for s, _ in holders})
         ans = f"ANSWER: {len(holders)} holder(s) across {n_surfaces} surface(s)"

@@ -98,7 +98,22 @@ case "$1 $2" in
     # prove the selector reached gh rather than being inferred from the cwd.
     printf '%s\n' "$@" > "$d/pr-list-argv.txt"
     f="$d/${state:-open}_prs.json" ;;
-  "api --paginate") f="$d/closed_prs.json"; printf '%s\n' "$@" > "$d/api-argv.txt" ;;
+  "api --paginate")
+    # #8560: the landed surface's TARGETED, PAGINATED timeline query
+    # (`api --paginate --slurp repos/<slug>/issues/<N>/timeline?...`). It writes
+    # its own argv + call log: the closed-PR surface's "ONE bounded request"
+    # assertion reads `api-calls.log`, and sharing it would count this call too.
+    # `GH_STUB_TIMELINE_FAIL=1` is a SEPARATE failure seam from
+    # `GH_STUB_API_FAIL_AFTER_OUTPUT`, which fails the ADVISORY closed-PR request
+    # and must leave this BLOCKING surface readable — otherwise every
+    # closed-PR-failure test would flip to INCOMPLETE.
+    f="$d/timeline.json"
+    printf '%s\n' "$@" > "$d/timeline-argv.txt"
+    printf '%s\n' "$*" >> "$d/timeline-calls.log"
+    if [ "${GH_STUB_TIMELINE_FAIL:-0}" = "1" ]; then
+      echo "gh-stub: read tcp 127.0.0.1:1->20.26.156.210:443: read: connection reset by peer" >&2
+      exit 1
+    fi ;;
   "api -i")
     # #5251: the closed-PR surface is ONE bounded request made with `gh api -i`.
     # `-i` prefixes the body with the status line + headers + a blank line, and
@@ -160,12 +175,6 @@ case "$1 $2" in
 esac
 if [ ! -f "$f" ]; then echo "gh-stub: no fixture: $f" >&2; exit 1; fi
 cat "$f"
-# Mid-enumeration transport failure: pages were already printed, the exit is
-# non-zero. Partial output must never be salvaged into a "complete" list.
-if [ "$1 $2" = "api --paginate" ] && [ "${GH_STUB_API_FAIL_AFTER_OUTPUT:-0}" = "1" ]; then
-  echo "gh-stub: read tcp 127.0.0.1:1->20.26.156.210:443: read: connection reset by peer" >&2
-  exit 1
-fi
 """
 
 # A Python stand-in for the fleet's `map-sessions.py` was written for a
@@ -234,6 +243,7 @@ exec "${REAL_GIT:?REAL_GIT unset}" "$@"
 """
 
 SURFACE_ROWS = (
+    "issue landed",
     "open PRs",
     "recently-closed PRs",
     "local branches",
@@ -479,6 +489,11 @@ class CollisionPreflightTest(unittest.TestCase):
         self.jev_stub.write_text(JEV_STUB)
         # Default: every GitHub surface is queryable and empty.
         self.gh_fixtures(open_prs=[], closed_prs=[], issue=self.issue_payload())
+        # #8560: the landed surface's timeline is queryable by default (one empty
+        # page) so every pre-existing test keeps its verdict. A test that wants
+        # landed evidence or a timeline FAILURE opts in explicitly.
+        self.timeline_fixture()
+        self._timeline_calls = 0
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -582,8 +597,47 @@ class CollisionPreflightTest(unittest.TestCase):
             (self.gh_dir / "issue.json").write_text(json.dumps(issue))
 
     def clear_fixtures(self) -> None:
-        for name in ("open_prs.json", "closed_prs.json", "issue.json"):
+        for name in ("open_prs.json", "closed_prs.json", "issue.json",
+                     "timeline.json"):
             (self.gh_dir / name).unlink(missing_ok=True)
+
+    def timeline_fixture(self, events=None, pages=None) -> None:
+        """Write the landed surface's timeline fixture (#8560).
+
+        `events` is ONE page (the common case); `pages` is the raw slurped
+        array-of-pages, for multi-page and malformed cases. Defaults to one
+        empty page, which is what `gh api --paginate --slurp` returns for an
+        issue with no events.
+        """
+        if pages is None:
+            pages = [list(events or [])]
+        (self.gh_dir / "timeline.json").write_text(json.dumps(pages))
+
+    @staticmethod
+    def merged_cross_reference(number: int, title: str,
+                               merged_at: str = "2026-10-05T09:19:18Z") -> dict:
+        """A real `cross-referenced` timeline event whose source PR MERGED.
+
+        Shape taken from the live REST payload
+        (`repos/<o>/<r>/issues/7174/timeline`): the merged marker lives at
+        `source.issue.pull_request.merged_at`, and the title is
+        `source.issue.title`.
+        """
+        return {
+            "event": "cross-referenced",
+            "source": {
+                "issue": {
+                    "number": number,
+                    "title": title,
+                    "state": "closed",
+                    "pull_request": {
+                        "url": f"https://api.github.invalid/repos/o/r/pulls/{number}",
+                        "html_url": f"https://github.invalid/o/r/pull/{number}",
+                        "merged_at": merged_at,
+                    },
+                }
+            },
+        }
 
     def jev_rules(self, default=0.95, rules=None) -> None:
         """Write the JEV stub's probability rules. `rules` is a list of
@@ -4031,9 +4085,9 @@ class CollisionPreflightTest(unittest.TestCase):
         rc, out = self.run_tool(env_extra={"GH_STUB_API_FAIL_AFTER_OUTPUT": "1"})
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
-        # 5, not 6 — and the shortfall is NAMED, not hidden.
-        self.assertIn("5/6 surfaces queried", out)
-        self.assertNotIn("6/6 surfaces queried", out)
+        # 6, not 7 — and the shortfall is NAMED, not hidden.
+        self.assertIn("6/7 surfaces queried", out)
+        self.assertNotIn("7/7 surfaces queried", out)
         self.assertIn("advisory surface(s) partial or unqueried", out)
 
     def test_advisory_failure_coexists_with_a_collision_without_escalating(self):
@@ -5027,10 +5081,15 @@ class CollisionPreflightTest(unittest.TestCase):
         evil = "CLOSED\x1b[2K\x1b]52;c;AAAA\x07"
         self.gh_fixtures(issue=self.issue_payload(state=evil))
         rc, out = self.run_tool()
-        self.assertEqual(rc, 0, out)
+        # #8560: the sanitised state reads as CLOSED, which is now DECISIVE — the
+        # terminal answer is carried by the `issue landed` surface and the
+        # verdict is LANDED (exit 4), not CLEAN. The sanitization contract is
+        # unchanged: no control byte reaches stdout.
+        self.assertEqual(rc, 4, out)
         self.assertNotIn("\x1b", out)
         self.assertNotIn("\x07", out)
         self.assertIn("issue state=CLOSED", out)
+        self.assertIn("VERDICT: LANDED", out)
 
     def test_invalid_remote_slug_is_rejected_not_printed(self):
         # A git-remote-derived slug is untrusted AND printed. A slug that is not
@@ -5054,7 +5113,160 @@ class CollisionPreflightTest(unittest.TestCase):
     def test_every_surface_is_always_evaluated(self):
         _rc, out = self.run_tool()
         self.assert_all_surface_rows(out)
-        self.assertIn("6/6 surfaces queried", out)
+        self.assertIn("7/7 surfaces queried", out)
+
+    # ── #8560: the LANDED answer (authoritative, paginated) ──────────────────
+
+    def test_closed_issue_is_landed_never_clean(self):
+        # A CLOSED issue is TERMINAL. The tool used to print it
+        # "(closed issues are warn-only, not a hit)" and return CLEAN — the
+        # exact false-CLEAN that dispatched a lane onto shipped code. It must be
+        # refused, with its OWN verdict (not COLLISION, whose remedy differs).
+        self.gh_fixtures(issue=self.issue_payload(state="CLOSED"))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 4, out)
+        self.assertIn("VERDICT: LANDED (exit 4)", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertNotIn("VERDICT: COLLISION", out)
+        self.assertIn("[issue landed]", out)
+        self.assertIn("issue state=CLOSED", out)
+
+    def test_7174_merged_pr_outside_the_closed_sample_is_not_clean(self):
+        # THE REAL HISTORICAL INSTANCE. #7174 stayed OPEN for eight days after
+        # its fix merged as PR #7403 (2026-10-05). #7403 *referenced* #7174
+        # without a closing keyword, and it sat outside the bounded 100-PR
+        # ADVISORY closed-PR sample — so the old tool returned CLEAN and a lane
+        # re-implemented landed code. The targeted, PAGINATED timeline must find
+        # it even while the issue is OPEN and the sample does not contain it.
+        # (The title is the real #7403 title; the closed-PR sample is EMPTY, so
+        # the finding is produced by the timeline and by nothing else.)
+        self.gh_fixtures(
+            issue=self.issue_payload(
+                title="arch(durability): the #4647 numeric guard is a "
+                      "maintained call-site list",
+                state="OPEN"),
+            closed_prs=[],
+        )
+        self.timeline_fixture(events=[self.merged_cross_reference(
+            7403,
+            "refactor(durability): the numeric guard is a param-boundary seam, "
+            "not a call-site list (#7174)",
+        )])
+        rc, out = self.run_tool(issue=7174)
+        self.assertEqual(rc, 4, out)
+        self.assertIn("VERDICT: LANDED (exit 4)", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("PR #7403", out)
+        self.assertIn("NAMES IT IN ITS TITLE", out)
+
+    def test_landed_reference_on_a_later_timeline_page_is_reached(self):
+        # "PAGINATED to exhaustion" must be a property of the TOOL, not only of
+        # gh. `--slurp` hands back an array of pages, and the scan must read
+        # EVERY page: a page-0-only loop would read a merged PR on a later page
+        # as absent — the bounded-sample defect returning one level down, which
+        # is exactly what this change exists to close. Issue #3061's own timeline
+        # is one page, so only a multi-page fixture can pin this.
+        self.gh_fixtures(issue=self.issue_payload(state="OPEN"))
+        self.timeline_fixture(pages=[
+            [{"event": "labeled"}],
+            [{"event": "commented"}],
+            [self.merged_cross_reference(7403, f"fix: shipped (#{ISSUE})")],
+        ])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 4, out)
+        self.assertIn("VERDICT: LANDED", out)
+        self.assertIn("PR #7403", out)
+
+    def test_landed_does_not_depend_on_the_advisory_closed_sample(self):
+        # "Do not add a second bounded sample and call it fixed": the landed
+        # answer must hold even when the ADVISORY closed-PR request FAILS. The
+        # timeline is the authoritative source; the sample is not consulted for
+        # this decision.
+        self.gh_fixtures(issue=self.issue_payload(state="OPEN"))
+        self.timeline_fixture(events=[self.merged_cross_reference(
+            999, f"fix: the thing (#{ISSUE})")])
+        rc, out = self.run_tool(
+            env_extra={"GH_STUB_API_FAIL_AFTER_OUTPUT": "1"})
+        self.assertEqual(rc, 4, out)
+        self.assertIn("VERDICT: LANDED", out)
+
+    def test_merged_pr_that_only_body_references_the_issue_is_clean(self):
+        # A merged PR that mentions #N only in its BODY is not a landing: the
+        # tool's existing rule is that PR-body prose is not a work reference.
+        # Landing on body prose would make every issue mentioned in any merged
+        # PR un-dispatchable.
+        self.gh_fixtures(issue=self.issue_payload(state="OPEN"))
+        self.timeline_fixture(events=[self.merged_cross_reference(
+            4242, "fix(projection): degrade corrupt journal values (#7369)")])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("1 merged cross-reference(s), none naming", out)
+
+    def test_unmerged_cross_reference_is_not_a_landing(self):
+        # An OPEN (unmerged) PR cross-referencing the issue is in-flight work,
+        # judged by the open-PR / branch surfaces — not a landing.
+        self.gh_fixtures(issue=self.issue_payload(state="OPEN"))
+        event = self.merged_cross_reference(4242, f"fix: the thing (#{ISSUE})")
+        event["source"]["issue"]["pull_request"]["merged_at"] = None
+        self.timeline_fixture(events=[event])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+
+    def test_landed_query_failure_is_incomplete_never_clean(self):
+        # A MISSING CHECK IS NEVER A GREEN CHECK. The landed surface is
+        # BLOCKING, so an unqueryable timeline is INCOMPLETE (exit 2), never
+        # CLEAN — the guarantee the header pins for every blocking surface.
+        self.gh_fixtures(issue=self.issue_payload(state="OPEN"))
+        rc, out = self.run_tool(env_extra={"GH_STUB_TIMELINE_FAIL": "1"})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("issue landed", out)
+
+    def test_malformed_timeline_page_is_incomplete_not_clean(self):
+        # A page the tool cannot read must never be scavenged into "no landing
+        # PR": the fail-OPEN direction this surface exists to close.
+        self.gh_fixtures(issue=self.issue_payload(state="OPEN"))
+        self.timeline_fixture(pages=[[None]])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_landed_outranks_a_collision_and_names_both(self):
+        # A terminal signal is DECISIVE. If a lane is ALSO on it, the verdict is
+        # LANDED (the terminal fact) and the collision is still reported.
+        self.gh_fixtures(
+            issue=self.issue_payload(state="CLOSED"),
+            open_prs=[{
+                "number": 9999, "title": f"fix: guard retrieval (#{ISSUE})",
+                "body": "", "headRefName": "fix/guard",
+            }],
+        )
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 4, out)
+        self.assertIn("VERDICT: LANDED", out)
+        self.assertNotIn("VERDICT: COLLISION", out)
+        self.assertIn("ALSO present", out)
+
+    def test_closed_issue_landed_arm_does_not_need_the_timeline(self):
+        # A decisive state answer must not depend on (or pay for) the timeline.
+        # GH_STUB_TIMELINE_FAIL proves the timeline was NOT consulted: the
+        # CLOSED state lands anyway.
+        self.gh_fixtures(issue=self.issue_payload(state="CLOSED"))
+        rc, out = self.run_tool(env_extra={"GH_STUB_TIMELINE_FAIL": "1"})
+        self.assertEqual(rc, 4, out)
+        self.assertIn("VERDICT: LANDED", out)
+
+    def test_open_issue_with_no_landing_reference_is_clean(self):
+        self.gh_fixtures(issue=self.issue_payload(state="OPEN"))
+        self.timeline_fixture(events=[])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("issue state=OPEN; 0 timeline event(s)", out)
 
     def test_usage_error_on_bad_issue(self):
         proc = subprocess.run(

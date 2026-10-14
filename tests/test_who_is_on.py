@@ -49,7 +49,12 @@ for a in "$@"; do
 done
 case "$1 $2" in
   "pr list") f="$d/${state:-open}_prs.json" ;;
-  "api --paginate") f="$d/closed_prs.json" ;;
+  "api --paginate")
+    # #8560: the landed surface's TARGETED, PAGINATED timeline query
+    # (`gh api --paginate --slurp repos/<slug>/issues/<N>/timeline?...`). It is
+    # served from its OWN fixture — a slurped ARRAY OF PAGES — so it cannot be
+    # confused with the ADVISORY closed-PR sample (the `api -i` request below).
+    f="$d/timeline.json" ;;
   # #5251: the closed-PR surface is ONE bounded request with `-i`, whose own
   # `Link` header supplies the total. `-i` prints the status line and headers,
   # then a blank line, then the body — and the pre-flight REQUIRES that
@@ -115,6 +120,10 @@ class WhoIsOnTest(unittest.TestCase):
         self.gh = self._write_exec(self.gh_dir / "gh", GH_STUB)
         (self.gh_dir / "open_prs.json").write_text("[]")
         (self.gh_dir / "closed_prs.json").write_text("[]")
+        # #8560: one empty timeline page — what `gh api --paginate --slurp`
+        # returns for an issue with no events, so the landed surface reads
+        # CLEAN by default. A test that wants landed evidence overwrites it.
+        (self.gh_dir / "timeline.json").write_text("[[]]")
         (self.gh_dir / "issue.json").write_text(json.dumps({
             "number": ISSUE,
             "title": "florfenicol dosing audit",
