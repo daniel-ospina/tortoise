@@ -36,7 +36,8 @@ WHAT THIS PINS
    wording reds.
 3. `test_the_code_still_agrees_with_the_corrected_passage` — the refusal set
    still refuses both keys, `entityCues` is still the *declarable* slot, and
-   the read surface is still the one `compile_kind_index_spec` renders. If the
+   the read surface is still the one `compile_kind_index_spec` READS from the
+   pack's kindDefs and RENDERS into the classification surface. If the
    underlying `#1026`/`#4894` work is reversed, this reds instead of the brief
    silently re-rotating.
 
@@ -144,8 +145,15 @@ def test_the_code_still_agrees_with_the_corrected_passage():
             f"declarable; `{key}` is back in VALID_EXTRACTION_KEYS."
         )
 
-    # The read surface is real: `compile_kind_index_spec` renders the kindDefs
-    # synonyms/examples into the classification surface.
+    # The read surface is real: `compile_kind_index_spec` READS the kindDefs
+    # synonyms/examples AND PASSES them into the rendered surface.
+    #
+    # Assert the read + the render CALL SHAPE, never a bare substring: the
+    # function's docstring already mentions both field names, so a
+    # `field in body` check stays green when the render call is neutralised
+    # (`_surface(k, desc, syns, exs)` -> `_surface(k, desc, [], [])`) — an
+    # assertion passing for a reason it does not state (PR #8639 review,
+    # non-blocking observation). The mutation is applied below.
     extractor = VALUE_EXTRACTOR.read_text(encoding="utf-8")
     body = _block(
         extractor,
@@ -153,8 +161,27 @@ def test_the_code_still_agrees_with_the_corrected_passage():
         "`compile_kind_index_spec`",
     )
     for field in ("synonyms", "examples"):
-        assert field in body, (
+        assert f'kd.get("{field}")' in body, (
             "§6.7 now names `ontology.kindDefs.<kind>."
             f"{field}` as the read home; `compile_kind_index_spec` no longer "
-            "renders it into the classification surface."
+            "reads it from the pack's kindDefs."
         )
+    render = re.compile(r"_surface\(\s*k\s*,\s*desc\s*,\s*syns\s*,\s*exs\s*\)")
+    assert render.search(body), (
+        "§6.7 now names the per-kind surface forms as rendered INTO the "
+        "classification surface; `compile_kind_index_spec` no longer PASSES "
+        "the kindDefs synonyms/examples into `_surface` — a docstring mention "
+        "is not the behaviour."
+    )
+    # Prove the clause above is not vacuous: apply the exact mutation that
+    # leaves the docstring's wording intact and confirm the check reds on it.
+    neutralised = render.sub("_surface(k, desc, [], [])", body, count=1)
+    assert neutralised != body, (
+        "the render-call check did not match the real source — it cannot "
+        "certify the render it claims to guard."
+    )
+    assert not render.search(neutralised), (
+        "the render-call check stays green on a neutralised render "
+        "(`_surface(k, desc, [], [])`), so it passes for a reason it does not "
+        "state."
+    )
