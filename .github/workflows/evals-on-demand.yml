@@ -1,10 +1,16 @@
 # On-demand evals — the pipeline-running tests that must NOT gate a merge
 #
 # WHY THIS WORKFLOW EXISTS
-# `config/ci-surfaces.yml` `on_demand:` lists test files that execute the real
-# retrieval/write-path harness rather than assert a contract. They are
-# excluded from EVERY pre-merge leg (fast halves, slow, carve-out) by
-# `tools/ci_selection.py::on_demand_files`, and run only here.
+# `config/ci-surfaces.yml` `on_demand:` lists test files that must not gate a
+# merge. They are excluded from EVERY pre-merge leg (fast halves, slow,
+# carve-out) by `tools/ci_selection.py::on_demand_files`, and run from here.
+#
+# ⚠️ `on_demand:` NOW HAS TWO RUNNERS, and this is only one of them: the
+# dedicated perf lane (`tests/test_perf_lane_volunteer_context.py`, #3992) is
+# run by `.github/workflows/perf-lane.yml`, because the plan names it in its own
+# right. The lane membership is what keeps both off the gate; running a perf
+# lane from here as well is harmless (a blank `files` input runs the whole
+# lane), but do not read this workflow as the lane's sole owner.
 #
 # The file this lane was created for, `eval/retrieval/test_integration.py`,
 # was 25.4 min — 24.9% of ALL measured test time in this repo, and 24.9 of the
@@ -15,7 +21,7 @@
 # customer; it is a calibration instrument for the retrieval pipeline.
 #
 # It still has to RUN — a calibration instrument that is never run is
-# documentation. Hence this workflow, which is the lane's ONLY runner.
+# documentation. Hence this workflow.
 #
 # WHY NOT JUST DROP IT FROM slow_files
 # `fast_pool()` is "every classified file that is not slow / env-broken /
