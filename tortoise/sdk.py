@@ -7638,7 +7638,7 @@ class TortoiseSDK:
         # no-op — the stored True/None stays untouched). The empty/blank
         # gate returns before the Session MERGE, so nothing to record there.
         # NOTE (documented lane divergence, mirror of hosted): sdk computes ok
-        # BEFORE the write-verb enrichment read (sdk.py:7874). A failed or
+        # BEFORE the write-verb enrichment read below. A failed or
         # partial post-write read therefore leaves capture_ok True while the
         # returned memory_write_v1 verb is reported partial with the affected
         # points left un-enriched; hosted additionally logs a per-point warning
