@@ -351,15 +351,16 @@ make the hourly job RED, so a broken pipeline cannot stay green for weeks (the
 |---|---|---|
 | deliberate-off | `enabled:false`, no `config_error`/`storage_error`, pool **measured** fresh | silent `exit 0` — a real operator pause must not page |
 | off-because-broken | `enabled:false` + non-null `config_error` | files **SWEEP_CONFIG_ERROR**, job RED |
-| off-because-storage-down | `enabled:false` + non-null `storage_error` | files **R2_DOWN**, job RED |
+| off-because-storage-down | `enabled:false` + non-null `storage_error` | files **R2_UNLISTABLE** (#3147: the app ANSWERED and reports broken storage — the listing/measurement tier, not unreachability), job RED |
 | off-while-pool-stale | `enabled:false`, no config/storage error, and the pool is not **measured fresh**: a `backups/{org_id}/default/` archive older than `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (240), a team prefix with **no default archive at all**, or a listing that failed | files **SWEEP_OFF_STALE**, job RED (the pooled **POOL_STALE** incident still files when a tenant measured stale; the per-tenant `STALE` residual is the watcher's) |
 | enabled-but-backing-up-nothing | `enabled:true` and the sweep backed up 0 teams (`no_teams` / `no_eligible_teams` / `no_work` / `enum_failed` / `error`) while the R2 pool holds ≥1 team prefix, **or while the pool cannot be measured**, **or** the sweep reported a lock that cannot be verified as recent | files **SWEEP_NO_COVERAGE**, job RED |
 
 **Filing ⇒ the job is RED.** The taxonomy above is the classifier; the job
 status is simpler and deliberately blunter — `file_alert` sets a run-level
 `LOUD` flag and every terminal exit goes through it, so *any* incident filed
-this run (APP_DOWN, WATCHER_DOWN, a pooled **POOL_STALE** from the direct-R2 leg, an
-R2_DOWN — preflight or partial-listing — a stuck-lock SWEEP_NO_COVERAGE, or a
+this run (APP_DOWN, WATCHER_DOWN, a pooled **POOL_STALE** from the direct-R2 leg,
+an **R2_DOWN** — the reachability tier — or an **R2_UNLISTABLE** — the listing
+and measurement tier — a stuck-lock SWEEP_NO_COVERAGE, or a
 PURGE_FAILED/RECONCILE_FAILED ride-along) exits 1. (The converse does not hold
 **only** where filing is impossible by construction: the two pre-flight guards —
 a missing `GITHUB_TOKEN`, or a missing `INTERNAL_API_URL`/`FASTAPI_INTERNAL_KEY`
@@ -380,8 +381,8 @@ top-level listing, any per-team listing — or a failed `get-object` of the
 legacy-flat classification index leaves the pool *unmeasured*: the driver then
 never reads it as fresh, never files a false `STALE` from a failed read, and
 never lets it silence the 0-team envelope. A listing that fails while
-`head-bucket` passes also files **R2_DOWN** (storage partially reachable,
-pool unverifiable) so a "successful" sweep cannot keep the run green. A failed
+`head-bucket` passes also files **R2_UNLISTABLE** (storage reachable,
+pool unverifiable — #3147) so a "successful" sweep cannot keep the run green. A failed
 read while the sweep is OFF is **not** a confirmed deliberate pause, so it
 files SWEEP_OFF_STALE. An unclassifiable `/status` (no boolean `.enabled`, or a
 non-JSON 200) fails **closed** as SWEEP_NO_COVERAGE. A held sweep lock is not
@@ -409,17 +410,25 @@ whose default graph is legitimately empty while a custom graph archived is not
 a coverage gap.
 
 **Storage errors are not the kill-switch.** A non-null `storage_error` files
-**R2_DOWN** whether or not the sweep is enabled (the enabled path used to drop
-it), and it blocks the `R2_DOWN` self-heal for that run — a sweep that
+**R2_UNLISTABLE** whether or not the sweep is enabled (the enabled path used to
+drop it) — #3147: the app ANSWERED and reports broken storage, so this is the
+listing/measurement tier, never the reachability tier. It blocks the
+`R2_UNLISTABLE` self-heal for that run — a sweep that
 "completes" while `/status` reports broken app storage has not recovered it.
 
 **Self-heal is evidence-tiered (#2411 + #2796):** `APP_DOWN` and the resolved
 `SWEEP_CONFIG_ERROR`/`SWEEP_OFF_STALE` clear when `/status` + the sweep complete
-(the app answered). `R2_DOWN` clears **only** when the driver's own
+(the app answered). `R2_UNLISTABLE` (#3147, the LISTING tier — driver-owned)
+clears **only** when the driver's whole-pool measurement is clean: the
 `head-bucket` preflight succeeded, `storage_error` is clear **and** the pool was
 measured this run — a sweep that "completes" with R2 down must not close the
-`R2_DOWN` it just filed (that would re-file and re-close forever). It can
+incident it just filed (that would re-file and re-close forever). It can
 therefore also clear from the disabled path once storage is proven back.
+`R2_DOWN` (#3147, the REACHABILITY tier — **watcher-owned**) clears only on the
+watcher's own evidence: its R2 probe reaches the substrate again. The driver
+files it when its preflight fails but **cannot** clear it (`resolve_global`
+refuses a watcher-owned kind), which is what makes the split safe in both
+directions.
 `WATCHER_DOWN` clears on **watcher evidence** (a `.watcher` block with a real
 boolean `running` read this run) — a missing/malformed block neither files nor
 clears it, because unknown is not evidence the daemon is alive.
@@ -467,11 +476,14 @@ cover a kind's recovery condition may declare it recovered — `KIND_OWNERS` in
 pinned across the language boundary by `test_kind_owner_contract_with_driver`.
 Anything else is refused and logged with the sentinel left intact. This exists
 because one shared object let the weaker probe win: the watcher's reachability
-check cannot distinguish "R2 unreachable" from
+check could not distinguish "R2 unreachable" from
 "the bucket cannot be listed" (the driver's `R2_LIST_OK=0` class), so its
 all-clear would close the driver's `R2_DOWN` — a false recovery, and the driver
 would then re-file on its next run: one duplicate issue + Telegram pair per
-hour. Each sentinel records the `writer` that filed it for diagnosis only — it
+hour. #3147 modelled the two as two kinds with two owners
+(see §"The two R2 tiers (#3147)" in this document), so each writer clears the
+tier its own
+probes cover. Each sentinel records the `writer` that filed it for diagnosis only — it
 is not an authority token, and a legacy object with no `writer` field resolves
 by the same `KIND_OWNERS` rule. See
 `docs/adr/ADR-011-resolution-authority-for-dr-alerts.md`.
@@ -544,6 +556,61 @@ enabled+unmeasurable cases, the empty-prefix measured-empty case (#3659), and
 dedup open/closed/404/blip/backfill. (The driver carries the exec bit so the
 harness invokes it directly — a `$(bash script)` command substitution trips the
 agent worktree guard, #1484.)
+
+### The two R2 tiers (#3147)
+
+R2_DOWN used to cover two failure modes with two different evidence requirements,
+so one kind was cleared by writers that had only one of them — and ADR-011 had to
+refuse the watcher the right to close `R2_DOWN` at all. That refusal was a guard
+around a modelling error rather than a model; #3147 models it. **One kind now
+corresponds to exactly one recovery condition and one evidence tier.**
+
+| Tier | Kind | Filed by | Recovery evidence (the ONLY thing that clears it) | Owner |
+|---|---|---|---|---|
+| unreachable | `R2_DOWN` (frozen key **retained**, meaning narrowed) | the driver's `head-bucket` preflight **and** the watcher's R2 read | the substrate **ANSWERS** — a probe reaches it | **watcher** (was driver) |
+| unlistable | `R2_UNLISTABLE` (**new**) | the driver's listing leg (`R2_LIST_OK=0`) and the app's `storage_error` (read from `/status` by the driver) | the driver's **whole-pool measurement**: `head-bucket` OK + `storage_error` clear + `R2_LIST_OK=1` | **driver** |
+
+**Why R2_DOWN keeps its key instead of being renamed `R2_UNREACHABLE`.**
+`tortoise/incident_kinds.py` freezes kind strings: the kind IS the R2 dedup key
+(`ops/alerts/{KIND}/{subject}.json`) AND the `[DR] {KIND}` adoption token, so a
+rename is a data migration (the module docstring carries the playbook), not a
+refactor. Keeping `R2_DOWN` means no live dedup object or open issue is orphaned
+and the R2-unreachable adoption path keeps working, while its *meaning* narrows to
+the reachability tier. `R2_UNLISTABLE` is a NEW key — there was no open
+`[DR] R2_DOWN` incident to hand-adopt when the split landed, so playbook step 2
+had nothing to do.
+
+**Ownership holds in BOTH directions** (indicator 4). The driver may not clear
+`R2_DOWN`: `kind_owner()`/`KIND_OWNERS` make it watcher-owned, so the driver's
+`resolve_global` refuses it and leaves the sentinel intact (pinned by
+`registry-cron.test.sh` case 66 and by `tests/test_alert_store.py`). The watcher
+may not clear `R2_UNLISTABLE`: its probe measures reachability, not the pool
+(pinned by `tests/test_alert_store.py`). No provenance exception was added — the
+`writer` field on a sentinel is diagnostic only.
+
+**Suppression is per-kind, so the two tiers suppress independently.**
+`ops/suppression.json` is keyed `{"KIND": {"until": "ISO"}}`, and the issue
+titles differ (`[DR] R2_DOWN …` vs `[DR] R2_UNLISTABLE …`), so pausing one tier
+does not pause the other and the GH-search adoption path cannot cross-adopt them
+(`github_issue.incident_title_matches` is `[DR] {kind}`-prefix anchored).
+
+**NAMED RESIDUAL — a watcher-side permission failure is filed at the
+reachability tier.** The watcher's probe is `storage.list("backups/")` →
+`list-objects-v2`. On FAILURE it cannot tell "R2 does not answer" from "R2
+answers but this key cannot list" (the body's premise that only the driver tests
+the listing tier is imprecise for the watcher), so it files the incident at the
+reachability tier (`R2_DOWN`) — the tier its evidence *claims*. When the real
+cause is a watcher-side `ListObjects` failure, the incident is therefore filed
+under `R2_DOWN` while the driver's `R2_UNLISTABLE` (if its listing leg also
+fails) is the accurate one; both can be open, and the `R2_DOWN` one clears as
+soon as the watcher's read succeeds again. This is a labelling residual, not a
+lost signal — filed as **#8472**. Anti-flap/hysteresis for the tier BOTH surfaces
+can file is **#3146**.
+
+**Not done here (deliberately).** ADR-011 is a dated, human-gated decision record
+and is not edited by this change; this runbook section is the operational home.
+The `R2_DOWN` key is retained, never renamed (see the migration playbook in
+`tortoise/incident_kinds.py`).
 
 ## Control plane / dialect (#2823)
 
@@ -633,7 +700,8 @@ warning ahead of it.
 | METADATA_LOST | archives exist but the graph's per-graph state object missing | Re-run sweep (state re-created) |
 | BACKUP_SET_MISSING | state exists but no archives (bulk delete/erroneous prune) | Investigate R2; restore from a retained archive if possible |
 | DRIVER_DOWN | driver heartbeat stale (> 4h) — workflow disabled/dead | Re-enable the workflow; GH 60-day auto-disable |
-| R2_DOWN | R2 unreachable or not listable (driver-side signal: `head-bucket` failed, or it passed but `list-objects-v2` failed so the pool is unverifiable) | Check R2 creds/billing/bucket policy and the access key's `ListObjects` permission |
+| R2_DOWN | #3147: R2 is **UNREACHABLE** — no probe reaches the substrate. The driver files it when its own `head-bucket` preflight fails. Filed by BOTH surfaces: the driver's preflight AND the watcher's R2 read (on a FAILING read the watcher cannot tell the two tiers apart, so it files at this one — see the named residual in §"The two R2 tiers (#3147)") | Check R2 reachability (network/endpoint/billing) and the R2 credentials. **Auto-resolves** on the WATCHER's own evidence: its next R2 probe reaches the substrate. The driver deliberately CANNOT clear it (`resolve_global` refuses a watcher-owned kind) — its passing preflight is not the watcher's evidence |
+| R2_UNLISTABLE | #3147: R2 **answers** (a probe reaches it) but the pool cannot be **listed** — the driver's `R2_LIST_OK=0` class (typically the access key lacks `ListObjects`), or a non-null `/status.storage_error`. The unlistable half of the old single `R2_DOWN` key | Check the R2 access key's `ListObjects` permission (`head-bucket` succeeds while `list-objects-v2` fails), the bucket policy, and — for a `storage_error` filing — the app-side storage. **Auto-resolves** on the DRIVER's whole-pool measurement: preflight OK + `storage_error` clear + `R2_LIST_OK=1`. The watcher deliberately cannot clear it (its probe measures reachability, not the pool) |
 | ALERTER_DOWN | daemon's GitHub PAT dead (`gh_ok: false`) | **NOT EMITTED — no writer exists.** `gh_ok` is not on `/status`, so the driver has nothing to read; the condition currently surfaces only as a red workflow run. See "Kinds with no writer" below (deferred: #3033; the writer is tracked as **#3412**) |
 | APP_DOWN | app unreachable from the driver | Fly health; cold-start OOM (#545) |
 | WATCHER_DOWN | watcher heartbeat stale (daemon dead) | Check app logs; restart |
@@ -773,7 +841,10 @@ Three paths exist:
 1. **Producer-side clear** (`AlertStore.resolve_incident` → close the issue, push
 the resolved Telegram, delete the dedup object). The watcher drives this for the
 absence kinds (`STALE`, `NEVER_BACKED_UP`, `METADATA_LOST`, `BACKUP_SET_MISSING`,
-`R2_DOWN`, `DRIVER_DOWN`); the sweep endpoint drives it for **its own guards**
+`DRIVER_DOWN`) **and for `R2_DOWN`** (#3147: its own R2 read is the reachability
+evidence); the driver drives it for `R2_UNLISTABLE` (the whole-pool measurement is
+its evidence) and for the rest of its substrate kinds; the sweep endpoint drives
+it for **its own guards**
 (`P0_GUARD_FAIL`, `NO_ELIGIBLE_TEAMS`, `ENUM_DELTA`,
 `GRAPH_NAME_RESOLUTION_FAIL`) — before #3030 those four had no resolver on any
 surface and stayed open forever (the live case was #2821).
@@ -1023,7 +1094,8 @@ curl -m 900 -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
 - **App down AND driver disabled simultaneously** — no alert (documented residual; reopen condition: first unattended app-down).
 - **NEVER detection while the app is down** — daemon-only; a never-backed-up team during an outage is silent until recovery.
 - **GH single-provider scheduling axis** — the driver terminates in GitHub; a GH incident delays backup triggers (the daemon still alerts).
-- **R2 outage** — neither fabricates (UNKNOWN on fresh boot) nor silences (GH-search fallback + driver R2_DOWN) once a known-good baseline exists.
+- **R2 outage** — neither fabricates (UNKNOWN on fresh boot) nor silences (GH-search fallback + the driver's `R2_DOWN`/`R2_UNLISTABLE` filings) once a known-good baseline exists.
+- **Watcher-side `ListObjects` failure is labelled at the reachability tier (#3147 → #8472)** — the watcher's R2 read cannot tell "R2 does not answer" from "R2 answers but this key cannot list", so it files `R2_DOWN` while `R2_UNLISTABLE` is the accurate kind. The fault is still filed and paged; only the kind label is imprecise. See §"The two R2 tiers (#3147)".
 
 ### Post-#2313 residuals (recorded 2026-09-06 audit — #2378)
 

@@ -1681,9 +1681,13 @@ def test_cli_batch_size_limits_kills(monkeypatch):
 
 @pytest.mark.timeout(660)  # full-sweep CLI (same budget rationale as test_cli_no_dry_run_kills; 660 > sp.run's 600s cap)
 def test_cli_singleton_lock_prevents_concurrent(monkeypatch):
-    """Second concurrent instance (lock held mid-sweep) exits 0 with
-    'already running'. The lock is held only DURING a sweep, so we hold it
-    directly to simulate a mid-sweep overlap."""
+    """Second concurrent instance (lock held mid-sweep) is refused with a
+    NON-ZERO exit and a message naming the VERIFIED live holder.
+
+    #4299: the refusal used to exit 0 and print the raw lock-record contents as
+    "reaper already running (PID N)". The holder here is THIS pytest process,
+    so the honest message names a live test session (#4473) and the exit is
+    non-zero — a fire that swept nothing must not record as success."""
     from tortoise.embedded_reaper import _ReaperLock
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
     lock = _ReaperLock()
@@ -1691,8 +1695,24 @@ def test_cli_singleton_lock_prevents_concurrent(monkeypatch):
     try:
         rc, out, err = _run_cli("--no-dry-run", "--timeout", "600",
                                 timeout=600)
-        assert rc == 0
-        assert "already running" in (out + err).lower()
+        text = out + err
+        assert rc == 1, f"a refusal must not report success (rc={rc})"
+        assert "already running" not in text.lower(), (
+            "the holder is a test session, not a reaper — calling it a reaper "
+            "is the #4299 misreport")
+        # The POSITIVE wording is deliberately NOT pinned to one verdict pole,
+        # and the KIND is not asserted here (#4299 review, cycle 1):
+        # `_holder_kind` is a heuristic over argv, pinned by its own unit test
+        # with an explicit argv, and the pole this refusal lands on is
+        # probe-dependent — when `ps -o lstart=` times out (2s, on a loaded
+        # host: the condition #3599 documents) the verdict is the honest
+        # `unknown` pole instead. Asserting "LIVE test session" here would pin
+        # a flake to this box AND red on a green commit the day xdist is
+        # re-admitted (an xdist worker's argv carries no `pytest`; the CI
+        # workflow keeps that `-n` guard inert one line from live). What must
+        # hold on BOTH honest poles: a refusal that treats the lock as real
+        # (not stale) and never names a reaper.
+        assert ("not stale" in text) or ("cannot be verified" in text), text
     finally:
         lock.release()
 
@@ -3006,6 +3026,548 @@ def test_reaper_lock_symlinked_dir_is_not_chmodded(tmp_path):
     assert lock.acquire() is False, "a symlinked lock dir must be refused"
     assert (os.stat(str(victim)).st_mode & 0o777) == 0o755, \
         "the planted symlink redirected a chmod onto an unrelated dir"
+
+
+# ── #4299: the refusal reports a VERIFIED holder, never a raw record ──
+#
+# The singleton lock is a `flock`, so it cannot go stale; the refusal's defect
+# is that it never identified the holder (a raw read of the mutable record file
+# was printed as "reaper already running (PID N)"). `lock_holder_verdict` is
+# the decision that replaces that read, and these tests pin it: a pid is
+# presented as the holder only when it is ALIVE and its start time MATCHES
+# (pid recycling) — otherwise the refusal says the record is stale or
+# unverifiable. Every probe is a parameter, so the decision is exercised with
+# fakes, never by killing a live process.
+
+
+def _verdict(record, *, alive=(), starts=None, commands=None):
+    """`lock_holder_verdict` on fakes: the seam this module's callers use."""
+    import tortoise.embedded_reaper as er
+    alive, starts = set(alive), starts or {}
+    commands = commands or {}
+    return er.lock_holder_verdict(
+        record,
+        is_alive=lambda pid: pid in alive,
+        start_time_of=lambda pid: starts.get(pid),
+        command_of=lambda pid: commands.get(pid, ""),
+    )
+
+
+_REAPER_CMD = "/x/.venv/bin/python -m tortoise.embedded_reaper --no-dry-run"
+_PYTEST_CMD = "/y/.venv/bin/python -m pytest tests/test_reaper.py"
+
+
+def test_holder_kind_checks_the_runner_before_the_module_marker():
+    """A pytest argv that MENTIONS `embedded_reaper` is a test session.
+
+    #4299: the kinds are ordered, and the order matters. Testing the module
+    marker first would classify `python -m pytest tests/test_embedded_reaper.py`
+    (or `-k embedded_reaper`) as a running SWEEP — and `main()` exits 0 for a
+    `live-reaper` holder, so the fire would record as success while a test
+    session held the lock and nothing was swept.
+    """
+    import tortoise.embedded_reaper as er
+    for cmd in ("/y/.venv/bin/python -m pytest tests/test_embedded_reaper.py",
+                "/y/.venv/bin/python -m pytest -k embedded_reaper tests/",
+                "/y/.venv/bin/py.test -q"):
+        assert er._holder_kind(cmd) == "test session", cmd
+    assert er._holder_kind(_REAPER_CMD) == "reaper"
+    assert er._holder_kind("/x/bin/python3.12") == "python3.12"
+    assert er._holder_kind("") == "process"
+
+
+def test_lock_holder_verdict_verifies_a_live_reaper():
+    """A live pid whose start time matches IS the holder — and is named."""
+    v = _verdict("pid=111\nstart=1000.0\n", alive=[111],
+                 starts={111: 1000.5}, commands={111: _REAPER_CMD})
+    assert v.state == "live-reaper" and v.verified and v.pid == 111
+    assert "already running" in v.describe()
+
+
+def test_lock_holder_verdict_names_a_live_non_reaper_holder():
+    """#4473 measured this holder: a pytest session, not a reaper.
+
+    The refusal must say so — calling every holder a reaper is the misreport
+    that made ordinary contention read as a wedged reaper.
+    """
+    v = _verdict("pid=222\nstart=2000.0\n", alive=[222],
+                 starts={222: 2000.0}, commands={222: _PYTEST_CMD})
+    assert v.state == "live-other" and v.kind == "test session" and v.verified
+    assert "already running" not in v.describe()
+    assert "not stale" in v.describe()
+
+
+def test_lock_holder_verdict_never_names_a_dead_pid_as_the_holder():
+    """A DEAD recorded pid is never the holder.
+
+    The caller only asks after `flock` was refused, so a dead pid in the
+    record proves the record does not describe the holder: it must not be
+    reported as the running reaper.
+    """
+    v = _verdict("pid=999\nstart=1000.0\n", alive=[], starts={})
+    assert v.state == "stale-record" and not v.verified
+    assert "already running" not in v.describe()
+    assert "not alive" in v.describe()
+
+
+def test_lock_holder_verdict_rejects_a_recycled_pid():
+    """An ALIVE pid whose start time differs is a recycled number, not the holder."""
+    v = _verdict("pid=111\nstart=500.0\n", alive=[111],
+                 starts={111: 1000.0}, commands={111: _REAPER_CMD})
+    assert v.state == "stale-record" and not v.verified
+    assert "recycled" in v.describe()
+
+
+def test_lock_holder_verdict_rejects_a_pid_only_legacy_record():
+    """A record with no `start=` line is not verifiable — never a holder.
+
+    That form is exactly what a fossil looks like (`acquire()` writes the
+    start time now), so it must not be trusted just because the pid is alive.
+    """
+    v = _verdict("4242", alive=[4242], starts={4242: 7.0})
+    assert v.state == "unknown" and not v.verified
+    assert "cannot be verified" in v.describe()
+
+
+def test_lock_holder_verdict_has_no_age_input():
+    """#4299: the verdict takes NO clock and NO record mtime.
+
+    An age bound was considered and deliberately rejected: a held flock
+    already proves the holder is alive and `(pid, start)` identifies it, so an
+    age clause can only ever fire on the TRUE holder — reporting it as
+    "stale", which is the #4299 misdiagnosis re-introduced. No safe constant
+    exists either (`--timeout` is unbounded; the suite-end sweep runs past its
+    own budget by design), and the wedged-holder case is exactly when the
+    operator most needs the true pid.
+
+    The removal is bound by the SIGNATURE: an age gate needs an input (a
+    clock, a record mtime, or a module bound), and adding any of them turns
+    this red.
+    """
+    import inspect
+
+    import tortoise.embedded_reaper as er
+    params = set(inspect.signature(er.lock_holder_verdict).parameters)
+    assert params == {"record", "is_alive", "start_time_of", "command_of"}, params
+    assert not hasattr(er, "LOCK_RECORD_MAX_AGE_S"), \
+        "no record-age bound may exist: it can only misfire on the true holder"
+    # ...and a live, identity-matched holder is verified.  This is the one case
+    # an age clause would have broken, so it is asserted directly.
+    v = _verdict("pid=111\nstart=1000.0\n", alive=[111],
+                 starts={111: 1000.0}, commands={111: _REAPER_CMD})
+    assert v.verified and v.state == "live-reaper"
+
+
+def test_lock_holder_verdict_reports_an_unreadable_start_as_unverified():
+    """Cannot read the live start time -> cannot verify -> not a holder."""
+    v = _verdict("pid=111\nstart=1000.0\n", alive=[111], starts={})
+    assert v.state == "unknown" and not v.verified
+    assert "unreadable" in v.describe()
+
+
+def test_lock_holder_verdict_reports_a_missing_record_as_unverified():
+    for record in (None, "", "not-a-record", "pid=abc\n"):
+        v = _verdict(record)
+        assert v.state == "unknown" and not v.verified, record
+
+
+def test_lock_holder_verdict_rejects_a_non_finite_or_unparsable_start():
+    """A bad `start=` must never become a VERIFIED holder (#4299 review, cycle 1).
+
+    Two guards here had NO test — removing either left the whole suite green
+    (found by mutation testing, S1/S3):
+
+      * ``float(start_raw)`` raising: `start=abc` must return ``None``, not
+        propagate a `ValueError` out of the REFUSAL path, which runs before
+        `signal.alarm(timeout)` is armed — a malformed record would replace a
+        clean refusal with a traceback.
+      * ``math.isfinite(start)``: a non-finite start must NOT be treated as a
+        matching start. ``abs(anything - nan) > 2.0`` is **False**, so without
+        the guard `start=nan` falls through to the live-holder branch and is
+        reported as ``verified`` — a FAIL-OPEN confidence claim, the same trap
+        `_owner_records` documents from the #3599 review (`1e400` -> inf
+        takes the identical path).
+    """
+    import tortoise.embedded_reaper as er
+    for record in ("pid=5\nstart=abc\n", "pid=5\nstart=nan\n",
+                   "pid=5\nstart=inf\n", "pid=5\nstart=-inf\n",
+                   "pid=5\nstart=1e999\n"):
+        assert er._parse_lock_record(record) is None, record
+        v = _verdict(record, alive=[5], starts={5: 1.0},
+                     commands={5: _REAPER_CMD})
+        assert v.state == "unknown" and not v.verified, record
+
+
+def test_lock_holder_verdict_rejects_an_unparsable_or_nonpositive_pid():
+    """The parser is TOTAL: a record it cannot read returns None, never raises.
+
+    #4299 review cycle 1 (P1, found independently by two reviewers):
+    `pid_raw.isdigit()` is True for non-decimal Unicode digits (`²`, `①`) that
+    `int()` rejects — the exact trap `_owner_records` documents — so the
+    pre-fix parser raised `ValueError: invalid literal for int()` from the
+    refusal path. `pid<=0` is the sibling guard: `os.kill(0, 0)` succeeds
+    against the caller's own process group (#3599), so `pid=0` can never be a
+    holder.
+
+    Cycle 2 added the OTHER half of the gate: a guarded `int()` alone accepts
+    `+5` and `5_0`, forms no writer emits, so the pid must be ASCII DECIMAL
+    digits (`isascii() and isdigit()`), with the guarded `int()` kept as the
+    totality backstop.
+
+    BOTH halves of that gate are bound here, and each catches a different set:
+    `\u0665`/`\uff15` are `isdigit()`-True NON-ASCII decimals that `int()`
+    parses happily (so `isascii()` is load-bearing, not decoration), while
+    `+5`/`5_0` are admitted by `int()` and rejected by `isdigit()`.
+    """
+    import tortoise.embedded_reaper as er
+    for record in ("pid=\u00b2\nstart=1.0\n", "\u00b2", "pid=\u2460\nstart=1.0\n",
+                   "pid=\u0665\nstart=1.0\n", "pid=\uff15\nstart=1.0\n",
+                   "pid=0\nstart=1.0\n", "pid=-1\nstart=1.0\n",
+                   "pid=+5\nstart=1.0\n", "pid=5_0\nstart=1.0\n",
+                   "pid=0x5\nstart=1.0\n"):
+        assert er._parse_lock_record(record) is None, record
+        v = _verdict(record, alive=[0, 1], starts={0: 1.0, 1: 1.0})
+        assert v.state == "unknown" and not v.verified, record
+
+
+def test_lock_holder_verdict_is_total_for_a_pid_beyond_the_int_limit():
+    """#4299: the guarded `int()` is the backstop that keeps the parse TOTAL.
+
+    `isascii() and isdigit()` admit a pid of ANY length, and CPython's
+    int-string conversion RAISES above ~4300 digits — so the `try/except` is
+    load-bearing for totality, not decoration: removing it reddens THIS test
+    while every other parser test stays green.
+
+    (The `isascii()` half of the gate is bound separately, by
+    `test_lock_holder_verdict_rejects_an_unparsable_or_nonpositive_pid`: the
+    non-ASCII DECIMAL digits `\u0665`/`\uff15` are `isdigit()`-True and `int()`
+    parses them to 5, so without `isascii()` they parse to a pid taken from a
+    record this module did not write — the defect #4299 removes.)
+
+    It cannot arrive through `_lock_record_read()` (which caps the read at 128
+    bytes), so this pins the contract for a direct call rather than an input
+    reachable in production. The assertion is the CONTRACT (never raise), not
+    the interpreter's limit: with `PYTHONINTMAXSTRDIGITS=0` a huge pid parses,
+    so demanding `None` would pin the environment instead of the behaviour.
+    """
+    import tortoise.embedded_reaper as er
+    parsed = er._parse_lock_record("pid=" + "1" * 4301 + "\nstart=1.0\n")
+    assert parsed is None or parsed[1] == 1.0, parsed
+
+
+def test_lock_holder_verdict_pins_the_start_tolerance_boundary():
+    """#4299 review, cycle 2: the 2s boundary itself is pinned.
+
+    Mutating `abs(live_start - start) > _LOCK_START_TOLERANCE` to `>=` left the
+    whole suite green (every other case differs by 0.0 / 0.5 / 500s), so which
+    side of the boundary counts as the holder was unpinned. The tolerance
+    exists because `ps -o lstart=` has 1s resolution, so two reads of the SAME
+    process can differ by up to that — a difference of exactly 2.0 must still
+    be the holder (`>` and not `>=`). The other side would report a LIVE
+    holder's record as "stale", which is the #4299 misdiagnosis re-introduced.
+    """
+    import tortoise.embedded_reaper as er
+    tol = er._LOCK_START_TOLERANCE
+    assert tol == 2.0, "the 2s tolerance is tied to `ps -o lstart=`'s 1s resolution"
+    for delta, state in ((0.0, "live-reaper"), (1.999, "live-reaper"),
+                         (tol, "live-reaper"), (tol + 0.001, "stale-record")):
+        v = _verdict("pid=7\nstart=1000.0\n", alive=[7],
+                     starts={7: 1000.0 + delta}, commands={7: _REAPER_CMD})
+        assert v.state == state, f"delta={delta} -> {v.state}, expected {state}"
+
+
+def test_the_verdict_uses_the_real_probes_it_is_wired_to(monkeypatch):
+    """#4299 review, cycle 2: `_lock_holder_verdict()`'s WIRING is pinned.
+
+    The pure decision is tested with fakes, but NOTHING asserted that the
+    production wrapper passes the REAL probes to it. Breaking the wiring
+    (`start_time_of=lambda pid: None`, i.e. it can never verify anything) left
+    the whole suite green, because every remaining real-probe test accepts the
+    honest `unknown` pole — so the VERIFIED path could silently stop
+    verifying. Pin the wiring where it cannot flake: the record, the live start
+    time, and the command line all come through the module's own seams, so no
+    real `ps` timeout decides the assertion.
+
+    This is also why the two CLI tests may stay classification-independent:
+    the verified pole is bound end to end of the DECISION here
+    (`_lock_record_read` -> `_process_start_time` -> `_cmdline` -> verdict),
+    while the holder KIND stays pinned by its explicit-argv unit test.
+    """
+    import tortoise.embedded_reaper as er
+    monkeypatch.setattr(er, "_lock_record_read",
+                        lambda: f"pid={os.getpid()}\nstart=4242.0\n")
+    monkeypatch.setattr(er, "_process_start_time", lambda pid: 4242.0)
+    monkeypatch.setattr(er, "_cmdline", lambda pid: _REAPER_CMD)
+    v = er._lock_holder_verdict()
+    assert v.state == "live-reaper" and v.verified, v.describe()
+    assert v.pid == os.getpid(), v.describe()
+    # The same wiring must report a NON-reaper holder as one...
+    monkeypatch.setattr(er, "_cmdline", lambda pid: _PYTEST_CMD)
+    assert er._lock_holder_verdict().state == "live-other"
+    # ...and a start time it cannot read as UNVERIFIABLE, never as the holder.
+    monkeypatch.setattr(er, "_process_start_time", lambda pid: None)
+    assert er._lock_holder_verdict().state == "unknown"
+    # A record it cannot read at all is the honest `unknown` pole too.
+    monkeypatch.setattr(er, "_lock_record_read", lambda: None)
+    assert er._lock_holder_verdict().state == "unknown"
+
+
+def test_a_start_time_probe_failure_never_fails_the_lock(tmp_path, monkeypatch):
+    """#4299 review, cycle 2: the DIAGNOSTIC probe must never break the LOCK.
+
+    `acquire()` wraps `_process_start_time` in `except Exception` ("never fail
+    the LOCK over a diagnostic") — a guard with NO test: replacing it with a
+    bare call left the suite green, so a `ps` failure would escape `acquire()`
+    (whose contract is return-False-never-raise) and take the reaper down
+    instead of degrading to the pid-only record.
+    """
+    import tortoise.embedded_reaper as er
+
+    def _boom(pid):
+        raise RuntimeError("ps blew up")
+
+    monkeypatch.setattr(er, "_process_start_time", _boom)
+    path = str(tmp_path / f".tortoise-reaper-{os.geteuid()}" / ".reaper.lock")
+    monkeypatch.setattr(er, "_LOCK_PATH", path)
+    lock = er._ReaperLock(path)
+    assert lock.acquire() is True, "a probe fault must not fail the lock"
+    try:
+        assert er._parse_lock_record(er._lock_record_read()) == (os.getpid(), None), (
+            "an unreadable start degrades to the pid-ONLY record, never to a "
+            "wrong pid")
+        # ...and that record is reported as UNVERIFIABLE, not as a holder.
+        # (No probe runs: the verdict returns at the `start is None` check.)
+        assert er._lock_holder_verdict().state == "unknown"
+    finally:
+        lock.release()
+
+
+def test_the_lock_resolves_the_start_time_before_taking_the_flock(
+        tmp_path, monkeypatch):
+    """#4299: the wrong-holder race fix IS the ORDER — start time, then flock.
+
+    The record must be rewritten in the microseconds after `flock` returns, so
+    a `ps` call (up to its 2s timeout on a loaded box) must not sit in that
+    window; if it does, a contender refused in the gap reads the PREVIOUS
+    holder's complete record and names that still-live process as the holder.
+
+    #4299 review cycle 1: this ordering was bound by NO test — moving the
+    resolution back after the flock left the suite green, because the fossil
+    test only asserts the fields are PRESENT, which both orderings satisfy.
+    Bind the ORDER itself, over the seam.
+    """
+    import fcntl as _fcntl
+
+    import tortoise.embedded_reaper as er
+    order = []
+    monkeypatch.setattr(
+        er, "_process_start_time",
+        lambda pid: (order.append("start"), 1234.5)[1])
+    real_flock = _fcntl.flock
+
+    def _flock(*args, **kwargs):
+        order.append("flock")
+        return real_flock(*args, **kwargs)
+
+    monkeypatch.setattr(_fcntl, "flock", _flock)
+    path = str(tmp_path / f".tortoise-reaper-{os.geteuid()}" / ".reaper.lock")
+    monkeypatch.setattr(er, "_LOCK_PATH", path)
+    lock = er._ReaperLock(path)
+    assert lock.acquire()
+    try:
+        assert order == ["start", "flock"], (
+            "the holder's start time must be resolved BEFORE the flock is "
+            "taken: a `ps` call in the post-flock window is the "
+            "wrong-holder race (#4299)")
+        parsed = er._parse_lock_record(er._lock_record_read())
+        assert parsed is not None and parsed[0] == os.getpid()
+        assert parsed[1] == 1234.5, "the PRE-flock start time is what is stored"
+    finally:
+        lock.release()
+
+
+def test_lock_record_text_round_trips_pid_and_start():
+    """`_lock_record_text` -> `_parse_lock_record` preserves both fields."""
+    import tortoise.embedded_reaper as er
+    text = er._lock_record_text(4242, 1759876800.0)
+    assert er._parse_lock_record(text) == (4242, 1759876800.0)
+    # A start time that could not be read is written pid-only (and is then
+    # reported as unverifiable, never as a verified holder).
+    assert er._parse_lock_record(er._lock_record_text(4242, None)) == (4242, None)
+
+
+def test_reaper_lock_distinguishes_a_refusal_from_contention(tmp_path):
+    """#4299: a `_refuse()` fault must not read as "another sweeper holds it".
+
+    `acquire()` returns False for both, but only the contention case has a
+    live holder; the refusal case (foreign-owned dir, FIFO at the lock path,
+    write/flock fault) means NO lock was ever taken and must be reported as a
+    fault — `main()` keys on `refusal` for exactly that.
+    """
+    import tortoise.embedded_reaper as er
+    path = str(tmp_path / ".tortoise-reaper-a" / ".reaper.lock")
+    holder, waiter = er._ReaperLock(path), er._ReaperLock(path)
+    assert holder.acquire()
+    try:
+        assert waiter.acquire() is False
+        assert waiter.refusal is None, "contention is not a fault"
+    finally:
+        holder.release()
+    fifo_dir = tmp_path / ".tortoise-reaper-b"
+    fifo_dir.mkdir()
+    os.mkfifo(str(fifo_dir / ".reaper.lock"))
+    bad = er._ReaperLock(str(fifo_dir / ".reaper.lock"))
+    assert bad.acquire() is False
+    # The exact reason is platform-dependent (macOS refuses at `fdopen`,
+    # Linux at the `S_ISREG` check); what must hold is that it is a FAULT.
+    assert bad.refusal, "a non-regular lock path is a fault, not contention"
+    # A later contention attempt on the SAME object clears the stale fault
+    # marker. It must be the object that already FAULTED: a fresh `_ReaperLock`
+    # gets `refusal = None` from `__init__`, so asserting on one pins only
+    # "contention does not set a fault" and leaves `acquire()`'s
+    # `self.refusal = None` reset unbound (#4299 review, cycle 2 — a mutation
+    # deleting that line left the whole suite green).
+    fifo_dir2 = tmp_path / ".tortoise-reaper-c"
+    holder2 = er._ReaperLock(str(fifo_dir2 / ".reaper.lock"))
+    assert holder2.acquire()
+    try:
+        bad.path = holder2.path
+        assert bad.acquire() is False and bad.refusal is None, (
+            "a later contention attempt on the previously faulted object must "
+            "clear the stale fault marker — `acquire()` resets `refusal`")
+    finally:
+        holder2.release()
+
+
+def test_reaper_main_reports_contention_and_refusal_by_exit_code(
+        monkeypatch, tmp_path, caplog):
+    """#4299's exit-code semantics, at the `main()` seam.
+
+    Exit 0 only when a VERIFIED sweep holds the lock (the drain is being
+    served and this fire correctly yielded). A live NON-reaper holder, an
+    unverifiable holder, or a `_refuse()` fault means nothing swept — the
+    vacuous `return 0` the issue's own table cites as evidence the schedule
+    "worked" while 1219 fires drained nothing.
+
+    A `_refuse()` fault is NOT contention: no lock was ever taken, so the
+    refusal must not be reported as a held lock at all.
+    """
+    import logging
+
+    import tortoise.embedded_reaper as er
+
+    def _verdict_is(state):
+        monkeypatch.setattr(
+            er, "_lock_holder_verdict",
+            lambda: er.LockHolder(state, 7, "test session", "because"))
+
+    def _contended(self):
+        self.refusal = None
+        return False
+
+    monkeypatch.setattr(er._ReaperLock, "release", lambda self: None)
+
+    monkeypatch.setattr(er._ReaperLock, "acquire", _contended)
+    _verdict_is("live-reaper")
+    assert _reaper_main(["--no-dry-run", "--timeout", "5"]) == 0, \
+        "a verified sweep holding the lock means the fire did its job"
+    _verdict_is("live-other")
+    assert _reaper_main(["--no-dry-run", "--timeout", "5"]) == 1
+    _verdict_is("unknown")
+    assert _reaper_main(["--no-dry-run", "--timeout", "5"]) == 1
+
+    def _refused(self):
+        self.refusal = "the lock directory is not owned by this uid"
+        return False
+
+    def _must_not_be_consulted():
+        raise AssertionError(
+            "a `_refuse()` fault must not be reported as a held lock: no lock "
+            "was taken, so there is no holder to describe (#4299)")
+
+    monkeypatch.setattr(er._ReaperLock, "acquire", _refused)
+    monkeypatch.setattr(er, "_lock_holder_verdict", _must_not_be_consulted)
+    with caplog.at_level(logging.WARNING, logger=er.logger.name):
+        caplog.clear()   # drop the contention-case records asserted above
+        assert _reaper_main(["--no-dry-run", "--timeout", "5"]) == 1, \
+            "a fault that skipped the sweep must not report success"
+    assert not any("HELD (kernel flock)" in r.message for r in caplog.records), \
+        "a refusal path must not claim the lock is held"
+
+
+def test_a_fossil_record_does_not_block_the_next_sweep(tmp_path, monkeypatch):
+    """#4299: the lock is reclaimed by the KERNEL, not by validating the record.
+
+    A record naming a dead pid with no holder at all is not a lock — the next
+    acquire succeeds (flock is free) and rewrites the record with its own
+    pid AND start time, so the fossil cannot mislead the next reader either.
+
+    The start time is bound OVER THE SEAM. The record's `start=` comes from the
+    holder's own `ps -o lstart=` probe, which returns ``None`` on a 2s timeout
+    on a loaded host (#4299 review, cycle 2) — so asserting ``start is not
+    None`` against the real probe would red on a GREEN commit. Pin what the
+    holder RESOLVES and assert the record carries exactly that.
+    """
+    import tortoise.embedded_reaper as er
+    path = str(tmp_path / f".tortoise-reaper-{os.geteuid()}" / ".reaper.lock")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write("pid=999999\nstart=1.0\n")   # a fossil: no holder
+    monkeypatch.setattr(er, "_LOCK_PATH", path)
+    monkeypatch.setattr(er, "_process_start_time", lambda pid: 1234.5)
+    lock = er._ReaperLock(path)
+    assert lock.acquire() is True, "a fossil record must not be a lock"
+    try:
+        text = er._lock_record_read()
+        parsed = er._parse_lock_record(text)
+        assert parsed is not None, text
+        pid, start = parsed
+        assert pid == os.getpid() and start == 1234.5, (
+            "the new holder must record pid AND the start time it resolved "
+            "BEFORE the flock (#4299)")
+        verdict = er._lock_holder_verdict()
+        # The record now carries OUR identity — the fossil's dead pid is gone.
+        # Asserted classification-independently, because `_holder_kind` is a
+        # heuristic over the holder's argv and this test must not pin a probe:
+        # a `ps` timeout would yield the honest `unknown` pole, and an xdist
+        # worker's argv carries no `pytest` (#4299 review, cycle 1). The
+        # classification itself is pinned by
+        # `test_holder_kind_checks_the_runner_before_the_module_marker` with an
+        # explicit argv. What must hold here: the fossil never survives — OUR
+        # pid is the recorded one and it is not read as a stale record.
+        assert verdict.state != "stale-record", verdict.describe()
+        assert verdict.pid == os.getpid(), verdict.describe()
+    finally:
+        lock.release()
+
+
+def test_cli_refusal_never_names_a_dead_recorded_pid(monkeypatch):
+    """An unverifiable holder must not be presented as the running reaper.
+
+    Reproduces the condition the refusal cannot rule out deterministically: a
+    live holder whose RECORD names a pid that is gone. The refusal must call
+    the record stale — never print "already running (PID <dead>)" — and must
+    not exit 0.
+    """
+    from tortoise.embedded_reaper import _ReaperLock
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    lock = _ReaperLock()
+    assert lock.acquire(), "could not acquire lock for test"
+    try:
+        # The fossil: the record names a pid that is gone (and a start time
+        # that could not match it), while THIS live process holds the flock.
+        with open(lock.path, "w") as fh:
+            fh.write(f"pid={gone.pid}\nstart=1.0\n")
+        rc, out, err = _run_cli("--no-dry-run", "--timeout", "60", timeout=60)
+        text = out + err
+        assert rc == 1, f"a refusal that swept nothing must not exit 0 (rc={rc})"
+        assert "already running" not in text.lower(), text
+        assert f"already running (PID {gone.pid})" not in text, text
+        assert "stale" in text and "not alive" in text, text
+    finally:
+        lock.release()
 
 
 def test_open_marker_no_follow_replaces_fifo_without_blocking(tmp_path):

@@ -38,9 +38,19 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["strongest", "best argument", "most support", "evidence for", "supports"],
         "description": "Find claims supporting a target via IMPL chains, ranked by confidence",
         "subgraph_vars": ["supporter"],
+        # #6871: the operator's typed edges ARE its input set — idx 0 is the
+        # operator's SOURCE, idx >= 1 its targets — so "the claim supporting a
+        # target" is the idx=0 endpoint and the supported claim is an idx>=1
+        # one. Without the two role guards a plain identity guard
+        # (target.id <> supporter.id) also matches INVERSELY — the operator's
+        # own source served as the SUPPORTER of a target: querying the source
+        # returned the target as its supporter, and `tortoise_analyze` answered
+        # with the claim's own hypothesis as its evidence.
         "cypher": """
-            MATCH (supporter:Point)<-[:IMPL]-(op:Point {op_type:\"IMPL\"})-[:IMPL]->(target:Point)
-            WHERE target.id <> supporter.id
+            MATCH (supporter:Point)<-[r_in:IMPL]-(op:Point {op_type:\"IMPL\"})-[r_out:IMPL]->(target:Point)
+            WHERE coalesce(r_in.idx, 0) = 0
+              AND coalesce(r_out.idx, 0) >= 1
+              AND target.id <> supporter.id
               AND target.content CONTAINS $entity
               AND coalesce(supporter.confidence, 0.5) > 0.0
             RETURN supporter.id, supporter.content, coalesce(supporter.confidence,0.5) as conf
@@ -118,9 +128,15 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["evidence for", "supports", "basis", "foundation", "backing", "chain"],
         "description": "Trace IMPL support chain back to root evidence for a claim",
         "subgraph_vars": ["evidence"],
+        # #6871: same role guard as `strongest_for` above — the evidence is the
+        # operator's idx=0 endpoint, the chained claim an idx>=1 one. Without
+        # it, asking for the evidence chain of the SOURCE returned its own
+        # targets as its foundation.
         "cypher": """
-            MATCH (evidence:Point)<-[:IMPL]-(op:Point {op_type:\"IMPL\"})-[:IMPL]->(target:Point)
-            WHERE target.id <> evidence.id
+            MATCH (evidence:Point)<-[r_in:IMPL]-(op:Point {op_type:\"IMPL\"})-[r_out:IMPL]->(target:Point)
+            WHERE coalesce(r_in.idx, 0) = 0
+              AND coalesce(r_out.idx, 0) >= 1
+              AND target.id <> evidence.id
               AND target.content CONTAINS $entity
               AND evidence.is_operator = false
             RETURN evidence.id, evidence.content, coalesce(evidence.confidence,0.5) as conf

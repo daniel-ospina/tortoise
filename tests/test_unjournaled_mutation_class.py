@@ -98,6 +98,9 @@ from tortoise.projection import (
     _ENTITY_MUTATION_OPS,
     _ENTITY_MUTATION_PENDING_OPS,
     _ENTITY_MUTATION_STATE_OPS,
+    # #7951 §17.1: a hand-built journal record folded here is a REPLAY, so the
+    # fold declares the replay scope.
+    _replay_write_scope,
     classify_entity_mutation_op,
 )
 from tortoise.projection.nonfolded import NonFoldedEventsError
@@ -864,7 +867,7 @@ class TestNonFoldedSet:
         sdk, _events = env
         proj = sdk._get_proj()
         caplog.clear()
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("WARNING"), _replay_write_scope():
             proj.apply({"type": _REC, "op": "rename", "label": "Object",
                         "id": "obj-never-existed", "state": {"name": "x"},
                         "event_id": "e1"})
@@ -887,7 +890,7 @@ class TestNonFoldedSet:
         other = sdk.create_entity("object", name="sibling",
                                   objectKind="k")["node"]["id"]
         caplog.clear()
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("WARNING"), _replay_write_scope():
             sdk._get_proj().apply({
                 "type": _REC, "op": "rename",
                 "label": "Object) DETACH DELETE n //",

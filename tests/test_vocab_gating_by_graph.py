@@ -471,8 +471,13 @@ class TestPackKindDerivationFromBrief:
         """
         master = build_master_list()
         brief = compile_value_brief()
+        # #4894: the brief's RESERVED non-kind sections are excluded by the
+        # brief's OWN set, not by a literal here — the derivation under test
+        # reads that set, so a literal would let the two drift (and did: the
+        # new ``pack_hints`` section arrived with the reservation).
+        from tortoise.value_extractor import RESERVED_BRIEF_KEYS
         expected = [k for k in brief
-                    if k != "memory_granularity" and not k.startswith("core:")]
+                    if k not in RESERVED_BRIEF_KEYS and not k.startswith("core:")]
         assert expected, "fixture: the hermetic brief must have pack kinds"
         assert list(master["pack_kinds"]) == expected, \
             "pack_kinds must be exactly the brief's non-core keys, in order"

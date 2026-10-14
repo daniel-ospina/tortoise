@@ -17,6 +17,7 @@ import os
 import pathlib
 import tempfile
 import threading
+import time
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -6353,6 +6354,209 @@ _2600_UUID_A = "11111111-1111-4111-8111-111111111111"
 _2600_UUID_B = "22222222-2222-4222-8222-222222222222"
 
 
+# ── #3246: a TRANSIENT transport refusal is a retriable capture outcome ──────
+# The measured cause of this class's flake, and of the wider full-file
+# nondeterminism recorded on #8122. Under a large combined selection the
+# capture in `POST /v1/sessions` exceeds the OWNER-PINNED 10 s transport wait
+# bound (`mcp_auth._TRANSPORT_WAIT_BOUND_S`, mcp_auth.py:179 — a module constant
+# deliberately NOT an env knob) and the route answers a 504 whose body says the
+# work may still complete. Measured in a full-file run
+# (`pytest tests/test_hosted_api.py`, 2026-10-13): 4 failed / 428 passed, and ALL
+# FOUR failures are this one signature — `assert 504 == 200` on
+# `POST /v1/sessions` — in TestDreamEndpoint, TestSessionCaptureWriteVerb,
+# TestSessionDetail and TestSessionFloodGate:
+#
+#   WARNING tortoise.hosted_api: transport wait bound (10s) exceeded:
+#                                POST /v1/sessions — refusing legibly
+#   assert 504 == 200
+#
+# It is a TRANSPORT outcome, not an actor-stamp defect: the Session MERGE
+# (`sdk._write_session_and_turns`, awaited at hosted_api.py:13109) commits the
+# actor clause — first-writer-wins by `coalesce` (sdk.py:2364) — BEFORE
+# extraction runs, so a refusal during extraction leaves the contract under test
+# untouched.
+#
+# The retry below is the repo's OWN client contract for that refusal, not a
+# flake mask: the refusal body instructs the caller to wait for the advertised
+# delay and re-issue, and `tortoise/capture_spool.py::classify_failure`
+# (capture_spool.py:304-313) calls a capture TRANSIENT because it is an
+# idempotent upsert on `session_id`. Of the statuses that classifier marks
+# TRANSIENT, the three refusals THIS route emits on the capture admission path
+# are re-issued:
+#   504  transport wait-bound breach      (Retry-After 10, mcp_auth.py:204)
+#   429  capture capacity saturated       (Retry-After 30, hosted_api.py:664)
+#   409  same-session-in-flight           (Retry-After 30, hosted_api.py:670;
+#        the gate-2 recording-off 409 is a different refusal, not on this path)
+# The 429 shares that admission path with the 409 — both are raised by
+# `_reserve_capture_slot`, called from THIS route at hosted_api.py:12439 — and
+# the condition that drives it is the one documented above: a 504'd sibling
+# still completing server-side holds `_CAPTURE_IN_FLIGHT`, a process global the
+# suite's per-test reset does not cover (tests/_verdict.py PROCESS_GLOBALS), so
+# once abandoned siblings reach the cap the next capture answers 429.
+#
+# Deliberately NOT re-issued: every OTHER 5xx (a genuine handler error must
+# still fail on the first call), and the route's 402 quota refusal (gate 5,
+# hosted_api.py:12630) — TRANSIENT to the durable spool for a different purpose
+# (#4714), but an org-level condition a bounded in-test re-issue cannot clear.
+#
+# Applied per call-site (not to the shared client fixture): a test pinning a
+# FIRST-CALL refusal, or one meant to fail, must not be handed re-issues first.
+# The two failing-extractor tests in TestSessionActorStamp2600 keep a bare
+# `tc.post` for the same reason — they assert extractor call counts a re-issue
+# would consume. Bounded, and never a pass: the LAST response is returned, so an
+# exhausted retry still fails the caller's own status assertion loudly. Pinned
+# by `TestCaptureTransportRetry3246`.
+_CAPTURE_TRANSIENT_TRANSPORT = frozenset({504, 429, 409})
+
+#: Cap on the `Retry-After` the helper will honour. The advertised delay is the
+#: server's instruction (10 s on the wait-bound breach, 30 s on the in-flight
+#: 409 and on the capacity 429); capping keeps a pathological run from parking
+#: the suite, and a re-issue that is too early merely earns another transient
+#: refusal.
+_CAPTURE_RETRY_AFTER_CAP_S = 15.0
+
+
+def _post_capture_allowing_transport_retry(tc, *, headers, payload,
+                                           attempts: int = 4,
+                                           sleep=time.sleep):
+    """POST /v1/sessions, re-issuing the request on a TRANSIENT transport
+    refusal (504 wait-bound breach / 429 capture capacity saturated / 409
+    same-session-in-flight — the last two are the direct consequence of a
+    504'd sibling still completing server-side and holding the admission slot).
+
+    Returns the LAST response; a non-transient status (including the extractor
+    failure shapes the other tests pin) is returned on the first call.
+    """
+    response = None
+    budget = max(1, attempts)
+    for attempt in range(budget):
+        response = tc.post("/v1/sessions", headers=headers, json=payload)
+        if response.status_code not in _CAPTURE_TRANSIENT_TRANSPORT:
+            return response
+        if attempt + 1 == budget:
+            break  # exhausted: never sleep after the final attempt
+        try:
+            delay = float(response.headers.get("Retry-After", ""))
+        except (TypeError, ValueError):
+            delay = 2.0
+        sleep(min(max(delay, 0.0), _CAPTURE_RETRY_AFTER_CAP_S))
+    return response
+
+
+class TestCaptureTransportRetry3246:
+    """Falsifiable guard for ``_post_capture_allowing_transport_retry``.
+
+    No DB and no server: the helper's contract is a transport one, so a canned
+    response sequence is the whole fixture. Each case fails if the helper's
+    behaviour is changed to the opposite (no retry / blanket retry / silent
+    pass on exhaustion).
+    """
+
+    class _Response:
+        def __init__(self, status_code, retry_after=None):
+            self.status_code = status_code
+            self.headers = ({} if retry_after is None
+                            else {"Retry-After": str(retry_after)})
+            self.text = f"status {status_code}"
+
+    class _Client:
+        def __init__(self, *responses):
+            self._responses = list(responses)
+            self.calls = 0
+
+        def post(self, *_args, **_kwargs):
+            self.calls += 1
+            return self._responses.pop(0)
+
+    def test_transient_refusals_are_reissued_and_the_success_returned(self):
+        client = self._Client(self._Response(504, retry_after=10),
+                              self._Response(409, retry_after=1),
+                              self._Response(200))
+        slept: list[float] = []
+        r = _post_capture_allowing_transport_retry(
+            client, headers={}, payload={}, sleep=slept.append)
+        assert r.status_code == 200
+        assert client.calls == 3, "each transient refusal must be re-issued"
+        # The ADVERTISED delay is honoured, and capped (10 is under the cap).
+        assert slept == [10.0, 1.0], slept
+
+    def test_a_capacity_429_is_reissued_like_the_other_refusals(self):
+        # 429 is the third refusal this route emits on the capture admission
+        # path (`_reserve_capture_slot`, hosted_api.py:664) and is TRANSIENT in
+        # the cited contract. On the pre-fix set ({504, 409}) this returned the
+        # 429 on the first call (calls == 1) — the `assert 429 == 200` shape
+        # this helper exists to remove.
+        client = self._Client(self._Response(429, retry_after=30),
+                              self._Response(200))
+        slept: list[float] = []
+        r = _post_capture_allowing_transport_retry(
+            client, headers={}, payload={}, sleep=slept.append)
+        assert r.status_code == 200
+        assert client.calls == 2, "the capacity 429 must be re-issued"
+        # The advertised 30 s is honoured up to the cap, not for its full span.
+        assert slept == [_CAPTURE_RETRY_AFTER_CAP_S], slept
+
+    def test_a_quota_402_is_deliberately_not_reissued(self):
+        # 402 is TRANSIENT to the durable spool (#4714) but deliberately out of
+        # THIS bounded in-test retry: a quota refusal is an org-level condition
+        # a 15 s re-issue cannot clear, so a test pinning it must see it on the
+        # first call. Pins the exclusion so adding it is a visible choice.
+        client = self._Client(self._Response(402, retry_after=30))
+        slept: list[float] = []
+        r = _post_capture_allowing_transport_retry(
+            client, headers={}, payload={}, sleep=slept.append)
+        assert r.status_code == 402
+        assert client.calls == 1, "the quota 402 must not be retried"
+        assert slept == [], slept
+
+    def test_another_5xx_is_deliberately_not_reissued(self):
+        # The cited contract marks EVERY 5xx TRANSIENT, and this helper does
+        # not — the natural next editor, holding that classifier, would widen
+        # the set to `status >= 500`. Pins the other half of the exclusion the
+        # 402 case pins: a genuine handler 5xx must fail on the first call.
+        client = self._Client(self._Response(503))
+        slept: list[float] = []
+        r = _post_capture_allowing_transport_retry(
+            client, headers={}, payload={}, sleep=slept.append)
+        assert r.status_code == 503
+        assert client.calls == 1, "a non-504 5xx must not be retried"
+        assert slept == [], slept
+
+    def test_a_nontransient_refusal_is_returned_without_retry(self):
+        client = self._Client(self._Response(400))
+        slept: list[float] = []
+        r = _post_capture_allowing_transport_retry(
+            client, headers={}, payload={}, sleep=slept.append)
+        assert r.status_code == 400
+        assert client.calls == 1, "a genuine refusal must not be retried"
+        assert slept == [], slept
+
+    def test_an_exhausted_retry_surfaces_the_refusal_never_a_pass(self):
+        client = self._Client(*(self._Response(504, retry_after=999)
+                                for _ in range(4)))
+        slept: list[float] = []
+        r = _post_capture_allowing_transport_retry(
+            client, headers={}, payload={}, sleep=slept.append)
+        assert r.status_code == 504, "exhaustion must not become a pass"
+        assert client.calls == 4
+        # The advertised 999 s is capped — a pathological run cannot park the
+        # suite on the server's own back-off instruction.
+        assert slept == [_CAPTURE_RETRY_AFTER_CAP_S] * 3, slept
+
+    def test_the_last_refusal_is_the_one_returned_on_exhaustion(self):
+        # Distinct transient statuses so a "return the FIRST response" mutant
+        # cannot pass: the caller must see the LAST refusal, never an earlier
+        # one (which would let an exhausted retry read as a different outcome).
+        client = self._Client(self._Response(504, retry_after=0),
+                              self._Response(429, retry_after=0))
+        slept: list[float] = []
+        r = _post_capture_allowing_transport_retry(
+            client, headers={}, payload={}, attempts=2, sleep=slept.append)
+        assert r.status_code == 429, "the LAST refusal must be the one returned"
+        assert client.calls == 2
+        assert slept == [0.0], slept
+
+
 class TestSessionActorStamp2600:
     """Session MERGE actor clause — first-writer-wins coalesce + legacy
     backfill, asserted via DIRECT graph read (list_sessions does not expose
@@ -6399,7 +6603,7 @@ class TestSessionActorStamp2600:
         try:
             keyA = sdk.apikey_create(tid, _2600_UUID_A)
             hA = {"Authorization": f"Bearer {keyA['api_key']}"}
-            r = tc.post("/v1/sessions", headers=hA, json={
+            r = _post_capture_allowing_transport_retry(tc, headers=hA, payload={
                 "conversation": [{"role": "user", "content": "we should ship actor attribution first."},
                                   {"role": "assistant", "content": "agree — stamp it at capture."}],
                 "session_id": "s-stamp-2600-a", "harness": "claude"})
@@ -6425,7 +6629,7 @@ class TestSessionActorStamp2600:
             hB = {"Authorization": f"Bearer {keyB['api_key']}"}
             for h, sid, _expect in ((hA, "s-stamp-2600-ba", _2600_UUID_A),
                                    (hB, "s-stamp-2600-bb", _2600_UUID_B)):
-                r = tc.post("/v1/sessions", headers=h, json={
+                r = _post_capture_allowing_transport_retry(tc, headers=h, payload={
                     "conversation": [{"role": "user", "content": "member capture."},
                                       {"role": "assistant", "content": "stamped."}],
                     "session_id": sid})
@@ -6453,10 +6657,10 @@ class TestSessionActorStamp2600:
             hB = {"Authorization": f"Bearer {keyB['api_key']}"}
             conv = [{"role": "user", "content": "we should open the beta."},
                     {"role": "assistant", "content": "agreed."}]
-            r1 = tc.post("/v1/sessions", headers=hA, json={
+            r1 = _post_capture_allowing_transport_retry(tc, headers=hA, payload={
                 "conversation": conv, "session_id": "s-stamp-2600-fww"})
             assert r1.status_code == 200, r1.text[:300]
-            r2 = tc.post("/v1/sessions", headers=hB, json={
+            r2 = _post_capture_allowing_transport_retry(tc, headers=hB, payload={
                 "conversation": conv, "session_id": "s-stamp-2600-fww"})
             assert r2.status_code == 200, r2.text[:300]
             rows = self._data_sdk(tid)._get_proj().g.query(
@@ -6488,7 +6692,7 @@ class TestSessionActorStamp2600:
                         "tid": "s-stamp-2600-legacy_t0"})
             keyB = sdk.apikey_create(tid, _2600_UUID_B)
             hB = {"Authorization": f"Bearer {keyB['api_key']}"}
-            r = tc.post("/v1/sessions", headers=hB, json={
+            r = _post_capture_allowing_transport_retry(tc, headers=hB, payload={
                 "conversation": [{"role": "user", "content": "true-retry legacy backfill."},
                                   {"role": "assistant", "content": "ok."}],
                 "session_id": "s-stamp-2600-legacy"})
@@ -6504,7 +6708,12 @@ class TestSessionActorStamp2600:
     def test_actorless_key_repost_keeps_first_writer(self, tmp_path):
         """P1-1 variant: the pre-#2600 'api' class (non-UUID created_by) is
         NOT an actor — its re-POST must not erase A's stamp (missing clause
-        ≠ wipe)."""
+        ≠ wipe).
+
+        The two captures ride `_post_capture_allowing_transport_retry`: this is
+        the test #3246 reported as flaky under large combined selections, and
+        the measured cause is the transport wait-bound 504 (not this path) — see
+        that helper's comment."""
         gen = self._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
@@ -6514,10 +6723,10 @@ class TestSessionActorStamp2600:
             hL = {"Authorization": f"Bearer {legacy['api_key']}"}
             conv = [{"role": "user", "content": "attribution contract."},
                     {"role": "assistant", "content": "locked."}]
-            r1 = tc.post("/v1/sessions", headers=hA, json={
+            r1 = _post_capture_allowing_transport_retry(tc, headers=hA, payload={
                 "conversation": conv, "session_id": "s-stamp-2600-api"})
             assert r1.status_code == 200, r1.text[:300]
-            r2 = tc.post("/v1/sessions", headers=hL, json={
+            r2 = _post_capture_allowing_transport_retry(tc, headers=hL, payload={
                 "conversation": conv, "session_id": "s-stamp-2600-api"})
             assert r2.status_code == 200, r2.text[:300]
             rows = self._data_sdk(tid)._get_proj().g.query(
@@ -6666,7 +6875,7 @@ class TestSessionActorStamp2600:
         try:
             legacy = sdk.apikey_create(tid, "api")
             hL = {"Authorization": f"Bearer {legacy['api_key']}"}
-            r = tc.post("/v1/sessions", headers=hL, json={
+            r = _post_capture_allowing_transport_retry(tc, headers=hL, payload={
                 "conversation": [{"role": "user", "content": "legacy key capture."},
                                   {"role": "assistant", "content": "ok."}],
                 "session_id": "s-stamp-2600-legacy-key"})
@@ -10429,6 +10638,189 @@ async def _drive_bucket_check(store, lock, keys, **kw):
         except _ha_mod.HTTPException as exc:
             out.append(exc.status_code)
     return out
+
+
+class _IpLimiterReq:
+    """Minimal request-like for the IP-keyed limiters: `state.client_ip`
+    drives the real-IP chain and `client.host` is the peer fallback."""
+
+    class _Client:
+        def __init__(self, host):
+            self.host = host
+
+    class _State:
+        client_ip = None
+
+    def __init__(self, client_ip=None, peer="1.2.3.4"):
+        self.state = self._State()
+        self.state.client_ip = client_ip
+        self.client = self._Client(peer)
+
+
+class TestIpv6PrefixBucketKey:
+    """#5490 — a per-IP bucket identity aggregates a NATIVE IPv6 address to
+    its /64, so one client holding a delegated /64 cannot mint 2**64 buckets
+    (and therefore 2**64 budgets) by rotating within it."""
+
+    def test_helper_aggregates_native_ipv6_and_leaves_ipv4_alone(self):
+        k = _ha_mod._ip_bucket_key
+        # IPv4 and every IPv4-mapped spelling are unchanged (#1081 contract).
+        assert k("1.2.3.4") == "1.2.3.4"
+        assert k("::ffff:1.2.3.4") == "1.2.3.4"
+        assert k("::FFFF:1.2.3.4") == "1.2.3.4"
+        assert k("0:0:0:0:0:ffff:1.2.3.4") == "1.2.3.4"
+        # ONE /64 → ONE key while rotating anywhere inside it.
+        a = k("2001:db8:aaaa:1::1")
+        b = k("2001:db8:aaaa:1::ffff:ffff")
+        assert a == b == "2001:db8:aaaa:1::/64"
+        # A different /64 stays independent.
+        assert k("2001:db8:aaaa:2::1") == "2001:db8:aaaa:2::/64"
+        assert a != k("2001:db8:aaaa:2::1")
+        # A malformed address → ONE constant, never the raw string.
+        assert k("not-an-ip") == _ha_mod._IP_BUCKET_MALFORMED_KEY
+        assert k("") == _ha_mod._IP_BUCKET_MALFORMED_KEY
+        assert k("garbage") == k("other-garbage")
+        # Non-str keys (composite tuples) and None pass through — the
+        # primitive's key contract stays OPAQUE.
+        assert k(("invite-accept", "ip", "1.2.3.4")) == \
+            ("invite-accept", "ip", "1.2.3.4")
+        assert k(None) is None
+
+    def test_prefix_is_env_tunable_and_a_bad_value_falls_back(self, monkeypatch):
+        monkeypatch.setenv("TORTOISE_IP_BUCKET_IPV6_PREFIX", "48")
+        # two /64s inside one /48 collapse to the same bucket key
+        assert _ha_mod._ip_bucket_key("2001:db8:aaaa:1::1") == \
+            _ha_mod._ip_bucket_key("2001:db8:aaaa:2::1") == \
+            "2001:db8:aaaa::/48"
+        monkeypatch.setenv("TORTOISE_IP_BUCKET_IPV6_PREFIX", "0")
+        assert _ha_mod._ip_bucket_key("2001:db8:aaaa:1::1") == \
+            "2001:db8:aaaa:1::/64"  # invalid → default, never a /0
+
+    def test_primitive_default_path_rotating_within_a_64_is_one_bucket(
+            self, monkeypatch):
+        """The Request-default arm (no caller key) is definitionally an IP:
+        rotating inside one /64 exhausts ONE bucket at `limit`."""
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+            codes = []
+            for host in ("2001:db8:aaaa:1::1", "2001:db8:aaaa:1::2",
+                         "2001:db8:aaaa:2::1"):
+                try:
+                    await _ha_mod._check_ip_bucket_rate_limit(
+                        _bucket_req(host), buckets=store, lock=lock,
+                        limit=1, window_s=3600, detail="x")
+                    codes.append(200)
+                except _ha_mod.HTTPException as exc:
+                    codes.append(exc.status_code)
+            return store, codes
+
+        store, codes = asyncio.run(_run())
+        assert codes == [200, 429, 200], codes
+        assert set(store) == {"2001:db8:aaaa:1::/64",
+                              "2001:db8:aaaa:2::/64"}, store
+
+    def test_signup_limiter_rotating_within_a_64_cannot_reset_budget(
+            self, monkeypatch):
+        """An IP-keyed CALL SITE (bare-IP key) aggregates before the tuple/
+        string key reaches the primitive."""
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        _ha_mod._SIGNUP_BUCKETS.clear()
+
+        async def _run():
+            codes = []
+            for host in ("2001:db8:aaaa:1::1", "2001:db8:aaaa:1::2",
+                         "2001:db8:aaaa:1::3"):
+                try:
+                    await _ha_mod._check_signup_ip_rate_limit(
+                        _IpLimiterReq(client_ip=host))
+                    codes.append(200)
+                except _ha_mod.HTTPException as exc:
+                    codes.append(exc.status_code)
+            return codes
+
+        try:
+            codes = asyncio.run(_run())
+        finally:
+            _ha_mod._SIGNUP_BUCKETS.clear()
+        assert codes == [200, 200, 429], codes  # default 2/24h
+
+    def test_claim_limiter_rotating_within_a_64_cannot_reset_budget(
+            self, monkeypatch):
+        """The 8th site (issue comment): the claim limiter owns its own store
+        and must aggregate too — /v1/claim is ATO-adjacent."""
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setenv("TORTOISE_CLAIM_MAX_PER_24H", "2")
+        _ha_mod._CLAIM_BUCKETS.clear()
+
+        async def _run():
+            codes = []
+            for host in ("2001:db8:aaaa:1::1", "2001:db8:aaaa:1::2",
+                         "2001:db8:aaaa:1::3"):
+                try:
+                    await _ha_mod._check_claim_rate_limit(
+                        _IpLimiterReq(client_ip=host))
+                    codes.append(200)
+                except _ha_mod.HTTPException as exc:
+                    codes.append(exc.status_code)
+            return codes
+
+        try:
+            codes = asyncio.run(_run())
+            keys = set(_ha_mod._CLAIM_BUCKETS)
+        finally:
+            _ha_mod._CLAIM_BUCKETS.clear()
+        assert codes == [200, 200, 429], codes
+        assert keys == {"2001:db8:aaaa:1::/64"}, keys
+
+    def test_sensitive_op_budget_is_one_per_64_and_charge_key_matches(
+            self, monkeypatch):
+        """A TUPLE-keyed IP site: rotating inside a /64 must share the
+        `(ip, op)` budget, and the deferred charge key must be the SAME
+        aggregated tuple the check used — a mismatch charges a bucket the
+        check never read and fails OPEN."""
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setattr(_ha_mod, "_SENSITIVE_OP_LIMITS", {"export": 1})
+        _ha_mod._SENSITIVE_BUCKETS.clear()
+
+        async def _run():
+            keys = []
+            for host in ("2001:db8:aaaa:1::1", "2001:db8:aaaa:1::2"):
+                keys.append(await _ha_mod._check_sensitive_op_rate_limit(
+                    _IpLimiterReq(client_ip=host), "export",
+                    defer_charge=True))
+            return keys
+
+        try:
+            keys = asyncio.run(_run())
+        finally:
+            _ha_mod._SENSITIVE_BUCKETS.clear()
+        assert keys[0] == keys[1] == ("2001:db8:aaaa:1::/64", "export"), keys
+
+    def test_middleware_ip_fallback_aggregates_ipv6_64(self):
+        mw = _ha_mod.RateLimitMiddleware(lambda *_: None, max_per_minute=100)
+        assert mw._bucket_key("/v1/x", "", "2001:db8:aaaa:1::1") == \
+            "ip:2001:db8:aaaa:1::/64"
+        assert mw._bucket_key("/v1/x", "", "2001:db8:aaaa:1::2") == \
+            "ip:2001:db8:aaaa:1::/64"
+        assert mw._bucket_key("/v1/x", "", "2001:db8:aaaa:2::1") == \
+            "ip:2001:db8:aaaa:2::/64"
+        assert mw._bucket_key("/v1/x", "", "1.2.3.4") == "ip:1.2.3.4"
+        assert mw._bucket_key("/v1/x", "Bearer tt_abc", "1.2.3.4") == \
+            "tt_abc"
+
+    def test_dcr_store_key_shares_the_same_aggregation(self, monkeypatch):
+        """#5490 refactor: the DCR store key delegates to the SHARED helpers,
+        so its /64 aggregation cannot drift from the primitive's."""
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_IPV6_PREFIX", "64")
+        assert _ha_mod._oauth_dcr_store_key("2001:db8:aaaa:1::7") == \
+            "2001:db8:aaaa:1::/64"
+        assert _ha_mod._oauth_dcr_store_key("1.2.3.4") == "1.2.3.4"
+        assert _ha_mod._oauth_dcr_store_key("bogus") == \
+            _ha_mod._OAUTH_DCR_MALFORMED_KEY
+        assert _ha_mod._OAUTH_DCR_MALFORMED_KEY == \
+            _ha_mod._IP_BUCKET_MALFORMED_KEY
 
 
 class TestBoundedIpBucketStore:

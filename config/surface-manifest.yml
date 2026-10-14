@@ -21,7 +21,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: eebc5bad027393a5e6e5942cd7650b967699e5ec
+cut_at_commit: dc6ed063c61b33e0ff3cf02be61a2ddf15d1b34e
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -177,6 +177,24 @@ response_fields:
     "w1 yes approved" 2026-10-09)
   unchanged_when_off: n/a — not flag-gated; the tool returns the operator properties, so every pre-existing key
     keeps its value
+- response: tortoise_search
+  field: relationships_unavailable
+  emitted_when: only on a Point search whose bounded relationship-decoration query RAISED — every hit of the batch
+    carries it, because the failure is a property of the batch decoration, not of one point (#6971). The value is
+    the reason constant RELATIONSHIPS_UNAVAILABLE plus the recorded cause; the SDK search assembly relays it from
+    the RelationshipDecoration's decoration_error attribute (tortoise/search_engine.py is the constant's ONE home;
+    tortoise/sdk.py::tortoise_fts_query is the relay)
+  unchanged_when_off: yes — not flag-gated; the key is ABSENT unless the query raised, so a search whose decoration
+    did not raise stays byte-identical (relationships included) and simply omits this key
+- response: tortoise_search
+  field: subject_unavailable
+  emitted_when: only on a Point search where the WHOLE batch resolved no `subject` AND the graph has no
+    `aboutSubject` producer at all — the loud half of a read surface that would otherwise be silently empty; a
+    mixed batch needs no marker and the probe fails OPEN (any probe error reads as available, so a broken probe
+    never fabricates the claim). The reason constant SUBJECT_BINDING_UNAVAILABLE lives in
+    tortoise/search_engine.py; the SDK search assembly and its embedded fallback both set the key (#4889)
+  unchanged_when_off: yes — not flag-gated; the key is ABSENT whenever a subject resolved or the graph can carry
+    one, so those responses stay byte-identical and simply omit this key; no other key is affected either way
 approval_status: approved
 approval_principal: daniel-ospina
 approval_pr: '4120'
@@ -1767,8 +1785,11 @@ rows:
     quota; a missing LLM provider key is NOT a refusal — the capture is STORED and only extraction is skipped (extraction_mode
     "no-provider"); 422 for an invalid harness. session_id is the idempotency key (re-filing the same id mints zero
     new nodes). Only call this when the team has session recording enabled (the dashboard ''Memory sources > Agent
-    sessions'' toggle); if the call fails, tell the user it wasn''t filed and do NOT retry. Requires hosted mode
-    — stdio/self-hosted returns an honest error (no local fallback that bypasses the capture pipeline).'
+    sessions'' toggle); if the call fails, tell the user it wasn''t filed and do NOT retry. Consent: this tool runs
+    server-side and cannot read the caller''s TORTOISE_CAPTURE, so calling it IS the agreement to record the session
+    (#3662, Option 1 — connecting the agent is the agreement); tell the user you are filing the session before you
+    call, so they can decline. Requires hosted mode — stdio/self-hosted returns an honest error (no local fallback
+    that bypasses the capture pipeline).'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: agents, tooling, docs

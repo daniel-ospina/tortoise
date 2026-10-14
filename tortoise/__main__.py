@@ -509,6 +509,9 @@ def _cmd_reconcile(args):
     try:
         from tortoise.log import EventLog, TornTailResurrectionError, refuse_torn_tail_revival  # noqa: I001
         from tortoise.projection import FalkorProjection
+        # #7951 §17.1: `reconcile` replays records ALREADY in the journal, so
+        # its folds are authorized by the replay scope.
+        from tortoise.projection import _replay_write_scope
     except ImportError:
         print("Tortoise not installed. Run: pip install -e negation-game-explorations/tortoise", file=sys.stderr)
         return 1
@@ -547,7 +550,8 @@ def _cmd_reconcile(args):
         applied = 0
         for ev in event_entries:
             if ev["event"]["eventId"] not in existing:
-                proj.apply(ev)
+                with _replay_write_scope():
+                    proj.apply(ev)
                 applied += 1
 
         total = len(event_entries)

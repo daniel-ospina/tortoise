@@ -375,6 +375,25 @@ class TestDescriptionImprovements:
         assert pq.retired_use_instead.startswith("tortoise_query")
         assert qt.retired_use_instead.startswith("tortoise_query")
 
+    def test_session_capture_description_states_the_settled_consent_contract(self):
+        """#3662 (Option 1): the hosted MCP capture tool's ``tools/list``
+        description is the surface the recording agent reads, so the consent
+        basis and the disclosure obligation must live there — the owner's own
+        remedy was to move them "where the agent actually reads it … rather
+        than a code comment".
+
+        Option 1 ("connecting the agent is the agreement") is a deliberate
+        departure from the per-session-opt-in default (``OVERRIDES:`` on
+        #3662); this test is what stops it silently regressing into an
+        undocumented behaviour.
+        """
+        d = self._desc("tortoise_session_capture")
+        assert "consent" in d.lower(), d
+        assert "agreement" in d.lower(), d
+        assert "before you call" in d.lower(), (
+            "the disclosure obligation must be stated where the agent reads "
+            "it (#3662)")
+
 
 class TestFastMCPAdapter:
     """Gate 2: MCP adapter emits correct tools from registry."""

@@ -6,13 +6,16 @@
 # (aws CLI) is the only signal that covers the app-down case. The direct-R2
 # leg runs BEFORE the APP_DOWN early-exit (review P2-2) — it is genuinely
 # app-independent.
-#   1. aws preflight (R2_DOWN on failure) + DIRECT R2 freshness (per-team,
+#   1. aws preflight (R2_DOWN on failure — the REACHABILITY tier, #3147) +
+#      DIRECT R2 freshness (per-team,
 #      POOLED into ONE subject-less POOL_STALE incident naming the N stale
 #      tenants — #4994: one systemic fault is one issue, not one per tenant;
 #      per-tenant STALE stays watcher-owned)
 #   2. GET /status (classify: connect-fail → APP_DOWN; app-503/429 → up)
 #   3. kill-switch check — a DISABLED sweep is NOT automatically intentional:
-#      config_error → SWEEP_CONFIG_ERROR; storage_error → R2_DOWN; stale R2
+#      config_error → SWEEP_CONFIG_ERROR; storage_error → R2_UNLISTABLE (#3147:
+#      the app is reachable and reporting, so this is the listing/measurement
+#      tier, not unreachability); stale R2
 #      pool → SWEEP_OFF_STALE; an unmeasurable pool is never read as fresh.
 #      Only a genuinely deliberate pause (no config error, no storage error,
 #      a MEASURED fresh pool) stays silent (#2796)
@@ -30,7 +33,9 @@
 #   6. POST /driver/heartbeat
 #   7. self-heal: close an incident only on the evidence that proves it gone —
 #      APP_DOWN / resolved SWEEP_CONFIG_ERROR / SWEEP_OFF_STALE on a completed
-#      round trip; R2_DOWN on a passing R2 preflight; WATCHER_DOWN on a fresh
+#      round trip; R2_UNLISTABLE on a whole-pool measurement (#3147 — R2_DOWN is
+#      the WATCHER's now, cleared by ITS next positive reachability read;
+#      `resolve_global` refuses a watcher-owned kind); WATCHER_DOWN on a fresh
 #      watcher heartbeat; SWEEP_NO_COVERAGE on a run that actually backed up;
 #      POOL_STALE on a WHOLE-POOL measured-fresh reading held for
 #      BACKUP_POOL_RESOLVE_STREAK consecutive runs (#4994)
@@ -177,7 +182,12 @@ kind_owner() { # kind -> the writer whose probes cover this kind's recovery (#31
   # owner re-files it every run.
   case "$1" in
     # driver: its own R2 preflight + /status.storage_error + a measured pool.
-    R2_DOWN|APP_DOWN|WATCHER_DOWN|SWEEP_CONFIG_ERROR|SWEEP_OFF_STALE|SWEEP_NO_COVERAGE|LIVENESS_NO_WORK)
+    # #3147: R2_UNLISTABLE (R2 answers but the pool cannot be listed) is
+    # driver-owned — the recovery evidence is the WHOLE-POOL measurement
+    # (preflight OK + storage_error clear + R2_LIST_OK=1) and the driver is the
+    # only surface that performs it. R2_DOWN moved to the watcher below:
+    # reachability is a condition its own R2 read also tests.
+    R2_UNLISTABLE|APP_DOWN|WATCHER_DOWN|SWEEP_CONFIG_ERROR|SWEEP_OFF_STALE|SWEEP_NO_COVERAGE|LIVENESS_NO_WORK)
       echo driver ;;
     # #4994: the POOLED pool-stale incident. Driver-owned because the driver is
     # its filer AND the only surface whose probe covers its recovery (the
@@ -196,7 +206,11 @@ kind_owner() { # kind -> the writer whose probes cover this kind's recovery (#31
     PURGE_FAILED|RECONCILE_FAILED)
       echo driver ;;
     # watcher: archive/stamp freshness + the driver heartbeat, read in-process.
-    STALE|NEVER_BACKED_UP|METADATA_LOST|BACKUP_SET_MISSING|DRIVER_DOWN)
+    # #3147: R2_DOWN (the REACHABILITY tier) belongs here too — the watcher's
+    # own R2 read IS a reachability probe, so it can legitimately clear the kind
+    # it can evidence (indicator 2). It cannot clear R2_UNLISTABLE, which is
+    # driver-owned: the watcher's failing probe cannot tell the two tiers apart.
+    STALE|NEVER_BACKED_UP|METADATA_LOST|BACKUP_SET_MISSING|DRIVER_DOWN|R2_DOWN)
       echo watcher ;;
     # app: the drill resolves on its own success signal.
     RESTORE_DRILL_FAILED)
@@ -794,6 +808,13 @@ pool_set_streak() { # n — persist the fresh streak on the incident object
 # ── 0. aws preflight + DIRECT R2 freshness (the app-down/crash-loop leg) ─────
 # A failed listing is NEVER confirmed-empty (no STALE/NEVER from a failed
 # read); a broken R2 auth preflight files R2_DOWN loudly (review P3).
+# #3147: the two R2 failure tiers are now two kinds with two owners. The
+# head-bucket preflight failing is the REACHABILITY tier (`R2_DOWN`, owned by
+# the WATCHER — whose own R2 read is a reachability probe, so it can clear it);
+# a preflight that PASSES while a listing fails is the LISTING tier
+# (`R2_UNLISTABLE`, driver-owned — the whole-pool measurement is the evidence
+# and the driver is the only surface that makes it). The kinds are mutually
+# exclusive per run: the listing legs only run when R2_OK=1.
 R2_OK=1
 # #2796: pool-level signals retained from the app-independent leg and consumed
 # by the kill-switch classifier (off-while-stale) and the no-coverage check
@@ -890,7 +911,7 @@ if [ "$R2_OK" = "1" ]; then
       # aggregator over that absent element raises JMESPathTypeError, so the
       # aws CLI exits non-zero — an EMPTY prefix was read as a LISTING
       # FAILURE, set the GLOBAL R2_LIST_OK=0, and escalated to a platform-wide
-      # R2_DOWN while the top-level listing had succeeded in the same run.
+      # R2_UNLISTABLE while the top-level listing had succeeded in the same run.
       # The plain projection is total (absent/empty -> `null`/`[]`) and jq
       # takes the max — the same `max(LastModified)` shape the legacy-flat leg
       # already uses. An empty prefix is a MEASURED result, not an outage.
@@ -920,7 +941,7 @@ if [ "$R2_OK" = "1" ]; then
         # absent `Contents` as the JSON literal `null` (not `[]`), which the
         # `[ "$flat_list" != "[]" ]` guard would treat as a non-empty pool and
         # route into flat classification — where an index-read error would
-        # blank a MEASURED default archive and file a false R2_DOWN. Normalize
+        # blank a MEASURED default archive and file a false R2_UNLISTABLE. Normalize
         # null/empty to the empty list.
         flat_list="[]"
       fi
@@ -1013,12 +1034,13 @@ fi
 # A preflight that passes but a listing that fails is a PARTIAL storage outage:
 # the pool cannot be measured, so freshness/coverage cannot be verified (review
 # P3, coherence). This is the same "unknown ≠ empty" rule as everywhere else
-# and it must not be green just because the sweep claims a backup. R2_DOWN is
-# the right kind: its self-heal already requires a measured pool, so it will
-# not be closed by the same blind run.
+# and it must not be green just because the sweep claims a backup. #3147: this
+# is the LISTING tier, `R2_UNLISTABLE` — R2 ANSWERED (the preflight passed), so
+# the reachability kind would be a false label; its self-heal already requires
+# a measured pool, so it will not be closed by the same blind run.
 if [ "$R2_OK" = "1" ] && [ "$R2_LIST_OK" != "1" ]; then
-  log "R2 preflight passed but the pool listing failed — storage is only partially reachable; filing R2_DOWN"
-  file_alert R2_DOWN "[DR] R2_DOWN — backup storage not listable" \
+  log "R2 preflight passed but the pool listing failed — storage is reachable but unlistable; filing R2_UNLISTABLE"
+  file_alert R2_UNLISTABLE "[DR] R2_UNLISTABLE — backup storage not listable" \
     "head-bucket succeeded but one or more list-objects-v2 calls failed (R2_LIST_OK=0). The pool cannot be measured, so archive freshness and coverage cannot be verified. Check the R2 access key's ListObjects permission." ""
 fi
 
@@ -1060,7 +1082,7 @@ if [ "$STALE_TEAM_COUNT" != "0" ]; then
     # The tenants below WERE measured; the pool as a whole was not. Say so in
     # the body rather than letting a partial measurement read as the full pool.
     POOL_LIST_NOTE="
-⚠️ The pool listing did NOT complete this run (R2_LIST_OK=0), so this is what WAS measured, not the whole pool (see the R2_DOWN incident for the storage fault)."
+⚠️ The pool listing did NOT complete this run (R2_LIST_OK=0), so this is what WAS measured, not the whole pool (see the R2_UNLISTABLE incident for the storage fault)."
   fi
   POOL_STALE_BODY="The driver's direct R2 freshness leg (app-independent) measured ${STALE_TEAM_COUNT} team default archive(s) older than BACKUP_STALE_THRESHOLD_MIN (${STALE_MIN}m):
 
@@ -1293,8 +1315,8 @@ if [ "$ENABLED" != "true" ]; then
   # Config is readable again (config_error is null here) — clear the incident.
   resolve_global SWEEP_CONFIG_ERROR "Resolved — load_config() no longer raises."
   if [ -n "$STORAGE_ERR" ]; then
-    log "status reports a storage error — filing R2_DOWN (not a kill-switch)"
-    file_alert R2_DOWN "[DR] R2_DOWN — app storage unavailable" "status.storage_error: $STORAGE_ERR_SAFE" ""
+    log "status reports a storage error — filing R2_UNLISTABLE (not a kill-switch)"
+    file_alert R2_UNLISTABLE "[DR] R2_UNLISTABLE — app storage unavailable" "status.storage_error: $STORAGE_ERR_SAFE" ""
     fail "backups disabled by a storage error: ${STORAGE_ERR_SAFE}"
     exit 1
   fi
@@ -1317,11 +1339,16 @@ if [ "$ENABLED" != "true" ]; then
     exit 1
   fi
   resolve_global SWEEP_OFF_STALE "Resolved — the R2 pool is measured fresh."
-  # Review P2 (guidance): the app-storage R2_DOWN can only be filed from a
+  # Review P2 (guidance): the app-storage R2_UNLISTABLE can only be filed from a
   # disabled path, so without this it would stay open (and its 412 dedup object
   # would swallow the next real recurrence) even after storage recovered.
-  if [ "$R2_OK" = "1" ] && [ -z "$STORAGE_ERR" ]; then
-    resolve_global R2_DOWN "Resolved — storage answered (R2 preflight OK, storage_error clear)."
+  # #3147: this is the LISTING tier (driver-owned) — the evidence is the
+  # WHOLE-POOL measurement, so the preflight AND the listing must both be clean.
+  # R2_DOWN (the watcher-owned reachability tier) is deliberately NOT resolved
+  # here: `resolve_global` refuses a watcher-owned kind, and the driver's
+  # passing preflight is not the watcher's evidence anyway.
+  if [ "$R2_OK" = "1" ] && [ -z "$STORAGE_ERR" ] && [ "$R2_LIST_OK" = "1" ]; then
+    resolve_global R2_UNLISTABLE "Resolved — the storage answered and the whole pool was measured (R2 preflight + listing OK, storage_error clear)."
   fi
   log "kill-switch: backups deliberately disabled (measured-fresh pool) — skipping"
   finish
@@ -1332,8 +1359,8 @@ fi
 # still reports one is the same broken storage (the sweep is about to fail), so
 # surface it here too. §6 must not self-heal it while it is set.
 if [ -n "$STORAGE_ERR" ]; then
-  log "status reports a storage error while enabled — filing R2_DOWN (job red)"
-  file_alert R2_DOWN "[DR] R2_DOWN — app storage unavailable" "status.storage_error: $STORAGE_ERR_SAFE" ""
+  log "status reports a storage error while enabled — filing R2_UNLISTABLE (job red)"
+  file_alert R2_UNLISTABLE "[DR] R2_UNLISTABLE — app storage unavailable" "status.storage_error: $STORAGE_ERR_SAFE" ""
 fi
 
 # ── 2. watcher supervision (WATCHER_DOWN when the daemon is dead) ────────────
@@ -1635,8 +1662,11 @@ curl -sS -m 20 -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: applica
 # as a real backup:
 #   * APP_DOWN + the resolved SWEEP_CONFIG_ERROR/SWEEP_OFF_STALE clear on ANY
 #     completed /status + sweep round trip — the app answered.
-#   * R2_DOWN clears only when the driver's OWN head-bucket preflight passed
-#     this run (evidence, not inference).
+#   * R2_UNLISTABLE clears only when the driver's WHOLE-POOL measurement is
+#     clean this run (preflight OK + storage_error clear + R2_LIST_OK=1) —
+#     evidence, not inference (#3147). R2_DOWN is NOT resolved here: it is the
+#     WATCHER-owned reachability tier, and `resolve_global` refuses it; the
+#     driver's passing preflight is not the watcher's evidence anyway.
 #   * WATCHER_DOWN clears on WATCHER evidence: a fresh .watcher heartbeat read
 #     this run. #2796: the pre-fix code treated `no_teams` as healthy and
 #     closed a WATCHER_DOWN it had just filed because it keyed off the sweep
@@ -1652,15 +1682,17 @@ if [ "$SWEEP_COMPLETED" = "1" ]; then
   for kind in APP_DOWN SWEEP_CONFIG_ERROR SWEEP_OFF_STALE; do
     resolve_global "$kind" "Resolved — the app answered (/status + sweep completed, status=$RUN_STATUS_SAFE)."
   done
-  # R2_DOWN is cleared only when the driver's OWN storage probe succeeded this
-  # run (review R1/R3): a sweep that "completes" with R2_OK=0 (head-bucket
-  # failed) must not close the R2_DOWN it just filed — that would re-file and
-  # re-close on every run forever. Review R3: a non-null storage_error also
-  # proves the app-side storage is still broken — never close on that run.
+  # R2_UNLISTABLE is cleared only when the driver's whole-pool measurement is
+  # clean this run (review R1/R3): a sweep that "completes" with R2_OK=0
+  # (head-bucket failed) must not close it — that would re-file and re-close on
+  # every run forever. Review R3: a non-null storage_error also proves the
+  # app-side storage is still broken — never close on that run. #3147: the kind
+  # is the driver-owned LISTING tier; the unreachable tier (R2_DOWN) belongs to
+  # the watcher and is deliberately not touched here.
   if [ "$R2_OK" = "1" ] && [ -z "$STORAGE_ERR" ] && [ "$R2_LIST_OK" = "1" ]; then
-    resolve_global R2_DOWN "Resolved — the storage answered (R2 preflight + listing OK + sweep completed, status=$RUN_STATUS_SAFE)."
+    resolve_global R2_UNLISTABLE "Resolved — the storage answered and the whole pool was measured (R2 preflight + listing OK + sweep completed, status=$RUN_STATUS_SAFE)."
   else
-    log "self-heal: R2/storage evidence is not clean this run — leaving R2_DOWN open"
+    log "self-heal: R2/storage evidence is not clean this run — leaving R2_UNLISTABLE open"
   fi
 fi
 # WATCHER_DOWN self-heals only on WATCHER EVIDENCE (a real boolean .watcher

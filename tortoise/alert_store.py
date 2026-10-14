@@ -99,9 +99,13 @@ IssueOpen = Callable[[int], bool]           # (issue number) -> still open?
 #
 # `R2_DOWN` is the case that forced this: the driver tests its OWN head-bucket
 # preflight + `/status.storage_error` + a measured pool, while the watcher tests
-# only its own reachability probe. They are two different failure modes behind
-# one kind ("cannot reach R2" vs "can reach it but the key cannot ListObjects"),
-# so the watcher cannot distinguish them and must not clear the driver's.
+# only its own reachability probe. That is TWO different failure modes and, since
+# #3147, TWO kinds: `R2_DOWN` (the substrate does not answer a probe — owned by
+# the WATCHER, whose own R2 read clears it on the next positive poll) and
+# `R2_UNLISTABLE` (R2 answers but the pool cannot be listed, `R2_LIST_OK=0` —
+# owned by the DRIVER, the only surface that measures the whole pool). Before the
+# split the watcher could not distinguish them and so could not clear either,
+# which is why ADR-011 had to refuse it the right to close `R2_DOWN` at all.
 #
 # ⛔ The MAP is declared ONCE, in `tortoise/incident_kinds.py` (#4780): each
 # kind's `KindSpec.owner`. It is imported above (not restated) so existing

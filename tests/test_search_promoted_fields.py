@@ -99,6 +99,63 @@ def test_relationships_empty_when_no_operators(sdk):
     hit = next(r for r in results if r["id"] == p["id"])
     assert hit["relationships"] == []
     assert "status" in hit
+    # #6971: empty BECAUSE the point is sparse — and that is said by the
+    # ABSENCE of the failure marker, not by an empty list alone.
+    assert "relationships_unavailable" not in hit
+
+
+def test_failed_decoration_is_labelled_on_the_wire(sdk, monkeypatch):
+    """#6971 — a decoration query that RAISED must not read as 'no edges'.
+
+    The all-empty seed used to be returned verbatim from the ``except``, so
+    ``relationships: []`` meant both "this point is genuinely sparse" and "the
+    read failed", and only a ``logger.warning`` (below the API surface) said
+    which. The batch now carries ``relationships_unavailable``, so the two
+    states are distinguishable on the wire.
+    """
+    import tortoise.search_engine as se
+
+    p = sdk.create_point("statement", "claim whose decoration read failed")
+
+    def failing(graph, point_ids, **kw):
+        rels = se.RelationshipDecoration({pid: [] for pid in point_ids})
+        rels.decoration_error = "RuntimeError: boom"
+        return rels
+
+    monkeypatch.setattr(se, "get_relationships_bounded", failing)
+    results = _scan(sdk)
+    hit = next(r for r in results if r["id"] == p["id"])
+    assert hit["relationships"] == []
+    assert hit["relationships_unavailable"].startswith(
+        se.RELATIONSHIPS_UNAVAILABLE), hit["relationships_unavailable"]
+    assert "RuntimeError: boom" in hit["relationships_unavailable"], (
+        "the marker must carry the actual failure, not just a generic label"
+    )
+
+
+def test_failed_decoration_does_not_break_retrieval(sdk, monkeypatch):
+    """D1: decoration is default-on and must never turn a search into a failure.
+
+    The fix labels the failure rather than raising it, so the hits still come
+    back — with the same order the healthy decoration produced.
+    """
+    import tortoise.search_engine as se
+
+    pts = [sdk.create_point("statement", f"claim {i}") for i in range(5)]
+    healthy = [r["id"] for r in _scan(sdk)]
+
+    def failing(graph, point_ids, **kw):
+        rels = se.RelationshipDecoration({pid: [] for pid in point_ids})
+        rels.decoration_error = "RuntimeError: boom"
+        return rels
+
+    monkeypatch.setattr(se, "get_relationships_bounded", failing)
+    degraded = _scan(sdk)
+    assert [r["id"] for r in degraded] == healthy, (
+        "labelling the failure must not change which hits are returned"
+    )
+    assert {r["id"] for r in degraded} == {p["id"] for p in pts}
+    assert all("relationships_unavailable" in r for r in degraded)
 
 
 # ── Task 4: expand_relationships (SDK + MCP + registry) ─────────────────

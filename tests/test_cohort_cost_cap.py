@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1348,3 +1349,123 @@ def test_runbook_records_the_cap_below_balance_relation():
         "unarmed deployment the cohort-aggregate bound IS the provider balance")
     assert _cc.CAP_ENV in section, (
         "the section must name the env var that arms the cap")
+
+
+# ── 8. the ARM-ORDER instruction names the migrations the cap actually needs ──
+#
+# #4008: the ONLY written cap-arming instruction — `.env.example`'s #3665 block
+# and the mirror paragraph in `tortoise/cohort_cost.py`'s docstring — named a
+# SINGLE migration (20260917000001), while the anchor read the cap depends on
+# selects ``organizations.current_period_start``, a column that migration does
+# NOT create. An operator who followed it applied the wrong schema and every
+# non-replay capture 500'd: the anchor SELECT is unconditional, so the window is
+# unresolvable for EVERY org, free tier included (the D13 calendar-month
+# fallback is unreachable because the anchor READ fails first).
+#
+# The claim is hand-maintained in two places, so both are pinned — either can
+# rot alone. Nothing below is hand-LISTED: the migrations that provide the two
+# columns are DERIVED from the migration source, so a renumber or a relocated
+# DDL updates this guard instead of falsifying it (#5063's "one binding from a
+# written claim to the system it describes", at the scale of one claim).
+
+_MIG_ID_RE = re.compile(r"\b(20\d{12})\b")
+_MIGDIR = Path(__file__).resolve().parents[1] / "supabase" / "migrations"
+
+
+def _arm_order_instruction(text: str) -> str:
+    """The written arming instruction: from its ARM ORDER marker to the end of
+    that paragraph.
+
+    Scoping to the paragraph keeps a migration named ELSEWHERE in the same file
+    from satisfying the claim under test — ``cohort_cost``'s own docstring names
+    20260918000001 as the re-keying migration (a fact about the READ path, not
+    about arming) far above this paragraph.
+    """
+    idx = text.index("ARM ORDER MATTERS")
+    end = text.find("\n\n", idx)
+    return text[idx:end if end != -1 else len(text)]
+
+
+def _migrations_adding_column(table: str, column: str) -> set[str]:
+    """The migration id(s) whose DDL adds *column* to *table*, derived from the
+    migration source rather than written down here.
+
+    The ``ADD COLUMN`` clause must sit inside an ``ALTER TABLE <table>``
+    statement, so a function body that merely READS the column is not mistaken
+    for that column's home — 20260918000001's re-issued ``metering_increment``
+    reads ``capture_cost_usd`` without creating it.
+    """
+    homes: set[str] = set()
+    for f in _MIGDIR.glob("*.sql"):
+        for stmt in f.read_text(encoding="utf-8").split(";"):
+            if not re.search(rf"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?"
+                             rf"(?:public\.)?{table}\b", stmt, re.I):
+                continue
+            if re.search(rf"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+                         rf"(?:public\.)?{column}\b", stmt, re.I):
+                homes.add(f.name.split("_", 1)[0])
+    return homes
+
+
+@pytest.mark.parametrize("relpath", [".env.example", "tortoise/cohort_cost.py"])
+def test_arm_order_instruction_names_the_migrations_the_cap_needs(relpath):
+    """#4008: arming the cap requires TWO migrations, and the instruction must
+    name both, in order.
+
+    The cap's read path needs ``metering_records.capture_cost_usd`` (the column
+    the ceiling SUMS) and ``organizations.current_period_start`` (the anchor
+    ``metering._metering_anchor`` selects UNCONDITIONALLY, before any
+    subscription check). Each is provided by exactly one migration, and the
+    second's RPC body assigns from the first's column — so the apply order is
+    load-bearing, not cosmetic.
+
+    REDs on: the pre-#4008 text (only 20260917000001 named, leaving the anchor
+    column with no provider in the instruction); naming only 20260918000001
+    (leaving the summed column with none); inverting the stated order; or citing
+    a migration that does not exist.
+    """
+    text = (Path(__file__).resolve().parents[1] / relpath).read_text(
+        encoding="utf-8")
+    instruction = _arm_order_instruction(text)
+    named = set(_MIG_ID_RE.findall(instruction))
+
+    assert named, (
+        f"{relpath}: the ARM ORDER instruction names no migration id at all — "
+        f"the arming prerequisite is unstated (#4008)")
+    for mig in sorted(named):
+        assert any(p.name.startswith(mig) for p in _MIGDIR.glob("*.sql")), (
+            f"{relpath}: the ARM ORDER instruction cites migration {mig}, "
+            f"which does not exist in supabase/migrations/ (#5063)")
+
+    ledger_home = _migrations_adding_column("metering_records",
+                                            "capture_cost_usd")
+    anchor_home = _migrations_adding_column("organizations",
+                                            "current_period_start")
+    # A guard that resolves zero homes reads the wrong tree, and every assertion
+    # below would then be vacuous — an assertion that cannot fail is itself a
+    # defect (#5063).
+    assert ledger_home and anchor_home, (
+        "the guard found no migration that ADDs metering_records."
+        "capture_cost_usd and/or organizations.current_period_start — it is "
+        "reading the wrong tree, so its verdict is about nobody's deploy")
+    assert ledger_home <= named, (
+        f"{relpath}: the ARM ORDER instruction omits "
+        f"{sorted(ledger_home - named)} — the migration(s) that ADD "
+        f"metering_records.capture_cost_usd, the column the cap SUMS. "
+        f"Named: {sorted(named)} (#4008)")
+    assert anchor_home <= named, (
+        f"{relpath}: the ARM ORDER instruction omits "
+        f"{sorted(anchor_home - named)} — the migration(s) that ADD "
+        f"organizations.current_period_start, the anchor the reader selects "
+        f"for EVERY org. Named: {sorted(named)} (#4008)")
+
+    # 20260918000001's re-issued ``metering_increment`` assigns from
+    # ``public.metering_records.capture_cost_usd``, so it cannot be applied to a
+    # schema that lacks 20260917000001's column: the stated order must be
+    # ledger-column-first.
+    ledger_at = min(instruction.index(m) for m in ledger_home)
+    anchor_at = max(instruction.index(m) for m in anchor_home)
+    assert ledger_at < anchor_at, (
+        f"{relpath}: the ARM ORDER instruction names the anchor migration "
+        f"before the one whose column its RPC body reads — the stated order is "
+        f"not applicable (#4008)")

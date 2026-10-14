@@ -141,6 +141,39 @@ def test_public_site_surface_change_selects_onboarding_and_skips_slow():
         assert "test_website_docs_consistency.py" in r["test_files"], changed
 
 
+def test_the_capacity_guards_derived_source_selects_the_guard():
+    """#3329/#8492: a change to the guard's DERIVED SOURCE must select the guard.
+
+    `tests/test_capacity_page.py` derives the published write-concurrency figure
+    from `tests/test_embedded_concurrency.py`'s own loop bound. The two docs it
+    reads (`docs/capacity.md`, `docs/quickstart-selfhosted.md`) were registered
+    as `onboarding` `SOURCE_PATTERNS`, but the TEST FILE supplying the derived
+    value was not — so a diff that bumped the live test's coverage to six
+    writers and left the prose stale selected only `core`, excluded the guard,
+    and merged green. The drift then surfaced only on the `push`-event full run,
+    reddening `main` AFTER the merge — the failure mode the `#3442` guard in the
+    same workflow refuses to certify.
+
+    Asserted on the SURFACE and on the guard file, not merely "surfaces is
+    non-empty": `tests/` falls through to `core` on its own, so a bare
+    non-emptiness check passes with the wiring absent — a gate that can only
+    ever pass. Watched RED before the `SOURCE_PATTERNS` entry existed, GREEN
+    after.
+    """
+    changed = "tests/test_embedded_concurrency.py"
+    assert (REPO / changed).exists(), f"guarded derived source is gone: {changed}"
+    r = _sel([changed])
+    assert "onboarding" in r["surfaces"], (
+        f"{changed} selects {r['surfaces']} — its guard (test_capacity_page.py) "
+        "is not selected, so a coverage bump there merges with stale prose and "
+        "reds main after the merge"
+    )
+    assert "test_capacity_page.py" in r["test_files"], (
+        f"{changed} does not select test_capacity_page.py — the derived "
+        "write-concurrency figure has no guard on the change that invalidates it"
+    )
+
+
 def test_the_onboarding_copy_gate_is_wired_not_left_to_the_tier1_fallback():
     """#3673 indicator (2): the parity gate runs on every PR touching either copy.
 

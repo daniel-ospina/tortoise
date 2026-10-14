@@ -68,6 +68,7 @@ from .projection import (
     _norm,
     _object_hard_deleted_ids,
     _promotion_point_with_operator,
+    _replay_write_scope,  # #7951 §17.1: replay folds are authorized, live ones are not
     _writable_id,
     entities,
     fold_with_entities,
@@ -2833,9 +2834,11 @@ def recover_from_log(events_dir: str, projection) -> dict:
                         deferred_corrects.append(edge)
                 else:
                     if _pass_seq:
-                        projection.apply(ev, journal_seq=seq, **apply_kwargs)
+                        with _replay_write_scope():
+                            projection.apply(ev, journal_seq=seq, **apply_kwargs)
                     else:
-                        projection.apply(ev, **apply_kwargs)
+                        with _replay_write_scope():
+                            projection.apply(ev, **apply_kwargs)
                 applied += 1
             except UnrepresentableNumberError as exc:
                 refused += 1

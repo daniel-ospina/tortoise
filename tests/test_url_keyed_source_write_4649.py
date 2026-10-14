@@ -151,6 +151,62 @@ class TestReadPathPremise:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# The NAVIGATION path must ROOT the same url-keyed Source (#5448)
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestUrlKeyedSourceIsRootable:
+    """#5448: `navigation._ROOT_BRANCHES` was a THIRD, id-only copy of the
+    identity declaration (`_CANONICAL_ENTITY_ID_PROPS` +
+    `_CANONICAL_ENTITY_SECONDARY_ID_PROPS`), so `entityProfile` /
+    `tortoise_traverse` could not root a url-only `:Source` — the very node the
+    read path above resolves. (1) The failing value is the ROOT BAG: pre-fix it
+    is `{}` (`_resolve_root` -> `(None, {})`), while `get_entity(url)` returns
+    the node; and because the hop also assumed `{id:$eid}`, fixing the table
+    ALONE still yielded a root with an empty neighbourhood — both are pinned
+    here. (2) Reachability is the same `create_point(extractedFrom=...)` stub
+    the premise test pins (`id` ABSENT)."""
+
+    def test_entity_profile_roots_a_url_only_source(self, env):
+        from tortoise.navigation import entityProfile
+
+        sdk, _ = env
+        url = "https://example.com/nav-root"
+        point = sdk.create_point("statement", "the claim", extractedFrom=url)
+        proj = sdk._get_proj()
+        assert _stub(proj, url)[0] is None, (
+            "fixture minted an id-carrying Source — it does not exercise the "
+            "url-only identity")
+
+        profile = entityProfile(proj.db, proj.graph_name, url, hops=1)
+
+        assert profile["entity"].get("url") == url, (
+            "entityProfile returned an empty root for a url-keyed Source the "
+            "read path resolves (#5448)")
+        assert {n.get("id") for n in profile["connected"]["points"]} == {
+            point["id"]}, (
+            "the hop OFF the root must bind the root's OWN key (url) — the "
+            "hardcoded `{id:$eid}` hop left the neighbourhood empty (#5448)")
+
+    def test_tortoise_traverse_roots_a_url_only_source(self, env):
+        from tortoise.navigation import tortoise_traverse
+
+        sdk, _ = env
+        url = "https://example.com/nav-root"
+        point = sdk.create_point("statement", "the claim", extractedFrom=url)
+        proj = sdk._get_proj()
+        assert _stub(proj, url)[0] is None
+
+        result = tortoise_traverse(proj.db, proj.graph_name, url, max_hops=1)
+
+        assert result["entity"].get("url") == url, (
+            "tortoise_traverse returned an empty root for a url-keyed Source "
+            "(#5448)")
+        assert {n["node"].get("id") for n in result["nodes"]} == {
+            point["id"]}, (
+            "tortoise_traverse must reach the root's neighbour by its url key")
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # The defect — the write paths ignored the url identity (RED pre-fix)
 # ══════════════════════════════════════════════════════════════════════════
 

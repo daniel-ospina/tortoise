@@ -233,6 +233,17 @@ SHARED_MODULES = (
     # select `core` only, and a break it induced in an api/eval/ep test would
     # never run on the PR that made it (#1349/#3332/#3910 under-selection class).
     "tests/_signal_hygiene.py",
+    # #7357: the canonical-store guard (`tests/_canonical_store_guard.py`) is
+    # imported at conftest MODULE level and REFUSES THE SESSION for any surface
+    # whose `TORTOISE_DB_URI` targets the fleet's map instance (loopback
+    # port 16379). Same class as `_verdict.py` / `_signal_hygiene.py` above and
+    # enforced by
+    # `tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`:
+    # not a `test_*.py` file, so the manifest never classifies it — without this
+    # entry a change to the guard would select `core` only, and a break it
+    # induced in an api/eval/ep session would never run on the PR that made it
+    # (#1349/#3332/#3910 under-selection class).
+    "tests/_canonical_store_guard.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",
@@ -375,6 +386,33 @@ SOURCE_PATTERNS = {
                    "website/functions/contact/submit.ts",
                    "website/website_architecture.md",
                    "docs/auth-architecture.md",
+                   # #3329: `test_capacity_page.py` pins the public capacity page and
+                   # derives its write-concurrency figure from
+                   # `tests/test_embedded_concurrency.py`'s own coverage. `docs/` is in
+                   # NON_PYTHON_PREFIXES and is not itself a pattern, so without this
+                   # CONCRETE entry a `docs/capacity.md`-only edit selects NO surface and
+                   # the guard is asleep on the one change it exists to catch (exactly
+                   # the requirement #3329 states: every published number stays bound to
+                   # its source).
+                   "docs/capacity.md",
+                   # #3329: the same guard pins the write-concurrency figure in the
+                   # self-hosted quickstart (and `.env.example`, which falls through to a
+                   # FULL selection). `docs/` is in NON_PYTHON_PREFIXES, so a
+                   # quickstart-only diff would otherwise select NOTHING and leave the
+                   # figure unpinned in the file a self-hoster actually reads.
+                   "docs/quickstart-selfhosted.md",
+                   # #3329: the guard DERIVES the published write-concurrency figure
+                   # from this test file's own loop bound, so a change to it can
+                   # invalidate the prose the guard pins. Without this entry a
+                   # `tests/test_embedded_concurrency.py`-only diff matched only
+                   # the `tests/` -> `core` fallback and did NOT select
+                   # `test_capacity_page.py` — a PR that bumped the coverage to
+                   # six writers and left the docs stale merged green, and the
+                   # drift surfaced only on the post-merge `push` full run (the
+                   # #3442 shape). Same #1349/#3332/#3616 class: the derived
+                   # source needs the same reachability guarantee as the docs it
+                   # feeds (#8492).
+                   "tests/test_embedded_concurrency.py",
                    # #3524: `test_oauth_consent_bridge.py` also pins the two auth
                    # records its subject is specified in — the consent bridge spec
                    # (`docs/engineering/auth/consent-identity-bridge.md`) and the

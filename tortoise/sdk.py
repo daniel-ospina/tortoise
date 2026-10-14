@@ -104,6 +104,8 @@ from . import monitoring
 from .retrieval_metering import metered_query as _metered_query
 from . import file_indexer  # noqa: F401 — binds the classifier/identity module (§4.4); sourceKind registration is registry-owned (source_credibility.SOURCE_KIND_DEFAULTS)
 from .projection import FalkorProjection
+# #7951 §17.1: the single-writer scope the live doors open around their fold.
+from .projection import _live_write_scope
 from .projection.entities import (  # #3998: the declared :Source surface
     _SOURCE_NODE_PROP_NAMES,
     _SOURCE_SERVER_MANAGED_PROPS,
@@ -2670,8 +2672,7 @@ _GRAPH_EVENT_TYPES = frozenset({
 #   2. POST-APPLY-SNAPSHOT PAYLOAD (the one real apply-first). When the record
 #      cannot be constructed until the fold has produced it, there is no
 #      pre-fold record to append. The dominant case is `create_point`, whose
-#      `PointAdded` payload IS `get_point(pid)` — the applied node — and whose
-#      canonical id can be an apply result (dedup / name MERGE). Such a site
+#      `PointAdded` payload IS `get_point(pid)` — the applied node. Such a site
 #      applies first and inherits window (a); the window closes only at §17.1's
 #      one atomic write. A site that CAN form its record before the fold MUST
 #      NOT take this exception.
@@ -5124,6 +5125,19 @@ class TortoiseSDK:
                 self._proj = FalkorProjection.from_uri(self._db_uri, graph_name=graph_name)
             else:
                 self._proj = FalkorProjection(self._db_path, graph_name=graph_name)
+            # #7951 §17.1: this projection is the DERIVED CACHE OF A JOURNAL
+            # whenever one is configured, so it is under the single-writer
+            # guard — a fold or a mutating raw-query on it is refused unless a
+            # live door or a replay engine declared itself. Binding HERE arms
+            # every path that reaches the projection THROUGH `_get_proj`,
+            # without naming any of them. It does NOT reach a caller that
+            # assigns `_proj` directly and never calls this method: the
+            # docker-URI MCP lane at `mcp_server.py:985`
+            # (`_sdk._proj = _proj`) is journal-less by construction, so a bind
+            # there is a provable no-op (its own comment records this), and the
+            # `_projection_for(target)` assignments in `__main__.py` hand the
+            # SDK a projection that was never bound either.
+            self._proj._bind_journal(self._event_log_path)
             # (B) #2952: explicit embedder warm-up at ENGINE INIT —
             # best-effort, non-fatal, and non-blocking (daemon thread) so a
             # load failure surfaces ONCE here instead of masquerading as a
@@ -5694,7 +5708,13 @@ class TortoiseSDK:
                 # `_emit_event` already logged at ERROR and incremented
                 # `tortoise_journal_write_failures_total`.
                 return
-        proj.apply(event)
+        # #7951 §17.1: the fold runs inside the live-write scope. The append
+        # above has already COMMITTED, so the ordering contract is
+        # journal-then-cache by construction; a `proj.apply` reached from
+        # anywhere BUT these live doors (or a replay) is refused by
+        # `FalkorProjection.apply`.
+        with _live_write_scope("chokepoint"):
+            proj.apply(event)
 
     def create_point(self, kind: str, content: str, *, is_episodic: bool | None = None,
                       credibility: str | int | float | None = None,
@@ -9275,11 +9295,14 @@ class TortoiseSDK:
         # `update_point(content=…)` re-encodes the embedding (#4208) and the
         # merge below would store it as a plain Cypher `List` — no `vecf32`,
         # no clear. `typeof` then flips `Vectorf32` → `List` on ONE content
-        # edit, and `search_engine`'s per-row dense leg
-        # (`vec.euclideanDistance(n.embedding, …)`) raises
-        # "Type mismatch: expected Null or VectorF32 but was List" for the
-        # WHOLE `MATCH` — so one edited Point degrades the entire Point dense
-        # leg to FTS-only recall. That is the #4521 class on the LIVE path
+        # edit: a bare `List` node is not in the HNSW index at all, so it is
+        # silently MISSING from the index-served Point dense leg (#8429) — the
+        # write seam exists so a server-owned vector is always the typed,
+        # indexable shape. (#8316 has since normalised a right-width `List` at
+        # the READ boundary, so the "expected Null or VectorF32 but was List"
+        # abort this comment used to cite no longer happens for the right-width
+        # case; a wrong-width or non-numeric value still aborts the MATCH —
+        # #8430.) That is the #4521 class on the LIVE path
         # (#4521 / PR #7740 fixed only the replay's `_revise_point`). The
         # derived vector is SERVER-owned, so it is cast and CLEARED first,
         # exactly like `_revise_point`: `vecf32()` alone is not enough,
@@ -9794,11 +9817,18 @@ class TortoiseSDK:
         ``_supersede_window_end``. See docs/ONTOLOGY.md §4.7 (``validTo``).
 
         Transfers all edges from the old point to the new point:
-          - Operator edges (IMPL, NAND, hasPart) with idx
+          - Operator edges (IMPL, NAND, hasPart) with idx, AND their reverse
+            ``(support)-[:INPUT]->(operator)`` mirrors (#6180 — the mirror IS
+            the operator's support source, so it must travel with its typed
+            edge; see the 2a / 2a-INPUT blocks).
           - Plain structural edges (aboutSubject, aboutObject, aboutAction,
             aboutEvent, aboutPoint, aboutDocument, extractedFrom, etc.)
-        Preserves edge type and idx (source vs target position).
-        Leaves the old point outdated with only the CORRECTS edge from the new point.
+        Preserves edge type and idx (source vs target position). Every
+        transfer MERGEs, so an edge the successor already carries (a caller
+        wired the successor first) collapses onto the existing one instead of
+        doubling. Leaves the old point outdated with only the CORRECTS edge
+        from the new point. ``edges_transferred`` counts the PRIMARY edges
+        (operator/direct/structural); the INPUT mirrors ride along uncounted.
         """
         from datetime import datetime, timezone
         proj = self._get_proj()
@@ -9832,7 +9862,7 @@ class TortoiseSDK:
         #    a failure leaves the graph untouched.
         edges_result = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[r]->(old:Point {id:$old_id}) "
-            "RETURN op.id, type(r), r.idx, op.label",
+            "RETURN op.id, type(r), r.idx, op.label, ID(r)",
             params={"old_id": old_id},
         )
         from .security import validate_rel_type
@@ -9986,10 +10016,30 @@ class TortoiseSDK:
 
         # 2a. Transfer operator edges (IMPL, NAND, hasPart) — preserve provenance
 
+        # #6180: collect the INPUT mirrors BEFORE any mutation, beside the
+        # typed edges (the #329 collect-then-mutate discipline).
+        # ``(support)-[:INPUT {idx}]->(operator)`` is the operator's SUPPORT
+        # SOURCE: why.py::_SUPPORT_OP_CYPHER reads
+        # ``(sup)-[INPUT {idx:0}]->(op)-[:IMPL]->(n)`` and EP's factor
+        # extraction reads the same INPUTs. Leaving the mirror on the dead
+        # point had both effects the issue reports — the replacement's
+        # why/support chain went empty, and the superseded point kept
+        # exerting influence through the operator. Driven by the INPUT edges
+        # themselves (not by the typed-edge loop) so an operator whose
+        # op_type carries no typed edge still transfers its support source,
+        # and the rebuild pass-2b leg can mirror this query exactly.
+        input_rows = proj.g.query(
+            "MATCH (old:Point {id:$old_id})-[ri:INPUT]->"
+            "(op:Point {is_operator:true}) "
+            "RETURN op.id, ri.idx, ID(ri), op.label",
+            params={"old_id": old_id},
+        ).result_set
+
         transferred = 0
         for row in edges_result.result_set:
             op_id, edge_type, idx = row[0], row[1], row[2]
             op_label = row[3] if len(row) > 3 else None
+            rid = row[4] if len(row) > 4 else None
             if op_label == "alreadyDecided":
                 # #1080 review: dedup context edges must NOT be re-pointed at
                 # the replacement — an alreadyDecided IMPL on the superseded
@@ -10000,19 +10050,80 @@ class TortoiseSDK:
                     op_id, old_id,
                 )
                 continue
-            # Create new edge: operator → new point (same idx preserves source/target position)
+            # Create new edge: operator → new point (same idx preserves
+            # source/target position). #6180: MERGE, not CREATE — a caller
+            # that pre-wired the shared edge onto the successor (the
+            # successor-first write ordering the #6180 report reproduces) got
+            # a SECOND parallel edge here, inflating the operator's evidence
+            # weight while passing every "is the edge there?" check. idx
+            # rides the MERGE pattern, so the two edges
+            # create_operator(op, old, [old]) mints (idx 0 and idx 1) stay
+            # distinct and both transfer.
+            #
+            # #6180 null-idx leg: an operator edge may carry NO idx at all —
+            # `mitigate_operator` writes `(m)-[:IMPL]->(op)` and
+            # `(op)-[:mitigated_by]->(m)` with no idx property, so `r.idx` is
+            # null here. `MERGE … {idx:null}` is REFUSED by FalkorDB ("Cannot
+            # merge node using null property value") and a `{idx:null}` MATCH
+            # never matches, so the null class must merge on the bare pattern
+            # (type + endpoints), exactly as the 2a-DIRECT leg below does.
+            if idx is None:
+                proj.g.query(
+                    f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$new_id}}) "
+                    f"MERGE (op)-[:{edge_type}]->(new)",
+                    params={"op_id": op_id, "new_id": new_id},
+                )
+            else:
+                proj.g.query(
+                    f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$new_id}}) "
+                    f"MERGE (op)-[:{edge_type} {{idx:$idx}}]->(new)",
+                    params={"op_id": op_id, "new_id": new_id, "idx": idx},
+                )
+            # Delete the old edge by IDENTITY, never by an `{idx:$idx}` pattern:
+            # at idx null such a pattern matches nothing (the edge would be
+            # stranded), and even at a known idx the identity is the precise
+            # key. The 2a-INPUT leg and the rebuild replay already delete by
+            # `ID(r)`; 2a now matches them.
             proj.g.query(
-                f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$new_id}}) "
-                f"CREATE (op)-[:{edge_type} {{idx:$idx}}]->(new)",
-                params={"op_id": op_id, "new_id": new_id, "idx": idx},
-            )
-            # Delete old edge (match by idx for precision)
-            proj.g.query(
-                f"MATCH (op:Point {{id:$op_id}})-[r:{edge_type} {{idx:$idx}}]->(old:Point {{id:$old_id}}) "
-                f"DELETE r",
-                params={"op_id": op_id, "idx": idx, "old_id": old_id},
+                f"MATCH (op:Point {{id:$op_id}})-[r:{edge_type}]->"
+                f"(old:Point {{id:$old_id}}) "
+                f"WHERE ID(r) = $rid DELETE r",
+                params={"op_id": op_id, "old_id": old_id, "rid": rid},
             )
             transferred += 1
+
+        # 2a-INPUT (#6180): the operator's reverse INPUT mirror follows its
+        # support source onto the successor. MERGE, like 2a — a successor
+        # that already carries the mirror must not get a second one. The
+        # alreadyDecided carve-out mirrors 2a: an operator deliberately kept
+        # attached to the dead prior keeps its INPUT there too.
+        for row in input_rows:
+            op_id, idx = row[0], row[1]
+            rid = row[2]
+            op_label = row[3] if len(row) > 3 else None
+            if op_label == "alreadyDecided":
+                continue
+            # #6180 null-idx leg: the mirror may carry no idx (see 2a) — merge
+            # on the bare pattern then, because `{idx:null}` is refused by
+            # MERGE and never matched by MATCH.
+            if idx is None:
+                proj.g.query(
+                    "MATCH (new:Point {id:$new_id}), (op:Point {id:$op_id}) "
+                    "MERGE (new)-[:INPUT]->(op)",
+                    params={"new_id": new_id, "op_id": op_id},
+                )
+            else:
+                proj.g.query(
+                    "MATCH (new:Point {id:$new_id}), (op:Point {id:$op_id}) "
+                    "MERGE (new)-[:INPUT {idx:$idx}]->(op)",
+                    params={"new_id": new_id, "op_id": op_id, "idx": idx},
+                )
+            proj.g.query(
+                "MATCH (old:Point {id:$old_id})-[ri:INPUT]->"
+                "(op:Point {id:$op_id}) "
+                "WHERE ID(ri) = $rid DELETE ri",
+                params={"old_id": old_id, "op_id": op_id, "rid": rid},
+            )
 
         # 2a-DIRECT (epic #902 §8 / plan §5.3 review fix): transfer
         # OPERATOR-LESS direct IMPL/NAND edges incident to the superseded
@@ -20009,6 +20120,7 @@ class TortoiseSDK:
             SearchResult, SearchScores,
             search_provenance_enabled,
             subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,
+            RELATIONSHIPS_UNAVAILABLE,
             filter_by_relationship, filter_by_traversal_predicate,
             expand_structural_hops,
             _recency_factors,
@@ -20902,7 +21014,18 @@ class TortoiseSDK:
         # 7.5. Fetch relationships for result Points (Point only) — bounded,
         #      state-centric decoration (#1353 D2/D3/D4; D12 keeps the shared
         #      unbounded get_relationships for topic_summarization).
+        #      #6971: ``point_relationships`` is a ``RelationshipDecoration``
+        #      whose ``decoration_error`` is set when the query body raised. Read
+        #      it BEFORE building hits: the all-empty seed is then LABELLED below
+        #      rather than read as "no relationships". ``getattr`` so a plain
+        #      dict from a stand-in still degrades to "no failure recorded".
         point_relationships = get_relationships_bounded(graph, result_ids) if entity_type == "point" else {}
+        decoration_failed = bool(getattr(point_relationships, "decoration_error", ""))
+        relationships_unavailable = (
+            f"{RELATIONSHIPS_UNAVAILABLE}; cause: "
+            f"{getattr(point_relationships, 'decoration_error', '')}"
+            if decoration_failed else ""
+        )
         # 7.6. Promoted epistemic state (status/superseded_by/supersedes/subject) — #1353 D8/D10
         point_state = fetch_point_epistemic_state(graph, result_ids) if entity_type == "point" else {}
 
@@ -20951,6 +21074,10 @@ class TortoiseSDK:
                 match_source=match_source,
                 ep=ep,
                 relationships=point_relationships.get(pid, []),
+                # #6971: the emptiness of ``relationships`` above is a FAILED
+                # read, not a sparse point — say so on every hit (the failure
+                # is a property of the batch decoration).
+                relationships_unavailable=relationships_unavailable,
                 status=point_state.get(pid, {}).get("status", "")
                 or pt.get("status", ""),
                 superseded_by=point_state.get(pid, {}).get("superseded_by")
@@ -24037,7 +24164,14 @@ class TortoiseSDK:
         if event_type == "DocumentCreated":
             self._journal_entity_event(event)
         # Apply through projection (writes to FalkorDB)
-        apply_result = proj.apply(event)
+        # #7951 §17.1: the live-write scope. `_create_entity` is the recorded
+        # apply-first deviation (its Object/Subject/Event registration blocks
+        # fold before they journal — contract exception 2's neighbour), so it
+        # declares itself here rather than silently bypassing the gate. The
+        # deviation itself is unchanged and still recorded at the module-top
+        # contract.
+        with _live_write_scope("create_entity"):
+            apply_result = proj.apply(event)
         if label == "Event":
             # #2061: journal EventRecorded so SDK-created Events survive
             # rebuild_all (fold parity for Event-input operators).
@@ -26688,7 +26822,10 @@ class TortoiseSDK:
             # Append failed → not committed → do NOT fold. `_emit_event` has
             # already logged at ERROR and counted the failure.
             return
-        proj.apply(ev)
+        # #7951 §17.1: document writes are journal-first (`_emit_event` above),
+        # so the fold runs inside the live-write scope.
+        with _live_write_scope("doc_write"):
+            proj.apply(ev)
 
     def _embedding_repair_attempt(self, event_id, frontmatter, text, title,
                                   repair_backoff, marker) -> tuple:
