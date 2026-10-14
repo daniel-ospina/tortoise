@@ -364,6 +364,14 @@ surfaces:
   # `core` fallback — a one-surface registration would skip the suite whenever
   # the other half of the diff changed.
   - test_activation_scorecard.py
+  # #3839 (lane B7): the retention indicator (GET /v1/internal/retention/cohort).
+  # Registered under `api` AND `core` for the same reason as
+  # test_activation_scorecard.py above: the endpoint lives in
+  # tortoise/hosted_api.py (selects `api`) while tortoise/retention_indicator.py
+  # matches no named pattern and falls to the `core` fallback — a one-surface
+  # registration would skip the suite whenever the other half of the diff
+  # changed.
+  - test_retention_indicator.py
   - test_audit.py
   # #2938: the eight battery members previously dual-registered here (arms,
   # cli, config, determinism, enums, run, runner, setup) were verified per
@@ -1427,6 +1435,7 @@ surfaces:
   - test_about_event_untangle.py
   - test_action_endpoints_dual_auth.py
   - test_activation_scorecard.py   # #B7: activation scorecard (with the `api` half — see there)
+  - test_retention_indicator.py   # #3839: retention indicator (with the `api` half — see there)
   - test_agent_ops_pack.py
   - test_agent_ops_supersede.py
   - test_alert_store.py
@@ -4869,6 +4878,7 @@ durations:
   test_reaper_orphan.py: 0.1  # unmeasured
   test_redis_guard.py: 0.5  # unmeasured
   test_rest_surface_inventory.py: 4.8  # unmeasured (new file, #3875 — no CI junit yet)
+  test_retention_indicator.py: 3.0  # unmeasured (new file, #3839 — no CI junit yet; hermetic: pure fold + a fake control plane, one embedded TestClient boot)
   test_resume_gate_parity.py: 0.1  # unmeasured
   test_sdk.py: 7.9  # unmeasured
   test_sdk_group3.py: 2.7  # unmeasured
