@@ -764,8 +764,12 @@ function SettingsTab(props) {
             </ul>
             {/* #2002 (W6): delete action error surfaces under the list (row-
                 level, never a fabricated success) + the transcript panel for
-                the open session (loading / honest error / transcript body). */}
-            {sessionsActionError && (
+                the open session (loading / honest error / transcript body).
+                #3885 (e) review P3-2: while the delete dialog is armed the same
+                reason renders INSIDE it (the backdrop paints over this line),
+                so this copy is suppressed then — one announcement, always on
+                the visible surface. */}
+            {sessionsActionError && !confirmSessionId && (
               <p className="error" role="alert" style={{ marginTop: '0.5rem' }}>{sessionsActionError}</p>
             )}
             {openSessionId && (
@@ -783,15 +787,20 @@ function SettingsTab(props) {
                 the graph-delete pattern (#2701) and applying to EVERY storage
                 mode — the gate is about the consequence, not about who holds
                 the bytes. Same `.graph-delete-modal` CSS vocabulary and the
-                same `deleteTypedMatches` gate as the graph modal; the required
-                word and the consequence lines come from capturedSessions.js so
-                copy, gate and tripwire cannot drift. The dialog renders only
+                same `deleteTypedMatches` gate as the graph modal, but the required
+                word is PASSED IN from capturedSessions.js (DELETE_CONFIRM_WORD)
+                so the word rendered and the word required are one value; the
+                consequence lines come from the same module, so copy and
+                tripwire cannot drift. A failure keeps the dialog armed AND
+                renders its reason INSIDE the dialog — the page-level banner
+                sits under this backdrop, so a reason left there would be
+                unreadable while the gate stays up. The dialog renders only
                 while its session is still listed, so a successful DELETE
                 closes it and a failed one keeps it armed. */}
             {confirmSessionId && (() => {
               const ds = sessions.find((x) => String(x.id) === confirmSessionId)
               if (!ds) return null
-              const sessionTypedOk = deleteTypedMatches(sessionConfirmTyped)
+              const sessionTypedOk = deleteTypedMatches(sessionConfirmTyped, DELETE_CONFIRM_WORD)
               const sessionBusy = deletingSessionId === confirmSessionId
               return (
                 <div className="modal-backdrop" onClick={() => { if (!sessionBusy) { setConfirmSessionId(null); setSessionConfirmTyped('') } }}>
@@ -824,6 +833,13 @@ function SettingsTab(props) {
                         onClick={() => onDeleteSession(ds.id)}
                       >{sessionBusy ? 'Deleting…' : 'Delete session'}</button>
                     </div>
+                    {/* #3885 (e) review P3-2: the failure reason renders HERE,
+                        not only under the list — `.modal-backdrop` is a fixed,
+                        70%-opaque, z-60 layer, so a reason painted in the page
+                        flow is unreadable while the gate is still armed. */}
+                    {sessionsActionError && (
+                      <p className="error" role="alert" style={{ margin: '0.8rem 0 0' }}>{sessionsActionError}</p>
+                    )}
                   </div>
                 </div>
               )

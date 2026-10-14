@@ -164,8 +164,11 @@ export function kindBadgeClass(kind) {
 // (#2701), not a native `window.confirm`. The owner's requirement covers EVERY
 // storage mode (local / hosted-by-us / the user's own store): the confirmation
 // is about the CONSEQUENCE, not about who holds the bytes. The required word
-// and the consequence lines live here (one place) so the modal, its guard and
-// its tripwire read the same source and cannot drift.
+// and the consequence lines live here (one place): the modal RENDERS the word
+// from DELETE_CONFIRM_WORD and passes that same constant into the gate
+// (`deleteTypedMatches(typed, DELETE_CONFIRM_WORD)`), and its tripwire reads
+// the constant too — so the word shown, the word required and the word pinned
+// cannot drift apart.
 export const DELETE_CONFIRM_WORD = 'delete'
 
 // What the delete actually does, in the order the user meets it. The last

@@ -303,11 +303,17 @@ export function trashEraseLabel(deletedAt, nowIso) {
 }
 
 // ── #2701 delete-modal derivations (pure) ────────────────────────────────
-// The type-to-confirm gate: the user must literally TYPE the word "delete"
-// (case-insensitive after trim) before the destructive Confirm enables — a
-// strong accidental-delete deterrent on top of the 7-day Trash window.
-export function deleteTypedMatches(typed) {
-  return (typed || '').trim().toLowerCase() === 'delete'
+// The type-to-confirm gate: the user must literally TYPE the word the dialog
+// DISPLAYS (case-insensitive after trim) before the destructive Confirm
+// enables — a strong accidental-delete deterrent on top of the 7-day Trash
+// window. The word is a PARAMETER (default 'delete', the graph modal's
+// literal) rather than a second hardcoded literal, so a dialog that renders
+// its required word from a shared constant can pass that same constant here
+// (#3885 e). Two independent literals — one rendered, one required — can drift,
+// and a drift silently makes the destructive path unreachable: the dialog
+// tells the user to type one word while the gate demands another.
+export function deleteTypedMatches(typed, word = 'delete') {
+  return (typed || '').trim().toLowerCase() === (word || 'delete').trim().toLowerCase()
 }
 
 // #2307 (post-#2083 C7 review): role-aware [Keys] panel empty copy ─────────

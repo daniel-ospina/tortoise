@@ -68,8 +68,8 @@ test('#3885(e): the raw delete is armed by a type-to-confirm modal, never window
 })
 
 test("#3885(e): the confirm button is gated on the typed word via the shared deleteTypedMatches helper", () => {
-  assert.match(sessionModal, /const sessionTypedOk = deleteTypedMatches\(sessionConfirmTyped\)/,
-    'the modal must compute the gate from the typed input via the pure helper (mirroring the graph modal)')
+  assert.match(sessionModal, /const sessionTypedOk = deleteTypedMatches\(sessionConfirmTyped, DELETE_CONFIRM_WORD\)/,
+    'the modal must pass the word it RENDERS into the shared gate — a separate hardcoded literal in the gate is the drift review P3-1 named')
   assert.match(sessionModal, /disabled=\{!sessionTypedOk \|\| sessionBusy\}/,
     'Confirm must stay disabled until the user types the required word — the whole point of the strong gate')
   assert.match(sessionModal, /e\.key === 'Enter' && sessionTypedOk && !sessionBusy/,
@@ -111,4 +111,19 @@ test('#3885(e): the dialog disarms when its session leaves the list (success) an
     'the modal must resolve its session from the LIVE list — a successful DELETE removes the row and closes it')
   assert.match(sessionModal, /if \(!ds\) return null/,
     'a session no longer in the list must close the dialog (no stale armed gate)')
+})
+
+test('#3885(e): a failed delete renders its reason INSIDE the armed dialog (review P3-2)', () => {
+  // `.modal-backdrop` is `position: fixed; inset: 0; z-index: 60` at 70%
+  // opacity, so a reason painted in the page flow is unreadable for as long as
+  // the gate stays armed. Before this fix a failed delete looked like a dialog
+  // that did nothing.
+  assert.match(sessionModal, /\{sessionsActionError && \(/,
+    'the armed dialog must render the failure reason — the page-level banner sits under the backdrop')
+  assert.match(sessionModal, /role="alert"[^>]*>\{sessionsActionError\}/,
+    'the in-dialog reason must be announced (role=alert), not only painted')
+  // …and the page-level copy must not double-announce the same reason while
+  // armed: exactly one visible, announced surface per failure.
+  assert.match(mainJsx, /\{sessionsActionError && !confirmSessionId && \(/,
+    'the page-level banner must yield to the in-dialog copy while the dialog is armed')
 })
