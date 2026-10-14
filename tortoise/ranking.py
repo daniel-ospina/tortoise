@@ -73,8 +73,24 @@ DEFAULT_HALF_LIFE_DAYS = 30.0
 # W4-b (issue #2102): the bounded contested-relevance boost, in graph-boost
 # space (weighted by graph_boost_weight in the final score).  Small by
 # design — it tips relevance-matched contested claims ABOVE their
-# uncontested twins (E2E-1, pinned twin deltas < the boost effect), it does
-# not reorder the tail.  Strictly > 0 so a boost never lowers a score.
+# uncontested twins (E2E-1) while the twins' FUSED relevance difference stays
+# BELOW the boost's final-score contribution
+# (W4_CONTESTED_BOOST × graph_boost_weight = 0.0175); it does not reorder the
+# tail.  Strictly > 0 so a boost never lowers a score.
+#
+# THAT CONDITION IS NOT GUARANTEED ON A FUSED READ (#7704).  Content-identical
+# twins tie on EVERY leg, and each leg's own ``ORDER BY score DESC,
+# node.<id> ASC`` tie-break (#3019) hands the lower-ULID twin rank 0.  RRF is
+# rank-based (``1/(k + rank + 1)``), so the post-fusion min-max normalization
+# converts that ONE-rank difference into a relevance gap that grows as the
+# pool shrinks — measured on the shipped hybrid path: 0.0188 of final score on
+# the 4-row E2E-1 fixture (just above the 0.0175 boost, so the contested twin
+# ranks BELOW its twin), 0.254 on a 3-row pool.  The guarantee therefore holds
+# on a SINGLE-LEG read (where both twins score identically and the boost is
+# the sole differentiator), and on a fused read only while the fused relevance
+# delta stays under the boost effect.  Sizing the boost, changing the fusion
+# tie semantics, or restating the promise is a product decision — tracked on
+# #7704, not decided here.
 W4_CONTESTED_BOOST = 0.05
 # Significant-token floor: query/counter-claim overlap needs tokens ≥ this
 # many alphanumerics (1-3 char function words and subword noise never count;
