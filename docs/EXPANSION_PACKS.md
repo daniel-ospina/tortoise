@@ -30,7 +30,7 @@ ontology:
   extends: core              # always 'core'
   objectKinds: [contract]    # entity nouns → Object nodes
   pointKinds: [rationale]    # claims/decisions → Point nodes
-  eventKinds: [ruleRevised]  # what happened → Event nodes
+  eventKinds: [ruleRevised, contractSigned]  # what happened → Event nodes
   documentKinds: []          # document subclasses
   subclassOf: {}             # e.g. {epic: Project}
   equivalentTo: {}           # e.g. {issue: [pm:issue]} — cross-pack identity

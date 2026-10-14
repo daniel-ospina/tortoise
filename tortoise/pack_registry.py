@@ -1375,11 +1375,22 @@ class PackRegistry:
                     # published by `load_all` into `lifecycle_warnings` (the
                     # PackManifest does not exist yet at this point).
                     if "statuses" in spec or "folds" in spec:
+                        # Filter to the string entries the ontology loop above
+                        # has already validated: an unhashable entry here
+                        # (``eventKinds: [[1]]``) would make ``set()`` raise
+                        # ``TypeError`` out of ``_validate``, whose contract is
+                        # to RETURN its error list. The invalid value is
+                        # already recorded as an ``ontology.<field>`` error by
+                        # the loop at the top of this section.
                         _decl_errors, _decl_warnings = validate_status_decl(
                             kind, spec,
                             namespace=ns,
-                            declared_event_kinds=set(ont.get("eventKinds", [])),
-                            declared_object_kinds=set(ont.get("objectKinds", [])),
+                            declared_event_kinds={
+                                k for k in ont.get("eventKinds", [])
+                                if isinstance(k, str) and k},
+                            declared_object_kinds={
+                                k for k in ont.get("objectKinds", [])
+                                if isinstance(k, str) and k},
                         )
                         errors.extend(_decl_errors)
                         if _decl_warnings:

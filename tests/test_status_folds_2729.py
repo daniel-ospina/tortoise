@@ -160,6 +160,37 @@ class TestStatusDeclValidation:
                         "when": "always"}]})
         assert any("unknown key" in e for e in errors)
 
+    def test_non_string_fold_key_is_a_diagnostic_not_a_crash(self):
+        """A raw YAML fold map can carry a non-string key (``1: x``). The
+        unknown-key path used to ``sorted()`` a mixed key set and ``join()``
+        it, raising ``TypeError`` out of a function whose contract is
+        ``-> (errors, warnings)``. It must return the diagnostic instead.
+        (Pre-fix this raises: `'<' not supported between 'str' and 'int'`.)"""
+        errors, _ = self._validate(
+            {"statuses": ["released"],
+             "folds": [{1: "x", "zzz": "y",
+                        "event": "trancheReleased",
+                        "status": "released"}]})
+        assert any("non-string key" in e for e in errors), errors
+        assert any("unknown key" in e for e in errors), errors
+        # The message must render, not blow up, with the mixed key set.
+        assert any("zzz" in e for e in errors), errors
+
+    def test_non_string_declared_event_kind_is_a_diagnostic_not_a_crash(self):
+        """``ontology.eventKinds: [1]`` reaches the orphan-fold message, which
+        used to ``join()`` the raw declared set. It must render the diagnostic
+        rather than raise ``TypeError: sequence item 0: expected str``.
+        (Pre-fix this raises on the orphan-fold f-string.)"""
+        errors, _ = validate_status_decl(
+            "tranche",
+            {"statuses": ["released"],
+             "folds": [_decl("nope", "released")]},
+            namespace="demo",
+            declared_event_kinds={1},
+            declared_object_kinds={"tranche"})
+        assert any("is not an event kind declared by this pack" in e
+                   for e in errors), errors
+
     def test_shared_vocabulary_overlap_is_a_warning_not_an_error(self):
         errors, warnings = self._validate(
             {"statuses": ["open", "done"],
@@ -208,6 +239,23 @@ class TestRegistryWiring:
         errors = reg._validate(raw)
         assert not any("statuses" in e for e in errors), errors
         assert "demo" in reg._pending_lifecycle_warnings
+
+    def test_non_string_event_kind_entry_is_an_error_not_a_crash(self):
+        """``ontology.eventKinds: [1]`` with a declared fold: the ontology loop
+        already records the invalid value, but the declaration check used to
+        ``set()``/``sorted()`` the raw list and raise out of ``_validate``.
+        (Pre-fix this raises ``TypeError`` in the orphan-fold message.)"""
+        raw = self._manifest({"tranche": {
+            "statuses": ["pending", "released"],
+            "folds": [_decl("trancheReleased", "released")]}})
+        raw["ontology"]["eventKinds"] = [1]
+        errors = PackRegistry("/tmp/nonexistent")._validate(raw)
+        assert any("invalid kind value" in e for e in errors), errors
+        # With the numeric entry rejected, the fold's event genuinely has no
+        # valid declaration to resolve against — an orphan diagnostic, not a
+        # crash or a silent pass.
+        assert any("not an event kind declared by this pack" in e
+                   for e in errors), errors
 
 
 # ── 2. Built-in parity ───────────────────────────────────────────────────

@@ -221,11 +221,26 @@ def validate_status_decl(
                     f"'event' and 'status'"
                 )
                 continue
-            unknown = sorted(set(fold) - VALID_FOLD_KEYS)
+            # ``fold`` is a raw YAML map, so a key can be a non-string
+            # (``1: x``). Sorting a mixed key set raises ``TypeError`` and
+            # ``', '.join()`` raises on a non-string element — out of a
+            # function whose contract is ``-> (errors, warnings)``. Coerce at
+            # the message boundary and record the non-string key as its own
+            # diagnostic, exactly as the ``statuses`` loop does for a
+            # non-string entry.
+            unknown = sorted((k for k in set(fold) - VALID_FOLD_KEYS),
+                             key=str)
+            non_string_keys = [k for k in unknown if not isinstance(k, str)]
+            if non_string_keys:
+                errors.append(
+                    f"kindDefs '{kind}': folds[{i}] has non-string key(s) "
+                    f"{', '.join(repr(k) for k in non_string_keys)} — a fold "
+                    f"key must be a string"
+                )
             if unknown:
                 errors.append(
                     f"kindDefs '{kind}': folds[{i}] has unknown key(s) "
-                    f"{', '.join(unknown)} (allowed: "
+                    f"{', '.join(str(k) for k in unknown)} (allowed: "
                     f"{', '.join(sorted(VALID_FOLD_KEYS))})"
                 )
             event = fold.get("event")
@@ -246,7 +261,7 @@ def validate_status_decl(
                 errors.append(
                     f"kindDefs '{kind}': folds[{i}] 'event' {event!r} is not "
                     f"an event kind declared by this pack (declared: "
-                    f"{', '.join(sorted(declared_event_kinds)) or 'none'}) — "
+                    f"{', '.join(str(k) for k in sorted(declared_event_kinds, key=str)) or 'none'}) — "
                     f"an orphan fold key would never fire"
                 )
             if isinstance(event, str) and event:
