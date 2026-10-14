@@ -32012,7 +32012,8 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
       (``_project_items``). The 600-item fixture that could not complete
       within the 10 s transport bound now leaves the loop free.
     * all ``_update_onboarding_state`` writes (the legacy-backfill marker, and
-      the single cursor persist shared by the `completed` and `failed` exits)
+      the single cursor persist shared by EVERY walk exit — `completed`,
+      `failed`, and the `BaseException` exits that skip both `except` arms)
       ride the index job's OWN pool (``_run_off_loop(_INDEX_EXECUTOR, ...)`` — NOT the
       loop's shared default executor, whose few workers the walk would
       otherwise hold against every other tenant) with ``_echo=False`` (their
@@ -32020,7 +32021,11 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
       BOUND: a bounded ``wait_for`` cancels only the await, never the worker
       (CPython #87185), so it would abandon a worker MID-WRITE — the #2863
       hazard #4625's bounded-mutation rule names. That is the explicit
-      bound/no-bound decision this issue requires.
+      bound/no-bound decision this issue requires. The persist and the
+      terminal status write both live in the walk try's ``finally`` (so a
+      cancelled run still persists its cursors, #1792 P2), and a RAISING
+      persist is caught and folded into the terminal status — never allowed to
+      wedge the job at ``started``.
     * WHAT STAYS ON THE LOOP, and why it is not an omission: the
       ``_make_sdk`` construction and the single ``org_sdk._get_proj()`` attach
       handed to ``backfill_legacy_closed``; ``index_repo``'s own attach too
@@ -32104,10 +32109,13 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
               "repos_processed": 0, "errors": [], "quota_hit": False,
               "backfill_minted": 0, "cleared_truncated": False}
     # #4709: the terminal status is DECIDED in the walk try/except and WRITTEN
-    # in the shared tail below, AFTER the single state persist — so no terminal
+    # in that try's `finally`, AFTER the single state persist — so no terminal
     # status (`completed` or `failed`) is ever observable before the cursor is
-    # durable.
-    terminal_status = "completed"
+    # durable. It stays `None` until the walk RETURNS or an `except` arm sets
+    # it: a `BaseException` exit (`asyncio.CancelledError`) reaches the
+    # `finally` with `None`, persists the accumulated cursors, and invents NO
+    # status — the pre-#4709 shape (the job stayed `started`).
+    terminal_status: str | None = None
     terminal_error: str | None = None
     try:
         org_sdk = _make_sdk(namespace=org_id)
@@ -32212,86 +32220,123 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
                  repos_processed=totals["repos_processed"],
                  repos_total=len(walk_repos))
 
-        # NOTE: the terminal status write and the state persist are NOT here —
-        # they are the shared tail below, so that BOTH terminal statuses
-        # (`completed` and `failed`) are written only AFTER the cursor/flags
-        # are durable. See the tail comment.
+        # The terminal status is DECIDED here (a normal return) and written in
+        # the `finally` below, AFTER the single state persist — see that
+        # block's comment for the ordering and the exit coverage.
+        terminal_status = "completed"
     except GitHubFetchError as e:
         # Mid-walk 401/429 / unresolved org (T1-P13 + P2): honest "failed"
         # status with a readable error; the cursor was NOT advanced past
         # unprocessed items (the indexer only returns it for processed
         # items) — a re-run resumes without gaps/dupes (idempotent writes
-        # make overlap harmless). The status itself is written in the shared
-        # tail, AFTER the persist.
+        # make overlap harmless). The status itself is written in the
+        # `finally`, AFTER the persist.
         terminal_status = "failed"
         terminal_error = str(e)
     except Exception as e:
         terminal_status = "failed"
         terminal_error = str(e)
-
-    # #4709: THE single state persist, then the terminal status. Persisting
-    # BEFORE the status write makes `completed` AND `failed` truthful "the run
-    # is over AND its resume point is durable" signals. The persist used to
-    # live only in a `finally` — i.e. AFTER the status was already visible to a
-    # poller — and that window was masked only because the write ran ON the
-    # loop (it blocked the poller's GET). With the write off the loop
-    # (`_run_off_loop(_INDEX_EXECUTOR, ...)`) the window is real for BOTH
-    # statuses: a client that reads state on `completed` (the dashboard,
-    # `tests/test_github_index_lifecycle.py`) or on `failed`
-    # (`test_midwalk_fetch_error_stamps_indexed_at`) can observe the PREVIOUS
-    # cursor and re-walk the whole backlog. `_index_state_updates` is the same
-    # computation the old `finally` used, so the fields persisted are
-    # byte-identical.
-    #
-    # The write is OFF the loop, on the index job's OWN pool
-    # (`_INDEX_EXECUTOR` — not the loop's shared default executor), with NO
-    # BOUND — the bound decision #4625 requires, recorded here. This write
-    # MUTATES the jsonb state via a compare-and-set, and a bounded `wait_for`
-    # cancels only the await, never the worker thread (CPython #87185): it
-    # would abandon a worker MID-WRITE and claim a retryable state it cannot
-    # observe (#2863). So the answer is an unbounded `_run_off_loop` hand-off
-    # (waits for completion). `_echo=False`: the return is DISCARDED here,
-    # which is the documented WRITE-ONLY contract (#4625) — it skips
-    # `_get_onboarding_projection`'s blocking registry probes without changing
-    # what is written.
-    try:
-        await _run_off_loop(
-            _INDEX_EXECUTOR, _update_onboarding_state, org_id, _echo=False,
-            **_index_state_updates(cursors, totals))
-        if terminal_status == "completed":
-            _job(status="completed", progress=100,
-                 points_created=totals["points_created"],
-                 statements_superseded=totals["statements_superseded"],
-                 events_minted=totals["events_minted"],
-                 repos_processed=totals["repos_processed"],
-                 repos_total=len(walk_repos),
-                 issues_beyond_window=totals["issues_beyond_window"],
-                 backfill_minted=totals["backfill_minted"],
-                 quota_hit=totals["quota_hit"],
-                 cleared_truncated=totals["cleared_truncated"],
-                 errors=totals["errors"],
-                 error=None)
-            # #1727 Slice 2 (Task 12, T1-P15): re-run the entity-linking pass
-            # on index COMPLETION — sessions captured before their entities
-            # materialized now resolve (the capture-time links were honest
-            # no-matches then). Owned by the completion hook, never a separate
-            # endpoint.
-            _relink_sessions_after_index(org_id)
-        else:
-            _job(status="failed", error=terminal_error)
     finally:
-        # Evict after an hour (T1-P14: eviction-expired polls render
-        # honestly). P2: the persist above runs for EVERY exit that reaches it
-        # (partial/mid-walk raises included), so the accumulated cursors are
-        # never lost and github_indexed flips True ONLY on real progress
-        # (>=1 repo processed): a 0-repo failure (resolve_repos 404,
-        # pre-walk raise) leaves it untouched so the next run keeps the
-        # ONE-repo bounded first-run pacing (P2, PR #1792).
-        import asyncio as _asyncio
-        _asyncio.get_running_loop().call_later(
-            _INDEX_JOB_EVICT_S,
-            lambda: (_INDEX_JOBS.pop(job_id, None),
-                     _INDEX_JOB_OWNERS.pop(job_id, None)))
+        # ── #4709: THE single state persist, then the terminal status. ──
+        #
+        # Persisting BEFORE the status write makes `completed` AND `failed`
+        # truthful "the run is over AND its resume point is durable" signals.
+        # The persist used to live only in a `finally` — i.e. AFTER the status
+        # was already visible to a poller — and that window was masked only
+        # because the write ran ON the loop (it blocked the poller's GET).
+        # With the write off the loop (`_run_off_loop(_INDEX_EXECUTOR, ...)`)
+        # the window is real for BOTH statuses: a client that reads state on
+        # `completed` (the dashboard, `tests/test_github_index_lifecycle.py`)
+        # or on `failed` (`test_midwalk_fetch_error_stamps_indexed_at`) can
+        # observe the PREVIOUS cursor and re-walk the whole backlog.
+        # `_index_state_updates` is the same computation the old `finally`
+        # used, so the fields persisted are byte-identical.
+        #
+        # The persist AND the status write are in this `finally` — a `finally`
+        # runs on EVERY exit, including the `BaseException` exits
+        # (`asyncio.CancelledError` at shutdown) that neither `except` arm
+        # catches. That is exactly the coverage the pre-#4709 `finally`
+        # persist had (#1792 P2): a cancelled run still persists the cursors
+        # it accumulated and schedules its own eviction. `terminal_status` is
+        # `None` on that exit, so no terminal status is invented (the job
+        # stays `started`, as it did pre-#4709).
+        #
+        # A RAISING persist must not withhold the terminal status —
+        # `_update_onboarding_state` is fail-loud by contract
+        # (`OnboardingStateConflictError` after CAS exhaustion, plus any
+        # control-plane/store error), and `ThreadPoolExecutor.submit` raises
+        # once the pool is shut down. Pre-#4709 the status was written FIRST
+        # and the persist lived in the `finally`; the ordering fix inverted
+        # that, so the raise is caught here and folded into the terminal
+        # status instead of escaping a fire-and-forget task and wedging the
+        # job at `started` for `_INDEX_JOB_STALE_S` (which also blocks the
+        # org's next run via the single-flight claim).
+        #
+        # The write is OFF the loop, on the index job's OWN pool
+        # (`_INDEX_EXECUTOR` — not the loop's shared default executor), with NO
+        # BOUND — the bound decision #4625 requires, recorded here. This write
+        # MUTATES the jsonb state via a compare-and-set, and a bounded
+        # `wait_for` cancels only the await, never the worker thread (CPython
+        # #87185): it would abandon a worker MID-WRITE and claim a retryable
+        # state it cannot observe (#2863). So the answer is an unbounded
+        # `_run_off_loop` hand-off (waits for completion). `_echo=False`: the
+        # return is DISCARDED here, which is the documented WRITE-ONLY
+        # contract (#4625) — it skips `_get_onboarding_projection`'s blocking
+        # registry probes without changing what is written.
+        try:
+            try:
+                await _run_off_loop(
+                    _INDEX_EXECUTOR, _update_onboarding_state, org_id,
+                    _echo=False, **_index_state_updates(cursors, totals))
+            except Exception as e:
+                # Do NOT mask a `BaseException` exit (a propagating
+                # `CancelledError` leaves `terminal_status` None): the persist
+                # failure is only folded into a status that actually exists.
+                if terminal_status is not None:
+                    if terminal_status == "completed":
+                        terminal_status = "failed"
+                    terminal_error = (
+                        f"state persist failed: {e}" if not terminal_error
+                        else f"{terminal_error}; state persist failed: {e}")
+                _logger.warning(
+                    "index state persist failed (team=%s): %s", org_id, e)
+
+            if terminal_status == "completed":
+                _job(status="completed", progress=100,
+                     points_created=totals["points_created"],
+                     statements_superseded=totals["statements_superseded"],
+                     events_minted=totals["events_minted"],
+                     repos_processed=totals["repos_processed"],
+                     repos_total=len(walk_repos),
+                     issues_beyond_window=totals["issues_beyond_window"],
+                     backfill_minted=totals["backfill_minted"],
+                     quota_hit=totals["quota_hit"],
+                     cleared_truncated=totals["cleared_truncated"],
+                     errors=totals["errors"],
+                     error=None)
+                # #1727 Slice 2 (Task 12, T1-P15): re-run the entity-linking
+                # pass on index COMPLETION — sessions captured before their
+                # entities materialized now resolve (the capture-time links
+                # were honest no-matches then). Owned by the completion hook,
+                # never a separate endpoint.
+                _relink_sessions_after_index(org_id)
+            elif terminal_status == "failed":
+                _job(status="failed", error=terminal_error)
+        finally:
+            # Evict after an hour (T1-P14: eviction-expired polls render
+            # honestly). P2: the persist above runs for EVERY exit — partial
+            # and mid-walk raises (`except` arms) AND the `BaseException`
+            # exits that skip them (a cancelled run) — so the accumulated
+            # cursors are never lost, and github_indexed flips True ONLY on
+            # real progress (>=1 repo processed): a 0-repo failure
+            # (resolve_repos 404, pre-walk raise) leaves it untouched so the
+            # next run keeps the ONE-repo bounded first-run pacing (P2, PR
+            # #1792).
+            import asyncio as _asyncio
+            _asyncio.get_running_loop().call_later(
+                _INDEX_JOB_EVICT_S,
+                lambda: (_INDEX_JOBS.pop(job_id, None),
+                         _INDEX_JOB_OWNERS.pop(job_id, None)))
 
 
 def _index_state_updates(cursors: dict, totals: dict) -> dict:

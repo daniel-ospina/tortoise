@@ -1104,8 +1104,9 @@ def _boundary_calls_for(node, callable_name: str) -> list[ast.Call]:
 def _carries_index_state_updates(call: ast.Call) -> bool:
     """True for a hand-off passing ``**_index_state_updates(...)`` (#4709).
 
-    That ``**`` expansion is what identifies the CURSOR persists — the
-    completion path and the ``finally`` fallback. The third
+    That ``**`` expansion is what identifies the CURSOR persist (the single
+    ``_update_onboarding_state`` hand-off inside the walk try's ``finally``,
+    shared by the `completed`, `failed` and `BaseException` exits). The other
     ``_update_onboarding_state`` hand-off passes the legacy-backfill MARKER
     instead, so it must not be allowed to satisfy the ordering assertion: it
     always precedes the status write, making a "some write is before
@@ -1115,6 +1116,37 @@ def _carries_index_state_updates(call: ast.Call) -> bool:
         k.arg is None and isinstance(k.value, ast.Call)
         and _callee_name(k.value.func) == "_index_state_updates"
         for k in call.keywords)
+
+
+#: Timeout wrappers that BOUND a seam. Membership in
+#: ``_UNBOUNDED_OFFLOAD_SEAMS`` is by CALLEE NAME only, so
+#: ``asyncio.wait_for(_run_off_loop(...), timeout=...)`` reads as the unbounded
+#: seam. That is the exact shape the recorded NO-BOUND decision forbids, so the
+#: pins check the seam's ANCESTORS too.
+_BOUND_WRAPPER_CALLEES = frozenset({"wait_for", "timeout"})
+
+
+def _bound_wrapper_around(call: ast.Call, node: ast.AST) -> str | None:
+    """The timeout-wrapper callee enclosing ``call`` as an argument, if any.
+
+    Walks the PARENT chain (AST has no parent pointers) and reports a wrapper
+    whose arguments contain ``call``. A wrapper in the same expression that
+    does NOT contain the call (e.g. a bound on some other await) is ignored.
+    """
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(node):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    current: ast.AST = call
+    while current in parents:
+        parent = parents[current]
+        if isinstance(parent, ast.Call) \
+                and _callee_name(parent.func) in _BOUND_WRAPPER_CALLEES:
+            args = [*parent.args, *(k.value for k in parent.keywords)]
+            if any(current in ast.walk(a) for a in args):
+                return _callee_name(parent.func)
+        current = parent
+    return None
 
 
 def test_run_indexing_residual_is_named_head_on():
@@ -1144,6 +1176,17 @@ def test_run_indexing_residual_is_named_head_on():
         f"bound cancels only the await, never the worker (CPython #87185), so "
         f"it abandons a worker MID-WRITE (#2863); the recorded decision is "
         f"NO BOUND")
+    # `_UNBOUNDED_OFFLOAD_SEAMS` matches by CALLEE NAME, so a bound wrapped
+    # AROUND the seam (`asyncio.wait_for(_run_off_loop(...), timeout=...)`)
+    # reads as the unbounded seam and passes the check above. Check the
+    # seam's ANCESTORS too, or the NO-BOUND decision it claims is unenforced.
+    for _write_call in _boundary_calls_for(node, "_update_onboarding_state"):
+        _wrapper = _bound_wrapper_around(_write_call, node)
+        assert _wrapper is None, (
+            f"#4709: an onboarding write is wrapped in `{_wrapper}` — the "
+            f"recorded decision is NO BOUND (a bound cancels only the AWAIT, "
+            f"never the worker — CPython #87185 — so it abandons a worker "
+            f"MID-WRITE, #2863)")
 
     # #4709 ordering guarantee: the single cursor persist must run BEFORE the
     # terminal status write, for `completed` AND `failed`. Persisting only in
@@ -1280,6 +1323,17 @@ def test_index_repo_projection_walk_is_offloaded():
         "10 s transport bound), rides a BOUNDED seam that would abandon a "
         "mid-write worker (#2863), or is back on the SHARED default executor "
         "(`asyncio.to_thread`), where it starves the pool's other tenants")
+    walk_calls = _boundary_calls_for(index_repo, "_project_items")
+    assert walk_calls, (
+        "#4709: no offload boundary carries `_project_items` — the bound "
+        "check below would be vacuous")
+    for _walk_call in walk_calls:
+        _wrapper = _bound_wrapper_around(_walk_call, index_repo)
+        assert _wrapper is None, (
+            f"#4709: the projection walk is wrapped in `{_wrapper}` — "
+            f"`_UNBOUNDED_OFFLOAD_SEAMS` matches by CALLEE NAME, so a bound "
+            f"around the seam is invisible to it; the recorded decision is "
+            f"NO BOUND (#2863/CPython #87185)")
     assert _inline_calls_to(index_repo, frozenset({"_project_items"})) == [], (
         "#4709: `_project_items` is also INVOKED inline in `index_repo` — the "
         "walk would run twice, once on the loop")

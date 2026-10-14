@@ -97,10 +97,14 @@ _PAGE_SIZE = 100
 #: write is exactly the unobservable failure #2863 names — so completing it is
 #: the side of the trade chosen here. The cost accepted is that a long walk
 #: delays interpreter exit; the orchestrator's kill timeout, not this pool, is
-#: what bounds that. NOTE the departure: the sibling pools
-#: (``hosted_api._CAPTURE_EXECUTOR`` and ``_DEMAND_PING_EXECUTOR``,
-#: ``operator_alert._POOL``) all install a ``threading._register_atexit``
-#: dispose hook; this pool deliberately does not, for the reason above.
+#: what bounds that. NOTE the departure: TWO of the three sibling pools install
+#: a ``threading._register_atexit`` dispose hook
+#: (``hosted_api._CAPTURE_EXECUTOR`` and ``_DEMAND_PING_EXECUTOR``);
+#: ``operator_alert._POOL`` uses plain ``atexit.register`` instead — the
+#: pattern ``hosted_api._dispose_capture_executor``'s own note documents as
+#: "STRUCTURALLY ALWAYS TOO LATE" for executor work, because a plain ``atexit``
+#: hook runs after the stdlib has already joined the pool. This pool
+#: deliberately installs NEITHER, for the reason above.
 _INDEX_THREAD_PREFIX = "tortoise-index"
 _INDEX_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
