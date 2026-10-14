@@ -555,12 +555,12 @@ def _reset_vector_gap_warnings() -> None:
 # A query is a bulk wipe when it contains DETACH DELETE but has NO property map
 # ({...} — e.g. MATCH (n:Label {id:$id})) and NO real WHERE clause.
 # A WHERE clause is "real" only if it references a property (n.xxx) or a
-# parameter ($id) or CONTAINS / ``IN (`` — tautologies (WHERE true, WHERE 1=1)
-# don't count. Note ``IN [list]`` is NOT recognized (only ``IN (``), so a
-# scoped delete whose only reference is `id(n) IN [..]` is misclassified as a
-# bulk wipe (#3007).
+# parameter ($id) or CONTAINS / ``IN (...)`` / ``IN [...]`` — tautologies
+# (WHERE true, WHERE 1=1) don't count. ``IN [list]`` was NOT recognized before
+# #3007 (only ``IN (``), so a scoped delete whose only reference was
+# `id(n) IN [..]` / `labels(n)[0] IN [..]` was misclassified as a bulk wipe.
 _WHERE_REAL_RE = re.compile(
-    r"\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_]|CONTAINS|IN\s*\(",
+    r"\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_]|CONTAINS|IN\s*[\(\[]",
     re.IGNORECASE,
 )
 # #3037/#8223: the property-map exemption is anchored to the statement's
@@ -653,14 +653,89 @@ def _strip_call_subqueries(statement: str) -> str:
         text = text[:m.start()] + " " * (end - m.start()) + text[end:]
 
 
+# ── #3007: delete-target-aware scoping ──────────────────────────────────────
+# A ``DETACH DELETE`` may name several variables (``DETACH DELETE n, m``); each
+# is a separate target. The clause tail is read up to the next clause keyword so
+# ``DELETE n RETURN count(*)`` yields ``n``, never ``RETURN``/``count``.
+_DELETE_CLAUSE_RE = re.compile(r"\bDETACH\s+DELETE\b(.*)$", re.IGNORECASE | re.S)
+#: Clause keywords that TERMINATE a DELETE target list (and must never be read
+#: as a variable name). Longest-first is irrelevant here: ``\b`` anchors each.
+_CLAUSE_STOP_RE = re.compile(
+    r"\b(?:RETURN|WITH|ORDER|SKIP|LIMIT|WHERE|SET|CREATE|MERGE|UNWIND|MATCH|"
+    r"OPTIONAL|FOREACH|CALL|DETACH|DELETE|REMOVE|UNION|USE|LOAD|DROP)\b",
+    re.IGNORECASE,
+)
+_VAR_NAME_RE = re.compile(r"[A-Za-z_]\w*")
+#: A label on a variable's OWN node/relationship pattern: ``(n:Label)``,
+#: ``(n :Label1:Label2)``, ``[r:IMPL]``, ``(n:$param)``. The bracket must be a
+#: node/rel pattern delimiter immediately before the variable, so a label word
+#: elsewhere in the statement cannot satisfy it.
+_VAR_LABEL_RE = r"[\(\[]\s*{var}\s*:(?:\s*(?:[A-Za-z_]\w*|\$[A-Za-z_]\w*))+"
+#: A ``WITH <projection> ... LIMIT`` block. ``LIMIT`` bounds the rows that flow
+#: forward, so it scopes whatever the projection carries FROM that point.
+_WITH_LIMIT_RE = re.compile(r"\bWITH\b(.*?)\bLIMIT\b", re.IGNORECASE | re.S)
+
+
+def _delete_targets(text: str) -> tuple[list[str], int]:
+    """(deleted variable names, index of the ``DETACH DELETE`` clause, or -1).
+
+    Read from the already-masked, CALL-stripped ``text`` so a keyword inside a
+    string/comment cannot become a variable name (#3037).
+    """
+    m = _DELETE_CLAUSE_RE.search(text)
+    if m is None:
+        return [], -1
+    tail = m.group(1)
+    stop = _CLAUSE_STOP_RE.search(tail)
+    if stop is not None:
+        tail = tail[: stop.start()]
+    return _VAR_NAME_RE.findall(tail), m.start()
+
+
+def _var_is_scoped(text: str, var: str, delete_at: int) -> bool:
+    """True when ``var`` is provably a proper subset of the graph (#3007).
+
+    Three lexical scoping signals, each anchored to the DELETED variable:
+
+    (a)  a LABEL on the variable's own pattern — ``MATCH (n:GraphEvent) ...
+         DETACH DELETE n``;
+    (a') a LABEL PREDICATE on it — ``WHERE n:Point``; and
+    (b)  a ``WITH <var> ... LIMIT`` bound on it — ``WITH n ... LIMIT $overflow``.
+
+    A label or a LIMIT that constrains a DIFFERENT variable must NOT exempt the
+    wipe: ``MATCH (x:Foo) WITH x MATCH (n) DETACH DELETE n`` and
+    ``MATCH (n) WITH n LIMIT 10 MATCH (m) DETACH DELETE m`` each still delete
+    every node. That is why the check is per-target rather than a substring
+    test over the whole statement.
+    """
+    name = re.escape(var)
+    if re.search(_VAR_LABEL_RE.format(var=name), text) is not None:
+        return True
+    if re.search(r"\bWHERE\s+" + name + r"\b\s*:", text, re.IGNORECASE) is not None:
+        return True
+    # Only a WITH *before* the DELETE can bound the rows it deletes.
+    for wm in _WITH_LIMIT_RE.finditer(text[:delete_at]):
+        if re.search(r"\b" + name + r"\b", wm.group(1)) is not None:
+            return True
+    return False
+
+
 def _is_bulk_wipe(cypher: str) -> bool:
-    """True when ``cypher`` may delete EVERY node of the graph (#99/#3037).
+    """True when ``cypher`` may delete EVERY node of the graph (#99/#3037/#3007).
 
     Bulk = contains DETACH DELETE and carries no targeting construct: a
-    property map on a node/relationship pattern, or a real WHERE clause. The
-    verdict is made on structure, not on raw text — comments, string literals,
-    backtick identifiers and ``CALL { ... }`` subqueries are blanked first, so
-    a stray ``{`` in any of them cannot exempt a whole-graph wipe (#3037).
+    property map on a node/relationship pattern, a real WHERE clause, or a
+    label/LIMIT scope on the DELETED variable itself. The verdict is made on
+    structure, not on raw text — comments, string literals, backtick
+    identifiers and ``CALL { ... }`` subqueries are blanked first, so a stray
+    ``{`` in any of them cannot exempt a whole-graph wipe (#3037).
+
+    #3007: a label-scoped / LIMIT-bounded delete (``MATCH (n:GraphEvent) WITH n
+    ORDER BY n.seq ASC LIMIT $overflow DETACH DELETE n``) is a maintenance
+    delete of a SUBGRAPH, not a whole-graph wipe — classifying it bulk made the
+    event-retention cap a silent no-op on every non-test server graph. The
+    scoping must be on the DELETED variable; a label on another pattern (this
+    is the #8215 shape) does not exempt.
     """
     # Fast path: the overwhelming majority of statements are reads. A DETACH
     # DELETE cannot be MASKED INTO existence, so a raw-text miss proves the
@@ -691,7 +766,13 @@ def _is_bulk_wipe(cypher: str) -> bool:
         return False
     # Real WHERE clause (property/param/CONTAINS/IN reference) => targeted
     m = re.search(r"WHERE\s+(.+) ", text + " ", re.IGNORECASE)
-    if m and _WHERE_REAL_RE.search(m.group(1)):  # noqa: SIM103
+    if m and _WHERE_REAL_RE.search(m.group(1)):
+        return False
+    # #3007: label/LIMIT scope on the DELETED variable => targeted. Every
+    # target must be scoped: `MATCH (n:L), (m) DETACH DELETE n, m` still
+    # deletes the graph (m is unconstrained), so `all`, never `any`.
+    targets, delete_at = _delete_targets(text)
+    if targets and all(_var_is_scoped(text, v, delete_at) for v in targets):  # noqa: SIM103
         return False
     return True
 
@@ -2457,12 +2538,16 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 #     decision on ``_is_bulk_wipe``'s scope (#3007/#3037), because more verbs
 #     applying a classifier with those two defects would REFUSE more
 #     legitimate operations than it catches.
-#   * ``_is_bulk_wipe`` over-classifies label/LIMIT/WITH-scoped deletes and
-#     ``WHERE id(n) IN [..]``-scoped ones, so ``event_store.purge_overflow`` is
+#   * ``_is_bulk_wipe`` USED TO over-classify label/LIMIT/WITH-scoped deletes and
+#     ``WHERE id(n) IN [..]``-scoped ones, so ``event_store.purge_overflow`` was
 #     refused on a non-test server graph and
-#     its callers swallow it (the hosted sweeper at DEBUG, the SDK lazy hook at
-#     WARNING) — the per-team event cap no-ops without a build failure
-#     (tracked: #3007).
+#     its callers swallowed it (the hosted sweeper at DEBUG, the SDK lazy hook at
+#     WARNING) — the per-team event cap no-op'd without a build failure.
+#     FIXED by #3007: the classifier is now delete-target aware (a label on the
+#     DELETED variable's own pattern, or a ``WITH <var> … LIMIT`` bound on it,
+#     exempts) and ``IN [list]`` is recognized as a real WHERE reference. A
+#     label/LIMIT on a DIFFERENT variable still does not exempt (the #8215
+#     shape), and a bare ``MATCH (n) DETACH DELETE n`` is still bulk.
 #   * ``_is_bulk_wipe`` also UNDER-classified (FIXED by #3037 + #8223): a bare
 #     ``"{" in cypher`` exemption meant a whole-graph wipe whose text contains
 #     a brace (``MATCH (n) DETACH DELETE n // {``, ``CALL { MATCH (n) DETACH
