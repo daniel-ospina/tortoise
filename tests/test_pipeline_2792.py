@@ -403,6 +403,97 @@ class TestEffectivePipeline:
         finally:
             sdk.close()
 
+    def test_a_refused_edit_does_not_materialise_the_graph_override(
+            self, tmp_path):
+        """Copy-on-write seeds the override — a durable write (``:Pipeline`` +
+        every ``:PipelineStage``, enrolled in #2814's config registry). The seed
+        used to happen at the START of every mutator (inside
+        ``_require_override``), before the edit was validated, so a call that
+        RAISED still flipped the graph to ``source="graph-override"`` forever:
+        ``effective_pipeline`` then short-circuited on it and a later pack
+        release no longer reached the graph. Validate against a side-effect-free
+        read; seed only a legal edit.
+        """
+        cases = {
+            "rename_unknown_stage": lambda g: P.rename_stage(
+                g, KEY, "stg_nope", "X", declared=DECL),
+            "retire_the_default_stage": lambda g: P.retire_stage(
+                g, KEY, "stg_contact", declared=DECL),
+            "add_a_duplicate_label": lambda g: P.add_stage(
+                g, KEY, stage_id="stg_x", label="Won", slot="active",
+                declared=DECL),
+            "add_a_tied_order": lambda g: P.add_stage(
+                g, KEY, stage_id="stg_y", label="Y", slot="active", order=2,
+                declared=DECL),
+            "reorder_partially": lambda g: P.reorder_stages(
+                g, KEY, ["stg_contact"], declared=DECL),
+            "set_an_unknown_default": lambda g: P.set_default_stage(
+                g, KEY, "stg_nope", declared=DECL),
+        }
+        for name, edit in cases.items():
+            sdk = _mk_sdk(tmp_path / name)
+            try:
+                g = sdk._get_proj().g
+                assert P.effective_pipeline(
+                    g, KEY, declared=DECL).source == "pack-default"
+                with pytest.raises(ValueError):
+                    edit(g)
+                assert P.effective_pipeline(
+                    g, KEY, declared=DECL).source == "pack-default", name
+                assert g.query(
+                    "MATCH (p:Pipeline {pipelineKey:$k}) RETURN p.pipelineKey",
+                    params={"k": KEY}).result_set == [], name
+                assert g.query(
+                    "MATCH (s:PipelineStage {pipelineKey:$k}) "
+                    "RETURN s.stageKey",
+                    params={"k": KEY}).result_set == [], name
+            finally:
+                sdk.close()
+
+    def test_a_padded_label_is_stored_trimmed_and_resolvable(self, tmp_path):
+        """A padded label passed every uniqueness check (compared stripped)
+        but was stored verbatim, and ``resolve`` trims only the PROBE — so the
+        stored label could not be resolved by its natural spelling.
+        ``advance_stage`` then parked a stage that EXISTS as an "unknown stage"
+        review candidate and left the Object's stage unchanged. Canonicalise on
+        write so the resolver, the label owner and the validator agree."""
+        padded = {
+            "defaultStage": "stg_contact",
+            "stages": [
+                {"id": "stg_contact", "label": " Contact ", "order": 1,
+                 "slot": "entry"},
+                {"id": "stg_won", "label": "Won", "order": 2,
+                 "slot": "terminal", "outcome": "won"},
+            ],
+        }
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            assert P.validate_pipeline_decl(padded) == []
+            # The pack-default tier (no override yet) canonicalises too.
+            assert [s.label for s in P.list_stages(g, KEY, declared=padded)] == [
+                "Contact", "Won"]
+            added = P.add_stage(g, KEY, stage_id="stg_x",
+                                label="  Diligence  ", slot="active",
+                                declared=padded)
+            assert added.label == "Diligence"
+            renamed = P.rename_stage(g, KEY, "stg_won", "  Closed  ",
+                                     declared=padded)
+            assert renamed.label == "Closed"
+            pipe = P.effective_pipeline(g, KEY, declared=padded)
+            assert pipe.resolve("Diligence").stage_id == "stg_x"
+            assert pipe.resolve("Closed").stage_id == "stg_won"
+            assert pipe.resolve("  Diligence  ").stage_id == "stg_x"
+            # The consequence the padding used to cause is gone: a real stage is
+            # applied, not parked as an unknown candidate.
+            sdk.create_object("deal-pad", objectKind=KEY)
+            move = P.advance_stage(sdk, "deal-pad", KEY, "Diligence",
+                                   at="2026-09-02", declared=padded)
+            assert move.applied and move.stage.stage_id == "stg_x", move
+            assert P.unknown_stage_candidates(g, pipeline_key=KEY) == []
+        finally:
+            sdk.close()
+
 
 # ── Movement: advance → current-stage read, history retained ──────────────
 
@@ -872,6 +963,78 @@ class TestGuardIntegrity:
             for prop, key in P._STAGE_READ_KEYS.items():
                 assert prop in written, f"the write omits {prop}"
                 assert key in cur, f"the read omits {key}"
+        finally:
+            sdk.close()
+
+    def test_a_closed_object_with_no_stage_is_not_resurrected(self, tmp_path):
+        """``isClosed`` is the Object's durable closed marker, written through
+        the generic entity surface and INDEPENDENT of the stage. The terminal
+        guard used to live inside ``if cur_stage is not None``, so an Object the
+        graph records as closed with NO current stage was reopened by an
+        ordinary later mention (``isClosed=True`` -> ``False``, journaled,
+        replayed by rebuild). Fail closed."""
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            node = sdk.create_object("legacy-closed", objectKind=KEY)
+            sdk.update_entity(node["id"], isClosed=True)
+            cur = P.current_stage(g, "legacy-closed")
+            assert cur["isClosed"] is True and cur["stageId"] is None, cur
+            move = P.advance_stage(sdk, "legacy-closed", KEY, "stg_discussion",
+                                   at="2026-10-01", declared=DECL)
+            assert not move.applied and move.reason == "terminal-guard", move
+            after = P.current_stage(g, "legacy-closed")
+            assert after["isClosed"] is True and after["stageId"] is None
+            # The explicit reopen still moves it — a gate, not a dead end.
+            revived = P.advance_stage(sdk, "legacy-closed", KEY,
+                                      "stg_discussion", at="2026-11-01",
+                                      reopen=True, reason="deal revived",
+                                      declared=DECL)
+            assert revived.applied, revived
+            assert P.current_stage(g, "legacy-closed")["isClosed"] is False
+        finally:
+            sdk.close()
+
+    def test_reorder_stages_cannot_leave_a_tie_with_a_retired_stage(
+            self, tmp_path):
+        """``retire_stage`` keeps the retired row (and the Objects in it), so
+        renumbering only the ACTIVE block from 1 could collide with a retired
+        stage's order — re-creating the tie ``validate_pipeline_decl`` and
+        ``add_stage`` both refuse, and silently disabling the regression guard
+        (``target.order < cur_stage.order``) for the tied pair. The renumber
+        must produce a total order."""
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("deal-tie", objectKind=KEY)
+            P.seed_pipeline(g, KEY, DECL)
+            P.advance_stage(sdk, "deal-tie", KEY, "stg_discussion",
+                            at="2026-09-02", declared=DECL)
+            # Retire the stage the Object sits in (allowed and flagged), then
+            # reorder the survivors. The active renumber from 1 produced
+            # stg_won=1 / stg_contact=2 — tying with the retired
+            # stg_discussion=2.
+            P.retire_stage(g, KEY, "stg_discussion", declared=DECL)
+            P.reorder_stages(g, KEY, ["stg_won", "stg_contact"], declared=DECL)
+            stages = P.list_stages(g, KEY, declared=DECL, include_retired=True)
+            orders = [s.order for s in stages]
+            assert len(orders) == len(set(orders)), orders
+            by_id = {s.stage_id: s for s in stages}
+            # The Object still sits in the retired stage, which keeps its own
+            # position rather than being pushed behind the active block.
+            assert by_id["stg_discussion"].status == P.STAGE_RETIRED
+            cur_order = by_id["stg_discussion"].order
+            earlier = [s for s in stages if s.status == P.STAGE_ACTIVE
+                       and s.order < cur_order]
+            assert earlier, "the fixture must exercise the guard"
+            move = P.advance_stage(sdk, "deal-tie", KEY, earlier[0].stage_id,
+                                   at="2026-09-03", declared=DECL)
+            assert not move.applied and move.reason == "regression-guard", move
+            # And the mutators agree: the state reorder produced is one
+            # add_stage refuses to duplicate.
+            with pytest.raises(ValueError, match="already used"):
+                P.add_stage(g, KEY, stage_id="stg_z", label="Z", slot="active",
+                            order=cur_order, declared=DECL)
         finally:
             sdk.close()
 

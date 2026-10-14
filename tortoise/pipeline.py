@@ -291,7 +291,11 @@ class Pipeline:
             return hit
         low = probe.casefold()
         for s in self.stages:
-            if s.label.casefold() == low:
+            # The STORED side is compared trimmed too: labels are canonicalised
+            # on write (``add_stage``/``rename_stage``/``_pipeline_from_decl``),
+            # and this keeps a pre-existing padded row resolvable rather than
+            # parking a stage that exists as an "unknown stage" candidate.
+            if s.label.strip().casefold() == low:
                 return s
         return None
 
@@ -323,7 +327,7 @@ def _row_to_stage(props: dict) -> PipelineStage:
     outcome = props.get("outcome")
     return PipelineStage(
         stage_id=props.get("stageId", ""),
-        label=props.get("label", ""),
+        label=(props.get("label") or "").strip(),
         order=int(props.get("order") or 0),
         slot=props.get("slot", "entry"),
         outcome=outcome if outcome else None,
@@ -355,7 +359,11 @@ def _read_override(graph, pipeline_key: str) -> Pipeline | None:
 def _pipeline_from_decl(pipeline_key: str, decl: dict) -> Pipeline:
     stages = [
         PipelineStage(
-            stage_id=s["id"], label=s["label"], order=s["order"],
+            # Canonicalise on write: ``resolve`` trims the probe and
+            # ``_label_owner`` compares trimmed, so an untrimmed stored label
+            # passed every uniqueness check but could not be resolved by its
+            # natural spelling (a YAML ``label: " Draft "`` reached that state).
+            stage_id=s["id"], label=s["label"].strip(), order=s["order"],
             slot=s["slot"], outcome=s.get("outcome") or None)
         for s in decl["stages"]
     ]
@@ -524,6 +532,29 @@ def seed_pipeline(graph, pipeline_key: str, declared: dict, *,
     return pipe
 
 
+def _base_pipeline(graph, pipeline_key: str, declared: dict | None) -> Pipeline:
+    """The graph's pipeline as it stands NOW, without materialising one.
+
+    ``_require_override`` performs the copy-on-write SEED — a durable write
+    (``:Pipeline`` + every ``:PipelineStage``, both enrolled in #2814's
+    authoritative config registry). Validating an edit through it meant a
+    REFUSED edit still flipped the graph to ``source="graph-override"``, so
+    ``effective_pipeline`` short-circuited on the override forever and a later
+    pack release no longer reached the graph (and this change exposes no verb
+    that returns a graph to ``pack-default``). The mutators therefore validate
+    against THIS side-effect-free read and only seed once the edit is known to
+    be legal.
+    """
+    existing = _read_override(graph, pipeline_key)
+    if existing is not None:
+        return existing
+    if declared is None:
+        raise ValueError(
+            f"no pipeline is declared for {pipeline_key!r} and the graph has "
+            "no override — nothing to edit")
+    return _pipeline_from_decl(pipeline_key, declared)
+
+
 def _require_override(graph, pipeline_key: str, declared: dict | None,
                       *, actor: str) -> Pipeline:
     """The graph's override to edit.
@@ -578,7 +609,8 @@ def add_stage(graph, pipeline_key: str, *, stage_id: str, label: str,
         raise ValueError(stage_id_error)
     if not label or not label.strip():
         raise ValueError("label must be non-empty")
-    pipe = _require_override(graph, pipeline_key, declared, actor=actor)
+    label = label.strip()
+    pipe = _base_pipeline(graph, pipeline_key, declared)
     if pipe.by_id(stage_id) is not None:
         raise ValueError(f"stage id {stage_id!r} already exists in {pipeline_key!r}")
     dup = _label_owner(pipe, label)
@@ -604,6 +636,9 @@ def add_stage(graph, pipeline_key: str, *, stage_id: str, label: str,
                 f"order {order!r} is already used by another stage in "
                 f"{pipeline_key!r}; ties make the forward/regression guard "
                 "non-deterministic")
+    # The edit is legal: only NOW seed the copy-on-write override (a refused
+    # edit must not materialise one — see ``_base_pipeline``).
+    _require_override(graph, pipeline_key, declared, actor=actor)
     stage = PipelineStage(stage_id=stage_id, label=label, order=order,
                           slot=slot, outcome=outcome)
     _write_stage(graph, pipeline_key, stage)
@@ -617,7 +652,8 @@ def rename_stage(graph, pipeline_key: str, stage_id: str, label: str, *,
     sitting in the stage — and every derived flag — is unaffected."""
     if not label or not label.strip():
         raise ValueError("label must be non-empty")
-    pipe = _require_override(graph, pipeline_key, declared, actor=actor)
+    label = label.strip()
+    pipe = _base_pipeline(graph, pipeline_key, declared)
     stage = pipe.by_id(stage_id) or pipe.resolve(stage_id)
     if stage is None:
         raise ValueError(f"unknown stage {stage_id!r} in {pipeline_key!r}")
@@ -627,6 +663,7 @@ def rename_stage(graph, pipeline_key: str, stage_id: str, label: str, *,
             f"label {label!r} is already used by stage {dup.stage_id!r} in "
             f"{pipeline_key!r}; a label is a stage reference, so it must be "
             "unique")
+    _require_override(graph, pipeline_key, declared, actor=actor)
     graph.query(
         "MATCH (s:PipelineStage {stageKey:$sk}) SET s.label=$label",
         params={"sk": _stage_key(pipeline_key, stage.stage_id), "label": label})
@@ -645,19 +682,38 @@ def reorder_stages(graph, pipeline_key: str, ordered_stage_ids: list[str], *,
 
     Every active stage must appear exactly once — a partial order would leave
     ties that make the forward/regression guard non-deterministic."""
-    pipe = _require_override(graph, pipeline_key, declared, actor=actor)
+    pipe = _base_pipeline(graph, pipeline_key, declared)
     active = {s.stage_id for s in pipe.active_stages()}
     if len(ordered_stage_ids) != len(active) or set(ordered_stage_ids) != active:
         raise ValueError(
             "ordered_stage_ids must list every active stage exactly once "
             f"(active={sorted(active)}, got={ordered_stage_ids})")
+    # The edit is legal: only now seed the copy-on-write override.
+    _require_override(graph, pipeline_key, declared, actor=actor)
     out: list[PipelineStage] = []
-    for i, sid in enumerate(ordered_stage_ids, start=1):
+    # The renumber must not collide with a RETIRED stage's order. ``retire_stage``
+    # leaves those rows (and the Objects sitting in them) in place, so
+    # renumbering the active block from 1 blindly re-created the very tie
+    # ``validate_pipeline_decl`` and ``add_stage`` refuse — and a tie makes the
+    # forward/regression guard (``target.order < cur_stage.order``)
+    # non-deterministic, applying the move with NO guard (the same call is
+    # refused as ``regression-guard`` without the tie). Allocate the smallest
+    # unused positive integers instead, so the result is total; the retired
+    # stages keep their own orders (pushing them behind the active block would
+    # make every move OUT of a retired stage a backward one).
+    used = {s.order for s in pipe.stages if s.status != STAGE_ACTIVE}
+    nxt = 1
+    for sid in ordered_stage_ids:
+        while nxt in used:
+            nxt += 1
+        order = nxt
+        used.add(order)
+        nxt += 1
         stage = pipe.by_id(sid)
         graph.query(
             "MATCH (s:PipelineStage {stageKey:$sk}) SET s.order=$order",
-            params={"sk": _stage_key(pipeline_key, sid), "order": i})
-        out.append(PipelineStage(stage.stage_id, stage.label, i, stage.slot,
+            params={"sk": _stage_key(pipeline_key, sid), "order": order})
+        out.append(PipelineStage(stage.stage_id, stage.label, order, stage.slot,
                                  stage.outcome, stage.status, stage.retired_at))
     _touch_pipeline(graph, pipeline_key, actor=actor)
     return out
@@ -667,7 +723,7 @@ def retire_stage(graph, pipeline_key: str, stage_id: str, *,
                  declared: dict | None = None, actor: str = "") -> PipelineStage:
     """Retire a stage — it stops being offered, but Objects sitting in it keep
     their stage (never silently moved). The default stage cannot be retired."""
-    pipe = _require_override(graph, pipeline_key, declared, actor=actor)
+    pipe = _base_pipeline(graph, pipeline_key, declared)
     stage = pipe.by_id(stage_id) or pipe.resolve(stage_id)
     if stage is None:
         raise ValueError(f"unknown stage {stage_id!r} in {pipeline_key!r}")
@@ -675,6 +731,7 @@ def retire_stage(graph, pipeline_key: str, stage_id: str, *,
         raise ValueError(
             f"cannot retire the default stage {stage.stage_id!r}; set another "
             "default first")
+    _require_override(graph, pipeline_key, declared, actor=actor)
     at = _now()
     graph.query(
         "MATCH (s:PipelineStage {stageKey:$sk}) "
@@ -688,10 +745,11 @@ def retire_stage(graph, pipeline_key: str, stage_id: str, *,
 
 def set_default_stage(graph, pipeline_key: str, stage_id: str, *,
                       declared: dict | None = None, actor: str = "") -> None:
-    pipe = _require_override(graph, pipeline_key, declared, actor=actor)
+    pipe = _base_pipeline(graph, pipeline_key, declared)
     stage = pipe.by_id(stage_id) or pipe.resolve(stage_id)
     if stage is None or stage.status != STAGE_ACTIVE:
         raise ValueError(f"unknown or retired stage {stage_id!r} in {pipeline_key!r}")
+    _require_override(graph, pipeline_key, declared, actor=actor)
     graph.query(
         "MATCH (p:Pipeline {pipelineKey:$k}) SET p.defaultStageId=$d",
         params={"k": pipeline_key, "d": stage.stage_id})
@@ -844,28 +902,36 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
         prev_t, in_t = _as_utc(cur.get("since")), _as_utc(stage_ts)
         if prev_t is not None and in_t is not None and in_t < prev_t:
             return StageMove(applied=False, reason="stale-transition", stage=target)
-    if cur_stage is not None:
-        # The durable closed marker is the Object's ``isClosed`` prop, NOT the
-        # effective declaration's slot. A graph that has not overridden its
-        # pipeline reads the pack default on the fly, so a pack release that
-        # reclassifies the stage the Object sits in from ``terminal`` to an
-        # active slot takes effect immediately; keying stickiness off the
-        # resolved slot alone then skipped this guard and the write rewrote
-        # ``isClosed=True`` to ``False`` — a durable, journaled resurrection.
-        # The two sources must AGREE: an Object the graph records as closed
-        # stays closed, whatever the live declaration now says about its slot.
-        was_closed = bool(cur.get("isClosed"))
-        if (cur_stage.is_terminal or was_closed) and not (
-                reopen and not target.is_terminal):
-            return StageMove(applied=False, reason="terminal-guard", stage=target)
-        # ``reopen`` is the TERMINAL guard's escape hatch, not a general
-        # regression opt-out: on a live (non-terminal) Object it dropped this
-        # guard too and applied a silent backward move. The regression guard's
-        # documented opt-out is ``correction``; a reopen still has to travel
-        # FROM a terminal stage to be a reopen at all.
-        if target.order < cur_stage.order and not correction and not (
-                reopen and cur_stage.is_terminal):
-            return StageMove(applied=False, reason="regression-guard", stage=target)
+    # The durable closed marker is the Object's ``isClosed`` prop, NOT the
+    # effective declaration's slot. A graph that has not overridden its
+    # pipeline reads the pack default on the fly, so a pack release that
+    # reclassifies the stage the Object sits in from ``terminal`` to an
+    # active slot takes effect immediately; keying stickiness off the
+    # resolved slot alone then skipped this guard and the write rewrote
+    # ``isClosed=True`` to ``False`` — a durable, journaled resurrection.
+    # The two sources must AGREE: an Object the graph records as closed
+    # stays closed, whatever the live declaration now says about its slot.
+    #
+    # The marker is also INDEPENDENT of the current stage: an Object the graph
+    # records as closed with no resolvable stage (``isClosed`` is written
+    # through the generic entity surface — ``create_object(..., isClosed=
+    # True)``, ``update_entity(id, isClosed=True)``, or the #2728 repair verb
+    # that clears ``pipelineStageId`` while the marker remains) was reopened by
+    # an ordinary later mention, because this check used to live inside
+    # ``if cur_stage is not None``. That is the mirror of the
+    # ``unresolvable-current-stage`` refusal above and is refused the same way.
+    was_closed = bool(cur.get("isClosed")) or (
+        cur_stage is not None and cur_stage.is_terminal)
+    if was_closed and not (reopen and not target.is_terminal):
+        return StageMove(applied=False, reason="terminal-guard", stage=target)
+    # ``reopen`` is the TERMINAL guard's escape hatch, not a general
+    # regression opt-out: on a live (non-terminal) Object it dropped this
+    # guard too and applied a silent backward move. The regression guard's
+    # documented opt-out is ``correction``; a reopen still has to travel
+    # FROM a terminal stage to be a reopen at all.
+    if (cur_stage is not None and target.order < cur_stage.order
+            and not correction and not (reopen and cur_stage.is_terminal)):
+        return StageMove(applied=False, reason="regression-guard", stage=target)
 
     props: dict[str, Any] = {
         "pipelineStageId": target.stage_id,
