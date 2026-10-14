@@ -528,8 +528,11 @@ def test_the_gate_opens_on_the_affected_engine_and_shuts_on_the_safe_one() -> No
     """MEASURED range: 6.0.0/6.0.1 drop the predicate, 4.20.x bind it.
 
     The gate is the whole point of the seam: `WITH *` is a no-op on the engines
-    that already bind, so the version decision is made ONCE per client rather
-    than by 27 hand-written literals that cannot know what they run on.
+    that already bind for every shape the normaliser still rewrites, so the
+    version decision is made ONCE per client rather than by 27 hand-written
+    literals that cannot know what they run on. (The one shape `WITH *` does NOT
+    survive on 4.20.x is excluded by the normaliser, not by this gate — see the
+    named-endpoint section below.)
     """
 
     class _Engine:
@@ -689,3 +692,178 @@ def test_an_alternation_keyword_type_cannot_reach_a_6x_engine(keyword: str) -> N
     assert "|WITH *" not in sent[0], (
         f"the barrier was injected inside the type list: {sent[0]!r}"
     )
+
+
+# ── #7162 P2: a NAMED-endpoint PATTERN predicate must NOT be barred ──────────
+#
+# MEASURED on throwaway containers (falkordb v4.20.4 / server v4.20.6, and 6.0.1)
+# with a topology where the correct answer and the defect answer differ:
+#
+#   4.20.x  no barrier : OK          -> the predicate is applied
+#   4.20.x  `WITH *`   : ERROR       -> Unable to resolve filtered alias 'a'
+#   6.0.1   no barrier : OK (correct rows) OR a LOUD error when the endpoint is
+#                        not bound — never a silent bypass
+#   6.0.1   `WITH *`   : OK, and on some spellings it MULTIPLIES rows
+#
+# The 4.20.x row is a FALSE REFUSAL of a legitimate query — P1-class by this
+# module's own standard ("a guard that refuses a legitimate query is worse than
+# the bug") — and it is REACHABLE: the repo's own per-graph ACL recipe
+# (`acl_graph_users._GRAPH_COMMANDS`) grants a tenant user no `MODULE LIST`, so
+# the probe is unreadable and the gate opens on a 4.20.x engine. The normaliser
+# must therefore exclude the shape; the gate cannot (it only knows the version).
+#
+# The exclusion is NARROW: only a variable the predicate's OWN pattern INTRODUCES
+# (`a` here — not bound by the preceding MATCH) is dropped from the re-bind
+# trigger. A variable the predicate CONSTRAINS and a preceding MATCH bound (the
+# `n.id IN $ids` case) still bars, so the #6976 rail is intact.
+
+#: A `WHERE` whose predicate is itself a relationship pattern with a NAMED
+#: endpoint (`a`), re-bound by a later plain `MATCH`.
+_NAMED_ENDPOINT_PREDICATE = (
+    "MATCH (n:Point) WHERE (n)<-[:REL]-(a) MATCH (a) RETURN n.id"
+)
+
+
+def test_a_named_endpoint_pattern_predicate_is_left_byte_identical() -> None:
+    """Value that makes this fail: dropping only ``_predicate_vars`` as before."""
+    assert _predicate_drop_barrier(_NAMED_ENDPOINT_PREDICATE) == (
+        _NAMED_ENDPOINT_PREDICATE
+    )
+
+
+def test_the_false_refusal_is_gone_on_a_4x_engine_with_an_unreadable_probe() -> None:
+    """The ACL reachability, pinned end-to-end: an unreadable probe on a 4.20.x
+    engine must NOT put a barrier in front of this shape.
+
+    Before the fix the gate opened (unreadable) and the normaliser rewrote the
+    statement, so the engine refused a query that works unbarred. Value that
+    makes this fail: the previous (unconditional) ``pred_vars`` trigger.
+    """
+    handle, wire = _handle_on(None)  # a 4.20.x engine the probe cannot read
+    handle.query(_NAMED_ENDPOINT_PREDICATE, {})
+    sent = _sent(wire)
+    assert len(sent) == 1, wire.commands
+    assert sent[0].endswith(_NAMED_ENDPOINT_PREDICATE), sent[0]
+    assert "WITH *" not in sent[0], (
+        f"a false refusal was dispatched to the engine: {sent[0]!r}"
+    )
+
+
+def test_the_same_shape_reaches_a_6x_engine_unbarred_and_therefore_loud() -> None:
+    """No SILENT BYPASS is re-introduced: the shape is not rewritten on 6.x either.
+
+    MEASURED on 6.0.1: unbarred this shape either returns the CORRECT rows or
+    errors LOUDLY (``'a' not defined``); it is never the #6976 foreign-row
+    bypass. The gate itself still WANTS a barrier on 6.x — the exclusion lives in
+    the normaliser, which is deliberate, so assert both halves. Value that makes
+    this fail: moving the exclusion into the version gate (which would then also
+    suppress a shape the engine really does drop).
+    """
+
+    class _Engine:
+        def execute_command(self, *args):
+            return [[b"name", b"graph", b"ver", 60001]]
+
+    assert _engine_needs_predicate_barrier(_Engine()) is True, (
+        "the gate must still be open on 6.x; the exclusion belongs to the normaliser"
+    )
+    handle, wire = _handle_on(60001)
+    handle.query(_NAMED_ENDPOINT_PREDICATE, {})
+    sent = _sent(wire)
+    assert len(sent) == 1, wire.commands
+    assert sent[0].endswith(_NAMED_ENDPOINT_PREDICATE), sent[0]
+    assert "WITH *" not in sent[0], sent[0]
+
+
+#: The shapes the reviewer measured as FINE (barrier is a no-op, correct rows) on
+#: 4.20.4 — the exclusion must not over-reach into any of them.
+_FINE_WHEN_BARRED_ON_4X = [
+    # id predicate + later re-bind (the base #6976 shape)
+    "MATCH (n:Point) WHERE n.id IN $ids MATCH (n)-[:REL]->(m:Point) RETURN n.id",
+    # OR predicate
+    "MATCH (n:Point) WHERE n.id = 'p1' OR n.id = 'p2' "
+    "MATCH (n)-[:REL]->(m:Point) RETURN n.id",
+    # named path
+    "MATCH p = (n:Point) WHERE n.id IN $ids "
+    "MATCH (n)-[:REL]->(m:Point) RETURN n.id",
+    # STARTS WITH (the operator's `WITH`)
+    "MATCH (n:Point) WHERE n.name STARTS WITH 'a' "
+    "MATCH (n)-[:REL]->(m:Point) RETURN n.id",
+    # ANONYMOUS pattern predicate — names no endpoint, so nothing is introduced
+    "MATCH (n:Point) WHERE (n)<-[:REL]-({id:'p2'}) MATCH (n) RETURN n.id",
+    # two barriered shapes in one statement
+    "MATCH (n:Point) WHERE n.id IN $ids MATCH (n)-[:REL]->(m:Point) "
+    "WHERE m.id IN $ids MATCH (m)-[:NEXT]->(z) RETURN n.id",
+]
+
+
+@pytest.mark.parametrize("statement", _FINE_WHEN_BARRED_ON_4X)
+def test_shapes_the_barrier_does_not_break_stay_barred(statement: str) -> None:
+    """The over-exclusion rail: these six shapes are MEASURED fine when barred on
+    4.20.4, so they must keep their barrier — including on an unreadable probe."""
+    out = _predicate_drop_barrier(statement)
+    assert out != statement, f"the shape was left unbarred: {out!r}"
+    assert "WITH *" in out, out
+    handle, wire = _handle_on(None)
+    handle.query(statement, {"ids": ["p1"]})
+    sent = _sent(wire)
+    assert "WITH *" in sent[0], (
+        f"a shape that is FINE when barred lost its barrier: {sent[0]!r}"
+    )
+
+
+def test_a_function_argument_is_not_an_introduced_pattern_variable() -> None:
+    """`toLower(n.name)` puts `n` after a `(` — but that `(` is a CALL, not a
+    pattern, so `n` is CONSTRAINED by the predicate and must keep its power to
+    trigger a barrier. Value that makes this fail: an endpoint regex without the
+    identifier lookbehind (``_PATTERN_VAR_RE`` used directly)."""
+    statement = (
+        "MATCH (n:Point) WHERE toLower(n.name) STARTS WITH 'a' "
+        "MATCH (n)-[:REL]->(m:Point) RETURN n.id"
+    )
+    out = _predicate_drop_barrier(statement)
+    assert out != statement, f"the shape was left unbarred: {out!r}"
+    assert "WITH *" in out, out
+
+
+# ── #7162 P2 (the cheap half): an UNREADABLE verdict must not be permanent ────
+
+
+def test_an_unreadable_probe_is_re_probed_after_the_ttl(monkeypatch) -> None:
+    """One transient `MODULE LIST` failure must not taint a long-lived client.
+
+    The verdict is cached — bounded re-probes, never one per query — but only
+    until the TTL, after which a recovered server shuts the gate it never needed.
+    Value that makes this fail: caching the unreadable verdict permanently (the
+    second/third assertions see a stale ``True`` and ``calls`` stays at 1).
+    """
+    from tortoise import cypher_guard
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(
+        cypher_guard, "time", type("_Clock", (), {"monotonic": staticmethod(
+            lambda: clock["t"])})()
+    )
+
+    class _Flaky:
+        def __init__(self):
+            self.calls = 0
+            self.recovered = False
+
+        def execute_command(self, *args):
+            self.calls += 1
+            if not self.recovered:
+                raise RuntimeError("MODULE LIST is denied here")
+            return [[b"name", b"graph", b"ver", 42004]]
+
+    client = _Flaky()
+    assert _engine_needs_predicate_barrier(client) is True
+    # within the TTL the verdict is CACHED — no per-query probe
+    assert _engine_needs_predicate_barrier(client) is True
+    assert client.calls == 1, client.calls
+    client.recovered = True
+    clock["t"] += cypher_guard._ENGINE_VERSION_RETRY_SECONDS + 1.0
+    assert _engine_needs_predicate_barrier(client) is False, (
+        "a recovered 4.20.4 client is still barred after the TTL"
+    )
+    assert client.calls == 2, client.calls

@@ -108,6 +108,7 @@ import contextlib
 import contextvars
 import functools
 import re
+import time
 from contextlib import contextmanager
 
 from tortoise.exceptions import (
@@ -329,6 +330,12 @@ _WHERE_RE = re.compile(r"\bWHERE\b", re.IGNORECASE)
 #: `()`, `({a:1})` bind none. Applied to the MASKED text, so labels/maps/params
 #: cannot contribute a variable.
 _PATTERN_VAR_RE = re.compile(r"[\[(]\s*([A-Za-z_][A-Za-z0-9_]*)")
+#: The same, but only where `(`/`[` STARTS a pattern. `_PATTERN_VAR_RE` cannot tell
+#: a pattern from a FUNCTION CALL: in `toLower(n)` the `(` is preceded by an
+#: identifier, so the `n` is an ARGUMENT the predicate constrains, not a name the
+#: predicate introduces. The negative lookbehind rejects that (and an index
+#: `list[i]`), so only a real endpoint counts as introduced.
+_PATTERN_ENDPOINT_RE = re.compile(r"(?<![A-Za-z0-9_.])[\[(]\s*([A-Za-z_][A-Za-z0-9_]*)")
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PROPERTY_ACCESS_RE = re.compile(r"\.\s*[A-Za-z_][A-Za-z0-9_]*")
 _PARAM_RE = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*")
@@ -516,6 +523,31 @@ def _predicate_vars(predicate: str) -> set[str]:
     }
 
 
+def _predicate_endpoint_vars(predicate: str) -> set[str]:
+    """Names the predicate's OWN patterns introduce (its node/rel endpoints).
+
+    `_mask_literals` first, so a name inside a string/map/parameter cannot count.
+    """
+    return set(_PATTERN_ENDPOINT_RE.findall(_mask_literals(predicate)))
+
+
+def _bound_pattern_vars(masked: str, clauses, before: int) -> set[str]:
+    """Names bound by a pattern in a `MATCH` clause that starts before *before*.
+
+    Over-collecting is the SAFE direction here: a name counted as bound is never
+    treated as introduced, so it keeps its power to trigger a barrier.
+    """
+    bound: set[str] = set()
+    for clause in clauses:
+        if clause.start() >= before:
+            break
+        if clause.group().upper().split() not in (["MATCH"], ["OPTIONAL", "MATCH"]):
+            continue
+        pattern = masked[clause.end():_pattern_end(masked, clause.end())]
+        bound |= set(_PATTERN_VAR_RE.findall(pattern))
+    return bound
+
+
 def _predicate_drop_barrier(cypher: str) -> str:
     """Insert a `WITH *` barrier before a plain MATCH that re-binds a filtered var.
 
@@ -571,7 +603,21 @@ def _predicate_drop_barrier(cypher: str) -> str:
                 break
         if following is None or following.group().upper().split() != ["MATCH"]:
             continue
-        pred_vars = _predicate_vars(cypher[w_end:following.start()])
+        predicate = cypher[w_end:following.start()]
+        pred_vars = _predicate_vars(predicate)
+        if not pred_vars:
+            continue
+        # A name the predicate's OWN pattern introduces is not a FILTERED
+        # variable: it did not exist before the `WHERE`, so barriering a later
+        # re-bind of it protects no filter — and on 4.20.x it is a hard refusal
+        # (`WITH *` cannot project a predicate-local alias: MEASURED,
+        # ``Unable to resolve filtered alias 'a'``). On 6.x the same shape is
+        # MEASURED to keep the predicate (correct rows) or to error LOUDLY when
+        # unbarred, so dropping the barrier here cannot become a silent bypass.
+        pred_vars -= (
+            _predicate_endpoint_vars(predicate)
+            - _bound_pattern_vars(masked, clauses, w_start)
+        )
         if not pred_vars:
             continue
         # Search FORWARD for the first plain MATCH whose pattern re-binds a name
@@ -592,16 +638,30 @@ def _predicate_drop_barrier(cypher: str) -> str:
 #: (measured: 4.20.4 -> 42004, 6.0.1 -> 60001). The predicate drop is present
 #: in the 6.x line and absent from the 4.x line this repo pins, so the barrier
 #: is emitted for ``>= 6.0.0`` — and for an UNREADABLE version, because the
-#: barrier is a measured no-op on the engines that already bind while a missing
-#: barrier is a SILENT filter bypass. A wrong probe must never be a false CLEAN.
-#: One MEASURED exception to "no-op on the engines that bind": on 4.20.4 a
-#: PATTERN-predicate shape — a `WHERE` whose predicate is itself a relationship
-#: pattern, followed by a second `MATCH` that binds the pattern's endpoint — IS
-#: rewritten and then errors (``Unable to resolve filtered alias 'a'``). It is
-#: reachable ONLY through the UNREADABLE-version path above — a readable 4.20.4
-#: shuts this gate — so the gate, not the normaliser, keeps that shape safe.
+#: barrier is a measured no-op on the engines that already bind for every shape
+#: the normaliser still rewrites, while a missing barrier is a SILENT filter
+#: bypass. A wrong probe must never be a false CLEAN.
+#: An UNREADABLE probe is NOT hypothetical: the repo's OWN per-graph ACL recipe
+#: (``acl_graph_users._GRAPH_COMMANDS``) grants only the GRAPH commands, so a
+#: connection authenticated as a tenant user is DENIED ``MODULE LIST`` for its
+#: whole lifetime; and a single transient error at the first guarded query on a
+#: long-lived client has the same effect. Both are covered — the first by the
+#: normaliser below, the second by the bounded re-probe.
+#: One MEASURED false refusal the barrier WOULD cause on 4.20.x: a predicate that
+#: is itself a relationship pattern with a NAMED endpoint (the endpoint was not
+#: bound by the preceding MATCH), followed by a second `MATCH` that binds that
+#: endpoint. ``WITH *`` cannot project the predicate-local alias, so the engine
+#: errors ``Unable to resolve filtered alias``. That shape is excluded by the
+#: normaliser, not by this gate — see `_predicate_drop_barrier`.
 _PREDICATE_DROP_AFFECTED_FROM = (6, 0, 0)
 _ENGINE_VERSION_MARKER = "_tortoise_falkordb_engine_version"
+#: An UNREADABLE verdict expires: after this many seconds the probe runs again,
+#: so a transient failure self-heals instead of tainting the client forever. A
+#: READABLE version is still cached permanently (it cannot change without a new
+#: connection). The window bounds re-probes to one per interval, NOT one per
+#: query, for a client that can genuinely never read (the ACL tenant above).
+_ENGINE_VERSION_RETRY_SECONDS = 30.0
+_ENGINE_VERSION_RETRY_MARKER = "_tortoise_falkordb_engine_version_retry_at"
 
 
 def _is_version_triple(value) -> bool:
@@ -635,6 +695,22 @@ def _cached_engine_version(client):
     if version is not None and not _is_version_triple(version):
         return None
     return cached
+
+
+def _cached_retry_at(client):
+    """The stored re-probe deadline for an UNREADABLE verdict, or ``None``.
+
+    Type-checked exactly like :func:`_cached_engine_version`, and for the same
+    reason: a permissive ``__getattr__`` object answers EVERY name, and a
+    non-numeric answer would be COMPARED (``TypeError`` out of the guard).
+    """
+    try:
+        deadline = getattr(client, _ENGINE_VERSION_RETRY_MARKER, None)
+    except Exception:
+        return None
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+        return None
+    return float(deadline)
 
 
 def _graph_module_version(client):
@@ -675,19 +751,36 @@ def _graph_module_version(client):
 def _engine_module_version(client):
     """Cached :func:`_graph_module_version` — ONE probe per client, not per query.
 
-    Cached as a 1-tuple so an UNREADABLE version is cached too: storing a bare
-    ``None`` would be indistinguishable from "not probed yet" and re-issue
-    ``MODULE LIST`` on every query. A client that refuses the attribute
-    (``__slots__``) is probed every time, which is correct if slower.
+    A READABLE version is cached permanently as a 1-tuple. An UNREADABLE one is
+    cached only until ``_ENGINE_VERSION_RETRY_SECONDS`` have passed and is then
+    re-probed, so a transient failure self-heals instead of barriering every
+    later query on that client for its whole lifetime. Storing the verdict as a
+    1-tuple (never a bare ``None``) is what makes "probed, unreadable"
+    distinguishable from "not probed yet" — and the deadline is a SEPARATE
+    marker, so a permissive double that forges one cannot forge the other. A
+    client that refuses the attribute (``__slots__``) is probed every time,
+    which is correct if slower.
     """
     if client is None:
         return None
     cached = _cached_engine_version(client)
     if cached is not None:
         return cached[0]
+    now = time.monotonic()
+    retry_at = _cached_retry_at(client)
+    if retry_at is not None and now < retry_at:
+        return None
     version = _graph_module_version(client)
     with contextlib.suppress(Exception):
-        setattr(client, _ENGINE_VERSION_MARKER, (version,))
+        if version is None:
+            setattr(
+                client,
+                _ENGINE_VERSION_RETRY_MARKER,
+                now + _ENGINE_VERSION_RETRY_SECONDS,
+            )
+        else:
+            setattr(client, _ENGINE_VERSION_MARKER, (version,))
+            setattr(client, _ENGINE_VERSION_RETRY_MARKER, None)
     return version
 
 
@@ -698,9 +791,9 @@ def _engine_needs_predicate_barrier(client) -> bool:
     assumed per call site (the gap that let 27 hand-patched literals coexist with
     an engine that still drops the predicate). An UNREADABLE version is treated
     as affected: the barrier is a measured no-op on the engines that already
-    bind (with ONE measured 4.20.4 pattern-predicate exception — see
-    ``_PREDICATE_DROP_AFFECTED_FROM``), while a missing barrier is a SILENT
-    filter bypass — a wrong probe must never be a false CLEAN.
+    bind for every shape the normaliser still rewrites, while a missing barrier
+    is a SILENT filter bypass — a wrong probe must never be a false CLEAN. The
+    unreadable verdict is re-probed after a TTL, so a transient failure heals.
     """
     version = _engine_module_version(client)
     # Anything that is not a decoded integer triple is UNKNOWN, and UNKNOWN gets
