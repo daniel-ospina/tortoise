@@ -1278,6 +1278,50 @@ def test_an_unaddressable_graph_name_skips_the_read_rather_than_guessing():
     assert e.classify(result, {"status": e.ENGINE_OK}) == e.UNMEASURABLE
 
 
+def test_an_apostrophe_graph_name_is_unaddressable_not_a_green():
+    """(a) FAILS on the pre-fix guard (`ch in '"\\'`), which missed `'`:
+    Redis' inline parser (`sdssplitargs`) quotes on BOTH quote characters, so
+    `GRAPH.RO_QUERY it's "RETURN 1"` is a protocol error and the named graph is
+    never read — yet the `-ERR` reply was recorded as a generic `unverified:`
+    and `classify` called it GRAPH_UP. That is the #7235 false green one layer
+    down, reached by an ordinary name. The guard already refuses whitespace, so
+    the missing apostrophe is a one-character hole in the SAME guard — not a
+    new class.
+    (b) Reachable: `--graph "it's"`, or a URI path carrying an apostrophe
+    (`resolve_db_endpoint` keeps the name verbatim).
+    """
+    server, seen, done = _two_step_server(
+        b"+PONG\r\n", b"-ERR Protocol error: unbalanced quotes in request\r\n")
+    port = server.getsockname()[1]
+    try:
+        result = e.probe_graph("127.0.0.1", port, timeout=1.0, graph="it's")
+    finally:
+        done.wait(2.0)
+        server.close()
+    assert result["ok"] is True, result
+    assert result["read_ok"] is None, result
+    assert result["read_error"] == e.READ_UNADDRESSABLE, result
+    assert e.classify(result, {"status": e.ENGINE_OK}) == e.UNMEASURABLE
+    # the unaddressable read is NOT sent: an apostrophe must not reach the
+    # inline protocol where the engine would re-parse (or unquote) the name.
+    assert b"GRAPH.RO_QUERY" not in (seen[1] if len(seen) > 1 else b""), seen
+
+
+def test_a_fully_quoted_graph_name_cannot_smuggle_a_different_graph():
+    """(a) FAILS on the pre-fix guard: a name wrapped in single quotes
+    (`--graph "'team_graph'"`) is not merely unreadable — the engine UNQUOTES
+    it, so the probe would issue a COMPLETED read against `team_graph`, a graph
+    the caller never named, and certify THAT with GRAPH_UP. A completed read of
+    the wrong graph is worse than a skipped one, so such a name must be
+    refused as unaddressable before it reaches the protocol.
+    (b) Reachable: `--graph "'$TENANT'"`, or a URI path written with quotes.
+    """
+    assert e._addressable_graph_name("'team_graph'") is False
+    assert e._addressable_graph_name("team_graph") is True
+    for name in ("it's", "o'brien", "a'b 'c", "'x'"):
+        assert e._addressable_graph_name(name) is False, name
+
+
 def test_main_exits_two_and_names_the_wedge(monkeypatch, capsys):
     """(a) FAILS if the wedge exits 0, which is exactly how a caller gating on
     the exit code (a heartbeat, a retry loop, a lane's pre-flight) is told the
@@ -1386,6 +1430,44 @@ def test_an_unaddressable_graph_name_is_not_a_green(monkeypatch, capsys):
     port = server.getsockname()[1]
     rc = e.main(["--no-docker", "--graph", "bad name",
                  "--port", str(port), "--timeout", "1.0"])
+    out = capsys.readouterr().out
+    assert rc == 3, (rc, out)
+    assert "VERDICT: UNMEASURABLE" in out, out
+    assert "unaddressable-graph-name" in out, out
+
+
+def test_an_apostrophe_graph_flag_exits_three_not_zero(monkeypatch, capsys):
+    """(a) FAILS on the pre-fix guard, which sent the read for `it's`, read the
+    server's `-ERR Protocol error: unbalanced quotes` as an `unverified:` reply
+    and exited 0 / GRAPH_UP for a graph that was never read. The apostrophe is
+    the same unaddressable class as `--graph 'bad name'`, so the CLI must
+    refuse it the same way: UNMEASURABLE / exit 3, never the green.
+    (b) Reachable: `--graph "it's"` from an ordinary shell.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    server = _one_shot_server(b"+PONG\r\n")
+    port = server.getsockname()[1]
+    rc = e.main(["--no-docker", "--graph", "it's",
+                 "--port", str(port), "--timeout", "1.0"])
+    out = capsys.readouterr().out
+    assert rc == 3, (rc, out)
+    assert "VERDICT: UNMEASURABLE" in out, out
+    assert "unaddressable-graph-name" in out, out
+
+
+def test_a_uri_path_with_an_apostrophe_exits_three_not_zero(monkeypatch, capsys):
+    """(a) FAILS on the pre-fix guard: the read's name comes straight from the
+    URI's path, so `TORTOISE_DB_URI=…/o'brien` issued `GRAPH.RO_QUERY o'brien
+    "RETURN 1"`, got the protocol error, and returned GRAPH_UP / exit 0 for a
+    graph it never read. Reachable WITHOUT `--graph`, i.e. through the default
+    path every lane uses.
+    (b) Reachable: a per-tenant URI whose path carries an apostrophe.
+    """
+    server = _one_shot_server(b"+PONG\r\n")
+    port = server.getsockname()[1]
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       f"docker://:pw@127.0.0.1:{port}/o'brien")
+    rc = e.main(["--no-docker", "--timeout", "1.0"])
     out = capsys.readouterr().out
     assert rc == 3, (rc, out)
     assert "VERDICT: UNMEASURABLE" in out, out
@@ -1549,9 +1631,62 @@ def test_a_refused_credential_stays_the_documented_green():
         server.close()
     assert result["ok"] is True, result
     assert result["read_ok"] is None, result
-    assert result["read_error"].startswith("auth-refused"), result
+    # The record is the CONSTANT a consumer keys on, not a one-off string that
+    # merely STARTS with it: `read_error == READ_AUTH_REFUSED` must match.
+    assert result["read_error"] == e.READ_AUTH_REFUSED, result
+    # …and the instance's own reply is carried separately, so the report can
+    # still name WHY admission was refused.
+    assert "WRONGPASS" in (result["read_reply"] or ""), result
     assert e.classify(result, {"status": e.ENGINE_OK}) == e.GRAPH_UP
     # the read is NOT attempted with a credential the instance refused
+    assert b"GRAPH.RO_QUERY" not in b"".join(seen[2:]), seen
+
+
+def test_the_refused_auth_is_reported_with_its_constant_and_reply(
+        monkeypatch, capsys):
+    """(a) FAILS on the pre-fix code, which stored `auth-refused:<reply>` in
+    `read_error` and left the `READ_AUTH_REFUSED` constant unreferenced — so a
+    consumer matching the constant never matched, and the report's reason was
+    the only carrier of the detail. The refusal must be the constant in the
+    machine field AND still name the instance's reply for a human.
+    (b) Reachable: a stale password in TORTOISE_DB_URI.
+    """
+    import json as _json
+
+    # (1) the MACHINE field is the constant itself, and the instance's reply
+    # rides in `read_reply` instead of being smuggled into the code.
+    server, seen, done = _auth_server(
+        b"-NOAUTH Authentication required.\r\n",
+        b"-WRONGPASS invalid username-password pair\r\n", _RO_REPLY)
+    port = server.getsockname()[1]
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       f"docker://:stalepw@127.0.0.1:{port}/tortoise")
+    try:
+        rc = e.main(["--json", "--no-docker", "--timeout", "1.0"])
+    finally:
+        done.wait(2.0)
+        server.close()
+    payload = _json.loads(capsys.readouterr().out)
+    assert rc == 0, (rc, payload)
+    assert payload["graph"]["read_error"] == e.READ_AUTH_REFUSED, payload
+    assert "WRONGPASS" in (payload["graph"]["read_reply"] or ""), payload
+    assert b"GRAPH.RO_QUERY" not in b"".join(seen[2:]), seen
+
+    # (2) the human report still names the refusal AND the instance's reason.
+    server, seen, done = _auth_server(
+        b"-NOAUTH Authentication required.\r\n",
+        b"-WRONGPASS invalid username-password pair\r\n", _RO_REPLY)
+    port = server.getsockname()[1]
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       f"docker://:stalepw@127.0.0.1:{port}/tortoise")
+    try:
+        e.main(["--no-docker", "--timeout", "1.0"])
+    finally:
+        done.wait(2.0)
+        server.close()
+    out = capsys.readouterr().out
+    assert f"skipped ({e.READ_AUTH_REFUSED}" in out, out
+    assert "WRONGPASS" in out, out
     assert b"GRAPH.RO_QUERY" not in b"".join(seen[2:]), seen
 
 

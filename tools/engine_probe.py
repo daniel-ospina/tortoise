@@ -187,8 +187,10 @@ READ_PRE_AUTH_PING = "pre-auth-ping"
 READ_UNADDRESSABLE = "unaddressable-graph-name"
 #: The instance refused the AUTH the URI's credential was presented for. The
 #: probe cannot be admitted, so the read is skipped — the documented pre-auth
-#: carve-out, green. Recorded so the report NAMES the refusal rather than
-#: leaving a read that never happened looking like a completed one.
+#: carve-out, green. Recorded as the exact `read_error` so a consumer keying on
+#: the constant MATCHES it (the instance's reply text is carried separately in
+#: `read_reply`), and the report NAMES the refusal rather than leaving a read
+#: that never happened looking like a completed one.
 READ_AUTH_REFUSED = "auth-refused"
 
 
@@ -381,7 +383,11 @@ def probe_graph(host: str, port: int, timeout: float,
                 if auth["ok"]:
                     result.update(_probe_graph_read(sock, graph))
                 elif auth["answered"]:
+                    # The refusal code is the CONSTANT, so a consumer can match
+                    # `read_error == READ_AUTH_REFUSED`; the instance's own reply
+                    # text rides in `read_reply` and is shown in the report.
                     result["read_error"] = auth["error"]
+                    result["read_reply"] = auth.get("reply")
                 else:
                     result["read_ok"] = False
                     result["read_error"] = auth["error"]
@@ -413,16 +419,26 @@ def probe_graph(host: str, port: int, timeout: float,
 def _addressable_graph_name(graph: str) -> bool:
     """Can `graph` go into the inline `GRAPH.RO_QUERY` command unmangled?
 
-    The inline Redis protocol splits the command on whitespace and treats `"`
-    and `\\` specially, so a name carrying any of those would silently address a
-    DIFFERENT graph (or a second command) rather than the one the URI named. A
-    probe must not invent an endpoint, so an unaddressable name skips the read
+    The inline Redis protocol splits the command on whitespace and treats `"`,
+    `'` AND `\\` specially (`sdssplitargs` quotes on BOTH quote characters), so
+    a name carrying any of those would silently address a DIFFERENT graph (or a
+    second command) rather than the one the URI named. A probe must not invent
+    an endpoint, so an unaddressable name skips the read
     (`read_error=READ_UNADDRESSABLE`, i.e. unverified) instead of guessing —
     and `classify` reports that skip as UNMEASURABLE, never GRAPH_UP, because
     the graph the caller NAMED was not verified.
+
+    The apostrophe was MISSED here once, and the miss re-created the #7235
+    false green one layer down: `--graph "it's"` is a protocol error (the
+    unclosed quote rejects the whole request), the reply's `-ERR` is read as
+    an `unverified:` reply, and the probe certified exit 0 for a graph it never
+    read. A fully-quoted name (`--graph "'team_graph'"`) is worse the same way:
+    the engine STRIPS the quotes, so the probe would read the different graph
+    `team_graph` and certify it with a COMPLETED read of a name never asked
+    for. Both are unaddressable and must be treated as such.
     """
     return bool(graph) and not any(
-        ch.isspace() or ch in '"\\' for ch in graph
+        ch.isspace() or ch in '"\'\\' for ch in graph
     )
 
 
@@ -464,8 +480,11 @@ def _authenticate(sock: socket.socket, username: str | None,
     if text[0] == "+":
         return {"ok": True, "answered": True, "reply": text[:160],
                 "error": None}
+    # `error` is the CONSTANT (so `read_error == READ_AUTH_REFUSED` is a match a
+    # consumer can key on); the instance's reply text is `reply`, carried
+    # separately rather than smuggled into the machine-readable code.
     return {"ok": False, "answered": True, "reply": text[:160],
-            "error": f"auth-refused:{text[:80]}"}
+            "error": READ_AUTH_REFUSED}
 
 
 def _probe_graph_read(sock: socket.socket, graph: str) -> dict:
@@ -789,7 +808,14 @@ def _report(args, verdict: str, graph: dict, host: str, port: int,
         elif read_ok is False:
             outcome = graph.get("read_error") or "no reply"
         else:
-            outcome = f"skipped ({graph.get('read_error') or 'no read issued'})"
+            reason = graph.get("read_error") or "no read issued"
+            # The refusal's machine code is the constant READ_AUTH_REFUSED;
+            # the instance's own reply text rides in `read_reply`, so a human
+            # still sees WHY admission was refused (`-WRONGPASS …`) rather
+            # than a bare code.
+            if reason == READ_AUTH_REFUSED and graph.get("read_reply"):
+                reason = f"{reason}: {graph['read_reply']}"
+            outcome = f"skipped ({reason})"
         target = graph.get("read_graph") or "(no graph name)"
         print(f"read   GRAPH.RO_QUERY {target} "
               f'"RETURN 1" -> {outcome}')
