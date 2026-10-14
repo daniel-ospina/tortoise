@@ -102,16 +102,61 @@ def test_create_entity_document_journals_and_survives_rebuild(env):
 
 
 def test_the_record_carries_the_applied_payload(env):
-    """The journal line must reproduce the live node byte for byte."""
+    """The journal line reproduces the applied payload — NOT byte for byte.
+
+    ``_journal_record_payload`` drops the envelope keys ``_emit_event`` owns,
+    and ``_upsert_document`` re-merges the record onto a FRESH node at replay,
+    so three properties of the LIVE node are NOT reproduced. The rebuild below
+    asserts that EXACT set:
+
+    * ``eventId`` — the live create carries no ``event_id``, so the fold
+      coalesces it to ``""``; replay reads the record's ``event_id`` envelope
+      key, so the rebuilt node carries the journal line's ulid.
+    * ``ingestedAt`` / ``updatedAt`` — re-stamped at rebuild time (the fold's
+      own clock), so they differ from the live values by the rebuild delay.
+
+    Everything else — ``title``, ``documentKind``, ``url``, the embedding, the
+    derived ``_searchText`` — IS reproduced. The assertion is the FULL property
+    map (not just the three payload keys), so a NEW unintended divergence
+    fails here instead of passing silently.
+    """
     sdk, events = env
     doc = sdk.create_document("Payload Doc", "report")
     proj = sdk._get_proj()
     live = _sources(proj, doc["id"])[0][0]
     rec = _document_created(events)[0]
-    # The payload minus the envelope keys the record owns.
+
+    # The applied payload the record owns (envelope keys excluded) lands on the
+    # live node verbatim...
     assert rec["title"] == live["title"]
     assert rec["document_kind"] == live["documentKind"]
     assert rec["url"] == doc["id"]
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    after = _sources(proj, doc["id"])[0][0]
+
+    # ...and the rebuild reproduces everything EXCEPT the three named
+    # properties. Report the differing KEYS, not value reprs — two long
+    # property maps are unreadable and this assertion has to be actionable.
+    diverged = sorted(k for k in set(live) | set(after)
+                      if live.get(k) != after.get(k))
+    assert diverged == ["eventId", "ingestedAt", "updatedAt"], (
+        "rebuild_all diverged from live beyond the documented "
+        f"eventId/ingestedAt/updatedAt set: {diverged}")
+
+    # Pin the DIRECTION of each, so an inversion (e.g. the payload stops being
+    # applied, or the eventId divergence reverses) is caught rather than only
+    # the key set.
+    assert live["eventId"] == "" and after["eventId"] == rec["event_id"], (
+        "the rebuilt node's eventId is the journal line's envelope id, and the "
+        f"live create leaves it empty: live={live['eventId']!r} "
+        f"after={after['eventId']!r} rec.event_id={rec['event_id']!r}")
+    assert after["ingestedAt"] != live["ingestedAt"], (
+        "ingestedAt is re-stamped at rebuild time — the live value must not "
+        "survive the replay")
+    assert after["updatedAt"] != live["updatedAt"], (
+        "updatedAt is re-stamped at rebuild time — the live value must not "
+        "survive the replay")
 
 
 def test_document_mutation_survives_rebuild(env):
