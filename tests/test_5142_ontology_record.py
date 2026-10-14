@@ -256,30 +256,110 @@ def test_upsert_document_writes_the_source_kind_and_the_anchor_pair() -> None:
     )
 
 
+def _string_expression(node, module_consts: dict[str, str]) -> str | None:
+    """Best-effort static evaluation of a string expression.
+
+    Recovers a plain string, an f-string's literal parts, a `+`-concatenation of
+    strings (including a bare name bound to a module-level string constant), and
+    a bare module-level constant name. Returns `None` when the node is not
+    statically a string we can recover — a clause assembled at runtime is the
+    documented coverage ceiling.
+    """
+    import ast
+
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            part.value if isinstance(part, ast.Constant) and isinstance(part.value, str) else " "
+            for part in node.values
+        )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _string_expression(node.left, module_consts)
+        right = _string_expression(node.right, module_consts)
+        if left is not None or right is not None:
+            return (left or "") + (right or "")
+        return None
+    if isinstance(node, ast.Name):
+        return module_consts.get(node.id)
+    return None
+
+
+def _module_string_consts(tree) -> dict[str, str]:
+    """Every module-level `NAME = <string expression>` value, resolvable."""
+    import ast
+
+    consts: dict[str, str] = {}
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Assign):
+            value = _string_expression(stmt.value, consts)
+            if value is not None:
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name):
+                        consts[target.id] = value
+        elif (
+            isinstance(stmt, ast.AnnAssign)
+            and isinstance(stmt.target, ast.Name)
+            and stmt.value is not None
+        ):
+            value = _string_expression(stmt.value, consts)
+            if value is not None:
+                consts[stmt.target.id] = value
+    return consts
+
+
+def _document_writers_in_source(text: str, filename: str) -> dict[str, str]:
+    """The document-`:Source` writers in one module's source.
+
+    A writer is a function whose recovered Cypher mentions both a
+    `MERGE (s:Source` and the `documentKind` key. Recovery deliberately spans
+    more than the function's own string literals: bare references to
+    module-level string constants are followed too, so a writer that composes
+    its MERGE clause from a shared constant (`"MERGE (s:Source ..." + DOC_SET`)
+    is still found — the #8525 review's P2 showed a function-locals-only scan
+    missed exactly that shape.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:  # pragma: no cover — a syntax error fails elsewhere
+        return {}
+    module_consts = _module_string_consts(tree)
+    writers: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        parts: list[str] = [
+            child.value
+            for child in ast.walk(node)
+            if isinstance(child, ast.Constant) and isinstance(child.value, str)
+        ]
+        parts += [
+            module_consts[child.id]
+            for child in ast.walk(node)
+            if isinstance(child, ast.Name)
+            and isinstance(child.ctx, ast.Load)
+            and child.id in module_consts
+        ]
+        src = " ".join(parts)
+        if "MERGE (s:Source" in src and "documentKind" in src:
+            writers[f"{filename}::{node.name}"] = src
+    return writers
+
+
 def _document_source_writers() -> dict[str, str]:
-    """Every function in `tortoise/` whose string literals build a `:Source`
+    """Every function in `tortoise/` whose recovered strings build a `:Source`
     MERGE that sets `documentKind` — i.e. every writer that can create a
     document `:Source`. Derived MECHANICALLY: a hand-picked list is exactly how
     the two writers #8525's review found (and the doc named none of them) went
     unnamed.
     """
-    import ast
-
     writers: dict[str, str] = {}
     for path in sorted((REPO / "tortoise").rglob("*.py")):
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except SyntaxError:  # pragma: no cover — a syntax error fails elsewhere
-            continue
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            src = " ".join(
-                child.value for child in ast.walk(node)
-                if isinstance(child, ast.Constant) and isinstance(child.value, str)
-            )
-            if "MERGE (s:Source" in src and "documentKind" in src:
-                writers[f"{path.name}::{node.name}"] = src
+        writers.update(
+            _document_writers_in_source(path.read_text(encoding="utf-8"), path.name)
+        )
     return writers
 
 
@@ -319,3 +399,34 @@ def test_every_document_source_writer_stamps_source_kind() -> None:
             f"_required_sweep harnesses assert it on every :Source, and #5082 "
             f"is only closed if every writer agrees (#8525 review)"
         )
+
+
+def test_writer_scanner_follows_module_level_constants() -> None:
+    """The derivation must not miss a writer that composes its MERGE clause from
+    a module-level constant (the #8525 review's P2).
+
+    The pre-review scanner only gathered string literals *inside* the function,
+    so `"MERGE (s:Source ..." + DOC_SET` was invisible — a future writer could
+    leave the doc's universal claim false and still pass. The scanner now
+    follows bare module-level string constants; this synthetic writer is
+    detected, and the assertion fails if that resolution is removed.
+    """
+    text = '''\
+DOC_SET = (
+    "s.documentKind='note', "
+    "s.sourceKind=coalesce(s.sourceKind, 'document')"
+)
+
+
+def _synthetic_writer():
+    return "MERGE (s:Source {url:$id}) SET " + DOC_SET
+'''
+    writers = _document_writers_in_source(text, "synthetic.py")
+    assert "synthetic.py::_synthetic_writer" in writers, (
+        "a writer composing its MERGE clause from a module-level constant must "
+        "still be derived — the pre-#8525-review function-locals-only scan "
+        "missed exactly this shape"
+    )
+    assert "coalesce(s.sourceKind, 'document')" in writers["synthetic.py::_synthetic_writer"], (
+        "the resolved module-level clause must be visible to the stamp check"
+    )
