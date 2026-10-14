@@ -1164,6 +1164,77 @@ class TestDrRebaseline:
         state = json.loads(mem_storage.download("ops/teams/team_x/state.json"))
         assert state["node_count"] == 3
 
+    def test_rebaseline_refreshes_the_label_baseline(
+            self, client, dr_env, mem_storage):
+        """#8595 review P1: a re-baseline must refresh ``label_counts`` — the
+        #661 guard's baseline — not only ``node_count``.
+
+        The guard compares the CURRENT per-label counts against the
+        ``label_counts`` in the persisted state. Only the sweep's success path
+        ever wrote that field, so refreshing ``node_count`` alone left the label
+        baseline at its PRE-drop value: the next sweep re-fired the incident the
+        operator had just cleared — deleting that run's fresh archive and, by
+        delete-to-resolve, filing a NEW issue. #4132–#4135 are default-graph
+        incidents of exactly this shape.
+
+        RED (pre-fix): the written state keeps the seeded
+        ``{"OnboardingStep": 4}``, and ``_check_per_label_drift`` re-fires on
+        4 → 3.
+        """
+        from tortoise.backup_sweep import (
+            _check_per_label_drift,
+            query_label_counts,
+        )
+
+        _seed_team("team_x", nodes=3)
+        sdk = TortoiseSDK(namespace="registry")
+        _SEED_SDKS.append(sdk)
+        g = sdk._get_proj().db.select_graph("org_team_x")
+        for i in range(3):
+            g.query("CREATE (o:OnboardingStep {id:$id})",
+                    params={"id": f"os-{i}"})
+        # Create the projection's own bookkeeping marker EXPLICITLY instead of
+        # relying on the endpoint to materialise one mid-request. The marker is
+        # the thing this test exists to prove is excluded: with no bookkeeping
+        # node in the graph, the assertions below hold even when
+        # `_LABEL_COUNT_QUERY` is reverted to a bare `MATCH (n)` — the read has
+        # nothing to include — so the pin was vacuous (#8595 review P2). Seeding
+        # it makes the read genuinely discriminating and removes the race.
+        # `point_fts_v2` is one of `hosted_api._EXPORT_SKIP_META_KEYS`.
+        g.query("MERGE (m:Meta {key:'point_fts_v2'})")
+        live = query_label_counts(g)
+        assert live == {"OnboardingStep": 3, "Point": 3}, live
+
+        # The last SUCCESSFUL backup's baseline: a small label one node above
+        # where the graph now sits — the unresolved-fire shape.
+        mem_storage.upload(
+            "ops/teams/team_x/state.json",
+            json.dumps({
+                "node_count": 16,
+                "label_counts": {"OnboardingStep": 4},
+            }).encode(),
+        )
+        r = client.post(
+            "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
+            json={"org_id": "team_x"},
+        )
+        assert r.status_code == 200, r.text
+        state = json.loads(mem_storage.download("ops/teams/team_x/state.json"))
+        assert state["label_counts"] == live, (
+            "re-baseline did not refresh the per-label baseline, so the next "
+            "sweep re-fires the incident it was meant to clear")
+        # …and it must count the SAME node set ``node_count`` does. The
+        # projection's bookkeeping is not content: a marker that appears while
+        # a projection is open would enter the baseline and then, on the run
+        # that excludes it, be a `1 → 0` drop on a label below the floor —
+        # firing the DATA_LOSS_CANDIDATE the baseline was written to clear.
+        assert "Meta" not in state["label_counts"], (
+            f"the baseline records the projection's own marker: "
+            f"{sorted(state['label_counts'])}")
+        assert _check_per_label_drift(
+            prev_counts=state["label_counts"], current_counts=live) is None, (
+            "the state a re-baseline wrote still breaches the #661 guard")
+
     def test_rebaseline_survives_a_resolve_failure(self, client, dr_env, mem_storage,
                                                     monkeypatch):
         """Cycle-2 review P2: `resolve_incident` RAISES on a failed close, and the
@@ -1637,6 +1708,41 @@ class TestDrRebaselinePerGraph:
         # team mirror untouched for custom re-baseline
         assert json.loads(mem_storage.download(
             "ops/teams/team_x/state.json"))["node_count"] == 99
+
+    def test_rebaseline_refreshes_the_custom_graph_label_baseline(
+            self, client, dr_env, mem_storage):
+        """#8595 review P1, custom-graph half: ``graph_id != "default"`` merged
+        ``{}``, so the written state had NO ``label_counts`` at all and the #661
+        guard was SKIPPED (both sides must be non-empty) for a run — a blind
+        window right after the operator cleared an incident. The empty merge
+        also dropped every other sweep-written field.
+
+        RED (pre-fix): the state carries no ``label_counts`` key (KeyError) and
+        no ``latest_backup_at``.
+        """
+        _seed_team("team_x", nodes=2)
+        self._seed_custom()
+        mem_storage.upload(
+            "ops/teams/team_x/graphs/g_c1/state.json",
+            json.dumps({
+                "node_count": 9,
+                "label_counts": {"Point": 5, "OnboardingStep": 4},
+                "latest_backup_at": "2026-01-01T00:00:00+00:00",
+            }).encode(),
+        )
+        r = client.post(
+            "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
+            json={"org_id": "team_x", "graph_id": "g_c1"},
+        )
+        assert r.status_code == 200, r.text
+        state = json.loads(mem_storage.download(
+            "ops/teams/team_x/graphs/g_c1/state.json"))
+        assert state["label_counts"] == {"Point": 1}, (
+            "a custom-graph re-baseline wrote no refreshed label baseline, so "
+            "the #661 guard is SKIPPED for the next run")
+        assert state["latest_backup_at"] == "2026-01-01T00:00:00+00:00", (
+            "the custom-graph re-baseline dropped sweep-written state it did "
+            "not need to touch")
 
     def test_rebaseline_refuses_tombstoned_graph(self, client, dr_env, mem_storage):
         _seed_team("team_x", nodes=2)
