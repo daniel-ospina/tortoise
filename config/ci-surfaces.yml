@@ -2048,6 +2048,21 @@ surfaces:
   # `tier1` is where it must live; `core` is its home for the code diffs that
   # can revert the scrub the ruling assumes.
   - test_extractor_v4_redaction_reconciliation.py
+  # #8639 review P1: the entity-attachment brief's §6.7 must not name a REFUSED
+  # pack slot as an existing declaration surface. Pins the retracted sentence as
+  # ABSENT, the corrected passage (the `ontology.kindDefs.<kind>.synonyms` read
+  # home + the `#1026` "no name patterns" refusal) as PRESENT **within the §6.7
+  # section** — the §5 row carries the same literals, so a file-wide membership
+  # test cannot red on §6.7's silent deletion (#8639 review, test-scope). Also
+  # pins the code facts
+  # behind it (`REFUSED_EXTRACTION_KEYS` refuses `entityPatterns`/
+  # `excludePatterns`; they are NOT in `VALID_EXTRACTION_KEYS`; and
+  # `compile_kind_index_spec` still renders kindDefs synonyms/examples). Same
+  # docs-only reason as the guards above: a `docs/`-only diff takes `select()`'s
+  # early return, so `tier1` is where it must live; `core` is its home for the
+  # code diffs (`tortoise/pack_registry.py`, `tortoise/value_extractor.py` — each
+  # selects `core`) that can reverse the refusal the brief now states.
+  - test_entity_attachment_brief_claims.py
   - test_falkordb_compat.py
   # #7076: the degraded-fallback snapshot's OWN guard. test_fallback_snapshot.py
   # was registered only under `api`, while the module it guards
@@ -3516,6 +3531,10 @@ tier1:
 # no-DB file scan plus the scrub's marker/idempotence assertions, so a docs-only
 # PR runs it here.
 - test_extractor_v4_redaction_reconciliation.py
+# #8639 review P1: the entity-attachment brief's pack-slot claim (`core` above) —
+# a fast, no-DB file scan of the brief plus two module-text reads, so a docs-only
+# PR must run it here.
+- test_entity_attachment_brief_claims.py
 slow_files:
 - test_3311_multilabel_status_vocab.py
 - test_about_edges.py
@@ -4502,6 +4521,7 @@ durations:
   test_extractor_v4_citation_rot.py: 0.1  # #8506: doc-text scans + a handful of file reads; same no-DB shape as the two guards above
   test_extractor_v4_failure_policy.py: 0.1  # #8495: §4.4 doc-text scan + two module reads; same no-DB shape as the three guards above
   test_extractor_v4_redaction_reconciliation.py: 0.3  # #8496: one section read + a marker/idempotence check; the `tortoise.sdk` import (~0.12s) is the only cost
+  test_entity_attachment_brief_claims.py: 0.1  # #8639 review P1: doc-text scan + three regex block reads; same no-DB shape as the extractor-v4 guards above
   test_file_indexer.py: 0.7
   test_open_kinds.py: 0.3
   test_postmerge_verdict.py: 0.4
