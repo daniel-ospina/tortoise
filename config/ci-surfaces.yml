@@ -2196,6 +2196,13 @@ surfaces:
   - test_subject_supersession_1423.py
   - test_open_kinds.py
   - test_operator_annotator_rebuild.py   # #3689 journaled OperatorAnnotated + PointRevised annotator dims survive rebuild_all
+  # #7551: the operator-label declared vocabulary. Registered under `core` so it
+  # is CLASSIFIED at all (manifest-integrity refuses an unregistered test file)
+  # AND selected on the regression vector it exists for: `tortoise/sdk.py`,
+  # `tortoise/pack_registry.py` and `tortoise/enforcement.py` each select `core`
+  # (verified with `tools/ci_selection.py --changed-files <path>`), and without
+  # this arm the guard would never run on the write path it holds.
+  - test_operator_label_vocabulary.py
   - test_operator_source_search.py
   - test_operator_source_unit.py
   - test_ops_safety.py

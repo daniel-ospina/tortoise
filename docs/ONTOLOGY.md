@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.25"
+title: "Tortoise — Canonical Ontology v3.26"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-10-13
+updated: 2026-10-14
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.25
+# Tortoise — Canonical Ontology v3.26
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -32,6 +32,21 @@ doc_status: live
 > **⭐ If this document and the code disagree, THIS DOCUMENT IS RIGHT and the code
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in the changelog.
+>
+> **Changelog v3.26 (2026-10-14 — issue #7551 — the operator-label declared vocabulary is stated, and the write path consults the whole of it):**
+>
+> **A code/record alignment, not a model change** — no meaning, direction or vocabulary
+> moves. §3.9 already said operators are *"`IMPL`, `NAND` (+ semantic label)"*, but the set
+> `create_operator` checked a `label` against was the **pack relations alone**: every core
+> predicate read as *undeclared*, so `supports` — this document's own evidence→claim meaning
+> (§8) — returned the same `undeclared_relation` warning as an invented name. A lane with no
+> reachable declared predicate therefore invented one (`measures`, ≈25 such edges). §3.9 now
+> **states the declared vocabulary** — the mechanism pair ∪ the closed §8 semantics vocabulary
+> ∪ every predicate an installed pack declares (`pack_registry.CORE_OPERATOR_LABELS`) — and
+> the write path consults all three. **Warn-not-block is unchanged (#1934):** declaredness is
+> what the check answers, not shape (the §8 reification table governs the latter), and a
+> **retired** spelling (`opposes` / `produces` / `holds` / `funds`) deliberately keeps warning
+> so the caller learns the canonical word. `measures` stays undeclared.
 >
 > **Changelog v3.25 (2026-10-13 — issue #5142 — the D10 code half's ONTOLOGY record: the `format` markers, the deferred node collapse, and the document `:Source` scoping):**
 >
@@ -1025,6 +1040,19 @@ wasDerivedFrom
 > move together, and the replay branch keys on `etype in DERIVABLE_STRUCTURAL_RELS`.
 
 Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label).
+
+> **The operator-label declared vocabulary (#7551).** A `label` passed to
+> `create_operator` / `tortoise_create_operator` is **declared** — written without an
+> `undeclared_relation` warning — when it is `IMPL`/`NAND`, a value of the §8 Layer-2 semantics
+> vocabulary, or a predicate an installed pack declares. The declared set is the **union** of
+> those three, and it is **derived** (`pack_registry.CORE_OPERATOR_LABELS`), never
+> re-transcribed, so it cannot drift from §8's table. **Declaredness is not shape:** the §8
+> reification table governs which edges *ought* to carry an operator, and an undeclared label
+> still warns without blocking (warn-not-block, #1934). A **retired** spelling (`opposes`,
+> `produces`, `holds`, `funds` — the transition map) is deliberately **not** declared, so it
+> keeps warning and the caller learns the canonical word. `measures` is declared nowhere and
+> was never a §8 meaning — it was invented by a lane that could find no reachable declared
+> predicate, which is what this statement exists to prevent.
 
 Mitigation edge: `mitigated_by` — Point → Point (operator → mitigation Point), written by `mitigate_operator` (`TortoiseSDK.mitigate_operator`): `(op:Point {is_operator:true})-[:mitigated_by]->(m:Point)`, with the mitigation Point back-linking `-[:IMPL]->` the operator (#909 §4.3 #7 — registered).
 

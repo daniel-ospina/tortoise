@@ -9092,10 +9092,12 @@ class TortoiseSDK:
         (#6131).
 
         Note what this path does NOT do: unlike ``create_operator``, which returns
-        a structured ``undeclared_relation`` warning when no installed pack
-        declares the predicate, ``update(<operator_id>, label=...)`` performs no
+        a structured ``undeclared_relation`` warning when the predicate is neither
+        a core operator label (``pack_registry.CORE_OPERATOR_LABELS`` — ONTOLOGY
+        §3.9's ``IMPL``/``NAND`` plus §8's semantics vocabulary) nor a predicate an
+        installed pack declares, ``update(<operator_id>, label=...)`` performs no
         declaredness check and installs the label silently. Take valid predicates
-        from ``list_relations()``.
+        from ``list_relations()`` for the pack-declared leg, or the core set above.
 
         Detects the node type by label:
           - Point → point-lifecycle semantics (delegates to update_point):
@@ -11440,8 +11442,15 @@ class TortoiseSDK:
         # #1934 (epic #1891 slice 3): relation-level write validation —
         # warn-not-block (governance D1/D2). An undeclared domain label is
         # warned (structured) and the write proceeds; the violations event
-        # feeds the future governance app. Consults the pack registry's
-        # declared relation predicates — the ladder is no longer dead config.
+        # feeds the future governance app.
+        #
+        # #7551: the declared set is the CORE operator-label vocabulary
+        # (`pack_registry.CORE_OPERATOR_LABELS` — the §3.9 mechanism pair plus
+        # the closed §8 semantics vocabulary) UNIONED with every pack-declared
+        # relation predicate. It used to be pack relations alone, so EVERY core
+        # predicate read as undeclared and the warning carried no information:
+        # `supports` — the graph's own evidence→claim convention — warned
+        # exactly like an invented name, which is how `measures` accumulated.
         #
         # #2030 (verified, NOT a bug): relation predicates are declared and
         # matched BARE by contract — manifests declare bare `relations[]
@@ -11457,15 +11466,16 @@ class TortoiseSDK:
         if label:
             from tortoise.domain_loader import _get_registry
             from tortoise.enforcement import emit_violation, warning_for_relation
+            from tortoise.pack_registry import CORE_OPERATOR_LABELS
             reg = _get_registry()
-            declared = set()
+            declared = set(CORE_OPERATOR_LABELS)
             if reg is not None:
-                declared = {r.get("predicate") for r in reg.list_relations()}
-            # #4937: the generic operator menu is IMPL/NAND (+ pack-declared
-            # relations) — MITIGATES is NOT a built-in operator label. A
-            # caller spelling it here gets the undeclared-relation warning
-            # instead of a silent peer spelling of mitigation.
-            if label not in declared and label not in ("IMPL", "NAND"):
+                declared |= {r.get("predicate") for r in reg.list_relations()}
+            # #4937: MITIGATES is NOT a built-in operator label — it is absent
+            # from both legs above, so a caller spelling it here gets the
+            # undeclared-relation warning instead of a silent peer spelling of
+            # mitigation.
+            if label not in declared:
                 warnings.append(warning_for_relation(label))
                 emit_violation(code="undeclared_relation", relation=label,
                                detail=f"op_type={op_type}")
