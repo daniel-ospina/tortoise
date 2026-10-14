@@ -2041,21 +2041,21 @@ surfaces:
   # return, so `tier1` is where it must live; `core` is its home for the code
   # diffs that can falsify a claim.
   - test_extractor_v4_s4_stage_claims.py
-  # #8495: the FOURTH guard over the same document — §4.4's per-step failure
+  # #8495: the FIFTH guard over the same document — §4.4's per-step failure
   # policy. Pins that every §4.0 canonical step keeps a declared direction, that
   # the three invariants and the re-narrate tie-break survive, and that `HOLD` is
-  # not silently added to `vet_gate.OUTCOMES`. Same docs-only reason as the three
+  # not silently added to `vet_gate.OUTCOMES`. Same docs-only reason as the
   # guards above: a `docs/`-only diff takes `select()`'s early return, so `tier1`
   # is where it must live; `core` is its home for the code diffs (a fixed
   # `_render_search_results`, or a new step) that can re-rot the passage.
   - test_extractor_v4_failure_policy.py
-  # #8496: the FOURTH guard over the same document — the G4 reconciliation
+  # #8496: the SIXTH guard over the same document — the G4 reconciliation
   # (append-only raw layer vs credential redaction). Pins the stated design
   # choice (R1–R4: redact BEFORE the append, retention-erasure for the
   # already-persisted case, `(scanned, total)` coverage, Postgres home) AND the
   # code ground it rests on (`redact_secrets` marker + idempotence, and
   # `_capture_turn_texts` storing the marker). Same docs-only reason as the
-  # three guards above: a `docs/`-only diff takes `select()`'s early return, so
+  # guards above: a `docs/`-only diff takes `select()`'s early return, so
   # `tier1` is where it must live; `core` is its home for the code diffs that
   # can revert the scrub the ruling assumes.
   - test_extractor_v4_redaction_reconciliation.py
