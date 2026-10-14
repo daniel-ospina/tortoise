@@ -610,3 +610,86 @@ def test_no_sdk_query_re_declares_the_current_status_allow_list() -> None:
         "sdk.py re-declares the current-status allow-list: call "
         f"live._current_status_clause instead — {offenders}"
     )
+
+
+# ── 7. #8662 review — the contract text and the DERIVATION, not just ────────
+#          values (a value-only pin cannot see a re-literalisation, because
+#          the pre-fix literal has the same value as the derived set).
+
+def _function_docstring(source: str, name: str) -> str:
+    """The docstring of ``name`` in ``source``, or an explicit assertion."""
+    for node in ast.walk(ast.parse(source)):
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == name):
+            return ast.get_docstring(node, clean=True) or ""
+    raise AssertionError(f"{name} not found in the scanned source")
+
+
+def test_review_connections_contract_names_every_stale_status() -> None:
+    """#8662 P2 — the contract text must name every member of the set.
+
+    ``review_connections(mode=prune)``'s only reader-facing definition of
+    ``stale`` is its docstring enumeration. #4058 rebased
+    ``STALE_TERMINAL_STATUSES`` onto the canonical exclusion, which added the
+    legacy ``deprecated`` — the enumeration named four of the five, so an agent
+    reading the SDK was told a deprecated-incident edge would NOT surface as
+    stale. Every member must be named.
+    """
+    from tortoise.sdk import STALE_TERMINAL_STATUSES
+
+    doc = _function_docstring(
+        (_REPO_ROOT / "tortoise" / "sdk.py").read_text(encoding="utf-8"),
+        "review_connections")
+    stale_bullet = re.sub(r"\s+", " ", doc).split(
+        "* stale", 1)[1].split("* contested", 1)[0]
+    missing = sorted(s for s in STALE_TERMINAL_STATUSES if s not in stale_bullet)
+    assert not missing, (
+        "the review_connections(mode=prune) stale enumeration omits "
+        f"{missing} — a reader is told those statuses do not surface as "
+        "stale. Name every member of STALE_TERMINAL_STATUSES in the docstring."
+    )
+
+
+def test_state_excluded_status_derives_from_the_canonical_exclusion() -> None:
+    """#8662 P3 — pin the DERIVATION, not only the value.
+
+    The pre-#4058 literal ``frozenset({"superseded", "deprecated",
+    "retracted"})`` is EQUAL to ``TERMINAL_EXCLUDED_STATUSES - {"outdated",
+    "archived"}``, so every value/inclusion assertion passes on the pre-fix
+    code and a re-literalisation lands green — the exact drift the derivation
+    exists to prevent. The claim the definition makes ("DERIVED rather than
+    re-literalised") is pinned structurally: the assignment's RHS must subtract
+    the canonical exclusion, and may name only the members the state view
+    deliberately keeps visible — so a status added to the vocabulary lands in
+    the set automatically, and a hand-written ``frozenset`` REDs.
+    """
+    source = (_REPO_ROOT / "tortoise" / "sdk.py").read_text(encoding="utf-8")
+    assignments = [
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "STATE_EXCLUDED_STATUS"
+                for t in node.targets)
+    ]
+    assert len(assignments) == 1, (
+        f"expected exactly one STATE_EXCLUDED_STATUS assignment, "
+        f"found {len(assignments)}"
+    )
+    rhs = assignments[0].value
+    assert isinstance(rhs, ast.BinOp) and isinstance(rhs.op, ast.Sub), (
+        "STATE_EXCLUDED_STATUS must DERIVE from the canonical Point exclusion "
+        "(TERMINAL_EXCLUDED_STATUSES - {...}), not re-literalise it — a "
+        "hand-written set drifts when the vocabulary grows: "
+        f"{ast.unparse(rhs)[:160]}"
+    )
+    assert isinstance(rhs.left, ast.Name) \
+        and rhs.left.id == "TERMINAL_EXCLUDED_STATUSES", ast.unparse(rhs)
+    assert isinstance(rhs.right, ast.Set), ast.unparse(rhs)
+    deliberately_visible = {elt.value for elt in rhs.right.elts}
+    assert deliberately_visible == {"outdated", "archived"}, (
+        "the state view may only drop the members it deliberately keeps "
+        f"visible (the #3308 pin): {sorted(deliberately_visible)}"
+    )
+    # And the VALUE tracks the LIVE canonical set, not the vocabulary as it was
+    # when a hand-written literal was first spelled out.
+    expected = TERMINAL_EXCLUDED_STATUSES - deliberately_visible
+    assert expected == TortoiseSDK.STATE_EXCLUDED_STATUS

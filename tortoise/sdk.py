@@ -15478,8 +15478,11 @@ class TortoiseSDK:
             EP signals. Flags IMPL/NAND edges (operator-mediated OR direct
             per the reification rule) where:
               * stale         — edge incident to a retracted/superseded/
-                                outdated/archived Point (or legacy
-                                outdated=true flag). suggested_action is
+                                outdated/archived/deprecated Point (or the
+                                legacy outdated=true flag). STALE_TERMINAL_STATUSES
+                                is the canonical exclusion set, so this list
+                                tracks it — the legacy `deprecated` member
+                                included (#4058). suggested_action is
                                 "re-point" when a CORRECTS successor exists,
                                 else "prune".
               * contested     — edge incident to a claim with high posterior
