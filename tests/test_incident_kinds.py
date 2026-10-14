@@ -275,10 +275,15 @@ def test_the_sweep_module_docstring_points_at_the_triage_row():
     src = (ROOT / "tortoise/backup_sweep.py").read_text(encoding="utf-8")
     docstring = ast.get_docstring(ast.parse(src)) or ""
     assert docstring, "tortoise/backup_sweep.py lost its module docstring"
-    assert "docs/ops/registry-backup-dr.md" in docstring, (
-        "the module docstring must link the runbook row that gives the #661 "
-        "guard's firing a disposition — a reader from the code otherwise has "
-        "no triage path")
+    # Derive the path from ``RUNBOOK`` — the single declaration site — rather
+    # than re-typing it: a second literal would let the runbook be renamed
+    # while this pin stayed green, leaving the docstring pointing at a file
+    # that no longer exists (the #8595 review's P3).
+    runbook_rel = str(RUNBOOK.relative_to(ROOT))
+    assert runbook_rel in docstring, (
+        f"the module docstring must link the runbook row that gives the #661 "
+        f"guard's firing a disposition ({runbook_rel}) — a reader from the "
+        f"code otherwise has no triage path")
     # …and the link target must be real, so the reference cannot rot silently.
     # The assertion is on the PARSED triage table, not on a substring of the
     # whole file: the kind token appears in several other runbook passages, so

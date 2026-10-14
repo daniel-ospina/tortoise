@@ -1214,6 +1214,14 @@ class TestDrRebaseline:
         assert state["label_counts"] == live, (
             "re-baseline did not refresh the per-label baseline, so the next "
             "sweep re-fires the incident it was meant to clear")
+        # …and it must count the SAME node set ``node_count`` does. The
+        # projection's bookkeeping is not content: a marker that appears while
+        # a projection is open would enter the baseline and then, on the run
+        # that excludes it, be a `1 → 0` drop on a label below the floor —
+        # firing the DATA_LOSS_CANDIDATE the baseline was written to clear.
+        assert "Meta" not in state["label_counts"], (
+            f"the baseline records the projection's own marker: "
+            f"{sorted(state['label_counts'])}")
         assert _check_per_label_drift(
             prev_counts=state["label_counts"], current_counts=live) is None, (
             "the state a re-baseline wrote still breaches the #661 guard")

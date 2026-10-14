@@ -28,8 +28,12 @@ per-GRAPH — state, dumps, and retention are graph-scoped, #2313):
   absolute-count-aware thresholds — a <50% wipe of a low-count label
   (e.g. Invitation) that passes the overall >50% guard still fires
   DATA_LOSS_CANDIDATE. Triage and disposition for it: the
-  ``DATA_LOSS_CANDIDATE`` row of docs/ops/registry-backup-dr.md — read
-  ``label_breaches``, never ``overall_drop_pct`` alone.
+  ``DATA_LOSS_CANDIDATE`` row of docs/ops/registry-backup-dr.md. Which field
+  to read there follows the TRIGGER: this per-label path emits both
+  ``overall_drop_pct`` and ``label_breaches``, while the overall >50% / >0 → 0
+  paths emit ``drop_pct`` and no ``label_breaches`` key at all — so a detail
+  carrying ``label_breaches`` is a label-path incident whatever its headline
+  percentage, and one without that key is not.
 - Enumeration-delta guard: a prior org count > 0 → 0 fires an incident (a
   wiped enumeration source must not degrade silently to chronic NO_ORGS).
 - Per-org serialization via the caller's lock factory.
@@ -206,8 +210,23 @@ def _check_per_label_drift(
 #: backup, and ``hosted_api.backups_rebaseline`` REFRESHES it so a re-baseline
 #: actually re-arms the guard. Sharing it means a re-baseline can never write a
 #: baseline shaped differently from the one the next sweep compares against.
+# The #661 guard compares this against a baseline written by the same sweep, so
+# it must count the SAME node set `node_count` does. A bare `MATCH (n)` did not:
+# it counted the projection's own bookkeeping (`EpMeta` / `GraphEventMeta` /
+# `TeamMeta`, plus `Meta` nodes keyed `point_fts_v2` / `event_fts_v2`), which is
+# not content. The two surfaces could then disagree about whether the marker
+# exists — a projection opened on the org graph MERGEs `point_fts_v2` into it —
+# and `Meta: 1 → 0` is a breach, because a label whose previous count is below
+# the floor fires on ANY drop. That re-fires the very DATA_LOSS_CANDIDATE the
+# baseline exists to clear, and it deletes the next run's archive when it does.
+# The predicate is `_COUNT_DATA_NODES_QUERY`'s, over the SAME
+# `_EXPORT_SKIP_LABELS` / `_EXPORT_SKIP_META_KEYS` constants — one definition,
+# so the two counts cannot drift apart (#8595).
 _LABEL_COUNT_QUERY = (
-    "MATCH (n) UNWIND labels(n) AS lbl RETURN lbl, count(*) ORDER BY lbl"
+    "MATCH (n) WHERE NOT any(l IN labels(n) WHERE l IN $skip_labels) "
+    "AND NOT ('Meta' IN labels(n) AND n.key IS NOT NULL "
+    "AND n.key IN $meta_keys) "
+    "UNWIND labels(n) AS lbl RETURN lbl, count(*) ORDER BY lbl"
 )
 
 
@@ -216,7 +235,10 @@ def query_label_counts(graph) -> dict[str, int]:
 
     A server-side AGGREGATE, like
     :func:`tortoise.hosted_backup.count_data_nodes`: one row, so it is immune to
-    FalkorDB's ``RESULTSET_SIZE`` cap.
+    FalkorDB's ``RESULTSET_SIZE`` cap. It counts that function's node set — the
+    content set, with the projection's bookkeeping excluded — because the #661
+    guard compares labels across runs and a marker that appears or disappears
+    with a projection is not data loss.
 
     Raises on a query failure — the CALLERS decide what a failed read means, and
     they differ on purpose. :func:`_backup_graph` continues without a label
@@ -225,7 +247,14 @@ def query_label_counts(graph) -> dict[str, int]:
     baseline left at its pre-drop value would re-fire the incident the operator
     just cleared, deleting the next run's archive and filing a NEW issue.
     """
-    rows = graph.query(_LABEL_COUNT_QUERY).result_set
+    from tortoise.hosted_api import (
+        _EXPORT_SKIP_LABELS,
+        _EXPORT_SKIP_META_KEYS,
+    )
+    rows = graph.query(_LABEL_COUNT_QUERY, params={
+        "skip_labels": sorted(str(l) for l in _EXPORT_SKIP_LABELS),  # noqa: E741
+        "meta_keys": sorted(str(k) for k in _EXPORT_SKIP_META_KEYS),
+    }).result_set
     return {str(r[0]): int(r[1]) for r in rows if r and r[0]}
 
 
