@@ -805,11 +805,14 @@ test('#3428: the done screen is gated on the SERVER-observed connection, not a c
   // read as "advance", and nothing on this screen is the next step
   assert.match(done, /Head back to /, 'the redirect is prose, not a control')
   assert.doesNotMatch(done, /btn-primary/, 'no filled primary control on the done step')
-  // review cycle 1 (P2-2): the owner-approved screen has exactly ONE control
-  // beneath the redirect (the design decision names the dashboard link as "the
-  // only real control") — the docs link lives on other surfaces.
+  // review cycle 1 (P2-2): the owner-approved screen has exactly ONE DEMOTED
+  // `done-link` (the design decision names the dashboard link as "the only real
+  // control"). Scope, per #3727: this guard counts the demoted link class ONLY.
+  // The shared per-step `wizard-nav` row — its bordered "← Back" ghost button
+  // sits INSIDE this slice — is NOT examined here, so this guard does not assert
+  // the done screen's TOTAL control count.
   assert.equal((done.match(/className="done-link"/g) || []).length, 1,
-    'the approved success screen has exactly one control (the dashboard link)')
+    'the approved success screen has exactly one demoted `done-link` (the dashboard exit); the shared wizard-nav row is outside this guard')
   assert.doesNotMatch(done, /Read the docs/,
     'the docs link must not re-appear on the approved done step')
   // review cycle 2 (P2-4) / cycle 3 (P1-D): the not-connected remedy is
