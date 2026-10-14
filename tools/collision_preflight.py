@@ -4305,6 +4305,18 @@ def _timeline_events(gh_bin: str, slug: str | None, cwd: str, timeout: float,
         raise SurfaceError(
             f"gh {' '.join(args)} returned a non-list body: {_one_line(out)}"
         )
+    if not pages:
+        # A bare `[]` is never a valid `--paginate --slurp` body: an empty
+        # result is `[[]]` (ONE empty page), measured on gh 2.97.0. Read as
+        # zero pages it becomes a measured, EMPTY timeline, and the surface
+        # then reports a COMPLETE measurement ("0 timeline event(s)") on an
+        # input it never read — the fail-OPEN direction this section exists to
+        # close. Mirrors `branch_reaper.fetch_prs`, which raises on the same
+        # shape for the same reason.
+        raise SurfaceError(
+            f"gh {' '.join(args)} returned an empty page list — a valid "
+            "slurp payload always has at least one page"
+        )
     events: list[dict] = []
     for page_index, page in enumerate(pages):
         if not isinstance(page, list):

@@ -5262,6 +5262,20 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: INCOMPLETE", out)
         self.assertNotIn("VERDICT: CLEAN", out)
 
+    def test_empty_slurp_body_is_incomplete_not_clean(self):
+        # A bare `[]` is not a valid `--paginate --slurp` body — an empty
+        # result is `[[]]`, ONE empty page. Read as zero pages it becomes a
+        # measured, EMPTY timeline, and the surface reports a COMPLETE
+        # measurement ("0 timeline event(s)") on an input it never read: the
+        # fail-OPEN direction this surface exists to close. Mirrors
+        # `branch_reaper.fetch_prs`'s guard on the identical shape.
+        self.gh_fixtures(issue=self.issue_payload(state="OPEN"))
+        self.timeline_fixture(pages=[])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+
     def test_landed_outranks_a_collision_and_names_both(self):
         # A terminal signal is DECISIVE. If a lane is ALSO on it, the verdict is
         # LANDED (the terminal fact) and the collision is still reported.
