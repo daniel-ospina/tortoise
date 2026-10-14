@@ -1914,8 +1914,13 @@ class TestMcpBoundedMiddlewareStore:
 
     def test_a_429_creates_no_bucket(self, monkeypatch):
         """#5518 AC3: ``_bucket_route`` never inserts, so the refused key is
-        absent from the store. The old ``defaultdict`` pre-inserted the bucket
-        BEFORE the limit check — every 429 leaked a store entry."""
+        absent from the store. Pre-#5518 the READ ``self._buckets[key_id]`` on
+        a ``defaultdict`` inserted the bucket on the LOOKUP path (#1719's
+        insertion-discipline defect) — that is not a per-429 leak: a fresh
+        key's empty bucket is under any ``max_per_minute >= 1``, so a fresh key
+        is charged, never refused (only ``max_per_minute == 0`` could refuse a
+        lookup-created key). This pins the post-fix discipline: a refusal is
+        reached without ever writing the refused key."""
         import tortoise.rate_buckets as rb
 
         # cap=1, limit=1: A owns the single slot, B is charged to the shared

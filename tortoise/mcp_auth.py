@@ -1047,9 +1047,14 @@ class MCPRateLimitMiddleware(BaseHTTPMiddleware):
     limiter), so the old arrangement was the defect, not a bound: a
     rotating-key flood pruned nothing (every bucket was charged inside the
     window), and the 60 s wholesale sweep was O(n) over that growing store.
-    ``_bucket_route`` never inserts, so a 429 leaves NO bucket behind — the
-    old ``self._buckets[key_id]`` on a ``defaultdict`` pre-inserted BEFORE the
-    limit check. The sweep is gone entirely; the deadline attribute with it.
+    ``_bucket_route`` never inserts, so a 429 leaves NO bucket behind. The
+    old read ``self._buckets[key_id]`` on a ``defaultdict`` inserted the bucket
+    on the LOOKUP path (#1719's insertion-discipline defect) — but that is not
+    a per-429 leak: a fresh key's bucket is empty, so it is under any
+    ``max_per_minute >= 1`` and the pre-insert is always followed by a charge.
+    Only the degenerate ``max_per_minute == 0`` config (the off switch is
+    ``RATE_LIMIT_DISABLED=1``) could refuse a key the lookup had just created.
+    The sweep is gone entirely; the deadline attribute with it.
     """
 
     #: Hard cap on OWNED (client-keyed) buckets. Mirrors
