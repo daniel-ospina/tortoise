@@ -60,7 +60,7 @@ THE DESIGN (one seam, not two patches):
         * a key set to ``None`` is REMOVED live, so ``properties(n)`` omits it;
           a snapshot-based replay would resurrect it (``test_removal_…``);
         * a snapshot also carries props the write never touched, and
-          ``properties(n)`` returns a ``VectorF32`` as a plain list, so
+          ``properties(n)`` returns a ``Vectorf32`` as a plain list, so
           re-applying it DEMOTES the vector and silently breaks dense
           retrieval (``test_state_keys_are_exactly_the_writes_keys``).
 
@@ -318,7 +318,7 @@ class TestPropertyMutationRoundTrip:
         """C1's other half: no snapshot, so nothing the write did not touch.
 
         A snapshot ``state`` carries every prop, and ``properties(n)`` returns
-        a ``VectorF32`` as a plain ``list`` — re-applying it demotes the
+        a ``Vectorf32`` as a plain ``list`` — re-applying it demotes the
         vector and silently breaks dense retrieval (``run_vector_query`` →
         ``[]`` / ``query_failed``). Asserting key-exactness rules that out
         transitively, without needing an embedding model in CI.

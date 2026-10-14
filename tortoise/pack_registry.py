@@ -296,6 +296,31 @@ SEMANTICS_TRANSITION: dict[str, str] = {
     "funds": "transacts",
 }
 
+# ── #7551 — the operator-LABEL declared vocabulary ───────────────────────
+# `create_operator`'s declaredness check answers ONE question: is this label
+# **declared** — not "is it shaped like a verb", and (the defect) not "does an
+# installed pack happen to declare it". It consulted pack relations ONLY, so
+# EVERY core predicate read as undeclared and the warning carried no
+# information: `supports` — the convention ONTOLOGY §8 gives evidence→claim —
+# warned exactly like an invented name, and a lane with no reachable declared
+# predicate invented one (`measures`; #7551, ≈25 such edges).
+#
+# The set is DERIVED, never re-transcribed, so it cannot drift from its two
+# sources: the mechanism pair (§3.9 "Epistemic edges (operators): IMPL, NAND")
+# UNIONED with the CLOSED Layer-2 semantics vocabulary (§8) — the "(+ semantic
+# label)" §3.9 admits. Widening the accepted vocabulary is therefore a change
+# to `SEMANTICS_VALUES` or `CORE_PREDICATES` (and to §8's table, which the
+# guard pins) — not a quiet addition here.
+#
+# A RETIRED spelling (`opposes` / `produces` / `holds` / `funds`, see
+# `SEMANTICS_TRANSITION`) is deliberately ABSENT: it must keep warning so the
+# caller learns the canonical word.
+#
+# Declaredness is not shape. §8's reification table governs which edges ought
+# to carry an operator; a `label` outside that shape is odd but still
+# *declared*, and this check was never a shape gate (warn-not-block, #1934).
+CORE_OPERATOR_LABELS = CORE_PREDICATES | SEMANTICS_VALUES
+
 # ── Layer 3 — the relation write-path verdict (#2766) ─────────────────────
 # A pack `ontology.relations[]` entry is only *real* if some runtime surface
 # accepts its predicate. This is the ONE place that decides which declared
