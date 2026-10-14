@@ -820,9 +820,14 @@ class _NonEmptyRecordingGraph(_RecordingGraph):
 class _UnmeasurableRecordingGraph(_RecordingGraph):
     """A fake handle whose *total-node* count returns NO row at all.
 
-    #3044 review: an absent/NULL count is this surface's
-    "could not observe" shape (``_node_count`` returns None, and
-    ``recover_from_log`` passes None through) — never a measured 0. The guard
+    #3044 review: the guard reads an absent/NULL count as UNMEASURABLE and
+    refuses — deliberately STRICTER than the probe it re-validates.
+    ``_node_count`` (consistency.py) flattens the SAME shape to 0 and reserves
+    ``None`` for a query that RAISED, so the two readers of one query disagree
+    on this shape by design: the probe reads "empty" and proceeds while
+    ``require_empty`` refuses. That asymmetry is the point, not an oversight —
+    the probe's 0 is the very claim the guard exists to re-validate, and a
+    count row the guard never received is not evidence of emptiness. The guard
     must fail CLOSED on it."""
 
     def query(self, cypher, params=None, timeout=None):
@@ -839,8 +844,12 @@ def test_require_empty_refuses_an_unmeasurable_count(tmp_path):
     `MATCH (n) RETURN count(n)` yielding no row (or NULL) means the guard
     could not observe the store, not that the store is empty — flattening it
     to 0 issues the wipe on a count that was never taken and destroys whatever
-    the window holds. The fail-closed choice is to refuse. FAILS IF: the wipe
-    proceeds on an unmeasured count."""
+    the window holds. The fail-closed choice is to refuse. NOTE the deliberate
+    asymmetry with the probe this re-validates: `_node_count` returns 0 for
+    the SAME shape and reserves `None` for a RAISED query, so the two readers
+    of one query disagree here by design (pinned end to end by
+    `test_unmeasurable_row_is_refused_by_the_guard_and_flattened_by_the_probe`).
+    FAILS IF: the wipe proceeds on an unmeasured count."""
     proj = _bare_projection(graph_name="test_3044_unmeasured", embedded=True)
     proj.g = _UnmeasurableRecordingGraph()
     with pytest.raises(WipePreconditionRefused, match="MEASURED"):
@@ -848,6 +857,44 @@ def test_require_empty_refuses_an_unmeasurable_count(tmp_path):
                          require_empty=True)
     assert proj.g.wipes() == [], (
         "the wipe ran on a node count that was never measured")
+
+
+def test_unmeasurable_row_is_refused_by_the_guard_and_flattened_by_the_probe(
+        tmp_path):
+    """#3044 review: the guard's refusal is STRICTER than the probe, on purpose.
+
+    Both readers issue the same `MATCH (n) RETURN count(n)`, but they do NOT
+    read an absent/NULL row the same way: `_node_count` (the probe in
+    `recover_from_log`) flattens it to 0 and proceeds as if empty, while
+    `require_empty` treats it as UNMEASURABLE and refuses. The docstrings above
+    state that asymmetry, so this pins it END TO END on one shape — the
+    probe's reading and the guard's must both hold, or the stated premise is
+    false again.
+
+    FAILS IF: the guard flattens the absent row (the wipe runs), or the probe
+    starts reporting `None`/"graph unresponsive" for the same shape without the
+    documented reason being rewritten.
+    """
+    from tortoise.consistency import recover_from_log
+
+    (tmp_path / "events.jsonl").write_text("")  # one adjacent (empty) log
+
+    # 1) The probe reads the absent count row as 0 — "empty" — and proceeds.
+    probe = _bare_projection(graph_name="test_3044_asym_probe", embedded=True)
+    probe.g = _UnmeasurableRecordingGraph()
+    result = recover_from_log(str(tmp_path), probe)
+    assert "graph unresponsive" not in result["reason"], (
+        f"the probe read the absent count row as UNMEASURABLE; the guard's "
+        f"docstring claims it flattens to 0: {result['reason']!r}")
+
+    # 2) The guard re-validating the very same claim must NOT flatten it.
+    guard = _bare_projection(graph_name="test_3044_asym_guard", embedded=True)
+    guard.g = _UnmeasurableRecordingGraph()
+    with pytest.raises(WipePreconditionRefused, match="MEASURED"):
+        guard.rebuild_all(str(tmp_path), confirm_destructive=True,
+                          require_empty=True)
+    assert guard.g.wipes() == [], (
+        "the wipe ran on the count the probe had flattened to 0")
 
 
 def test_require_empty_refuses_a_graph_that_filled_after_the_probe(tmp_path):

@@ -9334,11 +9334,15 @@ class FalkorProjection(
         if require_empty:
             _rows = self.g.query("MATCH (n) RETURN count(n)").result_set
             # #3044 review: an ABSENT/NULL count row is UNMEASURABLE, not zero.
-            # `_node_count` and this surface use `None` for "could not
-            # observe" everywhere else, and flattening it to 0 here would let
-            # a wipe proceed on a store the guard never actually saw as empty
-            # — the fail-closed choice is to refuse. A query that RAISES was
-            # already fail-closed (the exception propagates).
+            # This is deliberately STRICTER than the probe it re-validates:
+            # `_node_count` (consistency.py) flattens the SAME shape to 0 and
+            # reserves `None` for a query that RAISED, so the two readers of
+            # one query disagree here on purpose. The probe's 0 is exactly the
+            # claim this guard exists to re-validate, so a count row the guard
+            # never received is no evidence of emptiness — flattening it to 0
+            # here would let a wipe proceed on a store the guard never
+            # actually saw as empty. That is the fail-closed choice. A query
+            # that RAISES was already fail-closed (the exception propagates).
             _measured = (int(_rows[0][0])
                          if _rows and _rows[0][0] is not None else None)
             if _measured is None:
