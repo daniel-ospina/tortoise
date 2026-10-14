@@ -5,9 +5,11 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  BACKUP_LOADING_FLOOR_MS,
   graphBackupBucketKey,
   graphBackupSummary,
   graphBackupCellState,
+  teamBackupsEnabled,
 } from './graphs.js'
 
 const NOW = Date.parse('2026-09-12T00:00:00Z')
@@ -196,4 +198,78 @@ test('#2784 cell: the sentinel bucket is unreachable from any row', () => {
 
 test('#2784 cell: a falsy row is empty-safe, never a crash', () => {
   assert.equal(graphBackupCellState(null, {}, 'ok', NOW).kind, 'none')
+})
+
+// ── #3376: team eligibility + the shared loading floor ───────────────────
+
+test('#3376 teamBackupsEnabled: free is ineligible regardless of the stored flag', () => {
+  // The sweep predicate is `tier != 'free' AND backup_enabled` — a free org can
+  // never be swept, so a stale/odd backup_enabled=true must not read as enabled.
+  assert.equal(teamBackupsEnabled({ tier: 'free', backup_enabled: true }), false)
+  assert.equal(teamBackupsEnabled({ tier: 'free', backup_enabled: false }), false)
+  // `anon` is the derived tier for an unclaimed free org (same ineligibility).
+  assert.equal(teamBackupsEnabled({ tier: 'anon', backup_enabled: true }), false)
+})
+
+test('#3376 teamBackupsEnabled: a PAID team reads the server flag (the case tier alone cannot answer)', () => {
+  assert.equal(teamBackupsEnabled({ tier: 'pro', backup_enabled: true }), true)
+  assert.equal(teamBackupsEnabled({ tier: 'pro', backup_enabled: false }), false)
+  assert.equal(teamBackupsEnabled({ tier: 'solo', backup_enabled: false }), false)
+})
+
+test('#3376 teamBackupsEnabled: an absent flag is UNKNOWN, never a disabled claim', () => {
+  // An older /v1/team payload or an additive read that degraded must not be
+  // reported as "backups are off" — the column keeps the neutral empty copy.
+  assert.equal(teamBackupsEnabled({ tier: 'pro' }), null)
+  assert.equal(teamBackupsEnabled({ tier: 'pro', backup_enabled: null }), null)
+  assert.equal(teamBackupsEnabled(null), null)
+  assert.equal(teamBackupsEnabled(undefined), null)
+})
+
+test('#3376 cell: an ineligible team states that backups are off, not "None recorded"', () => {
+  const st = graphBackupCellState({ graph_id: 'g_prod', kind: 'custom' }, {}, 'ok', NOW, false)
+  assert.equal(st.kind, 'disabled')
+  assert.equal(st.label, 'Not enabled')
+  assert.match(st.title, /aren't enabled for this team/i)
+  assert.notEqual(st.label, graphBackupCellState({ graph_id: 'g_prod', kind: 'custom' }, {}, 'ok', NOW, true).label)
+})
+
+test('#3376 cell: disabled is team-level — the same on every row, default and custom', () => {
+  const s = graphBackupSummary([])
+  assert.equal(graphBackupCellState({ graph_id: 'default', kind: 'default' }, s, 'ok', NOW, false).kind, 'disabled')
+  assert.equal(graphBackupCellState({ graph_id: 'g_a', kind: 'custom' }, s, 'ok', NOW, false).kind, 'disabled')
+})
+
+test('#3376 cell: eligible and unknown eligibility BOTH keep the neutral "None recorded"', () => {
+  const row = { graph_id: 'g_prod', kind: 'custom' }
+  assert.equal(graphBackupCellState(row, {}, 'ok', NOW, true).kind, 'none')
+  assert.equal(graphBackupCellState(row, {}, 'ok', NOW, null).kind, 'none')
+  assert.equal(graphBackupCellState(row, {}, 'ok', NOW, undefined).kind, 'none')
+  assert.equal(graphBackupCellState(row, {}, 'ok', NOW).kind, 'none')
+})
+
+test('#3376 cell: a recorded backup outranks the disabled state (never hide real evidence)', () => {
+  const row = { graph_id: 'g_prod', kind: 'custom' }
+  const s = graphBackupSummary([{ graph_id: 'g_prod', kind: 'custom', created_at: '2026-09-11T22:00:00Z' }])
+  const st = graphBackupCellState(row, s, 'ok', NOW, false)
+  assert.equal(st.kind, 'ok')
+  assert.equal(st.label, '2 hr ago')
+})
+
+test('#3376 cell: the loading state has a terminal floor at the shared window', () => {
+  const row = { graph_id: 'g_prod', kind: 'custom' }
+  // Inside the window: the honest loading glyph.
+  const loading = graphBackupCellState(row, {}, 'loading', NOW, undefined, false)
+  assert.equal(loading.kind, 'loading')
+  assert.equal(loading.label, '…')
+  // Past the floor: the SAME unavailable state a failed list renders — never an
+  // eternal `…`, and never a negative claim about the graph.
+  const floored = graphBackupCellState(row, {}, 'loading', NOW, undefined, true)
+  assert.equal(floored.kind, 'unavailable')
+  assert.equal(floored.label, '—')
+  assert.match(floored.title, /unavailable/i)
+})
+
+test('#3376: the shared loading floor is the BackupsCard\'s 15s window', () => {
+  assert.equal(BACKUP_LOADING_FLOOR_MS, 15_000)
 })

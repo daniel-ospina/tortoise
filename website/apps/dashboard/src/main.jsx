@@ -92,6 +92,7 @@ import { allowanceLine, upgradeNoticeFrom, rotateCapNoticeFrom, existingKeyNoteF
 // the three render sites cannot drift (see billingCta.js).
 import { COMPARE_PLANS_URL, CHECKOUT_UNAVAILABLE_REASON, checkoutCtaFor, capNoticeUpgrade, headerUpgradeCta } from './billingCta.js'
 import {
+  BACKUP_LOADING_FLOOR_MS,
   canManageGraphKeys,
   deleteTypedMatches,
   graphBackupCellState,
@@ -103,6 +104,7 @@ import {
   graphsMeter,
   sortedGraphRows,
   sortedTrashRows,
+  teamBackupsEnabled,
   tierCreateLocked,
   TRASH_GRACE_DAYS,
   trashDaysLeft,
@@ -444,18 +446,63 @@ function OverviewNextActionCard({ state, loading, onOpenSettings }) {
   )
 }
 
-// #2000 (W4) review P2-6: the Backups summary relocated from the Overview to
-// the API Keys tab. It needs its OWN 15s loading floor — the old Overview
-// card's frameStale latch only ticks while the Overview tab is mounted
-// (#1842/#1923), so the relocated card can never rely on it. Local floor:
-// skeleton for 15s, then the honest '—' frame.
-function BackupsCard({ status, count }) {
-  const [stale, setStale] = React.useState(false)
+// ── #3376: ONE shared 30s clock for every relative-time label ─────────────
+// The Graphs Last-backup column used to own a `setInterval(30_000)` PER ROW
+// (#1894 pattern): N graphs → N timers AND N independent leaf re-renders per
+// tick, with a second copy of the same interval in MemorySources. This
+// module-level store starts ONE interval when the first consumer subscribes
+// and clears it when the last unsubscribes — every consumer re-renders on the
+// same tick. `useSyncExternalStore` needs a referentially stable snapshot, so
+// the cached epoch-ms value only changes inside the interval callback; the
+// server snapshot mirrors it (no SSR clock skew).
+const NOW_TICK_MS = 30_000
+let nowTickValue = Date.now()
+let nowTickTimer = null
+const nowTickSubscribers = new Set()
+function subscribeNowTick(cb) {
+  nowTickSubscribers.add(cb)
+  if (nowTickTimer === null) {
+    nowTickTimer = setInterval(() => {
+      nowTickValue = Date.now()
+      for (const fn of nowTickSubscribers) fn()
+    }, NOW_TICK_MS)
+  }
+  return () => {
+    nowTickSubscribers.delete(cb)
+    if (nowTickSubscribers.size === 0 && nowTickTimer !== null) {
+      clearInterval(nowTickTimer)
+      nowTickTimer = null
+    }
+  }
+}
+const getNowTick = () => nowTickValue
+function useNowTick() {
+  return React.useSyncExternalStore(subscribeNowTick, getNowTick, getNowTick)
+}
+
+// #3376 (2): the shared LOADING FLOOR latch. ONE implementation and ONE
+// constant (BACKUP_LOADING_FLOOR_MS) so the Graphs Last-backup column and the
+// API-Keys BackupsCard resolve on the same window — a hung /v1/backups used to
+// show the card's `—` at 15s while the column stayed `…` forever. Returns true
+// once `active` has been continuously true for `ms`; resets when it is not.
+function useLoadingFloor(active, ms = BACKUP_LOADING_FLOOR_MS) {
+  const [reached, setReached] = React.useState(false)
   React.useEffect(() => {
-    if (status !== 'loading') { setStale(false); return undefined }
-    const t = setTimeout(() => setStale(true), 15_000)
+    if (!active) { setReached(false); return undefined }
+    const t = setTimeout(() => setReached(true), ms)
     return () => clearTimeout(t)
-  }, [status])
+  }, [active, ms])
+  return reached
+}
+
+// #2000 (W4) review P2-6: the Backups summary relocated from the Overview to
+// the API Keys tab. It needs its OWN loading floor — the old Overview card's
+// frameStale latch only ticks while the Overview tab is mounted (#1842/#1923),
+// so the relocated card can never rely on it. The floor is now SHARED with the
+// Graphs Last-backup column (#3376) so the two backups surfaces cannot
+// disagree: skeleton for BACKUP_LOADING_FLOOR_MS, then the honest '—' frame.
+function BackupsCard({ status, count }) {
+  const stale = useLoadingFloor(status === 'loading')
   const value = status === 'ok' ? (count || 'none')
     : (status === 'loading' && !stale) ? <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />
       : '—'
@@ -10542,7 +10589,7 @@ function claimIntentInFlight() {
                         g.key_count != null ? g.key_count : '—'
                       )}
                     </td>
-                    <GraphBackupCell g={g} summary={graphBackups} status={backupsStatus} />
+                    <GraphBackupCell g={g} summary={graphBackups} status={backupsStatus} backupsEnabled={teamBackupsEnabled(team)} />
                     <td className="graph-actions">
                       {canManageGraphKeys(g) && (
                         <button
@@ -11138,25 +11185,31 @@ function claimIntentInFlight() {
   )
 }
 
-// #2784: per-graph "last backup". Its own 30s ticker (the #1894 pattern)
-// keeps the relative label true on a long-lived session; never an App-scope
-// interval — App already declares `now`, and a second interval there would
-// re-render the whole dashboard every 30s. The label text comes only from
-// graphBackupCellState: this component never invents a state claim. The cell
-// carries its own aria-label because the state's full explanation lives in the
-// tooltip, which is unreachable for keyboard/AT users on a non-focusable cell.
-function GraphBackupCell({ g, summary, status }) {
-  const [now, setNow] = React.useState(Date.now())
-  React.useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 30_000)
-    return () => clearInterval(t)
-  }, [])
-  const state = graphBackupCellState(g, summary, status, now)
+// #2784: per-graph "last backup". #3376: the ticker is the ONE shared
+// `useNowTick()` clock (module-level; one `setInterval` for the whole app) —
+// NOT a per-row interval, and never an App-scope one (App already declares
+// `now` for the 1s overview skeleton, and a second interval there would
+// re-render the whole dashboard on every backup tick). The label text comes
+// only from graphBackupCellState: this component never invents a state claim.
+// #3376 (2): the loading `…` now has the shared BACKUP_LOADING_FLOOR_MS
+// terminal floor (useLoadingFloor) so a hung list resolves like the
+// BackupsCard instead of showing `…` forever. The cell keeps its own
+// aria-label AND an sr-only copy of the same explanation, because the tooltip
+// is unreachable for keyboard/AT users on a non-focusable cell and the
+// visible glyph (`…`/`—`) carries no meaning in a table read-out.
+function GraphBackupCell({ g, summary, status, backupsEnabled }) {
+  const now = useNowTick()
+  const loadingFloorHit = useLoadingFloor(status === 'loading')
+  const state = graphBackupCellState(g, summary, status, now, backupsEnabled, loadingFloorHit)
   return (
     <td className="graph-backup" title={state.title} aria-label={state.title}>
-      <span className={state.kind === 'ok' || state.kind === 'none' ? 'small' : 'dim small'}>
+      <span
+        className={state.kind === 'ok' || state.kind === 'none' ? 'small' : 'dim small'}
+        aria-hidden="true"
+      >
         {state.label}
       </span>
+      <span className="sr-only">{state.title}</span>
     </td>
   )
 }
@@ -11198,12 +11251,10 @@ function MemorySources(props) {
 
   // #1894: relative-time ticker — keeps "Indexed · 2 min ago" and the job
   // status lines fresh WITHOUT a poll or reload. Declared BEFORE the early
-  // returns (hooks rules: loading/state guards return early).
-  const [now, setNow] = React.useState(Date.now())
-  React.useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 30_000)
-    return () => clearInterval(t)
-  }, [])
+  // returns (hooks rules: loading/state guards return early). #3376: the
+  // shared useNowTick() clock (ONE module-level interval for the whole app,
+  // also driving the Graphs Last-backup column) replaces the local copy.
+  const now = useNowTick()
 
   // #3513: the grid's own state. Hooks are declared BEFORE the early returns
   // (rules of hooks — the loading/state guards return early below).

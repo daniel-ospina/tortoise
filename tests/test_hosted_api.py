@@ -1279,6 +1279,48 @@ class TestLastUsedAtTracking:
             finally:
                 _restore_tortoise_sdk_init(_orig_init)
 
+    def test_get_current_org_carries_backup_enabled(self):
+        """#3376: the registry key lane exposes the org's ``backup_enabled``
+        so /v1/team can answer "are backups even on for this team?". A legacy
+        Team node with no property resolves None — the client keeps the
+        NEUTRAL empty copy rather than fabricating a disabled state."""
+        import asyncio  # noqa: I001
+        from unittest.mock import MagicMock
+        from tortoise.auth import hash_api_key
+        from tortoise.hosted_api import _make_sdk, get_current_org
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            _orig_init = _patch_tortoise_sdk_init(db_path)
+            try:
+                sdk = _make_sdk(namespace="registry")
+                for tid, token, enabled in (
+                        ("pro-backed", "tt_pro_backed_key_000000001", True),
+                        ("legacy-no-flag", "tt_legacy_no_flag_key_000001", None)):
+                    props = f", backup_enabled: {str(enabled).lower()}" if enabled is not None else ""
+                    sdk._get_registry().query(
+                        f"CREATE (t:Team {{id: $id, tier: 'pro'{props}}})",
+                        params={"id": tid},
+                    )
+                    sdk._get_registry().query(
+                        "CREATE (k:APIKey {id: $id, org_id: $tid, "
+                        "key_hash: $kh, key_prefix: $kp, created_by: $cb})",
+                        params={"id": f"key-{tid}", "tid": tid,
+                                "kh": hash_api_key(token),
+                                "kp": token[:10], "cb": "test"},
+                    )
+                    request = MagicMock()
+                    request.url.path = "/v1/team"
+                    request.headers = {"Authorization": f"Bearer {token}"}
+                    request.state = MagicMock()
+                    result = asyncio.run(get_current_org(request))
+                    assert result["org_id"] == tid
+                    assert result["backup_enabled"] is enabled, (
+                        f"{tid}: expected backup_enabled={enabled!r}, "
+                        f"got {result.get('backup_enabled')!r}")
+            finally:
+                _restore_tortoise_sdk_init(_orig_init)
+
     def test_get_current_team_returns_c1_tenancy_fields(self):
         """C1 (#2110): the registry resolve path returns graph scope + scopes +
         legacy class + delegation (parity with resolve_api_key). Legacy key
@@ -1704,6 +1746,24 @@ class TestTeamInfo:
         # #4331: node usage vs the plan's node allowance.
         assert "nodes_used" in body and isinstance(body["nodes_used"], int)
         assert body["max_nodes"] == 10000  # TEST_TEAM.max_points (free tier)
+
+    def test_team_info_exposes_backup_enabled(self, client):
+        """#3376: /v1/team carries the org's per-org backup flag so the Graphs
+        Last-backup column can name the ineligible state (the sweep predicate
+        is ``tier != 'free' AND backup_enabled``) instead of rendering the
+        neutral "None recorded" forever.
+
+        The route forwards the RESOLVED org dict value verbatim: a dict with
+        no key (legacy / dependency-override lane) reads None, and the client
+        must then keep the neutral copy rather than claim "disabled"."""
+        # TEST_TEAM omits the field → None, never a fabricated False.
+        assert client.get("/v1/team").json()["backup_enabled"] is None
+        app.dependency_overrides[get_current_org] = (
+            lambda: {**TEST_TEAM, "backup_enabled": False})
+        try:
+            assert client.get("/v1/team").json()["backup_enabled"] is False
+        finally:
+            app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
 
     def test_team_info_nodes_used_counts_object_not_point_count(self, client):
         """#4331: `nodes_used` is the count the points cap gates —
