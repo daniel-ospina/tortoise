@@ -102,6 +102,16 @@ class TestActivityPredicate:
         assert ri.row_establishes_use(_search(TODAY, "3")) is None
         assert ri.row_establishes_use(_search(TODAY, True)) is None
 
+    def test_a_negative_result_count_is_unclassifiable_not_a_non_use(self):
+        """Parity with ``activation_scorecard._count_returned``: a NEGATIVE
+        count is UNCAPTABLE there (its ``uncountable_result_count``), never a
+        zero. The two surfaces share the allowlist and the prop on purpose
+        ("so the two cannot disagree about what a use is"); publishing ``-1``
+        as a definite non-use would emit a churn reading the parity rule
+        explicitly refuses and would, on a day whose only row is negative, drop
+        a possibly-retained team from a confident denominator."""
+        assert ri.row_establishes_use(_search(TODAY, -1)) is None
+
     def test_a_non_mapping_properties_does_not_raise(self):
         assert ri.row_establishes_use(
             {"event_name": ri.MCP_TELEMETRY_EVENT, "properties": None}) is None
@@ -160,6 +170,18 @@ class TestFoldActivityDays:
 
     def test_an_unclassifiable_retrieval_is_reported_separately(self):
         rows = [_search(TODAY - timedelta(days=4), None)]
+        active, ambiguous, reason = ri.fold_activity_days(
+            rows, since_day=TODAY - timedelta(days=30), until_day=TODAY)
+        assert reason is None
+        assert active == set()
+        assert {d.isoformat() for d in ambiguous} == {
+            (TODAY - timedelta(days=4)).isoformat()}
+
+    def test_a_negative_result_count_makes_the_day_ambiguous(self):
+        """The same parity rule at the fold level: a day whose only candidate
+        use carries a negative count is UNCLASSIFIABLE, so it partials the
+        marks it could have settled instead of reading as churn."""
+        rows = [_search(TODAY - timedelta(days=4), -1)]
         active, ambiguous, reason = ri.fold_activity_days(
             rows, since_day=TODAY - timedelta(days=30), until_day=TODAY)
         assert reason is None
@@ -571,6 +593,39 @@ class TestAssemble:
         assert payload["cohort"] is None
         assert payload["reason"] == ri.REASON_WRITE_PATH_UNCONFIGURED
 
+    def test_a_reading_with_nothing_measured_reads_unavailable_not_measured(
+            self):
+        """A fleet-wide analytics outage (write path green, walk certified) is
+        NOT a measured reading of zero. The cells were already honest
+        (``unavailable``), but the one field a consumer switches on said
+        ``measured`` — the state inversion this surface exists to prevent.
+        Derive the surface state from the rows."""
+        start = AS_OF - timedelta(days=40)
+        rows = [_row("a", start, state=ri.STATE_UNAVAILABLE, reason="boom"),
+                _row("b", start, state=ri.STATE_UNAVAILABLE, reason="boom")]
+        payload = ri.assemble(as_of=AS_OF, team_rows=rows)
+        assert payload["state"] == ri.STATE_UNAVAILABLE
+        assert payload["reason"] == ri.REASON_NO_TEAM_MEASURED
+        assert payload["cohort"] is None
+        assert (payload["teams_measured"], payload["teams_total"]) == (0, 2)
+
+    def test_a_partially_measured_fleet_reads_partial(self):
+        start = AS_OF - timedelta(days=40)
+        rows = [_row("a", start, active={start + timedelta(days=10)}),
+                _row("b", start, state=ri.STATE_UNAVAILABLE, reason="boom")]
+        payload = ri.assemble(as_of=AS_OF, team_rows=rows)
+        assert payload["state"] == ri.STATE_PARTIAL
+        assert payload["reason"] is None
+        assert payload["cohort"]["marks"]["7"]["state"] == ri.STATE_PARTIAL
+
+    def test_a_fully_measured_fleet_still_reads_measured(self):
+        start = AS_OF - timedelta(days=40)
+        rows = [_row("a", start, active={start + timedelta(days=10)}),
+                _row("b", start, active=set())]
+        payload = ri.assemble(as_of=AS_OF, team_rows=rows)
+        assert payload["state"] == ri.STATE_MEASURED
+        assert payload["cohort"]["marks"]["7"]["state"] == ri.STATE_MEASURED
+
     def test_the_definition_and_its_hash_ride_with_the_number(self):
         payload = ri.assemble(as_of=AS_OF, team_rows=[])
         assert payload["definition"]["marks"] == list(ri.RETENTION_MARKS)
@@ -604,7 +659,15 @@ class TestAggregationOnlyGuard:
 class FakeCP:
     """Serves `organizations` and `analytics_events` with server-side filtering
     and a completeness flag, mirroring the ``SupabaseControlPlane.query_all``
-    contract the readers depend on."""
+    contract the readers depend on.
+
+    The filter semantics follow PostgREST: the reader's own filter list is what
+    selects the rows. In particular ``deleted_at is null`` MUST drop a
+    soft-deleted org exactly as PostgREST does — if this double ignored the
+    reader's filters (as it once did, hard-coding the drop), a reader that
+    stopped filtering churn could not be distinguished from one that
+    silently lost every churned team.
+    """
 
     def __init__(self, orgs, events, *, fleet_complete=True,
                  activity_complete=True):
@@ -614,28 +677,33 @@ class FakeCP:
         self.activity_complete = activity_complete
         self.calls: list[tuple[str, list]] = []
 
+    @staticmethod
+    def _matches(row: dict, filters: list) -> bool:
+        for col, op, value in filters:
+            cell = row.get(col)
+            if op == "eq":
+                ok = cell == value
+            elif op == "is":
+                ok = (cell is None) if value is None else (cell is value)
+            elif op == "gte":
+                ok = str(cell) >= str(value)
+            elif op == "lt":
+                ok = str(cell) < str(value)
+            else:  # pragma: no cover - a new operator must be added here
+                raise AssertionError(f"FakeCP: unsupported operator {op!r}")
+            if not ok:
+                return False
+        return True
+
     def query_all(self, table, *, select=None, filters=None, cursor="id",
                   page_size=1000, max_pages=100):
         fs = list(filters or [])
         self.calls.append((table, fs))
         if table == "organizations":
             rows = [{"id": o["id"], "created_at": o.get("created_at")}
-                    for o in self.orgs if o.get("deleted_at") is None]
+                    for o in self.orgs if self._matches(o, fs)]
             return rows, self.fleet_complete
-        out = []
-        for row in self.events:
-            ok = True
-            for col, op, value in fs:
-                cell = row.get(col)
-                matches = (
-                    (op == "eq" and cell == value)
-                    or (op == "gte" and str(cell) >= str(value))
-                    or (op == "lt" and str(cell) < str(value))
-                )
-                if not matches:
-                    ok = False
-            if ok:
-                out.append(row)
+        out = [row for row in self.events if self._matches(row, fs)]
         return out, self.activity_complete
 
 
@@ -646,6 +714,25 @@ class TestReadTeamStarts:
         teams, complete, reason = ri.read_team_starts(cp)
         assert complete is True and reason is None
         assert teams == [{"org_id": "org-a", "start": AS_OF - timedelta(days=5)}]
+
+    def test_a_soft_deleted_team_is_still_in_the_denominator(self):
+        """The settled decision on #3839: the denominator is *all teams signed
+        up >= N days ago, INCLUDING CHURNED*. ``soft_delete_org`` stamps
+        ``deleted_at`` but keeps the row (and its ``created_at`` start) through
+        the restore window, so a ``deleted_at IS NULL`` filter silently drops
+        every churned team and biases the rate UPWARD. This is the P1."""
+        start = AS_OF - timedelta(days=40)
+        cp = FakeCP([
+            {"id": "org-live", "created_at": _iso(start)},
+            {"id": "org-churned", "created_at": _iso(start),
+             "deleted_at": _iso(AS_OF - timedelta(days=5))},
+        ], [])
+        teams, complete, reason = ri.read_team_starts(cp)
+        assert complete is True and reason is None
+        assert {t["org_id"] for t in teams} == {"org-live", "org-churned"}
+        # The reader must not filter the churn column at all.
+        org_filters = [fs for table, fs in cp.calls if table == "organizations"]
+        assert org_filters == [[]]
 
     def test_an_uncertified_walk_is_not_a_denominator(self):
         cp = FakeCP([{"id": "org-a", "created_at": _iso(AS_OF - timedelta(days=5))}],
@@ -732,6 +819,33 @@ def _wire(monkeypatch, cp, *, write_path=True):
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
     monkeypatch.setattr(sc, "get_control_plane", lambda: cp)
     return cp
+
+
+class TestParseAsOfIsTheUtcDay:
+    def test_an_offset_timestamp_is_converted_to_utc(self):
+        """`.date()` on an AWARE datetime reads the date in that value's OWN
+        offset; it does not convert. `as_of_day` is `until_day` for every
+        per-org read, the `as_of` handed to `mark_available`, and the value
+        written to the audit row, so the shift moves which day-N marks have
+        arrived — and contradicts the function's own first line and
+        `DEFINITION["day_boundary"] = "UTC calendar days"`."""
+        import tortoise.hosted_api as ha
+
+        utc_day = AS_OF - timedelta(days=2)
+        prev = utc_day - timedelta(days=1)
+        # 23:00 at -06:00 the previous day IS 05:00Z on `utc_day`.
+        assert ha._parse_as_of(f"{prev.isoformat()}T23:00:00-06:00") == utc_day
+        assert ha._parse_as_of(f"{utc_day.isoformat()}T05:00:00Z") == utc_day
+        # A naive stamp is still treated as UTC (the `curl`-with-a-date case).
+        assert ha._parse_as_of(f"{utc_day.isoformat()}T05:00:00") == utc_day
+
+    def test_two_encodings_of_one_instant_read_the_same_day(self):
+        import tortoise.hosted_api as ha
+
+        utc_day = AS_OF - timedelta(days=2)
+        prev = utc_day - timedelta(days=1)
+        assert (ha._parse_as_of(f"{prev.isoformat()}T23:00:00-06:00")
+                == ha._parse_as_of(f"{utc_day.isoformat()}T05:00:00Z"))
 
 
 class TestEndpointAuth:
@@ -822,6 +936,28 @@ class TestEndpointReading:
         assert body["cohort"]["marks"]["7"]["n"] == 2
         assert body["cohort"]["marks"]["60"]["state"] == ri.STATE_NOT_MEASURABLE
 
+    def test_a_churned_team_is_counted_in_the_denominator(
+            self, client, internal_key, monkeypatch):
+        """Endpoint-level half of the P1: a churned (soft-deleted) team is
+        enumerated, gets its marks, and is IN the mark denominator. Dropping it
+        would publish 1/1 (100%) where the honest reading is 1/2 — the upward
+        bias the decision warns against."""
+        start = AS_OF - timedelta(days=40)
+        cp = FakeCP(
+            [{"id": "org-live", "created_at": _iso(start)},
+             {"id": "org-churned", "created_at": _iso(start),
+              "deleted_at": _iso(AS_OF - timedelta(days=5))}],
+            [_capture(start + timedelta(days=10), org="org-live")],
+        )
+        _wire(monkeypatch, cp)
+        body = client.get(PATH, params={"as_of": AS_OF.isoformat()},
+                          headers=internal_key).json()
+        by_id = {t["org_id"]: t for t in body["teams"]}
+        assert "org-churned" in by_id
+        assert by_id["org-churned"]["active_at"]["7"] is False
+        cell = body["cohort"]["marks"]["7"]
+        assert (cell["k"], cell["n"]) == (1, 2)
+
     def test_an_unreadable_org_names_itself_and_partials_the_cell(
             self, client, internal_key, monkeypatch):
         start = AS_OF - timedelta(days=40)
@@ -846,7 +982,34 @@ class TestEndpointReading:
         cell = body["cohort"]["marks"]["7"]
         assert cell["state"] == "partial"
         assert cell["unmeasured_teams"] == 1
+        assert body["state"] == ri.STATE_PARTIAL
+        assert any("read `partial`" in note for note in body["notes"])
         assert any("org-b" in note for note in body["notes"])
+
+    def test_a_fleet_wide_analytics_outage_is_unavailable_not_measured(
+            self, client, internal_key, monkeypatch):
+        """The note must state the state the surface ACTUALLY produced. When
+        every team fails, the cells read `unavailable`, so the old note's
+        "the cells they feed read `partial`" contradicted the payload beside
+        it. The surface itself must be `unavailable`, never `measured`."""
+        start = AS_OF - timedelta(days=40)
+
+        class DarkCP(FakeCP):
+            def query_all(self, table, **kw):
+                if table == "analytics_events":
+                    raise RuntimeError("store down")
+                return super().query_all(table, **kw)
+
+        _wire(monkeypatch, DarkCP(
+            [{"id": "org-a", "created_at": _iso(start)},
+             {"id": "org-b", "created_at": _iso(start)}], []))
+        body = client.get(PATH, params={"as_of": AS_OF.isoformat()},
+                          headers=internal_key).json()
+        assert body["state"] == ri.STATE_UNAVAILABLE
+        assert body["cohort"] is None
+        assert body["teams_measured"] == 0
+        assert any("read `unavailable`" in note for note in body["notes"])
+        assert not any("read `partial`" in note for note in body["notes"])
 
     def test_the_endpoint_audits_one_operator_read(
             self, client, internal_key, monkeypatch):
@@ -914,10 +1077,46 @@ class TestRetentionReadsDoNotShareTheDefaultExecutor:
         assert ha._retention_worker_count("99", 4) == 8    # ceiling
         assert ha._retention_worker_count("4", 2) == 4     # raw wins over default
 
-    def test_the_pool_and_the_semaphore_read_the_same_bound(self):
-        """A semaphore wider than the pool would let a read burn its whole
-        timeout queued, then report a self-inflicted `org_read_timeout`."""
+    def test_the_semaphore_never_admits_more_reads_than_the_pool(
+            self, client, internal_key, monkeypatch):
+        """A semaphore wider than the pool lets every read enter its timeout
+        section at once and queue on the executor — each burning its whole
+        ``_RETENTION_PER_ORG_TIMEOUT_S`` before reporting a self-inflicted
+        ``org_read_timeout``. The previous test asserted only on
+        ``_max_workers`` and never touched the semaphore, so replacing the
+        production bound with ``asyncio.Semaphore(max(1, len(teams)))`` left it
+        green (mutation-vacuous). Observe the actual fan-out instead."""
+        import asyncio
+
         import tortoise.hosted_api as ha
+        import tortoise.retention_indicator as ri
+
+        start = AS_OF - timedelta(days=40)
+        n_teams = ha._RETENTION_WORKERS + 3
+        cp = FakeCP([{"id": f"org-{i}", "created_at": _iso(start)}
+                     for i in range(n_teams)], [])
+        _wire(monkeypatch, cp)
+
+        real = ha._run_off_loop
+        inflight = {"n": 0, "peak": 0}
+
+        async def _spy(executor, fn, /, *args, **kwargs):
+            # Only the PER-ORG read is bounded by the semaphore; the fleet walk
+            # is awaited before it and is deliberately not counted.
+            if fn is ri.read_org_activity:
+                inflight["n"] += 1
+                inflight["peak"] = max(inflight["peak"], inflight["n"])
+                try:
+                    await asyncio.sleep(0.01)
+                    return await real(executor, fn, *args, **kwargs)
+                finally:
+                    inflight["n"] -= 1
+            return await real(executor, fn, *args, **kwargs)
+
+        monkeypatch.setattr(ha, "_run_off_loop", _spy)
+        resp = client.get(PATH, params={"as_of": AS_OF.isoformat()},
+                          headers=internal_key)
+        assert resp.status_code == 200, resp.text
+        assert inflight["peak"] == min(ha._RETENTION_WORKERS, n_teams)
         assert ha._RETENTION_EXECUTOR._max_workers == ha._RETENTION_WORKERS
-        assert ha._RETENTION_WORKERS >= 1
-        assert ha._RETENTION_WORKERS <= 8
+        assert 1 <= ha._RETENTION_WORKERS <= 8

@@ -103,6 +103,14 @@ from .activation_scorecard import (
 SCHEMA_VERSION = 1
 SURFACE = "retention"
 
+#: A cell — or the whole surface — that measured SOME of its population while
+#: part of it could not be read. Distinct from `unavailable`: the number exists
+#: but a NAMED subset is missing, so it is a lower bound rather than a count.
+#: The surface state is DERIVED from its members (never asserted by the
+#: caller), so a `measured` surface cannot sit over all-`unavailable` cells: a
+#: consumer switching on `state` is refused exactly when nothing was measured.
+STATE_PARTIAL = "partial"
+
 #: The day-N marks the indicator reports, in ascending order. PINNED as the
 #: literal the issue names rather than derived, so adding or dropping a mark
 #: is a visible decision rather than a silent change to the cohort shape.
@@ -160,6 +168,11 @@ REASON_WINDOW_PREDICATE_NOT_APPLIED = "window_predicate_not_applied"
 REASON_UNCLASSIFIABLE_USE_DAY = "unclassifiable_use_day_result_count_not_recorded"
 REASON_START_UNREADABLE = "org_start_unreadable"
 
+#: Whole-surface reason: a reading was taken but NOTHING in the fleet could be
+#: measured, so no cell carries a number. `assemble` derives this from the
+#: rows rather than trusting a caller to have noticed.
+REASON_NO_TEAM_MEASURED = "no_team_could_be_measured"
+
 #: Whole-surface reasons.
 REASON_WRITE_PATH_UNCONFIGURED = "analytics_write_path_unconfigured"
 REASON_FLEET_INCOMPLETE = "fleet_enumeration_incomplete"
@@ -181,8 +194,13 @@ DEFINITION: dict[str, Any] = {
     "day_boundary": "UTC calendar days",
     "day_n_window": "cumulative — 'on or after day N', not 'exactly day N'",
     "denominator": (
-        "every team whose start is at least N days before the reading, whether "
-        "or not it is active"
+        "every team whose `organizations` row is still enumerable (live OR "
+        "soft-deleted/churned — the churned population is IN the denominator, "
+        "not filtered out) whose start is at least N days before the reading, "
+        "whether or not it is active. A team hard-purged after the restore "
+        "grace window has no recoverable start and is NOT enumerable; that "
+        "residual is named in `limitations` and makes the denominator a "
+        "lower bound over every team that ever signed up"
     ),
     "retrieval_tools": sorted(RETRIEVAL_TOOL_ALLOWLIST),
     "marks": list(RETENTION_MARKS),
@@ -208,6 +226,16 @@ LIMITATIONS: tuple[str, ...] = (
     f"({', '.join(CHURN_REASONS)}) is actually recorded, a reading must not "
     "be interpreted as churn. The recording surface does not exist yet "
     "(#8637, a #3839 companion) — the taxonomy below is its category set.",
+    "DENOMINATOR RESIDUAL — hard-purged teams are not enumerable. A churned "
+    "team keeps its `organizations` row (with `deleted_at` stamped and its "
+    "start date intact) through the restore grace window, and this read "
+    "ENUMERATES it. After the window the row is hard-deleted "
+    "(`purge_org_control_plane`) and the start date is unrecoverable; "
+    "`analytics_events` survives the purge by design but carries no start, so "
+    "the omission cannot be counted. The denominator is therefore a LOWER "
+    "BOUND over every team that ever signed up, and the reading is biased "
+    "UPWARD by exactly the purged-not-retained teams it cannot enumerate. Do "
+    "not read it as an exact total-ever churn measure.",
     "The activity predicate's retrieval leg depends on the forward-only "
     f"`{RESULT_COUNT_PROP}` prop (#3675, shipped 2026-10-11). A retrieval row "
     "written before it carries no readable count, so a day whose only "
@@ -348,9 +376,15 @@ def row_establishes_use(row: Any) -> bool | None:
     if tool not in RETRIEVAL_TOOL_ALLOWLIST:
         return False
     count = props.get(RESULT_COUNT_PROP)
-    if isinstance(count, bool) or not isinstance(count, int):
-        # Absent, null, or a non-int (an SDK failure the MCP seam could not
-        # count). Not a use we can evidence, and not a use we can rule out.
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        # Absent, null, a non-int (an SDK failure the MCP seam could not
+        # count), or a NEGATIVE count. The negative case is the parity rule:
+        # ``activation_scorecard._count_returned`` treats ``count < 0`` as
+        # UNCAPTABLE (its ``uncountable_result_count``), not as a zero — the
+        # two surfaces import the same allowlist/prop on purpose "so the two
+        # cannot disagree about what a use is". Publishing a negative as a
+        # definite non-use would emit a churn reading the parity rule refuses
+        # to make. Not a use we can evidence, and not a use we can rule out.
         return None
     return count >= 1
 
@@ -657,27 +691,65 @@ def cohort_summary(team_rows: Sequence[dict], *, as_of: date) -> dict:
             "active_days_histogram": histogram}
 
 
+def _cohort_is_partial(cohort: dict | None) -> bool:
+    """Whether any cohort sub-surface measured only PART of its population.
+
+    `partial` is the state a cell (or the histogram) carries when a named
+    subset of the teams it feeds could not be read. It is the derived signal
+    `assemble` needs: a surface cannot honestly read `measured` over cells
+    that read `partial`, and the caller must not have to recompute that.
+    """
+    if not cohort:
+        return False
+    for group in ("marks", "bands"):
+        if any((cell or {}).get("state") == STATE_PARTIAL
+               for cell in (cohort.get(group) or {}).values()):
+            return True
+    return any((cohort.get(key) or {}).get("state") == STATE_PARTIAL
+               for key in ("trailing_30_active", "active_days_histogram"))
+
+
 def assemble(*, as_of: date, team_rows: Sequence[dict],
              surface_state: str = STATE_MEASURED,
              surface_reason: str | None = None,
              limits: dict | None = None) -> dict:
     """Compose the retention payload from per-team rows.
 
-    ``surface_state`` is ``unavailable`` when the whole read could not be
-    established (fleet enumeration incomplete, analytics writer dark): in that
-    case no cohort cell is computed and no rate is emitted. The per-team rows
-    are still returned when they exist, each carrying its own state, so an
+    The surface state is DERIVED FROM ITS MEMBERS, never asserted: a reading
+    that measured nothing is `unavailable` (with ``REASON_NO_TEAM_MEASURED``)
+    even though the walk itself succeeded, and a reading that measured only
+    part of the fleet is `partial`. A `measured` surface over all-`unavailable`
+    cells is the one state inversion this surface exists to avoid — the field a
+    consumer switches on would say "the number is here" while no number was
+    produced. `partial` and `unavailable` change which cells exist; a caller
+    passing `surface_state` explicitly still OVERRIDES the derivation for a
+    whole-read failure (fleet enumeration incomplete, analytics writer dark), in
+    which case no cohort cell is computed and no rate is emitted. The per-team
+    rows are still returned when they exist, each carrying its own state, so an
     operator sees WHAT was and was not measurable rather than a single blank.
     """
     measured_rows = [t for t in team_rows if t["state"] == STATE_MEASURED]
+    state = surface_state
+    reason = surface_reason
     cohort = (cohort_summary(team_rows, as_of=as_of)
               if surface_state == STATE_MEASURED else None)
+    if surface_state == STATE_MEASURED and team_rows:
+        if not measured_rows:
+            # A whole-fleet analytics outage is not a measured reading of zero:
+            # refuse the surface the same way a dark write path is refused, and
+            # drop the cohort so no consumer can read an empty denominator as a
+            # rate. Every team row still names its own failure.
+            state = STATE_UNAVAILABLE
+            reason = REASON_NO_TEAM_MEASURED
+            cohort = None
+        elif _cohort_is_partial(cohort):
+            state = STATE_PARTIAL
     payload: dict[str, Any] = {
         "surface": SURFACE,
         "schema_version": SCHEMA_VERSION,
         "as_of": as_of.isoformat(),
-        "state": surface_state,
-        "reason": surface_reason,
+        "state": state,
+        "reason": reason,
         "definition": dict(DEFINITION),
         "definition_hash": _definition_hash(),
         "teams": list(team_rows),
@@ -706,12 +778,23 @@ def _definition_hash() -> str:
 # ── readers (fail-closed; every failure is a named reason) ─────────────────
 
 def read_team_starts(cp) -> tuple[list[dict] | None, bool, str | None]:
-    """Every non-deleted org's ``(org_id, start)`` plus a completeness flag.
+    """Every enumerable org's ``(org_id, start)`` plus a completeness flag.
 
     Returns ``(rows, complete, reason)``. ``rows`` is ``None`` on a read
     failure, and ``complete`` is ``False`` when the walk could not be certified
     — either way the caller MUST NOT publish a denominator (a partial fleet is
     exactly the lower-bound-as-a-count defect #5388 fixed).
+
+    THE WALK IS UNFILTERED ON PURPOSE (#3839 review P1): the denominator must
+    include teams that CHURNED. ``soft_delete_org`` stamps
+    ``organizations.deleted_at`` and keeps the row — and its ``created_at``
+    start — through the restore grace window, so a ``deleted_at IS NULL``
+    filter silently drops every churned team from every denominator, biasing
+    the rate UPWARD (the direction the settled decision on #3839 warns
+    against: *"all teams signed up >= N days ago, including churned"*). The
+    row is enumerated whether or not ``deleted_at`` is stamped. Only a team
+    hard-purged after the window leaves the set; that residual cannot be
+    counted (no start survives) and is stated in ``LIMITATIONS``.
 
     ``start`` is the org's ``created_at`` as a UTC calendar date, from the
     control plane (`organizations`), which is the authoritative "account
@@ -723,7 +806,7 @@ def read_team_starts(cp) -> tuple[list[dict] | None, bool, str | None]:
         rows, complete = cp.query_all(
             "organizations",
             select=["id", "created_at"],
-            filters=[("deleted_at", "is", None)],
+            filters=None,
             cursor="id",
         )
     except Exception:

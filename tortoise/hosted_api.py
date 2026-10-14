@@ -16647,10 +16647,8 @@ def _retention_worker_count(raw: str | None, default: int) -> int:
     missing or non-numeric value falls back to ``default`` (the
     ``_int_env`` rule), and the result is clamped to ``[1, 8]``.
     """
-    if raw is None or not raw.strip().isdigit():
-        value = default
-    else:
-        value = int(raw)
+    value = (default if raw is None or not raw.strip().isdigit()
+             else int(raw))
     return max(1, min(value, 8))
 
 
@@ -16703,7 +16701,16 @@ def _parse_as_of(as_of: str | None) -> date:
         else:
             iso = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
             parsed = datetime.fromisoformat(iso)
-            day = (parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)).date()
+            # `.date()` on an AWARE datetime returns the date in that value's
+            # OWN offset — it does not convert. Two encodings of one instant
+            # (`2026-10-01T23:00:00-05:00` and `2026-10-02T04:00:00Z`) then
+            # yield two different reading days, moving which day-N marks have
+            # arrived and contradicting this function's own "UTC day boundary"
+            # and `DEFINITION["day_boundary"]`. `retention_indicator._as_utc`
+            # normalises for exactly this reason; a naive value is treated as
+            # UTC (the `replace`), an aware one is CONVERTED.
+            day = (parsed.astimezone(UTC) if parsed.tzinfo
+                   else parsed.replace(tzinfo=UTC)).date()
     except ValueError as exc:
         raise HTTPException(
             status_code=422,
@@ -16731,8 +16738,10 @@ async def retention_cohort(request: Request, as_of: str | None = None):
     Fail-soft in the right direction: an unreadable store, an uncertified
     fleet walk, or a dark analytics write path makes the surface
     `unavailable` with a REASON — it is never reported as a confident zero. A
-    single team that cannot be measured is excluded and NAMED, and the cell it
-    would have fed reads `partial`.
+    single team that cannot be measured is excluded and NAMED; the surface
+    reads `partial` when only some teams measured and `unavailable` when NONE
+    did (derived from the rows in `assemble`, not asserted here), and the
+    note names the state the cells actually read.
     """
     _check_internal(request)
 
@@ -16742,6 +16751,7 @@ async def retention_cohort(request: Request, as_of: str | None = None):
         REASON_FLEET_INCOMPLETE,
         REASON_WRITE_PATH_UNCONFIGURED,
         STATE_MEASURED,
+        STATE_PARTIAL,
         STATE_UNAVAILABLE,
         assemble,
         build_team_rows,
@@ -16837,9 +16847,15 @@ async def retention_cohort(request: Request, as_of: str | None = None):
     unmeasured = [r["org_id"] for r in rows
                   if r["state"] != STATE_MEASURED]
     if unmeasured:
+        # The note must state the state the surface ACTUALLY produced. Saying
+        # the cells read `partial` when every team failed (the cells read
+        # `unavailable`) is the same state inversion the derived surface state
+        # fixes — prose that contradicts the field beside it.
+        cells = (STATE_UNAVAILABLE if payload["state"] == STATE_UNAVAILABLE
+                 else STATE_PARTIAL)
         payload["notes"].append(
             f"{len(unmeasured)} team(s) could not be measured and are EXCLUDED "
-            f"from every denominator; the cells they feed read `partial`. "
+            f"from every denominator; the cells they feed read `{cells}`. "
             f"Named in `teams`: {', '.join(sorted(unmeasured))}")
     payload["notes"].append(
         "This is an AGGREGATION over existing rows, never a data-retention "
