@@ -7925,8 +7925,9 @@ class TortoiseSDK:
         # verb. The hosted
         # capture surface has always spoken this envelope; the mirror speaks
         # it too now (``tests/eval/write_path/runner.py`` — the W2 gate's own
-        # lane — drives THIS surface, so the gate can finally observe the
-        # contract it gates). Additive over the legacy keys (``extra=resp``):
+        # lane — drives THIS surface, so the gate's lane now RECEIVES the verb
+        # it could not see before; the runner does not yet read it).
+        # Additive over the legacy keys (``extra=resp``):
         # the protocol-owned keys win, the legacy ``points`` list is preferred
         # as the verb's per-point array, and a legacy key can never silently
         # corrupt ``protocol_version``/``status``/``provenance``/``error``.

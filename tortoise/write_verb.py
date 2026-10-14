@@ -3,8 +3,9 @@
 gbrain MEMORY_VERBS_v1 ADAPT (epic plan §4.4/§6.4): every session->graph
 WRITE-BACK response (the 2xx path — gate rejections are HTTP-level errors on
 the hosted/MCP surfaces, not write responses, and keep their HTTP semantics;
-on the SDK mirror the same pre-write rejections are returned dicts and
-likewise carry no verb, since no write-back occurred) speaks ``memory_write_v1``:
+on the SDK mirror the dict-returning pre-write rejection (empty/blank)
+likewise carries no verb, since no write-back occurred, while the turn-cap
+rejection raises before any write) speaks ``memory_write_v1``:
 
     protocol_version: "memory_write_v1"   REQUIRED in every write response
     status:            ok | accepted | partial | error

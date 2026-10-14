@@ -742,14 +742,15 @@ def test_hosted_and_mirror_reingest_parity(client):
 def test_sdk_mirror_speaks_memory_write_v1_verb(sdk, monkeypatch):
     """W5 Phase A+B mirror-parity (#2104, indicator 2 / S12): the SDK capture
     mirror speaks the SAME frozen ``memory_write_v1`` write verb as the hosted
-    surface — ``protocol_version`` on EVERY write response, a REQUIRED
+    surface — ``protocol_version`` on every WRITE-BACK response (a pre-write
+    gate rejection such as empty/blank carries no verb), a REQUIRED
     provenance block, and per-point ``status``/``ep_updated``/``point_id``
     enriched from GRAPH truth (never fabricated).
 
     Why this is not a duplicate of the hosted verb test: the W2 write-path CI
     gate drives THIS surface (`tests/eval/write_path/runner.py` calls
-    ``sdk.capture_session``), so before this the gate's own lane could not
-    observe the frozen verb at all — ``protocol_version`` was absent because
+    ``sdk.capture_session``), so before this the gate's own lane never
+    received the frozen verb — ``protocol_version`` was absent because
     the envelope was wired on the hosted capture surface only. A field on an
     existing approved method, not a surface change.
 

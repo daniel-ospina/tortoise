@@ -4143,7 +4143,7 @@ def _maybe_onboarding_auto_complete(*,
 # (hosted_api._capture_session_impl) so the two surfaces can never drift on
 # gate order: boundary 422 → admission 429 (#3060) / in-flight 409 (#3129)
 # → session_recording opt-out 409 → turn cap 400 → empty 422 → quota 402 —
-# the tool docstring below carries the single canonical list.
+# the tool docstring below carries this surface's full ordered list.
 # A missing provider key is NOT a gate (#3892): the capture
 # is STORED and only the LLM extraction is skipped, reported as
 # `extraction_mode: "no-provider"`. Stdio/self-host returns an honest "requires
@@ -4172,8 +4172,9 @@ def tortoise_session_capture(conversation: list[dict],
     exists. Returns the
     capture result (a memory_write_v1 envelope, #2104) on success, or an
     honest error dict on failure (the per-harness last-error state key is
-    recorded on non-2xx EXCEPT the #3060 capacity 429 — a server condition —
-    and cleared on 2xx; same receipt semantics as the REST path).
+    recorded on non-2xx EXCEPT the #3060 capacity 429 and the #3129
+    in-flight 409 — both server conditions — and cleared on 2xx; same
+    receipt semantics as the REST path).
     """
     from tortoise.mcp_auth import (  # noqa: I001
         SELFHOST_ORG_ID,
@@ -4189,7 +4190,7 @@ def tortoise_session_capture(conversation: list[dict],
     if not org_id or org_id == SELFHOST_ORG_ID:
         # stdio / self-host HTTP: no hosted state plane, no receipts — the
         # honest error (matching the onboarding-tool precedent), never a
-        # local fallback that bypasses the 409/402/503 gates.
+        # local fallback that bypasses the server-enforced capture gates.
         return {"error": "session capture requires hosted mode — the "
                           "tortoise_session_capture tool files to Tortoise "
                           "Cloud (server-enforced recording + receipts); "
