@@ -273,7 +273,14 @@ def _emit_mcp_tool_call_telemetry(org_id: str, tool_name: str, status: str,
       exception class, or the unwrapped cause's class name, respectively);
       the #236 stdio auth gate is the OTHER ``auth_error`` producer, with
       ``error_kind = "stdio_auth_gate"`` — it is not an exception class, so it
-      is not produced by that classifier.
+      is not produced by that classifier. That kind is emitted ONLY when the
+      transport in force is ``"stdio"``: the gate's message prefix is shared
+      by the HTTP tenant-context refusal and by `_safe`'s unset-transport
+      refusal, which record ``auth_error`` with ``error_kind = None`` rather
+      than claim a gate they never touched. ``exec_error`` has ONE more producer
+      with ``error_kind = "safe_error"``: a dispatch whose `_safe` failure was
+      shipped inside a wrap envelope the tool's own schema forbids (#8482) —
+      it is not an exception either, because `_safe` ANSWERED with a dict.
     - ``timeout`` — the transport wait bound fired at this seam
       (``error_kind = "wait_bound"``).
     - ``cancelled`` — the caller cancelled the dispatch
@@ -819,6 +826,300 @@ async def _check_mcp_op_budget(name: str, org_id: str) -> None:
         ) from None
 
 
+# ── #8482: a wrap-envelope tool must not ship a payload its schema forbids ──
+#
+# A tool annotated `-> list[dict]` gets FastMCP's wrap envelope: the output
+# schema becomes `{result: <array schema>, required: [result],
+# x-fastmcp-wrap-result: true}` and `Tool._convert_result` writes
+# `structured_content = {"result": <value>}` (fastmcp/tools/base.py:363-369).
+# The envelope is a promise about the SUCCESS shape, and every conforming
+# client enforces it: the TS SDK validates `structuredContent` against the
+# advertised `outputSchema` whenever that field is PRESENT and refuses the
+# whole call with -32602 on a mismatch; an ABSENT payload is accepted only
+# when `isError` is true (client `callTool`).
+#
+# `_safe` answers every failure with a dict (`_SafeError`, defined below) —
+# never a list. So a FAILED wrap-envelope tool ships
+# `{"result": {"error": ...}}`, which is not an array; the client then
+# discards the SDK's real message and reports a schema complaint about a
+# payload nobody can read. That is the whole of #8482: a failure delivered in
+# the success channel. It is NOT "the tool returns a list" — the four sibling
+# tools the issue could not separate (`tortoise_check_structure`,
+# `tortoise_packs_list`, `tortoise_list_batches`, `tortoise_list_namespaces`)
+# carry the SAME envelope and work, because their SDK calls succeed. The
+# discriminator is the RAISE.
+#
+# The repair is at the WIRE seam, and it does not relax the schema: the
+# failure moves to the channel MCP has for it (`is_error`, no
+# `structured_content`), where the client accepts it and the message survives.
+# The declared schema is the product's success contract (`tortoise_search`
+# does return an array) — widening it to admit the error dict would convert a
+# loud failure into a silent false negative.
+
+#: The `_meta` key a repaired failure uses to re-home the machine-readable
+#: error payload its envelope could not carry — see :func:`_schema_error_result`.
+_SCHEMA_ERROR_META_KEY = "tortoise_error"
+
+#: JSON-schema ``type`` → the Python type a value must satisfy. Only the types
+#: a wrap envelope can declare for its ``result`` key. A declared ``anyOf`` (or
+#: no ``type`` at all) is deliberately ABSENT: a dict ``result`` is admissible
+#: there, so there is nothing to repair (`tortoise_query` and
+#: `tortoise_delete_entity` are the two registry tools in that form).
+_WRAP_ENVELOPE_TYPE_CHECKS: dict[str, type | tuple[type, ...]] = {
+    "array": list,
+    "object": dict,
+    "string": str,
+    "boolean": bool,
+    "number": (int, float),
+    "integer": int,
+}
+
+
+#: Resolved wrap-envelope schemas, keyed by the LOCAL provider component key
+#: (``tool:<name>@<version>``) the schema belongs to. ``mcp.get_tool`` REBUILDS
+#: the tool on every call (measured p50 ≈ 0.13–0.4 ms), and a UNION envelope's
+#: legitimate non-list success (`tortoise_delete_entity` → bool,
+#: `tortoise_query` → ``{results, total, hasMore}``) reaches the pre-filter on
+#: EVERY call — without this the classification would be relearned at a full
+#: rebuild, on the product's read path, for a repair the payload never needed.
+#: The key carries the stored VERSION **and the identity of the live component**,
+#: so a stale classification cannot be served even if a name is re-registered:
+#: ``register_all`` skips a duplicate, but FastMCP's own ``add_tool`` REPLACES
+#: on a duplicate name, and ``remove_tool`` + a re-add drops the object
+#: entirely. The VALUE holds the component itself, not just its ``id`` — a
+#: bare ``id`` is an address, and CPython recycles an address once the object
+#: is freed, so a key built from it would collide with a later component and
+#: serve the replaced schema. Holding the component pins that identity for as
+#: long as the entry lives. An unreadable schema is never cached.
+_WRAP_ENVELOPE_SCHEMA_CACHE: dict[str, tuple[object, dict | None]] = {}
+
+
+def _local_tool_component(name: str):
+    """The local provider's stored component for ``name``, or ``None``.
+
+    Cheap by design (no tool rebuild): it reads the provider's component store
+    directly — the same source ``FastMCPAdapter.register_all`` uses for its
+    duplicate check — and is ``getattr``-guarded so an upstream layout change
+    degrades to "not cached", never a crash.
+    """
+    provider = getattr(mcp, "_local_provider", None)
+    components = getattr(provider, "_components", None)
+    if not components:
+        return None
+    matches = [c for c in components.values()
+               if getattr(c, "name", None) == name
+               and hasattr(c, "output_schema")]
+    if not matches:
+        return None
+    return max(matches,
+               key=lambda c: (c.version is not None, str(c.version)))
+
+
+def _local_tool_cache_key(name: str) -> str | None:
+    """The local provider's stored key for ``name``, or ``None`` when the name
+    is not served locally (a transform/shim or a mounted provider).
+
+    ``None`` makes the caller read through ``get_tool`` without caching,
+    exactly as before. The ``id`` half disambiguates a re-registration under
+    the same key; the cache VALUE holds the component, which is what keeps
+    that ``id`` from being recycled out from under the entry.
+    """
+    chosen = _local_tool_component(name)
+    if chosen is None:
+        return None
+    return f"{chosen.key}#{id(chosen)}"
+
+
+async def _wrap_envelope_schema(name: str) -> dict | None:
+    """The tool's OWN advertised wrap-envelope output schema, or ``None``.
+
+    ``None`` means "not a wrap-envelope tool, or the schema could not be
+    read" — and the caller must then repair NOTHING. That is deliberately
+    fail-OPEN: the repair is only ever applied to a payload PROVEN to violate
+    the schema the tool itself advertises, so a schema this seam cannot read
+    leaves a working tool working. (Fail-closed would be wrong here: an
+    object-annotated tool's `_safe` error dict is perfectly valid, and a
+    repair applied without the schema to prove the violation would break it.)
+
+    The classification is memoised per stored tool (see
+    ``_WRAP_ENVELOPE_SCHEMA_CACHE``) so a union tool's non-list success pays
+    the rebuild ONCE, not once per call.
+    """
+    cache_key = _local_tool_cache_key(name)
+    if cache_key is not None and cache_key in _WRAP_ENVELOPE_SCHEMA_CACHE:
+        return _WRAP_ENVELOPE_SCHEMA_CACHE[cache_key][1]
+    try:
+        tool = await mcp.get_tool(name)
+    except Exception:  # an unreadable schema must never break a tool call
+        return None
+    schema = getattr(tool, "output_schema", None)
+    if not (isinstance(schema, dict) and schema.get("x-fastmcp-wrap-result")):
+        schema = None
+    if cache_key is not None:
+        # Pin the component: the key embeds its address, and this reference is
+        # what stops that address being reused by a later component.
+        component = _local_tool_component(name)
+        if component is not None:
+            _WRAP_ENVELOPE_SCHEMA_CACHE[cache_key] = (component, schema)
+    return schema
+
+
+def _violates_wrap_envelope(schema: dict, structured: Any) -> bool:
+    """Whether ``structured`` can satisfy ``schema``'s own envelope contract.
+
+    Two producers reach this as a violation, and they are the two #8482
+    observed:
+
+    1. a ``result`` present but of the wrong type — `_safe`'s error dict inside
+       an array envelope, `{"result": {"error": ...}}`;
+    2. ``result`` MISSING entirely — the transport wait-bound refusal
+       (:func:`_await_under_mcp_wait_bound`), which answers
+       ``{"error": {...}}``. ``result`` is ``required``, so this is just as
+       unreadable to a conforming client — and it hits the ``anyOf`` tools too,
+       which is why the check is driven by ``required`` and not by the
+       declared type alone.
+
+    ``structured is None`` is NOT a violation: FastMCP omits the payload when
+    serialization fails (fastmcp/tools/base.py:352-354). Repairing that would
+    mark a possibly-successful call as an error on a shape this defect has no
+    producer for — a different root, deliberately left alone.
+    """
+    if structured is None:
+        return False
+    if not isinstance(structured, dict):
+        return True  # the envelope is an object; a list/scalar cannot be one
+    if "result" not in structured:
+        return True  # `result` is required — see (2) above
+    prop = (schema.get("properties") or {}).get("result")
+    declared = prop.get("type") if isinstance(prop, dict) else None
+    check = _WRAP_ENVELOPE_TYPE_CHECKS.get(declared) if isinstance(declared, str) else None
+    if check is None:
+        return False  # anyOf / undeclared: a dict `result` is admissible
+    return not isinstance(structured["result"], check)
+
+
+def _maybe_wrap_envelope_violation(result) -> bool:
+    """CHEAP pre-filter: could this result violate a wrap envelope at all?
+
+    Resolving the schema is NOT free on the dispatch path — it goes through
+    ``mcp.get_tool``, measured here at p50 ≈ 0.13–0.4 ms / p95 ≈ 1.2 ms per
+    call because FastMCP rebuilds the tool. Probing it on every tool call
+    would spend that on the whole surface to protect a failure path, so the
+    shapes a violation can have are recognised from data ALREADY on the
+    result, and the schema is resolved only when one is present:
+
+    * the transport wait-bound refusal — its payload carries no ``result``;
+    * a FastMCP-marked wrap envelope whose ``result`` is NOT a list — a dict is
+      the only shape :func:`_safe` ever returns for a failure, and a scalar is
+      a payload no array envelope can hold either. A UNION envelope
+      legitimately admits the dict — and deciding THAT is precisely what the
+      schema read is for. That read is MEMOISED per stored tool
+      (:data:`_WRAP_ENVELOPE_SCHEMA_CACHE`), so the union success pays it once
+      rather than on every dispatch.
+
+    An ARRAY-envelope success costs two dict lookups and no schema read: it
+    carries a list under ``result``, and an object-annotated tool carries no
+    ``fastmcp`` wrap marker at all. One deliberate limit: this recognises the
+    ENVELOPE, not the payload's contents, so an array whose ITEMS violate the
+    declared ``items`` schema is not caught — that is validation of the tool's
+    data rather than of the envelope, it has no producer in the registry
+    today, and a partial re-implementation of JSON Schema would imply a
+    completeness it would not have.
+    """
+    payload = getattr(result, "structured_content", None)
+    if not isinstance(payload, dict):
+        return False
+    meta = getattr(result, "meta", None) or {}
+    if meta.get(_WAIT_BOUND_META_KEY):
+        return True
+    wrapped = (meta.get("fastmcp") or {}).get("wrap_result")
+    if not wrapped:
+        return False
+    return not isinstance(payload.get("result"), list)
+
+
+def _safe_failure_message(payload: Any) -> str | None:
+    """The `_safe` failure TEXT a payload carries, read THROUGH the envelope.
+
+    `_safe` answers every failure with a string ``error``. `_wrapped_call_tool`
+    uses this to classify the stdio auth gate (#236) — and that probe read the
+    TOP LEVEL only, so for a wrap-envelope tool the gate's refusal
+    (``{"result": {"error": "Authentication required..."}}``) was missed and
+    the call was recorded as ``ok``. Same class as #8482: a failure that reads
+    as a success. Both shapes are read here so the classification cannot
+    depend on whether FastMCP wrapped the payload.
+
+    Returns the message only when it IS a string — the wait-bound refusal's
+    ``{"error": {"code": ..., "message": ...}}`` is not one, so it keeps its
+    own ``timeout``/``refused`` classification.
+    """
+    if not isinstance(payload, dict):
+        return None
+    if isinstance(payload.get("error"), str):
+        return payload["error"]
+    inner = payload.get("result")
+    if isinstance(inner, dict) and isinstance(inner.get("error"), str):
+        return inner["error"]
+    return None
+
+
+def _schema_error_result(result, name: str, schema: dict) -> ToolResult:
+    """Rewrite a schema-violating envelope as an MCP ERROR result.
+
+    ``content`` is kept verbatim — it already carries the SDK's real message —
+    the invalid ``structured_content`` is dropped, and ``is_error`` is set.
+    That pair is exactly what a conforming client accepts for a tool it holds
+    an output schema for, so the caller can READ the failure instead of the
+    -32602 that used to replace it.
+
+    When the kept ``content`` is EMPTY (a tool that returned ``None`` produces
+    ``{"result": None}`` with no text block), a message naming the tool and
+    the violated schema is SYNTHESISED: a repaired error with no message is
+    exactly the unreadable degradation #8482 exists to prevent, so this
+    channel must never be empty.
+
+    ``meta`` is preserved (the wait-bound marker decides how the call is
+    classified downstream) except FastMCP's own ``wrap_result`` claim, which
+    described a payload that is no longer there — a client that trusted it
+    would unwrap a ``None``.
+
+    A dropped payload whose TOP-LEVEL ``error`` is a MAPPING is re-homed under
+    ``_SCHEMA_ERROR_META_KEY``, because it carries the machine-readable half of
+    the failure. The one producer that meets that condition is the transport
+    wait-bound refusal (`{"error": {code, message, data}}`): a `_safe` failure
+    carries a mapping too (``code``/``violations``/``batch_id``), but inside a
+    wrap envelope it sits under ``result``, so this top-level read does not
+    reach it — it is kept verbatim as the JSON text in ``content`` and NOT
+    re-homed. The refusal:
+    its retry delay ships ONLY as ``error.data.retry_after`` (``mcp_auth`` keeps
+    the refusal prose digit-free BECAUSE that payload is the delay's one
+    source), so dropping it would tell the caller to wait for an advertised
+    delay and then not advertise it. ``_meta`` is the other channel a conforming
+    client accepts, and this seam already carries the wait-bound marker there.
+    """
+    meta = dict(getattr(result, "meta", None) or {})
+    meta.pop("fastmcp", None)
+    payload = getattr(result, "structured_content", None)
+    inner = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(inner, dict):
+        meta[_SCHEMA_ERROR_META_KEY] = inner
+    content = getattr(result, "content", None)
+    if not content:
+        from mcp.types import TextContent
+        declared = ((schema.get("properties") or {}).get("result") or {}).get(
+            "type")
+        detail = f" (result must be {declared})" if isinstance(declared, str) else ""
+        content = [TextContent(type="text", text=(
+            f"Tool '{name}' produced a result that violates its declared "
+            f"output schema{detail}; the failure carried no message."))]
+    return ToolResult(
+        content=content,
+        structured_content=None,
+        meta=meta or None,
+        is_error=True,
+    )
+
+
 async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None, *,
                              version=None, run_middleware: bool = True,
                              task_meta=None):
@@ -879,10 +1180,37 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         # (TORTOISE_API_KEY set → every call is rejected). Classify it so
         # unauthenticated stdio calls don't masquerade as ok.
         payload = getattr(result, "structured_content", result)
-        if (isinstance(payload, dict)
-                and isinstance(payload.get("error"), str)
-                and payload["error"].startswith("Authentication required")):
-            status, error_kind = "auth_error", "stdio_auth_gate"
+        # #8482: read the `_safe` text THROUGH the wrap envelope — the stdio
+        # auth gate is one of the failures FastMCP wraps, so a top-level probe
+        # alone recorded it as `ok` for every array-envelope tool.
+        failure = _safe_failure_message(payload)
+        if failure is not None and failure.startswith("Authentication required"):
+            status = "auth_error"
+            # The prefix is shared by producers that are NOT the #236 gate:
+            # `tortoise_packs_list`'s HTTP no-tenant refusal and `_safe`'s
+            # unset-transport refusal both open with it. Stamping
+            # `stdio_auth_gate` on those would make the metric's documented
+            # meaning false and fold hosted tenant refusals into it, so the
+            # KIND follows the transport that actually refused. The STATUS is
+            # `auth_error` either way — each of them IS an auth refusal.
+            error_kind = ("stdio_auth_gate"
+                          if _transport_mode.get() == "stdio" else None)
+        # #8482: ...and repair the payload the tool's OWN schema forbids. Last,
+        # so the classification above still sees the shape the dispatch
+        # produced rather than the repaired one. The schema read is behind a
+        # cheap pre-filter — see `_maybe_wrap_envelope_violation`.
+        if _maybe_wrap_envelope_violation(result):
+            envelope = await _wrap_envelope_schema(name)
+            if envelope is not None and _violates_wrap_envelope(envelope, payload):
+                result = _schema_error_result(result, name, envelope)
+                if status == "ok":
+                    # The seam has just PROVEN this dispatch failed and told the
+                    # client so (`is_error`); leaving the row `ok` would put the
+                    # scorecard and the wire in disagreement — the same
+                    # "a failure that reads as a success" defect #8135 owns for
+                    # the general `_SafeError` case. Only when nothing else has
+                    # classified it: the wait-bound statuses are set above.
+                    status, error_kind = "exec_error", "safe_error"
         return result
     except asyncio.CancelledError:
         # A cancelled dispatch is neither an "ok" nor an exec error — classifying
@@ -972,6 +1300,16 @@ def _get_sdk():
                 if attempt > 0:
                     _log.warning("Docker connection succeeded on attempt %d", attempt + 1)
                 _sdk = TortoiseSDK()
+                # #7951 review P1: NO journal is bound here. This lane passes
+                # ``namespace=None, graph_name=None``, and
+                # ``config._resolve_event_log_path`` returns ``None`` for the
+                # unnamed default graph by construction — so a bind here is a
+                # provable no-op that only bought an import of
+                # ``tortoise.hosted_api`` (and with it the loss of the
+                # self-host deployment discriminator, which reads that module's
+                # presence in ``sys.modules``). The guard is, and must remain,
+                # INERT on a journal-less lane: with no journal there is no
+                # truth store for the cache to be ahead of.
                 _sdk._proj = _proj
                 break
             except Exception as e:
@@ -1012,8 +1350,8 @@ _QUOTA_GATED: frozenset[str] = frozenset({
     # #684: node-creating tools that were missed in the original #329 audit
     "tortoise_file_human_approval",  # creates Event + decision Point + IMPL edges
     "tortoise_assess_source",        # creates assessment Point
-    # epic #900 T7 (#1043): the index path creates Sources + Events/Documents
-    # + references edges — node/edge-creating, quota-gated (S8 pin, I25)
+    # epic #900 T7 (#1043): the index path creates Sources + Events (a document
+    # is a Source — D10) + references edges — node/edge-creating, quota-gated (S8 pin, I25)
     "tortoise_index_files",
 })
 
@@ -2110,10 +2448,10 @@ def tortoise_compute_confidence(factors: Any = None,
     unbounded on a multi-tenant surface).
     """
     # #395 (delta C): HTTP no-arg is the disable-contract — a fresh
-    # request-scoped SDK (mcp_auth.py:69) always has empty _dirty_roots, so
+    # request-scoped SDK (mcp_auth.py:120) always has empty _dirty_roots, so
     # the no-arg path would silently return {} where today it runs whole-
     # graph EP (the #7288 timeout surface). Transport-aware branch lives in
-    # the handler (precedent: _transport_mode checks at mcp_server.py:962).
+    # the handler (precedent: _transport_mode checks at mcp_server.py:1304).
     # #1163: the graph is now the dirty-state source of truth — hydrate the
     # request-scoped SDK's persisted dirty roots; the diagnostic only fires
     # when the graph is TRULY clean (no persisted dirty state).
@@ -2354,7 +2692,8 @@ def tortoise_file_human_approval(approver_id: str, artifact_id: str,
     dependent claims strengthen.
 
     approver_id: Subject id of the human approving
-    artifact_id: Object/Document id of the artifact being approved
+    artifact_id: Object id, or the url of the document Source, of the artifact
+        being approved
     point_ids: claim Point ids being approved
     decision_content: optional content override for the decision Point
 
@@ -2712,7 +3051,7 @@ def tortoise_issue_insight(title: str, body: str | None = None,
 
 def tortoise_ingest_corpus(directory: str) -> dict:
     """Batch document ingestion — walk directory, parse YAML frontmatter
-    from .md files, create/update Document nodes.
+    from .md files, create/update document Sources (D10: a document is a :Source).
     Returns {ingested, updated, skipped}.
 
     #236: EXCLUDED from tenant HTTP — walks server filesystem with a
@@ -2725,7 +3064,8 @@ def tortoise_ingest_corpus(directory: str) -> dict:
 # ── Taxonomy ─────────────────────────────────────────────────
 
 def tortoise_taxonomy() -> dict[str, int]:
-    """Count entities by node label. Returns {Point: N, Event: N, Subject: N, Object: N, Document: N}.
+    """Count entities by node label. Returns {Point: N, Event: N, Subject: N,
+    Object: N, Source: N} (D10: a document is a Source, not a :Document node).
     Alias → overview(section='taxonomy') (epic #888 W3)."""
     return _safe(_get_org_sdk().taxonomy)
 
@@ -3056,8 +3396,8 @@ def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_m
 
 def tortoise_index_files(directory: str, corpus_name: str | None = None,
                         extract_metadata: bool = False) -> dict:
-    """Index a corpus directory of .md files as Sources + Events/Documents
-    (epic #900 — the unified index path). Returns the honest §3.1 summary
+    """Index a corpus directory of .md files as Sources + Events (D10: a document
+    is a Source; the unified index path, epic #900). Returns the honest §3.1 summary
     (file_count, indexed, updated, skipped, failed, aborted, ignored,
     errors[], by_kind). Idempotent: re-runs converge to skipped. On a shared
     graph, give each corpus a unique corpus_name (default = directory
@@ -3098,7 +3438,8 @@ def tortoise_search_sessions(query: str, agent: str | None = None, topics: Any =
                  after=after, before=before, limit=limit, offset=offset)
 
 def tortoise_create_document(title: str, documentKind: str, props: Any = None) -> dict:
-    """Create a Document node (research, planDoc, meetingNotes, etc.)."""
+    """Create a document — a :Source keyed by url (research, planDoc,
+    meetingNotes, etc.)."""
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
@@ -3542,8 +3883,8 @@ def tortoise_get(id: str, type: str | None = None,
 
     type selects the node kind:
       point | operator | entity | event | session | events | governance
-    Omitted type → auto-detect by id lookup (Point/Subject/Object/Document/
-    Source/Event by id|eventId|url; AgentSession by session_id|sessionId).
+    Omitted type → auto-detect by id lookup (Point/Subject/Object/Source/Event
+    by id|eventId|url; AgentSession by session_id|sessionId).
 
     Returns the node properties (same shape as the legacy tool it replaces).
     type='events': id is optional — recent Events list, id used as an
@@ -4141,8 +4482,11 @@ def _maybe_onboarding_auto_complete(*,
 # Claude Web (and every harness with an MCP surface) files sessions through
 # this tool. It calls the SAME capture pipeline as POST /v1/sessions
 # (hosted_api._capture_session_impl) so the two surfaces can never drift on
-# gate order: admission 429 (#3060) → session_recording opt-out 409 → empty
-# 422 → quota 402. A missing provider key is NOT a gate (#3892): the capture
+# gate order: boundary 422 → admission 429 (#3060) / in-flight 409 (#3129)
+# → session_recording opt-out 409 → turn cap 400 → empty 422 → quota 402;
+# the tool docstring below carries the full list, including the inner
+# extractor-provider 503 that can follow them.
+# A missing provider key is NOT a gate (#3892): the capture
 # is STORED and only the LLM extraction is skipped, reported as
 # `extraction_mode: "no-provider"`. Stdio/self-host returns an honest "requires
 # hosted mode" error —
@@ -4158,13 +4502,26 @@ def tortoise_session_capture(conversation: list[dict],
     """File an agent session into the graph (T3 workflows prompt surface).
 
     Server-enforced gates (identical to POST /v1/sessions — VERIFIED order,
-    #2093 S2): boundary 422 (invalid harness/shape — SessionRequest
-    construction below) -> 409 (recording off) -> 503 (no provider) -> 400
-    (turn cap) -> 422 (empty/blank transcript) -> 402 (quota). Returns the
+    #2093 S2 amendment): boundary 422 (invalid harness/shape — SessionRequest
+    construction below) -> 429 (capture capacity saturated) / 409 (duplicate
+    in-flight capture of the same session_id — both raised by the admission
+    reservation at ``_reserve_capture_slot`` below, #3060/#3129) -> 409
+    (recording off) -> 400 (turn cap) -> 422 (empty/blank transcript) -> 402
+    (quota). The pre-#3892 "503 (no provider)" entry in that list is removed:
+    a MISSING provider key is no longer a gate — since #3892 (owner ruling)
+    the capture is STORED and only the LLM extraction is skipped (receipt mode
+    "no-provider"). A provider refusal can still surface as a 503 from INSIDE
+    extraction — after the gates above, with the turns already stored — when
+    the configured provider selection cannot be satisfied (#1468/#1530); it is
+    not part of the pre-write gate order above. Returns the
     capture result (a memory_write_v1 envelope, #2104) on success, or an
-    honest error dict on failure (the per-harness last-error state key is
-    recorded on non-2xx EXCEPT the #3060 capacity 429 — a server condition —
-    and cleared on 2xx; same receipt semantics as the REST path).
+    honest error dict on failure. Per-harness last-error bookkeeping (same on
+    the REST path): the key is SET on a non-2xx EXCEPT the #3060 capacity 429
+    and the #3129 in-flight 409 (both server conditions), and is not written
+    for the payload-boundary 422 above, which returns before the capture
+    pipeline just as REST's Pydantic 422 does; on 2xx the shared pipeline
+    clears the key for a fully processed capture and SETS it when extraction
+    was attempted but did not complete (#3520).
     """
     from tortoise.mcp_auth import (  # noqa: I001
         SELFHOST_ORG_ID,
@@ -4180,7 +4537,7 @@ def tortoise_session_capture(conversation: list[dict],
     if not org_id or org_id == SELFHOST_ORG_ID:
         # stdio / self-host HTTP: no hosted state plane, no receipts — the
         # honest error (matching the onboarding-tool precedent), never a
-        # local fallback that bypasses the 409/402/503 gates.
+        # local fallback that bypasses the server-enforced capture gates.
         return {"error": "session capture requires hosted mode — the "
                           "tortoise_session_capture tool files to Tortoise "
                           "Cloud (server-enforced recording + receipts); "
@@ -5284,7 +5641,15 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
     transfer_edges=False is the invalidate behaviour and reuses that preview.
     transfer_edges=True enumerates the edges the writer repoints, leg by leg:
       * 2a operator -> old, EXCEPT `alreadyDecided` (kept on the dead prior).
-        The writer uses CREATE here, so every row becomes its own edge;
+        The writer MERGEs (idx-keyed; an idx-less edge merges on the bare
+        pattern — #6180): a pre-existing edge at the successor is
+        a no-op rather than a second parallel edge, while the two rows
+        `create_operator(op, old, [old])` mints (idx 0 and idx 1) stay distinct;
+      * 2a-INPUT `(old)-[:INPUT]->(op)` mirrors, ALSO MERGE-backed (#6180). The
+        writer transfers each mirror with its operator's support source so the
+        successor's why/support chain resolves; they are removed from old and
+        created at the successor, but are NOT part of
+        `edges_transferred_from_old` (the writer's own counter excludes them);
       * 2a-DIRECT operator-less IMPL/NAND incident to old, excluding operator
         targets. The writer MERGEs, so rows to the same target collapse;
       * 2b the structural rels in `SUPERSEDE_STRUCTURAL_RELS` (imported from
@@ -5318,10 +5683,12 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
 
     Each condition has its own test. This
     value is the accurate one; the self-loop is reported under `edges_dropped`
-    with the reason "self-loop on the old node". It counts every row the write
-    removes from old, INCLUDING the delete-only rows (`edges_dropped`: a
-    self-loop, or a far endpoint that is the successor / not a Point) that the
-    writer also books as "transferred" while creating nothing.
+    with the reason "self-loop on the old node". It counts every PRIMARY row
+    the write removes from old, INCLUDING the delete-only rows (`edges_dropped`:
+    a self-loop, or a far endpoint that is the successor / not a Point) that the
+    writer also books as "transferred" while creating nothing. The 2a-INPUT
+    mirrors are removed from old but excluded from this count (and from
+    `edges_transferred`), because the writer's own counter excludes them.
     It is therefore NOT "the edges that arrive at the successor": those are
     `edges_created_at_new` + `edges_already_present_at_new`.
     `edges_remaining_at_old` is the complementary count — the edges incident to
@@ -5347,19 +5714,51 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
     sdk._assert_lifecycle_guard(new_id, method="supersession", role="target")
     proj = sdk._get_proj()
     from tortoise.security import validate_rel_type
-    created: list[dict] = []   # 2a operator edges — CREATE, never collapse
+    created: list[dict] = []   # net-new 2a operator edges only (that leg is MERGE-backed;
+                              # 2a-INPUT net-new lives in `mirror_created`, the
+                              # 2a-DIRECT/2b legs in `merged` until split below)
     merged: list[tuple] = []   # (merge_key, edge) — MERGE-backed legs
     dropped: list[dict] = []
     kept: list[dict] = []
+    # Edges already present at the successor — a MERGE on them is a no-op, so
+    # they are NOT net-new. `mirror_*` are the 2a-INPUT leg's (#6180); they
+    # are counted in `edges_created_at_new`/`edges` but NOT in
+    # `edges_transferred_from_old`, which mirrors the writer's own primary-edge
+    # counter (INPUT mirrors ride along uncounted — see sdk.supersede_point).
+    typed_present: list[dict] = []
+    mirror_created: list[dict] = []
+    mirror_present: list[dict] = []
     # INTERNAL ids of every edge the write removes from old (repointed OR
     # delete-only). Set-keyed so an edge matched by two passes is handled once;
     # `edges_remaining_at_old` is the incident count minus this set.
     handled_old_edge_ids: set = set()
 
+    # Pre-existing operator edges/INPUT mirrors at the successor, keyed on the
+    # operator's LOGICAL id — the writer's 2a/2a-INPUT MERGEs are per-operator
+    # (the typed edge, idx-keyed, plus the reverse INPUT mirror), so one
+    # operator's existing edge must not mark another operator's as present.
+    # `idx` rides the key (the writer's MERGE pattern carries it), so the two
+    # edges `create_operator(op, old, [old])` mints (idx 0 and idx 1) stay
+    # distinct.
+    pre_op_out = {(r[0], r[1], r[2]) for r in proj.g.query(
+        "MATCH (op:Point {is_operator:true})-[r]->(new:Point {id:$n}) "
+        "RETURN op.id, type(r), r.idx",
+        params={"n": new_id}).result_set}
+    pre_op_in = {(r[0], r[1]) for r in proj.g.query(
+        "MATCH (new:Point {id:$n})-[r:INPUT]->(op:Point {is_operator:true}) "
+        "RETURN op.id, r.idx",
+        params={"n": new_id}).result_set}
+    # #6180 null-idx class: the writer MERGEs an idx-less edge on the BARE
+    # pattern, which matches a same-type edge at ANY idx — so a null-idx row is
+    # "already present" when the successor carries that operator edge at all.
+    pre_op_out_any = {(a, b) for (a, b, _idx) in pre_op_out}
+    pre_op_in_any = {a for (a, _idx) in pre_op_in}
+
     # 2a — operator edges. The writer validates every relationship type BEFORE
     # any mutation (a raw/imported undeclared type is an injection primitive),
-    # so the preview validates too.
-    for op_id, rtype, _idx, op_label, op_rid in proj.g.query(
+    # so the preview validates too. The writer MERGEs (idx-keyed), so an edge
+    # the successor already carries is a no-op rather than a net-new one.
+    for op_id, rtype, idx, op_label, op_rid in proj.g.query(
         "MATCH (op:Point {is_operator:true})-[r]->(o:Point {id:$old}) "
         "RETURN op.id, type(r), r.idx, op.label, ID(r)",
         params={"old": old_id},
@@ -5369,8 +5768,36 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
             kept.append({"type": rtype, "from": op_id, "to": old_id,
                          "reason": "alreadyDecided stays on the superseded prior"})
         else:
-            created.append({"type": rtype, "from": op_id, "to": new_id})
+            edge = {"type": rtype, "from": op_id, "to": new_id}
+            present = ((op_id, rtype) in pre_op_out_any if idx is None
+                       else (op_id, rtype, idx) in pre_op_out)
+            (typed_present if present else created).append(edge)
             handled_old_edge_ids.add(op_rid)
+
+    # 2a-INPUT (#6180) — the writer transfers the operator's reverse INPUT
+    # mirror with its typed edge (`(support)-[:INPUT]->(operator)` is the
+    # support source why.py reads). MERGE, so a mirror already at the successor
+    # is a no-op. alreadyDecided operators keep their INPUT on the dead prior,
+    # mirroring 2a.
+    for op_id, idx, op_label, op_rid in proj.g.query(
+        "MATCH (o:Point {id:$old})-[r:INPUT]->(op:Point {is_operator:true}) "
+        "RETURN op.id, r.idx, op.label, ID(r)",
+        params={"old": old_id},
+    ).result_set:
+        if op_label == "alreadyDecided":
+            # #6180: the retained mirror must be VISIBLE in the kept set, like
+            # 2a's typed branch — the writer keeps it on the dead prior, and a
+            # caller enumerating edges + edges_kept_attached otherwise cannot
+            # see it at all (only edges_remaining_at_old reflects it).
+            kept.append({"type": "INPUT", "from": old_id, "to": op_id,
+                         "reason": "alreadyDecided keeps its INPUT on the "
+                                   "superseded prior"})
+            continue
+        edge = {"type": "INPUT", "from": new_id, "to": op_id}
+        present = (op_id in pre_op_in_any if idx is None
+                   else (op_id, idx) in pre_op_in)
+        (mirror_present if present else mirror_created).append(edge)
+        handled_old_edge_ids.add(op_rid)
 
     # #4021 parity — a window whose resolved END precedes the predecessor's own
     # validFrom is refused by the writer before it mutates anything, so the
@@ -5489,13 +5916,18 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
         seen.add(key)
         merged_final.append((key, edge))
     # A MERGE destination that already exists at the successor is a no-op.
-    created_edges: list[dict] = list(created)  # 2a operator CREATEs always create
-    already_present: list[dict] = []
+    created_edges: list[dict] = list(created) + mirror_created
+    already_present: list[dict] = list(typed_present) + mirror_present
     for (rtype, direction, t_internal), edge in merged_final:
         present = ((rtype, t_internal) in pre_out if direction == "out"
                    else (rtype, t_internal) in pre_in)
         (already_present if present else created_edges).append(edge)
-    removed_raw = len(created) + len(merged) + len(dropped)
+    # Primary-edge old-side count, mirroring the writer's own
+    # `edges_transferred`. The 2a-INPUT mirrors are removed from old (they ride
+    # `handled_old_edge_ids` below) but are NOT counted here — the writer does
+    # not count them either (see sdk.supersede_point).
+    removed_raw = (len(created) + len(typed_present)
+                   + len(merged) + len(dropped))
     # The writer's status write is a bare `MATCH (n:Point {id:$id}) SET …` — it
     # binds EVERY matching node (no cardinality guard), which is exactly what
     # `_preview_invalidate` already counts as `n_old`. Mirror it instead of

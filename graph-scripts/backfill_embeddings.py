@@ -592,9 +592,19 @@ def _print_completeness(stats: dict) -> None:
 def _repair_legacy_event_embeddings(g, *, dry_run: bool, limit: int) -> int:
     """Rewrite plain-list Event embeddings into vecf32 (per-node, idempotent).
 
-    Pre-#244 _upsert_event stored embeddings as plain Python lists;
-    vec.euclideanDistance then fails the whole MATCH ("expected Null or
-    Vectorf32 but was List") — one legacy node poisons Event vector search.
+    Pre-#244 _upsert_event stored embeddings as plain Python lists. Before
+    #8316 such a node made `vec.euclideanDistance` fail the whole MATCH
+    ("expected Null or Vectorf32 but was List") — one legacy node poisoned
+    Event vector search. The read boundary now normalises a right-width
+    numeric `List` (#8316), so this repair serves SHAPE CONSISTENCY — every
+    stored Event embedding typed the way this repo's own writers produce them
+    (the typed shape the Point index cohort requires, #8429; a verbatim
+    caller-supplied Point embedding is deliberately a plain `List` — PR
+    #3018 — and is not this repair's business). A wrong-width or non-numeric `List`
+    still aborts a read (#8430), and the two halves differ HERE: `vecf32()`
+    DOES retype a wrong-width numeric `List`, so it lands in the `rewritten`
+    count without curing the dimension mismatch, while a non-numeric `List`
+    makes the rewrite itself raise and is counted as skipped.
     vecf32() on an already-vecf32 node errors, so each node is rewritten in a
     try/except and failures are counted (expected on fully-migrated DBs).
 
@@ -642,8 +652,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--repair-embeddings", action="store_true",
         help="Rewrite Event embeddings stored as plain lists into vecf32 "
-        "(pre-#244 _upsert_event wrote plain lists; a single such node poisons "
-        "brute-force vector search for the whole Event label).",
+        "(pre-#244 _upsert_event wrote plain lists). Shape consistency: every "
+        "stored EVENT embedding typed the way this repo's own writers produce "
+        "them — a verbatim caller-supplied Point embedding is deliberately a "
+        "plain List (PR #3018) and is not this repair's business. A right-width "
+        "numeric List is normalised at read time since #8316, while a wrong "
+        "width or a non-numeric List still aborts one (#8430).",
     )
     ap.add_argument(
         "--force-re-embed", action="store_true",

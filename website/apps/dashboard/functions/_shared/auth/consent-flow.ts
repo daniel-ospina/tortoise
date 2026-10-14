@@ -33,6 +33,21 @@
  * implied, so the gap is readable from the code.
  */
 
+/**
+ * The query parameter that marks the sign-in leg as ALREADY ATTEMPTED.
+ *
+ * The `attempted` input below has to be carried across the sign-in round trip,
+ * and this is its one carrier: the `sign_in` redirect points at `auth_url`, whose
+ * `next` is this flow's return target carrying `consent_retry=1`. On the return,
+ * the route reads that parameter and passes `attempted = true`.
+ *
+ * It is deliberately NOT `stale=1` (`welcome.ts`, `admin/[[path]].ts`): `stale`
+ * marks a server-side snapshot as out of date and means something different, so
+ * reusing it would make one flag answer two questions — and the loop guard would
+ * then trigger on an unrelated staleness marker.
+ */
+export const CONSENT_RETRY_PARAM = "consent_retry";
+
 /** What the session lookup established. Mirrors `getAccessTokenForSession`'s + `/api/session`'s contract. */
 export type SessionOutcome = "usable" | "none" | "unavailable";
 
@@ -49,11 +64,22 @@ export type ConsentAdvance =
 
 export interface ConsentAdvanceInput {
   session: SessionOutcome;
-  /** Same-origin URL that continues the flow (the validated consent start/bounce). */
-  flow_url: string;
+  /**
+   * The authorization-server authorize URL, REBUILT FROM THE VALIDATED PARAMS —
+   * the target a usable session advances to (spec §4). It must be the AS route
+   * (cross-origin `https://api.premiselabs.co/oauth/authorize?...`), never the BFF
+   * route that calls this decision: advancing to the calling route re-enters it
+   * and 302s again forever (`ERR_TOO_MANY_REDIRECTS`), and the loop guard cannot
+   * stop that because a usable session is checked before `attempted`.
+   */
+  authorize_url: string;
   /** Same-origin sign-in URL, already carrying this flow as its return target. */
   auth_url: string;
-  /** Whether the sign-in leg has already run once for this flow. */
+  /**
+   * Whether the sign-in leg has already run once for this flow. Carried across
+   * the round trip as the `consent_retry=1` parameter on `auth_url`'s `next`
+   * (see `CONSENT_RETRY_PARAM`) — distinct from `stale=1`.
+   */
   attempted: boolean;
 }
 
@@ -69,11 +95,12 @@ export function decideConsentAdvance(input: ConsentAdvanceInput): ConsentAdvance
   // session that lands after the sign-in hop is never mistaken for the loop the
   // guard exists to stop.
   if (input.session === "usable") {
-    return { action: "advance", status: 302, to: input.flow_url };
+    return { action: "advance", status: 302, to: input.authorize_url };
   }
 
   // No session: exactly ONE hop to the sign-in surface, carrying this flow as
-  // the return target, so completing sign-in lands back on `flow_url`.
+  // the return target (with `consent_retry=1`), so completing sign-in lands back
+  // on this flow's BFF route rather than the AS authorize URL.
   if (!input.attempted) return { action: "sign_in", status: 302, to: input.auth_url };
 
   // Already been to sign-in and come back with no session. A second hop can

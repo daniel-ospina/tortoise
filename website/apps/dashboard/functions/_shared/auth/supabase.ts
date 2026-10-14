@@ -185,20 +185,28 @@ export function exchangePkceCode(
  */
 export function isRefreshTokenDead(status: number, errorBody: string): boolean {
   if (status >= 500 || status === 429) return false;
-  let text = errorBody;
+  // ONLY a JSON error envelope can name a credential failure. A NON-JSON body is
+  // — by construction — not a Supabase/GoTrue error, so it can never be
+  // EVIDENCE that the refresh token was rejected: an HTML config or WAF page
+  // that happens to contain `token has expired`, a truncated response, or an
+  // empty body is a deployment fault, not a session verdict. Testing the RAW
+  // text made a WAF page a sign-out (#3485) — the sibling `isUserTokenRejection`
+  // below already refuses this for the same reason. Unparseable → fault (503).
+  let parsed: {
+    error_code?: string;
+    error?: string;
+    msg?: string;
+    error_description?: string;
+  };
   try {
-    const parsed = JSON.parse(errorBody) as {
-      error_code?: string;
-      error?: string;
-      msg?: string;
-      error_description?: string;
-    };
-    text = [parsed.error_code, parsed.error, parsed.msg, parsed.error_description]
-      .filter(Boolean)
-      .join(" ");
+    parsed = JSON.parse(errorBody) as typeof parsed;
   } catch {
-    /* not JSON — fall back to the raw body */
+    return false;
   }
+  if (parsed === null || typeof parsed !== "object") return false;
+  const text = [parsed.error_code, parsed.error, parsed.msg, parsed.error_description]
+    .filter(Boolean)
+    .join(" ");
   return /invalid_grant|refresh_token_not_found|refresh_token_already_used|session_not_found|token has expired|jwt expired/i.test(
     text,
   );

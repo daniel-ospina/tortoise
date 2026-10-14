@@ -105,7 +105,12 @@ jobs:
           esac
       - name: Install e2e deps
         run: |
-          pip install pytest requests playwright pytest-playwright
+          # pytest-timeout is NOT a runtime dependency of the package (nor pulled
+          # in by playwright/pytest-playwright), and this hand-rolled install
+          # does not use the `.[test]` extra — without it the `timeout = 300`
+          # config default is an inert key here (`Unknown config option`), so the
+          # lane would have no per-test killer (#5035).
+          pip install pytest 'pytest-timeout>=2.4.0' requests playwright pytest-playwright
           pip install -e .
       - name: Run the blog write E2E against the target
         env:

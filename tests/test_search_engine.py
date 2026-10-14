@@ -267,10 +267,14 @@ def test_vector_trace_ok_on_healthy_graph(tmp_path):
         sdk.close()
 
 
-def test_vector_trace_poisoned_plain_list_node(tmp_path):
-    """D4 (R3): a malformed plain-list embedding node poisons the brute-
-    force MATCH (vecf32 throws per-row — 'Type mismatch: expected Null or
-    Vectorf32 but was List') → reason='query_failed' (NOT no_embeddings)."""
+def test_vector_trace_wrong_dim_node_is_query_failed(tmp_path):
+    """D4 (R3): a malformed embedding node costs the brute-force MATCH.
+
+    The node here is malformed by DIMENSION (a 2-dim list against the 384-dim
+    query), which is #8430's root. The plain-``List`` SHAPE alone no longer
+    poisons the leg — #8316 normalises it at the read boundary — so this test
+    now exercises the width half, not the type half.
+    """
     _embedder_or_skip()
     sdk = _trace_sdk(tmp_path)
     try:

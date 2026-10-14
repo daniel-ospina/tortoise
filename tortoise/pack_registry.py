@@ -96,6 +96,16 @@ CANONICAL_ACTION_KINDS = frozenset({
     "meet", "experiment", "deploy", "review", "other",
 })
 
+# Pack-DECLARATION entity vocabulary — NOT the graph-label vocabulary. This is the
+# type a pack's edge (`from`/`to`) and a bare kind reference may name, and it is
+# deliberately kept distinct from the labels a query leg serves:
+#   * ``Document`` stays here ON PURPOSE (D10, ONTOLOGY v3.15 §4.4). A pack may
+#     declare an edge from/to a document; the WRITE path routes that to a
+#     ``:Source`` keyed ``url`` (``sdk._create_entity``), and the READ path maps
+#     ``document`` → ``:Source`` (``security.ENTITY_TYPE_LABELS``). Removing the
+#     spelling here would break pack declarations over a label that no longer
+#     exists, so it is a declaration alias, not a live graph label.
+#   * ``Action`` likewise names a declared kind, not a node label.
 VALID_ENTITY_TYPES = frozenset({
     "Subject", "Object", "Action", "Point", "Event", "Document", "Source",
 })
@@ -285,6 +295,31 @@ SEMANTICS_TRANSITION: dict[str, str] = {
     "holds": "ownedBy",
     "funds": "transacts",
 }
+
+# ── #7551 — the operator-LABEL declared vocabulary ───────────────────────
+# `create_operator`'s declaredness check answers ONE question: is this label
+# **declared** — not "is it shaped like a verb", and (the defect) not "does an
+# installed pack happen to declare it". It consulted pack relations ONLY, so
+# EVERY core predicate read as undeclared and the warning carried no
+# information: `supports` — the convention ONTOLOGY §8 gives evidence→claim —
+# warned exactly like an invented name, and a lane with no reachable declared
+# predicate invented one (`measures`; #7551, ≈25 such edges).
+#
+# The set is DERIVED, never re-transcribed, so it cannot drift from its two
+# sources: the mechanism pair (§3.9 "Epistemic edges (operators): IMPL, NAND")
+# UNIONED with the CLOSED Layer-2 semantics vocabulary (§8) — the "(+ semantic
+# label)" §3.9 admits. Widening the accepted vocabulary is therefore a change
+# to `SEMANTICS_VALUES` or `CORE_PREDICATES` (and to §8's table, which the
+# guard pins) — not a quiet addition here.
+#
+# A RETIRED spelling (`opposes` / `produces` / `holds` / `funds`, see
+# `SEMANTICS_TRANSITION`) is deliberately ABSENT: it must keep warning so the
+# caller learns the canonical word.
+#
+# Declaredness is not shape. §8's reification table governs which edges ought
+# to carry an operator; a `label` outside that shape is odd but still
+# *declared*, and this check was never a shape gate (warn-not-block, #1934).
+CORE_OPERATOR_LABELS = CORE_PREDICATES | SEMANTICS_VALUES
 
 # ── Layer 3 — the relation write-path verdict (#2766) ─────────────────────
 # A pack `ontology.relations[]` entry is only *real* if some runtime surface
@@ -1502,7 +1537,11 @@ class PackRegistry:
         # valueGate: this pack's keep/drop HINTS for the value brief — what a
         # valuable utterance looks like in this domain. It is NOT a mint-time
         # drop rule: no hint can remove an artefact, only inform the
-        # utterance-level value gate.
+        # utterance-level value gate. CONSUMED (§ #4894):
+        # ``compile_value_brief`` carries it into the brief's reserved
+        # ``pack_hints`` section and extractor_v2 renders it into the S1/S2/S4
+        # value-brief slot. It stays a hint — the mechanical, artefact-level
+        # predicate is ``tortoise/value_gate.py``, and no hint becomes a rule.
         value_gate = extraction.get("valueGate")
         if value_gate is not None and not isinstance(value_gate, dict):
             errors.append("extraction.valueGate must be a map")
@@ -1521,9 +1560,10 @@ class PackRegistry:
                     )
 
         # promptFragments: pack-authored instruction snippets declared for the
-        # value brief. Capped on BOTH words and characters so a pack cannot
-        # inflate every brief it activates — and cannot evade the word cap by
-        # shipping one whitespace-free blob.
+        # value brief. CONSUMED (§ #4894) into the same S1/S2/S4 slot as the
+        # `valueGate` hints. Capped on BOTH words and characters so a pack
+        # cannot inflate every brief it activates — and cannot evade the word
+        # cap by shipping one whitespace-free blob.
         fragments = extraction.get("promptFragments")
         if fragments is not None and not isinstance(fragments, list):
             errors.append("extraction.promptFragments must be a list")

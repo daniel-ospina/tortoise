@@ -35,6 +35,8 @@ from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
     _guard_execute_command,
     _guard_numeric_params,  # #7174: the store's numeric domain, same seam
     _guard_unsupported_cypher,
+    _predicate_barrier_required,  # #7162: engine-version gate for the barrier
+    _predicate_drop_barrier,  # #7162: the predicate-drop normaliser
     _skip_cypher_quoted,  # noqa: F401  re-export: the scanner's public test surface
     _unsupported_cypher_operator,  # noqa: F401  re-export
     guarded_client,
@@ -2917,6 +2919,128 @@ def _journal_safe_params(params, cypher=None):
     return out
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# #7951 §17.1 — THE SINGLE-WRITER GUARD. Read this before adding a fold or a
+# raw cache write.
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# THE RULE (`docs/architecture/STORAGE-ARCHITECTURE.md` §17.1 — a consequence
+# of the §2.0 owner ruling of 2026-10-08: **Postgres is the system of record;
+# FalkorDB is a derived hot cache**):
+#
+#   > every write goes to the truth store first, and the cache is projected
+#   > from it.
+#
+# The reason is definitional, not stylistic:
+#
+#   > **A derived cache that is also written to directly is not derived.**
+#
+# §3 already states the protocol for the derived TABLES — *"Writes go to the
+# truth first, then project"* — and §17.1 extends it to the CACHE. `#8127`
+# built the chokepoint (`TortoiseSDK._apply_and_journal`, journal-first then
+# project) and `#8315` enumerated the doors to the fold. **This guard is step
+# three: enforce it, so a direct cache write FAILS rather than merely being
+# discouraged.**
+#
+# WHY A RUNTIME GATE AND NOT A BIGGER LIST. The failure mode is not one bad
+# writer; it is that a *new* unjournaled writer can appear silently. A
+# lexical/AST inventory cannot be sound by construction (the terminal finding
+# of `#8315`, accepted), so this enforcement is RUNTIME and FAIL-CLOSED: a
+# fold on a **journal-backed** projection is refused unless the caller has
+# declared that it is a sanctioned projection of the journal —
+#
+#   * `_live_write_scope(...)` — opened by the live doors that append FIRST and
+#     fold second (`TortoiseSDK._apply_and_journal`, `_doc_write`,
+#     `_create_entity`, `EventAPI._emit`, `ConversationMiner._emit_event`).
+#     The append is the COMMIT POINT (the ordering contract at the top of
+#     `tortoise/sdk.py`); the scope is opened immediately AFTER it, around the
+#     fold that follows — so the journal write is never inside the scope that
+#     authorizes the cache write, it strictly precedes it.
+#   * `_replay_write_scope()` — opened by the replay engines (`rebuild`,
+#     `recover_from_log`, `backup.restore`, `_cmd_reconcile`), whose records
+#     came FROM the journal and must not journal again.
+#
+# The declaration is not a bypass flag: it is a per-call `with` block (no
+# instance attribute, constructor argument or env var can set it), and the
+# gate REFUSES BY DEFAULT — so a writer that forgets to declare itself fails
+# closed, which is the direction the definitional rule requires.
+#
+# SCOPE — STATED SO IT IS NOT OVER-READ. This closes the FOLD
+# (`FalkorProjection.apply`) and the public raw-query lane
+# (`FalkorProjection.query`) for a journal-backed projection. It does NOT yet
+# refuse a mutating statement issued straight at the guarded handle
+# (`proj.g.query(...)`). That handle is *also* the live path of every SDK
+# writer — `create_point`'s `CREATE (:Point)`, `update_point`'s
+# `SET n += $props` — so a blanket refusal there would break the product's own
+# write path, not a violation of it: the SDK's live doors journal (or carry
+# the recorded apply-first exception), and there is no runtime signal at the
+# handle that separates a journaled live write from a direct one. Converting
+# that 300+-site surface is §17.1's mechanism (1), the atomic write, and it is
+# recorded as still-open on `#7951` rather than papered over here.
+#
+# ⛔ THE RESIDUAL IS THREE ESCAPES, NOT ONE — named so it is stated, not
+# discovered. A writer that wants to write this cache directly has:
+#   1. `proj.g.query("CREATE …")`     — the guarded handle itself (the SDK's
+#      own live lane, above);
+#   2. `proj.g._g.query("CREATE …")`  — one private hop past the handle into
+#      the raw `_GuardedGraph`;
+#   3. `proj.db.select_graph(<g>).query("CREATE …")` — straight at the
+#      falkordb client, naming ANY graph.
+# All three are verified ALLOWED against a journal-backed projection. (2) and
+# (3) are the same class as (1) — they bypass the same fold — and none of the
+# three is guarded in this increment. They are the surface §17.1's atomic
+# write has to close; a lexical inventory cannot, because each is one hop
+# below anything a runtime signal is placed on.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class DirectCacheWriteRefused(RuntimeError):
+    """§17.1: a write reached the derived cache without authorization.
+
+    Raised when a fold (`FalkorProjection.apply`) or a mutating statement on
+    the public raw-query lane (`FalkorProjection.query`) is issued against a
+    **journal-backed** projection outside a sanctioned scope. The projection is
+    the derived cache of a journal; a write it did not receive through its
+    journal is the second writer §17.1 forbids.
+    """
+
+
+#: The single-writer authorization for the current context. ``None`` = no
+#: sanctioned projection is in flight, so the default is REFUSAL. A ContextVar
+#: (not an instance or `threading.local` attribute) so a concurrent thread
+#: writing through the same projection sees the default and is refused rather
+#: than inheriting another thread's authorization — the same thread-isolation
+#: property the #7951 replay anchors were moved to in round 3.
+_CACHE_WRITE_AUTHORIZED: ContextVar[str | None] = ContextVar(
+    "tortoise_cache_write_authorized", default=None)
+
+
+@contextlib.contextmanager
+def _cache_write_authorized(reason: str):
+    """Declare the enclosed writes a sanctioned projection of the journal.
+
+    ``reason`` is carried for the refusal message and for a test that asserts
+    the live doors declare themselves. Entry is always paired with a ``reset``
+    in a ``finally``, so a raising fold can never leave the scope armed over
+    the caller's next write.
+    """
+    token = _CACHE_WRITE_AUTHORIZED.set(reason)
+    try:
+        yield
+    finally:
+        _CACHE_WRITE_AUTHORIZED.reset(token)
+
+
+def _live_write_scope(reason: str = "live-door"):
+    """The live doors' scope: journal appended first, then the fold."""
+    return _cache_write_authorized(reason)
+
+
+def _replay_write_scope():
+    """The replay engines' scope: the record came FROM the journal."""
+    return _cache_write_authorized("replay")
+
+
 class _GuardedGraph:
     """Wrapper around the FalkorDB Graph handle that guards bulk graph-wipe queries.
 
@@ -2971,6 +3095,7 @@ class _GuardedGraph:
         # ``cypher_guard._guard_unsupported_cypher`` — shared with the guarded
         # handles so the two paths cannot drift.
         _guard_unsupported_cypher(cypher)
+        cypher = self._bar(cypher)
         # #7951 R2-P1: observe the fold's OWN Source mint at the write
         # chokepoint. Every replay path that materialises a `:Source` writes
         # through this handle, so the anchor is derived from what was actually
@@ -3004,6 +3129,7 @@ class _GuardedGraph:
         # rather than relying on the inner handle's class.
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
+        cypher = self._bar(cypher)
         return self._g.ro_query(
             cypher, params=_journal_safe_params(params, cypher), timeout=timeout
         )
@@ -3013,6 +3139,7 @@ class _GuardedGraph:
         # reaching `_query` directly must not slip past the refusal either.
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
+        cypher = self._bar(cypher)
         return self._g._query(
             cypher, params=_journal_safe_params(params, cypher),
             timeout=timeout, read_only=read_only,
@@ -3023,11 +3150,13 @@ class _GuardedGraph:
         # `_query`, so they carry their own refusal.
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
+        cypher = self._bar(cypher)
         return self._g.profile(cypher, params=_journal_safe_params(params, cypher))
 
     def explain(self, cypher: str, params=None):
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
+        cypher = self._bar(cypher)
         return self._g.explain(cypher, params=_journal_safe_params(params, cypher))
 
     def execute_command(self, *args, **kwargs):
@@ -3035,11 +3164,25 @@ class _GuardedGraph:
         # `GRAPH.QUERY` / `GRAPH.PROFILE` / ... too, and the guarded handles
         # beneath `self._g` already intercept it — but keep the wrapper's own
         # refusal complete rather than depending on the inner handle's class.
-        _guard_execute_command(args)
+        # #7162: the returned args carry the `WITH *` barrier when the shape
+        # needs it, so they — not the original `args` — are what gets dispatched.
+        args = _guard_execute_command(args, getattr(self._g, "client", None))
         return self._g.execute_command(*args, **kwargs)
 
     def __getattr__(self, name):
         return getattr(self._g, name)
+
+    def _bar(self, cypher: str) -> str:
+        """#7162: the `WITH *` barrier, when this handle's engine needs it.
+
+        The inner handle is guarded too, so this normally runs a second (cheap,
+        idempotent) pass; it exists so the `proj.g` path stays complete even when
+        a lightweight stub is wrapped here, matching the wrapper's own
+        "refuse on its own rather than depend on the inner class" convention.
+        """
+        if _predicate_barrier_required(self._g):
+            return _predicate_drop_barrier(cypher)
+        return cypher
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS, parse_uri_userinfo  # noqa: E402, I001
 from tortoise.fork_slot import is_fork_refusal  # noqa: E402
@@ -3621,6 +3764,8 @@ from tortoise.projection.entities import (  # noqa: E402, I001
     _stated_tags,
     _store_holds_prop_value,
     _usable_instant,
+    gated_promote_payload,
+    promote_status_applies,
 )
 from tortoise.projection.edges import _EdgeHandlers  # noqa: E402
 from tortoise.projection.grounding import _GroundingMixin  # noqa: E402
@@ -6508,6 +6653,39 @@ class FalkorProjection(
     non-disposable server graph.
     """
 
+    # #7951 §17.1: whether this projection is the DERIVED CACHE OF A CONFIGURED
+    # JOURNAL, and so under the single-writer guard. A CLASS attribute (not set
+    # in ``__init__``) so the ``object.__new__`` guard stubs that skip
+    # ``__init__`` do not raise `AttributeError` — the same property the
+    # `_replay_*` ContextVar properties have.
+    #
+    # ⛔ READ THE POLARITY — the two defaults point OPPOSITE ways:
+    #   * ``_journal_backed = False`` here is the PERMISSIVE default. A
+    #     projection that never bound a journal is NOT under the guard, because
+    #     with no journal there is no truth store for its cache to be ahead of
+    #     (§17.1 has nothing to enforce). Only ``_bind_journal`` sets it
+    #     ``True``, and only a live door that OWNS a journal calls it.
+    #   * the REFUSAL lives in the authorization ContextVar
+    #     (``_CACHE_WRITE_AUTHORIZED``, default ``None`` = refusal), and it is
+    #     read ONLY on the ``_journal_backed`` branch. So the gate refuses by
+    #     default *given a journal*, which is the fail-closed direction.
+    # A stub that skips ``__init__`` therefore reads "no journal configured"
+    # and is ALLOWED to fold — it is not silently authorized against a bound
+    # journal (it cannot be: nothing turned ``True``), and no stub can flip the
+    # refusal off on a projection whose journal really was bound.
+    _journal_backed: bool = False
+
+    def _bind_journal(self, journal_path: str | None) -> None:
+        """Mark this projection as the derived cache of a journal (`#7951`).
+
+        Called by the live doors that OWN a journal (`TortoiseSDK._get_proj`
+        when an event log is configured). It does not enable a bypass — it
+        ARMS the guard: from this point a fold or a mutating raw-query on this
+        projection is refused unless the caller declares a sanctioned scope
+        (``_live_write_scope`` / ``_replay_write_scope``).
+        """
+        self._journal_backed = bool(journal_path)
+
     # #7951 round 3: the replay anchors are CONTEXT-LOCAL (ContextVar), not
     # instance attributes. `rebuild_all` runs with them armed on its own
     # thread/context; another thread writing through the same `_GuardedGraph`
@@ -7370,6 +7548,28 @@ class FalkorProjection(
               journal_object_deleted=None, journal_first_materialized=None,
               journal_seq: int | None = None,
               journal_existence=None) -> None:
+        # #7951 §17.1 — THE SINGLE-WRITER GATE (fail-closed, default REFUSAL).
+        # A fold is the cache WRITE of the record/cache split, so on a
+        # journal-backed projection it is legal only when a sanctioned scope is
+        # in flight: a live door that appended to the journal FIRST (the
+        # chokepoint), or a replay engine whose record came FROM the journal.
+        # A direct `proj.apply(ev)` with neither is the "hidden door" class the
+        # door inventory (`#8315`) names as the remaining S2 failure mode — it
+        # would put the DERIVED store ahead of the TRUTH with no repair path,
+        # and it now RAISES instead of silently folding.
+        if self._journal_backed and _CACHE_WRITE_AUTHORIZED.get() is None:
+            raise DirectCacheWriteRefused(
+                "Refusing a DIRECT fold: `FalkorProjection.apply` was called "
+                "with no sanctioned write scope in flight. This projection is "
+                "the derived cache of a journal, and §17.1 requires every "
+                "write to go to the truth store first — "
+                "docs/architecture/STORAGE-ARCHITECTURE.md §17.1: a derived "
+                "cache that is also written to directly is not derived. Live "
+                "writers must append first and fold through "
+                "`TortoiseSDK._apply_and_journal` (or `EventAPI._emit`); replay "
+                "engines must run inside `_replay_write_scope()`. event_type="
+                f"{(event or {}).get('type')!r}"
+            )
         # #3585 re-review (cycle 2, FIX A): `journal_object_surviving` is
         # ``(ids, names)`` of every Object the WHOLE journal leaves in place,
         # and `journal_object_deleted` the ids it hard-deletes. They are
@@ -7519,9 +7719,17 @@ class FalkorProjection(
             # #785: re-apply the full promoted snapshot (status live +
             # reviewed + promotedAt) — rebuild parity for reviewer-gated
             # promotions (PointRetracted-style lifecycle event).
+            # #6239: the STATUS half is gated on live's own promote
+            # precondition — a promote replayed over a status it could not
+            # have overwritten live (a supersede is status-TERMINAL) is a
+            # status no-op, or this chronological arm re-livens a Point
+            # ``rebuild_all``'s sweep leaves terminal. The rest of the
+            # snapshot still folds, exactly as that sweep's inline pass has
+            # always applied it.
             p = ev.get("point")
             if isinstance(p, dict) and _writable_id(p.get("id")):
-                self._upsert(p)
+                self._upsert(gated_promote_payload(
+                    p, self._point_status(p["id"])))
             elif isinstance(p, dict):
                 # #7369: a truthy-but-unwritable id is skipped, not MERGEd —
                 # the skip must be observable (see `_log_identity_skip`).
@@ -7957,6 +8165,28 @@ class FalkorProjection(
     @_fail_closed("rebuild(log)")
     @tolerates_altered_numbers
     def rebuild(self, log, *, confirm_destructive: bool = False) -> None:
+        """#7951 §17.1: the REPLAY entry point for one EventLog.
+
+        A thin wrapper that opens the replay scope and delegates to
+        ``_replay_log``. The replay's records CAME FROM the journal, so they
+        are authorized to be folded — and, by the ordering contract's exception
+        1, they must NOT be journaled again. Opening the scope here (rather
+        than at each `apply` call) means a fold added to any of this engine's
+        helpers is covered without a second declaration.
+
+        #7174/#5011: BOTH markers are declared on THIS public name, not on the
+        private ``_replay_log`` — ``rebuild`` is the whole-journal replay engine
+        the exemption set names (``cypher_guard.tolerates_altered_numbers``'
+        docstring and ``test_7174_param_boundary_numeric_guard``), and the guard
+        reads the MODULE-LEVEL attribute. ``functools.wraps`` on the marker
+        wrappers is the documented thing the guard inspects, so placing them on
+        the wrapper keeps the exemption on the public entry point while the
+        implementation stays extracted.
+        """
+        with _replay_write_scope():
+            self._replay_log(log, confirm_destructive=confirm_destructive)
+
+    def _replay_log(self, log, *, confirm_destructive: bool = False) -> None:
         """Wipe the graph and replay one EventLog. DESTRUCTIVE.
 
         #2944: the wipe is gated by L1 — the caller MUST pass
@@ -9446,6 +9676,15 @@ class FalkorProjection(
         # reproduced in this worktree (the name-only fold did not apply here at
         # all), so this half is reasoned, not empirically pinned, and has no test.
         _state_folds: dict = {}
+        # #6239: ``{id: [(seq, promote_payload), …]}`` for the ``PointPromoted``
+        # records of a Point (journal-append order, like ``_state_folds``). The
+        # status-only fold the post-supersede re-fold needs: a promote is a
+        # status WRITER, and the sweep that follows pass-1b folds the
+        # terminal ``superseded`` unconditionally, so a promote the journal
+        # places AFTER that supersede must be able to restore ``status='live'``
+        # when a later ``restatus`` legalized it (the live-reachable shape
+        # ``supersede → update_entity(status='draft') → promote_point``).
+        _promote_folds: dict = {}
         _supersede_seq: dict = {}
         # #3664: EntityLinked records are deferred to a trailing sweep that
         # runs after PASS 2 (see the sweep before pass 2b). The deferral is
@@ -9629,6 +9868,17 @@ class FalkorProjection(
                     if _prom_anchor is not None and seq <= _prom_anchor:
                         _prom_props = {k: v for k, v in p.items()
                                        if k not in BELIEF_PROPS}
+                    # #6239: record the promote as a status writer for the
+                    # post-supersede re-fold, and withhold its ``status`` where
+                    # live could not have written it (see
+                    # ``promote_status_applies``). The inline position still
+                    # sees the PRE-sweep graph, so the sweep can clobber a
+                    # legal promote — the re-fold restores it, in seq order
+                    # with any later ``restatus``.
+                    if isinstance(p["id"], str):
+                        _promote_folds.setdefault(p["id"], []).append((seq, p))
+                    _prom_props = gated_promote_payload(
+                        _prom_props, self._point_status(p["id"]))
                     wrote_embedding, wrote_content_hash, _prom_extras = (
                         self._upsert_point_props(_prom_props))
                     # #4305: id-wide journal-owned derived marks. #5004: the
@@ -10416,9 +10666,22 @@ class FalkorProjection(
         # gate covers every such record. Events re-fold in seq order (each
         # `_state_folds` list is append-ordered), so the LAST journaled writer
         # wins — exactly as live and `apply()` resolve it.
-        for (_ujm_label, _ujm_id), _ujm_events in _state_folds.items():
-            if _ujm_label != "Point":
-                continue
+        #
+        # #6239: a ``PointPromoted`` after the surviving supersede is a status
+        # writer TOO, and before this change the re-fold's own comment was
+        # false — the re-fold keyed only on ``_state_folds``, so a promote the
+        # journal places AFTER a later ``restatus`` was invisible and the
+        # restatus clobbered it. Merging the two families into ONE seq-ordered
+        # pass is what makes "the last journaled status writer wins" true. The
+        # promote contributes its STATUS only (the inline pass already folded
+        # its content/derived props at its chronological position, so re-folding
+        # the whole snapshot here would clobber a LATER ``PointRevised``), and
+        # the status is written only where live could have written it
+        # (``promote_status_applies``).
+        _point_refold_ids = {
+            _id for (_lbl, _id) in _state_folds if _lbl == "Point"}
+        _point_refold_ids |= set(_promote_folds)
+        for _ujm_id in _point_refold_ids:
             _psup = supersede_last.get(_ujm_id)
             if _psup is None:
                 continue
@@ -10435,12 +10698,25 @@ class FalkorProjection(
                     params={"i": _ujm_id}).result_set:
                 continue
             _psup_seq = _psup[0]
-            for _seq, _ev in _ujm_events:
-                if _seq > _psup_seq:
+            _refold_writers: list[tuple[int, str, dict]] = [
+                (s, "state", e)
+                for s, e in _state_folds.get(("Point", _ujm_id), [])]
+            _refold_writers.extend(
+                (s, "promote", e)
+                for s, e in _promote_folds.get(_ujm_id, []))
+            for _seq, _kind, _ev in sorted(_refold_writers,
+                                           key=lambda w: w[0]):
+                if _seq <= _psup_seq:
+                    continue
+                if _kind == "state":
                     self._fold_entity_mutation(
                         _ev,
                         journal_first_materialized=first_materialized,
                         journal_seq=_seq)
+                elif promote_status_applies(self._point_status(_ujm_id)):
+                    self.g.query(
+                        "MATCH (n:Point {id:$id}) SET n.status = 'live'",
+                        params={"id": _ujm_id})
 
         # fold_seq[old_id] = journal seq of the id's surviving supersede fold
         # (pass-2b re-point discriminator; bound to the supersede-kind
@@ -11225,7 +11501,9 @@ class FalkorProjection(
         # DirectEdgeRepoint descriptor replay — AFTER pass-2 rebuilt operator
         # edges from operator PointAdded snapshots whose stored
         # operator.inputs STILL NAME THE OLD point (live supersede's transfer
-        # is CREATE+DELETE graph mutation only — operator.inputs is never
+        # is MERGE+DELETE graph mutation only — idx-keyed at the typed leg,
+        # and it re-points the reverse INPUT mirror too (#6180) — so
+        # operator.inputs is never
         # updated and no operator snapshot is re-emitted), so every
         # transferred operator edge re-materialized at the OLD point (the
         # edge-topology half of the #2423 resurrection).
@@ -11305,6 +11583,11 @@ class FalkorProjection(
                 # live successor (transitive chain resolution), so folds
                 # stay order-independent (#2249).
                 repoints: list[tuple] = []  # (op_id, rel_type, idx, rid, old_id, new_id, op_label)
+                # #6180: the reverse INPUT mirrors re-point too, one row per
+                # `(old)-[:INPUT]->(op)` edge, same discriminator/carve-outs as
+                # the typed leg. Driven by the INPUT edges themselves so the
+                # replay mirrors live `supersede_point`'s 2a-INPUT loop exactly.
+                input_repoints: list[tuple] = []  # (op_id, idx, rid, old_id, new_id, op_label)
                 for _, ev in supersede_last.values():
                     oid = ev.get("id")
                     if not isinstance(oid, str):
@@ -11319,8 +11602,12 @@ class FalkorProjection(
                         params={"id": oid},
                     ).result_set
                     for row in rows:
-                        # r.idx can be null (legacy edge) — Cypher handles a
-                        # null idx in the pattern; validate ONLY the rel type.
+                        # r.idx may be null (e.g. mitigate_operator's
+                        # idx-less edges) — a null idx canNOT ride an `{idx}`
+                        # pattern (`MERGE {idx:null}` is refused, and
+                        # `MATCH {idx:null}` never matches), so the legs below
+                        # merge on the bare pattern and delete by ID.
+                        # Validate ONLY the rel type here.
                         validate_rel_type(row[1])
                         op_seq = operator_created_seq.get(row[0])
                         if op_seq is not None and fseq is not None \
@@ -11329,6 +11616,18 @@ class FalkorProjection(
                         repoints.append(
                             (row[0], row[1], row[2], row[3], oid, final_id,
                              row[4]))
+                    for row in self.g.query(
+                        "MATCH (old:Point {id:$id})-[ri:INPUT]->"
+                        "(op:Point {is_operator:true}) "
+                        "RETURN op.id, ri.idx, ID(ri), op.label",
+                        params={"id": oid},
+                    ).result_set:
+                        op_seq = operator_created_seq.get(row[0])
+                        if op_seq is not None and fseq is not None \
+                                and op_seq > fseq:
+                            continue  # operator postdates the supersede
+                        input_repoints.append(
+                            (row[0], row[1], row[2], oid, final_id, row[3]))
                 repointed_seen: set[tuple] = set()
                 for (op_id, rtype, idx, rid, oid, nid, op_label) in repoints:
                     # alreadyDecided ops keep their dedup-context edge on the
@@ -11346,16 +11645,58 @@ class FalkorProjection(
                     if key in repointed_seen:
                         continue
                     repointed_seen.add(key)
+                    # #6180: MERGE, not CREATE — mirror live's 2a exactly, so a
+                    # successor that already carries the shared edge collapses
+                    # onto it instead of doubling (idx rides the pattern, so
+                    # parallel same-type legs at different idx stay distinct).
+                    # #6180 null-idx leg: an idx-less edge (mitigate_operator)
+                    # cannot ride an `{idx:null}` pattern — MERGE refuses a null
+                    # property and MATCH never matches it — so merge on the
+                    # bare pattern, exactly as live's 2a does.
+                    if idx is None:
+                        self.g.query(
+                            f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$nid}}) "
+                            f"MERGE (op)-[:{rtype}]->(new)",
+                            params={"op_id": op_id, "nid": nid},
+                        )
+                    else:
+                        self.g.query(
+                            f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$nid}}) "
+                            f"MERGE (op)-[:{rtype} {{idx:$idx}}]->(new)",
+                            params={"op_id": op_id, "nid": nid, "idx": idx},
+                        )
                     self.g.query(
-                        f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$nid}}) "
-                        f"CREATE (op)-[:{rtype} {{idx:$idx}}]->(new)",
-                        params={"op_id": op_id, "nid": nid, "idx": idx},
-                    )
-                    self.g.query(
-                        f"MATCH (op:Point {{id:$op_id}})-[r:{rtype} {{idx:$idx}}]->"
+                        f"MATCH (op:Point {{id:$op_id}})-[r:{rtype}]->"
                         f"(old:Point {{id:$oid}}) WHERE ID(r)=$rid DELETE r",
-                        params={"op_id": op_id, "oid": oid, "idx": idx,
-                                "rid": rid},
+                        params={"op_id": op_id, "oid": oid, "rid": rid},
+                    )
+                input_seen: set[tuple] = set()
+                for (op_id, idx, rid, oid, nid, op_label) in input_repoints:
+                    if op_label == "alreadyDecided":
+                        continue
+                    key = (op_id, idx, nid)
+                    if key in input_seen:
+                        continue
+                    input_seen.add(key)
+                    # #6180 null-idx leg (mirror live's 2a-INPUT): merge on the
+                    # bare pattern when the mirror carries no idx.
+                    if idx is None:
+                        self.g.query(
+                            "MATCH (new:Point {id:$nid}), (op:Point {id:$op_id}) "
+                            "MERGE (new)-[:INPUT]->(op)",
+                            params={"nid": nid, "op_id": op_id},
+                        )
+                    else:
+                        self.g.query(
+                            "MATCH (new:Point {id:$nid}), (op:Point {id:$op_id}) "
+                            "MERGE (new)-[:INPUT {idx:$idx}]->(op)",
+                            params={"nid": nid, "op_id": op_id, "idx": idx},
+                        )
+                    self.g.query(
+                        "MATCH (old:Point {id:$oid})-[ri:INPUT]->"
+                        "(op:Point {id:$op_id}) "
+                        "WHERE ID(ri) = $rid DELETE ri",
+                        params={"oid": oid, "op_id": op_id, "rid": rid},
                     )
 
             if direct_repoint_events:
@@ -12038,6 +12379,26 @@ class FalkorProjection(
         }
 
     def query(self, cypher: str, **params):
+        # #7951 §17.1 — the public raw-query lane is closed for a
+        # journal-backed projection. This is the door the SDK does NOT use
+        # (`proj.g.query` is the SDK's write lane); it is the raw lane a caller
+        # reaches for when it wants to write the cache without the projection,
+        # and a mutating statement here is exactly the second writer §17.1
+        # forbids. Reads pass unchanged; the classifier is the same
+        # conservative `_statement_writes` the parameter gate uses, so an
+        # unreadable statement fails CLOSED.
+        if self._journal_backed and _CACHE_WRITE_AUTHORIZED.get() is None \
+                and _statement_writes(cypher):
+            raise DirectCacheWriteRefused(
+                "Refusing a mutating statement on the raw-query lane: "
+                "`FalkorProjection.query` bypasses the projection and this "
+                "projection is the derived cache of a journal "
+                "(docs/architecture/STORAGE-ARCHITECTURE.md §17.1). Write "
+                "through the journal instead (`TortoiseSDK._apply_and_journal` "
+                "or the SDK's public write API); replay engines run inside "
+                "`_replay_write_scope()`. statement="
+                + " ".join((cypher or "").split())[:160]
+            )
         # L2 guard (#99): refuse bulk graph-wipe on non-test graphs. There is
         # NO bypass attribute (#2944 removed `_skip_guard`): this path is
         # unconditional, exactly like _GuardedGraph.query. The authorized
@@ -12871,7 +13232,35 @@ class FalkorProjection(
         )
 
     def _ensure_indexes(self) -> None:
-        """Create indexes on frequently-filtered Point properties.
+        """Create this store's indexes, and resolve its vector-index handle.
+
+        ⛔ The historical opening line — *"Create indexes on frequently-filtered
+        Point properties"* — under-described the function badly enough that its
+        vector half had to be re-derived BY HAND from `CALL db.indexes()` plus
+        two functions (#4997), and lane L2 (#5094) cites the line as its
+        evidence that the gap read as intended rather than as drift. What this
+        function actually issues, in full:
+
+          * RANGE indexes on canonical entity keys — ``Point``
+            (``_POINT_RANGE_INDEX_PROPS``, plus the plain ``Point.lastDreamedAt``
+            staleness index, epic 903-C2, #1240); the four entity labels
+            ``_RANGE_INDEX_LABEL_PROPS`` names — ``Subject``, ``Object``,
+            ``Event``, ``Source`` (#327); and two ``Session`` keys
+            (``actor_user_id``, #2600; ``id``, #3947);
+          * FULL-TEXT indexes on the FIVE labels ``_FULLTEXT_INDEX_LABEL_FIELDS``
+            names — ``Point``, ``Event``, ``Subject``, ``Object``, ``Source``;
+          * the VECTOR index on ``Point.embedding`` ONLY, resolved or created by
+            ``_ensure_vector_index_api``, which then MEASURES the engine's
+            vector-index inventory against the labels the vector leg SERVES
+            (``ENTITY_TYPE_LABELS.values()``) and reports the gap (#4997).
+
+        ⛔ The vector index stays ``Point``-only ON PURPOSE. Whether the other
+        served labels (``Object`` / ``Event`` / ``Subject`` / ``Source``) should
+        carry one is the owner's OPEN decision V1
+        (``docs/architecture/STORAGE-ARCHITECTURE.md`` §12.1c / §14.3, raised
+        2026-09-24) — this store MAKES THE GAP A FACT (``_vector_indexed_labels``;
+        every served label absent from that set full-scans) and never spends that
+        decision. See ``_record_vector_index_inventory``.
 
         Wraps CREATE INDEX in try/except because FalkorDB raises
         "Attribute 'X' is already indexed" rather than silently no-opping.
@@ -13674,13 +14063,14 @@ class FalkorProjection(
                     params["embedding"] = emb  # None = wipe stale embedding for empty content
                 except Exception:
                     params["embedding"] = None  # wipe stale embedding on failure (#19)
-                # #4521: cast with `vecf32()` like every other Point embedding
-                # writer. Without it the recomputed vector landed as a plain
-                # Cypher `List`, and `vec.euclideanDistance` — search_engine's
-                # per-row dense leg — raises "Type mismatch: expected Null or
-                # Vectorf32 but was List", aborting the WHOLE query. So ONE
-                # revised node degraded the entire Point dense leg to FTS-only
-                # recall for that graph, not just its own row. The `CASE` keeps
+                # #4521: cast with `vecf32()` like every other server-owned Point
+                # embedding writer, so a server-owned vector is always the typed shape —
+                # a bare `List` node is absent from the Point HNSW index at all
+                # (#8429). Before #8316 the flip to `List` also aborted the
+                # whole dense READ (`Type mismatch: expected Null or Vectorf32
+                # but was List`); the read boundary now normalises a right-width
+                # `List`, so only a wrong width or a non-numeric value still
+                # aborts the MATCH (#8430). The `CASE` keeps
                 # this clause's existing wipe-on-None semantics (`$embedding` is
                 # None for empty content and on encoder failure) while casting
                 # every real vector — `vecf32(NULL)` is not relied upon.
@@ -13895,7 +14285,7 @@ class FalkorProjection(
             # The clause is the SAME `SET n += $s` the live write ran, on the
             # SAME map — so live and replay cannot disagree on removals or on
             # value typing (a `properties(n)` snapshot would: a removed key is
-            # absent from it, and a VectorF32 comes back as a plain list).
+            # absent from it, and a Vectorf32 comes back as a plain list).
             if not isinstance(rid, str):
                 return 0                                   # #331 parity
             if not (isinstance(label, str) and label in _CANONICAL_ENTITY_LABELS):

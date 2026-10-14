@@ -210,7 +210,8 @@ _DOC_ID_MAX = 255
 
 
 def validate_document_id(doc_id: str) -> str:
-    """Validate a Document node id minted from tenant/event input.
+    """Validate a document id minted from tenant/event input (D10: the id is the
+    ``url`` of a document ``:Source``; there is no ``:Document`` node).
 
     Accepts ULIDs and operator file basenames (leading ``._-``, non-ASCII).
     Rejects anything that could resolve to a host path (``/``, ``\\``, ``..``,

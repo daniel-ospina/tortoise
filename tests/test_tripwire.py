@@ -45,6 +45,10 @@ _CHILD_LANE_VARS = (
     "TORTOISE_DB_URI",
     "TORTOISE_TEST_EXPECT_URI",
     "TORTOISE_TEST_ALLOW_REMOTE",
+    # #7357: a parent shell's opt-in must never disarm the child's
+    # canonical-store guard — the child's verdict is about the URI it was
+    # handed, nothing else.
+    "TORTOISE_TEST_ALLOW_CANONICAL",
     "TORTOISE_TEST_NO_REDIRECT",
     "TORTOISE_TEST_JOURNAL_FILE",
     "TORTOISE_DB_PATH",

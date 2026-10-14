@@ -17,8 +17,8 @@ marker the writer does not honour.
      for the index-completeness gate.
   3. **The document `:Source` scoping was unrecorded.** §4.6 marked
      `sourceKind`/`contentHash`/`version` REQUIRED ✅, while the document write
-     path supplies a different set — two written (`contentHash`/`version`,
-     PR #5592), one not (`sourceKind`, #5082).
+     path supplied a different set — `contentHash`/`version` (PR #5592) and
+     `sourceKind` (#5082, closed on the CREATE-only write).
 
 This module is the **anti-drift falsifier** for all three. It asserts the doc
 and the code together, so neither half can move alone:
@@ -29,10 +29,17 @@ and the code together, so neither half can move alone:
     record (so a re-attribution has to carry a changelog line);
   * §4.4 carries the deferral statement **and** its `OVERRIDES:` line naming
     the departed default;
-  * §4.6 carries the document-`:Source` scoping note naming `sourceKind` as
-    unwritten (#5082) and `contentHash`/`version` as written (#5422);
-  * `_upsert_document` writes `contentHash` **and** `version`, and writes **no**
-    `sourceKind` — so both halves of that note stay true in both directions.
+  * §4.6 carries the document-`:Source` scoping note recording `sourceKind`
+    as written since #5082 (CREATE-only) and `contentHash`/`version` as
+    written since #5422;
+  * `_upsert_document` writes `contentHash` **and** `version` **and**
+    `sourceKind='document'` (CREATE-only) — so the note stays true in both
+    directions;
+  * **every** writer that can create a document `:Source`
+    (`_upsert_document`, `_event_plain_merge`'s `objectType='Document'` branch,
+    and `hosted_api._execute_commit_writes`' `/v1/sessions` transcript MERGE)
+    stamps the same CREATE-only `sourceKind='document'` — the note's claim is
+    universal, so one writer dropping it must not pass silently (#8525).
 
 Hermetic: a file read plus one import of the handler class. No DB, no network,
 no browser.
@@ -180,35 +187,56 @@ def test_section_4_4_carries_the_overrides_line() -> None:
 
 def test_section_4_6_records_the_document_scoping() -> None:
     section = _section(_doc(), "### §4.6 Source")
-    # `sourceKind` is unwritten on a document :Source — the open work item.
     assert "Document `:Source` scoping" in section, (
-        "§4.6 marks REQUIRED fields that a document `:Source` does not supply; "
+        "§4.6 marks REQUIRED fields a document `:Source` supplies conditionally; "
         "the scoping note must state that at the row a reader trusts, instead of "
         "leaving it to the global 'code may lag' caveat (#5142)"
     )
     assert KIND_ISSUE in section, (
-        f"the scoping note must name the open issue for the missing "
-        f"`sourceKind` ({KIND_ISSUE}) — #5142"
+        f"the scoping note must name the issue that closed the missing "
+        f"`sourceKind` write ({KIND_ISSUE}) — #5142/#5082"
     )
-    assert "not written" in section, (
-        "the scoping note must say which of the three REQUIRED fields the "
-        "document path does NOT write — that is the one that is a work item "
-        "(#5142)"
+    assert "written since #5082" in section, (
+        "the scoping note must now record that `sourceKind` IS written on the "
+        "document path (#5082) — otherwise it overstates a closed gap the way "
+        "the pre-#5142 rows understated a landed one"
+    )
+    assert "CREATE ONLY" in section or "create-only" in section.lower(), (
+        "the note must record the `coalesce` create-only semantics — #398's "
+        "never-overwrite contract is what makes the write safe on a node an "
+        "authoritative writer already stamped (#5082)"
     )
     assert ANCHOR_PR in section or "#5422" in section, (
         f"the scoping note must record that `contentHash`/`version` ARE written "
         f"on the document path ({ANCHOR_PR} / #5422) — otherwise the note "
         f"overstates the gap the way the markers overstated the code (#5142)"
     )
+    # #8525 review (P1/P2): state the downstream consequences of the write, not
+    # just the field. A future lane that deletes either paragraph must fail here.
+    assert "word-point un-freeze requires a" in section, (
+        "the note must record the belief-path guard that keeps 'no credibility "
+        "inheritance moves' TRUE: a document source resolves no tier, so the "
+        "#398 word-point un-freeze requires a resolved evidence body — without "
+        "it a word Point over a neutral document is re-labelled "
+        "`set-by-author` -> `inherited-from-source` with nothing inherited "
+        "(#8525 review P1)"
+    )
+    assert "cross-lens" in section, (
+        "the note must name the intended D3 consequence of the write: a "
+        "document `:Source` is a REGISTERED kind, so `_cross_lens_pool` now "
+        "admits Points extracted from documents (the #8525 review's P2 — an "
+        "otherwise unstated output change)"
+    )
 
 
-def test_upsert_document_writes_the_anchor_pair_and_no_source_kind() -> None:
+def test_upsert_document_writes_the_source_kind_and_the_anchor_pair() -> None:
     """Both halves of the §4.6 note, true in both directions.
 
-    `contentHash`/`version` are written (the note's ✅ half); `sourceKind` is
-    not (the note's ❌ half, #5082). A change that adds the `sourceKind` write
-    must update the note and this test together — the note must never be
-    silently right or silently wrong.
+    `sourceKind='document'` IS written on CREATE only (#5082, implementing §4.6's
+    REQUIRED marking and #5013 Q2's *"a source is `sourceKind: document` and
+    carries a genre"*), and so are `contentHash`/`version` (#5422). A change
+    that removes either write must update the note and this test together — the
+    note must never be silently right or silently wrong.
     """
     import inspect
 
@@ -217,9 +245,188 @@ def test_upsert_document_writes_the_anchor_pair_and_no_source_kind() -> None:
     src = inspect.getsource(_EntityHandlers._upsert_document)
     assert "s.contentHash" in src, "the document path must write the version anchor (#5422)"
     assert "s.version" in src, "the anchor pair is never half-written (#5422)"
-    assert "s.sourceKind" not in src and "sourceKind=" not in src, (
-        "`_upsert_document` writes no `sourceKind` (that is the #5082 gap the "
-        "§4.6 scoping note records). If this write is added, #5082 is closed and "
-        "the §4.6 note — plus this test — must be updated in the same change "
-        "(#5142)"
+    assert "s.sourceKind" in src, (
+        "`_upsert_document` must write `sourceKind='document'` — §4.6 marks it "
+        "REQUIRED on every :Source and #5013 Q2 keeps the two axes (#5082)"
+    )
+    assert "coalesce(s.sourceKind, 'document')" in src, (
+        "the `sourceKind` write must be CREATE-ONLY (`coalesce`) — #398's "
+        "never-overwrite contract; a plain SET would clobber an authoritative "
+        "kind on a node the document fold merely MERGEs onto (#5082)"
+    )
+
+
+def _string_expression(node, module_consts: dict[str, str]) -> str | None:
+    """Best-effort static evaluation of a string expression.
+
+    Recovers a plain string, an f-string's literal parts, a `+`-concatenation of
+    strings (including a bare name bound to a module-level string constant), and
+    a bare module-level constant name. Returns `None` when the node is not
+    statically a string we can recover — a clause assembled at runtime is the
+    documented coverage ceiling.
+    """
+    import ast
+
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            part.value if isinstance(part, ast.Constant) and isinstance(part.value, str) else " "
+            for part in node.values
+        )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _string_expression(node.left, module_consts)
+        right = _string_expression(node.right, module_consts)
+        if left is not None or right is not None:
+            return (left or "") + (right or "")
+        return None
+    if isinstance(node, ast.Name):
+        return module_consts.get(node.id)
+    return None
+
+
+def _module_string_consts(tree) -> dict[str, str]:
+    """Every module-level `NAME = <string expression>` value, resolvable."""
+    import ast
+
+    consts: dict[str, str] = {}
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Assign):
+            value = _string_expression(stmt.value, consts)
+            if value is not None:
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name):
+                        consts[target.id] = value
+        elif (
+            isinstance(stmt, ast.AnnAssign)
+            and isinstance(stmt.target, ast.Name)
+            and stmt.value is not None
+        ):
+            value = _string_expression(stmt.value, consts)
+            if value is not None:
+                consts[stmt.target.id] = value
+    return consts
+
+
+def _document_writers_in_source(text: str, filename: str) -> dict[str, str]:
+    """The document-`:Source` writers in one module's source.
+
+    A writer is a function whose recovered Cypher mentions both a
+    `MERGE (s:Source` and the `documentKind` key. Recovery deliberately spans
+    more than the function's own string literals: bare references to
+    module-level string constants are followed too, so a writer that composes
+    its MERGE clause from a shared constant (`"MERGE (s:Source ..." + DOC_SET`)
+    is still found — the #8525 review's P2 showed a function-locals-only scan
+    missed exactly that shape.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:  # pragma: no cover — a syntax error fails elsewhere
+        return {}
+    module_consts = _module_string_consts(tree)
+    writers: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        parts: list[str] = [
+            child.value
+            for child in ast.walk(node)
+            if isinstance(child, ast.Constant) and isinstance(child.value, str)
+        ]
+        parts += [
+            module_consts[child.id]
+            for child in ast.walk(node)
+            if isinstance(child, ast.Name)
+            and isinstance(child.ctx, ast.Load)
+            and child.id in module_consts
+        ]
+        src = " ".join(parts)
+        if "MERGE (s:Source" in src and "documentKind" in src:
+            writers[f"{filename}::{node.name}"] = src
+    return writers
+
+
+def _document_source_writers() -> dict[str, str]:
+    """Every function in `tortoise/` whose recovered strings build a `:Source`
+    MERGE that sets `documentKind` — i.e. every writer that can create a
+    document `:Source`. Derived MECHANICALLY: a hand-picked list is exactly how
+    the two writers #8525's review found (and the doc named none of them) went
+    unnamed.
+    """
+    writers: dict[str, str] = {}
+    for path in sorted((REPO / "tortoise").rglob("*.py")):
+        writers.update(
+            _document_writers_in_source(path.read_text(encoding="utf-8"), path.name)
+        )
+    return writers
+
+
+#: The writers `_document_source_writers()` must find — #4.6's claim is
+#: UNIVERSAL, so a NEW writer (or a removed one) is a doc/claim change, not a
+#: silent addition.
+PINNED_DOCUMENT_SOURCE_WRITERS = frozenset({
+    "entities.py::_upsert_document",
+    "entities.py::_event_plain_merge",
+    "hosted_api.py::_execute_commit_writes",
+})
+
+
+def test_every_document_source_writer_stamps_source_kind() -> None:
+    """The §4.6 note and the four `_required_sweep` harnesses now assert
+    `sourceKind` on **every** `:Source` — a universal. Every path that can create
+    a document `:Source` must stamp it; the PR #8525 review found two of them
+    still writing `sourceKind = NULL` while the doc and the sweeps claimed
+    otherwise.
+
+    The writer set is DERIVED, not hardcoded: a new document writer changes the
+    derived set and fails the pin, so it cannot leave the doc's "every writer"
+    claim false and the four sweeps a false green the way #8525's two unnamed
+    writers did.
+    """
+    writers = _document_source_writers()
+    assert set(writers) == set(PINNED_DOCUMENT_SOURCE_WRITERS), (
+        "the set of document-`:Source` writers changed — stamp "
+        "`coalesce(s.sourceKind, 'document')` on any new writer, update the "
+        "§4.6 note, and re-pin here in the same change (#5082/#8525). "
+        f"derived={sorted(writers)}"
+    )
+    for name, src in writers.items():
+        assert "coalesce(s.sourceKind, 'document')" in src, (
+            f"{name} must stamp `sourceKind='document'` on the document :Source "
+            f"— §4.6 marks it REQUIRED on every :Source, the four "
+            f"_required_sweep harnesses assert it on every :Source, and #5082 "
+            f"is only closed if every writer agrees (#8525 review)"
+        )
+
+
+def test_writer_scanner_follows_module_level_constants() -> None:
+    """The derivation must not miss a writer that composes its MERGE clause from
+    a module-level constant (the #8525 review's P2).
+
+    The pre-review scanner only gathered string literals *inside* the function,
+    so `"MERGE (s:Source ..." + DOC_SET` was invisible — a future writer could
+    leave the doc's universal claim false and still pass. The scanner now
+    follows bare module-level string constants; this synthetic writer is
+    detected, and the assertion fails if that resolution is removed.
+    """
+    text = '''\
+DOC_SET = (
+    "s.documentKind='note', "
+    "s.sourceKind=coalesce(s.sourceKind, 'document')"
+)
+
+
+def _synthetic_writer():
+    return "MERGE (s:Source {url:$id}) SET " + DOC_SET
+'''
+    writers = _document_writers_in_source(text, "synthetic.py")
+    assert "synthetic.py::_synthetic_writer" in writers, (
+        "a writer composing its MERGE clause from a module-level constant must "
+        "still be derived — the pre-#8525-review function-locals-only scan "
+        "missed exactly this shape"
+    )
+    assert "coalesce(s.sourceKind, 'document')" in writers["synthetic.py::_synthetic_writer"], (
+        "the resolved module-level clause must be visible to the stamp check"
     )

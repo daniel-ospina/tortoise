@@ -1,10 +1,17 @@
-# Tortoise Self-Host — durable reference topology (#338 D2/T4.3)
+# Tortoise Self-Host — reference topology (#338 D2/T4.3)
 #
 # daemon + falkordb sidecar (AOF on, named volume, healthcheck). This is the
-# RECOMMENDED durable path — the embedded-FalkorDBLite path (see
-# docs/quickstart-selfhosted.md Option C) is single-writer eval only: durable
-# for ONE process since #915, but concurrent writers LOSE data (2026-08-05
-# incident #101 is the historical context: AOF-off + no backups).
+# RECOMMENDED multi-writer path. Its durability is the sidecar's own
+# persistence — AOF `everysec` survives a process/container crash (≤1s), and
+# does NOT survive losing the named volume or the host. The off-box copy is a
+# STEP OF THIS SETUP (see the `tortoise` service env and
+# docs/durability-posture.md): declare an R2_* target, or decline one with
+# TORTOISE_OFFBOX_BACKUP_DECLINED=1. Leaving both unset boots and serves, but
+# the daemon reports the single local copy LOUDLY at startup (#8543) — never
+# silently. The embedded-FalkorDBLite path (docs/quickstart-selfhosted.md
+# Option C) is single-writer eval only: durable for ONE process since #915, but
+# concurrent writers LOSE data (2026-08-05 incident #101 is the historical
+# context: AOF-off + no backups).
 #
 # FalkorDB is intentionally NOT bundled inside the Tortoise image — its
 # official image is SSPLv1 (license interaction) and the sidecar lets AOF +
@@ -34,6 +41,37 @@ services:
       # ⚠️ Set a strong key before exposing beyond localhost (auth_mode=static);
       # unset + loopback bind → auth_mode=none (eval only).
       TORTOISE_API_KEY: ""
+      # ── #8543: the off-box backup target — DECLARE or DECLINE, never silent ──
+      # Durability = the store's persistence PLUS an off-box copy. AOF on the
+      # sidecar covers a crash; it does NOT cover a lost volume or host. Pick
+      # exactly ONE of the two blocks below:
+      #
+      # (a) DECLARE an off-box target (the repo's backup env contract —
+      #     tortoise/backup_config.py). Fill all four in:
+      R2_ACCOUNT_ID: ""
+      R2_ACCESS_KEY_ID: ""
+      R2_SECRET_ACCESS_KEY: ""
+      R2_BUCKET: ""
+      # (b) ...or DECLINE explicitly, accepting AOF-only durability (`1`):
+      TORTOISE_OFFBOX_BACKUP_DECLINED: ""
+      # Both unset = UNDECIDED: the daemon boots and serves, and says so at
+      # startup. NOTE (#8544): a DECLARED target is a declared intent, not a
+      # demonstrated copy — this lane has no archive driver yet, so no off-box
+      # copy is produced either way. See docs/durability-posture.md.
+      # #8497: the per-graph JSONL REBUILD journal. Without it the self-hosted
+      # deployment was journal-less by construction: the derived graph was the
+      # ONLY copy, `rebuild` had nothing to replay, and §17.1's single-writer
+      # guard was inert (`config.ensure_selfhost_event_log` also defaults this
+      # when /data is a mount; stating it here makes the deployment's config
+      # inspectable). The journal is the REBUILD source — NOT the durability
+      # mechanism: durability is the sidecar's AOF + volume
+      # (docs/durability-posture.md).
+      TORTOISE_EVENT_LOG_BASE_DIR: "/data/events"
+    volumes:
+      # #8497: the journal (and the embedded-eval DB, when that path is used)
+      # must outlive the container — /data is the persistent root the journal
+      # default is gated on.
+      - tortoise-data:/data
     depends_on:
       falkordb:
         condition: service_healthy
@@ -92,3 +130,4 @@ services:
 
 volumes:
   falkordb-data:
+  tortoise-data:

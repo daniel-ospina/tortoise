@@ -42,7 +42,13 @@ EXPOSE 8000
 # TORTOISE_DB_PATH (via config.resolve_db_path) — make /data exist and point
 # the default there so the documented `docker run` eval path works and
 # /health/ready matches the engine's real DB.
-RUN mkdir -p /data
+#
+# #8497: /data is also the self-host journal's root. The dir is created here (a
+# `docker run` without a mount has it on the ephemeral layer, so
+# `ensure_selfhost_event_log` will NOT arm a journal there — it gates on /data
+# being a real MOUNT); `docker-compose.yml` mounts the named volume and sets
+# TORTOISE_EVENT_LOG_BASE_DIR explicitly.
+RUN mkdir -p /data/events
 ENV TORTOISE_DB_PATH=/data/tortoise.db
 
 CMD ["uvicorn", "tortoise.selfhost:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "5"]

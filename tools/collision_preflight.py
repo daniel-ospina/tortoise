@@ -61,8 +61,28 @@ Design contract
    ``(?<![0-9])N(?![0-9])`` means ``3061`` never matches ``30610`` — so the
    tool cannot manufacture a collision out of an unrelated number.
 
-Surfaces (6 rows, ALL hit-capable)
+5. THE LANDED QUESTION IS ANSWERED AUTHORITATIVELY, AND IT IS NOT A SAMPLE
+   (#8560). This gate answers TWO questions, not one: "who is on #N?" (the
+   surfaces below) and "is #N already DONE?". The second is not derivable from
+   the first, and the tool used to have no answer for it: a CLOSED issue was
+   printed as `closed issues are warn-only, not a hit`, and the only terminal-PR
+   surface was a bounded ADVISORY sample — so an issue whose fix had already
+   merged could read CLEAN. That happened twice in one session (#7174, whose
+   merged PR #7403 fell outside the 100-PR sample, and #5035) and each time a
+   lane was dispatched to re-implement shipped code. The landed answer is
+   therefore its OWN surface, BLOCKING (an unqueryable one is INCOMPLETE, never
+   CLEAN), fed by two targeted sources: the issue's own state (a CLOSED issue is
+   decisive) and a PAGINATED timeline query that reaches a merged PR older than
+   any sample could — a merged PR whose TITLE names this issue. It exits 4
+   (LANDED), a NEW code: every existing consumer stops on ANY non-zero exit, and
+   a caller that reads the code alone can still tell a landing from a collision
+   or an unqueryable surface.
+
+Surfaces (7 rows, ALL hit-capable)
 ----------------------------------------------------------------------------
+  issue landed              issue state (gh issue view) +  (CLOSED issue;
+  · AUTHORITATIVE ·         gh api --paginate --slurp        merged PR naming
+                            /issues/N/timeline               this issue)
   open PRs                  gh pr list --state open   (title / headRef;
                                                          body closing
                                                          reference;
@@ -77,9 +97,11 @@ Surfaces (6 rows, ALL hit-capable)
   local worktrees           git worktree list --porcelain   (UNTRUNCATED)
   issue assignee/comments   gh issue view N (assignee + claim comments)
 
-The removed 7th row was `issue keywords`. It was deleted with the lexical arm
-(#3504): a row that can only report a guess does not become honest by being
-listed.
+The `issue keywords` row was removed with the lexical arm (#3504): a row that
+can only report a guess does not become honest by being listed. The seventh row
+today is a DIFFERENT one — `issue landed` (#8560), which answers a question the
+tool never had an authoritative source for — so do not read "7 rows" as the
+deleted keyword row returning.
 
 NOT PRESENT: a fleet-session surface. #1233 asked for one wired to
 `map-sessions.py`, and it was built and measured for this change — then left
@@ -268,6 +290,15 @@ Exit codes
                         is the open-PR refusal" MISROUTES this one. Remedy: pass
                         `--repo owner/name`.
     3  usage / internal error
+    4  LANDED       the issue's own state is CLOSED (worded from its closure
+                    reason), or a MERGED PR the paginated timeline ties to
+                    this issue names it — a TERMINAL fact, so this is NOT free
+                    work (do NOT dispatch). A landed issue is never reachable
+                    as CLEAN, and this code takes precedence over 1 and 2 (a
+                    terminal signal is decisive). It is DISTINCT from 1 because
+                    the remedy differs — verify and close the issue, not
+                    coordinate with a lane — and from 2 because there is
+                    nothing to re-run.
 
 Env seams (tests point these at stubs; production defaults are the real tools)
     COLLISION_PREFLIGHT_GH                gh binary        (default: gh)
@@ -337,6 +368,15 @@ EXIT_CLEAN = 0
 EXIT_COLLISION = 1
 EXIT_INCOMPLETE = 2
 EXIT_USAGE = 3
+# #8560: the terminal answer to "is #N already landed?". It is a REFUSAL and
+# MUST NOT be CLEAN; distinct from EXIT_COLLISION because the remedy differs
+# (verify/close, not coordinate) and distinct from EXIT_INCOMPLETE because
+# nothing needs re-running. Adding a code is fail-safe for a consumer that reads
+# the EXIT CODE (any non-zero stops it); the one in-repo consumer that parses the
+# VERDICT TEXT instead — operations/orchestrator-harness/refresh-candidates.sh —
+# gets an explicit LANDED arm in this same change, so the new verdict is not
+# silently defeated there (it used to fall through to "no verdict").
+EXIT_LANDED = 4
 
 DEFAULT_TIMEOUT = 60.0
 # PR caps are completeness bounds, not sampling windows: OPEN PRs are fetched
@@ -404,6 +444,10 @@ SURFACE_LOCAL_BRANCHES = "local branches"
 SURFACE_REMOTE_BRANCHES = "remote branches"
 SURFACE_WORKTREES = "local worktrees"
 SURFACE_ISSUE = "issue assignee/comments"
+# #8560: the AUTHORITATIVE terminal answer. Its hits decide EXIT_LANDED, never
+# EXIT_COLLISION — the surface is separated out in `format_report` — and it is
+# BLOCKING, so a failure to read it is INCOMPLETE rather than a silent CLEAN.
+SURFACE_LANDED = "issue landed"
 
 # The complete, ordered surface list. `_assert_all_surfaces` proves the run
 # evaluated every row — a partial run is an internal error (exit 3), never a
@@ -413,9 +457,12 @@ SURFACE_ISSUE = "issue assignee/comments"
 # derived vocabulary and its BLIND/INCOMPLETE annotation. With the lexical arm
 # deleted the row had nothing left to report — nothing ever added a hit to it;
 # it existed only to describe a dimension that no longer matches anything — so
-# it is gone rather than kept as a decorative CLEAN line. Surface counts in the
-# verdict read 6/6 accordingly.
+# it is gone rather than kept as a decorative CLEAN line. Surface counts read
+# 6/6 after that deletion. `issue landed` (#8560) is a DIFFERENT seventh row: it
+# is not the deleted keyword row returning, it answers a question the tool never
+# had an authoritative source for. Counts read 7/7.
 ALL_SURFACES = (
+    SURFACE_LANDED,
     SURFACE_OPEN_PRS,
     SURFACE_CLOSED_PRS,
     SURFACE_LOCAL_BRANCHES,
@@ -605,6 +652,17 @@ class Hit:
     ref: str
     detail: str
     strength: str  # "strong" (issue number / closing reference) | "weak"
+    # What KIND of terminal fact produced a `issue landed` hit (#8560 review).
+    # Only the landed surface sets this; every other surface leaves the
+    # default. `format_report` and `who_is_on.py` word their answers from it, so
+    # a `CLOSED` issue parked as NOT_PLANNED is never described as "already
+    # shipped" — the refusal direction is identical (do NOT dispatch), but the
+    # terminal fact is not a merge.
+    #   "shipped"      — the work landed (a merged PR names this issue)
+    #   "completed"    — the issue was closed as COMPLETED
+    #   "not-planned"  — closed as NOT_PLANNED (declined/superseded)
+    #   "closed"       — closed, reason unavailable/unrecognised
+    kind: str = "collision"
 
 
 def _is_default_branch(name: str, defaults: set[str]) -> bool:
@@ -843,8 +901,9 @@ class Surface:
     # they simply cannot block a dispatch and cannot force INCOMPLETE (#5251).
     authority: str = AUTHORITY_BLOCKING
 
-    def add(self, ref: str, detail: str, strength: str) -> None:
-        self.hits.append(Hit(self.name, ref, detail, strength))
+    def add(self, ref: str, detail: str, strength: str,
+            kind: str = "collision") -> None:
+        self.hits.append(Hit(self.name, ref, detail, strength, kind))
         self.status = STATUS_HIT
 
     def incomplete(self, note: str) -> None:
@@ -4188,9 +4247,303 @@ def scan_issue_surface(
         )
     if not surface.hits:
         state = issue_data.get("state")
-        if state and state.upper() != "OPEN":
-            note = f"issue state={_sanitize(state)} (closed issues are warn-only, not a hit)"
+        # De-sequenced, like the `issue landed` row: a state carrying an escape
+        # sequence must not make THIS row assert a terminal reading about the
+        # same value the landed row — which this note points to — measured as
+        # OPEN (#8560 review).
+        state_norm = (
+            _strip_control_sequences(state).strip().upper()
+            if isinstance(state, str) else ""
+        )
+        if state_norm and state_norm != "OPEN":
+            # #8560: the terminal FACT itself is now carried by the `issue
+            # landed` surface, which decides EXIT_LANDED. This note remains only
+            # as a visibility aid on the assignee/comment row; it must not say
+            # the closed state is decision-free, because it no longer is.
+            note = (
+                f"issue state={_sanitize(state)} (the terminal answer for this "
+                "state is carried by the `issue landed` surface)"
+            )
             surface.note = (surface.note + "; " + note) if surface.note else note
+
+
+# ── the LANDED answer (#8560) ─────────────────────────────────────────────
+# The gate answered only "who is on #N?", never "is #N already done?" — so an
+# issue whose fix had ALREADY MERGED could read CLEAN and a lane was dispatched
+# to re-implement shipped code (#7174: merged PR #7403 sat outside the bounded
+# ADVISORY closed-PR sample; #5035). This section is the authoritative answer.
+#
+# ⛔ IT IS NOT A SECOND BOUNDED SAMPLE. The closed-PR surface's bounded sample
+# cannot prove the ABSENCE of a landing PR, and "absence of evidence" read as
+# "free work" is exactly the defect. The timeline is PAGINATED to exhaustion,
+# so a merge older than any one page is still reachable.
+TIMELINE_PAGE_SIZE = 100
+
+
+def _timeline_events(gh_bin: str, slug: str | None, cwd: str, timeout: float,
+                     issue: int) -> list[dict]:
+    """The issue's OWN timeline, PAGINATED to exhaustion (#8560).
+
+    `--slurp` wraps the pages into one JSON array-of-arrays and `--paginate`
+    follows every `rel="next"`, so the result is the WHOLE timeline rather than
+    a sample. A non-zero exit (a mid-pagination transport failure) RAISES: the
+    partial output a failed `--paginate` leaves behind is never salvaged into
+    "no landing PR", because that is the fail-OPEN direction this whole section
+    exists to close — a landing PR that was not seen would read as free work.
+
+    The path is built from the RESOLVED `owner/name` literally, never from gh's
+    `{owner}/{repo}` placeholders (those resolve from the cwd — the #4027
+    cross-repo false CLEAN).
+    """
+    if not slug:
+        raise SurfaceError(
+            "target-repo-unresolved: no owner/name for the target repo — "
+            "refusing to read a landing timeline against an unknown repository"
+        )
+    args = [
+        "api", "--paginate", "--slurp",
+        f"repos/{slug}/issues/{issue}/timeline?per_page={TIMELINE_PAGE_SIZE}",
+    ]
+    rc, out, err, timed_out = _run([gh_bin, *args], cwd, timeout)
+    if rc != 0:
+        why = "timeout" if timed_out else f"exit {rc}"
+        raise SurfaceError(f"gh {' '.join(args)} failed ({why}): {_one_line(err or out)}")
+    try:
+        pages = json.loads(out)
+    except json.JSONDecodeError as exc:
+        raise SurfaceError(
+            f"gh {' '.join(args)} returned non-JSON: {exc}: {_one_line(out)}"
+        ) from exc
+    if not isinstance(pages, list):
+        raise SurfaceError(
+            f"gh {' '.join(args)} returned a non-list body: {_one_line(out)}"
+        )
+    if not pages:
+        # A bare `[]` is never a valid `--paginate --slurp` body: an empty
+        # result is `[[]]` (ONE empty page), measured on gh 2.97.0. Read as
+        # zero pages it becomes a measured, EMPTY timeline, and the surface
+        # then reports a COMPLETE measurement ("0 timeline event(s)") on an
+        # input it never read — the fail-OPEN direction this section exists to
+        # close. Mirrors `branch_reaper.fetch_prs`, which raises on the same
+        # shape for the same reason.
+        raise SurfaceError(
+            f"gh {' '.join(args)} returned an empty page list — a valid "
+            "slurp payload always has at least one page"
+        )
+    events: list[dict] = []
+    for page_index, page in enumerate(pages):
+        if not isinstance(page, list):
+            raise SurfaceError(
+                f"gh {' '.join(args)} page {page_index} is not a list "
+                f"({type(page).__name__}) — refusing to read a malformed "
+                "timeline as empty (NOT clean)"
+            )
+        for item in page:
+            if not isinstance(item, dict):
+                raise SurfaceError(
+                    f"gh {' '.join(args)} page {page_index} carries a non-object "
+                    f"event ({type(item).__name__}) — refusing to inflate "
+                    "`no landing PR` from a shape it cannot read"
+                )
+            events.append(item)
+    return events
+
+
+def _merged_reference(event: dict) -> tuple[int, str] | None:
+    """`(pr_number, title)` for a MERGED pull request this event cross-references.
+
+    Only `cross-referenced` events carry a `source.issue`, and only one whose
+    `pull_request.merged_at` is set has actually LANDED. An OPEN cross-reference
+    is in-flight work — the open-PR / branch / closed-PR surfaces already judge
+    those — so it is deliberately NOT read here as a landing.
+
+    Every field is validated: a malformed event yields `None` (ignored) rather
+    than raising, because this predicate runs over the whole timeline and one
+    unreadable entry must not make the answer unknowable. The CALLER's contract
+    check on the page shapes has already refused a body that is not a list of
+    objects.
+    """
+    if event.get("event") != "cross-referenced":
+        return None
+    source = event.get("source")
+    if not isinstance(source, dict):
+        return None
+    src_issue = source.get("issue")
+    if not isinstance(src_issue, dict):
+        return None
+    pull = src_issue.get("pull_request")
+    if not isinstance(pull, dict) or not pull.get("merged_at"):
+        return None
+    number = src_issue.get("number")
+    title = src_issue.get("title")
+    if not _is_issue_number(number) or not isinstance(title, str):
+        return None
+    return number, title
+
+
+def _landed_wording(kinds: set[str]) -> str:
+    """Classify landed hit kinds into the ONE claim both verbs may make.
+
+    The single source of truth for the terminal wording (#8560 review): the
+    gate's verdict AND `tools/who_is_on.py`'s answer derive from this, so the
+    two verbs cannot describe the same input differently.
+
+      * ``shipment``   — a merged timeline PR (`shipped`) or a `COMPLETED`
+                         closure WAS observed; the only class that may say the
+                         work shipped.
+      * ``not-planned``— the only observed fact is a `NOT_PLANNED` closure
+                         (declined or superseded); the work did not ship.
+      * ``terminal``   — a CLOSED issue whose ``stateReason`` is unavailable or
+                         unrecognised. The refusal (do NOT dispatch) holds, but
+                         no shipment may be claimed: the tool did not observe
+                         one.
+    """
+    if kinds <= {"not-planned"}:
+        return "not-planned"
+    if "shipped" in kinds or "completed" in kinds:
+        return "shipment"
+    return "terminal"
+
+
+def _landed_conclusion(landed_hits: list[Hit]) -> str:
+    """The closing clause of the LANDED verdict, worded from the TERMINAL FACT.
+
+    ⛔ A closed issue is not a merged PR (#8560 review). The refusal is the same
+    in every case — do NOT dispatch — but the verdict must not state a cause it
+    did not observe. `NOT_PLANNED` means the issue was declined or superseded;
+    the work did not ship, and "appears ALREADY SHIPPED" is a false diagnosis
+    that sends a human looking for a merge that does not exist. A merged
+    timeline PR (kind `shipped`) or a `COMPLETED` closure IS a shipment.
+    """
+    wording = _landed_wording({hit.kind for hit in landed_hits})
+    if wording == "not-planned":
+        return (
+            "the issue was CLOSED AS NOT PLANNED (superseded or declined) — "
+            "the work did not ship, but it is TERMINAL and never free work; "
+            "do NOT dispatch"
+        )
+    if wording == "shipment":
+        return "the work appears ALREADY SHIPPED — do NOT dispatch"
+    return "the work item is TERMINAL (closed) — do NOT dispatch"
+
+
+def scan_landed_surface(surface: Surface, issue: int, issue_data: dict,
+                        events: list[dict] | None) -> None:
+    """The authoritative "is #N already landed?" answer (#8560).
+
+    TWO sources, both aimed at THIS issue:
+
+      1. the ISSUE'S OWN STATE — `gh issue view` already returns it, so it costs
+         nothing. `CLOSED` is decisive and terminal: a closed issue is not free
+         work, and the tool used to print it as warn-only and return CLEAN.
+      2. a MERGED PR, cross-referenced by this issue, whose TITLE names the
+         issue number (boundary-exact, `number_present`). `#7174`'s PR #7403
+         is exactly this shape. The timeline is paginated, so an older merge is
+         reachable where the closed-PR sample is not.
+
+    `events is None` means the timeline was NOT fetched (state was terminal, so
+    it was unnecessary, or the query failed and the caller already marked this
+    surface). It is NEVER read as "no landing PR": an OPEN issue with events
+    `None` is INCOMPLETE, because the single fact that would have answered the
+    question was not measured.
+
+    A state that is neither OPEN nor CLOSED is INCOMPLETE too: the tool cannot
+    tell whether the work item is still live, and reading an uninterpretable
+    state as free work is the fail-OPEN direction.
+    """
+    raw_state = issue_data.get("state")
+    # Interpret the DE-SEQUENCED state, not merely the byte-sanitised one.
+    # `_sanitize` is the DISPLAY helper (and the module's stated contract): it
+    # removes the control BYTES only, so an OSC 52 payload survives it as
+    # literal text — `CLOSED\x1b[2K\x1b]52;c;AAAA\x07` becomes
+    # `CLOSED[2K]52;c;AAAA` — and a real CLOSED would be read as
+    # uninterpretable. That is the fail-CLOSED direction but the WRONG verdict:
+    # the terminal fact is present and must decide. `_strip_control_sequences`
+    # removes the WHOLE sequence (payload included) for MATCHING, so the same
+    # input still reads as CLOSED. See
+    # `test_control_sequences_in_issue_state_are_stripped`.
+    normalised = (
+        _strip_control_sequences(raw_state).strip().upper()
+        if isinstance(raw_state, str) else ""
+    )
+    if normalised == "CLOSED":
+        # ⛔ THE REASON DECIDES THE WORDING, never the direction (#8560 review).
+        # `CLOSED` is decisive either way — a closed issue is never free work —
+        # but an issue parked as `NOT_PLANNED` was DECLINED or SUPERSEDED; its
+        # work did not ship. Reporting it as "the work appears ALREADY SHIPPED"
+        # invents a merge that never happened (measured live: #8497,
+        # `state_reason=not_planned`, read as ALREADY SHIPPED). The module holds
+        # its refusals to the reason that actually caused them (#2573).
+        reason_raw = issue_data.get("stateReason")
+        reason = (
+            _strip_control_sequences(reason_raw).strip().upper().replace("-", "_")
+            if isinstance(reason_raw, str) else ""
+        )
+        if reason == "NOT_PLANNED":
+            detail = (
+                f"issue state={_sanitize(raw_state)} (closed as NOT PLANNED) — "
+                "the work item is TERMINAL: the issue was declined or superseded, "
+                "NOT shipped; it is never free work"
+            )
+            kind = "not-planned"
+        elif reason == "COMPLETED":
+            detail = (
+                f"issue state={_sanitize(raw_state)} (closed as COMPLETED) — the "
+                "work item is TERMINAL; a closed issue is never free work"
+            )
+            kind = "completed"
+        else:
+            # An unavailable/unrecognised reason is NOT read as "shipped": the
+            # refusal (do not dispatch) is identical and never depends on it.
+            detail = (
+                f"issue state={_sanitize(raw_state)} — the work item is TERMINAL; "
+                "a closed issue is never free work"
+            )
+            kind = "closed"
+        surface.add(f"issue #{issue}", detail, "strong", kind)
+        return
+    if normalised != "OPEN":
+        surface.incomplete(
+            f"issue-state-uninterpretable: state={_sanitize(raw_state)!r} is "
+            "neither OPEN nor CLOSED, so whether this work item is still live "
+            "cannot be established — refusing to read it as free (NOT clean)"
+        )
+        return
+    if events is None:
+        surface.incomplete(
+            "issue-timeline-unmeasured: the targeted landing query did not run "
+            "for this OPEN issue, so a merge older than the closed-PR sample "
+            "cannot be ruled out (NOT clean)"
+        )
+        return
+    merged_refs = 0
+    naming: list[tuple[int, str]] = []
+    for event in events:
+        found = _merged_reference(event)
+        if found is None:
+            continue
+        merged_refs += 1
+        number, title = found
+        if number == issue:
+            # The PR IS the issue number: that is the #7009 wrong-object input,
+            # refused elsewhere; it is not evidence of a landing.
+            continue
+        if number_present(title, issue):
+            naming.append((number, title))
+    for number, title in naming:
+        surface.add(
+            f"PR #{number}",
+            "MERGED PR cross-references this issue and NAMES IT IN ITS TITLE — "
+            f"the work appears already shipped: {_one_line(title, 90)}",
+            "strong",
+            "shipped",
+        )
+    if not surface.hits:
+        surface.note = (
+            f"issue state=OPEN; {len(events)} timeline event(s), "
+            f"{merged_refs} merged cross-reference(s), none naming #{issue} "
+            "in its title"
+        )
 
 
 # ── target-repo resolution (#4027) ──────────────────────────────────────────
@@ -4410,7 +4763,7 @@ def run_preflight(
             data = _gh_json(
                 gh_bin,
                 ["issue", "view", str(issue), "--repo", slug, "--json",
-                 "number,title,state,assignees,comments,url"],
+                 "number,title,state,stateReason,assignees,comments,url"],
                 cwd, timeout,
             )
             if isinstance(data, dict):
@@ -4434,6 +4787,48 @@ def run_preflight(
             else:
                 msg = f"gh-unavailable: {exc}"
             surfaces[SURFACE_ISSUE].incomplete(msg)
+    # 1.5 THE LANDED ANSWER (#8560) — the authoritative "is #N already done?".
+    #     Scanned HERE, right after the issue metadata (whose `state` it reads)
+    #     and BEFORE the in-flight surfaces, so its verdict is decided even if
+    #     every other surface later fails. It is a BLOCKING surface: an
+    #     unqueryable timeline is INCOMPLETE, never CLEAN. The paginated timeline
+    #     query is SKIPPED only when the issue's own state already answers the
+    #     question — a CLOSED issue is terminal — so a landed-via-state run costs
+    #     no extra API call, while an OPEN issue always pays the one targeted,
+    #     paginated query that reaches a merge older than the closed-PR sample.
+    landed_surface = surfaces[SURFACE_LANDED]
+    if slug is None:
+        landed_surface.incomplete(
+            "target-repo-unresolved: no owner/name for the target repo — "
+            "refusing to read a landing timeline against an unknown repository "
+            "(NOT clean)"
+        )
+    elif issue_data is None:
+        landed_surface.incomplete(
+            "issue-metadata-unavailable: the issue's own state could not be "
+            "read, so neither it nor its timeline could be consulted (NOT clean)"
+        )
+    else:
+        _state = (issue_data.get("state") or "")
+        # De-sequenced, not byte-sanitised (see `scan_landed_surface`): this
+        # same value decides BOTH whether the timeline is fetched here and the
+        # scan's verdict, so the two must not disagree about "OPEN".
+        _state_norm = (
+            _strip_control_sequences(_state).strip().upper()
+            if isinstance(_state, str) else ""
+        )
+        timeline: list[dict] | None = None
+        if _state_norm == "OPEN":
+            try:
+                timeline = _timeline_events(gh_bin, slug, cwd, timeout, issue)
+            except SurfaceError as exc:
+                landed_surface.incomplete(f"gh-unavailable: {exc}")
+        # Do NOT re-scan a surface that already failed: the scan would overwrite
+        # the gh-unavailable reason with a generic "timeline unmeasured" note,
+        # and the report would blame the wrong thing.
+        if landed_surface.status != STATUS_INCOMPLETE:
+            scan_landed_surface(landed_surface, issue, issue_data, timeline)
+
     # NOTE: the issue surface (assignee + claim comments) is scanned LATER,
     # after the git surfaces — see the #8175 note at its call site. The claim
     # gate must be able to re-verify the artifacts a claim names, and the
@@ -4935,9 +5330,20 @@ def format_report(
     ]
     strong = [
         h for h in hits
-        if h.surface not in advisory_names and h.strength == "strong"
+        if h.surface not in advisory_names
+        and h.surface != SURFACE_LANDED
+        and h.strength == "strong"
     ]
-    weak = [h for h in hits if h.strength == "weak"]
+    weak = [
+        h for h in hits
+        if h.surface != SURFACE_LANDED and h.strength == "weak"
+    ]
+    # #8560: the landed surface is BLOCKING, but its hits decide EXIT_LANDED —
+    # NOT EXIT_COLLISION — so they are separated out before the strong/weak
+    # tiers, exactly as advisory hits are. A landed hit is never counted as a
+    # collision: the two refusals name different remedies, and conflating them
+    # would make the refusal's stated reason not what caused it.
+    landed_hits = [h for h in hits if h.surface == SURFACE_LANDED]
     # ── the verdict counts the hits that DECIDED it (#3504 class 2) ──────────
     # `strong` is now the ONLY tier that can block, so it is the only tier the
     # refusal may count. The verdict line used to print `len(hits)` — EVERY hit,
@@ -4995,8 +5401,16 @@ def format_report(
                 # Two tiers only, now that the lexical arm is deleted (#3504):
                 # a `keyword` strength no longer exists, so a tag entry for it
                 # would be dead code that reads as a live tier.
-                tag = {"strong": "number", "weak": "weak"}.get(
-                    hit.strength, hit.strength)
+                # #8560: a landed hit is tagged distinctly. It is the one hit
+                # on a BLOCKING surface that neither authorizes nor refuses like
+                # a collision, and the bare `(number)` tag is what a collision
+                # prints — so an unlabelled landed hit would be indistinguishable
+                # from the one that caused a COLLISION.
+                if hit.surface == SURFACE_LANDED:
+                    tag = "landed"
+                else:
+                    tag = {"strong": "number", "weak": "weak"}.get(
+                        hit.strength, hit.strength)
                 # An ADVISORY surface's hits are tagged distinctly. A CLEAN
                 # report can now legitimately DISPLAY a hit that would have
                 # blocked on a blocking surface, and the bare `(number)` tag is
@@ -5106,6 +5520,40 @@ def format_report(
                 "whose failure COULD)."
             )
     lines.append("")
+    if landed_hits:
+        lines.append(
+            f"VERDICT: LANDED (exit {EXIT_LANDED}) — {len(landed_hits)} "
+            f"authoritative terminal signal(s) for #{issue} in {slug}: "
+            + _landed_conclusion(landed_hits)
+        )
+        # The remedy is the point of a DISTINCT verdict: a landed issue needs
+        # verification and closure, not coordination (COLLISION) and no re-run
+        # (INCOMPLETE). The #4886 tension is named honestly: a merged PR that
+        # names an issue can belong to a multi-PR issue that still needs work,
+        # so the bar is "verify, then re-state the remaining scope" — never
+        # "treat the issue as free".
+        lines.append(
+            "  These are AUTHORITATIVE, not the bounded ADVISORY closed-PR "
+            "sample: the issue's own state, or a MERGED PR the PAGINATED "
+            "timeline ties to this issue by name. There is no dismissal switch — "
+            "verify the named artifact against the issue body. If the issue is "
+            "genuinely complete, close it (or record why it was left open); if "
+            "it still needs work, its REMAINING scope must be stated before "
+            "dispatch, so the next lane does not re-implement shipped code."
+        )
+        if incomplete:
+            lines.append(
+                f"  ALSO INCOMPLETE: {len(incomplete)} surface(s) could not be "
+                f"queried ({', '.join(s.name for s in incomplete)}) — but a "
+                "terminal signal above is decisive, so the verdict is LANDED, "
+                "not INCOMPLETE."
+            )
+        if strong:
+            lines.append(
+                f"  ({len(strong)} BLOCKING collision hit(s) are ALSO present — "
+                "the work item is TERMINAL AND another lane appears to be on it.)"
+            )
+        return "\n".join(lines) + "\n", EXIT_LANDED
     if strong:
         lines.append(
             f"VERDICT: COLLISION (exit {EXIT_COLLISION}) — {len(deciding)} blocking "

@@ -46,13 +46,60 @@ readable at every read/delete path for at least one incident lifetime
 kind); (4) only then delete the ``{old}`` objects. Skipping (2) is what
 produces the duplicate issue; skipping (1) or (4) is what strands the sentinel.
 
+RECOVERY WINDOWS (#3146)
+------------------------
+``KindSpec.resolve_streak`` declares, per kind, how many CONSECUTIVE healthy
+observations are required before the incident may be cleared — the hysteresis
+that stops a condition flapping around its threshold from producing an
+open/close pair per cycle. The window is declared HERE (one site), consumed by
+``tortoise/alert_store.py`` and mirrored by ``recovery_streak_for()`` in
+``.github/scripts/registry-cron.sh`` (pinned by the cross-language contract
+test beside ``test_kind_owner_contract_with_driver``).
+
+The boundary is deliberate: the threshold-driven DR plane listed under
+:data:`DR_RECOVERY_KINDS` (reachability probes, an archive's age against the
+staleness threshold, a heartbeat against its window, a whole-pool freshness
+reading) carries a window; every other kind keeps 1 and is unchanged. A
+human-triggered resolve (``SIZE_GUARD_ABORT`` / ``DATA_LOSS_CANDIDATE`` at
+re-baseline) must NOT need the operator to act twice, and an app-owned trigger
+that already carries its own threshold on the trigger side
+(``ANALYTICS_SINK_DEGRADED``) is outside this plane. **OVERRIDES:** the common
+practice of one global hysteresis window for every alert — here the kinds
+legitimately differ, so the window is a per-kind declaration with an explicit
+default rather than a fleet-wide constant.
+
 The runbook row for each kind lives in ``docs/ops/registry-backup-dr.md``
 (§"Alert taxonomy + triage") and is pinned to this module by the test.
+
+⛔ ONE KIND = ONE RECOVERY CONDITION = ONE EVIDENCE TIER (#3147)
+---------------------------------------------------------------
+R2_DOWN used to cover two failure modes with two different evidence
+requirements: (a) R2 is unreachable — a probe does not reach it; (b) R2 answers
+but the pool cannot be listed (``R2_LIST_OK=0``, typically a missing
+``ListObjects`` permission). The two need different recovery evidence, so the
+watcher could not safely clear the kind and ADR-011 had to refuse it the right
+to close R2_DOWN at all — a guard around a modelling error rather than a model.
+The vocabulary now models it: :data:`KIND_R2_DOWN` keeps the frozen key (a
+rename would orphan the dedup object; see the playbook above) with its meaning
+NARROWED to reachability, and :data:`KIND_R2_UNLISTABLE` is the new key for the
+listing tier. Each has its own owner (see :data:`SPECS`), its own runbook row,
+and its own issue-title token, so the watcher legitimately clears the tier its
+probe covers and the driver retains the whole-pool measurement.
+
+The operational home for the split is ``docs/ops/registry-backup-dr.md``
+§"The two R2 tiers (#3147)". ADR-011 is a dated, human-gated decision record
+and is deliberately not edited by that change.
 """
 
 from __future__ import annotations
 
+import logging
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # ── Resolution authority (moved here from AlertStore.KIND_OWNERS, #3127) ─────
 # Single-writer principle: for each incident kind, exactly ONE writer's probes
@@ -88,13 +135,44 @@ class KindSpec:
     legacy_lowercase: bool = False
     #: One-line purpose, for an importer that only wants the vocabulary.
     meaning: str = ""
+    #: #3146 — the RECOVERY HYSTERESIS window: how many CONSECUTIVE healthy
+    #: observations are required before the incident may be cleared. `1` (the
+    #: default) preserves the historical "one healthy poll resolves" behaviour;
+    #: `2` means a condition that flaps around its threshold produces ONE
+    #: incident per flap-suppression window instead of one open/close pair per
+    #: cycle. Semantics are consecutive OBSERVATIONS, not elapsed time: the two
+    #: writers poll on different cadences, so a count is the only cadence-neutral
+    #: reading and needs no clock (the #4994 ruling, generalized).
+    #:
+    #: The window is per KIND, not global, because the kinds differ: a
+    #: threshold-driven measurement can hover at its boundary and must not be
+    #: cleared by one lucky reading, while a human-triggered resolve (a
+    #: re-baseline) or an app-owned trigger that already carries its own
+    #: threshold must clear promptly. See :data:`DR_RECOVERY_KINDS` for the
+    #: declared plane and the module docstring for the boundary rule.
+    resolve_streak: int = 1
 
 
 # ── The vocabulary — ONE constant per kind ───────────────────────────────────
 # ⛔ Never change a value. See the module docstring's migration playbook.
 
-# Driver-owned DR substrate (its own R2 preflight + storage_error + a measured pool).
+# DR substrate + reachability. The group is by SUBSTRATE, not by owner: #3147
+# moved R2_DOWN's owner to the watcher (a probe reaching R2 is a condition the
+# watcher's own read tests) while R2_UNLISTABLE and the rest stay driver-owned.
+#: #3147: the FROZEN R2 reachability key, its meaning NARROWED to the
+#: reachability tier only (the substrate does not answer a probe). The string is
+#: retained, not renamed to `R2_UNREACHABLE`, because it IS the R2 dedup key
+#: (``ops/alerts/R2_DOWN/_.json``) and the ``[DR] R2_DOWN`` adoption token — a
+#: rename is the migration playbook, not a refactor. The unlistable tier, which
+#: used to share this key, is now :data:`KIND_R2_UNLISTABLE`.
 KIND_R2_DOWN = "R2_DOWN"
+#: #3147: R2 answers (a probe reaches it) but the pool cannot be LISTED
+#: (``R2_LIST_OK=0``) — typically the access key lacks ``ListObjects`` — or the
+#: app reports a ``storage_error``. A NEW key: no live dedup object or open issue
+#: existed under it, so there is nothing to migrate. Distinct from
+#: :data:`KIND_R2_DOWN` because the two need different recovery evidence and so
+#: have different owners (see the module docstring).
+KIND_R2_UNLISTABLE = "R2_UNLISTABLE"
 KIND_APP_DOWN = "APP_DOWN"
 KIND_WATCHER_DOWN = "WATCHER_DOWN"
 KIND_SWEEP_CONFIG_ERROR = "SWEEP_CONFIG_ERROR"
@@ -166,43 +244,86 @@ LEGACY_LOWERCASE_KINDS: frozenset[str] = frozenset(
     {KIND_ABUSE_REVIEW_NEEDED, KIND_ABUSE_SUSPENDED})
 
 
+#: #3146: the sane default for the THRESHOLD-DRIVEN DR plane — the kinds whose
+#: recovery condition is a bounded measurement that can hover at its boundary
+#: (a reachability probe, an archive's age against the staleness threshold, a
+#: heartbeat against its window, a whole-pool freshness reading). Two
+#: consecutive healthy observations, matching the repo's own precedent on
+#: POOL_STALE (#4994/#5047). It is a named constant so the boundary is ONE
+#: reviewable declaration; every other kind keeps the field default (1) and is
+#: unchanged by #3146.
+DR_RECOVERY_STREAK = 2
+
+
 def _spec(owner: str, *, emitted: bool = True, manual_close: bool = False,
-          legacy_lowercase: bool = False, meaning: str = "") -> KindSpec:
+          legacy_lowercase: bool = False, resolve_streak: int = 1,
+          meaning: str = "") -> KindSpec:
     return KindSpec(owner=owner, emitted=emitted, manual_close=manual_close,
-                    legacy_lowercase=legacy_lowercase, meaning=meaning)
+                    legacy_lowercase=legacy_lowercase,
+                    resolve_streak=resolve_streak, meaning=meaning)
 
 
 #: kind -> its declaration. The ONE site for a kind's metadata.
 SPECS: dict[str, KindSpec] = {
     # driver: its own R2 preflight + storage_error + a measured pool.
-    KIND_R2_DOWN: _spec(WRITER_DRIVER, meaning="R2 unreachable or not listable"),
-    KIND_APP_DOWN: _spec(WRITER_DRIVER, meaning="app unreachable from the driver"),
-    KIND_WATCHER_DOWN: _spec(WRITER_DRIVER, meaning="watcher heartbeat stale"),
+    # #3147: R2 reachability is decided by a PROBE REACHING the substrate — a
+    # condition the watcher's own R2 read also tests — so the WATCHER owns the
+    # reachability tier (it clears R2_DOWN on its next positive read) and the
+    # driver, which cannot clear it, files it when its own preflight fails.
+    # The whole-pool measurement stays with the only surface that performs it.
+    # #3146: BOTH tiers are threshold-driven — a reachability probe and a
+    # listing that can flap at its boundary — so both carry the declared
+    # recovery window, like the rest of the DR plane below.
+    KIND_R2_DOWN: _spec(
+        WRITER_WATCHER, resolve_streak=DR_RECOVERY_STREAK,
+        meaning="R2 unreachable — no probe reaches the substrate (#3147)"),
+    KIND_R2_UNLISTABLE: _spec(
+        WRITER_DRIVER, resolve_streak=DR_RECOVERY_STREAK,
+        meaning="R2 answers but the pool cannot be listed (R2_LIST_OK=0) or the "
+                "app reports storage_error (#3147)"),
+    KIND_APP_DOWN: _spec(
+        WRITER_DRIVER, resolve_streak=DR_RECOVERY_STREAK,
+        meaning="app unreachable from the driver"),
+    KIND_WATCHER_DOWN: _spec(
+        WRITER_DRIVER, resolve_streak=DR_RECOVERY_STREAK,
+        meaning="watcher heartbeat stale"),
     KIND_SWEEP_CONFIG_ERROR: _spec(
-        WRITER_DRIVER, meaning="enabled:false with a non-null config_error"),
+        WRITER_DRIVER, resolve_streak=DR_RECOVERY_STREAK,
+        meaning="enabled:false with a non-null config_error"),
     KIND_SWEEP_OFF_STALE: _spec(
-        WRITER_DRIVER, meaning="sweep off and the pool is not measured fresh"),
+        WRITER_DRIVER, resolve_streak=DR_RECOVERY_STREAK,
+        meaning="sweep off and the pool is not measured fresh"),
     KIND_SWEEP_NO_COVERAGE: _spec(
-        WRITER_DRIVER, meaning="a conclusive run backed up 0 teams"),
+        WRITER_DRIVER, resolve_streak=DR_RECOVERY_STREAK,
+        meaning="a conclusive run backed up 0 teams"),
     KIND_LIVENESS_NO_WORK: _spec(
         WRITER_DRIVER, emitted=False,
         meaning="superseded, never wired (#3033)"),
     KIND_POOL_STALE: _spec(
-        WRITER_DRIVER, meaning="pooled stale tenants in ONE incident (#4994)"),
+        WRITER_DRIVER, resolve_streak=DR_RECOVERY_STREAK,
+        meaning="pooled stale tenants in ONE incident (#4994)"),
     KIND_PURGE_FAILED: _spec(
-        WRITER_DRIVER, meaning="hourly trash-purge ride-along incomplete"),
+        WRITER_DRIVER, resolve_streak=DR_RECOVERY_STREAK,
+        meaning="hourly trash-purge ride-along incomplete"),
     KIND_RECONCILE_FAILED: _spec(
-        WRITER_DRIVER, meaning="hourly reconcile ride-along incomplete"),
+        WRITER_DRIVER, resolve_streak=DR_RECOVERY_STREAK,
+        meaning="hourly reconcile ride-along incomplete"),
     # watcher: freshness + heartbeat, read in-process.
     KIND_STALE: _spec(
-        WRITER_WATCHER, meaning="newest archive older than the threshold"),
+        WRITER_WATCHER, resolve_streak=DR_RECOVERY_STREAK,
+        meaning="newest archive older than the threshold"),
     KIND_NEVER_BACKED_UP: _spec(
-        WRITER_WATCHER, meaning="eligible graph with no archive"),
+        WRITER_WATCHER, resolve_streak=DR_RECOVERY_STREAK,
+        meaning="eligible graph with no archive"),
     KIND_METADATA_LOST: _spec(
-        WRITER_WATCHER, meaning="archives exist but the per-graph state is missing"),
+        WRITER_WATCHER, resolve_streak=DR_RECOVERY_STREAK,
+        meaning="archives exist but the per-graph state is missing"),
     KIND_BACKUP_SET_MISSING: _spec(
-        WRITER_WATCHER, meaning="state exists but no archives"),
-    KIND_DRIVER_DOWN: _spec(WRITER_WATCHER, meaning="driver heartbeat stale"),
+        WRITER_WATCHER, resolve_streak=DR_RECOVERY_STREAK,
+        meaning="state exists but no archives"),
+    KIND_DRIVER_DOWN: _spec(
+        WRITER_WATCHER, resolve_streak=DR_RECOVERY_STREAK,
+        meaning="driver heartbeat stale"),
     # sweep guards: no single probe owns recovery.
     KIND_SIZE_GUARD_ABORT: _spec(
         WRITER_UNSPECIFIED,
@@ -315,6 +436,12 @@ def _check_closure() -> None:
         if spec.owner not in (WRITER_DRIVER, WRITER_WATCHER, WRITER_APP,
                               WRITER_UNSPECIFIED):
             raise RuntimeError(f"{kind!r}: unknown owner {spec.owner!r}")
+        # #3146: a window below 1 would mean "never resolve" — a typo no
+        # deployment may reach. 1 is the explicit "no window" spelling.
+        if not isinstance(spec.resolve_streak, int) or spec.resolve_streak < 1:
+            raise RuntimeError(
+                f"{kind!r}: resolve_streak must be an integer >= 1, got "
+                f"{spec.resolve_streak!r}")
 
 
 _check_closure()
@@ -329,6 +456,13 @@ KIND_OWNERS: dict[str, str] = {
 }
 
 
+#: #3146: the kinds that carry a recovery window, DERIVED from the declaration
+#: (never restated), so the boundary is exactly the set whose
+#: :attr:`KindSpec.resolve_streak` is above 1.
+DR_RECOVERY_KINDS: frozenset[str] = frozenset(
+    kind for kind, spec_ in SPECS.items() if spec_.resolve_streak > 1)
+
+
 def spec(kind: str) -> KindSpec:
     """The declaration for ``kind``; raises ``KeyError`` for an unknown string.
 
@@ -341,3 +475,89 @@ def spec(kind: str) -> KindSpec:
 def is_declared(kind: str) -> bool:
     """True iff ``kind`` is part of the declared vocabulary."""
     return kind in SPECS
+
+
+def _coerce_streak(value: Any, origin: str) -> int | None:
+    """A configured window, or ``None`` when the value is not usable (#3146).
+
+    Mirrors the driver's own coercion exactly: a non-integer OR a NEGATIVE
+    value is IGNORED with a warning (the declared value stands), and ``0`` is
+    read as 1 with a warning — a window of zero would mean "never resolve",
+    which no typo may reach. A negative value is a typo, not the deliberate
+    "clear now" spelling (that is the explicit ``1``), so it must not silently
+    defeat the hysteresis this window exists to provide (#3146 review P2: the
+    bash twin already ignored it, so the two writers disagreed on the recovery
+    window for the same env var).
+
+    The accepted shape is spelled out rather than left to ``int()``, which is
+    deliberately MORE permissive than the bash ``case`` guard (it accepts
+    ``+3``, ``1_0`` and non-ASCII digits). Relying on it is how the two writers
+    drifted in the first place, so the shape here is exactly the driver's:
+    an optional ``-`` followed by ASCII digits, compared after
+    :meth:`str.strip` (the same surrounding whitespace the bash twin trims).
+    """
+    text = str(value).strip()
+    negative = text.startswith("-")
+    digits = text[1:] if negative else text
+    if not digits or any(ch not in "0123456789" for ch in digits):
+        logger.warning(
+            "ALERT_RECOVERY_STREAK config %s=%r is not an integer — ignoring it",
+            origin, value)
+        return None
+    if negative and any(ch != "0" for ch in digits):
+        logger.warning(
+            "ALERT_RECOVERY_STREAK config %s=%r is negative — ignoring it "
+            "(the declared window stands; use 1 to deliberately clear now)",
+            origin, value)
+        return None
+    # ``-0`` is ZERO (the sign carries no value), not a negative window, so it
+    # falls through the below-1 clamp exactly like the bash twin.
+    parsed = 0 if negative else int(digits)
+    if parsed < 1:
+        logger.warning(
+            "ALERT_RECOVERY_STREAK config %s=%r is below 1 — reading it as 1 "
+            "(a window of 0 would mean 'never resolve')", origin, value)
+        return 1
+    return parsed
+
+
+def resolve_streak_for(kind: str, env: Mapping[str, str] | None = None) -> int:
+    """The EFFECTIVE recovery window for ``kind`` (#3146).
+
+    Precedence, highest first — the same contract the driver's
+    ``recovery_streak_for()`` implements:
+
+    1. ``ALERT_RECOVERY_STREAK=N`` — every kind. The "clear now" emergency
+       lever (set it to 1 to restore the pre-#3146 behaviour fleet-wide).
+    2. ``ALERT_RECOVERY_STREAKS="KIND=n,KIND2=m"`` — per kind.
+    3. ``BACKUP_POOL_RESOLVE_STREAK`` — the legacy POOL_STALE-only knob
+       (#4994), kept working as that kind's alias by decision 7/8 of #3146.
+    4. the declared :attr:`KindSpec.resolve_streak`.
+
+    An unknown kind has no declaration, so it falls back to 1 ("no window"),
+    the same safe default ``kind_owner`` uses for an unlisted kind.
+    """
+    environment = os.environ if env is None else env
+    declared = SPECS[kind].resolve_streak if kind in SPECS else 1
+    window = declared
+    if kind == KIND_POOL_STALE:
+        legacy = environment.get("BACKUP_POOL_RESOLVE_STREAK")
+        if legacy not in (None, ""):
+            coerced = _coerce_streak(legacy, "BACKUP_POOL_RESOLVE_STREAK")
+            if coerced is not None:
+                window = coerced
+    for pair in (environment.get("ALERT_RECOVERY_STREAKS") or "").split(","):
+        if "=" not in pair:
+            continue
+        name, _, value = pair.partition("=")
+        if name.strip() != kind:
+            continue
+        coerced = _coerce_streak(value, "ALERT_RECOVERY_STREAKS")
+        if coerced is not None:
+            window = coerced
+    global_value = environment.get("ALERT_RECOVERY_STREAK")
+    if global_value not in (None, ""):
+        coerced = _coerce_streak(global_value, "ALERT_RECOVERY_STREAK")
+        if coerced is not None:
+            window = coerced
+    return window

@@ -509,6 +509,9 @@ def _cmd_reconcile(args):
     try:
         from tortoise.log import EventLog, TornTailResurrectionError, refuse_torn_tail_revival  # noqa: I001
         from tortoise.projection import FalkorProjection
+        # #7951 §17.1: `reconcile` replays records ALREADY in the journal, so
+        # its folds are authorized by the replay scope.
+        from tortoise.projection import _replay_write_scope
     except ImportError:
         print("Tortoise not installed. Run: pip install -e negation-game-explorations/tortoise", file=sys.stderr)
         return 1
@@ -547,7 +550,8 @@ def _cmd_reconcile(args):
         applied = 0
         for ev in event_entries:
             if ev["event"]["eventId"] not in existing:
-                proj.apply(ev)
+                with _replay_write_scope():
+                    proj.apply(ev)
                 applied += 1
 
         total = len(event_entries)
@@ -4572,8 +4576,9 @@ def _session_post(api_key: str, api_url: str):
 
     Returns a ``handle(payload) -> PostOutcome`` so the spool never knows the
     transport: network/timeout failures come back with ``status=None`` (the
-    spool retries with backoff), HTTP errors keep their status (permanent 4xx
-    are discarded *with a reason*, not retried).
+    spool retries with backoff), HTTP errors keep their status (a permanent 4xx
+    is recorded and the entry is marked terminal and KEPT — never unlinked,
+    #7708).
     """
     import json as _json
     from http.client import HTTPException
@@ -4894,7 +4899,7 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         capture_consent_enabled,
         record_capture_declined,
     )
-    from tortoise.capture_spool import flush_spool, read_spool_meta
+    from tortoise.capture_spool import _terminal_marker, flush_spool, read_spool_meta
     if not capture_consent_enabled():
         # Durable + one-time: a stale copied hook discards this stderr
         # (`2>/dev/null`), so the same notice is also written to
@@ -4933,6 +4938,15 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         if meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key"):
             print(f"Session {session_id} already filed — nothing to capture.")
             return 0
+        tf = _terminal_marker(meta)
+        if tf is not None:
+            print(f"capture refused permanently (kept, not retried): session "
+                  f"{session_id} — {tf.get('detail') or tf.get('reason') or ''}",
+                  file=_sys.stderr)
+            print("re-file with 'tortoise session drain --retry-terminal' once "
+                  "the refusal is fixed", file=_sys.stderr)
+            print(f"Spooled session: {session_id}")
+            return 0
         print(f"capture deferred: session {session_id} is spooled (backoff window) "
               "and will retry", file=_sys.stderr)
         print(f"Spooled session: {session_id}")
@@ -4940,6 +4954,19 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
     if not outcome.ok:
         if summary.lost:
             return 1
+        # A PERMANENT refusal (#7708) is terminal and non-destructive: the
+        # capture is KEPT on disk but will NOT be retried, so the transient
+        # "will retry" wording below would be a lie to the operator.
+        _terminal_now = read_spool_meta(root, session_id) or {}
+        tf = _terminal_marker(_terminal_now)
+        if tf is not None:
+            print(f"capture refused permanently (kept, not retried): session "
+                  f"{session_id} — {tf.get('detail') or tf.get('reason') or ''}",
+                  file=_sys.stderr)
+            print("re-file with 'tortoise session drain --retry-terminal' once "
+                  "the refusal is fixed", file=_sys.stderr)
+            print(f"Spooled session: {session_id}")
+            return 0
         # TRANSIENT (network / 5xx / retryable 4xx): the capture is DURABLE in
         # the spool — report the deferral honestly and exit 0 (the data is not
         # lost; the hook must never be blocked by a capture failure).
@@ -5089,7 +5116,8 @@ def _cmd_session_drain_best_effort(args) -> int:
                   "#3660)", file=_sys.stderr)
             return 0
         return _cmd_session_drain(api_key, api_url,
-                                  getattr(args, "exclude_session_id", None))
+                                  getattr(args, "exclude_session_id", None),
+                                  getattr(args, "retry_terminal", False))
     except Exception as e:
         print(f"spool drain: nothing filed — {e}", file=_sys.stderr)
         return 0
@@ -5151,7 +5179,8 @@ def _record_drain_deferrals(root, summary) -> None:
 
 
 def _cmd_session_drain(api_key: str, api_url: str,
-                       exclude_session_id: str | None = None) -> int:
+                       exclude_session_id: str | None = None,
+                       retry_terminal: bool = False) -> int:
     """Replay every spooled session that has not been filed (#3963).
 
     This is the "next opportunity" the SessionStart hook wires in: an
@@ -5165,6 +5194,13 @@ def _cmd_session_drain(api_key: str, api_url: str,
     after a `--resume`/`clear`/`compact` would be stored but never mined. The
     drain files OTHER sessions only, exactly as the Pi leg's `session_start`
     flush does.
+
+    ``retry_terminal`` (#7708 follow-up) clears every ``terminal_failure``
+    marker before flushing. A permanent refusal marks an entry terminal and NOT
+    retried — correct while the refusal's cause is live, but a client-side fix
+    (a corrected lane/harness) would make the same payload fileable and nothing
+    ever un-set the marker, so the capture stayed stranded. This is the
+    supported exit; it is a no-op when no entry is terminal.
     """
     import sys as _sys
 
@@ -5181,7 +5217,7 @@ def _cmd_session_drain(api_key: str, api_url: str,
         capture_consent_enabled,
         record_capture_declined,
     )
-    from tortoise.capture_spool import flush_spool, spool_dir
+    from tortoise.capture_spool import flush_spool, reset_terminal_entries, spool_dir
     if not capture_consent_enabled():
         record_capture_declined()
         print(f"spool drain: capture declined — {CAPTURE_DECLINED_HINT}",
@@ -5189,6 +5225,14 @@ def _cmd_session_drain(api_key: str, api_url: str,
         return 0
 
     root = spool_dir()
+    if retry_terminal:
+        # #7708 follow-up: the ONE supported exit from `terminal_failure`. The
+        # entry is KEPT either way — this only removes the "do not retry" mark
+        # and re-arms the window so THIS drain attempts it.
+        cleared = reset_terminal_entries(root)
+        print(f"spool drain: cleared terminal state on {cleared} "
+              f"entr{'y' if cleared == 1 else 'ies'} — retrying",
+              file=_sys.stderr)
     summary = flush_spool(root, _session_post(api_key, api_url),
                           exclude_session_id=exclude_session_id)
     # #4197: a store-only 2xx delivered by THIS drain is the same silent loss
@@ -5207,13 +5251,15 @@ def _cmd_session_drain(api_key: str, api_url: str,
         print(f"spool refusal: {r['session_id']} — {r['detail']}",
               file=_sys.stderr)
     if summary.attempted or summary.discarded or summary.probe_refusals \
-            or summary.held_by_backoff:
+            or summary.held_by_backoff or summary.terminal:
         print(
             f"spool drain: filed {summary.filed}, deferred {summary.deferred}, "
             f"skipped {summary.skipped} "
             f"({summary.held_by_backoff} waiting on backoff), "
             f"held back {summary.held_back}, "
             f"probe refusals {len(summary.probe_refusals)}, "
+            f"terminal {summary.terminal} (kept, not retried; re-file with "
+            f"'tortoise session drain --retry-terminal'), "
             f"discarded {len(summary.discarded)}",
             file=_sys.stderr,
         )
@@ -6576,6 +6622,7 @@ def _cmd_sessions_import(args) -> int:
                 RETRY_MAX_SECONDS,
                 Snapshot,
                 _backoff_ms,
+                _terminal_marker,
                 capture_key,
                 classify_failure,
                 read_spool_meta,
@@ -6622,7 +6669,17 @@ def _cmd_sessions_import(args) -> int:
             meta = read_spool_meta(root, session_id) or {}
             already_filed = bool(meta.get("filed_key")) and \
                 meta.get("filed_key") == capture_key(session_id, spool_turns)
-            if already_filed:
+            if _terminal_marker(meta) is not None:
+                # #7708: a previous permanent refusal is terminal and the entry
+                # is KEPT but never retried, so telling the operator to run a
+                # drain (the else-branch below) would send them in a circle.
+                print(f"Spooled session: {session_id} — a previous filing was "
+                      "refused permanently; the capture is kept and is NOT "
+                      "retried (running a drain will not file it — re-file with "
+                      "'tortoise session drain --retry-terminal' once the "
+                      "refusal is fixed).",
+                      file=_sys.stderr)
+            elif already_filed:
                 print(f"Session {session_id} is already filed; the spooled copy "
                       "is a no-op.", file=_sys.stderr)
             else:
@@ -10535,6 +10592,12 @@ def main(argv: list[str] | None = None) -> int:
     # capture_install.CAPTURE_SEAM — one definition, never a second list that
     # could drift.
     from tortoise.session_verify import HARNESSES
+    # #7708 follow-up: the harness a spool entry may claim is the SERVER's closed
+    # set — the spool mirrors it (`capture_spool.SESSION_HARNESSES`) and
+    # `_normalise_harness` coerces anything else. Rejecting an unknown harness at
+    # the CLI makes a typo VISIBLE at the input instead of silently stored (and
+    # then either 422'd or coerced).
+    from tortoise.capture_spool import SESSION_HARNESSES
 
     uri_schemes_hint = ", ".join(f"{s}://" for s in SUPPORTED_URI_SCHEMES)
 
@@ -10780,8 +10843,10 @@ def main(argv: list[str] | None = None) -> int:
     isess.add_argument("--metadata", action="store_true",
                        help="Run LLM metadata extraction (default: keyword-only — sweep never burns LLM tokens)")
     # tortoise index directory — the unified index path (epic #900 T8, §6.5)
-    idir = idx_sp.add_parser("directory",
-                             help="Index a corpus directory of .md files as Sources + Events/Documents (unified index path)")
+    idir = idx_sp.add_parser(
+        "directory",
+        help="Index a corpus directory of .md files as Sources + Events "
+             "(documents are document Sources — D10); unified index path")
     idir.add_argument("corpus_dir", nargs="?", default=None,
                       help="Corpus directory (default: TORTOISE_INGEST_BASE_DIR — the hook passes positionally)")
     idir.add_argument("--db", default=None,
@@ -10819,7 +10884,7 @@ def main(argv: list[str] | None = None) -> int:
     # its harness (per-harness receipts). Both optional — the no-arg form
     # stays legacy-compatible (SessionRequest defaults).
     session_capture.add_argument(
-        "--harness", default=None,
+        "--harness", default=None, choices=[*sorted(SESSION_HARNESSES), "desktop"],
         help="Harness that produced the transcript (claude, codex, pi, ...) — "
              "per-harness receipts (#1727)")
     session_capture.add_argument(
@@ -10849,6 +10914,12 @@ def main(argv: list[str] | None = None) -> int:
         "--exclude-session-id", default=None,
         help="Session id to leave alone (the LIVE session — filing it would "
              "make the server replay it and skip extraction)")
+    session_drain.add_argument(
+        "--retry-terminal", action="store_true",
+        help="Clear the `terminal_failure` marker (set by a permanent refusal, "
+             "#7708) on every spooled entry and retry it now. The supported "
+             "exit for a capture stranded by a refusal a fix has since made "
+             "fileable; the transcript is always kept)")
     # #3963: the CHEAP per-turn capture. The Claude Code `UserPromptSubmit` hook
     # calls this: spool the transcript locally, no network. Filing is deferred
     # to the drain (SessionStart) or the final flush (session capture).
@@ -10857,7 +10928,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Spool a transcript locally without filing it (#3963)")
     session_spool.add_argument("--file", required=True, help="Transcript file path")
     session_spool.add_argument(
-        "--harness", default="claude",
+        "--harness", default="claude", choices=[*sorted(SESSION_HARNESSES), "desktop"],
         help="Harness that produced the transcript (default: claude)")
     session_spool.add_argument(
         "--session-id", default=None,

@@ -352,6 +352,29 @@ export interface GenerateSeoResult {
   tags: string[];
   meta_title: string;
   meta_description: string;
+  /**
+   * The keyword the response is verified against, or `null` when none could be
+   * derived. Read it together with `keyword_ok`.
+   */
+  primary_keyword: string | null;
+  /**
+   * Whether the returned `meta_title`/`meta_description` are the MODEL'S OWN
+   * text with `primary_keyword` in them, unshortened by the length caps.
+   *
+   * It does NOT promise the field is byte-identical to the raw model output —
+   * the contract normalises trailing punctuation and removes a brand suffix the
+   * model wrote. It promises the keyword is the model's own placement and no cap
+   * cut it.
+   *
+   * ⛔ Deliberately CONSERVATIVE, and narrower than the #8293 contract of
+   * "the returned fields contain the keyword" (which the repair always
+   * satisfies). `false` means the model needed help — it omitted the keyword, or
+   * wrote a field past its cap — so the returned meta is not purely the model's
+   * work. Treat `false` as "consider regenerating", NOT as "the keyword is
+   * missing": the keyword IS present, because the repair guarantees it. `null`
+   * means no keyword was derived and nothing was verified — never a success.
+   */
+  keyword_ok: boolean | null;
   provider: string;
   input_tokens: number;
   output_tokens: number;

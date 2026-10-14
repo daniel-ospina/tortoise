@@ -68,6 +68,7 @@ from .projection import (
     _norm,
     _object_hard_deleted_ids,
     _promotion_point_with_operator,
+    _replay_write_scope,  # #7951 §17.1: replay folds are authorized, live ones are not
     _writable_id,
     entities,
     fold_with_entities,
@@ -90,6 +91,7 @@ from .projection.entities import (
     _writable_journalled_vector,
     flatten_search_keys_prop,
     is_non_operator_payload,
+    promote_status_applies,
 )
 from .projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_POINT_SUPERSEDED_NO_NEW_ID,
@@ -1099,7 +1101,23 @@ def _fold_journal(events: list[dict]) -> dict:
                 entry = by_id.get(p["id"])
                 if isinstance(entry, dict):
                     merged = dict(entry)
-                    merged.update(p)
+                    if (t == "PointPromoted"
+                            and not promote_status_applies(
+                                entry.get("status"))):
+                        # #6239: live's promote emitters are gated on a
+                        # ``draft``/status-less Point, so a ``PointPromoted``
+                        # replayed over a terminal status (a supersede is
+                        # status-TERMINAL) is a status NO-OP — fold the rest of
+                        # the snapshot, withhold the status column. Without
+                        # this the reference fold re-lived the Point while the
+                        # rebuilt graph kept it terminal, and
+                        # ``check_consistency`` red a faithful replay. Same
+                        # predicate as the graph engines, so the two cannot
+                        # drift (see ``promote_status_applies``).
+                        merged.update({k: v for k, v in p.items()
+                                       if k != "status"})
+                    else:
+                        merged.update(p)
                     # The writer's NON-coalesce SET clauses: an omitted key is
                     # RESET, not preserved (`n.content=$content` with
                     # `p.get("content", "")`; `n.is_operator=$isop` /
@@ -2833,9 +2851,11 @@ def recover_from_log(events_dir: str, projection) -> dict:
                         deferred_corrects.append(edge)
                 else:
                     if _pass_seq:
-                        projection.apply(ev, journal_seq=seq, **apply_kwargs)
+                        with _replay_write_scope():
+                            projection.apply(ev, journal_seq=seq, **apply_kwargs)
                     else:
-                        projection.apply(ev, **apply_kwargs)
+                        with _replay_write_scope():
+                            projection.apply(ev, **apply_kwargs)
                 applied += 1
             except UnrepresentableNumberError as exc:
                 refused += 1

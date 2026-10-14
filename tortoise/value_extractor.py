@@ -20,6 +20,57 @@ from tortoise._gate_memo import GateMemo
 
 # ── The value brief: compiled vocab + semantics (the #954 contract) ─────────
 
+#: The brief's RESERVED, NON-KIND sections. ``compile_value_brief`` is the only
+#: seam through which a pack's domain reaches the extractor, so a pack-authored
+#: section has to ride the brief — but every key in the brief is ALSO read as an
+#: objectKind form by ``_object_kind_vocab`` (it adds each key, its bare tail and
+#: their case-folds). A non-kind section therefore has to be reserved explicitly
+#: here, in the brief's own module, or it silently WIDENS the closed objectKind
+#: vocabulary. ``memory_granularity`` is the pre-existing member of this set
+#: (``pack_manifest_store`` already reserves it as a NAMESPACE for the same
+#: reason); ``pack_hints`` is the #1026 value-brief slots below. The skip in
+#: ``_object_kind_vocab`` reads THIS set, so the reservation and the emit cannot
+#: drift, and ``tests/test_pack_brief_hints_4894.py`` fails if a new non-kind
+#: section is added without landing here.
+RESERVED_BRIEF_KEYS = frozenset({"memory_granularity", "pack_hints"})
+
+
+def _extraction_hints(extraction: object) -> dict:
+    """A pack's ``extraction`` VALUE-BRIEF slots (#1026), normalized.
+
+    ``ontology.memory_granularity`` is a PROSE declaration and reaches the S1
+    prompt; ``extraction.valueGate`` is the same policy in STRUCTURED form
+    (*keep* / *drop*) and ``extraction.promptFragments`` are pack-authored
+    instruction snippets. Both are declared *for the value brief* (see
+    ``packs/_template/manifest.yaml`` and ``pack_registry``'s slot notes) and
+    neither had a consumer — a pack could declare them and see nothing happen,
+    which is the "declared reads exactly like shipped" gap (#4894, #1026).
+
+    Returns ``{}`` when a pack declares neither slot, so the brief key is only
+    ever populated by a pack that actually asked for something — and the
+    default render stays byte-identical. SHAPE is validated per-manifest by
+    ``pack_registry``; this normalizes WITHOUT trusting it (a non-dict
+    ``valueGate``/``promptFragments`` degrades to absent rather than raising),
+    matching the manifest-load contract that one malformed section degrades
+    itself and nothing else.
+    """
+    ex = extraction if isinstance(extraction, dict) else {}
+    out: dict = {}
+    gate = ex.get("valueGate")
+    if isinstance(gate, dict):
+        for key in ("keep", "drop"):
+            vals = [v for v in (gate.get(key) or [])
+                    if isinstance(v, str) and v.strip()]
+            if vals:
+                out[key] = vals
+    fragments = ex.get("promptFragments")
+    if isinstance(fragments, list):
+        vals = [f for f in fragments if isinstance(f, str) and f.strip()]
+        if vals:
+            out["fragments"] = vals
+    return out
+
+
 def compile_value_brief(packs_dir: Path | str | None = None,
                         tenant_manifests: dict[str, str] | None = None,
                         installed_namespaces: Collection[str] | None = None) -> dict:
@@ -78,7 +129,9 @@ def compile_value_brief(packs_dir: Path | str | None = None,
     compile path). ``None`` → the default (shared-catalog-only) path,
     byte-identical to before. The overlay contributes the tenant manifest's
     kindDefs (with nearMisses, same extraction discipline), its
-    memory_granularity, and declared-but-kindDefs-less object/document/
+    memory_granularity, its ``extraction`` value-brief hints (``valueGate`` /
+    ``promptFragments`` → the reserved ``pack_hints`` section) and
+    declared-but-kindDefs-less object/document/
     event kinds (empty semantics — the parity surface for the default
     path's FIX M declared-kind acceptance, which is served by the
     process-global ``_PACK_*_FORMS`` sets that tenant packs never reach).
@@ -131,6 +184,10 @@ def compile_value_brief(packs_dir: Path | str | None = None,
     # missed project/tag/user/skill/agent/agreement + strategy/plan/goal/
     # target and added concept (not in §5). `concept` is mapped to core:other.
     granularity = {}
+    #: #1026 / #4894: the SAME namespace gate and the SAME loop as the kinds and
+    #: the granularity — a hint is pack-authored domain data, so an uninstalled
+    #: pack's hints must not reach the prompt any more than its kinds may.
+    pack_hints: dict = {}
     for ns, path in ns_files.items():
         if _gate is not None and ns not in _gate:
             continue
@@ -138,6 +195,9 @@ def compile_value_brief(packs_dir: Path | str | None = None,
         g = (raw.get("ontology") or {}).get("memory_granularity")
         if g:
             granularity[ns] = g
+        hints = _extraction_hints(raw.get("extraction"))
+        if hints:
+            pack_hints[ns] = hints
 
     # #2031: per-tenant custom packs (hosted) — the SAME compile loop over
     # the tenant's :PackManifest YAMLs (graph-native, not filesystem).
@@ -190,6 +250,9 @@ def compile_value_brief(packs_dir: Path | str | None = None,
                 g = onto.get("memory_granularity")
                 if g:
                     granularity[ns] = g
+                hints = _extraction_hints(raw.get("extraction"))
+                if hints:
+                    pack_hints[ns] = hints
             except Exception:  # noqa: BLE001, RUF100 — never let one node
                 continue  # take down the whole tenant's vocabulary
 
@@ -220,7 +283,11 @@ def compile_value_brief(packs_dir: Path | str | None = None,
     # ORDER (core kinds first — the default path's brief is byte-identical,
     # key order included).
     return {**core, **{k: v for k, v in kinds.items() if k not in core},
-            "memory_granularity": granularity}
+            "memory_granularity": granularity,
+            # #1026/#4894: the pack's value-brief slots, carried by the brief so
+            # the SINGLE documented pack→extractor seam stays single. RESERVED —
+            # ``_object_kind_vocab`` skips it, so it never reads as an objectKind.
+            "pack_hints": pack_hints}
 
 
 def compile_kind_index_spec(packs_dir: Path | str | None = None,
@@ -416,6 +483,13 @@ def _object_kind_vocab(installed_namespaces: Collection[str] | None = None
         brief = compile_value_brief(installed_namespaces=installed_namespaces)
         vocab = set()
         for key in brief:
+            # #4894: a RESERVED non-kind section is not a kind and must not be
+            # accepted as one. Without this skip, the brief's own section keys
+            # (``memory_granularity``, ``pack_hints``) become writable
+            # objectKinds — an allow-list admitting the vocabulary that
+            # describes it.
+            if key in RESERVED_BRIEF_KEYS:
+                continue
             ns, _, kind = key.rpartition(":")
             vocab.add(key)
             vocab.add(kind)                       # bare form
