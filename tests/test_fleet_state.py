@@ -1358,6 +1358,7 @@ def test_free_refuses_when_the_registry_is_unreadable(monkeypatch, capsys) -> No
         ("who", argparse.Namespace(number=1234, json=False), "no lane holds it"),
         ("orphans", argparse.Namespace(json=False), "none"),
         ("conflicts", argparse.Namespace(json=False), "no ownership conflicts"),
+        ("violations", argparse.Namespace(json=False), "none"),
     ],
 )
 def test_roster_derived_answers_refuse_an_unreadable_registry(
@@ -1479,6 +1480,7 @@ def _unread_state(**extra):
         "lanes": [{"identity": {"lane": "BUSY-REALLY"}, "free": True,
                    "session": {"sid": "a" * 36}}],
         "orphans": [],
+        "violations": [],
         "reconciliation": {"workspaces_measured": True, "github_measured": False,
                            "github_error": "gh pr list timed out"},
         **extra,

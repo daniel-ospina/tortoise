@@ -1918,8 +1918,9 @@ def _registry_readable(state: Mapping[str, Any], cmd: str, what: str) -> bool:
     ``load_registry`` used to swallow an ``OSError`` into ``[]``, which made an
     unreadable registry indistinguishable from a fleet with no lanes: every command
     that asserts "no free lane", "no lane holds it", "no ownership conflicts",
-    "no orphans", "no lane matching that name" or "nothing to bind" answered from a
-    read that never happened. Same polarity as ``_board_readable`` (#7957 H5).
+    "no orphans", "no lane matching that name", "nothing to bind" or
+    "no session-partition breaks" answered from a read that never happened.
+    Same polarity as ``_board_readable`` (#7957 H5).
     """
     rp = registry_provenance(state)
     if rp["measured"]:
@@ -2341,6 +2342,12 @@ def cmd_orphans(args: argparse.Namespace) -> int:
 
 def cmd_violations(args: argparse.Namespace) -> int:
     state = _load_or_build(args)
+    # `violations` comes from `resolve_sessions(rows, ...)`, where `rows` is exactly
+    # `load_registry()`'s output: an unreadable registry yields zero rows, hence zero
+    # claimed sessions, hence zero violations — the old code printed `none` on rc=0,
+    # byte-identical to a measured, genuinely-clean roster (PR #8594 review P2).
+    if not _registry_readable(state, "violations", "cannot detect session-partition breaks"):
+        return 2
     print(json.dumps(state["violations"], indent=2) if args.json else "\n".join(
         f"  {v['session'][:8]}… -> {', '.join(v['lanes'])}" for v in state["violations"]
     ) or "  none")
