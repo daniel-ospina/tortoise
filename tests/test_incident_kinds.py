@@ -288,6 +288,29 @@ def test_the_sweep_module_docstring_points_at_the_triage_row():
         "the runbook lost the DATA_LOSS_CANDIDATE triage row the docstring links")
 
 
+def test_the_data_loss_row_does_not_read_repetition_as_loss():
+    """#8595 review P1: the disposition cell must not claim a repeating drop is loss.
+
+    The old cell ended "⚠️ A drop that repeats every run is NOT a false
+    positive — re-baselining it hides the loss". Repetition carries NO
+    information: a fire does not advance the persisted baseline
+    (``test_backup_sweep.py`` pins "State was NOT updated (guard ordering — no
+    write on fire)"), so an unresolved drop re-fires IDENTICALLY every run,
+    and the only fire that does not repeat is one whose count recovered back to
+    the frozen baseline — the case where nothing was lost. The rule also
+    contradicted its own preceding sentence (churn removes nodes durably, so a
+    churn drop repeats too) and AC11 of ``docs/plans/2026-08-08-596-plan.md``,
+    whose re-baseline remedy works precisely because it MOVES the baseline.
+
+    RED (pre-fix): the cell carries "repeats every run is NOT a false positive".
+    """
+    row = _runbook_rows()["DATA_LOSS_CANDIDATE"]
+    assert "repeats every run is NOT a false positive" not in row
+    assert "does not advance the persisted baseline" in row, (
+        "the cell must say WHY repetition is uninformative — the fire does not "
+        "advance the baseline — or a reader re-derives the old rule")
+
+
 def test_manual_close_kinds_document_the_dedup_close_procedure():
     """``manual_close`` kinds must carry the close-then-delete procedure — and only they.
 

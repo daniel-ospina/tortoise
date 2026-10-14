@@ -201,6 +201,34 @@ def _check_per_label_drift(
     return breaches or None
 
 
+#: The per-label count read. ONE query for the two surfaces that must agree on
+#: the #661 guard's baseline: :func:`_backup_graph` PERSISTS it on a successful
+#: backup, and ``hosted_api.backups_rebaseline`` REFRESHES it so a re-baseline
+#: actually re-arms the guard. Sharing it means a re-baseline can never write a
+#: baseline shaped differently from the one the next sweep compares against.
+_LABEL_COUNT_QUERY = (
+    "MATCH (n) UNWIND labels(n) AS lbl RETURN lbl, count(*) ORDER BY lbl"
+)
+
+
+def query_label_counts(graph) -> dict[str, int]:
+    """Per-label node counts for a graph handle — the #661 drift guard's input.
+
+    A server-side AGGREGATE, like
+    :func:`tortoise.hosted_backup.count_data_nodes`: one row, so it is immune to
+    FalkorDB's ``RESULTSET_SIZE`` cap.
+
+    Raises on a query failure — the CALLERS decide what a failed read means, and
+    they differ on purpose. :func:`_backup_graph` continues without a label
+    baseline (the overall-count guards still ran, and the next successful backup
+    re-establishes it), while ``backups_rebaseline`` fails the request: a
+    baseline left at its pre-drop value would re-fire the incident the operator
+    just cleared, deleting the next run's archive and filing a NEW issue.
+    """
+    rows = graph.query(_LABEL_COUNT_QUERY).result_set
+    return {str(r[0]): int(r[1]) for r in rows if r and r[0]}
+
+
 def _refuse_wrong_dialect(source) -> None:
     """#2823 fail-closed: the enumeration source must match the CONFIGURED lane.
 
@@ -796,10 +824,7 @@ def _backup_graph(
     # ── Query per-label counts (before dump — same snapshot window). ──
     label_counts: dict[str, int] = {}
     try:
-        rows = g.query(
-            "MATCH (n) UNWIND labels(n) AS lbl RETURN lbl, count(*) ORDER BY lbl"
-        ).result_set
-        label_counts = {str(r[0]): int(r[1]) for r in rows if r and r[0]}
+        label_counts = query_label_counts(g)
     except Exception:
         logger.warning("per-label count query failed for %s — continuing", graph_name)
 
