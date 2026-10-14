@@ -119,6 +119,16 @@ ARM_TABLE: tuple[dict, ...] = (
               "REORDER.",
      "isolation": "depth-only control for the applied-rerank confound",
      "indicators": ["2(a)"]},
+    # #2992: ``cap3-only``'s pre-registered reach is intentionally LEFT
+    # UNCHANGED — the reach statement is the arm's DESIGN-TIME intent and is
+    # captured in the committed pre-registration ``docs/runbook/prereg-2578.json``
+    # (rewriting it would rewrite that record). The post-fix COLLAPSE — this
+    # arm now resolves to the same effective config as ``applied-rerank``
+    # (the 40-item rerank default is floored at the #1947 baseline, so the
+    # explicit ``--rerank-pool 120`` is redundant) — is recorded in
+    # ``docs/runbook/2578-temporal-measurement.md`` limitation 6, in the
+    # ``ARM_POOL_LIMIT`` comment above, and pinned by
+    # ``tests/test_longmem_rerank.py::test_cap3_only_arm_collapses_into_applied_rerank``.
     {"id": "cap3-only",
      "knobs": ["--rerank", "--rerank-cap", "3"],
      "reach": "per-session rerank cap 2->3 at pool 40 — the issue's own "
@@ -819,6 +829,7 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
                 baseline_verdicts: list[dict],
                 arm_verdicts: dict[str, list[dict]],
                 arm_stats: dict[str, dict],
+                arm_pool_depths: dict[str, int | None] | None = None,
                 pool_limit: int = DEFAULT_POOL_LIMIT,
                 reader_model: str = "pinned (see methodology)",
                 judge_model: str = "pinned",
@@ -844,6 +855,13 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
     When `arms_meta` (arm_id -> methodology block) is supplied the
     reader/judge/prompt constancy assertion runs HERE, before any table is
     emitted — a mixed-reader comparison must never reach the gate output.
+
+    `arm_pool_depths` (arm_id -> measured ``pool_depth.requested``, the
+    depth the retrieve path ACTUALLY fetched) gates the #2992 retraction on
+    this run's OWN data: an arm is retracted only when its measured depth
+    equals the baseline arm's — the stated vacuity condition. Without depth
+    data no retraction is rendered (the renderer never asserts a measured
+    fact it did not read).
     """
     if arms_meta:
         assert_reader_constancy(arms_meta)
@@ -898,8 +916,14 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
     reach_lines = []
     prereg_arms = {a["id"]: a for a in prereg.get("arms", [])}
     observed_bands = _observed_gold_bands(baseline_verdicts)
+    # #2992 defect 2: the retraction is a MEASURED verdict — only an arm whose
+    # own fetch depth equals the baseline's is a NO-OP (see
+    # _retracted_arms); a genuine re-test keeps its live reach text.
+    _retracted = _retracted_arms(arm_stats, arm_pool_depths)
     for arm_id, s in arm_stats.items():
         reach = prereg_arms.get(arm_id, {}).get("reach", "(unregistered)")
+        if arm_id in _retracted:
+            reach = f"⛔ RETRACTED (#2992) — {reach}"
         reach_lines.append(f"| {arm_id} | {s.get('mean_context_tokens', '—')} "
                            f"| {observed_bands} | {reach} |")
     from tools.longmem_eval.report import wilson_ci as _wilson
@@ -995,6 +1019,22 @@ def gate_output(*, issue: str, prereg: dict, qid_to_cls: dict[str, str],
            "(pool_depth, baseline) | pre-registered reach |",
            "| --- | --- | --- | --- |"]
     md += reach_lines
+    # #2992 defect 2: name every arm whose config is a NO-OP against the
+    # baseline — its conclusion is retracted, never reported as a null
+    # result. Gated on the arm being present in THIS run's stats AND on the
+    # arm's measured fetch depth actually equalling the baseline's (a
+    # rebuild that omits the arm, or a genuine re-test at a different
+    # depth, must not be stamped retracted).
+    if _retracted:
+        md += ["", "## ⛔ Retracted arms — no isolation evidence", "",
+               "An arm listed here is a NO-OP against the baseline: its "
+               "applied fetch depth equals the baseline's, so it cannot "
+               "isolate the knob it was pre-registered to test. Its "
+               "published conclusion is RETRACTED — the lever is "
+               "UNTESTED on this slice, NOT null.", "",
+               "| arm | why retracted |", "| --- | --- |"]
+        for _arm, _why in sorted(_retracted.items()):
+            md.append(f"| {_arm} | {_why} |")
     _misses = sum(1 for vs in [baseline_verdicts,
                                *arm_verdicts.values()] for v in vs
                   if "refusal-classifier-miss" in (v.get("flags") or []))
@@ -1061,7 +1101,75 @@ ARM_POOL_LIMIT: dict[str, int] = {
     # reranker can actually promote from ranks 25-120.)
     "pool-only-isolation": 40,
     "cap3-only": 40,
+    # #2992: ``cap3-only``'s COMMITTED receipt fetched 40 (the pre-fix rerank
+    # branch replaced the baseline with the 40-item default). Post-fix the
+    # live arm resolves to the SAME fetch depth as ``applied-rerank`` (the
+    # rerank default is floored at the baseline), so its 40 here is the
+    # HISTORICAL receipt's horizon — never a claim about a future run.
 }
+
+#: #2992 defect 2: arms whose committed configuration is a NO-OP against
+#: the baseline, so the arm cannot isolate the knob it was pre-registered to
+#: test and its published conclusion is RETRACTED. ``pool-only-isolation``
+#: was pre-registered as the depth control (``--rerank-pool 120``, rerank
+#: OFF) intended to WIDEN the pool, but since #1947 the baseline ALREADY
+#: fetches 120, so the two arms resolve to the same fetch depth. On the
+#: committed receipts they agree on the admission-relevant fields
+#: (``pool_depth.requested`` 120 on both arms, identical ``gold_admitted``
+#: vector, ``context_tokens`` mean 94.9) — they are NOT byte-identical as
+#: runs (per-row ``answer`` text, the deduped ``pool_depth.pool_size`` and
+#: one ``reader_refusal`` differ), and the retraction rests on the DEPTH
+#: equality, which is what makes the arm a no-op. The values are the
+#: EXPLANATION half of the retraction reason: :func:`gate_output` renders
+#: them only when the run's OWN measured depth confirms the no-op (see
+#: :func:`_retracted_arms`) and prefixes the numbers it actually read.
+RETRACTED_ARMS: dict[str, str] = {
+    "pool-only-isolation": (
+        "the #1947 baseline already fetches the same depth, so 'widening "
+        "the pool WITHOUT reranking changes nothing' carries no evidence. "
+        "The depth lever is UNTESTED on this slice, not null — a valid "
+        "control needs a shallow baseline (TORTOISE_LME_POOL_SIZE below "
+        "the arm) or an arm deeper than the baseline (e.g. 240)."),
+}
+
+
+def _retracted_arms(arm_stats: dict[str, dict],
+                    arm_pool_depths: dict[str, int | None] | None,
+                    ) -> dict[str, str]:
+    """The retraction reason for every arm THIS RUN's data proves vacuous.
+
+    An arm is retracted only when all three hold: it is declared in
+    :data:`RETRACTED_ARMS`, it is present in the run's stats, and its
+    measured applied fetch depth (``pool_depth.requested``) equals the
+    baseline arm's — the stated vacuity condition (*its applied fetch depth
+    equals the baseline's*). Keying on the arm NAME alone would stamp a
+    genuine re-test (a shallow ``TORTOISE_LME_POOL_SIZE`` baseline, or an
+    arm at 240) as retracted and print historical numbers no run produced —
+    a false claim in the very section that exists to retract one. With no
+    measured depth data nothing is retracted: an unsupported claim is never
+    rendered.
+    """
+    if not arm_pool_depths:
+        return {}
+    base_depth = arm_pool_depths.get(BASELINE_ARM)
+    if base_depth is None:
+        return {}
+    reasons: dict[str, str] = {}
+    for arm, why in RETRACTED_ARMS.items():
+        if arm not in arm_stats:
+            continue
+        depth = arm_pool_depths.get(arm)
+        if depth is None or depth != base_depth:
+            continue
+        measured = f"applied fetch depth {depth} on both arms"
+        arm_mean = (arm_stats.get(arm) or {}).get("mean_context_tokens")
+        base_mean = (arm_stats.get(BASELINE_ARM) or {}).get(
+            "mean_context_tokens")
+        if arm_mean is not None and base_mean is not None:
+            measured += (f", context_tokens mean {arm_mean} vs {base_mean}")
+        reasons[arm] = (f"#2992: no-op against {BASELINE_ARM} on THIS run's "
+                        f"own data ({measured}) — {why}")
+    return reasons
 
 #: The arm that supplies the baseline 2x2 (optionally overridden).
 BASELINE_ARM = "A-default"
@@ -1210,6 +1318,22 @@ def gold_undated(instance: dict) -> bool:
     return False
 
 
+def _measured_pool_depth(outcomes: list[dict]) -> int | None:
+    """The fetch depth an arm's outcomes REQUESTED, or None if unknown.
+
+    Reads ``measure_facts.pool_depth.requested`` — the value
+    ``retrieve_for_question`` records for the depth it actually fetched.
+    Rows that disagree (or carry no facts) yield ``None``: the retraction
+    gate must never guess a depth it was not given.
+    """
+    requested: set = set()
+    for o in outcomes:
+        pd = (o.get("measure_facts") or {}).get("pool_depth") or {}
+        requested.add(pd.get("requested"))
+    requested.discard(None)
+    return requested.pop() if len(requested) == 1 else None
+
+
 def rebuild_from_reports(*, reports_dir, census_path=CENSUS_DEFAULT,
                          out_md=None, out_jsonl=None,
                          instances=None) -> dict:
@@ -1263,6 +1387,13 @@ def rebuild_from_reports(*, reports_dir, census_path=CENSUS_DEFAULT,
             "mean_context_tokens": (round(sum(toks) / len(toks), 1)
                                     if toks else 0)}
 
+    # #2992 defect 2: the retraction is gated on THIS run's measured fetch
+    # depth, so it is derived from the raw outcomes (never from a constant)
+    # and handed to the renderer; an arm whose rows disagree yields None and
+    # cannot be stamped retracted.
+    arm_pool_depths = {arm: _measured_pool_depth(outs)
+                       for arm, outs in outcomes_raw.items()}
+
     prereg = write_preregistration(load_census(census_path)["rows"],
                                    (Path(out_md).parent / "prereg-2578.json")
                                    if out_md else "prereg-2578.json")
@@ -1272,11 +1403,15 @@ def rebuild_from_reports(*, reports_dir, census_path=CENSUS_DEFAULT,
         baseline_verdicts=verdicts[BASELINE_ARM],
         arm_verdicts={a: v for a, v in verdicts.items()
                       if a != BASELINE_ARM},
-        arm_stats=arm_stats, pool_limit=ARM_POOL_LIMIT[BASELINE_ARM],
+        arm_stats=arm_stats, arm_pool_depths=arm_pool_depths,
+        pool_limit=ARM_POOL_LIMIT[BASELINE_ARM],
         reader_model=m0.get("reader_model_spec", "pinned (see methodology)"),
         judge_model=m0.get("judge_model", "pinned"), arms_meta=arm_meta)
     if out_md:
-        Path(out_md).write_text(text, encoding="utf-8")
+        # a generated artifact that is byte-reproducible from committed
+        # inputs (the repository's files carry a trailing newline)
+        Path(out_md).write_text(text if text.endswith("\n") else text + "\n",
+                                encoding="utf-8")
     if out_jsonl:
         with Path(out_jsonl).open("w", encoding="utf-8") as fh:
             for arm in (BASELINE_ARM, *[a for a in verdicts

@@ -49,8 +49,9 @@ from tools.longmem_eval.retrieve import (
     TimeConstraint,
     _apply_time_window,
     detect_time_constraint,
+    resolve_rerank_arm_pool_limit,
 )
-from tortoise.retrieval import assemble_context
+from tortoise.retrieval import DEFAULT_POOL_SIZE, assemble_context
 
 REPO = Path(__file__).resolve().parent.parent.parent
 OUTCOMES = REPO / "docs" / "runbook" / "2578-measured-outcomes.jsonl"
@@ -154,12 +155,19 @@ def test_window_widening_cannot_reach_the_band_only_reorder_can():
 
 
 def test_pool_only_isolation_arm_is_vacuous_on_this_baseline():
-    """The #2578 'depth isolation' arm did NOT widen anything.
+    """The #2578 'depth isolation' arm did NOT widen anything — RETRACTED.
 
     Since #1947 the baseline already fetches ``DEFAULT_POOL_SIZE`` = 120, so
-    ``--rerank-pool 120 --rerank OFF`` is byte-identical to the baseline: its
-    'widening the pool changes nothing' conclusion carries no evidence.
-    Recorded as a finding (see the #2976 trace / follow-up filing).
+    ``--rerank-pool 120 --rerank OFF`` resolves to the same fetch depth as the
+    baseline (the arms are separate runs — per-row ``answer`` text, the deduped
+    ``pool_depth.pool_size`` and one ``reader_refusal`` differ — but they share
+    the applied depth, which is what makes the arm a no-op): its
+    'widening the pool WITHOUT reranking changes nothing' conclusion carries
+    no evidence (see #2992 defect 2, retracted in
+    ``docs/runbook/2578-temporal-measurement.md`` and in the generated gate
+    output's retracted-arms section). The pool-depth lever is UNTESTED on
+    this slice, not null — the code fix for defect 1 does NOT re-scope this
+    arm (it still resolves to the baseline depth).
     """
     base = _arm("A-default")
     arm = _arm("pool-only-isolation")
@@ -168,16 +176,46 @@ def test_pool_only_isolation_arm_is_vacuous_on_this_baseline():
     assert [r["gold_admitted"] for r in base] == [r["gold_admitted"] for r in arm]
 
 
-def test_rerank_without_explicit_pool_collapses_the_fetch_depth():
-    """``--rerank`` alone silently shrinks the candidate pool 120 -> 40.
+def test_committed_receipt_records_the_pre_fix_pool_collapse():
+    """REFERENCE RECEIPT of #2992 defect 1 (fixed in code, receipt frozen).
 
-    ``rerank_pool`` defaults to 40 and the rerank branch overrides
+    ``rerank_pool`` defaulted to 40 and the rerank branch overrode
     ``pool_limit`` instead of taking ``max(rerank_pool, baseline)`` — so
-    turning the reranker on discards the #1947 deepening unless the caller
-    also passes ``--rerank-pool 120``. Recorded as a finding.
+    turning the reranker on discarded the #1947 deepening unless the caller
+    also passed ``--rerank-pool 120``. The committed ``cap3-only`` arm
+    (``--rerank --rerank-cap 3``, no explicit pool) therefore fetched 40.
+
+    The code is FIXED at HEAD: the rerank arm is floored at the baseline
+    fetch depth (``resolve_rerank_arm_pool_limit``), pinned by
+    ``test_rerank_arm_pool_is_floored_at_the_baseline_depth`` below. This
+    test remains the immutable RECEIPT of the pre-fix behaviour (the
+    committed JSONL is historical evidence, never regenerated), so the two
+    together record what was measured and that the defect is gone.
     """
     assert {r["pool_depth"]["requested"] for r in _arm("cap3-only")} == {40}
     assert {r["pool_depth"]["requested"] for r in _arm("applied-rerank")} == {120}
+
+
+def test_rerank_arm_pool_is_floored_at_the_baseline_depth(monkeypatch):
+    """#2992 defect 1 fix — a rerank arm never fetches below the baseline.
+
+    The reranker can only reorder the candidates it is handed, so its fetch
+    depth must never be shallower than the #1947 baseline
+    (``DEFAULT_POOL_SIZE`` = 120): the 40-item rerank default can only RAISE
+    against the floor. Hermetic (pure resolution, no DB).
+    """
+    monkeypatch.delenv("TORTOISE_LME_POOL_SIZE", raising=False)
+    # the bare 40-item rerank default is floored at the baseline
+    assert resolve_rerank_arm_pool_limit(
+        rerank_pool=40, max_k=20) >= DEFAULT_POOL_SIZE
+    # an explicit deeper knob still wins (only widens, never narrows)
+    assert resolve_rerank_arm_pool_limit(rerank_pool=240, max_k=20) == 240
+    # the baseline env depth is the floor the knob sits on
+    monkeypatch.setenv("TORTOISE_LME_POOL_SIZE", "300")
+    assert resolve_rerank_arm_pool_limit(rerank_pool=40, max_k=20) == 300
+    # the deepest recall horizon is honoured independently of the knob
+    monkeypatch.delenv("TORTOISE_LME_POOL_SIZE", raising=False)
+    assert resolve_rerank_arm_pool_limit(rerank_pool=40, max_k=200) == 200
 
 
 # ── Mechanism pin: admission is the window cut, not membership ────────────

@@ -1428,8 +1428,16 @@ def _sweep_events() -> None:
                 proj = sdk._get_proj()
                 purge_expired(proj, retention_days=days)
                 purge_overflow(proj, max_events=cap)
-            except Exception:
-                _logger.debug("event retention sweep skipped for %s", org.get("org_id"))
+            except Exception as exc:
+                # #3007: WARNING, not debug. A per-team retention failure was
+                # invisible here (this is the hosted sweeper), so a silently
+                # unenforced per-team event cap read as a healthy sweep. The
+                # exception is carried in the message; there is no stack
+                # (the loop must continue) but the team and the cause are.
+                _logger.warning(
+                    "event retention sweep skipped for %s: %s",
+                    org.get("org_id"), exc,
+                )
     except Exception as exc:
         _logger.warning("event retention sweep failed: %s", exc)
 

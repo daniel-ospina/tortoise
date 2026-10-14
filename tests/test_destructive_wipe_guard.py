@@ -473,6 +473,140 @@ def test_pattern_property_map_still_exempts_a_targeted_delete(statement):
     assert _is_bulk_wipe(statement) is False, statement
 
 
+# ── #3007: label/LIMIT-scoped and `IN [..]` deletes are NOT whole-graph wipes ─
+#
+# Pre-fix every statement in the first table returned True (bulk): the
+# classifier only exempted a property map or a WHERE reference, and it did not
+# recognize a label on the deleted variable, a LIMIT bound, or `IN [list]`. That
+# false positive made ``event_store.purge_overflow`` raise on every non-test
+# server graph, so the per-team event cap was a silent no-op on hosted graphs.
+
+@pytest.mark.parametrize("statement", [
+    # The product offender verbatim (event_store.purge_overflow) — label AND limit.
+    "MATCH (n:GraphEvent) WITH n ORDER BY n.seq ASC LIMIT $overflow "
+    "DETACH DELETE n RETURN count(*)",
+    # The issue's indicator (2) form.
+    "MATCH (n:Label) WITH n LIMIT 10 DETACH DELETE n",
+    # Label alone, no limit.
+    "MATCH (n:Label) DETACH DELETE n",
+    # A label PREDICATE is the same scoping signal.
+    "MATCH (n) WHERE n:Point DETACH DELETE n",
+    # LIMIT alone, no label (the WITH must carry the deleted variable).
+    "MATCH (n) WITH n ORDER BY n.seq ASC LIMIT $overflow DETACH DELETE n",
+    # Relationship-type scoping — the INSTANTIATES migration in graph-scripts.
+    "MATCH (e:Event)-[r:INSTANTIATES]->(o:Object) "
+    "MERGE (e)-[:aboutObject]->(o) DETACH DELETE r",
+    # #3007 additional case: the list form of IN, with non-dotted expressions.
+    "MATCH (n) WHERE id(n) IN [1,2] DETACH DELETE n",
+    "MATCH (n) WHERE labels(n)[0] IN ['Point','Meta'] DETACH DELETE n",
+    # Every target scoped => scoped, even with several targets.
+    "MATCH (a:Point), (b:Meta) DETACH DELETE a, b",
+])
+def test_scoped_delete_is_not_a_bulk_wipe(statement):
+    """Indicator (2): a label/LIMIT-scoped or `IN [..]`-scoped delete is a
+    subgraph maintenance delete, not a whole-graph wipe."""
+    from tortoise.projection import _is_bulk_wipe
+
+    assert _is_bulk_wipe(statement) is False, statement
+
+
+@pytest.mark.parametrize("statement", [
+    # Genuine wipe — indicator (3): no targeting construct at all.
+    "MATCH (n) DETACH DELETE n",
+    "MATCH (n) DETACH DELETE n RETURN count(*)",
+    # DISCRIMINATING: the scope is on a DIFFERENT variable. ``m``/``n`` is
+    # bound by a bare MATCH after the label/limit and is deleted unfiltered, so
+    # each deletes every node. A whole-statement substring test would wrongly
+    # exempt both; the per-target check must not.
+    "MATCH (x:Foo) WITH x MATCH (n) DETACH DELETE n",
+    "MATCH (n) WITH n LIMIT 10 MATCH (m) DETACH DELETE m",
+    # A label predicate on a DIFFERENT variable scopes nothing it deletes.
+    "MATCH (x) WHERE x:Foo MATCH (n) DETACH DELETE n",
+    # A scoped and an unscoped target in one clause: the unscoped ``m`` still
+    # means every node. ``all``, never ``any``.
+    "MATCH (n:Point), (m) DETACH DELETE n, m",
+    "MATCH (n)-[r:X]->(m:Anything) DETACH DELETE n, m",
+    # A label that lives only in TEXT is not a label (masked before the scan).
+    "MATCH (n) DETACH DELETE n // (n:GraphEvent)",
+    "MATCH (n) DETACH DELETE n RETURN '(n:GraphEvent)'",
+    # A LIMIT AFTER the delete cannot bound the rows it deletes.
+    "MATCH (n) DETACH DELETE n WITH n LIMIT 10",
+    # No parseable target at all => fail closed.
+    "MATCH (n) DETACH DELETE",
+])
+def test_genuine_or_wrongly_scoped_wipe_is_still_bulk(statement):
+    """Indicator (3) + the adversarial edge: a label/LIMIT that does not scope
+    the deleted variable must NOT exempt a whole-graph wipe."""
+    from tortoise.projection import _is_bulk_wipe
+
+    assert _is_bulk_wipe(statement) is True, statement
+
+
+class _CountingGraph:
+    """Fake FalkorDB handle for the retention purge: a count read returns
+    ``total`` and the overflow delete reports ``deleted``, so ``purge_overflow``
+    can run to completion without a live server."""
+
+    def __init__(self, total: int, deleted: int):
+        self.total = total
+        self.deleted = deleted
+        self.queries: list[str] = []
+
+    def query(self, cypher, params=None, timeout=None):
+        self.queries.append(cypher)
+        if "DETACH DELETE" in cypher.upper():
+            return _Result([[self.deleted]])
+        if "COUNT(" in cypher.upper():
+            return _Result([[self.total]])
+        return _Result([])
+
+    def wipes(self) -> list[str]:
+        return [q for q in self.queries if "DETACH DELETE" in q.upper()]
+
+
+@pytest.mark.parametrize("name", ["tortoise", "team_42", "prod_tortoise"])
+def test_purge_overflow_runs_on_a_non_test_server_graph(name):
+    """Indicator (1): the per-team event cap must actually run on a real
+    server graph. Pre-fix ``purge_overflow``'s label-scoped delete was
+    classified bulk, L2 refused it, and BOTH callers swallowed the exception
+    (hosted sweeper at DEBUG, SDK hook at WARNING) — the cap was silently dead.
+    """
+    from tortoise.event_store import purge_overflow
+
+    proj = _bare_projection(graph_name=name, embedded=False)
+    proj.g = _GuardedGraph(_CountingGraph(total=5, deleted=3), proj)
+    deleted = purge_overflow(proj, max_events=2)
+    assert deleted == 3, "the overflow delete must execute and report its count"
+    assert proj.g._g.wipes(), "the retention delete never reached the graph"
+
+
+@pytest.mark.parametrize("statement", [
+    "MATCH (n:GraphEvent) WITH n ORDER BY n.seq ASC LIMIT $overflow "
+    "DETACH DELETE n RETURN count(*)",
+    "MATCH (n:GraphEvent) WHERE n.ts < $cutoff "
+    "WITH n LIMIT 10000 DETACH DELETE n RETURN count(*)",
+    "MATCH (n) WHERE id(n) IN [1,2] DETACH DELETE n",
+])
+def test_scoped_delete_reaches_the_graph_on_a_non_test_server_graph(statement):
+    """Indicator (1), through BOTH L2 call sites: the classifier verdict must
+    reach ``_assert_test_graph`` — a scoped delete is not refused."""
+    proj = _bare_projection(graph_name="team_x", embedded=False)
+    proj.g = _GuardedGraph(_RecordingGraph(), proj)
+    proj.query(statement)
+    proj.g.query(statement)
+    assert len(proj.g._g.queries) == 2, "a scoped delete must reach the graph"
+
+
+def test_purge_overflow_is_still_refused_without_a_target_scope():
+    """Indicator (3), at the L2 call sites: a genuine whole-graph wipe is still
+    refused on a non-test server graph after the #3007 narrowing."""
+    proj = _bare_projection(graph_name="team_x", embedded=False)
+    proj.g = _GuardedGraph(_RecordingGraph(), proj)
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        proj.g.query("MATCH (n) DETACH DELETE n")
+    assert proj.g._g.wipes() == [], "the refused wipe must not reach the graph"
+
+
 @pytest.mark.parametrize("statement", [
     "MATCH (n) DETACH DELETE n // {",
     "CALL { MATCH (n) DETACH DELETE n }",
