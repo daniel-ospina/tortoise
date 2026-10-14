@@ -504,6 +504,14 @@ def test_the_schema_columns_are_read_from_disk_not_restated():
     assert "confidence" in refused["point"]
     assert "ep_alpha" in refused["point"]
     assert "status" in refused["object"]  # projection-owned cache (§2.6)
+    # #8263: the SAME refusal on `subject`, carried by the forward migration
+    # 20261014000001. Read from disk means the `ALTER TABLE … ADD CONSTRAINT`
+    # form is parsed too — a schema read that only understood `CREATE TABLE`
+    # would silently miss it and let the projection emit a refused props key.
+    assert "status" in refused["subject"]
+    assert "embedding" in refused["subject"], (
+        "the forward ALTER must EXTEND the refusal set, never replace it"
+    )
 
 
 def test_a_record_with_no_usable_key_is_refused():
@@ -531,9 +539,11 @@ def test_the_projection_owned_status_cache_is_never_stored_by_a_mutation():
     `Object.status` and `Subject.status` are the **projection-owned lifecycle
     cache** (§2.6, `_fold_object_superseded`'s own docstring; `ONTOLOGY.md`
     §2/§4.2/§4.3), so a stored copy is a derived value made authority — capstone
-    S5. `Object.props` refuses the name by CHECK; `Subject.props` does NOT
-    (filed as a schema gap in the PR body), so the projection carries the
-    refusal on its own side rather than relying on the backstop.
+    S5. Both `Object.props` and `Subject.props` refuse the name by CHECK —
+    `Object` from #8179, `Subject` from the forward migration #8263 — so the
+    projection carries the refusal on its own side rather than relying on the
+    backstop. (`Subject`'s schema refusal was the gap #8263 closed; before it,
+    the props tail accepted the cache name.)
 
     `Point.status` is the counter-example that keeps the scope honest: a Point's
     lifecycle IS journaled and `point.status` is a PRIMARY column, so
@@ -566,6 +576,31 @@ def test_the_projection_owned_status_cache_is_never_stored_by_a_mutation():
         org_id="o", graph_id="g",
     )
     assert "status" in point[0].sql and "superseded" in point[0].params
+
+
+def test_a_subject_snapshot_carrying_the_cache_name_drops_it():
+    """The SNAPSHOT door onto the same refusal (#8263).
+
+    `test_the_projection_owned_status_cache_is_never_stored_by_a_mutation`
+    covers `EntityMutated`, where `never_store` is the guard. `SubjectAdded`
+    is a different door — a flat snapshot routed through
+    `refused_props_names()`, the schema read. That read now sees the forward
+    migration's `status` in `chk_subject_props_no_derived`; without it the
+    projection emitted a `props` tail the CHECK refuses — a crash handed to a
+    caller instead of a refusal.
+    """
+    statements = rp.mutations_for(
+        {"type": "SubjectAdded", "ts": "T", "id": "s1", "name": "sub1",
+         "subjectKind": "topic", "status": "superseded"},
+        org_id="o", graph_id="g",
+    )
+    stored = _stored_names(statements)
+    assert "status" not in stored, (
+        "SubjectAdded stored the projection-owned lifecycle cache as authority "
+        "— the schema refuses it and the projection must drop it, not crash"
+    )
+    # The PRIMARY half of the same snapshot still lands (no over-drop).
+    assert "subject_kind" in stored
 
 
 def test_document_created_does_not_store_the_retired_props():
