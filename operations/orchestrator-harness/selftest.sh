@@ -348,7 +348,7 @@ unset -f tmux
 # (LIMIT+1)-th candidate was recorded as checked and then the loop broke without ever running
 # collision_preflight.py for it. checked.txt suppresses that issue forever and the §7.1 reaper
 # only un-blacklists dispatched.txt entries — so one dispatchable issue was lost per refresh.
-awk '/^n=0$/{f=1} f{print} /^done < /{f=0}' "$REFRESH" > "$TMP/refreshloop.sh"
+awk '/^n=0$/{f=1} f{print} f&&/^echo "\[refresh\] checked \$n;/{exit}' "$REFRESH" > "$TMP/refreshloop.sh"
 if need "$TMP/refreshloop.sh" "the refresh loop body is extracted from the shipped refresh-candidates.sh"; then
   RL="$TMP/refresh"; mkdir -p "$RL/fakesc/.venv/bin"
   printf '10\n20\n30\n40\n50\n' > "$RL/.pool"
@@ -413,28 +413,111 @@ PY
   case "$(tr '\n' ' ' < "$RC/candidates.txt")" in *10*) rc=0;; *) rc=1;; esac
   ck "shipped refresh loop: the COLLISION is re-attempted and queued once it clears" $rc
 
-  # ── 5f) LANDED is TERMINAL: recorded once, never re-pre-flighted, never queued ────────────────
-  # #8560 added a fourth verdict, LANDED (exit 4): the issue's work already shipped. The shipped
-  # loop's sed matched only CLEAN|COLLISION, so a LANDED line did not match, `$V` became the whole
-  # line, and control fell to `*)` — logged as "no verdict", never recorded in checked.txt, and so
-  # re-pre-flighted on EVERY pass while consuming a LIMIT slot. LANDED is terminal (nothing to
-  # dispatch), so it must be recorded as checked and NOT queued as a candidate.
+  # ── 5f) LANDED is suppressed, NOT blacklisted: landed.txt, reported on every pass ──────────
+  # #8560 added a fourth verdict, LANDED (exit 4): the issue's work already shipped. Two properties
+  # must hold, and the first fix in this PR delivered only the second one (#8560 review):
+  #   (i)  nothing is queued for it, and it does not consume a LIMIT slot (a dispatch onto shipped
+  #        code, plus a capacity leak);
+  #   (ii) it is NOT recorded in checked.txt. This loop's pool is built from `--state open`, so the
+  #        pre-flight's state-CLOSED arm is unreachable here: every LANDED it sees comes from the
+  #        TIMELINE arm on an OPEN issue — possibly a multi-PR issue that still needs work (the
+  #        gate's own #4886 caveat). checked.txt is only pruned for a reaped DISPATCH, and a landed
+  #        issue is never dispatched, so writing it there removed an open work item from the backlog
+  #        permanently and silently — the failure class the §7.1 reaper removed.
+  # Pre-fix (this branch's previous head) `checked.txt` held 10 and no landed.txt existed, so
+  # assertions (ii), the landed.txt write, and both "reported" checks below are RED.
   RL2="$TMP/landed"; mkdir -p "$RL2/fakesc/.venv/bin"
   printf '10\n' > "$RL2/.pool"
-  : > "$RL2/checked.txt"; : > "$RL2/candidates.txt"; : > "$RL2/dispatched.txt"
+  : > "$RL2/checked.txt"; : > "$RL2/candidates.txt"; : > "$RL2/dispatched.txt"; : > "$RL2/landed.txt"
   cat > "$RL2/fakesc/.venv/bin/python" <<'PY'
 #!/bin/bash
-# stand-in for a landed pre-flight: a terminal verdict, non-zero exit in production
+# stand-in for a landed pre-flight: a terminal verdict, non-zero exit in production. Each
+# invocation is counted so pass 2 can prove the recorded issue is not re-pre-flighted.
+echo x >> "$(dirname "$0")/.calls"
 echo "VERDICT: LANDED (exit 4) — 1 authoritative terminal signal(s)"
 PY
   chmod +x "$RL2/fakesc/.venv/bin/python"
-  O="$RL2" LIMIT=5 SC="$RL2/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/landed.out" 2>&1
-  case "$(tr '\n' ' ' < "$RL2/checked.txt")" in *10*) rc=0;; *) rc=1;; esac
-  ck "shipped refresh loop: a LANDED verdict is recorded terminal (not re-pre-flighted)" $rc
+  O="$RL2" LIMIT=5 SC="$RL2/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/landed-1.out" 2>&1
+  case "$(tr '\n' ' ' < "$RL2/landed.txt")" in *10*) rc=0;; *) rc=1;; esac
+  ck "shipped refresh loop: a LANDED verdict is recorded in landed.txt (not checked.txt)" $rc
+  case "$(tr '\n' ' ' < "$RL2/checked.txt")" in *10*) rc=1;; *) rc=0;; esac
+  ck "shipped refresh loop: a LANDED OPEN issue is NOT blacklisted in checked.txt" $rc
   case "$(tr '\n' ' ' < "$RL2/candidates.txt")" in *10*) rc=1;; *) rc=0;; esac
   ck "shipped refresh loop: a LANDED verdict is NOT queued as a dispatch candidate" $rc
-  case "$(cat "$TMP/landed.out")" in *"no verdict"*) rc=1;; *) rc=0;; esac
+  case "$(cat "$TMP/landed-1.out")" in *"no verdict"*) rc=1;; *) rc=0;; esac
   ck "shipped refresh loop: a LANDED verdict is not logged as a missing verdict" $rc
+  # the suppression is VISIBLE: the set and its remedy are named on the pass that records it
+  case "$(cat "$TMP/landed-1.out")" in *"landed (awaiting verify/close"*"10"*) rc=0;; *) rc=1;; esac
+  ck "shipped refresh loop: the landed set and its remedy are printed when it is recorded" $rc
+  # ... and on a LATER pass, where no new verdict arrives at all. That is what makes the entry a
+  # reported decision instead of an invisible permanent suppression (pre-fix: pass 2 prints nothing).
+  O="$RL2" LIMIT=5 SC="$RL2/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/landed-2.out" 2>&1
+  case "$(cat "$TMP/landed-2.out")" in *"landed (awaiting verify/close"*"10"*) rc=0;; *) rc=1;; esac
+  ck "shipped refresh loop: the landed set is STILL reported on a later pass" $rc
+  [ "$(wc -l < "$RL2/fakesc/.venv/bin/.calls" | tr -d ' ')" = "1" ] && rc=0 || rc=1
+  ck "shipped refresh loop: a recorded LANDED issue is not re-pre-flighted on the next pass" $rc
+  # a landed entry is recorded but does not consume a slot on LATER passes: the pool is 10 (LANDED
+  # once) then 20 (CLEAN), LIMIT=1. Pass 1 spends the single pre-flight slot on 10; pass 2 filters
+  # the landed entry BEFORE the LIMIT counter, so 20 is pre-flighted and queued. Pre-fix (before
+  # #8560's arm existed) the LANDED line fell through to `*)`, was never recorded, and so 10 was
+  # re-pre-flighted on every pass — 20 could never be reached.
+  RC2="$TMP/landed-cap"; mkdir -p "$RC2/fakesc/.venv/bin"
+  printf '10\n20\n' > "$RC2/.pool"
+  : > "$RC2/checked.txt"; : > "$RC2/candidates.txt"; : > "$RC2/dispatched.txt"; : > "$RC2/landed.txt"
+  cat > "$RC2/fakesc/.venv/bin/python" <<'PY'
+#!/bin/bash
+case "$*" in *" 10 "*) echo "VERDICT: LANDED (exit 4)";; *) echo "VERDICT: CLEAN";; esac
+PY
+  chmod +x "$RC2/fakesc/.venv/bin/python"
+  O="$RC2" LIMIT=1 SC="$RC2/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/landed-cap-1.out" 2>&1
+  case "$(tr '\n' ' ' < "$RC2/landed.txt")" in *10*) rc=0;; *) rc=1;; esac
+  ck "shipped refresh loop: the LANDED entry is recorded while the slot is spent" $rc
+  [ "$(tr '\n' ' ' < "$RC2/candidates.txt" | wc -w | tr -d ' ')" = "0" ] && rc=0 || rc=1
+  ck "shipped refresh loop: the LIMIT-1 pass pre-flights one issue and queues none of them" $rc
+  O="$RC2" LIMIT=1 SC="$RC2/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/landed-cap-2.out" 2>&1
+  case "$(tr '\n' ' ' < "$RC2/candidates.txt")" in *20*) rc=0;; *) rc=1;; esac
+  ck "shipped refresh loop: a recorded LANDED entry frees the next pass's LIMIT slot (20 queued)" $rc
+
+  # ── 5g) the reaper DROPS a landed entry once its issue is CLOSED ───────────────────────────
+  # landed.txt must not become the same permanent list checked.txt was: an entry means "a decision
+  # is owed", and once the issue is CLOSED the decision is made. Fail-closed (§7.1) still applies:
+  # the whole reaper — pruning included — is skipped when a listing could not be read.
+  RP="$TMP/landed-prune"; mkdir -p "$RP"
+  printf '10\n30\n' > "$RP/landed.txt"
+  printf '10\n' > "$RP/.open_iss"      # 30 is no longer open -> the decision was made
+  : > "$RP/.pr_brs"
+  : > "$RP/dispatched.txt"; : > "$RP/checked.txt"
+  awk '/^python3 - "\$O" <<.PY.$/{f=1;next} /^PY$/{f=0} f' "$REFRESH" > "$RP/reap.py"
+  if need "$RP/reap.py" "the reaper is extracted from the shipped refresh-candidates.sh"; then
+    ( PATH="$R:$PATH" python3 "$RP/reap.py" "$RP" ) > "$TMP/landed-prune.out" 2>&1
+    case "$(tr '\n' ' ' < "$RP/landed.txt")" in *10*) rc=0;; *) rc=1;; esac
+    ck "shipped reaper: a landed entry whose issue is still OPEN is kept" $rc
+    case "$(tr '\n' ' ' < "$RP/landed.txt")" in *30*) rc=1;; *) rc=0;; esac
+    ck "shipped reaper: a landed entry whose issue is CLOSED is dropped" $rc
+    case "$(cat "$TMP/landed-prune.out")" in *"dropped"*30*) rc=0;; *) rc=1;; esac
+    ck "shipped reaper: dropping a settled landed entry is logged, not silent" $rc
+    # fail-closed half: an unreadable listing prunes NOTHING
+    RPF="$TMP/landed-prune-fail"; mkdir -p "$RPF"
+    printf '10\n30\n' > "$RPF/landed.txt"
+    printf '10\n' > "$RPF/.open_iss"     # .pr_brs deliberately ABSENT: the read failed
+    : > "$RPF/dispatched.txt"; : > "$RPF/checked.txt"
+    ( PATH="$R:$PATH" python3 "$RP/reap.py" "$RPF" ) > "$TMP/landed-prune-fail.out" 2>&1
+    case "$(tr '\n' ' ' < "$RPF/landed.txt")" in *10*30*) rc=0;; *) rc=1;; esac
+    ck "shipped reaper: an UNREADABLE listing prunes no landed entry (both kept)" $rc
+    # fail-closed half 2: the open listing is CAPPED (`--limit 500`). A truncated listing makes an
+    # open issue look closed, so pruning against it would drop a suppression that is still owed and
+    # re-pre-flight the issue every pass — the leak landed.txt exists to close. Refuse to prune.
+    RPT="$TMP/landed-prune-trunc"; mkdir -p "$RPT"
+    printf '10\n' > "$RPT/landed.txt"
+    seq 1 501 | grep -v '^10$' > "$RPT/.open_iss"   # 500 entries: the cap is hit, and 10 is not in the sample
+    : > "$RPT/.pr_brs"
+    : > "$RPT/dispatched.txt"; : > "$RPT/checked.txt"
+    ( PATH="$R:$PATH" python3 "$RP/reap.py" "$RPT" ) > "$TMP/landed-prune-trunc.out" 2>&1
+    case "$(tr '\n' ' ' < "$RPT/landed.txt")" in *10*) rc=0;; *) rc=1;; esac
+    ck "shipped reaper: a TRUNCATED open listing prunes no landed entry (10 kept)" $rc
+    case "$(cat "$TMP/landed-prune-trunc.out")" in *"cap"*) rc=0;; *) rc=1;; esac
+    ck "shipped reaper: refusing to prune against a capped listing is logged, not silent" $rc
+  fi
 fi
 
 # ── 5e) the capture site itself: a failed `gh` leaves ABSENCE, not an empty file ──────────────
