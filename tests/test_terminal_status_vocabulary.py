@@ -428,8 +428,8 @@ def test_terminal_expression_is_the_keep_filters_exact_negation(sdk) -> None:
     negation of ``= false`` under FalkorDB's strict type comparison, so a
     non-boolean ``outdated`` made a node BOTH not-terminal and not-live — an
     excluded middle. Asserted against the live engine, on a live-status
-    Point, for every probe value (including the falsy non-boolean ``0`` and
-    ``""``, where the builder and the PYTHON mirror still differ by contract).
+    Point, for every probe value (including numeric ``0`` and the empty string
+    ``""``, the examples of the falsy non-boolean divergence).
     """
     proj = sdk._get_proj()
     for value in _OUTDATED_PROBE_VALUES:
@@ -484,7 +484,8 @@ def test_builder_and_python_mirror_agree_on_non_boolean_flags(sdk, value) -> Non
     )
 
 
-#: Falsy NON-boolean values: the residual class the two docstrings name. The
+#: Falsy non-boolean values where the two predicates diverge (the residual the
+#: docstrings state by mechanism, these being the practical examples): the
 #: builder (and ``_terminal_excluded``) read them as the ``<> false`` half
 #: (terminal), while the Python mirror's ``bool()`` reads them live.
 _FALSY_NON_BOOLEAN_RESIDUALS = [0, 0.0, ""]
@@ -492,14 +493,14 @@ _FALSY_NON_BOOLEAN_RESIDUALS = [0, 0.0, ""]
 
 @pytest.mark.parametrize("value", _FALSY_NON_BOOLEAN_RESIDUALS)
 def test_documented_residual_class_is_falsy_non_boolean(sdk, value) -> None:
-    """The docstrings' residual is executable: for EVERY falsy non-boolean
-    value the Cypher builder calls the node terminal while the Python mirror
-    calls it live.
+    """The docstrings' residual, made executable: for each falsy non-boolean
+    value probed here the Cypher builder calls the node terminal while the
+    Python mirror calls it live.
 
-    The residual class is ``0``/``0.0``/``""`` — NOT only numeric ``0`` (the
-    pre-fix prose omitted the empty string). Fails on the pre-fix ``= true``
-    builder, where such a node read NOT terminal and was separately non-live
-    (the excluded middle this PR removes).
+    It pins the example values ``0``/``0.0``/``""`` — the pre-fix prose named
+    only numeric ``0`` and omitted the empty string. Fails on the pre-fix
+    ``= true`` builder, where such a node read NOT terminal and was separately
+    non-live (the excluded middle this PR removes).
     """
     pid = _mk_point(sdk, f"residual {value!r}", status="live", outdated=value)
     terminal, kept = _terminal_and_keep(sdk._get_proj(), pid)
