@@ -118,6 +118,17 @@ class TestDeclarationValidation:
         errs = P.validate_pipeline_decl(bad)
         assert any("duplicate stage label" in e for e in errs), errs
 
+    def test_a_stage_id_containing_the_key_separator_is_refused(self):
+        """``stageKey`` is ``pipeline|stage``. An id carrying ``|`` made the
+        composite ambiguous, so two distinct (pipeline, id) pairs collided on
+        one node and the second write silently removed the first pipeline's
+        stage. The declaration must refuse the separator."""
+        bad = {"stages": [
+            {"id": "a|b", "label": "Alpha", "order": 1, "slot": "entry"},
+        ]}
+        errs = P.validate_pipeline_decl(bad)
+        assert any("must not contain" in e for e in errs), errs
+
 
 class TestPackManifestIntegration:
     def test_pipeline_key_is_accepted_by_kinddef_validation(self):
@@ -289,6 +300,40 @@ class TestEffectivePipeline:
             g = sdk._get_proj().g
             with pytest.raises(ValueError, match="nothing to edit"):
                 P.rename_stage(g, "venture:none", "stg_x", "Y", declared=None)
+        finally:
+            sdk.close()
+
+    def test_rename_stage_returns_the_updated_label(self, tmp_path):
+        """The return value is the POST-write state (as ``add_stage`` and
+        ``retire_stage`` already were). Pre-fix it returned the pipeline read
+        before the write, so the caller saw the OLD label while
+        ``list_stages`` reported the new one."""
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            returned = P.rename_stage(g, KEY, "stg_discussion", "Diligence",
+                                      declared=DECL)
+            assert returned.label == "Diligence"
+            assert [s.label for s in P.list_stages(g, KEY, declared=DECL)] == [
+                "Contact", "Diligence", "Won"]
+        finally:
+            sdk.close()
+
+    def test_add_stage_refuses_an_id_containing_the_key_separator(
+            self, tmp_path):
+        """A graph-created stage id carries the same constraint as a declared
+        one: without it, stage ``a|b`` under ``venture:deal`` and stage ``b``
+        under ``venture:deal|a`` resolved to one ``stageKey``, and the second
+        write silently removed the first pipeline's stage."""
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            P.seed_pipeline(g, KEY, DECL)
+            with pytest.raises(ValueError, match="must not contain"):
+                P.add_stage(g, KEY, stage_id="a|b", label="A B",
+                            slot="active", declared=DECL)
+            assert [s.stage_id for s in P.list_stages(g, KEY, declared=DECL)] == [
+                "stg_contact", "stg_discussion", "stg_won"]
         finally:
             sdk.close()
 
@@ -590,6 +635,32 @@ class TestGuardIntegrity:
                             slot="active", declared=DECL)
             assert P.effective_pipeline(g, KEY, declared=DECL).resolve(
                 "Discussion").stage_id == "stg_discussion"
+        finally:
+            sdk.close()
+
+    def test_an_ambiguous_object_name_is_refused_not_silently_picked(
+            self, tmp_path):
+        """Two live Objects may share a name (#3590 D2). The hand-rolled
+        ``name = $n OR id = $n ... LIMIT 1`` silently picked one carrier, so
+        the read could answer from the wrong Object and a stage could be
+        journaled onto it; both sites must route-then-refuse."""
+        from tortoise.entity_identity import AmbiguousEntityName
+
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            for oid in ("dup-a", "dup-b"):
+                g.query(
+                    "CREATE (o:Object {id:$id, name:'dup-deal', "
+                    "objectKind:$k, status:'live'})",
+                    params={"id": oid, "k": KEY})
+            with pytest.raises(AmbiguousEntityName):
+                P.current_stage(g, "dup-deal")
+            with pytest.raises(AmbiguousEntityName):
+                P.advance_stage(sdk, "dup-deal", KEY, "stg_discussion",
+                                declared=DECL)
+            # An exact id is unambiguous and still resolves.
+            assert P.current_stage(g, "dup-a")["name"] == "dup-deal"
         finally:
             sdk.close()
 

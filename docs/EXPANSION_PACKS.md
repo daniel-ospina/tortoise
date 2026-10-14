@@ -82,12 +82,12 @@ The model has two tiers: a small **canonical slot** vocabulary the graph underst
 
 | field | required | meaning |
 |---|---|---|
-| `stages[].id` | ✅ | stable, immutable identity. Anchoring keys on this, never on the label, so a rename never moves an Object. Unique within the pipeline. |
+| `stages[].id` | ✅ | stable, immutable identity. Anchoring keys on this, never on the label, so a rename never moves an Object. Unique within the pipeline; must not contain `|` (the composite stage key's separator). |
 | `stages[].label` | ✅ | the tenant-visible name (renameable). |
 | `stages[].order` | ✅ | integer; the forward/regression judgement for future moves. |
 | `stages[].slot` | ✅ | one of `entry`, `active`, `suspended`, `terminal`. Canonical and fixed. |
 | `stages[].outcome` | terminal only | required iff `slot: terminal`, one of `won`, `lost`, `withdrawn`, `completed`. |
-| `defaultStage` | optional | the stage a new Object starts in; defaults to the lowest-`order` stage. |
+| `defaultStage` | optional | the declared default stage id. **Declaration-only in this change**: it is validated and stored, and read back by the mutators (it cannot be retired), but nothing applies it to a new Object yet — the stage a new Object enters is set by `advance_stage`, and a null stage reference is a no-op. The Graph Settings surface that consumes it is #2728. |
 
 State and history: the **current** stage is a property on the Object (`pipelineStageId`,
 `pipelineSlot`, `pipelineOutcome`, `pipelineStageSince`, `isClosed`) so a query always returns one

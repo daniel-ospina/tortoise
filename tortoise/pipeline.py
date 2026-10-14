@@ -30,8 +30,8 @@ Storage note (why stages are denormalised, not edge-linked): the durability
 registry added by #2814 (``projection/__init__.py::_config_classes``) captures
 and restores **nodes only**, not edges. A ``:PipelineStage`` therefore carries
 its own ``pipelineKey`` rather than being reached through a
-``(:Pipeline)-[:HAS_STAGE]->(:PipelineStage)`` edge, so pipeline configuration
-survives ``rebuild_all`` intact.
+Pipeline→PipelineStage edge (a shape the code deliberately never writes), so
+pipeline configuration survives ``rebuild_all`` intact.
 """
 from __future__ import annotations
 
@@ -39,6 +39,8 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+
+from tortoise.entity_identity import resolve_entity_id
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +88,34 @@ PENDING_PROP = "pipelineStagePending"
 PENDING_KEY_PROP = "pipelineStagePendingKey"
 
 _TERMINAL_SLOT = "terminal"
+
+#: A stage id must not contain this character. ``stageKey`` is the composite
+#: ``f"{pipeline_key}|{stage_id}"`` — the durability registry's single-property
+#: node identity — so an unescaped ``|`` INSIDE a stage id makes the composite
+#: ambiguous: ``("venture:deal", "a|b")`` and ``("venture:deal|a", "b")``
+#: both yield ``venture:deal|a|b``. The second write then rewrites the shared
+#: node's ``pipelineKey`` and the first pipeline SILENTLY LOSES that stage
+#: (#2792 review, P2). Forbidding the separator in the id keeps the
+#: decomposition total (the id half can never contain one), so the composite
+#: is injective. The pipeline key itself may keep a ``|``: with a
+#: separator-free id, splitting at the LAST ``|`` is unambiguous.
+_STAGE_ID_FORBIDDEN = "|"
+
+
+def _stage_id_error(stage_id: Any) -> str | None:
+    """Why ``stage_id`` is not a legal stage id, else ``None``.
+
+    ONE home for the rule, so the pack-declaration validator, ``add_stage``
+    and the stage-row write cannot drift on what an id may contain.
+    """
+    if not isinstance(stage_id, str) or not stage_id.strip():
+        return "'id' must be a non-empty string"
+    if _STAGE_ID_FORBIDDEN in stage_id:
+        return (
+            f"'id' {stage_id!r} must not contain {_STAGE_ID_FORBIDDEN!r} — the "
+            "composite stage key (pipeline|stage) uses it as its separator, so "
+            "an id containing it would collide with another pipeline's stage")
+    return None
 
 
 def _now() -> str:
@@ -135,8 +165,9 @@ def validate_pipeline_decl(decl: Any) -> list[str]:
             errors.append(f"pipeline.stages[{i}] has unknown key(s) {bad} "
                           "(allowed: 'id', 'label', 'order', 'slot', 'outcome')")
         sid = stage.get("id")
-        if not isinstance(sid, str) or not sid.strip():
-            errors.append(f"pipeline.stages[{i}]: 'id' must be a non-empty string")
+        sid_error = _stage_id_error(sid)
+        if sid_error is not None:
+            errors.append(f"pipeline.stages[{i}]: {sid_error}")
         else:
             if sid in ids:
                 errors.append(f"pipeline.stages[{i}]: duplicate stage id {sid!r}")
@@ -349,12 +380,20 @@ def current_stage(graph, object_ref: str) -> dict:
 
     The projection is built from ``STAGE_PROPS``, so a prop the fold writes is
     a prop this read returns — the two cannot drift.
+
+    The coordinate is resolved route-then-refuse (#3633), never by a
+    hand-rolled ``name = $n OR id = $n ... LIMIT 1``: same-name coexistence is
+    legal (#3590 D2), and the bare ``LIMIT 1`` silently picked one carrier, so
+    this read could answer from the wrong Object.
     """
+    oid = resolve_entity_id(graph, "Object", object_ref)
+    if oid is None:
+        return {}
     cols = ", ".join(f"o.{p}" for p in STAGE_PROPS)
     rows = graph.query(
-        f"MATCH (o:Object) WHERE o.name = $n OR o.id = $n "
-        f"RETURN o.name, {cols}, o.{PENDING_PROP} LIMIT 1",
-        params={"n": object_ref}).result_set
+        f"MATCH (o:Object {{id:$oid}}) "
+        f"RETURN o.name, {cols}, o.{PENDING_PROP}",
+        params={"oid": oid}).result_set
     if not rows:
         return {}
     r = rows[0]
@@ -401,6 +440,13 @@ def unknown_stage_candidates(graph, *, pipeline_key: str | None = None) -> list[
 
 def _write_stage(graph, pipeline_key: str, stage: PipelineStage,
                  *, created_at: str | None = None) -> None:
+    # The write is the LAST line of defence for the composite identity: a
+    # direct ``seed_pipeline`` bypasses ``add_stage`` and a hand-built
+    # declaration, and a ``|`` in the id would then hijack another pipeline's
+    # stage node (see ``_STAGE_ID_FORBIDDEN``).
+    stage_id_error = _stage_id_error(stage.stage_id)
+    if stage_id_error is not None:
+        raise ValueError(stage_id_error)
     # The node identity is COMPOSITE (``pipelineKey|stageId``): the declared
     # ``id`` is pack-local, so two pipelines may legitimately both declare
     # ``stg_contact``. The user-facing ``stageId`` stays per-pipeline; the
@@ -513,8 +559,9 @@ def add_stage(graph, pipeline_key: str, *, stage_id: str, label: str,
             f"got {outcome!r}")
     if slot != _TERMINAL_SLOT and outcome is not None:
         raise ValueError(f"outcome is only valid on a terminal stage, slot={slot!r}")
-    if not stage_id or not stage_id.strip():
-        raise ValueError("stage_id must be non-empty")
+    stage_id_error = _stage_id_error(stage_id)
+    if stage_id_error is not None:
+        raise ValueError(stage_id_error)
     if not label or not label.strip():
         raise ValueError("label must be non-empty")
     pipe = _require_override(graph, pipeline_key, declared, actor=actor)
@@ -555,7 +602,12 @@ def rename_stage(graph, pipeline_key: str, stage_id: str, label: str, *,
         "MATCH (s:PipelineStage {stageKey:$sk}) SET s.label=$label",
         params={"sk": _stage_key(pipeline_key, stage.stage_id), "label": label})
     _touch_pipeline(graph, pipeline_key, actor=actor)
-    return stage
+    # Return the POST-write state: ``stage`` was read before the write, so its
+    # label is stale. A caller using the return value (the obvious shape, and
+    # the one ``add_stage``/``retire_stage`` honour) would otherwise see the
+    # pre-rename label while ``list_stages`` reports the new one.
+    return PipelineStage(stage.stage_id, label, stage.order, stage.slot,
+                         stage.outcome, stage.status, stage.retired_at)
 
 
 def reorder_stages(graph, pipeline_key: str, ordered_stage_ids: list[str], *,
@@ -621,15 +673,26 @@ def set_default_stage(graph, pipeline_key: str, stage_id: str, *,
 
 
 def _resolve_object(graph, ref: str) -> tuple[str, dict] | None:
+    """The Object coordinate, resolved route-then-refuse (#3633).
+
+    A hand-rolled ``name = $n OR id = $n ... LIMIT 1`` silently picked one of
+    two same-name live carriers (#3590 D2), so a stage could be journaled onto
+    the WRONG Object and the terminal/regression/stale guards evaluated
+    against the wrong current stage. The resolver routes a name to exactly one
+    id and REFUSES on ambiguity; the props are then read by that id.
+    """
+    oid = resolve_entity_id(graph, "Object", ref)
+    if oid is None:
+        return None
     rows = graph.query(
-        "MATCH (o:Object) WHERE o.name = $n OR o.id = $n "
+        "MATCH (o:Object {id:$oid}) "
         "RETURN o.id, o.name, o.pipelineStageId, o.pipelineSlot, "
-        "o.pipelineStageSince, o.pipelineStageKey, o.objectKind LIMIT 1",
-        params={"n": ref}).result_set
+        "o.pipelineStageSince, o.pipelineStageKey, o.objectKind",
+        params={"oid": oid}).result_set
     if not rows:
         return None
     r = rows[0]
-    return r[0] or r[1], {
+    return r[0] or oid, {
         "name": r[1], "stageId": r[2], "slot": r[3], "since": r[4],
         "pipelineKey": r[5], "objectKind": r[6]}
 
