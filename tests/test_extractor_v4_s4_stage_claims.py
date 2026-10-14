@@ -139,6 +139,21 @@ def _marker_block(text: str | None = None) -> str:
     return _flatten("\n".join(block))
 
 
+def _module_docstring(source: str) -> str:
+    """`extractor_v2.py`'s MODULE docstring — the home the S4 call site names.
+
+    Scoped deliberately: the call site says *"see the ``G5 record — the live S4
+    stage (#8500)`` in the module docstring"*, and `config/ci-surfaces.yml` and
+    the design doc say the same. A FILE-WIDE membership check cannot see the
+    record MOVE out of the docstring — the #8601 review relocated it verbatim
+    to a `#` comment at end of file and every assertion stayed green, leaving
+    the pointer dangling again (the defect this pins). Returns `""` when there
+    is no module docstring, so the caller's `RECORD_ANCHOR in doc` assertion is
+    what reports it.
+    """
+    return ast.get_docstring(ast.parse(source)) or ""
+
+
 def _dict_constant(expr: ast.expr, key: str) -> ast.expr | None:
     """The value bound to `key` in the first dict in `expr`'s subtree that has
     it. Structural, so `"degraded" in body` cannot pass for `degraded: False`."""
@@ -432,23 +447,60 @@ def test_the_design_still_states_its_position_and_the_marker_naming_8500():
 def test_the_module_docstring_carries_the_record_the_call_site_points_at():
     """Before #8500's fix the call site said *"see the G5 record in the module
     docstring"* and there was no such record — a dangling pointer. Non-vacuity:
-    the anchor string was not in the module before this change."""
-    text = EXTRACTOR.read_text(encoding="utf-8")
-    assert RECORD_ANCHOR in text, (
+    the anchor string was not in the module before this change.
+
+    Scoped to the DOCSTRING, not the file: the call site, `ci-surfaces.yml`
+    and the design doc all name the module docstring as the record's home, and
+    a file-wide read cannot see the record move out of it while the call site's
+    pointer is left dangling (#8601 review, P3).
+    """
+    doc = _module_docstring(EXTRACTOR.read_text(encoding="utf-8"))
+    assert RECORD_ANCHOR in doc, (
         f"the S4 call site names the record {RECORD_ANCHOR!r} in the module "
         "docstring; it is no longer there, so the pointer is dangling again."
     )
-    assert "v4 MIGRATION DELIVERABLE" in text, (
+    assert "v4 MIGRATION DELIVERABLE" in doc, (
         "the record must state the removal-ordering obligation: `run_s4` is a "
         "v4 migration deliverable, not a cleanup."
     )
-    assert "OPEN QUESTION" in text, (
+    assert "OPEN QUESTION" in doc, (
         "the record must leave #8500's precedence question OPEN — which side is "
         "authoritative until the migration lands is the OWNER's ruling, not an "
         "agent-authored claim (the #8601 review flagged the previous 'shipped "
         "code is authoritative' sentence as answering a question #8500 reserves "
         "to the owner)."
     )
+
+
+def test_the_docstring_scope_check_reds_when_the_record_leaves_the_docstring():
+    """#8601 review finding (P3) — the check read the WHOLE FILE, so the record
+    could be cut out of the module docstring and re-appended verbatim as a `#`
+    comment at end of file while every assertion stayed green, leaving the S4
+    call site's *"in the module docstring"* pointer dangling again.
+
+    The mutation demotes the module docstring to a plain assignment: the record
+    text stays in the FILE but leaves the DOCSTRING. A file-wide read cannot
+    see that; the docstring-scoped read must.
+    """
+    source = EXTRACTOR.read_text(encoding="utf-8")
+    mutated = source.replace('"""', '_relocated_record = """', 1)
+    assert mutated != source, "the module docstring moved — re-point this fixture"
+    assert RECORD_ANCHOR in mutated, (
+        "the mutation must leave the record's text in the FILE, or it exercises "
+        "deletion rather than relocation — not the vacuity this closes"
+    )
+    assert RECORD_ANCHOR in _module_docstring(source), (
+        "the unmutated tree no longer carries the record in the docstring, so "
+        "this fixture cannot attribute the detection to the mutation"
+    )
+    scoped = _module_docstring(mutated)
+    assert RECORD_ANCHOR not in scoped, (
+        "a file-wide membership check cannot see the record LEAVE the module "
+        "docstring; the docstring-scoped read must, or the S4 call site can "
+        "point at a record that is not there while the guard reports clean"
+    )
+    assert "v4 MIGRATION DELIVERABLE" not in scoped
+    assert "OPEN QUESTION" not in scoped
 
 
 # ── the shipped-code facts ─────────────────────────────────────────────────
