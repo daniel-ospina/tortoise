@@ -219,7 +219,7 @@ PRIVACY_DRAFT = DRAFTS_DIR / "2026-08-08-657-privacy-draft.md"
 
 LEGAL_PAGES = ("/privacy", "/tos", "/license", "/dpa", "/security")
 FOOTER_LINK_HREFS = ("/privacy", "/tos", "/license", "/dpa", "/security")
-PRODUCT_ROOT_MARKER = "Memory that makes your agents"
+PRODUCT_ROOT_MARKER = "Agent memory that"
 PRODUCT_ROOT_MARKER_LOWER = PRODUCT_ROOT_MARKER.lower()
 FOOTER_SELECTOR = "footer, .legal-footer, .footer"
 # The ABSOLUTE canonical Pricing Page URL (reviewer P2): the relative
