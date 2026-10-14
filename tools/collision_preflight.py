@@ -33,12 +33,14 @@ Design contract
    mode, no early exit. If a BLOCKING surface cannot be queried the run is
    INCOMPLETE, never CLEAN. Surfaces declared ADVISORY (see the surface table)
    are still evaluated and still reported, but they cannot block a dispatch.
-   Their failure cannot set the RUN INCOMPLETE — though a row whose source was
-   never read is still marked INCOMPLETE ITSELF, so the report never prints an
-   unqueried advisory row as a measured zero. A surface that could never
-   prevent a duplicate carries no information in its failure, and halting a
-   dispatch for it was the defect #5251 removes. Every blocking surface keeps
-   the fail-closed posture.
+   An advisory row's own status never enters the blocking/incomplete set, so it
+   can never make an otherwise-CLEAN run non-clean. Where a read's failure DOES
+   make the run INCOMPLETE (a failed timeline, say) the BLOCKING surface that
+   owns the read is what sets it — the advisory row is merely marked unqueried
+   beside it, so the report never prints an unread advisory row as a measured
+   zero. A surface that could never prevent a duplicate carries no information
+   in its failure, and halting a dispatch for it was the defect #5251 removes.
+   Every blocking surface keeps the fail-closed posture.
 2. Worktree enumeration is UNTRUNCATED, and the OPEN-PR surface is enumerated
    to COMPLETENESS. This module never pipes, heads or tails git output — the
    reported count is the full count — and the open PR list is fetched with
@@ -97,8 +99,10 @@ Surfaces (8 rows, ALL hit-capable)
   merged PRs naming an      no query of its own — it         (MERGED PR whose
   OPEN issue                reuses the LANDED row's          TITLE names an
   · ADVISORY ·              /issues/N/timeline read; a       OPEN issue; a
-                            failure marks THIS row           reference, not a
-                            INCOMPLETE, never the RUN        closure — #8625)
+                            failure marks BOTH rows          reference, not a
+                            INCOMPLETE (the LANDED row       closure — #8625)
+                            is BLOCKING, so the RUN
+                            is INCOMPLETE too)
   open PRs                  gh pr list --state open   (title / headRef;
                                                          body closing
                                                          reference;

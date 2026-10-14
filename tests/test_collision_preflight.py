@@ -5454,7 +5454,7 @@ class CollisionPreflightTest(unittest.TestCase):
         # printed ABSENCE for a read that never happened (the defect class the
         # `recently-closed PRs` row is already guarded against at the report
         # site). The verdict is unchanged (exit 2 either way — an ADVISORY
-        # surface's failure cannot set the RUN INCOMPLETE), but the row must say
+        # surface's own status never enters the incomplete set), but the row must say
         # UNQUERIED, not `0`.
         self.assertIn(
             "[merged PRs naming an OPEN issue] 0 hit(s) — gh-unavailable", out)
