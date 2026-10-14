@@ -921,8 +921,10 @@ re-baseline, or restore). Its trigger is **either** an overall `>50%` / `>0 → 
 drop **or** the #661 per-label drift guard (any drop on a label below
 `REGISTRY_LABEL_FLOOR`, default 10; `>= REGISTRY_LABEL_DRIFT_PCT`, default 40%,
 at or above it) — so a detail carrying both `overall_drop_pct` and a
-`label_breaches` entry is still this kind at a single-digit headline: read the
-breach, not the headline percentage. (The overall trigger carries `drop_pct` and
+`label_breaches` entry is still this kind at a **low headline**: the four open
+incidents read 6.2 / 12.5 / 12.5 / 7.1% overall, yet each carries a
+`floor=10 (any drop)` breach — read the breach, not the headline percentage.
+(The overall trigger carries `drop_pct` and
 no `label_breaches` key, so the field to read follows the trigger.)
 `SIZE_GUARD_ABORT` closes through
 **re-baseline** (`POST /v1/internal/backups/re-baseline` resolves it together with

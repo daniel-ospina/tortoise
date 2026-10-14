@@ -2432,15 +2432,24 @@ def _graph_copy_with_restore_bound(db, src_name: str, dst_name: str, *,
             pass
 
 
+#: The Cypher predicate naming a graph's CONTENT nodes — the complement of
+#: ``hosted_api._is_export_skip_node``. This is its ONE textual definition:
+#: ``_COUNT_DATA_NODES_QUERY`` below counts the set, and
+#: ``backup_sweep.query_label_counts`` breaks the same set down per label for
+#: the #661 drift guard's baseline, so the scalar and the per-label surfaces
+#: cannot drift apart about which nodes are content (#8595).
+_CONTENT_NODE_PREDICATE = (
+    "NOT any(l IN labels(n) WHERE l IN $skip_labels) "
+    "AND NOT ('Meta' IN labels(n) AND n.key IS NOT NULL "
+    "AND n.key IN $meta_keys)"
+)
+
 #: The cap-immune data-node count query. Module-level so a test can assert
 #: its ONE-ROW AGGREGATE shape (which is what makes it immune to the
 #: server-global ``RESULTSET_SIZE`` cap) WITHOUT mutating that server-global
 #: setting (#4233).
 _COUNT_DATA_NODES_QUERY = (
-    "MATCH (n) WHERE NOT any(l IN labels(n) WHERE l IN $skip_labels) "
-    "AND NOT ('Meta' IN labels(n) AND n.key IS NOT NULL "
-    "AND n.key IN $meta_keys) "
-    "RETURN count(n)"
+    f"MATCH (n) WHERE {_CONTENT_NODE_PREDICATE} RETURN count(n)"
 )
 
 

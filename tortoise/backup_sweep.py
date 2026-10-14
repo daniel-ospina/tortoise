@@ -58,6 +58,7 @@ from .graph_storage import (
     record_graph_storage,
 )  # #5331 metering ledger
 from .hosted_backup import (
+    _CONTENT_NODE_PREDICATE,
     _delete_backup_objects,
     _is_supabase_source,
     create_backup,
@@ -219,13 +220,13 @@ def _check_per_label_drift(
 # and `Meta: 1 → 0` is a breach, because a label whose previous count is below
 # the floor fires on ANY drop. That re-fires the very DATA_LOSS_CANDIDATE the
 # baseline exists to clear, and it deletes the next run's archive when it does.
-# The predicate is `_COUNT_DATA_NODES_QUERY`'s, over the SAME
-# `_EXPORT_SKIP_LABELS` / `_EXPORT_SKIP_META_KEYS` constants — one definition,
-# so the two counts cannot drift apart (#8595).
+# The predicate is ``hosted_backup._CONTENT_NODE_PREDICATE`` — the SAME
+# textual definition ``_COUNT_DATA_NODES_QUERY`` is built from — over the SAME
+# ``_EXPORT_SKIP_LABELS`` / ``_EXPORT_SKIP_META_KEYS`` constants, so the
+# per-label baseline and ``node_count`` cannot drift apart about what is
+# content (#8595).
 _LABEL_COUNT_QUERY = (
-    "MATCH (n) WHERE NOT any(l IN labels(n) WHERE l IN $skip_labels) "
-    "AND NOT ('Meta' IN labels(n) AND n.key IS NOT NULL "
-    "AND n.key IN $meta_keys) "
+    f"MATCH (n) WHERE {_CONTENT_NODE_PREDICATE} "
     "UNWIND labels(n) AS lbl RETURN lbl, count(*) ORDER BY lbl"
 )
 

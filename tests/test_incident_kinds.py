@@ -316,6 +316,34 @@ def test_the_data_loss_row_does_not_read_repetition_as_loss():
         "advance the baseline — or a reader re-derives the old rule")
 
 
+def test_the_manual_close_rollup_names_the_measured_headline_range():
+    """#8595 review P2: the roll-up must not narrow the label-path class to a
+    "single-digit" headline.
+
+    Two of the four incidents the row cites (#4133/#4134) carry an
+    ``overall_drop_pct`` of **12.5%** — not a single-digit figure — and are
+    still ``DATA_LOSS_CANDIDATE``, because the discriminator is the
+    ``label_breaches`` entry, not the headline magnitude. A roll-up that scopes
+    the class to "single-digit" tells the operator that a 12.5% headline is a
+    different kind, which is the dismissal the row exists to correct.
+
+    The LAST ``**Manual close only**`` is the §roll-up; the earlier one is the
+    triage-table cell, which never carried the qualifier.
+
+    RED (pre-fix): the roll-up says "still this kind at a single-digit
+    headline" and names no measured figure.
+    """
+    text = RUNBOOK.read_text(encoding="utf-8")
+    rollup = text[text.rindex("**Manual close only**"):]
+    assert "single-digit" not in rollup, (
+        "the roll-up narrows the #661 label-path class to a 'single-digit' "
+        "headline, but #4133/#4134 read 12.5% overall and are still this kind "
+        "— state the measured range instead (#8595 review P2)")
+    assert "6.2 / 12.5 / 12.5 / 7.1%" in rollup, (
+        "the roll-up must name the measured overall_drop_pct range of the four "
+        "cited incidents, so the label-path class is not narrowed below it")
+
+
 def test_manual_close_kinds_document_the_dedup_close_procedure():
     """``manual_close`` kinds must carry the close-then-delete procedure — and only they.
 
