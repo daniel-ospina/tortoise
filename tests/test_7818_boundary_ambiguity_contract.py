@@ -1,6 +1,6 @@
 """#7818 — the `get_historical_knowledge` reply contract + the §4.7 coverage boundary.
 
-Two defects, one root, and one record gap:
+Two defects, one root, and two record gaps:
 
   1. **The `ambiguous` reply omitted `found`.** `get_historical_knowledge` set
      `ambiguous`/`candidates` and returned WITHOUT a `found` key, so a consumer
@@ -25,6 +25,12 @@ Two defects, one root, and one record gap:
      anti-drift pin for that record lives in ``tests/test_7818_ontology_record.py``
      — hermetic and registered in ``core`` + ``tier1``, so a docs-only ONTOLOGY
      edit runs it (this file is docker-lane and `sdk`-registered only).
+  4. **The reply-shape change was not recorded in the surface manifest.**
+     ``CONTRIBUTING.md`` requires every added response field in the
+     ``response_fields`` block of ``config/surface-manifest.yml``; no gate can
+     see an unrecorded field, so it is a reviewing obligation. The rows are
+     added (and the two stale #5361 byte-identity claims corrected), and
+     ``test_surface_manifest_records_the_status_and_found_keys`` pins them.
 
 ⚠️ **Scope.** This change does NOT pick a representation. Flipping ``_covers``
 to half-open ``[vF, vT)`` is a global boundary-semantics change (it also makes a
@@ -54,11 +60,16 @@ import os
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
+import yaml
 from tortoise.sdk import TortoiseSDK
+
+REPO = Path(__file__).resolve().parent.parent
+MANIFEST = REPO / "config" / "surface-manifest.yml"
 
 # The contiguous chain's shared boundary: P[06-01, 06-10] ← C[06-10, ∞).
 P_START = "2026-06-01"
@@ -235,4 +246,56 @@ def test_forward_chain_shared_boundary_is_entry_point_dependent(sdk):
     assert len(out["chain"]) == 1, (
         "the walk from the predecessor must not reach the successor")
     assert out["chain"][0]["id"] == old
+
+
+# ── the surface-manifest record (§ P2 of the #8575 review) ───────────────
+
+def test_surface_manifest_records_the_status_and_found_keys() -> None:
+    """The reply-shape change is RECORDED, per ``CONTRIBUTING.md``.
+
+    ``status`` (every shape) and ``found``-on-``ambiguous`` are response-field
+    additions, and CONTRIBUTING requires each in the ``response_fields`` block
+    of ``config/surface-manifest.yml`` — no gate compares response BODIES, so
+    an unrecorded field is caught by review alone. The two pre-existing #5361
+    rows also claimed reply behaviour that #7818 changed; those claims are
+    pinned out here too.
+
+    (1) *What value makes this test fail?*  The pre-fix manifest, which had no
+        row for either key, and a #5361 row still claiming the found/ambiguous
+        replies are byte-identical/untouched.
+    (2) *Does the fixture reach it?*  Yes — the committed manifest is read and
+        the exact (response, field) rows asserted.
+    """
+    doc = yaml.safe_load(MANIFEST.read_text(encoding="utf-8"))
+    entries = {
+        (e.get("response"), e.get("field")): e
+        for e in (doc.get("response_fields") or [])
+        if isinstance(e, dict)
+    }
+    status = entries.get(("sdk:get_historical_knowledge", "status"))
+    assert status is not None, (
+        "the `status` reply key is not recorded in response_fields — an "
+        "unrecorded field has no approval behind it (CONTRIBUTING.md)")
+    emitted = status["emitted_when"]
+    for value in ("found", "ambiguous", "absent"):
+        assert value in emitted, (
+            f"the status row does not record the {value!r} member")
+    assert "every" in emitted.lower(), (
+        "status is emitted on EVERY shape, not one branch")
+
+    found = entries.get(("sdk:get_historical_knowledge", "found"))
+    assert found is not None, (
+        "the `found`-on-the-ambiguous-shape change is not recorded")
+    assert "ambiguous" in found["emitted_when"], (
+        "the ambiguous-shape `found` change is the point of the row")
+
+    stale_byte_identity = entries[
+        ("sdk:get_historical_knowledge", "malformed")]["unchanged_when_off"]
+    assert "found and ambiguous replies are byte-identical" not in stale_byte_identity, (
+        "#7818 changes the found and ambiguous replies, so this #5361 claim is "
+        "false — scope it to this key")
+    stale_untouched = entries[
+        ("sdk:get_historical_knowledge", "nearest.malformed")]["unchanged_when_off"]
+    assert "found and ambiguous replies are untouched" not in stale_untouched, (
+        "#7818 touches every shape, so this #5361 claim is false")
 
