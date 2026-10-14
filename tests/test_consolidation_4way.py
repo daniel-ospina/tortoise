@@ -272,6 +272,92 @@ class TestExecuteEmbedConsolidation:
         assert any("no S3 prior" in w for w in result["warnings"])
         assert result["payload"] is not None  # pipeline proceeds
 
+    # ── #8039: same-session retraction resolution ─────────────────────────
+
+    def test_same_session_retraction_resolves_to_deletion(self):
+        """#8039 — a ref withdrawing a fact first stated IN THIS SESSION
+        resolves against the points this session emits (no S3 prior exists),
+        producing a DELETE-soft record instead of a fail-open warning. The
+        point is still written (write-then-tombstone); the deletion record
+        names its emitted id."""
+        content = "my gym slot is 6pm"
+        embed = {"entities": [], "events": [],
+                 "points": [{"content": content, "pointKind": "statement",
+                             "about_entities": []}],
+                 "retractions": [{"content": content}]}
+        result = v2.execute_embed(embed, {}, session_id="s1")
+        emitted = [p for p in result["payload"]["points"]
+                   if p["content"] == content]
+        assert len(emitted) == 1
+        assert len(result["deletions"]) == 1
+        assert result["deletions"][0]["point_id"] == emitted[0]["id"]
+        assert result["stats"]["deletions"] == 1
+        assert not any("fail-open" in w for w in result["warnings"])
+        # D8 — the record stays result-level; the payload does not grow.
+        assert "deletions" not in result["payload"]
+
+    def test_same_session_retraction_by_minted_id(self):
+        """#8039 — the id leg resolves a ref naming this session's own
+        content-addressed point id (the emitted points carry
+        ``_content_id("pt", content)``)."""
+        content = "the release ships on friday"
+        pid = v2._content_id("pt", content)
+        embed = {"entities": [], "events": [],
+                 "points": [{"content": content, "pointKind": "statement",
+                             "about_entities": []}],
+                 "retractions": [{"id": pid}]}
+        result = v2.execute_embed(embed, {}, session_id="s1")
+        assert [p["id"] for p in result["payload"]["points"]] == [pid]
+        assert [d["point_id"] for d in result["deletions"]] == [pid]
+        assert not any("fail-open" in w for w in result["warnings"])
+
+    def test_same_session_retraction_only_extends_not_replaces(self):
+        """#8039 never-guess regression — a ref that matches NEITHER the S3
+        priors NOR the points this session emits still fails open with the
+        warning, and the session's other points are unaffected."""
+        embed = {"entities": [], "events": [],
+                 "points": [{"content": "lunch is at noon",
+                             "pointKind": "statement",
+                             "about_entities": []}],
+                 "retractions": [{"content": "a fact nobody stated"}]}
+        result = v2.execute_embed(embed, {}, session_id="s1")
+        assert result["deletions"] == []
+        assert any("no S3 prior" in w for w in result["warnings"])
+        assert result["payload"]["points"][0]["content"] == "lunch is at noon"
+
+    def test_cross_session_retraction_precedence_unchanged(self):
+        """#8039 indicator 3 — a ref matching an S3 prior resolves to that
+        prior EVEN WHEN this session also emits a point: the S3 leg runs
+        first, so cross-session retraction behaviour is unchanged."""
+        embed = {"entities": [], "events": [],
+                 "points": [{"content": "a brand new fact",
+                             "pointKind": "statement",
+                             "about_entities": []}],
+                 "retractions": [{"content": "gym at 6pm"}]}
+        search = {"entities": [], "events": [],
+                  "points": [{"id": "pt_old", "content": "gym at 6pm",
+                              "kind": "statement"}]}
+        result = v2.execute_embed(embed, search, session_id="s1")
+        assert [d["point_id"] for d in result["deletions"]] == ["pt_old"]
+        assert not any("fail-open" in w for w in result["warnings"])
+
+    def test_in_session_duplicate_fold_retracts_the_prior(self):
+        """#8039 boundary — an in-session re-emission of an S3 prior folds
+        (NOOP, no payload point), so a retraction of that content resolves to
+        the PRIOR id via the S3 leg — never to a non-existent emitted id."""
+        content = "gym at 6pm"
+        search = {"entities": [], "events": [],
+                  "points": [{"id": "pt_old", "content": content,
+                              "kind": "statement"}]}
+        embed = {"entities": [], "events": [],
+                 "points": [{"content": content, "pointKind": "statement",
+                             "about_entities": []}],
+                 "retractions": [{"content": content}]}
+        result = v2.execute_embed(embed, search, session_id="s1")
+        assert result["payload"]["points"] == []
+        assert len(result["noops"]) == 1
+        assert [d["point_id"] for d in result["deletions"]] == ["pt_old"]
+
     def test_retractions_not_in_layer1_payload(self):
         """D8 — noops/deletions stay result-level; the payload schema is
         byte-identical (client_commit_id canonical unchanged)."""
