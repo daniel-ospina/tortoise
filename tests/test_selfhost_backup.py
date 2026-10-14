@@ -12,6 +12,7 @@ no network, no R2.
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 
@@ -45,6 +46,23 @@ class TestInterval:
         becomes the floor, not a busy loop, and garbage falls back to the
         default."""
         assert offbox_backup_interval_seconds({INTERVAL_ENV: raw}) == expected
+
+    def test_docstring_matches_the_clamp_for_non_positive_values(self):
+        """The documented degradation policy must match the pinned behaviour.
+
+        The resolver CLAMPS 0/-5 up to the floor (asserted above), but the
+        docstring used to promise the DEFAULT for "non-positive" values — a
+        reader would expect 3600 and get 60 (#8610 review P3). The docstring is
+        the only place this policy is stated, so pin it to the behaviour.
+        """
+        doc = " ".join((offbox_backup_interval_seconds.__doc__ or "").split())
+        assert "MIN_INTERVAL_SECONDS" in doc
+        assert "non-positive" in doc, doc
+        assert not re.search(
+            r"non-positive[^.]*falls back to the default", doc), doc
+        # And the claim is true of the code, not just of the prose.
+        assert offbox_backup_interval_seconds({INTERVAL_ENV: "0"}) == \
+            MIN_INTERVAL_SECONDS != DEFAULT_INTERVAL_SECONDS
 
 
 class TestGraphName:
@@ -229,10 +247,42 @@ class TestDriverLoop:
         assert "R2 unreachable" in (driver.last_error or "")
         assert any(r.levelname == "ERROR" for r in caplog.records)
 
-        # Recovery clears the error state on the next success.
+        # Recovery clears the error state AND the failure streak on the next
+        # success — the error line says "consecutive", so an intermittent
+        # target must report failure #1 again, not keep counting (#8610 P3).
         driver._run = lambda: {"status": "backed_up"}
         assert driver.run_once() is not None
         assert driver.runs == 1 and driver.last_error is None
+        assert driver.failures == 0, (
+            "a success must reset the 'consecutive failure(s)' streak")
+
+    def test_failure_streak_does_not_survive_a_success(self, caplog):
+        """fail -> success -> fail reports a streak of ONE, not two.
+
+        ``failures`` is the number the ERROR line prints as
+        "N consecutive failure(s)", and it is the lane's only run-health
+        signal, so a cumulative counter would read an intermittent target as a
+        continuous outage and hide the recovery (#8610 review P3). Asserting
+        the counter directly on the pre-fix code fails: it reaches 2.
+        """
+        def _boom():
+            raise RuntimeError("R2 unreachable")
+
+        driver = OffboxBackupDriver(interval_seconds=60, run=_boom)
+        with caplog.at_level("ERROR"):
+            assert driver.run_once() is None
+            assert driver.failures == 1
+            driver._run = lambda: {"status": "backed_up"}
+            assert driver.run_once() is not None
+            driver._run = _boom
+            assert driver.run_once() is None
+        assert driver.failures == 1, (
+            "one consecutive failure after a success, not a cumulative 2")
+        # ...and the emitted line must say so, since it is the operator's only
+        # signal that the target recovered in between.
+        final = [r for r in caplog.records
+                 if r.levelname == "ERROR" and "consecutive" in r.getMessage()]
+        assert final and "1 consecutive" in final[-1].getMessage()
 
     def test_start_is_idempotent_and_stop_joins(self):
         """The name claims a JOIN, so assert the join — not the bookkeeping.

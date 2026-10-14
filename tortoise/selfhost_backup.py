@@ -90,9 +90,11 @@ class _NoControlPlane:
 def offbox_backup_interval_seconds(env: dict | None = None) -> int:
     """Resolve the sweep interval, clamped to ``[MIN_INTERVAL_SECONDS, ∞)``.
 
-    A non-numeric or non-positive value falls back to the default rather than
-    raising: the cadence knob must never be able to wedge a boot, and the
-    failure is visible in the boot line the driver logs.
+    A non-numeric value falls back to the default rather than raising; a value
+    below the floor — including a non-positive one — is clamped UP to
+    ``MIN_INTERVAL_SECONDS`` (a typo'd ``0`` becomes one minute, never a busy
+    loop). Either way the cadence knob can never wedge a boot, and the resolved
+    value is visible in the boot line the driver logs.
     """
     raw = (env if env is not None else os.environ).get(INTERVAL_ENV, "")
     try:
@@ -208,9 +210,12 @@ class OffboxBackupDriver:
     that restarts before its first interval produces no archive, which is why
     the boot signal says a declared target is not yet a copy.
 
-    State is deliberately minimal — a stop event and counters. The thread is
-    a daemon so a wedged store can never hold the interpreter open past the
-    daemon's own shutdown drain (#2203's discipline).
+    State is deliberately minimal — a stop event and counters. ``failures``
+    counts CONSECUTIVE failed runs (a success resets it), which is what the
+    "N consecutive failure(s)" error line claims and what lets an operator see
+    a target recover. The thread is a daemon so a wedged store can never hold
+    the interpreter open past the daemon's own shutdown drain (#2203's
+    discipline).
     """
 
     def __init__(self, *, interval_seconds: int, run=None, sleep=None) -> None:
@@ -255,6 +260,11 @@ class OffboxBackupDriver:
             )
             return None
         self.runs += 1
+        # CONSECUTIVE, not cumulative: a success resets the streak so the
+        # error line's "N consecutive failure(s)" is true after a recovery
+        # rather than reporting an intermittent target as a continuous outage
+        # (#8610 review P3).
+        self.failures = 0
         self.last_error = None
         self.last_result = result
         _logger.info(
