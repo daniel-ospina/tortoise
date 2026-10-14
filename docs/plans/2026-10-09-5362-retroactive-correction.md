@@ -506,7 +506,7 @@ temporal properties of both points (reachable through the SDK, MCP and the hoste
 
 | # | Residual | Polarity | Silent mis-read possible? |
 |---|---|---|---|
-| RES-1 | `t = vP` reads `ambiguous` (one instant per correction, §3.3) | fail-safe **only if the consumer tests `status`** — the `ambiguous` branch now sets `found=True` with `valid_point` absent (#7818) and the reader is SDK-only | **No** — the `.get("found")`-reads-ambiguity-as-absence gap is **fixed by #7818** (branch on `status`, never on `found` alone; the `t = vP` ambiguity itself remains flagged, not silent) |
+| RES-1 | `t = vP` reads `ambiguous` (one instant per correction, §3.3) | fail-safe **only if the consumer tests `status`** — ✅ the `found` omission is **fixed by #7818**: the `ambiguous` branch now sets `found=True` with `valid_point` absent, and every reply carries `status` (`found`/`ambiguous`/`absent`) | **No** since #7818 for a `status`-aware consumer (branch on `status`, never on `found` alone); a `.get("found")`-only consumer still cannot tell two candidates from one — the `t = vP` ambiguity itself remains flagged, not silent |
 | RES-2 | both-refuse inputs (§2) | fail-safe (refuse; escape named) | no |
 | RES-3 | no automated trip for "#5362 never lands" | process | n/a |
 | RES-4 | `audit.py:665` flags only strict `k_to < k_from`, so the collapse is audit-invisible (and it never counted overlapping candidates) | fail-safe but **under-reports** | "audit clean" ≠ "no ambiguity" |
