@@ -1321,8 +1321,25 @@ fi
 SH
   # `gh` returns a head sha (so the refusal path has a real head it COULD have recorded against),
   # `git` answers the worktree lookup — no repo, no network, no writes outside $TMP.
+  # ⚠️ The `git` stub must model the EFFECT of `worktree add --detach <dir> <base>`, not only its
+  # status: the shipped merge-one.sh cds INTO the review sandbox it asks for (#8484), so a stub that
+  # exits 0 without creating <dir> models a git that does not exist and the driven checks below stop
+  # measuring the load gate at all.
   printf '#!/bin/bash\nfor a in "$@"; do [ "$a" = ".headRefOid" ] && { echo deadbeefdeadbeef; exit 0; }; done\nexit 0\n' > "$GB/gh"
-  printf '#!/bin/bash\ncase "${1:-}" in worktree) printf "worktree /tmp/w\\nbranch refs/heads/br\\n" ;; rev-parse) exit 0 ;; *) printf "\\n" ;; esac\nexit 0\n' > "$GB/git"
+  cat > "$GB/git" <<'SH'
+#!/bin/bash
+if [ "${3:-}" = "worktree" ] && [ "${4:-}" = "add" ]; then
+  prev=""
+  for a in "$@"; do
+    if [ "$prev" = "--detach" ]; then mkdir -p "$a"; break; fi
+    prev="$a"
+  done
+  echo "Preparing worktree"
+  exit 0
+fi
+case "${1:-}" in worktree) printf 'worktree /tmp/w\nbranch refs/heads/br\n' ;; rev-parse) exit 0 ;; *) printf '\n' ;; esac
+exit 0
+SH
   chmod +x "$GB"/*
   printf 'prompt\n' > "$TMP/gate-prompt.txt"
   # the shipped helper, run under a fake load of 150 (the box's real ceiling is 100)
@@ -1368,11 +1385,19 @@ SH
   probe merge-one.sh 150 "$TMP/pmO" "$TMP/mrepo" owner/repo 1 br
   [ "$PROBE_RC" = "75" ] && [ ! -e "$GMARK" ] && grep -q REFUSED "$TMP/pmO/logs/merge-1.log" && rc=0 || { rc=1; echo "      rc=$PROBE_RC"; }
   ck "merge-one.sh under load 150 (the chain-<N> path): reviewer REFUSES to spawn, exits 75" $rc
+  # #8484: the refusal must also leave NO review sandbox. The gate is consulted before the checkout
+  # is provisioned, so a refused run does no repo-sized work on the box it was refused for.
+  [ ! -e "$TMP/pmO/review" ] && rc=0 || { rc=1; echo "      sandbox left: $(ls "$TMP/pmO/review" 2>/dev/null | tr '\n' ' ')"; }
+  ck "a load-refused reviewer creates NO review sandbox (the gate precedes the checkout)" $rc
   [ -z "$(ls "$TMP/pmO/state" 2>/dev/null | grep '^needsfix-1-')" ] && [ ! -e "$TMP/pmO/state/mergeclaim-1.lock" ] && rc=0 || { rc=1; echo "      state: $(ls "$TMP/pmO/state" 2>/dev/null | tr '\n' ' ')"; }
   ck "a load refusal is NOT a verdict: no needsfix marker, and the PR claim is released" $rc
   probe merge-one.sh 3 "$TMP/pmO2" "$TMP/mrepo" owner/repo 1 br
   [ -e "$GMARK" ] && rc=0 || rc=1
   ck "merge-one.sh under load 3: the reviewer IS spawned" $rc
+  # …and the reviewer really was given the sandbox: the EXIT trap must have removed it again, so a
+  # leaked mutant cannot survive the run (#8484).
+  [ -d "$TMP/pmO2/review" ] && [ ! -e "$TMP/pmO2/review/1-deadbeefdeadbeef" ] && rc=0 || { rc=1; echo "      review dir: $(ls "$TMP/pmO2/review" 2>/dev/null | tr '\n' ' ')"; }
+  ck "a completed review leaves no sandbox behind (the EXIT trap reaped it)" $rc
   # fix-one.sh — the post-fix re-review path, and what adopt-fix.sh runs. A refusal must also skip
   # re-running the merge chain: nothing changed, so a re-review is pure cost on a loaded box.
   probe fix-one.sh 150 "$TMP/pfO" "$TMP/mrepo" owner/repo 1 br
@@ -1786,8 +1811,11 @@ if need "$TMP/lockblock.sh" "the lock+trap block is extracted from the shipped o
 
   # The same defect on merge-one.sh's per-PR claim (§5.1b): a TERM must not free the claim while
   # the worker keeps reviewing/merging, which let a second worker spawn for the same head.
-  sed -n '/^CLAIM="\$O\/state\/mergeclaim-\$PR.lock"/,/^trap .rm -f "\$CLAIM".*$/p' "$MERGE" > "$TMP/claimtrap.sh"
-  if need "$TMP/claimtrap.sh" "the claim+trap block is extracted from the shipped merge-one.sh"; then
+  # The extraction starts at the review helpers (#8484) because the EXIT trap now calls
+  # review_cleanup: a driver holding the trap but not the function would fail at exit for a reason
+  # unrelated to what this check measures.
+  sed -n '/^# .*review_helpers: the reviewer/,/^trap .rm -f "\$CLAIM".*$/p' "$MERGE" > "$TMP/claimtrap.sh"
+  if need "$TMP/claimtrap.sh" "the claim+trap block (with the review helpers it now calls) is extracted from the shipped merge-one.sh"; then
     { echo 'set -u'; echo "O='$LK'"; echo 'PR=9191'; echo "L='$LK/claim'"; cat "$TMP/claimtrap.sh"; echo 'while :; do sleep 0.2; done'; } > "$LK/mdrive.sh"
     bash -n "$LK/mdrive.sh" && rc=0 || rc=1
     ck "the claim-trap driver parses" $rc
@@ -1856,6 +1884,70 @@ if need "$TMP/lockblock.sh" "the lock+trap block is extracted from the shipped o
   out="$(bash "$LK/acquire.sh" 2>&1)"
   case "$out" in *ACQUIRED*) rc=1; echo "      a live lock was stolen";; *) rc=0;; esac
   ck "a lock held by a LIVE pid is NOT stolen (reclamation is not a silent overwrite)" $rc
+fi
+
+# ── 21) the reviewer is CONTAINED in its own checkout, and a ref move is LOUD (#8484) ─────────
+# #8484: the fresh-context reviewer was run with cwd = the SHARED checkout, with the main-edits hatch
+# open and VGATE skipped, so "do not touch the main checkout" was a prompt aimed at a model with
+# shell access. A reviewer that mutated the tree it was reading, committed, merged origin/main and
+# pushed — unprompted — is the observed failure, and it absorbed the controller's unstaged edits.
+# These checks read the SHIPPED script and drive the SHIPPED helpers against a real throwaway repo,
+# so they fail on the pre-fix copy rather than re-implementing the fix.
+rc=0
+grep -qE '^export [^#]*AGENT_ALLOW_MAIN_EDITS' "$MERGE" && rc=1 || rc=0
+ck "merge-one.sh does NOT open the main-edits hatch for its reviewer" $rc
+grep -q 'cd "\$SANDBOX"' "$MERGE" && rc=0 || rc=1
+ck "the reviewer's cwd is the sandbox (cd \"\$SANDBOX\")" $rc
+grep -qE '^ *cd \$REPO && git fetch' "$MERGE" && rc=1 || rc=0
+ck "the reviewer prompt no longer sends the reviewer into the shared checkout" $rc
+sed -n '/^review_sandbox() {/,/^}/p;/^review_cleanup() {/,/^}/p;/^ref_shas() {/,/^}/p' "$MERGE" > "$TMP/rfuncs.sh"
+if need "$TMP/rfuncs.sh" "the review-sandbox helpers are extracted from the shipped merge-one.sh"; then
+  SB="$TMP/src"; mkdir -p "$SB"
+  git -C "$SB" init -q
+  git -C "$SB" config user.email sb@test; git -C "$SB" config user.name sb
+  echo one > "$SB/f"; git -C "$SB" add f; git -C "$SB" commit -qm one
+  git -C "$SB" branch -q feat/x
+  SHA="$(git -C "$SB" rev-parse refs/heads/feat/x)"
+  OUT="$TMP/out"
+  {
+    echo 'set -u'
+    echo "O='$OUT'"; echo "REPO='$SB'"; echo 'PR=9191'
+    cat "$TMP/rfuncs.sh"
+    echo 'SANDBOX="$(review_sandbox '"$SHA"')"; echo "SANDBOX=$SANDBOX"'
+    echo '[ -n "$SANDBOX" ] || exit 1'
+    echo 'cd "$SANDBOX" || exit 1'
+    echo 'echo "DETACHED=$(git rev-parse --abbrev-ref HEAD)"'
+    echo 'echo mutant > f'
+    echo 'git add f && git commit -qm mutant'
+    echo 'echo "SRC_TIP=$(git -C "$REPO" rev-parse refs/heads/feat/x)"'
+    echo 'echo "SRC_FILE=$(cat "$REPO/f")"'
+    echo 'echo "PRE=$(ref_shas feat/x)"'
+    echo 'echo two > "$REPO/g"; git -C "$REPO" add g; git -C "$REPO" commit -qm two'
+    echo 'git -C "$REPO" update-ref refs/heads/feat/x HEAD'
+    echo 'echo "POST=$(ref_shas feat/x)"'
+    echo 'review_cleanup'
+    echo 'echo "GONE=$([ -d "$SANDBOX" ] && echo no || echo yes)"'
+  } > "$TMP/sbdrive.sh"
+  bash -n "$TMP/sbdrive.sh" && rc=0 || rc=1
+  ck "the review-sandbox driver parses" $rc
+  sbout="$(bash "$TMP/sbdrive.sh" 2>&1)"
+  sbp="$(printf '%s' "$sbout" | grep -a '^SANDBOX=' | cut -d= -f2-)"
+  case "$sbp" in "" | "$SB"/*) rc=1;; *) rc=0;; esac
+  ck "the reviewer's checkout is created OUTSIDE the reviewed repo" $rc
+  case "$sbout" in *'DETACHED=HEAD'*) rc=0;; *) rc=1;; esac
+  ck "the reviewer's checkout is DETACHED — a commit there cannot move a branch" $rc
+  case "$sbout" in *"SRC_TIP=$SHA"*) rc=0;; *) rc=1; echo "      got: $(printf '%s' "$sbout" | grep -a SRC_TIP)";; esac
+  ck "a commit made in the sandbox does NOT move the reviewed branch" $rc
+  case "$sbout" in *'SRC_FILE=one'*) rc=0;; *) rc=1;; esac
+  ck "a mutation written in the sandbox does NOT reach the reviewed tree" $rc
+  sbpre="$(printf '%s' "$sbout" | grep -a '^PRE=' | cut -d= -f2-)"
+  sbpost="$(printf '%s' "$sbout" | grep -a '^POST=' | cut -d= -f2-)"
+  [ -n "$sbpre" ] && [ "$sbpre" != "$sbpost" ] && rc=0 || { rc=1; echo "      pre='$sbpre' post='$sbpost'"; }
+  ck "ref_shas reports an unrequested ref move (the detector is not vacuous)" $rc
+  case "$sbout" in *'GONE=yes'*) rc=0;; *) rc=1;; esac
+  ck "review_cleanup removes the reviewer's checkout (no mutant is left behind)" $rc
+  [ "$(git -C "$SB" worktree list 2>/dev/null | wc -l | tr -d ' ')" = "1" ] && rc=0 || rc=1
+  ck "review_cleanup leaves no worktree admin entry in the reviewed repo" $rc
 fi
 
 echo
