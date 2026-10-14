@@ -2111,11 +2111,15 @@ def check_consistency(log_path: str, projection, *,
                                           "never baselined"); reported, never
                                           treated as a divergence
       state_superseded_format           — the format of a WELL-FORMED
-                                          predecessor baseline that this run
-                                          MIGRATED (re-baselined at the current
-                                          format; #8268/#7936). Version skew,
+                                          predecessor baseline this run
+                                          OBSERVED (#8268/#7936); version skew,
                                           not corruption — so it is NOT a
-                                          divergence and NOT a state_error
+                                          divergence and NOT a state_error.
+                                          The migration is APPLIED only when
+                                          `state_recorded` is True: a read-only
+                                          or non-healthy run reports the
+                                          predecessor and leaves the
+                                          re-baseline to the next recording run
       excluded_fields                   — {key: reason} for every field the
                                           comparison did NOT decide but saw
       one_sided_fields                  — {key: reason} for a field present on
@@ -2186,8 +2190,11 @@ def check_consistency(log_path: str, projection, *,
     # The `(label, id)` re-key of THIS Point view and of `db_hash` — one index
     # deriving `log_points`/`db_points`/`_compare_views`/the fingerprint — stays
     # open on #7936: widening the digest moves `content_hash` for every existing
-    # baseline and the sidecar has no migration (an untrusted/differing state is
-    # never re-recorded), so it needs a baseline-format change first.
+    # baseline, so it needs a `format_version` bump first — append the new format
+    # to `_PROJECTION_STATE_FORMAT_HISTORY`. That is no longer a dead end
+    # (#8268/#7936): a known predecessor is MIGRATED (re-baselined at the current
+    # format) on the next healthy recording run, so the re-key is landable
+    # without stranding the baseline.
     count_rows = projection.query("MATCH (n:Point) RETURN count(n)").result_set
     db_count = 0
     if count_rows and len(count_rows[0]) > 0:
