@@ -48,23 +48,28 @@ test('#2784 tripwire: the anchors resolve to real regions (non-vacuity guard)', 
   assert.ok(cellStart !== -1 && cellBody.length > 0, 'GraphBackupCell body slice non-empty')
 })
 
-test('#2784 tripwire: the Graphs table declares exactly six columns, Last backup before Actions', () => {
+test('#2784 tripwire: the Graphs table declares exactly seven columns, Last backup before Recording before Actions', () => {
   const header = mainJsx.slice(tableStart, mainJsx.indexOf('</thead>', tableStart))
   const ths = header.match(/<th[ >]/g) || []
-  assert.equal(ths.length, 6, `expected 6 <th>, got ${ths.length}`)
+  assert.equal(ths.length, 7, `expected 7 <th>, got ${ths.length}`)
   assert.match(header, /<th scope="col">Last backup<\/th>/, 'Last backup header present')
   assert.ok(header.indexOf('Last backup') > header.indexOf('Keys'),
     'Last backup sits AFTER Keys — the three e2e locators index the Keys cell positionally (nth(3))')
+  // #2650: the per-graph Recording column sits AFTER Last backup, so the
+  // positional Keys (nth(3)) and Last-backup locators keep their indices.
+  assert.match(header, /<th scope="col">Recording<\/th>/, 'Recording header present (#2650)')
+  assert.ok(header.indexOf('Recording') > header.indexOf('Last backup'),
+    'Recording sits AFTER Last backup — inserting it earlier would shift the Keys cell the e2e suite indexes at nth(3)')
   assert.match(header, /<span className="sr-only">Actions<\/span><\/th><\/tr>$/, 'Actions stays last')
   const scoped = header.match(/<th scope="col">/g) || []
-  assert.equal(scoped.length, 6, `every Graphs <th> must carry scope="col" (got ${scoped.length})`)
+  assert.equal(scoped.length, 7, `every Graphs <th> must carry scope="col" (got ${scoped.length})`)
 })
 
-test('#2784 tripwire: all four empty-state rows carry colSpan="6" and none is left at 5', () => {
+test('#2784 tripwire: all four empty-state rows carry colSpan="7" and none is left at 6', () => {
+  const spans7 = graphsTable.match(/colSpan="7"/g) || []
   const spans6 = graphsTable.match(/colSpan="6"/g) || []
-  const spans5 = graphsTable.match(/colSpan="5"/g) || []
-  assert.equal(spans6.length, 4, `expected 4 colSpan="6" rows (loading/denied/error/empty), got ${spans6.length}`)
-  assert.equal(spans5.length, 0, 'no empty-state row may keep the 5-column span')
+  assert.equal(spans7.length, 4, `expected 4 colSpan="7" rows (loading/denied/error/empty), got ${spans7.length}`)
+  assert.equal(spans6.length, 0, 'no empty-state row may keep the 6-column span (#2650)')
 })
 
 test('#2784 tripwire: the data row renders the cell from the row object (identity join, not an index)', () => {
