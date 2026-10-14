@@ -40,14 +40,40 @@ git fetch origin --quiet 2>/dev/null || true
 # OOM, crash) therefore blacklists its issue forever — invisibly, because the issue stays open
 # with no PR. Real cases: #4114, #4095, #3554 sat for >24h. Un-blacklist an entry whose issue is
 # still open, has no PR, and has no live lane, so the pre-flight below can re-queue it.
-gh issue list --repo "$OR" --state open --limit 500 --json number --jq '.[].number' > "$O/.open_iss" 2>/dev/null || : > "$O/.open_iss"
-gh pr list --repo "$OR" --state all --limit 500 --json headRefName --jq '.[].headRefName' > "$O/.pr_brs" 2>/dev/null || : > "$O/.pr_brs"
+# ⛔ A FAILED listing is NOT an EMPTY one, and the reader below cannot tell them apart. `|| : >
+# "$O/.pr_brs"` wrote an EMPTY file when `gh pr list` failed, and an empty `.pr_brs` makes the
+# reaper's `has_pr` false for EVERY issue — so a failed listing un-blacklisted open issues that DO
+# have a PR. orch-loop.sh skips only what is in dispatched.txt, so it then re-spawned a lane for an
+# issue that already had one: duplicate work against the shared queue (agent-infra#1705). Write each
+# list only when the listing SUCCEEDS and DELETE it when it fails, so "the read failed" (ABSENT) is
+# distinguishable from "the answer is none" (PRESENT but EMPTY). The reaper refuses the whole pass
+# unless both are present; a genuinely empty list is still a valid answer and still reaps.
+if ! gh issue list --repo "$OR" --state open --limit 500 --json number --jq '.[].number' > "$O/.open_iss" 2>/dev/null; then
+  rm -f "$O/.open_iss"
+  echo "[refresh] WARN: open-issue listing FAILED — reaping pass will be skipped (an unreadable listing is not an empty one)"
+fi
+if ! gh pr list --repo "$OR" --state all --limit 500 --json headRefName --jq '.[].headRefName' > "$O/.pr_brs" 2>/dev/null; then
+  rm -f "$O/.pr_brs"
+  echo "[refresh] WARN: PR listing FAILED — reaping pass will be skipped (an unreadable listing is not an empty one)"
+fi
 python3 - "$O" <<'PY'
 import os, re, subprocess, sys
 O = sys.argv[1]
 def lines(name):
     p = os.path.join(O, name)
     return [l.strip() for l in open(p)] if os.path.exists(p) else []
+# ⛔ FAIL CLOSED. An ABSENT list means the read FAILED, which is not the same as "the answer is
+# none". The capture above deletes the file when `gh` fails, so absence is the failure signal — and
+# without this guard `brs == []` makes `has_pr` false for EVERY issue, un-blacklisting open issues
+# that DO have a PR; orch-loop.sh (which skips only what is in dispatched.txt) then re-spawns a lane
+# for them. Refuse the whole pass and leave the blacklist untouched, so the next cycle retries with a
+# live listing. A PRESENT but EMPTY file is a real answer ("no PRs") and is still reaped.
+# (agent-infra#1705)
+missing = [f for f in (".open_iss", ".pr_brs") if not os.path.exists(os.path.join(O, f))]
+if missing:
+    print("[reap] SKIPPED: %s not readable — an unreadable listing is not an empty one; blacklist untouched"
+          % " ".join(missing))
+    raise SystemExit(0)
 open_iss = {l for l in lines(".open_iss") if l}
 brs = [l for l in lines(".pr_brs") if l]
 try:
@@ -116,12 +142,14 @@ while read -r N; do
   # examined and the backlog could never refill (#8469 review P2). A no-verdict entry costs
   # nothing against `LIMIT`; it is bounded by `RETRY_MAX` in the `*)` arm below instead.
   [ "$n" -ge "$LIMIT" ] && break
-  # ⛔ A pre-flight that ERRORED is not a verdict. Mark the issue checked only on a real
-  # CLEAN/COLLISION answer: an empty VERDICT line (API failure, missing venv, timeout) used to
-  # be written to checked.txt just the same, consuming the issue permanently and invisibly.
-  # checked.txt=63 against candidates.txt=9 on 2026-10-13 is what that leak looks like.
+  # ⛔ A pre-flight that ERRORED is not a verdict. Mark the issue checked only on a real CLEAN
+  # answer: an empty VERDICT line (API failure, missing venv, timeout) used to be written to
+  # checked.txt just the same, consuming the issue permanently and invisibly.
+  # checked.txt=63 against candidates.txt=9 on 2026-10-13 is what that leak looks like. A
+  # COLLISION is likewise transient — the colliding work lands — so it too is retried rather than
+  # blacklisted forever (agent-infra#1716 / #8515).
   PRE="$("$SC/.venv/bin/python" tools/collision_preflight.py "$N" --repo . 2>&1)"
-  # INCOMPLETE (exit 3, some surfaces unqueried) is a REAL verdict, not a missing one — capture
+  # INCOMPLETE (exit 2, some surfaces unqueried) is a REAL verdict, not a missing one — capture
   # it so the log names what happened instead of calling it "no verdict".
   V="$(printf '%s\n' "$PRE" | grep -E '^VERDICT' | head -1 | sed -E 's/.*VERDICT: (CLEAN|COLLISION|INCOMPLETE).*/\1/')"
   case "$V" in
@@ -132,10 +160,11 @@ while read -r N; do
       echo "$N" >> "$O/candidates.txt"
       echo "[refresh] +#$N CLEAN -> backlog" ;;
     COLLISION)
+      # A peer's work is in flight; a collision is transient by nature, so leave the issue
+      # unchecked and re-attempt it next pass rather than consuming it permanently.
       n=$((n+1))
-      echo "$N" >> "$O/checked.txt"
       rm -f "$O/state/pretry-$N"
-      echo "[refresh] =#$N collision — a peer owns it, not queued" ;;
+      echo "[refresh] =#$N collision — a peer owns it, retried next pass" ;;
     *)
       # No verdict (empty) or an INCOMPLETE one (unqueryable surfaces). Leave the issue for the
       # next pass — a transient failure must NOT blacklist it — but BOUND the retries: a

@@ -386,6 +386,33 @@ SOURCE_PATTERNS = {
                    "website/functions/contact/submit.ts",
                    "website/website_architecture.md",
                    "docs/auth-architecture.md",
+                   # #3329: `test_capacity_page.py` pins the public capacity page and
+                   # derives its write-concurrency figure from
+                   # `tests/test_embedded_concurrency.py`'s own coverage. `docs/` is in
+                   # NON_PYTHON_PREFIXES and is not itself a pattern, so without this
+                   # CONCRETE entry a `docs/capacity.md`-only edit selects NO surface and
+                   # the guard is asleep on the one change it exists to catch (exactly
+                   # the requirement #3329 states: every published number stays bound to
+                   # its source).
+                   "docs/capacity.md",
+                   # #3329: the same guard pins the write-concurrency figure in the
+                   # self-hosted quickstart (and `.env.example`, which falls through to a
+                   # FULL selection). `docs/` is in NON_PYTHON_PREFIXES, so a
+                   # quickstart-only diff would otherwise select NOTHING and leave the
+                   # figure unpinned in the file a self-hoster actually reads.
+                   "docs/quickstart-selfhosted.md",
+                   # #3329: the guard DERIVES the published write-concurrency figure
+                   # from this test file's own loop bound, so a change to it can
+                   # invalidate the prose the guard pins. Without this entry a
+                   # `tests/test_embedded_concurrency.py`-only diff matched only
+                   # the `tests/` -> `core` fallback and did NOT select
+                   # `test_capacity_page.py` — a PR that bumped the coverage to
+                   # six writers and left the docs stale merged green, and the
+                   # drift surfaced only on the post-merge `push` full run (the
+                   # #3442 shape). Same #1349/#3332/#3616 class: the derived
+                   # source needs the same reachability guarantee as the docs it
+                   # feeds (#8492).
+                   "tests/test_embedded_concurrency.py",
                    # #3524: `test_oauth_consent_bridge.py` also pins the two auth
                    # records its subject is specified in — the consent bridge spec
                    # (`docs/engineering/auth/consent-identity-bridge.md`) and the
@@ -944,6 +971,17 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # class). Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "supabase/migrations/2026101200000",
+             # #8263: the FORWARD record migration that adds `status` to
+             # `subject.props`'s refusal. It sorts OUTSIDE the
+             # `2026101200000` prefix above, and `supabase/` is in
+             # NON_PYTHON_PREFIXES, so without its own entry a
+             # forward-migration-only change would select NO surface and the two
+             # readers (`test_record_projection.py`,
+             # `test_record_schema_placement.py`) would not run on the very
+             # change that can drift them — the same #1349/#3332/#3616
+             # silent-drop class as the entry above. Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
+             "supabase/migrations/20261014000001_record_subject_props_no_derived.sql",
              "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
              # #8469 review P1: the orchestrator harness's shipped shell scripts
              # (lane.sh, merged-not-closed.sh, refresh-candidates.sh, orch-loop.sh,

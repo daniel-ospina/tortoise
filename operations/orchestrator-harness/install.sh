@@ -18,7 +18,13 @@ REPO="${REPO:-/Users/danielospina/Documents/GitHub/tortoise}"
 OR="${OR:-daniel-ospina/tortoise}"
 
 # sanity ceiling only; the swap/RAM gates below are the real constraint.
-_NCPU="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+# Portable core count, IDENTICAL to orch-loop.sh's line. install.sh itself refuses to run off macOS
+# (it renders a launchd plist), but selftest §7 EVALUATES this assignment on whatever host runs the
+# suite and compares it with the loop's — so on a Linux host a divergence here would resolve
+# MAX_LOAD=40 against the loop's cores*10 and fail a check for a difference with no runtime effect.
+# sysctl -n hw.ncpu is a macOS-only key and sysctl is absent from a minimal Linux userland
+# (debian:stable-slim ships no procps): in the LOOP that silently pinned _NCPU=4, MAX_LOAD=40 (#1702).
+_NCPU="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 MAX_LOAD="${MAX_LOAD:-$(( _NCPU * 10 ))}"
 MAX_LANES="${MAX_LANES:-4}"
 MAX_REVIEW="${MAX_REVIEW:-4}"
@@ -259,7 +265,7 @@ ok "plist valid"
 # invokes, not just orch-loop.sh. A drift here is silent and serious: a fix applied only to the
 # shipped copy (e.g. the fail-closed ai-review-gate classifier) would never reach the running box.
 DRIFTED=""
-for f in orch-loop.sh dispatch-merge.sh lane.sh chain-merge.sh merge-one.sh fix-one.sh refresh-candidates.sh adopt-fix.sh merged-not-closed.sh; do
+for f in orch-loop.sh dispatch-merge.sh lane.sh chain-merge.sh merge-one.sh fix-one.sh refresh-candidates.sh adopt-fix.sh merged-not-closed.sh spawn-gate.sh; do
   [ -f "$O/$f" ] || { DRIFTED="$DRIFTED $f(missing)"; continue; }
   diff -q "$HERE/$f" "$O/$f" >/dev/null 2>&1 || DRIFTED="$DRIFTED $f"
 done

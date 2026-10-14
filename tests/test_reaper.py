@@ -3185,7 +3185,7 @@ def test_lock_holder_verdict_rejects_a_non_finite_or_unparsable_start():
         matching start. ``abs(anything - nan) > 2.0`` is **False**, so without
         the guard `start=nan` falls through to the live-holder branch and is
         reported as ``verified`` — a FAIL-OPEN confidence claim, the same trap
-        `_live_owner_counts` documents from the #3599 review (`1e400` -> inf
+        `_owner_records` documents from the #3599 review (`1e400` -> inf
         takes the identical path).
     """
     import tortoise.embedded_reaper as er
@@ -3203,7 +3203,7 @@ def test_lock_holder_verdict_rejects_an_unparsable_or_nonpositive_pid():
 
     #4299 review cycle 1 (P1, found independently by two reviewers):
     `pid_raw.isdigit()` is True for non-decimal Unicode digits (`²`, `①`) that
-    `int()` rejects — the exact trap `_live_owner_counts` documents — so the
+    `int()` rejects — the exact trap `_owner_records` documents — so the
     pre-fix parser raised `ValueError: invalid literal for int()` from the
     refusal path. `pid<=0` is the sibling guard: `os.kill(0, 0)` succeeds
     against the caller's own process group (#3599), so `pid=0` can never be a
@@ -3213,9 +3213,15 @@ def test_lock_holder_verdict_rejects_an_unparsable_or_nonpositive_pid():
     `+5` and `5_0`, forms no writer emits, so the pid must be ASCII DECIMAL
     digits (`isascii() and isdigit()`), with the guarded `int()` kept as the
     totality backstop.
+
+    BOTH halves of that gate are bound here, and each catches a different set:
+    `\u0665`/`\uff15` are `isdigit()`-True NON-ASCII decimals that `int()`
+    parses happily (so `isascii()` is load-bearing, not decoration), while
+    `+5`/`5_0` are admitted by `int()` and rejected by `isdigit()`.
     """
     import tortoise.embedded_reaper as er
     for record in ("pid=\u00b2\nstart=1.0\n", "\u00b2", "pid=\u2460\nstart=1.0\n",
+                   "pid=\u0665\nstart=1.0\n", "pid=\uff15\nstart=1.0\n",
                    "pid=0\nstart=1.0\n", "pid=-1\nstart=1.0\n",
                    "pid=+5\nstart=1.0\n", "pid=5_0\nstart=1.0\n",
                    "pid=0x5\nstart=1.0\n"):
@@ -3229,10 +3235,14 @@ def test_lock_holder_verdict_is_total_for_a_pid_beyond_the_int_limit():
 
     `isascii() and isdigit()` admit a pid of ANY length, and CPython's
     int-string conversion RAISES above ~4300 digits — so the `try/except` is
-    load-bearing for totality, not decoration. (Cycle 3: reverting it reddens
-    THIS test while every other parser test stays green, and the ASCII gate in
-    front of it makes the older `isdigit()` mutation a no-op — the gate already
-    rejects every non-decimal digit.)
+    load-bearing for totality, not decoration: removing it reddens THIS test
+    while every other parser test stays green.
+
+    (The `isascii()` half of the gate is bound separately, by
+    `test_lock_holder_verdict_rejects_an_unparsable_or_nonpositive_pid`: the
+    non-ASCII DECIMAL digits `\u0665`/`\uff15` are `isdigit()`-True and `int()`
+    parses them to 5, so without `isascii()` they parse to a pid taken from a
+    record this module did not write — the defect #4299 removes.)
 
     It cannot arrive through `_lock_record_read()` (which caps the read at 128
     bytes), so this pins the contract for a direct call rather than an input

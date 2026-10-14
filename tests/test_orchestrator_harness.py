@@ -24,8 +24,8 @@ Findings covered (all reproduced by the reviewer at the pre-fix head):
   never to emit ("2 when a surface could not be queried — never 1").
 * ``refresh-candidates.sh`` marked an issue checked even when the pre-flight
   emitted NO verdict, blacklisting it forever (``checked.txt=63`` vs
-  ``candidates.txt=9`` live). Only a real ``CLEAN``/``COLLISION`` marks it now;
-  the no-verdict arm must leave it for the next pass.
+  ``candidates.txt=9`` live). Only a real ``CLEAN`` marks it now; a no-verdict
+  pre-flight AND a transient COLLISION both leave the issue for the next pass.
 * The no-verdict arm must ALSO be bounded and must not consume the pass budget:
   counting every entry against ``LIMIT`` let a few persistently non-answering
   entries at the pool head re-spend the whole pass every time, starving the
@@ -36,6 +36,10 @@ Findings covered (all reproduced by the reviewer at the pre-fix head):
   surface could not be queried: an unusable total left ``floor`` as ``None`` and
   a truncated sweep printed as a complete universe with exit 0. An unusable
   total is now an unusable surface (exit 2).
+* ``merged-not-closed.sh`` broke its own "never 1" contract on every RUNTIME
+  error path: a 200 with a non-JSON/truncated page (the #8246 mode), an item
+  with no ``number``, a ``gh`` that vanished mid-sweep, and a missing ``python3``
+  all exited 1 (traceback / 127). Every failure now maps to the documented 2.
 * ``orch-loop.sh``'s P0 merge-priority override (BP0, default-ON
   ``P0_BYPASS_MERGE_PRIORITY=1``) clears only the merge-priority gate when a
   ``P0-blocker`` is at the head of the backlog. A grep for its text stayed green
@@ -104,6 +108,8 @@ if log:
 TOTAL, PAGE = cfg["total"], cfg["page"]
 PRS, HITS = set(cfg["prs"]), set(cfg["hits"])
 TRUNC = cfg.get("truncate_pages")
+MALFORMED = cfg.get("malformed")
+MISSING_NUMBER = cfg.get("missing_number")
 
 
 def row(n):
@@ -133,6 +139,16 @@ if args[:2] == ["api", "--paginate"] and "timeline" in path:
     sys.stdout.write(json.dumps(tl)); sys.exit(0)
 
 if args[:2] == ["api", "--paginate"]:
+    if MALFORMED:
+        # A 200 with a non-JSON/truncated body — the #8246 failure mode. `gh` exits 0,
+        # so the shell cannot tell it from a real page; the parser must refuse (exit 2)
+        # rather than let a traceback exit 1.
+        sys.stdout.write('[{"number": 11, "title": "truncated page"')
+        sys.exit(0)
+    if MISSING_NUMBER:
+        # A well-formed JSON page whose single row has no `number` key.
+        sys.stdout.write(json.dumps([{"title": "no number here"}]))
+        sys.exit(0)
     pages = (TOTAL + PAGE - 1) // PAGE
     if TRUNC:
         pages = min(pages, TRUNC)
@@ -224,6 +240,30 @@ class MergedNotClosedEnumeration(unittest.TestCase):
             p = stub.run("--label", "P0-blocker")
             self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
             self.assertIn("PARTIAL", p.stderr)
+
+    def test_a_malformed_enumeration_page_exits_2_not_1(self):
+        """A 200 with a non-JSON body is a surface that could not be queried, not exit 1.
+
+        The header's contract is exit 2 — never 1 — so a caller cannot mistake "the API
+        failed" for "nothing to drain". The enumeration parse used to sit outside any
+        try/except, so a truncated page (the #8246 mode) escaped as a traceback and
+        python exited 1 (#8469 review P2).
+        """
+        with tempfile.TemporaryDirectory() as td:
+            stub = _Stub(Path(td), malformed=True)
+            p = stub.run("--label", "P0-blocker")
+            self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+            self.assertIn("could not be queried", p.stderr)
+
+    def test_an_item_without_a_number_exits_2_not_1(self):
+        """A malformed row is the same class: refuse with 2, never a KeyError exit 1."""
+        with tempfile.TemporaryDirectory() as td:
+            # total=2, one PR row -> the search floor is 1, so the enumeration is not
+            # short and the bad row is actually reached.
+            stub = _Stub(Path(td), total=2, prs=[5], hits=[11], missing_number=True)
+            p = stub.run("--label", "P0-blocker")
+            self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+            self.assertIn("could not be queried", p.stderr)
 
     def test_a_pull_request_row_is_not_counted_as_an_issue(self):
         """The `issues` endpoint returns PRs; the universe is issues."""
@@ -422,8 +462,8 @@ class RefreshPoolContract(unittest.TestCase):
     def test_a_pre_flight_with_no_verdict_is_not_marked_checked(self):
         """A pre-flight that ERRORED is not a verdict (#8469 §2).
 
-        The fix's whole substance: `checked.txt` is written only in the CLEAN/
-        COLLISION arms. With the pre-fix unconditional write, issue 10 (no VERDICT
+        The fix's whole substance: `checked.txt` is written only on a CLEAN
+        verdict. With the pre-fix unconditional write, issue 10 (no VERDICT
         line) is blacklisted forever and never re-flighted; here it must stay for the
         next pass while the later CLEAN candidate is still queued. The existing
         fixtures all print `VERDICT: CLEAN`, so neither suite took this arm.
@@ -549,6 +589,28 @@ class RefreshPoolContract(unittest.TestCase):
             self.assertEqual(states[2][1], [])
             self.assertIn("marked checked after 3 attempts",
                           procs[-1].stdout + procs[-1].stderr)
+
+
+    def test_a_collision_is_retried_not_blacklisted(self):
+        """A COLLISION is transient — the colliding work lands — so it must be retried.
+
+        `checked.txt` used to be written before the verdict was read, so a legitimate
+        COLLISION consumed the issue permanently (agent-infra#1716). With the fix, the
+        first pass records nothing and the second pass queues the issue once the peer's
+        work has landed.
+        """
+        stub = ("#!/bin/bash\n"
+                "case \"$2\" in *[!0-9]*|\"\") exit 3;; esac\n"
+                "S=\"$(dirname \"$0\")/.pass\"\n"
+                "if [ -f \"$S\" ]; then echo 'VERDICT: CLEAN'; "
+                "else : > \"$S\"; echo 'VERDICT: COLLISION'; fi\n")
+        with tempfile.TemporaryDirectory() as td:
+            procs, states = self._drive_loop(Path(td), "10\n", stub, limit="5", runs=2)
+            self.assertEqual([p.returncode for p in procs], [0, 0])
+            self.assertNotIn("10", states[0][0], "a COLLISION blacklisted the issue")
+            self.assertNotIn("10", states[0][1])
+            self.assertIn("10", states[1][0], "the re-attempted COLLISION was not queued")
+            self.assertIn("10", states[1][1])
 
 
 class MergePriorityOverride(unittest.TestCase):

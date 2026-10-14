@@ -4347,7 +4347,7 @@ def _parse_lock_record(text: str | None) -> tuple[int, float | None] | None:
     ``None`` and `lock_holder_verdict` then reports it as UNVERIFIABLE, never
     as a verified holder: a pid-only record is indistinguishable from a fossil.
 
-    ⛔ DELIBERATE DIVERGENCE from `_live_owner_counts`, which maps an
+    ⛔ DELIBERATE DIVERGENCE from `_owner_records`, which maps an
     unparsable/non-finite STAMP to ``start = None`` and KEEPS the pid. Here a
     ``start=`` that is PRESENT but cannot be read discards the whole record.
     Reason: the lock record is written by THIS module in ONE write, so a record
@@ -4372,7 +4372,7 @@ def _parse_lock_record(text: str | None) -> tuple[int, float | None] | None:
     pid_raw = fields.get("pid", "")
     # Decimal ASCII digits only — two gates, because each catches a DIFFERENT
     # set: `isdigit()` alone accepts non-decimal Unicode digits (`²`, `①`) that
-    # `int()` then REJECTS (the trap `_live_owner_counts` documents from the
+    # `int()` then REJECTS (the trap `_owner_records` documents from the
     # #3599 review), while `int()` alone also accepts `+5` and `5_0`, forms no
     # writer emits (found by review, cycle 2). The guarded `int()` stays as the
     # totality backstop. This parser must be TOTAL: it runs in the REFUSAL path
@@ -4381,6 +4381,10 @@ def _parse_lock_record(text: str | None) -> tuple[int, float | None] | None:
     # remove (#4299 review, cycle 1).
     if not pid_raw.isascii() or not pid_raw.isdigit():
         return None
+    # ...where `isascii()` is LOAD-BEARING, not decoration: `isdigit()` is True
+    # for non-ASCII DECIMAL digits (`\u0665` Arabic-Indic, `\uff15` fullwidth)
+    # that `int()` happily parses, so dropping `isascii()` readmits a pid taken
+    # from a record this module did not write — the defect #4299 removes.
     try:
         pid = int(pid_raw)
     except ValueError:

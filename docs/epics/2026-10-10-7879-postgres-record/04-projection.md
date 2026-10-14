@@ -152,15 +152,21 @@ imports `#7968`'s parser (not a second one), builds a record carrying **every**
 PRIMARY and **every** DERIVED name of each section, and asserts that every PRIMARY
 name is storable and no DERIVED name is.
 
-**Two names the schema's own CHECKs do not cover**, so the projection carries the
-refusal itself:
+**The one name the schema's own CHECKs do not cover**, so the projection carries
+the refusal itself — plus the name that used to be a schema gap and is now
+closed at both layers:
 
-* **`Subject.status`** — `public.object`'s props CHECK refuses `status`;
-  `public.subject`'s does not, although §2.6 classifies both as the
-  projection-owned lifecycle cache. Filed as **#8263** (the schema should fail
-  closed for every writer, not only for this one) and refused here via
-  `OpDispatch.never_store`. `Point.status` is deliberately NOT in that set: a
-  Point's lifecycle IS journaled and `point.status` is a PRIMARY column.
+* **`Subject.status`** — once a schema gap (`public.object`'s props CHECK
+  refused `status`; `public.subject`'s did not, although §2.6 classifies both as
+  the projection-owned lifecycle cache). Filed as **#8263** and now **CLOSED**:
+  forward migration `20261014000001_record_subject_props_no_derived` re-declares
+  `chk_subject_props_no_derived` to refuse `embedding` **and** `status`, and the
+  projection still carries the refusal on its own side too —
+  `OpDispatch.never_store` for the `EntityMutated` mutation path, the
+  `refused_props_names()` schema read for the snapshot path — so it DROPS the
+  name rather than emitting a props tail the CHECK would refuse. `Point.status`
+  is deliberately NOT in that set: a Point's lifecycle IS journaled and
+  `point.status` is a PRIMARY column.
 * **The retired `DocumentCreated` props** (`content`, `doc_status`, `objectKind`)
   — §9.5 Q3 retired them and `_upsert_document` scrubs them, so storing them would
   leave the record holding state the node removed.

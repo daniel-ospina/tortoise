@@ -163,7 +163,11 @@ def test_message_names_model_revision_kind_and_fix(monkeypatch):
     assert "not_installed" in msg
     assert REQUIRED_ENV in msg
     assert "keyword-only" in msg
-    assert "extra embeddings" in msg
+    # #5277: the remediation must NOT repeat the #2985 footgun — an explicit
+    # --extra list is EXACT and silently REMOVES the ``parity`` extra.
+    assert "--extra embeddings --extra parity" in msg
+    assert "--all-extras" in msg
+    assert "#2985" in msg
     assert "ModuleNotFoundError" in msg
 
 
@@ -195,3 +199,121 @@ def test_warm_up_still_returns_false_when_not_required(monkeypatch):
     monkeypatch.delenv(REQUIRED_ENV, raising=False)
     _arm_negative_cache(monkeypatch, kind="not_installed")
     assert EmbeddingModel.warm_up() is False
+
+
+# --------------------------------------------------------------------------
+# #5277 item 1 — the NON-RETRIEVAL seams keep the #399/#880 TF-IDF degrade.
+# --------------------------------------------------------------------------
+
+
+def test_encode_degrades_to_tfidf_under_required(monkeypatch):
+    """``_encode``'s documented fallback must stay reachable when armed.
+
+    The flag exists so a *retrieval* result cannot be misread as hybrid; it
+    must not turn semantic dedup (#880), pairwise similarity or cross-lens
+    matching (#399) into hard failures. **Removal test**: rewire the handler
+    around ``EmbeddingModel.get()`` in ``_encode`` and this raises.
+    """
+    monkeypatch.setenv(REQUIRED_ENV, "1")
+    _arm_negative_cache(monkeypatch, kind="not_installed")
+    from tortoise.embeddings import _encode
+
+    vectors, degraded = _encode([
+        "deploy the new feature to production servers tonight",
+        "deploy the new feature to production servers today",
+    ])
+    assert degraded is True
+    assert vectors.shape[0] == 2
+
+
+def test_default_pairwise_similarity_degrades_under_required(monkeypatch):
+    """``TortoiseSDK._default_pairwise_similarity`` is a #399 degrade surface."""
+    monkeypatch.setenv(REQUIRED_ENV, "1")
+    _arm_negative_cache(monkeypatch, kind="load_timeout")
+    from tortoise.sdk import TortoiseSDK
+
+    points = [
+        {"id": "a", "content": "deploy the new feature to production servers tonight"},
+        {"id": "b", "content": "deploy the new feature to production servers today"},
+    ]
+    scores = TortoiseSDK._default_pairwise_similarity(points)
+    assert scores, "TF-IDF must still score the pair; a raise would have propagated"
+
+
+def test_find_cross_lens_matches_degrades_under_required(monkeypatch):
+    """``cross_lens.find_cross_lens_matches`` is a #399 degrade surface."""
+    monkeypatch.setenv(REQUIRED_ENV, "1")
+    _arm_negative_cache(monkeypatch, kind="load_failed")
+    from tortoise.cross_lens import find_cross_lens_matches
+
+    points = {
+        "a": {"content": "deploy the new feature to production servers tonight",
+              "lens": "src-1"},
+        "b": {"content": "deploy the new feature to production servers today",
+              "lens": "src-2"},
+    }
+    candidates = find_cross_lens_matches(points)
+    assert isinstance(candidates, list)  # ran degraded, did not raise
+
+
+def test_semantic_dedup_degrades_under_required(monkeypatch):
+    """``_semantic_dedup``'s #880 degrade chain stays reachable when armed."""
+    monkeypatch.setenv(REQUIRED_ENV, "1")
+    _arm_negative_cache(monkeypatch, kind="not_installed")
+    from types import SimpleNamespace
+
+    from tortoise.sdk import TortoiseSDK
+
+    class _FakeProj:
+        def __init__(self, rows):
+            self.g = SimpleNamespace(
+                query=lambda *a, **kw: SimpleNamespace(result_set=rows))
+
+    sdk = object.__new__(TortoiseSDK)
+    sdk._get_proj = lambda: _FakeProj(
+        [("p1", "deploy the new feature to production servers tonight")])
+    pairs = sdk._semantic_dedup(
+        [
+            ({"id": "c1",
+              "content": "deploy the new feature to production servers today"}, ""),
+        ],
+        threshold=0.7,
+        return_pairs=True,
+    )
+    assert pairs, "TF-IDF must still catch the near-duplicate (#880)"
+
+
+# --------------------------------------------------------------------------
+# #5277 item 5 — ``_last_error`` must not nest the prior message every cycle.
+# --------------------------------------------------------------------------
+
+
+def test_last_error_does_not_nest_under_repeated_warm_up(monkeypatch):
+    """The REQUIRED raise interpolates ``_last_error``; storing its message
+    re-nests the whole prior chain and grows without bound (#5277).
+    """
+    monkeypatch.setenv(REQUIRED_ENV, "1")
+    _arm_negative_cache(monkeypatch, kind="not_installed")
+    lengths = []
+    for cycle in range(5):
+        assert EmbeddingModel.warm_up() is False
+        error = EmbeddingModel._last_error or ""
+        assert "last error:" not in error, (
+            f"_last_error nested the prior raise at cycle {cycle}: {error!r}")
+        lengths.append(len(error))
+    assert max(lengths) <= 200, f"_last_error grew across cycles: {lengths}"
+
+
+# --------------------------------------------------------------------------
+# #5277 item 4 — the knob must be discoverable next to its siblings.
+# --------------------------------------------------------------------------
+
+
+def test_env_example_declares_the_required_flag():
+    from pathlib import Path
+
+    env = (Path(__file__).resolve().parents[1] / ".env.example").read_text()
+    assert REQUIRED_ENV in env, (
+        "TORTOISE_EMBEDDING_MODEL_REQUIRED is a fail-loud contract switch "
+        "but is not declared in .env.example (#5277)")
+    assert f"# {REQUIRED_ENV}=0" in env, "the default must be documented as OFF"

@@ -2766,8 +2766,9 @@ class RelationshipDecoration(dict):
     """``{point_id: [entry, …]}`` plus the decoration's own health (#6971).
 
     A plain ``dict`` to every existing consumer — equality, ``.get``,
-    ``set(out)``, iteration and ``values()`` are unchanged, so the ~25 direct
-    callers and the SDK assembly need no rewriting. The one addition is
+    ``set(out)``, iteration and ``values()`` are unchanged, so the one
+    production caller (the SDK search assembly) and the 25 test call sites in
+    ``tests/test_relationships_bounded.py`` need no rewriting. The one addition is
     ``decoration_error``: ``""`` on success, and ``"<ExcType>: <message>"``
     when the query body raised. This is what makes ``get_relationships_bounded``
     distinguishable from an empty result without changing its return CONTRACT

@@ -345,9 +345,11 @@ class EmbedderUnavailableError(RuntimeError):
             f"could not be loaded (failure_kind={failure_kind!r}){err} — this "
             f"process set TORTOISE_EMBEDDING_MODEL_REQUIRED, so any retrieval "
             f"result it produced would be keyword-only (FTS) while claiming to "
-            f"be the product's hybrid retrieval. Install the embedder "
-            f"(uv sync --extra embeddings) or unset the variable to allow the "
-            f"documented keyword-only degrade (#4861)."
+            f"be the product's hybrid retrieval. Install the embedder — "
+            f"`uv sync --extra embeddings --extra parity` (an explicit --extra "
+            f"list is EXACT and silently REMOVES any extra you omit — #2985; "
+            f"`uv sync --all-extras` also works) — or unset the variable to "
+            f"allow the documented keyword-only degrade (#4861)."
         )
 
 

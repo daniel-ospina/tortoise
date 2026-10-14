@@ -176,15 +176,40 @@ def _terminal_expression(clause: str) -> str:
     Composes the SAME vocabulary as ``_terminal_excluded`` (status in
     TERMINAL_EXCLUDED_STATUSES OR the legacy ``outdated=true`` flag) but in
     the POSITIVE direction, usable in RETURN projections, CASE conditions and
-    WHERE OR-chains. ``_terminal_excluded`` is a keep-filter whose
-    NULL-status handling (legacy nodes = live) means its bare negation is
-    safe to use here: legacy nodes with no status are NOT terminal.
+    WHERE OR-chains.
+
+    It is the EXACT De Morgan dual of ``_terminal_excluded`` — by
+    construction, not by hand-written correspondence: the flag half below is
+    ``coalesce(flag, false) <> false``, the negation of that predicate's
+    ``coalesce(flag, false) = false``, and the status half negates its
+    ``(status IS NULL OR status <> '…')`` NULL-guard. ``_alive_flag`` (this
+    expression negated) therefore cannot report ALIVE a node the keep-filter
+    drops, on any stored value (#7075). Before #7075 the flag half was
+    ``= true``, which is NOT ``NOT (… = false)``: FalkorDB compares types
+    strictly, so a non-boolean ``outdated`` matched NEITHER comparison and
+    such a node was simultaneously "not terminal" here and "not live" in
+    ``_terminal_excluded`` — an excluded middle. ``= true`` and ``<> false``
+    agree on every boolean and on NULL, so in-contract graphs are unaffected.
+
+    ⚠️ ``outdated`` is contractually a BOOLEAN: it is server-managed (#2491),
+    ``_sanitize_props`` refuses it on the props passthrough, and the journal
+    fold enforces the type (``_belief_bool_value_ok``). Only a hand-edited or
+    pre-#2491 graph can hold a non-boolean. The Python mirror
+    ``is_terminal_status`` reads that flag by ``bool()`` truthiness, so it
+    agrees with this expression on every boolean, NULL, non-empty string and
+    non-zero number. The two can still differ when Python's ``bool()`` is
+    falsy while ``coalesce(v, false) <> false`` holds — e.g. numeric
+    ``0``/``0.0`` or the empty string ``""``, which are terminal here (and in
+    ``_terminal_excluded``) but live in the Python mirror. Out of contract; no
+    in-repo writer can produce such a value. This is a stated
+    contract, NOT a promise that arbitrary hand-edited data is interpreted
+    consistently.
     """
     alias = clause.split(".", 1)[0] if "." in clause else clause
     members = " OR ".join(
         f"{alias}.status = '{s}'" for s in sorted(TERMINAL_EXCLUDED_STATUSES))
     return (f"(({alias}.status IS NOT NULL AND ({members})) "
-            f"OR coalesce({alias}.outdated, false) = true)")
+            f"OR coalesce({alias}.outdated, false) <> false)")
 
 
 def _alive_flag(clause: str) -> str:
@@ -213,7 +238,17 @@ def is_terminal_status(status, outdated: bool = False) -> bool:
     """Python mirror of the Cypher terminal predicate (status in the
     terminal vocab OR the legacy ``outdated=true`` flag). NULL/absent status
     is LIVE (the entity write path defaults ``coalesce($st, n.status,
-    'live')``) — mirrors ``_terminal_excluded``'s NULL handling."""
+    'live')``) — mirrors ``_terminal_excluded``'s NULL handling.
+
+    ``outdated`` is contractually a BOOLEAN (server-managed since #2491; the
+    journal fold enforces the type). This mirror reads it by ``bool()``
+    truthiness while ``_terminal_expression`` negates
+    ``coalesce(outdated, false) = false``; the two agree on every boolean,
+    NULL, non-empty string and non-zero number, and can differ when Python's
+    ``bool()`` is falsy while ``coalesce(v, false) <> false`` holds — e.g.
+    numeric ``0``/``0.0`` or the empty string ``""`` (live here, terminal in
+    Cypher). Out of contract; no in-repo writer can produce such a value
+    (#7075)."""
     return (status or "") in TERMINAL_EXCLUDED_STATUSES or bool(outdated)
 
 

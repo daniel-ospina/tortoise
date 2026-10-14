@@ -3,6 +3,9 @@
 # ~/orchestrator, not /tmp).
 #   watch-one.sh <repo-path> <pr> <branch> [kind]
 # kind: py (tortoise, pytest) | ts (agent-infra, npx tsx)  — default py
+# RETIRED, kept for the record. NOTE: its `pi` spawns are NOT load-gated — the live spawn path is
+# spawn-gate.sh::run_agent() (agent-infra#1720). Do not re-activate this without routing its
+# spawns through that helper; README §4 names this file as the residual of its gating claim.
 set -u
 REPO="$1"; PR="$2"; BR="$3"; KIND="${4:-py}"
 O="${O:-$HOME/orchestrator}"; mkdir -p "$O/logs" "$O/state"

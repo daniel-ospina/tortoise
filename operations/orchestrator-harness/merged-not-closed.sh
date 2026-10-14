@@ -50,6 +50,7 @@ while [ $# -gt 0 ]; do
 done
 
 command -v gh >/dev/null 2>&1 || { echo "merged-not-closed: gh not on PATH" >&2; exit 2; }
+command -v python3 >/dev/null 2>&1 || { echo "merged-not-closed: python3 not on PATH" >&2; exit 2; }
 
 # The issue list is the universe. A failure here must NOT read as "empty" — and it must not
 # read as COMPLETE when it is only the first page. `gh issue list --limit N` stops at N and
@@ -78,6 +79,23 @@ TMP="$(mktemp)"; trap 'rm -f "$TMP"' EXIT
 printf '%s' "$ISSUES" > "$TMP"
 python3 - "$REPO" "$JSON" "$TMP" "$EXPECTED_BEFORE" "$EXPECTED_AFTER" <<'PY'
 import json, subprocess, sys
+
+# ⛔ The documented contract is exit 2 when a surface could not be queried — NEVER 1, so a caller
+# cannot mistake "the API failed" for "nothing to drain". The argument errors and the search
+# surface guard below call sys.exit(2) explicitly, but the remaining failure paths are runtime
+# ones — a 200 with a non-JSON/truncated body (the #8246 mode), an item with no `number`, a `gh`
+# that vanishes mid-sweep — and an unhandled Python exception exits 1. Route EVERY such path
+# through one hook so the contract holds for the whole payload, not only the paths that
+# remembered to guard. Explicit sys.exit(2) calls are unaffected (SystemExit is not an
+# Exception), so the deliberate refusals keep their own diagnostics.
+def _fail_closed(exc_type, exc, tb):
+    import traceback
+    traceback.print_exception(exc_type, exc, tb, file=sys.stderr)
+    print("merged-not-closed: a surface could not be queried — refusing (exit 2)",
+          file=sys.stderr)
+    sys.exit(2)
+
+sys.excepthook = _fail_closed
 
 repo, as_json, path = sys.argv[1], sys.argv[2] == "1", sys.argv[3]
 exp_before, exp_after = sys.argv[4], sys.argv[5]

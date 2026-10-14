@@ -106,7 +106,7 @@ processes in tmux sessions, so a killed worker cannot take the controller down w
 | `.orch.lock` | atomic single-instance lock (noclobber create); stale locks are reclaimed |
 | `candidates.txt` | the dispatch backlog: issue numbers that passed collision pre-flight |
 | `dispatched.txt` | issues already handed to a lane. **Append-only — never expires** (see §7.1) |
-| `checked.txt` | issues already pre-flighted; prevents re-running the collision check |
+| `checked.txt` | issues whose pre-flight returned **CLEAN** (the terminal verdict); an **errored** pre-flight and a **COLLISION** leave no entry, so the next pass re-attempts them (agent-infra#1716) |
 | `state/mergeclaim-<PR>.lock` | single-owner claim: only one worker may review/record/merge a given PR |
 | `state/needsfix-<PR>-<head>` | "a reviewer found real issues at this exact head" |
 | `state/fixcount-<PR>` | fixer attempts for that PR, capped by `MAX_FIX_TRIES` |
@@ -197,7 +197,7 @@ secret into a world-readable plist, and launchd inherits no shell environment �
 
 | Var | Value | Why |
 |---|---|---|
-| `MAX_LOAD` | `cores*10` (100 on a 10-core box; sanity ceiling) | dispatch stops above this 1-min load |
+| `MAX_LOAD` | `cores*10` (100 on a 10-core box; sanity ceiling) | dispatch **and every agent spawn** stop above this 1-min load (resolved in `spawn-gate.sh`, rendered into the plist by `install.sh`, asserted equal by the self-test) |
 | `MAX_LANES` | `4` | concurrent implementation lanes |
 | `MAX_REVIEW` | `4` | concurrent `merge-<PR>` reviewers |
 | `MERGE_PRIORITY_AT` | `10` | above this many open PRs, **merging takes priority**: dispatch of new lanes stops (unless none are running, or a `P0-blocker` is at the backlog head — see `P0_BYPASS_MERGE_PRIORITY`) and reviewer headroom rises to `MAX_REVIEW+2` |
@@ -205,7 +205,7 @@ secret into a world-readable plist, and launchd inherits no shell environment �
 | `MAX_FIX` | `3` | concurrent `fix-<PR>` fixers |
 | `MAX_FIX_TRIES` | `3` | per-PR fixer attempts before it is left alone |
 | `MIN_SWAP_FREE` | `600` | MB; with `MAX_LOAD` raised this and `MIN_MEM_FREE_MB` are the binding gates in practice |
-| `MIN_MEM_FREE_MB` | `512` | MB of *available* memory (`free`+`inactive`); macOS shows pressure as compression with swap flat, so swap alone does not see it |
+| `MIN_MEM_FREE_MB` | `512` | MB of *available* memory (`MemAvailable` on Linux, else `MemFree`+`Cached`; `free`+`inactive` on macOS). macOS shows pressure as compression with swap flat, so swap alone does not see it |
 | `BATCH` | `2` | issues dispatched per cycle |
 | `CYC` | `240` | seconds between cycles |
 | `STALE_MIN` | `40` | a worker whose log has not grown in this many minutes is presumed hung and its session is killed (§6) |
@@ -213,24 +213,86 @@ secret into a world-readable plist, and launchd inherits no shell environment �
 | `REVIEW_TIMEOUT` | `1800` | wall-clock limit on a reviewer `pi` run (s) |
 | `FIX_TIMEOUT` | `2400` | wall-clock limit on a fixer `pi` run (s) |
 
-**Every agent spawn is load-gated, not just lane dispatch.** A Mac reboot lands in an indexing
-storm (Spotlight, `PerfPowerServices`, `duetexpertd`) that routinely pushes 1-min load past 200. The
-lane gate already respected `MAX_LOAD`; the merge sweep did not, so a fresh boot got six reviewers
-piled onto the spike. `can_spawn()` now guards all four spawn sites — conflict fixer, review-fix
-fixer, CI-red fixer, merge re-review — while the cheap actions (`gh pr merge`, `gh pr ready`,
-`gh run rerun`) stay ungated, so merges keep flowing during a spike and nothing is starved.
+**Every agent spawn is load-gated, not just lane dispatch — and the gate is at the SPAWN, not at the
+controller's decision.** A Mac reboot lands in an indexing storm (Spotlight, `PerfPowerServices`,
+`duetexpertd`) that routinely pushes 1-min load past 200. There are two gates now, and the
+second one is the invariant:
 
-⚠️ **`can_spawn()` tests load only.** The available-memory gate applies to *lane dispatch*, not to
-these four spawn sites — the two cover different populations. Raising `MAX_LOAD` therefore narrows
-the band in which the spawn sites hold back (`16`–`99` is now permitted, where `16` used to hold).
-Closing that needs `can_spawn()` to consult memory as well, which changes the one-line shape its
-self-test extracts from the shipped file; left as a named follow-up rather than half-done here.
+1. `orch-loop.sh` gates its **decisions to create a worker session** at four sites (conflict fixer,
+   review-fix fixer, CI-red fixer, merge re-review), while the cheap actions (`gh pr merge`,
+   `gh pr ready`, `gh run rerun`) stay ungated so merges keep flowing during a spike.
+2. **The `pi` invocation itself is gated**, in the shared helper `spawn-gate.sh` — the only place in
+   the harness that runs `pi` at all. `lane.sh`, `merge-one.sh` and `fix-one.sh` route through its
+   `run_agent()`, which takes a **fresh** load reading and refuses above `MAX_LOAD`. A refusal costs
+   nothing and consumes nothing: the worker exits `75`, records no verdict, and the PR is
+   re-dispatched when load falls (a manual `chain-<N>` or `adopt-fix.sh` run names the refusal in
+   its own log, so a box with no controller running does not fail silently).
+
+   "Consumes nothing" needs two things the gate alone cannot provide, because the controller books a
+   fixer attempt when it **creates the session** (`orch-loop.sh`) — *upstream* of the gate:
+   - `fix-one.sh` **refunds** that attempt on a refusal. It is the only party that knows no agent
+     ran, so it rewinds `fixcount-<PR>`; without the refund, three refusals reach `MAX_FIX_TRIES`
+     and park a PR that never had a single fixer run.
+   - the controller no longer deletes `needsfix-<PR>-<head>` at dispatch. `fix-one.sh` consumes it
+     only once the agent has **actually started**, so a refusal leaves the reviewer's findings
+     intact and the next cycle re-dispatches instead of spending a full fresh-context re-review on
+     a head nobody fixed.
+
+   Refusal is `AGENT_STARTED=0`, set by `run_agent()` and authoritative over the exit code: `pi`
+   shares the 0–255 status namespace, so a `pi` that exited `75` for its own reason must not be read
+   as a load refusal.
+
+(2) is what makes the claim true rather than nearly true. Gating only the decision was
+insufficient: `chain-<N>` — the primary first-review path for every own-lane PR, and the one path
+the controller deliberately stands down for because the chain holds the claim — waits up to 90
+minutes for its PR, so a lane dispatched on a quiet box had its reviewer launch onto whatever load
+existed at that later moment (`fix-one.sh` and `adopt-fix.sh` reached the same ungated spawn).
+`spawn-gate.sh` exists so there is **one** gate to keep true rather than one per launch path: a
+fourth path added tomorrow is refused by `run_agent()` automatically, and `selftest.sh` asserts that
+exactly one shipped file invokes `pi` and that the helper refuses above `MAX_LOAD`.
+
+⚠️ **Both gates test load only.** The available-memory gate applies to *lane dispatch*, not to these
+spawn sites — the two cover different populations. Raising `MAX_LOAD` therefore narrows the band in
+which the spawn sites hold back (`16`–`99` is now permitted, where `16` used to hold). Closing that
+needs the gate to consult memory as well, which changes the one-line shape its self-test extracts
+from the shipped file; left as a named follow-up rather than half-done here.
+
+⚠️ **The retired scripts in `retired/` are the named residual.** `refix.sh` and `watch-one.sh` still
+call `pi` directly and are **not** load-gated. They are not installed, not invoked by
+`orch-loop.sh`, and each carries a banner saying so — do not re-activate one without routing its
+spawn through `spawn-gate.sh`. The self-test asserts the banner is present, so a silent
+re-activation fails the suite.
 
 **Swap, not lanes, is what actually throttles this box.** Observed at 15 concurrent workers:
 `swap_free=588M` → dispatch correctly refused. Raising `MAX_LANES` alone buys nothing on 8 GB;
 it just moves the pressure into the compressor. `swap_total=0` right after boot is treated as
 *uninitialised*, not as pressure (that bug silently blocked all dispatch for the first minutes
 after a restart until it was fixed).
+
+**The capacity probes are portable: Linux cell + macOS host.** `#1702`. Every probe used to be a
+macOS primitive, so on a Linux cell `load1()` returned empty (the `MAX_LOAD` gate could never bind),
+swap read as `0` (the gate skipped by its own "uninitialised" rule), and the reaper's
+`stat -f '%m'` became an arithmetic error that killed the controller one cycle after its first
+dispatch — every lane/merge/fix writes the log the reaper stats. Each probe now has a Linux path
+(`/proc/loadavg`, `/proc/meminfo`, `nproc`) and a macOS one (`sysctl`, `vm_stat`), and the reaper's
+mtime probe is a GNU-then-BSD `stat` ladder with a numeric guard (GNU first on purpose: GNU
+`stat -f` writes the filesystem listing to **stdout** before exiting 1, so a BSD-first `||` ladder is
+the bug itself).
+
+⚠️ **Available memory was the fifth macOS-only probe, and the only one that fails CLOSED.** The gate
+is deliberately "UNKNOWN is not ample" (`mem_probe_failed` → do not add work), so with a `vm_stat`-only
+probe every Linux cell set `MEM_UNKNOWN=1` on every cycle: load, lanes and swap could all be healthy
+and the memory gate still bound — the controller completed cycles, logged `mem_probe_failed` and
+dispatched nothing, which is a *different* false green from the one #1702 removes. `mem_avail_mb()`
+therefore reads `/proc/meminfo` (`MemAvailable`, else `MemFree`+`Cached`) on a cell and keeps the
+`vm_stat` `free`+`inactive` parse on macOS. The fail-closed ruling for a genuinely unreadable probe is
+unchanged — only its Linux measurability is.
+
+A load reading that is *unreadable* stays the documented **fail-open** (`can_spawn()` defaults it to
+`0`): both supported platforms are measurable now, and failing closed on an unreadable probe would
+turn "no load back-pressure" into a permanent controller outage. `install.sh` still refuses to run
+off macOS (it renders a launchd plist) — the portability that matters is `orch-loop.sh`, the file
+`cloud-cell-supervisor.sh` starts.
 
 ---
 
@@ -383,6 +445,15 @@ is removed from `dispatched.txt` **and** `checked.txt` so the pre-flight re-queu
 self-test's checks pin exactly this decision table (`4114` reaped, `8888` kept for its PR, `9999`
 kept because it is closed, `7777` kept for its live lane).
 
+⛔ **A failed listing is not an empty one.** The reaper refuses the whole pass unless both
+`.open_iss` and `.pr_brs` are **present**; the capture deletes a list when `gh` fails, so "the read
+failed" (absent) is distinguishable from "the answer is none" (present but empty). Before the
+guard, a failed `gh pr list` left an empty `.pr_brs`, `has_pr` was false for every issue, and
+`dispatched.txt` was cleared — so `orch-loop.sh` re-spawned a lane for an issue that already had a
+PR (duplicate work against the shared queue, agent-infra#1705). The self-test's failure-path checks
+pin both halves (absent → nothing reaped and `checked.txt` untouched; empty-but-readable → still
+reaps), and the capture site is driven directly with a stub `gh`.
+
 ### 7.2 Draft PRs are invisible to the sweep — **FIXED in this PR**
 
 The selector was `select(.isDraft|not)` and nothing readied our own lanes' drafts, so a draft ran
@@ -439,9 +510,13 @@ because the self-test now drives every one of them:
 | `retired/auto-loop.sh` and `retired/sweep.sh` still carried the fail-open `ai-review-gate` classifier | shipping "the record" with the very bug being fixed invites reuse of it | both annotated in place as retired-with-known-fail-open |
 | §3 and §8 admitted cross-box duplication while §5.1b said "one owner per PR" | the invariant was stated more strongly than the code delivers | §5.1b scoped to per-box; §7.2b states the open cross-box gap |
 | **a PR branch name was interpolated into the `sh -c` string `tmux new-session` executes** | **arbitrary command execution on the unattended host that holds the merge key.** git permits `'` `;` `$` `` ` `` `&` `\|` `(` `)` `{` `}` `"` `<` `>` `#` in a ref name, so a fork PR on `fix/x';touch${IFS}/tmp/x;#` broke out of the quotes. Reproduced end-to-end before fixing | `safe_ref` allowlist + `check-ref-format`; numeric-only PR ids; and worker args now travel in a file (`--argv`) so no PR-derived value is interpolated at all |
+| **the check classifier was a deny-list** (`bad = FAILURE\|ERROR\|CANCELLED\|TIMED_OUT\|ACTION_REQUIRED`) | a conclusion in **neither** list — one GitHub has not documented, or a **null** one — read `PENDING`, and `PENDING` arms the merge (`gh pr merge --auto`): the merge decision failed **open**. At the same time `CANCELLED` was named *red*, so a normally-superseded run (`cancel-in-progress: true`) was routed to `fix-one.sh` or to `gh run rerun` — failing **closed** on a green PR. `fix-one.sh`'s failing-check list named `CANCELLED` too, so such a run burned a capped fixer attempt (agent-infra#1714) | the classifier is an **allow-list with polarity**, the rule `admin-merge.sh` and `record-review.sh` already implement: non-red only for a NAMED conclusion (`success`/`neutral`/`skipped`/`cancelled`/`stale`), in-flight only for a NAMED status, and **everything else RED** — so an unrecognised or null conclusion blocks instead of arming; grouping is per `(app, name)` (newest attempt by `id`) so one app cannot mask another's; and an **empty** surface is `NOCHECKS`, never `GREEN`. `fix-one.sh` uses the same allow-list (agent-infra#1714) |
 | the claim-file guard added in the first fix round introduced a permanent stall | the controller treated *the existence of* `mergeclaim-<PR>.lock` as "in flight", but only `merge-one.sh` removes it — a SIGKILLed worker or a reboot mid-merge left the PR skipped forever with no fixer and no re-record | `claim_live()` tests the recorded pid with `kill -0` and removes a dead owner's claim |
 | 6 self-test checks passed vacuously because an empty extraction did not fail the check | the round-1 vacuity fix was incomplete: checks depending on `sess()`, the claim block or the reaper passed when the shipped script had no such code | `need()` turns a missing extraction into a FAIL; each check was then re-proved against the pre-fix tree it pins |
 | **a hung worker held a concurrency slot for 9 hours** | `pi -p` has no timeout and the caps count **tmux sessions**, so a hung reviewer (or a runaway `find /` it spawned) permanently reduced merge throughput while the queue looked busy — three slots were dead weight overnight on 2026-10-12 | portable `run_agent()` wall-clock limit (bash `wait` + watchdog subshell, since macOS ships no `timeout`) plus a `reap_stale_workers()` sweep that kills any worker silent for `STALE_MIN` minutes |
+| **only the controller's DECISION was load-gated; the `pi` spawns were not** (agent-infra#1720) | `chain-<N>` — the primary first-review path, and the one path the controller stands down for — waits up to 90 min for its PR, so its reviewer launched onto the load that existed *then*, not the quiet load the lane was dispatched under, and `fix-one.sh`/`adopt-fix.sh` reached the same ungated spawn while §4 claimed all of it was gated | the one `pi` invocation moved into `spawn-gate.sh::run_agent()`, which takes a **fresh** reading and refuses above `MAX_LOAD` — so the gate is at the spawn, and a fourth launch path is refused by construction. A refusal is `AGENT_LOAD_REFUSED` and is **not** a verdict: `merge-one.sh` exits without writing `needsfix-<PR>-<head>`, because recording one would authorise a fixer for a review that never happened and burn a `MAX_FIX_TRIES` attempt (the #1716 class). The self-test drives all three worker entry points under a stubbed high load and asserts no agent started, and asserts exactly one shipped file invokes `pi`. The ceiling, the core-count probe and `load1()` all live in the helper now, so the controller's decision and the worker's spawn cannot disagree |
+| **a load-refused FIXER still consumed a `MAX_FIX_TRIES` attempt, and the controller had deleted the reviewer's findings marker before the gate ran** (#1720, review round) | the controller books the attempt on **session creation** (`orch-loop.sh`), which is upstream of the gate inside `fix-one.sh`; a refusal did no work yet left the counter incremented and `needsfix-<PR>-<head>` removed. Three refusals — the normal regime on a box running at load 95–175 against `MAX_LOAD=100` — reached the terminal branch and **parked a PR that never had a fixer run**, the #1716 class this change set out to close | `fix-one.sh` **refunds** `fixcount-<PR>` on a refusal (controller-dispatched runs only) and the controller no longer deletes the findings marker at dispatch: `fix-one.sh` consumes it itself, once the agent has started. Both halves are driven in §9's self-test with a pre-seeded counter and marker; the refund check fails on the pre-fix fixer |
+| **`adopt-fix.sh` inverted its own exit status** (#1720, review round) | the new refusal-reporting line became the script's **last** command, so its status was the `[ … ] && echo` compound: `1` on a clean success (the path that used to exit `0`) and `0` on the load refusal it exists to report. Verified: `bash -c 'true; rc=$?; [ "$rc" = "75" ] && echo x'; echo $?` → `1` | the report is an `if … fi` and the script ends `exit "$rc"`; the self-test drives the shipped script with a stub fixer at rc 0 / 75 / 3 and asserts the status follows the fixer |
 | **only `ai-review-gate` and `python-ci-gate` failures had a remediation path** | a PR red on any *other* required check (`docs`, `test-isolation`, `license-surface`, `legal-e2e`, `pricing-artifact`) was merely logged, so it sat red forever with **no worker at all**. Observed: #8278 had *unresolved conflict markers committed* (caught by the docs job's marker check) and #8193 had a new `MD018` docs-lint finding — both with zero workers for hours | those checks now route to `fix-one.sh` too, capped and parkable like every other fix loop; and `fix-one.sh` now fetches the failing check's **log** into the prompt, because it previously only ever read a reviewer comment — for a CI failure there may be no comment at all |
 
 ### 7.5 Still open, deliberately not fixed here
@@ -451,7 +526,11 @@ because the self-test now drives every one of them:
   than an ad-hoc `find -mtime`.
 - **`[ -z "$WT" ] && { … }` as a script's last statement** makes the exit status that of the
   test. The shipped `fix-one.sh` ends with a positive `echo` so it no longer leaks a non-zero
-  status, but the pattern is easy to reintroduce — a `exit 0` at the end of each script would pin it.
+  status — but the pattern is easy to reintroduce, and `adopt-fix.sh` did exactly that (its new
+  refusal report became the last command, inverting the status: `1` on success, `0` on the refusal
+  it reports). `adopt-fix.sh` now ends `exit "$rc"` and the self-test drives that. The general fix
+  is to end every script on an explicit status — `exit "$rc"` where a caller reads it (as here),
+  `exit 0` where the last line is only reporting.
 - **Worktree reaping.** Every dispatch and every foreign-branch fixer adds a worktree; the box
   carried ~150 by the end of the run. Nothing removes them after their PR merges.
 
@@ -496,6 +575,7 @@ algorithmic advantage. The claim worth evaluating is *utilisation*, not *efficie
 | Script | Role |
 |---|---|
 | `orch-loop.sh` | the controller: merge sweep → capacity-gated dispatch → backlog refresh |
+| `spawn-gate.sh` | **the ONE load gate and the ONE `pi` invocation**; sourced by the controller and by every worker |
 | `dispatch-merge.sh` | creates the worktree and starts the `lane-*` + `chain-*` pair for an issue |
 | `lane.sh` | the implementation worker (prompt template included) |
 | `chain-merge.sh` | waits for the lane's PR, then runs the merge chain |
@@ -510,6 +590,9 @@ algorithmic advantage. The claim worth evaluating is *utilisation*, not *efficie
 **Retired** (`retired/`, kept so nothing is lost): `auto-loop.sh`, `dispatch.sh`,
 `do-merge.sh`, `refix.sh`, `sweep.sh`, `watch-one.sh`. These are earlier iterations of the
 same idea and are no longer invoked; they are included for the record, not for use.
+`refix.sh` and `watch-one.sh` still call `pi` directly, so they are **not** load-gated — each
+carries a banner saying so, and the self-test fails if a retired `pi`-invoking script loses it
+(§4). Re-activating one means routing its spawn through `spawn-gate.sh` first.
 
 **Portability edits applied to every shipped script.** Three per-box constants became
 overridable with this box's values as defaults (the launchd `PATH` is no longer one of them —
@@ -524,10 +607,12 @@ O="${O:-$HOME/orchestrator}"
 ```
 
 The shipped copies are **not** byte-identical to the ones running on the original box: they are
-those copies **plus every §7.4 fix**. `install.sh` compares all 8 live scripts against the running
+those copies **plus every §7.4 fix**. `install.sh` compares all 9 live scripts against the running
 copies at `$O` and warns loudly on drift, because the daemon executes `$O/<script>` — a fix that
-only lands in this directory is not in effect. If you are adopting this onto an existing box, sync
-them (`cp <harness>/*.sh $O/`) and restart the loop before trusting any §5 invariant.
+only lands in this directory is not in effect. `spawn-gate.sh` is on that list too: the workers
+source it, so a stale copy at `$O` silently restores the ungated spawn. If you are adopting this
+onto an existing box, sync them (`cp <harness>/*.sh $O/`) and restart the loop before trusting any
+§5 invariant.
 
 ⛔ **Copying the scripts is not enough when a *limit* changed.** The launchd plist carries its own
 environment block, rendered by `install.sh` from these defaults, and that environment **overrides the
