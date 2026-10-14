@@ -163,6 +163,10 @@ LEGACY_KIND_ALIASES: dict[str, tuple[str, ...]] = {
 VALID_KINDDEF_KEYS = frozenset({
     "description", "synonyms", "examples", "nearMisses",
     "extractable", "storeAs", "enforcement",
+    # #2792: a stage-driven kind may declare its default stage lifecycle. The
+    # canonical slot vocabulary and the shape rules live in
+    # ``tortoise/pipeline.py`` (one home); this key only opts the kind in.
+    "pipeline",
 })
 
 # storeAs values — what stream bucket a kind belongs to (R6 §3.1)
@@ -1306,6 +1310,14 @@ class PackRegistry:
                             f"{', '.join(sorted(VALID_ENFORCEMENT_LEVELS))}, "
                             f"got {spec['enforcement']!r}"
                         )
+                    # #2792: a declared stage pipeline is validated by the
+                    # pipeline module (canonical slots, terminal outcomes,
+                    # unique ids, a default that exists). Shape only — the
+                    # per-graph override layer reads it at runtime.
+                    if "pipeline" in spec:
+                        from tortoise.pipeline import validate_pipeline_decl
+                        for perr in validate_pipeline_decl(spec["pipeline"]):
+                            errors.append(f"kindDefs '{kind}': {perr}")
                     # nearMisses targets resolve post-load (cross-pack pass)
 
             # ── Manifest v3 (R6 §3.2/§3.5): chains validation ────────────

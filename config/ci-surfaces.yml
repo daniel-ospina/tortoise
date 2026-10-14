@@ -2298,6 +2298,12 @@ surfaces:
   # and pack_state/pack_manifest_store are the writer modules whose labels
   # the registry must agree with.
   - test_rebuild_config_preservation.py
+  # #2792: configurable per-graph pipelines. The subject is
+  # `tortoise/pipeline.py` (+ the `kindDefs.pipeline` validation in
+  # `pack_registry.py` and the `:Pipeline`/`:PipelineStage` enrolment in
+  # `projection/__init__.py`) — none matches a named SOURCE_PATTERN, so the
+  # change falls through to `core` and this arm is what runs it.
+  - test_pipeline_2792.py
   # #4653: the same wipe+replay drives the `event_meta` sidecar section and the
   # watermark re-derivation, both in tortoise/projection/ (core fallback) over
   # tortoise/event_store.py's allocator.
@@ -3531,6 +3537,7 @@ slow_files:
 - test_pack_shipping_wheel.py
 - test_projection.py
 - test_rebuild_config_preservation.py  # #2814: drives the real full rebuild_all wipe+replay
+- test_pipeline_2792.py  # #2792: per-graph pipeline config + stage movement over the embedded EntityMutated journal/rebuild
 - test_rebuild_parity_fail_loud_3585.py  # #3585: 76 tests driving real FalkorDB rebuild/recover cycles (~36s on a healthy docker lane MEASURED 2026-10-08 WHEN THE FILE COLLECTED 47; it now collects 76, of which #7719 contributed 10 (66 -> 76), so ~36s is a LOWER bound and the committed 45.0 weight predates those 10 — refresh with `tools/ci_timing.py --refresh-durations`; the earlier ~470-720s figures were taken on this host at load ~97 — see its durations note)
 - test_projection_embedded_socket_timeout.py  # #3350: embedded lane socket timeout (carve-out)
 - test_projection_lifecycle.py
@@ -3709,6 +3716,11 @@ carve_out:
 # carve-out is load-bearing — the pins exercise the real unconditional wipe,
 # which the server-side bulk-wipe guard refuses on a non-test graph).
 - test_rebuild_config_preservation.py
+# #2792: configurable per-graph pipelines — the state pins drive the real
+# `EntityMutated` journal + `rebuild_all` replay, so the embedded carve-out is
+# load-bearing (a URI-set lane would redirect the construction and lose the
+# replay). Mirror of the `test_pipeline_2792` rows above.
+- test_pipeline_2792.py
 # #7852 W1: the Layer-2 `semantics` write-path guard is embedded-only — the
 # fixture builds `TortoiseSDK(<tmpfile>)` and drives the real `rebuild_all`
 # replay, so the carve-out is load-bearing (a URI-set lane would redirect it).

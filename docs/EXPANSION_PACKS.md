@@ -39,6 +39,12 @@ ontology:
       description: A commercial agreement between parties
       synonyms: [deal, agreement]
       nearMisses: [standard]   # confusable kinds → classifier guidance
+      pipeline:                # #2792: optional stage lifecycle for a stage-driven kind
+        defaultStage: stg_draft
+        stages:
+          - {id: stg_draft,  label: Draft,  order: 1, slot: entry}
+          - {id: stg_active, label: Active, order: 2, slot: active}
+          - {id: stg_done,   label: Done,   order: 3, slot: terminal, outcome: won}
   relations:                 # epistemic edge declarations (IMPL/NAND)
     - predicate: groundedIn
       mechanism: IMPL
@@ -63,6 +69,37 @@ extraction:
 
 1. **`memory_granularity` at the top level** — the value-brief compiler reads `ontology.memory_granularity`. Top-level is silently ignored. (The `_template` teaches the correct placement — copy it.)
 2. **A `kindDefs` key not declared in `objectKinds`/`pointKinds`/etc.** — the validator rejects it. Every kindDefs key must be a declared kind.
+
+## Declaring a per-kind stage pipeline (#2792)
+
+A stage-driven kind (a deal, an investment, a tranche, an action item) can declare its **default
+lifecycle** under `kindDefs[<kind>].pipeline`. The pack ships sensible defaults; each graph may
+**override** them (add / rename / reorder / retire a stage) without a code change or a pack release —
+the CRM model (Salesforce stages / HubSpot deal pipelines / Jira workflows).
+
+The model has two tiers: a small **canonical slot** vocabulary the graph understands, and the
+**tenant stage list** a graph owns.
+
+| field | required | meaning |
+|---|---|---|
+| `stages[].id` | ✅ | stable, immutable identity. Anchoring keys on this, never on the label, so a rename never moves an Object. Unique within the pipeline. |
+| `stages[].label` | ✅ | the tenant-visible name (renameable). |
+| `stages[].order` | ✅ | integer; the forward/regression judgement for future moves. |
+| `stages[].slot` | ✅ | one of `entry`, `active`, `suspended`, `terminal`. Canonical and fixed. |
+| `stages[].outcome` | terminal only | required iff `slot: terminal`, one of `won`, `lost`, `withdrawn`, `completed`. |
+| `defaultStage` | optional | the stage a new Object starts in; defaults to the lowest-`order` stage. |
+
+State and history: the **current** stage is a property on the Object (`pipelineStageId`,
+`pipelineSlot`, `pipelineOutcome`, `pipelineStageSince`, `isClosed`) so a query always returns one
+answer; the **history** is the dated journal. A terminal stage is **sticky** — a passing later
+mention cannot resurrect a closed thing; only an explicit reopen does. A stage reported by
+extraction that is not in the effective list is **captured for review** (`pipelineStagePending`),
+never dropped and never auto-adopted.
+
+The canonical slot/outcome vocabulary and the shape rules live in `tortoise/pipeline.py`; the pack
+key is opt-in and validated exactly like the other `kindDefs` keys. The Settings UI that edits a
+graph's stages is #2728; the hardcoded connector `Object.status` fold is #2729 (a separate axis —
+pipeline stage is not `Object.status`).
 
 ## Declaring a relation — writable, or explicitly declaration-only (#2766)
 
