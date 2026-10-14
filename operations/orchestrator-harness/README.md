@@ -492,8 +492,8 @@ refresh loop runs that pre-flight over a pool built **only** from `gh issue list
 
 ⛔ **#8625 narrowed `LANDED` to the issue's own state, and that changed which arm is reachable.**
 Before #8625 the title arm could return `LANDED` for an OPEN issue, so this loop saw it constantly;
-#8625 demoted that arm to the ADVISORY surface `merged PRs naming an OPEN issue` (a merged PR
-*references* an issue, it does not *close* it), so a landed-but-OPEN issue — the #7174 shape —
+the #8625 change demoted that arm to the ADVISORY surface `merged PRs naming an OPEN issue` (a merged
+PR *references* an issue, it does not *close* it), so a landed-but-OPEN issue — the #7174 shape —
 now reads **CLEAN** and flows to `candidates.txt`. That is #8625's accepted cost: a wasted dispatch
 is recoverable and self-correcting, a false `LANDED` (measured on #7951 against three merged
 increments, none of them closing it) is not.
