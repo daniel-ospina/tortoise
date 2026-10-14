@@ -300,6 +300,12 @@
         "packs-compile"
       ]
     ],
+    "perf-lane": [
+      [
+        "perf-lane.yml",
+        "perf-lane"
+      ]
+    ],
     "post-deploy-verify": [
       [
         "deploy-hosted.yml",
@@ -491,7 +497,7 @@
       ]
     ]
   },
-  "gate_digest": "b8ddf2989c45356af8046b5bc0d587c8f1ebef44ad168612c55f651848b20254",
+  "gate_digest": "05050b64cedadf1fcd203a80525091a08a1f45753c3797067d2701783130eb2f",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -515,5 +521,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-10-11T21:50:54Z"
+  "verified_at": "2026-10-14T21:09:26Z"
 }

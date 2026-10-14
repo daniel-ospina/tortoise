@@ -110,11 +110,11 @@ import uuid
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-import httpx  # noqa: E402
-import pytest  # noqa: E402
+import httpx
+import pytest
 
-from battery.runner.retrieval_preflight import require_hybrid_retrieval  # noqa: E402
-from tortoise.volunteer import SLO_MS  # noqa: E402
+from battery.runner.retrieval_preflight import require_hybrid_retrieval
+from tortoise.volunteer import SLO_MS
 
 # Plan: "median of 3 runs of 50". Run count and per-run request count are the
 # stability rule; the mix below is the request-shape half.

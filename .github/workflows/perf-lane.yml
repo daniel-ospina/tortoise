@@ -68,10 +68,11 @@ env:
   TORTOISE_TEST_CARVE_OUT: '1'
   TORTOISE_SECRET_PEPPER: test-static-pepper
   TORTOISE_FAST_ATEXIT: '1'
-  # No network embedder fetch mid-measurement: a download would put a
-  # multi-second stall inside the sample. The cache step below pre-warms it.
-  HF_HUB_OFFLINE: '1'
-  TRANSFORMERS_OFFLINE: '1'
+  # NB: HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are NOT workflow-level. They are
+  # scoped to "Run the dedicated perf lane" only — `huggingface_hub` latches
+  # HF_HUB_OFFLINE into a module constant AT IMPORT, so setting it for the whole
+  # job would make the embedder-provisioning step's download fallback dead and
+  # turn a self-inflicted cache miss into a "couldn't connect" red (#2573).
 
 jobs:
   perf-lane:
@@ -106,6 +107,14 @@ jobs:
         # before the offline measurement — otherwise the lane refuses for a
         # reason that reads like a code regression. Same provisioner, attempts
         # and backoff as the carve-out job (the embedded lane it mirrors).
+        #
+        # This step deliberately does NOT inherit the offline pair below: the
+        # download fallback only runs when HF_HUB_OFFLINE is unset at import.
+        env:
+          # #7359: the watchdog only DUMPS (exit=False) — it cannot fail a run.
+          # Above the worst-case retry sleep (attempts 5 x backoff 10 = 100s),
+          # below the 10-minute cap, so the dump lands before the runner's kill.
+          TORTOISE_EMBEDDER_WATCHDOG_S: "570"
         timeout-minutes: 10
         run: |
           exec python3 tools/embedder_provision.py --attempts 5 --backoff 10
@@ -139,6 +148,13 @@ jobs:
         # the RUNNER rather than by loosening the SLO assertion. `-s` surfaces
         # the measurement the test prints, so the number lands in the log even
         # on a green run.
+        env:
+          # No network embedder fetch mid-measurement: a download would put a
+          # multi-second stall inside the sample. The cache step above pre-warms
+          # it; the provision step resolved any miss while still online.
+          # STEP-scoped on purpose — see the provision step's comment.
+          HF_HUB_OFFLINE: '1'
+          TRANSFORMERS_OFFLINE: '1'
         run: |
           set +e
           for attempt in 1 2; do

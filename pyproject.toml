@@ -313,9 +313,11 @@ disable_error_code = [
 # `tests/e2e/auth/`, the auth-clickthrough pair, the legal+signup pair, the
 # keys/graphs pair, `tests/e2e/hosted/`), `welcome-e2e-monitor.yml`,
 # `python-ci.yml`'s carve-out shard, `deploy-pages.yml`'s legal leg, and
-# `evals-on-demand.yml` (whose lane is exactly one file,
-# `tests/eval/retrieval/test_integration.py`, which declares
-# `pytest.mark.timeout(600)`). This change also adds `pytest-timeout` to the two
+# `evals-on-demand.yml` (whose `on_demand:` lane is resolved from
+# `config/ci-surfaces.yml`: its long-standing member
+# `tests/eval/retrieval/test_integration.py` declares
+# `pytest.mark.timeout(600)`, and the #3992 perf-lane member declares 900, which
+# `perf-lane.yml` also passes as `--timeout=900`). This change also adds `pytest-timeout` to the two
 # blog e2e install lines (`blog-write-e2e.yml`, `deploy-pages.yml`): they install
 # pytest by hand (`pip install pytest requests playwright pytest-playwright`) and
 # would otherwise leave this key INERT —

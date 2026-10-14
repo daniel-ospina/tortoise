@@ -7110,9 +7110,32 @@ def test_the_perf_lane_runner_is_off_the_gate_and_reads_the_lane_from_config():
     assert perf in on_demand_files(load_manifest()), (
         "the perf lane runs from the on_demand lane — without membership it "
         "is excluded from the gate and claimed by nothing")
-    assert perf not in {f[:-3] for f in fast_pool(load_manifest())}, (
+    # `fast_pool()` returns `.py`-SUFFIXED entries, and the set below strips the
+    # suffix, so the comparison must use the bare name. The pre-fix form
+    # compared `perf` (WITH `.py`) against bare names — a value that can never
+    # be in that set — so it was satisfied by construction and the mutation it
+    # names (the file re-entering `fast_pool`) left this test green.
+    bare = perf[:-3] if perf.endswith(".py") else perf
+    assert bare not in {f[:-3] for f in fast_pool(load_manifest())}, (
         "the lane must be filtered out of fast_pool, or the wall-clock "
         "assertion is back on the merge gate")
+    # Non-vacuity control, ASSERTED (the sibling duration test's pattern): move
+    # the file back onto a surface and off the lane, and the assertion above
+    # must go red. This is the discriminator between the fixed form and the
+    # dead one — with `perf` (suffixed) this control passes vacuously too.
+    m = load_manifest()
+    first_surface = next(iter(m["surfaces"]))
+    on_gate = {
+        **m,
+        "on_demand": [f for f in m.get("on_demand") or [] if f != perf],
+        "surfaces": {
+            **m["surfaces"],
+            first_surface: [*m["surfaces"][first_surface], perf],
+        },
+    }
+    assert bare in {f[:-3] for f in fast_pool(on_gate)}, (
+        "control: with the file back on a surface it IS in fast_pool — if this "
+        "fails, the assertion above cannot fail for the regression it names")
 
 
 def test_the_lane_files_duration_key_is_classified_not_drift():
