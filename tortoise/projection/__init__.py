@@ -3764,6 +3764,8 @@ from tortoise.projection.entities import (  # noqa: E402, I001
     _stated_tags,
     _store_holds_prop_value,
     _usable_instant,
+    gated_promote_payload,
+    promote_status_applies,
 )
 from tortoise.projection.edges import _EdgeHandlers  # noqa: E402
 from tortoise.projection.grounding import _GroundingMixin  # noqa: E402
@@ -7717,9 +7719,17 @@ class FalkorProjection(
             # #785: re-apply the full promoted snapshot (status live +
             # reviewed + promotedAt) — rebuild parity for reviewer-gated
             # promotions (PointRetracted-style lifecycle event).
+            # #6239: the STATUS half is gated on live's own promote
+            # precondition — a promote replayed over a status it could not
+            # have overwritten live (a supersede is status-TERMINAL) is a
+            # status no-op, or this chronological arm re-livens a Point
+            # ``rebuild_all``'s sweep leaves terminal. The rest of the
+            # snapshot still folds, exactly as that sweep's inline pass has
+            # always applied it.
             p = ev.get("point")
             if isinstance(p, dict) and _writable_id(p.get("id")):
-                self._upsert(p)
+                self._upsert(gated_promote_payload(
+                    p, self._point_status(p["id"])))
             elif isinstance(p, dict):
                 # #7369: a truthy-but-unwritable id is skipped, not MERGEd —
                 # the skip must be observable (see `_log_identity_skip`).
@@ -9666,6 +9676,15 @@ class FalkorProjection(
         # reproduced in this worktree (the name-only fold did not apply here at
         # all), so this half is reasoned, not empirically pinned, and has no test.
         _state_folds: dict = {}
+        # #6239: ``{id: [(seq, promote_payload), …]}`` for the ``PointPromoted``
+        # records of a Point (journal-append order, like ``_state_folds``). The
+        # status-only fold the post-supersede re-fold needs: a promote is a
+        # status WRITER, and the sweep that follows pass-1b folds the
+        # terminal ``superseded`` unconditionally, so a promote the journal
+        # places AFTER that supersede must be able to restore ``status='live'``
+        # when a later ``restatus`` legalized it (the live-reachable shape
+        # ``supersede → update_entity(status='draft') → promote_point``).
+        _promote_folds: dict = {}
         _supersede_seq: dict = {}
         # #3664: EntityLinked records are deferred to a trailing sweep that
         # runs after PASS 2 (see the sweep before pass 2b). The deferral is
@@ -9849,6 +9868,17 @@ class FalkorProjection(
                     if _prom_anchor is not None and seq <= _prom_anchor:
                         _prom_props = {k: v for k, v in p.items()
                                        if k not in BELIEF_PROPS}
+                    # #6239: record the promote as a status writer for the
+                    # post-supersede re-fold, and withhold its ``status`` where
+                    # live could not have written it (see
+                    # ``promote_status_applies``). The inline position still
+                    # sees the PRE-sweep graph, so the sweep can clobber a
+                    # legal promote — the re-fold restores it, in seq order
+                    # with any later ``restatus``.
+                    if isinstance(p["id"], str):
+                        _promote_folds.setdefault(p["id"], []).append((seq, p))
+                    _prom_props = gated_promote_payload(
+                        _prom_props, self._point_status(p["id"]))
                     wrote_embedding, wrote_content_hash, _prom_extras = (
                         self._upsert_point_props(_prom_props))
                     # #4305: id-wide journal-owned derived marks. #5004: the
@@ -10636,9 +10666,22 @@ class FalkorProjection(
         # gate covers every such record. Events re-fold in seq order (each
         # `_state_folds` list is append-ordered), so the LAST journaled writer
         # wins — exactly as live and `apply()` resolve it.
-        for (_ujm_label, _ujm_id), _ujm_events in _state_folds.items():
-            if _ujm_label != "Point":
-                continue
+        #
+        # #6239: a ``PointPromoted`` after the surviving supersede is a status
+        # writer TOO, and before this change the re-fold's own comment was
+        # false — the re-fold keyed only on ``_state_folds``, so a promote the
+        # journal places AFTER a later ``restatus`` was invisible and the
+        # restatus clobbered it. Merging the two families into ONE seq-ordered
+        # pass is what makes "the last journaled status writer wins" true. The
+        # promote contributes its STATUS only (the inline pass already folded
+        # its content/derived props at its chronological position, so re-folding
+        # the whole snapshot here would clobber a LATER ``PointRevised``), and
+        # the status is written only where live could have written it
+        # (``promote_status_applies``).
+        _point_refold_ids = {
+            _id for (_lbl, _id) in _state_folds if _lbl == "Point"}
+        _point_refold_ids |= set(_promote_folds)
+        for _ujm_id in _point_refold_ids:
             _psup = supersede_last.get(_ujm_id)
             if _psup is None:
                 continue
@@ -10655,12 +10698,25 @@ class FalkorProjection(
                     params={"i": _ujm_id}).result_set:
                 continue
             _psup_seq = _psup[0]
-            for _seq, _ev in _ujm_events:
-                if _seq > _psup_seq:
+            _refold_writers: list[tuple[int, str, dict]] = [
+                (s, "state", e)
+                for s, e in _state_folds.get(("Point", _ujm_id), [])]
+            _refold_writers.extend(
+                (s, "promote", e)
+                for s, e in _promote_folds.get(_ujm_id, []))
+            for _seq, _kind, _ev in sorted(_refold_writers,
+                                           key=lambda w: w[0]):
+                if _seq <= _psup_seq:
+                    continue
+                if _kind == "state":
                     self._fold_entity_mutation(
                         _ev,
                         journal_first_materialized=first_materialized,
                         journal_seq=_seq)
+                elif promote_status_applies(self._point_status(_ujm_id)):
+                    self.g.query(
+                        "MATCH (n:Point {id:$id}) SET n.status = 'live'",
+                        params={"id": _ujm_id})
 
         # fold_seq[old_id] = journal seq of the id's surviving supersede fold
         # (pass-2b re-point discriminator; bound to the supersede-kind

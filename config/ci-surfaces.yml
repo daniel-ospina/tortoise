@@ -997,6 +997,7 @@ surfaces:
   - test_5051_capture_receipt_key_registry.py
   - test_5089_operator_prop_parity.py
   - test_5089_operator_status_parity.py
+  - test_6239_promote_after_supersede.py
   - test_7369_journal_param_boundary.py
   - test_7809_hosted_prewarm_warmup_flag.py
   - test_7767_restore_rollback.py
