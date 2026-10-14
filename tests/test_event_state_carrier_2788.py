@@ -8,12 +8,17 @@ issue asks for:
 
   * the typed commit path cannot populate the lane at all — `CommitEvent` is
     `extra="forbid"`, so none of the three is a supported commit field; and
-  * the lane is not a state carrier — the three keys sit outside the
-    consistency gate's belief/status comparison, and the Object/Subject
-    `status` state column has no Event analogue.
+  * the lane is not a projection-owned state surface — the three keys sit
+    outside the consistency gate's comparison, and the projection declares no
+    Event `status` column (the gate compares `status` only for the
+    Object/Subject families). A writer-supplied `status` prop is **not inert**:
+    `_promote_incident_operators` (`tortoise/sdk.py`, #7853) reads an Event
+    endpoint's `status` as a live/draft gate, so the declared absence is not a
+    claim that an Event's `status` is unread (pinned by
+    `tests/test_7853_confidence_label_propagation.py`).
 
 ONTOLOGY §4.5 states the invariant in prose ("an Event is a dated fact — it
-carries no current state"); this file is its executable half.
+carries no projection-owned state"); this file is its executable half.
 
 Runnable (URI-less embedded):
   TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \
@@ -81,19 +86,42 @@ class TestTheLaneIsNotAStateCarrier:
             assert key not in _EntityHandlers._EVENT_HANDLED
 
     def test_no_event_state_column_exists(self):
-        """``status`` is the Object/Subject state column; an Event has none —
-        it is neither a projection-handled Event field nor a belief/state
-        field the consistency gate compares."""
+        """The projection declares no Event ``status`` column: ``status`` is
+        not projection-handled (``_EVENT_HANDLED``) and is not a belief field
+        the consistency gate compares. It is absent from ``_EVENT_HANDLED``
+        for the same reason the three ``_PROP_LANE_KEYS`` are — the extras
+        lane carries it as a prop — so this is a statement about the DECLARED
+        surface, never a claim that an Event's ``status`` is inert. It is not:
+        ``_promote_incident_operators`` (``tortoise/sdk.py``, #7853) reads an
+        Event endpoint's ``status`` as a live/draft gate, pinned by
+        ``tests/test_7853_confidence_label_propagation.py::
+        test_promote_incident_operators_gates_on_non_point_endpoint_status``.
+        """
         assert "status" not in _EntityHandlers._EVENT_HANDLED
         assert "status" not in _ENTITY_BELIEF_FIELDS
         assert "eventStatus" not in _ENTITY_BELIEF_FIELDS
 
     def test_belief_surface_is_the_declared_pair(self):
-        """Anchor the previous assertion to the real surface, so trimming the
-        belief props cannot silently make it vacuous."""
-        assert set(_ENTITY_BELIEF_FIELDS) == (
-            set(BELIEF_PROPS) | set(BELIEF_BOOL_PROPS)
-        )
+        """Pin the fold's belief surface to its literal membership and to the
+        two registries it is built from, so adding or trimming a belief prop
+        moves an expectation instead of both sides of a set identity.
+
+        (``set(_ENTITY_BELIEF_FIELDS) == set(BELIEF_PROPS) |
+        set(BELIEF_BOOL_PROPS)`` is deliberately NOT asserted: the fold is
+        DEFINED as that concatenation, so it holds for every input and can
+        never fail. Pinning the literal names is the non-vacuous check.)
+        """
+        assert set(_ENTITY_BELIEF_FIELDS) == {
+            "confidence",
+            "posterior_alpha",
+            "posterior_beta",
+            "lastDreamedAt",
+            "outdated",
+        }
+        # The surface must still be the two declared registries: disjoint (a
+        # key in both would be compared twice) and duplicate-free.
+        assert set(BELIEF_PROPS).isdisjoint(BELIEF_BOOL_PROPS)
+        assert len(_ENTITY_BELIEF_FIELDS) == len(set(_ENTITY_BELIEF_FIELDS))
 
     def test_event_status_lands_as_a_prop_and_no_state_is_folded(self):
         """Behavioural half: the lane IS reachable (an SDK-created Event node
@@ -111,6 +139,29 @@ class TestTheLaneIsNotAStateCarrier:
             ).result_set[0][0]
             assert props.get("eventStatus") == "scheduled"
             assert "status" not in props
+        finally:
+            sdk.close()
+            shutil.rmtree(os.path.dirname(db), ignore_errors=True)
+
+    def test_a_writer_supplied_status_lands_as_a_prop(self):
+        """The declared surface has no Event ``status`` column, yet the extras
+        lane still carries a writer-supplied ``status`` onto the node — which
+        is why the projection-declared absence must not be read as "an Event's
+        ``status`` is inert". ``_promote_incident_operators`` reads exactly
+        this prop as a live/draft gate (#7853).
+        """
+        db = os.path.join(tempfile.mkdtemp(prefix="tortoise_2788_"), "t.db")
+        sdk = TortoiseSDK(db)
+        try:
+            created = sdk.create_entity(
+                "event", "StatusCarrier", eventKind="meeting", status="draft")
+            node = created["node"]
+            eid = node.get("eventId") or node.get("id")
+            props = sdk._get_proj().g.query(
+                "MATCH (e:Event {eventId:$e}) RETURN properties(e)",
+                params={"e": eid},
+            ).result_set[0][0]
+            assert props.get("status") == "draft"
         finally:
             sdk.close()
             shutil.rmtree(os.path.dirname(db), ignore_errors=True)
