@@ -282,7 +282,7 @@ function keyRowDisclosure(row, fallbackName) {
 // capturedSessions.test.js) for the Settings Captured-sessions home.
 import {
   removeSession, sessionRowMeta, transcriptModel,
-  turnRoleClass, kindBadgeClass, DELETE_CONFIRM,
+  turnRoleClass, kindBadgeClass, DELETE_CONFIRM_WORD, DELETE_CONSEQUENCES,
 } from './capturedSessions.js'
 // #2001 (W5): the Setup-guide card mirror — ONE shared derivation
 // (setupGuide.js, node --test) of the graph-held FLOW state. Renders the
@@ -534,6 +534,7 @@ function SettingsTab(props) {
     selectedSessionId, onViewSession, onClearSessionDetail,
     sessionDetail, detailLoading, sessionDetailError,
     onDeleteSession, deletingSessionId, sessionsActionError,
+    onClearSessionsActionError,
   } = props
   const reposNote = githubConnected
     ? (github.repos != null ? `${github.repos} repos available`
@@ -545,6 +546,19 @@ function SettingsTab(props) {
   // mirrors the App-level sessionDetail/selectedSessionId (kept in the App
   // so team switches + logouts clear it in one place).
   const openSessionId = selectedSessionId ? String(selectedSessionId) : null
+  // #3885 (e): deleting the RAW transcript is armed by a TYPE-TO-CONFIRM
+  // modal — the same gate the product uses to delete a whole graph (#2701) —
+  // not a native window.confirm. State is per-row and validated against the
+  // live `sessions` list: a successful DELETE removes the row and closes the
+  // dialog, a failed one leaves it armed with its reason rendered inside it.
+  const [confirmSessionId, setConfirmSessionId] = React.useState(null)
+  const [sessionConfirmTyped, setSessionConfirmTyped] = React.useState('')
+  // #3885 (e) review P3-2b: "the dialog is armed" is NOT "confirmSessionId is
+  // set" — the modal returns null the moment its session leaves the live list,
+  // while `confirmSessionId` stays truthy. Gate the page-level copy on the
+  // dialog that ACTUALLY renders, so a delete reason can never be suppressed
+  // with no surface left to show it (exactly one visible surface, always).
+  const sessionDeleteArmed = !!confirmSessionId && sessions.some((x) => String(x.id) === confirmSessionId)
   return (
     <section className="settings" aria-label="Settings">
       <h2>Settings</h2>
@@ -743,8 +757,14 @@ function SettingsTab(props) {
                         style={{ color: 'var(--red,#f87171)' }}
                         disabled={!!deletingSessionId}
                         onClick={() => {
-                          if (!window.confirm(DELETE_CONFIRM)) return
-                          onDeleteSession(s.id)
+                          // #3885 (e): arm the type-to-confirm modal — the
+                          // deletion itself only runs from the gated dialog.
+                          // Review P3-2c: clear the previous delete's reason
+                          // FIRST — otherwise session A's failure would appear
+                          // inside the dialog armed for session B.
+                          onClearSessionsActionError()
+                          setConfirmSessionId(sid)
+                          setSessionConfirmTyped('')
                         }}>
                         {deleting ? 'Deleting…' : 'Delete'}
                       </button>
@@ -755,8 +775,14 @@ function SettingsTab(props) {
             </ul>
             {/* #2002 (W6): delete action error surfaces under the list (row-
                 level, never a fabricated success) + the transcript panel for
-                the open session (loading / honest error / transcript body). */}
-            {sessionsActionError && (
+                the open session (loading / honest error / transcript body).
+                #3885 (e) review P3-2: while the delete dialog is armed the same
+                reason renders INSIDE it (the backdrop paints over this line),
+                so this copy is suppressed then — one announcement, always on
+                the visible surface. The condition is `!sessionDeleteArmed`,
+                not `!confirmSessionId`: the dialog can be closed by its session
+                leaving the list while `confirmSessionId` stays set. */}
+            {sessionsActionError && !sessionDeleteArmed && (
               <p className="error" role="alert" style={{ marginTop: '0.5rem' }}>{sessionsActionError}</p>
             )}
             {openSessionId && (
@@ -769,6 +795,68 @@ function SettingsTab(props) {
                 onClose={onClearSessionDetail}
               />
             )}
+            {/* #3885 (e): the raw-delete confirmation. Owner requirement:
+                deleting the raw needs STRONG confirmation, consistent with
+                the graph-delete pattern (#2701) and applying to EVERY storage
+                mode — the gate is about the consequence, not about who holds
+                the bytes. Same `.graph-delete-modal` CSS vocabulary and the
+                same `deleteTypedMatches` gate as the graph modal, but the required
+                word is PASSED IN from capturedSessions.js (DELETE_CONFIRM_WORD)
+                so the word rendered and the word required are one value; the
+                consequence lines come from the same module, so copy and
+                tripwire cannot drift. A failure keeps the dialog armed AND
+                renders its reason INSIDE the dialog — the page-level banner
+                sits under this backdrop, so a reason left there would be
+                unreadable while the gate stays up. The dialog renders only
+                while its session is still listed, so a successful DELETE
+                closes it and a failed one keeps it armed. */}
+            {confirmSessionId && (() => {
+              const ds = sessions.find((x) => String(x.id) === confirmSessionId)
+              if (!ds) return null
+              const sessionTypedOk = deleteTypedMatches(sessionConfirmTyped, DELETE_CONFIRM_WORD)
+              const sessionBusy = deletingSessionId === confirmSessionId
+              return (
+                <div className="modal-backdrop" onClick={() => { if (!sessionBusy) { setConfirmSessionId(null); setSessionConfirmTyped('') } }}>
+                  <div className="modal graph-delete-modal session-delete-modal" role="dialog" aria-modal="true" aria-label="Delete captured session" onClick={(e) => e.stopPropagation()}>
+                    <h3>Delete this captured session?</h3>
+                    <p className="danger-note">This cannot be undone — think before you confirm.</p>
+                    <ul className="dim small">
+                      {DELETE_CONSEQUENCES.map((line) => <li key={line}>{line}</li>)}
+                    </ul>
+                    <p className="dim small" style={{ margin: '0.6rem 0 0.4rem' }}>
+                      Type <code>{DELETE_CONFIRM_WORD}</code> to confirm:
+                    </p>
+                    <input
+                      autoFocus
+                      className="delete-confirm-input"
+                      value={sessionConfirmTyped}
+                      aria-label={`Type ${DELETE_CONFIRM_WORD} to confirm`}
+                      onChange={(e) => setSessionConfirmTyped(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && sessionTypedOk && !sessionBusy) { e.preventDefault(); onDeleteSession(ds.id) }
+                        if (e.key === 'Escape' && !sessionBusy) { setConfirmSessionId(null); setSessionConfirmTyped('') }
+                      }}
+                    />
+                    <div className="new-key-actions" style={{ marginTop: '0.8rem' }}>
+                      <button type="button" className="ghost" disabled={sessionBusy} onClick={() => { setConfirmSessionId(null); setSessionConfirmTyped('') }}>Cancel</button>
+                      <button
+                        type="button"
+                        className="danger"
+                        disabled={!sessionTypedOk || sessionBusy}
+                        onClick={() => onDeleteSession(ds.id)}
+                      >{sessionBusy ? 'Deleting…' : 'Delete session'}</button>
+                    </div>
+                    {/* #3885 (e) review P3-2: the failure reason renders HERE,
+                        not only under the list — `.modal-backdrop` is a fixed,
+                        70%-opaque, z-60 layer, so a reason painted in the page
+                        flow is unreadable while the gate is still armed. */}
+                    {sessionsActionError && (
+                      <p className="error" role="alert" style={{ margin: '0.8rem 0 0' }}>{sessionsActionError}</p>
+                    )}
+                  </div>
+                </div>
+              )
+            })()}
           </>
         )}
       </section>
@@ -10138,6 +10226,7 @@ function claimIntentInFlight() {
             onDeleteSession={deleteCapturedSession}
             deletingSessionId={sessionDeletingId}
             sessionsActionError={sessionsActionError}
+            onClearSessionsActionError={() => setSessionsActionError(null)}
             memorySourcesProps={memorySourcesProps}
           />
         )}
