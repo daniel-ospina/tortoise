@@ -4171,12 +4171,13 @@ def tortoise_session_capture(conversation: list[dict],
     "no-provider") — the pre-#3892 docstring here listed a 503 that no longer
     exists. Returns the
     capture result (a memory_write_v1 envelope, #2104) on success, or an
-    honest error dict on failure (the per-harness last-error state key is
-    recorded on non-2xx EXCEPT the #3060 capacity 429 and the #3129
-    in-flight 409 — both server conditions — and cleared on a fully
-    processed 2xx; a 2xx whose extraction was attempted but did not
-    complete SETS the key instead (#3520); same receipt semantics as the
-    REST path).
+    honest error dict on failure. Per-harness last-error bookkeeping (same on
+    the REST path): the key is SET on a non-2xx EXCEPT the #3060 capacity 429
+    and the #3129 in-flight 409 (both server conditions), and is not written
+    for the payload-boundary 422 above, which returns before the capture
+    pipeline just as REST's Pydantic 422 does; on 2xx the shared pipeline
+    clears the key for a fully processed capture and SETS it when extraction
+    was attempted but did not complete (#3520).
     """
     from tortoise.mcp_auth import (  # noqa: I001
         SELFHOST_ORG_ID,
