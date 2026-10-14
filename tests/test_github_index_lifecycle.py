@@ -156,7 +156,11 @@ def _load_dedup_script():
     return mod
 
 
-def _wait_for(predicate, timeout_s: float = 8.0):
+def _wait_for(
+    predicate,
+    timeout_s: float = 8.0,
+    what: str = "the background index run was invoked",
+):
     """Wait for a fire-and-forget side effect (background _run_indexing task
     on the TestClient's portal loop).
 
@@ -170,11 +174,17 @@ def _wait_for(predicate, timeout_s: float = 8.0):
     report a regression as a machine-load SKIP. The event is the only part
     that legitimately depends on load; callers assert the captured payload
     deterministically AFTER it returns.
+
+    #8590 review P3: the INCONCLUSIVE reason must name THAT event. It used to
+    say "a background index job reached its terminal state" — a property this
+    predicate does not observe (the five callers wait on `bool(seen)`, the run
+    being *invoked*) — which pointed the reader at the job-status/heartbeat
+    path instead of the invocation path, and contradicted
+    `tests/_verdict.py::inconclusive`'s own contract ("``what`` names the
+    property that was not observed"). `what` stays overridable for a future
+    caller with a different predicate.
     """
-    require_within(
-        predicate, timeout_s=timeout_s,
-        what="a background index job reached its terminal state",
-    )
+    require_within(predicate, timeout_s=timeout_s, what=what)
 
 
 def _pump_until_walk_entered(client, job_id: str, beats: list,
@@ -269,6 +279,14 @@ def _drain_jobs(client, timeout_s: float = 5.0):
         time.sleep(0.02)
 
 
+#: The index job's terminal statuses: `hosted_api` mints "started" and writes
+#: exactly "completed"/"failed" (`_job(status=...)`). A body in this set either
+#: MATCHES the expected status or is a determinate contradiction — never the
+#: indeterminate "still working" state a load-driven deadline is allowed to
+#: skip on.
+_TERMINAL_JOB_STATUSES = ("completed", "failed")
+
+
 def _poll_until(client, job_id: str, status: str, timeout_s: float | None = None):
     """Poll the index job; INCONCLUSIVE (never FAIL) on either deadline.
 
@@ -294,7 +312,20 @@ def _poll_until(client, job_id: str, status: str, timeout_s: float | None = None
         )
         assert r.status_code == 200, r.text
         observed["body"] = r.json()
-        return observed["body"]["status"] == status
+        observed_status = observed["body"]["status"]
+        if observed_status != status and observed_status in _TERMINAL_JOB_STATUSES:
+            # #8590 review P2 (fail-open): an ANSWERED terminal status that
+            # CONTRADICTS the expected one is a determinate product
+            # observation — the run already ended in a different terminal
+            # state — not a machine-load event. Raising INSIDE the predicate
+            # keeps the FAIL observation-triggered, never deadline-triggered;
+            # a non-terminal body ("started") at the budget still expires
+            # through `require_within` as INCONCLUSIVE.
+            raise AssertionError(
+                f"job {job_id} reached {observed_status!r}, expected "
+                f"{status!r}: {observed['body']}"
+            )
+        return observed_status == status
 
     # #5049 rule 1: the poll's own deadline is a wall-clock budget, so its
     # expiry is INCONCLUSIVE and names the budget — never the AssertionError
@@ -379,6 +410,58 @@ def test_poll_until_deadline_is_inconclusive_never_an_assertion():
     assert "INCONCLUSIVE [#5049]" in message
     assert "0s" in message, message
     assert "job job-1 reached status 'completed'" in message, message
+
+
+def test_poll_until_terminal_mismatch_is_a_fail_not_a_skip():
+    """#8590 review P2 must-fail leg: a CONTRADICTORY terminal status is a
+    determinate observation, never a machine-load SKIP.
+
+    Deterministic: an answered 200 whose body has already reached the OTHER
+    terminal status, with the budget spent. Pre-fix the predicate was false
+    forever and the budget exited as `INCONCLUSIVE [#5049]`, dropping the run's
+    own failure text; an answered terminal contradiction must FAIL.
+    """
+
+    class _Failed:
+        status_code = 200
+        text = '{"status": "failed", "error": "boom"}'
+
+        def get(self, *_args, **_kwargs):
+            return self
+
+        def json(self):
+            return {"status": "failed", "error": "boom"}
+
+    try:
+        _poll_until(_Failed(), "job-1", "completed", timeout_s=0.0)
+    except AssertionError as exc:
+        message = str(exc)
+    except pytest.skip.Exception as exc:
+        raise AssertionError(
+            "a contradictory terminal status ('failed' while awaiting "
+            f"'completed') was swallowed as an INCONCLUSIVE skip: {exc}"
+        ) from exc
+    else:
+        raise AssertionError(
+            "the poll raised no verdict for a contradictory terminal status")
+    assert "reached 'failed', expected 'completed'" in message, message
+    assert "boom" in message, message
+
+
+def test_wait_for_names_the_event_it_waits_for():
+    """#8590 review P3: the INCONCLUSIVE reason names the event the predicate
+    observes — the run was INVOKED — not its terminal state.
+
+    Pre-fix the reason said "a background index job reached its terminal
+    state", a property `lambda: bool(seen)` never observes, so this fails on
+    the pre-fix string.
+    """
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        _wait_for(lambda: False, timeout_s=0.0)
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message, message
+    assert "the background index run was invoked" in message, message
+    assert "terminal state" not in message, message
 
 
 def test_post_index_is_inconclusive_on_a_bound_refusal():

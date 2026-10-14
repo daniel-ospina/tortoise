@@ -328,7 +328,11 @@ exhausting its budget SKIPs naming that budget instead of raising `AssertionErro
 the refusal is a non-answer, but an **answered** 4xx/5xx is not — each helper asserts
 the answered status (`assert rp.status_code == 200`) before reading the body, so a
 genuine 404 stays a FAIL instead of exiting the budget as a machine-load SKIP that
-hides the regression (#8590 review P2).
+hides the regression (#8590 review P2). A contradictory **terminal** status is not a
+load event either: both `_poll_until`s raise the FAIL from INSIDE the predicate when an
+answered body has already reached the OTHER terminal status (`completed`/`failed`), so a
+determinate contradiction is observation-triggered while a still-`started` body at the
+budget keeps expiring through `require_within` as INCONCLUSIVE (#8590 review P2).
 
 **Remaining, deliberately not converted here:** the bare `assert r.status_code == 200`
 reads on non-exempt routes that sit behind no shared seam (≈1.7k across `tests/`, top
@@ -349,7 +353,9 @@ The contract's `wait_for` is adopted at the converted sites only. `_wait_for` in
 `tests/test_github_index_lifecycle.py` is converted to an **event** wait (the run was
 invoked) whose callers then assert the captured payload deterministically — an
 exact-equality predicate over that payload was fail-open, reporting a wrong forward as a
-machine-load SKIP (#8579 review P2). `tests/test_index_docs_api.py`'s `_wait_for` was
+machine-load SKIP (#8579 review P2) — and whose INCONCLUSIVE reason names that event
+(`what="the background index run was invoked"`), not the job's terminal state it does not
+observe (#8590 review P3). `tests/test_index_docs_api.py`'s `_wait_for` was
 unused at head and at base and has been removed along with its conversion.
 
 The pre-existing predicate

@@ -243,6 +243,14 @@ def _drain_jobs(client, timeout_s: float = 5.0):
         time.sleep(0.02)
 
 
+#: The index job's terminal statuses: `hosted_api` mints "started" and writes
+#: exactly "completed"/"failed" (`_job(status=...)`). A body in this set either
+#: MATCHES the expected status or is a determinate contradiction — never the
+#: indeterminate "still working" state a load-driven deadline is allowed to
+#: skip on.
+_TERMINAL_JOB_STATUSES = ("completed", "failed")
+
+
 def _poll_until(client, job_id: str, status: str, timeout_s: float | None = None):
     """Poll the docs index job; INCONCLUSIVE (never FAIL) on either deadline.
 
@@ -263,7 +271,20 @@ def _poll_until(client, job_id: str, status: str, timeout_s: float | None = None
         )
         assert r.status_code == 200, r.text
         observed["body"] = r.json()
-        return observed["body"]["status"] == status
+        observed_status = observed["body"]["status"]
+        if observed_status != status and observed_status in _TERMINAL_JOB_STATUSES:
+            # #8590 review P2 (fail-open): an ANSWERED terminal status that
+            # CONTRADICTS the expected one is a determinate product
+            # observation — the run already ended in a different terminal
+            # state — not a machine-load event. Raising INSIDE the predicate
+            # keeps the FAIL observation-triggered, never deadline-triggered;
+            # a non-terminal body ("started") at the budget still expires
+            # through `require_within` as INCONCLUSIVE.
+            raise AssertionError(
+                f"docs job {job_id} reached {observed_status!r}, expected "
+                f"{status!r}: {observed['body']}"
+            )
+        return observed_status == status
 
     # #5049 rule 1: the poll's own deadline is a wall-clock budget, so its
     # expiry is INCONCLUSIVE and names the budget — never the AssertionError
@@ -327,6 +348,42 @@ def test_poll_until_deadline_is_inconclusive_never_an_assertion():
     assert "INCONCLUSIVE [#5049]" in message
     assert "0s" in message, message
     assert "docs job job-1 reached status 'completed'" in message, message
+
+
+def test_poll_until_terminal_mismatch_is_a_fail_not_a_skip():
+    """#8590 review P2 must-fail leg: a CONTRADICTORY terminal status is a
+    determinate observation, never a machine-load SKIP.
+
+    Deterministic: an answered 200 whose body has already reached the OTHER
+    terminal status, with the budget spent. Pre-fix the predicate was false
+    forever and the budget exited as `INCONCLUSIVE [#5049]`, dropping the run's
+    own failure text; an answered terminal contradiction must FAIL.
+    """
+
+    class _Failed:
+        status_code = 200
+        text = '{"status": "failed", "error": "boom"}'
+
+        def get(self, *_args, **_kwargs):
+            return self
+
+        def json(self):
+            return {"status": "failed", "error": "boom"}
+
+    try:
+        _poll_until(_Failed(), "job-1", "completed", timeout_s=0.0)
+    except AssertionError as exc:
+        message = str(exc)
+    except pytest.skip.Exception as exc:
+        raise AssertionError(
+            "a contradictory terminal status ('failed' while awaiting "
+            f"'completed') was swallowed as an INCONCLUSIVE skip: {exc}"
+        ) from exc
+    else:
+        raise AssertionError(
+            "the poll raised no verdict for a contradictory terminal status")
+    assert "reached 'failed', expected 'completed'" in message, message
+    assert "boom" in message, message
 
 
 def test_pump_until_midwalk_deadline_is_inconclusive_never_an_assertion():
