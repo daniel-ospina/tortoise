@@ -399,10 +399,11 @@ def test_live_predicate_and_set_agree_on_both_axes() -> None:
 # ── 5. #7075 — builder is the keep-filter's exact negation, on every value ─
 
 #: Values a hand-edited / pre-#2491 graph can actually hold on ``outdated``.
-#: ``0`` is the one value where Cypher type-strictness and Python ``bool()``
-#: cannot agree (see ``_terminal_expression``'s docstring) — it is asserted
-#: explicitly like the rest, because the DUAL invariant must hold for it even
-#: though the Python mirror cannot.
+#: The FALSY NON-BOOLEAN values (``0`` and ``""``) are where Cypher
+#: type-strictness and Python ``bool()`` cannot agree (see
+#: ``_terminal_expression``'s docstring) — they are asserted explicitly like
+#: the rest, because the DUAL invariant must hold for them even though the
+#: Python mirror cannot.
 _OUTDATED_PROBE_VALUES = [True, False, None, 1, 0, 2, "true", "false", ""]
 
 
@@ -427,8 +428,8 @@ def test_terminal_expression_is_the_keep_filters_exact_negation(sdk) -> None:
     negation of ``= false`` under FalkorDB's strict type comparison, so a
     non-boolean ``outdated`` made a node BOTH not-terminal and not-live — an
     excluded middle. Asserted against the live engine, on a live-status
-    Point, for every probe value (including numeric ``0``, where the builder
-    and the PYTHON mirror still differ by contract).
+    Point, for every probe value (including the falsy non-boolean ``0`` and
+    ``""``, where the builder and the PYTHON mirror still differ by contract).
     """
     proj = sdk._get_proj()
     for value in _OUTDATED_PROBE_VALUES:
@@ -483,6 +484,37 @@ def test_builder_and_python_mirror_agree_on_non_boolean_flags(sdk, value) -> Non
     )
 
 
+#: Falsy NON-boolean values: the residual class the two docstrings name. The
+#: builder (and ``_terminal_excluded``) read them as the ``<> false`` half
+#: (terminal), while the Python mirror's ``bool()`` reads them live.
+_FALSY_NON_BOOLEAN_RESIDUALS = [0, 0.0, ""]
+
+
+@pytest.mark.parametrize("value", _FALSY_NON_BOOLEAN_RESIDUALS)
+def test_documented_residual_class_is_falsy_non_boolean(sdk, value) -> None:
+    """The docstrings' residual is executable: for EVERY falsy non-boolean
+    value the Cypher builder calls the node terminal while the Python mirror
+    calls it live.
+
+    The residual class is ``0``/``0.0``/``""`` — NOT only numeric ``0`` (the
+    pre-fix prose omitted the empty string). Fails on the pre-fix ``= true``
+    builder, where such a node read NOT terminal and was separately non-live
+    (the excluded middle this PR removes).
+    """
+    pid = _mk_point(sdk, f"residual {value!r}", status="live", outdated=value)
+    terminal, kept = _terminal_and_keep(sdk._get_proj(), pid)
+    mirror = is_terminal_status("live", value)
+    assert terminal is True, (
+        f"Cypher builder should read falsy non-boolean {value!r} as terminal "
+        f"(keep-filter dual); got {terminal}"
+    )
+    assert kept is False, value  # the keep-filter agrees it is terminal
+    assert mirror is False, (
+        f"Python mirror should still read {value!r} live (the documented "
+        f"residual); got {mirror}"
+    )
+
+
 def test_python_mirror_truthiness_of_non_boolean_flags() -> None:
     """The Python half of indicator 1, without a graph: the mirror's own
     answers on the probe set — the contract the Cypher half must meet wherever
@@ -490,5 +522,6 @@ def test_python_mirror_truthiness_of_non_boolean_flags() -> None:
     assert is_terminal_status("live", 1) is True
     assert is_terminal_status("live", "true") is True
     assert is_terminal_status("live", "false") is True  # non-empty string
-    assert is_terminal_status("live", 0) is False  # the documented residual
+    assert is_terminal_status("live", 0) is False  # falsy residual: numeric
+    assert is_terminal_status("live", "") is False  # falsy residual: empty str
     assert is_terminal_status("live", None) is False

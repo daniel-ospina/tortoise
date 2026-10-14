@@ -197,9 +197,10 @@ def _terminal_expression(clause: str) -> str:
     pre-#2491 graph can hold a non-boolean. The Python mirror
     ``is_terminal_status`` reads that flag by ``bool()`` truthiness, so it
     agrees with this expression on every boolean, NULL, non-empty string and
-    non-zero number; the ONE residual is a stored numeric ``0`` (terminal
-    here and in ``_terminal_excluded``, live in the Python mirror) — an
-    out-of-contract value no in-repo writer can produce. This is a stated
+    non-zero number. They differ for **falsy non-boolean** values — numeric
+    ``0``/``0.0`` and the empty string ``""`` are terminal here (and in
+    ``_terminal_excluded``) but live in the Python mirror — an out-of-contract
+    class no in-repo writer can produce. This is a stated
     contract, NOT a promise that arbitrary hand-edited data is interpreted
     consistently.
     """
@@ -242,9 +243,10 @@ def is_terminal_status(status, outdated: bool = False) -> bool:
     journal fold enforces the type). This mirror reads it by ``bool()``
     truthiness while ``_terminal_expression`` negates
     ``coalesce(outdated, false) = false``; the two agree on every boolean,
-    NULL, non-empty string and non-zero number, and differ only for a stored
-    numeric ``0`` (live here, terminal in Cypher) — an out-of-contract value
-    no in-repo writer can produce (#7075)."""
+    NULL, non-empty string and non-zero number, and differ for **falsy
+    non-boolean** values (numeric ``0``/``0.0`` and the empty string ``""`` —
+    live here, terminal in Cypher) — an out-of-contract class no in-repo
+    writer can produce (#7075)."""
     return (status or "") in TERMINAL_EXCLUDED_STATUSES or bool(outdated)
 
 
