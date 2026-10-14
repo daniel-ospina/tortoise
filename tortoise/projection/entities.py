@@ -217,6 +217,17 @@ def _terminal_object_statuses() -> list:
     return list(OBJECT_TERMINAL_STATUSES)
 
 
+# #2729 review P2: the last successfully compiled set of declared-lifecycle
+# kind spellings. `_status_fold_index` fails open (an empty index) when the
+# pack registry is unavailable, but an empty index also empties the built-in
+# fold's `$declared` ownership guard — so a lifecycle-owning kind would take
+# the connector fold again (`github.issue.closed` → `completed`, a status
+# outside its declared vocabulary). Retaining the last-good forms keeps the
+# OWNERSHIP half through an outage; only the declared folds go silent (the
+# registry, their source, is gone), which is the honest degradation.
+_LAST_GOOD_KIND_FORMS: frozenset = frozenset()
+
+
 def _status_fold_index():
     """#2729: the compiled pack-declared fold surface, or an EMPTY index.
 
@@ -228,7 +239,17 @@ def _status_fold_index():
 
     Never raises: the fold is a state cache and a pack-resolution failure must
     not take down an event write (the #1930 ponytail contract).
+
+    ⚠️ The EMPTY index is not fully empty: its ``kind_forms`` carries the
+    last-good declared-lifecycle spellings (see `_LAST_GOOD_KIND_FORMS`), so
+    an outage does not re-open the connector-fold collision for a kind that
+    owns its state. What IS lost is the declared folds themselves — they are
+    compiled FROM the unavailable registry — and the registry-unavailable
+    warn-once is the only signal. A warm process keeps the ownership guard; a
+    cold process with no registry cannot know the catalog and degrades to the
+    pre-#2729 behaviour.
     """
+    global _LAST_GOOD_KIND_FORMS
     from tortoise.status_folds import StatusFoldIndex
 
     try:
@@ -236,8 +257,12 @@ def _status_fold_index():
 
         reg = _get_registry()
         if reg is None:
-            return StatusFoldIndex()
-        return reg.status_fold_index
+            empty = StatusFoldIndex()
+            empty.kind_forms = _LAST_GOOD_KIND_FORMS
+            return empty
+        index = reg.status_fold_index
+        _LAST_GOOD_KIND_FORMS = index.kind_forms
+        return index
     except Exception as e:  # fail-open: pack resolution never breaks a write
         # Warn-ONCE (#1930): this runs per event, and an unavailable registry
         # must not spam the log on the write/replay hot path.
@@ -246,17 +271,27 @@ def _status_fold_index():
         _warn_packs_once(
             ("status-fold-index", "unavailable"),
             "status-fold index unavailable; built-in folds only: %s", e)
-        return StatusFoldIndex()
+        empty = StatusFoldIndex()
+        empty.kind_forms = _LAST_GOOD_KIND_FORMS
+        return empty
 
 
 def _emit_fold_violation(target_kind: str, event_kind: str, name: str) -> None:
-    """#2729: a declared fold fired but no Object of the declaring kind exists.
+    """#2729: a declared fold's explicit ``object`` target names no Object.
 
-    Reported at the kind's #1934 enforcement level (``warn | retry | block``)
-    through the shared ``enforcement`` seam. The projection has no retry loop of
-    its own — ``retry`` marks the miss for the extractor's bounded re-attempt,
-    exactly as ``enforcement.resolve_enforcement`` documents. Fail-open: the
-    reporter never raises into the fold.
+    The kind's #1934 enforcement level (``warn | retry | block``) is RESOLVED
+    and recorded in the violation detail, then reported through the shared
+    ``enforcement.emit_violation`` seam. ⚠️ The level does not currently
+    CHANGE behaviour: ``emit_violation`` logs every violation at WARNING and
+    nothing reads the emitted ``status_fold_unapplied`` code, so ``warn``,
+    ``retry`` and ``block`` are identical here. There is no retry loop on the
+    projection write path, and the one real retry consumer
+    (``kind_classifier``) retries near-miss kind CLASSIFICATION, not a status
+    fold — so this is a recorded level, not a routed ladder. Making it
+    level-aware (or giving the code a consumer) is a separate change; do not
+    describe it here as if the ladder already routes it.
+
+    Fail-open: the reporter never raises into the fold.
     """
     try:
         from tortoise.enforcement import emit_violation, resolve_enforcement
@@ -4075,7 +4110,8 @@ class _EntityHandlers:
         # ── MEETING GUARD path (cycle-12/13/17/18; the ONLY guard consumer) ──
         return self._event_guarded_merge(inner, eid, props, guard_source_file)
 
-    def _fold_object_status(self, name: str, event_kind: str) -> None:
+    def _fold_object_status(self, name: str | None, event_kind: str, *,
+                            about_names=()) -> None:
         """#2729 — THE ONE Object-status fold dispatcher.
 
         Two halves, applied in this order:
@@ -4084,7 +4120,10 @@ class _EntityHandlers:
            Object whose ``objectKind`` is the DECLARING pack's namespaced kind
            (``venture:tranche``) — dispatching on the namespaced kind is what
            stops two packs that share a bare kind name from colliding at the
-           fold, and it is why the fold needs no per-event ``if``.
+           fold, and it is why the fold needs no per-event ``if``. The lookup
+           and the guard are case-folded and form-widened (``venture:tranche``
+           OR bare ``tranche``) because the write gate admits both spellings
+           and the extraction commit strips the event namespace.
         2. **The built-in connector compatibility fold**
            (``status_folds.BUILTIN_CONNECTOR_FOLDS``), guarded to Objects whose
            kind declares NO lifecycle. A kind that declares ``statuses`` OWNS
@@ -4092,50 +4131,76 @@ class _EntityHandlers:
            venture Object with the connector's ``completed`` (#2725 conflict
            check).
 
+        ``name`` is the event's explicit ``object`` property — the event's
+        declared target, whose absence is reported. ``about_names`` are the
+        event's ``about_entities``: a LOOSE list of entities the event
+        concerns, so a declared fold is applied to any of them that is an
+        Object of the declaring kind, but a non-match is NOT a violation (the
+        extraction pipeline emits events with ``about_entities`` and no
+        ``object``; reporting per-non-match would spam every unrelated
+        entity).
+
         The terminal-status guard is unchanged in both halves (#2164/#3309):
         a superseded / deprecated / archived / retracted Object is never
         resurrected into ``recall_state``'s default view.
 
-        A declared fold that finds no Object of its kind is a real signal (a
-        mis-named object in the event, or a kind that drifted) — it is emitted
-        at the kind's #1934 enforcement level rather than swallowed.
+        A declared fold whose explicit ``object`` target is absent is a real
+        signal (a mis-named object in the event, or a kind that drifted) — it
+        is emitted at the kind's #1934 enforcement level rather than
+        swallowed.
         """
         index = _status_fold_index()
         from tortoise.status_folds import builtin_fold_status
 
         excluded = _terminal_object_statuses()
         declared = index.folds_for_event(event_kind)
-        for target_kind, status in declared:
-            rows = self.g.query(
-                "MATCH (o:Object {name:$n}) "
-                "WHERE o.objectKind = $kind "
-                "  AND (o.status IS NULL OR NOT (o.status IN $excluded)) "
-                "SET o.status = $status "
-                "RETURN count(o) AS n",
-                params={"n": name, "kind": target_kind, "status": status,
-                        "excluded": excluded},
-            ).result_set
-            if rows and rows[0][0]:
-                continue
-            # No write: either the terminal guard refused (correct, silent) or
-            # no Object of the declaring kind exists (a fold violation).
-            present = self.g.query(
-                "MATCH (o:Object {name:$n}) "
-                "WHERE o.objectKind = $kind "
-                "RETURN count(o) AS n",
-                params={"n": name, "kind": target_kind},
-            ).result_set
-            if not (present and present[0][0]):
-                _emit_fold_violation(target_kind, event_kind, name)
+        if declared:
+            # The explicit target is REPORTED on a miss; an `about_entities`
+            # target is folded silently (see the docstring). `name` wins when
+            # it is also present in the list — one write, one report.
+            targets: list[tuple[str, bool]] = []
+            if name:
+                targets.append((name, True))
+            for about in about_names or ():
+                if isinstance(about, str) and about and about != name:
+                    targets.append((about, False))
+            for target_name, report in targets:
+                for target_kind, status in declared:
+                    kinds = index.kind_forms_for(target_kind)
+                    rows = self.g.query(
+                        "MATCH (o:Object {name:$n}) "
+                        "WHERE toLower(o.objectKind) IN $kinds "
+                        "  AND (o.status IS NULL OR NOT (o.status IN $excluded)) "
+                        "SET o.status = $status "
+                        "RETURN count(o) AS n",
+                        params={"n": target_name, "kinds": kinds,
+                                "status": status, "excluded": excluded},
+                    ).result_set
+                    if rows and rows[0][0]:
+                        continue
+                    if not report:
+                        continue
+                    # No write: either the terminal guard refused (correct,
+                    # silent) or no Object of the declaring kind exists (a
+                    # fold violation).
+                    present = self.g.query(
+                        "MATCH (o:Object {name:$n}) "
+                        "WHERE toLower(o.objectKind) IN $kinds "
+                        "RETURN count(o) AS n",
+                        params={"n": target_name, "kinds": kinds},
+                    ).result_set
+                    if not (present and present[0][0]):
+                        _emit_fold_violation(target_kind, event_kind,
+                                             target_name)
         builtin_status = builtin_fold_status(event_kind)
-        if builtin_status is not None:
+        if builtin_status is not None and name:
             self.g.query(
                 "MATCH (o:Object {name:$n}) "
-                "WHERE (o.objectKind IS NULL OR NOT (o.objectKind IN $declared)) "
+                "WHERE (o.objectKind IS NULL OR NOT (toLower(o.objectKind) IN $declared)) "
                 "  AND (o.status IS NULL OR NOT (o.status IN $excluded)) "
                 "SET o.status=$status",
                 params={"n": name, "status": builtin_status,
-                        "declared": sorted(index.lifecycle_kinds),
+                        "declared": sorted(index.kind_forms),
                         "excluded": excluded},
             )
 
@@ -4277,8 +4342,18 @@ class _EntityHandlers:
         # built-in behaviour is preserved VERBATIM for any Object whose kind
         # declares no lifecycle; a kind that declares one OWNS its state and
         # the connector fold no longer applies to it.
-        if _obj_name and _wk:
-            self._fold_object_status(_obj_name, _wk)
+        #
+        # The event's `object` prop is its declared target; `about_entities`
+        # is the loose list the extraction pipeline emits instead (`sdk.py`
+        # passes the payload's `about_entities` through, and the projection
+        # folds a declared rule onto any of them that is an Object of the
+        # declaring kind — without reporting a miss, which is scoped to the
+        # explicit `object`).
+        _about = inner.get("about_entities") or inner.get("aboutEntities") or []
+        if isinstance(_about, str):
+            _about = [_about]
+        if _wk and (_obj_name or _about):
+            self._fold_object_status(_obj_name, _wk, about_names=_about)
         # Event -[:uses]-> Object (input entities, #122; #125 structured dicts)
         uses = inner.get("uses")
         if uses:

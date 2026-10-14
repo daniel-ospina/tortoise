@@ -574,7 +574,7 @@ class PackManifest:
 
     # Manifest v3 (R6 §3.1): per-kind extractor metadata, keyed by pack-local
     # kind name. Allowed value keys: description, synonyms, examples,
-    # nearMisses, extractable, storeAs, enforcement.
+    # nearMisses, extractable, storeAs, enforcement, statuses, folds.
     kind_defs: dict[str, dict] = dataclasses.field(default_factory=dict)
 
     # Manifest v3 (R6 §3.2): first-class business-logic chains.

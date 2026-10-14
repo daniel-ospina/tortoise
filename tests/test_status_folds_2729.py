@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest  # noqa: I001
 from tortoise.pack_registry import PackRegistry, default_packs_dir
+from tortoise.pack_manifest_store import validate_manifest
 from tortoise.status_folds import (
     BUILTIN_CONNECTOR_FOLDS,
     SHARED_CONNECTOR_STATUS_WORDS,
@@ -103,6 +104,36 @@ class TestStatusDeclValidation:
         assert any("duplicates" in e for e in errors)
         errors, _ = self._validate({"statuses": ["a", ""]})
         assert any("non-empty strings" in e for e in errors)
+
+    def test_unhashable_statuses_entry_is_a_diagnostic_not_a_crash(self):
+        """A payload-controlled non-string entry (`statuses: [{a: 1}]`) must
+        return the validator's error list, not raise `TypeError: unhashable
+        type` out of a function whose contract is `-> (errors, warnings)`.
+        (Pre-fix the duplicate check ran `set(statuses)` over the raw list.)"""
+        for bad in ({"a": 1}, [1]):
+            errors, _ = self._validate({"statuses": [bad]})
+            assert any("non-empty strings" in e for e in errors)
+        errors, _ = self._validate({"statuses": [[1], "ok"]})
+        assert any("non-empty strings" in e for e in errors)
+
+    def test_duplicate_fold_event_on_one_kind_is_rejected(self):
+        """Two folds naming the same event on one kind would silently
+        last-win in the index (and in `_fold_object_status`'s declaration
+        order); #2729's precedence question is open, so this is an error."""
+        errors, _ = self._validate({
+            "statuses": ["a", "b"],
+            "folds": [_decl("trancheReleased", "a"),
+                      _decl("trancheReleased", "b")]})
+        assert any("more than once" in e for e in errors)
+
+    def test_two_distinct_fold_events_are_still_accepted(self):
+        """Parity control: only the SAME event twice is rejected."""
+        errors, _ = self._validate({
+            "statuses": ["a", "b"],
+            "folds": [_decl("trancheReleased", "a"),
+                      _decl("demo:otherEvent", "b")]},
+            declared=("trancheReleased", "otherEvent"))
+        assert errors == []
 
     def test_orphan_fold_event_is_rejected(self):
         errors, _ = self._validate(
@@ -387,3 +418,229 @@ class TestFoldBehaviour:
                        for r in caplog.records)
         finally:
             sdk.close()
+
+
+# ── 5. Form-widened dispatch (#2729 review P1/P2) ────────────────────────
+
+
+class TestFormWidenedDispatch:
+    """The write gate admits a pack kind BOTH namespaced and bare, case-folded
+    (``extractor_v2._object_kind_forms``/``_event_kind_forms`` ``.lower()``
+    every form, and no path normalizes the stored value), and the extraction
+    commit strips the event namespace. Keying the index on the namespaced
+    spelling alone made a declared fold inert — and the built-in connector fold
+    re-applied to a bare-spelled lifecycle kind, writing a status outside its
+    declared vocabulary."""
+
+    def test_bare_object_and_bare_event_kind_fold(self):
+        sdk = _fresh_sdk()
+        try:
+            sdk.create_entity("object", "B1", objectKind="tranche")
+            sdk.create_event("B1 released", "disbursement", object="B1")
+            assert _object_status(sdk, "B1") == "released"
+        finally:
+            sdk.close()
+
+    def test_bare_object_with_namespaced_event_folds(self):
+        sdk = _fresh_sdk()
+        try:
+            sdk.create_entity("object", "B2", objectKind="tranche")
+            sdk.create_event("B2 released", "venture:disbursement", object="B2")
+            assert _object_status(sdk, "B2") == "released"
+        finally:
+            sdk.close()
+
+    def test_namespaced_object_with_bare_event_folds(self):
+        sdk = _fresh_sdk()
+        try:
+            sdk.create_entity("object", "B3", objectKind="venture:tranche")
+            sdk.create_event("B3 released", "disbursement", object="B3")
+            assert _object_status(sdk, "B3") == "released"
+        finally:
+            sdk.close()
+
+    def test_bare_spelled_lifecycle_kind_is_not_relabelled_by_the_connector_fold(self):
+        """The wrong-state write the review reproduced (row B): a bare-spelled
+        ``tranche`` took the connector's ``completed``, a value outside the
+        kind's declared vocabulary ``[pending, conditions-met, released,
+        denied]``."""
+        sdk = _fresh_sdk()
+        try:
+            sdk.create_entity("object", "B4", objectKind="tranche")
+            sdk.create_event("closed", "github.issue.closed", object="B4")
+            assert _object_status(sdk, "B4") == "live"
+        finally:
+            sdk.close()
+
+    def test_case_varied_spelling_folds_and_is_owned(self):
+        sdk = _fresh_sdk()
+        try:
+            sdk.create_entity("object", "B5", objectKind="VENTURE:TRANCHE")
+            sdk.create_event("B5 released", "Venture:Disbursement", object="B5")
+            assert _object_status(sdk, "B5") == "released"
+            sdk.create_entity("object", "B6", objectKind="Tranche")
+            sdk.create_event("closed", "github.issue.closed", object="B6")
+            assert _object_status(sdk, "B6") == "live"
+        finally:
+            sdk.close()
+
+    def test_index_registers_both_spellings(self, venture_registry):
+        idx = venture_registry.status_fold_index
+        assert idx.folds_for_event("disbursement") == [
+            ("venture:tranche", "released")]
+        assert idx.folds_for_event("Venture:Disbursement") == [
+            ("venture:tranche", "released")]
+        assert "venture:tranche" in idx.kind_forms
+        assert "tranche" in idx.kind_forms
+        assert idx.owns_state("tranche")
+
+
+# ── 6. The extraction pipeline's own event shape (#2729 review P1) ───────
+
+
+_PIPELINE_EMBED = {
+    "entities": [{"name": "T1", "kind": "venture:tranche",
+                  "lifecycle": "created", "supersedes": None, "note": None}],
+    "events": [{"content": "T1 released", "eventKind": "venture:disbursement",
+                "about_entities": ["T1"]}],
+    "points": [], "operators": [], "chain_notes": [],
+    "link_before_create": [],
+}
+
+
+class TestExtractionPipelineFold:
+    """The acceptance indicator must hold for the shape the PIPELINE emits, not
+    only for the SDK door: `execute_embed` writes a BARE event kind
+    (`sdk.py::_extract_session_v2` does `.rsplit(":", 1)[-1]`) and carries
+    `about_entities`, not `object`."""
+
+    def test_payload_event_shape_is_the_pipeline_shape(self):
+        """Pin the producer: bare event kind + `about_entities`, no `object`."""
+        import tortoise.extractor_v2 as v2
+
+        payload = v2.execute_embed(
+            _PIPELINE_EMBED, {}, session_id="s1")["payload"]
+        event = payload["events"][0]
+        assert event["eventKind"] == "disbursement"
+        assert "object" not in event
+        assert event["about_entities"] == ["T1"]
+        assert payload["entities"][0]["kind"] == "venture:tranche"
+
+    def test_declared_fold_fires_through_execute_embed_and_the_commit(
+            self, monkeypatch):
+        import tortoise.extractor_v2 as v2
+
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+        payload = v2.execute_embed(
+            _PIPELINE_EMBED, {}, session_id="s1")["payload"]
+        monkeypatch.setattr(
+            v2, "extract_session_v2",
+            lambda *a, **k: {"payload": payload, "errors": [], "warnings": []})
+        sdk = _fresh_sdk()
+        try:
+            sdk._extract_session_v2(
+                [{"role": "user", "content": "T1 released"}], "s1",
+                "2026-01-01T00:00:00Z")
+            assert _object_status(sdk, "T1") == "released"
+        finally:
+            sdk.close()
+
+    def test_builtin_fold_still_does_not_fire_via_about_entities(self):
+        """Parity control: the widening is for DECLARED folds only — routing
+        `about_entities` must not let the built-in connector fold apply through
+        a list the old code never read."""
+        sdk = _fresh_sdk()
+        try:
+            sdk.create_entity("object", "ISSUE", objectKind="dev:issue")
+            sdk.create_event("opened", "github.issue.open",
+                             about_entities=["ISSUE"])
+            assert _object_status(sdk, "ISSUE") == "live"
+        finally:
+            sdk.close()
+
+
+# ── 7. Registry outage keeps the ownership guard (#2729 review minor) ────
+
+
+class TestOwnershipSurvivesRegistryOutage:
+    def test_outage_keeps_the_last_good_kind_forms(self, monkeypatch):
+        from tortoise.projection import entities as ents
+
+        warm = ents._status_fold_index()
+        assert "venture:tranche" in warm.kind_forms
+        assert "venture:tranche" in ents._LAST_GOOD_KIND_FORMS
+
+        def _boom():
+            raise RuntimeError("packs unavailable")
+
+        monkeypatch.setattr("tortoise.domain_loader._get_registry", _boom)
+        degraded = ents._status_fold_index()
+        # The declared folds are gone (the registry that compiles them is), but
+        # the OWNERSHIP half survives.
+        assert degraded.folds_for_event("venture:disbursement") == []
+        assert degraded.kind_forms == warm.kind_forms
+        assert degraded.owns_state("venture:tranche")
+
+    def test_builtin_fold_respects_ownership_when_declared_folds_are_empty(
+            self, monkeypatch):
+        """End-to-end of the guard: an index with no declared folds but the
+        last-good ownership forms must still suppress the connector fold for a
+        lifecycle-owning kind (pre-fix, an empty index re-applied it)."""
+        from tortoise.projection import entities as ents
+
+        warm = ents._status_fold_index()
+        degraded = StatusFoldIndex()
+        degraded.kind_forms = warm.kind_forms
+        monkeypatch.setattr(ents, "_status_fold_index", lambda: degraded)
+        sdk = _fresh_sdk()
+        try:
+            sdk.create_entity("object", "O1", objectKind="venture:tranche")
+            sdk.create_event("closed", "github.issue.closed", object="O1")
+            assert _object_status(sdk, "O1") == "live"
+        finally:
+            sdk.close()
+
+
+# ── 8. The hosted (graph-native) route refuses the declaration ───────────
+
+
+_TENANT_MANIFEST = """namespace: tenantx
+name: Tenant X
+version: 0.1.0
+tier: free
+ontology:
+  extends: core
+  objectKinds: [tranche]
+  eventKinds: [disbursement]
+  kindDefs:
+    tranche:
+      statuses: [pending, released]
+      folds:
+        - event: disbursement
+          status: released
+"""
+
+_TENANT_MANIFEST_NO_FOLDS = """namespace: tenantx
+name: Tenant X
+version: 0.1.0
+tier: free
+ontology:
+  extends: core
+  objectKinds: [tranche]
+  eventKinds: [disbursement]
+"""
+
+
+class TestHostedTenantRouteRefusesFolds:
+    def test_tenant_manifest_declaring_folds_is_refused_not_silently_inert(self):
+        r = validate_manifest(_TENANT_MANIFEST)
+        assert r.ok is False, (
+            "a graph-native tenant manifest never enters the fold index, so "
+            "accepting `statuses`/`folds` admits a declaration that can never "
+            "fire")
+        assert any("hosted" in e and "inert" in e for e in r.errors), r.errors
+
+    def test_tenant_manifest_without_folds_still_validates(self):
+        """Parity control — the refusal is scoped to the fold declaration."""
+        r = validate_manifest(_TENANT_MANIFEST_NO_FOLDS)
+        assert r.ok is True, r.errors

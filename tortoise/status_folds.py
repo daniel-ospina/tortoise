@@ -37,7 +37,11 @@ Three contracts this module owns:
    declaring ``open``/``closed`` for its own lifecycle would otherwise
    silently inherit connector semantics — one word, two incompatible
    lifecycles. Dispatch is on the NAMESPACED kind (``venture:tranche``), so
-   two packs declaring the same bare kind name cannot collide at the fold.
+   two packs declaring the same bare kind name cannot collide at the fold;
+   the lookup and the ownership guard are additionally **case-folded and
+   form-widened** (``venture:tranche`` and bare ``tranche``), because the
+   write gate admits both spellings and the extraction commit strips the
+   namespace.
 
 3. **The overlap is DETECTED, not silent.** When a declared ``statuses`` list
    contains a word the shared connector vocabulary also uses (``open``,
@@ -165,11 +169,19 @@ def validate_status_decl(
                         f"kindDefs '{kind}': 'statuses' entries must be "
                         f"non-empty strings, got {value!r}"
                     )
-            if len(set(statuses)) != len(statuses):
+            # The duplicate check runs over the STRING entries only: a
+            # payload-controlled non-string entry (``statuses: [{a: 1}]`` on
+            # the hosted upload route) is unhashable, and ``set(statuses)``
+            # raised ``TypeError`` out of a function whose contract is
+            # ``-> (errors, warnings)`` — an internal exception string instead
+            # of the kindDef diagnostic above (the type error is already
+            # recorded by the loop). Guarding here keeps the validator total.
+            str_statuses = [v for v in statuses if isinstance(v, str)]
+            if len(set(str_statuses)) != len(str_statuses):
                 errors.append(
                     f"kindDefs '{kind}': 'statuses' contains duplicates"
                 )
-            if all(isinstance(v, str) for v in statuses):
+            if len(str_statuses) == len(statuses):
                 collisions = sorted(
                     set(statuses) & SHARED_CONNECTOR_STATUS_WORDS)
                 if collisions:
@@ -182,6 +194,14 @@ def validate_status_decl(
                     )
 
     folds_present = "folds" in spec
+    # A second fold naming the same event on the same kind is a declaration
+    # conflict the index cannot resolve: `build_status_fold_index` appends
+    # both and `_fold_object_status` applies them in declaration order, so the
+    # LAST one silently wins. #2729's open decision (b) ("precedence when
+    # multiple folds apply to one event") is not settled by this PR, and an
+    # orphan/miss lint already exists for the adjacent class, so an ambiguous
+    # duplicate is a validation error rather than an undocumented last-wins.
+    seen_fold_events: set[str] = set()
     if folds_present and not statuses_present:
         errors.append(
             f"kindDefs '{kind}': 'folds' requires 'statuses' — a fold target "
@@ -214,6 +234,13 @@ def validate_status_decl(
                     f"kindDefs '{kind}': folds[{i}] 'event' must be a "
                     f"non-empty string"
                 )
+            elif event in seen_fold_events:
+                errors.append(
+                    f"kindDefs '{kind}': folds[{i}] names event {event!r} more "
+                    f"than once — the second entry would silently win "
+                    f"(declare one status per event; use one fold per "
+                    f"event)"
+                )
             elif not _fold_event_resolves(event, namespace,
                                           declared_event_kinds):
                 errors.append(
@@ -222,6 +249,8 @@ def validate_status_decl(
                     f"{', '.join(sorted(declared_event_kinds)) or 'none'}) — "
                     f"an orphan fold key would never fire"
                 )
+            if isinstance(event, str) and event:
+                seen_fold_events.add(event)
             status = fold.get("status")
             if isinstance(statuses, list) and all(
                     isinstance(v, str) for v in statuses):
@@ -261,31 +290,63 @@ class StatusFoldIndex:
 
     Built from a loaded ``PackRegistry`` (see :func:`build_status_fold_index`).
     Immutable by convention: built once per registry and cached on it.
+
+    Every key here is **case-folded and form-widened**: the write gate admits
+    a pack kind as both ``ns:local`` and ``local`` (``extractor_v2``'s
+    ``_object_kind_forms``/``_event_kind_forms`` ``.lower()`` every form and
+    the projection stores ``objectKind``/``eventKind`` verbatim), and the
+    extraction pipeline's own event commit strips the namespace
+    (``sdk.py`` ``_extract_session_v2`` writes ``ekind.rsplit(":", 1)[-1]``).
+    Keying the index on the namespaced spelling alone made a declared fold
+    inert for every event the pipeline emits — the #2729 review P1.
     """
 
-    __slots__ = ("by_event", "lifecycle_kinds", "statuses_by_kind")
+    __slots__ = ("by_event", "kind_forms", "lifecycle_kinds",
+                 "statuses_by_kind")
 
     def __init__(self) -> None:
-        #: namespaced event kind → [(namespaced object kind, status), ...]
+        #: case-folded event kind (``ns:local`` OR bare ``local``) →
+        #: [(namespaced object kind, status), ...]
         self.by_event: dict[str, list[tuple[str, str]]] = {}
         #: namespaced object kinds that declare a `statuses` lifecycle
         self.lifecycle_kinds: frozenset[str] = frozenset()
         #: namespaced object kind → declared status tuple (order preserved)
         self.statuses_by_kind: dict[str, tuple[str, ...]] = {}
+        #: every case-folded spelling (``ns:local`` AND bare ``local``) of a
+        #: kind that declares a lifecycle — the built-in connector fold's
+        #: ``$declared`` guard, so a bare-spelled ``objectKind`` is suppressed
+        #: exactly like its namespaced twin.
+        self.kind_forms: frozenset[str] = frozenset()
 
     def folds_for_event(self, event_kind: str) -> list[tuple[str, str]]:
         """The declared ``(kind, status)`` targets for one event kind.
 
-        Empty for a built-in-only or unknown event — the caller then applies
-        the compatibility fold, which knows nothing about kinds.
+        Case-insensitive and form-widened: a bare ``disbursement`` and a
+        namespaced ``venture:disbursement`` both resolve. Empty for a
+        built-in-only or unknown event — the caller then applies the
+        compatibility fold, which knows nothing about kinds.
         """
-        return list(self.by_event.get(event_kind, ()))
+        return list(self.by_event.get((event_kind or "").lower(), ()))
 
     def statuses_for(self, namespaced_kind: str) -> tuple[str, ...]:
         return self.statuses_by_kind.get(namespaced_kind, ())
 
     def owns_state(self, namespaced_kind: str | None) -> bool:
-        return bool(namespaced_kind) and namespaced_kind in self.lifecycle_kinds
+        return bool(namespaced_kind) and namespaced_kind.lower() in self.kind_forms
+
+    def kind_forms_for(self, namespaced_kind: str) -> list[str]:
+        """Every case-folded spelling a target kind may be stored under.
+
+        ``venture:tranche`` → ``["venture:tranche", "tranche"]``; a bare
+        declaration is returned as-is. The caller binds these as one
+        ``IN $kinds`` parameter, so a bare-spelled Object is folded by the
+        same rule as its namespaced twin.
+        """
+        forms = [namespaced_kind.lower()]
+        local = namespaced_kind.partition(":")[2]
+        if local and local.lower() not in forms:
+            forms.append(local.lower())
+        return forms
 
 
 def build_status_fold_index(packs) -> StatusFoldIndex:
@@ -307,6 +368,7 @@ def build_status_fold_index(packs) -> StatusFoldIndex:
     index = StatusFoldIndex()
     statuses_by_kind: dict[str, tuple[str, ...]] = {}
     by_event: dict[str, list[tuple[str, str]]] = {}
+    kind_forms: set[str] = set()
     for ns, pack in packs.items():
         for kind in getattr(pack, "object_kinds", ()) or ():
             statuses = _declared_statuses(pack, kind)
@@ -314,6 +376,13 @@ def build_status_fold_index(packs) -> StatusFoldIndex:
                 continue
             namespaced = f"{ns}:{kind}"
             statuses_by_kind[namespaced] = tuple(statuses)
+            # The built-in fold's `$declared` guard reads these, and the write
+            # gate stores the kind verbatim — so BOTH the namespaced and the
+            # bare spelling are registered, case-folded, or a bare-spelled
+            # Object inherits the connector fold it declared away (the
+            # #2729 review P2).
+            kind_forms.add(namespaced.lower())
+            kind_forms.add(str(kind).lower())
             for fold in _declared_folds(pack, kind):
                 if not isinstance(fold, dict):
                     continue
@@ -322,10 +391,15 @@ def build_status_fold_index(packs) -> StatusFoldIndex:
                 if not isinstance(event, str) or not isinstance(status, str):
                     continue
                 local = event.partition(":")[2] or event
-                by_event.setdefault(f"{ns}:{local}", []).append(
-                    (namespaced, status))
+                # Index under the namespaced AND the bare spellings — the two
+                # forms the write gate admits (`extractor_v2._event_kind_forms`)
+                # and the form the extraction commit actually writes
+                # (`sdk.py::_extract_session_v2` strips the namespace).
+                for key in {f"{ns}:{local}".lower(), local.lower()}:
+                    by_event.setdefault(key, []).append((namespaced, status))
     index.statuses_by_kind = statuses_by_kind
     index.lifecycle_kinds = frozenset(statuses_by_kind)
+    index.kind_forms = frozenset(kind_forms)
     index.by_event = by_event
     return index
 

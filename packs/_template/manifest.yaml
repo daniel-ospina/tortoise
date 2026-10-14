@@ -53,7 +53,7 @@ ontology:
   # Map keyed by pack-local kind name. Keys must be declared in one of this
   # pack's *Kinds lists (or be a core kind this pack's chains reference, e.g.
   # `workflow`). All fields optional. Allowed keys: description, synonyms,
-  # examples, nearMisses, extractable, storeAs, enforcement.
+  # examples, nearMisses, extractable, storeAs, enforcement, statuses, folds.
   #   - description:  one line of what the kind IS (this is prompt material)
   #   - synonyms:     normalized aliases — deterministic near-miss catch
   #   - examples:     concrete instance examples for the classifier
@@ -86,7 +86,9 @@ ontology:
   #         # the built-in connector fold no longer applies to it.
   #         statuses: [draft, active, retired]
   #         folds:
-  #           - event: otherKindApproved   # bare or self-ns (`mydomain:...`)
+  #           - event: otherKindApproved   # bare or self-ns (`mydomain:...`);
+  #             # must be an event kind THIS pack declares, and one fold per
+  #             # event per kind (a duplicate event is a validation error)
   #             status: active           # must be one of `statuses`
   kindDefs: {}
 
