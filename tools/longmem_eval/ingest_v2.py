@@ -239,6 +239,19 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
             if p.get("when"):
                 point_props["when"] = str(p.get("when"))
                 point_props["validFrom"] = str(p.get("when"))
+            # #2684 (Slice B): the value-bearing verbatim SPAN pointer rides
+            # the payload onto the node, so ``point_props_for_hits`` can
+            # surface it WITH the point and ``package_evidence_pool`` can hand
+            # a consumer an address instead of a paraphrase. All-or-nothing —
+            # the contract's own rule — and validated HERE so a malformed
+            # half-span drops the POINTER, never the point (the eval lane's
+            # node is reached through ``create_point``'s own validation, which
+            # raises, and a raise here would silently lose the whole claim).
+            _ss, _se = p.get("span_start"), p.get("span_end")
+            if (type(_ss) is int and type(_se) is int
+                    and _ss >= 0 and _se > _ss):
+                point_props["span_start"] = _ss
+                point_props["span_end"] = _se
             sdk.create_point(
                 EXTRACTION_POINT_KIND, content, id=pid, session_id=sid,
                 lme_question_id=qid, lme_session_index=si,
