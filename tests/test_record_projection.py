@@ -509,8 +509,51 @@ def test_the_schema_columns_are_read_from_disk_not_restated():
     # form is parsed too — a schema read that only understood `CREATE TABLE`
     # would silently miss it and let the projection emit a refused props key.
     assert "status" in refused["subject"]
-    assert "embedding" in refused["subject"], (
-        "the forward ALTER must EXTEND the refusal set, never replace it"
+    # `refused_props_names()` UNIONs a forward ALTER into the CREATE TABLE's
+    # names, so `"embedding" in refused["subject"]` stays true even if the
+    # ALTER declared only `['status']` — the union is fail-safe against an
+    # unknown ADD, but it cannot catch a SHRINKING re-declaration. Assert the
+    # ALTER's OWN array names both; the LIVE constraint is pinned by the pgTAP
+    # suite (a `{"embedding":…}` subject INSERT must be refused), which the
+    # union parse cannot see.
+    subject_alters = [arr for table, arr in rp._ALTER_DERIVED_CHECK_RE.findall(
+        rp._read_migrations()) if table == "subject"]
+    assert subject_alters, (
+        "no forward ALTER re-declares chk_subject_props_no_derived — the schema "
+        "read would silently miss the refusal"
+    )
+    assert "status" in subject_alters[-1] and "embedding" in subject_alters[-1], (
+        f"the forward ALTER must re-declare BOTH names, got {subject_alters[-1]!r}"
+    )
+
+
+def test_every_record_schema_migration_on_disk_is_read():
+    """The schema read's file list must not silently miss a forward migration.
+
+    `_read_migrations` joins the HAND list `RECORD_MIGRATIONS` and skips a
+    listed-but-absent file, so a migration that shapes the record schema but is
+    not listed would be invisible: `refused_props_names()` would drop no name
+    and the projection would emit a props tail the CHECK refuses — the drift the
+    forward-ALTER mechanism (#8263) exists to close. Every migration that
+    creates a record table or re-declares a `chk_*_props_no_derived` CHECK must
+    be listed.
+    """
+    tables = "|".join(rp.THE_RECORD_TABLES)
+    shapes = re.compile(
+        rf"CREATE TABLE IF NOT EXISTS public\.(?:{tables})\b"
+        rf"|ALTER TABLE public\.(?:{tables})\b[^;]*?chk_[a-z_]+_props_no_derived"
+    )
+    migdir = rp.REPO_ROOT / "supabase" / "migrations"
+    on_disk = {
+        p.name for p in sorted(migdir.glob("*.sql"))
+        if shapes.search(p.read_text(encoding="utf-8"))
+    }
+    assert on_disk, "no record-schema migration found on disk"
+    unread = sorted(on_disk - set(rp.RECORD_MIGRATIONS))
+    assert not unread, (
+        f"record-schema migration(s) shape the schema but are NOT read by "
+        f"record_projection.RECORD_MIGRATIONS: {unread} — refused_props_names() "
+        f"would silently miss their refusals"
     )
 
 

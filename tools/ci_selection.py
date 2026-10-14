@@ -971,6 +971,17 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # class). Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "supabase/migrations/2026101200000",
+             # #8263: the FORWARD record migration that adds `status` to
+             # `subject.props`'s refusal. It sorts OUTSIDE the
+             # `2026101200000` prefix above, and `supabase/` is in
+             # NON_PYTHON_PREFIXES, so without its own entry a
+             # forward-migration-only change would select NO surface and the two
+             # readers (`test_record_projection.py`,
+             # `test_record_schema_placement.py`) would not run on the very
+             # change that can drift them — the same #1349/#3332/#3616
+             # silent-drop class as the entry above. Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
+             "supabase/migrations/20261014000001_record_subject_props_no_derived.sql",
              "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md")
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).

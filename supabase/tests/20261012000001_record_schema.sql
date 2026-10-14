@@ -173,6 +173,21 @@ BEGIN
   END;
 END $$;
 
+-- 4a(ii). The forward migration REPLACES the constraint wholesale, so the OTHER
+-- name it refuses must be pinned on the LIVE constraint (not just via the Python
+-- union parse, which cannot see a shrinking re-declaration). `embedding` is not
+-- a column on `subject`, so this is a props-tail refusal and nothing else.
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.subject (org_id, graph_id, node_key, name, props)
+    VALUES ('org_7968','g_7968','rec-schema-subject','rec-schema-subject',
+            '{"embedding":[0.1]}'::jsonb);
+    RAISE EXCEPTION '8263: the forward ALTER re-opened `embedding` on subject.props' USING ERRCODE = 'P0002';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+END $$;
+
 DO $$
 BEGIN
   BEGIN
