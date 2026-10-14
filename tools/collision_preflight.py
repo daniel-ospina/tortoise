@@ -89,14 +89,14 @@ Design contract
 
 Surfaces (8 rows, ALL hit-capable)
 ----------------------------------------------------------------------------
-  issue landed              issue state (gh issue view)       (CLOSED issue —
-                                                             the ONLY source
+  issue landed              issue state (gh issue view);     (CLOSED issue —
+                            /issues/N/timeline when OPEN     the ONLY source
                                                              of a landing)
-  merged PRs naming an      gh api --paginate --slurp        (MERGED PR whose
-  OPEN issue                /issues/N/timeline               TITLE names an
-  · ADVISORY ·                                               OPEN issue; a
-                                                             reference, not a
-                                                             closure — #8625)
+  merged PRs naming an      no query of its own — it         (MERGED PR whose
+  OPEN issue                reuses the LANDED row's          TITLE names an
+  · ADVISORY ·              /issues/N/timeline read; a       OPEN issue; a
+                            failure there makes the LANDED   reference, not a
+                            row INCOMPLETE, never this row   closure — #8625)
   open PRs                  gh pr list --state open   (title / headRef;
                                                          body closing
                                                          reference;
@@ -4887,6 +4887,29 @@ def run_preflight(
         if landed_surface.status != STATUS_INCOMPLETE:
             scan_landed_surface(landed_surface, surfaces[SURFACE_UNCLOSED_REF],
                                 issue, issue_data, timeline)
+
+    # ⛔ #8629 review (F2). The ADVISORY `merged PRs naming an OPEN issue` surface
+    # is fed by the SAME timeline read the BLOCKING landed surface performs (and,
+    # for an uninterpretable issue state, by the same state read). So every path
+    # that leaves the landing question unmeasured — an unresolved repo, unreadable
+    # issue metadata, a failed timeline query, or an issue state that is neither
+    # OPEN nor CLOSED — also leaves the advisory surface UNMEASURED. Reporting it
+    # as a clean `0` was a printed ABSENCE for a read that never happened, the same
+    # defect class the report site already guards for `recently-closed PRs`. It is
+    # ADVISORY, so this can never force INCOMPLETE nor change the exit code: it
+    # only makes the row render "could not be queried" instead of a false `0`.
+    #
+    # ⛔ The CLOSED arm is deliberately NOT this case. A CLOSED issue has no
+    # unclosed reference BY DEFINITION, so that path IS measured (its advisory
+    # count is a true zero) and must stay clean — marking it incomplete here would
+    # manufacture exactly the false "could not be queried" this guard removes.
+    if (landed_surface.status == STATUS_INCOMPLETE
+            and surfaces[SURFACE_UNCLOSED_REF].status != STATUS_INCOMPLETE):
+        surfaces[SURFACE_UNCLOSED_REF].incomplete(
+            landed_surface.note
+            or "the landing query did not complete, so the timeline this surface "
+               "shares with it was never read"
+        )
 
     # NOTE: the issue surface (assignee + claim comments) is scanned LATER,
     # after the git surfaces — see the #8175 note at its call site. The claim

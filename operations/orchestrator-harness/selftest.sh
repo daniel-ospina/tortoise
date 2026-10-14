@@ -552,10 +552,17 @@ PY
   case "$(tr '\n' ' ' < "$RC2/candidates.txt")" in *20*) rc=0;; *) rc=1;; esac
   ck "shipped refresh loop: a recorded LANDED entry frees the next pass's LIMIT slot (20 queued)" $rc
 
-  # ── 5g) the reaper DROPS a landed entry once its issue is CLOSED ───────────────────────────
+  # ── 5g) the reaper DROPS a landed entry once its issue is CLOSED, and RELEASES an OPEN one ───
   # landed.txt must not become the same permanent list checked.txt was: an entry means "a decision
   # is owed", and once the issue is CLOSED the decision is made. Fail-closed still applies: an
   # entry whose state cannot be READ is kept, never assumed closed.
+  #
+  # ⛔ AN OPEN ENTRY IS RELEASED (#8629 review F3), not kept. `landed.txt` is a durable,
+  # cross-version store, and before #8625 its only persistent producer was the timeline title arm on
+  # an OPEN issue — so every pre-existing entry names an OPEN issue the tool now reports CLEAN.
+  # Keeping one suppressed that issue on every pass, the very "no dismissal path" harm #8625 removes.
+  # After #8625 an OPEN entry can only be a reopened close-race landing, which must not suppress
+  # either.
   #
   # ⛔ THE PRUNE READS `gh issue view <N> --json state` (UNCAPPED), NOT absence from `.open_iss`. The
   # pre-fix `len(open_iss) < 500` guard was a permanent no-op: `.open_iss` is `--limit 500` and this
@@ -570,12 +577,14 @@ PY
   awk '/^python3 - "\$O" "\$OR" <<.PY.$/{f=1;next} /^PY$/{f=0} f' "$REFRESH" > "$RP/reap.py"
   if need "$RP/reap.py" "the reaper is extracted from the shipped refresh-candidates.sh"; then
     ( PATH="$R:$PATH" GH_STUB_OPEN="10" python3 "$RP/reap.py" "$RP" "acme/example" ) > "$TMP/landed-prune.out" 2>&1
-    case "$(tr '\n' ' ' < "$RP/landed.txt")" in *10*) rc=0;; *) rc=1;; esac
-    ck "shipped reaper: a landed entry whose issue is still OPEN is kept" $rc
+    case "$(tr '\n' ' ' < "$RP/landed.txt")" in *10*) rc=1;; *) rc=0;; esac
+    ck "shipped reaper: a landed entry whose issue is still OPEN is RELEASED (#8629 F3)" $rc
     case "$(tr '\n' ' ' < "$RP/landed.txt")" in *30*) rc=1;; *) rc=0;; esac
     ck "shipped reaper: a landed entry whose issue is CLOSED is dropped" $rc
     case "$(cat "$TMP/landed-prune.out")" in *"dropped"*30*) rc=0;; *) rc=1;; esac
     ck "shipped reaper: dropping a settled landed entry is logged, not silent" $rc
+    case "$(cat "$TMP/landed-prune.out")" in *"OPEN — RELEASED"*10*) rc=0;; *) rc=1;; esac
+    ck "shipped reaper: releasing an OPEN landed entry is logged, naming the pre-#8625 shape" $rc
     # fail-closed half: an UNREADABLE state prunes NOTHING (a failed read is not "closed")
     RPF="$TMP/landed-prune-fail"; mkdir -p "$RPF"
     printf '10\n30\n' > "$RPF/landed.txt"
@@ -587,17 +596,17 @@ PY
     case "$(cat "$TMP/landed-prune-fail.out")" in *"could not be re-read"*) rc=0;; *) rc=1;; esac
     ck "shipped reaper: keeping an unreadable landed entry is logged, not silent" $rc
     # ⛔ NON-VACUOUS against the pre-fix cap guard: `.open_iss` is SATURATED at 500 entries and
-    # omits 10, while gh reports 10 OPEN. Absence from a capped listing proves nothing, so 10 must
-    # be KEPT; and 30 (gh: CLOSED) must still be dropped. Pre-fix, the `len(open_iss) < 500` guard
-    # fired and neither entry was pruned.
+    # omits 10, while gh reports 10 OPEN. Absence from a capped listing proves nothing, so the
+    # targeted state read must answer OPEN for 10 — and OPEN now means RELEASED (#8629 F3), never
+    # silently kept or assumed closed. 30 (gh: CLOSED) must still be dropped.
     RPT="$TMP/landed-prune-saturated"; mkdir -p "$RPT"
     printf '10\n30\n' > "$RPT/landed.txt"
     seq 1 500 | grep -v '^10$' | grep -v '^30$' > "$RPT/.open_iss"   # 500 entries: the cap is hit
     : > "$RPT/.pr_brs"
     : > "$RPT/dispatched.txt"; : > "$RPT/checked.txt"
     ( PATH="$R:$PATH" GH_STUB_OPEN="10" python3 "$RP/reap.py" "$RPT" "acme/example" ) > "$TMP/landed-prune-sat.out" 2>&1
-    case "$(tr '\n' ' ' < "$RPT/landed.txt")" in *10*) rc=0;; *) rc=1;; esac
-    ck "shipped reaper: a saturated .open_iss does NOT make an OPEN landed entry look closed" $rc
+    case "$(tr '\n' ' ' < "$RPT/landed.txt")" in *10*) rc=1;; *) rc=0;; esac
+    ck "shipped reaper: a saturated .open_iss does NOT mask the targeted OPEN read — 10 is RELEASED" $rc
     case "$(tr '\n' ' ' < "$RPT/landed.txt")" in *30*) rc=1;; *) rc=0;; esac
     ck "shipped reaper: the landed prune settles a CLOSED entry even when .open_iss is saturated" $rc
   fi
