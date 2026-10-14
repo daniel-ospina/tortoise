@@ -1429,6 +1429,30 @@ def test_capstone_probe_change_selects_core_not_tier1():
         assert r["full"] is False, (path, r)
 
 
+def test_supabase_config_change_selects_core_not_tier1():
+    # supabase/config.toml is the committed LOCAL-stack config and resolves its
+    # providers by `env(NAME)` substitution, so each of those names is required
+    # by a tracked file. tests/test_env_contract_covers_supabase_config.py
+    # (`core`) is the guard: every config `env(NAME)` must be declared in
+    # .env.example, the contract an operator reads.
+    #
+    # `supabase/` is a flat NON_PYTHON_PREFIXES entry and the path matches no
+    # SOURCE_PATTERNS row, so before the CORE_ALSO entry a CONFIG-ONLY change
+    # came back with `changed == []` and took the docs-only early return —
+    # `select()` returned NO surface and the guard never ran on the half of the
+    # pair it exists to hold (the #1349/#3332/#3616 silent-drop class). A
+    # SOURCE_PATTERNS entry cannot fix it: `_selection_relevant()` deliberately
+    # skips the `core` surface, and the guard is `core`-registered.
+    #
+    # Measured before the entry: `_sel(["supabase/config.toml"])` ->
+    # surfaces=[], full=False, 40 test files, the guard absent.
+    # Mutation check: removing the CORE_ALSO entry fails the assert below.
+    r = _sel(["supabase/config.toml"])
+    assert "core" in r["surfaces"], r
+    assert "test_env_contract_covers_supabase_config.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1():
     # tools/install-queue-reconcile-schedule.sh owns
     # tests/test_install_queue_reconcile_schedule.py (hermetic cases pinning
