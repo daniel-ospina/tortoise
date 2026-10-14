@@ -1393,3 +1393,56 @@ def test_a_slack_edit_past_the_200_char_bound_advances_the_version():
         assert "textDigest" not in props, (
             "the full-text hash is an edit signal, not node content"
         )
+
+
+def test_a_linear_description_edit_advances_the_version():
+    """#8010: the same root cause on the third connector in the issue's table.
+    The Linear poll already fetches `description`, but the payload carried only
+    the title (capped at 200), so a description-only edit left the version
+    untouched — a false `current`. `textDigest` covers the FULL title +
+    description.
+
+    FAILS IF `_issue_to_event` drops `textDigest`, or hashes only the capped
+    `object`."""
+    from tortoise.connectors.linear import LinearConnector
+
+    url = "https://linear.app/test/issue/TEAM-42"
+    base = {
+        "identifier": "TEAM-42", "title": "Fix login flow",
+        "state": {"name": "In Progress"}, "team": {"key": "TEAM"},
+        "assignee": None, "createdAt": "2026-07-15T10:00:00Z",
+        "updatedAt": "2026-07-19T12:00:00Z", "completedAt": None,
+        "canceledAt": None, "url": url,
+        "description": "The auth handshake drops the nonce.",
+    }
+    lc = LinearConnector(config={"api_key": "lin_api_test", "team_id": "team-1"})
+    a = lc._issue_to_event(dict(base))
+    b = lc._issue_to_event(dict(base, description="The auth handshake drops the token."))
+    assert a["object"] == b["object"], "the display title is unchanged"
+    assert _connector_content_hash(a) != _connector_content_hash(b), (
+        "a description-only Linear edit is item content and must be in the digest"
+    )
+    # A title edit past the 200-char display cap is invisible to `object`, so the
+    # full-text digest must cover it too.
+    long_title = "T" * 200
+    c = lc._issue_to_event(dict(base, title=long_title + " one"))
+    d = lc._issue_to_event(dict(base, title=long_title + " two"))
+    assert c["object"] == d["object"] == long_title
+    assert _connector_content_hash(c) != _connector_content_hash(d), (
+        "a title edit past the cap must still be in the digest"
+    )
+    with fresh_sdk() as sdk:
+        proj = sdk._get_proj()
+        proj.apply(a)
+        v1 = _source(proj, url)
+        proj.apply(b)
+        v2 = _source(proj, url)
+        assert v2[0] != v1[0], "a description edit must move the contentHash"
+        assert v2[1] == v1[1] + 1
+        props = proj.g.query(
+            "MATCH (e:Event {eventId: $e}) RETURN properties(e)",
+            params={"e": a["eventId"]},
+        ).result_set[0][0]
+        assert "textDigest" not in props, (
+            "the full-text hash is an edit signal, not node content"
+        )
