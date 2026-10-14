@@ -1352,6 +1352,35 @@ def test_free_refuses_when_the_registry_is_unreadable(monkeypatch, capsys) -> No
     assert "no genuinely free lane" not in cap.out, "an empty roster is not an answer"
 
 
+@pytest.mark.parametrize(
+    ("cmd_name", "args", "false_answer"),
+    [
+        ("who", argparse.Namespace(number=1234, json=False), "no lane holds it"),
+        ("orphans", argparse.Namespace(json=False), "none"),
+        ("conflicts", argparse.Namespace(json=False), "no ownership conflicts"),
+    ],
+)
+def test_roster_derived_answers_refuse_an_unreadable_registry(
+    monkeypatch, capsys, cmd_name, args, false_answer
+) -> None:
+    """PR #8594 review P1: EVERY roster-derived answer refuses, not only `free`.
+
+    An unreadable registry enumerates ZERO lanes, so `index` is empty ("no lane
+    holds it"), `conflict_claimants` is empty ("no ownership conflicts") and no PR
+    has an owner (orphans report from the roster too). Each is the same false
+    negative `_registry_readable`'s own docstring names — a lane shown work another
+    lane already holds — and each was answered from a read that never happened.
+    """
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: _unread_registry_state())
+    rc = getattr(fs, f"cmd_{cmd_name}")(args)
+    cap = capsys.readouterr()
+    assert rc == 2, f"{cmd_name} answered from an unread roster: {cap.out!r}"
+    assert "UNREADABLE" in cap.err and "lane-registry" in cap.err, cmd_name
+    assert false_answer not in cap.out, (
+        f"{cmd_name} manufactured {false_answer!r} from an unread roster"
+    )
+
+
 def test_build_refuses_to_cache_a_state_with_an_unreadable_registry(tmp_path, monkeypatch,
                                                                    capsys) -> None:
     """A cached zero-lane state would be served as a FRESH fleet for the whole TTL."""

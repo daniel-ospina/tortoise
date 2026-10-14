@@ -40,12 +40,25 @@ USAGE
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below. This tool is a
+# script/timer job invoked by path (its authoritative copy lives outside every
+# repo), and the ambient `python3` on a host can be older (Apple CLT 3.9.6). A
+# module-level 3.11+-only import would raise ImportError first, which reads as
+# "this tool is broken" rather than "your interpreter is too old" (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/agent-infra-queue-dispatch.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/agent-infra-queue-dispatch.py`"
+    )
+
 import argparse
 import json
 import os
 import re
 import subprocess
-import sys
 import time
 
 HOME = os.path.expanduser("~")
@@ -378,7 +391,7 @@ def lanes(scan_timeout=None):
             f"lane-status.py produced non-JSON output (rc={rc}): {(out or '').strip()[:200]}")
     try:
         rows = json.loads(out)
-    except Exception as exc:                                     # noqa: BLE001
+    except Exception as exc:
         raise LaneReadError(f"lane-status.py output unparseable: {exc}") from exc
     if not isinstance(rows, list):
         raise LaneReadError(f"lane-status.py returned {type(rows).__name__}, not a list")
@@ -430,12 +443,13 @@ def assignments():
     out = {}
     if not os.path.exists(ASSIGNMENTS):
         return out
-    for i, line in enumerate(open(ASSIGNMENTS, errors="replace")):
-        if i == 0 or not line.strip() or line.startswith("#"):
-            continue
-        f = line.rstrip("\n").split("\t")
-        if len(f) >= 2:
-            out[f[0].strip()] = f[1].strip()
+    with open(ASSIGNMENTS, errors="replace") as fh:
+        for i, line in enumerate(fh):
+            if i == 0 or not line.strip() or line.startswith("#"):
+                continue
+            f = line.rstrip("\n").split("\t")
+            if len(f) >= 2:
+                out[f[0].strip()] = f[1].strip()
     return out
 
 
@@ -448,9 +462,7 @@ def cool(lane: str) -> bool:
     silently disarms the thing it just described. Inspecting a system must not change it.
     """
     p = os.path.join(COOLDOWN_DIR, lane.replace("/", "_").replace(" (", "_("))
-    if os.path.exists(p) and (time.time() - os.path.getmtime(p)) < COOLDOWN_S:
-        return False
-    return True
+    return not (os.path.exists(p) and (time.time() - os.path.getmtime(p)) < COOLDOWN_S)
 
 
 def mark_sent(lane: str) -> None:
@@ -628,7 +640,9 @@ def _single_instance():
     """
     import fcntl
     path = os.path.join(STATE, "queue-dispatch.lock")
-    fh = open(path, "w")
+    # Held for the process lifetime on purpose: the flock dies with the handle, so a
+    # `with` that closed it here would release the lock while the pass is still running.
+    fh = open(path, "w")  # noqa: SIM115 — the handle IS the lock
     try:
         fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -814,7 +828,7 @@ def main():
         # not a new item, so nothing is claimed and no queue item is burned on it.
         try:
             choice, meta = classify_last_turn(r)
-        except Exception as exc:                                     # noqa: BLE001
+        except Exception as exc:
             choice, meta = None, {"error": str(exc)[:80]}
         conf = meta.get("confidence") if isinstance(meta, dict) else None
         if choice is None:

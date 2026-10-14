@@ -132,7 +132,7 @@ def test_degraded_roster_is_refused(sut, fake_home):
     """
     rows = [{"lane": "real-lane", "ws": "W1", "verdict": "DONE-IDLE", "degraded": False},
             {"lane": "live-only-lane", "ws": "W2", "verdict": "DONE-IDLE", "degraded": True}]
-    _stub_lane_status(fake_home, "import json; print(json.dumps(%r))\n" % (rows,))
+    _stub_lane_status(fake_home, f"import json; print(json.dumps({rows!r}))\n")
     sut.LANE_STATUS = str(fake_home / ".pi" / "agent" / "scripts" / "lane-status.py")
     with pytest.raises(sut.LaneReadError) as ei:
         sut.lanes(scan_timeout=10)

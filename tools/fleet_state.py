@@ -1917,8 +1917,9 @@ def _registry_readable(state: Mapping[str, Any], cmd: str, what: str) -> bool:
 
     ``load_registry`` used to swallow an ``OSError`` into ``[]``, which made an
     unreadable registry indistinguishable from a fleet with no lanes: every command
-    that asserts "no free lane", "no lane holds it" or "no orphans" answered from a
-    read that never happened. Same polarity as ``_board_readable`` (#7957 H5).
+    that asserts "no free lane", "no lane holds it", "no ownership conflicts" or
+    "no orphans" answered from a read that never happened. Same polarity as
+    ``_board_readable`` (#7957 H5).
     """
     rp = registry_provenance(state)
     if rp["measured"]:
@@ -2145,6 +2146,12 @@ def cmd_who(args: argparse.Namespace) -> int:
     # The board being unreadable is exactly when a claim looks absent.
     if not _board_readable(state, "who", f"cannot say whether a lane holds #{args.number}"):
         return 2
+    # #8246 / PR #8594 review: the ROSTER is the OTHER source behind "no lane holds
+    # it". `index` is built from `lanes`, and `lanes` comes from the registry, so an
+    # unreadable registry yields an empty index and manufactures the same false
+    # negative as an unread board — a lane picks up work another lane already holds.
+    if not _registry_readable(state, "who", f"cannot say whether a lane holds #{args.number}"):
+        return 2
     if args.json:
         print(json.dumps({"number": args.number, "kind": None, "lanes": [], "evidence": {},
                           "freshness": payload_freshness(state)}))
@@ -2166,6 +2173,11 @@ def cmd_conflicts(args: argparse.Namespace) -> int:
     # An empty conflict list is an ALL-CLEAR; it must not be manufactured by a board
     # that could not be read (#7957 H5).
     if not _board_readable(state, "conflicts", "cannot rule out ownership conflicts"):
+        return 2
+    # ...and the ROSTER behind them: `conflict_claimants` is derived from `lanes`, so
+    # an unreadable registry reports "no ownership conflicts" — an all-clear from a
+    # read that never happened (#8246 / PR #8594 review).
+    if not _registry_readable(state, "conflicts", "cannot rule out ownership conflicts"):
         return 2
     cmap = conflict_map(state)
     live = lane_live_map(state)
@@ -2307,6 +2319,11 @@ def cmd_orphans(args: argparse.Namespace) -> int:
     # The "unclaimed PR" orphan class is derived from the board; "none" from an unread
     # board is a false all-clear (#7957 H5).
     if not _board_readable(state, "orphans", "cannot detect work with no live owner"):
+        return 2
+    # ...and the ROSTER behind the owners: `orphan_report` decides "no live owner"
+    # from `lanes`, so an unreadable registry reports a claimed PR as unowned (or
+    # reports `none` from a fixture state) — never an answer (#8246 / PR #8594 review).
+    if not _registry_readable(state, "orphans", "cannot detect work with no live owner"):
         return 2
     print(json.dumps(state["orphans"], indent=2, default=str) if args.json else "\n".join(
         f"  [{o['kind']}] {o.get('number', o.get('lane', '?'))}: {o['reason']}" for o in state["orphans"]
