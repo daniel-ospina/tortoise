@@ -1532,8 +1532,10 @@ class CollisionPreflightTest(unittest.TestCase):
         # REQUIRED, so a comment carrying no `body` key passed the contract and
         # then `comment.get("body") or ""` read it as EMPTY — no claim matched,
         # and the BLOCKING issue surface reported "6/6 surfaces queried, no
-        # in-flight work". Absence indistinguishable from emptiness is the one
-        # distinction this contract exists to make.
+        # in-flight work" (6 was the surface count before #8560 added `issue
+        # landed`; the quote is a historical defect report). Absence
+        # indistinguishable from emptiness is the one distinction this contract
+        # exists to make.
         #
         # A comment has no second field to carry the hit: on a PR the title, the
         # head branch and `closingIssuesReferences` all still speak, whereas
@@ -4071,13 +4073,14 @@ class CollisionPreflightTest(unittest.TestCase):
         # Review cycle 2 (P2-7): the CLEAN line counts surfaces actually READ.
         # Before #5251 it was reachable only when every surface had been
         # queried, so a full count was literally true; with an advisory surface
-        # it can now mean 5 of 6 were read. A silent revert of that count would
+        # it can now mean 6 of 7 were read. A silent revert of that count would
         # otherwise pass the whole suite, because the pre-existing full-count
         # assertion still matches a fully-queried run.
         #
-        # (The totals moved 7 -> 6 when #3504 deleted the `issue keywords`
-        # row. Recomputing them here from SURFACE_ROWS instead of hardcoding
-        # them would have hidden the deletion, so they stay literal — and two
+        # (The totals were 6 before #8560 added the `issue landed` row, and were
+        # themselves 7 -> 6 when #3504 deleted the `issue keywords` row.
+        # Recomputing them here from SURFACE_ROWS instead of hardcoding them
+        # would have hidden BOTH deletions, so they stay literal — and two
         # literals now pin the count.)
         self.gh_fixtures(open_prs=[])
         # Fail ONLY the (advisory) closed-PR request: every blocking surface
@@ -5192,12 +5195,16 @@ class CollisionPreflightTest(unittest.TestCase):
 
     def test_merged_pr_that_only_body_references_the_issue_is_clean(self):
         # A merged PR that mentions #N only in its BODY is not a landing: the
-        # tool's existing rule is that PR-body prose is not a work reference.
-        # Landing on body prose would make every issue mentioned in any merged
-        # PR un-dispatchable.
+        # tool reads the TITLE only. The body here really does name the issue
+        # (the real REST payload carries `source.issue.body`), so CLEAN depends
+        # on the implementation ignoring it — without the body this test would
+        # only prove "a title naming ANOTHER issue is not a landing", and a
+        # regression that started scanning bodies would stay green.
         self.gh_fixtures(issue=self.issue_payload(state="OPEN"))
-        self.timeline_fixture(events=[self.merged_cross_reference(
-            4242, "fix(projection): degrade corrupt journal values (#7369)")])
+        event = self.merged_cross_reference(
+            4242, "fix(projection): degrade corrupt journal values (#7369)")
+        event["source"]["issue"]["body"] = f"refs #{ISSUE} only in prose"
+        self.timeline_fixture(events=[event])
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
@@ -5224,6 +5231,26 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: INCOMPLETE", out)
         self.assertNotIn("VERDICT: CLEAN", out)
         self.assertIn("issue landed", out)
+        # The REASON, not just the status: with `events is None` the scan would
+        # emit the generic `issue-timeline-unmeasured` note and still return
+        # INCOMPLETE, so without this the test cannot tell "the query FAILED"
+        # from "the query never ran".
+        self.assertIn("gh-unavailable", out)
+
+    def test_landed_outranks_an_incomplete_blocking_surface(self):
+        # A terminal signal is decisive even when ANOTHER blocking surface could
+        # not be read: the verdict is LANDED (the fact is established) and the
+        # report says the run is also incomplete. Without this the precedence
+        # the module claims is asserted only in prose.
+        self.gh_fixtures(issue=self.issue_payload(state="CLOSED"))
+        # A malformed open-PR payload makes the open-PR (BLOCKING) surface
+        # INCOMPLETE while the issue state still answers the landed question.
+        (self.gh_dir / "open_prs.json").write_text("{not json")
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 4, out)
+        self.assertIn("VERDICT: LANDED", out)
+        self.assertIn("ALSO INCOMPLETE", out)
+        self.assertNotIn("VERDICT: INCOMPLETE", out)
 
     def test_malformed_timeline_page_is_incomplete_not_clean(self):
         # A page the tool cannot read must never be scavenged into "no landing
@@ -5259,6 +5286,28 @@ class CollisionPreflightTest(unittest.TestCase):
         rc, out = self.run_tool(env_extra={"GH_STUB_TIMELINE_FAIL": "1"})
         self.assertEqual(rc, 4, out)
         self.assertIn("VERDICT: LANDED", out)
+        # The stub's timeline FAILURE seam was armed and yet was never reached:
+        # a CLOSED issue must not pay for (or depend on) the timeline query.
+        self.assertFalse((self.gh_dir / "timeline-calls.log").exists())
+
+    def test_timeline_query_is_paginated_slurped_and_targeted(self):
+        # The ARGUMENT CONTRACT is what makes this query authoritative (reach a
+        # merge older than any sample) and correctly TARGETED (#4027: the
+        # resolved slug literally, never gh's `{owner}/{repo}` placeholders,
+        # which resolve from the cwd). The stub serves the fixture for ANY
+        # `api --paginate`, so only an argv assertion pins it.
+        self.gh_fixtures(issue=self.issue_payload(state="OPEN"))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        argv = (self.gh_dir / "timeline-argv.txt").read_text()
+        self.assertIn("--paginate", argv)
+        self.assertIn("--slurp", argv)
+        self.assertIn(
+            f"repos/test-owner/test-repo/issues/{ISSUE}/timeline", argv)
+        self.assertNotIn("{owner}", argv)
+        self.assertNotIn("{repo}", argv)
+        calls = (self.gh_dir / "timeline-calls.log").read_text().splitlines()
+        self.assertEqual(len(calls), 1, calls)
 
     def test_open_issue_with_no_landing_reference_is_clean(self):
         self.gh_fixtures(issue=self.issue_payload(state="OPEN"))

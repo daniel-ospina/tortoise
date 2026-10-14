@@ -694,6 +694,80 @@ exec {self.gh} "$@"
         self.assertNotIn("(no remote branch, open/closed PR", out)
         self.assertIn("could NOT be read in full", out)
 
+    # ── #8560: the landed fact, mirrored from the gate ───────────────────────
+
+    def _closed_issue(self) -> None:
+        (self.gh_dir / "issue.json").write_text(json.dumps({
+            "number": ISSUE,
+            "title": "florfenicol dosing audit",
+            "state": "CLOSED",
+            "url": f"https://example.invalid/issues/{ISSUE}",
+            "assignees": [],
+            "comments": [],
+        }))
+
+    def _merged_timeline_pr(self, number: int = 777) -> None:
+        """One slurped page holding a MERGED cross-reference naming #ISSUE."""
+        (self.gh_dir / "timeline.json").write_text(json.dumps([[
+            {
+                "event": "cross-referenced",
+                "source": {"issue": {
+                    "number": number,
+                    "title": f"fix: shipped (#{ISSUE})",
+                    "state": "closed",
+                    "pull_request": {
+                        "url": f"https://api.github.invalid/repos/o/r/pulls/{number}",
+                        "html_url": f"https://github.invalid/o/r/pull/{number}",
+                        "merged_at": "2026-10-05T09:19:18Z",
+                    },
+                }},
+            },
+        ]]))
+
+    def test_a_closed_issue_answers_landed_not_nobody(self):
+        """#8560: a CLOSED issue is not "nobody" — it is DONE. The answering
+        verb must name the same terminal fact the gate refuses on, at rc 0 (the
+        question HAS an answer)."""
+        self._closed_issue()
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("LANDED — the issue's work appears ALREADY SHIPPED", out)
+        self.assertIn("ANSWER: already landed", out)
+        self.assertNotIn("ANSWER: nobody", out)
+        self.assertNotIn("holder(s) are ALSO present", out)
+
+    def test_a_merged_timeline_pr_answers_landed(self):
+        """The timeline arm through this verb: an OPEN issue whose merged PR
+        names it in the title is landed, not free."""
+        self._merged_timeline_pr()
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ANSWER: already landed", out)
+        self.assertIn("PR #777", out)
+        self.assertNotIn("ANSWER: nobody", out)
+
+    def test_landed_with_a_coexisting_holder_names_both(self):
+        """A terminal signal and a live holder CAN coexist. The gate says so
+        explicitly ("ALSO present"); this verb must not deny a holder it just
+        displayed above — the two describe the same input."""
+        self._closed_issue()
+        self.local_branch(f"fix/{ISSUE}-strand")
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ANSWER: already landed", out)
+        self.assertIn("holder(s) are ALSO present", out)
+
+    def test_landed_with_an_unreadable_blocking_surface_still_answers_incomplete(self):
+        """A landed fact does not license an INCOMPLETE answer to read as
+        complete: when a non-advisory surface could not be read, the verb stays
+        rc 2 and says the landed fact is ALSO present."""
+        self._closed_issue()
+        (self.gh_dir / "open_prs.json").write_text("{not json")
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("ANSWER INCOMPLETE", out)
+        self.assertIn("ALSO reported as LANDED", out)
+
     def test_wrapper_runs_the_same_verb(self):
         self.local_branch(f"fix/{ISSUE}-strand")
         proc = subprocess.run(

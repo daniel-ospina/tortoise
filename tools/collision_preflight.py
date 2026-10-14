@@ -97,9 +97,11 @@ Surfaces (7 rows, ALL hit-capable)
   local worktrees           git worktree list --porcelain   (UNTRUNCATED)
   issue assignee/comments   gh issue view N (assignee + claim comments)
 
-The removed 7th row was `issue keywords`. It was deleted with the lexical arm
-(#3504): a row that can only report a guess does not become honest by being
-listed.
+The `issue keywords` row was removed with the lexical arm (#3504): a row that
+can only report a guess does not become honest by being listed. The seventh row
+today is a DIFFERENT one — `issue landed` (#8560), which answers a question the
+tool never had an authoritative source for — so do not read "7 rows" as the
+deleted keyword row returning.
 
 NOT PRESENT: a fleet-session surface. #1233 asked for one wired to
 `map-sessions.py`, and it was built and measured for this change — then left
@@ -368,9 +370,11 @@ EXIT_USAGE = 3
 # #8560: the terminal answer to "is #N already landed?". It is a REFUSAL and
 # MUST NOT be CLEAN; distinct from EXIT_COLLISION because the remedy differs
 # (verify/close, not coordinate) and distinct from EXIT_INCOMPLETE because
-# nothing needs re-running. Every existing consumer stops on ANY non-zero exit,
-# so adding a code is fail-safe for them; a consumer that reads the code alone
-# can now tell the three refusals apart.
+# nothing needs re-running. Adding a code is fail-safe for a consumer that reads
+# the EXIT CODE (any non-zero stops it); the one in-repo consumer that parses the
+# VERDICT TEXT instead — operations/orchestrator-harness/refresh-candidates.sh —
+# gets an explicit LANDED arm in this same change, so the new verdict is not
+# silently defeated there (it used to fall through to "no verdict").
 EXIT_LANDED = 4
 
 DEFAULT_TIMEOUT = 60.0
@@ -4230,7 +4234,15 @@ def scan_issue_surface(
         )
     if not surface.hits:
         state = issue_data.get("state")
-        if state and state.upper() != "OPEN":
+        # De-sequenced, like the `issue landed` row: a state carrying an escape
+        # sequence must not make THIS row assert a terminal reading about the
+        # same value the landed row — which this note points to — measured as
+        # OPEN (#8560 review).
+        state_norm = (
+            _strip_control_sequences(state).strip().upper()
+            if isinstance(state, str) else ""
+        )
+        if state_norm and state_norm != "OPEN":
             # #8560: the terminal FACT itself is now carried by the `issue
             # landed` surface, which decides EXIT_LANDED. This note remains only
             # as a visibility aid on the assignee/comment row; it must not say

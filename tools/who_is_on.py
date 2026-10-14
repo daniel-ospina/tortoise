@@ -14,8 +14,9 @@ invisible for six days and nearly got a second lane dispatched onto the same
 code path (#4256).
 
 `tools/collision_preflight.py` already answers correctly — it enumerates local
-branches and worktrees too — but it is a DISPATCH GATE: it exits 1 on a hit
-and exits 2 when a surface cannot be queried.
+branches and worktrees too — but it is a DISPATCH GATE: it exits 1 on a hit,
+exits 2 when a surface cannot be queried, and exits 4 when the issue is already
+landed.
 That makes it the wrong thing to reach for when the question is "who holds
 #N?", not "may I dispatch?".
 
@@ -698,6 +699,18 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
         # holder — the parity the two verbs promise (the gate exits non-zero on
         # the SAME input, and this verb names the same terminal fact).
         lines.append("")
+        if holders:
+            # A terminal signal and a live holder CAN coexist, and the gate says
+            # so explicitly ("ALSO present"). This verb must not deny holders it
+            # just displayed above: the gate's report and this answer describe
+            # the same input, and a reader taking the answer from the ANSWER line
+            # must not read "not a holder" where the gate reports one.
+            n_surfaces = len({s.name for s, _ in holders})
+            lines.append(
+                f"NOTE: {len(holders)} holder(s) are ALSO present across "
+                f"{n_surfaces} surface(s) — the work appears shipped AND another "
+                "lane appears to be on it."
+            )
         lines.append(
             "ANSWER: already landed — the artifacts above are TERMINAL, not a "
             "holder. Verify the issue body against the named artifact before "

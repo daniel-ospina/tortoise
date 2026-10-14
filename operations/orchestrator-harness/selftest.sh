@@ -411,6 +411,29 @@ PY
   O="$RC" LIMIT=5 SC="$RC/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/collide-2.out" 2>&1
   case "$(tr '\n' ' ' < "$RC/candidates.txt")" in *10*) rc=0;; *) rc=1;; esac
   ck "shipped refresh loop: the COLLISION is re-attempted and queued once it clears" $rc
+
+  # ── 5f) LANDED is TERMINAL: recorded once, never re-pre-flighted, never queued ────────────────
+  # #8560 added a fourth verdict, LANDED (exit 4): the issue's work already shipped. The shipped
+  # loop's sed matched only CLEAN|COLLISION, so a LANDED line did not match, `$V` became the whole
+  # line, and control fell to `*)` — logged as "no verdict", never recorded in checked.txt, and so
+  # re-pre-flighted on EVERY pass while consuming a LIMIT slot. LANDED is terminal (nothing to
+  # dispatch), so it must be recorded as checked and NOT queued as a candidate.
+  RL2="$TMP/landed"; mkdir -p "$RL2/fakesc/.venv/bin"
+  printf '10\n' > "$RL2/.pool"
+  : > "$RL2/checked.txt"; : > "$RL2/candidates.txt"; : > "$RL2/dispatched.txt"
+  cat > "$RL2/fakesc/.venv/bin/python" <<'PY'
+#!/bin/bash
+# stand-in for a landed pre-flight: a terminal verdict, non-zero exit in production
+echo "VERDICT: LANDED (exit 4) — 1 authoritative terminal signal(s)"
+PY
+  chmod +x "$RL2/fakesc/.venv/bin/python"
+  O="$RL2" LIMIT=5 SC="$RL2/fakesc" bash "$TMP/refreshloop.sh" > "$TMP/landed.out" 2>&1
+  case "$(tr '\n' ' ' < "$RL2/checked.txt")" in *10*) rc=0;; *) rc=1;; esac
+  ck "shipped refresh loop: a LANDED verdict is recorded terminal (not re-pre-flighted)" $rc
+  case "$(tr '\n' ' ' < "$RL2/candidates.txt")" in *10*) rc=1;; *) rc=0;; esac
+  ck "shipped refresh loop: a LANDED verdict is NOT queued as a dispatch candidate" $rc
+  case "$(cat "$TMP/landed.out")" in *"no verdict"*) rc=1;; *) rc=0;; esac
+  ck "shipped refresh loop: a LANDED verdict is not logged as a missing verdict" $rc
 fi
 
 # ── 5e) the capture site itself: a failed `gh` leaves ABSENCE, not an empty file ──────────────

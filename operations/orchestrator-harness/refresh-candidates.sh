@@ -136,16 +136,24 @@ while read -r N; do
   # line (API failure, missing venv, timeout) blacklisted the issue forever, invisibly: checked.txt
   # suppresses it, and the reaper above only walks dispatched.txt, so nothing ever removed the entry.
   # A COLLISION was permanent the same way, though a collision is transient by nature (the colliding
-  # work lands). checked.txt is therefore written ONLY on the verdict that terminates the issue —
-  # CLEAN, which is queued. Everything else is left unchecked, so the next pass re-attempts it.
-  # (agent-infra#1716)
+  # work lands). checked.txt is therefore written ONLY on a verdict that TERMINATES the issue:
+  # CLEAN (queued) and LANDED (#8560 — the work already shipped, so it is recorded but NOT queued).
+  # Everything else is left unchecked, so the next pass re-attempts it. (agent-infra#1716)
+  #
+  # LANDED must be matched explicitly: it did not exist before #8560, so the sed below dropped the
+  # whole line and control fell to `*)` — logged as "no verdict" and re-pre-flighted on EVERY pass,
+  # consuming a LIMIT slot forever. Nothing is dispatched for it (only CLEAN is queued), but a
+  # terminal fact read as an error is a false diagnosis and a permanent capacity leak.
   PRE="$("$SC/.venv/bin/python" tools/collision_preflight.py "$N" --repo . 2>&1)"
-  V="$(printf '%s\n' "$PRE" | grep -E '^VERDICT' | head -1 | sed -E 's/.*VERDICT: (CLEAN|COLLISION).*/\1/')"
+  V="$(printf '%s\n' "$PRE" | grep -E '^VERDICT' | head -1 | sed -E 's/.*VERDICT: (CLEAN|COLLISION|LANDED).*/\1/')"
   case "$V" in
     CLEAN)
       echo "$N" >> "$O/checked.txt"
       echo "$N" >> "$O/candidates.txt"
       echo "[refresh] +#$N CLEAN -> backlog" ;;
+    LANDED)
+      echo "$N" >> "$O/checked.txt"
+      echo "[refresh] =#$N landed — work already shipped; verify/close, not dispatched" ;;
     COLLISION)
       echo "[refresh] =#$N collision — a peer owns it, retried next pass" ;;
     *)
