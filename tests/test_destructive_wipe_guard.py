@@ -33,6 +33,7 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -41,7 +42,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tortoise.log import EventLog
-from tortoise.projection import FalkorProjection, _GuardedGraph
+from tortoise.projection import (
+    _SNAPSHOT_SECTIONS,
+    FalkorProjection,
+    WipePreconditionRefused,
+    _GuardedGraph,
+    _write_prewipe_snapshot,
+    prewipe_snapshot_path,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -788,3 +796,458 @@ def test_rebuild_all_fast_fails_before_any_work(monkeypatch):
     with pytest.raises(RuntimeError, match="sentinel"):
         proj.rebuild_all(NO_IO_DIR, confirm_destructive=True)
     assert proj.g.queries == []
+
+
+# ── #3044: the recovery route's emptiness claim, re-validated at the wipe ──
+
+
+class _NonEmptyRecordingGraph(_RecordingGraph):
+    """A fake handle whose *total-node* count reports ONE node.
+
+    Models the #3044 window exactly: the caller proved the graph empty before
+    the journal parse, and a node landed since. Only the whole-graph count is
+    overridden, so the pre-wipe reads that legitimately expect 0 keep seeing 0
+    and the test isolates the emptiness check."""
+
+    def query(self, cypher, params=None, timeout=None):
+        if " ".join((cypher or "").split()).upper() == \
+                "MATCH (N) RETURN COUNT(N)":
+            self.queries.append(cypher)
+            return _Result([[1]])
+        return super().query(cypher, params=params, timeout=timeout)
+
+
+class _UnmeasurableRecordingGraph(_RecordingGraph):
+    """A fake handle whose *total-node* count returns NO row at all.
+
+    #3044 review: the guard reads an absent/NULL count as UNMEASURABLE and
+    refuses — deliberately STRICTER than the probe it re-validates.
+    ``_node_count`` (consistency.py) flattens the SAME shape to 0 and reserves
+    ``None`` for a query that RAISED, so the two readers of one query disagree
+    on this shape by design: the probe reads "empty" and proceeds while
+    ``require_empty`` refuses. That asymmetry is the point, not an oversight —
+    the probe's 0 is the very claim the guard exists to re-validate, and a
+    count row the guard never received is not evidence of emptiness. The guard
+    must fail CLOSED on it. The refusal carries its own measurement, so
+    `recover_from_log` reports this shape to the operator as `db_points: None`
+    (UNMEASURABLE), never a fabricated 0."""
+
+    def query(self, cypher, params=None, timeout=None):
+        if " ".join((cypher or "").split()).upper() == \
+                "MATCH (N) RETURN COUNT(N)":
+            self.queries.append(cypher)
+            return _Result([])
+        return super().query(cypher, params=params, timeout=timeout)
+
+
+def test_require_empty_refuses_an_unmeasurable_count(tmp_path):
+    """#3044 review: an UNMEASURABLE store is not an empty one.
+
+    `MATCH (n) RETURN count(n)` yielding no row (or NULL) means the guard
+    could not observe the store, not that the store is empty — flattening it
+    to 0 issues the wipe on a count that was never taken and destroys whatever
+    the window holds. The fail-closed choice is to refuse. NOTE the deliberate
+    asymmetry with the probe this re-validates: `_node_count` returns 0 for
+    the SAME shape and reserves `None` for a RAISED query, so the two readers
+    of one query disagree here by design (pinned end to end by
+    `test_unmeasurable_row_is_refused_by_the_guard_and_flattened_by_the_probe`).
+    The refusal carries its own measurement, so the exception reports
+    `db_points is None` — UNMEASURABLE — never a measured 0.
+    FAILS IF: the wipe proceeds on an unmeasured count, or the refusal claims
+    the store holds 0 nodes."""
+    proj = _bare_projection(graph_name="test_3044_unmeasured", embedded=True)
+    proj.g = _UnmeasurableRecordingGraph()
+    with pytest.raises(WipePreconditionRefused, match="MEASURED") as excinfo:
+        proj.rebuild_all(str(tmp_path), confirm_destructive=True,
+                         require_empty=True)
+    assert excinfo.value.db_points is None, (
+        "the unmeasurable refusal carried a fabricated count: "
+        f"{excinfo.value.db_points!r}")
+    assert proj.g.wipes() == [], (
+        "the wipe ran on a node count that was never measured")
+
+
+def test_unmeasurable_row_is_refused_by_the_guard_and_flattened_by_the_probe(
+        tmp_path):
+    """#3044 review: the guard's refusal is STRICTER than the probe, on purpose.
+
+    Both readers issue the same `MATCH (n) RETURN count(n)`, but they do NOT
+    read an absent/NULL row the same way: `_node_count` (the probe in
+    `recover_from_log`) flattens it to 0 and proceeds as if empty, while
+    `require_empty` treats it as UNMEASURABLE and refuses. The docstrings above
+    state that asymmetry, so this pins it END TO END on one shape — the
+    probe's reading and the guard's must both hold, or the stated premise is
+    false again.
+
+    FAILS IF: the guard flattens the absent row (the wipe runs), or the probe
+    starts reporting `None`/"graph unresponsive" for the same shape without the
+    documented reason being rewritten.
+    """
+    from tortoise.consistency import recover_from_log
+
+    (tmp_path / "events.jsonl").write_text("")  # one adjacent (empty) log
+
+    # 1) The probe reads the absent count row as 0 — "empty" — and proceeds.
+    probe = _bare_projection(graph_name="test_3044_asym_probe", embedded=True)
+    probe.g = _UnmeasurableRecordingGraph()
+    result = recover_from_log(str(tmp_path), probe)
+    assert "graph unresponsive" not in result["reason"], (
+        f"the probe read the absent count row as UNMEASURABLE; the guard's "
+        f"docstring claims it flattens to 0: {result['reason']!r}")
+
+    # 2) The guard re-validating the very same claim must NOT flatten it.
+    guard = _bare_projection(graph_name="test_3044_asym_guard", embedded=True)
+    guard.g = _UnmeasurableRecordingGraph()
+    with pytest.raises(WipePreconditionRefused, match="MEASURED"):
+        guard.rebuild_all(str(tmp_path), confirm_destructive=True,
+                          require_empty=True)
+    assert guard.g.wipes() == [], (
+        "the wipe ran on the count the probe had flattened to 0")
+
+
+def test_require_empty_refuses_a_graph_that_filled_after_the_probe(tmp_path):
+    """#3044: the wipe re-validates the emptiness claim it acts on.
+
+    Without this the recovery route's 0-node probe — taken in another module,
+    before the whole journal parse — is the only thing bounding a wipe that is
+    unconditional over EVERY label while its pre-wipe snapshot covers only the
+    labels `_SNAPSHOT_SECTIONS` names. The refusal must land before any
+    destructive statement."""
+    proj = _bare_projection(graph_name="test_3044", embedded=True)
+    proj.g = _NonEmptyRecordingGraph()
+    with pytest.raises(WipePreconditionRefused, match="require_empty") as excinfo:
+        proj.rebuild_all(str(tmp_path), confirm_destructive=True,
+                         require_empty=True)
+    assert excinfo.value.db_points == 1, (
+        "the refusal must carry the count it refused on — the operator reads "
+        f"it as db_points: {excinfo.value.db_points!r}")
+    assert proj.g.wipes() == [], (
+        "the wipe ran even though the graph had stopped being empty")
+
+
+def test_wipe_refusal_names_the_real_snapshot_residual(tmp_path):
+    """#3044 review: the blast-radius claim must match `_SNAPSHOT_SECTIONS`.
+
+    The refusal is the operator's only account of what the wipe would have
+    destroyed, and the exception docstring is the whole stated justification
+    for the guard — so a residual clause that understates the snapshot's
+    coverage mis-scopes what the refusal protects. The pre-#548-era wording
+    ("covers only :Point/:Batch") is contradicted by the tuple: it also
+    carries `:Session`, the onboarding pair, the config registry,
+    `:GraphEventMeta` (restored by `reestablish_watermark` inside
+    `rebuild_all`) and `:TeamMeta`. The genuinely unrestorable residual is
+    `:GraphEvent` rows (#4664: no replay pass recreates them) plus any label
+    outside the tuple. The claim and the tuple it cites are asserted TOGETHER,
+    so an enrolment that changes the coverage reddens this test rather than
+    silently re-opening the gap."""
+    proj = _bare_projection(graph_name="test_3044_residual", embedded=True)
+    proj.g = _NonEmptyRecordingGraph()
+    with pytest.raises(WipePreconditionRefused) as excinfo:
+        proj.rebuild_all(str(tmp_path), confirm_destructive=True,
+                         require_empty=True)
+    message = str(excinfo.value)
+
+    # The clause the snapshot tuple contradicts must be gone...
+    assert "covers only :Point/:Batch" not in message, (
+        "the refusal still claims the snapshot covers only :Point/:Batch, "
+        "which _SNAPSHOT_SECTIONS contradicts")
+    # ...and the residual must be the REAL one.
+    assert ":GraphEvent" in message, (
+        "the refusal must name :GraphEvent rows — the residual no "
+        "_SNAPSHOT_SECTIONS entry restores")
+    # Pin the claim to the coverage it cites, so neither can drift alone.
+    assert "_SNAPSHOT_SECTIONS" in message
+    assert "event_meta" in _SNAPSHOT_SECTIONS, (
+        ":GraphEventMeta IS captured, so a 'covers only :Point/:Batch' "
+        "claim is false by construction")
+
+    doc = WipePreconditionRefused.__doc__ or ""
+    assert "covers only ``:Point`` / ``:Batch``" not in doc, (
+        "the exception docstring — the guard's stated justification — still "
+        "understates the snapshot coverage")
+    assert ":GraphEvent" in doc
+
+
+def test_require_empty_is_opt_in_not_a_new_global_precondition(tmp_path):
+    """#3044: an explicit operator rebuild on a populated graph stays legal.
+
+    The token is a per-call opt-in. Making the emptiness check unconditional
+    would refuse every `tortoise rebuild --dir` on a store that has data — the
+    operation the wipe exists for."""
+    proj = _bare_projection(graph_name="test_3044_optin", embedded=True)
+    proj.g = _NonEmptyRecordingGraph()
+    counts = proj.rebuild_all(str(tmp_path), confirm_destructive=True)
+    assert counts["nodes"] == 0
+    assert proj.g.wipes() == ["MATCH (n) DETACH DELETE n"], (
+        "without the token the wipe is the operator's explicit instruction")
+
+
+def test_require_empty_passes_a_genuinely_empty_graph(tmp_path):
+    """#3044: no false refusal — the recovery route's real precondition.
+
+    The route reaches this call only on a graph it proved empty, so the token
+    must be inert there. A check that refused here would turn every embedded
+    auto-recovery into a permanent failure."""
+    proj = _bare_projection(graph_name="test_3044_empty", embedded=True)
+    counts = proj.rebuild_all(str(tmp_path), confirm_destructive=True,
+                              require_empty=True)
+    assert counts["nodes"] == 0
+    assert proj.g.wipes() == ["MATCH (n) DETACH DELETE n"]
+
+
+def test_require_empty_spares_a_label_the_wipe_never_restores(
+        tmp_path, monkeypatch):
+    """#3044 end-to-end on a real embedded graph: the non-vacuity pair.
+
+    The node the wipe would destroy is a label the pre-wipe snapshot does NOT
+    cover, so after the wipe there is no record of it anywhere. WITH the token
+    the wipe refuses and the node survives; WITHOUT it the same call completes
+    and the node is gone — so the survival is the token doing the work, not a
+    coincidence of the call not reaching the wipe.
+
+    A :Point is present too, so the run has a non-empty section and would
+    write a rescue sidecar if it proceeded — the refusal must precede that
+    write (the existing pre-wipe-guard convention)."""
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)  # force embedded
+    log_dir = tmp_path / "events"
+    log_dir.mkdir()
+    sidecar = prewipe_snapshot_path(str(log_dir))
+
+    proj = FalkorProjection(str(tmp_path / "guard_3044.db"),
+                            graph_name="test_guard_3044",
+                            skip_health_check=True)
+    try:
+        proj.g.query("CREATE (:GraphEvent {seq: 1})")
+        proj.g.query("CREATE (p:Point {id:'p3044', content:'x', "
+                     "context:'t'})")
+
+        with pytest.raises(WipePreconditionRefused, match="require_empty"):
+            proj.rebuild_all(str(log_dir), confirm_destructive=True,
+                             require_empty=True)
+        rows = proj.g.query(
+            "MATCH (n:GraphEvent) RETURN count(n)").result_set
+        assert int(rows[0][0]) == 1, (
+            "a node that appeared after the emptiness probe was destroyed: "
+            "the wipe is unconditional and :GraphEvent rows are covered by "
+            "no _SNAPSHOT_SECTIONS entry")
+        assert not os.path.exists(sidecar), (
+            "a refused wipe must strand no rescue sidecar")
+
+        # Non-vacuity: WITHOUT the token the same call wipes it.
+        proj.rebuild_all(str(log_dir), confirm_destructive=True)
+        rows = proj.g.query(
+            "MATCH (n:GraphEvent) RETURN count(n)").result_set
+        assert int(rows[0][0]) == 0
+    finally:
+        proj.close()
+
+
+def test_recover_from_log_refuses_the_wipe_when_a_writer_lands_in_the_window(
+        tmp_path, monkeypatch):
+    """#3044: the recovery route re-validates its probe at the wipe.
+
+    `recover_from_log` proves 0 nodes, then parses the journal (seconds for a
+    large log), then wipes. The window is simulated at the exact seam it sits
+    at: a node is created while the pending sidecar is being loaded — after
+    the probe, before the wipe. The refusal must leave the graph UNTOUCHED,
+    NOT rolled back: a rollback there would be the destruction the refusal
+    exists to prevent, because `_roll_back_declined_replay` is sound only when
+    every node present came from the declined replay."""
+    from tortoise import consistency as consistency_mod
+
+    events = tmp_path / "events"
+    events.mkdir()
+    (events / "sdk.jsonl").write_text(json.dumps({
+        "event_id": "e1", "ts": "2026-01-01T00:00:00Z",
+        "type": "IngestStarted"}) + "\n", encoding="utf-8")
+    _write_prewipe_snapshot(prewipe_snapshot_path(str(events)), {
+        "version": 1, "created_at": "2026-01-01T00:00:00Z",
+        "synthetic_events": [{
+            "type": "PointAdded", "projection_version": 2,
+            "point": {"id": "sidecar-3044", "content": "x",
+                      "pointKind": "fact", "status": "live"}}],
+        "batch_snapshot": [], "batch_point_links": [],
+        "session_snapshot": [], "session_point_links": [],
+    })
+
+    proj = FalkorProjection(str(tmp_path / "recover_3044.db"),
+                            graph_name="test_recover_3044",
+                            skip_health_check=True)
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")  # the 0-node probe's subject
+
+        real_load = consistency_mod._load_prewipe_snapshot
+
+        def load_and_a_writer_lands(path):
+            loaded = real_load(path)
+            proj.g.query("CREATE (:GraphEvent {seq: 1})")  # concurrent write
+            return loaded
+
+        monkeypatch.setattr(consistency_mod, "_load_prewipe_snapshot",
+                            load_and_a_writer_lands)
+        result = consistency_mod.recover_from_log(str(events), proj)
+
+        assert result["recovered"] is False, result
+        assert "refused" in result["reason"], result
+        assert result["db_points"] == 1, (
+            "the refusal must report the count it refused on: the graph holds "
+            f"1 node, not {result['db_points']!r}")
+        rows = proj.g.query(
+            "MATCH (n:GraphEvent) RETURN count(n)").result_set
+        assert int(rows[0][0]) == 1, (
+            "recover_from_log destroyed a node that landed after its "
+            "emptiness probe — #3044's exact failure mode")
+        assert os.path.exists(prewipe_snapshot_path(str(events))), (
+            "the pre-existing sidecar is the record of an interrupted "
+            "rebuild; a refusal must not retire it")
+    finally:
+        proj.close()
+
+
+def test_recover_from_log_reports_an_unmeasurable_refusal_as_unknown(
+        tmp_path):
+    """#3044 review (P2): the refusal RESULT carries the guard's OWN count.
+
+    The guard refuses the UNMEASURABLE shape — `MATCH (n) RETURN count(n)`
+    yields no row — with "could not be MEASURED". `recover_from_log` used to
+    report that refusal's `db_points` from `_node_count()`, which flattens the
+    SAME absent row to 0, so `_auto_health_recover` was told the store was
+    EMPTY in the very line that said its count was never taken. The
+    measurement now travels on the exception, so the producer and the consumer
+    cannot drift apart. FAILS IF: the empty-row refusal is reported as
+    `db_points: 0` — the false "empty store" claim this guard exists to
+    remove."""
+    from tortoise import consistency as consistency_mod
+
+    events = tmp_path / "events"
+    events.mkdir()
+    (events / "sdk.jsonl").write_text(json.dumps({
+        "event_id": "e1", "ts": "2026-01-01T00:00:00Z",
+        "type": "IngestStarted"}) + "\n", encoding="utf-8")
+    _write_prewipe_snapshot(prewipe_snapshot_path(str(events)), {
+        "version": 1, "created_at": "2026-01-01T00:00:00Z",
+        "synthetic_events": [{
+            "type": "PointAdded", "projection_version": 2,
+            "point": {"id": "sidecar-3044-unmeasured", "content": "x",
+                      "pointKind": "fact", "status": "live"}}],
+        "batch_snapshot": [], "batch_point_links": [],
+        "session_snapshot": [], "session_point_links": [],
+    })
+
+    proj = FalkorProjection(str(tmp_path / "recover_3044_unmeasured.db"),
+                            graph_name="test_recover_3044_unmeasured",
+                            skip_health_check=True)
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")  # the 0-node probe's subject
+
+        real_g = proj.g
+        seen = {"total_count_reads": 0}
+
+        class _UnmeasurableTotalCount:
+            """Delegate to the real guarded handle, but make the TOTAL-node
+            count unmeasurable (an empty rowset). `_GuardedGraph` is slotted,
+            so the read cannot be patched in place."""
+
+            def __getattr__(self, name):
+                return getattr(real_g, name)
+
+            def query(self, cypher, params=None, timeout=None):
+                if " ".join((cypher or "").split()).upper() == \
+                        "MATCH (N) RETURN COUNT(N)":
+                    seen["total_count_reads"] += 1
+                    return _Result([])  # the guard's "could not be MEASURED" row
+                return real_g.query(cypher, params=params, timeout=timeout)
+
+        proj.g = _UnmeasurableTotalCount()
+        result = consistency_mod.recover_from_log(str(events), proj)
+
+        assert seen["total_count_reads"] >= 2, (
+            "the unmeasurable count was never read by both the probe and the "
+            f"guard — this fixture is not exercising the shape ({seen})")
+        assert result["recovered"] is False, result
+        assert "refused" in result["reason"], result
+        assert "MEASURED" in result["reason"], (
+            "the fixture must reach the guard's UNMEASURABLE refusal, not "
+            f"another one: {result['reason']!r}")
+        assert result["db_points"] is None, (
+            f"the unmeasurable refusal was reported as {result['db_points']!r}; "
+            "0 asserts an empty store that was never observed, contradicting "
+            "the refusal's own 'could not be MEASURED' message")
+    finally:
+        proj.close()
+
+
+def test_recover_from_log_leaves_the_window_node_when_the_journal_fails_before_the_wipe(
+        tmp_path, monkeypatch):
+    """#3044 review (P1): the guard must cover BOTH destructive statements.
+
+    The `require_empty` guard sits AFTER the journal parse, so a mid-file
+    corruption raises in the parse — before the guard, before the sidecar and
+    before any wipe. That failure lands in the pending route's generic
+    `except`, which measured the graph and called
+    `_roll_back_declined_replay`. With a node in the window the measured count
+    is > 0, so the rollback issued its OWN `MATCH (n) DETACH DELETE n` and
+    destroyed the very node the guard exists to protect — the rollback's entry
+    invariant ("every node present came from the declined replay") is false
+    when no replay ever ran. FAILS IF: a pre-wipe failure rolls back the
+    window node, or any destructive statement runs before the guard."""
+    from tortoise import consistency as consistency_mod
+
+    events = tmp_path / "events"
+    events.mkdir()
+    # Line 1 is a valid record; line 2 is malformed MID-FILE (not a torn
+    # append), so `rebuild_all`'s parse refuses it before reaching the guard.
+    (events / "sdk.jsonl").write_text(
+        json.dumps({"event_id": "e1", "ts": "2026-01-01T00:00:00Z",
+                    "type": "IngestStarted"}) + "\n"
+        + "this is not json\n", encoding="utf-8")
+    _write_prewipe_snapshot(prewipe_snapshot_path(str(events)), {
+        "version": 1, "created_at": "2026-01-01T00:00:00Z",
+        "synthetic_events": [{
+            "type": "PointAdded", "projection_version": 2,
+            "point": {"id": "sidecar-3044-p1", "content": "x",
+                      "pointKind": "fact", "status": "live"}}],
+        "batch_snapshot": [], "batch_point_links": [],
+        "session_snapshot": [], "session_point_links": [],
+    })
+
+    proj = FalkorProjection(str(tmp_path / "recover_before_wipe.db"),
+                            graph_name="test_recover_before_wipe",
+                            skip_health_check=True)
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")  # the 0-node probe's subject
+
+        real_load = consistency_mod._load_prewipe_snapshot
+
+        def load_and_a_writer_lands(path):
+            loaded = real_load(path)
+            proj.g.query("CREATE (:GraphEvent {seq: 1})")  # concurrent write
+            return loaded
+
+        monkeypatch.setattr(consistency_mod, "_load_prewipe_snapshot",
+                            load_and_a_writer_lands)
+
+        wipes: list = []
+        real_wipe = FalkorProjection._wipe_all_nodes
+
+        def traced_wipe(self, **kwargs):
+            wipes.append(kwargs.get("operation"))
+            return real_wipe(self, **kwargs)
+
+        monkeypatch.setattr(FalkorProjection, "_wipe_all_nodes", traced_wipe)
+        result = consistency_mod.recover_from_log(str(events), proj)
+
+        assert result["recovered"] is False, result
+        rows = proj.g.query(
+            "MATCH (n:GraphEvent) RETURN count(n)").result_set
+        assert int(rows[0][0]) == 1, (
+            "a pre-wipe failure rolled back the node that landed after the "
+            "emptiness probe — the exact loss #3044 exists to prevent")
+        assert wipes == [], (
+            f"no destructive statement may run before the guard; saw {wipes!r}")
+        assert result.get("replay_rolled_back") is None, result
+        assert "before the wipe" in result["reason"], result
+        assert os.path.exists(prewipe_snapshot_path(str(events))), (
+            "a refused pre-wipe failure must not retire the sidecar")
+    finally:
+        proj.close()

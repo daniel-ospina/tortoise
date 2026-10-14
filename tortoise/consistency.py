@@ -59,6 +59,7 @@ from .projection import (
     _ENTITY_ID_PROP,
     _ENTITY_MUTATION_STATE_OPS,
     _REFERENCE_FOLD_ENTITY_LABELS,
+    WipePreconditionRefused,
     _annotator_value_ok,
     _apply_one,
     _creation_entity_id_from_record,
@@ -2378,6 +2379,16 @@ def recover_from_log(events_dir: str, projection) -> dict:
     Without this the store was left partially populated and the NEXT open's
     `db_count > 0` refusal ("graph already has nodes — no rebuild") destroyed
     the retry path, serving a store that was neither empty nor correct.
+
+    #3044 adds the one refusal that is NOT rolled back, because it happens
+    BEFORE the wipe: the pending-snapshot route's ``rebuild_all`` is called
+    with ``require_empty=True``, so it re-validates the 0-node probe this
+    function took before the journal parse. If the graph gained nodes in that
+    window the wipe is refused with :class:`WipePreconditionRefused` and the
+    graph is returned to the caller UNTOUCHED — rolling back there would be
+    the very destruction the refusal exists to prevent (the nodes present were
+    not created by a declined replay, which is the only shape the rollback is
+    sound for).
     """
     import os
 
@@ -2543,13 +2554,51 @@ def recover_from_log(events_dir: str, projection) -> dict:
         # this call site. Safe here because this branch is reached only
         # with db_count == 0 (the early return above) — the wipe is a
         # no-op on an empty graph, but the token is still required.
+        #
+        # #3044: `require_empty=True` makes that safety RE-VALIDATED at the
+        # wipe instead of assumed from the probe ~200 lines above (which
+        # happens before the whole journal parse). A graph that gained nodes
+        # since is refused, not wiped — see the ATOMICITY note above.
         try:
             counts = projection.rebuild_all(events_dir,
-                                            confirm_destructive=True)
+                                            confirm_destructive=True,
+                                            require_empty=True)
             nodes = int(counts.get("nodes") or 0)
             events = int(counts.get("events") or 0)
             edges = int(counts.get("edges") or 0)
+        except WipePreconditionRefused as e:
+            # #3044: nothing was wiped, so there is nothing to roll back — and
+            # a rollback would BE the destruction this refusal exists to
+            # prevent. `_roll_back_declined_replay` is sound only when every
+            # node present was created by the declined replay; no replay ever
+            # ran here. Report the guard's OWN measurement, which travels on
+            # the exception: re-querying with `_node_count()` would flatten
+            # the UNMEASURABLE shape (an absent/NULL count row) to 0 and so
+            # describe a store that was never observed as EMPTY, contradicting
+            # the refusal's own "could not be MEASURED" message in the very
+            # line `_auto_health_recover` reads. `None` = UNMEASURABLE.
+            return {"recovered": False, "log_points": 0,
+                    "db_points": getattr(e, "db_points", None),
+                    "reason": ("rebuild from the pending pre-wipe snapshot "
+                               f"refused: {e}")}
         except Exception as e:
+            # #3044 review (P1): the rollback is bound to the ONE shape it is
+            # sound on. `rebuild_all` exposes `_rebuild_wiped`, set only as its
+            # destructive statement is issued; a failure BEFORE that point ran
+            # no wipe and applied no replay, so every node present — including
+            # one a writer landed in the #3044 window (the seconds-long journal
+            # parse IS that window) — came from somewhere other than a declined
+            # replay. `_roll_back_declined_replay`'s entry invariant is
+            # therefore false on this shape, and its `MATCH (n) DETACH DELETE n`
+            # would destroy the very node this route's `require_empty` guard
+            # exists to protect. Return untouched instead. Absent attribute
+            # (a projection whose `rebuild_all` is a test double) keeps the
+            # pre-existing rollback behaviour.
+            if getattr(projection, "_rebuild_wiped", True) is False:
+                return {"recovered": False, "log_points": 0,
+                        "db_points": _node_count(),
+                        "reason": ("rebuild from the pending pre-wipe snapshot "
+                                   f"failed before the wipe: {e}")}
             # #7929: `rebuild_all` wipes before it can raise, so this refusal
             # can land on a partially replayed graph. Roll it back ONLY while
             # the sidecar still exists — a post-replay `NonFoldedEventsError`

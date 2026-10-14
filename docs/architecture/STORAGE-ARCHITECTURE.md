@@ -1212,7 +1212,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 
 > **Taking *"objects must be vectorised"* literally would index 7,859 strings that are 62.3% low-information, with no description field, and buy near-zero discriminating power for BOTH jobs a vector could do** — while paying the dominant RAM cost.
 
-**⭐ What we already have is the right shape:** `Object.name` **already has a FULLTEXT index**, as do `Event.subject`/`Event.name` (measured, §12.1b). **Lexical entity lookup is the resolution signal every system above pairs with the vector — and we have it.** What we lack is (a) the **description field** that would make an entity vector meaningful, and (b) a ruling on whether `:Object`/`:Event` embeddings should exist at all (`#4997`).
+**⭐ What we already have is the right shape:** `Object.name` **already has a FULLTEXT index**, as do `Event.subject`/`Event.name` (measured, §12.1b). **Lexical entity lookup is the resolution signal every system above pairs with the vector — and we have it.** What we lack is (a) the **description field** that would make an entity vector meaningful, and (b) a ruling on whether `:Object`/`:Event` embeddings should exist at all — the open **V1/§12.1c** decision (measured and filed as `#4997`, now CLOSED `COMPLETED`).
 
 **⚠️ CORRECTION ACCEPTED (owner, 2026-09-24) — weak names are a SEQUENCING fact, not an argument against the vector.** The definite-description problem **is already an in-flight extractor workstream** (VET/CLASSIFY, the `DISCARD` path). An earlier draft of this section used it as a reason to doubt entity vectors; **that overstated it.** The correct reading:
 

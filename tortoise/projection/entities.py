@@ -1076,9 +1076,26 @@ class _EntityHandlers:
         # Declared here so it rides the version digest without growing the
         # Event surface.
         "textDigest",
-        # name / eventStatus / createdAt are intentionally NOT here —
-        # they were historically dropped by the fixed-field MERGE and
-        # are now persisted as arbitrary props via _persist_extra_props.
+        # #2788: `name` / `eventStatus` / `createdAt` are deliberately NOT in
+        # this skip set — the omission is what lets `_persist_extra_props`
+        # carry them onto the node (its skip is `_META_KEYS |
+        # _EVENT_HANDLED`). This is a PROP lane, never a projection-owned STATE
+        # lane: an Event is a dated fact (§4.5), so no fold reads any of the
+        # three back into Event state. `status` is not in this skip set either
+        # (so a writer-supplied `status` also lands as a prop), and the
+        # consistency gate compares `status` only for the Object/Subject
+        # families — but a `status` prop on an Event is NOT inert:
+        # `_promote_incident_operators` (sdk.py, #7853) reads an Event
+        # endpoint's `status` as a live/draft gate, so it suppresses operator
+        # promotion exactly as a draft Point does. Of the three omitted keys,
+        # only `name` has a reader (`sdk.backfill_about_entities` matches an
+        # Event against a Point's content); `eventStatus` is an INGEST marker
+        # (`scheduled` → `completed`, written by the session/meeting indexers),
+        # not a state read. The typed commit path cannot populate the lane at
+        # all — `CommitEvent` is `extra="forbid"` (`commit_schema.py`) — so
+        # only in-tree SDK/indexer writers reach it. The pack-declared fold
+        # generalization is Object-scoped and does NOT extend to Events
+        # (#2729); #2725 answered the Event-carries-state question "no".
     })
     # #3998 (D30): the DECLARED extra-property surface of a :Source. The graph
     # is the INDEX of the raw, not its store — so this is a CLOSED set, not an
