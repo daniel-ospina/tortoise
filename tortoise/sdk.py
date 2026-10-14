@@ -10782,7 +10782,8 @@ class TortoiseSDK:
           - operator node → blocked {blocked: True, reason: "is_operator"} —
             operators only go live via the R16 endpoint gate (matching
             retract_point's operator rejection)
-          - terminal (retracted/superseded/outdated/archived) → blocked
+          - not draft/live (terminal — retracted/superseded/outdated/archived,
+            or the legacy `deprecated` — or an absent status) → blocked
             {blocked: True, reason: "not_draft"}
           - Point belongs to a QUARANTINED batch → blocked
             {blocked: True, reason: "batch_quarantined", batch_id} — quarantine

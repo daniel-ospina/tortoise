@@ -635,18 +635,31 @@ def test_review_connections_contract_names_every_stale_status() -> None:
     reading the SDK was told a deprecated-incident edge would NOT surface as
     stale. Every member must be named.
     """
-    from tortoise.sdk import STALE_TERMINAL_STATUSES
-
-    doc = _function_docstring(
+    doc = re.sub(r"\s+", " ", _function_docstring(
         (_REPO_ROOT / "tortoise" / "sdk.py").read_text(encoding="utf-8"),
-        "review_connections")
-    stale_bullet = re.sub(r"\s+", " ", doc).split(
-        "* stale", 1)[1].split("* contested", 1)[0]
-    missing = sorted(s for s in STALE_TERMINAL_STATUSES if s not in stale_bullet)
+        "review_connections"))
+    assert "* stale" in doc and "* contested" in doc, (
+        "review_connections no longer documents the mode=prune "
+        "stale/contested bullets, so this pin cannot bind the stale "
+        "contract to STALE_TERMINAL_STATUSES. Update the pin with the new "
+        "contract text."
+    )
+    stale_bullet = doc.split("* stale", 1)[1].split("* contested", 1)[0]
+    # Either enumerate every member, or cite the canonical constant: the
+    # invariant is that no member is OMITTED from the reader-visible contract
+    # (the pre-fix text enumerated four of the five and cited nothing).
+    if "STALE_TERMINAL_STATUSES" in stale_bullet:
+        return
+    # Iterate the CANONICAL exclusion, not ``STALE_TERMINAL_STATUSES``: a pin
+    # that iterates the set under test cannot see a member that set is missing
+    # (the pre-fix docstring and the pre-fix 4-member set agreed with each
+    # other while both understated the canonical five).
+    missing = sorted(s for s in TERMINAL_EXCLUDED_STATUSES if s not in stale_bullet)
     assert not missing, (
         "the review_connections(mode=prune) stale enumeration omits "
         f"{missing} — a reader is told those statuses do not surface as "
-        "stale. Name every member of STALE_TERMINAL_STATUSES in the docstring."
+        "stale. Name every member of STALE_TERMINAL_STATUSES in the docstring, "
+        "or cite STALE_TERMINAL_STATUSES itself."
     )
 
 
@@ -664,12 +677,16 @@ def test_state_excluded_status_derives_from_the_canonical_exclusion() -> None:
     the set automatically, and a hand-written ``frozenset`` REDs.
     """
     source = (_REPO_ROOT / "tortoise" / "sdk.py").read_text(encoding="utf-8")
-    assignments = [
-        node for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Assign)
-        and any(isinstance(t, ast.Name) and t.id == "STATE_EXCLUDED_STATUS"
-                for t in node.targets)
-    ]
+    assignments = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        # AnnAssign carries one target (``t: T = v``) — an annotation on the
+        # definition must not read as "the derivation disappeared".
+        targets = [node.target] if isinstance(node, ast.AnnAssign) else node.targets
+        if any(isinstance(t, ast.Name) and t.id == "STATE_EXCLUDED_STATUS"
+               for t in targets):
+            assignments.append(node)
     assert len(assignments) == 1, (
         f"expected exactly one STATE_EXCLUDED_STATUS assignment, "
         f"found {len(assignments)}"
