@@ -555,12 +555,12 @@ def _reset_vector_gap_warnings() -> None:
 # A query is a bulk wipe when it contains DETACH DELETE but has NO property map
 # ({...} — e.g. MATCH (n:Label {id:$id})) and NO real WHERE clause.
 # A WHERE clause is "real" only if it references a property (n.xxx) or a
-# parameter ($id) or CONTAINS / ``IN (`` — tautologies (WHERE true, WHERE 1=1)
-# don't count. Note ``IN [list]`` is NOT recognized (only ``IN (``), so a
-# scoped delete whose only reference is `id(n) IN [..]` is misclassified as a
-# bulk wipe (#3007).
+# parameter ($id) or CONTAINS / ``IN (...)`` / ``IN [...]`` — tautologies
+# (WHERE true, WHERE 1=1) don't count. ``IN [list]`` was NOT recognized before
+# #3007 (only ``IN (``), so a scoped delete whose only reference was
+# `id(n) IN [..]` / `labels(n)[0] IN [..]` was misclassified as a bulk wipe.
 _WHERE_REAL_RE = re.compile(
-    r"\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_]|CONTAINS|IN\s*\(",
+    r"\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_]|CONTAINS|IN\s*[\(\[]",
     re.IGNORECASE,
 )
 # #3037/#8223: the property-map exemption is anchored to the statement's
@@ -653,14 +653,89 @@ def _strip_call_subqueries(statement: str) -> str:
         text = text[:m.start()] + " " * (end - m.start()) + text[end:]
 
 
+# ── #3007: delete-target-aware scoping ──────────────────────────────────────
+# A ``DETACH DELETE`` may name several variables (``DETACH DELETE n, m``); each
+# is a separate target. The clause tail is read up to the next clause keyword so
+# ``DELETE n RETURN count(*)`` yields ``n``, never ``RETURN``/``count``.
+_DELETE_CLAUSE_RE = re.compile(r"\bDETACH\s+DELETE\b(.*)$", re.IGNORECASE | re.S)
+#: Clause keywords that TERMINATE a DELETE target list (and must never be read
+#: as a variable name). Longest-first is irrelevant here: ``\b`` anchors each.
+_CLAUSE_STOP_RE = re.compile(
+    r"\b(?:RETURN|WITH|ORDER|SKIP|LIMIT|WHERE|SET|CREATE|MERGE|UNWIND|MATCH|"
+    r"OPTIONAL|FOREACH|CALL|DETACH|DELETE|REMOVE|UNION|USE|LOAD|DROP)\b",
+    re.IGNORECASE,
+)
+_VAR_NAME_RE = re.compile(r"[A-Za-z_]\w*")
+#: A label on a variable's OWN node/relationship pattern: ``(n:Label)``,
+#: ``(n :Label1:Label2)``, ``[r:IMPL]``, ``(n:$param)``. The bracket must be a
+#: node/rel pattern delimiter immediately before the variable, so a label word
+#: elsewhere in the statement cannot satisfy it.
+_VAR_LABEL_RE = r"[\(\[]\s*{var}\s*:(?:\s*(?:[A-Za-z_]\w*|\$[A-Za-z_]\w*))+"
+#: A ``WITH <projection> ... LIMIT`` block. ``LIMIT`` bounds the rows that flow
+#: forward, so it scopes whatever the projection carries FROM that point.
+_WITH_LIMIT_RE = re.compile(r"\bWITH\b(.*?)\bLIMIT\b", re.IGNORECASE | re.S)
+
+
+def _delete_targets(text: str) -> tuple[list[str], int]:
+    """(deleted variable names, index of the ``DETACH DELETE`` clause, or -1).
+
+    Read from the already-masked, CALL-stripped ``text`` so a keyword inside a
+    string/comment cannot become a variable name (#3037).
+    """
+    m = _DELETE_CLAUSE_RE.search(text)
+    if m is None:
+        return [], -1
+    tail = m.group(1)
+    stop = _CLAUSE_STOP_RE.search(tail)
+    if stop is not None:
+        tail = tail[: stop.start()]
+    return _VAR_NAME_RE.findall(tail), m.start()
+
+
+def _var_is_scoped(text: str, var: str, delete_at: int) -> bool:
+    """True when ``var`` is provably a proper subset of the graph (#3007).
+
+    Three lexical scoping signals, each anchored to the DELETED variable:
+
+    (a)  a LABEL on the variable's own pattern — ``MATCH (n:GraphEvent) ...
+         DETACH DELETE n``;
+    (a') a LABEL PREDICATE on it — ``WHERE n:Point``; and
+    (b)  a ``WITH <var> ... LIMIT`` bound on it — ``WITH n ... LIMIT $overflow``.
+
+    A label or a LIMIT that constrains a DIFFERENT variable must NOT exempt the
+    wipe: ``MATCH (x:Foo) WITH x MATCH (n) DETACH DELETE n`` and
+    ``MATCH (n) WITH n LIMIT 10 MATCH (m) DETACH DELETE m`` each still delete
+    every node. That is why the check is per-target rather than a substring
+    test over the whole statement.
+    """
+    name = re.escape(var)
+    if re.search(_VAR_LABEL_RE.format(var=name), text) is not None:
+        return True
+    if re.search(r"\bWHERE\s+" + name + r"\b\s*:", text, re.IGNORECASE) is not None:
+        return True
+    # Only a WITH *before* the DELETE can bound the rows it deletes.
+    for wm in _WITH_LIMIT_RE.finditer(text[:delete_at]):
+        if re.search(r"\b" + name + r"\b", wm.group(1)) is not None:
+            return True
+    return False
+
+
 def _is_bulk_wipe(cypher: str) -> bool:
-    """True when ``cypher`` may delete EVERY node of the graph (#99/#3037).
+    """True when ``cypher`` may delete EVERY node of the graph (#99/#3037/#3007).
 
     Bulk = contains DETACH DELETE and carries no targeting construct: a
-    property map on a node/relationship pattern, or a real WHERE clause. The
-    verdict is made on structure, not on raw text — comments, string literals,
-    backtick identifiers and ``CALL { ... }`` subqueries are blanked first, so
-    a stray ``{`` in any of them cannot exempt a whole-graph wipe (#3037).
+    property map on a node/relationship pattern, a real WHERE clause, or a
+    label/LIMIT scope on the DELETED variable itself. The verdict is made on
+    structure, not on raw text — comments, string literals, backtick
+    identifiers and ``CALL { ... }`` subqueries are blanked first, so a stray
+    ``{`` in any of them cannot exempt a whole-graph wipe (#3037).
+
+    #3007: a label-scoped / LIMIT-bounded delete (``MATCH (n:GraphEvent) WITH n
+    ORDER BY n.seq ASC LIMIT $overflow DETACH DELETE n``) is a maintenance
+    delete of a SUBGRAPH, not a whole-graph wipe — classifying it bulk made the
+    event-retention cap a silent no-op on every non-test server graph. The
+    scoping must be on the DELETED variable; a label on another pattern (this
+    is the #8215 shape) does not exempt.
     """
     # Fast path: the overwhelming majority of statements are reads. A DETACH
     # DELETE cannot be MASKED INTO existence, so a raw-text miss proves the
@@ -691,7 +766,13 @@ def _is_bulk_wipe(cypher: str) -> bool:
         return False
     # Real WHERE clause (property/param/CONTAINS/IN reference) => targeted
     m = re.search(r"WHERE\s+(.+) ", text + " ", re.IGNORECASE)
-    if m and _WHERE_REAL_RE.search(m.group(1)):  # noqa: SIM103
+    if m and _WHERE_REAL_RE.search(m.group(1)):
+        return False
+    # #3007: label/LIMIT scope on the DELETED variable => targeted. Every
+    # target must be scoped: `MATCH (n:L), (m) DETACH DELETE n, m` still
+    # deletes the graph (m is unconstrained), so `all`, never `any`.
+    targets, delete_at = _delete_targets(text)
+    if targets and all(_var_is_scoped(text, v, delete_at) for v in targets):  # noqa: SIM103
         return False
     return True
 
@@ -2457,12 +2538,16 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 #     decision on ``_is_bulk_wipe``'s scope (#3007/#3037), because more verbs
 #     applying a classifier with those two defects would REFUSE more
 #     legitimate operations than it catches.
-#   * ``_is_bulk_wipe`` over-classifies label/LIMIT/WITH-scoped deletes and
-#     ``WHERE id(n) IN [..]``-scoped ones, so ``event_store.purge_overflow`` is
+#   * ``_is_bulk_wipe`` USED TO over-classify label/LIMIT/WITH-scoped deletes and
+#     ``WHERE id(n) IN [..]``-scoped ones, so ``event_store.purge_overflow`` was
 #     refused on a non-test server graph and
-#     its callers swallow it (the hosted sweeper at DEBUG, the SDK lazy hook at
-#     WARNING) — the per-team event cap no-ops without a build failure
-#     (tracked: #3007).
+#     its callers swallowed it (the hosted sweeper at DEBUG, the SDK lazy hook at
+#     WARNING) — the per-team event cap no-op'd without a build failure.
+#     FIXED by #3007: the classifier is now delete-target aware (a label on the
+#     DELETED variable's own pattern, or a ``WITH <var> … LIMIT`` bound on it,
+#     exempts) and ``IN [list]`` is recognized as a real WHERE reference. A
+#     label/LIMIT on a DIFFERENT variable still does not exempt (the #8215
+#     shape), and a bare ``MATCH (n) DETACH DELETE n`` is still bulk.
 #   * ``_is_bulk_wipe`` also UNDER-classified (FIXED by #3037 + #8223): a bare
 #     ``"{" in cypher`` exemption meant a whole-graph wipe whose text contains
 #     a brace (``MATCH (n) DETACH DELETE n // {``, ``CALL { MATCH (n) DETACH
@@ -6106,9 +6191,13 @@ def fold_with_entities(events: list[dict]) -> tuple[dict[str, dict], dict]:
     durable step — one ``(label, id)`` index deriving ``log_points`` /
     ``db_points`` / ``_compare_views`` / the fingerprint from a single view —
     stays open on #7936 and is deliberately NOT smuggled in here: re-keying the
-    digest would move ``content_hash`` for every existing baseline, and the
-    sidecar has no format-migration path (a bumped ``format_version`` is
-    untrusted forever and the baseline is never re-recorded).
+    digest would move ``content_hash`` for every existing baseline, which
+    entails a ``format_version`` bump — and since #8268/#7936 that is no longer
+    a dead end. A predecessor format appended to
+    ``consistency._PROJECTION_STATE_FORMAT_HISTORY`` is MIGRATED: the next
+    healthy recording run re-baselines at the current format and reports
+    ``state_superseded_format``. Only an UNKNOWN or FUTURE ``format_version``
+    stays untrusted and is never re-recorded.
 
     ``entities`` is a BATCH/replay view: it is built from the journal's ordered
     existence boundary, which the one-record incremental path does not have.
@@ -6289,6 +6378,46 @@ class RebuildDroppedEpisodicPoints(RuntimeError):
     message an operator can act on, which is why ``tortoise.__main__``'s
     ``_cmd_rebuild`` handles it rather than letting a driver traceback out.
     """
+
+
+class WipePreconditionRefused(RuntimeError):
+    """#3044: ``rebuild_all(require_empty=True)`` found the graph non-empty.
+
+    The auto-recovery route (``tortoise.consistency.recover_from_log``)
+    reaches its destructive ``rebuild_all`` branch only after proving the graph
+    held 0 nodes — but that probe runs in another module, BEFORE the whole
+    journal parse. Emptiness is therefore a claim about the past by the time
+    the statement that depends on it is issued, and nothing re-validated it at
+    the wipe itself.
+
+    This is that re-validation. With ``require_empty=True`` the caller asserts
+    "there is nothing here to destroy"; the wipe refuses if the assertion no
+    longer holds. It is raised BEFORE the #2943 sidecar is written and before
+    any destructive statement, so the store is untouched and any pre-existing
+    rescue file is preserved.
+
+    It exists because ``rebuild_all``'s wipe is unconditional over EVERY label
+    while its pre-wipe snapshot covers only the sections ``_SNAPSHOT_SECTIONS``
+    names (graph-only ``:Point``, ``:Batch``, ``:Session``, the onboarding
+    pair, the config registry, the ``:GraphEventMeta`` high-water mark and
+    ``:TeamMeta``; the journal-replayable labels are re-created by the replay
+    itself). The residual is therefore ``:GraphEvent`` rows — the raw event
+    log, which no replay pass recreates (#4664) — plus any label outside that
+    tuple. A node from either group that appears between the emptiness probe
+    and the wipe would be destroyed with no record of it anywhere.
+    """
+
+    def __init__(self, *args, db_points: int | None = None):
+        super().__init__(*args)
+        # #3044 review (P2): the MEASUREMENT this refusal was raised on travels
+        # WITH the exception, because ``recover_from_log`` reports it to the
+        # operator as ``db_points``. Re-deriving that count at the caller with
+        # ``_node_count()`` would flatten the very absent/NULL count row this
+        # guard refuses on to ``0`` — telling the operator the store is EMPTY
+        # in the same message that says its count could not be MEASURED. `None`
+        # here therefore means UNMEASURABLE, and a refusal raised without the
+        # field (e.g. a test double) reports `None` rather than a fabricated 0.
+        self.db_points = db_points
 
 
 # #3947 review: the journal event types whose replay CREATES a Point/Operator
@@ -7442,9 +7571,39 @@ class FalkorProjection(
                     # rolled back by `recover_from_log`, so this really is an
                     # empty DB here rather than a half-built one that a later
                     # open would serve as "already has nodes".
-                    logger.warning(
-                        "empty embedded DB not auto-recovered: %s",
-                        result.get("reason"))
+                    #
+                    # #3044 review: NOT every decline leaves an empty store.
+                    # The #7929 rollback is itself REFUSED when the sidecar is
+                    # already retired, and the #3044 pre-wipe refusal never ran
+                    # a replay to roll back — both leave the nodes they found
+                    # in place. `db_points` is the field that says which shape
+                    # the operator is looking at, so describe the store from
+                    # the MEASURED count: telling them it is "empty" at the
+                    # moment they must not lose what is in it is the same lie
+                    # about the store #7929 removed from the count.
+                    # #3044 review: `db_points is None` is UNMEASURABLE, not
+                    # empty — `recover_from_log` passes `None` through on a dead
+                    # backend (a count that raises, or a post-replay count the
+                    # backend never answered), and calling that store "empty"
+                    # tells the operator to ignore nodes that are in fact still
+                    # there. Three shapes, three messages.
+                    measured = result.get("db_points")
+                    if measured is None:
+                        logger.warning(
+                            "embedded DB NOT auto-recovered and its node "
+                            "count is UNMEASURABLE (left untouched, NOT "
+                            "verified empty): %s",
+                            result.get("reason"))
+                    elif measured:
+                        logger.warning(
+                            "embedded DB NOT auto-recovered with %s node(s) "
+                            "still in the store (left untouched, NOT empty): "
+                            "%s",
+                            measured, result.get("reason"))
+                    else:
+                        logger.warning(
+                            "empty embedded DB not auto-recovered: %s",
+                            result.get("reason"))
 
     def _recover_or_raise(self, events_dir: str) -> None:
         """Run recover_from_log, fail loud if it did not recover.
@@ -8455,7 +8614,8 @@ class FalkorProjection(
     @_fail_closed("rebuild_all")
     @tolerates_altered_numbers
     def rebuild_all(self, log_dir: str, *,
-                    confirm_destructive: bool = False) -> dict:
+                    confirm_destructive: bool = False,
+                    require_empty: bool = False) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.
 
         #3585 (R8/R9): the whole fold runs inside the non-folded-event
@@ -8467,6 +8627,17 @@ class FalkorProjection(
         the wipe on an explicit per-call opt-in — the caller MUST pass
         ``confirm_destructive=True`` (default refuses). L2 still refuses a
         non-disposable server graph even with the token.
+
+        ``require_empty=True`` (#3044) adds a second, independent precondition
+        for callers that only know the graph was empty EARLIER (the
+        ``consistency.recover_from_log`` auto-recovery route proves 0 nodes
+        before a journal parse that can take seconds): the wipe re-validates
+        that claim immediately before the sidecar write and the destructive
+        statement, and refuses with :class:`WipePreconditionRefused` if the
+        graph gained nodes since. The check precedes the #2943 sidecar write,
+        so a refusal leaves no rescue file behind (the existing pre-wipe-guard
+        convention). Default ``False``: an operator rebuild legitimately runs
+        on a populated graph.
 
         Two-pass: creates all Point nodes first (pass 1), then operator edges
         and all other event types second (pass 2), so cross-file operator→Point
@@ -8501,6 +8672,15 @@ class FalkorProjection(
         or a refused wipe all abort BEFORE the wipe. See
         ``_PREWIPE_SNAPSHOT_FILENAME``.
         """
+        # #3044 review (P1): the recovery route's caller
+        # (`consistency.recover_from_log`) has to tell a PRE-wipe failure from
+        # a post-wipe one. `_roll_back_declined_replay` is sound only once the
+        # destructive statement has been issued; before it, a node a writer
+        # landed in the #3044 window is still present, and rolling back would
+        # destroy exactly what `require_empty` refuses to. Reset before
+        # anything that can fail, so an early return can never inherit a stale
+        # value from a previous call.
+        self._rebuild_wiped = False
         import os  # noqa: I001
         from tortoise.log import EventLog
 
@@ -9159,6 +9339,58 @@ class FalkorProjection(
         self._assert_test_graph(
             "REFUSING to run bulk DETACH DELETE on non-test graph")
 
+        # #3044: the recovery route's emptiness claim, re-validated AT the
+        # operation that depends on it. `recover_from_log` proves 0 nodes
+        # before a journal parse that can take seconds; this re-checks just
+        # before the wipe (and before the sidecar write, so a refusal strands
+        # no rescue file — see the convention above). Opt-in only: a rebuild
+        # an operator asked for runs on a populated graph by design, so this
+        # must never be unconditional. The refusal is raised before ANY
+        # destructive statement, so the store is untouched.
+        if require_empty:
+            _rows = self.g.query("MATCH (n) RETURN count(n)").result_set
+            # #3044 review: an ABSENT/NULL count row is UNMEASURABLE, not zero.
+            # This is deliberately STRICTER than the probe it re-validates:
+            # `_node_count` (consistency.py) flattens the SAME shape to 0 and
+            # reserves `None` for a query that RAISED, so the two readers of
+            # one query disagree here on purpose. The probe's 0 is exactly the
+            # claim this guard exists to re-validate, so a count row the guard
+            # never received is no evidence of emptiness — flattening it to 0
+            # here would let a wipe proceed on a store the guard never
+            # actually saw as empty. That is the fail-closed choice. A query
+            # that RAISES was already fail-closed (the exception propagates).
+            # The measurement this refusal was raised on travels ON the
+            # exception, so `recover_from_log` reports the guard's own answer
+            # instead of re-querying with the flattening helper.
+            _measured = (int(_rows[0][0])
+                         if _rows and _rows[0][0] is not None else None)
+            if _measured is None:
+                raise WipePreconditionRefused(
+                    "rebuild_all was called with require_empty=True, but the "
+                    "graph's node count could not be MEASURED — refusing to "
+                    "wipe (#3044). An unmeasurable store is not an empty "
+                    "one: the caller proved this graph EMPTY before the "
+                    "journal parse, and a wipe issued on an unverified count "
+                    "is exactly the destruction that guard exists to "
+                    "prevent. Re-run recovery once the backend responds, or "
+                    "rebuild explicitly with `tortoise rebuild --dir <dir>`.",
+                    db_points=_measured,
+                )
+            if _measured:
+                raise WipePreconditionRefused(
+                    f"rebuild_all was called with require_empty=True, but the "
+                    f"graph holds {_measured} node(s) — refusing to wipe "
+                    f"(#3044). The caller proved this graph EMPTY before the "
+                    f"journal parse; a node appearing since then would be "
+                    f"destroyed with no record — the pre-wipe snapshot "
+                    f"covers only the labels in _SNAPSHOT_SECTIONS, so "
+                    f":GraphEvent rows and any label outside that set are "
+                    f"lost. Re-run recovery when no writer is "
+                    f"active, or rebuild explicitly with "
+                    f"`tortoise rebuild --dir <dir>`.",
+                    db_points=_measured,
+                )
+
         # Persist immediately before the destructive wipe: after DETACH DELETE
         # these nodes exist nowhere else, so replay must be able to recover
         # them from disk even if THIS process dies. A write failure aborts the
@@ -9315,6 +9547,10 @@ class FalkorProjection(
             episodic_before | recovered_session_turns, events,
             snapshot_ids=snapshot_ids)
 
+        # The destructive statement is about to be issued: from here a failure
+        # can land on a partially wiped graph, which is the #7929 rollback
+        # shape the recovery route is allowed to undo (#3044 review, P1).
+        self._rebuild_wiped = True
         self._wipe_all_nodes(confirm_destructive=confirm_destructive,
                              operation="rebuild_all")
 

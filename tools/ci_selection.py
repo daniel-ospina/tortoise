@@ -729,6 +729,13 @@ SOURCE_PATTERNS = {
             # this entry a retrieval_metering.py-only diff matched no pattern,
             # fell through to `core`, and skipped the guard that pins it — the
             # #7076 self-guard class the test below refuses.
+            # #8544: the self-host off-box backup DRIVER. Its guard
+            # (tests/test_selfhost_backup.py) is registered in `api`, and it is
+            # armed from `tortoise/selfhost.py` (already an entry above) — but a
+            # selfhost_backup.py-only diff would otherwise match no pattern and
+            # fall through to `core`, skipping the guard that pins it (the
+            # #2938/#3154/#4367 silent-drop class).
+            "tortoise/selfhost_backup.py",
             "tortoise/retrieval_metering.py",
             "tortoise/transport.py",
             # #2938: EventAPI — the append surface `ingest.py`, `mining.py`,
@@ -1020,9 +1027,44 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tools/queue_resweep.py above. Pinned by
              # tests/test_ci_selection.py::test_queue_dispatch_and_fleet_state_change_select_core_not_tier1.
              "tools/agent-infra-queue-dispatch.py",
-             "tools/fleet_state.py")
-
-# Paths that are NOT python-relevant (docs/config PRs skip the matrix).
+             "tools/fleet_state.py",
+             # #7950 / PR #8609 review P1: the capstone end-to-end probe
+             # (docs/evidence/7950-capstone/probes/e2e_chain_probe.py) owns
+             # tests/test_7950_capstone_probe.py, registered `core` — the DB-free
+             # pin asserting the probe's two reconciliation readers map the REAL
+             # property sets (not `{}` placeholders, which make
+             # `field_mismatches` structurally zero). `docs/` is a flat
+             # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches the
+             # probe, so a PROBE-ONLY change came back with `changed == []` and
+             # took the docs-only early return: `select()` returned NO surface
+             # and the pin never ran on the exact file it guards — reverting the
+             # readers to the pre-fix `{}` shape landed with the pin silent (the
+             # #1349/#3332/#3616 silent-drop class, the same shape as the
+             # migrations/placement-doc entries above and
+             # docs/research/1714-solution-converge.md). A SOURCE_PATTERNS entry
+             # could not fix it: `_selection_relevant()` deliberately skips the
+             # `core` surface, and the probe's guard is `core`-registered.
+             # Pinned by
+             # tests/test_ci_selection.py::test_capstone_probe_change_selects_core_not_tier1.
+             "docs/evidence/7950-capstone/probes/",
+             # #4030: `supabase/config.toml` is the committed LOCAL-stack config,
+             # and every env var it resolves by `env(NAME)` substitution must be
+             # declared in `.env.example` — the guard for that pair
+             # (tests/test_env_contract_covers_supabase_config.py) is
+             # `core`-registered. `supabase/` is a flat NON_PYTHON_PREFIXES entry
+             # and the path matches no SOURCE_PATTERNS row, so a CONFIG-ONLY
+             # change came back with `changed == []` and took the docs-only early
+             # return: `select()` returned NO surface and the guard never ran on
+             # the half of the pair it exists to hold (the #1349/#3332/#3616
+             # silent-drop class, the same shape as the migrations/placement-doc
+             # entries above). A SOURCE_PATTERNS entry cannot fix it —
+             # `_selection_relevant()` deliberately skips the `core` surface.
+             # Measured before this entry: `select(["supabase/config.toml"])` ->
+             # surfaces=[], full=False, 40 test files, the guard absent. `core` is
+             # the right surface rather than a cost concern: config.toml is edited
+             # rarely (9 commits ever as of 2026-10-14). Pinned by
+             # tests/test_ci_selection.py::test_supabase_config_change_selects_core_not_tier1.
+             "supabase/config.toml")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",

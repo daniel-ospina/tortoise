@@ -71,6 +71,13 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_cohort_cost_cap.py": {"registry": "prod-coupled"},
     "test_cross_tenant_read_isolation.py": {"registry": "prod-coupled"},  # #3663 — registry control-plane seeding for the cross-tenant read proof
     "test_graph_storage.py": {"registry": "prod-coupled"},  # #5331 — the byte-meter fixture seeds an org through the registry namespace (the literal is the namespace PROD resolves; same class as test_cross_tenant_read_isolation)
+    # #2728: `_seed_org` / `_seed_member` seed the Team + Graph/Membership
+    # control-plane nodes through the CANONICAL `registry` namespace the new
+    # per-graph pack routes resolve (`_resolve_graph_data_namespace` reads the
+    # registry graph's `graph_list`), so the literal IS the namespace PROD code
+    # resolves — same `prod-coupled` class as test_github_connect. A `test_*`
+    # rename would seed a DIFFERENT graph than the routes under test read.
+    "test_pack_selection_by_graph.py": {"registry": "prod-coupled"},
     "test_3926_error_prop_guard.py": {"registry": "prod-coupled"},  # #3926 — the literal IS the canonical namespace PROD code resolves
     "test_index_docs_api.py": {"registry": "index-docs"},
     # #3553: the CAS concurrency tests provision + tear down REAL Team nodes in
@@ -158,6 +165,13 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # lane end to end — a `test_*` rename would exercise a namespace prod
     # never resolves.
     "test_onboarding_selfhost_w12.py": {"selfhost": "prod-coupled"},
+    # #8544: same `selfhost` literal class as test_onboarding_selfhost_w12
+    # above. The driver's guard constructs `TortoiseSDK(db_path=…,
+    # namespace="selfhost")` to dump the graph the self-host daemon actually
+    # opens, and `selfhost_graph_name()` must equal `org_<SELFHOST_ORG_ID>` —
+    # a `test_*` rename would archive a graph prod never resolves. The named
+    # equality assertion fails LOUDLY on a decoupling rather than passing.
+    "test_selfhost_backup.py": {"selfhost": "prod-coupled"},
     # #3517 parity: `_provision_org` seeds the registry Team node directly
     # (`_ha._make_sdk(namespace="registry")._get_registry()`) because the
     # onboarding state the surfaces under test write lives ON that node — a

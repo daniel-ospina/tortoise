@@ -45,6 +45,26 @@ Findings covered (all reproduced by the reviewer at the pre-fix head):
   ``P0-blocker`` is at the head of the backlog. A grep for its text stayed green
   when the block was deleted or its tab key changed, so the shipped FUNCTION is
   executed here.
+* ``merge-one.sh``'s reviewer prompt told its agent to run the test suite with
+  ``.venv/bin/python -m pytest`` in a checkout that has **no** ``.venv`` — and,
+  after #8484 gave the reviewer its own detached worktree, to ``uv sync`` one
+  first. So the agent went hunting for an interpreter (``find $HOME -name
+  pyvenv.cfg``, killed at >120s) and 35% of runs ended at the 1800s cap with no
+  verdict at all. The prompt is now a shipped ``reviewer_prompt()`` FUNCTION and
+  these tests execute it, so a reflow that restores an execution instruction
+  fails.
+* ``merge-one.sh`` shared ONE ``*)`` arm for a real ``ISSUES`` verdict and for a
+  review that produced **no** ``CLEAN``/``ISSUES`` line at all (a stall, a
+  crash), and wrote ``state/needsfix-<PR>-<head>`` for both. A pure stall thus
+  authorised a fixer for a review that never happened, spent one of
+  ``MAX_FIX_TRIES`` on it, and three of them PARKED the PR "needs a human". The
+  shipped ``verdict_kind()``/``apply_verdict_marker()`` pair is executed here, AND
+  the shipped ``case "$(verdict_kind "$LAST")" in`` DISPATCH that consumes it — the
+  arm the loop actually obeys. Driving only the helpers would stay green if the
+  marker were written back into the verdict-less arm, because the helper's kind
+  guard is never exercised by production (its one call site passes the literal
+  ``"issues"``): only a real ``ISSUES`` verdict writes the marker (#8602,
+  agent-infra#1741, #8612 review P2).
 
 Run under pytest:  python3 -m pytest tests/test_orchestrator_harness.py -q
 Run standalone:    python3 tests/test_orchestrator_harness.py
@@ -66,6 +86,7 @@ LANE = HARNESS / "lane.sh"
 MNC = HARNESS / "merged-not-closed.sh"
 REFRESH = HARNESS / "refresh-candidates.sh"
 LOOP = HARNESS / "orch-loop.sh"
+MERGE = HARNESS / "merge-one.sh"
 
 
 def _extract_function(path: Path, name: str) -> str:
@@ -77,6 +98,23 @@ def _extract_function(path: Path, name: str) -> str:
     m = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", path.read_text(), re.S | re.M)
     assert m, f"{path.name} no longer defines {name}()"
     return m.group(0)
+
+
+def _extract_verdict_dispatch() -> str:
+    """Return the shipped ``case "$(verdict_kind "$LAST")" in ... esac`` block.
+
+    The helper pair is prepended, so the block runs the SHIPPED classifier and the
+    SHIPPED marker writer: the DECISION the loop obeys is the arm taken here, and a
+    test that drives only the helpers cannot observe it (#8612 review P2 — a marker
+    re-added to the verdict-less arm, or removed from the ``issues`` arm, kept a
+    29-test suite fully green).
+    """
+    m = re.search(r'^case "\$\(verdict_kind "\$LAST"\)" in\n.*?^esac\n',
+                  MERGE.read_text(), re.S | re.M)
+    assert m, 'merge-one.sh no longer dispatches on `case "$(verdict_kind "$LAST")" in`'
+    return (_extract_function(MERGE, "verdict_kind")
+            + _extract_function(MERGE, "apply_verdict_marker")
+            + m.group(0))
 
 # The enumeration fixture. The pull-request row is filtered, so the issue
 # universe is TOTAL - len(PRS); the hits live at the OLD (tail) end so a
@@ -679,6 +717,187 @@ class MergePriorityOverride(unittest.TestCase):
             out, log = self._run(Path(td), "7951", "7951 0\n")
             self.assertEqual(out, self.WHY)
             self.assertNotIn("OVERRIDDEN", log)
+
+
+class ReviewerPromptContract(unittest.TestCase):
+    """#8602: the reviewer prompt must not send its agent hunting for an interpreter.
+
+    The reviewer's cwd is a DISPOSABLE detached worktree (``merge-one.sh``,
+    #8484) — it has no ``.venv``. The prompt used to tell the reviewer to run
+    ``.venv/bin/python -m pytest`` there, and (after #8484) to ``uv sync``
+    first. Either way the agent goes looking: measured on the live box, a
+    reviewer's last tool call was ``find ... -name pyvenv.cfg`` and it then sat
+    silent until the 1800s cap killed it, with no verdict. The prompt is now a
+    shipped FUNCTION, and this drives it, so a reflow of the heredoc that
+    restores an execution instruction fails here.
+    """
+
+    def _prompt(self) -> str:
+        fn = _extract_function(MERGE, "reviewer_prompt")
+        env = dict(os.environ)
+        env.update(OR="daniel-ospina/tortoise", PR="42", BR="feat/x-tm",
+                   REPO="/tmp/shared-main")
+        p = subprocess.run(["bash", "-c", fn + "\nreviewer_prompt\n"],
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout
+
+    def test_the_shipped_prompt_forbids_executing_or_provisioning_tests(self):
+        out = self._prompt()
+        for token in ("uv sync", ".venv", "pytest", "TORTOISE_TEST_CARVE_OUT"):
+            self.assertNotIn(token, out, f"the reviewer is still told to run tests ({token!r})")
+        self.assertIn("DO NOT RUN THE TEST SUITE", out)
+
+    def test_the_shipped_prompt_names_the_walk_bound_and_the_writers_job(self):
+        out = self._prompt()
+        self.assertIn("FIXER's job", out)
+        self.assertIn("$HOME", out)
+
+    def test_the_verdict_contract_is_still_required(self):
+        # The fix must delete the venv hunt, NOT weaken the artifact contract:
+        # the review is the merge gate's audit evidence, and its final line is
+        # still exactly CLEAN <url> or ISSUES <n>.
+        out = self._prompt()
+        self.assertIn("gh pr comment", out)
+        self.assertIn("CLEAN <", out)
+        self.assertIn("ISSUES <n>", out)
+        self.assertIn("do not fix code", out)
+
+
+class VerdictMarkerContract(unittest.TestCase):
+    """#8602 / agent-infra#1741: a verdict-less run must not authorise a fixer.
+
+    ``state/needsfix-<PR>-<head>`` is the only thing that makes ``orch-loop.sh``
+    spend a ``MAX_FIX_TRIES`` attempt on a fixer at that head. A reviewer that
+    times out produces no ``CLEAN``/``ISSUES`` line, so the old single ``*)`` arm
+    wrote the marker for a stall too — three stalls parked the PR "needs a
+    human" with the reviewer's findings never addressed. Both halves of the
+    shipped decision are executed here, never re-implemented.
+    """
+
+    def _kind(self, last: str) -> str:
+        fn = _extract_function(MERGE, "verdict_kind")
+        p = subprocess.run(["bash", "-c", fn + '\nverdict_kind "$1"', "bash", last],
+                           capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout.strip()
+
+    def test_a_clean_verdict_is_clean(self):
+        self.assertEqual(self._kind("CLEAN https://github.com/o/r/pull/1#issuecomment-9"), "clean")
+
+    def test_an_issues_verdict_is_issues(self):
+        self.assertEqual(self._kind("ISSUES 3"), "issues")
+
+    def test_no_final_line_is_none_not_issues(self):
+        for last in ("", "   ", "some other output"):
+            self.assertEqual(self._kind(last), "none", last)
+
+    def _marker(self, kind: str, head: str):
+        with tempfile.TemporaryDirectory() as td:
+            o = Path(td) / "o"
+            (o / "state").mkdir(parents=True)
+            fn = _extract_function(MERGE, "apply_verdict_marker")
+            env = dict(os.environ)
+            env.update(O=str(o), PR="42")
+            p = subprocess.run(["bash", "-c", fn + '\napply_verdict_marker "$1" "$2"',
+                                "bash", kind, head], capture_output=True, text=True, env=env)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            marker = o / "state" / f"needsfix-42-{head}" if head else None
+            return p.stdout.strip(), (marker.exists() if marker is not None else False)
+
+    def test_an_issues_verdict_writes_the_marker_the_loop_reads(self):
+        out, exists = self._marker("issues", "deadbeef")
+        self.assertTrue(exists)
+        self.assertIn("needsfix-42-deadbeef", out)
+
+    def test_a_verdict_less_run_writes_no_marker(self):
+        # The helper's own guard. The regression it protects is only observable
+        # through the DISPATCH — see VerdictDispatchContract below.
+        for kind in ("none", "clean"):
+            out, exists = self._marker(kind, "deadbeef")
+            self.assertFalse(exists, f"kind={kind} wrote an authorising marker")
+            self.assertEqual(out, "")
+
+    def test_an_issues_verdict_with_no_head_writes_no_marker(self):
+        # HEAD is empty only when gh could not resolve the PR head; a marker keyed
+        # on an empty head is unreadable by the loop and must not be written.
+        out, exists = self._marker("issues", "")
+        self.assertFalse(exists)
+        self.assertEqual(out, "")
+
+
+class VerdictDispatchContract(unittest.TestCase):
+    """#8612 review P2: the SHIPPED ``case`` arm is the decision the loop obeys.
+
+    ``apply_verdict_marker`` has exactly one production call site, in the ``issues``
+    arm, always passed the literal ``"issues"`` — so its kind guard can never refuse
+    anything in production. The rule that produced the false park lives in the ARM:
+    re-adding the marker call to the verdict-less arm (the pre-fix behaviour,
+    re-expressed through the new helper) must fail here. The whole shipped block is
+    executed against a stubbed ``gh``/``record-review.sh`` and a temp ``$O`` state
+    dir, so nothing here re-implements the routing.
+    """
+
+    def _run_dispatch(self, last: str):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            o = root / "o"
+            (o / "state").mkdir(parents=True)
+            (o / "logs").mkdir()
+            scripts = root / "home" / ".pi" / "agent" / "scripts"
+            scripts.mkdir(parents=True)
+            rec = scripts / "record-review.sh"
+            rec.write_text('#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$REC_LOG"\nexit 0\n')
+            rec.chmod(0o755)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            gh = bin_dir / "gh"
+            gh.write_text('#!/bin/sh\n'
+                          'case "$*" in\n'
+                          '  *"pr checks"*) echo SUCCESS ;;\n'
+                          '  *"pr merge"*) ;;\n'
+                          '  *) echo "gh stub: unhandled $*" >&2; exit 1 ;;\n'
+                          'esac\n'
+                          'exit 0\n')
+            gh.chmod(0o755)
+            rec_log = root / "record.log"
+            env = dict(os.environ)
+            env.update(O=str(o), PR="42", HEAD="deadbeef", OR="daniel-ospina/tortoise",
+                       BR="feat/x-tm", REPO=str(root / "checkout"),
+                       L=str(o / "logs" / "merge-42"), HOME=str(root / "home"),
+                       REC_LOG=str(rec_log), LAST=last,
+                       PATH=f"{bin_dir}{os.pathsep}{env.get('PATH', '')}")
+            p = subprocess.run(["bash", "-c", "set -u\n" + _extract_verdict_dispatch()],
+                               capture_output=True, text=True, env=env, timeout=60)
+            return (p, (o / "state" / "needsfix-42-deadbeef").exists(),
+                    (o / "state" / "merged-42.done").exists(),
+                    rec_log.read_text() if rec_log.exists() else "")
+
+    def test_a_verdict_less_run_takes_the_non_authorising_arm(self):
+        # THE regression, driven through the shipped dispatch: a marker in this arm
+        # books a fixer attempt for a review that never happened, and three of them
+        # park the PR "needs a human" with the findings never addressed.
+        for last in ("", "   ", "some other output"):
+            p, marker, merged, rec = self._run_dispatch(last)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertFalse(marker, f"LAST={last!r} authorised a fixer for a non-verdict")
+            self.assertFalse(merged)
+            self.assertEqual(rec, "")
+
+    def test_an_issues_verdict_takes_the_arm_that_authorises_the_fixer(self):
+        p, marker, merged, rec = self._run_dispatch("ISSUES 3")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(marker, "a real ISSUES verdict must authorise a fixer")
+        self.assertFalse(merged)
+        self.assertEqual(rec, "")
+
+    def test_a_clean_verdict_takes_the_arm_that_records_and_merges(self):
+        p, marker, merged, rec = self._run_dispatch(
+            "CLEAN https://github.com/daniel-ospina/tortoise/pull/8612#issuecomment-424242")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertFalse(marker, "a CLEAN verdict must not authorise a fixer")
+        self.assertTrue(merged, "a CLEAN verdict must record the review and merge")
+        self.assertIn("42 deadbeef clean", rec)
 
 
 if __name__ == "__main__":

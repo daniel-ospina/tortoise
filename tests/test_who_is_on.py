@@ -753,6 +753,37 @@ exec {self.gh} "$@"
         self.assertNotIn("ANSWER: nobody", out)
         self.assertNotIn("holder(s) are ALSO present", out)
 
+    def test_the_landed_answer_names_the_issue_state_as_the_only_authority(self):
+        """#8629 review (P2): this verb prints the LANDED contract to a reader
+        deciding whether to dispatch. It used to say the answer could come from
+        "the issue's own state, or a MERGED PR the PAGINATED timeline ties to
+        it" — but #8625 demoted that arm to an ADVISORY, so on any LANDED answer
+        the printed sentence described a source that cannot produce it. The
+        verb's own module docstring made the same claim; both are pinned here so
+        the two cannot drift back apart (the docstrings are the contract, and
+        `_landed_wording` is shared with the gate).
+        """
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "who_is_on_landed_contract", TOOL)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        # ⛔ #8629 review (F5): normalize BEFORE matching. These phrases pin the
+        # docstring's MEANING, but `assertIn("its own\n        state is CLOSED",
+        # …)` pinned an exact line wrap, so a meaning-preserving rewrap turned it
+        # RED — and this repo has already had a commit whose only job was
+        # rewrapping a paragraph (1bbaad59f). Flatten first; assert on phrases.
+        flat_doc = " ".join((mod.__doc__ or "").split())
+        self.assertNotIn("or a MERGED PR the paginated timeline ties to it",
+                         flat_doc)
+        self.assertIn("its own state is CLOSED", flat_doc)
+        self._closed_issue()
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("the issue's OWN STATE, and nothing else", out)
+        self.assertNotIn("or a MERGED PR the", out)
+        self.assertNotIn("PAGINATED timeline ties to it", out)
+
     def test_a_not_planned_closure_is_not_answered_as_shipped(self):
         """#8560 review: `NOT_PLANNED` means the issue was DECLINED or
         SUPERSEDED — the work did not ship. The answer is still terminal (rc 0,
@@ -797,15 +828,17 @@ exec {self.gh} "$@"
         self.assertIn("issue landed", out)
         self.assertNotIn("ANSWER: nobody", out)
 
-    def test_a_merged_timeline_pr_answers_landed(self):
-        """The timeline arm through this verb: an OPEN issue whose merged PR
-        names it in the title is landed, not free."""
+    def test_a_merged_timeline_pr_on_an_open_issue_is_an_advisory(self):
+        """#8625: an OPEN issue whose merged PR names it in the title is NOT
+        landed — a reference is not a closure. The verb reports the advisory and
+        still answers "nobody": a merged PR is not a holder either."""
         self._merged_timeline_pr()
         rc, out = self.run_tool(ISSUE)
         self.assertEqual(rc, 0, out)
-        self.assertIn("ANSWER: already landed", out)
+        self.assertIn("[merged PRs naming an OPEN issue]", out)
         self.assertIn("PR #777", out)
-        self.assertNotIn("ANSWER: nobody", out)
+        self.assertIn("ANSWER: nobody", out)
+        self.assertNotIn("ANSWER: already landed", out)
 
     def test_landed_with_a_coexisting_holder_names_both(self):
         """A terminal signal and a live holder CAN coexist. The gate says so

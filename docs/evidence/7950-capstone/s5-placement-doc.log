@@ -1,0 +1,19 @@
+=== placement table doc: header counts ===
+30:The two-store split cannot be built without two things it does not have: **(a)** a key both stores agree names the same node by, and **(b)** a per-field decision about which store owns each property. The issue states the second as an *enumeration*, and a prior measurement pass produced one (216 names → 185 PRIMARY / 23 DERIVED-VOLATILE / 8 UNRESOLVED, #7955 comment `6097993997`; **three measured classes corrected in review → 182 / 26 / 8, §2.4–§2.7**). The first is a genuine gap: **there is no recorded decision about the canonical id anywhere** — not in `STORAGE-ARCHITECTURE.md`, not on the graph (searched 2026-10-11: `canonical id` → the storage-architecture decision only, which *assumes* "the same canonical id as the graph node" without defining it).
+48:4. **Deliver the placement table per layer**, state the deciding test, and resolve the 8 UNRESOLVED rows (§2).
+156:2. **Not carried, but deterministically recomputable from carried data** → **DERIVED** (EP scalars, `content_hash`, declared caches). *Recomputable* is the test, not "not journaled".
+160:Classes 3 and 4 are what §17.5's "9 of 87 derived/volatile" conflates; separating them is what resolves the 8 UNRESOLVED rows (§2.7).
+168:| `ep_alpha`, `ep_beta` | DERIVED | DERIVED | ✓ holds — recomputed by the EP fold |
+169:| `ep_dirty`, `ep_dirty_at` | DERIVED | DERIVED (volatile flag) | ✓ holds |
+170:| `posterior_alpha`, `posterior_beta` | DERIVED | DERIVED | ✓ holds |
+171:| `confidence` | DERIVED | DERIVED | ✓ holds — but see §2.9: the code persists a payload value into it today |
+172:| `baseline_set` | DERIVED | DERIVED (a mirror once the baseline is journaled) | ✓ holds — see §2.7 #5: it is **not derivable today** |
+173:| **`baseline_source`** | DERIVED | **PRIMARY when `='set-by-author'`; DERIVED otherwise** | ⚠️ **narrowing** — see §2.8 |
+174:| `c_cal`, `lastDreamedAt` | (EP caches) | DERIVED | ✓ holds — correctly-implemented CQRS caches |
+180:**Read the "journal carrier" column as the *why*: it is §3's per-write test, source-cited.** A `PRIMARY` row names the event+key that carries it (or is marked `PRIMARY-WITHOUT-CARRIER`); a `DERIVED` row names the recomputation; a `VOLATILE` row names why the value need not survive replay. Weights are the **floor** the prior pass measured (recorded durably in `#7955` comment `6097993997`; local copy `/tmp/w2-placement.md`): the open-set `SET n += $props` passthrough makes the surface unbounded, exactly as §17.5's 87 is a floor.
+184:**LEGEND:** `P` = PRIMARY · `D` = DERIVED/VOLATILE · `U` = UNRESOLVED (as measured) · `P*` = PRIMARY-WITHOUT-CARRIER (journal it).
+188:`Event` (30: 29 P / 1 D) · `Source` (49: 44 P / 5 D) · `Session` (21: 21 P).
+196:*The properties are journaled on `ObjectRegistered` / `SubjectAdded` snapshots; `embedding` on both is **DERIVED** — the writer recomputes `encode_for_store(name)` and never reads `ev.get("embedding")` (`_upsert_object`/`_upsert_subject`, `projection/entities.py`), so it is class 2 (not carried, deterministically recomputable from the carried `name` — §2.1 rule 2), the same shape as `Point.content_hash`. The `Object` lifecycle-fold fields are split in §2.6: `supersededBy` is journal-carried verbatim (**PRIMARY**), `status` is a projection-owned **cache** (**DERIVED**), and `supersededAt` is **PRIMARY** — carried by the event's envelope `ts`, which the live fold must pass (§2.6).*
+
+=== placement table size ===
+     527 docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md

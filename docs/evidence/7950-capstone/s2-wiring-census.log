@@ -1,0 +1,15 @@
+production population: ['tortoise', 'tools', 'scripts']/**/*.py
+
+== reconciliation.reconcile: 0 production call site(s) ==
+
+== record_projection.replay: 0 production call site(s) ==
+
+== cache_projection.read_record_view: 0 production call site(s) ==
+
+== FalkorProjection.rebuild_from_record: 0 production call site(s) ==
+
+test population: tests/*.py
+  reconciliation.reconcile: 1 test-file hit line(s)
+  record_projection.replay: 0 test-file hit line(s)
+  cache_projection.read_record_view: 2 test-file hit line(s)
+  FalkorProjection.rebuild_from_record: 6 test-file hit line(s)

@@ -481,7 +481,7 @@ exemptions from R1; they are orthogonal to R2 and are not widened here.
 |---|---|---|---|
 | **Hosted — graph archives** (`tortoise/hosted_backup.py`, `tortoise/backup_sweep.py`) | Per-graph **logical dump** (`tortoise-logical-dump-v1`), AES-256-GCM encrypted, uploaded with a sha256 manifest to **Cloudflare R2 (off-box)**, swept hourly (`registry-backup-cron.yml`, `17 * * * *`). **Gated:** `BACKUP_SWEEP_ENABLED` is fail-closed (default off, `tortoise/backup_config.py:172-180`, `:249`); `deploy-hosted.yml:358-380` sets it true only when every required secret is present. | **≤ 1 h typical / ≤ 2 h worst-case** for *entitled* graphs (`tier ≠ free` AND `backup_enabled`; `tortoise/backup_sweep.py:248-272`) *when the sweep is enabled* (`docs/ops/registry-backup-dr.md` §RPO; achieved age is measured per team/graph via `/v1/internal/backups/status`). An **unentitled** graph has **no periodic archive** — its window is unbounded. With the sweep **off** the same holds; the Pro on-demand backup endpoint (`POST /backups`, `tortoise/hosted_api.py`) and the vendor snapshot below remain. | **Checksum + on-path restore verification; the drill is NOT yet clean.** The live restore path verifies sha256 against the manifest and node/edge counts against the authenticated payload before swapping (`tortoise/hosted_backup.py:3-40`) — that gate is what caught the incomplete dump. A **restore drill was attempted once and FAILED** (2026-09-17, `workflow_dispatch`): `Edge restore incomplete: 9687/10000 linked — dump references missing nodes` (#3894; export defect fixed by #3921, `_DUMP_REVISION = 2` — #3895 stays open tracking a successful re-drill of a real artifact). The scheduled monthly drill (`registry-drill-cron.yml`, #2317) has **not yet run**. Until a real archive restores end-to-end this row is **not drilled to success**; the sweep producing archives is covered by the freshness watcher (#2790 / #2922). |
 | **Hosted — vendor platform persistence** (FalkorDB Cloud) | Vendor-managed. Off-box **snapshots every 12 h, 7-day retention** (Startup & Pro); snapshots deleted after 14 days. **Restore creates a NEW instance.** | **≤ 12 h** off-box. In-box persistence (AOF) is **contested** — see below; until settled, treat in-box persistence as unverified. | **Existence only — not drilled.** The cadence and retention are vendor-documented; no restore of a vendor snapshot has been performed by us. |
-| **Self-hosted (Docker Compose sidecar)** | FalkorDB sidecar with AOF + named volume (`README.md` self-host path, `docker-compose.yml`) — **on-box only**. Since **#8543** the off-box target is an explicit SETUP-PATH decision (`docker-compose.yml`, `docs/quickstart-selfhosted.md` §Option A2, `website/self-hosted.html`): declare an `R2_*` target, or set `TORTOISE_OFFBOX_BACKUP_DECLINED=1`; an UNDECIDED target is reported loudly at daemon startup (`tortoise/selfhost.py`). ⚠️ **Declaring the target does not yet produce a copy** — the sweep driver's only production caller is the hosted app, so this lane has **no archive driver** (**#8544**, open). `scripts/daily-backup.sh` is a host-specific RDB copy (issue #101) that is not wired into the compose path or its docs. | AOF `everysec` = **≤ 1 s** on a clean host; **total loss** if the host or volume is lost. The declared target's window is **unbounded until #8544 lands**, because no archive is produced. | **Not drilled.** AOF is a live on-box artifact, not a backup, and no restore of a self-hosted archive has been performed. |
+| **Self-hosted (Docker Compose sidecar)** | FalkorDB sidecar with AOF + named volume (`README.md` self-host path, `docker-compose.yml`) — **on-box only**. Since **#8543** the off-box target is an explicit SETUP-PATH decision (`docker-compose.yml`, `docs/quickstart-selfhosted.md` §Option A2, `website/self-hosted.html`): declare the COMPLETE target (`R2_*` **and** `TORTOISE_BACKUP_KEY`), or set `TORTOISE_OFFBOX_BACKUP_DECLINED=1`; an UNDECIDED (or PARTIAL) target is reported loudly at daemon startup (`tortoise/selfhost.py`). Since **#8544** a complete target also **arms the driver** (`tortoise/selfhost_backup.py`): the daemon sweeps `org_selfhost` to that target on the `TORTOISE_OFFBOX_BACKUP_INTERVAL_SECONDS` cadence (default 1 h, floor 60 s) with the read-back-verified logical dump (`hosted_backup.create_backup` — the same per-graph primitive the hosted sweep calls), and prunes under the shared retention triple (24 h + 7 d + 4 w). A failed run is logged on **every** attempt. `scripts/daily-backup.sh` is a host-specific RDB copy (issue #101) that is not wired into the compose path or its docs. | AOF `everysec` = **≤ 1 s** on a clean host; **total loss** if the host or volume is lost. With a complete declared target the archive window is **≤ 1 h** once the first run lands (the **first run is one interval after boot**, so a deployment that restarts inside that interval has none). A declined/undecided deployment's window is **unbounded** — it produces no archive. | **Not drilled.** AOF is a live on-box artifact, not a backup. The archive *writer* is the production-verified one (sha256 manifest + per-object ledger + read-back coverage proof), but no restore of a **self-hosted** archive has been performed end-to-end. |
 | **Embedded (redisLite — eval only)** | RDB file; **AOF off by default** (`TORTOISE_EMBEDDED_AOF=1` opts in — `tortoise/projection/__init__.py:36-45` (`_embedded_aof_enabled`), `:1157-1181`, `:1831`, `:1865`). Single-writer; concurrent writers lose data. | AOF on: **≤ 1 s**. AOF off: **up to the next RDB save or a clean close** — RDB snapshots may never fire for a small graph (#915, #2879). | **Not drilled** (and not a production path). AOF's on-disk artifact is measured when opted in (`tests/test_embedded_durability_claim.py`) — presence, not a restore. |
 
 > These rows describe **data-plane durability**. Deletion and retention windows
@@ -518,6 +518,13 @@ enumerated under *Open items*, not silently tolerated. The durability-scoped
 gate in `tests/test_durability_posture.py` fails the build if a
 `log`/`journal`/`jsonl`/`event stream` is bound to `source of truth` — or to
 `is [the] truth` — outside this file.
+
+**The gate matches a CLAIM SHAPE, not durability claims in general.** It fires on
+a `log`/`journal`/`jsonl`/`event stream` bound to `source of truth` / `is [the]
+truth`; a *mechanism promise* — e.g. a managed store "provides AOF durability" —
+does not match it, and is corrected by hand (`docs/infra-runbook.md` §1 did this
+under **#2968**). That seam is not this gate's to close: the general binding from
+a written claim to the system it describes is **#5063**.
 
 ## Open items
 
@@ -624,22 +631,24 @@ gate in `tests/test_durability_posture.py` fails the build if a
   indicators are contributed into *Authoritative node classes across a rebuild*
   above; it does not create a rival map.
 
-- **#8544 — the self-hosted off-box copy has no DRIVER** (the live residual of
-  the rule above for self-host). #2880 — the earlier "no off-box copy" defect — is
-  **closed** (consolidated into #5062), and its docs-and-recipe-only ruling was
-  **superseded** by the **#8543** owner decision (2026-10-13) for durability
-  **parity**: the target is now a step of the self-host setup path, and an
-  UNDECIDED target is reported loudly at daemon startup
-  (`tortoise/selfhost.py::off_box_backup_state`), so this document's self-hosted
-  row is truthful rather than "durable" in prose. The **execution** half — a
-  driver that actually produces an archive on this lane — is **#8544** (open),
-  so a declared target is an intent, never a copy, until it lands. `README.md`
+- **#8544 — the self-hosted off-box copy has a DRIVER** (the residual closed for
+  self-host, with one piece explicitly still owed). #2880 — the earlier "no
+  off-box copy" defect — is **closed** (consolidated into #5062), and its
+  docs-and-recipe-only ruling was **superseded** by the **#8543** owner decision
+  (2026-10-13) for durability **parity**: the target is now a step of the
+  self-host setup path, and an UNDECIDED target is reported loudly at daemon
+  startup (`tortoise/selfhost.py::off_box_backup_state`). #8544 added the
+  **execution** half the #8543 lane recorded as missing:
+  `tortoise/selfhost_backup.py` arms an in-process driver off the same resolved
+  state and, for a COMPLETE target, sweeps `org_selfhost` to the declared store
+  on an interval with the read-back-verified logical dump. Declaring is
+  therefore no longer inert, and "configured" now means a complete target
+  (`R2_*` + `TORTOISE_BACKUP_KEY`) — a partial one is reported UNDECIDED with
+  the missing variables named. **Still owed, and named rather than implied: no
+  self-hosted archive has been restored end-to-end, so the driver's output is
+  verified as a WRITE (ledger read-back) and not as a RECOVERY.** `README.md`
   and `docs/quickstart-selfhosted.md` state the AOF-scoped guarantee and link
   this document.
-- **#2968** — `docs/infra-runbook.md:29` still states "FalkorDB Cloud (managed)
-  — provides AOF durability", the exact claim this document marks CONTESTED.
-  Tracked there; the gate's pattern does not match an `AOF … durability` claim,
-  so it is not silently tolerated, it is a named residual.
 - **`graph-scripts/`** — `add_convergence_evidence.py` and `baseline_scan.py`
   still describe the JSONL as the "source of truth" for graph convergence. This
   document's gate is scoped to the contract surfaces (`tortoise/`, the five

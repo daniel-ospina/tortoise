@@ -106,8 +106,18 @@ if reaped:
 # `landed.txt` is the LANDED verdicts' home (see the loop below), NOT a second blacklist. An entry
 # whose issue is now CLOSED has had its decision made, so drop it — otherwise landed.txt would be the
 # same invisible permanent suppression checked.txt was, and the only escape would be hand-editing the
-# file. A still-OPEN entry is left in place and reported by the loop on every pass, because it is
-# exactly the case the operator must act on: verify and close, or re-state the remaining scope.
+# file.
+#
+# ⛔ AN ENTRY WHOSE ISSUE IS *OPEN* IS RELEASED, NOT KEPT (#8625 → #8629 review F3). `landed.txt`
+# is a DURABLE, cross-version store: before #8625 the only persistent producer of `LANDED` was the
+# timeline title arm on an OPEN issue, so every pre-existing entry is an OPEN issue — exactly the
+# issues the tool now reports CLEAN. Keeping an OPEN entry suppressed the issue on EVERY pass
+# before its pre-flight ran (`grep -qx "$N" "$O/landed.txt" && continue` below), which is the
+# "no dismissal path" harm #8625 removed, merely pushed into the consumer. And after #8625 an OPEN
+# entry can only mean the issue was reopened since its close-race landing — in which case the work
+# is NOT done and suppressing it is a false `LANDED`. Either way the entry must go: a wasted
+# dispatch is recoverable and self-correcting, a false `LANDED` is not. The release is logged
+# loudly, naming the pre-#8625 reclassification, so it is never silent.
 #
 # ⛔ THE PRUNE READS THE ENTRY'S OWN STATE — it does NOT infer CLOSED from ABSENCE in the capped
 # `.open_iss` listing (#8560 review). `.open_iss` is `gh issue list --limit 500`, and this repo has
@@ -142,21 +152,32 @@ def landed_issue_state(n):
     return state.strip().upper() or None
 
 if landed_entries:
-    still_landed, settled, unreadable = [], [], []
+    still_landed, released, settled, unreadable = [], [], [], []
     for n in landed_entries:
         state = landed_issue_state(n)
         if state == "CLOSED":
             settled.append(n)
+        elif state == "OPEN":
+            # Readable-OPEN: release. Pre-#8625 this is a legacy suppression from
+            # the (now-removed) timeline title arm; post-#8625 it is an issue
+            # reopened after its close-race landing. Neither may suppress.
+            released.append(n)
         else:
+            # Unreadable/unknown state: KEEP (fail closed per entry).
             still_landed.append(n)
-            if state != "OPEN":
-                unreadable.append(n)
+            unreadable.append(n)
     if os.path.exists(lp):
         with open(lp, "w") as fh:
             fh.write("\n".join(still_landed) + ("\n" if still_landed else ""))
     if settled:
         print("[reap] landed list: decision made (issue CLOSED), dropped: %s"
               % " ".join(sorted(settled, key=int)))
+    if released:
+        print("[reap] landed list: issue is OPEN — RELEASED (a LANDED entry can only be a "
+              "close race since #8625; a pre-#8625 entry, produced by the timeline title "
+              "arm on an OPEN issue, is exactly this shape and would otherwise suppress a "
+              "now-authorized issue forever): %s"
+              % " ".join(sorted(released, key=int)))
     if unreadable:
         print("[reap] landed list: %d entr(ies) could not be re-read — KEPT, not assumed "
               "closed: %s" % (len(unreadable), " ".join(sorted(unreadable, key=int))))
@@ -217,16 +238,22 @@ while read -r N; do
   # below increments `n`); INCOMPLETE keeps the existing rule — it costs nothing against LIMIT and is
   # bounded by RETRY_MAX in the `*)` arm (#8469 review P2).
   #
-  # ⛔ LANDED IS NOT TERMINAL HERE, so it does NOT go in checked.txt. The pool is built from
-  # `gh issue list --state open`, so the pre-flight's state-CLOSED arm is unreachable from this loop:
-  # 100% of the LANDED verdicts written below come from the TIMELINE arm on an OPEN issue — and that
-  # landing may belong to a multi-PR issue that still needs work (the gate's own #4886 caveat, whose
-  # remedy is "verify it … if it still needs work, state the REMAINING scope before dispatch").
+  # ⛔ LANDED IS NOT TERMINAL HERE, so it does NOT go in checked.txt. Since #8625 the ONLY source of
+  # `VERDICT: LANDED` is the issue's OWN STATE being CLOSED (the timeline title arm lost its
+  # authority — a merged PR that merely names an issue is an ADVISORY on `merged PRs naming an OPEN
+  # issue`, and a CLEAN verdict now follows). This pool is built from `gh issue list --state open`,
+  # so the arm below is reachable ONLY through a CLOSE RACE: an issue listed as open by the pool
+  # queries, then closed before its pre-flight runs. It is kept for exactly that race. A
+  # landed-but-OPEN issue (the #7174 shape) is NOT suppressed any more: it parses as CLEAN and flows
+  # to candidates.txt, which is #8625's accepted cost — a wasted dispatch is recoverable, a false
+  # LANDED is not (measured on #7951: three merged increments that each said the issue stays open).
   # checked.txt is never pruned for an issue the reaper did not dispatch, and a landed issue is never
   # dispatched, so writing it there removed an OPEN work item from the backlog permanently and
   # silently — the exact failure class #8515 removed. landed.txt instead keeps it out of the backlog
   # WITHOUT hiding it: the pool filter above spares the LIMIT slot, and the pass summary below names
-  # the set on every pass. The reaper drops an entry once the issue is CLOSED (#8560 review).
+  # the set on every pass. The reaper drops an entry once its issue is CLOSED and RELEASES one whose
+  # issue is readable-OPEN (#8560 review, #8645) — a pre-#8625 entry was written by the timeline title
+  # arm, so it names an OPEN issue that the tool now reports CLEAN.
   PRE="$("$SC/.venv/bin/python" tools/collision_preflight.py "$N" --repo . 2>&1)"
   V="$(printf '%s\n' "$PRE" | grep -E '^VERDICT' | head -1 | sed -E 's/.*VERDICT: (CLEAN|COLLISION|LANDED|INCOMPLETE).*/\1/')"
   case "$V" in
@@ -239,6 +266,8 @@ while read -r N; do
     LANDED)
       # Counts against the pass budget like every other ANSWERED verdict: without this the loop
       # would walk past the LIMIT hunting for more entries on every pass a landed issue appears.
+      # Reachable only via a close race since #8625 — see the block comment above; the arm is kept
+      # for that race, not for the (removed) timeline arm.
       n=$((n+1))
       rm -f "$O/state/pretry-$N"
       echo "$N" >> "$O/landed.txt"
@@ -295,7 +324,8 @@ awk '!seen[$0]++' "$O/candidates.txt" > "$O/.cand" && mv "$O/.cand" "$O/candidat
 # filtered but never printed is the same invisible suppression it replaced: the operator debugging
 # "why is #N never dispatched again?" must see it here. It is not an error and not a missing verdict —
 # it is a decision waiting to be made (verify + close, or re-state the remaining scope). The reaper
-# above drops an entry once its issue is CLOSED, so the list drains as decisions are made.
+# above drops an entry once its issue is CLOSED and releases one whose issue is OPEN, so the list
+# drains as decisions are made.
 if [ -s "$O/landed.txt" ]; then
   echo "[refresh] landed (awaiting verify/close or a re-scope), not queued: $(tr '\n' ' ' < "$O/landed.txt")"
 fi

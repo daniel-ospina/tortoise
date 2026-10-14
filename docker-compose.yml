@@ -5,10 +5,12 @@
 # persistence — AOF `everysec` survives a process/container crash (≤1s), and
 # does NOT survive losing the named volume or the host. The off-box copy is a
 # STEP OF THIS SETUP (see the `tortoise` service env and
-# docs/durability-posture.md): declare an R2_* target, or decline one with
-# TORTOISE_OFFBOX_BACKUP_DECLINED=1. Leaving both unset boots and serves, but
-# the daemon reports the single local copy LOUDLY at startup (#8543) — never
-# silently. The embedded-FalkorDBLite path (docs/quickstart-selfhosted.md
+# docs/durability-posture.md): declare the COMPLETE `R2_*` + `TORTOISE_BACKUP_KEY`
+# target, or decline one with TORTOISE_OFFBOX_BACKUP_DECLINED=1. Leaving both
+# unset boots and serves, but the daemon reports the single local copy LOUDLY at
+# startup (#8543) — never silently. A complete target also arms the off-box
+# backup driver (#8544), which is what makes a declared target produce an
+# archive. The embedded-FalkorDBLite path (docs/quickstart-selfhosted.md
 # Option C) is single-writer eval only: durable for ONE process since #915, but
 # concurrent writers LOSE data (2026-08-05 incident #101 is the historical
 # context: AOF-off + no backups).
@@ -47,17 +49,29 @@ services:
       # exactly ONE of the two blocks below:
       #
       # (a) DECLARE an off-box target (the repo's backup env contract —
-      #     tortoise/backup_config.py). Fill all four in:
+      #     tortoise/backup_config.py). ALL FIVE are required: a partial target
+      #     cannot produce a restorable archive, so the daemon reports a
+      #     partial one as UNDECIDED (naming what is missing) rather than
+      #     "declared". Fill all five in:
       R2_ACCOUNT_ID: ""
       R2_ACCESS_KEY_ID: ""
       R2_SECRET_ACCESS_KEY: ""
       R2_BUCKET: ""
+      #     the archive encryption key (base64 32 bytes; keep it safe — the
+      #     archive is unreadable without it):
+      #     python -c "import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())"
+      TORTOISE_BACKUP_KEY: ""
       # (b) ...or DECLINE explicitly, accepting AOF-only durability (`1`):
       TORTOISE_OFFBOX_BACKUP_DECLINED: ""
       # Both unset = UNDECIDED: the daemon boots and serves, and says so at
-      # startup. NOTE (#8544): a DECLARED target is a declared intent, not a
-      # demonstrated copy — this lane has no archive driver yet, so no off-box
-      # copy is produced either way. See docs/durability-posture.md.
+      # startup (#8543). NOTE (#8544): a DECLARED target arms the off-box backup
+      # DRIVER — the daemon sweeps this deployment's graph to that target every
+      # TORTOISE_OFFBOX_BACKUP_INTERVAL_SECONDS (default 3600, floor 60) with
+      # the read-back-verified logical dump, and prunes under the shared
+      # retention triple. The first archive appears after the first interval;
+      # a failed run is logged on every attempt and never skipped silently.
+      # See docs/durability-posture.md.
+      TORTOISE_OFFBOX_BACKUP_INTERVAL_SECONDS: ""
       # #8497: the per-graph JSONL REBUILD journal. Without it the self-hosted
       # deployment was journal-less by construction: the derived graph was the
       # ONLY copy, `rebuild` had nothing to replay, and §17.1's single-writer

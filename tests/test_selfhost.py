@@ -111,8 +111,11 @@ class TestOffBoxBackupSignal:
     Owner decision 2026-10-13 (parity with hosted): a self-host deployment must
     DECLARE an off-box target or EXPLICITLY DECLINE one; ABSENT must stay
     distinguishable from DECLINED. These tests pin the tristate, the message
-    polarity, and the boot emission — none of them touch the backup subsystem
-    (the resolver is a pure read; the driver does not exist, #8544).
+    polarity, and the boot emission. #8544 tightened what "declare" MEANS: the
+    target is the COMPLETE set (R2 access + bucket + the archive encryption
+    key), because a partial target cannot produce a restorable archive — and it
+    added the DRIVER, whose own behaviour is pinned in
+    ``tests/test_selfhost_backup.py``.
     """
 
     def test_unset_is_absent_and_says_single_local_copy(self):
@@ -163,18 +166,57 @@ class TestOffBoxBackupSignal:
         # residual (no off-box copy) without naming AOF/RDB (#8552 review).
         assert "no off-box copy" in msg.lower()
 
-    @pytest.mark.parametrize("var", [
-        "R2_BUCKET", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
-    ])
-    def test_each_declared_target_var_reports_configured(self, var):
+    def test_only_a_complete_target_reports_configured(self):
+        """#8544: a PARTIAL target is ABSENT, not "declared".
+
+        ``R2Storage`` refuses a partial R2 config and ``encrypt_backup``
+        fail-closes without ``TORTOISE_BACKUP_KEY``, so a deployment holding
+        some of the target cannot produce a restorable archive. Reporting it
+        "declared" is the exact defect #8544 names, one layer down. Each var
+        alone (the pre-#8544 rule made ANY of them "configured") now reports
+        ABSENT; only the full set reports CONFIGURED.
+        """
         from tortoise import selfhost
 
-        assert selfhost.off_box_backup_state({var: "x"}) == selfhost.OFF_BOX_CONFIGURED
-        # The hosted driver switch is also a declared target.
+        each = {n: "x" for n in selfhost._OFF_BOX_TARGET_ENVS}
+        for var in selfhost._OFF_BOX_TARGET_ENVS:
+            assert selfhost.off_box_backup_state({var: "x"}) == \
+                selfhost.OFF_BOX_ABSENT, var
+            # Blank is UNSET, not declared — even with the rest present.
+            partial = dict(each, **{var: "  "})
+            assert selfhost.off_box_backup_state(partial) == \
+                selfhost.OFF_BOX_ABSENT, var
+            assert var in selfhost.off_box_backup_missing(partial), var
+        assert selfhost.off_box_backup_state(dict(each)) == \
+            selfhost.OFF_BOX_CONFIGURED
+        assert selfhost.off_box_backup_missing(dict(each)) == []
+
+    def test_hosted_driver_switch_is_not_a_selfhost_target(self):
+        """#8544: ``BACKUP_SWEEP_ENABLED`` is the HOSTED app's switch.
+
+        Nothing in the self-host lane ever consumed it, so a self-host deploy
+        flipping it was reported "declared" while nothing could run — a false
+        PASS on the surface that tells an operator whether they are backed up.
+        The self-host driver is armed by the complete target set alone.
+        """
+        from tortoise import selfhost
+
         assert selfhost.off_box_backup_state(
-            {"BACKUP_SWEEP_ENABLED": "true"}) == selfhost.OFF_BOX_CONFIGURED
-        # Blank is UNSET, not declared.
-        assert selfhost.off_box_backup_state({var: "  "}) == selfhost.OFF_BOX_ABSENT
+            {"BACKUP_SWEEP_ENABLED": "true"}) == selfhost.OFF_BOX_ABSENT
+
+    def test_absent_message_names_the_missing_target_vars(self):
+        """A partial config must be ACTIONABLE: the boot line names exactly
+        what is missing rather than reporting a bare "no target"."""
+        from tortoise import selfhost
+
+        partial = {"R2_BUCKET": "b", "TORTOISE_BACKUP_KEY": "k"}
+        missing = selfhost.off_box_backup_missing(partial)
+        assert missing == ["R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID",
+                           "R2_SECRET_ACCESS_KEY"]
+        msg = selfhost.off_box_backup_signal(
+            selfhost.OFF_BOX_ABSENT, missing=missing)
+        for name in missing:
+            assert name in msg, name
 
     def test_declared_target_wins_over_a_decline_flag(self):
         """Both set is a config error; the target the deploy is configured with
@@ -182,27 +224,31 @@ class TestOffBoxBackupSignal:
         target configuration."""
         from tortoise import selfhost
 
-        env = {"R2_BUCKET": "b", selfhost._OFF_BOX_DECLINE_ENV: "1"}
+        env = {n: "x" for n in selfhost._OFF_BOX_TARGET_ENVS}
+        env[selfhost._OFF_BOX_DECLINE_ENV] = "1"
         assert selfhost.off_box_backup_state(env) == selfhost.OFF_BOX_CONFIGURED
 
     def test_configured_message_never_claims_a_copy_exists(self):
-        """#8544: no self-host process runs the sweep, so a declared target must
-        not read as an off-box copy — the message names the gap instead."""
+        """#8544: the signal cannot observe the driver's runs, so a declared
+        target must not read as an off-box copy — it says what the driver does
+        and that a copy is a RUN that reported one."""
         from tortoise import selfhost
 
         msg = selfhost.off_box_backup_signal(selfhost.OFF_BOX_CONFIGURED)
-        assert "#8544" in msg
         low = msg.lower()
-        assert "no off-box copy is being produced" in low
         assert "declared" in low
+        assert "not a copy" in low
+        assert "driver" in low
 
     def _reload_with_no_backup_env(self, monkeypatch):
         """Reload selfhost with EVERY input of ``off_box_backup_state`` scrubbed.
 
         Derived from the resolver's OWN registries (``_OFF_BOX_TARGET_ENVS`` +
-        the hosted driver switch + the decline flag) rather than a hand list, so
-        a new target var cannot silently re-introduce the ambient-shell premise
-        (#8552 review; #3695/#5477 doctrine). Returns the captured stderr.
+        the decline flag) rather than a hand list, so a new target var cannot
+        silently re-introduce the ambient-shell premise (#8552 review;
+        #3695/#5477 doctrine). ``BACKUP_SWEEP_ENABLED`` is scrubbed too: it is
+        no longer an input (#8544 — it is the hosted app's switch), and leaving
+        it would let a stale premise pass by accident.
         """
         import importlib
 
@@ -215,17 +261,16 @@ class TestOffBoxBackupSignal:
 
     @pytest.mark.parametrize("var", [
         "R2_BUCKET", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
-        "BACKUP_SWEEP_ENABLED",
+        "TORTOISE_BACKUP_KEY", "BACKUP_SWEEP_ENABLED",
     ])
     def test_boot_signal_premise_ignores_ambient_target_env(
             self, monkeypatch, capsys, var):
-        """#8552 review P2: the boot-emission test asserts "nothing is
-        declared", so it must scrub ALL FIVE inputs the resolver reads — an
-        ambient ``R2_ACCOUNT_ID`` (a real exported var on this box's deploy and
-        backup lanes) otherwise flips the resolver to CONFIGURED and the
+        """#8552 review P2, extended by #8544: the boot-emission test asserts
+        "nothing is declared", so it must scrub ALL inputs the resolver reads —
+        an ambient ``R2_ACCOUNT_ID`` (a real exported var on this box's deploy
+        and backup lanes) otherwise flips the resolver to CONFIGURED and the
         assertion fails on a clean tree. Non-vacuous by construction: pre-fix
-        the reload cleared only ``R2_BUCKET`` + the decline flag, so setting any
-        of the other four made the boot message read DECLARED.
+        the reload cleared only ``R2_BUCKET`` + the decline flag.
         """
         monkeypatch.setenv(var, "ambient-value")
         self._reload_with_no_backup_env(monkeypatch)
@@ -244,16 +289,22 @@ class TestOffBoxBackupSignal:
 
     def test_setup_surfaces_record_the_decision(self):
         """Deliverable 1 of #8543: the decision is a STEP of the self-host setup
-        path, so the shipped compose template and the quickstart both name it."""
+        path, so the shipped compose template and the quickstart both name it.
+        #8544 adds the requirement that the declared target is COMPLETE — the
+        compose template must therefore carry the archive key too, or following
+        it verbatim yields an archive-less "declared" deployment.
+        """
         from pathlib import Path
 
         root = Path(__file__).resolve().parent.parent
         compose = (root / "docker-compose.yml").read_text()
         assert "TORTOISE_OFFBOX_BACKUP_DECLINED" in compose
         assert "R2_BUCKET" in compose
+        assert "TORTOISE_BACKUP_KEY" in compose
         quickstart = (root / "docs" / "quickstart-selfhosted.md").read_text()
         assert "TORTOISE_OFFBOX_BACKUP_DECLINED" in quickstart
         assert "durability-posture.md" in quickstart
+        assert "TORTOISE_BACKUP_KEY" in quickstart
 
 
 class TestHealth:

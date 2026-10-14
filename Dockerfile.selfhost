@@ -27,7 +27,13 @@ COPY tests/sample_transcript.txt tests/
 COPY pyproject.toml .
 # --no-deps on the editable install: dependencies come from the lock-pinned
 # requirements.txt above; extras resolve here once, at build time (#494).
-RUN pip install --no-cache-dir '.[embeddings]' \
+# `[backups]` is REQUIRED, not optional (#8610 review): a declared off-box
+# target arms the driver, whose `_default_storage()` builds
+# `hosted_backup.R2Storage` — which imports `boto3`, shipped only by this
+# extra (Dockerfile.hosted installs it too, line 86). Without it the
+# RECOMMENDED `docker compose up -d` path validates a target and then fails
+# every run at the first upload instead of producing an archive.
+RUN pip install --no-cache-dir '.[embeddings]' '.[backups]' \
     && pip install --no-cache-dir -e . --no-deps
 
 # NOTE: unlike Dockerfile.hosted (which bakes the embedding model at build

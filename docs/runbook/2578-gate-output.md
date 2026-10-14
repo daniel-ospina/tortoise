@@ -69,8 +69,16 @@ Pre-registered bound = baseline refusal rate + 0.1 (module constant, never chose
 | tr_top_k24 | 288.8 | 41-120:111 | admits <= 24 pool ranks but the 8000-token budget trims to ~19 items at median chunk — 20 vs 24 are near-duplicates, reported as a plateau. |
 | c2-on | 94.9 | 41-120:111 | position-ceiling promotion over the deduped pool; deep reach limited to answer-string-marked rows (~never on derived answers). |
 | applied-rerank | 624.0 | 41-120:111 | rerank pool 40->120 + per-session cap 2->3 + cross-encoder scorer + MMR; CONFOUNDED pool x ordering x scorer — reported with the pool-only isolation leg. |
-| pool-only-isolation | 94.9 | 41-120:111 | DEPTH-CEILING CONTROL — rerank OFF + deep pool still truncates pool[:top_k] then tr_top_k (retrieve.py:1432-1433), CANNOT admit rank-25-120 gold; separates DEPTH from reranker REORDER. |
+| pool-only-isolation | 94.9 | 41-120:111 | ⛔ RETRACTED (#2992) — DEPTH-CEILING CONTROL — rerank OFF + deep pool still truncates pool[:top_k] then tr_top_k (retrieve.py:1432-1433), CANNOT admit rank-25-120 gold; separates DEPTH from reranker REORDER. |
 | cap3-only | 625.9 | 41-120:111 | per-session rerank cap 2->3 at pool 40 — the issue's own arm (b), stand-alone; isolates the cap from pool depth. |
+
+## ⛔ Retracted arms — no isolation evidence
+
+An arm listed here is a NO-OP against the baseline: its applied fetch depth equals the baseline's, so it cannot isolate the knob it was pre-registered to test. Its published conclusion is RETRACTED — the lever is UNTESTED on this slice, NOT null.
+
+| arm | why retracted |
+| --- | --- |
+| pool-only-isolation | #2992: no-op against A-default on THIS run's own data (applied fetch depth 120 on both arms, context_tokens mean 94.9 vs 94.9) — the #1947 baseline already fetches the same depth, so 'widening the pool WITHOUT reranking changes nothing' carries no evidence. The depth lever is UNTESTED on this slice, not null — a valid control needs a shallow baseline (TORTOISE_LME_POOL_SIZE below the arm) or an arm deeper than the baseline (e.g. 240). |
 
 > **Refusal-classifier disagreement (3 of 5 conversion-wrong outcomes)**: these answers state the information is absent in wording the shared product classifier does not match (see `refusal_classifier_hint`). They are NOT re-labelled — the 2×2 deliberately uses the same classifier the product uses — so the reader-wrong split above is an UPPER BOUND and the true refusal-driven share is higher. Fixing the production classifier vocabulary is a separate follow-up.
 
