@@ -54,7 +54,8 @@ New to Tortoise? There are two ways to run it:
   The compose sidecar is the supported team/production path — AOF (`everysec`)
   survives a process or container crash (≤1 s), **not** a lost volume or host.
   Durability is that persistence **plus an off-box copy**, so the off-box backup
-  target is a setup step: declare an `R2_*` target or set
+  target is a setup step: declare the complete `R2_*` + `TORTOISE_BACKUP_KEY`
+  target — which arms the daemon's hourly backup driver — or set
   `TORTOISE_OFFBOX_BACKUP_DECLINED=1` (see
   [docs/durability-posture.md](docs/durability-posture.md) — the one authority
   for durability claims). For a single-agent eval without Docker, use the pip
@@ -171,10 +172,15 @@ Point it at a running server (`TORTOISE_MCP_URL`, default `http://localhost:8000
 **Running the server** (self-hosted): Docker compose (`docker compose up -d`) or `pip install tortoise-graph` + `tortoise-serve` — see [docs/quickstart-selfhosted.md](docs/quickstart-selfhosted.md). The `tortoise-graph` package still ships the full SDK surface for server-side power use and local eval. (The bare `tortoise` PyPI name is squatted by an unrelated library — engine = `tortoise-graph`, client = `tortoise-client`, #258/#526.)
 
 ```bash
-pip install tortoise-graph   # server package: engine + daemon + MCP server
-# from source (clone): uv sync --extra embeddings --extra parity && uv run python -m tortoise.selfhost
+pip install 'tortoise-graph[backups]'   # server package: engine + daemon + MCP server
+#   [backups] is the off-box backup driver's dependency (boto3 for its R2
+#   store, #8544). Leave it off only if you never declare a target: a complete
+#   target with no boto3 validates at boot and then fails every backup run.
+# from source (clone): uv sync --extra embeddings --extra parity --extra backups
+#   && uv run python -m tortoise.selfhost
 #   The explicit --extra list is EXACT: name every extra the env needs in ONE
-#   command (or use --all-extras) — `uv sync --extra embeddings` alone drops parity.
+#   command (or use --all-extras) — `uv sync --extra embeddings` alone drops
+#   parity, and dropping `backups` leaves a declared target failing every run.
 ```
 
 Full split mechanics (build, version coupling, license boundary): [docs/client-server-split.md](docs/client-server-split.md).

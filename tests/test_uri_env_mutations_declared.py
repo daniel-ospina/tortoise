@@ -168,6 +168,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_quota.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_selfhost.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],
     "test_selfhost_rest.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],
+    "test_selfhost_backup.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],  # #8544: the lifespan + production-seam tests force the EMBEDDED lane (setenv "" IS the point — the selfhost daemon boots and dumps without a live server; the fixture-param monkeypatch auto-restores, no lane leak)
     "test_selfhost_volunteer_context.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],  # #2103 (W4C) — selfhost volunteer forces the embedded lane (the selfhost_rest pattern)
     "test_turnstile_signup.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_value_extractor.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],

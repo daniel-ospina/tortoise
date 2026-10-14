@@ -729,6 +729,13 @@ SOURCE_PATTERNS = {
             # this entry a retrieval_metering.py-only diff matched no pattern,
             # fell through to `core`, and skipped the guard that pins it — the
             # #7076 self-guard class the test below refuses.
+            # #8544: the self-host off-box backup DRIVER. Its guard
+            # (tests/test_selfhost_backup.py) is registered in `api`, and it is
+            # armed from `tortoise/selfhost.py` (already an entry above) — but a
+            # selfhost_backup.py-only diff would otherwise match no pattern and
+            # fall through to `core`, skipping the guard that pins it (the
+            # #2938/#3154/#4367 silent-drop class).
+            "tortoise/selfhost_backup.py",
             "tortoise/retrieval_metering.py",
             "tortoise/transport.py",
             # #2938: EventAPI — the append surface `ingest.py`, `mining.py`,
