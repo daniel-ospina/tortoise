@@ -1531,6 +1531,95 @@ def test_the_runbook_documents_both_producers_of_incidents_unresolved():
         "the no-channel branch the runbook documents is gone from hosted_api")
 
 
+def test_the_runbook_names_the_live_production_restore_not_a_501():
+    """#3880: the "Restore / drill" section claimed production restore was out of
+    scope (501) while ``POST /backups/restore`` shipped live.
+
+    The claim was false from the commit that wrote it: 62d8477dc (#680) added
+    the runbook line, and the route already existed in that commit's tree — it
+    was added the day before by c99eb9b21 (#305/#582), so the doc was wrong the
+    moment it was written. The route is a real destructive surface —
+    ``restore_backup(drill=False)`` is pre-restore
+    safety copy → delete live → ``GRAPH.COPY`` temp→live — so an operator
+    reasoning from the runbook would understate what production can do and would
+    not look for its 409/503 failure modes on a real restore.
+
+    The runbook names the route and its handler by SYMBOL, never by line
+    number: this issue's own target cited ``hosted_api.py:21422``, which had
+    already moved by the time a lane read it (#5063's "identity by position").
+    The absence of a line citation is asserted below, so a later edit cannot
+    re-introduce one and keep this green.
+
+    The code half is asserted against the source so the doc claim keeps a
+    referent: deleting the route makes this fail rather than leave the runbook
+    describing a surface that is gone.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    doc = (root / "docs/ops/registry-backup-dr.md").read_text(encoding="utf-8")
+    section = doc[doc.index("## Restore / drill"):]
+    next_heading = section.find("\n## ", 1)
+    if next_heading != -1:
+        section = section[:next_heading]
+    para = " ".join(section.split())
+
+    assert "NOT in scope (501)" not in para, (
+        "the runbook must not claim production restore is out of scope — "
+        "POST /backups/restore is a live destructive surface")
+    assert "/backups/restore" in para, (
+        "the runbook must name the live production-restore route: " + para)
+    assert "backups_restore" in para, (
+        "the runbook must name the route's handler by SYMBOL (a line citation "
+        "rots — this issue's :21422 had moved): " + para)
+    # …and the citation must STAY symbol-only. `hosted_api.py:<line>` is exactly
+    # the identity-by-position rot #5063 names, so a re-introduced line number
+    # has to red here rather than pass on the symbol being present.
+    assert not re.search(r"hosted_api\.py:\d+", para), (
+        "the runbook must cite the handler by SYMBOL only — a line citation "
+        "rots (#5063's identity by position): " + para)
+
+    # Pricing half (re-review P2): the 402-for-every-tier conclusion is reached
+    # THROUGH a per-tier claim, so pin the claim against its canonical source.
+    # Pre-fix the line read '`"planned"` on every tier today', while
+    # product/pricing.json carries the boolean `false` on free/solo/anon — the
+    # distribution was wrong for three of five tiers even though the conclusion
+    # held (`_require_backup_tier` accepts only a real JSON `true`).
+    pricing = json.loads(
+        (root / "product/pricing.json").read_text(encoding="utf-8"))
+    hbu = {t: c["features"]["hourly_backups"]
+           for t, c in pricing["tiers"].items()}
+    assert not any(v is True for v in hbu.values()), (
+        "no tier may be entitled today — the runbook's 402-for-all-tiers claim "
+        f"depends on it: {hbu}")
+    planned = "/".join(t for t, v in hbu.items() if v == "planned")
+    disabled = "/".join(t for t, v in hbu.items() if v is False)
+    assert f'`"planned"` on {planned}' in para, (
+        "the runbook must state the real per-tier split (order follows the "
+        "committed pricing file): " + para)
+    assert f"`false` on {disabled}" in para, (
+        "the runbook must state the real per-tier split (order follows the "
+        "committed pricing file): " + para)
+
+    # Referent half (re-review P2): the refusal used to close by pointing at
+    # #2339 as "the graph-bound endpoint". #2339 is CLOSED (consolidated into
+    # the also-closed #5062) and no graph-bound archive-restore route exists —
+    # an operator following it reads a shipped remedy that is not there.
+    assert "#2339" not in para, (
+        "the runbook must not cite a closed tracker entry as the graph-bound "
+        "restore endpoint: " + para)
+    assert "no graph-bound archive-restore endpoint exists" in para, (
+        "the custom-graph refusal must state plainly that no graph-bound "
+        "restore surface exists, so the operator knows it is terminal: " + para)
+
+    # Code half: the route + handler the runbook names really exist, live.
+    src = (root / "tortoise/hosted_api.py").read_text(encoding="utf-8")
+    assert '@app.post("/backups/restore")' in src, (
+        "the route the runbook documents is gone from hosted_api")
+    assert "async def backups_restore(" in src, (
+        "the handler the runbook names is gone from hosted_api")
+
+
 class TestDrDrill:
     def test_drill_requires_params(self, client, dr_env, mem_storage):
         r = client.post("/v1/internal/backups/drill", headers=INTERNAL_HEADERS, json={})
