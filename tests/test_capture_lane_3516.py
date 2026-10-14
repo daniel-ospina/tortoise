@@ -617,3 +617,242 @@ def test_spool_lane_upgrade_survives_identical_content_dedup(tmp_path, monkeypat
     assert res["written"] is True, (
         "the content-dedup early-return swallowed the lane upgrade")
     assert spool.read_spool_meta(root, sid).get("capture_lane") == "hook"
+
+
+# ── #7708 — an unrecognised / falsy lane can never reach the wire or delete ──
+#
+# The defect: the drain forwarded the stored lane VERBATIM, the server answered
+# 422 for an unrecognised one, the drain classified 422 PERMANENT, and unlinked
+# the entry's turn log — the only copy of the conversation. The same shape made
+# a FALSY stored lane re-POST forever (the payload dropped it while the skip
+# clause and the CAS compared the raw value against `None`).
+#
+# Site map — one discriminating test each; REMOVING the normaliser at a site
+# reds that site's test:
+#   1 WRITE         test_spool_writer_drops_an_unrecognised_lane
+#                   test_spool_writer_heals_a_stored_foreign_lane
+#   2 DRAIN payload test_the_drain_never_puts_an_unrecognised_lane_on_the_wire
+#   3 SKIP clause   test_a_falsy_lane_that_was_filed_is_skipped_not_re_posted
+#   4 SUCCESS CAS   test_a_falsy_stored_lane_is_stamped_filed_on_the_first_drain
+#   6 TERMINAL      test_a_422_is_terminal_and_never_unlinks_the_transcript
+# Plus the vocabulary mirror and a cross-language set pin.
+
+
+def test_the_spool_lane_vocabulary_mirrors_the_server_set():
+    """The closed set lives at the SERVER (`hosted_api._SESSION_CAPTURE_LANE_VALUES`)
+    — it is what produces the 422. The spool mirrors it (it cannot import
+    hosted_api's FastAPI stack); this pin makes that mirror drift-proof."""
+    import tortoise.capture_spool as spool
+
+    assert spool.CAPTURE_LANES == ha_mod._SESSION_CAPTURE_LANE_VALUES
+    assert set(spool.CAPTURE_LANES) == {"hook", "store_sync"}
+    # And the normaliser really is the membership test, not a truthiness gate.
+    for good in ("hook", "store_sync"):
+        assert spool._normalise_lane(good) == good
+    for bad in ("bogus", "recorder", "", "Hook", 0, False, None, [], ["hook"]):
+        assert spool._normalise_lane(bad) is None, bad
+
+
+def test_the_spool_harness_vocabulary_mirrors_the_server_set():
+    """The HARNESS mirror (#7708 follow-up): the spool normalises `harness` at
+    the write and at the wire, so its set must equal the server's closed set —
+    a drift would either coerce a legal harness to the default or let an illegal
+    one through."""
+    import tortoise.capture_spool as spool
+
+    assert spool.SESSION_HARNESSES == ha_mod._SESSION_HARNESS_VALUES
+    for good in ("claude", "codex", "pi", "openclaw", "hermes", "claude-desktop"):
+        assert spool._normalise_harness(good) == good
+    # The CLI alias resolves; everything else (incl. non-strings) is the default.
+    assert spool._normalise_harness("desktop") == "claude-desktop"
+    for bad in ("bogus", "Claude", 0, False, None, [], ["codex"]):
+        assert spool._normalise_harness(bad) == "claude", bad
+
+
+def test_the_ts_lane_set_matches_the_server_and_python_legs(tmp_path):
+    """The TS leg is a separate language, so its mirror has no import to pin it.
+    Execute it and compare the SET — an over-wide TS set (e.g. one that also
+    accepts "harness") would otherwise let an unrecognised lane reach the wire
+    with no test red."""
+    import json as _json
+    from pathlib import Path
+
+    import tortoise.capture_spool as spool
+    from tests.test_capture_spool import _node_that_can_strip_ts
+
+    node = _node_that_can_strip_ts()
+    ts_uri = (Path(__file__).resolve().parents[1]
+              / "tortoise" / "pi-hooks" / "tortoise-capture.ts").as_uri()
+    driver = tmp_path / "lane-set.mjs"
+    driver.write_text(
+        f'import {{ CAPTURE_LANES }} from "{ts_uri}";\n'
+        "console.log(JSON.stringify([...CAPTURE_LANES].sort()));\n",
+        encoding="utf-8")
+    import subprocess
+    proc = subprocess.run(
+        [node, "--experimental-strip-types", str(driver)],
+        capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    ts_set = set(_json.loads(proc.stdout.strip().splitlines()[-1]))
+    assert ts_set == set(ha_mod._SESSION_CAPTURE_LANE_VALUES) == set(spool.CAPTURE_LANES)
+
+
+def test_spool_writer_drops_an_unrecognised_lane(tmp_path):
+    """Site 1. MUTATION THAT REDS THIS: remove `_normalise_lane` from the writer
+    → the foreign token is stored and later posted verbatim."""
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id="7708-writer-drop", turns=[{"role": "user", "content": "x"}],
+        source="t", machine_id="m", capture_lane="bogus"))
+    meta = spool.read_spool_meta(root, "7708-writer-drop")
+    assert "capture_lane" not in meta, meta
+    # positive control: a RECOGNISED lane IS stored, so the assertion above
+    # cannot pass on a writer that stopped storing lanes entirely.
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id="7708-writer-keep", turns=[{"role": "user", "content": "x"}],
+        source="t", machine_id="m", capture_lane="hook"))
+    assert spool.read_spool_meta(root, "7708-writer-keep").get("capture_lane") == "hook"
+
+
+def test_spool_writer_heals_a_stored_foreign_lane(tmp_path):
+    """Site 1 (`lane_upgrade`). Raw resolution would let a stored foreign lane
+    win the truthy `or` AND keep `lane_upgrade` False, so the byte-identical
+    dedup early-return would strand the valid snapshot lane forever."""
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    sid = "7708-writer-heal"
+    turns = [{"role": "user", "content": "same"}]
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m"))
+    meta = spool.read_spool_meta(root, sid)
+    meta["capture_lane"] = "bogus"  # crafted: the API never writes a foreign lane
+    spool._write_meta(root, meta)
+    res = spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m", capture_lane="hook"))
+    assert res["written"] is True, "the dedup early-return swallowed the upgrade"
+    assert spool.read_spool_meta(root, sid).get("capture_lane") == "hook"
+
+
+def test_the_drain_never_puts_an_unrecognised_lane_on_the_wire(tmp_path):
+    """Site 2. MUTATION THAT REDS THIS: remove `_normalise_lane` from the payload
+    gate → the wire carries the foreign token and the server 422s."""
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    sid = "7708-drain-gate"
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=[{"role": "user", "content": "x"}],
+        source="t", machine_id="m"))
+    meta = spool.read_spool_meta(root, sid)
+    meta["capture_lane"] = "bogus"
+    spool._write_meta(root, meta)
+    posted: list[dict] = []
+    spool.flush_spool(
+        root, lambda p: (posted.append(dict(p)),
+                         spool.PostOutcome(ok=True, status=200))[1],
+        only_session_id=sid)
+    assert posted, "the entry was not filed"
+    assert "capture_lane" not in posted[0], posted[0]
+    assert spool.read_spool_meta(root, sid).get("filed_key"), (
+        "the entry was not marked filed — the drain could not skip it later")
+
+
+def test_a_falsy_lane_that_was_filed_is_skipped_not_re_posted(tmp_path):
+    """Site 3 (skip clause). MUTATION THAT REDS THIS: compare the RAW lanes →
+    `None == ""` is False and the entry re-POSTs its whole transcript on EVERY
+    drain (#4714 amplification)."""
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    sid = "7708-skip"
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=[{"role": "user", "content": "x"}],
+        source="t", machine_id="m"))
+    posts: list[dict] = []
+    spool.flush_spool(
+        root, lambda p: (posts.append(dict(p)),
+                         spool.PostOutcome(ok=True, status=200))[1],
+        only_session_id=sid)
+    assert posts and "capture_lane" not in posts[0]
+    meta = spool.read_spool_meta(root, sid)
+    assert meta.get("filed_key") and "filed_lane" not in meta, meta
+    meta["capture_lane"] = ""  # crafted later: filed_lane stays ABSENT
+    spool._write_meta(root, meta)
+    again: list[dict] = []
+    summary = spool.flush_spool(
+        root, lambda p: (again.append(dict(p)),
+                         spool.PostOutcome(ok=True, status=200))[1],
+        only_session_id=sid)
+    assert again == [], "an already-filed entry with a falsy lane was re-POSTed"
+    assert summary.skipped == 1
+
+
+def test_a_falsy_stored_lane_is_stamped_filed_on_the_first_drain(tmp_path):
+    """Site 4 (success CAS). MUTATION THAT REDS THIS: compare the raw disk lane
+    → `"" == None` is False, `filed_key` is never stamped, and the entry
+    re-POSTs on every drain."""
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    sid = "7708-cas-falsy"
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=[{"role": "user", "content": "x"}],
+        source="t", machine_id="m"))
+    meta = spool.read_spool_meta(root, sid)
+    meta["capture_lane"] = ""
+    spool._write_meta(root, meta)
+    posts: list[dict] = []
+    spool.flush_spool(
+        root, lambda p: (posts.append(dict(p)),
+                         spool.PostOutcome(ok=True, status=200))[1],
+        only_session_id=sid)
+    assert posts and "capture_lane" not in posts[0]
+    assert spool.read_spool_meta(root, sid).get("filed_key"), (
+        "the CAS did not stamp filed_key for a falsy lane (re-POST loop)")
+    again: list[dict] = []
+    summary = spool.flush_spool(
+        root, lambda p: (again.append(dict(p)),
+                         spool.PostOutcome(ok=True, status=200))[1],
+        only_session_id=sid)
+    assert again == [] and summary.skipped == 1, (again, summary)
+
+
+def test_a_422_is_terminal_and_never_unlinks_the_transcript(tmp_path):
+    """Site 6. MUTATION THAT REDS THIS: route the permanent verdict back to
+    `_discard_entry` → the entry (meta AND turn log) is UNLINKED, the only copy
+    of the conversation is gone, and `read_spool_meta` returns None."""
+    import tortoise.capture_spool as spool
+
+    root = tmp_path / "spool"
+    sid = "7708-terminal"
+    turns = [{"role": "user", "content": "the only copy"}]
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m"))
+    posts: list[dict] = []
+
+    def refuse(payload):
+        posts.append(dict(payload))
+        return spool.PostOutcome(
+            ok=False, status=422, detail='invalid capture_lane "bogus"')
+
+    first = spool.flush_spool(root, refuse, only_session_id=sid)
+    assert len(posts) == 1
+    assert [d["reason"] for d in first.discarded] == [spool.DISCARD_HTTP_REJECTED]
+    assert first.lost == [], (
+        "a retained terminal refusal must not read as a loss (#3971 class)")
+    meta = spool.read_spool_meta(root, sid)
+    assert meta is not None, "a 422 UNLINKED the only copy of the transcript"
+    assert meta.get("terminal_failure"), meta
+    assert spool.read_spool_turns(root, sid) == turns, "the turn log was lost"
+    # A byte-IDENTICAL re-snapshot must not resurrect the retry: the dedup
+    # early-return does not rebuild the meta, so the terminal marker survives.
+    spool.write_spool_entry(root, spool.Snapshot(
+        session_id=sid, turns=turns, source="t", machine_id="m"))
+    assert spool.read_spool_meta(root, sid).get("terminal_failure"), (
+        "a byte-identical re-snapshot cleared the terminal marker")
+    second = spool.flush_spool(root, refuse, only_session_id=sid)
+    assert second.attempted == 0 and second.terminal == 1, second
+    assert len(posts) == 1, "a terminal entry was re-POSTed"

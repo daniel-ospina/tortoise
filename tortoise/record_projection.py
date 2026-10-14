@@ -90,6 +90,12 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     "20261012000002_record_semantic.sql",
     "20261012000003_record_epistemic.sql",
     "20261012000004_record_procedural.sql",
+    # A FORWARD migration re-declaring a refusal. Migrations are append-only
+    # history, so a later refusal (`subject.props` gains `status`, #8263)
+    # arrives as `ALTER TABLE … ADD CONSTRAINT` — and the schema read below
+    # must see it, or the record projection would emit a props tail the
+    # constraint refuses and hand a caller a crash instead of a drop.
+    "20261014000001_record_subject_props_no_derived.sql",
 )
 
 #: The record's own tables (the procedural layer is views over these).
@@ -322,12 +328,14 @@ class OpDispatch:
     REFUSED rather than guessed (`#3377`/`#4769`).
 
     ``never_store`` is the record's own half of the §2.6 split: `Object.status`
-    and `Subject.status` are **projection-owned caches** (the fold's docstring) —
-    `Object.status` is refused by the schema's props CHECK, `Subject.status` is
-    not (filed as a schema gap, #7969's PR body) — and the projection must not
-    make either authoritative through the props tail. `Point.status` is NOT in
-    this set: a Point's lifecycle IS journaled (`PointRetracted`/`…Superseded`)
-    and `point.status` is a PRIMARY column.
+    and `Subject.status` are **projection-owned caches** (the fold's docstring),
+    and BOTH are refused by the schema's props CHECK (`Object` from #8179,
+    `Subject` from the forward migration 20261014000001/#8263) — so the
+    projection must not make either authoritative through the props tail. This
+    set is the mutation path's second line; the snapshot path is covered by
+    `refused_props_names()`, which reads the same CHECKs from disk.
+    `Point.status` is NOT in this set: a Point's lifecycle IS journaled
+    (`PointRetracted`/`…Superseded`) and `point.status` is a PRIMARY column.
     """
 
     table_for_label: Mapping[str, str]
@@ -631,6 +639,19 @@ _DERIVED_CHECK_RE = re.compile(
 _TABLE_RE = re.compile(
     r"CREATE TABLE IF NOT EXISTS public\.([a-z_]+)\s*\((.*?)\n\);\s*\n", re.S
 )
+#: The SAME refusal carried by a FORWARD migration: `ALTER TABLE public.<t> …
+#: ADD CONSTRAINT chk_<t>_props_no_derived CHECK (…)`. A landed migration is
+#: never edited (append-only history), so a later refusal arrives this way —
+#: and the schema read must see it, or the projection would emit a props tail
+#: the constraint refuses (#8263). `[^;]*?` keeps the match inside one
+#: statement (DROP CONSTRAINT …, ADD CONSTRAINT … is a single ALTER).
+_ALTER_DERIVED_CHECK_RE = re.compile(
+    r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?public\.([a-z_]+)\b"
+    r"[^;]*?ADD\s+CONSTRAINT\s+chk_[a-z_]+_props_no_derived\s+CHECK\s*\("
+    r"\s*NOT\s*\(\s*props\s*\?\|"
+    r"\s*ARRAY\[(.*?)\]\s*::text\[\]\s*\)\s*\)",
+    re.S,
+)
 
 
 def _migrations_dir() -> Path:
@@ -685,14 +706,27 @@ def refused_props_names(migrations_dir: Path | None = None) -> dict[str, frozens
     """
     sql = _read_migrations(migrations_dir)
     out: dict[str, frozenset[str]] = {}
-    for block in re.split(r"CREATE TABLE IF NOT EXISTS public\.", sql):
-        table = block.split("(", 1)[0].strip()
+    # Bound each table to ITS OWN `CREATE TABLE … );` body (`_TABLE_RE`, the
+    # same regex `table_columns` uses). Splitting on the CREATE headers alone
+    # would run the LAST table's block to the end of the concatenated SQL, so a
+    # later forward `ALTER` (#8263) would be misread as belonging to whichever
+    # table happened to be last.
+    for table, body in _TABLE_RE.findall(sql):
         if table not in THE_RECORD_TABLES:
             continue
         names: set[str] = set()
-        for arr in _DERIVED_CHECK_RE.findall(block):
+        for arr in _DERIVED_CHECK_RE.findall(body):
             names |= {n.strip().strip("'") for n in arr.split(",") if n.strip()}
         out[table] = frozenset(n for n in names if n)
+    # Forward migrations re-declare a refusal rather than rewrite the CREATE
+    # TABLE (append-only history). Apply them over the parsed tables — the set
+    # only ever GROWS, so an ALTER that names fewer keys cannot silently
+    # re-open a name an earlier migration closed.
+    for table, arr in _ALTER_DERIVED_CHECK_RE.findall(sql):
+        if table not in out:
+            continue
+        extra = frozenset(n.strip().strip("'") for n in arr.split(",") if n.strip())
+        out[table] = out[table] | extra
     return out
 
 

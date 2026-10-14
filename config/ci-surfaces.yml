@@ -1006,6 +1006,15 @@ surfaces:
   # falls through to `core`, so without this entry the declaration's guard
   # never runs on the change that can delete it.
   - test_7856_goal_state.py
+  # #8497 / PR #8526 review P2-2: DUAL-REGISTERED with `api` (above). The
+  # arming seam this file pins lives in `tortoise/config.py`, which matches no
+  # SOURCE_PATTERNS entry and is not a SHARED_MODULE, so it falls through to
+  # `core` — and a named-surface match REPLACES that fallback. Registered only
+  # under `api`, a `config.py`-only change selected `core` and ran none of the
+  # T1–T8 pins (verified with the repo's own selector: `--changed-files
+  # tortoise/config.py` → surfaces=['core'], test_selfhost_rest.py absent) — the
+  # #1349/#2938/#3154 silent-drop class.
+  - test_selfhost_rest.py
   # #7951: a session DELETE must survive `derived = replay(journal)`. The
   # guarded surface is the journal fold + the hosted delete path
   # (`tortoise/sdk.py`, `tortoise/projection/__init__.py`,
@@ -1122,10 +1131,12 @@ surfaces:
   # #7969 (epic #7879, Interface A): the record projection — journal →
   # Postgres, total + idempotent. Registered against `core` because BOTH
   # inputs it reads select `core`: `tortoise/record_projection.py` matches no
-  # named SOURCE_PATTERN (the `core` fallback), and the four record migrations
-  # under `supabase/migrations/` do too. So a projection-only or
-  # migration-only change selects `core` and this guard runs with it. Its
-  # DB-level half is NOT here — it is the PGlite replay in
+  # named SOURCE_PATTERN (the `core` fallback), and the record migrations
+  # under `supabase/migrations/` — the four CREATE-TABLE files plus forward
+  # migrations such as `20261014000001_record_subject_props_no_derived.sql`,
+  # each pinned in `CORE_ALSO` (`tools/ci_selection.py`) — do too. So a
+  # projection-only or migration-only change selects `core` and this guard runs
+  # with it. Its DB-level half is NOT here — it is the PGlite replay in
   # `supabase/tests/pglite/validate.mjs` (the #7968 convention: the SQL half
   # lives in the harness that has a Postgres, this file stays hermetic).
   - test_record_projection.py

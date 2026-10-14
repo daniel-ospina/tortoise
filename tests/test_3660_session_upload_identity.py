@@ -112,8 +112,8 @@ def test_session_drain_uses_global_identity_not_repo_config(places, monkeypatch)
     seen: dict = {}
     monkeypatch.setattr(
         main, "_cmd_session_drain",
-        lambda api_key, api_url, exclude_session_id=None: seen.update(
-            key=api_key, url=api_url) or 0)
+        lambda api_key, api_url, exclude_session_id=None, retry_terminal=False:
+            seen.update(key=api_key, url=api_url) or 0)
 
     rc = main._cmd_session_drain_best_effort(
         SimpleNamespace(exclude_session_id=None))
