@@ -196,6 +196,16 @@ catalog union (the back-compat fallback — every pre-#318, self-hosted and
 restored graph, #2714 indicator 3); marker present → the `active` records **∪**
 the namespaces already in the graph's data. The data leg is what keeps
 historical points writable after a pack is disabled.
+- **The marker is the only write path to the configurable set.** Every seeding
+path (`get_tenant_packs`'s self-heal *and* `ensure_tenant_packs` — the
+provision retry, the Supabase control plane, and
+`graph-scripts/backfill_pack_installs.py`) skips a graph that carries a marker,
+so a re-run cannot resurrect a pack the user removed or disabled. A change to
+the set only ever happens through `set_graph_packs`, which moves the revision.
+- **Concurrency:** both the first configuration and every later one move the
+marker with a conditional compare-and-swap (`_cas_first_selection` /
+`_bump_selection`) *before* any install record is written, so a worker that
+loses a race gets a `409` and has written nothing.
 - **Management surface:** `GET` / `PUT /v1/graphs/{graph_id}/packs`. Owner/admin
 (session) or a key carrying `team:manage`; a graph-bound key is refused on
 mutation, so C5 #2114's boundary holds. `PUT` is a full desired-state replace

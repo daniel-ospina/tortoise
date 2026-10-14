@@ -399,10 +399,41 @@ def ensure_tenant_packs(sdk: TortoiseSDK, *, starter: list[str] | tuple[str, ...
     fails (or is unknown in the catalog) is skipped with a logged warning
     and never raises into the provisioning path. Returns the activation
     records written (or already present) this call.
+
+    #8648 review P2: a ``:PackSelection`` marker means the graph's set was
+    DELIBERATELY configured, and this path must not re-seed it. Suppressing
+    the self-heal in ``get_tenant_packs`` alone left this second seeding path
+    (provision retry, ``graph-scripts/backfill_pack_installs.py``, the
+    Supabase control plane) re-activating every starter namespace with
+    ``status='active'`` — silently resurrecting packs a user had removed or
+    disabled, and WITHOUT moving the revision, so a client holding
+    ``revision=1`` could not even detect the widening. The invariant is:
+    **no write path may alter the configurable set without moving the
+    marker**; activation therefore skips (with a log line) and returns ``[]``.
     """
     catalog = _resolve_catalog()
     g = _target_graph(sdk, graph_name)
     lock_graph = _resolved_graph_name(sdk, graph_name)
+    try:
+        selection = _read_selection(g)
+    except Exception as e:  # noqa: BLE001, RUF100
+        # Best-effort means NEVER raise into the provisioning path — and when
+        # the marker cannot be read we cannot prove the graph is unconfigured,
+        # so activation is SKIPPED rather than risk re-seeding a deliberately
+        # configured graph (narrowing, never widening).
+        log.warning(
+            "pack_state: pack-selection marker read failed for %s — starter "
+            "activation skipped (a configured graph must never be re-seeded): "
+            "%s", lock_graph, e)
+        return []
+    if selection is not None:
+        log.info(
+            "pack_state: graph %s is deliberately configured (revision %s) — "
+            "starter activation skipped (a configured graph is never "
+            "re-seeded; the configurable set only moves through "
+            "set_graph_packs)",
+            lock_graph, selection.revision)
+        return []
     now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
     activated: list[dict] = []
     for ns in _starter_namespaces(starter):
@@ -763,21 +794,36 @@ def read_pack_selection(sdk: TortoiseSDK, *,
     return _read_selection(_target_graph(sdk, graph_name))
 
 
-def _write_selection(g, *, revision: int, updated_by: str | None,
-                     now: str) -> None:
-    """FIRST configuration: create the marker (``revision`` = 1).
+def _cas_first_selection(g, *, revision: int, updated_by: str | None,
+                         now: str) -> bool:
+    """Conditional FIRST configuration — the compare-and-swap for
+    ``expected_revision == 0`` (#8648 review P2).
 
-    Only ever reached when no marker exists. The MERGE is keyed on nothing but
-    the label because the GRAPH is the isolation boundary (one marker per
-    graph); the in-process lock serializes same-worker first-writes.
+    Creates the marker ONLY when none exists (``MERGE … ON CREATE``) and
+    reports whether THIS call created it. The winner is decided by a per-call
+    write token: ``ON CREATE`` stamps it, ``ON MATCH`` leaves the node's
+    existing token alone, and only the creator reads its own token back. Two
+    workers racing a graph's first PUT both pre-read ``None``, but exactly one
+    MERGE creates the node — so the loser refuses with ``PackRevisionConflict``
+    having written NOTHING, instead of applying a second set under the same
+    ``revision = 1`` and renumbering an already-advanced marker backwards.
+
+    Before this, only the existing-marker branch was conditional
+    (``_bump_selection``), so the documented cross-worker contract — "a write
+    that reports revision N really owns revision N" — did not hold for the
+    FIRST configuration.
     """
-    g.query(
+    token = os.urandom(16).hex()
+    rows = g.query(
         f"MERGE (s:{PACK_SELECTION_LABEL}) "
-        "SET s.revision = $rev, "
-        "    s.configured_at = coalesce(s.configured_at, $now), "
-        "    s.updated_at = $now, s.updated_by = $by",
-        params={"rev": int(revision), "now": now, "by": updated_by},
-    )
+        "ON CREATE SET s.revision = $rev, s.configured_at = $now, "
+        "    s.updated_at = $now, s.updated_by = $by, "
+        "    s.write_token = $token "
+        "RETURN s.write_token",
+        params={"rev": int(revision), "now": now, "by": updated_by,
+                "token": token},
+    ).result_set
+    return bool(rows) and rows[0][0] == token
 
 
 def _bump_selection(g, *, expected: int, revision: int,
@@ -870,10 +916,15 @@ def set_graph_packs(sdk: TortoiseSDK, *,
     (provisioning, CLI, backfill).
 
     The mutation is serialized per physical graph (``_pack_selection_lock``)
-    within one worker, and the marker is bumped with a CONDITIONAL compare-and-
-    swap (``_bump_selection``) BEFORE any install record is written. Together
-    those make the caller's contract — "a write that reports revision N really
-    owns revision N" — hold across workers: the loser of a race gets a 409 and
+    within one worker, and the marker moves with a CONDITIONAL compare-and-swap
+    BEFORE any install record is written — ``_cas_first_selection`` for the
+    FIRST configuration (``expected_revision == 0``) and ``_bump_selection``
+    for every later one. (The first-write branch used to be an unconditional
+    ``MERGE … SET revision = 1``, so two workers racing a graph's FIRST PUT
+    both reported a 200 claiming revision 1 over an interleaved set — the
+    cross-worker guarantee below did not hold there.) Together those make the
+    caller's contract — "a write that reports revision N really owns revision
+    N" — hold across workers: the loser of a race gets a 409 and
     has written nothing. (It is not a multi-statement transaction, so a process
     killed between the bump and the record writes leaves the marker one
     revision ahead; the next successful PUT reconciles it, and this is a
@@ -935,7 +986,13 @@ def set_graph_packs(sdk: TortoiseSDK, *,
         # (2) the conditional bump is the compare-and-swap that makes the
         # optimistic-concurrency token more than a pre-read equality check.
         if selection is None:
-            _write_selection(g, revision=1, updated_by=updated_by, now=now)
+            if not _cas_first_selection(g, revision=1,
+                                        updated_by=updated_by, now=now):
+                # A peer created the marker between our read and our write.
+                # Report the revision the graph ACTUALLY holds, write nothing.
+                latest = _read_selection(g)
+                raise PackRevisionConflict(
+                    latest.revision if latest is not None else 0)
         elif changed and not _bump_selection(g, expected=current_revision,
                                             revision=current_revision + 1,
                                             updated_by=updated_by, now=now):

@@ -210,6 +210,87 @@ class TestResolvedPackSet:
                                 expected_revision=1)
         assert again.revision == 1
 
+    def test_lost_first_write_cas_refuses_and_writes_nothing(
+            self, tmp_path, monkeypatch):
+        """The FIRST configuration is a compare-and-swap too (#8648 review P2).
+
+        ``test_lost_cas_race_refuses_and_writes_nothing`` monkeypatches
+        ``_bump_selection`` and always runs AFTER a successful first write, so
+        it can never reach the first-write branch — the unconditional
+        ``MERGE ... SET revision = 1`` there was invisible to it. This test
+        simulates the cross-worker race on a graph's FIRST PUT: the pre-read
+        sees no marker while a peer has already created one.
+
+        FAIL-ON: pre-fix the first-write branch is unconditional, so this call
+        does not conflict — it tombstones ``dev``, activates ``marketing`` and
+        renumbers the peer's advanced marker BACKWARDS to 1.
+        """
+        sdk = _sdk(tmp_path, "test_sel_first_cas")
+        set_graph_packs(sdk, packs=[{"namespace": DEV}], expected_revision=0)
+        real_read_selection = ps._read_selection
+        calls = {"n": 0}
+
+        def _stale_once(g):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return None  # the pre-read that lost the race
+            return real_read_selection(g)
+
+        monkeypatch.setattr(ps, "_read_selection", _stale_once)
+        with pytest.raises(PackRevisionConflict) as exc:
+            set_graph_packs(sdk, packs=[{"namespace": MARKETING}],
+                            expected_revision=0)
+        assert exc.value.current == 1
+        monkeypatch.setattr(ps, "_read_selection", real_read_selection)
+        assert read_pack_selection(sdk).revision == 1
+        assert dict(_raw_installs(sdk)) == {DEV: "active"}
+        assert resolved_pack_set(sdk).namespaces == frozenset({DEV})
+
+    def test_backfill_activation_does_not_reseed_a_configured_graph(
+            self, tmp_path):
+        """The marker must suppress the OTHER seeding path too (#8648 P2).
+
+        ``get_tenant_packs``'s self-heal honours the marker, but
+        ``ensure_tenant_packs`` — the path a provision retry and
+        ``graph-scripts/backfill_pack_installs.py`` (documented "safe to
+        re-run") call — used to unconditionally MERGE every starter namespace
+        and set ``status='active'``, resurrecting removed/disabled packs with
+        the revision unchanged.
+
+        FAIL-ON: pre-fix ``activated`` lists every starter namespace and the
+        resolved set widens back to the starter set.
+        """
+        sdk = _sdk(tmp_path, "test_sel_backfill")
+        set_graph_packs(sdk, packs=[{"namespace": DEV}], expected_revision=0)
+        activated = ensure_tenant_packs(sdk)
+        assert activated == []
+        assert read_pack_selection(sdk).revision == 1
+        assert resolved_pack_set(sdk).namespaces == frozenset({DEV})
+        assert [p["namespace"] for p in get_tenant_packs(sdk)] == [DEV]
+
+    def test_backfill_activation_skips_when_marker_read_fails(
+            self, tmp_path, monkeypatch):
+        """An unreadable marker must NOT fall through to seeding.
+
+        ``ensure_tenant_packs`` is best-effort and must never raise into the
+        provisioning path — but when the marker read fails we cannot prove the
+        graph is unconfigured, so the safe direction is to skip rather than
+        widen a deliberately configured graph (narrowing, never widening).
+
+        FAIL-ON: pre-fix ``ensure_tenant_packs`` never reads the marker, so it
+        seeds the whole starter set and returns five records.
+        """
+        sdk = _sdk(tmp_path, "test_sel_read_fail")
+        real = ps._read_selection
+
+        def _boom(_g):
+            raise RuntimeError("simulated marker read failure")
+
+        monkeypatch.setattr(ps, "_read_selection", _boom)
+        assert ensure_tenant_packs(sdk) == []
+        monkeypatch.setattr(ps, "_read_selection", real)
+        assert _raw_installs(sdk) == []
+
     def test_changes_are_isolated_to_their_graph(self, tmp_path):
         """A change on graph A must leave graph B untouched.
 
@@ -280,6 +361,16 @@ def _seed_org(db_path: str, org_id: str) -> dict:
                                 namespace=f"org_{org_id}")
     custom = sdk._graph_create(org_id, "custom", kind="custom")
     return {"default": default, "custom": custom}
+
+
+def _seed_member(db_path: str, org_id: str, user_id: str, role: str) -> None:
+    """An active ``Membership`` node in the registry graph, so the session
+    lane of the dual-lane authorization resolves (#2728)."""
+    sdk = TortoiseSDK(db_path=db_path, namespace="registry")
+    sdk._get_registry().query(
+        "MERGE (m:Membership {user_id:$u, org_id:$t}) "
+        "SET m.status='active', m.role=$r",
+        params={"u": user_id, "t": org_id, "r": role})
 
 
 def _auth(tc, org_id: str, **extra):
@@ -471,6 +562,56 @@ class TestGraphPacksRest:
         assert calls[0]["actor_user_id"] == _U1
         assert calls[0]["detail"]["via"] == "api_key"
         assert calls[0]["detail"]["revision"] == 1
+
+
+class TestGraphPacksSessionLane:
+    """The SESSION lane of the new authorization (#8648 review P2).
+
+    Every other REST test's ``_auth()`` injects ``key_id="k-1"``, so
+    ``key_ctx["key_id"]`` is always truthy and the owner/admin membership
+    branch in ``_apply_graph_packs_put`` — the check deciding who may rewrite
+    a graph's approved ontology — never ran, nor did the member check in
+    ``_graph_packs_read``. These tests make that branch live: dropping
+    ``or membership.get("role") not in ("owner", "admin")`` now FAILS
+    ``test_session_plain_member_cannot_mutate``.
+    """
+
+    def test_session_member_may_read(self, sel_client):
+        tc, db_path = sel_client
+        _seed_org(db_path, "t-sel-s1")
+        _seed_member(db_path, "t-sel-s1", "member-1", "member")
+        _auth(tc, "t-sel-s1", key_id=None, session_user_id="member-1")
+        r = tc.get("/v1/graphs/default/packs?org_id=t-sel-s1")
+        assert r.status_code == 200, r.text
+        assert r.json()["graph_id"] == "default"
+
+    def test_session_non_member_read_is_403(self, sel_client):
+        tc, db_path = sel_client
+        _seed_org(db_path, "t-sel-s2")
+        _auth(tc, "t-sel-s2", key_id=None, session_user_id="outsider")
+        r = tc.get("/v1/graphs/default/packs?org_id=t-sel-s2")
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == "No membership in team"
+
+    def test_session_owner_may_mutate(self, sel_client):
+        tc, db_path = sel_client
+        _seed_org(db_path, "t-sel-s3")
+        _seed_member(db_path, "t-sel-s3", "owner-1", "owner")
+        _auth(tc, "t-sel-s3", key_id=None, session_user_id="owner-1")
+        r = tc.put("/v1/graphs/default/packs?org_id=t-sel-s3", json={
+            "packs": [{"namespace": DEV}], "expected_revision": 0})
+        assert r.status_code == 200, r.text
+        assert r.json()["revision"] == 1
+
+    def test_session_plain_member_cannot_mutate(self, sel_client):
+        tc, db_path = sel_client
+        _seed_org(db_path, "t-sel-s4")
+        _seed_member(db_path, "t-sel-s4", "member-2", "member")
+        _auth(tc, "t-sel-s4", key_id=None, session_user_id="member-2")
+        r = tc.put("/v1/graphs/default/packs?org_id=t-sel-s4", json={
+            "packs": [{"namespace": DEV}], "expected_revision": 0})
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == "Requires owner or admin role in team"
 
 
 def test_ps_public_helpers_are_importable():

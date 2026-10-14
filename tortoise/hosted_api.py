@@ -18235,6 +18235,20 @@ class GraphPacksPut(BaseModel):
     expected_revision: int
 
 
+def _registry_graph_list(org_id: str) -> list[dict]:
+    """Registry-lane ``graph_list`` in ONE worker hop — SDK construction
+    included (#8648 review P1).
+
+    ``_make_sdk`` is NOT free: in embedded mode it runs the keepalive anchor's
+    probe query and, on a miss, an eager connect that holds the socket
+    (#4660). Building the SDK on the loop and off-loading only the callee
+    (``to_thread(sdk.graph_list, …)``) left that blocking I/O on the event
+    loop — the exact defect ``tests/test_read_routes_loop_responsiveness.py``
+    pins.
+    """
+    return _make_sdk(namespace="registry").graph_list(org_id)
+
+
 async def _resolve_graph_data_namespace(org_id: str, graph_id: str) -> str | None:
     """#2728 — ``graph_id`` → the graph's PHYSICAL FalkorDB name, both modes.
 
@@ -18244,9 +18258,8 @@ async def _resolve_graph_data_namespace(org_id: str, graph_id: str) -> str | Non
     derived default row's id IS the literal — reading the ``graph_list`` seam
     makes both lanes agree without a second resolution path.
     """
-    sdk = _make_sdk(namespace="registry")
     try:
-        rows = await asyncio.to_thread(sdk.graph_list, org_id)
+        rows = await asyncio.to_thread(_registry_graph_list, org_id)
     except Exception as _exc:
         _raise_503_if_cp_outage(_exc)
         raise
@@ -18283,6 +18296,19 @@ def _graph_packs_view(gsdk) -> tuple[dict, list[dict]]:
     """Read the per-graph state in ONE thread hop (blocking DB reads)."""
     from tortoise.pack_state import get_tenant_packs, resolved_pack_set
     return resolved_pack_set(gsdk).to_dict(), get_tenant_packs(gsdk)
+
+
+def _graph_packs_view_for(namespace: str) -> tuple[dict, list[dict]]:
+    """Read a graph's pack state in ONE worker hop — SDK construction
+    included (#8648 review P1).
+
+    Off-loading only the CALLEE (``to_thread(_graph_packs_view,
+    _make_sdk(graph_name=namespace))``) still evaluates ``_make_sdk`` on the
+    event loop, where its embedded-mode anchor probe / eager connect blocks
+    every other request (the app runs one uvicorn worker). The construction
+    belongs INSIDE the off-loaded callable.
+    """
+    return _graph_packs_view(_make_sdk(graph_name=namespace))
 
 
 def _packs_payload(graph_id: str, resolved: dict, packs: list[dict]) -> dict:
@@ -18333,7 +18359,7 @@ async def _graph_packs_read(graph_id: str, org_id: str, key_ctx: dict) -> dict:
                                    "graph's packs."})
     try:
         resolved, packs = await asyncio.to_thread(
-            _graph_packs_view, _make_sdk(graph_name=namespace))
+            _graph_packs_view_for, namespace)
     except Exception:
         _logger.exception("pack read failed for team %s graph %s",
                           org_id, graph_id)
