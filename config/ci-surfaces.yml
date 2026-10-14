@@ -619,6 +619,14 @@ surfaces:
   # no named pattern and falls to the `core` fallback. One-surface registration
   # would skip the suite on the other half of the diff.
   - test_mcp_result_count_telemetry.py
+  # #8482: a wrap-envelope tool (`-> list[dict]`) must not ship a structured
+  # payload its own advertised schema forbids — `_safe`'s error dict and the
+  # wait-bound refusal both landed under `result` and the client refused the
+  # WHOLE call with -32602, destroying the SDK's message. Registered on `api`
+  # like the rest of the mcp_server family (`tortoise/mcp_server.py` is a
+  # SHARED_MODULE, so its own changes already select the full matrix); this
+  # entry is what makes the guard RUN when the seam it pins moves.
+  - test_mcp_wrap_envelope_error_8482.py
   - test_metering.py
   - test_oauth_consent_pkce.py  # #3496: EXECUTES the MCP consent page's inline auth client (rendered by consent_page_html) under Node `vm` against the vendored supabase bundle — grant type actually used, PKCE verifier store routing, single-origin completion, refusal UX. Registered on `api` because the file it guards most (tortoise/oauth.py) selects that surface.
   - test_oauth_consent_bridge.py  # #3524: the consent identity bridge's spec guards — RFC 8414 `authorization_endpoint` stability (task 2), the four session-flow properties' confirmed anchors (task 3), the redirect-allowlist record covering the consent page's off-origin sign-in fallback (task 5). DUAL-REGISTERED with `onboarding` (see the entry there): `tortoise/oauth.py` + `tortoise/hosted_api.py` select `api`, but the task-3 half reads `website/apps/dashboard/functions/_shared/auth/token.ts`, and `website/apps/dashboard/functions/` is an `onboarding` SOURCE_PATTERN that does NOT select `api` (a named-surface match replaces the `core` fallback) — so an `api`-only registration leaves the token.ts guard asleep exactly when token.ts moves. It also reads `docs/` records, which the `onboarding` arm selects via the SOURCE_PATTERNS entries added with this fix.

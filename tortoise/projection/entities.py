@@ -3687,6 +3687,11 @@ class _EntityHandlers:
         `objectKind` are RETIRED and are never written (nor re-admissible via
         the open passthrough).
 
+        #5082: ``sourceKind`` is written ``'document'`` on CREATE ONLY
+        (``coalesce``), completing §4.6's REQUIRED field set for this node and
+        agreeing with the sibling ``_mint_source_stub`` default. It is the
+        TYPE axis; ``documentKind`` stays the GENRE axis (§4.4).
+
         #5422: ``contentHash`` is the node's **version anchor** on the
         extraction path (ONTOLOGY §4.6 — the hash identifies a version;
         identity is ``url``). It is written by the fixed clause above, gated
@@ -3763,6 +3768,23 @@ class _EntityHandlers:
             "MERGE (s:Source {url:$id}) " + clear_then_set_prefix("s") +
             "SET s.id=coalesce(s.id, $id), "
             "    s.title=coalesce($title, s.title), "
+            # #5082 (ONTOLOGY §4.6 + #5013 Q2): a document IS a `:Source`, and
+            # §4.6 marks `sourceKind` REQUIRED (✅) on every `:Source` — it is
+            # the TYPE axis, distinct from `documentKind`'s genre axis (§4.4:
+            # "`documentKind` is not `sourceKind` … neither absorbs the
+            # other"). This writer wrote none, so a document node carried
+            # `sourceKind = NULL` — a declared-but-unwritten REQUIRED field —
+            # while the sibling mint path `_mint_source_stub`
+            # (`projection/edges.py`) already defaults any non-`session:` url
+            # to exactly `'document'`: two writers of one node, disagreeing on
+            # a REQUIRED field. `'document'` is the registered §5 vocabulary
+            # term and `SOURCE_KIND_DEFAULTS` registers it NEUTRAL, so no
+            # credibility inheritance moves (#398).
+            # SET-ON-CREATE-ONLY via `coalesce`: #398's never-overwrite
+            # contract — a node that already carries an authoritative
+            # `sourceKind` (a stub, a connector Source, a session Source)
+            # keeps it, and a partial re-write cannot change it.
+            "    s.sourceKind=coalesce(s.sourceKind, 'document'), "
             # #5422: the document :Source's version anchor (ONTOLOGY §4.6 —
             # the hash names a version, identity is `url`). Gated so a write
             # that CARRIES no hash ($ch IS NULL) or an EMPTY one ($ch = '' —
@@ -4023,10 +4045,24 @@ class _EntityHandlers:
             from tortoise.security import validate_document_id
             validate_document_id(str(obj))
             # D10 (ONTOLOGY §4.4): a document is a :Source keyed by url.
+            # #5082 (second writer): the SAME document `:Source` shape the
+            # `DocumentCreated` fold writes — §4.6 marks `sourceKind` REQUIRED
+            # on every `:Source`, and #5013 Q2 keeps the TYPE axis here while
+            # the genre rides `documentKind` (the two are different questions,
+            # §4.4). Written on BOTH arms: create stamps 'document', match
+            # FILLS a NULL — which is exactly the effect of
+            # `_upsert_document`/`_execute_commit_writes`' plain-`SET` +
+            # `coalesce` (#398's never-overwrite contract). An authoritative
+            # kind (a `_mint_source_stub` stub, a connector/session Source) is
+            # kept, and a document node minted by THIS writer before the fix
+            # (or replayed from an old journal line) is repaired by the next
+            # fold instead of staying NULL forever.
             self.g.query(
                 "MERGE (s:Source {url:$id}) "
                 "ON CREATE SET s.id=$id, s.title=$id, "
-                "              s.documentKind='transcript'",
+                "              s.sourceKind=coalesce(s.sourceKind, 'document'), "
+                "              s.documentKind='transcript' "
+                "ON MATCH SET s.sourceKind=coalesce(s.sourceKind, 'document')",
                 params={"id": obj},
             )
             self.g.query(

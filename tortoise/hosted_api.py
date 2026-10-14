@@ -14071,10 +14071,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # NOTE (documented lane divergence): hosted computes _capture_ok AFTER
         # the post-write enrichment — an enrichment-read failure marks points
         # skipped → verb partial → capture_ok False → retryable. The sdk
-        # computes ok BEFORE its surfaced-verification read and treats a
-        # verification failure as a benign warning (capture_ok True). Both
-        # are internally consistent; the divergence is documented, not
-        # forced-aligned (the sdk surface has no skipped/verb concept).
+        # computes ok BEFORE its enrichment read and treats a
+        # verification failure as a benign warning (capture_ok True), while
+        # its verb status — derived from the SAME facts — is still partial.
+        # Both are internally consistent; the divergence is documented, not
+        # forced-aligned (it is now only the RECORDED retry bit, not the
+        # verb: the sdk mirror speaks memory_write_v1 too, with the same
+        # per-point enrichment).
         # Non-fatal bookkeeping (mirror of the sdk guard): a graph hiccup
         # must NOT 500 a committed capture — and on a FAILED capture a raise
         # would leave capture_ok=None → the next same-session re-POST would
@@ -14765,9 +14768,16 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # :Source) — deterministic id, replay-safe MERGE. NO content on the
     # derived path (§4.1: summary/story_arc/sessionId only); doc_status is
     # retired (§9.5 Q3). ──
+    # #5082 (third writer): `sourceKind='document'` is the document's TYPE
+    # axis beside the `documentKind='transcript'` GENRE axis (ONTOLOGY §4.6
+    # marks `sourceKind` REQUIRED on every `:Source`; #5013 Q2 keeps both).
+    # `coalesce` is CREATE-ONLY (#398's never-overwrite contract): a node an
+    # authoritative writer already stamped — e.g. a `_mint_source_stub` stub
+    # for a non-`session:` doc url — keeps its kind.
     proj.g.query(
         "MERGE (s:Source {url:$did}) "
         "SET s.id=coalesce(s.id, $did), "
+        "    s.sourceKind=coalesce(s.sourceKind, 'document'), "
         "    s.documentKind='transcript', s.title=$title, s.summary=$summary, "
         "    s.story_arc=$arc, s.sessionId=$sid, s.eventId=$eid, "
         "    s.sourcePath=$srcpath, s.is_episodic=true, "

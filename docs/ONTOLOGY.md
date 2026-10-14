@@ -71,10 +71,13 @@ doc_status: live
 >   posted on #5013** and carried at §4.4.
 > - **§4.6: the document `:Source` scoping is now stated at the row a reader trusts.**
 >   §4.6 marks `sourceKind`/`contentHash`/`version` REQUIRED ✅, but a document `:Source`
->   is written by a different path (`_upsert_document`) and supplies a different set. Two
->   of the three are written (**`contentHash` + `version`**, PR #5592 / `700960943`) and
->   **`sourceKind` is the one still missing** — a work item (**#5082**), named at §4.6
->   rather than left as a quiet absence under the global "code may lag" caveat.
+>   is written by different paths (`_upsert_document` for the `DocumentCreated` fold, plus
+>   the `objectType='Document'` event branch and the hosted `/v1/sessions` transcript MERGE)
+>   and supplies them conditionally.
+>   `contentHash` + `version` are written on the path that READS content (PR #5592 /
+>   `700960943`), and **`sourceKind='document'` since #5082** (all three writers, CREATE-only,
+>   #398) — so the note records which field is conditional on the read path instead of
+>   leaving the absence quiet under the global "code may lag" caveat.
 >
 > **Changelog v3.23 (2026-10-10 — issues #7813 + #7853 — confidence propagates across all four epistemic labels):**
 >
@@ -502,8 +505,10 @@ doc_status: live
 >   `tortoise_taxonomy`/`tortoise_ingest_corpus`/`tortoise_get` are retired names
 >   served only by the warning shim) and re-cut the `config/surface-manifest.yml`
 >   baseline — no tool was added, removed or renamed. **The D10 code half's own
->   residuals are named and open:** `#5082` (the document `:Source` carries no
->   `sourceKind`, while §4.6 marks it REQUIRED — scoped at §4.6), and `#5140` (the ten
+>   residuals are named and open:** **`#5082` closed** — the document `:Source` now
+>   writes `sourceKind='document'` (CREATE-only, #398), the field §4.6 marks REQUIRED;
+>   the remaining caveat is the read-path-conditional `contentHash`, recorded at §4.6;
+>   and `#5140` (the ten
 >   residuals outside the declared B1–B6 threat surface, including three reproduced
 >   P1s). **Landed:** `#5126` — `graph-scripts/backfill_embeddings.py` now targets
 >   `:Source` (PR `#8420`).
@@ -1245,15 +1250,27 @@ model**, never as an invitation to merge the two nodes. The reasoning is pinned 
 | `reliabilityComponents` | JSON | — | — | ⚠️ | Cache metadata: tier, decay, factor, assessment_count, derivation time (#398) |
 | `reliability_derived_at` | ISO8601 | — | — | ⚠️ | Cache freshness stamp (#398) |
 
-> **⚠️ Document `:Source` scoping — which §4.6 REQUIRED fields a document actually supplies (`#5082`, recorded `#5142`).** §4.4 says a document is a `:Source`, but a document `:Source` is written by a **different path** (`tortoise/projection/entities.py::_upsert_document`, the `DocumentCreated` fold) from the provenance `:Source` (`_upsert_source`/`create_source`), and it does **not** supply the same REQUIRED set. Measured on `main`:
+> **⚠️ Document `:Source` scoping — which §4.6 REQUIRED fields a document actually supplies (`#5082`; recorded `#5142`, closed here).** §4.4 says a document is a `:Source`, but a document `:Source` is written by **different paths** from the provenance `:Source` (`_upsert_source`/`create_source`): the `DocumentCreated` fold (`entities.py::_upsert_document`), the `objectType='Document'` event branch (`entities.py::_event_plain_merge`), and the hosted `/v1/sessions` transcript MERGE (`hosted_api.py::_execute_commit_writes`) — **all three** are named at the row below. The `sourceKind` gap this note recorded is **closed**; `contentHash` stays **conditional on the read path**:
 >
 > | REQUIRED field | on a document `:Source` |
 > |---|---|
-> | `sourceKind` | ❌ **not written.** `_upsert_document` sets none, so a document node carries `sourceKind = NULL`; its genre rides `documentKind`, which is a **different axis** (§4.4). **Open: #5082** — the ruling is between scoping §4.6 to provenance Sources and adding the write; until it lands, the three index `_required_sweep` harnesses and `list_sources()` are scoped to provenance Sources for exactly this reason |
-> | `contentHash` | ✅ **written since PR #5592** (`#5422`, `700960943`) — through a preserve/replace gate: an absent or empty (`''`) hash preserves the stored one, an empty stored hash is completed, and a differing hash **replaces it on the SAME node** (never a second `:Source`) |
+> | `sourceKind` | ✅ **written since #5082 by every writer that creates a document `:Source`** — each stamps `'document'` **CREATE-ONLY** (`coalesce` writes only when the value is absent — #398's never-overwrite contract; the event branch also **fills a pre-#5082 NULL** on its match arm): the `DocumentCreated` fold (`entities.py::_upsert_document`), the `objectType='Document'` event branch (`entities.py::_event_plain_merge`), and the hosted `/v1/sessions` transcript MERGE (`hosted_api.py::_execute_commit_writes`). A document node therefore carries the **TYPE** axis beside its `documentKind` **GENRE** axis (§4.4 — different questions, neither absorbs the other). The value is the registered §5 term and is **NEUTRAL** in `SOURCE_KIND_DEFAULTS`, so no credibility inheritance moves (#398); it agrees with `_mint_source_stub`'s own non-`session:` default (`projection/edges.py`). `list_sources()` still filters on `documentKind` — a document node is not a *provenance* source |
+> | `contentHash` | ⚠️ **written on the path that READS content.** Since PR #5592 (`#5422`, `700960943`) the extraction-ingest path writes it through a preserve/replace gate: an absent or empty (`''`) hash preserves the stored one, an empty stored hash is completed, and a differing hash **replaces it on the SAME node** (never a second `:Source`). The `#900` index path (`_doc_write`) and `--capture-metadata` deliberately emit none (no content read — the latter skips extraction by design), so a document node can sit with `contentHash = NULL` until extraction; the `_required_sweep` harnesses scope the `contentHash` clause to provenance Sources for exactly this reason |
 > | `version` | ✅ **written by the same clause**, advancing with the hash exactly as §4.6 specifies ("1 at creation, +1 on each content-hash change"), so the pair §4.6 calls a version anchor can no longer be half-written |
 >
-> So **`sourceKind` is the one field that is a declared-but-unwritten gap** — a **work item (#5082)**, not a licence to read §4.4 as *"a document is a `:Source` that carries no `sourceKind`"*, and not a licence to close it by collapsing the two nodes (§4.4's `OVERRIDES`).
+> The recorded ruling is **#5013 Q2** (*"KEEP BOTH AXES. A source is `sourceKind: document` **and** carries a genre"*) plus §4.6's REQUIRED marking — the `#5082` write implements it; it is **not** a licence to read §4.4 as *"a document is a `:Source` that carries no `sourceKind`"*, and **not** a licence to close it by collapsing the two nodes (§4.4's `OVERRIDES`).
+>
+> **What the write does and does not move downstream (`#8525` review).** It does **not** move credibility: a
+> document node resolves **no tier** (`SOURCE_KIND_DEFAULTS['document'] is None`), so it contributes no group
+> to `_apply_source_inheritance`'s aggregate; and the #398 word-point un-freeze requires a **resolved
+> evidence body** (a tiered source, or an ORIGINATING `agentSession` whose weak body is the evidence), so a
+> word Point whose only source is a neutral document keeps its authored `set-by-author` baseline instead of
+> being re-labelled `inherited-from-source` with nothing inherited — the false provenance report
+> (`calibrate_summary` → "inherited from its source's trust rating" for a source with no rating) that the
+> un-guarded write produced on the primary path. It **does** change candidate generation, and that is
+> intended under **D3** ("registered kinds of any tier count"): `_cross_lens_pool` gates on
+> `s.sourceKind IN $registered`, and §5 registers `'document'`, so Points extracted from a document are now
+> eligible for the cross-lens candidate pool.
 
 **Versioning.** Identity is `url`; `contentHash` identifies a **version** of that identity. A re-fetched source whose content differs is a **new version, never an edit** — so **identity is stable and version is per-read**, and the two are never conflated.
 

@@ -206,13 +206,21 @@ ERR_SUSPENDED = -32006
 # #3834: the transport-level wait bound was breached — the server stopped
 # waiting before a response was ready. On the REST surface this is the code in
 # the JSON-RPC 504 body returned by ``hosted_api.WaitBoundMiddleware``. On the
-# MCP surface it is the code in the refused tool result's
-# ``structuredContent.error`` (``mcp_server._await_under_mcp_wait_bound``): the
-# MCP SDK converts tool-handler exceptions to ``CallToolResult(isError=True)``
+# MCP surface it is the code in the refused tool result
+# (``mcp_server._await_under_mcp_wait_bound``): the MCP SDK converts
+# tool-handler exceptions to ``CallToolResult(isError=True)``
 # (``mcp/server/lowlevel/server.py::_make_error_result``), so once the SSE
 # stream is open a raised ``McpError`` loses its code and ``data`` — the result
-# is the only channel that can still carry the retry signal. Either way the
-# advertised delay is ``error.data.retry_after`` (#3851's shape).
+# is the channel that can still carry the retry signal.
+#
+# WHICH field inside that result carries it depends on the tool's envelope
+# (#8482). For a tool with no wrap envelope it is ``structuredContent.error``.
+# For the 13 wrap-envelope tools (``x-fastmcp-wrap-result``) the payload is
+# re-homed on the result's ``_meta.tortoise_error`` instead — the same
+# ``{code, message, data}`` mapping — because the repair that moves a
+# schema-violating payload off ``structuredContent`` is exactly what drops it
+# (``mcp_server._schema_error_result``). Either way the advertised delay is
+# ``error.data.retry_after`` (#3851's shape).
 #
 # -32009, NOT -32007: the ERR_* namespace is split across this module and
 # ``mcp_server.py``, and -32007 is already ``ERR_QUOTA_SERVER`` there (see the

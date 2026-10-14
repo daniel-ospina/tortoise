@@ -322,7 +322,7 @@ class TestDeriveReliability:
 
 import tempfile  # noqa: E402
 
-from tortoise.sdk import TortoiseSDK  # noqa: E402
+from tortoise.sdk import BASELINE_SOURCE_DISPLAY, TortoiseSDK  # noqa: E402
 
 
 @pytest.fixture
@@ -915,6 +915,64 @@ class TestAuthorAsSourceIntegration:
         pt = sdk.get_point(p["id"])
         assert pt["ep_alpha"] == pytest.approx(5.1)
         assert pt["baseline_source"] == "inherited-from-source"
+
+    @pytest.mark.parametrize("ordering", ["source-first", "stub-first",
+                                          "document-fold"])
+    def test_neutral_source_never_invents_an_inheritance(self, sdk, ordering):
+        """#5082 review P1 — a word Point over a SOLE neutral source keeps its
+        authored baseline (`set-by-author`): the source resolves no tier, so
+        the aggregate carries only the author's own weak body and nothing is
+        inherited.
+
+        Measured on the #5082 head before the guard: the token flipped
+        `set-by-author` -> `inherited-from-source` (the number did not move,
+        1.1 -> 1.1), `inherited_at` was stamped — un-freezing the authored
+        baseline forever — and `calibrate_summary` reported "inherited from its
+        source's trust rating" for a source that carries NO rating, a
+        user-facing false provenance report.
+
+        Three orderings reach the same node shape and the same flip, so all
+        three are pinned: `create_source(..., 'document')` first; a stub minted
+        by `create_point(extractedFrom=…)` (the latent over-reach on `main`,
+        which #5082 did not introduce); and the `DocumentCreated` fold
+        `_upsert_document` (the path #5082 newly exposed).
+        """
+        proj = sdk._get_proj()
+        if ordering == "source-first":
+            ref = "https://neutral-doc.example"
+            sdk.create_source(ref, "document")
+        elif ordering == "stub-first":
+            ref = "https://neutral-stub.example"
+        else:
+            ref = sdk.create_document("Neutral doc", "brief")["id"]
+
+        p = sdk.create_point("statement", "word over a neutral source",
+                             status="live", credibility="T3",
+                             extractedFrom=ref)["id"]
+        before = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.baseline_source, n.ep_alpha",
+            params={"id": p}).result_set[0]
+        assert before[0] == "set-by-author", before
+        assert before[1] == pytest.approx(1.1), before
+
+        # The source is NEUTRAL on the tier axis in every ordering — that is
+        # what makes the rewrite an invention rather than a derivation.
+        src = proj.g.query(
+            "MATCH (s:Source {url:$u}) RETURN s.sourceKind, s.credibilityTier",
+            params={"u": ref}).result_set
+        assert src and src[0][0] == "document" and src[0][1] is None, src
+
+        sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+
+        row = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.baseline_source, n.ep_alpha, "
+            "n.inherited_at", params={"id": p}).result_set[0]
+        assert row[0] == "set-by-author", row
+        assert row[1] == pytest.approx(1.1), row
+        assert row[2] is None, row  # not marked as a derived baseline
+        summary = next(i for i in sdk.calibrate_summary() if i["id"] == p)
+        assert summary["provenance"] == \
+            BASELINE_SOURCE_DISPLAY["set-by-author"], summary
 
     def test_agent_word_is_weak_not_the_declared_tier(self, sdk):
         """An agent-authored gold claim: the agentSession IS the evidence body

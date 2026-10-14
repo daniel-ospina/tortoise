@@ -406,20 +406,28 @@ class TestFourNodeChain:
         assert rows[0][2] is True
 
         # Document transcript — D10: a :Source keyed url=doc_<hash>
-        # (summary/story_arc/sessionId/sourcePath; NO content/doc_status)
+        # (summary/story_arc/sessionId/sourcePath; NO content/doc_status).
+        # #5082: the document's TYPE axis (`sourceKind='document'`) sits beside
+        # the `documentKind` genre — pre-fix this writer left it NULL while
+        # §4.6 marks it REQUIRED on every `:Source`.
         rows = g.query(
             "MATCH (s:Source) WHERE s.sessionId='s1' "
             "AND s.documentKind IS NOT NULL "
             "RETURN s.documentKind, s.summary, s.story_arc, s.sourcePath, "
-            "s.is_episodic",
+            "s.is_episodic, s.sourceKind",
         ).result_set
         assert rows, "Document Source missing"
-        kind, summary, arc, srcpath, episodic = rows[0]
+        kind, summary, arc, srcpath, episodic, skind = rows[0]
         assert kind == "transcript"
         assert summary == "summary text"
         assert arc == "arc text"
         assert srcpath == "session.md"  # basename only (privacy)
         assert episodic is True
+        assert skind == "document", (
+            "the /v1/sessions transcript :Source must carry "
+            "sourceKind='document' (#5082) — a document is a :Source (§4.4) "
+            "and §4.6 marks sourceKind REQUIRED on every :Source"
+        )
 
         # (Event)-[:produces]->(document Source)
         n = g.query(
