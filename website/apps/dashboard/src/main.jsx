@@ -534,6 +534,7 @@ function SettingsTab(props) {
     selectedSessionId, onViewSession, onClearSessionDetail,
     sessionDetail, detailLoading, sessionDetailError,
     onDeleteSession, deletingSessionId, sessionsActionError,
+    onClearSessionsActionError,
   } = props
   const reposNote = githubConnected
     ? (github.repos != null ? `${github.repos} repos available`
@@ -549,9 +550,15 @@ function SettingsTab(props) {
   // modal — the same gate the product uses to delete a whole graph (#2701) —
   // not a native window.confirm. State is per-row and validated against the
   // live `sessions` list: a successful DELETE removes the row and closes the
-  // dialog, a failed one leaves it armed (the reason renders under the list).
+  // dialog, a failed one leaves it armed with its reason rendered inside it.
   const [confirmSessionId, setConfirmSessionId] = React.useState(null)
   const [sessionConfirmTyped, setSessionConfirmTyped] = React.useState('')
+  // #3885 (e) review P3-2b: "the dialog is armed" is NOT "confirmSessionId is
+  // set" — the modal returns null the moment its session leaves the live list,
+  // while `confirmSessionId` stays truthy. Gate the page-level copy on the
+  // dialog that ACTUALLY renders, so a delete reason can never be suppressed
+  // with no surface left to show it (exactly one visible surface, always).
+  const sessionDeleteArmed = !!confirmSessionId && sessions.some((x) => String(x.id) === confirmSessionId)
   return (
     <section className="settings" aria-label="Settings">
       <h2>Settings</h2>
@@ -752,6 +759,10 @@ function SettingsTab(props) {
                         onClick={() => {
                           // #3885 (e): arm the type-to-confirm modal — the
                           // deletion itself only runs from the gated dialog.
+                          // Review P3-2c: clear the previous delete's reason
+                          // FIRST — otherwise session A's failure would appear
+                          // inside the dialog armed for session B.
+                          onClearSessionsActionError()
                           setConfirmSessionId(sid)
                           setSessionConfirmTyped('')
                         }}>
@@ -768,8 +779,10 @@ function SettingsTab(props) {
                 #3885 (e) review P3-2: while the delete dialog is armed the same
                 reason renders INSIDE it (the backdrop paints over this line),
                 so this copy is suppressed then — one announcement, always on
-                the visible surface. */}
-            {sessionsActionError && !confirmSessionId && (
+                the visible surface. The condition is `!sessionDeleteArmed`,
+                not `!confirmSessionId`: the dialog can be closed by its session
+                leaving the list while `confirmSessionId` stays set. */}
+            {sessionsActionError && !sessionDeleteArmed && (
               <p className="error" role="alert" style={{ marginTop: '0.5rem' }}>{sessionsActionError}</p>
             )}
             {openSessionId && (
@@ -10213,6 +10226,7 @@ function claimIntentInFlight() {
             onDeleteSession={deleteCapturedSession}
             deletingSessionId={sessionDeletingId}
             sessionsActionError={sessionsActionError}
+            onClearSessionsActionError={() => setSessionsActionError(null)}
             memorySourcesProps={memorySourcesProps}
           />
         )}

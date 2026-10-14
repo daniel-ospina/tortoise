@@ -173,6 +173,10 @@ test('kindBadgeClass maps extracted kinds to badge classes', () => {
 // required word is a literal the modal and the tripwire both read. A bare
 // window.confirm ("a single click is not enough") is no longer the flow.
 test('DELETE_CONFIRM_WORD is the literal the destructive gate requires', () => {
+  // The constant itself is still pinned: the dialog's own copy says "Type
+  // delete to confirm", so it must never be emptied or renamed silently (a
+  // gate that accepts any word would have kept the suite green — review P3-3).
+  assert.equal(DELETE_CONFIRM_WORD, 'delete')
   // Executed, not self-compared: the word the dialog RENDERS is fed through the
   // gate the modal calls, so a change to the constant cannot leave the dialog
   // instructing one word while the gate demands another.
@@ -186,6 +190,11 @@ test('DELETE_CONFIRM_WORD is the literal the destructive gate requires', () => {
     'the gate must accept the word it is given, not a hardcoded default')
   assert.equal(deleteTypedMatches('delete', 'erase'), false,
     'the gate must not fall back to the graph modal default when given a word')
+  // …and a falsy word matches NOTHING rather than silently re-adopting 'delete'.
+  assert.equal(deleteTypedMatches('delete', ''), false,
+    'an empty required word must match nothing — no silent fallback to the default')
+  assert.equal(deleteTypedMatches('', ''), false,
+    'an empty required word can never be satisfied')
 })
 
 test('DELETE_CONSEQUENCES states the real consequences, including the backup residual', () => {

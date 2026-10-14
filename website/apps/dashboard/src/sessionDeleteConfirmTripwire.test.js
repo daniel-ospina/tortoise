@@ -60,6 +60,8 @@ test('#3885(e): the raw delete is armed by a type-to-confirm modal, never window
     'the row Delete must arm the confirmation modal (setConfirmSessionId) — not delete directly')
   assert.match(rowBlock, /setSessionConfirmTyped\(''\)/,
     'arming the modal must clear any previously typed confirmation word')
+  assert.match(rowBlock, /onClearSessionsActionError\(\)/,
+    'arming the modal must clear a PREVIOUS session\'s failure reason (review P3-2c) — otherwise it renders inside the newly armed dialog')
   // … and the old single-click flow is gone.
   assert.doesNotMatch(rowBlock, /window\.confirm/,
     'the raw delete must NOT use window.confirm — a single native confirm is the flow #3885 (e) rules out')
@@ -123,7 +125,13 @@ test('#3885(e): a failed delete renders its reason INSIDE the armed dialog (revi
   assert.match(sessionModal, /role="alert"[^>]*>\{sessionsActionError\}/,
     'the in-dialog reason must be announced (role=alert), not only painted')
   // …and the page-level copy must not double-announce the same reason while
-  // armed: exactly one visible, announced surface per failure.
-  assert.match(mainJsx, /\{sessionsActionError && !confirmSessionId && \(/,
-    'the page-level banner must yield to the in-dialog copy while the dialog is armed')
+  // armed: exactly one visible, announced surface per failure. The gate is the
+  // DERIVED `sessionDeleteArmed`, not `confirmSessionId` — the modal returns
+  // null once its session leaves the live list while `confirmSessionId` stays
+  // set, and a `!confirmSessionId` gate would then suppress the reason with no
+  // surface left to show it (review P3-2b).
+  assert.match(mainJsx, /const sessionDeleteArmed = !!confirmSessionId && sessions\.some\(\(x\) => String\(x\.id\) === confirmSessionId\)/,
+    'the page-copy gate must derive from the dialog that actually renders, not from confirmSessionId alone')
+  assert.match(mainJsx, /\{sessionsActionError && !sessionDeleteArmed && \(/,
+    'the page-level banner must yield to the in-dialog copy while the dialog is really armed')
 })

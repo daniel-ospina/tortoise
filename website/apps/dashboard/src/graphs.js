@@ -313,7 +313,11 @@ export function trashEraseLabel(deletedAt, nowIso) {
 // and a drift silently makes the destructive path unreachable: the dialog
 // tells the user to type one word while the gate demands another.
 export function deleteTypedMatches(typed, word = 'delete') {
-  return (typed || '').trim().toLowerCase() === (word || 'delete').trim().toLowerCase()
+  // A word must be PROVIDED and non-empty: silently falling back to the graph
+  // modal's literal would let an emptied constant keep passing here while the
+  // dialog renders no instruction at all (review P3-3).
+  if (!word) return false
+  return (typed || '').trim().toLowerCase() === String(word).trim().toLowerCase()
 }
 
 // #2307 (post-#2083 C7 review): role-aware [Keys] panel empty copy ─────────
