@@ -13038,10 +13038,13 @@ class TortoiseSDK:
         (that composition is ``live.is_terminal_status``). The builder emits the
         expanded OR-chain under a NULL guard —
         ``((n.status IS NOT NULL AND (n.status = '…' OR …)) OR
-        coalesce(n.outdated,false) = true)`` — i.e. the POSITIVE direction of
-        the vocabulary ``_terminal_excluded`` filters on. It assumes
-        ``outdated`` is a boolean; every in-repo writer emits the literal
-        ``true`` (see #7075 for the hand-edited/legacy-graph case). Before #3142 this site carried its own
+        coalesce(n.outdated,false) <> false)`` — i.e. the POSITIVE direction of
+        the vocabulary ``_terminal_excluded`` filters on, and its exact De
+        Morgan dual (#7075: the flag half negates ``= false`` rather than
+        testing ``= true``, so this builder and the keep-filter cannot
+        disagree on a non-boolean ``outdated``). ``outdated`` is
+        contractually a boolean; every in-repo writer emits the literal
+        ``true`` and the journal fold enforces the type. Before #3142 this site carried its own
         forked ``status IN $terminal AND coalesce(outdated,false) = false``,
         which is the AND of the two halves and so matched NEITHER: a point
         superseded through ``supersede_point`` (which stamps BOTH
