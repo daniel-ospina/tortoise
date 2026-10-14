@@ -78,7 +78,7 @@ An arm listed here is a NO-OP against the baseline: its applied fetch depth equa
 
 | arm | why retracted |
 | --- | --- |
-| pool-only-isolation | #2992: byte-identical to A-default on the committed receipts (pool_depth.requested 120 on both arms, identical gold_admitted vector, context_tokens mean 94.9) — the baseline already fetches 120 since #1947, so 'widening the pool WITHOUT reranking changes nothing' carries no evidence. The depth lever is UNTESTED on this slice, not null. |
+| pool-only-isolation | #2992: no-op against A-default on THIS run's own data (applied fetch depth 120 on both arms, context_tokens mean 94.9 vs 94.9) — the #1947 baseline already fetches the same depth, so 'widening the pool WITHOUT reranking changes nothing' carries no evidence. The depth lever is UNTESTED on this slice, not null — a valid control needs a shallow baseline (TORTOISE_LME_POOL_SIZE below the arm) or an arm deeper than the baseline (e.g. 240). |
 
 > **Refusal-classifier disagreement (3 of 5 conversion-wrong outcomes)**: these answers state the information is absent in wording the shared product classifier does not match (see `refusal_classifier_hint`). They are NOT re-labelled — the 2×2 deliberately uses the same classifier the product uses — so the reader-wrong split above is an UPPER BOUND and the true refusal-driven share is higher. Fixing the production classifier vocabulary is a separate follow-up.
 

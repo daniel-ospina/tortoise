@@ -158,7 +158,10 @@ def test_pool_only_isolation_arm_is_vacuous_on_this_baseline():
     """The #2578 'depth isolation' arm did NOT widen anything — RETRACTED.
 
     Since #1947 the baseline already fetches ``DEFAULT_POOL_SIZE`` = 120, so
-    ``--rerank-pool 120 --rerank OFF`` is byte-identical to the baseline: its
+    ``--rerank-pool 120 --rerank OFF`` resolves to the same fetch depth as the
+    baseline (the arms are separate runs — per-row ``answer`` text, the deduped
+    ``pool_depth.pool_size`` and one ``reader_refusal`` differ — but they share
+    the applied depth, which is what makes the arm a no-op): its
     'widening the pool WITHOUT reranking changes nothing' conclusion carries
     no evidence (see #2992 defect 2, retracted in
     ``docs/runbook/2578-temporal-measurement.md`` and in the generated gate

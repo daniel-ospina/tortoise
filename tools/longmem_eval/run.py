@@ -6122,7 +6122,8 @@ def _build_parser() -> argparse.ArgumentParser:
                         "default 40; honored with rerank OFF too — the "
                         "pool-only isolation arm, OQ5; >= 1; with rerank ON "
                         "the applied pool is max(pool, baseline, max(k)) "
-                        "with baseline = max(TORTOISE_LME_POOL_SIZE, 120) — "
+                        "with baseline = TORTOISE_LME_POOL_SIZE when set "
+                        "(default 120), itself floored at max(k) — "
                         "the knob can only RAISE the depth; the rerank-OFF "
                         "pool-only arm is max(pool, max(k)))")
     p.add_argument("--rerank-cap", type=_positive_int, default=None,

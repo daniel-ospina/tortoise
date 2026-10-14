@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tools.longmem_eval import rerank  # noqa: E402, RUF100
 from tools.longmem_eval.ingest import ingest_haystack  # noqa: E402, RUF100
 from tools.longmem_eval.retrieve import (  # noqa: E402, RUF100
+    resolve_rerank_arm_pool_limit,
     retrieve_for_question,
 )
 from tools.longmem_eval.run import (  # noqa: E402, RUF100
@@ -877,7 +878,7 @@ def test_runner_env_hermeticity(tmp_path, monkeypatch):
         sdk.close()
 
 
-def test_rerank_pool_user_docs_state_the_floored_applied_pool():
+def test_rerank_pool_user_docs_state_the_floored_applied_pool(monkeypatch):
     """#2992 defect 1 (docs-staleness P2): the user-facing descriptions of the
     rerank-pool knob must state the SAME resolution the code applies.
 
@@ -886,11 +887,21 @@ def test_rerank_pool_user_docs_state_the_floored_applied_pool():
     was told the applied pool was 40 while ``retrieve_for_question`` fetched
     ``DEFAULT_POOL_SIZE`` = 120. The knob is a raise-only FLOOR now; every
     description must say so, and keep the rerank-OFF pool-only arm distinct.
+
+    #2992 review (P2): the baseline is the env override ``TORTOISE_LME_POOL_SIZE``
+    with a 120 DEFAULT — NOT a 120 floor — so the docs must not claim
+    ``max(TORTOISE_LME_POOL_SIZE, 120)``. The final assertions pin that
+    distinction against the code.
     """
     readme = (Path(__file__).resolve().parent.parent
               / "tools" / "longmem_eval" / "README.md").read_text(
                   encoding="utf-8")
-    help_text = _build_parser().format_help()
+    # argparse HARD-WRAPS format_help() at the terminal width, which honours
+    # $COLUMNS — normalize whitespace so the assertion is a property of the
+    # help STRING, not of the environment it was rendered in (#2992 review:
+    # the raw substring was green at COLUMNS unset/80/200 and red at
+    # 40/50/60/120).
+    help_text = " ".join(_build_parser().format_help().split())
     floored = "max(pool, baseline, max(k))"
     # (1) CLI help text
     assert "--rerank-pool" in help_text
@@ -908,6 +919,40 @@ def test_rerank_pool_user_docs_state_the_floored_applied_pool():
     # the knob can no longer LOWER the depth below the baseline)
     assert "can only RAISE" in help_text
     assert "can only RAISE" in readme
+    # the baseline is an OVERRIDE-with-default, never a 120 floor — neither
+    # surface may claim the flat max() form, and the code must keep honouring
+    # a shallower env override (#2992 review, CLAUDE.md-adherence).
+    assert "max(TORTOISE_LME_POOL_SIZE, 120)" not in help_text
+    assert "max(TORTOISE_LME_POOL_SIZE, 120)" not in readme
+    monkeypatch.setenv("TORTOISE_LME_POOL_SIZE", "50")
+    assert resolve_rerank_arm_pool_limit(rerank_pool=40, max_k=20) == 50
+
+
+def test_cap3_only_arm_collapses_into_applied_rerank(monkeypatch):
+    """#2992 (recorded loss): post-fix the pre-registered ``cap3-only`` arm
+    (``--rerank --rerank-cap 3``, no ``--rerank-pool``) resolves to the SAME
+    effective config as ``applied-rerank`` (``--rerank --rerank-pool 120
+    --rerank-cap 3``). The 40-item rerank default is floored at the #1947
+    baseline, so ``applied-rerank``'s explicit ``--rerank-pool 120`` is now
+    redundant and the cap-only isolation it was pre-registered for is no
+    longer reproducible via the arm's own knobs.
+
+    Recorded in ``measure_temporal.ARM_TABLE`` (reach) and runbook limitation
+    6. Pre-fix the two configs DIFFERED (cap3-only fetched 40), so this
+    equality fails on the pre-fix code. A future cap-vs-depth control needs a
+    shallow ``TORTOISE_LME_POOL_SIZE`` baseline or an explicit pool below it.
+    """
+    for _var in ("TORTOISE_LME_POOL_SIZE", "TORTOISE_LME_RERANK_POOL",
+                 "TORTOISE_LME_RERANK", "TORTOISE_LME_RERANK_CAP"):
+        monkeypatch.delenv(_var, raising=False)
+    applied = _resolve_rerank(rerank=True, rerank_pool=120,
+                              per_session_cap=3, rerank_model=None,
+                              mmr_lambda=None, max_k=20)
+    cap3 = _resolve_rerank(rerank=True, rerank_pool=None,
+                           per_session_cap=3, rerank_model=None,
+                           mmr_lambda=None, max_k=20)
+    assert cap3["config"] == applied["config"]
+    assert cap3["config"]["pool_size"] == DEFAULT_POOL_SIZE
 
 
 # ── Task 5: aggregation + checkpoint (three-valued D9) ─────────────────────
