@@ -7641,12 +7641,12 @@ class TortoiseSDK:
         # BEFORE the write-verb enrichment read below. A failed or
         # partial post-write read therefore leaves capture_ok True while the
         # returned memory_write_v1 verb is reported partial with the affected
-        # points left un-enriched; hosted additionally logs a per-point warning
-        # that the sdk does not. Hosted computes _capture_ok AFTER its
-        # enrichment and downgrades to partial (retryable) when points are
-        # skipped. Both internally consistent: the two now share the skipped
-        # counter and the memory_write_v1 verb, and diverge only in the ORDER
-        # ok is computed — not in whether the concept exists here.
+        # points left un-enriched; hosted additionally appends a per-point
+        # warning to its receipt that the sdk does not. Hosted computes
+        # _capture_ok AFTER its enrichment and downgrades to partial when
+        # points are skipped. Both internally consistent: the two share the
+        # skipped counter and the verb, diverging only in the ORDER ok is
+        # computed (the recorded retry bit) and in that per-point warning.
         # #3892: what THIS attempt RECORDS on the Session. A keyed attempt
         # records its real outcome + lane, exactly as before. A KEYLESS
         # attempt records capture_ok=False + lane "none": no extraction lane
