@@ -643,14 +643,21 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
         else:
             lines.append("  (no remote branch, open/closed PR, assignee or claim comment)")
     if landed:
+        # The conclusion is the GATE's own (`_landed_conclusion`), so the two
+        # verbs cannot drift into describing the same terminal fact differently
+        # — and a `NOT_PLANNED` closure is never rendered as ``already shipped``
+        # (#8560 review).
+        landed_kinds = {hit.kind for _s, hit in landed}
         lines.append("")
-        lines.append("LANDED — the issue's work appears ALREADY SHIPPED")
+        lines.append("LANDED — " + cp._landed_conclusion([h for _s, h in landed]))
         lines.append("  (AUTHORITATIVE — the issue's own state, or a MERGED PR the")
         lines.append("   PAGINATED timeline ties to it; not the advisory closed-PR sample)")
         for surface, hit in landed:
             lines.append(f"  [{_clean(surface.name)}] {_clean(hit.ref)} — "
                          f"{_clean(hit.detail)}")
-        lines.append("  These are NOT holders — do NOT dispatch onto shipped work.")
+        lines.append("  These are NOT holders — do NOT dispatch onto "
+                     + ("a terminal work item." if landed_kinds <= {"not-planned"}
+                        else "shipped work."))
     if weak and not holders:
         lines.append("")
         lines.append(f"WEAK SIGNALS (non-blocking — prose is not work): {len(weak)} "
@@ -712,8 +719,12 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
                 "lane appears to be on it."
             )
         lines.append(
-            "ANSWER: already landed — the artifacts above are TERMINAL, not a "
-            "holder. Verify the issue body against the named artifact before "
+            ("ANSWER: already closed (not planned) — the artifacts above are "
+             "TERMINAL, not a holder. "
+             if landed_kinds <= {"not-planned"}
+             else "ANSWER: already landed — the artifacts above are TERMINAL, not "
+                  "a holder. ")
+            + "Verify the issue body against the named artifact before "
             "dispatching; if it still needs work, state the remaining scope."
         )
         return "\n".join(lines) + "\n", EXIT_ANSWERED

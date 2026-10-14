@@ -54,6 +54,13 @@ case "$1 $2" in
     # (`gh api --paginate --slurp repos/<slug>/issues/<N>/timeline?...`). It is
     # served from its OWN fixture — a slurped ARRAY OF PAGES — so it cannot be
     # confused with the ADVISORY closed-PR sample (the `api -i` request below).
+    # `GH_STUB_TIMELINE_FAIL=1` makes this the UNQUERYABLE case: the landed
+    # surface is BLOCKING, so the verb must answer INCOMPLETE naming it, never
+    # "nobody".
+    if [ "${GH_STUB_TIMELINE_FAIL:-0}" = "1" ]; then
+      echo "gh-stub: read tcp 127.0.0.1:1->20.26.156.210:443: read: connection reset by peer" >&2
+      exit 1
+    fi
     f="$d/timeline.json" ;;
   # #5251: the closed-PR surface is ONE bounded request with `-i`, whose own
   # `Link` header supplies the total. `-i` prints the status line and headers,
@@ -128,6 +135,7 @@ class WhoIsOnTest(unittest.TestCase):
             "number": ISSUE,
             "title": "florfenicol dosing audit",
             "state": "OPEN",
+            "stateReason": None,
             "url": f"https://example.invalid/issues/{ISSUE}",
             "assignees": [],
             "comments": [],
@@ -204,12 +212,15 @@ class WhoIsOnTest(unittest.TestCase):
     # ── runners ──────────────────────────────────────────────────────────────
 
     def run_tool(self, *args, tool: Path = TOOL, gh: Path | None = None,
-                 git_bin: Path | None = None):
+                 git_bin: Path | None = None, env_extra: dict | None = None):
         cmd = [PYTHON, str(tool), *[str(a) for a in args],
                "--repo", str(self.repo), "--gh", str(gh or self.gh)]
         if git_bin is not None:
             cmd += ["--git", str(git_bin)]
-        proc = subprocess.run(cmd, capture_output=True, text=True, env=self._env(),
+        env = self._env()
+        if env_extra:
+            env.update(env_extra)
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=env,
                               timeout=120)
         return proc.returncode, proc.stdout + proc.stderr
 
@@ -696,11 +707,16 @@ exec {self.gh} "$@"
 
     # ── #8560: the landed fact, mirrored from the gate ───────────────────────
 
-    def _closed_issue(self) -> None:
+    def _closed_issue(self, state_reason: str | None = "COMPLETED") -> None:
+        """A CLOSED issue, with its `stateReason` as `gh issue view --json`
+        returns it: `COMPLETED` (the work was done) or `NOT_PLANNED` (declined or
+        superseded). The default is the COMMON case, so a test that wants the
+        not-planned wording opts in (#8560 review)."""
         (self.gh_dir / "issue.json").write_text(json.dumps({
             "number": ISSUE,
             "title": "florfenicol dosing audit",
             "state": "CLOSED",
+            "stateReason": state_reason,
             "url": f"https://example.invalid/issues/{ISSUE}",
             "assignees": [],
             "comments": [],
@@ -731,10 +747,34 @@ exec {self.gh} "$@"
         self._closed_issue()
         rc, out = self.run_tool(ISSUE)
         self.assertEqual(rc, 0, out)
-        self.assertIn("LANDED — the issue's work appears ALREADY SHIPPED", out)
+        self.assertIn("LANDED — the work appears ALREADY SHIPPED", out)
+        self.assertIn("closed as COMPLETED", out)
         self.assertIn("ANSWER: already landed", out)
         self.assertNotIn("ANSWER: nobody", out)
         self.assertNotIn("holder(s) are ALSO present", out)
+
+    def test_a_not_planned_closure_is_not_answered_as_shipped(self):
+        """#8560 review: `NOT_PLANNED` means the issue was DECLINED or
+        SUPERSEDED — the work did not ship. The answer is still terminal (rc 0,
+        not "nobody"), but it must not claim a shipment that never happened."""
+        self._closed_issue(state_reason="NOT_PLANNED")
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("LANDED — the issue was CLOSED AS NOT PLANNED", out)
+        self.assertNotIn("ALREADY SHIPPED", out)
+        self.assertIn("ANSWER: already closed (not planned)", out)
+        self.assertNotIn("ANSWER: nobody", out)
+        self.assertNotIn("do NOT dispatch onto shipped work", out)
+
+    def test_landed_surface_failure_answers_incomplete(self):
+        """The landed surface is BLOCKING: an unqueryable timeline must answer
+        INCOMPLETE (rc 2) naming `issue landed` — never "nobody". The gate's
+        fail-closed posture must hold through this verb too (#8560 review)."""
+        rc, out = self.run_tool(ISSUE, env_extra={"GH_STUB_TIMELINE_FAIL": "1"})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("ANSWER INCOMPLETE", out)
+        self.assertIn("issue landed", out)
+        self.assertNotIn("ANSWER: nobody", out)
 
     def test_a_merged_timeline_pr_answers_landed(self):
         """The timeline arm through this verb: an OPEN issue whose merged PR

@@ -280,7 +280,7 @@ printf '4114\n8888\n' > "$R/.open_iss"
 printf 'feat/8888-tm\n' > "$R/.pr_brs"
 tmux() { printf 'lane-7777\nmerge-100\n'; }
 # extract the embedded reaper (the heredoc body only)
-awk '/^python3 - "\$O" <<.PY.$/{f=1;next} /^PY$/{f=0} f' "$REFRESH" > "$R/reap.py"
+awk '/^python3 - "\$O" "\$OR" <<.PY.$/{f=1;next} /^PY$/{f=0} f' "$REFRESH" > "$R/reap.py"
 if need "$R/reap.py" "the reaper is extracted from the shipped refresh-candidates.sh"; then
 # the extracted body shells out to tmux; export the fake so the child sees it
 cat > "$R/tmux" <<'SH'
@@ -288,7 +288,19 @@ cat > "$R/tmux" <<'SH'
 printf 'lane-7777\nmerge-100\n'
 SH
 chmod +x "$R/tmux"
-( PATH="$R:$PATH" python3 "$R/reap.py" "$R" ) > "$TMP/reap.out" 2>&1
+# the landed prune shells out to `gh issue view <N> --repo <slug> --json state`
+# (UNCAPPED, per-entry) — the fake answers from GH_STUB_OPEN (`<N> ...` = open,
+# anything else = closed), and GH_STUB_FAIL=1 is the unreadable case.
+cat > "$R/gh" <<'SH'
+#!/bin/bash
+if [ "${GH_STUB_FAIL:-0}" = "1" ]; then
+  echo "gh: could not reach api.github.com" >&2; exit 1
+fi
+case " ${GH_STUB_OPEN:-} " in *" $3 "*) echo '{"state":"OPEN"}'; exit 0;; esac
+echo '{"state":"CLOSED"}'
+SH
+chmod +x "$R/gh"
+( PATH="$R:$PATH" python3 "$R/reap.py" "$R" "acme/example" ) > "$TMP/reap.out" 2>&1
 kept="$(tr '\n' ' ' < "$R/dispatched.txt")"
 case "$kept" in *4114*) rc=1;; *) rc=0;; esac
 ck "shipped reaper: open+no-PR+no-lane dispatch is un-blacklisted" $rc
@@ -312,7 +324,7 @@ printf '4114\n8888\n' > "$RF/dispatched.txt"
 printf '4114\n8888\n' > "$RF/checked.txt"
 printf '4114\n8888\n' > "$RF/.open_iss"
 # .pr_brs deliberately ABSENT: this is the shape the shipped capture leaves on a failed `gh pr list`
-( PATH="$R:$PATH" python3 "$R/reap.py" "$RF" ) > "$TMP/reap-failpr.out" 2>&1
+( PATH="$R:$PATH" python3 "$R/reap.py" "$RF" "acme/example" ) > "$TMP/reap-failpr.out" 2>&1
 kept="$(tr '\n' ' ' < "$RF/dispatched.txt")"
 case "$kept" in *4114*8888*) rc=0;; *) rc=1; echo "      dispatched.txt: '$kept'";; esac
 ck "shipped reaper: an UNREADABLE PR listing reaps NOTHING (both entries kept)" $rc
@@ -325,7 +337,7 @@ RO="$TMP/reap-failopen"; mkdir -p "$RO"
 printf '4114\n8888\n' > "$RO/dispatched.txt"
 printf '4114\n8888\n' > "$RO/checked.txt"
 printf 'feat/8888-tm\n' > "$RO/.pr_brs"
-( PATH="$R:$PATH" python3 "$R/reap.py" "$RO" ) > "$TMP/reap-failopen.out" 2>&1
+( PATH="$R:$PATH" python3 "$R/reap.py" "$RO" "acme/example" ) > "$TMP/reap-failopen.out" 2>&1
 case "$(tr '\n' ' ' < "$RO/dispatched.txt")" in *4114*) rc=0;; *) rc=1;; esac
 ck "shipped reaper: an UNREADABLE open-issue listing reaps nothing either" $rc
 # a PRESENT but EMPTY list is a REAL answer and must still reap
@@ -334,7 +346,7 @@ printf '4114\n7777\n' > "$RE/dispatched.txt"
 printf '4114\n7777\n' > "$RE/checked.txt"
 printf '4114\n' > "$RE/.open_iss"   # 7777 is not open -> kept
 : > "$RE/.pr_brs"                     # readable and empty: there are genuinely no PRs
-( PATH="$R:$PATH" python3 "$R/reap.py" "$RE" ) > "$TMP/reap-emptypr.out" 2>&1
+( PATH="$R:$PATH" python3 "$R/reap.py" "$RE" "acme/example" ) > "$TMP/reap-emptypr.out" 2>&1
 kept="$(tr '\n' ' ' < "$RE/dispatched.txt")"
 case "$kept" in *4114*) rc=1;; *) rc=0;; esac
 ck "shipped reaper: a genuinely EMPTY (readable) PR listing still reaps 4114" $rc
@@ -527,43 +539,52 @@ PY
 
   # ── 5g) the reaper DROPS a landed entry once its issue is CLOSED ───────────────────────────
   # landed.txt must not become the same permanent list checked.txt was: an entry means "a decision
-  # is owed", and once the issue is CLOSED the decision is made. Fail-closed (§7.1) still applies:
-  # the whole reaper — pruning included — is skipped when a listing could not be read.
+  # is owed", and once the issue is CLOSED the decision is made. Fail-closed still applies: an
+  # entry whose state cannot be READ is kept, never assumed closed.
+  #
+  # ⛔ THE PRUNE READS `gh issue view <N> --json state` (UNCAPPED), NOT absence from `.open_iss`. The
+  # pre-fix `len(open_iss) < 500` guard was a permanent no-op: `.open_iss` is `--limit 500` and this
+  # repo has >500 open issues, so the guard tripped on EVERY pass and landed.txt could only be
+  # cleared by hand. The saturated-listing check below is the non-vacuous one: `.open_iss` omits the
+  # landed issues entirely, and the pre-fix code would keep BOTH (its cap guard fires).
   RP="$TMP/landed-prune"; mkdir -p "$RP"
   printf '10\n30\n' > "$RP/landed.txt"
-  printf '10\n' > "$RP/.open_iss"      # 30 is no longer open -> the decision was made
+  : > "$RP/.open_iss"
   : > "$RP/.pr_brs"
   : > "$RP/dispatched.txt"; : > "$RP/checked.txt"
-  awk '/^python3 - "\$O" <<.PY.$/{f=1;next} /^PY$/{f=0} f' "$REFRESH" > "$RP/reap.py"
+  awk '/^python3 - "\$O" "\$OR" <<.PY.$/{f=1;next} /^PY$/{f=0} f' "$REFRESH" > "$RP/reap.py"
   if need "$RP/reap.py" "the reaper is extracted from the shipped refresh-candidates.sh"; then
-    ( PATH="$R:$PATH" python3 "$RP/reap.py" "$RP" ) > "$TMP/landed-prune.out" 2>&1
+    ( PATH="$R:$PATH" GH_STUB_OPEN="10" python3 "$RP/reap.py" "$RP" "acme/example" ) > "$TMP/landed-prune.out" 2>&1
     case "$(tr '\n' ' ' < "$RP/landed.txt")" in *10*) rc=0;; *) rc=1;; esac
     ck "shipped reaper: a landed entry whose issue is still OPEN is kept" $rc
     case "$(tr '\n' ' ' < "$RP/landed.txt")" in *30*) rc=1;; *) rc=0;; esac
     ck "shipped reaper: a landed entry whose issue is CLOSED is dropped" $rc
     case "$(cat "$TMP/landed-prune.out")" in *"dropped"*30*) rc=0;; *) rc=1;; esac
     ck "shipped reaper: dropping a settled landed entry is logged, not silent" $rc
-    # fail-closed half: an unreadable listing prunes NOTHING
+    # fail-closed half: an UNREADABLE state prunes NOTHING (a failed read is not "closed")
     RPF="$TMP/landed-prune-fail"; mkdir -p "$RPF"
     printf '10\n30\n' > "$RPF/landed.txt"
-    printf '10\n' > "$RPF/.open_iss"     # .pr_brs deliberately ABSENT: the read failed
+    : > "$RPF/.open_iss"; : > "$RPF/.pr_brs"
     : > "$RPF/dispatched.txt"; : > "$RPF/checked.txt"
-    ( PATH="$R:$PATH" python3 "$RP/reap.py" "$RPF" ) > "$TMP/landed-prune-fail.out" 2>&1
+    ( PATH="$R:$PATH" GH_STUB_FAIL=1 python3 "$RP/reap.py" "$RPF" "acme/example" ) > "$TMP/landed-prune-fail.out" 2>&1
     case "$(tr '\n' ' ' < "$RPF/landed.txt")" in *10*30*) rc=0;; *) rc=1;; esac
-    ck "shipped reaper: an UNREADABLE listing prunes no landed entry (both kept)" $rc
-    # fail-closed half 2: the open listing is CAPPED (`--limit 500`). A truncated listing makes an
-    # open issue look closed, so pruning against it would drop a suppression that is still owed and
-    # re-pre-flight the issue every pass — the leak landed.txt exists to close. Refuse to prune.
-    RPT="$TMP/landed-prune-trunc"; mkdir -p "$RPT"
-    printf '10\n' > "$RPT/landed.txt"
-    seq 1 501 | grep -v '^10$' > "$RPT/.open_iss"   # 500 entries: the cap is hit, and 10 is not in the sample
+    ck "shipped reaper: an UNREADABLE landed state prunes no entry (both kept)" $rc
+    case "$(cat "$TMP/landed-prune-fail.out")" in *"could not be re-read"*) rc=0;; *) rc=1;; esac
+    ck "shipped reaper: keeping an unreadable landed entry is logged, not silent" $rc
+    # ⛔ NON-VACUOUS against the pre-fix cap guard: `.open_iss` is SATURATED at 500 entries and
+    # omits 10, while gh reports 10 OPEN. Absence from a capped listing proves nothing, so 10 must
+    # be KEPT; and 30 (gh: CLOSED) must still be dropped. Pre-fix, the `len(open_iss) < 500` guard
+    # fired and neither entry was pruned.
+    RPT="$TMP/landed-prune-saturated"; mkdir -p "$RPT"
+    printf '10\n30\n' > "$RPT/landed.txt"
+    seq 1 500 | grep -v '^10$' | grep -v '^30$' > "$RPT/.open_iss"   # 500 entries: the cap is hit
     : > "$RPT/.pr_brs"
     : > "$RPT/dispatched.txt"; : > "$RPT/checked.txt"
-    ( PATH="$R:$PATH" python3 "$RP/reap.py" "$RPT" ) > "$TMP/landed-prune-trunc.out" 2>&1
+    ( PATH="$R:$PATH" GH_STUB_OPEN="10" python3 "$RP/reap.py" "$RPT" "acme/example" ) > "$TMP/landed-prune-sat.out" 2>&1
     case "$(tr '\n' ' ' < "$RPT/landed.txt")" in *10*) rc=0;; *) rc=1;; esac
-    ck "shipped reaper: a TRUNCATED open listing prunes no landed entry (10 kept)" $rc
-    case "$(cat "$TMP/landed-prune-trunc.out")" in *"cap"*) rc=0;; *) rc=1;; esac
-    ck "shipped reaper: refusing to prune against a capped listing is logged, not silent" $rc
+    ck "shipped reaper: a saturated .open_iss does NOT make an OPEN landed entry look closed" $rc
+    case "$(tr '\n' ' ' < "$RPT/landed.txt")" in *30*) rc=1;; *) rc=0;; esac
+    ck "shipped reaper: the landed prune settles a CLOSED entry even when .open_iss is saturated" $rc
   fi
 fi
 

@@ -651,6 +651,17 @@ class Hit:
     ref: str
     detail: str
     strength: str  # "strong" (issue number / closing reference) | "weak"
+    # What KIND of terminal fact produced a `issue landed` hit (#8560 review).
+    # Only the landed surface sets this; every other surface leaves the
+    # default. `format_report` and `who_is_on.py` word their answers from it, so
+    # a `CLOSED` issue parked as NOT_PLANNED is never described as "already
+    # shipped" — the refusal direction is identical (do NOT dispatch), but the
+    # terminal fact is not a merge.
+    #   "shipped"      — the work landed (a merged PR names this issue)
+    #   "completed"    — the issue was closed as COMPLETED
+    #   "not-planned"  — closed as NOT_PLANNED (declined/superseded)
+    #   "closed"       — closed, reason unavailable/unrecognised
+    kind: str = "collision"
 
 
 def _is_default_branch(name: str, defaults: set[str]) -> bool:
@@ -889,8 +900,9 @@ class Surface:
     # they simply cannot block a dispatch and cannot force INCOMPLETE (#5251).
     authority: str = AUTHORITY_BLOCKING
 
-    def add(self, ref: str, detail: str, strength: str) -> None:
-        self.hits.append(Hit(self.name, ref, detail, strength))
+    def add(self, ref: str, detail: str, strength: str,
+            kind: str = "collision") -> None:
+        self.hits.append(Hit(self.name, ref, detail, strength, kind))
         self.status = STATUS_HIT
 
     def incomplete(self, note: str) -> None:
@@ -4368,6 +4380,28 @@ def _merged_reference(event: dict) -> tuple[int, str] | None:
     return number, title
 
 
+def _landed_conclusion(landed_hits: list[Hit]) -> str:
+    """The closing clause of the LANDED verdict, worded from the TERMINAL FACT.
+
+    ⛔ A closed issue is not a merged PR (#8560 review). The refusal is the same
+    in every case — do NOT dispatch — but the verdict must not state a cause it
+    did not observe. `NOT_PLANNED` means the issue was declined or superseded;
+    the work did not ship, and "appears ALREADY SHIPPED" is a false diagnosis
+    that sends a human looking for a merge that does not exist. A merged
+    timeline PR (kind `shipped`) or a `COMPLETED` closure IS a shipment.
+    """
+    kinds = {hit.kind for hit in landed_hits}
+    if kinds <= {"not-planned"}:
+        return (
+            "the issue was CLOSED AS NOT PLANNED (superseded or declined) — "
+            "the work did not ship, but it is TERMINAL and never free work; "
+            "do NOT dispatch"
+        )
+    if "shipped" in kinds or "completed" in kinds:
+        return "the work appears ALREADY SHIPPED — do NOT dispatch"
+    return "the work item is TERMINAL (closed) — do NOT dispatch"
+
+
 def scan_landed_surface(surface: Surface, issue: int, issue_data: dict,
                         events: list[dict] | None) -> None:
     """The authoritative "is #N already landed?" answer (#8560).
@@ -4408,12 +4442,40 @@ def scan_landed_surface(surface: Surface, issue: int, issue_data: dict,
         if isinstance(raw_state, str) else ""
     )
     if normalised == "CLOSED":
-        surface.add(
-            f"issue #{issue}",
-            f"issue state={_sanitize(raw_state)} — the work item is TERMINAL; a "
-            "closed issue is never free work",
-            "strong",
+        # ⛔ THE REASON DECIDES THE WORDING, never the direction (#8560 review).
+        # `CLOSED` is decisive either way — a closed issue is never free work —
+        # but an issue parked as `NOT_PLANNED` was DECLINED or SUPERSEDED; its
+        # work did not ship. Reporting it as "the work appears ALREADY SHIPPED"
+        # invents a merge that never happened (measured live: #8497,
+        # `state_reason=not_planned`, read as ALREADY SHIPPED). The module holds
+        # its refusals to the reason that actually caused them (#2573).
+        reason_raw = issue_data.get("stateReason")
+        reason = (
+            _strip_control_sequences(reason_raw).strip().upper().replace("-", "_")
+            if isinstance(reason_raw, str) else ""
         )
+        if reason == "NOT_PLANNED":
+            detail = (
+                f"issue state={_sanitize(raw_state)} (closed as NOT PLANNED) — "
+                "the work item is TERMINAL: the issue was declined or superseded, "
+                "NOT shipped; it is never free work"
+            )
+            kind = "not-planned"
+        elif reason == "COMPLETED":
+            detail = (
+                f"issue state={_sanitize(raw_state)} (closed as COMPLETED) — the "
+                "work item is TERMINAL; a closed issue is never free work"
+            )
+            kind = "completed"
+        else:
+            # An unavailable/unrecognised reason is NOT read as "shipped": the
+            # refusal (do not dispatch) is identical and never depends on it.
+            detail = (
+                f"issue state={_sanitize(raw_state)} — the work item is TERMINAL; "
+                "a closed issue is never free work"
+            )
+            kind = "closed"
+        surface.add(f"issue #{issue}", detail, "strong", kind)
         return
     if normalised != "OPEN":
         surface.incomplete(
@@ -4449,6 +4511,7 @@ def scan_landed_surface(surface: Surface, issue: int, issue_data: dict,
             "MERGED PR cross-references this issue and NAMES IT IN ITS TITLE — "
             f"the work appears already shipped: {_one_line(title, 90)}",
             "strong",
+            "shipped",
         )
     if not surface.hits:
         surface.note = (
@@ -4675,7 +4738,7 @@ def run_preflight(
             data = _gh_json(
                 gh_bin,
                 ["issue", "view", str(issue), "--repo", slug, "--json",
-                 "number,title,state,assignees,comments,url"],
+                 "number,title,state,stateReason,assignees,comments,url"],
                 cwd, timeout,
             )
             if isinstance(data, dict):
@@ -5435,8 +5498,8 @@ def format_report(
     if landed_hits:
         lines.append(
             f"VERDICT: LANDED (exit {EXIT_LANDED}) — {len(landed_hits)} "
-            f"authoritative terminal signal(s) for #{issue} in {slug}: the work "
-            "appears ALREADY SHIPPED — do NOT dispatch"
+            f"authoritative terminal signal(s) for #{issue} in {slug}: "
+            + _landed_conclusion(landed_hits)
         )
         # The remedy is the point of a DISTINCT verdict: a landed issue needs
         # verification and closure, not coordination (COLLISION) and no re-run

@@ -501,11 +501,19 @@ class CollisionPreflightTest(unittest.TestCase):
     # ── fixtures ────────────────────────────────────────────────────────────
 
     def issue_payload(self, title="florfenicol dosing audit", assignees=(),
-                      comments=(), state="OPEN", comment_author=None) -> dict:
+                      comments=(), state="OPEN", comment_author=None,
+                      state_reason=None) -> dict:
         """`comments` items are body strings (author "someone") or
         `(author_login, body)` tuples. The author is still controllable so a
         test can assert the comment is NAMED (the REMEDY line), even though
-        claim comments are no longer attributed by author."""
+        claim comments are no longer attributed by author.
+
+        `state_reason` mirrors `gh issue view --json stateReason`: null while
+        OPEN, `COMPLETED` / `NOT_PLANNED` once closed. Normalized in (like
+        `comments`/`assignees`) because the real CLI always returns the key when
+        asked, so omitting it models a payload gh cannot produce. Tests that
+        want the CLOSED-as-NOT_PLANNED wording pass it explicitly (#8560
+        review)."""
         rendered = []
         for comment in comments:
             if isinstance(comment, dict):
@@ -520,6 +528,7 @@ class CollisionPreflightTest(unittest.TestCase):
             "number": ISSUE,
             "title": title,
             "state": state,
+            "stateReason": state_reason,
             "url": f"https://example.invalid/issues/{ISSUE}",
             "assignees": [{"login": a} for a in assignees],
             "comments": rendered,
@@ -5125,7 +5134,8 @@ class CollisionPreflightTest(unittest.TestCase):
         # "(closed issues are warn-only, not a hit)" and return CLEAN — the
         # exact false-CLEAN that dispatched a lane onto shipped code. It must be
         # refused, with its OWN verdict (not COLLISION, whose remedy differs).
-        self.gh_fixtures(issue=self.issue_payload(state="CLOSED"))
+        self.gh_fixtures(issue=self.issue_payload(state="CLOSED",
+                                                  state_reason="COMPLETED"))
         rc, out = self.run_tool()
         self.assertEqual(rc, 4, out)
         self.assertIn("VERDICT: LANDED (exit 4)", out)
@@ -5133,6 +5143,41 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("VERDICT: COLLISION", out)
         self.assertIn("[issue landed]", out)
         self.assertIn("issue state=CLOSED", out)
+        # A COMPLETED closure IS a shipment, and the wording may say so.
+        self.assertIn("closed as COMPLETED", out)
+        self.assertIn("ALREADY SHIPPED", out)
+
+    def test_closed_as_not_planned_is_not_reported_as_shipped(self):
+        # ⛔ THE REASON, NOT JUST THE DIRECTION (#8560 review). `NOT_PLANNED`
+        # means the issue was DECLINED or SUPERSEDED — its work did not ship.
+        # The refusal is identical (LANDED, exit 4, do NOT dispatch), but
+        # "the work appears ALREADY SHIPPED" invents a merge that does not exist
+        # (measured live on #8497, `state_reason=not_planned`). The tool must
+        # name the reason that actually caused the refusal.
+        self.gh_fixtures(issue=self.issue_payload(state="CLOSED",
+                                                  state_reason="NOT_PLANNED"))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 4, out)
+        self.assertIn("VERDICT: LANDED (exit 4)", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("closed as NOT PLANNED", out)
+        self.assertIn("NOT PLANNED", out)
+        # The VERDICT's own conclusion, not only the hit detail: the mutation
+        # that forces `_landed_conclusion` to "ALREADY SHIPPED" must fail here.
+        self.assertIn("was CLOSED AS NOT PLANNED", out)
+        self.assertNotIn("ALREADY SHIPPED", out)
+
+    def test_closed_with_an_unknown_reason_makes_no_shipment_claim(self):
+        # The refusal direction never depends on the reason, and an unavailable
+        # or unrecognised `stateReason` must not be read as a shipment either.
+        # The wording stays neutral rather than inventing a cause.
+        self.gh_fixtures(issue=self.issue_payload(state="CLOSED"))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 4, out)
+        self.assertIn("VERDICT: LANDED (exit 4)", out)
+        self.assertIn("the work item is TERMINAL (closed)", out)
+        self.assertNotIn("ALREADY SHIPPED", out)
+        self.assertNotIn("NOT PLANNED", out)
 
     def test_7174_merged_pr_outside_the_closed_sample_is_not_clean(self):
         # THE REAL HISTORICAL INSTANCE. #7174 stayed OPEN for eight days after
@@ -5192,6 +5237,11 @@ class CollisionPreflightTest(unittest.TestCase):
             env_extra={"GH_STUB_API_FAIL_AFTER_OUTPUT": "1"})
         self.assertEqual(rc, 4, out)
         self.assertIn("VERDICT: LANDED", out)
+        # ⛔ THE PREMISE, not just the verdict (#8560 review): without these two
+        # the test still passes when the failure seam is neutered, so it would
+        # not prove the landed answer is independent of the advisory sample.
+        self.assertIn("gh-unavailable", out)
+        self.assertIn("ADVISORY SURFACES", out)
 
     def test_merged_pr_that_only_body_references_the_issue_is_clean(self):
         # A merged PR that mentions #N only in its BODY is not a landing: the
@@ -5220,6 +5270,14 @@ class CollisionPreflightTest(unittest.TestCase):
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
+        # ⛔ THE NOTE, not just the verdict (#8560 review): `rc == 0` alone is
+        # what the PRE-FIX tool returns for an OPEN issue (it never fetched the
+        # timeline), so without this the test cannot tell "the unmerged event was
+        # read and correctly rejected" from "the timeline was never consulted".
+        # The event COUNT pins the read; `0 merged cross-reference(s)` pins that
+        # the unmerged event was not counted as a landing.
+        self.assertIn("1 timeline event(s)", out)
+        self.assertIn("0 merged cross-reference(s), none naming", out)
 
     def test_landed_query_failure_is_incomplete_never_clean(self):
         # A MISSING CHECK IS NEVER A GREEN CHECK. The landed surface is
@@ -5275,6 +5333,56 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertEqual(rc, 2, out)
         self.assertIn("VERDICT: INCOMPLETE", out)
         self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_scalar_timeline_body_is_incomplete_not_clean(self):
+        # ⛔ THE `isinstance(pages, list)` GUARD IS NOT REDUNDANT (#8560 review).
+        # A scalar body has no page to iterate, so WITHOUT the guard the run dies
+        # as `TypeError: 'int' object is not iterable` — exit 3 (internal), not
+        # exit 2 — and a scalar is exactly what a truncated/hostile response
+        # gives. Pinned here because the guard's removal is otherwise silent.
+        self.gh_fixtures(issue=self.issue_payload(state="OPEN"))
+        (self.gh_dir / "timeline.json").write_text("5")
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertNotIn("Traceback", out)
+
+    def test_non_json_timeline_body_is_incomplete_not_clean(self):
+        # A body that is not JSON is a FAILED read, never "no landing PR".
+        self.gh_fixtures(issue=self.issue_payload(state="OPEN"))
+        (self.gh_dir / "timeline.json").write_text("{not json")
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("non-JSON", out)
+
+    def test_uninterpretable_issue_state_is_incomplete_not_clean(self):
+        # A state that is neither OPEN nor CLOSED leaves the landed question
+        # unanswerable — reading it as free work is the fail-OPEN direction.
+        # The tool must refuse rather than guess.
+        self.gh_fixtures(issue=self.issue_payload(state="MERGED"))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("issue-state-uninterpretable", out)
+
+    def test_cross_reference_number_equal_to_the_issue_is_not_a_landing(self):
+        # The #7009 wrong-object input: an event whose `source.issue.number` IS
+        # this issue (not a separate PR). It is refused as a landing rather than
+        # read as "the PR that shipped it". The merged-cross-reference COUNT
+        # still includes it (it is a merged cross-reference), but nothing NAMES
+        # the issue, so the answer is CLEAN and the note proves the event was
+        # read — not skipped.
+        self.gh_fixtures(issue=self.issue_payload(state="OPEN"))
+        self.timeline_fixture(events=[self.merged_cross_reference(
+            ISSUE, f"fix: the thing (#{ISSUE})")])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("1 merged cross-reference(s), none naming", out)
 
     def test_landed_outranks_a_collision_and_names_both(self):
         # A terminal signal is DECISIVE. If a lane is ALSO on it, the verdict is

@@ -477,14 +477,20 @@ quoted two lines above the arm itself.
 - the set is echoed on **every** pass (not only when a new verdict arrives), so an operator who asks
   "why is #N never dispatched again?" sees it — alongside the remedy — instead of it vanishing;
 - nothing is queued: only `CLEAN` reaches `candidates.txt`;
-- the reaper drops an entry once its issue is `CLOSED`, so the list drains as decisions are made; it
-  prunes **nothing** when a listing could not be read (`§7.1`'s fail-closed rule) or when the
-  open-issue listing hit its 500 cap — absence from a capped listing cannot prove an issue is
-  closed.
+- the reaper drops an entry once its issue is `CLOSED`, so the list drains as decisions are made.
+  It does **not** infer CLOSED from absence in the capped `.open_iss` listing: that listing is
+  `--limit 500` and this repo has >500 open issues, so it is permanently saturated and absence there
+  proves nothing — the earlier `len(open_iss) < 500` guard tripped on every pass and the prune was a
+  no-op. The prune asks the entry's own state directly (`gh issue view <N> --json state`, uncapped),
+  and **keeps** an entry whose state cannot be read — a failed read never drops a suppression that is
+  still owed. (Widening the shared listing is not the fix: `.pr_brs` is capped the same way, so a
+  longer open list would expose the dispatcher reaper's `has_pr` to more false negatives — duplicate
+  dispatch, worse than a stale entry.)
 
 The self-test's `5f`/`5g` blocks pin all of it: the separate file, the absence of a `checked.txt`
-entry, not queued, the set named on a later pass, `reap.py` dropping a closed entry — and refusing to
-prune against an unreadable or capped listing.
+entry, not queued, the set named on a later pass, the targeted per-entry prune dropping a closed
+entry and keeping an open one — including against a **saturated** `.open_iss` that omits it — and
+keeping (with a log line) an entry whose state could not be read.
 
 ### 7.2 Draft PRs are invisible to the sweep — **FIXED in this PR**
 
