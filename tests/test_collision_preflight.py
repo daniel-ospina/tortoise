@@ -42,6 +42,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -244,6 +245,7 @@ exec "${REAL_GIT:?REAL_GIT unset}" "$@"
 
 SURFACE_ROWS = (
     "issue landed",
+    "merged PRs naming an OPEN issue",
     "open PRs",
     "recently-closed PRs",
     "local branches",
@@ -3742,8 +3744,14 @@ class CollisionPreflightTest(unittest.TestCase):
         # The table still reports BOTH hits — the fix is about the VERDICT, not
         # about hiding evidence. A mutant that suppressed the hits instead of
         # demoting them would fail here.
-        self.assertIn("open PRs                 HIT", out)
-        self.assertIn("issue assignee/comments  HIT", out)
+        #
+        # ⛔ Matched on the CELL SEPARATION, not a fixed padding: #8629 widened
+        # the SURFACE column to the longest real surface name (31 chars, the
+        # new ADVISORY row) so every row's STATUS/HITS stay aligned, and a
+        # hardcoded 24-char pad would have pinned the cosmetic width instead of
+        # the property this test is about.
+        self.assertRegex(out, r"(?m)^open PRs\s+HIT\s+1")
+        self.assertRegex(out, r"(?m)^issue assignee/comments\s+HIT\s+1")
         self.assertEqual(out.count("(non-blocking)"), 2, out)
 
     def test_collision_count_names_only_blocking_hits(self):
@@ -4097,9 +4105,9 @@ class CollisionPreflightTest(unittest.TestCase):
         rc, out = self.run_tool(env_extra={"GH_STUB_API_FAIL_AFTER_OUTPUT": "1"})
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
-        # 6, not 7 — and the shortfall is NAMED, not hidden.
-        self.assertIn("6/7 surfaces queried", out)
-        self.assertNotIn("7/7 surfaces queried", out)
+        # 7, not 8 — and the shortfall is NAMED, not hidden.
+        self.assertIn("7/8 surfaces queried", out)
+        self.assertNotIn("8/8 surfaces queried", out)
         self.assertIn("advisory surface(s) partial or unqueried", out)
 
     def test_advisory_failure_coexists_with_a_collision_without_escalating(self):
@@ -5125,7 +5133,60 @@ class CollisionPreflightTest(unittest.TestCase):
     def test_every_surface_is_always_evaluated(self):
         _rc, out = self.run_tool()
         self.assert_all_surface_rows(out)
-        self.assertIn("7/7 surfaces queried", out)
+        self.assertIn("8/8 surfaces queried", out)
+
+    def test_the_header_contract_matches_the_surface_set(self):
+        # #8629 review (P2, claim mismatch). This tool states its contract in the
+        # module header, and that header is what the next lane reads before
+        # changing a surface — #8560's own verification checklist is exactly
+        # "the new verdict is in the docstring table and the surface set matches
+        # `ALL_SURFACES`". #8625 added `SURFACE_UNCLOSED_REF` and updated only
+        # the inline `ALL_SURFACES` comment, so the file disagreed with itself
+        # five lines apart about how many surfaces it has, and the new ADVISORY
+        # row was invisible to every reader of the header.
+        cp = _tool_module()
+        doc = cp.__doc__ or ""
+        declared = re.search(r"Surfaces \((\d+) rows", doc)
+        self.assertIsNotNone(declared, "the header must declare the row count")
+        self.assertEqual(
+            int(declared.group(1)), len(cp.ALL_SURFACES),
+            "the header's `Surfaces (N rows)` must equal len(ALL_SURFACES)")
+        for name in cp.ALL_SURFACES:
+            self.assertIn(
+                name, doc,
+                f"surface {name!r} is missing from the header table — a row "
+                "that ships without a contract entry is a contract the next "
+                "reader cannot see")
+        # The ADVISORY marker is the only place a reader learns that a hit on a
+        # row cannot block; every advisory surface must carry one.
+        self.assertEqual(doc.count("· ADVISORY ·"), len(cp.ADVISORY_SURFACES))
+        # The exit-code table may not advertise an arm that cannot reach it:
+        # after #8625 the timeline title arm is an ADVISORY, so only the issue's
+        # own state may be named as a source of exit 4 ("a verdict must not
+        # state a cause it did not observe").
+        self.assertNotIn("or a MERGED PR the paginated", doc)
+
+    def test_the_retired_shipped_kind_is_gone_not_left_as_a_dead_tier(self):
+        # #8629 review (P2). #8625 moved the only producer of the `shipped` hit
+        # kind to the ADVISORY surface (which emits `unclosed`), so the kind and
+        # its branch in `_landed_wording` became unreachable — a described tier
+        # that no code path can produce. The file's own standard at the hit-tag
+        # site refuses exactly this ("a tag entry for it would be dead code that
+        # reads as a live tier").
+        import inspect
+        cp = _tool_module()
+        # The documented vocabulary is the kind entries of `Hit.kind`'s comment
+        # (`#   "<kind>"   — <meaning>`), so prose that MENTIONS a retired kind
+        # cannot satisfy or defeat this.
+        documented = set(re.findall(
+            r'^\s*#\s+"([a-z-]+)"\s+—', inspect.getsource(cp.Hit), re.M))
+        self.assertEqual(
+            documented, {"completed", "not-planned", "closed", "unclosed"},
+            "`Hit.kind`'s documented vocabulary must be exactly the kinds this "
+            "module can produce (no `shipped`: #8625 left it unreachable)")
+        self.assertNotIn(
+            '"shipped"', inspect.getsource(cp._landed_wording),
+            "`_landed_wording` must not branch on the retired `shipped` kind")
 
     # ── #8560: the LANDED answer (authoritative, paginated) ──────────────────
 
@@ -5179,13 +5240,22 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("ALREADY SHIPPED", out)
         self.assertNotIn("NOT PLANNED", out)
 
-    def test_7174_merged_pr_outside_the_closed_sample_is_not_clean(self):
-        # THE REAL HISTORICAL INSTANCE. #7174 stayed OPEN for eight days after
-        # its fix merged as PR #7403 (2026-10-05). #7403 *referenced* #7174
-        # without a closing keyword, and it sat outside the bounded 100-PR
-        # ADVISORY closed-PR sample — so the old tool returned CLEAN and a lane
-        # re-implemented landed code. The targeted, PAGINATED timeline must find
-        # it even while the issue is OPEN and the sample does not contain it.
+    def test_7174_merged_pr_on_an_open_issue_is_an_advisory_not_a_landing(self):
+        # THE REAL HISTORICAL INSTANCE, with #8625's rule applied to it. #7174
+        # stayed OPEN for eight days after its fix merged as PR #7403
+        # (2026-10-05). #7403 *referenced* #7174 without a closing keyword, and
+        # it sat outside the bounded 100-PR ADVISORY closed-PR sample — so the
+        # old tool returned CLEAN and a lane re-implemented landed code.
+        #
+        # The targeted, PAGINATED timeline must still FIND it — that is #8560's
+        # fix and it is preserved. What changed is its WEIGHT: a reference is
+        # not a closure (GitHub closes an issue only on a closing keyword), so a
+        # merged title-naming PR on an OPEN issue is an ADVISORY, reported with
+        # a remedy, and never LANDED. Reading it as terminal re-created #4886 on
+        # a new surface — measured, it refused dispatch on #7951 for the
+        # remainder of that lane on the strength of three PRs (#8127, #8315,
+        # #8389) that each said in their own body that the issue stays open.
+        #
         # (The title is the real #7403 title; the closed-PR sample is EMPTY, so
         # the finding is produced by the timeline and by nothing else.)
         self.gh_fixtures(
@@ -5201,11 +5271,14 @@ class CollisionPreflightTest(unittest.TestCase):
             "not a call-site list (#7174)",
         )])
         rc, out = self.run_tool(issue=7174)
-        self.assertEqual(rc, 4, out)
-        self.assertIn("VERDICT: LANDED (exit 4)", out)
-        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("VERDICT: LANDED", out)
+        self.assertIn("[merged PRs naming an OPEN issue]", out)
         self.assertIn("PR #7403", out)
-        self.assertIn("NAMES IT IN ITS TITLE", out)
+        self.assertIn("names this issue in its TITLE", out)
+        self.assertIn("NOT a landing", out)
+        self.assertIn("advisory — cannot block", out)
 
     def test_landed_reference_on_a_later_timeline_page_is_reached(self):
         # "PAGINATED to exhaustion" must be a property of the TOOL, not only of
@@ -5221,27 +5294,49 @@ class CollisionPreflightTest(unittest.TestCase):
             [self.merged_cross_reference(7403, f"fix: shipped (#{ISSUE})")],
         ])
         rc, out = self.run_tool()
-        self.assertEqual(rc, 4, out)
-        self.assertIn("VERDICT: LANDED", out)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("[merged PRs naming an OPEN issue]", out)
         self.assertIn("PR #7403", out)
 
     def test_landed_does_not_depend_on_the_advisory_closed_sample(self):
-        # "Do not add a second bounded sample and call it fixed": the landed
-        # answer must hold even when the ADVISORY closed-PR request FAILS. The
-        # timeline is the authoritative source; the sample is not consulted for
-        # this decision.
+        # "Do not add a second bounded sample and call it fixed": the OPEN-issue
+        # advisory must still be PRODUCED even when the ADVISORY closed-PR
+        # request FAILS. The timeline is the source; the sample is not consulted
+        # for this decision.
         self.gh_fixtures(issue=self.issue_payload(state="OPEN"))
         self.timeline_fixture(events=[self.merged_cross_reference(
             999, f"fix: the thing (#{ISSUE})")])
         rc, out = self.run_tool(
             env_extra={"GH_STUB_API_FAIL_AFTER_OUTPUT": "1"})
-        self.assertEqual(rc, 4, out)
-        self.assertIn("VERDICT: LANDED", out)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("[merged PRs naming an OPEN issue]", out)
+        self.assertIn("PR #999", out)
         # ⛔ THE PREMISE, not just the verdict (#8560 review): without these two
         # the test still passes when the failure seam is neutered, so it would
         # not prove the landed answer is independent of the advisory sample.
         self.assertIn("gh-unavailable", out)
         self.assertIn("ADVISORY SURFACES", out)
+
+    def test_landed_verdict_names_the_issue_state_as_the_only_authority(self):
+        # #8629 review (P2). The LANDED preamble is printed AT THE POINT OF
+        # REFUSAL to the agent that must act on it, and it used to advertise the
+        # merged-PR timeline arm as an AUTHORITATIVE source of the verdict — an
+        # arm #8625 demoted to an ADVISORY, so on a LANDED verdict (reachable
+        # only from a CLOSED issue) the sentence named a cause it cannot observe
+        # (the #3504 class-2 standard this file's own comments were written to
+        # remove). The replacement must name the issue's own state as the sole
+        # authority AND point at where a title-naming PR is reported instead.
+        self.gh_fixtures(issue=self.issue_payload(state="CLOSED",
+                                                  state_reason="COMPLETED"))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 4, out)
+        self.assertIn("The authority here is the issue's OWN STATE", out)
+        self.assertNotIn("or a MERGED PR the PAGINATED", out)
+        self.assertIn(
+            "reported on the ADVISORY `merged PRs naming an OPEN issue` surface",
+            out)
 
     def test_merged_pr_that_only_body_references_the_issue_is_clean(self):
         # A merged PR that mentions #N only in its BODY is not a landing: the

@@ -110,7 +110,7 @@ processes in tmux sessions, so a killed worker cannot take the controller down w
 | `candidates.txt` | the dispatch backlog: issue numbers that passed collision pre-flight |
 | `dispatched.txt` | issues already handed to a lane. **Append-only — never expires** (see §7.1) |
 | `checked.txt` | issues whose pre-flight returned **CLEAN** — the one verdict that terminates the issue by **queueing** it. An **errored** pre-flight, a **COLLISION** and a **LANDED** verdict leave no entry (agent-infra#1716, #8560) |
-| `landed.txt` | issues whose pre-flight returned **LANDED** (exit 4): the work already shipped, so they are kept out of the backlog and out of the LIMIT budget — but **not** recorded as checked-forever. The set is printed on every refresh pass and an entry is dropped once its issue is **CLOSED**; see §7.1b (#8560) |
+| `landed.txt` | issues whose pre-flight returned **LANDED** (exit 4): the work already shipped, so they are kept out of the backlog and out of the LIMIT budget — but **not** recorded as checked-forever. The set is printed on every refresh pass and an entry is dropped once its issue is **CLOSED**; see §7.1b (#8560) — reachable since #8625 only when an issue closes between the pool listing and its pre-flight |
 | `state/mergeclaim-<PR>.lock` | single-owner claim: only one worker may review/record/merge a given PR |
 | `state/needsfix-<PR>-<head>` | "a reviewer found real issues at this exact head" |
 | `state/fixcount-<PR>` | fixer attempts for that PR, capped by `MAX_FIX_TRIES` |
@@ -485,14 +485,23 @@ PR (duplicate work against the shared queue, agent-infra#1705). The self-test's 
 pin both halves (absent → nothing reaped and `checked.txt` untouched; empty-but-readable → still
 reaps), and the capture site is driven directly with a stub `gh`.
 
-### 7.1b A `LANDED` verdict is suppressed, not blacklisted — **FIXED in this PR**
+### 7.1b A `LANDED` verdict is suppressed, not blacklisted — **now a CLOSE-RACE arm (#8625)**
 
-`collision_preflight.py` answers "is #N already done?" with exit **4 (`LANDED`)** (#8560). The
-refresh loop runs that pre-flight over a pool built **only** from `gh issue list --state open`, so
-the pre-flight's state-`CLOSED` arm is unreachable here: every `LANDED` this loop sees comes from
-the **timeline** arm on an **open** issue, and may belong to a multi-PR issue that still needs work
-(the gate's own #4886 caveat, whose remedy is *"verify it … if it still needs work, state the
-remaining scope before dispatch"*).
+`collision_preflight.py` answers "is #N already done?" with exit **4 (`LANDED`)** (#8560). This
+refresh loop runs that pre-flight over a pool built **only** from `gh issue list --state open`.
+
+⛔ **#8625 narrowed `LANDED` to the issue's own state, and that changed which arm is reachable.**
+Before #8625 the title arm could return `LANDED` for an OPEN issue, so this loop saw it constantly;
+the #8625 change demoted that arm to the ADVISORY surface `merged PRs naming an OPEN issue` (a merged
+PR *references* an issue, it does not *close* it), so a landed-but-OPEN issue — the #7174 shape —
+now reads **CLEAN** and flows to `candidates.txt`. That is #8625's accepted cost: a wasted dispatch
+is recoverable and self-correcting, a false `LANDED` (measured on #7951 against three merged
+increments, none of them closing it) is not.
+
+**What the `LANDED` arm is for now:** a **close race** — an issue the pool's `gh issue list`
+returned as open, but which is closed by the time its pre-flight runs. That window is real (the
+pool queries and the per-issue pre-flights are one pass), so the arm is kept rather than retired;
+since #8625 it can no longer fire for a merely-referenced open issue.
 
 Recording that verdict in `checked.txt` — as the first fix in this PR did — traded a visible
 capacity leak for an invisible permanent one: `checked.txt` is pruned only by the reaper, which

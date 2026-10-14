@@ -477,12 +477,16 @@ PY
   # must hold, and the first fix in this PR delivered only the second one (#8560 review):
   #   (i)  nothing is queued for it, and it does not consume a LIMIT slot (a dispatch onto shipped
   #        code, plus a capacity leak);
-  #   (ii) it is NOT recorded in checked.txt. This loop's pool is built from `--state open`, so the
-  #        pre-flight's state-CLOSED arm is unreachable here: every LANDED it sees comes from the
-  #        TIMELINE arm on an OPEN issue — possibly a multi-PR issue that still needs work (the
-  #        gate's own #4886 caveat). checked.txt is only pruned for a reaped DISPATCH, and a landed
-  #        issue is never dispatched, so writing it there removed an open work item from the backlog
-  #        permanently and silently — the failure class the §7.1 reaper removed.
+  #   (ii) it is NOT recorded in checked.txt. A LANDED verdict means the issue's own state is
+  #        CLOSED (#8560; since #8625 the timeline title arm cannot produce it — a merged PR that
+  #        merely NAMES an issue is an ADVISORY, so a landed-but-OPEN issue flows to the backlog as
+  #        CLEAN, #8625's accepted cost). This loop's pool is built from `--state open`, so the ONLY
+  #        reachable LANDED here is a CLOSE RACE: listed open by the pool, closed before the
+  #        pre-flight ran. Writing it to checked.txt would remove that issue from the backlog
+  #        permanently and silently — checked.txt is only pruned for a reaped DISPATCH, and a
+  #        landed issue is never dispatched — the failure class the §7.1 reaper removed.
+  #        The fake pre-flight below stands in for that close race; it cannot be produced through a
+  #        real pool entry any more, which is why the arm is pinned with a stub rather than live.
   # Pre-fix (this branch's previous head) `checked.txt` held 10 and no landed.txt existed, so
   # assertions (ii), the landed.txt write, and both "reported" checks below are RED.
   RL2="$TMP/landed"; mkdir -p "$RL2/fakesc/.venv/bin"
@@ -490,8 +494,10 @@ PY
   : > "$RL2/checked.txt"; : > "$RL2/candidates.txt"; : > "$RL2/dispatched.txt"; : > "$RL2/landed.txt"
   cat > "$RL2/fakesc/.venv/bin/python" <<'PY'
 #!/bin/bash
-# stand-in for a landed pre-flight: a terminal verdict, non-zero exit in production. Each
-# invocation is counted so pass 2 can prove the recorded issue is not re-pre-flighted.
+# stand-in for a landed pre-flight: a terminal verdict, non-zero exit in production. Since #8625
+# this cannot be produced by a real pool entry (only a close race can), so the LANDED arm is pinned
+# with a stub. Each invocation is counted so pass 2 can prove the recorded issue is not
+# re-pre-flighted.
 echo x >> "$(dirname "$0")/.calls"
 echo "VERDICT: LANDED (exit 4) — 1 authoritative terminal signal(s)"
 PY
@@ -515,6 +521,15 @@ PY
   ck "shipped refresh loop: the landed set is STILL reported on a later pass" $rc
   [ "$(wc -l < "$RL2/fakesc/.venv/bin/.calls" | tr -d ' ')" = "1" ] && rc=0 || rc=1
   ck "shipped refresh loop: a recorded LANDED issue is not re-pre-flighted on the next pass" $rc
+  # ⛔ CANARY, not decoration: the comment above says the arm is reachable ONLY through a close race
+  # because #8625 routed a title-naming OPEN-issue PR to the advisory `SURFACE_UNCLOSED_REF`
+  # surface. A comment cannot fail, so pin the producer half executably: if that routing is reverted,
+  # the timeline title arm regains authority, the close-race claim in §7.1b becomes false, and this
+  # check goes red. The tool lives two levels up from this script (repo root / tools).
+  HARNESS_TOOL="$HERE/../../tools/collision_preflight.py"
+  if grep -q 'SURFACE_UNCLOSED_REF' "$HARNESS_TOOL" 2>/dev/null \
+     && grep -q 'unclosed\.add(' "$HARNESS_TOOL" 2>/dev/null; then rc=0; else rc=1; fi
+  ck "shipped refresh loop: LANDED is a close-race arm — the tool routes a title-naming OPEN-issue PR to an ADVISORY surface (#8625)" $rc
   # a landed entry is recorded but does not consume a slot on LATER passes: the pool is 10 (LANDED
   # once) then 20 (CLEAN), LIMIT=1. Pass 1 spends the single pre-flight slot on 10; pass 2 filters
   # the landed entry BEFORE the LIMIT counter, so 20 is pre-flighted and queued. Pre-fix (before
