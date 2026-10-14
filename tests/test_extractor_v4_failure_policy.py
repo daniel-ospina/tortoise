@@ -30,10 +30,11 @@ WHAT THIS PINS
 5. The spec-change warning stays TRUE: while `extractor_v2.py` still says
    "assume everything is new", the doc must keep saying the code implements the
    inverted policy. Fix the code and this reds, forcing the doc to follow.
-6. §4.4's state-of-code citation names its revision pin. The header pins every
-   `file.py:NNNN` to `c79ba1cf2` *except where a passage names a later pin*;
-   `extractor_v2.py:2353` is a `7d348d351` line (2042 at the default pin), so a
-   bare number here is ambiguous. Naming the pin reds if it is dropped.
+6. Every `file.py:NNNN` citation in §4.4 names its revision pin. The header
+   pins every `file.py:NNNN` to `c79ba1cf2` *except where a passage names a later
+   pin*; `extractor_v2.py:2353` is a `7d348d351` line (2042 at the default pin),
+   so a bare number here reads as the wrong revision and the guard reds
+   (#8600 finding 1).
 
 Non-vacuity: the pre-fix document has no `### 4.4` heading, so check 1 fails.
 
@@ -58,6 +59,15 @@ CANONICAL_ANCHOR = "EIGHT steps:"
 STEP_ID = re.compile(r"S\d+(?:\.\d+)?")
 #: A §4.4 policy-table row: `| **S3 RESOLVE** — the lookup *(mechanical)* | …`.
 POLICY_ROW = re.compile(r"^\|\s*\*\*(S\d+(?:\.\d+)?)")
+#: The document's header (line 16) pins every `file.py:NNNN` reference to a base
+#: revision, *"except where a passage names a later pin"*. A citation that is
+#: not one of the header's named exceptions therefore reads against the base
+#: pin — so a section written at HEAD must name its own (#8600 finding 1).
+PIN_HEADER_MARKER = "Code citations — revision pin"
+BASE_PIN = "c79ba1cf2"
+_PIN_TOKEN = re.compile(r"`([0-9a-f]{7,40})`")
+#: `file.py:NNNN` — the citation form the header's rule governs.
+_CODE_CITATION = re.compile(r"`?[A-Za-z0-9_./-]+\.py:\d+`?")
 
 
 def _document() -> str:
@@ -194,6 +204,17 @@ def test_the_shipped_code_still_matches_the_documented_warning():
     )
 
 
+def _declared_later_pins() -> set[str]:
+    """The revisions the header names as exceptions to its base pin."""
+    for line in _document().splitlines():
+        if PIN_HEADER_MARKER in line:
+            return set(_PIN_TOKEN.findall(line)) - {BASE_PIN}
+    raise AssertionError(
+        f"the header's revision-pin rule ({PIN_HEADER_MARKER!r}) is gone from "
+        f"{DOC.name}; the revisions this guard resolves against cannot be read"
+    )
+
+
 def test_the_state_of_code_citation_names_its_revision_pin():
     """P2 (#8600): the §4.4 citation must not be a bare `file.py:NNNN`.
 
@@ -202,15 +223,36 @@ def test_the_state_of_code_citation_names_its_revision_pin():
     `7d348d351` (current-HEAD) line; at the declared default pin `c79ba1cf2`
     the same symbol sits at 2042. A bare number therefore reads as the wrong
     revision — the exact ambiguity `#8506` added the third-pin clause to kill.
+
+    The pin is resolved against the header's OWN declared pins and bound to the
+    LINE carrying the citation, so it cannot be satisfied by a pin mentioned
+    elsewhere in the section, and a second unpinned citation in §4.4 also reds.
     """
     section = _policy_section()
     assert "_render_search_results" in section, (
         "§4.4 no longer cites `_render_search_results`; the state-of-code "
         "warning in this section depends on it (#8600)."
     )
-    assert "at `7d348d351`" in section, (
-        "§4.4 cites `extractor_v2.py:2353` without naming its revision pin. The "
-        "header pins every unqualified `file.py:NNNN` to `c79ba1cf2`, where "
-        "that line is 2042 — name the pin (`at `7d348d351``) in the passage or "
-        "add the citation to the header's `7d348d351` list (#8600)."
+
+    later = _declared_later_pins()
+    assert later, (
+        "the header names no later pin — this guard would pass vacuously; the "
+        "header's pin vocabulary changed and needs re-reading (#8600)."
+    )
+    cited = [line for line in section.splitlines() if _CODE_CITATION.search(line)]
+    assert cited, (
+        "§4.4 carries no `file.py:NNNN` citation, so this guard is vacuous — "
+        "re-point it at whichever passage now carries a line number (#8600)."
+    )
+    unpinned = [
+        line.strip()[:160]
+        for line in cited
+        if not any(f"`{pin}`" in line for pin in later)
+    ]
+    assert not unpinned, (
+        "these §4.4 lines cite a `file.py:NNNN` without naming the revision the "
+        f"number holds at. The header reads an unnamed number against its base "
+        f"pin (`{BASE_PIN}`), where §4.4's HEAD numbers are wrong — name the pin "
+        "(`at `7d348d351``) in the passage or add the citation to the header's "
+        "`7d348d351` list (#8600):\n  - " + "\n  - ".join(unpinned)
     )
