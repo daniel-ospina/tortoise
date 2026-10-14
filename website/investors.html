@@ -29,9 +29,10 @@
        surfaces — a card with no artwork is the first thing the reader sees.
        The card is a NEW owned asset, not the design-partner one: an outreach
        link must not preview as a different document. It is the same family of
-       1200x630 brand mark — Georgia/Menlo type over a nested-triangle mark —
-       not a video frame, so the two previews read as related documents rather
-       than as two unrelated ones.
+       1200x630 brand mark as the design-partner card — a nested-triangle mark
+       beside a serif title over a mono sub-line — not a video frame, so the
+       two previews read as related documents rather than as two unrelated
+       ones.
        The two cards were rendered separately, though, and they have drifted
        measurably — so do NOT describe them as identical or as unable to drift.
        Measured off both JPEGs: the design-partner mark draws THREE nested
@@ -230,17 +231,15 @@
        For the parallel one-line claims (the coordination problems, the market
        gaps) and for the GTM proof points and biography lines. The marker is
        the accent dot, at the same visual weight as the ↑/↓ markers below.
-       `text-wrap: pretty` lets the browser drop a word down to the last line
-       instead of stranding one there, which this copy produces easily: at
-       1280px the third market gap ended on "teams." alone — 55px against a
-       591px measure, 9% fill — and now ends at 146px; the second went 119px ->
-       192px, and the first why-now shift 110px -> 174px. A narrower-column
-       reset for `.profile` was written and then dropped: the trade does not go
-       away with the column width (the Wedge proof point's middle line fills
-       59% under `pretty` at a 262px measure and at 272px alike), and a lone
-       word on the last line is the worse of the two, so this is declared once,
-       with no exception. Line COUNTS are unchanged throughout — only the last
-       lines reflow, so nothing gains height. */
+       `text-wrap: pretty` re-breaks a paragraph to avoid ending it on a short
+       lone word, which this copy does easily: the third market gap ended on
+       "teams." alone — 55px against a 591px measure — and now ends at 146px.
+       It is declared once, with no `.profile` exception, because the trade it
+       makes is not one a wider measure fixes — the Wedge proof point's middle
+       line holds ~156px of ink whether the measure is 262px or 272px — so a
+       narrower column reset would buy nothing. Line count and element height
+       are unchanged for all 14 items across the page's 5 `.bullets` lists,
+       from 320px to 1600px. */
     .bullets { list-style: none; margin-top: 1.15rem; }
     .bullets li { display: flex; gap: 0.7rem; align-items: baseline; font-size: 0.95rem; text-wrap: pretty; }
     .bullets li + li { margin-top: 0.4rem; }

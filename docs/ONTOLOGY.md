@@ -1236,6 +1236,32 @@ model**, never as an invitation to merge the two nodes. The reasoning is pinned 
 
 > **agentSession Event (#909 §4.3 #1):** the canonical eventKind for session-capture Events is **`AgentSession`** — EXACT code spelling (capital A; sdk.py `ingest_corpus`, session_indexer.py); `sessionCaptured` (the core kind still written by the regex capture path) is an **alias of the same concept** — both remain valid kinds, **no migration**. The capture graph's `:Session` node (session container, `CONTAINS` → turn Points) also carries `is_episodic: true` — the quota `sessions` branch counts `MATCH (s:Session)` (plan §4.4, slice 2).
 
+**An Event is a dated fact — it carries no projection-owned state.** An Event
+records *that something happened*. The current state of the thing it concerns
+lives on the Object (or Subject) it names, never on the Event: the projection
+declares **no Event `status` field and no Event state fold** — a later Event
+does not rewrite an earlier one, and the consistency gate compares `status` only
+for the Object/Subject families. The Event MERGE handles a declared field set and
+the projection's extras lane carries the rest of the payload as **content the
+writer supplied** — a prop lane, never a projection-owned state lane. A
+writer-supplied `status` prop is therefore not projection-owned, but it is **not
+inert**: `_promote_incident_operators` (`tortoise/sdk.py`, #7853) reads an Event
+endpoint's `status` as a live/draft gate, so a `status` prop on an Event
+suppresses operator promotion exactly as a draft Point does.
+
+> **(#2788)** The names this lane historically carried — `name`, `eventStatus`,
+> `createdAt` — are props, not projection state, and none of the three is read
+> back as Event state. `name` has one reader (`sdk.backfill_about_entities`
+> matches an Event against a Point's content); `eventStatus` is an **ingest**
+> marker (`scheduled` → `completed`) written by the session/meeting indexers,
+> deliberately outside the consistency gate's `status` comparison (which is
+> Object/Subject-only), and the typed commit path cannot set it at all
+> (`CommitEvent` is `extra="forbid"`). The `status` key is distinct from those
+> three: it is carried by the same extras lane, and it IS read as state by
+> `_promote_incident_operators` (#7853) — see the note above. The pack-declared
+> fold generalization (#2729) is Object-scoped and does not extend to Events —
+> the Event-carries-state question was answered **no** in #2725.
+
 ### §4.6 Source
 
 | Field | Type | Required | ISO/PROV/DC | Impl | Meaning |
