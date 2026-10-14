@@ -220,6 +220,41 @@ class TestMarks:
         assert row["active_at"]["15"] is False    # day-10 is before day 15
         assert row["unclassifiable_marks"] == ["7"]
 
+    def test_a_definite_use_settles_the_mark_despite_an_ambiguous_day(self):
+        """The definition is a DISJUNCTION over days: one genuine use on/after
+        day N settles the mark ``True``, so an ambiguous day in the same window
+        cannot turn a provably-retained team into an unknown.
+
+        Regression: the ambiguity was consulted BEFORE the verdict, so a
+        day-10 ambiguity made the day-7 mark ``None`` even though a capture on
+        day 20 had already established it. That contradicted the module
+        docstring's own "ONLY candidate use" rule and made the cumulative
+        series non-monotone."""
+        start = AS_OF - timedelta(days=40)
+        row = ri.team_row(org_id="o", start=start.isoformat(),
+                          state=ri.STATE_MEASURED, reason=None,
+                          active_days={start + timedelta(days=20)},
+                          ambiguous_days={start + timedelta(days=10)},
+                          as_of=AS_OF)
+        assert row["active_at"] == {"7": True, "15": True, "30": False,
+                                    "60": None, "90": None}
+        assert row["unclassifiable_marks"] == []
+
+    def test_a_settled_mark_is_never_none_above_a_true_one(self):
+        """CUMULATIVE(A) >= CUMULATIVE(B) for A < B: a definite use on day 20
+        has to read ``True`` at day 7 AND day 15 — a hole at the weaker mark
+        while the stronger one is True is a contradiction the reader cannot
+        interpret (and it silently dropped retained teams out of the bands)."""
+        start = AS_OF - timedelta(days=40)
+        row = ri.team_row(org_id="o", start=start.isoformat(),
+                          state=ri.STATE_MEASURED, reason=None,
+                          active_days={start + timedelta(days=20)},
+                          ambiguous_days={start + timedelta(days=12)},
+                          as_of=AS_OF)
+        seen = [row["active_at"][str(n)] for n in ri.RETENTION_MARKS]
+        assert seen[:3] == [True, True, False]
+        assert row["unclassifiable_marks"] == []
+
     def test_the_90_day_histogram_window_is_bounded(self):
         start = AS_OF - timedelta(days=200)
         old = {start + timedelta(days=5)}          # 195 days ago: outside 90
@@ -287,6 +322,22 @@ class TestCohortSummary:
         assert cell["state"] == "partial"
         assert cell["n"] == 1
 
+    def test_a_definite_use_offsets_an_ambiguous_day_in_the_same_window(self):
+        """Regression for the P1 review finding, at the cohort level: a genuine
+        use at day 20 settles the day-7 / day-15 marks even with an ambiguous
+        day-10 row, so the team stays in the mark denominators AND in the
+        band cells (which need BOTH marks non-``None``)."""
+        start = AS_OF - timedelta(days=40)
+        rows = [_row("a", start, active={start + timedelta(days=20)},
+                     ambiguous={start + timedelta(days=10)})]
+        cohort = ri.cohort_summary(rows, as_of=AS_OF)
+        cell = cohort["marks"]["7"]
+        assert cell["state"] == ri.STATE_MEASURED
+        assert (cell["k"], cell["n"], cell["unmeasured_teams"]) == (1, 1, 0)
+        band = cohort["bands"]["7->15"]
+        assert band["state"] == ri.STATE_MEASURED
+        assert (band["left_active"], band["right_active"]) == (1, 1)
+
     def test_bands_report_the_drop(self):
         start = AS_OF - timedelta(days=40)
         rows = [_row("a", start, active={start + timedelta(days=8)}),
@@ -302,6 +353,60 @@ class TestCohortSummary:
                 _row("b", start, active={AS_OF - timedelta(days=100)})]
         cell = ri.cohort_summary(rows, as_of=AS_OF)["trailing_30_active"]
         assert (cell["k"], cell["n"]) == (1, 2)
+
+    def test_a_fully_measured_trailing_cell_does_not_claim_a_refusal(self):
+        """``reason`` is a refusal label. Emitting it on a fully measured cell
+        says the number is partial when it is not — the inverse of the module's
+        "the honest states are enforced, not narrated" rule."""
+        start = AS_OF - timedelta(days=40)
+        rows = [_row("a", start, active={AS_OF - timedelta(days=5)})]
+        cell = ri.cohort_summary(rows, as_of=AS_OF)["trailing_30_active"]
+        assert cell["state"] == ri.STATE_MEASURED
+        assert cell["unmeasured_teams"] == 0
+        assert cell["reason"] is None
+
+    def test_a_partial_trailing_cell_still_names_the_refusal(self):
+        """The fix must not silence the label where it is TRUE."""
+        start = AS_OF - timedelta(days=40)
+        rows = [_row("a", start, active={AS_OF - timedelta(days=5)}),
+                _row("b", start, state=ri.STATE_UNAVAILABLE, reason="boom")]
+        cell = ri.cohort_summary(rows, as_of=AS_OF)["trailing_30_active"]
+        assert cell["state"] == "partial"
+        assert cell["unmeasured_teams"] == 1
+        assert cell["reason"] == "some_teams_are_unmeasurable"
+
+    def test_a_clean_histogram_reads_measured(self):
+        start = AS_OF - timedelta(days=200)
+        rows = [_row("a", start, active={AS_OF - timedelta(days=1)})]
+        hist = ri.cohort_summary(rows, as_of=AS_OF)["active_days_histogram"]
+        assert hist["state"] == ri.STATE_MEASURED
+        assert hist["unmeasured_teams"] == 0
+
+    def test_histogram_reads_partial_when_a_team_is_unmeasured(self):
+        """The histogram is built from the same population rule as the
+        trailing cell and `n`/`buckets` already exclude the missing team, so
+        ``state`` is the only signal a consumer switching on it has. It was
+        the one cohort sub-surface that could never read ``partial``."""
+        start = AS_OF - timedelta(days=200)
+        rows = [_row("a", start, active={AS_OF - timedelta(days=1)}),
+                _row("b", start, state=ri.STATE_UNAVAILABLE, reason="boom")]
+        hist = ri.cohort_summary(rows, as_of=AS_OF)["active_days_histogram"]
+        assert hist["unmeasured_teams"] == 1
+        assert hist["state"] == "partial"
+        assert hist["n"] == 1
+
+    def test_histogram_reads_partial_when_a_window_carries_an_ambiguity(self):
+        """The other half of the same condition: a measured team whose 90-day
+        window has an ambiguous day has no ``active_days_90``, so it is in
+        ``unmeasured_teams`` and must partial the histogram too."""
+        start = AS_OF - timedelta(days=200)
+        rows = [_row("a", start, active={AS_OF - timedelta(days=1)}),
+                _row("b", start, active=set(),
+                     ambiguous={AS_OF - timedelta(days=3)})]
+        hist = ri.cohort_summary(rows, as_of=AS_OF)["active_days_histogram"]
+        assert hist["unmeasured_teams"] == 1
+        assert hist["state"] == "partial"
+        assert hist["n"] == 1
 
     def test_histogram_buckets_separate_cadences(self):
         start = AS_OF - timedelta(days=200)
@@ -636,3 +741,44 @@ class TestEndpointReading:
         assert recorded[0]["operation"] == "retention_cohort_read"
         assert recorded[0]["org_id"] == ""
         assert recorded[0]["detail"]["teams_total"] == 1
+
+
+class TestRetentionReadsDoNotShareTheDefaultExecutor:
+    """#3060 doctrine: long or stallable blocking work must NOT ride the loop's
+    shared default executor (it carries ~80 other `to_thread` sites and the auth
+    middleware's abuse hooks). The fleet walk and each per-org walk are
+    paginated control-plane HTTP round trips, so both go to the dedicated
+    `_RETENTION_EXECUTOR` — the `_SCORECARD_EXECUTOR` precedent. The pool SIZE
+    is also what bounds live threads, since cancelling the await does not stop
+    the worker (CPython #87185)."""
+
+    def test_the_fleet_and_per_org_reads_use_the_dedicated_pool(
+            self, client, internal_key, monkeypatch):
+        import tortoise.hosted_api as ha
+        start = AS_OF - timedelta(days=40)
+        seen: list[object] = []
+        real = ha._run_off_loop
+
+        async def _spy(executor, fn, /, *args, **kwargs):
+            seen.append(executor)
+            return await real(executor, fn, *args, **kwargs)
+
+        monkeypatch.setattr(ha, "_run_off_loop", _spy)
+        _wire(monkeypatch, FakeCP(
+            [{"id": "org-a", "created_at": _iso(start)},
+             {"id": "org-b", "created_at": _iso(start)}],
+            [_capture(start + timedelta(days=10), org="org-a")]))
+        resp = client.get(PATH, params={"as_of": AS_OF.isoformat()},
+                          headers=internal_key)
+        assert resp.status_code == 200, resp.text
+        # 1 fleet read + one read per org; every one on the dedicated pool.
+        assert len(seen) == 3
+        assert all(e is ha._RETENTION_EXECUTOR for e in seen)
+        assert ha._RETENTION_EXECUTOR is not ha._SCORECARD_EXECUTOR
+
+    def test_the_worker_pool_is_sized_to_the_documented_bound(self):
+        import tortoise.hosted_api as ha
+        assert (ha._RETENTION_EXECUTOR._max_workers
+                == max(1, min(ha._int_env("TORTOISE_RETENTION_WORKERS",
+                                          ha._RETENTION_MAX_CONCURRENCY), 8)))
+        assert ha._RETENTION_EXECUTOR._max_workers <= 8

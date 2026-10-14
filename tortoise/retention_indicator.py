@@ -408,8 +408,12 @@ def team_row(*, org_id: str, start: str | None, state: str,
     with no readable ``result_count`` (see LIMITATIONS). They are applied
     PER MARK, not to the whole row: a day-10 ambiguity cannot make the day-30
     mark unknown, so refusing the entire team over it would throw away
-    measurements that are sound. A mark whose window contains an ambiguous day
-    is ``None`` and is listed in ``unclassifiable_marks``.
+    measurements that are sound. An ambiguity makes a mark unknown only when
+    it is the SOLE candidate evidence — the definition is a disjunction over
+    days, so a definite use at/after day N settles the mark ``True`` whatever
+    else the window holds. Only a mark with NO definite use at/after day N and
+    at least one ambiguous day there is ``None`` and listed in
+    ``unclassifiable_marks``.
     """
     row: dict[str, Any] = {
         "org_id": org_id,
@@ -431,11 +435,22 @@ def team_row(*, org_id: str, start: str | None, state: str,
         if not mark_available(start_dt, as_of, n):
             active_at[str(n)] = None
             continue
+        # The verdict is computed FIRST: the mark is a disjunction over days
+        # ("any active day on/after day N"), so one definite use settles it
+        # True even when an ambiguous day also falls in the window. Consulting
+        # ambiguity first would return None over a settled True and make the
+        # cumulative series non-monotone (active_at[N] is None while
+        # active_at[M] for M > N is True). Ambiguity can only decide a mark
+        # the definite evidence did NOT settle — i.e. the ambiguous day is the
+        # sole candidate evidence for it.
+        if active_at_day(start_dt, active_days, n):
+            active_at[str(n)] = True
+            continue
         if any(d >= start_dt + timedelta(days=n) for d in amb):
             active_at[str(n)] = None
             unknown.append(str(n))
             continue
-        active_at[str(n)] = active_at_day(start_dt, active_days, n)
+        active_at[str(n)] = False
     row["active_at"] = active_at
     row["unclassifiable_marks"] = unknown
     first90 = as_of - timedelta(days=ACTIVITY_HISTOGRAM_DAYS - 1)
@@ -488,11 +503,12 @@ def cohort_summary(team_rows: Sequence[dict], *, as_of: date) -> dict:
 
     DENOMINATOR RULE: a mark's denominator is every team that could be
     CLASSIFIED for it — its start is at least N days before ``as_of``, and its
-    day-N window contains no ambiguous day. Teams that are not active are IN
-    the denominator; teams whose day has not arrived, teams that failed to
-    read, and teams with an ambiguous day in the window are excluded and
-    counted in ``unmeasured_teams``, which makes the cell ``partial`` rather
-    than a confident rate over a silently smaller set.
+    day-N window either carries a definite use or carries no ambiguous day.
+    Teams that are not active are IN the denominator; teams whose day has not
+    arrived, teams that failed to read, and teams whose day-N mark an
+    ambiguous day left UNSETTLED are excluded and counted in
+    ``unmeasured_teams``, which makes the cell ``partial`` rather than a
+    confident rate over a silently smaller set.
     """
     measured = [t for t in team_rows if t["state"] == STATE_MEASURED]
 
@@ -558,12 +574,13 @@ def cohort_summary(team_rows: Sequence[dict], *, as_of: date) -> dict:
     trailing_elig = [t for t in measured if started(t)]
     trailing_values = [t["active_within_30"] for t in trailing_elig]
     trailing_classified = [v for v in trailing_values if v is not None]
+    trailing_unmeasured = _unmeasured_teams(team_rows, started) + (
+        len(trailing_values) - len(trailing_classified))
     trailing = _cell(
         sum(1 for v in trailing_classified if v) if trailing_classified else None,
         len(trailing_classified) or None,
-        unavailable=_unmeasured_teams(team_rows, started)
-        + (len(trailing_values) - len(trailing_classified)),
-        reason="some_teams_are_unmeasurable")
+        unavailable=trailing_unmeasured,
+        reason=("some_teams_are_unmeasurable" if trailing_unmeasured else None))
     trailing["definition"] = (
         "teams with at least one active day in the trailing "
         f"{TRAILING_ACTIVE_DAYS} UTC days; denominator = every measured team "
@@ -578,7 +595,12 @@ def cohort_summary(team_rows: Sequence[dict], *, as_of: date) -> dict:
     hist_unmeasured = _unmeasured_teams(team_rows, started) + sum(
         1 for t in measured if started(t) and t["active_days_90"] is None)
     histogram = {
-        "state": STATE_MEASURED if hist_elig else STATE_NOT_MEASURABLE,
+        # `_cell`'s rule applies here too: a denominator with an unmeasured
+        # team behind it is `partial`, never a confident reading. `n` and the
+        # buckets are computed over `hist_elig` alone, so `state` is the only
+        # signal a consumer switching on it has that a team is missing.
+        "state": ("partial" if hist_elig and hist_unmeasured
+                  else STATE_MEASURED if hist_elig else STATE_NOT_MEASURABLE),
         "n": len(hist_elig) if hist_elig else None,
         "buckets": hist,
         "unmeasured_teams": hist_unmeasured,

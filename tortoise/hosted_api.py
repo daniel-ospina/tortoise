@@ -16626,14 +16626,33 @@ async def activation_cohort(
 #: partial metric.
 _RETENTION_MAX_ORGS = 1000
 
-#: Bounded parallelism for the per-org analytics read. The read is a
-#: control-plane HTTP walk (not a graph scan), so it rides the same
-#: `asyncio.to_thread` seam `_read_recall` uses rather than a second pool.
+#: Bounded parallelism for the per-org analytics read. ENFORCED BY THE POOL,
+#: not by a bare semaphore: the read is a control-plane HTTP walk of up to
+#: `max_pages` round trips per org, which is the "long / stallable" class the
+#: #3060 doctrine above says must NOT share the loop's default executor with
+#: ~80 other `to_thread` sites and the auth middleware's abuse hooks.
 _RETENTION_MAX_CONCURRENCY = 4
+
+#: Dedicated pool for the per-org activity read (the `_SCORECARD_EXECUTOR`
+#: precedent above, same #3060 reasoning; four workers because the walk is
+#: network-bound). It replaces `asyncio.to_thread` here: the default pool on a
+#: 2-vCPU host is `min(32, cpu+4)` = 6 workers, so four slow orgs would park
+#: most of the shared pool and queue every other `to_thread` tenant behind
+#: them. The pool SIZE is also what bounds live threads: cancelling the await
+#: stops the awaitable, not the worker (CPython #87185, quoted in
+#: `_run_with_close`), so a timed-out org keeps its worker until the HTTP
+#: client gives up — an abandoned thread can never exceed this pool, which a
+#: semaphore over the shared pool could not promise.
+_RETENTION_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(1, min(_int_env("TORTOISE_RETENTION_WORKERS",
+                                    _RETENTION_MAX_CONCURRENCY), 8)),
+    thread_name_prefix="retention-cohort")
 
 #: Per-org bound: one hung or unreadable org costs THAT team's cell and
 #: nothing else — it folds to `unavailable` with the org named, and its
-#: exclusion from the denominator is visible as a `partial` cell.
+#: exclusion from the denominator is visible as a `partial` cell. A timed-out
+#: org keeps its `_RETENTION_EXECUTOR` worker until the HTTP client returns,
+#: so it can cost that ONE pool slot for the request — never the shared pool.
 _RETENTION_PER_ORG_TIMEOUT_S = 30.0
 
 
@@ -16739,7 +16758,8 @@ async def retention_cohort(request: Request, as_of: str | None = None):
         return _unavailable(REASON_FLEET_FAILED)
 
     try:
-        teams, complete, reason = await asyncio.to_thread(read_team_starts, cp)
+        teams, complete, reason = await _run_off_loop(
+            _RETENTION_EXECUTOR, read_team_starts, cp)
     except Exception as exc:  # pragma: no cover — read_team_starts is total
         log.warning("retention cohort: fleet read failed: %s",
                     type(exc).__name__, exc_info=True)
@@ -16767,9 +16787,9 @@ async def retention_cohort(request: Request, as_of: str | None = None):
         async with sem:
             try:
                 return team["org_id"], await asyncio.wait_for(
-                    asyncio.to_thread(read_org_activity, cp, team["org_id"],
-                                      since_day=team["start"],
-                                      until_day=as_of_day),
+                    _run_off_loop(_RETENTION_EXECUTOR, read_org_activity, cp,
+                                  team["org_id"], since_day=team["start"],
+                                  until_day=as_of_day),
                     timeout=_RETENTION_PER_ORG_TIMEOUT_S)
             except TimeoutError:
                 log.warning("retention cohort: org %s exceeded %ss (fail-soft)",
