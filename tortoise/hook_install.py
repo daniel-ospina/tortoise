@@ -1417,6 +1417,15 @@ _OPTION_LESS_LAUNCHERS = frozenset({
 #: An environment assignment prefix (``A=/x/y``, ``PATH=$PATH:/bin``).
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
+#: Variables whose VALUE is the project root.  A ``$VAR``-prefixed hook path can
+#: only be ours when ``VAR`` is one of these: the value of any other variable is
+#: unknowable at classification time, and accepting it by directory suffix judged
+#: a FOREIGN hook ours — the timeout was stamped on the foreign entry and the
+#: real registration was never added (a silent no-capture, #3864 residual 1).
+#: ``$CLAUDE_PROJECT_DIR`` is the form Claude Code documents; ``$PWD`` is the
+#: shell's own project-root spelling.
+_PROJECT_ROOT_VARS = frozenset({"CLAUDE_PROJECT_DIR", "PWD"})
+
 #: A launcher operand that is a number/duration (``timeout 5``, ``nice -n 7``).
 _LAUNCHER_OPERAND_RE = re.compile(r"^[0-9]+(\.[0-9]+)?[smhd]?$")
 
@@ -1605,6 +1614,38 @@ def _split_command(command: str) -> list[tuple[str, bool]] | None:
     return tokens
 
 
+def _leading_var(tok: str) -> str | None:
+    """The variable a ``$VAR``/``${VAR}``-prefixed token starts with, else None.
+
+    The two spellings are kept apart because the prefix's WIDTH differs: the
+    token ``${CLAUDE_PROJECT_DIR}/…`` carries its braces (``_split_command``
+    consumes ``${…}`` atomically), so the remainder starts after the ``}``.
+    """
+    if not tok.startswith("$"):
+        return None
+    rest = tok[1:]
+    if rest.startswith("{"):
+        end = rest.find("}")
+        return rest[1:end] if end != -1 else None
+    j = 0
+    while j < len(rest) and (rest[j].isalnum() or rest[j] == "_"):
+        j += 1
+    return rest[:j] or None
+
+
+def _dir_suffix_matches(tok: str, hooks_dir: str) -> bool:
+    """Directory-suffix fallback, used ONLY when no install root is known.
+
+    An absolute path is never accepted this way: it resolves elsewhere, so a
+    suffix match would judge another project's hook ours.
+    """
+    if os.path.isabs(tok):
+        return False
+    dir_parts = Path(tok).parent.parts
+    want = Path(hooks_dir).parts
+    return len(dir_parts) >= len(want) and dir_parts[-len(want):] == want
+
+
 def _token_is_our_script(tok: str, script_name: str, hooks_dir: str | None,
                          root: str | os.PathLike[str] | None = None) -> bool:
     """True when a single EXECUTED token names our script under ``hooks_dir``.
@@ -1616,27 +1657,39 @@ def _token_is_our_script(tok: str, script_name: str, hooks_dir: str | None,
         return False
     if hooks_dir is None:
         return True
-    if root is not None and not tok.startswith("$"):
+    if tok.startswith("$"):
+        # A ``$VAR``-prefixed path is ours only when the variable IS the
+        # project root.  An UNKNOWN variable names a path we cannot resolve,
+        # and the directory-suffix fallback then judged a FOREIGN hook ours:
+        # ``$OTHER_PROJECT/.claude/hooks/session-end.sh`` (bash expands to a
+        # path outside this install) stamped the timeout on the foreign entry
+        # and suppressed the real registration — a silent no-capture.  Fail
+        # CLOSED instead: a false "missing" only appends a duplicate.
+        var = _leading_var(tok)
+        if var not in _PROJECT_ROOT_VARS:
+            return False
+        if root is None:
+            return _dir_suffix_matches(tok, hooks_dir)
+        # The variable expands to the project ROOT, so ``$VAR/rest`` resolves
+        # as ``root/rest`` — exactly as a relative path does.
+        prefix = "${" + var + "}" if tok.startswith("${") else "$" + var
+        candidate = Path(str(root) + tok[len(prefix):])
+    elif root is None:
+        return _dir_suffix_matches(tok, hooks_dir)
+    else:
         # The token must resolve to THIS project's installed hook.  Absolute
         # AND relative paths are compared against ``root/hooks_dir/script`` —
         # suffix-matching a relative path let ``vendor/.claude/hooks/
         # session-end.sh`` (a DIFFERENT file) count as ours, which stamped a
         # timeout on the foreign entry and never registered the real one (a
         # silent no-capture).
-        expected = Path(root) / hooks_dir / script_name
         candidate = Path(tok) if os.path.isabs(tok) else Path(root) / tok
-        try:
-            return candidate.resolve() == expected.resolve()
-        except (OSError, ValueError, RuntimeError):
-            # NUL byte (ValueError) / symlink loop (RuntimeError) / IO error
-            return False
-    # No root (or a ``$VAR`` token whose value is unknowable): fall back to the
-    # directory-suffix check.  An absolute path is never accepted this way.
-    if os.path.isabs(tok):
+    expected = Path(root) / hooks_dir / script_name
+    try:
+        return candidate.resolve() == expected.resolve()
+    except (OSError, ValueError, RuntimeError):
+        # NUL byte (ValueError) / symlink loop (RuntimeError) / IO error
         return False
-    dir_parts = Path(tok).parent.parts
-    want = Path(hooks_dir).parts
-    return len(dir_parts) >= len(want) and dir_parts[-len(want):] == want
 
 
 def _invokes_script(command: str, script_name: str,
@@ -1665,7 +1718,11 @@ def _invokes_script(command: str, script_name: str,
     ``sh -c '…'``.
 
     A BARE filename is rejected because it resolves to the project root, and an
-    absolute path is accepted only when it resolves to THIS project's hook.  Each
+    absolute path is accepted only when it resolves to THIS project's hook.  A
+    ``$VAR``-prefixed path is accepted only when ``VAR`` is itself the project
+    root (``$CLAUDE_PROJECT_DIR``/``$PWD``); any other variable is foreign,
+    because its value is unknowable and a directory-suffix match on it judged a
+    FOREIGN hook ours (a silent no-capture).  Each
     false positive would suppress our own registration while reporting a healthy
     install; each false negative appends a DUPLICATE registration.
     """
@@ -1731,7 +1788,16 @@ def _invokes_script(command: str, script_name: str,
             launcher_word = "command"
             continue
         if not quoted and tok in ("-v", "-V") and launcher_word == "command":
-            return False  # ``command -v <path>`` is a query, not an execution
+            # ``command -v <name>`` QUERIES a name: its operands are query
+            # arguments, not executed commands — but only until the end of
+            # THIS simple command.  Returning False here condemned the whole
+            # line, so ``command -v <hook>; <hook>`` (bash runs the second
+            # one) was judged foreign and a DUPLICATE registration was
+            # appended.  Clearing ``expect_cmd`` skips the operands; the next
+            # separator re-arms executable position.
+            expect_cmd = False
+            launcher_word = None
+            continue
         launcher = _as_launcher(tok, quoted, root)
         if launcher is not None:
             launcher_word = launcher

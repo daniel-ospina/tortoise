@@ -729,9 +729,13 @@ def _is_our_script_command(command: str, script_name: str,
     Confinement to the install is provided by ``hook_install`` itself — a
     token resolving to a DIFFERENT file (a vendored
     ``vendor/.claude/hooks/session-end.sh``, an absolute path outside
-    ``root``) is somebody else's hook, while a ``$VAR`` token
+    ``root``) is somebody else's hook, and a ``$VAR`` token
     (``$CLAUDE_PROJECT_DIR/.claude/hooks/…``, the form Claude Code documents)
-    falls back to the shared directory-suffix rule.
+    is resolved against ``root`` only when the variable IS the project root
+    (``$CLAUDE_PROJECT_DIR`` / ``$PWD``); any other variable is foreign.  The
+    old directory-suffix fallback judged ``$OTHER_PROJECT/.claude/hooks/…``
+    ours, which stamped the timeout on a foreign entry and never registered
+    the real one — a silent no-capture (#3864 residual 1).
     """
     return hook_install._invokes_script(command, script_name, hooks_dir, root)
 

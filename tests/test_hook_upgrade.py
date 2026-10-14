@@ -2060,6 +2060,107 @@ class TestDeclaredThreatSurface:
             command, "session-end.sh", ".claude/hooks", root) is False
 
     @pytest.mark.parametrize("command", [
+        "$OTHER_PROJECT/.claude/hooks/session-end.sh",
+        "${OTHER_PROJECT}/.claude/hooks/session-end.sh",
+    ])
+    def test_unknown_var_path_is_not_a_registration(
+            self, tmp_path, monkeypatch, command):
+        """CLASS 1 (fail-open), third reproduction: a ``$VAR``-prefixed path is
+        ours only when the variable IS the project root.
+
+        For any other variable the value is unknowable, and the directory-suffix
+        fallback read ``$OTHER_PROJECT/.claude/hooks/session-end.sh`` as our
+        registration: ``detect_install`` reported the install current and
+        ``upgrade_install`` stamped the timeout onto the FOREIGN entry while the
+        real entry was never added — a silent no-capture.  The verdict is
+        ground-truthed by EXECUTING the form: ``$OTHER_PROJECT`` names a
+        DIFFERENT project whose hook touches a different marker, so bash runs
+        that hook and NOT ours, and the matcher must agree.
+
+        MUTATION: restore the ``$VAR`` directory-suffix fallback (accept any
+        token starting with ``$`` by suffix) → the foreign entry is judged ours
+        → no ``missing-hook-entry`` and no real entry appended → RED.
+        """
+        other = tmp_path / "other-project"
+        foreign = other / ".claude" / "hooks" / "session-end.sh"
+        foreign.parent.mkdir(parents=True)
+        foreign_marker = other / "FOREIGN-MARKER"
+        foreign.write_text(
+            f"#!/bin/bash\ntouch {shlex.quote(str(foreign_marker))}\n")
+        foreign.chmod(0o755)
+        monkeypatch.setenv("OTHER_PROJECT", str(other))
+        root = _old_install(tmp_path)
+        completed = subprocess.run(
+            ["bash", "-c", command], capture_output=True, text=True,
+            timeout=30, cwd=str(root))
+        assert foreign_marker.exists(), (
+            f"ground truth changed: {command!r} did not run the FOREIGN hook "
+            f"(stderr={completed.stderr!r})")
+        assert hook_install._invokes_script(
+            command, "session-end.sh", ".claude/hooks", root) is False
+
+        # The observable consequence: the dead entry is not mistaken for ours,
+        # so a REAL registration is appended instead of a timeout being
+        # stamped onto the foreign one.
+        doc = {"hooks": {"SessionEnd": [{"matcher": "", "hooks": [
+            {"type": "command", "command": command,
+             "timeout": 60}]}]}}
+        (root / ".claude" / "settings.json").write_text(json.dumps(doc))
+        assert any(
+            f.kind == "missing-hook-entry" and f.script == "session-end.sh"
+            for f in detect_install(root))
+        upgrade_install(root)
+        assert len(_settings(root)["hooks"]["SessionEnd"]) == 2
+
+    @pytest.mark.parametrize("command", [
+        "command -v {rel}; {rel}",   # the query does not end the command line
+        "bash -v {rel}",             # verbose-and-execute (a boolean -v)
+        "/bin/bash -v {rel}",
+    ])
+    def test_query_then_invocation_is_ours(self, tmp_path, command):
+        """CLASS 2 (false negative): ``command -v <hook>`` QUERIES the name; it
+        does not stop the rest of the command line.  The old guard returned
+        from the whole classification, so ``command -v <hook>; <hook>`` (bash
+        runs the second one) was judged foreign: ``detect_install`` emitted a
+        blocking ``missing-hook-entry`` for a WORKING install and
+        ``upgrade_install`` appended a duplicate — the hook then ran twice.
+
+        Ground-truthed by EXECUTING the form: the installed hook touches a
+        marker, so bash running it is observable, and the matcher must agree.
+
+        MUTATION: restore ``return False`` for the ``command -v``/``-V`` guard
+        (instead of clearing ``expect_cmd``) → the invocation after ``;`` is
+        never reached → the matcher says foreign → RED.
+        """
+        rel = ".claude/hooks/session-end.sh"
+        root = tmp_path / "project"
+        hook = root / Path(rel)
+        hook.parent.mkdir(parents=True)
+        marker = root / "MARKER"
+        hook.write_text(f"#!/bin/bash\ntouch {shlex.quote(str(marker))}\n")
+        hook.chmod(0o755)
+        command = command.format(rel=rel)
+        completed = subprocess.run(
+            ["bash", "-c", command], capture_output=True, text=True,
+            timeout=30, cwd=str(root))
+        assert marker.exists(), (
+            f"ground truth changed: {command!r} did not execute the hook "
+            f"(stderr={completed.stderr!r})")
+        assert hook_install._invokes_script(
+            command, "session-end.sh", ".claude/hooks", root) is True
+
+        # The observable consequence: no blocking ``missing-hook-entry`` for a
+        # working install, and no duplicate registration.
+        doc = {"hooks": {"SessionEnd": [{"matcher": "", "hooks": [
+            {"type": "command", "command": command, "timeout": 60}]}]}}
+        installed = _old_install(tmp_path, settings=doc)
+        assert not [f for f in detect_install(installed)
+                    if f.kind == "missing-hook-entry"
+                    and f.script == "session-end.sh"]
+        upgrade_install(installed)
+        assert len(_settings(installed)["hooks"]["SessionEnd"]) == 1
+
+    @pytest.mark.parametrize("command", [
         "/bin/bash {abs}",
         "/usr/bin/env bash {abs}",
         "/bin/sh -c '{abs}'",
