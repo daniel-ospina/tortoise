@@ -110,6 +110,40 @@ class TestActivityPredicate:
         assert ri.row_establishes_use(
             {"event_name": ri.MCP_TELEMETRY_EVENT, "properties": "oops"}) is None
 
+    def test_properties_as_a_json_string_is_read(self):
+        """PostgREST can hand the jsonb column back as a JSON-encoded STRING.
+        That shape is measured live on this store and is parsed by
+        ``activation_scorecard._row_props`` (pinned there by
+        ``test_properties_as_a_json_string_is_counted``); the scorecard is the
+        module this predicate claims parity with, so the retrieval leg must
+        read it too. Without that branch every search row on this store shape
+        reads unclassifiable and the leg silently contributes nothing."""
+        import json
+
+        row = {"event_name": ri.MCP_TELEMETRY_EVENT, "created_at": _iso(TODAY)}
+        assert ri.row_establishes_use(
+            {**row, "properties": json.dumps(
+                {"tool_name": "tortoise_search", ri.RESULT_COUNT_PROP: 3})}
+        ) is True
+        assert ri.row_establishes_use(
+            {**row, "properties": json.dumps(
+                {"tool_name": "tortoise_search", ri.RESULT_COUNT_PROP: 0})}
+        ) is False
+        # The unreadable-count rule is unchanged on this shape: a string with
+        # no result_count is still ambiguous, not a silent "not a use".
+        assert ri.row_establishes_use(
+            {**row, "properties": json.dumps({"tool_name": "tortoise_search"})}
+        ) is None
+
+    def test_a_json_string_that_is_not_a_mapping_is_not_a_use(self):
+        import json
+
+        assert ri._row_props({"properties": json.dumps([1, 2])}) == {}
+        assert ri._row_props({"properties": json.dumps("nope")}) == {}
+        assert ri.row_establishes_use(
+            {"event_name": ri.MCP_TELEMETRY_EVENT,
+             "properties": json.dumps("not-a-mapping")}) is None
+
 
 class TestFoldActivityDays:
     def test_collects_only_qualifying_days(self):

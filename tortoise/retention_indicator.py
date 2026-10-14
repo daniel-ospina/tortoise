@@ -85,6 +85,7 @@ categories. This module does not invent churn from silence.
 """
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Iterable, Sequence
 from datetime import UTC, date, datetime, timedelta
@@ -293,11 +294,29 @@ def _row_props(row: Any) -> dict:
     Defensive on purpose: a store or proxy that answers with a non-mapping
     ``properties`` must not become an ``AttributeError`` 500 — the row simply
     carries no readable props.
+
+    BOTH stored shapes are read: the writer stores a jsonb object, but a store
+    or proxy can hand the column back as a JSON-encoded STRING. That shape is
+    measured live on this store and is parsed by
+    ``activation_scorecard._row_props`` (pinned there by
+    ``test_properties_as_a_json_string_is_counted``); ``raw_state`` and
+    ``index_catalogue`` carry the same branch. Without it the retrieval leg is
+    DEAD on that shape — every search row reads as unclassifiable while the
+    module claims parity with the scorecard "so the two cannot disagree about
+    what a use is" — which is exactly the disagreement it causes.
     """
     if not isinstance(row, dict):
         return {}
     props = row.get("properties")
-    return props if isinstance(props, dict) else {}
+    if isinstance(props, dict):
+        return props
+    if isinstance(props, str):
+        try:
+            parsed = json.loads(props)
+        except (ValueError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 def row_establishes_use(row: Any) -> bool | None:
@@ -680,7 +699,6 @@ def _definition_hash() -> str:
     comparable.
     """
     import hashlib
-    import json
     blob = json.dumps(DEFINITION, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
