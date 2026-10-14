@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 
 from tests._github_mock import MockGitHubTransport, gh_issue
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import require_answered
 from tortoise.hosted_api import (
     _ALLOWED_STATE_KEYS,
     _INDEX_JOBS,
@@ -186,6 +187,10 @@ def _poll_until(client, job_id: str, status: str, timeout_s: float = 8.0):
     deadline = time.time() + timeout_s
     while True:
         r = client.get(f"/v1/index/github/{job_id}")
+        # #5049: `GET /v1/index/github/<id>` is not exempt from the transport
+        # wait bound, so a 504 here is the product refusing legibly, not an
+        # answer — INCONCLUSIVE, never the bare FAIL this assert used to make.
+        require_answered(r, what=f"GET /v1/index/github/{job_id} answered")
         assert r.status_code == 200, r.text
         body = r.json()
         if body["status"] == status:
@@ -193,6 +198,30 @@ def _poll_until(client, job_id: str, status: str, timeout_s: float = 8.0):
         if time.time() > deadline:
             raise AssertionError(f"job {job_id} not {status}: {body}")
         time.sleep(0.02)
+
+
+def test_poll_until_is_inconclusive_on_a_bound_refusal():
+    """#5049: the poll's own 504 refusal is a non-answer — never a FAIL.
+
+    Deterministic (no load, no server): the client answers with the product's
+    own refusal. Removing `require_answered` from `_poll_until` makes this go
+    RED with `assert 504 == 200`, which is the must-fail leg.
+    """
+
+    class _Refusing:
+        status_code = 504
+
+        def __init__(self) -> None:
+            from tortoise import mcp_auth
+
+            self.text = mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE
+
+        def get(self, *_args, **_kwargs):
+            return self
+
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        _poll_until(_Refusing(), "job-1", "completed")
+    assert "INCONCLUSIVE [#5049]" in str(excinfo.value)
 
 
 # ── State-key registration (cycle-3 P1-2) ─────────────────────────
@@ -470,6 +499,10 @@ def test_live_progress_written_during_walk(provisioned, mock_github, monkeypatch
     deadline = time.time() + 10.0
     while time.time() < deadline:
         rp = provisioned.tc.get(f"/v1/index/github/{job_id}")
+        # #5049: the same non-exempt poll route `_poll_until` converts — a
+        # refusal here is a non-answer, so the loop must not read its
+        # `{"detail": ...}` body as a missing-progress deadline FAIL.
+        require_answered(rp, what=f"GET /v1/index/github/{job_id} answered")
         body = rp.json()
         if (body.get("repos_processed", 0) >= 1
                 and 0 < body.get("progress", 0) < 100):
@@ -713,6 +746,10 @@ def test_repoll_drains_and_clears_truncated_persisted(client, tmp_path,
     monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
     # run 1: cap 500 → truncated cursor persisted
     r = client.tc.post("/v1/index/github", json={"org": "acme"})
+    # #5049: `POST /v1/index/github` is not exempt from the transport wait
+    # bound — a 504 refusal has no `job_id`, so dereferencing it produced the
+    # `KeyError: 'job_id'` that was read as a red (#8122, measured four times).
+    require_answered(r, what="POST /v1/index/github returned a job id")
     body = _poll_until(client.tc, r.json()["job_id"], "completed")
     assert body["repos_processed"] == 1
     state = client.tc.get("/v1/onboarding/state").json()["onboarding"]

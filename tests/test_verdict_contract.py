@@ -32,12 +32,29 @@ from tests._verdict import (
     ProcessGlobal,
     host_capability,
     inconclusive_on_timeout,
+    is_transport_wait_bound_refusal,
     node_meets,
+    require_answered,
     require_node_floor,
     require_within,
     reset_process_globals,
+    transport_wait_bound_s,
     wait_for,
 )
+
+
+def _refusal_response(*, status: int = 504, body: str | None = None):
+    """A canned HTTP response standing in for the hosted API's refusal."""
+    from tortoise import mcp_auth
+
+    class _Response:
+        def __init__(self) -> None:
+            self.status_code = status
+            self.text = (
+                mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE if body is None else body
+            )
+
+    return _Response()
 
 _ATEXIT = "tortoise.embedded_lifecycle._atexit_deadline"
 
@@ -97,6 +114,68 @@ def test_a_non_timeout_error_is_not_swallowed():
         what="the probe", deadline_s=4.0, exceptions=(_ClientTimeout,)
     ):
         raise ValueError("a real product defect")
+
+
+# ── rule 1, product side: the transport wait-bound refusal ─────────────────
+def test_the_transport_bound_refusal_skips_and_names_the_product_bound():
+    """A bound reached with no answer is INCONCLUSIVE, and names the budget."""
+    response = _refusal_response()
+    assert is_transport_wait_bound_refusal(response) is True
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        require_answered(response, what="POST /v1/sessions answered")
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    # The deadline NAMED is the product's own bound, not an invented one.
+    assert f"{transport_wait_bound_s():g}" in message
+
+
+def test_the_inconclusive_diagnosis_names_no_surface_status():
+    """The refusal rides a 504 on REST and a 200 on the MCP arm.
+
+    The diagnosis is the artifact a lane reads when a site skips, so it must
+    not send that reader hunting for a REST-only status that never occurred on
+    the MCP surface (the detector's own docstring forbids assuming one).
+    """
+    for status in (504, 200):
+        with pytest.raises(pytest.skip.Exception) as excinfo:
+            require_answered(_refusal_response(status=status), what="a probe")
+        message = str(excinfo.value)
+        assert "(HTTP 504)" not in message, message
+        assert "#3834" in message, message
+
+
+def test_an_unrelated_504_is_returned_to_the_caller():
+    """Only the product's OWN refusal is converted — a bare 504 is not it."""
+    response = _refusal_response(body='{"detail": "gateway timeout"}')
+    assert is_transport_wait_bound_refusal(response) is False
+    assert require_answered(response, what="a probe") is response
+
+
+def test_the_product_message_alone_is_enough_without_a_504_status():
+    """The MCP arm's refusal rides a 200, so the STATUS cannot be the gate.
+
+    `mcp_server._await_under_mcp_wait_bound` answers a breach with a
+    `CallToolResult(isError=True)` inside the SSE stream — HTTP 200 carrying the
+    SAME message. A status-gated detector would read that as a silent PASS; the
+    product's own message is the signal, on every surface.
+    """
+    response = _refusal_response(status=200)
+    assert is_transport_wait_bound_refusal(response) is True
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        require_answered(response, what="MCP tools/call answered")
+    assert "INCONCLUSIVE [#5049]" in str(excinfo.value)
+
+
+def test_an_answered_response_is_returned_untouched():
+    response = _refusal_response(status=200, body='{"ok": true}')
+    assert require_answered(response, what="a probe") is response
+
+
+def test_a_non_504_error_still_reaches_the_callers_own_assertion():
+    """A genuine product failure must FAIL, not skip: 402/500 are returned."""
+    for status in (402, 500, 409, 429):
+        response = _refusal_response(status=status, body='{"detail": "refused"}')
+        assert require_answered(response, what="a probe") is response, status
 
 
 # ── rule 2: sufficiency is a RECORDED property, never a live measurement ───

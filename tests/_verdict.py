@@ -143,6 +143,87 @@ def inconclusive_on_timeout(
         )
 
 
+# ── rule 1, product side: the transport wait-bound refusal ────────────────
+# The hosted API wraps every non-exempt route in `WaitBoundMiddleware` and
+# answers a request that outlives `mcp_auth._TRANSPORT_WAIT_BOUND_S` with a
+# 504 whose body is `mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE` (#3834, owner
+# ruling 2026-09-20). That refusal is the LEGIBLE REFUSAL the ruling requires —
+# it is the product saying "no answer yet", not an answer. A test that reads it
+# as a FAIL is therefore reading the host's load, which is exactly what rule 1
+# forbids; the property under test was never observed.
+#
+# The detection is deliberately narrow: the product's own refusal message must
+# be present in the response body. It is NOT gated on the status, because the
+# refusal's status differs by surface — the REST arm answers 504, while the MCP
+# arm answers HTTP 200 with a `CallToolResult(isError=True)` that carries the
+# SAME message (the SDK collapses a raised `McpError` into that shape — see
+# `mcp_server._await_under_mcp_wait_bound`). A 504 that does NOT carry the
+# message (a proxy, another seam) is not this refusal and is left to the caller.
+# Everything that is not this refusal — including every other error status — is
+# returned untouched, so a genuine product failure still FAILs the caller.
+
+
+def _body_text(response: Any) -> str:
+    """The response body as text, whatever the client exposes it on."""
+    body = getattr(response, "text", None)
+    if isinstance(body, str):
+        return body
+    content = getattr(response, "content", b"")
+    if isinstance(content, bytes):
+        return content.decode("utf-8", "replace")
+    return str(content)
+
+
+def transport_wait_bound_s() -> float:
+    """The product's transport wait bound, resolved lazily (rule 2: name the budget).
+
+    Imported inside the call so this module stays stdlib+pytest at import time
+    (it is imported at `tests/conftest.py` module level).
+    """
+    from tortoise import mcp_auth
+
+    return float(mcp_auth._TRANSPORT_WAIT_BOUND_S)
+
+
+def is_transport_wait_bound_refusal(response: Any) -> bool:
+    """True when ``response`` is the product's transport wait-bound refusal.
+
+    Surface-agnostic by construction: the REST arm answers a 504 whose body is
+    the refusal message, and the MCP arm answers 200 whose body carries the same
+    message inside an ``isError`` result. The message — emitted from one module
+    by one seam — is the signal; the status is not, because it differs by
+    surface. A conforming caller therefore cannot read the MCP refusal as a
+    silent PASS while the REST one is caught.
+    """
+    from tortoise import mcp_auth
+
+    return mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE in _body_text(response)
+
+
+def require_answered(response: Any, *, what: str) -> Any:
+    """Return an ANSWERED response; a transport wait-bound refusal is INCONCLUSIVE.
+
+    This is the product-side exit for rule 1: the request was refused by a
+    wall-clock bound with no answer, so the property was never observed. The
+    verdict is an INCONCLUSIVE skip that names the bound — never a bare FAIL
+    (which reads as a product defect) and never a silent pass.
+
+    Every other response, including a non-504 error, is returned unchanged.
+    """
+    if is_transport_wait_bound_refusal(response):
+        inconclusive(
+            what,
+            deadline_s=transport_wait_bound_s(),
+            diagnosis=(
+                "The product's transport wait bound refused the request instead "
+                "of answering it (#3834); the refusal's status differs by "
+                "surface (REST 504, MCP 200 with an isError result), so it is "
+                "named by neither — the property under test was never observed."
+            ),
+        )
+    return response
+
+
 @dataclasses.dataclass(frozen=True)
 class Deadline:
     """A named budget with its *recorded* endpoint time (rule 2).

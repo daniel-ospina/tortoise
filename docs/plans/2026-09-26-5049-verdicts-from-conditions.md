@@ -252,7 +252,7 @@ passes the flag → the recorded flag floor is 22.7, matching
 | #4497 redislite RDB schedule in subprocess fixtures | `tests/_embedded.py` + spawn sites | needs a child-process hook or per-site `serverconfig`; **not** reset per test (subprocesses don't import conftest) |
 | #4499 health-truth flake | `tests/test_selfhost.py` | needs a decision (stub probe vs liveness/readiness split) |
 | #4601 single-flight timing window | `tests/test_github_index_lifecycle.py` | needs an exposed synchronization seam |
-| #4627 first-commit 10 s transport bound | `tortoise/hosted_api.py` + test | touches the recorded #3834 ruling → owner decision |
+| #4627 first-commit 10 s transport bound | `tortoise/hosted_api.py` + test | **test-side verdict CONVERTED** — the bound's refusal now yields INCONCLUSIVE via the contract (`require_answered`); see **#4627 — the transport-bound verdict** below. The PRODUCT-side question (is 10 s sufficient for a cold commit?) still touches the recorded #3834 ruling → owner decision |
 | #4717 order-dependent BFF clickthrough | `tests/e2e/test_auth_bff_clickthrough.py` | needs the leaking precondition identified |
 | #4736 DR `APP_DOWN` 20 s vs ~17 s | `.github/scripts/registry-cron.sh` | CI-script surface; needs a measured endpoint ceiling |
 | #4737 welcome-e2e 15 s vs ~10 s | `tests/e2e/test_welcome_page.py` | live-network; measure/derive budget |
@@ -274,6 +274,54 @@ passes the flag → the recorded flag floor is 22.7, matching
 | #4026 shared `tortoise_test_matrix` | test DB provisioning | per-lane DB isolation |
 | **#5049 comment 2026-09-25** `test_capture_session.py` (warm vs flushed DB) | `tests/test_capture_session.py` | verdict from reused graph state → #4026 |
 | **#5049 comment 2026-09-25** `test_kind_eval_set.py` (concurrent pytest) | `tests/test_kind_eval_set.py` | verdict from a shared DB under concurrency → #4026 |
+
+### #4627 — the transport-bound verdict (converted)
+
+The two halves of `#4627` are deliberately separate, and only the test half was deferred
+here:
+
+- **Test half (converted).** Every route outside `_TRANSPORT_WAIT_BOUND_EXEMPT` is answered
+  by `hosted_api.WaitBoundMiddleware` with the legible refusal when it outlives
+  `mcp_auth._TRANSPORT_WAIT_BOUND_S` (504 on the REST arm; a `CallToolResult(isError=True)`
+  carrying the same message on a 200 for the MCP arm). A test that reads that refusal as
+  its verdict is reading the host's load, which is rule 1's subject. The contract now
+  expresses it: `tests/_verdict.py::require_answered` returns an ANSWERED response and
+  turns the refusal into `INCONCLUSIVE [#5049]` naming the 10 s bound. It detects the
+  refusal by the product's own message, not by the status, so the MCP arm's 200 cannot be
+  read as a silent pass. Every other response — including the 4xx refusals the callers
+  assert on — is returned unchanged.
+- **Product half (owner).** Whether the bound's VALUE is right for a cold commit, whether
+  to warm the embedder, or whether to reopen the exemption, is the recorded **#3834**
+  ruling's territory. Nothing here changes the product: the bound stays 10 s and the
+  refusal stays legible.
+
+Converted call sites and seams (the seams are the sweep — one conversion covers every
+caller behind them):
+
+| Site / seam | Covers |
+|---|---|
+| `test_commit_endpoint.py::_commit` | every hosted-app `/v1/sessions/commit` POST in the file — the seam plus the direct posts in `test_failed_write_retry_applies_the_counters_once`, `TestLayer1`, the 401 and body-cap sites (#4627's own reproducer) |
+| `test_github_index_lifecycle.py::_poll_until` | the file's whole `_poll_until` path, plus the pump-and-observe poll in `test_live_progress_written_during_walk` |
+| `test_index_docs_api.py::_poll_until` | the file's whole `_poll_until` path, plus the pump-and-observe polls in `test_docs_live_progress_written_during_walk` and `test_docs_live_progress_all_branches_site` |
+| `test_capture_loop_responsiveness.py::_measure_capture_graph_work` | the measured `#3086` capture through **both** callers (`_measure_on_loop_graph_work` and the direct schema-bootstrap caller) — the LOWER seam, not the wrapper |
+| `test_one_free_org_entitlement.py::_post_signed` | the `/webhooks/stripe` seam |
+| `test_activation_scorecard.py::test_default_window_is_24h` | `#5049`'s `KeyError: 'window'` instance |
+| `test_pack_state.py::TestGetV1Packs` (2) | `#4883`/`#4816`'s measured GETs |
+| `test_writer_inventory.py` (2) | the `#7931` signup / graph-write instances |
+| `test_capture_cost_measurement.py`, `test_onboarding_endpoints.py`, `test_oauth_mcp.py`, `test_signup_token_revoke.py`, `test_hosted_api.py::TestDreamEndpoint` | each issue-measured instance |
+
+**Remaining, deliberately not converted here:** the bare `assert r.status_code == 200`
+reads on non-exempt routes that sit behind no shared seam (≈1.7k across `tests/`, top
+files `test_hosted_api.py`, `test_dr_endpoints.py`, `test_invites_http.py`). They share
+one mechanism and one fix — route the response through `require_answered` — so the next
+lane converts the seam, not the leaf. `test_hosted_api.py`'s other three `#8122` nodeids
+are left to that issue's own retry-class handling.
+
+**Scope of the closure (recorded so the tracker does not read rule 1 as globally closed):**
+this increment closes rule 1 for the **transport-bound** path — every route and seam named
+in the table above — not for the ≈1.7k bare status reads behind no shared seam. The
+residual is tracked as **#8582** (the no-seam class), not an endorsement that the class is
+exhausted; `#5049` stays open until #8582 lands.
 
 ### Rule-1 driver inventory (the `wait_for` family the contract unifies)
 
