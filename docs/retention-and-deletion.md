@@ -54,6 +54,7 @@ The horizon is **path-dependent**, and the difference matters:
 | **Live**-data snapshots (a backup horizon, **not** an undo) | ≈ **28 days** (24 hourly + 7 daily + 4 weekly) | `tortoise/backup_config.py` `retention_hourly/daily/weekly` |
 | **Team-account** deletion — backup artifacts | **not yet erased** — see *Open gaps* below | `tortoise/hosted_api.py` `_purge_deleted_orgs` |
 | **Session recording** — the recording itself | **no expiry** — retained until deleted by a member of the organization (**owner ruling 2026-10-08**); a snapshot taken before the deletion retains it until it ages out on the ≈28-day cycle, so deletion is complete in the live service immediately and in backups within four weeks | `tortoise/hosted_api.py` `delete_session` |
+| **Product-usage record** — the per-capture / per-team `capture_cost` rows in `analytics_events` (#3843) | **no default window** — the record is kept; on an account/team erasure the **identity layer is hard-deleted and the row is retained decoupled** (the table has **no FK** to `organizations`, so no cascade reaches it, and the `organizations` row carrying the name is deleted) | `tortoise/supabase_control.py` `purge_org_control_plane` — it deletes `api_keys` / `org_memberships` / `invitations` and then the `organizations` row via `purge_org_record`, and deliberately **never touches `analytics_events`** |
 | **Second-region mirror** (shipped; `BACKUP_MIRROR_ENABLED` default **off**) | deletion **not propagated** (append-only) | `docs/ops/registry-backup-dr.md` |
 | **Auth session store** — an expired row in the D1 `sessions` table (the opaque handle + its refresh token) | deleted **24 hours after its own `expires_at`**; a **revoked** row is never deleted early, so it survives the session's whole declared life (400 days, `SESSION_MAX_AGE_S`) | `website/apps/dashboard/functions/_shared/auth/session.ts` `SESSION_SWEEP_GRACE_S` |
 
@@ -267,6 +268,39 @@ this is **credential hygiene**, a different axis from the deletion promise above
 and it is exempt from the "link or be a named constant" rule by the same logic
 as the operational event store. The control-plane audit trail lives in
 `audit_events`; no deletion here destroys an audit record.
+
+## A different axis: the product-usage record (#3843)
+
+The owner decided (#3843, 2026-09-17) to keep a rich **per-capture, per-team**
+usage record — *team · session · timestamp · harness · model(s) · calls · input
+tokens · output tokens · cost* — written as one `capture_cost` row per capture
+ATTEMPT into `analytics_events`, so usage can be read at team level ("this
+team's usage is climbing") and at capture level ("this capture was unusually
+expensive"). Its retention is **not** the deletion promise above and **is not a
+window**:
+
+- **No default window, of any length.** The owner ruled (#3853, 2026-09-17) that
+  there is no default retention period on user content, and the only
+  user-initiated deletion flow is the account/team path.
+- **On erasure the record is retained decoupled, not deleted.** *"Usage data
+  that's been aggregated (product usage analytics) can't be fully deleted but
+  gets decoupled from your identity (which is fully deleted)."* (Owner, #3853.)
+  No code severs a link, because the decoupling **is** the identity deletion:
+  `purge_org_control_plane` hard-deletes `api_keys`, `org_memberships`,
+  `invitations` and then the `organizations` row — the row that carries the
+  name, and through it the identity — and **never touches `analytics_events`**,
+  which has no FK to `organizations` to cascade through. The surviving row
+  carries a random `org_id` and no longer resolves to a team or a person. Pinned
+  by
+  `tests/test_retention_promise.py::test_usage_record_is_retained_decoupled_on_purge`.
+
+> **OVERRIDES:** the common erasure practice — a data-subject request deleting
+> *every* copy of that subject's personal data, analytics included — because the
+> owner ruled that product-usage analytics are kept and **de-identified** rather
+> than deleted. Customer copy states the same carve-out: privacy §6 *"analytics
+> data is not silently claimed to be deleted"*, and the §16 deletion scope is
+> *"deleted or de-identified"*. Reopening it is an owner question on **#3853**,
+> not a discovery to absorb into an adjacent deletion change.
 
 ## Open gaps and open decisions
 
