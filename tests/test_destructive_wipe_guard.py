@@ -817,6 +817,39 @@ class _NonEmptyRecordingGraph(_RecordingGraph):
         return super().query(cypher, params=params, timeout=timeout)
 
 
+class _UnmeasurableRecordingGraph(_RecordingGraph):
+    """A fake handle whose *total-node* count returns NO row at all.
+
+    #3044 review: an absent/NULL count is this surface's
+    "could not observe" shape (``_node_count`` returns None, and
+    ``recover_from_log`` passes None through) — never a measured 0. The guard
+    must fail CLOSED on it."""
+
+    def query(self, cypher, params=None, timeout=None):
+        if " ".join((cypher or "").split()).upper() == \
+                "MATCH (N) RETURN COUNT(N)":
+            self.queries.append(cypher)
+            return _Result([])
+        return super().query(cypher, params=params, timeout=timeout)
+
+
+def test_require_empty_refuses_an_unmeasurable_count(tmp_path):
+    """#3044 review: an UNMEASURABLE store is not an empty one.
+
+    `MATCH (n) RETURN count(n)` yielding no row (or NULL) means the guard
+    could not observe the store, not that the store is empty — flattening it
+    to 0 issues the wipe on a count that was never taken and destroys whatever
+    the window holds. The fail-closed choice is to refuse. FAILS IF: the wipe
+    proceeds on an unmeasured count."""
+    proj = _bare_projection(graph_name="test_3044_unmeasured", embedded=True)
+    proj.g = _UnmeasurableRecordingGraph()
+    with pytest.raises(WipePreconditionRefused, match="MEASURED"):
+        proj.rebuild_all(str(tmp_path), confirm_destructive=True,
+                         require_empty=True)
+    assert proj.g.wipes() == [], (
+        "the wipe ran on a node count that was never measured")
+
+
 def test_require_empty_refuses_a_graph_that_filled_after_the_probe(tmp_path):
     """#3044: the wipe re-validates the emptiness claim it acts on.
 
@@ -1006,5 +1039,81 @@ def test_recover_from_log_refuses_the_wipe_when_a_writer_lands_in_the_window(
         assert os.path.exists(prewipe_snapshot_path(str(events))), (
             "the pre-existing sidecar is the record of an interrupted "
             "rebuild; a refusal must not retire it")
+    finally:
+        proj.close()
+
+
+def test_recover_from_log_leaves_the_window_node_when_the_journal_fails_before_the_wipe(
+        tmp_path, monkeypatch):
+    """#3044 review (P1): the guard must cover BOTH destructive statements.
+
+    The `require_empty` guard sits AFTER the journal parse, so a mid-file
+    corruption raises in the parse — before the guard, before the sidecar and
+    before any wipe. That failure lands in the pending route's generic
+    `except`, which measured the graph and called
+    `_roll_back_declined_replay`. With a node in the window the measured count
+    is > 0, so the rollback issued its OWN `MATCH (n) DETACH DELETE n` and
+    destroyed the very node the guard exists to protect — the rollback's entry
+    invariant ("every node present came from the declined replay") is false
+    when no replay ever ran. FAILS IF: a pre-wipe failure rolls back the
+    window node, or any destructive statement runs before the guard."""
+    from tortoise import consistency as consistency_mod
+
+    events = tmp_path / "events"
+    events.mkdir()
+    # Line 1 is a valid record; line 2 is malformed MID-FILE (not a torn
+    # append), so `rebuild_all`'s parse refuses it before reaching the guard.
+    (events / "sdk.jsonl").write_text(
+        json.dumps({"event_id": "e1", "ts": "2026-01-01T00:00:00Z",
+                    "type": "IngestStarted"}) + "\n"
+        + "this is not json\n", encoding="utf-8")
+    _write_prewipe_snapshot(prewipe_snapshot_path(str(events)), {
+        "version": 1, "created_at": "2026-01-01T00:00:00Z",
+        "synthetic_events": [{
+            "type": "PointAdded", "projection_version": 2,
+            "point": {"id": "sidecar-3044-p1", "content": "x",
+                      "pointKind": "fact", "status": "live"}}],
+        "batch_snapshot": [], "batch_point_links": [],
+        "session_snapshot": [], "session_point_links": [],
+    })
+
+    proj = FalkorProjection(str(tmp_path / "recover_before_wipe.db"),
+                            graph_name="test_recover_before_wipe",
+                            skip_health_check=True)
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")  # the 0-node probe's subject
+
+        real_load = consistency_mod._load_prewipe_snapshot
+
+        def load_and_a_writer_lands(path):
+            loaded = real_load(path)
+            proj.g.query("CREATE (:GraphEvent {seq: 1})")  # concurrent write
+            return loaded
+
+        monkeypatch.setattr(consistency_mod, "_load_prewipe_snapshot",
+                            load_and_a_writer_lands)
+
+        wipes: list = []
+        real_wipe = FalkorProjection._wipe_all_nodes
+
+        def traced_wipe(self, **kwargs):
+            wipes.append(kwargs.get("operation"))
+            return real_wipe(self, **kwargs)
+
+        monkeypatch.setattr(FalkorProjection, "_wipe_all_nodes", traced_wipe)
+        result = consistency_mod.recover_from_log(str(events), proj)
+
+        assert result["recovered"] is False, result
+        rows = proj.g.query(
+            "MATCH (n:GraphEvent) RETURN count(n)").result_set
+        assert int(rows[0][0]) == 1, (
+            "a pre-wipe failure rolled back the node that landed after the "
+            "emptiness probe — the exact loss #3044 exists to prevent")
+        assert wipes == [], (
+            f"no destructive statement may run before the guard; saw {wipes!r}")
+        assert result.get("replay_rolled_back") is None, result
+        assert "before the wipe" in result["reason"], result
+        assert os.path.exists(prewipe_snapshot_path(str(events))), (
+            "a refused pre-wipe failure must not retire the sidecar")
     finally:
         proj.close()

@@ -7565,12 +7565,25 @@ class FalkorProjection(
                     # the MEASURED count: telling them it is "empty" at the
                     # moment they must not lose what is in it is the same lie
                     # about the store #7929 removed from the count.
-                    if result.get("db_points"):
+                    # #3044 review: `db_points is None` is UNMEASURABLE, not
+                    # empty — `recover_from_log` passes `None` through on a dead
+                    # backend (a count that raises, or a post-replay count the
+                    # backend never answered), and calling that store "empty"
+                    # tells the operator to ignore nodes that are in fact still
+                    # there. Three shapes, three messages.
+                    measured = result.get("db_points")
+                    if measured is None:
+                        logger.warning(
+                            "embedded DB NOT auto-recovered and its node "
+                            "count is UNMEASURABLE (left untouched, NOT "
+                            "verified empty): %s",
+                            result.get("reason"))
+                    elif measured:
                         logger.warning(
                             "embedded DB NOT auto-recovered with %s node(s) "
                             "still in the store (left untouched, NOT empty): "
                             "%s",
-                            result.get("db_points"), result.get("reason"))
+                            measured, result.get("reason"))
                     else:
                         logger.warning(
                             "empty embedded DB not auto-recovered: %s",
@@ -8643,6 +8656,15 @@ class FalkorProjection(
         or a refused wipe all abort BEFORE the wipe. See
         ``_PREWIPE_SNAPSHOT_FILENAME``.
         """
+        # #3044 review (P1): the recovery route's caller
+        # (`consistency.recover_from_log`) has to tell a PRE-wipe failure from
+        # a post-wipe one. `_roll_back_declined_replay` is sound only once the
+        # destructive statement has been issued; before it, a node a writer
+        # landed in the #3044 window is still present, and rolling back would
+        # destroy exactly what `require_empty` refuses to. Reset before
+        # anything that can fail, so an early return can never inherit a stale
+        # value from a previous call.
+        self._rebuild_wiped = False
         import os  # noqa: I001
         from tortoise.log import EventLog
 
@@ -9311,12 +9333,29 @@ class FalkorProjection(
         # destructive statement, so the store is untouched.
         if require_empty:
             _rows = self.g.query("MATCH (n) RETURN count(n)").result_set
-            _present = (int(_rows[0][0])
-                        if _rows and _rows[0][0] is not None else 0)
-            if _present:
+            # #3044 review: an ABSENT/NULL count row is UNMEASURABLE, not zero.
+            # `_node_count` and this surface use `None` for "could not
+            # observe" everywhere else, and flattening it to 0 here would let
+            # a wipe proceed on a store the guard never actually saw as empty
+            # — the fail-closed choice is to refuse. A query that RAISES was
+            # already fail-closed (the exception propagates).
+            _measured = (int(_rows[0][0])
+                         if _rows and _rows[0][0] is not None else None)
+            if _measured is None:
+                raise WipePreconditionRefused(
+                    "rebuild_all was called with require_empty=True, but the "
+                    "graph's node count could not be MEASURED — refusing to "
+                    "wipe (#3044). An unmeasurable store is not an empty "
+                    "one: the caller proved this graph EMPTY before the "
+                    "journal parse, and a wipe issued on an unverified count "
+                    "is exactly the destruction that guard exists to "
+                    "prevent. Re-run recovery once the backend responds, or "
+                    "rebuild explicitly with `tortoise rebuild --dir <dir>`."
+                )
+            if _measured:
                 raise WipePreconditionRefused(
                     f"rebuild_all was called with require_empty=True, but the "
-                    f"graph holds {_present} node(s) — refusing to wipe "
+                    f"graph holds {_measured} node(s) — refusing to wipe "
                     f"(#3044). The caller proved this graph EMPTY before the "
                     f"journal parse; a node appearing since then would be "
                     f"destroyed with no record — the pre-wipe snapshot "
@@ -9483,6 +9522,10 @@ class FalkorProjection(
             episodic_before | recovered_session_turns, events,
             snapshot_ids=snapshot_ids)
 
+        # The destructive statement is about to be issued: from here a failure
+        # can land on a partially wiped graph, which is the #7929 rollback
+        # shape the recovery route is allowed to undo (#3044 review, P1).
+        self._rebuild_wiped = True
         self._wipe_all_nodes(confirm_destructive=confirm_destructive,
                              operation="rebuild_all")
 

@@ -2577,6 +2577,23 @@ def recover_from_log(events_dir: str, projection) -> dict:
                     "reason": ("rebuild from the pending pre-wipe snapshot "
                                f"refused: {e}")}
         except Exception as e:
+            # #3044 review (P1): the rollback is bound to the ONE shape it is
+            # sound on. `rebuild_all` exposes `_rebuild_wiped`, set only as its
+            # destructive statement is issued; a failure BEFORE that point ran
+            # no wipe and applied no replay, so every node present — including
+            # one a writer landed in the #3044 window (the seconds-long journal
+            # parse IS that window) — came from somewhere other than a declined
+            # replay. `_roll_back_declined_replay`'s entry invariant is
+            # therefore false on this shape, and its `MATCH (n) DETACH DELETE n`
+            # would destroy the very node this route's `require_empty` guard
+            # exists to protect. Return untouched instead. Absent attribute
+            # (a projection whose `rebuild_all` is a test double) keeps the
+            # pre-existing rollback behaviour.
+            if getattr(projection, "_rebuild_wiped", True) is False:
+                return {"recovered": False, "log_points": 0,
+                        "db_points": _node_count(),
+                        "reason": ("rebuild from the pending pre-wipe snapshot "
+                                   f"failed before the wipe: {e}")}
             # #7929: `rebuild_all` wipes before it can raise, so this refusal
             # can land on a partially replayed graph. Roll it back ONLY while
             # the sidecar still exists — a post-replay `NonFoldedEventsError`
