@@ -162,6 +162,37 @@ mover_of() { # mover_of <pre "<local> <remote>"> <post> <branch> — "<ref> <sha
   printf 'refs/remotes/origin/%s %s' "$3" "$post_r"
 }
 
+# ── the reviewer's verdict, and what it authorises ────────────────────────────
+# Classify the reviewer's FINAL message. A function rather than an inline `case` so the self-test
+# EXECUTES the shipped rule: a `grep` for its text stays green when an arm is deleted or reworded
+# (the same lesson as orch-loop.sh's p0_merge_priority_override, #8469 review P2).
+# `none` means there was NO verdict — the reviewer timed out, crashed, or was killed at
+# $REVIEW_TIMEOUT. It is NOT "the reviewer found issues", and the two must never share a caller
+# arm: that conflation is what turned a stall into a false park (#8602, agent-infra#1741).
+verdict_kind() {
+  case "${1:-}" in
+    CLEAN*)  echo clean ;;
+    ISSUES*) echo issues ;;
+    *)       echo none ;;
+  esac
+  return 0
+}
+
+# Apply the reviewer's outcome marker. `needsfix-<PR>-<head>` is the ONLY thing that authorises
+# orch-loop.sh to spawn a FIXER at this head, so it is written for a real `ISSUES` verdict and for
+# nothing else. A verdict-less run writes NO marker: with one, a pure stall consumes one of
+# MAX_FIX_TRIES, and three stalls park the PR "needs a human" with the reviewer's findings never
+# addressed (measured: 7 PRs at fixcount==3, 4 false-parked — #8602 indicator (c)).
+# Echoes the marker path when it wrote one.
+apply_verdict_marker() {
+  local kind="${1:-}" head="${2:-}" m
+  [ "$kind" = "issues" ] || return 0
+  [ -n "$head" ] || return 0
+  m="$O/state/needsfix-$PR-$head"
+  touch "$m" 2>/dev/null && printf '%s' "$m"
+  return 0
+}
+
 # ── single-owner claim ────────────────────────────────────────────────────────
 # Three paths reach this script: chain-<N> (waits for a lane's PR), fix-<PR>, and the
 # controller's merge sweep. Only the last two are visible to the controller by session name,
@@ -230,7 +261,11 @@ fi
 echo "[merge $PR] review sandbox=$SANDBOX (detached at ${HEAD:-refs/heads/$BR})" >> "$L.log"
 
 # ── 1) fresh-context review, POSTED as a PR comment (the audit artifact) ──────
-cat > "$L-reviewer.txt" <<EOF
+# The prompt is a FUNCTION so the self-test can EXECUTE it and assert on the text the reviewer
+# actually receives (the #8602 check reads this function's output, not a grep of this file — a
+# reflow of the heredoc would otherwise silently restore the deleted sentence).
+reviewer_prompt() {
+cat <<EOF
 You are a FRESH-CONTEXT code reviewer for $OR. Review PR #$PR (branch $BR). Report only — do not fix code.
 Your cwd is a DISPOSABLE checkout of this PR's head, created for you by the harness, on a DETACHED
 HEAD: nothing you do in it can move a branch. Stay in it. Do NOT enter the shared checkout
@@ -240,7 +275,7 @@ HEAD: nothing you do in it can move a branch. Stay in it. Do NOT enter the share
     gh pr diff $PR --repo $OR
 Read the changed files IN FULL at the PR head (\`git show origin/$BR:<path>\`), not just the diff hunks. Read skills/code-review/SKILL.md for the discipline.
 Report ONLY HIGH-confidence real issues: correctness bugs; security (injection/auth bypass/secrets); VACUOUS tests (would pass on the pre-fix code — prove it); scope/claim mismatch; regressions; fail-open paths; repo-rule violations — especially a NEW test file missing from config/ci-surfaces.yml (the manifest-integrity leg fails and the file is never selected).
-If you need to run tests, run them HERE — this checkout has no venv of its own yet, so the first one needs \`uv sync --extra embeddings --extra parity\`: \`TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest <paths> -q -p no:cacheprovider\`. Bound every command; never run the whole suite.
+DO NOT RUN THE TEST SUITE AND DO NOT PROVISION AN ENVIRONMENT HERE. This checkout is DISPOSABLE and has NO interpreter environment of its own; provisioning one, or searching the filesystem for an existing one, can burn the whole review budget in a single blocking call and the review then ends with no verdict at all (#8602: 35% of reviewer runs hit the 1800s cap, 7/7 in one window). Executing tests is the FIXER's job and CI's job, not yours. To argue a test is VACUOUS, read the test against the PRE-FIX code (\`git show origin/main:<path>\`) and show the assertion cannot tell the two apart. Bound every command; never walk \`\$HOME\` or \`/\`.
 
 ## REQUIRED: post your review as a PR comment (this is the merge-gate audit artifact)
 Write your review to a file, then:
@@ -253,6 +288,8 @@ Your comment MUST state the outcome plainly and MUST NOT contain an unresolved a
     ISSUES <n>
 Do NOT modify code, commit, or merge.
 EOF
+}
+reviewer_prompt > "$L-reviewer.txt"
 # The reviewed refs, sampled immediately before the reviewer starts. `cd` into the sandbox FIRST so
 # the agent's cwd is the sandbox — run_agent spawns `pi` without a cwd argument, so it inherits this
 # shell's directory.
@@ -291,8 +328,8 @@ fi
 LAST="$(grep -aE '^(CLEAN|ISSUES) ' "$L.log" | tail -1 | tr -d '\r')"
 echo "[merge $PR] verdict: ${LAST:-<none>}" >> "$L.log"
 
-case "$LAST" in
-  CLEAN*)
+case "$(verdict_kind "$LAST")" in
+  clean)
     URL="$(printf '%s' "$LAST" | grep -oE 'https?://[^ ]+' | head -1)"
     CID="$(printf '%s' "$URL" | grep -oE '[0-9]+$')"
     echo "[merge $PR] evidence comment id=${CID:-?} url=$URL" >> "$L.log"
@@ -319,11 +356,21 @@ case "$LAST" in
       echo "[merge $PR] merge command failed" >> "$L.log"
     fi
     ;;
+  issues)
+    # The reviewer found real issues at this exact head. Leave a marker so the loop knows to
+    # spawn a FIXER (not another re-record) on its next cycle.
+    echo "[merge $PR] ISSUES at head=$HEAD — needs a fixer" >> "$L.log"
+    apply_verdict_marker issues "$HEAD" >/dev/null
+    ;;
   *)
-    # The reviewer found real issues (or the reviewer failed) at this exact head. Leave a
-    # marker so the loop knows to spawn a FIXER (not another re-record) on its next cycle.
-    echo "[merge $PR] NOT CLEAN or reviewer failed — needs a fixer at head=$HEAD" >> "$L.log"
-    [ -n "${HEAD:-}" ] && touch "$O/state/needsfix-$PR-$HEAD"
+    # ⛔ A VERDICT-LESS RUN IS NOT A VERDICT (#8602, agent-infra#1741). An empty LAST means the
+    # reviewer produced no `CLEAN`/`ISSUES` line — it timed out, crashed, or was killed at the
+    # wall limit. Writing `needsfix` for it authorises a fixer for a review that never happened,
+    # spends one of MAX_FIX_TRIES on it, and ends by parking the PR "needs a human" with the
+    # reviewer's findings never addressed. Report the stall AS a stall (the `[timeout]` line
+    # run_agent wrote above carries the wall limit and rc) and leave NO marker: the loop's next
+    # cycle re-records — a fresh review at this head — instead of inventing a fixer task.
+    echo "[merge $PR] NO VERDICT (no CLEAN/ISSUES line — reviewer stalled or failed) at head=$HEAD; NOT authorising a fixer" >> "$L.log"
     ;;
 esac
 echo "[merge $PR] end $(date)" >> "$L.log"

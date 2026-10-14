@@ -118,6 +118,45 @@ def test_hop_query_binds_the_frontier_identity_key():
     assert _hop_query("Source", "url; MATCH (x) DETACH DELETE x") is None
 
 
+def test_identity_key_order_covers_every_declared_identity_key():
+    """#8538: `_IDENTITY_KEY_ORDER` is the ONE order traversal resolves a
+    node's identity in — `_hop_query`'s dedupe coalesce and `_node_identity`
+    both read it. Pin it to the canonical identity declaration AND to the
+    interpolated-key guard set, so a new identity key cannot be added to the
+    canonical tables and silently left out of traversal (the #5448 drift class,
+    one table over)."""
+    from tortoise.navigation import _HOP_KEYS, _IDENTITY_KEY_ORDER
+    from tortoise.projection import (
+        _CANONICAL_ENTITY_ID_PROPS,
+        _CANONICAL_ENTITY_SECONDARY_ID_PROPS,
+    )
+
+    declared = {prop for _label, prop in _CANONICAL_ENTITY_ID_PROPS} | {
+        prop for _label, prop in _CANONICAL_ENTITY_SECONDARY_ID_PROPS}
+    assert declared <= set(_IDENTITY_KEY_ORDER), (
+        f"a declared identity key is not resolved by traversal: "
+        f"{sorted(declared - set(_IDENTITY_KEY_ORDER))} — the hop's coalesce "
+        f"filter and `_node_identity` would both miss it (#8538)")
+    assert set(_IDENTITY_KEY_ORDER) == _HOP_KEYS, (
+        "the identity order and the interpolated-key guard set drifted — a key "
+        "one accepts the other refuses")
+
+
+def test_hop_query_compares_the_neighbour_identity_not_bare_id():
+    """#8538: the hop's dedupe filter must compare the NEIGHBOUR's canonical
+    identity. `NOT m.id IN $visited` evaluates to NULL for a url-keyed
+    `:Source` (no `id` property), and Cypher's WHERE treats NULL as false — so
+    the row is dropped by the ENGINE: the node exists, `get_entity` resolves
+    it, and navigation never surfaces it. The filter must cover every key
+    `_IDENTITY_KEY_ORDER` resolves, and the same value `_node_identity` records
+    in `visited`."""
+    from tortoise.navigation import _hop_query
+
+    q = _hop_query("Point")
+    assert "coalesce(m.id, m.url, m.eventId)" in q
+    assert "WHERE NOT m.id IN $visited" not in q
+
+
 # ── entityProfile tests ───────────────────────────────
 
 def test_entity_profile_empty_entity():
@@ -356,6 +395,49 @@ def test_parse_node_prefers_public_id_over_internal():
     print("✓ _parse_node prefers public id over internal")
 
 
+def test_parse_node_identifies_a_url_only_source_by_its_url():
+    """#8538: a url-keyed `:Source` carries no `id` property. `_parse_node`
+    used to synthesise the internal FalkorDB numeric handle as `id` — the #44
+    leak — and the BFS then treated the node as id-keyed. Its public identity
+    is its `url` (the key `_resolve_root` and `get_entity` resolve by), so that
+    is what `id` becomes, and `url` is the key the next hop binds."""
+    from tortoise.navigation import _parse_node_with_identity
+
+    url = "https://example.com/url-only"
+    node = _node(2189, ["Source"], {"url": url, "sourceKind": "document"})
+
+    parsed, value, key = _parse_node_with_identity(node)
+    assert (value, key) == (url, "url"), (value, key)
+    assert parsed["id"] == url, (
+        f"the internal handle leaked as id: {parsed['id']!r}")
+    assert not str(parsed["id"]).isdigit()
+
+
+def test_parse_node_identifies_an_eventid_only_event_by_its_eventid():
+    """The same class on the OTHER canonical label: a legacy `:Event` carrying
+    only `eventId` (a shape `_RESOLVE_BRANCHES` explicitly covers) must be
+    identified by it — not by the internal handle — so a hop off it binds
+    `{eventId:$eid}` and its neighbours are reachable."""
+    from tortoise.navigation import _parse_node_with_identity
+
+    parsed, value, key = _parse_node_with_identity(
+        _node(4242, ["Event"], {"eventId": "evt-legacy"}))
+    assert (value, key) == ("evt-legacy", "eventId"), (value, key)
+    assert parsed["id"] == "evt-legacy"
+
+
+def test_parse_node_keeps_the_id_property_as_the_identity_when_present():
+    """The priority order (`id` > `url` > `eventId`): a `create_source`
+    `:Source` carries `id == url`, so it stays id-addressed (#4649's shape),
+    and the ambiguity does not re-key an id-carrying node."""
+    from tortoise.navigation import _parse_node_with_identity
+
+    node = _node(7, ["Source"], {"id": "sid", "url": "https://example.com/x"})
+    parsed, value, key = _parse_node_with_identity(node)
+    assert (value, key) == ("sid", "id"), (value, key)
+    assert parsed["id"] == "sid"
+
+
 def test_tortoise_traverse_returns_public_ids():
     """Regression: #44 — traverse output must use public ids from properties,
     never internal FalkorDB node ids.
@@ -477,6 +559,13 @@ def test_cross_ontology_query_no_entity_id():
 
 if __name__ == "__main__":
     tests = [
+        # The identity-table pins (#5448/#8538) run under pytest either way;
+        # they are listed here too so a direct `python tests/test_navigation.py`
+        # does not silently skip the two tables' drift guards.
+        test_navigation_roots_every_canonical_identity_key,
+        test_hop_query_binds_the_frontier_identity_key,
+        test_identity_key_order_covers_every_declared_identity_key,
+        test_hop_query_compares_the_neighbour_identity_not_bare_id,
         test_entity_profile_empty_entity,
         test_entity_profile_single_hop,
         test_entity_profile_multi_hop,
@@ -488,6 +577,9 @@ if __name__ == "__main__":
         test_tortoise_traverse_reports_edge_idx,
         test_tortoise_traverse_idx_none_on_plain_edge,
         test_parse_node_prefers_public_id_over_internal,
+        test_parse_node_identifies_a_url_only_source_by_its_url,
+        test_parse_node_identifies_an_eventid_only_event_by_its_eventid,
+        test_parse_node_keeps_the_id_property_as_the_identity_when_present,
         test_tortoise_traverse_returns_public_ids,
         test_entity_profile_returns_public_ids,
         test_entity_anchored_cypher_injection,
