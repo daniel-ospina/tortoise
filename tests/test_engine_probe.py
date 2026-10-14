@@ -1262,7 +1262,9 @@ def test_an_unaddressable_graph_name_skips_the_read_rather_than_guessing():
     the inline protocol: whitespace splits the command and a quote/backslash
     re-parses it, so the probe would query a DIFFERENT graph (or a second
     command) than the URI named.
-    (b) Reachable: `--graph 'my graph'`, or a percent-encoded URI path.
+    (b) Reachable: `--graph 'my graph'`, or a raw space in the URI path
+    (`resolve_db_endpoint` does not percent-decode, so `my%20graph` stays a
+    literal addressable name and does NOT reach this state).
     """
     server = _one_shot_server(b"+PONG\r\n")
     port = server.getsockname()[1]
@@ -1374,7 +1376,9 @@ def test_an_unaddressable_graph_name_is_not_a_green(monkeypatch, capsys):
     is the #7235 false green one layer up (measured on the pre-fix code:
     `VERDICT: GRAPH_UP` / RC=0 with no read line at all). It must be
     UNMEASURABLE/exit 3 AND say in the report that the read was skipped.
-    (b) Reachable: `--graph 'my graph'`, or a percent-encoded URI path.
+    (b) Reachable: `--graph 'my graph'`, or a raw space in the URI path
+    (`resolve_db_endpoint` does not percent-decode, so `my%20graph` stays a
+    literal addressable name and does NOT reach this state).
     """
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     server = _one_shot_server(b"+PONG\r\n")
