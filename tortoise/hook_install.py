@@ -1787,17 +1787,30 @@ def _invokes_script(command: str, script_name: str,
         if not quoted and tok == "command":
             launcher_word = "command"
             continue
-        if not quoted and tok in ("-v", "-V") and launcher_word == "command":
-            # ``command -v <name>`` QUERIES a name: its operands are query
-            # arguments, not executed commands — but only until the end of
-            # THIS simple command.  Returning False here condemned the whole
-            # line, so ``command -v <hook>; <hook>`` (bash runs the second
-            # one) was judged foreign and a DUPLICATE registration was
-            # appended.  Clearing ``expect_cmd`` skips the operands; the next
-            # separator re-arms executable position.
-            expect_cmd = False
-            launcher_word = None
-            continue
+        if not quoted and launcher_word == "command" and tok.startswith("-"):
+            # ``command`` is a shell BUILTIN, not a program launcher, so its
+            # options are handled here rather than by a per-launcher table
+            # (``_OPTIONS_WITH_ARG``/``_BOOLEAN_SHORT`` are keyed to
+            # ``_LAUNCHERS``, which holds programs).  ``-p`` is BOOLEAN (use
+            # the default PATH) and ``--`` ends its options — the command
+            # still follows.  ``-v``/``-V`` (or a cluster containing ``v``) is
+            # a QUERY whose operands are arguments, never executed commands —
+            # but only until the end of THIS simple command.  Returning False
+            # here condemned the whole line, so ``command -v <hook>; <hook>``
+            # (bash runs the second one) was judged foreign and a DUPLICATE
+            # registration was appended.  Reading ``-p`` as an
+            # argument-taking option was the other half: it made
+            # ``command -p <hook>`` foreign (duplicate) and
+            # ``command -p -v <hook>`` ours (the query's operand looked
+            # executed — a silent no-capture).
+            if tok == "--" or tok == "-p":
+                continue
+            if tok == "-v" or tok == "-V" or "v" in tok[1:]:
+                expect_cmd = False
+                launcher_word = None
+                continue
+            # An unrecognised option falls through to the generic arity
+            # default ("consumes"), which is the fail-closed direction.
         launcher = _as_launcher(tok, quoted, root)
         if launcher is not None:
             launcher_word = launcher

@@ -2160,6 +2160,47 @@ class TestDeclaredThreatSurface:
         upgrade_install(installed)
         assert len(_settings(installed)["hooks"]["SessionEnd"]) == 1
 
+    @pytest.mark.parametrize("command,executes", [
+        ("command -p {rel}", True),      # -p is BOOLEAN: the hook still runs
+        ("command -- {rel}", True),      # -- ends its options: the hook runs
+        ("command -p -v {rel}", False),  # -v makes it a QUERY: nothing runs
+        ("command -pv {rel}", False),    # clustered -p -v is also a query
+        ("command -V {rel}", False),     # -V is the query spelling
+    ])
+    def test_command_option_arity_matches_bash_ground_truth(
+            self, tmp_path, command, executes):
+        """``command`` is a shell BUILTIN, so its own grammar applies: ``-p``
+        is BOOLEAN (default PATH) and ``-v``/``-V`` is a QUERY.  Reading ``-p``
+        through the generic argument-taking default inverted both halves of the
+        guard — ``command -p <hook>`` was judged foreign (bash runs it → a
+        DUPLICATE registration) and ``command -p -v <hook>`` was judged ours
+        (bash runs nothing → the silent no-capture this module exists to
+        prevent).
+
+        Verified by EXECUTING each form, so the assertion is the observable
+        verdict, not the source text.
+
+        MUTATION: drop the ``launcher_word == "command"`` option block so
+        ``-p`` falls to the generic "consume" default → ``command -p <hook>``
+        turns foreign and ``command -p -v <hook>`` turns ours → RED on both.
+        """
+        rel = ".claude/hooks/session-end.sh"
+        root = tmp_path / "project"
+        hook = root / Path(rel)
+        hook.parent.mkdir(parents=True)
+        marker = root / "MARKER"
+        hook.write_text(f"#!/bin/bash\ntouch {shlex.quote(str(marker))}\n")
+        hook.chmod(0o755)
+        command = command.format(rel=rel)
+        completed = subprocess.run(
+            ["bash", "-c", command], capture_output=True, text=True,
+            timeout=30, cwd=str(root))
+        assert marker.exists() is executes, (
+            f"ground truth changed: {command!r} did not behave as expected "
+            f"(stderr={completed.stderr!r})")
+        assert hook_install._invokes_script(
+            command, "session-end.sh", ".claude/hooks", root) is executes
+
     @pytest.mark.parametrize("command", [
         "/bin/bash {abs}",
         "/usr/bin/env bash {abs}",
