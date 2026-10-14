@@ -96,6 +96,16 @@ CANONICAL_ACTION_KINDS = frozenset({
     "meet", "experiment", "deploy", "review", "other",
 })
 
+# Pack-DECLARATION entity vocabulary — NOT the graph-label vocabulary. This is the
+# type a pack's edge (`from`/`to`) and a bare kind reference may name, and it is
+# deliberately kept distinct from the labels a query leg serves:
+#   * ``Document`` stays here ON PURPOSE (D10, ONTOLOGY v3.15 §4.4). A pack may
+#     declare an edge from/to a document; the WRITE path routes that to a
+#     ``:Source`` keyed ``url`` (``sdk._create_entity``), and the READ path maps
+#     ``document`` → ``:Source`` (``security.ENTITY_TYPE_LABELS``). Removing the
+#     spelling here would break pack declarations over a label that no longer
+#     exists, so it is a declaration alias, not a live graph label.
+#   * ``Action`` likewise names a declared kind, not a node label.
 VALID_ENTITY_TYPES = frozenset({
     "Subject", "Object", "Action", "Point", "Event", "Document", "Source",
 })

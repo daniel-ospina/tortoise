@@ -7110,6 +7110,30 @@ def _normalize_mapped_ipv6(ip):
         return ip
     return str(mapped) if mapped is not None else ip
 
+# ── Bounded store policy for the shared bucket-store primitive (#3124) ──
+# The policy — owned-key cap, exactly ONE shared overflow bucket per store,
+# reclaim-inactive-only, O(1) hot path — LIVES in ``tortoise/rate_buckets``,
+# with its full record. It moved out of this module because a SECOND lane needs
+# the same policy and cannot import it from here (#5518):
+# ``mcp_auth.MCPRateLimitMiddleware`` carried the same unbounded-store defect on
+# a fully attacker-chosen key space, and importing ``hosted_api`` from
+# ``mcp_auth`` is a cycle that ALSO puts the whole hosted app in ``sys.modules``
+# on every stdio/self-host MCP process — that module's *presence* is the runtime
+# deployment discriminator the self-host branches read (see
+# ``mcp_auth._journal_path_for``; ``tortoise/body_limits.py`` documents the same
+# constraint and the same fix). Imported, never re-defined: exactly ONE
+# implementation, two lanes. This store is pinned by
+# ``tests/test_hosted_api.py::TestBoundedMiddlewareStore`` and the MCP store by
+# ``tests/test_mcp_http.py::TestMcpBoundedMiddlewareStore``.
+from tortoise.rate_buckets import (  # noqa: E402
+    _BUCKET_OVERFLOW_KEY,
+    _bucket_entry_ts,
+    _bucket_owned_count,  # noqa: F401 — re-exported (the #3124 tests read it here)
+    _bucket_prune_window,
+    _bucket_reclaim,
+    _bucket_route,
+    _bucket_touch,
+)
 
 # ── Per-/prefix aggregation for IPv6 IP-keyed buckets (#5490) ────────────
 # `_normalize_mapped_ipv6` handles only IPv4-MAPPED IPv6. A client on a
@@ -7184,192 +7208,6 @@ def _ip_bucket_key(ip):
         _ipv6_aggregation_prefix("TORTOISE_IP_BUCKET_IPV6_PREFIX",
                                  _IP_BUCKET_IPV6_PREFIX_DEFAULT))
 
-
-# ── Bounded store policy for the shared per-IP bucket primitive (#3124) ──
-# The primitive (and RateLimitMiddleware) pruned only *stale* buckets, so a
-# fresh-key flood pruned nothing — every bucket was charged inside the window.
-# The store then grew for the whole window_s (up to 86 400 s on the signup
-# limiter) and, once over max_entries, every request scanned the whole store
-# (O(n) per request, O(n^2) under a sustained flood). The policy below mirrors
-# #2866's DCR precedent:
-#
-#   owned-key cap .... max_entries (default 10 000) client-keyed buckets
-#   overflow ......... exactly ONE shared bucket per store (reserved key
-#                      _BUCKET_OVERFLOW_KEY), capped at the caller's
-#                      ``limit`` per window
-#   eviction ......... reclaim ONLY buckets whose in-window entries have all
-#                      expired; an ACTIVE key is never evicted
-#   hot path ......... O(1) in store size — no store-wide iteration on any
-#                      check or charge
-#
-# Last-charge ordering (every charge moves its key to the insertion-order
-# tail) makes reclaim O(1) and safe: the head is the least-recently-charged
-# key, so an active head implies every later key is also active. Reclaim stops
-# at the first active head and can never evict an active key — evicting one
-# would reset a victim's consumed budget, the fail-open shape #2866 rejects as
-# alternative C. A NEW key arriving when the owned store is full of active
-# buckets is charged to the shared overflow bucket instead of growing the
-# store; only when that overflow is ALSO at ``limit`` is the request refused
-# (429) — the deliberate, fail-closed store-overflow rejection class. The
-# overflow bucket lives in the SAME caller-owned store (this primitive is
-# polymorphic over 13 call sites, so a second global store cannot be passed
-# without a signature change); capacity counts owned keys only, so the stated
-# bound is owned <= max_entries and len(store) <= max_entries + 1.
-#
-# Per-key overflow attribution (fail-closed, #3124 review). A shared-overflow
-# entry is stored as ``(timestamp, key)``, so routing can tell WHICH key has
-# in-window overflow charges. That one change closes two opposite defects:
-#   * A key that exhausted its budget in the overflow cannot graduate to a
-#     fresh owned bucket while its OWN overflow charges are in-window — it
-#     stays in the overflow until they expire. Without attribution it
-#     graduated as soon as ANY slot freed and got a second full budget (up to
-#     2x its limit in one window — a fail-open regression vs. the pre-#3124
-#     per-key behaviour). Pinned by
-#     ``test_sticky_overflow_blocks_a_second_budget``.
-#   * The stickiness is PER KEY, never store-wide: a key with no overflow
-#     charges takes a free owned slot whenever one exists. A store-wide rule
-#     refused EVERY fresh key for the rest of the window (up to 86 400 s) once
-#     the overflow held any charge — a new-user denial reachable with an empty
-#     owned store. Pinned by
-#     ``test_fresh_key_below_cap_admitted_while_overflow_is_warm``.
-# The overflow still holds at most ``limit`` entries (the ``len >= limit``
-# check is unchanged) and the per-entry scan is O(limit), not O(store).
-#
-# Accepted overflow-regime properties (deliberate, both BOUNDED — a lane must
-# not "fix" either without re-opening the capacity decision):
-#   * Mixed-limit stores. One store may carry keys with different ``limit``s
-#     (``_SENSITIVE_BUCKETS`` is 20/5/5/5 per op; ``RateLimitMiddleware`` is
-#     300/100 per path). The overflow bucket is SHARED, so a high-limit key
-#     class can fill it and a fresh low-limit key then sees ``len >= limit``
-#     and is refused. This can only ever be MORE restrictive than the key's
-#     own budget — never more permissive — so it is fail-closed; it is
-#     reachable only in the genuine store-overflow regime (max_entries active
-#     keys in one window), which is a flood signature. Pinned by
-#     ``test_mixed_limit_overflow_is_fail_closed``.
-#   * ``_forget_bucket_charge`` pops the caller's OWN attributed overflow entry,
-#     so a successful accept refunds exactly its own charge and a forget for a
-#     key that was never charged is a no-op — it cannot refund a FOREIGN
-#     charge. "Successes consume no budget" still holds per store. The ceiling
-#     on the shared bucket is ``limit`` entries of overflow charges shared
-#     across overflow-routed keys; because a success refunds the per-token /
-#     IP / global dimensions, those caps bound FAILED attempts only, and the
-#     real ceiling on "limit + successes" is the outstanding-invite supply (a
-#     success consumes its invite).
-_BUCKET_OVERFLOW_KEY = "\x00overflow"
-
-
-def _bucket_entry_ts(entry) -> float:
-    """Timestamp of a bucket entry. Owned buckets and the DCR stores hold bare
-    floats; the shared overflow holds ``(ts, key)`` pairs so routing can
-    attribute each charge to its key (#3124). One accessor for both layouts
-    keeps `_bucket_prune_window` / `_bucket_reclaim` single-implementation."""
-    return entry[0] if isinstance(entry, tuple) else entry
-
-
-def _bucket_prune_window(bucket: list, now: float, window_s: int) -> list:
-    """In-window entries of `bucket`. The one implementation of the
-    security-relevant window boundary (``now - _bucket_entry_ts(entry) <
-    window_s``) for the hosted_api limiter family: #2866's
-    ``_dcr_prune_window`` delegates here (#3124). NOT the only copy in the
-    repo — ``tortoise/cimd.py`` keeps its own prune for a different
-    (threading) module — so the claim is scoped to this family.
-
-    `_bucket_entry_ts` reads the timestamp from either layout (a bare float, or the
-    shared overflow's ``(ts, key)`` pair), so this stays the ONE boundary
-    predicate for all of them.
-
-    The D10 parity test (``test_t_window_helper_parity_with_primitive``) can
-    no longer be an INDEPENDENT oracle now that both sides call this function
-    (#3124 review), so it asserts against a literal expected table: a mutation
-    of this boundary still fails it."""
-    return [t for t in bucket if now - _bucket_entry_ts(t) < window_s]
-
-
-def _bucket_owned_count(store) -> int:
-    """Client-keyed buckets in `store` — the one shared overflow bucket (if
-    present) does not count against the owned-key cap."""
-    return len(store) - (1 if _BUCKET_OVERFLOW_KEY in store else 0)
-
-
-def _bucket_touch(store, key) -> None:
-    """Move `key` to the insertion-order tail (last-charge ordering) so
-    `_bucket_reclaim` can stop at the first active head. Works on any
-    insertion-ordered mapping (dict/defaultdict/OrderedDict) — the primitive
-    takes a caller-owned store and must not change its type. O(1)."""
-    if not store or next(reversed(store), None) == key:
-        return
-    store[key] = store.pop(key)
-
-
-def _bucket_reclaim(store, now: float, window_s: int, cap: int,
-                    count=None) -> None:
-    """Pop inactive insertion-order-head buckets until the count is below
-    `cap` or the head is active. O(1) at the hot cap; never evicts an active
-    key (#2866 D3/D4 precedent).
-
-    `count` selects the capacity metric and defaults to ``len`` — a NEUTRAL
-    metric that assumes no reserved key. A caller whose store reserves one
-    (the primitive's shared overflow) passes ``_bucket_owned_count`` so the
-    reserved key does not consume a slot; #2866's separate-store layout counts
-    every key and passes ``len``. The default must not encode one caller's
-    layout: an adopter with a DIFFERENT reserved key would silently inherit
-    the primitive's counting semantics and a wrong cap (#3124 review)."""
-    _count = len if count is None else count
-    while _count(store) >= cap:
-        head_key = next(iter(store), None)
-        if head_key is None:
-            return
-        head = store[head_key]
-        if head and now - _bucket_entry_ts(head[-1]) < window_s:
-            return  # active head ⇒ every later key is active too
-        del store[head_key]
-
-
-def _bucket_route(store, key, now: float, window_s: int, cap: int):
-    """Resolve ``(bucket, on_overflow)`` for a check/charge of `key` under
-    the #3124 capacity policy — the ONE routing implementation shared by
-    `_check_ip_bucket_rate_limit`, `_charge_ip_bucket` and
-    `RateLimitMiddleware.dispatch`.
-
-    Does NOT insert: a fresh key returns a NEW empty list that the caller
-    writes back only when it charges (so a deferred check and a 429 leave no
-    store entry behind, #1719). A tracked key is pruned in place. A new key
-    at a full owned store is routed to the single shared overflow bucket
-    instead of growing the owned key space (#2866 reject-new/overflow), so
-    the owned count can never exceed `cap`. The overflow is STICKY PER KEY:
-    a key with its OWN in-window overflow charges stays in the overflow rather
-    than being handed a second full budget, while a key with none takes a free
-    owned slot (a store-wide rule would deny every fresh key until the whole
-    overflow drained). A key equal to the reserved overflow sentinel is routed
-    to the overflow rather than being allowed to own it."""
-    # A client key must NEVER own the reserved slot (#3124 review). If one
-    # could, its bucket would be stored under `_BUCKET_OVERFLOW_KEY` with bare
-    # float entries, and the next fresh-key scan (`entry[1]` on a float) would
-    # raise TypeError -> 500 for the whole window. Unreachable over HTTP today
-    # (h11's field grammar forbids NUL in a header value, and every other key
-    # is a tuple or an IP string), but the reserved-key boundary must be
-    # structural rather than transport-dependent.
-    if key == _BUCKET_OVERFLOW_KEY:
-        overflow = store.get(_BUCKET_OVERFLOW_KEY)
-        if overflow is None:
-            return [], True
-        overflow[:] = _bucket_prune_window(overflow, now, window_s)
-        return overflow, True
-    bucket = store.get(key)
-    if bucket is not None:
-        bucket[:] = _bucket_prune_window(bucket, now, window_s)
-        return bucket, False
-    _bucket_reclaim(store, now, window_s, cap, count=_bucket_owned_count)
-    # Per-key sticky overflow (see the policy block): entries are (ts, key), so
-    # a key is held in the overflow ONLY while its OWN charges are in-window.
-    overflow = store.get(_BUCKET_OVERFLOW_KEY)
-    if overflow is not None:
-        overflow[:] = _bucket_prune_window(overflow, now, window_s)
-        if any(entry[1] == key for entry in overflow):
-            return overflow, True
-    if _bucket_owned_count(store) >= cap:
-        return (overflow if overflow is not None else []), True
-    return [], False
 
 
 async def _check_ip_bucket_rate_limit(
@@ -23064,6 +22902,66 @@ def _stored_grace_elapsed(row_deleted_at, row_grace_hours,
     return deleted_dt + timedelta(hours=gh) <= now_dt
 
 
+# #5269: the single-flight guard for the deleted-org purge.
+#
+# THE INVARIANT. ONE logical purge emits exactly ONE `team_delete_purged` row.
+# The audit append is keyed on ROW OBSERVATION — every entry re-reads the same
+# past-grace row — so two entries in flight at once each append for the same
+# purge: a permanent duplicate in an append-only log. (The state effect is
+# benign: the graph drop and the control-plane delete are idempotent — which is
+# also why #3472's quiescing of the test's background callers removed the flake
+# without touching this.)
+#
+# WHY A GUARD, GIVEN TODAY'S TWO CALLERS ALREADY SERIALISE (#5269 re-measured
+# 2026-10-13). Both `_lifespan` callers — the one-shot `_run_boot_sweeps()` and
+# the hourly `_event_retention_loop()` — submit through
+# `run_on_daemon_worker(..., name="tortoise-boot-sweep")`, and
+# `daemon_worker("tortoise-boot-sweep")` is ONE SINGLE-SLOT worker whose loop
+# runs submissions one at a time. So the two purges CANNOT overlap today (the
+# issue's "both can fetch the same row before either deletes it" does not hold)
+# — but they are serialised by an ACCIDENT of two distant call sites agreeing
+# on a string whose documented purpose is the thread NAME (ops recipes match on
+# it), not exclusion, and nothing pins that agreement. A per-caller rename — a
+# plausible, entirely reviewable refactor — would put both sweeps in flight at
+# once and open the duplicate. The invariant belongs at the purge, not in a
+# coincidence between its callers.
+#
+# The duplicate that WAS observed (#3472: `assert ['reg-old', 'reg-old'] ==
+# ['reg-old']`) came from a third, different overlap: the lifespan's background
+# entry racing a DIRECT `_purge_deleted_orgs()` call on the test body's thread,
+# which bypasses the worker entirely (#3511 quiesced the test; the harness
+# pattern is recorded in `tests/test_export_delete._quiesce_testclient_background_work`).
+# No direct caller exists in production, but that IS the shape a future one
+# would take, and the guard holds against it too.
+#
+# WHY A `threading.Lock`. Taken and released INSIDE the worker thread, and
+# never on the event loop, for the reason `_DREAM_LOCKS`/`_CAPTURE_IN_FLIGHT_LOCK`
+# record above: an `asyncio.Lock` binds to the first loop that waits on it,
+# which breaks across the per-test loops. `acquire`/`release` are also the
+# only operations here — nothing under the guard is async, so no `await` can be
+# held across it.
+#
+# WHY NON-BLOCKING. A second entry SKIPS, it does not queue: the in-flight
+# sweep already walks the WHOLE superset (`deleted_at <= now`) for this instant,
+# so a queued duplicate would re-observe rows for no new work — and would still
+# be the duplicate this guard exists to prevent if it then re-fetched. Blocking
+# would instead park a daemon worker for the sweep's entire duration (the
+# #2850 reason these sweeps run on daemon workers at all, so a wedged call can
+# never delay interpreter shutdown). Skipping strands nothing: the periodic
+# caller retries on its next tick and the boot caller has already walked the
+# set.
+#
+# SCOPE — PROCESS-LOCAL, which is this issue's whole surface: both callers are
+# armed by `_lifespan`, in ONE process. A SECOND machine is NOT covered, and
+# none exists today — `fly.toml` pins a single-machine topology for unrelated
+# reasons (single-attach volume, per-process state; `docs/infra-runbook.md`
+# §6). If one were ever added, the fix for THAT shape is the issue's other
+# Indicator branch — the append KEYED ON the control-plane row's deletion, not
+# on row observation — because exclusion cannot cross a process boundary.
+# Recorded here so the residual is never read as covered.
+_PURGE_ORG_IN_FLIGHT_LOCK = threading.Lock()
+
+
 def _purge_deleted_orgs() -> None:
     """Hard-delete orgs past the soft-delete grace window (#302 E2E-6-D).
 
@@ -23086,6 +22984,32 @@ def _purge_deleted_orgs() -> None:
     registry/graph leak past the grace window). Immutable audit_events rows
     survive (no FK). Fail-safe: per-org failures are logged and skipped —
     a purge failure never crashes the loop.
+
+    #5269: SINGLE-FLIGHT — one logical purge emits one ``team_delete_purged``
+    # row; a concurrent second entry returns instead of re-observing the same
+    # past-grace row. See ``_PURGE_ORG_IN_FLIGHT_LOCK`` for why the invariant
+    # is enforced HERE (today's two lifespan callers are already serialised by
+    # a shared single-slot worker — by accident, not by construction) and for
+    # the recorded cross-process residual.
+    """
+    if not _PURGE_ORG_IN_FLIGHT_LOCK.acquire(blocking=False):
+        _logger.info(
+            "deleted-team purge already in flight — skipping this entry")
+        return
+    try:
+        _purge_deleted_orgs_locked()
+    finally:
+        _PURGE_ORG_IN_FLIGHT_LOCK.release()
+
+
+def _purge_deleted_orgs_locked() -> None:
+    """The purge sweep BODY — caller MUST hold ``_PURGE_ORG_IN_FLIGHT_LOCK``.
+
+    Split from :func:`_purge_deleted_orgs` so the lock is released on EVERY
+    exit path with a single ``finally`` (the body has many ``return``/``raise``
+    shapes: the Supabase branch returns early, and the outer ``except``
+    swallows). Nothing here may be called directly — the guard is the only
+    thing making one logical purge emit one ``team_delete_purged`` row.
     """
     try:
         env_grace = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS",
@@ -29286,6 +29210,10 @@ def _analytics_note_success() -> str:
       cleared the episode latch here, so the fresh incident was never resolved
       by this process and the following episode was absorbed into it (cycle-7
       P1).
+    * ``SKIPPED_WINDOW`` — #3146: an incident IS open and the recovery window
+      is not yet satisfied, so it was deliberately left alone. Same handling as
+      ``SKIPPED_FRESH`` (stay pending; unknown is not resolved). The analytics
+      kind declares no window, so this value cannot arise for it today.
     * a raise, or no usable store — the truth is unknown → also stay pending.
       When an incident is already on record the attempt re-arms the window
       (bounded reads); from the process-start UNKNOWN state nothing is armed,
@@ -29372,11 +29300,19 @@ def _analytics_note_success() -> str:
                 if outcome is ResolveOutcome.RESOLVED:
                     _logger.info("analytics sink recovered — %s resolved",
                                  _ANALYTICS_INCIDENT_KIND)
-                elif outcome is ResolveOutcome.SKIPPED_FRESH:
+                elif outcome in (ResolveOutcome.SKIPPED_FRESH,
+                                 ResolveOutcome.SKIPPED_WINDOW):
+                    # #3146: SKIPPED_WINDOW (the recovery window is not yet
+                    # satisfied) leaves the incident open for the same reason
+                    # SKIPPED_FRESH does — it is a kept-open verdict, not a
+                    # resolved one. This kind declares no window, so the value
+                    # cannot arise today; handling it keeps the gate correct
+                    # for any future declaration without a silent gap.
                     _logger.info(
-                        "analytics sink resolve skipped a FRESH %s — it "
-                        "stays open, keeping the resolve pending",
-                        _ANALYTICS_INCIDENT_KIND)
+                        "analytics sink resolve kept %s open (%s) — it "
+                        "stays pending",
+                        _ANALYTICS_INCIDENT_KIND, outcome.value,
+                    )
         except Exception as e:  # best-effort, never raises
             _logger.warning("analytics sink resolve failed: %s", e)
         # The CLEAR is applied only if the fact is not STALE. `armed_at_decision`
@@ -29433,7 +29369,8 @@ def _analytics_note_success() -> str:
                 # (`_analytics_note_degradation`): an uncertainty must not
                 # silence a real episode, so that state retries on the next
                 # delivered write instead.
-                if (outcome is ResolveOutcome.SKIPPED_FRESH
+                if (outcome in (ResolveOutcome.SKIPPED_FRESH,
+                                ResolveOutcome.SKIPPED_WINDOW)
                         or _ANALYTICS_RESOLVE_NOT_BEFORE is not None):
                     _ANALYTICS_RESOLVE_NOT_BEFORE = (
                         time.monotonic() + _ANALYTICS_RESOLVE_BACKOFF_S)

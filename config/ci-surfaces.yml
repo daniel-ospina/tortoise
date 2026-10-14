@@ -1649,6 +1649,18 @@ surfaces:
   # fix needs to stay green, and the `encode_for_store` seam.
   # DUAL-REGISTERED with `eval`, which owns `tortoise/embeddings.py`.
   - test_update_point_content_embedding_4208.py
+  # #5240: `update_point(id, content=None)` must be a NO-OP — the None
+  # boundary is "absent", decided once before the derived hash, the derived
+  # vector, the write and the `PointRevised` record all read it — and
+  # `content=""` stays a real edit. `core` owns it: the fix is
+  # `tortoise/sdk.py` (a SHARED_MODULE, so an sdk diff selects the full
+  # matrix), and the live==rebuild half of the file pins the
+  # `tortoise/projection/` replay fold, which matches no named surface and
+  # falls through to `core` (#2795 class). NOT dual-registered with `eval`:
+  # the file patches `compute_embedding` and never reaches the
+  # `encode_for_store` seam an `embeddings.py` diff would need to select —
+  # the sibling #4208 file above already carries that dual registration.
+  - test_update_point_none_content_5240.py
   - test_onboarding_truth_surface.py  # #3670/#3671/#3681: dual-registered (api+core) — pins tortoise/hosted_api.py
   # #2007 (W12): the self-hosted onboarding path. Load-bearing HERE because the
   # two SDK-init seams it pins (`tortoise/selfhost_api.py` `_sdk`,
@@ -2331,6 +2343,18 @@ surfaces:
   # differs, the contract does not), so it is deliberately NOT carve_out:
   # registering it there would exclude it from every docker leg.
   - test_4199_dense_scope_coverage.py
+  # #5321: the dense legs run, and they run because `EmbeddingModel.get()`
+  # returns the LOADED INNER encoder (not the `EmbeddingModel` wrapper). The
+  # file pins that accessor contract plus the model-branch outcome of each
+  # caller the issue named — `_encode`/`search_points` (`tortoise/embeddings.py`,
+  # which selects `eval`) AND `kind_index._DefaultEncoder.encode` +
+  # `fallback_snapshot` (neither matches a SOURCE_PATTERNS entry, so both fall
+  # to THIS `core` fallback). Dual registration is load-bearing in both
+  # directions: an accessor change in `tortoise/embeddings.py` must run it via
+  # `eval`, and a change to either core-fallback module must run it via here.
+  # Deliberately NOT carve_out — it is DB-free pure unit work and must run in
+  # the docker legs too.
+  - test_5321_embedder_accessor_liveness.py
   - test_search_promoted_fields.py
   - test_search_sessions_temporal.py
   - test_secret_store.py   # #2318: managed backup-key store + rotation (embedded)
@@ -3241,6 +3265,7 @@ surfaces:
   - bench/test_smoke_embedded.py
   - test_2952_degraded_read.py  # #2952: embeddings.py selects the eval surface — dual-registered so the (B) warm-up is covered there too
   - test_4199_dense_scope_coverage.py  # #4199: dual with `core` — this file's outcome records are gated on `tortoise/embeddings.py`'s embedder singleton (a healthy embedder over an un-embedded scope is the defect), and that module selects the eval surface
+  - test_5321_embedder_accessor_liveness.py  # #5321: dual with `core` — the invariant under test lives in `tortoise/embeddings.py` (an `eval` SOURCE_PATTERN: `get()` returns the loaded inner encoder, so the `show_progress_bar` call sites bind), while the core-fallback callers it drives are not selected by this surface. Dropping this arm would leave the accessor unguarded on an embeddings.py-only diff.
   - test_capture_cost_measurement.py  # #3359: the report reprices from the eval-owned PRICING_MAP (tools/longmem_eval/costing.py), so a pricing-map change must run it — dual-registered with `api`/`core`
   - test_analytics_write_path_resolution.py  # #3677: tools/capture_cost_report.py is an eval-surfaced source (the eval half of the cost measurement), so a read-path change there must run the guard that pins its resolved destination — dual-registered with `api`/`core`
   - test_analytics_fallback_alert.py  # #3820: triple-registered with `api`/`core` for the same reason as the #3677 file above — the outcome counter it pins lives in `tortoise/monitoring.py`, which the eval lane's cost measurement also reads
@@ -4733,6 +4758,7 @@ durations:
   test_embedding_model_required.py: 0.5  # unmeasured
   test_journal_embedding_5004.py: 24.0  # unmeasured
   test_update_point_content_embedding_4208.py: 9.6  # #4208: 9 tests, docker FalkorDB; locally measured (junit testcase/@time sum, max of 4 runs)
+  test_update_point_none_content_5240.py: 2.0  # #5240: 6 tests; measured 9.5s locally on the embedded carve-out lane (@time sum, max of 3 runs), entered at the flat default per the #3400/#4221 convention below until a CI junit artifact carries the weight
   test_helpers.py: 0.0  # unmeasured
   # #3400/#4221 convention: a new file enters at the flat 2.0s default and keeps
   # the `# unmeasured` marker until a CI junit artifact carries a measured weight,
