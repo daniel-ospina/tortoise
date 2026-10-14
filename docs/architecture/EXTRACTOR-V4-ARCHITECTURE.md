@@ -312,6 +312,81 @@ A `Point` is a **paraphrase** of the text, and that is exactly where a **proposi
 
 ⚠️ **No backfill is possible** — origins are unrecoverable for existing entities (**zero** outbound edges, measured above). **New entities only; the existing 7,863 stay origin-less.**
 
+#### 2.4.4 ⛔ Redaction and the append-only layer — the G4 reconciliation (`#8496`)
+
+**G4 (`§4.3`) is the one gap in this document that is not a missing step: it is two correct rulings made
+in different issues, at different times, where neither could see the other's constraint.** `#4911`
+(redaction) closed `COMPLETED` on **2026-09-26**; `§2.4.2` (append-only) was ruled **2026-09-23**. §2.4.2
+makes the raw-fact layer immutable *by design* — a raw fact that can be rewritten is not evidence — and a
+control that removes a credential is, read naively, a rewrite. **`#8496` asks for the reconciliation to be
+STATED, not implied. It is stated here, as four decisions.**
+
+| # | the item `#8496` requires stated | **the decision** | **the reason** |
+|---|---|---|---|
+| **R1** | **Where redaction sits relative to immutability** | ⭐ **Redact BEFORE the append.** The layer only ever holds already-redacted text; nothing on it is ever rewritten to remove a secret | the alternative — keep the raw, record a redaction separately — **keeps the secret** while recording that one was there, which is the exact failure G4 names (*immortal secrets*). Redaction-before-append is the only option under which the layer's immutability is **preserved rather than weakened**: a value that was never written needs no later edit |
+| **R2** | **The already-persisted case** | a **retention erasure** — erase the value **in place**, substituting the **same** `[REDACTED:<kind>]` marker the write path emits; journal the erasure (span id + kind + when, **never the value**); the citing `Point`s keep their status | §2.4.2 rule 3 already names exactly **one** in-place class: **GDPR / retention**. A discovered credential is the strongest retention case — the data may not be retained. *Supersession* is the wrong verb (it preserves the old record, and the old record is the secret). The **same marker** as R1 means a reader cannot tell a late redaction from an early one, so the layer has one representation of a redacted span and no second-class marker exists |
+| **R3** | **Scan coverage** | every *"the store is clean"* claim states coverage as **(scanned, total)**; a partial scan means *none found in the part examined*, **never** *clean*; full coverage means reading every page to the host's `hasMore=false` with `include_retracted=True` | the caveat is **a rule for reading a scan, not an open finding** — see below |
+| **R4** | **The residency question** | the layer lives in the **Postgres truth store** (the DATABASE — not the graph, not the object bucket); it carries **no credential in the steady state** because R1 redacts before the append; its retention is the **same user-data retention and erasure path** the other user data uses — not a new residency set | §2.4 already fixes the home. The widening G4 warns about is in **volume, not sensitivity** — and R1 is what makes the widening safe: a larger raw store that never receives a credential is not a larger *secret* store |
+
+**R1 and R2 are one rule at two times, and that is the whole reconciliation.** At *write* time a
+credential never reaches the layer (R1); at *discovery* time, if one is already there, it is erased under
+the retention trigger (R2). Both substitute the **identical marker**, so the layer never needs an answer
+to *"was this caught on the way in, or later?"* — a consumer cannot accidentally treat the two
+differently, and neither can a future lane.
+
+**⛔ A *superseding redaction record* is REFUSED — and it is the option `#8496` names first.** It retains
+the secret in order to preserve the evidence chain. But the evidence chain is kept *for fidelity*, and
+there is no fidelity value in retaining a credential: the chain is preserved without the bytes by R2's
+journal record and the marker. Keeping the bytes is the one outcome the control exists to prevent.
+
+**⛔ *Accepted residual risk* is REFUSED as the default answer, and this is the point of R2.** "The layer
+is immutable" is not a reason to retain a credential; the two *accepted* residuals are narrower and both
+are named: (1) the **pre-redaction window** — a turn captured before the scrub existed, which is what R2
+repairs; and (2) **rows a scan has not yet reached**, which R3 exists to keep honest. **A purge (delete
+the row) is the FALLBACK for R2**, used only where a deployment's storage tier genuinely refuses an
+in-place write; the span reference then resolves to a stated **purged** marker, so a reader still sees
+evidence was removed rather than a dangling link or *"never existed"*.
+
+**✅ R1–R4 request no new mechanism, and it is worth saying why.** `#4911` already landed the control at
+`_capture_turn_texts` / `_redact_turn_contents` — **the ONE definition of the stored turn text that the
+writer itself calls** (`tortoise/sdk.py`) — *before* the write, with a **visible**
+`[REDACTED:<kind>]` marker and a per-session `capture_redactions` count. The pattern table is
+`redact_secrets` / `CREDENTIAL_KINDS` in `tortoise/security.py`, and it is **idempotent by construction**
+(no rule's anchor can be satisfied inside the marker), so re-scanning already-redacted text neither
+changes it nor inflates the count. **The v4 raw-fact writer routes through that same chokepoint; R2 is the
+only redaction that can ever happen *after* a write, and it reuses the same marker rather than minting a
+second one.**
+
+**What R1 is NOT: a licence to weaken §2.4's fidelity goal.** Redaction is the **one sanctioned fidelity
+loss on this layer** — and, like the 5,000-char cut (`#4897`), it is **visible**: the marker is
+`[REDACTED:<kind>]`, never `***` and never a silent truncation, so a consumer can tell the text is not
+complete. **Fidelity yields to non-retention of a credential; it never yields silently.**
+
+**⚠️ R3 corrects the premise `#8496` was filed on — the partial-scan caveat was DISCHARGED by its own
+issue.** `#4911`'s *body* reported a scan of **10,000 of 19,960** turn nodes (FalkorDB's default result
+cap), and `#8496` inherited that as an open gap. `#4911`'s own **posted re-scan (2026-09-25)** read
+**21,281 of 21,281** turn nodes to the host's `hasMore=false`, `include_retracted=True`, and found **0**
+anchored matches (the *"170 nodes contain `sk-`"* figure is prose — `risk-`/`disk-`/`task-`). **So the
+coverage question is not *"was the store scanned?"* — it was — but *"does every future clean claim carry
+its denominator?"*, which is what R3 pins.** Two rules follow and they are the mechanism the item asked
+for: the scan **must page to `hasMore=false`** (a default-capped read is a partial scan wearing a clean
+verdict), and it **must run the same table as the write path** (`redact_secrets` / `CREDENTIAL_KINDS`) — a
+parallel pattern list is a second source of truth for what a credential *is*, and the two would drift
+apart silently.
+
+**⚠️ And the layer G4 governs does not exist yet — so R1–R4 bind a design, and R2 is a procedure for a
+store that today holds no raw facts.** The raw-fact persistence step is still open (`§4.3` G1 — `#5064`;
+`#5007` shipped the span *schema*, so a `Point` can carry `span_start`/`span_end`, but the raw-fact layer
+is not written); and `#4911`'s own measurement says there is nothing to erase today. **This subsection
+records the design so that the layer is built WITH the control — which is precisely what `#8496` asked
+for and what designing them in separate issues, at separate times, could not deliver.**
+
+**OVERRIDES: not applicable.** Redacting at ingest is the common practice (a control at the write
+boundary), so R1 runs *with* the grain; R2's in-place erasure is authorised by §2.4.2's own retention
+trigger rather than against it; and R4 keeps the layer where §2.4 already put it. Nothing is being
+overridden and no reopen is required. *(`#4911` reached the same conclusion for its own scope, and this
+line carries it forward so the next lane holding a vendor's append-only page finds the ruling here.)*
+
 ---
 
 ## 3. Step 0 is not the only source-varying step
@@ -734,14 +809,14 @@ S6  COMMIT
 
 ### 4.3 ⚠️ What the steps above do NOT yet cover (review-provided, all unaddressed)
 
-**The step list is the SHAPE, not a complete specification.** Five gaps were identified by review and are recorded here rather than silently implied by the diagram. **These are gaps to close, not designs already settled — but two of the filed issues ask the *owner* for a ruling** (`#5333` for G5's deletion/relocation half; **`#8500` for G5's S4 clause**, whose own body closes on *"Which is authoritative until the migration lands?"*), **and a third (`#8496`, G4's immutability-vs-redaction reconciliation) requires a stated design choice** — it asks for that choice and its reason to be *stated, not implied*, but requests no owner ruling. **So closing G4 and G5 means obtaining a decision; G1, G2 and G3 are steps to WRITE, not decisions to obtain — G2's decision is already made (`STORAGE-ARCHITECTURE.md` §12.2a) and only its step is missing.** ✅ **All five are now filed** — the issue reference is in each row (revalidated 2026-10-13; G3 and G4 had no tracker entry before that, and are `#8495` / `#8496`).
+**The step list is the SHAPE, not a complete specification.** Five gaps were identified by review and are recorded here rather than silently implied by the diagram. **These are gaps to close, not designs already settled — but two of the filed issues ask the *owner* for a ruling** (`#5333` for G5's deletion/relocation half; **`#8500` for G5's S4 clause**, whose own body closes on *"Which is authoritative until the migration lands?"*), **and a third (`#8496`, G4's immutability-vs-redaction reconciliation) asked for a stated design choice** — the choice and its reason to be *stated, not implied*, with no owner ruling requested. ✅ **That choice is now STATED in `§2.4.4` (R1–R4), so G4 no longer waits on a decision.** **So closing G5 means obtaining a decision; G1, G2 and G3 are steps to WRITE, not decisions to obtain — G2's decision is already made (`STORAGE-ARCHITECTURE.md` §12.2a) and only its step is missing.** ✅ **All five are now filed** — the issue reference is in each row (revalidated 2026-10-13; G3 and G4 had no tracker entry before that, and are `#8495` / `#8496`).
 
 | # | the gap | why it matters |
 |---|---|---|
 | **G1** → `#5064` (open remainder; `#5007` CLOSED `COMPLETED` via PR `#5108` — the schema + passthrough **shipped**, but **`extractor_v2.py` emits no `span_start`** (the repo's *document* extractor does — `docs_miner.py:373`)) · `#4894` (narrative) | **No step PERSISTS the narrative or the raw-fact span.** S6 is *"write entities + connections + metadata/lifecycle"*. §4.0 has no persistence purpose beyond S6. | ⛔ **D1 and §2.4 are not implementable from the steps as written.** If the narrative and the span are not written by a named step, they are not written. **Needs an explicit persistence step (or an explicit S6 sub-job).** |
 | **G2** → `#5008` | **No EMBEDDING-DECISION step.** `STORAGE-ARCHITECTURE.md` §12.2a **decides** the `EMBED` gate exists (*"a row can be worth KEEPING but not worth EMBEDDING"*, *"the lever is what gets an embedding"*) — **and this document never mentions it.** S2.3's kNN path **silently assumes every candidate is embedded.** | ⛔ **The two documents would ship contradictory designs.** The `EMBED` gate and the `KEEP` gate **share one rule set and enforce at TWO points** (§12.2a) — so the second enforcement point needs a home in this step list. |
 | **G3** → `#8495` | **No per-step FAILURE POLICY.** Only S2.2 (*"fail-open — keep"*) and S2.3 (*"never raises"*) state one. | **The S3 failure is the dangerous one: the natural fail-open marks candidates `new` — MANUFACTURING DUPLICATES, the exact failure S3 exists to prevent.** Also: partial S6 has no transaction/retry boundary vs `#4240` / `#4716` (both CLOSED `COMPLETED` — the step-level policy was never written, whatever those fixes landed); and **re-narrate has no tie-break** for a worse second narrative. |
-| **G4** → `#8496` | ⛔ **`#4911` (no secret redaction) + an append-only immutable raw layer = IMMORTAL SECRETS.** | ⚠️ **Earlier revisions listed `#4911` in §15 as an *unrelated* capture-path issue; as of 2026-10-13 §15 links them explicitly (`#4911` → "its *v4 raw-layer* consequence is `#8496`"). The two are not unrelated** — §2.4.2 makes the raw layer **append-only by design**, so **a secret captured once is a secret retained forever.** Redaction must be designed *with* the layer, or the layer's immutability becomes a liability. |
+| **G4** → `#8496` | ⛔ **`#4911` (no secret redaction) + an append-only immutable raw layer = IMMORTAL SECRETS.** ✅ **RECONCILED IN `§2.4.4` (R1–R4): redact BEFORE the append; the already-persisted case is a retention erasure reusing the SAME marker; every clean-scan claim carries `(scanned, total)`; the layer keeps its Postgres home and its existing retention path.** | ⚠️ **Earlier revisions listed `#4911` in §15 as an *unrelated* capture-path issue; as of 2026-10-13 §15 links them explicitly (`#4911` → "its *v4 raw-layer* consequence is `#8496`"). The two are not unrelated** — §2.4.2 makes the raw layer **append-only by design**, so **a secret captured once is a secret retained forever.** Redaction must be designed *with* the layer, or the layer's immutability becomes a liability. **The reconciliation is the last row of this table to stop waiting on a decision: it is stated in `§2.4.4`, and the layer is not built yet (`G1` — `#5064`), so the control ships with it.** |
 | **G5** → `#5333` · `#5059` · `#8500` (the S4 clause) | **No migration or backfill for the ~25k existing nodes.** | No backfill, no re-extraction path, and **no decision on the ~4,900 `the <X>` Objects.** Also unaddressed: **what happens to the live S4 `merge_embed_lists` when S4 leaves the step list** — the code and the design must not disagree. |
 
 **⚠️ And G2 is where the two documents bind:** `STORAGE-ARCHITECTURE.md` §12.2a's decided rule (*one rule set, two enforcement points*) **requires a step to hold the second point.** Until G2 is closed, **the storage doc's central lever has no implementation site.**
@@ -1245,7 +1320,7 @@ filed"* claim is what causes duplicate filing — the same failure the §4.3 gap
 | **G1** — narrative + raw-fact span persistence | **`#5064`** (open remainder; `#5007` CLOSED `COMPLETED` via PR `#5108`) · **`#4894`** (narrative) | ✅ filed |
 | **G2** — the EMBED gate | **`#5008`** | ✅ filed |
 | **G3** — per-step failure policy | **`#8495`** | ✅ filed |
-| **G4** — redaction designed with the append-only layer | **`#8496`** | ✅ filed (`#4911` is CLOSED; its design-level consequence was unowned) |
+| **G4** — redaction designed with the append-only layer | **`#8496`** | ✅ filed (`#4911` is CLOSED; its design-level consequence was unowned). ✅ **RECONCILED — `§2.4.4` (R1–R4) states the choice and its reason: redact before the append, retention-erasure for the already-persisted case, `(scanned, total)` on every clean claim, Postgres home + existing retention path** |
 | **G5** — migration / backfill / the live S4 | **`#5333`** · **`#5059`** · **`#8500`** (the S4 clause) | ✅ filed |
 
 **⇒ There are no longer any unfiled candidates in this document.** G1–G5 were recorded in §4.3 as gaps to close before

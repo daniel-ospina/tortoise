@@ -2024,6 +2024,16 @@ surfaces:
   # diff takes `select()`'s early return, so `tier1` is where it must live;
   # `core` is its home for the code diffs that can re-rotate a passage.
   - test_extractor_v4_citation_rot.py
+  # #8496: the FOURTH guard over the same document — the G4 reconciliation
+  # (append-only raw layer vs credential redaction). Pins the stated design
+  # choice (R1–R4: redact BEFORE the append, retention-erasure for the
+  # already-persisted case, `(scanned, total)` coverage, Postgres home) AND the
+  # code ground it rests on (`redact_secrets` marker + idempotence, and
+  # `_capture_turn_texts` storing the marker). Same docs-only reason as the
+  # three guards above: a `docs/`-only diff takes `select()`'s early return, so
+  # `tier1` is where it must live; `core` is its home for the code diffs that
+  # can revert the scrub the ruling assumes.
+  - test_extractor_v4_redaction_reconciliation.py
   - test_falkordb_compat.py
   # #7076: the degraded-fallback snapshot's OWN guard. test_fallback_snapshot.py
   # was registered only under `api`, while the module it guards
@@ -3457,6 +3467,10 @@ tier1:
 # and the same docs-only PR is exactly the change that can re-introduce a
 # retracted passage.
 - test_extractor_v4_citation_rot.py
+# #8496: the same document's G4 reconciliation guard (`core` above) — a fast,
+# no-DB file scan plus the scrub's marker/idempotence assertions, so a docs-only
+# PR runs it here.
+- test_extractor_v4_redaction_reconciliation.py
 slow_files:
 - test_3311_multilabel_status_vocab.py
 - test_about_edges.py
@@ -4428,6 +4442,7 @@ durations:
   test_extractor_v4_step_list_consistency.py: 0.1  # #5092: two fenced blocks + one paragraph read; measured 0.01s of test body (session setup excluded)
   test_extractor_v4_doc_citations.py: 0.1  # #8498 review P2: one row + two module assertions; same no-DB shape as the step-list guard
   test_extractor_v4_citation_rot.py: 0.1  # #8506: doc-text scans + a handful of file reads; same no-DB shape as the two guards above
+  test_extractor_v4_redaction_reconciliation.py: 0.3  # #8496: one section read + a marker/idempotence check; the `tortoise.sdk` import (~0.12s) is the only cost
   test_file_indexer.py: 0.7
   test_open_kinds.py: 0.3
   test_postmerge_verdict.py: 0.4

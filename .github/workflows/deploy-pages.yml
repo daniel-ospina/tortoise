@@ -1017,7 +1017,7 @@ jobs:
           # Accept trailing dot (standard dig output).
           if [ "$CNAME" = "premise-labs.pages.dev." ] || [ "$CNAME" = "premise-labs.pages.dev" ]; then
             ROOT_MARKER=$(curl -s https://tortoise.premiselabs.co/ 2>/dev/null || true)
-            if echo "$ROOT_MARKER" | grep -qF "Memory that makes your agents"; then
+            if echo "$ROOT_MARKER" | grep -qF "Agent memory that"; then
               echo "TORTISE_HOST_CHECK=1" >> "$GITHUB_ENV"
               echo "DNS preflight green — tortoise.* tests enabled"
             else
