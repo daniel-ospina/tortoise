@@ -1612,7 +1612,11 @@ def test_the_pending_route_rolls_back_when_its_source_survives(monkeypatch):
         "session_point_links": [],
     })
 
-    def _half_rebuild(self, log_dir, *, confirm_destructive=False):
+    def _half_rebuild(self, log_dir, *, confirm_destructive=False,
+                      require_empty=False):
+        # #3044: `require_empty` is accepted and ignored — this stub models a
+        # rebuild that WIPED and then raised mid-replay, which is the #7929
+        # rollback path, not the pre-wipe emptiness refusal.
         self.g.query(
             "CREATE (n:Point {id:'half', content:'half', status:'live',"
             " pointKind:'statement'})")

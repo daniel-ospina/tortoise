@@ -6291,6 +6291,32 @@ class RebuildDroppedEpisodicPoints(RuntimeError):
     """
 
 
+class WipePreconditionRefused(RuntimeError):
+    """#3044: ``rebuild_all(require_empty=True)`` found the graph non-empty.
+
+    The auto-recovery route (``tortoise.consistency.recover_from_log``)
+    reaches its destructive ``rebuild_all`` branch only after proving the graph
+    held 0 nodes — but that probe runs in another module, BEFORE the whole
+    journal parse. Emptiness is therefore a claim about the past by the time
+    the statement that depends on it is issued, and nothing re-validated it at
+    the wipe itself.
+
+    This is that re-validation. With ``require_empty=True`` the caller asserts
+    "there is nothing here to destroy"; the wipe refuses if the assertion no
+    longer holds. It is raised BEFORE the #2943 sidecar is written and before
+    any destructive statement, so the store is untouched and any pre-existing
+    rescue file is preserved.
+
+    It exists because ``rebuild_all``'s wipe is unconditional over EVERY label
+    while its pre-wipe snapshot covers only ``:Point`` / ``:Batch`` /
+    ``Point.batch_id`` — ``:GraphEvent``, ``:GraphEventMeta`` and the
+    unjournaled ``:Event`` / ``:Subject`` / ``:Object`` / ``:Document`` /
+    ``:Source`` writes are deleted and never restored. A node that appears
+    between the emptiness probe and the wipe would be destroyed with no record
+    of it anywhere.
+    """
+
+
 # #3947 review: the journal event types whose replay CREATES a Point/Operator
 # node (an `_upsert` / `_upsert_point_props` MERGE). Kept next to the exception
 # so the pre-wipe proof and `apply()`'s branches are read together — omitting a
@@ -8455,7 +8481,8 @@ class FalkorProjection(
     @_fail_closed("rebuild_all")
     @tolerates_altered_numbers
     def rebuild_all(self, log_dir: str, *,
-                    confirm_destructive: bool = False) -> dict:
+                    confirm_destructive: bool = False,
+                    require_empty: bool = False) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.
 
         #3585 (R8/R9): the whole fold runs inside the non-folded-event
@@ -8467,6 +8494,17 @@ class FalkorProjection(
         the wipe on an explicit per-call opt-in — the caller MUST pass
         ``confirm_destructive=True`` (default refuses). L2 still refuses a
         non-disposable server graph even with the token.
+
+        ``require_empty=True`` (#3044) adds a second, independent precondition
+        for callers that only know the graph was empty EARLIER (the
+        ``consistency.recover_from_log`` auto-recovery route proves 0 nodes
+        before a journal parse that can take seconds): the wipe re-validates
+        that claim immediately before the sidecar write and the destructive
+        statement, and refuses with :class:`WipePreconditionRefused` if the
+        graph gained nodes since. The check precedes the #2943 sidecar write,
+        so a refusal leaves no rescue file behind (the existing pre-wipe-guard
+        convention). Default ``False``: an operator rebuild legitimately runs
+        on a populated graph.
 
         Two-pass: creates all Point nodes first (pass 1), then operator edges
         and all other event types second (pass 2), so cross-file operator→Point
@@ -9158,6 +9196,30 @@ class FalkorProjection(
         # unconditional like every other guard on the path.
         self._assert_test_graph(
             "REFUSING to run bulk DETACH DELETE on non-test graph")
+
+        # #3044: the recovery route's emptiness claim, re-validated AT the
+        # operation that depends on it. `recover_from_log` proves 0 nodes
+        # before a journal parse that can take seconds; this re-checks just
+        # before the wipe (and before the sidecar write, so a refusal strands
+        # no rescue file — see the convention above). Opt-in only: a rebuild
+        # an operator asked for runs on a populated graph by design, so this
+        # must never be unconditional. The refusal is raised before ANY
+        # destructive statement, so the store is untouched.
+        if require_empty:
+            _rows = self.g.query("MATCH (n) RETURN count(n)").result_set
+            _present = (int(_rows[0][0])
+                        if _rows and _rows[0][0] is not None else 0)
+            if _present:
+                raise WipePreconditionRefused(
+                    f"rebuild_all was called with require_empty=True, but the "
+                    f"graph holds {_present} node(s) — refusing to wipe "
+                    f"(#3044). The caller proved this graph EMPTY before the "
+                    f"journal parse; a node appearing since then would be "
+                    f"destroyed with no record (the pre-wipe snapshot covers "
+                    f"only :Point/:Batch). Re-run recovery when no writer is "
+                    f"active, or rebuild explicitly with "
+                    f"`tortoise rebuild --dir <dir>`."
+                )
 
         # Persist immediately before the destructive wipe: after DETACH DELETE
         # these nodes exist nowhere else, so replay must be able to recover
