@@ -3151,6 +3151,16 @@ surfaces:
   - test_identity_contract.py
   - test_sdk_now_iso_single_definition.py   # #5375: sdk.py must declare exactly one module-level `_now_iso` (hermetic — ast.parse + the bound global)
   - test_validity_window_contract_5374.py   # #5374: the shared `commit_schema.validate_validity_window` contract + read-path (`_covers`) agreement (docker-lane)
+  # #7818: the `get_historical_knowledge` reply contract (`status`/`found` on
+  # every shape — the `ambiguous` reply used to omit `found`, so a `.get("found")`
+  # consumer read two candidates as honest absence) AND the §4.7 coverage-boundary
+  # record (closed `_covers`, its shared-instant consequence, and the OPEN
+  # closed-vs-half-open decision). Registered under `sdk` because `tortoise/sdk.py`
+  # — a SHARED_MODULE that already forces the full matrix — carries the code half,
+  # and the doc half is `docs/ONTOLOGY.md`; without a registration
+  # test_integrity_covers_all_test_files reds (docker-lane; URI-less it needs
+  # TORTOISE_TEST_CARVE_OUT=1).
+  - test_7818_boundary_ambiguity_contract.py
   - test_log.py
   - test_5917_torn_tail_seal.py   # #5917: a torn tail is sealed by the next append + read byte-safely (the record after a tear used to be lost)
   - test_longmem_reader_aggregation.py

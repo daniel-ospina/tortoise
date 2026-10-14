@@ -1,5 +1,5 @@
 ---
-title: "Tortoise — Canonical Ontology v3.26"
+title: "Tortoise — Canonical Ontology v3.27"
 type: data
 domain: data
 status: live
@@ -11,7 +11,7 @@ aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.26
+# Tortoise — Canonical Ontology v3.27
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -32,6 +32,24 @@ doc_status: live
 > **⭐ If this document and the code disagree, THIS DOCUMENT IS RIGHT and the code
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in the changelog.
+>
+> **Changelog v3.27 (2026-10-14 — issue #7818 — the §4.7 coverage boundary, stated and left OPEN):**
+>
+> **A record of an undocumented rule, not a model change** — no field, marker or
+> vocabulary moves. §4.7 stated no coverage rule for the query instant `t`, so two
+> readings coexisted silently: the `validTo` row's prose (*"the old fact stops being
+> true when the new one starts being true"*) describes a **half-open** `[vF, vT)`,
+> while the only read path that answers *"what was true at `t`"* —
+> `get_historical_knowledge`'s `_covers` — implements a **closed** `[vF, vT]`, the
+> rule `commit_schema.validate_validity_window` declares and its #5374 agreement
+> test pins (`t == vT` and a zero-length `[t, t]` cover). §4.7 now states the
+> boundary and its consequence — a well-formed contiguous chain reports
+> `status="ambiguous"` at the one shared instant — and records the choice between
+> the two readings as **OPEN**, tracked at **#7818**. Two read-path contract defects
+> are fixed alongside it: the `ambiguous` reply now carries an explicit `found`
+> (True) instead of omitting the key, so a `.get("found")` consumer can no longer
+> read two candidates as honest absence, and every reply carries a `status`
+> (`"found"` | `"ambiguous"` | `"absent"`).
 >
 > **Changelog v3.26 (2026-10-14 — issue #7551 — the operator-label declared vocabulary is stated, and the write path consults the whole of it):**
 >
@@ -1290,6 +1308,33 @@ window, independent of when Tortoise learned it. Canonical pair:
 | start | `validFrom` | `prov:generatedAtTime` | Populated by the date-carrying write paths — the hosted commit path sets it from the payload `when`, mining W-4 from the session frontmatter date (§4.1). An undated session stamps **no** `validFrom` at all (`ConversationMiner._temporal_wire`, #3654), so an **absent** `validFrom` means an **open/unbounded start** (`get_historical_knowledge`) — the write wall clock is never borrowed as a start. `create_point`'s base CREATE map seeds no `validFrom`; caller props — including `validFrom` — are appended to it, so `create_point` itself never **synthesizes** a clock-stamped start either. The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp |
 | end | `validTo` | `prov:invalidatedAtTime` | On **supersession** set to the successor's `validFrom` **when the successor carries one** — the **contiguous Graphiti (Zep) window intent: the old fact stops being true when the new one starts being true** (`supersede_point`, E6 #1538). An **undated** successor (absent `validFrom` ⇒ open start, row above) falls back to its `createdAt`, then to `now` — so the old `validTo` lands on the successor's `createdAt` and the windows **overlap** rather than being exactly contiguous. Exact contiguity requires a successor `validFrom` (`valid_from` kwarg → successor `validFrom` → successor `createdAt` → `now`). The kwarg is a **claim**, not an unconditional override: when the successor carries a stored `validFrom` the two must be **parseable** timestamps naming the **same instant** (compared by instant via `_created_sort_key`, the measure `_covers` uses), else `supersede_point` raises `ValueError` **before any mutation** — a disagreeing kwarg would otherwise gap or overlap the chain (#3980). The kwarg is the sole source for an undated successor **unless it names no instant** — a STRING kwarg that is unparseable falls through to the successor's `createdAt`, and that fallback itself requires an orderable value and otherwise lands on `now` (#5360). **The resolved end is additionally checked against the PREDECESSOR's own `validFrom`**: when BOTH order to an instant and the end is strictly earlier ⇒ `ValueError` before any mutation (#4021), because an inverted window (`validTo < validFrom`) is satisfied by **no** query instant, so the predecessor would be silently unreachable from every read surface — equality (a zero-length predecessor window) remains legal. An **unorderable** bound on either side is NOT compared even so: it names no instant, so a refusal would rest on a lexicographic accident rather than a comparison (and a point whose window is already unorderable is not newly hidden by the write) — the orderability residual is closed on the write path (#5360), except the deliberately-exempt NUMERIC `valid_from` kwarg (whose `str()` form `_covers` still cannot order). `invalidate_point` instead stamps `validTo = now` (no successor ⇒ no contiguity), and refuses with `ValueError` when a stored `validFrom` is after `now` — `retract_point` is the window-agnostic route (#5358) |
 
+> **The coverage boundary is stated here because it was not (#7818).** The read
+> path that answers *"what was true at `t`"* (`get_historical_knowledge`'s
+> `_covers`, `tortoise/sdk.py`) treats a window `[vF, vT]` as covering `t` iff
+> `vF <= t <= vT`, an absent bound read as open — the rule
+> `commit_schema.validate_validity_window` declares (#5374), whose agreement test
+> pins `t == vT` **and** a zero-length `[t, t]` as covering. Two consequences, both
+> stated so they are not rediscovered as defects:
+>
+> - **A well-formed contiguous chain has ONE shared instant.** For
+>   `P[vP, vC] ← C[vC, ∞)` — the shape every dated `supersede_point` writes —
+>   `t == vC` is covered by BOTH windows, so `get_historical_knowledge` reports
+>   `status="ambiguous"` with two `candidates` there. That is the closed-interval
+>   consequence, not corruption and not a silent wrong answer. The instant is also
+>   **entry-point-dependent**: entering from `C` reports the two candidates, while
+>   entering from `P` — whose CORRECTS walk is backwards-only — resolves to `P`
+>   alone. A chain-local tie-break ("prefer the successor") is therefore **not** a
+>   route: it makes the answer depend on the id you enter from, the #4021 defect
+>   class.
+> - **The `validTo` row's prose describes a DIFFERENT (half-open) reading.**
+>   *"The old fact stops being true when the new one starts being true"* is
+>   `[vF, vT)`; the code is closed `[vF, vT]`. Which is canonical is an **open
+>   decision** — flip to half-open (a global boundary-semantics change, which also
+>   makes a zero-length window genuinely empty; evaluated as R2 of the #5362 plan),
+>   accept the closed ambiguity, or a third shape — tracked at **#7818**. Until it
+>   is decided, a shared boundary instant is a known property of the closed
+>   reading, not a defect to be silently patched reader-by-reader.
+>
 > **Point's `when` is not a second valid-time slot.** `when` (§4.1) is the
 > **occurrence-date input** — the payload-level anchor the hosted commit path
 > copies verbatim into `validFrom` on the same node

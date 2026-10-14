@@ -21609,30 +21609,52 @@ class TortoiseSDK:
         contiguous windows (D2: old.validTo == successor's validFrom), so the
         walk answers "what was true then" exactly.
 
-        Return shapes:
-          {valid_point: {id, content, valid_from, valid_to},
-           current: {id, content},
-           chain: [{id, valid_from, valid_to}], ...}
-            — exactly one candidate covers ``at_date``.
-          {ambiguous: true, candidates: [...]} — two+ candidates whose
-            windows both plausibly cover (malformed/overlapping windows):
-            explicit ambiguity signal, never a silent wrong answer.
-          {found: false, nearest: {...}, chain: [...]} — honest absence:
-            the date lies outside every window (before the earliest / after
-            the latest); ``nearest`` is the closest window for context.
-            When a chain window is INVERTED (``validTo`` before
-            ``validFrom``, so it covers no instant at all) the reply also
-            carries ``malformed: true`` and ``malformed_ids``, and the
-            affected ``nearest`` entry carries ``malformed: true``. Without
-            that flag a corrupt window is indistinguishable from a point
-            that honestly has no window at this date (#5361). Detection is
-            scoped to THIS branch: a covering window cannot be inverted, so
-            the signal is only needed where absence is being reported.
+        Return shapes. EVERY reply carries a uniform ``status``
+        (``"found"`` | ``"ambiguous"`` | ``"absent"``) and a boolean
+        ``found``; branch on ``status``, never on ``found`` alone:
+
+          "found" — exactly one window covers ``at_date``. ``valid_point``
+            is present, ``found`` is True, and ``current``/``chain`` give
+            context.
+          "ambiguous" — two or more windows cover it. ``ambiguous`` (True)
+            and ``candidates`` are present and ``valid_point`` is ABSENT,
+            but ``found`` is **True**: a candidate WAS found, just not a
+            unique one. ``found`` is True here deliberately — a consumer
+            reading ``res.get("found")`` must never read two candidates as
+            "nothing was true at that instant" (#7818).
+          "absent" — no window covers ``at_date`` (before the earliest /
+            after the latest). ``found`` is False and ``nearest`` carries
+            the closest window for context. When a chain window is
+            INVERTED (``validTo`` before ``validFrom``, so it covers no
+            instant at all) the reply also carries ``malformed: true`` and
+            ``malformed_ids``, and the affected ``nearest`` entry carries
+            ``malformed: true``. Without that flag a corrupt window is
+            indistinguishable from a point that honestly has no window at
+            this date (#5361). Detection is scoped to THIS branch: a
+            covering window cannot be inverted, so the signal is only
+            needed where absence is being reported.
+
+        Coverage boundary (#7818). ``_covers`` is INCLUSIVE at BOTH ends:
+        a window ``[vF, vT]`` covers ``t`` iff ``vF <= t <= vT``, with an
+        absent bound read as open. That is the rule
+        ``commit_schema.validate_validity_window`` declares (#5374), whose
+        agreement test pins ``t == vT`` and a zero-length ``[t, t]`` as
+        covering. Consequence, recorded so it is never rediscovered: for a
+        well-formed contiguous chain ``P[vP, vC] ← C[vC, ∞)`` the shared
+        instant ``t == vC`` is covered by BOTH windows, so this method
+        reports ``"ambiguous"`` there — the closed-interval reading, NOT
+        the half-open ``[vF, vT)`` reading the ONTOLOGY's ``validTo`` prose
+        describes. The instant is also entry-point-dependent: entering from
+        ``P`` (whose CORRECTS walk is backwards-only) resolves to ``P``
+        alone, while entering from ``C`` reports the two candidates. Which
+        representation is canonical is an OPEN decision (ONTOLOGY §4.7,
+        #7818); a shared boundary instant is not corruption.
 
         Legacy undated points: no ``validFrom`` ⇒ open start; a superseded
         point without ``validTo`` ⇒ open end (covers everything before the
         successor's ``validFrom`` — no special case beyond IS NULL
-        handling). Missing point / empty chain ⇒ ``{found: false}``.
+        handling). Missing point / empty chain ⇒ ``status="absent"``,
+        ``found: false``.
 
         Date comparison reuses ``_created_sort_key``'s mixed-format
         tolerance (ISO strings + numeric epoch both parse).
@@ -21661,7 +21683,8 @@ class TortoiseSDK:
             if not rows:
                 if cur == point_id:
                     # Asked point missing entirely.
-                    return {"found": False, "point_id": point_id,
+                    return {"found": False, "status": "absent",
+                            "point_id": point_id,
                             "at_date": at_date, "chain": []}
                 break
             content, vf, vt, created = rows[0]  # noqa: RUF059
@@ -21677,7 +21700,8 @@ class TortoiseSDK:
             cur = older[0][0]
 
         if not chain:
-            return {"found": False, "point_id": point_id,
+            return {"found": False, "status": "absent",
+                    "point_id": point_id,
                     "at_date": at_date, "chain": []}
 
         t_key = _created_sort_key(at_date)
@@ -21704,10 +21728,19 @@ class TortoiseSDK:
                                    "valid_from": e["valid_from"],
                                    "valid_to": e["valid_to"]}
             out["found"] = True
+            out["status"] = "found"
             return out
         if len(covering) > 1:
-            # Overlapping/malformed windows — never a silent wrong answer.
+            # Two or more candidates — never a silent wrong answer. The
+            # shared instant of a well-formed contiguous chain lands here
+            # too (`_covers` is closed at both ends), not only a malformed
+            # overlap; see the docstring's coverage-boundary note (#7818).
+            # `found` is True on purpose: a candidate WAS found, so a
+            # `.get("found")` consumer must not read the ambiguity as
+            # honest absence — `status`/`valid_point` name the difference.
             out["ambiguous"] = True
+            out["found"] = True
+            out["status"] = "ambiguous"
             out["candidates"] = [{"id": e["id"], "content": e["content"],
                                    "valid_from": e["valid_from"],
                                    "valid_to": e["valid_to"]}
@@ -21716,6 +21749,7 @@ class TortoiseSDK:
 
         # Honest absence: no window covers. Report the nearest window.
         out["found"] = False
+        out["status"] = "absent"
 
         # #5361: an inverted window (validTo before validFrom) covers NO
         # instant, so `_covers` can never match it and this reply is otherwise

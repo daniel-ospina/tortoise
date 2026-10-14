@@ -330,7 +330,24 @@ class the system already tolerates at every window boundary.
 reading `res.get("found")` or `res.get("valid_point")` therefore reads the manufactured ambiguity as
 "nothing was true at `vP`" — the silent wrong answer the branch exists to prevent. That gap is
 **pre-existing** (it applies to every forward boundary today), belongs with the same read-path root,
-and is recorded on **#7818**; this plan does not fix it and does not rely on `found` being absent. A fourth alternative — a **chain-aware boundary
+and is recorded on **#7818**; this plan does not fix it and does not rely on `found` being absent.
+
+✅ **CORRECTED 2026-10-14 (#7818, merged separately):** the `found` omission is **fixed** and the
+reply shape is now uniform — every reply carries `status` (`"found"` | `"ambiguous"` |
+`"absent"`) and a boolean `found`, and the ambiguous shape sets `found=True` (a candidate WAS
+found; `valid_point` is what is absent). Any reader of this paragraph should not rely on the
+old omission. The method is now named `get_historical_knowledge` (renamed by #8337); read
+`sdk.py` for the line numbers. §4.7 now states the coverage boundary and flags the
+closed-vs-half-open choice as open.
+
+⚠️ **R10's rejection reason below is incomplete; reject R10 for a different, stronger reason.**
+The claim that `retrieval`/`assembly`/`time_aware`/`audit` would disagree is not supported: `_covers`
+is the sole coverage predicate in the tree (they render or annotate a window; none answers "what is
+true at `t`"), and `time_aware.is_stale_entry` (`valid_to <= question_date` ⇒ stale) already agrees
+with preferring the successor. What **does** defeat R10: the CORRECTS walk is **backwards-only**, so
+entering the shared instant from the PREDECESSOR resolves to the predecessor alone while entering
+from the successor yields two candidates — a tie-break makes the answer depend on which id you enter
+from, the #4021 defect class. A fourth alternative — a **chain-aware boundary
 tie-break in `restore_point_at`** (prefer the successor at `t == validTo == successor.validFrom`) —
 is evaluated as **R10** and rejected: it would make the one SDK-only reader disagree with every other
 window consumer (`retrieval`, `assembly`, `time_aware`, `audit`) unless all of them adopted it — the
