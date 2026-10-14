@@ -37,7 +37,10 @@ is the enforcement; the migration playbook is in the
 from __future__ import annotations
 
 import ast
+import json
+import os
 import re
+import subprocess
 import warnings
 from pathlib import Path
 
@@ -375,3 +378,418 @@ def test_spec_lookup_is_strict_about_unknown_kinds():
     assert ik.spec(ik.KIND_STALE).owner == ik.WRITER_WATCHER
     with pytest.raises(KeyError):
         ik.spec("STALE_TYPO")
+
+
+# ── #3146: the recovery-window declaration + its bash mirror ────────────────
+
+#: ⛔ The kinds that carry a recovery window (#3146). Explicit and pinned, like
+#: ``FROZEN_KIND_STRINGS``: the boundary between "a threshold-driven measurement
+#: that can flap" and "everything else" is a DECISION, and a new kind landing on
+#: the wrong side of it is exactly what this set is here to catch. A failure
+#: means either the boundary moved (argue it here) or a kind was mis-declared.
+DR_RECOVERY_KINDS_3146 = frozenset({
+    # #3147 split R2 into two tiers; BOTH are bounded measurements that can
+    # hover at their boundary, so both carry the window (R2_DOWN is the
+    # watcher-owned reachability tier, R2_UNLISTABLE the driver-owned listing
+    # tier).
+    "R2_DOWN", "R2_UNLISTABLE", "APP_DOWN", "WATCHER_DOWN",
+    "SWEEP_CONFIG_ERROR", "SWEEP_OFF_STALE", "SWEEP_NO_COVERAGE", "POOL_STALE",
+    "PURGE_FAILED", "RECONCILE_FAILED", "STALE", "NEVER_BACKED_UP",
+    "METADATA_LOST", "BACKUP_SET_MISSING", "DRIVER_DOWN",
+})
+
+
+def test_dr_recovery_plane_is_pinned():
+    """The recovery window is per kind, and the plane is a reviewed decision.
+
+    Two directions, both load-bearing: a kind that SHOULD carry a window but
+    does not is cleared by one lucky poll (the defect #3146 fixes), and a kind
+    that should NOT carry one (a human-triggered re-baseline, an app-owned
+    trigger with its own threshold) would silently need its operator to act
+    twice. ``resolve_streak`` for every non-plane kind is therefore pinned to 1.
+    """
+    assert ik.DR_RECOVERY_KINDS == DR_RECOVERY_KINDS_3146, (
+        "the recovery-window plane changed. If deliberate, update BOTH this "
+        "pin and the runbook narrative; the boundary is a decision, not an "
+        "accident of a field default.")
+    for kind, spec_ in ik.SPECS.items():
+        if kind in DR_RECOVERY_KINDS_3146:
+            assert spec_.resolve_streak == ik.DR_RECOVERY_STREAK, kind
+        else:
+            assert spec_.resolve_streak == 1, (
+                f"{kind} is outside the threshold-driven DR plane, so it must "
+                "keep the field default (1)")
+
+
+def test_resolve_streak_config_contract(caplog):
+    """#3146 config precedence, and the two failure directions of a bad value.
+
+    Precedence: global ``ALERT_RECOVERY_STREAK`` > per-kind
+    ``ALERT_RECOVERY_STREAKS`` > the legacy ``BACKUP_POOL_RESOLVE_STREAK`` (the
+    POOL_STALE-only #4994 knob) > the declared value. A non-integer OR a
+    NEGATIVE value is IGNORED with a warning (the declared value stands); ``0``
+    is read as 1 with a warning, because a window of zero would mean "never
+    resolve". A negative is a typo, not the ``1`` "clear now" spelling, so it
+    must not defeat the hysteresis — the bash twin agrees (#3146 review P2).
+    """
+    import logging
+
+    assert ik.resolve_streak_for("R2_DOWN", {}) == 2
+    assert ik.resolve_streak_for("DATA_LOSS_CANDIDATE", {}) == 1
+    assert ik.resolve_streak_for("POOL_STALE", {"BACKUP_POOL_RESOLVE_STREAK": "3"}) == 3
+    assert ik.resolve_streak_for(
+        "R2_DOWN", {"ALERT_RECOVERY_STREAKS": "R2_DOWN=4,STALE=7"}) == 4
+    assert ik.resolve_streak_for(
+        "STALE", {"ALERT_RECOVERY_STREAKS": "R2_DOWN=4,STALE=7"}) == 7
+    # global wins over per-kind
+    assert ik.resolve_streak_for(
+        "R2_DOWN", {"ALERT_RECOVERY_STREAKS": "R2_DOWN=4",
+                    "ALERT_RECOVERY_STREAK": "5"}) == 5
+    # the per-kind contract wins over the legacy POOL_STALE alias
+    assert ik.resolve_streak_for(
+        "POOL_STALE", {"BACKUP_POOL_RESOLVE_STREAK": "3",
+                       "ALERT_RECOVERY_STREAKS": "POOL_STALE=4"}) == 4
+    with caplog.at_level(logging.WARNING, logger="tortoise.incident_kinds"):
+        assert ik.resolve_streak_for(
+            "R2_DOWN", {"ALERT_RECOVERY_STREAKS": "R2_DOWN=x"}) == 2
+        assert ik.resolve_streak_for("R2_DOWN", {"ALERT_RECOVERY_STREAK": "0"}) == 1
+        assert ik.resolve_streak_for("R2_DOWN", {"ALERT_RECOVERY_STREAK": "-4"}) == 2
+        # ``-0`` IS zero, so it is not the negative branch: below-1 → 1.
+        assert ik.resolve_streak_for("R2_DOWN", {"ALERT_RECOVERY_STREAK": "-0"}) == 1
+    assert caplog.text.count("is not an integer") == 1, caplog.text
+    assert caplog.text.count("below 1") == 2, caplog.text
+    assert caplog.text.count("is negative") == 1, caplog.text
+
+
+def test_recovery_streak_contract_with_driver():
+    """The bash ``recovery_streak_declared`` must agree with the registry.
+
+    Two writers, two languages, one window policy. If the maps drift, one side
+    starts clearing an incident a window early (or late) — the #3146 defect from
+    the other direction — so the DECLARED per-kind window is pinned across the
+    language boundary, exactly like ``kind_owner``/``KIND_OWNERS``.
+    """
+    sh = DRIVER.read_text(encoding="utf-8")
+    body = sh.split("recovery_streak_declared() {", 1)[1].split("esac", 1)[0]
+    parsed: dict[str, int] = {}
+    pending: list[str] = []
+    for raw in body.splitlines():
+        line = raw.strip()
+        if re.fullmatch(r"[A-Z0-9_|]+\)", line):
+            pending = line[:-1].split("|")
+            continue
+        m = re.fullmatch(r"echo (\d+) ;;", line)
+        if m and pending:
+            parsed.update(dict.fromkeys(pending, int(m.group(1))))
+            pending = []
+    assert parsed, "recovery_streak_declared() did not parse — the shape changed"
+    declared_windows = {k: v for k, v in parsed.items() if v > 1}
+    assert declared_windows == {k: 2 for k in DR_RECOVERY_KINDS_3146}, (
+        f"the driver's declared windows disagree with the registry: "
+        f"{declared_windows} vs {sorted(DR_RECOVERY_KINDS_3146)}")
+    # Every kind the driver names in its DECLARED case is a real kind, and the
+    # declared windows match the Python declaration exactly.
+    assert set(parsed) <= ik.KIND_NAMES
+    for kind, window in parsed.items():
+        assert ik.SPECS[kind].resolve_streak == window, kind
+
+
+def _extract_function(sh: str, name: str) -> str:
+    """Extract a top-level bash function (its closing brace at column 0)."""
+    match = re.search(rf"^{re.escape(name)}\(\) \{{.*?^\}}$", sh, re.S | re.M)
+    assert match, f"{name}() did not extract — the driver shape changed"
+    return match.group(0)
+
+
+#: The driver functions the recovery-window harness executes. These are the
+#: PURE ones — the gate and its count — with every side effect (aws, r2, gh)
+#: stubbed, so the test measures the decision rather than the network.
+_DRIVER_WINDOW_FUNCS = (
+    "kind_owner", "alert_key", "alert_keys_all", "recovery_streak_declared",
+    "_coerce_streak", "recovery_streak_for", "alert_streak_get",
+    "alert_streak_set", "resolve_global",
+)
+
+
+def _driver_window_harness(tmp_path, *, extra_functions=(), body="",
+                           seed=None, env_extra=None):
+    """Run real driver functions over an in-memory object store.
+
+    Returns ``(proc, store_dir, close_log_path)``. The store maps a sentinel key
+    to a file (``/`` -> ``_``), exactly as ``r2_get``/``aws`` are stubbed to.
+    ``seed`` maps a sentinel key to its JSON body, written before the run.
+    """
+    sh = DRIVER.read_text(encoding="utf-8")
+    names = _DRIVER_WINDOW_FUNCS + tuple(extra_functions)
+    funcs = "\n".join(_extract_function(sh, n) for n in names)
+    store = tmp_path / "store"
+    store.mkdir(exist_ok=True)
+    close_log = tmp_path / "closes.txt"
+    for key, sentinel_body in (seed or {}).items():
+        _seed_sentinel(store, key, sentinel_body)
+    script = (
+        "set -uo pipefail\n"
+        "R2_ENDPOINT=http://x\nR2_BUCKET=b\n"
+        "GH_SEARCH_FAILED_SENTINEL=__gh_search_failed__\nLOUD=0\n"
+        "R2_STORE=__STORE__\nCLOSE_LOG=__CLOSES__\n"
+        "log() { printf 'LOG %s\\n' \"$*\" >&2; }\n"
+        "fail() { printf 'FAIL %s\\n' \"$*\" >&2; }\n"
+        "gh_find_open() { printf '%s' \"${GH_FIND_NUM:-42}\"; }\n"
+        "gh_close() { printf 'close:%s\\n' \"$1\" >> \"$CLOSE_LOG\"; return 0; }\n"
+        "gh_issue_open() { return \"${GH_ISSUE_OPEN_CODE:-0}\"; }\n"
+        "gh_record_occurrence() { :; }\n"
+        "r2_put_once() { return \"${R2_PUT_ONCE_RC:-1}\"; }\n"
+        "telegram() { :; }\n"
+        "r2_get() { local f=\"$R2_STORE/${1//\\//_}\"; "
+        "[ -f \"$f\" ] && cat \"$f\" || true; }\n"
+        "aws() { local key=\"\" body=\"\"; while [ $# -gt 0 ]; do "
+        "case \"$1\" in --key) key=\"$2\"; shift 2;; --body) body=\"$2\"; shift 2;; "
+        "*) shift;; esac; done; "
+        "if [ -n \"$key\" ] && [ -n \"$body\" ]; then "
+        "cp \"$body\" \"$R2_STORE/${key//\\//_}\"; fi; return 0; }\n"
+    ).replace("__STORE__", str(store)).replace("__CLOSES__", str(close_log))
+    script += funcs + "\n" + body
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("ALERT_RECOVERY_STREAK", "ALERT_RECOVERY_STREAKS",
+                        "BACKUP_POOL_RESOLVE_STREAK")}
+    env["GH_FIND_NUM"] = "42"
+    env.update(env_extra or {})
+    proc = subprocess.run(["bash", "-c", script], capture_output=True,
+                          text=True, env=env)
+    return proc, store, close_log
+
+
+def _seed_sentinel(store: Path, key: str, body: dict) -> Path:
+    path = store / key.replace("/", "_")
+    path.write_text(json.dumps(body), encoding="utf-8")
+    return path
+
+
+def _closes(close_log: Path) -> list[str]:
+    if not close_log.exists():
+        return []
+    return close_log.read_text(encoding="utf-8").split()
+
+
+def test_driver_recovery_window_needs_two_consecutive_healthy_runs(tmp_path):
+    """#3146 acceptance, driver side: ONE healthy run must not clear R2_UNLISTABLE.
+
+    Two consecutive healthy runs clear it; a single one only counts and leaves
+    the incident open with its sentinel intact. Measured on the shipping script
+    (the functions are extracted and executed, not re-described), because the
+    driver is the writer for the kind whose measurement flaps. R2_UNLISTABLE is
+    the driver-owned LISTING tier (#3147); the reachability tier, R2_DOWN, is
+    watcher-owned and the driver's ``resolve_global`` deliberately refuses it.
+    """
+    seed = {"ops/alerts/R2_UNLISTABLE/_.json": {
+        "kind": "R2_UNLISTABLE", "issue_number": 42,
+        "filed_at": "2026-01-01T00:00:00Z"}}
+    proc, store, close_log = _driver_window_harness(
+        tmp_path, seed=seed,
+        body=("resolve_global R2_UNLISTABLE 'first healthy run'\n"
+              "resolve_global R2_UNLISTABLE 'second healthy run'\n"),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert _closes(close_log) == ["close:42"], (
+        "exactly ONE close — the SECOND healthy run; the first only counts: "
+        f"{_closes(close_log)}")
+    assert "healthy reading 1/2" in proc.stderr, proc.stderr
+    body = json.loads((store / "ops_alerts_R2_UNLISTABLE__.json").read_text())
+    assert body["healthy_streak"] == 1, body
+
+
+def test_driver_recovery_window_reads_the_legacy_fresh_streak(tmp_path):
+    """One deploy cycle: an object written by the still-deployed driver
+    (``fresh_streak``, the #4994 spelling) must not be read as "no count".
+
+    Seeded at the old spelling with a count of 1, one healthy run reaches the
+    declared window of 2 and closes — the count carried over rather than being
+    discarded.
+    """
+    seed = {"ops/alerts/R2_UNLISTABLE/_.json": {
+        "kind": "R2_UNLISTABLE", "issue_number": 42,
+        "filed_at": "2026-01-01T00:00:00Z", "fresh_streak": 1}}
+    proc, _store, close_log = _driver_window_harness(
+        tmp_path, seed=seed,
+        body="resolve_global R2_UNLISTABLE 'healthy run'\n",
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert _closes(close_log) == ["close:42"], _closes(close_log)
+
+
+def test_driver_recovery_window_is_the_global_clear_now_lever(tmp_path):
+    """ALERT_RECOVERY_STREAK=1 restores the pre-#3146 "clear on one poll"."""
+    seed = {"ops/alerts/R2_UNLISTABLE/_.json": {
+        "kind": "R2_UNLISTABLE", "issue_number": 42,
+        "filed_at": "2026-01-01T00:00:00Z"}}
+    proc, _store, close_log = _driver_window_harness(
+        tmp_path, seed=seed,
+        body="resolve_global R2_UNLISTABLE 'healthy run'\n",
+        env_extra={"ALERT_RECOVERY_STREAK": "1"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert _closes(close_log) == ["close:42"], _closes(close_log)
+
+
+def test_driver_recovery_window_uses_the_legacy_pool_override(tmp_path):
+    """BACKUP_POOL_RESOLVE_STREAK still governs POOL_STALE (#4994's knob)."""
+    seed = {"ops/alerts/POOL_STALE/_.json": {
+        "kind": "POOL_STALE", "issue_number": 7,
+        "filed_at": "2026-01-01T00:00:00Z"}}
+    proc, _store, close_log = _driver_window_harness(
+        tmp_path, seed=seed,
+        body=("resolve_global POOL_STALE 'run 1'\n"
+              "resolve_global POOL_STALE 'run 2'\n"
+              "resolve_global POOL_STALE 'run 3'\n"),
+        env_extra={"BACKUP_POOL_RESOLVE_STREAK": "3", "GH_FIND_NUM": "7"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert _closes(close_log) == ["close:7"], _closes(close_log)
+    assert "healthy reading 1/3" in proc.stderr, proc.stderr
+    assert "healthy reading 2/3" in proc.stderr, proc.stderr
+
+
+def test_driver_file_alert_resets_the_count_on_adoption(tmp_path):
+    """#3146: the driver's still-unhealthy choke point resets the count.
+
+    ``file_alert`` is called only when the condition IS true, and an adoption
+    means the incident is still unhealthy — so the accumulated recovery count is
+    zeroed. Without it, alternating readings accumulate into a clear that was
+    never consecutive. Exercised on the shipping ``file_alert``: the sentinel is
+    seeded at a LIVE issue with a count of 1 and must come back at 0.
+    """
+    seed = {"ops/alerts/R2_DOWN/_.json": {
+        "kind": "R2_DOWN", "issue_number": 42,
+        "filed_at": "2026-01-01T00:00:00Z", "healthy_streak": 1}}
+    proc, store, close_log = _driver_window_harness(
+        tmp_path, seed=seed, extra_functions=("file_alert",),
+        body="file_alert R2_DOWN '[DR] R2_DOWN' 'body' ''\n",
+    )
+    assert proc.returncode == 0, proc.stderr
+    body = json.loads((store / "ops_alerts_R2_DOWN__.json").read_text())
+    assert body["healthy_streak"] == 0, body
+    assert _closes(close_log) == [], "an adoption never closes"
+
+
+
+def test_driver_recovery_streak_config_precedence(tmp_path):
+    """The driver's env contract, executed (the IFS/parse half is bash-only).
+
+    The DECLARED map is pinned above; this exercises the resolution order and the
+    two failure directions on the shipping functions, since the comma-splitting
+    and the non-integer guard exist only in bash and cannot be verified from
+    Python.
+    """
+    sh = DRIVER.read_text(encoding="utf-8")
+    funcs = "\n".join(
+        _extract_function(sh, n) for n in
+        ("recovery_streak_declared", "_coerce_streak", "recovery_streak_for"))
+    script = (
+        "log() { printf '%s\\n' \"$*\" >&2; }\n"
+        + funcs
+        + "\nprintf '%s ' \"$(recovery_streak_for R2_DOWN)\"\n"
+        "printf '%s ' \"$(recovery_streak_for STALE)\"\n"
+        "printf '%s ' \"$(recovery_streak_for POOL_STALE)\"\n"
+        "printf '%s\\n' \"$(recovery_streak_for DATA_LOSS_CANDIDATE)\"\n"
+    )
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("ALERT_RECOVERY_STREAK", "ALERT_RECOVERY_STREAKS",
+                        "BACKUP_POOL_RESOLVE_STREAK")}
+    env.update({
+        "ALERT_RECOVERY_STREAKS": "STALE=5,POOL_STALE=4,BADKIND=9",
+        "BACKUP_POOL_RESOLVE_STREAK": "3",
+    })
+    proc = subprocess.run(["bash", "-c", script], capture_output=True,
+                          text=True, env=env)
+    assert proc.returncode == 0, proc.stderr
+    # R2_DOWN is not in the per-kind map -> declared 2. STALE -> 5. POOL_STALE:
+    # the per-kind map (4) beats the legacy alias (3). A non-plane kind -> 1.
+    assert proc.stdout.strip() == "2 5 4 1", proc.stdout
+
+    # Global override wins over both.
+    env["ALERT_RECOVERY_STREAK"] = "7"
+    proc = subprocess.run(["bash", "-c", script], capture_output=True,
+                          text=True, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "7 7 7 7", proc.stdout
+
+    # A non-integer is IGNORED (the declared value stands) with a warning; a
+    # value below 1 is read as 1 with a warning — never as "never resolve".
+    env["ALERT_RECOVERY_STREAKS"] = "STALE=x,POOL_STALE=0"
+    env.pop("ALERT_RECOVERY_STREAK")
+    env.pop("BACKUP_POOL_RESOLVE_STREAK")
+    proc = subprocess.run(["bash", "-c", script], capture_output=True,
+                          text=True, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "2 2 1 1", proc.stdout
+    assert "is not an integer" in proc.stderr, proc.stderr
+    assert "below 1" in proc.stderr, proc.stderr
+
+    # A NEGATIVE value is IGNORED too (the declared value stands) — it must not
+    # silently defeat the hysteresis, and the Python twin must agree. This used
+    # to be the exact divergence #3146's review caught: bash read ``-4`` as a
+    # non-integer (declared window stands) while Python clamped it to 1, so one
+    # env var selected two different recovery windows across the two writers.
+    # ``-0`` is ZERO (Python's ``int("-0") == 0``), so it is NOT the negative
+    # branch: both writers read it through the below-1 clamp. The expected window
+    # for each kind is taken from the PYTHON twin, so the assertion cannot
+    # silently agree with only one side.
+    #
+    # The shape cases pin the rest of the contract the review called out:
+    # surrounding whitespace is trimmed by BOTH (the store's `str.strip()` and
+    # the driver's parameter-expansion trim), while spellings ``int()`` happens
+    # to tolerate but bash's digit guard does not (``+3``, ``1_0``) must be
+    # IGNORED by both rather than accepted by one side only.
+    cross_language_cases = {
+        "a negative value is ignored":
+            ({"ALERT_RECOVERY_STREAKS": "STALE=-4,POOL_STALE=-4"},
+             "is negative"),
+        "a signed zero is still zero":
+            ({"ALERT_RECOVERY_STREAKS": "STALE=-0,POOL_STALE=-0"},
+             "below 1"),
+        "surrounding whitespace is trimmed, not rejected":
+            ({"ALERT_RECOVERY_STREAKS": " STALE = 3 ,POOL_STALE= 4 "},
+             None),
+        "a plus sign is not an integer":
+            ({"ALERT_RECOVERY_STREAKS": "STALE=+3,POOL_STALE=+3"},
+             "is not an integer"),
+        "an underscore is not a digit":
+            ({"ALERT_RECOVERY_STREAKS": "STALE=1_0,POOL_STALE=1_0"},
+             "is not an integer"),
+    }
+    for label, (extra_env, expected_warning) in cross_language_cases.items():
+        env.update(extra_env)
+        proc = subprocess.run(["bash", "-c", script], capture_output=True,
+                              text=True, env=env)
+        assert proc.returncode == 0, proc.stderr
+        expected = " ".join(
+            str(ik.resolve_streak_for(kind, extra_env)) for kind in
+            ("R2_DOWN", "STALE", "POOL_STALE", "DATA_LOSS_CANDIDATE"))
+        assert proc.stdout.strip() == expected, (label, proc.stdout, expected)
+        if expected_warning is None:
+            assert "is not an integer" not in proc.stderr, (label, proc.stderr)
+            assert "below 1" not in proc.stderr, (label, proc.stderr)
+        else:
+            assert expected_warning in proc.stderr, (label, proc.stderr)
+
+
+def test_driver_workflow_binds_the_recovery_window_knobs():
+    """The runbook's knobs must reach the driver through its only production caller.
+
+    Actions passes a job ONLY the env it enumerates, so a knob the runbook
+    documents but the workflow omits is unreachable no matter what an operator
+    sets (#3146 review P2). The driver's sole production invocation is
+    ``registry-backup-cron.yml``, so pin the bindings there. The value is
+    ``${{ vars.… }}`` deliberately: an unset repository variable expands to the
+    empty string, which ``recovery_streak_for`` reads as "no override".
+    """
+    import yaml
+
+    wf = yaml.safe_load(
+        (ROOT / ".github/workflows/registry-backup-cron.yml").read_text())
+    env = wf["jobs"]["drive"]["env"]
+    for key in ("ALERT_RECOVERY_STREAK", "ALERT_RECOVERY_STREAKS",
+                "BACKUP_POOL_RESOLVE_STREAK"):
+        assert env.get(key) == f"${{{{ vars.{key} }}}}", (
+            f"registry-backup-cron must bind {key} so the documented lever "
+            f"reaches the driver; got {env.get(key)!r}")

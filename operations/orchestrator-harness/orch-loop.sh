@@ -46,6 +46,13 @@ MAX_FIX_TRIES="${MAX_FIX_TRIES:-3}"
 MAX_LANES="${MAX_LANES:-4}"
 MAX_REVIEW="${MAX_REVIEW:-4}"   # keep in sync with install.sh's default and README §4
 MERGE_PRIORITY_AT="${MERGE_PRIORITY_AT:-10}"   # above this many open PRs, drain before dispatching
+# When a P0-blocker sits at the head of the backlog, the merge-priority gate above MUST NOT bind:
+# the gate's job is "drain before opening more", and a P0 is the one case where opening a lane is
+# still the highest-severity work. 1 = on (the shipped default, so the override is not a hidden
+# behaviour); 0 = restore the unconditional gate. ONLY the merge-priority reason is overridden —
+# load, lanes, swap and memory still bind. Wired through install.sh + the plist like every other
+# tunable (launchd gives no shell env, so the kill switch must be renderable).
+P0_BYPASS_MERGE_PRIORITY="${P0_BYPASS_MERGE_PRIORITY:-1}"
 MIN_SWAP_FREE="${MIN_SWAP_FREE:-600}"
 # Available memory = free + inactive. macOS shows memory pressure as COMPRESSION with swap flat,
 # so a swap-only gate does not see it. See the gate chain below.
@@ -288,6 +295,33 @@ res_line() {
 }
 review_slots() { # <open_prs>
   if [ "${1:-0}" -gt "$MERGE_PRIORITY_AT" ]; then echo $((MAX_REVIEW + 2)); else echo "$MAX_REVIEW"; fi
+}
+
+# p0_merge_priority_override <gate_why> <open_prs> -> echoes the (possibly cleared) gate reason.
+# A P0-BLOCKER OUTRANKS THE MERGE-PRIORITY GATE (BP0, #8468).
+# The gate cannot tell WHAT is at the head of the backlog, and with `MERGE_PRIORITY_AT=10` and the
+# loop averaging 18-19 open PRs it is closed for most of the day. That was survivable while the
+# backlog was ordered by issue number (the PRs being drained and the work being opened were BOTH
+# non-P0); now that the backlog is in priority order, refusing to open a lane while the head is a
+# P0-blocker is the one case where the gate actively blocks the highest-severity work. Measured
+# 2026-10-13: 19 open PRs, 0 lanes started, 33 open P0-blockers, 0 P0/P1 closed in 12h.
+# Scope: ONLY the merge-priority reason is overridden. Load, lanes, swap and memory still bind, so
+# this can open at most the P0 lane the other gates already allow. Set
+# P0_BYPASS_MERGE_PRIORITY=0 to restore the unconditional gate.
+# ⛔ A function, not an inline block, so the tests EXECUTE this rule: a grep for its text stays
+# green when the block is deleted or its `-F'\t'` key is changed (#8469 review P2).
+p0_merge_priority_override() {
+  local why="${1:-}" open="${2:-0}" head=""
+  [ -n "$why" ] || { printf '%s' "$why"; return 0; }
+  [ "${P0_BYPASS_MERGE_PRIORITY:-1}" != "0" ] || { printf '%s' "$why"; return 0; }
+  head="$(head -1 "$O/candidates.txt" 2>/dev/null)"
+  [ -n "$head" ] || { printf '%s' "$why"; return 0; }
+  if [ "$(awk -F'\t' -v n="$head" '$1==n{print $2; exit}' "$O/.prio" 2>/dev/null)" = "0" ]; then
+    echo "[dispatch] merge-priority OVERRIDDEN for a P0-blocker at the backlog head (#$head, ${open} open PRs)" >> "$LOG"
+    printf ''
+    return 0
+  fi
+  printf '%s' "$why"
 }
 
 # Count of open PRs. This one number drives THREE decisions — scope (BROAD drain vs OWN), the
@@ -617,6 +651,8 @@ PY
   # Name the binding gate: an earlier version logged "skipped (load=…)" while load was never
   # consulted, so a lanes-bound or swap-bound stall looked like a load stall.
   GATE_WHY="$(mp_reason "${OPEN_N:-0}" "$LANES")"
+  # ⛔ A P0-blocker at the backlog head clears ONLY the merge-priority reason (BP0, #8468).
+  GATE_WHY="$(p0_merge_priority_override "$GATE_WHY" "${OPEN_N:-0}")"
   if [ -n "$GATE_WHY" ]; then :
   elif [ "$L" -ge "$MAX_LOAD" ]; then GATE_WHY="load=$L>=max_load=$MAX_LOAD"
   elif [ "$LANES" -ge "$MAX_LANES" ]; then GATE_WHY="lanes=$LANES>=max_lanes=$MAX_LANES"

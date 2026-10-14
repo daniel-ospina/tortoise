@@ -25,8 +25,9 @@ with the R2 create-once object as the dedup LINEARIZATION POINT:
 - ``resolve_incident`` closes the issue, pushes a "resolved" Telegram message,
   then deletes the dedup object (delete-to-resolve).
   ``resolve_incident_state`` is the same operation reporting WHICH fact it
-  established (:class:`ResolveOutcome`: RESOLVED / ABSENT / SKIPPED_FRESH) —
-  the bool form stays for the callers that only branch on it (#3820 cycle-7).
+  established (:class:`ResolveOutcome`: RESOLVED / ABSENT / SKIPPED_FRESH /
+  SKIPPED_WINDOW) — the bool form stays for the callers that only branch on it
+  (#3820 cycle-7).
   A close that FAILS is neither announced nor deleted-to-resolve: the failure
   is recorded on the sentinel, the incident stays OPEN, and the failure is
   propagated (``CloseCooldown`` once the bounded retry window is active) so a
@@ -40,6 +41,11 @@ with the R2 create-once object as the dedup LINEARIZATION POINT:
   (:class:`OpenOutcome`: FILED / DEDUP / SUPPRESSED) — one read of the
   suppression predicate, so a caller that must report WHY nothing was filed
   cannot disagree with the decision the call made (#3820 cycle-8 P2-2).
+- **Recovery hysteresis (#3146):** a clear requires ``KindSpec.resolve_streak``
+  CONSECUTIVE healthy observations, counted on the incident's own sentinel
+  (``healthy_streak``). An unhealthy observation resets the count at the dedup
+  path. So a condition flapping around its threshold yields ONE incident per
+  flap-suppression window instead of one open/close pair per cycle.
 - Suppression: ``ops/suppression.json`` ``{kind: {until: ISO}}`` pauses a kind.
 - Pending-push: a Telegram failure writes ``ops/pending-push/``; the daemon
   processes it on its next poll (``retry_pending``).
@@ -68,6 +74,7 @@ from tortoise.incident_kinds import (
     WRITER_DRIVER,  # noqa: F401 — re-exported
     WRITER_UNSPECIFIED,
     WRITER_WATCHER,  # noqa: F401 — re-exported
+    resolve_streak_for,
 )
 from tortoise.security import redact_for_publication
 
@@ -160,6 +167,33 @@ def _parse_iso(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)  # noqa: UP017
 
 
+def _streak_of(state: dict[str, Any]) -> int:
+    """The consecutive-healthy count a sentinel carries (#3146); 0 when absent.
+
+    ``healthy_streak`` is the one spelling both writers use. The driver's
+    pre-generalization ``fresh_streak`` (the #4994 POOL_STALE field) is read as a
+    fallback for one deploy cycle — an object written by the still-deployed
+    driver must not read as "no count" and be cleared a window early.
+
+    A PRESENT ``healthy_streak`` wins even when it is ``0``: the reset writes
+    ``healthy_streak = 0``, and letting a leftover ``fresh_streak`` sibling
+    override it would resurrect the pre-reset count and clear on a single
+    healthy observation — the fabricated recovery the reset exists to prevent
+    (review ISSUE 3). This matches the bash twin's
+    ``(.healthy_streak // .fresh_streak) // 0``: ``0`` is not null, so it wins,
+    and the legacy spelling is consulted only when the new one is ABSENT (or
+    explicitly null). A negative count is never a real window, so it reads 0.
+    """
+    for field in ("healthy_streak", "fresh_streak"):
+        if field not in state or state[field] is None:
+            continue
+        try:
+            return max(0, int(state[field]))
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
 class CloseCooldown(RuntimeError):
     """Raised when a close is SKIPPED because a recent attempt failed (#5143).
 
@@ -192,11 +226,19 @@ class ResolveOutcome(Enum):
                           the issue's liveness, and ``_alias_states`` does not
                           consult the issue state, so a sentinel naming a
                           CLOSED issue is refused as ``SKIPPED_FRESH`` too.
+    * ``SKIPPED_WINDOW`` — an incident is ON RECORD and the caller's healthy
+                          observation was COUNTED but the recovery window is
+                          not yet satisfied (#3146). The incident is still
+                          open and the caller must stay PENDING, exactly as for
+                          ``SKIPPED_FRESH``; the two are distinguished because
+                          only this one establishes that the condition was
+                          observed HEALTHY.
     """
 
     RESOLVED = "resolved"
     ABSENT = "absent"
     SKIPPED_FRESH = "skipped_fresh"
+    SKIPPED_WINDOW = "skipped_window"
 
 
 class OpenOutcome(Enum):
@@ -444,6 +486,12 @@ class AlertStore:
         create-once point — but only while its recorded issue is still OPEN
         (a sentinel naming a CLOSED issue is stale and is re-filed). An adopted
         or deduped incident is reported as :attr:`OpenOutcome.DEDUP`.
+
+        #3146: this is the store's ONE choke point for "the condition is still
+        true", so every DEDUP return RESETS the sentinel's ``healthy_streak``.
+        Without the reset, alternating healthy/unhealthy readings would
+        accumulate into a clear that was never consecutive — a flap that
+        resolves on two readings that were never adjacent.
         """
         detail = detail or {}
         if self._suppressed(kind):
@@ -468,6 +516,7 @@ class AlertStore:
                     "dedup: %s already tracked via %s (issue #%s) — no-op",
                     kind, sibling, number,
                 )
+                self._note_still_unhealthy(sibling, state)
                 return OpenOutcome.DEDUP
         if adopted:
             self._forget(adopted, kind)
@@ -498,6 +547,7 @@ class AlertStore:
                         self._storage.delete(key)
                     except Exception as e:
                         logger.warning("dedup: could not drop our own sentinel %s: %s", key, e)
+                    self._note_still_unhealthy(sibling, state)
                     return OpenOutcome.DEDUP
             self._become_filer(kind, org_id, detail, key, placeholder, writer)
             return OpenOutcome.FILED
@@ -505,7 +555,10 @@ class AlertStore:
         existing = _read_json(self._storage, key)
         number = existing.get("issue_number")
         if number and self._issue_is_live(kind, org_id, number):
-            return OpenOutcome.DEDUP  # already filed and still live — nothing to do
+            # already filed and still live — nothing to do beyond the #3146
+            # unhealthy-observation reset.
+            self._note_still_unhealthy(key, existing)
+            return OpenOutcome.DEDUP
         # Placeholder (winner died mid-filing): become the filer via GH-search
         # fallback to avoid duplicates.
         # ...or a stale closed-issue sentinel (#3127). Either way the filer
@@ -515,6 +568,48 @@ class AlertStore:
         # succeed on — two create-once points again.
         self._become_filer(kind, org_id, detail, key, existing, writer)
         return OpenOutcome.FILED
+
+    def _note_still_unhealthy(self, key: str, state: dict[str, Any]) -> None:
+        """Zero the recovery window on an incident observed STILL UNHEALTHY (#3146).
+
+        An unhealthy observation RESETS the consecutive count: without it,
+        alternating readings accumulate into a clear that was never
+        consecutive. Written only when a non-zero count is present, so a
+        steady-unhealthy incident costs no extra object write.
+
+        A write failure propagates (it is not swallowed): a reset that silently
+        did not happen would leave a STALE HIGH count and let the next healthy
+        poll clear an incident on non-consecutive readings — a fabricated
+        recovery, the direction this whole mechanism exists to prevent. The
+        caller's per-leg containment keeps it from escaping the poll
+        (``backup_watcher._alert_leg``).
+        """
+        if _streak_of(state) > 0:
+            self._set_healthy_streak(key, state, 0)
+
+    def _set_healthy_streak(self, key: str, state: dict[str, Any], value: int) -> None:
+        """Compare-and-set ``healthy_streak`` on a sentinel (#3146).
+
+        The caller's ``state`` is a snapshot taken earlier in the call, so a
+        BLIND write of it would clobber a sentinel another writer re-filed in
+        between (a NEW issue_number) and orphan that open issue — the #3030
+        class the resolve path's delete guard and ``_forget`` both protect
+        against. The value is therefore written only when the object still
+        matches the snapshot, and not at all when it disappeared (resolved
+        under us — there is nothing left to count).
+        """
+        current = _read_json(self._storage, key)
+        if not current:
+            return
+        if (current.get("issue_number") != state.get("issue_number")
+                or current.get("filed_at") != state.get("filed_at")):
+            logger.warning(
+                "recovery window: %s changed while we were checking it — "
+                "leaving it alone (the other writer re-filed)", key,
+            )
+            return
+        current["healthy_streak"] = value
+        _write_json(self._storage, key, current)
 
     def _forget(self, adopted: list[tuple[str, dict[str, Any]]], kind: str) -> None:
         """Best-effort delete of stale / unbackfilled sentinels.
@@ -774,6 +869,16 @@ class AlertStore:
         must not re-file; a permanent failure must not be silent" and "the
         incident stays open with no writer able to close it. That is correct
         rather than a defect … The driver's next healthy run closes it."
+
+        #3146: recovery is an explicit HYSTERESIS condition, not "the alert
+        condition stopped looking true". This call counts one healthy
+        observation and reports ``SKIPPED_WINDOW`` until
+        ``KindSpec.resolve_streak`` consecutive ones have been seen; the count
+        lives on the sentinel and is reset by an unhealthy observation at the
+        open path. ``SKIPPED_WINDOW`` and ``SKIPPED_FRESH`` both leave the
+        incident ON RECORD, so every caller must stay pending for either — the
+        new value is separate only because it additionally establishes that the
+        condition was observed HEALTHY.
         """
         states = self._alias_states(kind, org_id)
         if not states:
@@ -799,6 +904,39 @@ class AlertStore:
                     kind, owner, writer,
                 )
                 return ResolveOutcome.SKIPPED_FRESH
+        # #3146: RECOVERY HYSTERESIS. Every call here is ONE healthy
+        # observation of the condition, so the incident's own sentinel carries a
+        # counter of CONSECUTIVE healthy observations, and the clear happens only
+        # once the declared window is reached. Without it, a condition flapping
+        # around its threshold produces an open/close pair per cycle — one issue
+        # and one Telegram pair each time. The semantics are a COUNT, not elapsed
+        # time: the two writers poll on different cadences, so a count is the only
+        # cadence-neutral reading and it needs no clock.
+        #
+        # The counter rides on the incident's own record (a field beside
+        # ``issue_number``), so it is created with the incident and deleted with
+        # it by delete-to-resolve. A separate state object could be stranded and
+        # would then immediately clear a freshly re-filed recurrence.
+        #
+        # The increment is persisted ONLY while the window is unsatisfied. Once
+        # it is satisfied the attempt proceeds, and a close that fails leaves the
+        # persisted count at ``window - 1`` so the next healthy poll retries it
+        # rather than starting a fresh window. An unhealthy observation resets the
+        # count at the open path (see ``_note_still_unhealthy``), so the readings
+        # counted here are genuinely consecutive.
+        window = resolve_streak_for(kind)
+        if window > 1:
+            streak_key, streak_state = states[0]
+            streak = max((_streak_of(state) for _, state in states), default=0) + 1
+            if streak < window:
+                self._set_healthy_streak(streak_key, streak_state, streak)
+                logger.info(
+                    "recovery window: %s healthy observation %d/%d — not "
+                    "resolving yet (a single healthy poll must not clear an "
+                    "incident; #3146)",
+                    kind, streak, window,
+                )
+                return ResolveOutcome.SKIPPED_WINDOW
         # Bounded retry (#5143, final-cycle review P1): skip the attempt while a
         # recent close failure is cooling down, so a GitHub outage cannot make
         # every poll hammer the close endpoint. Raise the dedicated type so

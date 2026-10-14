@@ -25,16 +25,16 @@ lane closes the two that share a seam and cites the other two:
      ⚠️ The producer covers all five labels; whether the FOLD can match them
      depends on the CREATION door. `Document` creation via
      `create_entity(type="document")` / `create_document` goes through
-     `_create_entity`, which writes **neither** a JSONL record **nor** a
-     `DocumentCreated` :GraphEvent (`DocumentCreated` is not in
-     `_GRAPH_EVENT_TYPES`) — so a mutation of a Document created THAT way journals
-     an `EntityMutated label="Document"` whose fold can only warn, and a rebuild
-     destroys the Document. Pre-existing and tracked by **#2296**. (The
-     ingest/frontmatter route DOES journal `DocumentCreated`, and a Document
-     created that way folds fine — so this is a caveat about the creation door,
-     not about the label.) Disclosed, not fixed here;
-     `test_non_point_labels_share_the_one_seam` names it rather than claiming
-     five universally-working labels.
+     `_create_entity`, which — **since #2296** — journals `DocumentCreated`
+     (it is not in `_GRAPH_EVENT_TYPES`, so it is a JSONL-only record): the
+     creation is durable, the node survives a rebuild, and a later mutation is
+     addressed by the node's canonical `:Source` label (a document IS a
+     `:Source`, D10) so it folds. Before #2296 that door wrote no record, the
+     node was live-only, and a rebuild destroyed it — the residual this
+     docstring used to carry. (`DocumentCreated` is still absent from
+     `_GRAPH_EVENT_TYPES`; the ingest/frontmatter route journals it too.)
+     `test_non_point_labels_share_the_one_seam` exercises the two labels whose
+     mutation it drives rather than claiming five universally-working labels.
   2. **One event type, two live end-states.** ``delete_point`` hard-deletes,
      ``retract_point`` tombstones, and BOTH emitted
      ``_emit_event("PointRetracted", …, id=id)``. The fold has exactly one
@@ -379,17 +379,17 @@ class TestPropertyMutationRoundTrip:
             pytest.approx(0.25)
 
     def test_non_point_labels_share_the_one_seam(self, env, caplog):
-        """Two of the five labels on the one seam — and a named CAVEAT.
+        """Two of the five labels on the one seam — the others are covered too.
 
-        The producer journals for all five non-`Point` labels, but only FOUR of
-        them can fold: `Document` creation goes through `_create_entity`, which
-        writes **neither** a JSONL record **nor** a `DocumentCreated`
-        :GraphEvent (`DocumentCreated` is not in `_GRAPH_EVENT_TYPES`;
-        pre-existing, #2296). A `Document` mutation therefore journals an
-        `EntityMutated label="Document"` whose fold can only ever warn, and a
-        rebuild destroys the Document. That is #2296's disclosed residual, NOT
-        something this seam fixes — so this test asserts the labels it actually
-        exercises and does not claim five.
+        The producer journals for all five non-`Point` labels. `Document`
+        creation goes through `_create_entity`, which — **since #2296** —
+        journals `DocumentCreated` (a JSONL-only record; it is not in
+        `_GRAPH_EVENT_TYPES`), so the node survives a rebuild and a later
+        mutation is addressed by its canonical `:Source` label (a document IS
+        a `:Source`, D10) and folds. (#2296 is the home; the earlier residual
+        — a live-only creation destroyed by `rebuild_all` — is closed.) This
+        test asserts the two labels whose mutation it actually drives and does
+        not claim coverage for the rest.
         """
         sdk, events = env
         sub = sdk.create_subject("Topic")

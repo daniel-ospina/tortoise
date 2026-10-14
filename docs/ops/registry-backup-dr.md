@@ -434,10 +434,39 @@ boolean `running` read this run) — a missing/malformed block neither files nor
 clears it, because unknown is not evidence the daemon is alive.
 `POOL_STALE` (#4994) clears on the direct-R2 leg's OWN evidence — a whole-pool
 measured-fresh reading — and then only for the second consecutive such reading
-(`BACKUP_POOL_RESOLVE_STREAK`, default 2). The count rides on the incident's own
-R2 object as `fresh_streak`; a stale run, or one whose listings did not answer,
-resets it. Nothing else can clear it: it is driver-owned, so a watcher or app
-resolve is refused.
+(the declared recovery window, once `BACKUP_POOL_RESOLVE_STREAK`; #3146
+generalized it). The count rides on the incident's own R2 object as
+`healthy_streak`; a stale run, or one whose listings did not answer, resets it.
+Nothing else can clear it: it is driver-owned, so a watcher or app resolve is
+refused.
+
+**Recovery windows (hysteresis, #3146):** a clear is an explicit condition —
+**N consecutive healthy observations**, not "the alert condition stopped looking
+true" — so a fault that flaps around its threshold (a reachability probe, an
+archive age at the boundary, a heartbeat at its window) produces ONE incident per
+flap-suppression window instead of one open/close pair per cycle. The declared
+per-kind value lives in `tortoise/incident_kinds.py` (`KindSpec.resolve_streak`)
+and is mirrored by `recovery_streak_for()` in `.github/scripts/registry-cron.sh`;
+the threshold-driven DR plane defaults to **2** and every other kind keeps **1**
+(a human-triggered re-baseline, or an app-owned trigger that already carries its
+own threshold, must not need a second action). The count is carried on the
+incident's OWN sentinel as `healthy_streak`, so it is created with the incident
+and dies with it at delete-to-resolve; an unhealthy observation resets it to 0.
+Both writers honour the same config: `ALERT_RECOVERY_STREAKS="KIND=n,KIND2=m"`
+per kind, overridden by `ALERT_RECOVERY_STREAK=N` for ALL kinds (the "clear now"
+emergency lever — set it to 1 to restore the single-poll behaviour), over the
+declared value; the driver also keeps `BACKUP_POOL_RESOLVE_STREAK` as the
+POOL_STALE-only alias. A non-integer or negative value is ignored with a warning
+(the declared window stands; a negative is a typo, not the `1` "clear now"
+spelling), and `<1` is read as 1 (a window of 0 would mean "never resolve");
+surrounding whitespace is trimmed on both sides.
+
+**Where to set them.** The driver runs from the `registry-backup-cron` job, whose
+`env:` enumerates every variable it receives — Actions passes nothing else. Set
+these three as repository **variables** (Settings → Secrets and variables →
+Actions → **Variables**, not Secrets); an unset variable expands to the empty
+string, which the driver treats as "no override". The app-side writer reads the
+same names from its own environment (Fly secrets).
 `SWEEP_NO_COVERAGE` clears **only** on a run that actually backed up
 (`backed_up`/`degraded`), and that judgment is made from
 `graph_totals.backed_up`, not `teams_backed_up`.
@@ -695,7 +724,7 @@ warning ahead of it.
 | Kind | Meaning | Triage |
 |---|---|---|
 | STALE | a graph's newest archive is older than `BACKUP_STALE_THRESHOLD_MIN` (90) — subject `team` (default) or `team:graph` (custom) | Check sweep logs; run the sweep; R2 connectivity |
-| POOL_STALE | #4994: the DRIVER's app-independent direct-R2 leg measured at least one team's default archive older than `BACKUP_STALE_THRESHOLD_MIN` (90m). **Subject-less** (`_`): ONE incident names every stale tenant in its body, instead of one `[DR] STALE` per tenant. That N→1 cardinality is the fix — the driver filed one issue per tenant from inside its freshness loop (measured 2026-09-19: 51 issues/day, 11 landing within 40 minutes, one per tenant) for a single systemic fault. The kind is deliberately **not** `STALE`: the per-tenant residual stays **watcher-owned**, because the watcher resolves `STALE` per ORG in-process while the driver has no per-org probe — a per-tenant incident filed here would never close (`resolve_global` refuses a non-driver kind) and its sentinel would then swallow the next real recurrence. The body carries each measured tenant with its age in minutes, and says so explicitly when the pool listing did NOT complete (`R2_LIST_OK=0`), so a partial measurement never reads as the whole pool | Confirm backups are running (`/status` → `last_sweep`) and check R2 connectivity + the access key's `ListObjects` permission. **Auto-resolves** (driver-side `resolve_global`) on a **whole-pool** measured-fresh reading — every listing answered, no team stale or archive-less — held for `BACKUP_POOL_RESOLVE_STREAK` consecutive runs (default **2**). A SINGLE fresh reading never clears it (the pool reading can flap at the freshness boundary, so the clear is a recovery threshold, not a reading), and an **unmeasurable** pool neither clears it nor earns credit toward the threshold. Per-tenant `STALE` issues are closed by the **watcher**, per org. Both can be open at once **by design**: the pooled incident is the driver's app-independent record of the pool, the per-tenant `STALE` is the watcher's per-org trackable one. A legacy per-tenant `[DR] STALE` opened by the driver before this change is NOT adopted by the pooled kind (different kind, different title) and simply stays until the watcher's per-org recovery closes it |
+| POOL_STALE | #4994: the DRIVER's app-independent direct-R2 leg measured at least one team's default archive older than `BACKUP_STALE_THRESHOLD_MIN` (90m). **Subject-less** (`_`): ONE incident names every stale tenant in its body, instead of one `[DR] STALE` per tenant. That N→1 cardinality is the fix — the driver filed one issue per tenant from inside its freshness loop (measured 2026-09-19: 51 issues/day, 11 landing within 40 minutes, one per tenant) for a single systemic fault. The kind is deliberately **not** `STALE`: the per-tenant residual stays **watcher-owned**, because the watcher resolves `STALE` per ORG in-process while the driver has no per-org probe — a per-tenant incident filed here would never close (`resolve_global` refuses a non-driver kind) and its sentinel would then swallow the next real recurrence. The body carries each measured tenant with its age in minutes, and says so explicitly when the pool listing did NOT complete (`R2_LIST_OK=0`), so a partial measurement never reads as the whole pool | Confirm backups are running (`/status` → `last_sweep`) and check R2 connectivity + the access key's `ListObjects` permission. **Auto-resolves** (driver-side `resolve_global`) on a **whole-pool** measured-fresh reading — every listing answered, no team stale or archive-less — held for the declared recovery window (`BACKUP_POOL_RESOLVE_STREAK`, default **2**; #3146 generalized the per-kind window). A SINGLE fresh reading never clears it (the pool reading can flap at the freshness boundary, so the clear is a recovery threshold, not a reading), and an **unmeasurable** pool neither clears it nor earns credit toward the threshold. Per-tenant `STALE` issues are closed by the **watcher**, per org. Both can be open at once **by design**: the pooled incident is the driver's app-independent record of the pool, the per-tenant `STALE` is the watcher's per-org trackable one. A legacy per-tenant `[DR] STALE` opened by the driver before this change is NOT adopted by the pooled kind (different kind, different title) and simply stays until the watcher's per-org recovery closes it |
 | NEVER_BACKED_UP | an ELIGIBLE active graph exists with no archive yet (custom-graph incidents carry `team:graph`); orgs the sweep does not target (`tier=='free'` or `backup_enabled=false`) are `not_eligible` and open nothing when eligibility is CONFIRMED (an unconfirmed read fails open and is flagged `eligible_degraded`) — #3658 | Confirm graph is new/empty; if old, investigate |
 | METADATA_LOST | archives exist but the graph's per-graph state object missing | Re-run sweep (state re-created) |
 | BACKUP_SET_MISSING | state exists but no archives (bulk delete/erroneous prune) | Investigate R2; restore from a retained archive if possible |
@@ -878,8 +907,9 @@ reconcile leg only on a **completed** 2xx exchange (curl exit 0 with a body — 
 **SKIPPED** ride-along (sweep `already_running`, or a timed-out/empty sweep)
 clears neither — no evidence was gathered, and the driver logs that it is leaving
 them unchanged. `POOL_STALE` (#4994) clears on a whole-pool measured-fresh
-reading held for `BACKUP_POOL_RESOLVE_STREAK` consecutive runs (default 2): the
-recovery count is carried as a `fresh_streak` field on the incident's **own** R2
+reading held for `BACKUP_POOL_RESOLVE_STREAK` consecutive runs (default 2, now
+the generic per-kind recovery window — #3146): the
+recovery count is carried as a `healthy_streak` field on the incident's **own** R2
 dedup object, so it is created with the incident and deleted with it by
 close-then-delete-to-resolve, and any run that is stale or unmeasurable **resets
 it to 0** — a pool that is only fresh on alternate runs never reaches the

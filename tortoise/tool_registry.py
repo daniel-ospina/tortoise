@@ -762,7 +762,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.ingest_corpus",
         writes=True,
         description="DEPRECATED — use tortoise_index_files. Batch document ingestion — walk directory, parse YAML frontmatter "
-                    "from .md files, create/update Document nodes. "
+                    "from .md files, create/update document Sources "
+                    "(D10: a document is a :Source). "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
         annotations=_rw(),
         http_policy=False,
@@ -803,7 +804,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_taxonomy",
         id="surface.taxonomy",
         description="Count entities by node label. "
-                    "Returns {Point: N, Event: N, Subject: N, Object: N, Document: N}.",
+                    "Returns {Point: N, Event: N, Subject: N, Object: N, Source: N} "
+                    "(D10: a document is a Source, not a :Document node).",
         annotations=_ro(),
         http_policy=True,
         sdk_method="taxonomy",
@@ -953,8 +955,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_index_files",
         id="surface.index_files",
         writes=True,
-        description="Index a corpus directory of .md files as Sources + Events/"
-                    "Documents (the unified index path — replaces "
+        description="Index a corpus directory of .md files as Sources + Events "
+                    "(D10: a document is a Source) (the unified index path — replaces "
                     "tortoise_index_sessions + tortoise_ingest_corpus file semantics "
                     "for local corpora). Returns the honest summary (file_count, "
                     "indexed, updated, skipped, failed, aborted, ignored, errors[], "
@@ -978,7 +980,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_create_document",
         id="surface.create_document",
         writes=True,
-        description="Create a Document node (research, planDoc, meetingNotes, etc.).",
+        description="Create a document — a :Source keyed by url (research, planDoc, "
+                    "meetingNotes, etc.).",
         annotations=_idem(),
         http_policy=True,
         sdk_method="create_document",

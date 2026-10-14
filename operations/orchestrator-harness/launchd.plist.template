@@ -51,6 +51,10 @@
     <string>__MAX_REVIEW__</string>
     <key>MERGE_PRIORITY_AT</key>
     <string>__MERGE_PRIORITY_AT__</string>
+    <!-- BP0 (#8468): 1 = a P0-blocker at the backlog head is dispatched even above MERGE_PRIORITY_AT
+         (only that gate is bypassed; load/lanes/swap/memory still bind); 0 = unconditional gate. -->
+    <key>P0_BYPASS_MERGE_PRIORITY</key>
+    <string>__P0_BYPASS_MERGE_PRIORITY__</string>
     <key>MAX_FIX</key>
     <string>__MAX_FIX__</string>
     <key>MAX_FIX_TRIES</key>

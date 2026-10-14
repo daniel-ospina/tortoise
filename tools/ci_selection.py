@@ -982,7 +982,24 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # silent-drop class as the entry above. Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "supabase/migrations/20261014000001_record_subject_props_no_derived.sql",
-             "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md")
+             "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
+             # #8469 review P1: the orchestrator harness's shipped shell scripts
+             # (lane.sh, merged-not-closed.sh, refresh-candidates.sh, orch-loop.sh,
+             # install.sh, selftest.sh) own tests/test_orchestrator_harness.py,
+             # which is `core`-registered. `operations/` is a flat
+             # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches these
+             # scripts, so an `operations/**`-only diff filtered to `changed == []`,
+             # took the docs-only early return, and fell back to tier-1 smoke —
+             # which does NOT contain that file. The registration under `core`
+             # does NOT fix it: a name in a surface's test_files only runs when
+             # that surface is ALREADY selected; it cannot select the surface.
+             # Measured before this entry: `_sel(["operations/orchestrator-harness/
+             # lane.sh"])` -> surfaces=[], test_files=33, harness test absent. This
+             # is the repo's own documented remedy (the #1349/#3332/#3616
+             # silent-drop class), the same shape as tools/queue_resweep.py and
+             # tools/drift-guard.py above. Pinned by
+             # tests/test_ci_selection.py::test_orchestrator_harness_change_selects_core_not_tier1.
+             "operations/orchestrator-harness/")
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
 NON_PYTHON_PREFIXES = (

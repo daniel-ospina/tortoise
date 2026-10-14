@@ -136,16 +136,20 @@ tortoise index github https://github.com/your/repo --db '<path-or-uri>'
 `index github` clones the repo (or accepts a local path), extracts deterministically with offline mock models, and writes Points/Operators to the graph — idempotent across runs. For richer LLM-based extraction, use the standalone ingest CLI instead — `tortoise-ingest transcript.txt --db <path-or-uri>` (or `python -m tortoise.ingest`). It ingests a transcript file, requires `--db`, and defaults to offline mock models; pass `--point-model`/`--relation-model` (e.g. `ollama:llama3.2:3b`) to use a real LLM. `tortoise onboard` runs the full init → index → demo → doctor flow and passes the same resolved DB target to each step, so it works in embedded-only mode too (it used to crash; fixed in #705).
 
 For a LOCAL corpus of `.md` files (your own notes, docs, session exports), use the
-unified index path — [§4b Index a local corpus](#4b-index-a-local-corpus-of-markdown-files-the-unified-index-path) — which writes Sources + Events/Documents idempotently and is what the session-end hook's reconciliation sweep uses.
+unified index path — [§4b Index a local corpus](#4b-index-a-local-corpus-of-markdown-files-the-unified-index-path) — which writes Sources + Events idempotently (a document is a Source, not a `:Document` node — D10) and is what the session-end hook's reconciliation sweep uses.
 
 > **Indexing cost (real-world):** indexing is CPU-bound extraction, not I/O — a few hundred markdown files takes **minutes** (measured: ~280s for a 261-md repo on embedded with offline mock models). It is not hung; `tortoise onboard` Step 3 and the Q5 ingestion step run in the background until done.
 
 ## 4b. Index a local corpus of markdown files (the unified index path)
 
 `tortoise index directory <corpus-dir> [--db URI] [--corpus-name NAME] [--metadata]`
-walks a directory of `.md` files and writes **Sources + Events/Documents** (a
-Source per file, plus a session/meeting Event or a Document per file) —
-idempotent across runs (re-runs converge to `skipped`).
+walks a directory of `.md` files and writes **Sources + Events** — a corpus
+Source per file, plus, for a doc-classified file, the per-file document (a
+`:Source` carrying `documentKind`, keyed by its `documentId` and linked from
+the file Source by a `references` edge — D10 retires the `:Document` label,
+it does not merge the file Source and the document into one node) — and a
+session/meeting Event for session exports. It is idempotent across runs
+(re-runs converge to `skipped`).
 
 ```bash
 tortoise index directory ~/notes --db docker://:falkordb@localhost:6379/tortoise
@@ -364,7 +368,8 @@ what actually carries the new order to an existing install.
 ### How to restore (backup → wipe → rebuild → re-index)
 
 1. Back up: (1) the corpus files (source of truth), (2) the FULL `events/`
-   JSONL directory — the sole replay source for Sources/Events/Documents; on
+   JSONL directory — the sole replay source for Sources and Events, document
+   Sources included (their `DocumentCreated` events replay onto `:Source`); on
    the compose daemon this is the `tortoise-data` volume at `/data/events`
    (`TORTOISE_EVENT_LOG_BASE_DIR`); (3) the db file.
 2. Restore onto a fresh graph — `rebuild_all` is line-tolerant (a torn

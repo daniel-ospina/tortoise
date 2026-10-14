@@ -2502,11 +2502,11 @@ export GH_ISSUE_STATE=open
 export STUB_GET_BODY='{"kind":"POOL_STALE","issue_number":77,"filed_at":"2026-09-19T00:00:00Z"}'
 run_driver
 assert_eq "$RC" 0 "110. a measured-fresh pool with an open POOL_STALE stays green (1)"
-assert_contains "$OUT" "POOL_STALE measured-fresh reading 1/2" \
+assert_contains "$OUT" "POOL_STALE healthy reading 1/2" \
   "110. the FIRST fresh reading does not clear the incident"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/77" \
   "110. a single fresh reading never resolves (no close)"
-assert_match "$(cat "$LOG")" 'AWS put-object body=.*"fresh_streak":1' \
+assert_match "$(cat "$LOG")" 'AWS put-object body=.*"healthy_streak":1' \
   "110. the streak is persisted on the incident object"
 
 # …the SECOND consecutive fresh reading DOES clear it (and delete-to-resolve
@@ -2540,7 +2540,7 @@ run_driver
 assert_eq "$RC" 1 "110. a stale run between two fresh readings is RED (1)"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/77" \
   "110. a stale run never resolves the incident"
-assert_match "$(cat "$LOG")" 'AWS put-object body=.*"fresh_streak":0' \
+assert_match "$(cat "$LOG")" 'AWS put-object body=.*"healthy_streak":0' \
   "110. the interleaved stale run RESETS the recovery count"
 
 # …an UNMEASURABLE pool is not freshness: no resolve, and the count resets.
@@ -2555,7 +2555,7 @@ export STUB_GET_BODY='{"kind":"POOL_STALE","issue_number":77,"fresh_streak":1}'
 run_driver
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/77" \
   "110. an unmeasurable pool never resolves the incident"
-assert_match "$(cat "$LOG")" 'AWS put-object body=.*"fresh_streak":0' \
+assert_match "$(cat "$LOG")" 'AWS put-object body=.*"healthy_streak":0' \
   "110. an unmeasurable pool resets the recovery count (no evidence, no credit)"
 
 # …and the threshold is a KNOB (BACKUP_POOL_RESOLVE_STREAK), so N=2 is a start
