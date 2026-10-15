@@ -1093,20 +1093,25 @@ def count_stamped_repairs(graph: Any, org_id: str | None = None) -> int:
     ``org_id`` restricts the read to one org's node (the same key the repair
     writer matches on); ``None`` counts every completed repair in the graph.
 
-    The count is stamped NODES, not repair EVENTS: a re-stamp overwrites, so
-    it is a LOWER bound on how many repairs ever ran. It is an UPPER bound on
-    how many `OnboardingStep` nodes those repairs deleted — the orphan prune
-    ``_prune_orphan_decide_step`` only removes a node that has no remaining
-    referrer — so the caller treats it as a CEILING on the label delta it may
-    explain, never as licence to explain a larger drop.
+    The count is COMPLETED repairs, not repair EVENTS: a re-stamp overwrites
+    and a repaired org contributes one, so it is a LOWER bound on how many
+    repairs ever ran. It is also a LOWER bound on how many `OnboardingStep`
+    nodes those repairs deleted — each counted repair's `decide-completed` node
+    is gone, and one prune can take more than one node — so a caller comparing
+    a label delta against the count compares against a floor, and a delta that
+    exceeds it is NOT explained (fail-closed toward firing).
 
     DELIBERATE LIMITATION — the attribution is LABEL-level. The sweep's
-    baseline is a per-label CENSUS, not a node-identity set, so a loss of a
-    DIFFERENT `OnboardingStep` node on an already-repaired org is
-    indistinguishable from the repair's own removal, and a drop no larger than
-    this count is absorbed. That residual is documented for the operator
-    (docs/ops/registry-backup-dr.md); removing it needs a baseline schema
-    change (per-step identities), not another query here.
+    baseline is a per-label CENSUS, not a node-identity set, so within the ONE
+    sweep that absorbs a repair's drop, a coincident loss of a DIFFERENT
+    `OnboardingStep` node on an already-repaired org is indistinguishable from
+    the repair's own removal. Across sweeps there is no free pass: a caller
+    that windows on the DELTA of this count (see
+    `tortoise/backup_sweep.py::_explain_repair_stamped_breaches`) stops
+    explaining the moment the baseline records the repair. That residual is
+    documented for the operator (docs/ops/registry-backup-dr.md); removing it
+    needs a baseline schema change (per-step identities), not another query
+    here.
 
     Raises on a graph failure — the caller decides what an unreadable stamp
     means, and for the drift guard it means the drop is NOT explained

@@ -34372,6 +34372,7 @@ async def backups_rebaseline(request: Request):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Re-baseline rejected: {e}")  # noqa: B904
     from tortoise.backup_sweep import (
+        _COMPLETED_REPAIRS_KEY,
         _graph_state_key,
         _write_json,
         query_label_counts,
@@ -34413,7 +34414,7 @@ async def backups_rebaseline(request: Request):
         # true.
         graph_name = row["graph_name"]
 
-        def _current_counts() -> tuple[int, dict[str, int]]:
+        def _current_counts() -> tuple[int, dict[str, int], int]:
             # #8595 review P1: BOTH reads — the total and the per-label
             # baseline the #661 guard compares against — in ONE hand-off, so
             # the label query cannot be left inline on the loop (the same
@@ -34421,10 +34422,18 @@ async def backups_rebaseline(request: Request):
             # RAISES out of the helper and fails the request: writing
             # `node_count` with an unrefreshed label baseline would re-fire
             # the incident this call exists to clear.
+            # #8660: the third read is the completed-repair count, the count
+            # window's reference. It is refreshed here for the SAME #8595
+            # reason — a re-baseline must write the baseline shape the next
+            # sweep compares against, or the guard's count window reopens.
+            from tortoise.onboarding.state import count_stamped_repairs
+            graph_handle = db.select_graph(graph_name)
             return (count_data_nodes(db, graph_name),
-                    query_label_counts(db.select_graph(graph_name)))
+                    query_label_counts(graph_handle),
+                    count_stamped_repairs(graph_handle))
 
-        count, label_counts = await asyncio.to_thread(_current_counts)
+        count, label_counts, completed_repairs = await asyncio.to_thread(
+            _current_counts)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"graph unavailable: {e}")  # noqa: B904
     state = {
@@ -34439,6 +34448,10 @@ async def backups_rebaseline(request: Request):
           else read_graph_state(storage, org_id, graph_id)),
         "node_count": count,
         "label_counts": label_counts,
+        # #8660: refresh the count window's reference alongside the label
+        # baseline, so a re-baseline closes it the same way a sweep's success
+        # path does.
+        _COMPLETED_REPAIRS_KEY: completed_repairs,
         "updated_at": datetime.now(UTC).isoformat(),
     }
     _write_json(storage, _graph_state_key(org_id, graph_id), state)

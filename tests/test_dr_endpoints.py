@@ -1235,6 +1235,46 @@ class TestDrRebaseline:
             prev_counts=state["label_counts"], current_counts=live) is None, (
             "the state a re-baseline wrote still breaches the #661 guard")
 
+    def test_rebaseline_refreshes_the_completed_repair_count(
+            self, client, dr_env, mem_storage):
+        """#8660: a re-baseline must also refresh the COMPLETED-repair count —
+        the #661 count window's reference.
+
+        The sweep explains a label drop only up to the repairs that landed
+        since the persisted baseline. A re-baseline that left the field absent
+        would make the next sweep read it as 0 and re-open the window, so a
+        REAL one-node ``OnboardingStep`` loss could be explained away as an
+        already-absorbed repair. RED (pre-fix): no ``completed_repairs`` key at
+        all.
+        """
+        from tortoise.backup_sweep import _COMPLETED_REPAIRS_KEY
+
+        _seed_team("team_x", nodes=3)
+        sdk = TortoiseSDK(namespace="registry")
+        _SEED_SDKS.append(sdk)
+        g = sdk._get_proj().db.select_graph("org_team_x")
+        # A COMPLETED #3912 repair: the stamp is set AND its `decide-completed`
+        # step node is gone (no such node was ever created).
+        g.query(
+            "CREATE (s:OnboardingState {org_id:'team_x'}) "
+            "SET s.decide_completed_removed_at = '2026-09-19T05:31:29Z'")
+        mem_storage.upload(
+            "ops/teams/team_x/state.json",
+            json.dumps({
+                "node_count": 16,
+                "label_counts": {"OnboardingStep": 4},
+            }).encode(),
+        )
+        r = client.post(
+            "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
+            json={"org_id": "team_x"},
+        )
+        assert r.status_code == 200, r.text
+        state = json.loads(mem_storage.download("ops/teams/team_x/state.json"))
+        assert state[_COMPLETED_REPAIRS_KEY] == 1, (
+            "re-baseline left the count window open, so the next sweep could "
+            "explain a real OnboardingStep loss as an already-absorbed repair")
+
     def test_rebaseline_survives_a_resolve_failure(self, client, dr_env, mem_storage,
                                                     monkeypatch):
         """Cycle-2 review P2: `resolve_incident` RAISES on a failed close, and the

@@ -883,41 +883,51 @@ def test_check_per_label_drift_unit():
 
 
 def test_explain_repair_stamped_breaches_unit():
-    """The attribution rule: a stamp explains ONLY an `OnboardingStep` drop no
-    larger than the number of stamped repairs — nothing else.
+    """The attribution rule: a repair explains ONLY an `OnboardingStep` drop no
+    larger than the number of repairs that COMPLETED since the baseline —
+    nothing else.
 
     Pure unit pin on the rule, so the integration tests below can be read as
     end-to-end evidence for it rather than as the rule's only statement.
     """
     step_drop = {"OnboardingStep": {"previous": 4, "now": 3, "drop_pct": 25.0}}
 
-    # The production shape: 4 → 3 OnboardingStep, one stamped repair.
-    assert _explain_repair_stamped_breaches(step_drop, stamped_repairs=1) == step_drop
-
-    # A label the stamp says NOTHING about is never explained, however equal
-    # the numbers look — the rule is scoped to the stamp's own datum.
+    # The production shape: 4 → 3 OnboardingStep, one repair landed since the
+    # baseline.
     assert _explain_repair_stamped_breaches(
-        {"Invitation": {"previous": 4, "now": 3}}, stamped_repairs=1) == {}
+        step_drop, repairs_since_baseline=1) == step_drop
 
-    # A drop LARGER than the stamp can account for stays unexplained, so the
+    # A label the repair says NOTHING about is never explained, however equal
+    # the numbers look — the rule is scoped to the repair's own datum.
+    assert _explain_repair_stamped_breaches(
+        {"Invitation": {"previous": 4, "now": 3}},
+        repairs_since_baseline=1) == {}
+
+    # A drop LARGER than the repairs that landed stays unexplained, so the
     # guard fires on the residual.
     assert _explain_repair_stamped_breaches(
-        {"OnboardingStep": {"previous": 6, "now": 3}}, stamped_repairs=1) == {}
+        {"OnboardingStep": {"previous": 6, "now": 3}},
+        repairs_since_baseline=1) == {}
 
-    # No stamp → nothing is explained (the pre-#8660 behaviour, preserved).
-    assert _explain_repair_stamped_breaches(step_drop, stamped_repairs=0) == {}
-
-    # A drop SMALLER than the stamp count is still explained: the orphan prune
-    # is conditional, so one repair can leave the label one node down rather
-    # than two. An equality rule here would re-fire #8660.
+    # NO repair has landed since the baseline → nothing is explained. This is
+    # the #8660 permanent-free-pass guard: once the baseline absorbs a repair,
+    # the count window closes and the next one-node loss fires.
     assert _explain_repair_stamped_breaches(
-        {"OnboardingStep": {"previous": 5, "now": 4}}, stamped_repairs=2) == {
+        step_drop, repairs_since_baseline=0) == {}
+
+    # A drop SMALLER than the count is still explained: the census is a NET
+    # count, so a coincident `OnboardingStep` addition (or a repair whose prune
+    # took only one node where several landed) leaves a smaller delta. An
+    # equality rule here would re-fire #8660.
+    assert _explain_repair_stamped_breaches(
+        {"OnboardingStep": {"previous": 5, "now": 4}},
+        repairs_since_baseline=2) == {
             "OnboardingStep": {"previous": 5, "now": 4}}
 
-    # Mixed breaches split: the stamped label explains, the other still fires.
+    # Mixed breaches split: the repaired label explains, the other still fires.
     explained = _explain_repair_stamped_breaches(
         {**step_drop, "Invitation": {"previous": 5, "now": 3}},
-        stamped_repairs=1)
+        repairs_since_baseline=1)
     assert set(explained) == {"OnboardingStep"}
 
 
@@ -1044,13 +1054,16 @@ def test_sweep_stamped_repair_explains_label_drop(shared_proj):
             "the accepted archive was deleted — the destructive re-fire is back")
 
         # (3) The baseline ADVANCED, so the same explained drop cannot re-fire
-        #     on the next sweep.
-        assert read_org_state(store, "team_x")["label_counts"]["OnboardingStep"] == 3
+        #     on the next sweep — and it now records the repair count, which is
+        #     what closes the count window.
+        state3 = read_org_state(store, "team_x")
+        assert state3["label_counts"]["OnboardingStep"] == 3
+        assert state3["completed_repairs"] == 1
 
-        # (4) …and the guard is NOT blinded: a drop LARGER than the stamp can
-        #     account for still fires. The stamp accounts for at most ONE
-        #     pruned step node per repaired org, so a two-node loss measured
-        #     from the post-repair baseline is data loss, not a repair.
+        # (4) …and the guard is NOT blinded: a drop LARGER than the repairs
+        #     that landed since the baseline still fires. The baseline already
+        #     absorbed the repair (`completed_repairs` = 1 at the baseline), so
+        #     a two-node loss measured from it is data loss, not a repair.
         q = proj.db.select_graph(_team_graph("team_x")).query
         q("MATCH (o:OnboardingStep {org_id:'team_x', step_id:'step-1'}) DELETE o")
         q("MATCH (o:OnboardingStep {org_id:'team_x', step_id:'step-2'}) DELETE o")
@@ -1075,10 +1088,10 @@ def test_sweep_half_repaired_org_prune_is_explained(shared_proj):
     (`repair_false_decide_completion` → `_prune_orphan_decide_step`) finishes
     the prune WITHOUT touching the stamp. The attribution must still explain
     that drop — it is the repair's own removal — or the guard re-fires forever
-    on a half-repaired org, which is the #8660 failure mode. This is why the
-    rule keys on the step node's absence rather than on a stamp/newer-than-
-    baseline window: the window would exclude the older stamp here and
-    re-fire.
+    on a half-repaired org, which is the #8660 failure mode. This is WHY the
+    window is the completed-repair COUNT delta and not a stamp/newer-than-
+    baseline TIMESTAMP: the stamp here is older than the intervening baseline,
+    so a timestamp window would exclude it and re-fire.
     """
     with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         if shared_proj is None:
@@ -1106,7 +1119,11 @@ def test_sweep_half_repaired_org_prune_is_explained(shared_proj):
         res2 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
                                 config=_config())
         assert res2["results"]["team_x"]["status"] == "backed_up"
-        assert read_org_state(store, "team_x")["label_counts"]["OnboardingStep"] == 4
+        state2 = read_org_state(store, "team_x")
+        assert state2["label_counts"]["OnboardingStep"] == 4
+        # The stamp is write-ahead: with the step node still present the repair
+        # has NOT completed and is not in the baseline.
+        assert state2["completed_repairs"] == 0
 
         # The retry's prune lands, with no re-stamp.
         team_g.query(
@@ -1117,7 +1134,55 @@ def test_sweep_half_repaired_org_prune_is_explained(shared_proj):
         org_res3 = res3["results"]["team_x"]
         assert org_res3["status"] == "backed_up", org_res3
         assert not any(i["kind"] == "DATA_LOSS_CANDIDATE" for i in res3["incidents"])
-        assert read_org_state(store, "team_x")["label_counts"]["OnboardingStep"] == 3
+        state3 = read_org_state(store, "team_x")
+        assert state3["label_counts"]["OnboardingStep"] == 3
+        assert state3["completed_repairs"] == 1
+
+
+def test_sweep_recurring_single_node_loss_fires(shared_proj):
+    """#8660: a completed repair must NOT become a permanent free pass for the
+    `OnboardingStep` label.
+
+    Once a sweep absorbs a repair's drop and advances the baseline, the
+    completed-repair count is part of that baseline. A LATER one-node loss is a
+    fresh drop with `repairs_since_baseline == 0`, so it fires — otherwise a
+    repaired org could be drained one node per sweep with no incident and no
+    archive to restore from. This is the exact case a bare (unwindowed) count
+    gets wrong.
+    """
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
+        store = MemoryStorage()
+        reg, _g = _seed_repair_shape(proj)
+
+        res1 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                                config=_config())
+        assert res1["results"]["team_x"]["status"] == "backed_up"
+
+        # The real audited repair lands between the two sweeps and is absorbed.
+        _apply_stamped_repair(proj.db.select_graph(_team_graph("team_x")))
+        res2 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                                config=_config())
+        assert res2["results"]["team_x"]["status"] == "backed_up"
+        assert read_org_state(store, "team_x")["completed_repairs"] == 1
+
+        # A NEW one-node loss, measured from the post-repair baseline, is data
+        # loss — the window is closed, so it is NOT re-explained.
+        proj.db.select_graph(_team_graph("team_x")).query(
+            "MATCH (o:OnboardingStep {org_id:'team_x', step_id:'step-1'}) "
+            "DELETE o")
+        res3 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                                config=_config())
+        org_res3 = res3["results"]["team_x"]
+        assert org_res3["status"] == "data_loss_candidate", org_res3
+        assert "label_drift_explained" not in org_res3
+        inc = next(i for i in res3["incidents"]
+                   if i["kind"] == "DATA_LOSS_CANDIDATE")
+        assert (inc["detail"]["label_breaches"]["OnboardingStep"]
+                ["previous"], inc["detail"]["label_breaches"]
+                ["OnboardingStep"]["now"]) == (3, 2)
 
 
 def test_sweep_unstamped_label_drop_still_fires(shared_proj):

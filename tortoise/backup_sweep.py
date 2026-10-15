@@ -28,10 +28,12 @@ per-GRAPH — state, dumps, and retention are graph-scoped, #2313):
   absolute-count-aware thresholds — a <50% wipe of a low-count label
   (e.g. Invitation) that passes the overall >50% guard still fires
   DATA_LOSS_CANDIDATE. An audited onboarding repair is ATTRIBUTED first
-  (#8660): a drop on the ``OnboardingStep`` label that the graph's #3912
-  repair stamp accounts for is reported as EXPLAINED — the just-uploaded
-  archive is kept and the baseline advances — never as a data-loss candidate
-  (and never via a skip list, which would blind the guard to a real wipe).
+  (#8660): a drop on the ``OnboardingStep`` label up to the number of repairs
+  that have COMPLETED since the baseline (a count window — the `decide-completed`
+  step node gone, recorded as `completed_repairs` in the state) is reported as
+  EXPLAINED — the just-uploaded archive is kept and the baseline advances, which
+  closes the window — never as a data-loss candidate (and never via a skip list,
+  which would blind the guard to a real wipe).
   Triage and disposition for the kind: the
   ``DATA_LOSS_CANDIDATE`` row of docs/ops/registry-backup-dr.md. Which field
   to read there follows the TRIGGER: this per-label path emits both
@@ -214,84 +216,104 @@ def _check_per_label_drift(
 
 #: The ONE label the #3912 onboarding repair can delete — a `decide-completed`
 #: `OnboardingStep` node (`remove_decide_completed_edge` + its orphan prune).
-#: The per-label guard attributes a drop on THIS label to a stamped repair and
+#: The per-label guard attributes a drop on THIS label to a completed repair and
 #: to nothing else. It is an ATTRIBUTION, deliberately NOT a skip-list entry: a
 #: name in ``_EXPORT_SKIP_LABELS`` would stop counting the label altogether and
 #: blind the guard to a genuine wipe of it — the opposite of the fix (#8660).
 _REPAIR_STAMPED_LABEL = ONBOARDING_STEP_LABEL
 
 
+#: The per-graph `state.json` field carrying the number of COMPLETED #3912
+#: repairs at the time the baseline was taken
+#: (:func:`tortoise.onboarding.state.count_stamped_repairs`). The guard explains
+#: a drop only when repairs have landed SINCE the baseline — a COUNT window, not
+#: a timestamp one (see :func:`_explain_repair_stamped_breaches`). A baseline
+#: written before this field existed reads as 0, which can only explain the
+#: repairs that are already visible on the next sweep — never more.
+_COMPLETED_REPAIRS_KEY = "completed_repairs"
+
+
 def _explain_repair_stamped_breaches(
     breaches: dict[str, dict[str, Any]],
     *,
-    stamped_repairs: int,
+    repairs_since_baseline: int,
 ) -> dict[str, dict[str, Any]]:
-    """The subset of per-label breaches an audited repair stamp ACCOUNTS for.
+    """The subset of per-label breaches an audited repair ACCOUNTS for.
 
     A breach is explained only when BOTH hold:
 
     1. its label is ``_REPAIR_STAMPED_LABEL`` (``OnboardingStep``) — the single
-       label the repair's DELETE + orphan prune can reduce. A stamp on an org
+       label the repair's DELETE + orphan prune can reduce. A repair on an org
        says nothing about any other label; and
-    2. its drop is no larger than the number of stamped repairs
-       (``previous - now <= stamped_repairs``) — one stamped org accounts for
-       AT MOST one pruned step node.
+    2. its drop is no larger than the number of repairs that COMPLETED since
+       the baseline (``previous - now <= repairs_since_baseline``) — a repair
+       that landed after the census can account for at most one pruned step.
 
     Everything else stays unexplained so the guard fires: the rule explains
-    exactly what the stamp can account for, no more. Both clauses are
-    load-bearing. Reverting (1) lets a stamp excuse a drop on an unrelated
+    exactly what the repairs can account for, no more. Both clauses are
+    load-bearing. Reverting (1) lets a repair excuse a drop on an unrelated
     label; replacing (2) with a label skip would turn a genuine wipe of
-    ``OnboardingStep`` into a silent non-incident. The BOUND (rather than
-    equality) matters in the other direction too: the orphan prune is
-    CONDITIONAL, so a repair whose stamped org has a single-node drop would,
-    under an equality rule, leave a legitimate drop unexplained — re-firing the
-    incident and deleting each sweep's archive, the #8660 failure itself.
+    ``OnboardingStep`` into a silent non-incident.
 
-    DELIBERATE LIMITATION: ``stamped_repairs`` counts COMPLETED repairs
-    (``count_stamped_repairs``), and the guard's baseline is a per-label
-    census, not node identities — so on an already-repaired org a loss of a
-    DIFFERENT ``OnboardingStep`` node, of no more than this many nodes, is
-    absorbed. That residual is documented in
-    docs/ops/registry-backup-dr.md; removing it needs per-step identities in
-    the baseline, not a different rule here.
+    ⛔ WHY THE WINDOW IS A COUNT AND NOT A TIMESTAMP. ``repairs_since_baseline``
+    is the DELTA of the completed-repair count, ``now - at baseline`` — NOT
+    "repairs stamped after the baseline's ``updated_at``". A stamp is
+    WRITE-AHEAD of the DELETE, so its timestamp dates the STAMP, not the
+    removal: repair at T2, crash before the prune, a sweep at T3 (no label
+    drop, so the baseline advances past T2), the retry's prune at T4 with NO
+    re-stamp, and a timestamp window at T5 excludes the T2 stamp and re-fires
+    the #8660 false positive forever. The count delta has no such gap — the
+    repair is not counted until its node is actually gone, so it is first
+    explained on the sweep that sees the drop, whichever sweep that is.
 
-    Pure — the graph read lives in :func:`_stamped_repair_attribution`.
+    The BOUND (not equality) is right because the census is a NET count: a
+    repair landing while an ``OnboardingStep`` node is added shows a smaller
+    delta, and one repair's orphan prune can remove MORE than one node — so a
+    drop is explained only when it does not exceed the repairs that landed. A
+    larger drop fires (fail-closed). Once the baseline advances past a repair
+    it can never explain another drop: the NEXT single-node loss is a fresh
+    ``delta`` with ``repairs_since_baseline == 0`` and fires (pinned by
+    ``test_sweep_recurring_single_node_loss_fires``).
+
+    DELIBERATE LIMITATION: the baseline is a per-label census, not node
+    identities, so within the ONE sweep that absorbs a repair's drop, a
+    coincident loss of a DIFFERENT ``OnboardingStep`` node is not separately
+    visible. Across sweeps there is no free pass. Documented in
+    docs/ops/registry-backup-dr.md.
+
+    Pure — the count read lives in :func:`_completed_repairs`.
     """
-    if stamped_repairs <= 0:
+    if repairs_since_baseline <= 0:
         return {}
     explained: dict[str, dict[str, Any]] = {}
     for label, breach in breaches.items():
         if label != _REPAIR_STAMPED_LABEL:
             continue
         delta = int(breach.get("previous", 0)) - int(breach.get("now", 0))
-        if 0 < delta <= stamped_repairs:
+        if 0 < delta <= repairs_since_baseline:
             explained[label] = breach
     return explained
 
 
-def _stamped_repair_attribution(
-    graph,
-    org_id: str,
-    breaches: dict[str, dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    """Read this graph's completed repairs and return the breaches they explain.
+def _completed_repairs(graph, prior: dict[str, Any]) -> int:
+    """This graph's COMPLETED #3912 repair count, for the count window.
 
-    The stamp is read ONLY when the stamped label actually breached — an
-    unrelated label's drop needs no stamp read, and a query that is not needed
-    is a query that cannot fail. A read failure returns ``{}``: an unreadable
-    stamp must NEVER explain a drop (fail-closed toward firing), which is also
-    the pre-#8660 behaviour.
+    Reads :func:`tortoise.onboarding.state.count_stamped_repairs` and stores the
+    value on every accepted backup so the next sweep measures the delta against
+    it. On a read failure it CARRIES THE BASELINE VALUE FORWARD rather than
+    returning 0: writing 0 would make every already-completed repair look
+    freshly landed on the next sweep and over-explain, whereas carrying forward
+    keeps the window closed and the guard fail-closed toward firing. The value
+    self-heals on the next successful read.
     """
-    if _REPAIR_STAMPED_LABEL not in breaches:
-        return {}
+    baseline = int(prior.get(_COMPLETED_REPAIRS_KEY) or 0)
     try:
-        stamped = count_stamped_repairs(graph, org_id)
+        return int(count_stamped_repairs(graph))
     except Exception:
         logger.warning(
-            "repair-stamp read failed for %s — no breach explained by it",
-            org_id, exc_info=True)
-        return {}
-    return _explain_repair_stamped_breaches(breaches, stamped_repairs=stamped)
+            "completed-repair count read failed — carrying forward %d, the "
+            "count window stays closed (fail-closed)", baseline, exc_info=True)
+        return baseline
 
 
 #: The per-label count read. ONE query for the two surfaces that must agree on
@@ -949,6 +971,18 @@ def _backup_graph(
     except Exception:
         logger.warning("per-label count query failed for %s — continuing", graph_name)
 
+    # ── #8660: read the graph's completed-repair count in the SAME snapshot
+    # window as the label census, and persist it on this accepted backup. The
+    # guard explains a label drop only up to the repairs that landed SINCE the
+    # baseline, so the baseline must carry this count or every repair would
+    # keep explaining one future loss per sweep forever. A read failure carries
+    # the prior value forward (window stays closed). ──
+
+    completed_repairs = _completed_repairs(g, prior)
+    repairs_since_baseline = (
+        completed_repairs - int(prior.get(_COMPLETED_REPAIRS_KEY) or 0)
+    )
+
     # ── Dump via the shipped pipeline (registry-stream-key, not GH-key, #661). ──
     proj = SimpleNamespace(g=g)
     if not config.registry_stream_key or len(config.registry_stream_key) != 32:
@@ -1045,9 +1079,10 @@ def _backup_graph(
             # this guard cannot tell the repair from data loss, so it fires,
             # deletes the just-uploaded archive, and — because a fire returns
             # BEFORE the baseline write — re-fires on EVERY sweep. Attribute
-            # the drop first; only the residual is data loss.
-            explained_breaches = _stamped_repair_attribution(
-                g, org_id, breaches)
+            # the drop to the repairs that landed SINCE the baseline; only the
+            # residual is data loss.
+            explained_breaches = _explain_repair_stamped_breaches(
+                breaches, repairs_since_baseline=repairs_since_baseline)
             unexplained = {
                 label: breach for label, breach in breaches.items()
                 if label not in explained_breaches
@@ -1115,6 +1150,10 @@ def _backup_graph(
         "node_count": node_count,
         "counts": {"nodes": node_count, "edges": manifest.get("edge_count")},
         "label_counts": label_counts,
+        # #8660: the completed-repair count at THIS baseline — the reference the
+        # next sweep measures `repairs_since_baseline` against. Absent on a
+        # pre-#8660 baseline, which reads as 0.
+        _COMPLETED_REPAIRS_KEY: completed_repairs,
         # graph_name names the dumped FalkorDB graph — the watcher uses the
         # DEFAULT graph's state graph_name to disambiguate legacy flat
         # manifests (custom-era on-demand dumps must not gate org freshness).
@@ -1161,7 +1200,7 @@ def _backup_graph(
         # on this backup — the archive was accepted anyway and the baseline
         # advanced. Absent on an ordinary backed-up run, so its presence in the
         # sweep RESPONSE is the signal; /status does not carry per-graph
-        # results, so the WARNING line below is the app-log trace.
+        # results, so the WARNING emitted above is the app-log trace.
         **({"label_drift_explained": explained_breaches}
            if explained_breaches else {}),
     }
