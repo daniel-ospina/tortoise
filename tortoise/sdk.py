@@ -5984,33 +5984,17 @@ class TortoiseSDK:
         # CREATEd but BEFORE PointAdded was journaled, so the graph gained an
         # orphan that a rebuild would drop (live != rebuild). Fail closed here,
         # pre-write, matching the bundle Phase-1 contract.
-        _ef_in = props.get("extractedFrom")
-        if _ef_in is not None:
-            if isinstance(_ef_in, str):
-                if not _ef_in.strip():
-                    # explicit "no provenance" == absent (the bundle contract
-                    # allows an empty list for the same reason), so session
-                    # inference may still apply below.
-                    props.pop("extractedFrom", None)
-            elif isinstance(_ef_in, (list, tuple)):
-                _clean = [r for r in _ef_in
-                          if isinstance(r, str) and r.strip()]
-                if len(_clean) != len(_ef_in):
-                    raise ValueError(
-                        "create_point: extractedFrom must be a non-empty "
-                        f"string or a list of non-empty strings (got {_ef_in!r})"
-                    )
-                if _clean:
-                    props["extractedFrom"] = _clean
-                else:
-                    props.pop("extractedFrom", None)
-            else:
-                raise ValueError(
-                    "create_point: extractedFrom must be a non-empty string "
-                    f"or a list of non-empty strings (got {_ef_in!r}); a "
-                    "non-string scalar would mint a corrupt Source, and raised "
-                    "after the write would leave an un-journaled Point (#3263)"
-                )
+        if props.get("extractedFrom") is not None:
+            # #8171 (review P2): the shape rules that used to be spelled out
+            # here now live in ONE place, `_validate_extracted_from`, shared
+            # with `create_entity`/`create_document`. Keeping a second copy
+            # beside a helper that documents itself as the single home for the
+            # contract is how the two silently drift — the helper's whole
+            # reason to exist is that the doors routing a ref to
+            # `projection._link_source` cannot disagree. Behaviour is
+            # unchanged: this door's inline rules WERE that contract's
+            # definition (#3263).
+            _validate_extracted_from(props, door="create_point")
         if not props.get("extractedFrom"):
             # #3263: branch on TYPE, not truthiness. The contract is "a
             # non-empty string can name a Source", so anything else that is
@@ -25556,8 +25540,19 @@ class TortoiseSDK:
         Write nudges (nudge, don't enforce): returns ``{node, nudges}`` where
         ``nudges`` lists top related Points (by name/content token overlap) with
         a suggested IMPL/NAND/mitigate relation — advisory only, never enforced.
+
+        Returns ``{node, nudges}`` plus ``advisories`` when the write carries a
+        provenance gap this door can report — see ``_provenance_advisory``
+        (``no_source`` only for documents, where its remedy is real;
+        ``extracted_from_inert`` on any type that declares an unwired ref).
+        Advisory only: never a block, and it never changes what is stored.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # #8171 (review P1/P2): the ref must be shape-checked BEFORE any write
+        # — the one home is `_validate_extracted_from`, shared with
+        # `create_document` so the two doors cannot disagree. See its docstring
+        # for the three measured failure modes it closes.
+        _validate_extracted_from(props, door="create_entity")
         # W5 Phase F (#2104, review r1): the explicit ``_server_id`` param must
         # never be reachable through the props passthrough — the MCP boundary
         # denylist catches top-level keys, this catches the nested-props
@@ -25646,11 +25641,200 @@ class TortoiseSDK:
             raise ValueError(
                 f"create_entity: unknown type {type!r} — must be one of "
                 f"subject, object, event, document")
+        # ── #8171: MATERIALIZE the provenance a caller declared inline ──────
+        # `extractedFrom` is a recognised prop on this door — it rides the
+        # generic passthrough and is stored on the node.
+        # Storing it is NOT the capability: `create_document` (which
+        # `type='document'` absorbed in the epic #888 / #4282 consolidation)
+        # also wired the Source via `projection._link_source` (#394), and that
+        # half was LOST in the move — `create_entity` minted NO `:Source` node
+        # and NO `extractedFrom` edge, so a caller that had declared a source
+        # got a DOCUMENT the auditor reads as a provenance gap. Measured,
+        # `type='document'`: create_entity wired NOTHING; create_document minted
+        #     create_entity    sourceKind/edge: none
+        #     create_document  :Source node + extractedFrom edge
+        # `_link_source` is "declared inline, created if absent": it MERGEs the
+        # Source stub on the ref and is idempotent, so a re-declared ref
+        # converges instead of duplicating.
+        #
+        # ⛔ DOCUMENT ONLY, and that restriction is the point (review P1).
+        # The PRIMARY reason is the ontology: `extractedFrom` has a declared
+        # domain of Point -> Source (§3.3), and §4.6 says of these very
+        # classes: "Derived Events and Objects reach their source through their
+        # own links rather than `extractedFrom`". Their declared predicate is
+        # `references` (Source -> Event/Object/Source), written by
+        # `link_source_to_entity`. Routing subject/object/event through
+        # `_link_source` would invent an edge domain the ontology does not
+        # declare.
+        # A SECOND, independent reason: live-only edges are worse than no
+        # edge, and NO entity label has a replay writer — `_upsert_subject`,
+        # `_upsert_object`, `_upsert_event` and `_upsert_document` all omit
+        # `_link_source`, and `_create_entity` journals no `DocumentCreated`
+        # line at all, so `rebuild_all` has nothing to re-mint the edge from.
+        # That gap is PRE-EXISTING (#2296) and this change neither creates nor
+        # widens it: it restores the materialization `create_document` has had
+        # since #394, so the document door now behaves as its own alias always
+        # did. It is recorded on #8171 rather than claimed fixed here — this
+        # comment must NOT read as a replay-safety guarantee for the document
+        # edge, because there is none yet.
+        _prov_ref = props.get("extractedFrom")
+        _prov_label = self._ENTITY_SOURCE_LABELS.get(t)
+        if _prov_ref and _prov_label:
+            _prov_id = node.get("id") or node.get("eventId")
+            if _prov_id:
+                self._get_proj()._link_source(
+                    _prov_id, _prov_ref, label=_prov_label)
         return {
             "node": node,
             "nudges": self._nudge_candidates(
                 name, exclude_ids=[node.get("id") or node.get("eventId")]),
+            **self._provenance_advisory(node, props, entity_type=t),
         }
+
+    # ── #8171: the write-time provenance advisory ────────────────────
+    #
+    # The ruling (#398, delivered by #8171): an agent asserting something
+    # without research is a WEAK source, and the source is the agent-session
+    # transcript. `audit` has no entity-level provenance check — checks 1 and 7
+    # are Point-only (`(op:Point {is_operator:true})-[:IMPL|NAND]->(ev:Point)`)
+    # and cannot see a `:Source`/`:Event`/`:Subject` written here, so nothing
+    # post-hoc reports this gap for an entity write at all. The ruling asks for
+    # it AT WRITE TIME, the only point where it
+    # can change what the writer does next.
+    #
+    # ADVISORY ONLY. The ruling says "guard (advisory)", never a block, so this
+    # returns a note and NEVER raises, NEVER refuses the write and NEVER changes
+    # what was stored. A caller ignoring it loses nothing; a caller reading it
+    # learns the one cheap fix (declare `extractedFrom`, e.g. a
+    # `session:<id>` ref for what the writer itself asserts).
+    _ENTITY_SOURCE_LABELS: ClassVar[dict[str, str]] = {"document": "Source"}
+
+    def _provenance_advisory(self, node: dict, props: dict,
+                             *, entity_type: str | None = None) -> dict:
+        """Advisory for a provenance gap this door can report.
+
+        ``no_source`` for a document write that declared no materializable
+        source (the remedy the message names actually works there), and
+        ``extracted_from_inert`` when any type declares an ``extractedFrom``
+        this door does not wire. A type this door cannot source at all gets no
+        ``no_source`` note — see the branch below.
+
+        Returns ``{}`` when the node carries provenance that this door can
+        HONOUR, and ``{"advisories": [...]}`` when it does not. Never raises,
+        never blocks — see the block comment above.
+
+        Sourcedness is not the mere PRESENCE of an ``extractedFrom`` field — it
+        is whether the door will MATERIALIZE it (review P2). Only document-kind
+        writes wire ``extractedFrom`` (``_ENTITY_SOURCE_LABELS``), so a
+        ``subject``/``object``/``event`` that declares one stores the ref as a
+        bare property, mints no ``:Source`` and wires no edge. Treating that as
+        "sourced" made the advisory silent about exactly the invented-provenance
+        gap it exists to report: the node asserts a source nothing can traverse
+        to, which is worse than declaring none (design contract #3).
+
+        ``no_source`` is given only where the door has a remedy (review P1).
+        ``extractedFrom`` is the only source this door materializes, and only a
+        document write can. For a ``subject``/``object``/``event`` the
+        ``no_source`` message would name ``extractedFrom='session:<id>'`` — a
+        fix the door CANNOT honour: applying it swaps this advisory for
+        ``extracted_from_inert`` and leaves the gap exactly where it was. An
+        advisory that fires on every write of 3 of the 4 types, with inert
+        advice, is the noise the design note warns "is how an advisory stops
+        changing behaviour", so there is no note to give. A declared-but-inert
+        ref is still reported (the ``extracted_from_inert`` branch below).
+        """
+        _ref = props.get("extractedFrom")
+        _source_label = self._ENTITY_SOURCE_LABELS.get(entity_type or "")
+        if _ref and _source_label:
+            return {}
+        if _ref:
+            # Declared, but INERT for this type: no writer honours it.
+            _node_id = node.get("id") or node.get("eventId")
+            return {"advisories": [{
+                "code": "extracted_from_inert",
+                "node_id": _node_id,
+                "message": (
+                    f"extractedFrom is not wired for type={entity_type!r}. The "
+                    "ref is stored as a plain property and NO :Source is "
+                    "created, so the provenance cannot be traversed. "
+                    "`extractedFrom` is declared Point -> Source (ONTOLOGY "
+                    "3.3); a derived Event or Object reaches its source "
+                    "through its own `references` link (link_source_to_entity, "
+                    "4.6). Either use a door that wires it, or drop the ref so "
+                    "the node does not assert a source it cannot show."
+                ),
+                "advisory": True,
+            }]}
+        # ── no_source: only where this door HAS a remedy (review P1) ─────
+        # `extractedFrom` is the only source this door materializes, and only a
+        # document write can (`_ENTITY_SOURCE_LABELS`). For subject/object/event
+        # a `no_source` advisory would name `extractedFrom='session:<id>'` — a
+        # fix the door cannot honour: applying it swaps this advisory for the
+        # `extracted_from_inert` branch above and leaves the provenance gap
+        # exactly where it was. An advisory that fires on EVERY write of 3 of
+        # the 4 types and whose advice is inert is the noise the design note
+        # warns "is how an advisory stops changing behaviour". So a type this
+        # door cannot source gets no `no_source` note: a Subject has no source
+        # predicate at all, and Event/Object provenance goes through a separate
+        # `references` writer, never this door's `extractedFrom`. (A
+        # declared-but-unwireable ref is still reported just above.)
+        if not _source_label:
+            return {}
+        # ⛔ NO `session_id` BYPASS (review P1). An earlier revision returned
+        # `{}` here on the reasoning that "`create_point` infers `session:<id>`"
+        # (#3263). That inference lives ONLY in `create_point` — and
+        # `create_point` never calls this helper. Its only callers are
+        # `create_entity` and `create_document`, and NEITHER derives or
+        # materializes anything from `session_id`, so a `session_id`-only write
+        # through either door is genuinely UNSOURCED: the bypass silenced the
+        # advisory on exactly the class of write the advisory exists to report.
+        # Sourcedness must be judged by what THIS door will materialize, so a
+        # borrowed capability cannot be counted as provenance the door does not
+        # provide — the same rule the inert-`extractedFrom` branch above
+        # applies. The right fix for a writer that wants that inference is the
+        # message's advice, not a silent exemption.
+        _sid = props.get("session_id")
+        _sid_hint = (
+            " (A `session_id` was supplied, but only `create_point` derives a "
+            "source from one; this door does not. Pass "
+            "extractedFrom='session:<session_id>' explicitly.)"
+            if isinstance(_sid, str) and _sid.strip() else ""
+        )
+        # NOTE: no analogous hint for `sourceKind`. It IS still present in
+        # `props` here, but it is not materializable — the WRITE's passthrough
+        # discards it (`projection/entities.py::_SOURCE_HANDLED`) and no
+        # SET clause writes it (`_upsert_document`/`_upsert_source`) — so it
+        # cannot buy silence. There is deliberately no branch keyed on it; the
+        # caller is told in the door's docstring that `sourceKind` is not
+        # stored on these nodes.
+        # No `sourceKind` branch (review P1 in round 7). An earlier revision
+        # treated a declared `sourceKind` as provenance on a document and
+        # returned `{}` — on the D10 reasoning that a document IS a `:Source`.
+        # MEASURED on the head tree: NEITHER document door stores it.
+        # `sourceKind` is in `projection/entities.py::_SOURCE_HANDLED` and
+        # is denied the document upsert's open passthrough, and
+        # `_upsert_document`'s fixed SET clause never writes it — so a document
+        # created through either door with `sourceKind` only ends with no
+        # `sourceKind` property, no separate `:Source` and no edge. Keying
+        # silence on a property the write DISCARDs is the third
+        # borrowed-capability bypass on this function (after `session_id` and
+        # the unconditional `sourceKind`) and it silenced a genuinely
+        # unprovenanced write. There is now no branch here: only a materialized
+        # `extractedFrom` counts.
+        node_id = node.get("id") or node.get("eventId")
+        return {"advisories": [{
+            "code": "no_source",
+            "node_id": node_id,
+            "message": (
+                "No source and no provenance on this write. If it is "
+                "something YOU are asserting, source it from the session "
+                "that produced it with extractedFrom='session:<session_id>' "
+                "(registered as sourceKind=agentSession) — an unsourced "
+                "assertion carries whatever credibility its wording implies."
+                + _sid_hint
+            ),
+            "advisory": True,
+        }]}
 
     # ── Write nudges (epic #888 W2 — nudge, don't enforce) ───────────
 
@@ -25707,6 +25891,23 @@ class TortoiseSDK:
         return [{k: r[k] for k in ("candidate", "suggested_relation", "reason")}
                 for r in scored[:limit]]
 
+    def _flat_entity_result(self, result: dict) -> dict:
+        """Bare node a legacy ``create_*`` alias returns, plus #8171 advisories.
+
+        The aliases historically unwrapped ``create_entity(...)["node"]``,
+        which DROPS the top-level ``advisories`` key — so the alias MCP tools
+        (``tortoise_create_subject`` / ``-object`` / ``-event``) never surfaced
+        an advisory the identical ``create_entity`` write did (review P2).
+        ``create_document`` returns the flat node WITH the advisory; this
+        restores that shape on the three legacy doors. Additive: with no
+        advisory the return is the same node the alias returned before.
+        """
+        node = dict(result["node"])
+        _adv = result.get("advisories")
+        if _adv:
+            node["advisories"] = _adv
+        return node
+
     def create_subject(self, name: str, subjectKind: str = "other", **props) -> dict:
         """Thin alias for create_entity(type='subject') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
@@ -25714,8 +25915,9 @@ class TortoiseSDK:
         if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
             raise ValueError(
                 "'is_episodic' is a server-managed field and cannot be set via props.")
-        return self.create_entity("subject", name,
-                                  subjectKind=subjectKind, **props)["node"]
+        return self._flat_entity_result(
+            self.create_entity("subject", name,
+                               subjectKind=subjectKind, **props))
 
     def create_object(self, name: str, objectKind: str = "other", **props) -> dict:
         """Thin alias for create_entity(type='object') — epic #888 W2."""
@@ -25724,8 +25926,9 @@ class TortoiseSDK:
         if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
             raise ValueError(
                 "'is_episodic' is a server-managed field and cannot be set via props.")
-        return self.create_entity("object", name,
-                                  objectKind=objectKind, **props)["node"]
+        return self._flat_entity_result(
+            self.create_entity("object", name,
+                               objectKind=objectKind, **props))
 
     def create_event(self, name: str, eventKind: str, *, is_episodic: bool | None = None,
                       _server_id: str | None = None, **props) -> dict:
@@ -25759,9 +25962,10 @@ class TortoiseSDK:
                 "via props.")
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
-        return self.create_entity("event", name,
-                                  eventKind=eventKind, _server_id=_server_id,
-                                  **props)["node"]
+        return self._flat_entity_result(
+            self.create_entity("event", name,
+                               eventKind=eventKind, _server_id=_server_id,
+                               **props))
 
 
     # ── Session Indexing (AgentSession) ─────────────────────────
@@ -28123,6 +28327,17 @@ class TortoiseSDK:
     def create_document(self, title: str, documentKind: str, **props) -> dict:
         """Thin alias for create_entity(type='document') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # #8171 (review P2): this door routes `extractedFrom` to the SAME
+        # `_link_source` as `create_entity`, so it needs the SAME pre-write
+        # shape check. Without it the choke point's container gate turns a bad
+        # ref into a SILENT no-op — the caller gets a 200, no provenance, and
+        # no advisory. Pre-fix, only a NON-ITERABLE scalar failed loudly (and it
+        # failed AFTER the CREATE, leaving an orphan); the two other bad shapes
+        # were silent — a DICT had its keys minted as `:Source` nodes (invented
+        # provenance), and a mixed list DROPPED its non-str members. Those two
+        # silent cases are what this guard is for on this door: a ref the door
+        # cannot honour must not be accepted in silence.
+        _validate_extracted_from(props, door="create_document")
 
         did = self.ulid()
         result = self._create_entity("Document", did, {"title": title, "documentKind": documentKind, **props}, "DocumentCreated")
@@ -28131,6 +28346,15 @@ class TortoiseSDK:
         # source ref. D10: the entity label is Source (a document is a :Source).
         if props.get("extractedFrom"):
             self._get_proj()._link_source(did, props["extractedFrom"], label="Source")
+        # #8171 (review P2): the ADVISORY must be delivered on this door too.
+        # This is the documented alias AND a live MCP tool
+        # (`tortoise_create_document`), so a caller using it would otherwise
+        # get no advisory while the same write through
+        # `create_entity(type='document')` does — the two doors disagreeing is
+        # the defect the shared guard exists to prevent, and an advisory that
+        # reaches only one of two doors cannot change behaviour.
+        result.update(self._provenance_advisory(result, props,
+                                                entity_type="document"))
         return result
 
     def _resolve_source_url(self, url: str) -> str:
@@ -30039,3 +30263,52 @@ def _post_commit(payload: dict, *, base_url=None, api_key=None) -> dict:
                       json=payload, timeout=120)
     r.raise_for_status()
     return r.json()
+
+
+def _validate_extracted_from(props: dict, *, door: str) -> None:
+    """#8171: shape-check ``extractedFrom`` BEFORE any graph write.
+
+    The contract is `create_point`'s #3263 one, and it lives here so the three
+    doors that route a ref to `projection._link_source` — `create_point`,
+    `create_entity`, `create_document` — cannot disagree about what a legal
+    source ref is. `create_point` used to spell the same rules out inline; it
+    now calls this, so there is one definition rather than a copy that can
+    drift. Three input classes matter, and all three were
+    MEASURED to fail badly when unchecked, because `_link_source` fans out with
+    `list(source_ref)`:
+
+      - a non-str scalar (`123`) raised TypeError AFTER the node was CREATEd,
+        leaving an ORPHAN the caller gets no handle to;
+      - a DICT had its KEYS minted as `:Source` nodes, one per key — an
+        INVENTED provenance, which is worse than none (design contract #3);
+      - a list with a non-str member silently DROPPED that member.
+
+    Raising HERE, before the write, is what keeps the refusal atomic: a raise
+    after the CREATE still reports an error, but the node is already in the
+    graph and the caller cannot even name it. Empty and whitespace-only refs
+    are dropped rather than refused — they mean "no provenance", not "bad
+    provenance" (the bundle contract allows an empty list for the same reason).
+    """
+    ref = props.get("extractedFrom")
+    if ref is None:
+        return
+    if isinstance(ref, str):
+        if not ref.strip():
+            props.pop("extractedFrom", None)
+        return
+    if isinstance(ref, (list, tuple)):
+        clean = [r for r in ref if isinstance(r, str) and r.strip()]
+        if len(clean) != len(ref):
+            raise ValueError(
+                f"{door}: extractedFrom must be a non-empty string or a list "
+                f"of non-empty strings (got {ref!r})")
+        if clean:
+            props["extractedFrom"] = clean
+        else:
+            props.pop("extractedFrom", None)
+        return
+    raise ValueError(
+        f"{door}: extractedFrom must be a non-empty string or a list of "
+        f"non-empty strings (got {ref!r}); a non-string scalar would mint a "
+        "corrupt Source, and raising after the write would leave an "
+        "un-journaled orphan (#3263/#8171)")

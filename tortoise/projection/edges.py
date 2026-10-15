@@ -1022,10 +1022,26 @@ class _EdgeHandlers:
         it here would record a FALSE current. Absent / empty ⇒ no property at
         all (``ON CREATE SET r.sourceVersion = NULL`` is a no-op), never ``''``.
         """
-        refs = [source_ref] if isinstance(source_ref, str) else list(source_ref)
+        # #8171 (review P1): a ref that is neither a string nor a list/tuple of
+        # them is NOT a source identity. `list(source_ref)` on a DICT yielded
+        # its KEYS, and each key was minted as its own `:Source` — an INVENTED
+        # provenance, which "is worse than none" (design contract #3). Measured
+        # pre-fix: `{"url": ..., "kind": ...}` minted Sources named `url` and
+        # `kind`, each with an `extractedFrom` edge. A per-member type check
+        # cannot catch this — the keys ARE strings — so the gate has to be on
+        # the CONTAINER. The doors that can validate ATOMICALLY do
+        # (`create_entity`, `create_point`) and raise pre-write; this choke
+        # point guarantees the remaining callers cannot fabricate whatever
+        # they pass.
+        if isinstance(source_ref, str):
+            refs = [source_ref]
+        elif isinstance(source_ref, (list, tuple)):
+            refs = list(source_ref)
+        else:
+            return
         versions = source_versions or {}
         for raw_ref in refs:
-            if not raw_ref:
+            if not raw_ref or not isinstance(raw_ref, str):
                 continue
             # #7951 R2-P2: a `session:<id>` edge whose ORIGINATING record
             # precedes a later `SessionDeleted` belongs to the incarnation the

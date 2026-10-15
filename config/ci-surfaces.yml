@@ -1068,6 +1068,7 @@ surfaces:
   # without this entry the delete-resurrection guard would not run on the
   # change that can re-open the hole.
   - test_7951_delete_resurrection.py
+  - test_8171_claim_with_source.py
   # #7951 (remaining doors): the write-door INVENTORY — every projection
   # `.apply()` call site must be classified (chokepoint / closed / replay /
   # documented exemption), and `_doc_write` must journal before it folds.

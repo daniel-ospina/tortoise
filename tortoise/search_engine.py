@@ -1280,7 +1280,18 @@ def run_vector_query(
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
-    query_vec must be a 384-dim embedding matching the index dimension.
+    ``query_vec``'s required width is the STORE's, never a literal. The index
+    path needs a vector matching the width the index was created with — the
+    one ``FalkorProjection.required_embedding_dim`` declares (#4280) — while
+    the brute-force branch below (the embedded lane, an old FalkorDB, or any
+    lane whose index query fails) is DIMENSION-AGNOSTIC: it is
+    ``vec.euclideanDistance`` over ``vecf32``-wrapped values with no width
+    literal anywhere. An index-less store therefore reads back whatever width
+    its own encoder produced, and that is DELIBERATE — pinning the
+    brute-force lane to 384 re-introduces the #4280 regression (an
+    index-less store silently loses usable vectors) rather than fixing
+    anything. ``required_embedding_dim`` is the ONE home of the width rule;
+    do not mint a second one here.
 
     R3 (#1542) D4: ``leg_trace`` — when provided, appends a per-leg entry
     at every exit branch. The empty-embedding case is an EXPLICIT zero-row

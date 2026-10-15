@@ -544,6 +544,32 @@ def test_rotate_keeps_a_body_supplied_expiry(client, fake):
     assert r.json().get("expires_at"), "an explicit expires_in must be honoured"
 
 
+def test_rotate_can_lengthen_the_displaced_rows_expiry(client, fake, monkeypatch):
+    """T6 (P1, review round 1): the replacement inherits the target's privilege
+    CLASS (graph, scopes, delegation, lineage) but NOT its lifetime. The body's
+    expiry is parsed BEFORE the displaced row is read (`hosted_api.py:11365`)
+    and inherited only when the body omitted one (`:11413-11414`), so a rotate
+    CAN extend a credential's life by up to 366 days.
+
+    This is the widening path the brief documents in §2.3 item 1 and the
+    constraint #2446's member replace must add (`replacement expiry <= displaced
+    expiry`). The doc previously claimed the primitive could not widen expiry at
+    all — this test is that claim's non-vacuity proof: it passes on the shipped
+    primitive, so the old claim was false.
+    """
+    org = _claimed_session_org(client, fake, monkeypatch)
+    target = _mint(client, org["headers"], {"name": "short", "expires_in": 1})
+    r = _rotate(client, target["id"], org["headers"], {"expires_in": 366})
+    assert r.status_code == 200, r.text
+    displaced = datetime.fromisoformat(target["expires_at"])
+    replacement = datetime.fromisoformat(r.json()["expires_at"])
+    assert replacement > displaced, (
+        "a body-supplied expiry must be able to LENGTHEN the replacement — "
+        "rotate bounds the privilege class, not the lifetime"
+    )
+    assert (replacement - datetime.now(UTC)).days >= 365
+
+
 # ── T3: never leave the caller with no key ──────────────────────────────────
 
 def test_create_leg_failure_leaves_the_old_key_live(client, fake, monkeypatch):
