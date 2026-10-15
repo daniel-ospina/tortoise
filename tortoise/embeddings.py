@@ -1133,8 +1133,21 @@ def search_points(
     *,
     threshold: float = 0.3,
     limit: int = 10,
+    force_sparse: bool = False,
 ) -> list[dict]:
-    """Semantic search over Points. Returns ranked [{id, content, similarity, snippet}, ...]."""
+    """Semantic search over Points. Returns ranked [{id, content, similarity, snippet}, ...].
+
+    #2678: ``force_sparse=True`` PINS the sklearn TF-IDF leg — the embedder is
+    not resolved at all, so the scorer is the deterministic token-overlap one
+    even when an embedder is cached. Default-``False`` keeps the #399 dual mode
+    (``EmbeddingModel.get`` decides), which is what production tiers and their
+    tests pin.
+
+    Callers that NAME a sparse strategy (the retrieval eval's ``tfidf`` arm,
+    any isolation harness) must pass ``True``: otherwise the label lies about
+    the scorer that produced the ranking, and the same arm silently becomes a
+    second semantic arm whenever the embedder happens to be cached (#2678).
+    """
     if not points:
         return []
 
@@ -1147,7 +1160,13 @@ def search_points(
     # jointly fitting on [query] + texts lets the query enter the vocabulary,
     # shifting idf and silently reordering results (verified: ~2% reorders,
     # ~38% threshold changes at 0.3 on random corpora).
-    model = EmbeddingModel.get()
+    #
+    # #2678: force_sparse skips the resolution ENTIRELY rather than resolving
+    # and ignoring the model — resolving it would load an embedder in a process
+    # that asked for the token-overlap scorer, and under
+    # TORTOISE_EMBEDDING_MODEL_REQUIRED=1 it would raise the #5275 refusal for a
+    # caller that never wanted the dense leg.
+    model = None if force_sparse else EmbeddingModel.get()
     if model is not None:
         try:
             vecs = np.asarray(model.encode([query] + texts, show_progress_bar=False),  # noqa: RUF005
@@ -1156,6 +1175,8 @@ def search_points(
         except Exception:  # noqa: BLE001, RUF100
             model = None
     if model is None:
+        # #2678: this is the deterministic SPARSE leg — content ∪ search_keys
+        # was already applied by the caller's ``index_text`` where required.
         try:
             TfidfVectorizer = import_tfidf_vectorizer()
             tv = TfidfVectorizer()
