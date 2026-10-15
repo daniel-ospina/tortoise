@@ -434,16 +434,22 @@ def test_live_only_capture_loses_aboutobject_edges_without_the_journal(
 def test_unwritable_journal_is_disclosed_and_counted(tmp_path, monkeypatch):
     """F1: with ``TORTOISE_EVENT_LOG_BASE_DIR`` set to an EXISTING but
     unwritable dir (the reviewer's repro: mode 0500), ``mkdir -p`` succeeds and
-    every append fails. The capture must still succeed at the graph level
-    (``ok`` True — the write persisted) but must NO LONGER be silent: the
-    failure counter increments and the receipt carries an additive warning.
+    every append fails. The capture must NOT be silent: the failure counter
+    increments and the receipt carries an additive warning.
+
+    ⚠️ #7951 SUPERSEDES the fail-soft OUTCOME half of this test. F1 justified
+    ``ok is True`` with *"the write persisted"*; since §17.1's outbox ordering
+    the journal append IS the commit point, so a failed append means the Point
+    is NOT written — the capture reports ``partial`` and no points. That is the
+    honest, retryable answer (nothing persisted, so the #2335 TRUE gate
+    re-attempting is CORRECT), and F1's actual deliverable — the DISCLOSURE — is
+    unchanged and still asserted below.
 
     Reachable: chmod 0500 makes ``EventLog.append``'s ``mkdir``/``open`` raise
     PermissionError, which ``_emit_event`` catches.
 
     MUTATION: restore the WARNING-only swallow → no counter, no receipt warning
-    → RED. Note ``ok`` is intentionally still True: marking the capture failed
-    would trip the #2335 TRUE-retry gate over a write that persisted.
+    → RED.
     """
     events = tmp_path / "events"
     events.mkdir()
@@ -456,7 +462,10 @@ def test_unwritable_journal_is_disclosed_and_counted(tmp_path, monkeypatch):
     try:
         sdk.create_object("test/repo#42", objectKind="pm:issue")
         r = sdk.capture_session(CONV, session_id="s-4240-unwritable")
-        assert r.get("ok") is True, r
+        assert r.get("status") == "partial", r
+        assert r.get("points") == [], (
+            "no record could be committed, so §17.1 forbids the cache write — "
+            f"the capture must not report points it did not persist: {r!r}")
         assert any("journal append failed" in w for w in r["warnings"]), (
             "a failed append on a configured journal was not disclosed on the "
             f"capture receipt: {r['warnings']}")
@@ -490,13 +499,13 @@ def test_hosted_receipt_discloses_a_failed_journal_append(tmp_path, monkeypatch)
     dir, so the hosted SDK's every journal append raises and
     ``sdk._journal_write_failures`` is non-zero by the time the receipt is built.
 
+    ⚠️ #7951 SUPERSEDES the outcome half, exactly as in the F1 test above: the
+    append is now the commit point, so nothing persists and the envelope is
+    ``partial``, not ``ok``. The DISCLOSURE (this test's deliverable) is kept and
+    must still ride a partial capture.
+
     MUTATION: drop the hosted receipt disclosure (the pre-F2 state) → the
-    warning is absent on this receipt → RED. It must NOT be gated on the
-    capture outcome: the graph write persisted, so the envelope's ``status``
-    stays ``"ok"`` (the hosted receipt's success signal — it carries no literal
-    ``ok`` key) — asserting both the warning AND ``status == "ok"`` pins that
-    the disclosure is independent of the ``_capture_ok_record`` written earlier
-    (SDK lane, ``sdk.py`` F1 note).
+    warning is absent on this receipt → RED.
     """
     events = tmp_path / "events"
     events.mkdir()
@@ -515,7 +524,7 @@ def test_hosted_receipt_discloses_a_failed_journal_append(tmp_path, monkeypatch)
     finally:
         slot.release()
         events.chmod(0o700)  # restore before teardown
-    assert r.get("status") == "ok", r
+    assert r.get("status") == "partial", r
     assert any("journal append failed" in w for w in r["warnings"]), (
         "the hosted receipt did not disclose the failed journal append — a "
         f"hosted client cannot see its capture is live-only: {r['warnings']}")
