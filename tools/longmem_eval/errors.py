@@ -86,9 +86,9 @@ RESUME_ATTEMPTS_CAP = 2
 #       — and is deliberately NOT enumerated here, so this note cannot drift
 #       into a second, stale claim (the failure #7405's header exists to
 #       prevent). Read it there. The SDK's OTHER mutating surfaces remain
-#       un-retried: their robustness is still idempotent-MERGE +
-#       ``client_commit_id`` replay + server-side CommitRecordStore dedup +
-#       fail-closed error surfacing.
+#       un-retried: they are pure GRAPH writers (no ``client_commit_id``, no
+#       ``CommitRecordStore`` involvement), so their robustness is still
+#       idempotent-MERGE + server-side dedup.
 #   Eval role: this module RE-EXPORTS the product primitive unchanged; the
 #       eval's outer phase loop is unchanged, so its behaviour is identical
 #       and its retry-budget knobs stay eval-side.

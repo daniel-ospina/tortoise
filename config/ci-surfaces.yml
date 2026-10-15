@@ -3237,8 +3237,9 @@ surfaces:
   # MERGE, `_write_capture_turns`'s turn store + stale-turn sweep, and the
   # capture's follow-up provenance/state stamps) and the `_post_commit` commit
   # POST. Owns `tortoise/sdk.py` (a SHARED_MODULE, so this file is selected on
-  # any sdk change; DUAL-REGISTERED with `core` above, because the
-  # `tortoise/retry.py` coverage claim this pins selects `core`); the test
+  # any sdk change; DUAL-REGISTERED with `core` above because `tortoise/
+  # retry.py` matches no SOURCE_PATTERNS, so a retry.py-only diff falls through
+  # to the `core` fallback — and this file pins the retry wiring); the test
   # drives the REAL capture with the extractor seam mocked (a live URI when
   # configured, embedded otherwise).
   - test_7405_remaining_writes.py
