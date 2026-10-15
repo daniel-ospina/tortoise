@@ -59,6 +59,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
         f"{sys.version_info[0]}.{sys.version_info[1]})"
     )
 
+import difflib
 import re
 from collections.abc import Callable
 from typing import Any
@@ -201,6 +202,93 @@ def answer_string_mark(point: dict, gold_answer: str) -> bool:
         if gold in _normalize(str(key)):
             return True
     return False
+
+
+#: #2516 (C1, amended — the fact-grain bridge): the minimum CONTIGUOUS
+#: verbatim word span shared by the assembled reader context and the
+#: question's gold answer that counts as "the answer-bearing unit reached the
+#: reader". Three words is the D3 instrument's own reported rule
+#: (``tools/ask_shape_rate.py`` — ``gold_answer_in_evidence_pn``, ">=3
+#: contiguous shared words counts as present"), so the two readouts agree on
+#: what "present" means. LEXICAL FLOOR — a paraphrase/inference answer reads
+#: as absent (a lower bound, exactly as the D3 readout documents).
+ANSWER_EVIDENCE_MIN_WORDS = 3
+
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _words(text: Any) -> list[str]:
+    """Word tokens for the verbatim-span floor. Punctuation is stripped so a
+    sentence-final period cannot break a span that IS verbatim ('Five trips.'
+    vs 'five trips') — a lexical floor must not turn on punctuation.
+
+    Parity-pinned with ``tools/ask_shape_rate.py::_words`` (the D3 instrument):
+    same tokenizer, same normalization (``_normalize``)."""
+    return _WORD_RE.findall(_normalize(text))
+
+
+def longest_common_span(evidence: str, answer: str, *,
+                        min_words: int = ANSWER_EVIDENCE_MIN_WORDS
+                        ) -> str | None:
+    """The longest CONTIGUOUS verbatim word span shared by ``evidence`` and
+    ``answer``; None when the longest shared run is shorter than ``min_words``.
+
+    Exact (``difflib`` longest matching block over word-token lists), not a
+    heuristic n-gram scan. Parity-pinned with the D3 instrument's
+    ``tools/ask_shape_rate.py::longest_common_span`` — the SAME algorithm and
+    the SAME tokenizer, so the eval harness's fact-grain leg and the D3
+    readout can never drift apart (asserted by
+    ``tests/test_lme_m6_evidence.py::test_answer_evidence_parity_with_d3_instrument``).
+    """
+    a = _words(evidence)
+    b = _words(answer)
+    if not a or not b:
+        return None
+    m = difflib.SequenceMatcher(a=a, b=b, autojunk=False).find_longest_match(
+        0, len(a), 0, len(b))
+    if m.size < min_words:
+        return None
+    return " ".join(a[m.a:m.a + m.size])
+
+
+def answer_evidence_in_context(context_text: str, gold_answer: str, *,
+                               min_words: int = ANSWER_EVIDENCE_MIN_WORDS
+                               ) -> float | None:
+    """#2516 (C1, amended): the FACT-GRAIN answer-evidence leg — is the
+    answer-bearing unit inside the ASSEMBLED reader context?
+
+    ``1.0`` when the context the reader saw shares ``>= min_words`` contiguous
+    verbatim words with the question's gold answer, else ``0.0``. N/A (None)
+    when there is no gold answer to look for (abstention / ``_abs`` questions
+    carry none — the D3 receipt's own denominator rule: "answerable questions
+    only"), so it is dropped from the aggregate rather than counted as a miss
+    (the same N/A-not-0.0 discipline as ``evidence_recall@k``).
+
+    Why the leg exists (the C1 amendment): ``recall_all@5``/``session_recall@5``
+    measure the SESSION surface and ``reader_surface@5``/``reader_evidence@k``
+    measure the marked CONTENT surface, but neither says whether the
+    answer-bearing unit survived the assembly budget. Measured on the n=71
+    multi-session tail: ``recall_all@5`` 0.8592 with ``reader_surface@5``
+    0.9436 while the answer-bearing text reached the reader on only a
+    fraction of that surface (the A2 gap). This is the bridge metric the
+    A-levers are gated on; it is reported BESIDE the official number, never
+    instead of it.
+
+    ⚠ Seam: the retrieval leg computes this per outcome (retrieve.py
+    ``retrieve_for_question``, over the same assembled ``context_points`` the
+    reader receives) and report.py aggregates the per-outcome value as
+    ``retrieval.answer_evidence@k``. Keeping the math here (the M6 single
+    source of truth) lets the report's synthetic-outcome tests run the
+    IDENTICAL logic offline.
+
+    ⚠ Product-parity note: harness-only by nature — the product has no reader
+    surface (mirrors ``reader_surface@k``), so there is nothing to measure in
+    ``tortoise/``. No tracking issue (a metric is not a product feature).
+    """
+    if not (gold_answer or "").strip():
+        return None
+    return 1.0 if longest_common_span(context_text, gold_answer,
+                                      min_words=min_words) else 0.0
 
 
 def answer_string_recall_at_k(hits: list[dict], gold_answer: str,

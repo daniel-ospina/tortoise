@@ -12592,15 +12592,26 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # drift invariant); the concrete graph id is interpolated so
             # remediation is direct: a bound key → its graph,
             # org-wide/session → 'default'.
+            # #2650 (recording-on surfaces for HUMANS): the third writable
+            # surface — the dashboard Graphs tab's per-graph three-state
+            # control — shipped AFTER this copy was written, so the copy
+            # named every surface except the one a human owner/admin can
+            # actually use; and its authorization claim was narrower than
+            # the gate: the shared core admits the legacy full-access class
+            # (deleg NULL + scopes == []) beside a team:manage scope
+            # (hosted_api above), so the copy must not tell a caller that
+            # holds one of those that it is unqualified. Both are pinned in
+            # tests/test_delivery_tenancy.py (surface set + auth claim).
             gid = org.get("graph_id") or "default"
             detail = (
                 "Session recording is disabled for this graph (override). "
                 "Enable it via PATCH /v1/graphs/" + gid + " with "
                 "{recording: true} (or {recording: null} to inherit the "
                 "team default), or via the tortoise_graph_set_recording "
-                "MCP tool — both need a team:manage key; otherwise ask "
-                "your team owner or admin to turn recording on for this "
-                "graph."
+                "MCP tool — both need management authority (a team:manage "
+                "scope, or the legacy full-access team key); otherwise ask "
+                "your team owner or admin, who can switch recording on for "
+                "this graph in the dashboard's Graphs tab."
             )
         else:
             detail = ("Session recording is disabled for this team. Enable it "

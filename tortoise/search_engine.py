@@ -2192,6 +2192,24 @@ def degradation_chain(
     ``reason="timeout", ran=True, degraded=True`` (never absent). Default
     None = no trace (byte-identical behavior).
 
+    #6851 — what the cap does NOT promise. ``elevated_timeout_ms`` (default
+    500ms) bounds the WAIT, never the COLLECTION, so it is not a hard edge on
+    what a call returns: a leg that finished AFTER the deadline can still be
+    returned. Two measured windows admit one. (a) ``as_completed``'s own wait
+    wakes on a future's completion as well as on the deadline, so it can
+    overshoot the cap and then yield that future as if it had arrived on time.
+    The overshoot is SCHEDULING noise, not a budget: measured over a 30-run
+    sample against the 500ms cap, the ``TimeoutError`` raise landed a median
+    ~100ms late, with a worst case of ~270ms (0.501s–0.772s). That is why
+    #6842's 100ms stub margin was never enough — a 100ms margin sits at the
+    median of the overshoot it has to outrun, and the red was this window, not
+    a logic error. (b) The post-deadline rescan collects every
+    future that is ``done()`` by the time it runs. Only a worker STILL running
+    at that rescan is discarded, and only that one is recorded as ``timeout``.
+    A leg discarded this way is not a relevance verdict (see ``floored_legs``).
+    Pinned by ``tests/bench/test_degradation_chain.py::
+    test_post_deadline_rescan_collects_a_late_leg``.
+
     min_vector_similarity (#4028): optional COSINE relevance floor for the
         vector leg, forwarded to :func:`run_vector_query`. A nearest
         neighbour below it carries no relevance signal and is dropped rather
@@ -2308,11 +2326,23 @@ def degradation_chain(
                 "Strategies timed out (500ms) — collected %d/%d, cancelling remaining",
                 len(results), len(futures),
             )
-            # R3 (#1542) D4: a future not completed by the deadline is
-            # discarded AND self-recorded as ``timeout`` (never absent). The
-            # merge reads only done futures via result(timeout=0) — a
-            # still-running worker is never joined past the deadline; its
-            # late private-list entries are discarded (timed_out skip below).
+            # R3 (#1542) D4 (#6851): THE CAP BOUNDS THE WAIT, NOT THE
+            # COLLECTION. A future is discarded only if it is STILL not done
+            # HERE. One that finished after the deadline but before this
+            # rescan runs is COLLECTED, exactly like a leg that finished on
+            # time, and its private-list entries are merged normally — it is
+            # NOT recorded as ``timeout``. (The pre-#6851 wording claimed such
+            # a future was "discarded AND self-recorded as timeout"; this loop
+            # has never done that, and that claim is what let #6842 read the
+            # cap as a deterministic boundary.) The read stays non-blocking:
+            # result(timeout=0) on a done future, cancel() on the rest, never
+            # a join — so a worker still running here is not waited for, and
+            # its late private-list entries are discarded (timed_out skip
+            # below). Note cancel() cannot stop a thread that has already
+            # started, so a cancelled worker runs to completion regardless:
+            # the ThreadPoolExecutor.__exit__ join below is what actually
+            # bounds this call's wall-clock duration. The caller therefore
+            # pays a straggler's own latency, never the cap.
             for f in list(futures):
                 strategy_name = futures[f]
                 if strategy_name in results:
