@@ -1598,6 +1598,21 @@ surfaces:
   # it is not embedded-ONLY, and it exercises the real project-search path
   # (`tortoise_fts_query`, full-scan mode), which is the docker lane's subject.
   - test_source_currency_5581.py
+  # #2352: the evidence-currency predicate's three-way LIVE / STALE / DECAYED
+  # fixture — the issue's E2E Target ("currency E2E green"). Registered under
+  # `core` because every surface it drives selects it: the currency derive + the
+  # flag-gated row block live in `tortoise/search_engine.py` (falls through to
+  # `core`), and the standard read path it asserts on (`tortoise_fts_query` +
+  # `get_source_reliability`) lives in `tortoise/sdk.py`, a SHARED_MODULE that
+  # already forces the full matrix. It adds no source file — this row is the
+  # guard for the #5199/#5256/#5581 predicate against a later change that folds
+  # the decay axis into the currency verdict. Lane: URI-less-runnable (embedded
+  # FalkorDBLite per module, no `TORTOISE_DB_URI`), so `TORTOISE_TEST_CARVE_OUT=1`
+  # runs it locally; on a URI lane the #1647 test-mode redirect sends it to a
+  # per-path derived graph. Deliberately NOT carve_out-registered, for the same
+  # reason as `test_source_currency_5581.py` above (it exercises the real
+  # project-search path, which is the docker lane's subject).
+  - test_evidence_currency_2352.py
   # #5256 (extracted from #5038): the `extractedFrom` READ-VERSION anchor —
   # `sourceVersion` on the Point's provenance edge, carried in the node's own
   # journaled snapshot. Registered under `core` because every changed source
@@ -4086,6 +4101,16 @@ durations:
   # file; its own testcase call time is sub-second (the file's wall time is
   # session setup, which the map does not price).
   test_embedded_lane_canonical_store_4071.py: 0.1
+  # #2352: new file in this pool — it needs an entry or the #3400 coverage floor
+  # drops (`duration_coverage_issues()`), and its weight is its own testcase call
+  # time. Four asserts, sub-second each (0.01-0.09s measured); the file's WALL
+  # time is the module fixture's graph build, whose bulk is the once-per-leg cold
+  # embedder load the first point-creating file pays — a LEG-level cost the map
+  # does not price, exactly as the #4071 row above states for its session setup.
+  # It is therefore deliberately NOT priced at the standalone 129s reading:
+  # `test_source_currency_5581.py` above already carries that shared cost, and
+  # charging it twice would over-weight whichever shard happens to hold both.
+  test_evidence_currency_2352.py: 0.2
   test_embedded_evidence.py: 17.2
   # #3892 (B6): new file in this pool — it has no CI junit measurement yet (a file that
   # never ran cannot appear in an artifact), so it takes the flat 2.0s default under the
