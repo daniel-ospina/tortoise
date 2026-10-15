@@ -17,7 +17,9 @@ os.environ.setdefault("TORTOISE_ENCRYPTION_KEY",
 os.environ.setdefault("GITHUB_CLIENT_ID", "test-client-id")
 os.environ.setdefault("GITHUB_CLIENT_SECRET", "test-client-secret")
 
+import asyncio
 import sys
+import threading
 import time
 from contextlib import suppress
 from datetime import datetime
@@ -37,7 +39,7 @@ from tortoise.hosted_api import (
     _start_index_job,
     app,
 )
-from tortoise.indexer.github_indexer import GitHubFetchError, GitHubIndexer
+from tortoise.indexer.github_indexer import _INDEX_THREAD_PREFIX, GitHubFetchError, GitHubIndexer
 from tortoise.sdk import TortoiseSDK
 
 _GRAPH_SCRIPTS = str(Path(__file__).resolve().parent.parent / "graph-scripts")
@@ -1092,16 +1094,44 @@ def test_repoll_drains_and_clears_truncated_persisted(client, tmp_path,
         return self._client
 
     monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
+    # #4709: EXPLICIT poll budget for this test's 500-item walk. The module's
+    # 8 s default is sized for the small fixtures; this fixture is the one
+    # heavyweight run (600 items, cap 500) and its walk is REAL work on the
+    # graph. On an IDLE lane the whole test still finishes inside that 8 s
+    # default (measured ~7-10 s end-to-end at both the PR base and the head),
+    # so the budget below is HEADROOM, not a fix: the same run has been
+    # measured at ~47 s under concurrent host/DB load, a saturation artifact of
+    # the box, not a property of the walk.
+    #
+    # It MUST stay strictly below the harness per-test ceiling — CI passes
+    # `--timeout=300` on every pytest leg, with `faulthandler_timeout = 280`
+    # (pyproject.toml). A budget at or above 300 can never produce the legible
+    # assertion it exists for: on any walk slow enough to reach it,
+    # pytest-timeout kills the item first and the diagnostic is the timeout
+    # dump, not `job ... not completed`. 240 leaves 40 s under the watchdog and
+    # 60 s under the kill, while still dwarfing the ~47 s loaded-lane walk.
+    #
+    # The ceiling is PER-ITEM, and this test polls THREE times, so the budget
+    # is a SHARED DEADLINE (`_walk_budget` returns what is left of it), never
+    # 3 × 240 s — the sum of the three polls stays under the ceiling.
+    _WALK_POLL_S = 240.0
+    _walk_deadline = time.monotonic() + _WALK_POLL_S
+
+    def _walk_budget() -> float:
+        return max(1.0, _walk_deadline - time.monotonic())
+
     # run 1: cap 500 → truncated cursor persisted
     r = _post_index(client.tc, "/v1/index/github", json={"org": "acme"})
-    body = _poll_until(client.tc, r.json()["job_id"], "completed")
+    body = _poll_until(client.tc, r.json()["job_id"], "completed",
+                       timeout_s=_walk_budget())
     assert body["repos_processed"] == 1
     state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
     assert state["github_index_cursor"]["acme/repo1"] == {
         "updated_at": S, "number": 500, "truncated": True}
     # re-poll 1 (DRAIN): drains the remaining 100 → CLEAN persisted cursor
     r2 = _post_index(client.tc, "/v1/index/github/re-poll")
-    body2 = _poll_until(client.tc, r2.json()["job_id"], "completed")
+    body2 = _poll_until(client.tc, r2.json()["job_id"], "completed",
+                        timeout_s=_walk_budget())
     assert body2["repos_processed"] == 1
     state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
     assert state["github_index_cursor"]["acme/repo1"] == {
@@ -1111,11 +1141,331 @@ def test_repoll_drains_and_clears_truncated_persisted(client, tmp_path,
     # and the run stays exact-once (0 new mints)
     n_queries_before = len(t.issue_query_params())
     r3 = _post_index(client.tc, "/v1/index/github/re-poll")
-    body3 = _poll_until(client.tc, r3.json()["job_id"], "completed")
+    body3 = _poll_until(client.tc, r3.json()["job_id"], "completed",
+                        timeout_s=_walk_budget())
     assert body3["events_minted"] == 0, "exact-once — 0 new mints"
     new_queries = t.issue_query_params()[n_queries_before:]
     assert any("since" in p for p in new_queries), \
         "a clean persisted cursor must exit DRAIN (the next run uses since)"
+
+
+# ── #4709: the walk runs OFF the event loop ───────────────────────
+
+def test_projection_walk_runs_off_the_event_loop(client, tmp_path,
+                                                 monkeypatch):
+    """#4709: the projection walk runs on a WORKER thread, and the loop stays
+    free while it is blocked.
+
+    Two assertions, both falsified by the pre-#4709 shape:
+
+    * ``asyncio.get_running_loop()`` succeeds only on the loop thread — a
+      worker has no running loop. Every ``_project_issue`` must be recorded
+      with ``on_loop=False`` (the mechanism, in the style of
+      ``tests/test_dataplane_lane_loop_responsiveness.py``), and on a thread
+      OTHER than the one that ran the awaited ``_get_client``.
+    * a concurrent ``GET /v1/onboarding/state`` is answered INSIDE the blocked
+      walk's window. Inline, the walk parks the single loop: that request can
+      only return after the 10 s transport wait bound has refused it (the
+      ``KeyError: 'job_id'`` shape this issue was reproduced with).
+    """
+    _provision(client.db_path, org_id=client.org_id)
+    t = MockGitHubTransport(issues=[gh_issue(n) for n in range(1, 4)],
+                            repos=["acme/repo1"])
+
+    loop_threads: list[threading.Thread] = []
+    walk_threads: list[tuple[threading.Thread, bool]] = []
+    entered = threading.Event()
+    released = threading.Event()
+
+    async def _fake_get_client(self):
+        # Awaited ON the loop, immediately before the hand-off — this is the
+        # loop thread the walk must NOT be running on.
+        loop_threads.append(threading.current_thread())
+        if self._client is None:
+            self._client = httpx.AsyncClient(transport=t)
+        return self._client
+
+    orig_project_issue = GitHubIndexer._project_issue
+
+    def _blocking_project_issue(self, sdk, proj, repo, issue, **kw):
+        try:
+            asyncio.get_running_loop()
+            on_loop = True
+        except RuntimeError:
+            on_loop = False
+        walk_threads.append((threading.current_thread(), on_loop))
+        entered.set()
+        released.wait(15)  # hold the walk so the window is unambiguous
+        return orig_project_issue(self, sdk, proj, repo, issue, **kw)
+
+    monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
+    monkeypatch.setattr(GitHubIndexer, "_project_issue",
+                        _blocking_project_issue)
+
+    r = client.tc.post("/v1/index/github", json={"org": "acme"})
+    # A blocked loop refuses this POST at the 10 s transport bound (no
+    # `job_id`) — assert it legibly rather than KeyError-ing below.
+    assert r.status_code == 200 and "job_id" in r.json(), (
+        f"the index POST was not admitted ({r.status_code}: {r.text[:200]}) — "
+        f"the projection walk is holding the event loop (#4709)")
+    assert entered.wait(15), (
+        "the projection walk never started — this run proves nothing (#4709)")
+
+    started = time.perf_counter()
+    concurrent = client.tc.get("/v1/onboarding/state")
+    elapsed = time.perf_counter() - started
+
+    assert walk_threads, ("no projection call was recorded — vacuous run")
+    assert all(not on_loop for _, on_loop in walk_threads), (
+        f"the projection walk ran ON the event loop "
+        f"({[t.name for t, o in walk_threads if o]}) — one walk freezes every "
+        f"concurrent request on the single-worker app (#4709)")
+    assert all(wt.name.startswith(_INDEX_THREAD_PREFIX)
+               for wt, _ in walk_threads), (
+        f"the projection walk ran on a pool that is not the index job's own "
+        f"({[wt.name for wt, _ in walk_threads]}) — the pre-fix shape used "
+        f"`asyncio.to_thread`, i.e. the loop's SHARED default executor "
+        f"(`asyncio_*`), where a whole-job walk starves every other tenant "
+        f"of that pool (#4709)")
+    assert all(wt not in loop_threads for wt, _ in walk_threads), (
+        "the walk ran on the very thread that awaited `_get_client` — it was "
+        "never handed to a worker (#4709)")
+    assert concurrent.status_code == 200, (
+        f"a concurrent read was NOT served while the walk was blocked "
+        f"({concurrent.status_code}: {concurrent.text[:200]}) — the walk is "
+        f"parking the loop (#4709)")
+    assert elapsed < 5.0, (
+        f"the concurrent read took {elapsed:.1f}s while the walk was blocked "
+        f"— it queued behind the walk instead of being served (#4709)")
+
+    released.set()
+    body = _poll_until(client.tc, r.json()["job_id"], "completed")
+    assert body["repos_processed"] == 1, body
+    assert body["events_minted"] >= 3, body
+
+
+def test_index_onboarding_writes_run_on_the_dedicated_pool(client, tmp_path,
+                                                           monkeypatch):
+    """#4709 review P2: the ``_update_onboarding_state`` hand-offs ride the
+    index job's OWN pool, never the loop's SHARED default executor.
+
+    The pre-#4709 shape ran the writes INLINE on the loop (thread name
+    ``MainThread`` through the TestClient portal), and an intermediate revision
+    of this PR routed them through ``asyncio.to_thread`` — the loop's SHARED
+    default executor, whose threads are named ``asyncio_*``. The assertion
+    below (`tortoise-index`` prefix) falsifies BOTH. The fix routes each write
+    through ``_run_off_loop(_INDEX_EXECUTOR, ...)``, whose threads carry the
+    ``tortoise-index`` prefix. A walk holds a default worker for a whole job,
+    so the writes competing for the same ``min(32, cpu+4)`` workers is exactly
+    the starvation #3060's doctrine excludes.
+
+    Only the happy-path site is exercised here plus the backfill marker (the
+    backfill marker + the single cursor persist in the walk try's ``finally``);
+    the AST pin ``test_run_indexing_residual_is_named_head_on`` proves BOTH
+    hand-offs use this one seam.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    _provision(client.db_path, org_id=client.org_id)
+    t = MockGitHubTransport(issues=[gh_issue(1)], repos=["acme/repo1"])
+
+    async def _fake_get_client(self):
+        if self._client is None:
+            self._client = httpx.AsyncClient(transport=t)
+        return self._client
+
+    monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
+
+    write_threads: list[str] = []
+    real_update = ha_mod._update_onboarding_state
+
+    def _recording_update(*args, **kwargs):
+        write_threads.append(threading.current_thread().name)
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(ha_mod, "_update_onboarding_state", _recording_update)
+
+    r = client.tc.post("/v1/index/github", json={"org": "acme"})
+    assert r.status_code == 200 and "job_id" in r.json(), r.text[:200]
+    _poll_until(client.tc, r.json()["job_id"], "completed")
+
+    assert len(write_threads) >= 2, (
+        f"expected the backfill-marker and completion-path persists through "
+        f"the off-loop seam; saw {write_threads} — this run proves nothing")
+    assert all(n.startswith(_INDEX_THREAD_PREFIX) for n in write_threads), (
+        f"an onboarding write rode a pool that is not the index job's own "
+        f"({write_threads}) — the pre-#4709 shape wrote INLINE on the loop "
+        f"(a `MainThread` name), and `asyncio.to_thread` would name the loop's "
+        f"SHARED default executor (`asyncio_*`); both are falsified here "
+        f"(#4709)")
+
+
+def test_persist_failure_still_writes_a_terminal_status(client, tmp_path,
+                                                        monkeypatch):
+    """#4709 review P1: a RAISING state persist must still leave the job in a
+    TERMINAL state.
+
+    ``_update_onboarding_state`` is fail-loud by contract (CAS exhaustion
+    raises ``OnboardingStateConflictError``; the control-plane/store legs
+    raise) and now also rides a pool submission, so the persist is not
+    failure-free. The tail writes the terminal status AFTER the persist (the
+    ordering this PR fixed); without a guard on the persist, a raise escapes
+    the fire-and-forget ``_run_indexing`` task BEFORE either terminal write —
+    the job stays ``started``, every poll reports ``error: None`` until the
+    stale sweep, and the per-org single-flight claim blocks the org's next run
+    for ``_INDEX_JOB_STALE_S`` (30 min).
+
+    Pre-fix this test FAILS: the injected ``RuntimeError`` propagates out of
+    ``_run_indexing`` (the tail is a bare ``try/finally`` with no ``except``),
+    so ``run_until_complete`` raises instead of the job turning terminal.
+    """
+    _provision(client.db_path, org_id=client.org_id)
+    t = MockGitHubTransport(issues=[gh_issue(1)], repos=["acme/repo1"])
+
+    async def _fake_get_client(self):
+        if self._client is None:
+            self._client = httpx.AsyncClient(transport=t)
+        return self._client
+
+    monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
+
+    import tortoise.hosted_api as ha
+    real_update = ha._update_onboarding_state
+
+    def _raising_update(*args, **kwargs):
+        # only the CURSOR persist (the single shared one) fails; the
+        # legacy-backfill marker write must still succeed
+        if "github_index_cursor" in kwargs:
+            raise RuntimeError("persist boom (test)")
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(ha, "_update_onboarding_state", _raising_update)
+
+    job_id, _ = _start_index_job(client.org_id)
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(
+            ha._run_indexing(job_id, client.org_id, "acme", None))
+    finally:
+        loop.close()
+
+    body = _INDEX_JOBS[job_id]
+    assert body["status"] == "failed", (
+        f"a RAISING state persist must not withhold the terminal status — "
+        f"job is still {body['status']!r} {body}: the persist raise escaped "
+        f"the task and the org's single-flight is wedged")
+    assert "state persist failed" in (body["error"] or ""), body
+
+
+def test_baseexception_exit_persists_cursors_and_schedules_eviction(
+        client, tmp_path, monkeypatch):
+    """#4709 review P2: a ``BaseException`` exit (the realistic one is
+    ``asyncio.CancelledError`` at loop/app shutdown) must still persist the
+    cursors accumulated in the run, and still schedule the entry's eviction.
+
+    The walk's handlers catch ``GitHubFetchError``/``Exception`` only, so the
+    pre-fix tail (sequential code AFTER the handlers) was never entered — and
+    the per-repo cursors are only persisted at that ONE site. A cancelled run
+    therefore lost every cursor it had accumulated (repos already walked and
+    committed to the graph), and its ``_INDEX_JOBS``/``_INDEX_JOB_OWNERS``
+    entry was never evicted.
+
+    This pins two properties. (1) The #1792 P2 durability guarantee — a
+    ``BaseException`` exit still persists the accumulated cursors and arms
+    eviction — which the pre-#4709 ``finally`` already held, so this half is a
+    forward-looking guard, not a falsification of main. It is a real
+    regression pin for this PR's own intermediate revision (``cf9460a25``),
+    which moved the persist out of the ``finally`` entirely and so persisted
+    NOTHING on this exit. (2) The #4709 leg the pre-#4709 code could NOT
+    satisfy: the persist now rides the index job's OWN pool, so it runs on a
+    ``tortoise-index`` worker, where pre-#4709 it ran INLINE on the loop (a
+    ``MainThread`` name). The thread-name assertion below fails on the
+    pre-#4709 shape.
+
+    The cancel is injected by raising ``asyncio.CancelledError`` from the
+    second repo's walk — the same ``BaseException`` class and the same exit
+    path as a shutdown cancellation, without the flakiness of timing a real
+    ``task.cancel()``.
+    """
+    _provision(client.db_path, org_id=client.org_id)
+    t = MockGitHubTransport(issues=[gh_issue(1)],
+                            repos=["acme/repo1", "acme/repo2"])
+
+    async def _fake_get_client(self):
+        if self._client is None:
+            self._client = httpx.AsyncClient(transport=t)
+        return self._client
+
+    monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
+
+    import tortoise.hosted_api as ha
+    from tortoise.hosted_api import _INDEX_JOB_OWNERS
+
+    # seed indexed state so the walk visits BOTH repos (otherwise the
+    # first-run ONE-repo bound walks repo1 only and the cancel never fires).
+    # Seeded BEFORE the recording patch so its `MainThread` call is not counted.
+    ha._update_onboarding_state(client.org_id, _echo=False, github_indexed=True)
+    # shrink the eviction delay so the ``call_later`` is observable
+    monkeypatch.setattr(ha, "_INDEX_JOB_EVICT_S", 0.05)
+
+    # record WHERE the BaseException-exit persist runs: pre-#4709 it ran INLINE
+    # on the loop (``MainThread``); the #4709 fix routes it through
+    # ``_run_off_loop(_INDEX_EXECUTOR, ...)`` (``tortoise-index_*``)
+    write_threads: list[str] = []
+    real_update = ha._update_onboarding_state
+
+    def _recording_update(*args, **kwargs):
+        write_threads.append(threading.current_thread().name)
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(ha, "_update_onboarding_state", _recording_update)
+
+    orig_index_repo = GitHubIndexer.index_repo
+
+    async def _cancel_repo2(self, sdk, repo, **kw):
+        if repo.endswith("/repo2"):
+            raise asyncio.CancelledError()
+        return await orig_index_repo(self, sdk, repo, **kw)
+
+    monkeypatch.setattr(GitHubIndexer, "index_repo", _cancel_repo2)
+
+    job_id, _ = _start_index_job(client.org_id)
+    loop = asyncio.new_event_loop()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            loop.run_until_complete(
+                ha._run_indexing(job_id, client.org_id, "acme", None))
+
+        assert write_threads, (
+            "the BaseException exit persisted NOTHING — the accumulated "
+            "cursors were lost (#1792 P2); pre-#4709 the walk try's `finally` "
+            "still wrote them")
+        assert all(n.startswith(_INDEX_THREAD_PREFIX) for n in write_threads), (
+            f"the BaseException-exit persist ran on {write_threads!r} — "
+            f"pre-#4709 it ran INLINE on the loop (a `MainThread` name), and "
+            f"`asyncio.to_thread` would name the loop's SHARED default "
+            f"executor (`asyncio_*`); the #4709 fix rides the index job's OWN "
+            f"pool (`{_INDEX_THREAD_PREFIX}*`) (#4709)")
+
+        state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
+        cursor = state.get("github_index_cursor") or {}
+        assert "acme/repo1" in cursor, (
+            f"a BaseException exit must still persist the cursors accumulated "
+            f"in the run (#1792 P2); cursor={cursor!r} — repo1 was walked and "
+            f"committed before repo2 cancelled")
+        assert job_id in _INDEX_JOBS, (
+            "the eviction is a delayed callback — it must not have fired yet")
+
+        # the walk try's `finally` armed the eviction: pump its delay and
+        # observe it, so a skipped `call_later` is a FAIL and not a leak
+        loop.run_until_complete(asyncio.sleep(0.15))
+        assert job_id not in _INDEX_JOBS, (
+            "the BaseException exit skipped the eviction `call_later` — the "
+            "_INDEX_JOBS/_INDEX_JOB_OWNERS entry leaks until the stale sweep")
+    finally:
+        loop.close()
+        _INDEX_JOBS.pop(job_id, None)
+        _INDEX_JOB_OWNERS.pop(job_id, None)
 
 
 # ── P2 (PR #1792): marker / 404 / quota-break honesty ────────────────
@@ -1220,8 +1570,9 @@ def test_issue_ingest_no_longer_consumes_points_quota(client, tmp_path,
 def test_resolve_repos_failure_preserves_persisted_cursors(client, tmp_path,
                                                             monkeypatch):
     """P2: a PRE-WALK failure (resolve_repos raising) must not WIPE
-    previously persisted cursors — the finally persists the loaded state back
-    (a `cursors={}` blind write would silently drop the resume point).
+    previously persisted cursors — the shared tail persists the loaded state
+    back (before the `failed` status is written; a `cursors={}` blind write
+    would silently drop the resume point).
     (Formerly the points-quota preflight failure; that gate is removed in
     #1844 — the object-only job writes zero points — so the pre-walk failure
     surface is now resolve_repos.)"""

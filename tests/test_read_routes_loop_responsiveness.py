@@ -480,6 +480,10 @@ _SDK_CONSTRUCTION_SEAMS = frozenset({"_make_sdk", "_data_sdk"})
 _OFFLOAD_BOUNDARY_CALLEES = frozenset({
     "to_thread", "_run_off_loop", "_submit_off_loop", "_run_dream_on_pool",
     "_run_with_close", "run_in_executor",
+    # #4709: the index job's OWN-pool hand-off (``github_indexer``). Same
+    # UNBOUNDED semantics as ``_run_off_loop``, but a dedicated pool instead
+    # of the loop's shared default executor.
+    "_run_index_off_loop",
     "_cp_offload", "_oauth_offload", "run_control_plane_call",
     "run_on_daemon_worker", "_graph_offload",
 })
@@ -492,17 +496,20 @@ _OFFLOAD_BOUNDARY_CALLEES = frozenset({
 #: and the ``_graph_has_org_namespace`` probe handed to ``to_thread`` by
 #: reference — but its later onboarding WRITES still run through sync helpers
 #: the scan cannot see; those are part of the residual, not covered by this set.
-#: ⚠️ The same caveat is why ``_run_indexing`` is NOT here: most of its
-#: graph work (``indexer.index_repo``'s projection walk, the ``_make_sdk``
-#: construction and the ``_update_onboarding_state`` writes) is one level down
-#: in another module or in sync helpers, so membership here was a VACUOUS pass
-#: (round-4 review). Its brief worker hand-offs were reverted too: from a
-#: background task they resolved the embedded per-test DB path from a reused
-#: pool thread and wrote to the wrong store (see the ``_run_indexing``
-#: docstring). It is declared in ``_KNOWN_INLINE_HELPER_RESIDUAL`` under #4709
-#: instead — that declaration IS what its visible seam requires: the guard
-#: computes ``inline - declared``, so membership (not the seam) keeps it green,
-#: and dropping the name REDS it.
+#: ⚠️ The same caveat is why ``_run_indexing`` is NOT here. #4709 took its
+#: WALK and its two ``_update_onboarding_state`` writes off the loop (the walk
+#: inside ``index_repo`` via ``_project_items`` — which also carries the O(file)
+#: journal registration read as its first statement — the writes via
+#: ``_run_off_loop(_INDEX_EXECUTOR, ...)`` + ``_echo=False``), but the
+#: ``_make_sdk`` construction, the attach handed to ``backfill_legacy_closed``
+#: and that scan ITSELF still run in the body,
+#: and an attach that moved to a worker would resolve the embedded per-test
+#: store from a reused pool thread's STALE stem (tortoise#7500, the defect that
+#: reverted #4645's hand-offs). This set asserts NO construction and NO graph
+#: seam, so membership would still be VACUOUS — the declaration the round-4
+#: review removed. It stays in ``_KNOWN_INLINE_HELPER_RESIDUAL`` and
+#: ``test_run_indexing_residual_is_named_head_on`` pins its exact remaining
+#: sites so the claim cannot drift.
 #: Async bodies whose sync FalkorDB I/O is off-loaded with NO residuals the
 #: scan can see — neither a graph seam NOR an SDK construction on the loop.
 #:
@@ -595,21 +602,30 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
 #: registry/backup helpers. `_lifespan` was a member until #3718 residual 3
 #: off-loaded its `_control_plane_source` resolve.
 #:
-#: `_run_indexing` is here (not in `_OFFLOADED_ASYNC_BODIES`) because most of
-#: its graph work is helper-mediated and therefore INVISIBLE to the scan:
-#: `indexer.index_repo` (a method in another module — its own `_get_proj()`
-#: attach + a synchronous per-item projection loop), the `_make_sdk`
-#: construction, the `_relink_sessions_after_index` relink pass and two
-#: `_update_onboarding_state` writes. One seam IS visible — the
-#: `org_sdk._get_proj()` passed to `backfill_legacy_closed` — and membership
-#: here is what keeps that hit declared: the guard computes
-#: `inline - declared`, so removing this name REDS it. Round-4 review found
-#: the name was a vacuous off-load declaration; it is tracked under #4709.
-#: The three calls it briefly off-loaded (`_make_sdk`,
-#: `backfill_legacy_closed`, `_relink_sessions_after_index`) were REVERTED to
-#: inline — from a background task they resolved the embedded per-test DB
-#: path from a reused pool thread and wrote to the wrong store (see the
-#: `_run_indexing` docstring).
+#: `_run_indexing` is here (not in `_OFFLOADED_ASYNC_BODIES`) because, after
+#: #4709, sites in its OWN body still run on the loop, and they are declared
+#: residuals rather than omissions. Two are the tortoise#7500 constraint: the
+#: `_make_sdk` construction, and the `org_sdk._get_proj()` attach passed to
+#: `backfill_legacy_closed`. A worker-thread construction/attach resolves the
+#: embedded per-test store path from a reused pool thread's STALE inherited
+#: stem (epic #1686's currency check then fails closed to the non-per-test
+#: path), so the job writes to a store the test's reader never looks at —
+#: measured as 3 deterministic reds under #4645, whose hand-offs were
+#: reverted for it. The attach can move only once #7500 lands.
+#: `_relink_sessions_after_index` (the completion relink pass) is a third,
+#: same constraint — a sync helper that builds its own SDK.
+#: `backfill_legacy_closed`'s OWN one-time SCAN is the fourth and is NOT
+#: #7500-bound: it takes the same `proj` handle, so it CAN move to the index
+#: pool; it stays inline because the `github_legacy_backfill_done` marker
+#: bounds it to ONE run per org. The WALK (now `index_repo._project_items`,
+#: another module — it also carries the O(file) journal registration read as
+#: its first statement) and the single cursor persist
+#: (`_update_onboarding_state`, shared by the `completed` and `failed` exits,
+#: on the index job's own pool — `_run_off_loop(_INDEX_EXECUTOR, ...)` — plus
+#: `_echo=False`, and written BEFORE the terminal status)
+#: ARE off the loop as of #4709. `test_run_indexing_residual_is_named_head_on`
+#: pins exactly which calls may still sit inline here, so the walk or a write
+#: cannot silently come back.
 #:
 #: Same declared residual; same burn-down. Scanned rather than ignored because a
 #: dependency body is still ON the loop.
@@ -1032,6 +1048,372 @@ def test_residual_names_still_exist():
     assert not ghosts, (
         f"{ghosts} are declared residual but no longer defined in "
         f"hosted_api.py — the residual list has rotted (#3718)")
+
+
+# ── #4709 leg: the index walk + the onboarding writes ─────────────────────
+#
+# ``_run_indexing`` stays in ``_KNOWN_INLINE_HELPER_RESIDUAL``, so
+# ``test_graph_io_is_offloaded`` cannot see a FIXED leg regress inside it —
+# that allowlist is exactly why the walk could sit declared while running on
+# the loop (#4709's preamble calls the old pass VACUOUS). The pins below are
+# per-CALLEE, so they can.
+
+INDEXER = (Path(__file__).resolve().parent.parent
+           / "tortoise" / "indexer" / "github_indexer.py")
+
+#: UNBOUNDED worker seams. A bound (`asyncio.wait_for` around the hand-off)
+#: cancels only the AWAIT, never the worker thread (CPython #87185), so on a
+#: MUTATING region it abandons a mid-write worker and claims a retryable state
+#: it cannot observe (#2863) — the reason #4709 pins its walk and its
+#: onboarding writes to one of these.
+_UNBOUNDED_OFFLOAD_SEAMS = frozenset({
+    "to_thread", "_run_off_loop", "_run_index_off_loop"})
+
+
+def _offload_boundaries(node, callable_name: str) -> list[str]:
+    """Names of offload boundaries carrying `callable_name` as a CALLABLE arg.
+
+    Scanned at any position, so ``to_thread`` (callable at 0) and
+    ``run_in_executor`` (callable at 1) both match.
+    """
+    out: list[str] = []
+    for call in ast.walk(node):
+        if not isinstance(call, ast.Call):
+            continue
+        boundary = _callee_name(call.func)
+        if boundary not in _OFFLOAD_BOUNDARY_CALLEES:
+            continue
+        for arg in call.args:
+            if isinstance(arg, (ast.Name, ast.Attribute)) \
+                    and _callee_name(arg) == callable_name:
+                out.append(boundary)
+    return out
+
+
+def _boundary_calls_for(node, callable_name: str) -> list[ast.Call]:
+    """The offload-boundary CALL nodes that carry `callable_name`."""
+    return [
+        call for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and _callee_name(call.func) in _OFFLOAD_BOUNDARY_CALLEES
+        and any(isinstance(a, (ast.Name, ast.Attribute))
+                and _callee_name(a) == callable_name for a in call.args)
+    ]
+
+
+def _carries_index_state_updates(call: ast.Call) -> bool:
+    """True for a hand-off passing ``**_index_state_updates(...)`` (#4709).
+
+    That ``**`` expansion is what identifies the CURSOR persist (the single
+    ``_update_onboarding_state`` hand-off inside the walk try's ``finally``,
+    shared by the `completed`, `failed` and `BaseException` exits). The other
+    ``_update_onboarding_state`` hand-off passes the legacy-backfill MARKER
+    instead, so it must not be allowed to satisfy the ordering assertion: it
+    always precedes the status write, making a "some write is before
+    `completed`" check true by construction.
+    """
+    return any(
+        k.arg is None and isinstance(k.value, ast.Call)
+        and _callee_name(k.value.func) == "_index_state_updates"
+        for k in call.keywords)
+
+
+#: Timeout wrappers that BOUND a seam. Membership in
+#: ``_UNBOUNDED_OFFLOAD_SEAMS`` is by CALLEE NAME only, so
+#: ``asyncio.wait_for(_run_off_loop(...), timeout=...)`` reads as the unbounded
+#: seam. That is the exact shape the recorded NO-BOUND decision forbids, so the
+#: pins check the seam's ANCESTORS too. ``asyncio.timeout`` is an async context
+#: manager, so its real shape is ``async with asyncio.timeout(N): await seam`` —
+#: the seam is in the ``with`` BODY, never in the call's arguments — and both
+#: shapes are detected by ``_bound_wrapper_around`` below (#4709 review P3).
+_BOUND_WRAPPER_CALLEES = frozenset({"wait_for", "timeout"})
+
+
+def _bound_wrapper_around(call: ast.Call, node: ast.AST) -> str | None:
+    """The timeout-wrapper callee enclosing ``call``, if any.
+
+    Walks the PARENT chain (AST has no parent pointers) and reports either
+    shape a bound can take:
+
+    * a CALL wrapper whose arguments contain ``call`` —
+      ``asyncio.wait_for(seam, timeout=...)``; and
+    * a ``with``/``async with`` whose context expression is a bound callee and
+      whose BODY contains ``call`` — ``async with asyncio.timeout(N): await
+      seam`` (``asyncio.timeout`` is a context manager, so the seam is never an
+      argument of its call and callee-name membership alone cannot see it).
+
+    A wrapper in the same expression that does NOT enclose the call (e.g. a
+    bound on some other await) is ignored.
+    """
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(node):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    current: ast.AST = call
+    while current in parents:
+        parent = parents[current]
+        if isinstance(parent, ast.Call) \
+                and _callee_name(parent.func) in _BOUND_WRAPPER_CALLEES:
+            args = [*parent.args, *(k.value for k in parent.keywords)]
+            if any(current in ast.walk(a) for a in args):
+                return _callee_name(parent.func)
+        if isinstance(parent, (ast.With, ast.AsyncWith)) \
+                and any(current in ast.walk(stmt) for stmt in parent.body):
+            for item in parent.items:
+                if isinstance(item.context_expr, ast.Call) \
+                        and _callee_name(item.context_expr.func) \
+                        in _BOUND_WRAPPER_CALLEES:
+                    return _callee_name(item.context_expr.func)
+        current = parent
+    return None
+
+
+def test_bound_wrapper_detects_both_timeout_shapes():
+    """#4709 review P3: the NO-BOUND pin must see BOTH bound shapes.
+
+    ``asyncio.wait_for(seam, timeout=...)`` puts the seam in the wrapper's
+    ARGUMENTS; ``async with asyncio.timeout(N): await seam`` puts it in the
+    ``with`` BODY. The pins' failure text names both, so both must be
+    detectable — the pre-fix helper matched only the argument shape and left
+    the context-manager spelling (``asyncio.timeout``, the modern one) green
+    over a real bound (#2863/CPython #87185).
+    """
+    module = ast.parse(
+        "async def f(seam):\n"
+        "    await asyncio.wait_for(seam(), timeout=30)\n"
+        "    async with asyncio.timeout(30):\n"
+        "        await seam()\n"
+        "    await seam()\n"
+    )
+    func = module.body[0]
+    seam_calls = [
+        c for c in ast.walk(func)
+        if isinstance(c, ast.Call) and _callee_name(c.func) == "seam"]
+    assert len(seam_calls) == 3, seam_calls
+    assert {
+        _bound_wrapper_around(c, func) for c in seam_calls
+    } == {"wait_for", "timeout", None}, (
+        "the `asyncio.wait_for(seam, ...)` ARGUMENT shape and the `async with "
+        "asyncio.timeout(...): await seam` BODY shape must both be detected, "
+        "and an unbound `await seam()` must still report None — pre-fix the "
+        "`timeout` shape returned None, so the NO-BOUND pin stayed green "
+        "over a real bound (#4709 review P3)")
+
+
+def test_run_indexing_residual_is_named_head_on():
+    """#4709: the walk AND the onboarding writes are off the loop, on a
+    NO-BOUND seam; whatever is still inline is pinned by name.
+
+    ``_run_indexing`` is a declared residual body, so the inventory scan is
+    blind to a fixed leg regressing inside it. This pin is not.
+    """
+    node = _async_body_named("_run_indexing")
+
+    # (1) the onboarding writes: OFF the loop, NOT behind a bound, and the
+    # cursor persist ordered BEFORE the terminal (`completed`/`failed`) status.
+    assert _inline_calls_to(
+        node, frozenset({"_update_onboarding_state"})) == [], (
+        "#4709 regressed: `_run_indexing` writes onboarding state INLINE — a "
+        "mutating jsonb compare-and-set on the event loop (the leg #4625 "
+        "measured); off-load it on the index job's own pool "
+        "(`_run_off_loop(_INDEX_EXECUTOR, ...)`)")
+    write_seams = _offload_boundaries(node, "_update_onboarding_state")
+    assert len(write_seams) == 2, (
+        f"#4709: expected TWO `_update_onboarding_state` hand-offs (the "
+        f"legacy-backfill marker; the single cursor persist shared by the "
+        f"`completed` and `failed` exits), found {len(write_seams)}")
+    assert all(s in _UNBOUNDED_OFFLOAD_SEAMS for s in write_seams), (
+        f"#4709: an onboarding write rides a BOUNDED seam {write_seams} — a "
+        f"bound cancels only the await, never the worker (CPython #87185), so "
+        f"it abandons a worker MID-WRITE (#2863); the recorded decision is "
+        f"NO BOUND")
+    # `_UNBOUNDED_OFFLOAD_SEAMS` matches by CALLEE NAME, so a bound wrapped
+    # AROUND the seam (`asyncio.wait_for(_run_off_loop(...), timeout=...)`)
+    # reads as the unbounded seam and passes the check above. Check the
+    # seam's ANCESTORS too, or the NO-BOUND decision it claims is unenforced.
+    for _write_call in _boundary_calls_for(node, "_update_onboarding_state"):
+        _wrapper = _bound_wrapper_around(_write_call, node)
+        assert _wrapper is None, (
+            f"#4709: an onboarding write is wrapped in `{_wrapper}` — the "
+            f"recorded decision is NO BOUND (a bound cancels only the AWAIT, "
+            f"never the worker — CPython #87185 — so it abandons a worker "
+            f"MID-WRITE, #2863)")
+
+    # #4709 ordering guarantee: the single cursor persist must run BEFORE the
+    # terminal status write, for `completed` AND `failed`. Persisting only in
+    # the `finally` meant the status was visible to a poller before the cursor
+    # was durable — masked while the write ran on the loop (it blocked the
+    # poller's GET), a real window once the write is off the loop. A client
+    # reading state on a terminal status (the dashboard, and
+    # `test_github_index_lifecycle.py`) then sees the PREVIOUS cursor and
+    # re-walks the whole backlog.
+    completed_lines = [
+        c.lineno for c in ast.walk(node)
+        if isinstance(c, ast.Call) and _callee_name(c.func) == "_job"
+        and any(k.arg == "status" and getattr(k.value, "value", None)
+                == "completed" for k in c.keywords)
+    ]
+    assert len(completed_lines) == 1, (
+        f"#4709: expected ONE `_job(status='completed', ...)` write, found "
+        f"{len(completed_lines)}")
+    # `_echo=False` is part of the off-load, not a style choice: the return is
+    # DISCARDED here, and the echo's registry probes are the expensive half of
+    # the same loop-blocking leg (#4625).
+    write_calls = _boundary_calls_for(node, "_update_onboarding_state")
+    assert write_calls and all(
+        any(k.arg == "_echo" and getattr(k.value, "value", None) is False
+            for k in call.keywords) for call in write_calls), (
+        "#4709: an off-loaded onboarding write does not pass `_echo=False` — "
+        "the return is discarded, and the echo is "
+        "`_get_onboarding_projection`'s blocking registry read (#4625)")
+    # #4709 ordering guarantee, pinned on the NAMED calls. It must NOT be
+    # satisfiable by the other hand-off: the legacy-backfill marker always
+    # precedes the status write, so a "SOME write is before the status" check
+    # is true by construction and cannot fail for the regression it names.
+    # There is exactly ONE `**_index_state_updates(...)` persist — the cursor
+    # one — and it must precede BOTH terminal status writes.
+    state_persist_calls = [
+        c for c in write_calls if _carries_index_state_updates(c)]
+    assert len(state_persist_calls) == 1, (
+        f"#4709: expected ONE `_update_onboarding_state(..., "
+        f"**_index_state_updates(...))` persist shared by BOTH terminal "
+        f"exits, found {len(state_persist_calls)} — a second site means the "
+        f"persist was duplicated (or re-split across the `finally`), so the "
+        f"completion/failed paths can diverge again")
+    persist_line = state_persist_calls[0].lineno
+    failed_lines = [
+        c.lineno for c in ast.walk(node)
+        if isinstance(c, ast.Call) and _callee_name(c.func) == "_job"
+        and any(k.arg == "status" and getattr(k.value, "value", None)
+                == "failed" for k in c.keywords)
+    ]
+    assert failed_lines, (
+        "#4709: no `_job(status='failed', ...)` write found — the failure "
+        "arms regressed or moved somewhere the ordering pin cannot see")
+    assert persist_line < completed_lines[0], (
+        "#4709 ordering regressed: the CURSOR persist "
+        "(`_update_onboarding_state(..., **_index_state_updates(...))`) does "
+        "NOT run BEFORE `_job(status='completed', ...)` — the job reports "
+        "`completed` while the cursor is still only in the tail, so a "
+        "client that reads state on `completed` sees the previous cursor and "
+        "re-walks the whole backlog")
+    assert persist_line < max(failed_lines), (
+        "#4709 ordering regressed: the CURSOR persist runs AFTER the tail "
+        "`_job(status='failed', ...)` write — the failure path reports "
+        "`failed` before the now-off-loop persist lands, so a poller that "
+        "reads state on `failed` (test_midwalk_fetch_error_stamps_indexed_at) "
+        "observes the PREVIOUS cursor and re-walks the whole backlog; "
+        "pre-#4709 this window was masked because the persist ran ON the loop")
+
+    # (2) what stays on the loop is pinned as an EXACT count so no site can
+    # appear or leave unnoticed. Most are the tortoise#7500 constraint (the SDK
+    # construction, the attach handed to `backfill_legacy_closed`, the relink
+    # pass); `backfill_legacy_closed`'s OWN one-time scan is a declared
+    # residual rather than a #7500 site — it can be off-loaded (same `proj`
+    # handle) and is only left inline because the
+    # `github_legacy_backfill_done` marker bounds it to one run per org.
+    # Off-loading or re-siting any of these fails here: update the pin WITH the
+    # residual AND the docstring in `hosted_api._run_indexing`.
+    inline = _inline_calls_to(node, frozenset({
+        "_make_sdk", "_data_sdk", "_get_proj", "_relink_sessions_after_index",
+        "backfill_legacy_closed",
+    }))
+    assert inline.count("_make_sdk") == 1, (
+        f"#4709: `_run_indexing` has {inline.count('_make_sdk')} inline "
+        "`_make_sdk` construction(s); the single on-loop construction is the "
+        "documented tortoise#7500 residual (a worker-thread construction "
+        "resolves the per-test store from a stale pool-thread stem)")
+    assert inline.count("_data_sdk") == 0, (
+        "#4709: `_run_indexing` must not build its SDK through `_data_sdk` — "
+        "that is the ROUTE tenancy resolver, not the job's construction seam")
+    assert inline.count("_get_proj") == 1, (
+        f"#4709: `_run_indexing` has {inline.count('_get_proj')} inline graph "
+        "attach(es); the single one is the `backfill_legacy_closed` attach — "
+        "the tortoise#7500 residual. The WALK's attach happens inside "
+        "`index_repo`; a second attach here means the walk came back")
+    assert inline.count("_relink_sessions_after_index") == 1, (
+        "#4709: the completion relink pass is still a declared inline "
+        "residual (it builds its own SDK — same #7500 constraint); if it was "
+        "off-loaded, record that here")
+    assert inline.count("backfill_legacy_closed") == 1, (
+        f"#4709: `_run_indexing` has {inline.count('backfill_legacy_closed')} "
+        "inline `backfill_legacy_closed` scan(s); the single one is a declared "
+        "on-loop residual (two full-:Event reads plus a journaled mint per row, "
+        "`indexer/github_indexer.py`), bounded to ONE run per org by the "
+        "`github_legacy_backfill_done` marker. It is NOT a #7500 site — it "
+        "takes the `proj` handle, so it CAN move to the index pool; if it was "
+        "off-loaded (or a second site appeared), record that here and in the "
+        "`hosted_api._run_indexing` docstring")
+
+
+def test_index_repo_projection_walk_is_offloaded():
+    """#4709: `index_repo` hands its synchronous projection walk to ONE
+    unbounded worker seam, and the per-item loop is not in the async body.
+
+    The walk is the dominant graph work #4709 was opened for; it lives one
+    module down, where the hosted AST scan cannot see it — hence this pin.
+    """
+    tree = ast.parse(INDEXER.read_text())
+    index_repo = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "index_repo")
+    walk = next((n for n in ast.walk(tree)
+                 if isinstance(n, ast.FunctionDef)
+                 and not isinstance(n, ast.AsyncFunctionDef)
+                 and n.name == "_project_items"), None)
+    assert walk is not None, (
+        "#4709: the walk's sync half (`_project_items`) is missing or is an "
+        "`async def` — handing an async def to a worker seam returns an "
+        "un-awaited coroutine, so the walk would silently never run")
+
+    assert _offload_boundaries(
+        index_repo, "_project_items") == ["_run_index_off_loop"], (
+        "#4709 regressed: `_project_items` is not handed to the index job's "
+        "own UNBOUNDED pool (`_run_index_off_loop`) — the projection walk runs "
+        "on the event loop (the 600-item fixture cannot complete inside the "
+        "10 s transport bound), rides a BOUNDED seam that would abandon a "
+        "mid-write worker (#2863), or is back on the SHARED default executor "
+        "(`asyncio.to_thread`), where it starves the pool's other tenants")
+    walk_calls = _boundary_calls_for(index_repo, "_project_items")
+    assert walk_calls, (
+        "#4709: no offload boundary carries `_project_items` — the bound "
+        "check below would be vacuous")
+    for _walk_call in walk_calls:
+        _wrapper = _bound_wrapper_around(_walk_call, index_repo)
+        assert _wrapper is None, (
+            f"#4709: the projection walk is wrapped in `{_wrapper}` — "
+            f"`_UNBOUNDED_OFFLOAD_SEAMS` matches by CALLEE NAME, so a bound "
+            f"around the seam is invisible to it; the recorded decision is "
+            f"NO BOUND (#2863/CPython #87185)")
+    assert _inline_calls_to(index_repo, frozenset({"_project_items"})) == [], (
+        "#4709: `_project_items` is also INVOKED inline in `index_repo` — the "
+        "walk would run twice, once on the loop")
+    assert _inline_calls_to(
+        index_repo, frozenset({"_project_issue", "_project_pr"})) == [], (
+        "#4709 regressed: the per-item projection loop is back in the ASYNC "
+        "body of `index_repo` — it must live in the sync `_project_items`")
+    # #7951 P2-a / #4709: the journal registration read (`EventLog.read_all()`
+    # over the WHOLE, unbounded journal) used to run inline on the loop just
+    # above the hand-off. It feeds the walk's entity door, so it rides the
+    # SAME worker hand-off — pinned both ways (absent from the async body,
+    # present in the sync walk) so a re-siting is visible.
+    assert _inline_calls_to(
+        index_repo, frozenset({"_journal_registered_entities"})) == [], (
+        "#4709 regressed: `index_repo` reads the whole journal "
+        "(`_journal_registered_entities` -> `EventLog.read_all()`, O(file)) "
+        "INLINE on the event loop — it must ride the walk hand-off as the "
+        "first statement of the sync `_project_items`")
+    assert _inline_calls_to(
+        walk, frozenset({"_journal_registered_entities"})) == [
+            "_journal_registered_entities"], (
+        "#4709: the sync walk no longer reads the journal registrations — the "
+        "entity door's pre-fix-binary backfill (#7951 P2-a) would silently "
+        "degrade, or the read moved somewhere neither scan can see")
+    in_walk = _inline_calls_to(
+        walk, frozenset({"_project_issue", "_project_pr"}))
+    assert sorted(set(in_walk)) == ["_project_issue", "_project_pr"], (
+        f"#4709: the sync walk does not carry the projection calls "
+        f"({sorted(set(in_walk))}) — this pin would be vacuous")
 
 
 # ── #4625 leg 62: the capture read leg, narrowed out of the residual ────────
