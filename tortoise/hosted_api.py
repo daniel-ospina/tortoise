@@ -26435,6 +26435,17 @@ def _get_onboarding_state(org_id: str) -> dict:
         # so this pop cannot mutate the stored row.)
         stored.pop(_STATE_VERSION_KEY, None)
         return stored
+    from tortoise.mcp_auth import SELFHOST_ORG_ID
+    if org_id == SELFHOST_ORG_ID:
+        # #8686: same store as the write above. Merged OVER the defaults so an
+        # unset key keeps its documented default (`session_recording` is
+        # default-ON, #1927) instead of reading as absent.
+        from tortoise.onboarding import state as _ob_state
+        merged = _onboarding_defaults()
+        merged.update(_ob_state.read_operational_state(_org_proj(org_id),
+                                                      org_id))
+        merged.pop(_STATE_VERSION_KEY, None)
+        return merged
     import json as _json
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
@@ -26893,6 +26904,17 @@ def _write_onboarding_state(org_id: str, state: dict) -> None:
     )
     if is_supabase_enabled():
         _sb_write(get_control_plane(), org_id, state)
+        return
+    from tortoise.mcp_auth import SELFHOST_ORG_ID
+    if org_id == SELFHOST_ORG_ID:
+        # #8686: a self-hosted install has no control-plane team record, so the
+        # registry MATCH below matched NOTHING -- without error. The caller's
+        # echo then re-added the value it had just been asked to set, and the
+        # tool reported success over a write that never happened: a false ACK
+        # on the only capture control a user has. The deployment's own store is
+        # the :OnboardingState node it already owns (create-on-write seam).
+        from tortoise.onboarding import state as _ob_state
+        _ob_state.write_operational_state(_org_proj(org_id), org_id, state)
         return
     import json as _json
     sdk = _make_sdk(namespace="registry")

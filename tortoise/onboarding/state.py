@@ -18,10 +18,13 @@ result with ``.result_set`` and ``.stats``. Importable without hosted_api
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from collections.abc import Iterable
 from datetime import UTC
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 # ── canonical vocabulary ─────────────────────────────────────
 
@@ -696,6 +699,74 @@ def write_member_progress(graph: Any, org_id: str, user_id: str,
              "SET n.member_progress = $value",
              {"org_id": org_id, "value": json.dumps(merged)})
         return merged
+
+
+#: Node property holding a deployment's OPERATIONAL onboarding keys
+#: (``session_recording``, ``capture_extract``, ...).
+#:
+#: The HOSTED control plane keeps these in a jsonb blob on the team record.
+#: A self-hosted install has no control plane (#8686, decided 2026-10-15), so
+#: they live on the SAME ``:OnboardingState`` node as the FLOW keys — one store
+#: per deployment, which is what every comparable does (GitLab, PostHog,
+#: Cognee, Letta: self-hosted settings are operator-managed in the
+#: deployment's own store; no product requires a vendor control plane).
+OPERATIONAL_PROP = "operational_state"
+
+
+def read_operational_state(graph: Any, org_id: str) -> dict[str, Any]:
+    """OPERATIONAL onboarding keys, or ``{}`` when the node or property is
+    absent. Raises on graph failure — the caller decides 'unavailable' vs
+    defaults, the same contract ``read_onboarding_node`` keeps."""
+    node = read_onboarding_node(graph, org_id) or {}
+    return _decode_operational(node.get(OPERATIONAL_PROP))
+
+
+def _decode_operational(raw: Any) -> dict[str, Any]:
+    """FalkorDB node properties must be primitives, so the blob is a JSON
+    string (#498). A dict is accepted too. Anything unparseable is REPORTED and
+    read as empty rather than raising into a capture hot path — an unreadable
+    setting must never take the whole read down."""
+    if raw is None or raw == "":
+        return {}
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "replace")
+    if not isinstance(raw, str):
+        _logger.warning("operational_state is %s, not JSON — reading as empty",
+                        type(raw).__name__)
+        return {}
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        _logger.warning("operational_state is not valid JSON — reading as empty")
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_operational_state(graph: Any, org_id: str,
+                            fields: dict[str, Any]) -> None:
+    """Persist OPERATIONAL keys, CREATE-ON-WRITE (#8686).
+
+    The create-on-write is the fix, not a detail. The hosted write leg is a
+    bare ``MATCH (t:Team {id: $id}) SET ...``; an install with no control-plane
+    record matched NOTHING **without error**, so the caller's echo re-added the
+    value it was asked to set and the tool reported success over a write that
+    never happened — a false ACK on the only capture control a user has.
+
+    ``ensure_onboarding_state_node`` is the seam this module already uses for
+    exactly this reason (see ``write_status``: "absent-node orgs must not
+    silently no-op"), so the operational write goes through it too."""
+    if not isinstance(fields, dict) or not fields:
+        return
+    ensure_onboarding_state_node(graph, org_id)
+    merged = read_operational_state(graph, org_id)
+    merged.update(fields)
+    with _org_lock(org_id):
+        _run(graph,
+             f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
+             f"SET n.{OPERATIONAL_PROP} = $blob",
+             {"org_id": org_id, "blob": json.dumps(merged)})
 
 
 def write_status(graph: Any, org_id: str, status: str, *,
