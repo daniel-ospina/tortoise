@@ -275,8 +275,11 @@ def read_selfhost_state(handle: Any) -> dict[str, Any]:
         "last_decide_attempt": node.get("last_decide_attempt"),
         "fork_unsure_at": node.get("fork_unsure_at"),
         # the capture controls this deployment persists (#8686) — stored keys
-        # only; an absent key is the default, resolved by the caller.
-        "operational": _state.read_operational_state(proj, org_id),
+        # only; an absent key is the default, resolved by the caller. Decoded
+        # from the node ALREADY IN HAND: a second read would cost a round trip
+        # and, being outside the try above, would let a failure between the two
+        # reads escape this function instead of becoming 'unavailable' (#8741).
+        "operational": _state.operational_from_node(node),
         "onboarding_complete": node.get("status") == _state.STATUS_COMPLETE,
         "restart_pending": _state.restart_pending(steps),
         "next": next_selfhost_step(node, steps),

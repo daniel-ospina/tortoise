@@ -473,3 +473,97 @@ class TestCliRender:
             "a keyless install must not claim the hosted variant")
         assert body["kind"] == "disclosure"
         assert body["text"] == body["disclosure"]
+
+
+class TestSelfHostedStateShape:
+    """#8741: the CLI must read BOTH state shapes.
+
+    The hosted route wraps its projection in an ``"onboarding"`` envelope. The
+    self-hosted route returns it FLAT — there is no control-plane envelope to
+    wrap — and its operational keys are nested under ``"operational"``.
+
+    Reading only the hosted shape made the reader fall through to the default
+    (ON, #1927) and tell a self-hosted user their recording was ON while the
+    stored setting said OFF. That is the exact false statement this disclosure
+    exists to prevent, reintroduced by a shape mismatch rather than by a lie.
+    """
+
+    class _Resp:
+        def __init__(self, payload: bytes):
+            self._payload = payload
+
+        def read(self):
+            return self._payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    @pytest.fixture()
+    def selfhosted(self, tmp_path, monkeypatch):
+        for var in ("TORTOISE_API_KEY", "TORTOISE_MCP_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TORTOISE_API_KEY", "test-key")
+        monkeypatch.setenv("TORTOISE_API_URL", "http://127.0.0.1:9")
+        return tmp_path
+
+    def _serve(self, monkeypatch, body: dict):
+        import json as _json
+        import urllib.request as _url
+
+        payload = _json.dumps(body).encode()
+        monkeypatch.setattr(_url, "urlopen",
+                            lambda req, timeout=None: self._Resp(payload))
+
+    def _invoke(self, capsys, **argv):
+        import argparse
+
+        from tortoise.__main__ import _cmd_session_disclosure
+
+        args = argparse.Namespace(**{"harness": "claude", "kind": "disclosure",
+                                     "json": True, **argv})
+        rc = _cmd_session_disclosure(args)
+        out, _err = capsys.readouterr()
+        return rc, out
+
+    def test_a_flat_selfhost_read_shows_the_real_setting(
+            self, selfhosted, capsys, monkeypatch):
+        """Mutation: revert to `body.get("onboarding") or {}` and this reads
+        session_recording=True — the user told ON while the store says OFF."""
+        self._serve(monkeypatch, {
+            "org_id": "selfhost", "fork": "self",
+            "operational": {"session_recording": False},
+        })
+        rc, out = self._invoke(capsys, kind="declined")
+        import json as _json
+        assert rc == 0
+        assert _json.loads(out)["session_recording"] is False, out
+        assert "OFF" in _json.loads(out)["text"], out
+
+    def test_a_graph_down_operational_read_is_unknown_never_ON(
+            self, selfhosted, capsys, monkeypatch):
+        """'unavailable' is a VALUE, not an empty dict — and it must not decay
+        into the default ON, which would assert a state nobody observed."""
+        self._serve(monkeypatch, {
+            "org_id": "selfhost", "fork": "unavailable",
+            "operational": "unavailable",
+        })
+        rc, out = self._invoke(capsys, kind="disclosure")
+        import json as _json
+        assert rc == 0
+        assert _json.loads(out)["session_recording"] is None, out
+        assert _json.loads(out)["state_read"] == "unavailable", out
+
+    def test_the_hosted_envelope_still_reads(self, selfhosted, capsys, monkeypatch):
+        """The shape that already worked must not regress: the hosted route
+        wraps the projection in "onboarding"."""
+        self._serve(monkeypatch, {
+            "onboarding": {"session_recording": False},
+        })
+        rc, out = self._invoke(capsys, kind="declined")
+        import json as _json
+        assert rc == 0
+        assert _json.loads(out)["session_recording"] is False, out

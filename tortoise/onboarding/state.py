@@ -722,8 +722,18 @@ def read_operational_state(graph: Any, org_id: str) -> dict[str, Any]:
     """OPERATIONAL onboarding keys, or ``{}`` when the node or property is
     absent. Raises on graph failure — the caller decides 'unavailable' vs
     defaults, the same contract ``read_onboarding_node`` keeps."""
-    node = read_onboarding_node(graph, org_id) or {}
-    return _decode_operational(node.get(OPERATIONAL_PROP))
+    return operational_from_node(read_onboarding_node(graph, org_id))
+
+
+def operational_from_node(node: dict[str, Any] | None) -> dict[str, Any]:
+    """The OPERATIONAL keys carried by an ALREADY-READ node.
+
+    Use this when you hold the node: ``read_operational_state`` re-reads the
+    same row, which on the state read paths costs a third Cypher round trip and
+    — worse — sits OUTSIDE the caller's graph-down guard, so a failure between
+    the two reads escapes a function whose whole contract is to turn a graph
+    failure into a VALUE (#8741 review)."""
+    return _decode_operational((node or {}).get(OPERATIONAL_PROP))
 
 
 def _decode_operational(raw: Any) -> dict[str, Any]:
