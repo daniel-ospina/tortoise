@@ -672,14 +672,11 @@ setting, even after an earlier decline (see the re-enable pin below).
    land; say the setting could not be applied and that recording continues.
 3. **Confirm honestly** with
    `tortoise session disclosure --harness <harness> --kind declined`: nothing was
-   installed, nothing will be recorded, and the setting stays visible where the
-   user can turn it back on.
-   **Self-hosted: that wording is FALSE — do not print it verbatim.** The
-   `declined_confirmation` text is a fixed template and always says the setting
-   is "currently OFF"; it does not read the live flag, and self-hosted the
-   setting is ON (the decline did not persist — #8686). Say instead that the
-   preference could not be applied and that recording continues, and point the
-   user at where to turn it off once the write works.
+   installed, and the rendered text selects its state sentence from the LIVE
+   `session_recording` flag — OFF only when it is off, ON when the preference
+   could not be applied (self-hosted, #8686), and its own wording when the flag
+   could not be read. Print it as rendered; do NOT assert the recording state
+   from the user's answer alone.
 
 ### The re-enable path is pinned
 

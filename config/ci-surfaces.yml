@@ -2209,6 +2209,12 @@ surfaces:
   - test_ingest_v2_consolidation.py
   - test_ingest_v2_parallel.py
   - test_ingest_validation.py
+  # #8499: the endpoint-kind route contract — a plain IMPL/NAND between plain
+  # `:Point` endpoints is operator-mediated (owner ruling 2026-10-13), an
+  # Object↔Object pair keeps the operator-less direct edge, and the choice is
+  # made from the resolved endpoint KINDS (the route classifier alone cannot
+  # see them). Registered with the ingest family it pins.
+  - test_8499_point_mediated_routing.py
   - test_integration_search.py
   # #4780: the incident-kind registry's generated checks — runbook ⇄ code set
   # equality (both directions), the frozen string set, the emitted flag against a
@@ -5066,6 +5072,7 @@ durations:
   test_ingest_bundle.py: 8.7  # unmeasured
   test_ingest_mode.py: 4.4  # unmeasured
   test_ingest_validation.py: 1.4  # unmeasured
+  test_8499_point_mediated_routing.py: 1.4  # unmeasured
   test_longmem_runner.py: 26.7
   test_mcp_http.py: 16.5  # unmeasured
   test_mcp_route_challenge.py: 0.8  # unmeasured

@@ -138,6 +138,17 @@ def facts(*, harness: str, hosted: bool = True,
     state_kind = {True: "state_on", False: "state_off"}.get(
         recording, "state_unknown")
     facts["state"] = src["facts"][state_kind].format(**facts)
+    # ⛔ THE SAME LIVE-FLAG RULE FOR THE DECLINE BRANCH, AND ITS OWN WORDING.
+    # The decline confirmation used to hard-code "nothing will be recorded ...
+    # currently OFF" and never read `recording` at all — so a user whose
+    # recording was still ON was told it was OFF (#8686). The generic
+    # `state_*` sentences cannot be reused here: they say "the recorder ... is
+    # installed", which is exactly what a decline means did NOT happen.
+    # Selecting on the LIVE flag is the whole fix; `None` (the read did not
+    # happen) keeps its own honest wording rather than defaulting to "off".
+    facts["decline_state"] = src["facts"][
+        {True: "decline_state_on", False: "decline_state_off"}.get(
+            recording, "decline_state_unknown")].format(**facts)
     return facts
 
 

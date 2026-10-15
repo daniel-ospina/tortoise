@@ -88,10 +88,15 @@ SHAPE_SUPERSEDE_TARGET_DELETED = "supersede-target-deleted"
 #: ``_apply_one`` already emits for a different mechanism (an unrecognized
 #: record type), so a report can tell the two apart.
 SHAPE_UNCLASSIFIED_TERMINALIZER = "unclassified-terminalizer"
-#: #5380: an ``EdgeMessageChanged op=set`` matched no edge. Exempt — a plain
-#: direct edge is legitimately absent after a replay (``DirectEdgeCreated`` is
-#: not folded by the replay engines, A10 #1048, so the EDGE is lost by a gap
-#: this record does not cause), and a hard-deleted edge is gone live too.
+#: #5380: an ``EdgeMessageChanged op=set`` matched no edge. Exempt — the
+#: write-back's edge can be legitimately absent: a hard-deleted edge is gone
+#: live too, and on the one-record ``apply()`` leg a plain direct edge is still
+#: unfolded (``DirectEdgeCreated`` sits in ``_APPLY_WARN_ONLY_TYPES``; that
+#: engine has no pass-2b — see the ``SHAPE_EDGE_MESSAGE_MISS`` entry below).
+#: ⛔ The ORIGINAL justification — "``DirectEdgeCreated`` is not folded by the
+#: replay engines, A10 #1048, so the edge is lost by a gap this record does not
+#: cause" — is RETIRED for ``rebuild_all``, which now folds it, so on a
+#: ``rebuild_all`` run every occurrence is evidence of a REAL divergence.
 #: Recorded (not merely warned) so the miss is reported by the run boundary
 #: (``assert_no_non_folded`` warns and names every exempt record) and by
 #: ``rebuild_all``'s post-replay dressed-edge report. NOT by
@@ -163,14 +168,26 @@ EXEMPT_SHAPES: dict[str, str] = {
         "entity-parity leg still compares a re-created node's status"
     ),
     SHAPE_EDGE_MESSAGE_MISS: (
-        "a plain direct edge is legitimately absent after a replay — the "
-        "engines do not fold `DirectEdgeCreated` (A10 #1048), so the EDGE is "
-        "lost by a pre-existing gap this record does not cause, and a "
-        "hard-deleted edge is gone live too. DEGRADED GUARANTEE: the miss is "
-        "still REPORTED (the call site warns with src/tgt/rel; the record "
-        "names the edge), and `rebuild_all`'s post-replay dressed-edge "
-        "comparison reports the aggregate drop (#5380). Adding a fifth slot "
-        "here does not relax this: the edge-message fold owns no edge creation"
+        "the write-back's edge is legitimately absent because it was HARD-"
+        "DELETED live: the `set` fold runs AFTER every edge-creating pass, so "
+        "an edge the journal removed is already gone when its write-back is "
+        "replayed. ⛔ The ORIGINAL justification — 'the engines do not fold "
+        "`DirectEdgeCreated` (A10 #1048), so the edge is lost by a pre-existing "
+        "gap this record does not cause' — is RETIRED **for `rebuild_all`**, "
+        "which now folds it (see `direct_edge_created_events` in "
+        "projection/__init__.py). ⚠️ It is NOT retired for the one-record "
+        "`apply()` engine (`rebuild(log)` / `recover_from_log`), which has no "
+        "pass-2b and keeps `DirectEdgeCreated` in `_APPLY_WARN_ONLY_TYPES` — so "
+        "ON THAT LEG a plain direct edge is still legitimately absent for a "
+        "missing-creation-path reason. On a `rebuild_all` run, every remaining "
+        "occurrence is evidence of a REAL divergence — a producer whose edge "
+        "was never journaled, or an endpoint-kind leg that dropped it — so "
+        "this exemption must never be read as licence to ignore one. "
+        "DEGRADED GUARANTEE: the miss is still REPORTED (the call "
+        "site warns with src/tgt/rel; the record names the edge), and "
+        "`rebuild_all`'s post-replay dressed-edge comparison reports the "
+        "aggregate drop (#5380). Adding a fifth slot here does not relax this: "
+        "the edge-message fold owns no edge creation"
     ),
     SHAPE_EDGE_MESSAGE_UNREPLAYED: (
         "a `clear` record whose scope/ids the fold cannot map to a live query "

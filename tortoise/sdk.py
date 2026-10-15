@@ -13365,13 +13365,61 @@ class TortoiseSDK:
         """Route classification for a connection item: 'direct' for plain
         IMPL/NAND (operator-less per §8 — the terminal-status guard is
         direct-edge-scoped), 'operator' for mitigation/reify:true/part-whole,
-        'relation' otherwise."""
+        'relation' otherwise.
+
+        ⛔ This reads the CONNECTION ITEM only — it cannot see the endpoints
+        (refs are unresolved at validation time). 'direct' here is therefore a
+        REQUEST, not the final route: the endpoint-kind gate
+        (:meth:`_point_mediated_route`, owner ruling 2026-10-13, #8499) can
+        promote it to 'operator' once the endpoints are known. Callers that
+        need the effective route must apply that gate.
+        """
         if "operator" not in conn:
             return "relation"
         if conn["operator"] in ("IMPL", "NAND") and not conn.get("mitigation") \
                 and not conn.get("reify"):
             return "direct"
         return "operator"
+
+    def _point_mediated_route(self, node_ids: list[str]) -> bool:
+        """True when an operator-less IMPL/NAND between these endpoints is
+        FORBIDDEN by the endpoint-kind contract, so the connection must be
+        reified into an operator instead (owner ruling 2026-10-13, #8499).
+
+        **Point→Point relations are operator-mediated.** An operator-less edge
+        carries no operator node, so it can be neither mitigated nor annotated,
+        and it cannot carry the epistemic weighting a Point's relations claim —
+        those properties are the reason a Point's relations exist at all, so
+        the direct shape is wrong for any pair involving a plain :Point.
+
+        (Durability was the ruling's original third argument: plain direct
+        edges were journaled but never replayed, so ``rebuild_all`` lost them
+        — A10 #1048. #8499 landed the pass-2b ``DirectEdgeCreated`` fold, so an
+        operator-less edge now SURVIVES a rebuild too and the ruling no longer
+        rests on that argument. Do not re-derive the rule from the old loss.)
+
+        ``Object↔Object`` keeps the direct shape (no epistemic weighting is
+        claimed); ``Point↔Object`` is operator-mediated (the ruling's
+        "ideally"). ``Subject``/``Event`` endpoints are not Point-bearing and
+        take the Object path.
+
+        The probe is anchored on ``:Point`` so the per-(label, id) index is
+        kept — the same id-anchored sweep technique ``create_direct_edge``
+        uses, but deliberately narrowed to the ONE label that carries this
+        contract: ``create_direct_edge`` sweeps all four ``EPISTEMIC_LABELS``
+        because a direct edge may connect any of them, whereas only a
+        Point-bearing pair is operator-mediated. Operator endpoints are
+        EXCLUDED for the same reason ``create_direct_edge`` refuses them —
+        silently rerouting a connection TO an operator would hide that misuse
+        rather than report it.
+        """
+        rows = self._get_proj().g.query(
+            "MATCH (p:Point) WHERE p.id IN $ids "
+            "AND coalesce(p.is_operator, false) = false "
+            "RETURN count(p)",
+            params={"ids": list(node_ids)},
+        ).result_set
+        return bool(rows and rows[0][0])
 
     @staticmethod
     def _direction_from_semantics(semantics: str) -> str | None:
@@ -14230,7 +14278,9 @@ class TortoiseSDK:
         created = {"points": 0, "entities": 0, "sources": 0, "connections": 0}
         deduped = {"points": 0, "entities": 0, "sources": 0, "connections": 0}
         results = [] if granularity == "granular" else None
-        # A3 warnings contract (cycle-23): the ELEVEN-key enumeration lives in
+        # A3 warnings contract (cycle-23): the TWELVE-key enumeration lives in
+        # INGEST_CONTRACT §3.2 (extended from eleven by #8499 — the set is
+        # CLOSED, so a new key is a contract amendment, not a drive-by list)
         # E2E-6.2; this accumulator carries the operator-absorb / residue /
         # drift warnings appended during the connection loop.
         warnings: list[str] = []
@@ -14564,7 +14614,35 @@ class TortoiseSDK:
                 # promotion SET fires only on created==True (the promotion-on-
                 # created-only pin, §5.3/CYCLE-24) — the bare-MERGE dedup hit
                 # applies NO promotion.
-                if self._connection_route(conn) == "direct":
+                # ── ENDPOINT-KIND GATE (owner ruling 2026-10-13, #8499) ──
+                # The route selector reads only the connection ITEM; the
+                # endpoint kinds are knowable only HERE, refs resolved. A
+                # Point-involving pair is operator-mediated by contract, so a
+                # caller who wrote the plain spelling gets the operator form
+                # plus a warning naming what happened — never a silent
+                # structure change, and never a silent operator-less edge.
+                #
+                # NOTE (why the 'direct' branch below is retained): ingest's
+                # endpoint contract is POINT-ONLY (_check_connection rejects
+                # any non-Point endpoint, with a carve-out for an Event on the
+                # operator route), so for a plain IMPL/NAND this gate is
+                # ALWAYS true — the branch cannot be reached today. It is kept
+                # because it is what makes a future widening of that contract
+                # (Object↔Object bundles) automatically correct instead of
+                # silently operator-less.
+                _route = self._connection_route(conn)
+                if _route == "direct" and self._point_mediated_route([src, *dsts]):
+                    self._append_warning(
+                        f"point_mediated_route:{src}->{dsts[0]}:{op_type} — a "
+                        f"plain IMPL/NAND connection between :Point endpoints is "
+                        f"operator-mediated (owner ruling 2026-10-13, #8499): an "
+                        f"operator-less edge can be neither mitigated nor "
+                        f"annotated, and cannot carry the epistemic weighting a "
+                        f"Point's relations claim. Reified automatically; pass "
+                        f"`reify: true` to make the intent explicit."
+                    )
+                    _route = "operator"
+                if _route == "direct":
                     edge_res = self.create_direct_edge(
                         op_type, src, dsts[0],
                         label=label,
@@ -14912,12 +14990,12 @@ class TortoiseSDK:
         Completeness across ``rebuild_all``: batch_id on Points is restored
         from the pre-wipe live-graph snapshot (projection pass-1b tail) —
         a rebuild of the SAME store keeps the POINT half of the audit
-        intact; DIRECT EDGES are lost even on same-store rebuilds today
-        (their ``DirectEdgeCreated`` descriptors are journaled but not
-        replayed). The JSONL journal replay of ``BatchIdStamped`` /
-        ``DirectEdgeCreated`` records (a fresh-store rebuild from the
-        journal only) is A10 pass-2b (#1048, gated on A3) — NOT yet
-        landed, so journal-only rebuilds lose batch_id today (recorded
+        intact, and since #8499 the DIRECT-EDGE half survives too: the
+        ``DirectEdgeCreated`` descriptors that used to be journaled-but-never-
+        replayed now have a real pass-2b fold (``direct_edge_created_events``).
+        The remaining A10 pass-2b gap is ``BatchIdStamped`` on the
+        journal-only leg (a fresh-store rebuild from the journal alone) — NOT
+        yet landed, so journal-only rebuilds lose batch_id today (recorded
         deferral).
 
         Returns ``{"batch_id", "points": [{id, pointKind, status,
@@ -15056,7 +15134,10 @@ class TortoiseSDK:
         absent IMPL stays "bidirectional".
 
         Emits the dedicated JSONL edge descriptor for rebuild durability
-        (plan §4.4 — A10's pass-2b consumer) on created==True.
+        (#8499's pass-2b consumer) on EVERY write, NOT only on
+        ``created==True``: a dedup hit re-emits, so the crash window between
+        the MERGE and the emission is recovered by the retry's emission. (The
+        ``promote_source`` pin above is a separate, created-only rule.)
 
         Returns {"direct_edge": op_type, "from": source_id, "to": target_id,
                  "created": bool, "deduped": bool}.

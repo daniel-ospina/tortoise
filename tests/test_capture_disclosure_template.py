@@ -188,6 +188,39 @@ class TestRuntimeDrivenRender:
             "an unread flag must be its OWN wording — not the ON default in "
             "disguise")
 
+    def test_the_DECLINE_sentence_follows_the_live_flag_too(self):
+        """#8686: the decline branch hard-coded "currently OFF" and never read
+        the flag.
+
+        The decline confirmation is the sentence a user reads after saying no,
+        and it used to assert "nothing will be recorded ... currently OFF"
+        UNCONDITIONALLY — so a user whose recording was still ON was told the
+        opposite of the truth, in the one message that exists to tell them what
+        our recording state is. The caller already passed the live flag; the
+        template simply never used it.
+
+        Mutation: render `decline_state_off` unconditionally (drop the
+        `recording is True` branch) -> the ON case claims OFF and this reds.
+        """
+        on = cd.render_declined_confirmation(
+            harness="pi", hosted=False, recording=True)
+        assert "is ON" in on and "still being recorded" in on, on
+        assert "currently OFF" not in on, (
+            "a declined user whose recording is still ON is told it is OFF — "
+            "the #8686 defect")
+        assert "Nothing will be recorded" not in on, (
+            "the decline asserts nothing will be recorded while recording is "
+            "ON — a false promise in the same sentence")
+        off = cd.render_declined_confirmation(
+            harness="pi", hosted=False, recording=False)
+        assert "is OFF" in off and "Nothing will be recorded" in off, off
+        unknown = cd.render_declined_confirmation(
+            harness="pi", hosted=False, recording=None)
+        assert "could not read" in unknown, (
+            "an unread flag must be its OWN wording — not the OFF default in "
+            "disguise")
+        assert "currently OFF" not in unknown, unknown
+
     def test_the_rendered_facts_name_where_sessions_go_and_where_to_stop(self):
         """Every fact the user needs is present: what is recorded, the beacon,
         the destination, the off-switch and the view/delete home."""

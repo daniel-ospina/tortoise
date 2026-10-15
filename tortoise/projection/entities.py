@@ -2133,12 +2133,13 @@ class _EntityHandlers:
                               source_versions=source_versions)
         # #3947: the episodic turn stream is `(:Session)-[:CONTAINS]->(:Point)`
         # (ONTOLOGY §4.5, the session container's one structural edge). NOT a
-        # member of the deferred generic direct-edge replay (#1048: caller-
-        # authored `create_direct_edge` descriptors stay unaligned on
-        # rebuild): it carries no caller attrs, and it is the capture TURN LOOP
-        # ALONE that journals the link, on the turn's own PointAdded (the only
-        # two `contains_session=` emission sites are the SDK and hosted turn
-        # loops). The extractor-minted points are wired into the Session by
+        # member of the generic direct-edge replay (#1048; the journaled
+        # `DirectEdgeCreated`/`DirectEdgeRepoint` descriptors ARE replayed since
+        # #8499, but this CONTAINS link is carried by the capture TURN LOOP's
+        # PointAdded, not by a descriptor): it carries no caller attrs, and it
+        # is the capture TURN LOOP ALONE that journals the link, on the turn's
+        # own PointAdded (the only two `contains_session=` emission sites are
+        # the SDK and hosted turn loops). The extractor-minted points are wired into the Session by
         # OTHER, raw CONTAINS writes scattered through the capture/extraction
         # path — every one of them unjournaled — so a journal-only `rebuild()`
         # still drops those edges; only `rebuild_all`'s `:Session` snapshot
@@ -3388,11 +3389,13 @@ class _EntityHandlers:
           class), i.e. the fix would trade a loss for a divergence.
 
         Returns the matched-edge count for ``set`` (0 = no such edge) and the
-        dropped-edge count for ``clear``. A ``set`` miss is NOT a refusal: a
-        plain direct edge is legitimately absent after a rebuild (A10 #1048 —
-        ``DirectEdgeCreated`` replay is deferred and unimplemented, so the
-        EDGE itself is lost, which the callers report and the fold cannot
-        change), and a hard-deleted edge is gone live too.
+        dropped-edge count for ``clear``. A ``set`` miss is NOT a refusal: the
+        edge was hard-deleted live (the ``set`` fold runs after every
+        edge-creating pass), or — for the one-record ``apply()`` engine, which
+        has no pass-2b and still does not fold ``DirectEdgeCreated`` — the
+        plain direct edge was never re-created at all. Since #8499
+        ``rebuild_all`` DOES replay ``DirectEdgeCreated``, so on that leg a
+        miss is no longer explained by a missing creation path.
 
         #5380 R8: a miss is still a non-folded event and is RECORDED, never
         silently dropped. The ``set`` miss is recorded by its two callers

@@ -188,3 +188,166 @@ def test_a10_post_rebuild_fallback_dedups_unpatched_resubmission(a10):
     assert p2["id"] == "pr-partial"
     assert _count(g, "MATCH (n:Point {content:$c}) RETURN count(n)",
                   {"c": content}) == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# #8499 / A10 #1048: the plain DIRECT edge survives rebuild
+# ═══════════════════════════════════════════════════════════════════════
+# `create_direct_edge` journals a `DirectEdgeCreated` descriptor on every
+# write, but NOTHING folded it: the deferral #1048 named ("so every
+# bundle-created artifact survives rebuild") and whose tracker chain
+# (#2895 → #5048) closed WITHOUT landing it. So every operator-less direct
+# edge was LOST by every rebuild — silently, because the ingest router had
+# already been reifying Point↔Point (#8499) and the surviving producers are
+# the explicit `create_direct_edge` surface and the Object↔Object carve-out.
+#
+# `create_direct_edge` is the deliberate "operator-less edge" API, so it keeps
+# writing edges after the routing gate; this is the replay half that makes
+# those edges survive. Its `SHAPE_EDGE_MESSAGE_MISS` exemption named this gap
+# as its justification, so the fold retires that premise too.
+
+def _direct_edge(sdk, a, b, rel="IMPL"):
+    rows = sdk._get_proj().g.query(
+        f"MATCH (x {{id:$a}})-[r:{rel}]->(y {{id:$b}}) "
+        "RETURN r.direction, r.confidence, r.weight, r.label, r.batch_id",
+        params={"a": a, "b": b}).result_set
+    return list(rows[0]) if rows else None
+
+
+def _direct_edge_count(sdk, a, b, rel="IMPL"):
+    return _count(sdk._get_proj().g,
+                  f"MATCH (x {{id:$a}})-[r:{rel}]->(y {{id:$b}}) RETURN count(r)",
+                  {"a": a, "b": b})
+
+
+def test_a10_direct_edge_survives_rebuild_all(a10):
+    """The regression proper: create_direct_edge → rebuild_all → the edge is
+    back WITH its attributes (the last-writer-wins attr SET replays)."""
+    _, events, sdk = a10
+    a = sdk.create_point("statement", "A implies B.")["id"]
+    b = sdk.create_point("statement", "B.")["id"]
+    sdk.create_direct_edge("IMPL", a, b, direction="unidirectional",
+                           confidence=0.7, weight=0.4, label="supports",
+                           batch_id="01BATCH0000000000000000000")
+
+    before = _direct_edge(sdk, a, b)
+    assert before is not None, "precondition: the live write created the edge"
+
+    _rebuild(sdk, events)
+
+    after = _direct_edge(sdk, a, b)
+    assert after is not None, (
+        "the plain DIRECT edge did not survive rebuild_all: the pass-2b "
+        "`DirectEdgeCreated` fold did not re-create it — check "
+        "`direct_edge_created_events` in projection/__init__.py"
+    )
+    assert after == before, (
+        f"the rebuilt direct edge's attributes diverged from live: "
+        f"{after} != {before}"
+    )
+
+
+def test_a10_direct_edge_is_exactly_once_after_rebuild(a10):
+    """The MERGE-keyed replay is idempotent: a re-ingest after the rebuild
+    dedups to the SAME edge (never a parallel one — EP's no-parallel-direct-
+    edges contract)."""
+    _, events, sdk = a10
+    a = sdk.create_point("statement", "A implies B.")["id"]
+    b = sdk.create_point("statement", "B.")["id"]
+    sdk.create_direct_edge("IMPL", a, b)
+    _rebuild(sdk, events)
+    res = sdk.create_direct_edge("IMPL", a, b)
+    assert res["created"] is False and res["deduped"] is True, res
+    assert _direct_edge_count(sdk, a, b) == 1
+
+
+def test_a10_object_object_direct_edge_survives_rebuild(a10):
+    """#7902 label-agnostic endpoints: a direct IMPL/NAND may connect ANY two
+    of :Point/:Subject/:Object/:Event, so the replay must resolve each
+    endpoint by an id-anchored per-label sweep — a :Point-hardcoded fold would
+    silently drop every Object↔Object edge (the defect the repoint leg's
+    direct branch still carries)."""
+    _, events, sdk = a10
+    oa = sdk.create_object("Widget A", "product")["id"]
+    ob = sdk.create_object("Widget B", "product")["id"]
+    sdk.create_direct_edge("IMPL", oa, ob, label="related-to")
+
+    assert _direct_edge_count(sdk, oa, ob) == 1  # precondition
+    _rebuild(sdk, events)
+    assert _direct_edge_count(sdk, oa, ob) == 1, (
+        "an Object↔Object direct edge was dropped by the rebuild — the "
+        "created-fold is not label-agnostic (#7902)"
+    )
+    assert _direct_edge(sdk, oa, ob)[3] == "related-to"
+
+
+def test_a10_created_then_superseded_does_not_double_the_edge(a10):
+    """Ordering pin: a creation and its later supersede TRANSFER must not
+    compound.
+
+    Live: create A→B, then supersede A→A' (which journals BOTH the snapshot
+    transfer and a `DirectEdgeRepoint` descriptor). The rebuilt graph must hold
+    exactly ONE edge, A'→B — not A→B (the fold re-creating the phantom after
+    the repoint delete-leg cleaned it), and not both. The created-fold must
+    therefore replay at the FLAT endpoints and PRECEDE the repoint leg.
+    """
+    _, events, sdk = a10
+    a = sdk.create_point("statement", "A implies B.")["id"]
+    b = sdk.create_point("statement", "B.")["id"]
+    sdk.create_direct_edge("IMPL", a, b)
+    replacement = sdk.create_point("statement", "A, restated.")["id"]
+    sdk.supersede_point(a, replacement)
+
+    _rebuild(sdk, events)
+
+    assert _direct_edge_count(sdk, a, b) == 0, (
+        "the rebuild left a direct edge at the SUPERSEDED source — the "
+        "created-fold ran after the repoint delete-leg re-created the phantom"
+    )
+    assert _direct_edge_count(sdk, replacement, b) == 1, (
+        "the transferred direct edge is missing from the successor"
+    )
+
+
+def test_a10_post_transfer_recreation_attr_divergence_known_bound(a10):
+    """⚠️ KNOWN BOUND (#8722), pinned ON PURPOSE — this is the divergent
+    state, not the desired one.
+
+    A creation that FOLLOWS its own supersede-transfer replays BEFORE the
+    transfer and is then overwritten by it, because the created-fold and the
+    repoint leg are ordered by BLOCK, not by journal seq (see the ⚠️ KNOWN
+    BOUND comment on the fold in `projection/__init__.py`). The edge itself
+    survives — only the ATTRS differ, which is what makes it silent: rebuild
+    yields a plausible graph with different weights, and EP consumes them.
+
+    Pinning it is the point. When #8722 is fixed this test MUST be rewritten
+    to assert `after == before`; it must not be deleted, and it must not start
+    passing for the wrong reason.
+    """
+    _, events, sdk = a10
+    a = sdk.create_point("statement", "A implies B.")["id"]
+    b = sdk.create_point("statement", "B.")["id"]
+    sdk.create_direct_edge("IMPL", a, b, confidence=0.1, weight=0.1,
+                           label="old")
+    successor = sdk.create_point("statement", "A, restated.")["id"]
+    sdk.supersede_point(a, successor)
+    sdk.create_direct_edge("IMPL", successor, b, confidence=0.9, weight=0.9,
+                           label="new")
+
+    before = _direct_edge(sdk, successor, b)
+    assert before is not None and before[3] == "new", (
+        f"precondition: live holds the POST-transfer attrs, got {before}"
+    )
+
+    _rebuild(sdk, events)
+
+    after = _direct_edge(sdk, successor, b)
+    assert _direct_edge_count(sdk, successor, b) == 1, (
+        "the transferred-then-re-created edge must not be duplicated"
+    )
+    assert after is not None and after[3] == "old", (
+        "#8722 may now be FIXED — the replay reproduces the later "
+        "create_direct_edge's attrs. Rewrite this test to assert "
+        f"`after == before` and close #8722 (got {after}, wanted the "
+        "pre-transfer attrs)"
+    )
