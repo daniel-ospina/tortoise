@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Iterable
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Any
 
 # ── canonical vocabulary ─────────────────────────────────────
@@ -140,6 +140,11 @@ ONBOARDING_NODE_LABEL = "OnboardingState"
 ONBOARDING_STEP_LABEL = "OnboardingStep"
 COMPLETED_STEP_EDGE = "COMPLETED_STEP"
 ONBOARDS_EDGE = "onboards"  # OnboardingState → Organization Subject (W3 seed writes)
+
+#: The #3912 write-ahead repair stamp `remove_decide_completed_edge` sets on the
+#: OnboardingState node — declared ONCE so the writer and every reader name the
+#: same property. ``count_stamped_repairs`` is the DR reader (#8660).
+DECIDE_COMPLETED_REMOVED_AT = "decide_completed_removed_at"
 
 # default node shape (byte-identical across eager init + create-on-write)
 _NODE_DEFAULTS: dict[str, Any] = {
@@ -826,7 +831,6 @@ REPAIR_REASON_FALSE_DECIDE = "false-decide-completed (#3912)"
 
 
 def _utcnow_iso() -> str:
-    from datetime import datetime
     return datetime.now(UTC).isoformat()
 
 
@@ -1045,7 +1049,7 @@ def remove_decide_completed_edge(graph: Any, org_id: str, *,
         # Write-ahead intent BEFORE the destructive write.
         _run(graph,
              f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
-             "SET n.decide_completed_removed_at = $at, "
+             f"SET n.{DECIDE_COMPLETED_REMOVED_AT} = $at, "
              "    n.decide_completed_removed_reason = $reason",
              {"org_id": org_id, "at": at, "reason": reason})
         _run(graph,
@@ -1057,6 +1061,83 @@ def remove_decide_completed_edge(graph: Any, org_id: str, *,
              {"org_id": org_id})
         _prune_orphan_decide_step(graph, org_id)
     return True
+
+
+def _iso_utc(value: Any) -> datetime | None:
+    """Parse an ISO-8601 timestamp to an aware UTC datetime, or ``None``.
+
+    Accepts both spellings this seam writes — ``Z`` and ``+00:00`` — and reads
+    a naive value as UTC. ``None`` on anything unparseable so the caller fails
+    closed instead of comparing halves of a bound.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        ts = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    return ts.astimezone(UTC)
+
+
+def count_stamped_repairs(graph: Any, org_id: str | None = None, *,
+                          after: str | None = None) -> int:
+    """The #3912 repair stamps visible in a graph — one per repaired org.
+
+    ``remove_decide_completed_edge`` stamps ``decide_completed_removed_at`` on
+    the OnboardingState node (write-ahead of the DELETE) precisely so a later
+    reader can tell a repaired org from one that simply never reached the
+    step. The DR per-label drift guard (#661) is that later reader and could
+    not tell them apart (#8660): it compares per-label node counts across
+    sweeps, so a deliberate, stamped `decide-completed` `OnboardingStep`
+    removal read as DATA_LOSS_CANDIDATE — which deletes the just-uploaded
+    archive and, because the guard returns before the baseline write, re-fires
+    on every subsequent sweep.
+
+    ``org_id`` restricts the read to one org's node (the same key the repair
+    writer matches on); ``None`` counts every stamped node in the graph.
+
+    ``after`` is the WINDOW: only a stamp strictly NEWER than this ISO
+    timestamp is counted. The caller passes the baseline's ``updated_at``, so
+    the count is "repairs that can have caused a drop SINCE the last
+    baseline". Without it a repaired org would keep a permanent free pass for
+    one `OnboardingStep` deletion — the stamp is durable and never cleared —
+    and a genuine wipe of the label years later would be masked. An
+    unparseable ``after`` counts NOTHING (fail-closed: an unbounded window must
+    not explain a drop), and a stamp whose own timestamp will not parse is
+    skipped for the same reason.
+
+    The count is stamped NODES, not repair EVENTS: a re-stamp overwrites, so
+    it is a LOWER bound on how many repairs ever ran. It is an UPPER bound on
+    how many `OnboardingStep` nodes those repairs deleted — the orphan prune
+    ``_prune_orphan_decide_step`` only removes a node that has no remaining
+    referrer — which is why the caller treats it as a ceiling on the label
+    delta it may explain, never as licence to explain a larger drop.
+
+    Raises on a graph failure — the caller decides what an unreadable stamp
+    means, and for the drift guard it means the drop is NOT explained
+    (fail-closed toward firing).
+    """
+    if org_id is None:
+        res = _run(graph,
+                   f"MATCH (n:{ONBOARDING_NODE_LABEL}) "
+                   f"WHERE n.{DECIDE_COMPLETED_REMOVED_AT} IS NOT NULL "
+                   f"RETURN n.{DECIDE_COMPLETED_REMOVED_AT}")
+    else:
+        res = _run(graph,
+                   f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
+                   f"WHERE n.{DECIDE_COMPLETED_REMOVED_AT} IS NOT NULL "
+                   f"RETURN n.{DECIDE_COMPLETED_REMOVED_AT}",
+                   {"org_id": org_id})
+    stamps = [row[0] for row in res.result_set if row and row[0]]
+    if after is None:
+        return len(stamps)
+    cutoff = _iso_utc(after)
+    if cutoff is None:
+        return 0
+    return sum(1 for raw in stamps
+               if (ts := _iso_utc(raw)) is not None and ts > cutoff)
 
 
 def regress_status(graph: Any, org_id: str, *, reason: str,

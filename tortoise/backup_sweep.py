@@ -27,7 +27,12 @@ per-GRAPH — state, dumps, and retention are graph-scoped, #2313):
 - Label-level drift guard (#661): per-label node-count checks with
   absolute-count-aware thresholds — a <50% wipe of a low-count label
   (e.g. Invitation) that passes the overall >50% guard still fires
-  DATA_LOSS_CANDIDATE. Triage and disposition for it: the
+  DATA_LOSS_CANDIDATE. An audited onboarding repair is ATTRIBUTED first
+  (#8660): a drop on the ``OnboardingStep`` label that the graph's #3912
+  repair stamp accounts for is reported as EXPLAINED — the just-uploaded
+  archive is kept and the baseline advances — never as a data-loss candidate
+  (and never via a skip list, which would blind the guard to a real wipe).
+  Triage and disposition for the kind: the
   ``DATA_LOSS_CANDIDATE`` row of docs/ops/registry-backup-dr.md. Which field
   to read there follows the TRIGGER: this per-label path emits both
   ``overall_drop_pct`` and ``label_breaches``, while the overall >50% / >0 → 0
@@ -74,6 +79,7 @@ from .incident_kinds import (
     KIND_P0_GUARD_FAIL,
     KIND_SIZE_GUARD_ABORT,
 )
+from .onboarding.state import ONBOARDING_STEP_LABEL, count_stamped_repairs
 from .retention import RESTORE_WINDOW_DAYS  # #4179 single window authority
 
 # #2562 (re-audit P3): the sweep/purge per-org acquisitions are TIMED too
@@ -204,6 +210,86 @@ def _check_per_label_drift(
                     "threshold": f"drift>{drift_pct*100:.0f}%",
                 }
     return breaches or None
+
+
+#: The ONE label the #3912 onboarding repair can delete — a `decide-completed`
+#: `OnboardingStep` node (`remove_decide_completed_edge` + its orphan prune).
+#: The per-label guard attributes a drop on THIS label to a stamped repair and
+#: to nothing else. It is an ATTRIBUTION, deliberately NOT a skip-list entry: a
+#: name in ``_EXPORT_SKIP_LABELS`` would stop counting the label altogether and
+#: blind the guard to a genuine wipe of it — the opposite of the fix (#8660).
+_REPAIR_STAMPED_LABEL = ONBOARDING_STEP_LABEL
+
+
+def _explain_repair_stamped_breaches(
+    breaches: dict[str, dict[str, Any]],
+    *,
+    stamped_repairs: int,
+) -> dict[str, dict[str, Any]]:
+    """The subset of per-label breaches an audited repair stamp ACCOUNTS for.
+
+    A breach is explained only when BOTH hold:
+
+    1. its label is ``_REPAIR_STAMPED_LABEL`` (``OnboardingStep``) — the single
+       label the repair's DELETE + orphan prune can reduce. A stamp on an org
+       says nothing about any other label; and
+    2. its drop is no larger than the number of stamped repairs
+       (``previous - now <= stamped_repairs``) — one stamped org accounts for
+       AT MOST one pruned step node.
+
+    Everything else stays unexplained so the guard fires: the rule explains
+    exactly what the stamp can account for, no more. Both clauses are
+    load-bearing. Reverting (1) lets a stamp excuse a drop on an unrelated
+    label; replacing (2) with a label skip would turn a genuine wipe of
+    ``OnboardingStep`` into a silent non-incident. The BOUND (rather than
+    equality) matters in the other direction too: the orphan prune is
+    CONDITIONAL, so a repair whose step node was left in place would, under an
+    equality rule, leave a legitimate drop unexplained — re-firing the incident
+    and deleting each sweep's archive, the #8660 failure itself.
+
+    Pure — the graph read lives in :func:`_stamped_repair_attribution`.
+    """
+    if stamped_repairs <= 0:
+        return {}
+    explained: dict[str, dict[str, Any]] = {}
+    for label, breach in breaches.items():
+        if label != _REPAIR_STAMPED_LABEL:
+            continue
+        delta = int(breach.get("previous", 0)) - int(breach.get("now", 0))
+        if 0 < delta <= stamped_repairs:
+            explained[label] = breach
+    return explained
+
+
+def _stamped_repair_attribution(
+    graph,
+    org_id: str,
+    breaches: dict[str, dict[str, Any]],
+    *,
+    since: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Read this graph's repair stamp and return the breaches it explains.
+
+    ``since`` is the last baseline's ``updated_at``: only a repair stamped
+    AFTER it can have caused the current cross-run drop, so a durable stamp
+    from an earlier era does not keep explaining later label losses forever.
+
+    The stamp is read ONLY when the stamped label actually breached — an
+    unrelated label's drop needs no stamp read, and a query that is not needed
+    is a query that cannot fail. A read failure returns ``{}``: an unreadable
+    stamp must NEVER explain a drop (fail-closed toward firing), which is also
+    the pre-#8660 behaviour.
+    """
+    if _REPAIR_STAMPED_LABEL not in breaches:
+        return {}
+    try:
+        stamped = count_stamped_repairs(graph, org_id, after=since)
+    except Exception:
+        logger.warning(
+            "repair-stamp read failed for %s — no breach explained by it",
+            org_id, exc_info=True)
+        return {}
+    return _explain_repair_stamped_breaches(breaches, stamped_repairs=stamped)
 
 
 #: The per-label count read. ONE query for the two surfaces that must agree on
@@ -945,29 +1031,60 @@ def _backup_graph(
 
     # ── Per-label drift guard (#661): fires when the overall >50% ratio is
     # quiet but a low-count label took a hit (e.g. invitations). ──
+    explained_breaches: dict[str, dict[str, Any]] = {}
     if prev_label_counts and label_counts:
         breaches = _check_per_label_drift(
             prev_counts=prev_label_counts, current_counts=label_counts,
         )
         if breaches:
-            _delete_uploaded(storage, org_id, manifest.get("backup_id", ""))
-            incidents.append(
-                {
-                    "kind": KIND_DATA_LOSS_CANDIDATE,
-                    "org_id": org_id,
-                    "graph_id": graph_id,
-                    "detail": {
-                        "previous": prev_node_count,
-                        "now": node_count,
-                        "overall_drop_pct": round(
-                            (1 - node_count / prev_node_count) * 100, 1
-                        ),
-                        "label_breaches": breaches,
-                    },
+            # #8660: an AUDITED onboarding repair (PR #4152) deletes an
+            # unearned `decide-completed` OnboardingStep node and stamps the
+            # removal on the OnboardingState node. Without reading that stamp
+            # this guard cannot tell the repair from data loss, so it fires,
+            # deletes the just-uploaded archive, and — because a fire returns
+            # BEFORE the baseline write — re-fires on EVERY sweep. Attribute
+            # the drop first; only the residual is data loss.
+            explained_breaches = _stamped_repair_attribution(
+                g, org_id, breaches, since=prior.get("updated_at"))
+            unexplained = {
+                label: breach for label, breach in breaches.items()
+                if label not in explained_breaches
+            }
+            if unexplained:
+                _delete_uploaded(storage, org_id, manifest.get("backup_id", ""))
+                detail: dict[str, Any] = {
+                    "previous": prev_node_count,
+                    "now": node_count,
+                    "overall_drop_pct": round(
+                        (1 - node_count / prev_node_count) * 100, 1
+                    ),
+                    "label_breaches": unexplained,
                 }
-            )
-            return {"p0_checked": p0_checked, "status": "data_loss_candidate", "org_id": org_id,
-                    "graph_id": graph_id, "node_count": node_count}
+                if explained_breaches:
+                    # Additive attribution only: part of the drop WAS a stamped
+                    # repair, so the triager does not re-derive it as loss. The
+                    # FIRING set is `label_breaches`, never this field.
+                    detail["label_breaches_explained"] = explained_breaches
+                incidents.append(
+                    {
+                        "kind": KIND_DATA_LOSS_CANDIDATE,
+                        "org_id": org_id,
+                        "graph_id": graph_id,
+                        "detail": detail,
+                    }
+                )
+                return {"p0_checked": p0_checked, "status": "data_loss_candidate", "org_id": org_id,
+                        "graph_id": graph_id, "node_count": node_count}
+            # Every breach is an audited repair's own removal. The archive is
+            # good — do NOT delete it — and FALL THROUGH to the state write so
+            # the baseline ADVANCES. Skipping the write is what makes an
+            # explained drop re-fire forever, deleting each sweep's archive
+            # (#8660); advancing it also means a genuine wipe of the same label
+            # LATER is measured from the repaired count and still fires.
+            logger.warning(
+                "per-label drift on %s/%s is explained by a stamped onboarding "
+                "repair — accepted, baseline advances: %s",
+                org_id, graph_id, explained_breaches)
 
     # ── #2319 geo-mirror (env-guarded second-store copy): an ACCEPTED
     # archive (every guard passed) is copied to the mirror store and
@@ -1038,6 +1155,13 @@ def _backup_graph(
         # only through a create_backup whose ledger was read back verified, so
         # this is evidence, not a restatement of the writer's counters.
         "coverage": manifest.get("coverage"),
+        # #8660: present ONLY when an audited repair explained a per-label drop
+        # on this backup — the archive was accepted anyway and the baseline
+        # advanced. Absent on an ordinary backed-up run, so its presence is the
+        # signal, and an operator reading /status sees a repair was absorbed
+        # rather than a silent count change.
+        **({"label_drift_explained": explained_breaches}
+           if explained_breaches else {}),
     }
 
 
