@@ -394,20 +394,29 @@ mechanics** — pre-filter, batching, thresholds, caching, and fail-closed degra
 not let the model's probability *be* the verdict: the threshold band, the cache identity, and the
 failure paths belong to the caller, and they must be **measured and pinned, not assumed**.
 
-- **In-repo use:** `tools/collision_preflight.py` (#5070) — the claim-ownership `Noul` question
-  ("is this comment a lane taking ownership of the issue's work?"), with the model pinned to
-  `jev-1.13.0` and prompt version `claim-ownership-v1`. CLEAN requires p < 0.50; the band
-  `[0.50, 0.70)` is a HIT, never a silent CLEAN; a `model` field that is not exactly the pin is
-  rejected. No key, no network, or any JEV error/parse failure degrades to the offline verdict and
-  exit code (`COLLISION_PREFLIGHT_JEV=off` forces that path exactly) — a JEV outage can never
-  become a false CLEAN.
-- **The request shape is pinned by the caller and verified against the live endpoint — it is
-  deliberately NOT restated here.** A shape copied out of prose is how the next caller gets a 400
-  that blames its own code; copy the working construction in the caller instead (#7866 is the open
-  finding on that shape).
+- **In-repo use:** ⛔ **none at present, and the previous one is deliberately gone.**
+  `tools/collision_preflight.py` used JEV for the claim-ownership `Noul` question ("is this comment a
+  lane taking ownership of the issue's work?") — model pinned to `jev-1.13.0`, prompt version
+  `claim-ownership-v1`, CLEAN at p < 0.50, the band `[0.50, 0.70)` a HIT. **#8175 deleted that
+  path**, so the claim gate no longer calls JEV, no longer reads comment prose, and has no
+  `COLLISION_PREFLIGHT_JEV*` seam at all: it decides from the **holder** — the fleet board's own
+  mechanical attribution (branch slug / worktree path / the lane's own first user message) plus
+  that lane's own `session.pid_alive` (a live process keeps blocking even when its cmux workspace
+  is gone — `lane_live_map` folds a terminal workspace to dead even then, so the gate reads the pid
+  directly). The reasons are recorded in that module's docstring under "Claim gate —
+  the HOLDER, never prose"; the short version is that a **probability that only the caller can
+  interpret is not a mechanical answer**, and this gate needs one. The capability itself is
+  unchanged and still shared; the extraction journey is its next consumer, and it must
+  **build** the seam — `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §"✅ Jev for
+  classification is cheap — but ⚠️ the seam does **NOT** yet exist" (S2.2/S2.3): wiring it
+  "requires an adapter, a prompt, and a parser … it is work, not a config flag."
+- **When a caller does wire it:** the request shape is pinned by the caller and verified against the
+  live endpoint — it is deliberately NOT restated here. A shape copied out of prose is how the next
+  caller gets a 400 that blames its own code; copy the working construction in the caller instead
+  (#7866 is the open finding on that shape).
 - **Rationale and JEV's decision-only properties:** `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`
-  (§"✅ Jev for classification is cheap, and the seam already exists"; the extraction journey's
-  S2.2/S2.3 consumes the same capability) — not this file.
+  (§"✅ Jev for classification is cheap — but ⚠️ the seam does **NOT** yet exist"; the extraction
+  journey's S2.2/S2.3 is where that seam would be built) — not this file.
 
 ### ⛔ HARD RULE: Confirm the Dispatch Landed — `cmux send` Success Is Not Delivery
 
