@@ -3483,7 +3483,8 @@ def filter_by_traversal_predicate(
         return []
 
 
-def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict]:
+def fallback_tfidf(query: str, points: list[dict], limit: int = 10,
+                   *, force_sparse: bool = False) -> list[dict]:
     """Last-resort TF-IDF fallback when all FalkorDB strategies fail.
 
     points should be dicts with at least 'id', 'content', 'pointKind'.
@@ -3495,6 +3496,12 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict
     dicts from ``self.query`` carry ``search_keys`` when present (additive;
     absent → byte-identical to the pre-R2 path). The returned payload keeps
     the REAL content (the alias text is index-only, never surfaced).
+
+    #2678: ``force_sparse=True`` forwards to ``search_points`` so the caller
+    gets the DETERMINISTIC token-overlap scorer and the ``match_source="tfidf"``
+    label is true even when an embedder is cached. The default (``False``) is
+    the production contract and is UNCHANGED — ``search_points`` resolves the
+    embedder and the #5275 armed refusal is raised while it does.
 
     #5275: under ``TORTOISE_EMBEDDING_MODEL_REQUIRED=1`` this function
     PROPAGATES :class:`~tortoise.exceptions.EmbedderUnavailableError` instead
@@ -3515,7 +3522,8 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict
             {**p, "content": index_text(p.get("content"), p.get("search_keys"))}
             for p in points
         ]
-        results = search_points(query, indexed, threshold=0.0, limit=limit)
+        results = search_points(query, indexed, threshold=0.0, limit=limit,
+                                force_sparse=force_sparse)
         for r in results:
             r["content"] = real_content.get(r["id"], r["content"])
         return [

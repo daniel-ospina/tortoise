@@ -268,3 +268,72 @@ class TestFallbackTfidfSearchKeys:
         hits = fallback_tfidf("gym schedule", points, limit=5)
         assert [h["id"] for h in hits] == ["p1"]
         assert hits[0]["content"] == "gym schedule 5pm"
+
+
+class TestFallbackTfidfForceSparse:
+    """#2678: the named sparse path must not silently become the dense leg.
+
+    ``fallback_tfidf``'s contract and its ``match_source="tfidf"`` label say
+    token-overlap; ``search_points``'s #399 dual mode makes the DEFAULT a
+    semantic cosine whenever an embedder is cached. ``force_sparse=True`` is
+    the explicit seam that keeps the promise (the eval's ``tfidf`` arm uses
+    it), and the eval arm and the oracle's proof then measure one scorer.
+    """
+
+    POINTS = (
+        {"id": "p1", "content": "alpha beta", "pointKind": "statement"},
+        {"id": "p2", "content": "gamma delta", "pointKind": "statement"},
+    )
+
+    @staticmethod
+    def _install_reverse_embedder(monkeypatch):
+        """A cached embedder whose ranking is the OPPOSITE of token overlap.
+
+        The query shares a term with ``p1`` only, so the sklearn TF-IDF leg
+        ranks ``p1`` first. The stub scores ``p2`` (zero lexical overlap)
+        highest, so a dense leg running at all is visible in the ORDER — a
+        discriminator, not a shape check.
+        """
+        import numpy as np
+
+        from tortoise import embeddings
+
+        class _ReverseModel:
+            def encode(self, texts, **kwargs):
+                # texts = [query, p1 content, p2 content]
+                return np.asarray([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]])
+
+        monkeypatch.setattr(embeddings.EmbeddingModel, "get", classmethod(
+            lambda cls, load_timeout=None: _ReverseModel()))
+
+    def test_default_is_dense_when_the_embedder_is_cached(self, monkeypatch):
+        """The UNPINNED path is the #399 dual-mode contract — the bug's
+        precondition, kept honest here so the seam's effect is attributable."""
+        from tortoise.search_engine import fallback_tfidf
+        self._install_reverse_embedder(monkeypatch)
+        hits = fallback_tfidf("alpha", self.POINTS, limit=5)
+        assert [h["id"] for h in hits] == ["p2", "p1"]
+
+    def test_force_sparse_ignores_the_cached_embedder(self, monkeypatch):
+        """A cached embedder must not change a ``force_sparse`` ranking:
+        otherwise ``match_source="tfidf"`` labels a semantic result."""
+        from tortoise.search_engine import fallback_tfidf
+        self._install_reverse_embedder(monkeypatch)
+        hits = fallback_tfidf("alpha", self.POINTS, limit=5, force_sparse=True)
+        assert [h["id"] for h in hits] == ["p1", "p2"]
+        assert all(h["match_source"] == "tfidf" for h in hits)
+
+    def test_force_sparse_does_not_resolve_the_embedder(self, monkeypatch):
+        """Skipped entirely, not resolved-and-ignored: resolving it would
+        load a model (and can raise the #5275 refusal) for a caller that
+        asked for token overlap."""
+        from tortoise import embeddings
+        from tortoise.search_engine import fallback_tfidf
+
+        def _boom(cls, load_timeout=None):
+            raise AssertionError("force_sparse must not resolve the embedder")
+
+        monkeypatch.setattr(embeddings.EmbeddingModel, "get",
+                            classmethod(_boom))
+        hits = fallback_tfidf("alpha", self.POINTS, limit=5, force_sparse=True)
+        assert [h["id"] for h in hits] == ["p1", "p2"]

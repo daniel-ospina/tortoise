@@ -259,15 +259,23 @@ class TestVentureManifest:
         g = RAW_MANIFEST["ontology"]["memory_granularity"]
         assert "Durable" in g and "Ephemeral" in g
 
-    def test_pack_declares_no_fold_or_value_surface(self):
-        """The per-kind status fold is #2729 (generalised by #2792) and the
-        per-kind value-field surface is #2818 (behind #2782). This pack declares
-        neither: inventing one here is how a second, divergent mechanism starts."""
-        forbidden = {"pipeline", "pipelines", "folds", "statusFolds", "statuses",
-                     "values", "valueFields", "domainDetection"}
+    def test_pack_declares_no_value_surface(self):
+        """The per-kind value-field surface is #2818 (behind #2782); this pack
+        declares none: inventing one here is how a second, divergent mechanism
+        starts.
+
+        The FOLD surface is the opposite case now — #2729 landed it, and this
+        pack declares it deliberately. It is pinned POSITIVELY by
+        ``TestStateSupersedeShape`` (the per-kind ``statuses``/``folds`` blocks)
+        rather than forbidden here; only the TOP-LEVEL spellings stay forbidden,
+        because the declaration belongs on each ``kindDef``.
+        """
+        forbidden = {"pipeline", "pipelines", "statusFolds", "statuses",
+                     "folds", "values", "valueFields", "domainDetection"}
         assert not (set(RAW_MANIFEST["ontology"]) & forbidden)
         for kd in RAW_MANIFEST["ontology"]["kindDefs"].values():
-            assert not (set(kd) & forbidden)
+            assert not (set(kd) & {"pipeline", "pipelines", "statusFolds",
+                                   "values", "valueFields", "domainDetection"})
 
 
 # ── 2. Kind coverage vs the domain's thing-types ─────────────────────────
@@ -361,15 +369,29 @@ class TestKindCoverage:
 
 class TestStateSupersedeShape:
     def test_every_object_kind_declares_a_lifecycle(self, venture):
-        # These are PROSE assertions by design: the machine-readable per-kind
-        # lifecycle surface belongs to #2729 (generalised by #2792), so until it
-        # lands the lifecycle is declared in the kindDef description (which is
-        # extractor prompt material) and pinned here. When #2729 lands, move
-        # these to the declared surface and delete the prose coupling.
+        # #2729: the machine-readable per-kind lifecycle surface has landed —
+        # `kindDefs[<kind>].statuses` (the closed status vocabulary) plus, where
+        # the pack owns the driving event, `kindDefs[<kind>].folds` (event kind
+        # → status). The prose "Lifecycle: …" in the description stays as
+        # extractor prompt material and is still asserted, but it is no longer
+        # the only declaration.
         for kind in venture.object_kinds:
+            statuses = venture.kind_defs[kind].get("statuses")
+            assert statuses, f"{kind}: no declared statuses (#2729)"
+            assert all(isinstance(s, str) and s for s in statuses), kind
+            assert len(set(statuses)) == len(statuses), kind
             desc = venture.kind_defs[kind]["description"]
             assert "Lifecycle:" in desc, kind
             assert "→" in desc, kind
+
+    def test_declared_folds_target_declared_statuses_and_events(self, venture):
+        """#2729: every fold is internally consistent and its event exists."""
+        for kind in venture.object_kinds:
+            statuses = set(venture.kind_defs[kind].get("statuses", []))
+            for fold in venture.kind_defs[kind].get("folds", []):
+                assert fold["status"] in statuses, (kind, fold)
+                local = fold["event"].partition(":")[2] or fold["event"]
+                assert local in venture.event_kinds, (kind, fold)
 
     def test_no_event_kind_declares_state(self, venture):
         for kind in venture.event_kinds:

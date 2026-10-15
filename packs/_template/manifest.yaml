@@ -53,7 +53,7 @@ ontology:
   # Map keyed by pack-local kind name. Keys must be declared in one of this
   # pack's *Kinds lists (or be a core kind this pack's chains reference, e.g.
   # `workflow`). All fields optional. Allowed keys: description, synonyms,
-  # examples, nearMisses, extractable, storeAs, enforcement.
+  # examples, nearMisses, extractable, storeAs, enforcement, statuses, folds.
   #   - description:  one line of what the kind IS (this is prompt material)
   #   - synonyms:     normalized aliases — deterministic near-miss catch
   #   - examples:     concrete instance examples for the classifier
@@ -71,15 +71,30 @@ ontology:
   #                   entity; eventKinds → event) — review P2, PR #978
   #   - enforcement:  warn|retry|block — overrides the pack-wide default
   # Example:
-  #   kindDefs:
-  #     concept:
-  #       description: "A reusable idea the domain cares about"
-  #       synonyms: ["notion"]
-  #       examples: ["..."]
-  #       nearMisses: [otherKind]
-  #       extractable: true
-  #       storeAs: entity
-  #       enforcement: retry
+  #     kindDefs:
+  #       concept:
+  #         description: "A reusable idea the domain cares about"
+  #         synonyms: ["notion"]
+  #         examples: ["..."]
+  #         nearMisses: [otherKind]
+  #         extractable: true
+  #         storeAs: entity
+  #         enforcement: retry
+  #         # #2729 per-kind state lifecycle: the kind's closed status
+  #         # vocabulary, plus the event kinds THAT THIS PACK declares which
+  #         # fold the status. Only a kind listed in this pack's
+  #         # `objectKinds` may declare these keys (the fold dispatches on
+  #         # the namespaced kind, and a core/non-Object kind has none).
+  #         # A kind with `statuses` owns its Object state:
+  #         # the built-in connector fold no longer applies to it.
+  #         statuses: [draft, active, retired]
+  #         folds:
+  #           - event: otherKindApproved   # bare or self-ns (`mydomain:...`);
+  #             # must be an event kind THIS pack declares, and one fold per
+  #             # event per kind (a duplicate event is a validation error —
+  #             # `otherKindApproved` and `mydomain:otherKindApproved` are
+  #             # the same event, and case variants too)
+  #             status: active           # must be one of `statuses`
   kindDefs: {}
 
   # ── memory_granularity (epic #1891 #1931) ──────────────────────────────

@@ -1430,6 +1430,17 @@ def _fold_journal(events: list[dict]) -> dict:
 #     The invariant this leg enforces is accept/refuse; the content bound is
 #     named here, in the `apply()` branch's STATED PARITY BOUND comment, and in
 #     the PR body.
+#   * NO event-driven status fold is modelled (#8652). This reference fold
+#     carries the creation default (`live`), the `status`-writing state ops
+#     and `ObjectSuperseded` — not the built-in connector fold
+#     (`github.issue.closed` → `completed`) nor the #2729 pack-declared
+#     per-kind fold (`venture:disbursement` → `released`). `check_consistency`
+#     therefore reports `divergence="content"` for an Object whose `status` an
+#     `EventRecorded` folded, on a faithful journal — the #3311 class. The
+#     shape PRE-EXISTS #2729 (the built-in fold already hit it); #2729 widens
+#     the kinds it can hit. Closing it means teaching this fold the fold
+#     vocabulary AND the ownership rule (a lifecycle-declaring kind suppresses
+#     the built-in connector fold), which is its own change (#8652).
 _ENTITY_PARITY: tuple[tuple[str, str], ...] = tuple(
     (label, _ENTITY_ID_PROP[label])
     for label in ("Object", "Subject", "Event")
