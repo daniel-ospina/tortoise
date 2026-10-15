@@ -3283,6 +3283,30 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
             "'baseline_system_default' is a server-managed baseline-provision "
             "marker and cannot be set via props."
         )
+    # #7936 (review P2): `_stub` is the event-name-stub DISCRIMINATOR the
+    # first-registration probe in `_create_entity` excludes — a marked stub is
+    # NOT a registered node, so a later `create_entity` for the name still
+    # journals its `ObjectRegistered`/`SubjectAdded` (the durability half of
+    # #2194/#2295). Its VALUE therefore decides whether a registration line is
+    # written, which makes it server-managed: the projection is the only writer
+    # (`_event_plain_merge` sets it inside ON CREATE, `_upsert_object` /
+    # `_upsert_subject` clear it inside ON MATCH), and neither path re-enters
+    # this intake. Hard-reject (never strip), matching
+    # `baseline_system_default`/`__runId`: there is no legitimate caller intent,
+    # and a silent drop would let an attempted forgery pass unnoticed.
+    # Measured before this reject: `update_entity(<stub id>, _stub=False)` was
+    # ACCEPTED by `_update_entity`'s direct `SET n += $p`, journaled as an
+    # `EntityMutated` (so the forged value SURVIVED `rebuild_all`), and the
+    # following `create_entity` then SKIPPED the registration — re-opening the
+    # node-loss + live != replay class #7936 closes (live `_stub` cleared by
+    # adoption, replay `_stub=false` + `objectKind='other'`). The MCP boundary
+    # (`_SERVER_MANAGED_PROPS`) refuses it BEFORE the write is attempted; this
+    # is the fail-closed backstop for the direct SDK route.
+    if "_stub" in props:
+        raise ValueError(
+            "'_stub' is a server-managed event-stub discriminator and cannot "
+            "be set via props."
+        )
     # #7951 (review round 5): `credibility` is NOT a generic prop — it is the
     # author's declared WORD, a documented input of `create_point` /
     # `mitigate_operator`, which validate it and run the authored-assertion

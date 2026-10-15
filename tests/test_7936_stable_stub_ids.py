@@ -351,3 +351,113 @@ class TestStubAdoptionDurability:
             assert props.get("objectKind") == "core:task", props
         finally:
             sdk.close()
+
+    def test_stub_adoption_journals_uses_object_registration(
+            self, tmp_path: Path):
+        """The `uses[]` leg of the same probe-gate (#7936 review P3).
+
+        `_event_plain_merge` marks the per-`uses[]` Object stub `_stub=true`
+        exactly like the `object`/`subject` stubs, so a later `create_entity`
+        for a used name must still journal its `ObjectRegistered` and rebuild
+        byte-identically. Without coverage here the `uses[]` mint's
+        discriminator could be dropped unnoticed.
+        """
+        sdk, events = _journal(tmp_path)
+        try:
+            sdk.create_event(
+                "probe event", "test", object="probe-object",
+                uses=[{"name": "probe-use", "kind": "core:tool"}],
+                startedAt="2026-01-01T00:00:00Z")
+            sdk.create_entity("object", "probe-use",
+                              objectKind="core:task", is_episodic=False)
+            regs = _regs(events, "ObjectRegistered", "probe-use")
+            assert len(regs) == 1, (
+                "the canonical-id `uses[]` stub defeated the "
+                "first-registration probe — ObjectRegistered was never "
+                f"journaled, so rebuild drops the node: {regs}")
+            assert regs[0]["id"] == _entity_name_id("Object", "probe-use")
+            live = _node_props(sdk, "Object", "probe-use")
+            _rebuild(sdk, events)
+            rebuilt = _node_props(sdk, "Object", "probe-use")
+            assert rebuilt == live, (
+                f"live != replay after uses[] stub adoption: {live} != "
+                f"{rebuilt}")
+            assert rebuilt.get("objectKind") == "core:task", rebuilt
+        finally:
+            sdk.close()
+
+
+# ── P2 regression: the `_stub` discriminator is not caller-writable ─────────
+#
+# `_stub` gates whether `_create_entity`'s first-registration probe journals a
+# registration, so a caller who can WRITE it can forge the exclusion and
+# silently stop the journaling (node loss on rebuild + live != replay). The
+# write door is `update_entity`'s direct `SET n += $p`; `_sanitize_props`
+# (SDK backstop) and `_SERVER_MANAGED_PROPS` (MCP boundary) both refuse it.
+#
+# These guards are RED before the reject: `update_entity(..., _stub=False)` is
+# accepted, no error is raised, and the following `create_entity` skips the
+# registration.
+
+
+class TestStubDiscriminatorIsNotCallerWritable:
+    """#7936 P2: `_stub` must not be writable through the generic doors."""
+
+    @pytest.mark.parametrize("label,name", (
+        ("Object", "probe-object"),
+        ("Subject", "probe-subject"),
+    ))
+    def test_update_entity_refuses_the_stub_discriminator(
+            self, tmp_path: Path, label: str, name: str):
+        """The direct-write door (`update_entity`) must refuse `_stub`."""
+        sdk, events = _journal(tmp_path)
+        try:
+            sdk.create_event(
+                "probe event", "test", object="probe-object",
+                subject="probe-subject",
+                startedAt="2026-01-01T00:00:00Z")
+            stub_id = _stub_ids(sdk)[(label, name)]
+            with pytest.raises(ValueError, match="_stub"):
+                sdk.update_entity(stub_id, _stub=False)
+            assert "EntityMutated" not in [
+                e.get("type")
+                for e in EventLog(str(events / "events.jsonl")).read_all()
+            ], "a refused `_stub` write still journaled an EntityMutated"
+        finally:
+            sdk.close()
+
+    def test_a_refused_stub_forge_cannot_defeat_the_registration(
+            self, tmp_path: Path):
+        """End-to-end: an attempted forge is refused, `ObjectRegistered` is
+        still journaled, and live == replay."""
+        sdk, events = _journal(tmp_path)
+        try:
+            sdk.create_event(
+                "probe event", "test", object="probe-object",
+                startedAt="2026-01-01T00:00:00Z")
+            stub_id = _stub_ids(sdk)[("Object", "probe-object")]
+            with pytest.raises(ValueError, match="_stub"):
+                sdk.update_entity(stub_id, _stub=False)
+            sdk.create_entity("object", "probe-object",
+                              objectKind="core:task", is_episodic=False)
+            regs = _regs(events, "ObjectRegistered", "probe-object")
+            assert len(regs) == 1, (
+                "an attempted `_stub` forge silenced the first-registration "
+                f"probe: {regs}")
+            live = _node_props(sdk, "Object", "probe-object")
+            _rebuild(sdk, events)
+            rebuilt = _node_props(sdk, "Object", "probe-object")
+            assert rebuilt == live, (
+                f"live != replay after a refused forge: {live} != {rebuilt}")
+            assert rebuilt.get("objectKind") == "core:task", rebuilt
+        finally:
+            sdk.close()
+
+    def test_the_mcp_boundary_refuses_the_stub_discriminator(self):
+        """The boundary entry refuses `_stub` in FRONT of the write attempt,
+        and does not refuse an ordinary caller prop."""
+        from tortoise.mcp_server import _reject_server_managed_props
+
+        msg = _reject_server_managed_props({"_stub": False})
+        assert msg is not None and "_stub" in msg, msg
+        assert _reject_server_managed_props({"objectKind": "core:task"}) is None
