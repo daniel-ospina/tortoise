@@ -9,8 +9,11 @@ the truth of what is covered without over-claiming (three separate over-claims
 were already caught on this workstream; the issue carries two commits whose
 whole content is that correction).
 
-The surfaces, and why re-issuing each is safe (idempotent — verified below, not
-assumed):
+The surfaces, and why re-issuing each is safe (idempotency is REASONED from each
+statement's shape — a MERGE on an explicit key, an absolute ``SET``, an
+``eventId IS NULL`` guard, or a DELETE by an explicit id list — and the retry
+tests below pin that each aborted statement is re-issued; they do not measure
+idempotency):
 
 1. ``_write_session_and_turns`` — the ``:Session`` MERGE (``MERGE (s:Session
    {id:$sid}) SET s.…=coalesce(s.…, …)``). Re-running it re-MERGEs the same node
@@ -311,7 +314,10 @@ def test_post_commit_retries_a_transport_connection_error(monkeypatch):
     calls: list[dict] = []
 
     def fake_post(url, headers=None, json=None, timeout=None):
-        calls.append(json)
+        # Snapshot the payload INDEPENDENTLY: appending the same dict object
+        # twice would make the comparison below reduce to ``x == x`` and miss
+        # a payload mutated between attempts.
+        calls.append(dict(json))
         if len(calls) == 1:
             raise requests.exceptions.ConnectionError("connection reset")
         return _FakeResponse({"ok": True, "committed": True})
@@ -429,6 +435,17 @@ def _default_capture_payload():
           "direction": "unidirectional"}])
 
 
+def _label_stamp_state(sdk, session_id: str) -> tuple:
+    """The stamp state a capture left on its operators — the control
+    projection ``(stamped, eventIds, harnesses, statuses)``."""
+    rows = sdk._get_proj().g.query(
+        "MATCH (o:Point {is_operator:true}) WHERE o.source_session=$sid "
+        "RETURN count(o), count(distinct o.eventId), "
+        "collect(distinct o.source_harness), collect(distinct o.status)",
+        params={"sid": session_id}).result_set
+    return tuple(rows[0]) if rows else (0, 0, [], [])
+
+
 def _capture_with_abort(sdk, needle: str, *, session_id: str, present=True):
     """Run the REAL capture with one matching statement aborting once."""
     proj = sdk._get_proj()
@@ -476,11 +493,26 @@ def test_a_rebuild_abort_on_the_operator_label_provenance_stamp_is_retried(
             sdk, _LABEL_STAMP_NEEDLE, session_id="7405-label")
         assert result.get("ok") is True, result
         assert proxy.matching >= 2, "the aborted label stamp was never re-issued"
-        # The loop issues this statement once per epistemic label, so "applied"
-        # is legitimately > 1 here; the invariant is that the ONE aborted issue
-        # was re-issued and applied, and nothing else was lost.
-        assert proxy.applied == proxy.matching - 1, (
-            "the aborted label statement was not re-issued to application")
+        # The loop issues one statement per epistemic label, so the proxy's own
+        # ``applied == matching - 1`` arithmetic is a tautology of its default
+        # ``aborts=1`` — it holds even when nothing is re-issued. Prove the
+        # retry against the GRAPH instead: the aborted run must converge to the
+        # SAME stamp state as a no-abort control run.
+        control = _sdk(tmp_path, "labelstamp-control")
+        try:
+            control_result = control.capture_session(
+                _CONV, session_id="7405-label-ctl")
+            assert control_result.get("ok") is True, control_result
+            aborted_state = _label_stamp_state(sdk, "7405-label")
+            control_state = _label_stamp_state(control, "7405-label-ctl")
+            assert aborted_state == control_state, (
+                "the aborted label stamp did not converge to the no-abort "
+                f"state: {aborted_state} != {control_state}")
+            assert aborted_state[0] >= 1, (
+                "the stamp must land on at least one operator")
+        finally:
+            with contextlib.suppress(Exception):
+                control.close()
     finally:
         with contextlib.suppress(Exception):
             sdk.close()

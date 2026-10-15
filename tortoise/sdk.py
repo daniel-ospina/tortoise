@@ -30095,7 +30095,10 @@ def _post_commit(payload: dict, *, base_url=None, api_key=None) -> dict:
     keeping the reported failure class unchanged. Budget: ``retries=3`` (4
     attempts worst case) — a refused connection fails fast, a full 120 s
     response timeout is the slow case, and the bound stays FINITE so a dead
-    endpoint still surfaces rather than hanging forever.
+    endpoint still surfaces rather than hanging forever. Against a
+    reachable-but-unresponsive endpoint the AGGREGATE worst case is ≈494 s
+    (~8.2 min) — 4 × 120 s plus 7–14 s of jittered backoff (``base=2.0``,
+    ``cap=8.0``) — versus the ~120 s single attempt before this wiring.
     """
     import os  # noqa: I001 — `requests` is imported mid-block, same as before
     from tortoise.capture_consent import capture_declined_reason

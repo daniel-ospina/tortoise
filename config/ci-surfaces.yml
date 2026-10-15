@@ -2434,10 +2434,9 @@ surfaces:
   # #7405 (audit G8): DUAL-REGISTERED with `sdk` (whose SOURCE_PATTERNS own
   # `tortoise/sdk.py`). `tortoise/retry.py` matches no SOURCE_PATTERNS, so a
   # retry.py-only change falls through to the `core` fallback — and this file
-  # pins the RETRY WIRING plus `retry.py`'s own "PARTIALLY WIRED" coverage
-  # claim, so that change must run it or an edited coverage claim could ship
-  # unverified. (The `core` registration is load-bearing, not redundant with
-  # the `sdk` one: without it a retry.py-only diff runs neither.)
+  # pins the RETRY WIRING, so that change must run it. (The `core`
+  # registration is load-bearing, not redundant with the `sdk` one: without it
+  # a retry.py-only diff runs neither.)
   - test_7405_remaining_writes.py
   - test_retrieval_determinism_2952.py  # #2952: ranking determinism w.r.t. elapsed wall-clock (hermetic, no DB)
   - test_3844_annotation_injection.py  # #3844: reader-evidence annotation prefix cannot be forged by a newline in speaker/session_date OR the validity marker (hermetic, no DB)
