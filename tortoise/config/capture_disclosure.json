@@ -45,13 +45,16 @@
     "destination_self_hosted": "your own Tortoise store at {api_host}",
     "state_on": "Session recording for {harness} is ON and the recorder is installed.",
     "state_off": "The recorder for {harness} is installed, but this organization's recording setting is OFF — nothing is filed until you turn it back on at {off_switch}.",
-    "state_unknown": "The recorder for {harness} is installed. Recording is ON by default; I could not read this organization's live setting."
+    "state_unknown": "The recorder for {harness} is installed. Recording is ON by default; I could not read this organization's live setting.",
+    "decline_state_on": "This organization's recording setting is ON, so sessions are still being recorded — the preference could not be applied. Turn it off at {off_switch}.",
+    "decline_state_off": "Nothing will be recorded: this organization's recording setting is OFF. It stays visible at {off_switch} — turn it on there whenever you want it.",
+    "decline_state_unknown": "I could not read this organization's live setting, so I cannot say whether sessions will be recorded; recording is ON by default. Check it at {off_switch}."
   },
 
   "templates": {
     "install_disclosure": "{state}\n  - What is recorded: {recorded}.\n  - Also sent at the start of each session: {beacon}.\n  - Where it goes: {destination}.\n  - Turn it off: {off_switch} — {off_switch_effect}.\n  - See or delete what was captured: {view_delete}.",
     "installed_confirmation": "Done — {harness} now records sessions into {destination}. You can turn it off again at {off_switch} ({off_switch_effect}).",
-    "declined_confirmation": "Nothing was installed and nothing will be recorded. The recording setting stays visible at {off_switch}, currently OFF — turn it on there whenever you want it.",
+    "declined_confirmation": "Nothing was installed by this step. {decline_state}",
     "first_capture_line": "Heads up: I'll remember this session so you can recall it later. View/delete in {view_delete}."
   }
 }
