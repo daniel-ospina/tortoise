@@ -204,6 +204,49 @@ def _baseline_create_params(baseline: tuple[float, float, str]) -> dict:
     """CREATE params for a resolved (#2199) baseline: (alpha, beta, source)."""
     return {"ba": baseline[0], "bb": baseline[1], "bsrc": baseline[2]}
 
+
+def _journal_snapshot_from_create_map(
+        create_map: dict[str, str], create_params: dict) -> dict:
+    """The journal `point` payload for a fresh Point, built from the WRITE INTENT.
+
+    #7951 §17.1 (docs/architecture/STORAGE-ARCHITECTURE.md) requires the record
+    (truth) to be appended BEFORE the cache write, so `create_point` can no
+    longer journal the post-`CREATE` `get_point` read-back: the read-back does
+    not exist until the cache has already been written. This builds the same
+    property map from `_create_map` (key -> Cypher expression) and
+    `_create_params` (the values) — i.e. exactly the properties the `CREATE`
+    writes — so the record is complete without touching the cache.
+
+    The evaluation is DELIBERATELY closed: a `_create_map` expression form this
+    function does not know raises rather than guessing. A future expression
+    form therefore fails the write loudly instead of silently mis-journaling a
+    record that a replay would then materialise as a different node.
+
+    The only coercion applied is the two Cypher boolean literals. Everything
+    else is the param verbatim: `vecf32($embedding)` is journalled RAW, exactly
+    as the record's `embedding` has always been (the replay re-narrows it,
+    `projection/entities.py::_upsert_point_props`), and `embedding_verbatim`
+    already tells the replay which of the two forms was written.
+    """
+    out: dict = {}
+    for key, expr in create_map.items():
+        if expr == "true":
+            out[key] = True
+        elif expr == "false":
+            out[key] = False
+        elif expr.startswith("$"):
+            out[key] = create_params[expr[1:]]
+        elif expr.startswith("vecf32($") and expr.endswith(")"):
+            out[key] = create_params[expr[len("vecf32($"):-1]]
+        else:
+            raise ValueError(
+                "#7951: `_create_map` carries an expression form the journal "
+                f"snapshot builder does not know: {key!r} -> {expr!r}. A new "
+                "form must be taught here (and its replay clause checked) "
+                "before create_point can journal a complete record."
+            )
+    return out
+
 # baseline_source token family (issue #2199 direction, 2026-09-03):
 #   set-by-author         — belief stated directly by whoever filed the point
 #                           (human OR agent; the species is already tracked in
@@ -2671,11 +2714,14 @@ _GRAPH_EVENT_TYPES = frozenset({
 #
 #   2. POST-APPLY-SNAPSHOT PAYLOAD (the one real apply-first). When the record
 #      cannot be constructed until the fold has produced it, there is no
-#      pre-fold record to append. The dominant case is `create_point`, whose
-#      `PointAdded` payload IS `get_point(pid)` — the applied node. Such a site
-#      applies first and inherits window (a); the window closes only at §17.1's
-#      one atomic write. A site that CAN form its record before the fold MUST
-#      NOT take this exception.
+#      pre-fold record to append. Such a site applies first and inherits
+#      window (a); the window closes only at §17.1's one atomic write. A site
+#      that CAN form its record before the fold MUST NOT take this exception.
+#      #7951: `create_point` NO LONGER takes it — its `PointAdded` payload is
+#      now built from the write intent (`_create_map`, the properties the
+#      CREATE writes) and appended BEFORE the CREATE. No production site
+#      currently relies on this exception; it is retained for the shape it
+#      names, not as a licence.
 #
 # KNOWN DEVIATIONS in this tree (recorded, not concealed):
 # `TortoiseSDK._create_entity`'s Object/Subject/Event registration blocks are
@@ -2683,8 +2729,9 @@ _GRAPH_EVENT_TYPES = frozenset({
 # so they qualify for neither exception; they also fold regardless of a FAILED
 # append (`_emit_event` is best-effort). They are left as-is in this increment
 # because reordering them rides the #2194/#2295/#2309 first-registration
-# hardening and its pinned tests; `create_point`'s payload is genuinely
-# post-apply (exception 2). The `DocumentCreated` arm (#2296) DOES append
+# hardening and its pinned tests. (`create_point` was the other named
+# deviation; #7951 moved it to the outbox ordering — append first, cache
+# second — so it no longer appears here.) The `DocumentCreated` arm (#2296) DOES append
 # first (its record is a plain id-keyed entity create, and its append is
 # replay-healable)
 # but shares the fail-soft half: one funnel applies once for every arm, and
@@ -6646,55 +6693,85 @@ class TortoiseSDK:
         _create_fields = "".join(
             f", `{str(_k).replace('`', '``')}`: {_v}"
             for _k, _v in _create_map.items())
-        self._graph_write_with_retry(
-            lambda: proj.g.query(
-                "CREATE (n:Point {" + _create_fields.lstrip(", ") + "})",
-                params=_create_params,
-            ),
-            what="create_point CREATE(:Point)",
-        )
-        # No post-CREATE re-resolve: the `falkordb` Graph is STATELESS (it
-        # re-issues `GRAPH.QUERY <name>` per call), so a replaced-graph abort is
-        # a per-query race and `proj` is as valid after a retry as before it
-        # (#7405 review P1-2). `_sync_tags` / `_link_source` below reuse it.
-        # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
-        #
-        # #7209: the follow-up writes of a fresh create ride the SAME bounded
-        # retry as the CREATE above. Before this they were bare `proj.g.query`
-        # calls, so a rebuild's per-query abort landing here aborted the write
-        # AFTER the Point had already landed — leaving a half-materialized
-        # point (no TAGGED / no extractedFrom edges), which is a finding that
-        # provenance and tag reads cannot reach: the same "the map loses a
-        # finding" outcome by a narrower route. Every statement in these two
-        # helpers is a MERGE (plus a read-guarded canonicalUrl adopt, itself a
-        # documented no-op on re-run), so re-issuing one after an engine ABORT
-        # cannot duplicate anything — the abort means the statement did not
-        # land, exactly the contract `retryable_aborted_write` is built on.
-        tags = props.get("tags") or []
-        if isinstance(tags, (list, tuple)):
+        # ── #7951 §17.1 — THE OUTBOX ORDERING (docs/architecture/STORAGE-ARCHITECTURE.md) ──
+        # THE APPEND IS THE COMMIT POINT. The `PointAdded` record is built from
+        # the SAME `_create_map`/`_create_params` the CREATE below writes and is
+        # appended BEFORE any cache write, so the DERIVED store can never lead
+        # the TRUTH. This is the outbox form of §17.1's mechanism (1): the
+        # journal append is the transaction, and the cache write that follows
+        # materialises exactly the record's own properties. The old post-CREATE
+        # `get_point` read-back could not be journalled first — it does not
+        # exist until the cache has already been written, which is how
+        # `create_point` came to be the recorded apply-first deviation.
+        # If the append fails the cache is NOT written (`_journal_write_failures`
+        # delta, the `_doc_write` template): the record could not be committed,
+        # so the derived store must not be written. ⚠️ `_emit_event` writes the
+        # `:GraphEvent` store BEFORE the JSONL append, so this arm leaves a
+        # `:GraphEvent` for a Point that was never written — a DECLARED residual
+        # (plan §6.7), not a committed rebuild record: the JSONL journal (the
+        # rebuild source) holds nothing.
+        _intended = _journal_snapshot_from_create_map(_create_map, _create_params)
+        _failures_before = self._journal_write_failures
+        self._emit_event("PointAdded", {"id": pid, "kind": kind, "content_hash": ch},
+                         point=_intended)
+        if self._journal_write_failures > _failures_before:
+            from .exceptions import WriteNotLandedError
+            raise WriteNotLandedError(pid, getattr(proj, "graph_name", None))
+        # #7951 §17.1: the cache write runs inside the live-write scope — the
+        # door declares itself to the guard, and every statement below runs
+        # strictly AFTER the append above. (The scope is documentary on the
+        # raw handle: the §17.1 guard covers `FalkorProjection.apply`/`.query`,
+        # and the raw handle's remaining sites are the recorded residual.)
+        with _live_write_scope("create_point"):
             self._graph_write_with_retry(
-                lambda: self._sync_tags(proj, pid, tags),
-                what="create_point TAGGED edges",
+                lambda: proj.g.query(
+                    "CREATE (n:Point {" + _create_fields.lstrip(", ") + "})",
+                    params=_create_params,
+                ),
+                what="create_point CREATE(:Point)",
             )
-        # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
-        if props.get("extractedFrom"):
-            self._graph_write_with_retry(
-                lambda: proj._link_source(pid, props["extractedFrom"],
-                                          source_versions=_source_versions),
-                what="create_point extractedFrom edges",
-            )
-            # Inheritance gate dirty-mark: a freshly-sourced point is always
-            # inherit-eligible on the next EP run (no interval wait, #398).
-            # #2952: a born point carries no `inherited_at` stamp, so the
-            # `REMOVE n.inherited_at` the generic helper
-            # (`_invalidate_inheritance_gate`) issues is a no-op on the final
-            # state — and a no-op write on the node still costs a fulltext
-            # re-add. The `extractedFrom` invalidation therefore happens in
-            # the PROPS (see the up-front pop of `inherited_at` above): a
-            # caller-supplied stamp is dropped BEFORE the CREATE map is built
-            # instead of being written and then taken back out, so this path
-            # is ONE graph write too. The EP dirty-marking half is issued once
-            # below.
+            # No post-CREATE re-resolve: the `falkordb` Graph is STATELESS (it
+            # re-issues `GRAPH.QUERY <name>` per call), so a replaced-graph abort is
+            # a per-query race and `proj` is as valid after a retry as before it
+            # (#7405 review P1-2). `_sync_tags` / `_link_source` below reuse it.
+            # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
+            #
+            # #7209: the follow-up writes of a fresh create ride the SAME bounded
+            # retry as the CREATE above. Before this they were bare `proj.g.query`
+            # calls, so a rebuild's per-query abort landing here aborted the write
+            # AFTER the Point had already landed — leaving a half-materialized
+            # point (no TAGGED / no extractedFrom edges), which is a finding that
+            # provenance and tag reads cannot reach: the same "the map loses a
+            # finding" outcome by a narrower route. Every statement in these two
+            # helpers is a MERGE (plus a read-guarded canonicalUrl adopt, itself a
+            # documented no-op on re-run), so re-issuing one after an engine ABORT
+            # cannot duplicate anything — the abort means the statement did not
+            # land, exactly the contract `retryable_aborted_write` is built on.
+            tags = props.get("tags") or []
+            if isinstance(tags, (list, tuple)):
+                self._graph_write_with_retry(
+                    lambda: self._sync_tags(proj, pid, tags),
+                    what="create_point TAGGED edges",
+                )
+            # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
+            if props.get("extractedFrom"):
+                self._graph_write_with_retry(
+                    lambda: proj._link_source(pid, props["extractedFrom"],
+                                              source_versions=_source_versions),
+                    what="create_point extractedFrom edges",
+                )
+                # Inheritance gate dirty-mark: a freshly-sourced point is always
+                # inherit-eligible on the next EP run (no interval wait, #398).
+                # #2952: a born point carries no `inherited_at` stamp, so the
+                # `REMOVE n.inherited_at` the generic helper
+                # (`_invalidate_inheritance_gate`) issues is a no-op on the final
+                # state — and a no-op write on the node still costs a fulltext
+                # re-add. The `extractedFrom` invalidation therefore happens in
+                # the PROPS (see the up-front pop of `inherited_at` above): a
+                # caller-supplied stamp is dropped BEFORE the CREATE map is built
+                # instead of being written and then taken back out, so this path
+                # is ONE graph write too. The EP dirty-marking half is issued once
+                # below.
 
         # Apply the starting belief (only on new creation, not dedup).
         #
@@ -6755,15 +6832,18 @@ class TortoiseSDK:
         # documents but cannot: a state-gated re-issue applied into a rebuilt
         # graph that the rebuild's own replay then replaces again (#7685's
         # escalation line — closing it fully needs an engine identity token).
-        # Raising here also stops the `PointAdded` below from journaling a
-        # point the graph does not hold, so a rebuild cannot resurrect a
-        # journal record that never had a node behind it.
+        # #7951: the record was ALREADY appended ABOVE (the commit point),
+        # before the cache write — see the outbox block at the CREATE. The
+        # read-back below is the write-landed PROOF only; it is no longer the
+        # journal payload. A read-back miss AFTER a committed append means the
+        # TRUTH holds a record the cache has not materialised — a replay heals
+        # it (the ordering contract's replay-healable window) — so this raise
+        # must NEVER be read as "the write is gone": the record stands.
         _snapshot = self.get_point(pid)
         if not _snapshot:
             from .exceptions import WriteNotLandedError
-            raise WriteNotLandedError(pid, getattr(proj, "graph_name", None))
-        self._emit_event("PointAdded", {"id": pid, "kind": kind, "content_hash": ch},
-                         point=_snapshot)
+            raise WriteNotLandedError(pid, getattr(proj, "graph_name", None),
+                                      record_committed=True)
         if _source_change_notices:
             # #5516: the notice is TRANSIENT — it rides the write result the
             # writer sees, on a COPY, so the journaled snapshot above and every

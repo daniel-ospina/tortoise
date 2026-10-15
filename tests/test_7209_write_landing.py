@@ -141,19 +141,30 @@ def test_create_point_raises_when_its_own_write_is_not_readable(tmp_path):
         assert ei.value.graph == proj.graph_name
         assert ei.value.point_id and ei.value.point_id in msg
         assert proj.graph_name in msg
-        assert "did not land" in msg
+        # #7951: the append happens BEFORE the read-back, so a read-back miss
+        # means the TRUTH holds the record and the cache merely lags.
+        assert "did not materialise" in msg
+        assert ei.value.record_committed is True, (
+            "a read-back miss after the outbox append must report the record as "
+            "COMMITTED — the write is replay-healable, not lost")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
 
 
-def test_create_point_journals_no_point_that_is_not_there(tmp_path):
-    """The guard fires BEFORE the journal write — no ``PointAdded`` for a ghost.
+def test_create_point_journals_the_record_before_a_cache_readback_miss(tmp_path):
+    """#7951 — the record is the COMMIT POINT: a read-back miss does NOT un-journal it.
 
-    A ``PointAdded`` recorded for a Point the graph does not hold is a journal
-    record with no node behind it: a rebuild would "restore" a Point that never
-    existed, and `derived == replay(journal)` would be false in the other
-    direction. The guard sits before ``_emit_event`` so this cannot happen.
+    Since the §17.1 outbox ordering, ``create_point`` appends its ``PointAdded``
+    record BEFORE the cache write. A read-back miss after that append means the
+    TRUTH holds the record and the cache merely has not materialised it — the
+    replay-healable window — so the record MUST be there and the error MUST say
+    so (``record_committed=True``).
+
+    Before #7951 the guard sat BEFORE ``_emit_event``, so a phantom ``PointAdded``
+    could never be recorded; that behaviour is now the OTHER arm
+    (``record_committed=False`` — the append itself failed), pinned in
+    ``tests/test_7951_create_point_outbox.py``.
     """
     sdk = _sdk(tmp_path, "nojournal")
     try:
@@ -167,12 +178,15 @@ def test_create_point_journals_no_point_that_is_not_there(tmp_path):
         sdk._emit_event = _spy
         sdk.get_point = lambda _id: {}
 
-        with pytest.raises(WriteNotLandedError):
+        with pytest.raises(WriteNotLandedError) as ei:
             sdk.create_point("observation", "another finding that never landed")
 
-        assert "PointAdded" not in emitted, (
-            "a PointAdded event was journaled for a Point the graph does not "
-            "hold — the guard must sit before the journal write (#7209)")
+        assert "PointAdded" in emitted, (
+            "the outbox ordering appends the record BEFORE the cache write, so "
+            "the record must be emitted even when the read-back misses (#7951)")
+        assert ei.value.record_committed is True, (
+            "the record was appended before the read-back, so the error must "
+            "report it as committed — a replay heals the cache (#7951)")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
