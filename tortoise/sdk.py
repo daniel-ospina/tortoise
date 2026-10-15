@@ -9971,7 +9971,17 @@ class TortoiseSDK:
         # `(n)<-[:IMPL|NAND]-(op)-[:IMPL|NAND]->(m)` from them, so
         # `_affected_factors` still re-derives the operator's factor.
         neighbor_ids = [cid for cid in neighbor_claims if cid != id]
-        proj.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": id})
+        # #7405: the hard delete rides the bounded write retry. A DETACH DELETE
+        # by an explicit id is idempotent — a re-issue after a non-landing ABORT
+        # re-deletes a node that is (at worst) already gone, a no-op. The abort
+        # MUST be proved not-landed, which is exactly what
+        # `retryable_aborted_write` admits (a bare DELETE never rides
+        # `retryable_transient`).
+        self._graph_write_with_retry(
+            lambda: proj.g.query(
+                "MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": id}),
+            what="delete_point DETACH DELETE",
+        )
         # #3300 residual: ONE event type must not mean two end-states.
         # `delete_point` hard-deletes; `retract_point` tombstones. The single
         # `PointRetracted` (id=) call emitted BOTH stores, and its fold has
@@ -9992,7 +10002,15 @@ class TortoiseSDK:
         # Idempotent — DETACH DELETE leaves count-0 tags behind that would
         # otherwise accumulate in list_tags.
         if has_tag_edges:
-            proj.g.query("MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t")
+            # #7405: the orphan-tag GC is swept through the same retry. The
+            # statement re-derives "orphan" from the graph at issue time and a
+            # DELETE of an already-deleted tag is a no-op, so a re-issue after
+            # a non-landing ABORT cannot double-delete or remove a live tag.
+            self._graph_write_with_retry(
+                lambda: proj.g.query(
+                    "MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t"),
+                what="delete_point orphan tag GC",
+            )
         # Dreaming (#85): deletion changes the graph structure around
         # neighbors — mark the pre-captured neighbors dirty (#1916) so the
         # reverse-BFS has surviving edges to traverse (the deleted point's
@@ -11063,11 +11081,19 @@ class TortoiseSDK:
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         # CAS-guarded SET (concurrent promote can't double-fire); reviewed is
         # the DERIVED reviewer flag (plan §3 — no new stored status).
-        r = proj.g.query(
-            "MATCH (n:Point {id:$id}) WHERE n.status = 'draft' "
-            "SET n.status = 'live', n.reviewed = true, n.promotedAt = $now, "
-            "n.updatedAt = $now RETURN n.id",
-            params={"id": point_id, "now": now},
+        # #7405: the CAS promotion rides the bounded write retry. The abort is
+        # a non-landing abort, so a re-issue re-evaluates the SAME
+        # `WHERE n.status = 'draft'` predicate against unchanged state and lands
+        # exactly once; if a concurrent promote won the CAS instead, the empty
+        # result set is the already-existing "raced" branch below, unchanged.
+        r = self._graph_write_with_retry(
+            lambda: proj.g.query(
+                "MATCH (n:Point {id:$id}) WHERE n.status = 'draft' "
+                "SET n.status = 'live', n.reviewed = true, n.promotedAt = $now, "
+                "n.updatedAt = $now RETURN n.id",
+                params={"id": point_id, "now": now},
+            ),
+            what="promote_point CAS SET",
         )
         if not r.result_set:
             # Raced with a concurrent promote — re-read and report the outcome.
@@ -12036,9 +12062,18 @@ class TortoiseSDK:
         extra_props.append("status:$st")
         params["st"] = "live" if promote_source else "draft"
         props_clause = ", " + ", ".join(extra_props) if extra_props else ""
-        proj.g.query(
-            f"CREATE (o:Point {{id:$id, is_operator:true, op_type:$op, direction:$direction{props_clause}}})",
-            params=params,
+        # #7405: a bare CREATE is admissible ONLY on `retryable_aborted_write`,
+        # whose arms BOTH prove the statement did not land (a write-slot refusal
+        # raised before the slot is claimed, or a graph-abort). `pid` is minted
+        # once above the loop, so every re-issue names the same node and a
+        # non-landing abort cannot mint a second operator. It must NEVER ride
+        # `retryable_transient` — a lost reply is not a lost write.
+        self._graph_write_with_retry(
+            lambda: proj.g.query(
+                f"CREATE (o:Point {{id:$id, is_operator:true, op_type:$op, direction:$direction{props_clause}}})",
+                params=params,
+            ),
+            what="create_operator CREATE(:Point)",
         )
         # Ontology v2.1: map part/whole ops to hasPart.
         # A1b (#1272): operator endpoints may be Point OR Event nodes.
@@ -12051,12 +12086,19 @@ class TortoiseSDK:
         # carry identical INPUT edges (fold-parity).
         edge_type = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
         for i, inp_id in enumerate(inputs):
-            proj.g.query(
-                f"MATCH (o:Point {{id:$oid}}), (s) "
-                f"WHERE {epistemic_disjunction('s')} AND s.id = $sid "
-                f"CREATE (o)-[:{edge_type} {{idx:$i}}]->(s) "
-                f"CREATE (s)-[:INPUT {{idx:$i}}]->(o)",
-                params={"oid": pid, "sid": inp_id, "i": i},
+            # #7405: the typed edge and its INPUT mirror are created by ONE
+            # statement; the abort means NEITHER landed, and the endpoints/idx
+            # are fixed parameters, so a re-issue cannot double an edge. Bare
+            # CREATE ⇒ `retryable_aborted_write` only.
+            self._graph_write_with_retry(
+                lambda i=i, inp_id=inp_id: proj.g.query(
+                    f"MATCH (o:Point {{id:$oid}}), (s) "
+                    f"WHERE {epistemic_disjunction('s')} AND s.id = $sid "
+                    f"CREATE (o)-[:{edge_type} {{idx:$i}}]->(s) "
+                    f"CREATE (s)-[:INPUT {{idx:$i}}]->(o)",
+                    params={"oid": pid, "sid": inp_id, "i": i},
+                ),
+                what="create_operator operator edges",
             )
         # #1088: the guarded SET below fills in only a NEVER-SET status with
         # the live default — an explicitly-drafted source is never moved to
@@ -12070,11 +12112,17 @@ class TortoiseSDK:
             # #1088: only a never-set status is filled in with the live
             # default; an explicitly-drafted source is never moved to live
             # by this command.
-            proj.g.query(
-                "MATCH (s:Point {id:$sid}) "
-                "WHERE s.status IS NULL "
-                "SET s.status = 'live'",
-                params={"sid": source_id},
+            # #7405: an absolute SET guarded by the statement's own
+            # `s.status IS NULL` read — a re-issue after a non-landing ABORT
+            # fills in the same never-set status and cannot move a draft.
+            self._graph_write_with_retry(
+                lambda: proj.g.query(
+                    "MATCH (s:Point {id:$sid}) "
+                    "WHERE s.status IS NULL "
+                    "SET s.status = 'live'",
+                    params={"sid": source_id},
+                ),
+                what="create_operator source promote SET",
             )
         # Dreaming (#85): new edges change propagation — mark all inputs dirty.
         self._mark_dirty(inputs)
@@ -12365,16 +12413,28 @@ class TortoiseSDK:
         # guarded. EP weights read this value, so an inexact Decimal here
         # silently corrupts the operator weight. Guard before the write.
         _reject_unrepresentable_number("strength", strength)
-        proj.g.query(
-            "CREATE (m:Point {id:$id, content:$c, pointKind:'statement', "
-            "mitigation_strength:$s, is_operator:false, createdAt:$now, updatedAt:$now})",
-            params={"id": mid, "c": f"[MITIGATION] {reason}", "s": strength, "now": now},
+        # #7405: `mid` is minted once above, every property is a fixed
+        # parameter, and the abort means the statement did not land — so a
+        # re-issue cannot mint a second mitigation Point. Bare CREATE ⇒
+        # `retryable_aborted_write` only.
+        self._graph_write_with_retry(
+            lambda: proj.g.query(
+                "CREATE (m:Point {id:$id, content:$c, pointKind:'statement', "
+                "mitigation_strength:$s, is_operator:false, createdAt:$now, updatedAt:$now})",
+                params={"id": mid, "c": f"[MITIGATION] {reason}", "s": strength, "now": now},
+            ),
+            what="mitigate_operator CREATE(:Point)",
         )
         # Bidirectional link: mitigation Point -[:IMPL]-> operator, operator <-[:mitigated_by]- mitigation
-        proj.g.query(
-            "MATCH (m:Point {id:$mid}), (op:Point {id:$oid}) "
-            "CREATE (m)-[:IMPL]->(op), (op)-[:mitigated_by]->(m)",
-            params={"mid": mid, "oid": id},
+        # #7405: one statement, two fixed endpoints, abort ⇒ neither edge
+        # landed, so a re-issue cannot double the pair.
+        self._graph_write_with_retry(
+            lambda: proj.g.query(
+                "MATCH (m:Point {id:$mid}), (op:Point {id:$oid}) "
+                "CREATE (m)-[:IMPL]->(op), (op)-[:mitigated_by]->(m)",
+                params={"mid": mid, "oid": id},
+            ),
+            what="mitigate_operator mitigation edges",
         )
         # #2199: mitigation reasons are human-authored judgment — give the
         # fresh live point its explicit, provenance-recorded starting belief
@@ -16965,19 +17025,28 @@ class TortoiseSDK:
         # exclusion is atomic with the marking.
         persisted: set[str] = set()
         if dirty_ids and not set(dirty_ids) <= _stamped:
-            persisted_rows = proj.g.query(
-                "UNWIND $ids AS pid "
-                "MATCH (n:Point {id: pid}) "
-                "WHERE NOT coalesce(n.status, 'live') IN $terminal "
-                "AND coalesce(n.outdated, false) = false "
-                "AND NOT pid IN $stamped "
-                "SET n.ep_dirty = true, n.ep_dirty_at = $ep "
-                "RETURN pid",
-                params={"ids": dirty_ids,
-                        "terminal": sorted(TERMINAL_EXCLUDED_STATUSES),
-                        "ep": ep_version,
-                        "stamped": sorted(_stamped)},
-            ).result_set
+            # #7405: the dirty-persist SET rides the bounded write retry. It is
+            # an ABSOLUTE SET (fixed literal values) under a WHERE the statement
+            # itself re-reads at write time, so re-issuing it after an engine
+            # ABORT — which means the statement did not land — converges on the
+            # same marking and cannot duplicate; the state-independent and
+            # graph-abort arms of `retryable_aborted_write` both mean that.
+            persisted_rows = self._graph_write_with_retry(
+                lambda: proj.g.query(
+                    "UNWIND $ids AS pid "
+                    "MATCH (n:Point {id: pid}) "
+                    "WHERE NOT coalesce(n.status, 'live') IN $terminal "
+                    "AND coalesce(n.outdated, false) = false "
+                    "AND NOT pid IN $stamped "
+                    "SET n.ep_dirty = true, n.ep_dirty_at = $ep "
+                    "RETURN pid",
+                    params={"ids": dirty_ids,
+                            "terminal": sorted(TERMINAL_EXCLUDED_STATUSES),
+                            "ep": ep_version,
+                            "stamped": sorted(_stamped)},
+                ).result_set,
+                what="_mark_dirty ep_dirty persist SET",
+            )
             persisted = {r[0] for r in persisted_rows} if persisted_rows else set()
         # #2952: a pre-stamped id is persisted by its own CREATE — it is not
         # a terminal/live classification case, it simply needs no SET here.
@@ -17004,10 +17073,17 @@ class TortoiseSDK:
             terminal_ids = non_persisted & existing
             zombies = non_persisted - existing  # delete zombies (#1916)
             if terminal_ids:
-                proj.g.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids AND n.ep_dirty = true "
-                    "SET n.ep_dirty = null, n.ep_dirty_at = null",
-                    params={"ids": list(terminal_ids)},
+                # #7405: same retry, same reasoning as the persist SET above —
+                # an absolute SET guarded by the statement's own `n.ep_dirty =
+                # true` read, so a re-issue after a non-landing ABORT is
+                # idempotent (clearing an already-cleared flag is a no-op).
+                self._graph_write_with_retry(
+                    lambda: proj.g.query(
+                        "MATCH (n:Point) WHERE n.id IN $ids AND n.ep_dirty = true "
+                        "SET n.ep_dirty = null, n.ep_dirty_at = null",
+                        params={"ids": list(terminal_ids)},
+                    ),
+                    what="_mark_dirty terminal ep_dirty clear SET",
                 )
                 self._dirty_roots.difference_update(terminal_ids)
         # #1163: persist the dirty markings (points + reverse-BFS claims) so
@@ -25986,8 +26062,18 @@ class TortoiseSDK:
         if _prov_ref and _prov_label:
             _prov_id = node.get("id") or node.get("eventId")
             if _prov_id:
-                self._get_proj()._link_source(
-                    _prov_id, _prov_ref, label=_prov_label)
+                # #7405: `_link_source` is MERGE-based at every step — the
+                # Source stub is MERGE'd on its url and the `extractedFrom`
+                # edge is MERGE'd on the (node, Source) pair with its version
+                # write gated `ON CREATE` — so a re-issue after a non-landing
+                # ABORT converges instead of doubling. This is the same funnel
+                # and the same reasoning `create_point`'s `extractedFrom` leg
+                # already rides.
+                self._graph_write_with_retry(
+                    lambda: self._get_proj()._link_source(
+                        _prov_id, _prov_ref, label=_prov_label),
+                    what="create_entity extractedFrom edges",
+                )
         return {
             "node": node,
             "nudges": self._nudge_candidates(
@@ -28649,7 +28735,13 @@ class TortoiseSDK:
         # → Source via extractedFrom (Ontology v3.3) when the caller passes a
         # source ref. D10: the entity label is Source (a document is a :Source).
         if props.get("extractedFrom"):
-            self._get_proj()._link_source(did, props["extractedFrom"], label="Source")
+            # #7405: parity with `create_entity`'s document leg — same
+            # MERGE-idempotent writer, same bounded retry.
+            self._graph_write_with_retry(
+                lambda: self._get_proj()._link_source(
+                    did, props["extractedFrom"], label="Source"),
+                what="create_document extractedFrom edges",
+            )
         # #8171 (review P2): the ADVISORY must be delivered on this door too.
         # This is the documented alias AND a live MCP tool
         # (`tortoise_create_document`), so a caller using it would otherwise

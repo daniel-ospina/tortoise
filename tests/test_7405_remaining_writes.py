@@ -42,8 +42,9 @@ idempotency):
 
 ⛔ The retry must NOT mask a deletion. The engine reports the SAME abort for a
 rebuild and for a plain deletion, so the graph-abort family is retried only
-while the graph KEY is present (``_graph_exists``). A test per surface pins the
-loud arm as well as the retried one.
+while the graph KEY is present (``_graph_exists``). That loud arm is a shared
+property of ``_graph_write_with_retry`` and is pinned by the deleted-graph
+tests, not by every retry test.
 
 Lane: runs on the live graph when ``TORTOISE_DB_URI`` is set (the docker lane)
 and on embedded FalkorDBLite otherwise — the same dual-lane convention as
@@ -630,6 +631,559 @@ def test_a_deleted_graph_abort_on_the_capture_outcome_stamp_stays_loud(
                    for w in result.get("warnings", [])), (
             "the lost state write must be surfaced on the receipt, never "
             "silently swallowed")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+# ── 6. the residual SDK write surfaces (the increment after #8698) ───────────
+#
+# Each surface below was named in ``tortoise/retry.py``'s ``⛔ NOT covered``
+# list and is now wrapped by ``TortoiseSDK._graph_write_with_retry``. One test
+# per STATEMENT, not per method: a method may issue several writes, and the unit
+# of retry (and of the idempotency argument) is the statement.
+#
+# Re-issuing is safe for every surface here, and the reason is named per test:
+#
+#   * ``_mark_dirty``'s persist SET and its terminal clear SET are ABSOLUTE SETs
+#     guarded by the statement's own WHERE (a fixed literal value under a
+#     predicate the statement re-reads at write time);
+#   * ``delete_point``'s DETACH DELETE and orphan-tag GC are deletes by an
+#     explicit id / a re-derived "orphan" predicate — a re-issue of an already
+#     applied delete is a no-op;
+#   * ``promote_point``'s CAS SET re-evaluates the same ``status = 'draft'``
+#     predicate;
+#   * ``create_operator`` and ``mitigate_operator`` issue bare ``CREATE``s whose
+#     id is minted ONCE above the statement, so a re-issue names the same node —
+#     admissible ONLY because ``retryable_aborted_write`` proves the abort means
+#     the statement did NOT land;
+#   * the two ``_link_source`` legs are MERGE-idempotent at every step.
+#
+# Each positive test asserts the aborted statement was re-issued (a statement
+# count, not a verdict about the graph).
+
+_MARK_DIRTY_PERSIST_NEEDLE = "SET n.ep_dirty = true, n.ep_dirty_at = $ep"
+_MARK_DIRTY_CLEAR_NEEDLE = "SET n.ep_dirty = null, n.ep_dirty_at = null"
+_DELETE_POINT_NEEDLE = "MATCH (n:Point {id:$id}) DETACH DELETE n"
+_TAG_GC_NEEDLE = "WHERE NOT (t)<-[:TAGGED]-() DELETE t"
+_PROMOTE_CAS_NEEDLE = "SET n.status = 'live', n.reviewed = true"
+_OPERATOR_CREATE_NEEDLE = "CREATE (o:Point {id:$id, is_operator:true"
+_OPERATOR_EDGE_NEEDLE = "CREATE (s)-[:INPUT {idx:$i}]->(o)"
+_OPERATOR_PROMOTE_NEEDLE = "MATCH (s:Point {id:$sid}) WHERE s.status IS NULL"
+_MITIGATION_CREATE_NEEDLE = "CREATE (m:Point {id:$id, content:$c"
+_MITIGATION_EDGE_NEEDLE = "CREATE (m)-[:IMPL]->(op), (op)-[:mitigated_by]->(m)"
+_LINK_SOURCE_NEEDLE = "MERGE (n)-[r:extractedFrom]->(s)"
+
+
+class _DeterministicGraph(_AbortOnceGraph):
+    """Refuse every matching statement with a NON-transient ``ResponseError``.
+
+    The negative control: the write retry's predicate must be an allow-list, so
+    a deterministic error (``WRONGTYPE``) is re-raised on the FIRST attempt —
+    never re-issued, never wrapped.
+    """
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher:
+            self.matching += 1
+            raise redis_exc.ResponseError(
+                "WRONGTYPE Operation against a key holding the wrong kind of value")
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+
+def _abort_once(sdk, needle: str, *, present: bool = True):
+    """Install the abort-once proxy on the SDK's live projection."""
+    proj = sdk._get_proj()
+    proxy = _AbortOnceGraph(proj.g, needle, present=present)
+    proj.g = proxy
+    return proj, proxy
+
+
+# ── 6a. _mark_dirty — the EP dirty-persist SET ───────────────────────────────
+
+
+def test_a_rebuild_abort_on_the_dirty_persist_set_is_retried(tmp_path):
+    """``_mark_dirty``'s ``ep_dirty`` persist SET is retried.
+
+    Before this wiring the SET was a bare ``proj.g.query``: a per-query abort
+    raised out of ``_mark_dirty``, so the mutation the caller had just made was
+    left with NO dirty marking — the next EP pass would not recompute the claim
+    or its reverse-BFS neighbourhood, and the stored confidence would stay
+    stale with nothing recording that the marking was dropped.
+    """
+    sdk = _sdk(tmp_path, "dirtypersist")
+    try:
+        pid = sdk.create_point(
+            "statement", "a claim that must be marked dirty")["id"]
+        proj, proxy = _abort_once(sdk, _MARK_DIRTY_PERSIST_NEEDLE)
+        try:
+            sdk._mark_dirty([pid])
+        finally:
+            proj.g = proxy._real
+        assert proxy.matching >= 2, (
+            "the aborted dirty-persist SET was never re-issued")
+        assert proxy.applied == 1, (
+            "exactly one application — an absolute SET must not double-apply")
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.ep_dirty, n.ep_dirty_at",
+            params={"id": pid}).result_set
+        assert rows and rows[0][0] is True, "the ep_dirty marking must land"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_rebuild_abort_on_the_dirty_clear_set_is_retried(tmp_path):
+    """``_mark_dirty``'s terminal ``ep_dirty`` clear SET is retried.
+
+    A point that went terminal before the persist is excluded by the SET's own
+    WHERE, and the follow-up clear removes its live-era flag so it cannot strand
+    in the dirty-root mirror forever. A dropped clear leaves the flag set and
+    the terminal point permanently eligible as a dirty root.
+    """
+    sdk = _sdk(tmp_path, "dirtyclear")
+    try:
+        pid = sdk.create_point(
+            "statement", "a claim that will go terminal")["id"]
+        proj = sdk._get_proj()
+        # Terminal AND flagged, so the persist WHERE excludes it and the CLEAR
+        # path is the one that runs.
+        proj.g.query(
+            "MATCH (n:Point {id:$id}) SET n.status = 'retracted', "
+            "n.ep_dirty = true", params={"id": pid})
+        proxy = _AbortOnceGraph(proj.g, _MARK_DIRTY_CLEAR_NEEDLE, present=True)
+        proj.g = proxy
+        try:
+            sdk._mark_dirty([pid])
+        finally:
+            proj.g = proxy._real
+        assert proxy.matching >= 2, (
+            "the aborted dirty-clear SET was never re-issued")
+        assert proxy.applied == 1, "exactly one application"
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.ep_dirty",
+            params={"id": pid}).result_set
+        assert rows and rows[0][0] is None, (
+            "the terminal point's flag must be cleared after the retry")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_deleted_graph_abort_on_the_dirty_persist_set_stays_loud(tmp_path):
+    """The #7685 loud arm, at the dirty-persist SET.
+
+    With the graph key ABSENT the same abort means a plain deletion. Re-issuing
+    would write into a graph FalkorDB auto-created EMPTY and report success
+    against a graph the caller never wrote to (#6666 class), so the abort must
+    surface unchanged and nothing may be reported as applied.
+    """
+    sdk = _sdk(tmp_path, "dirtydeleted")
+    try:
+        pid = sdk.create_point("statement", "a claim never marked")["id"]
+        proj, proxy = _abort_once(
+            sdk, _MARK_DIRTY_PERSIST_NEEDLE, present=False)
+        try:
+            with pytest.raises(redis_exc.ResponseError,
+                               match="deleted or replaced"):
+                sdk._mark_dirty([pid])
+        finally:
+            proj.g = proxy._real
+        assert proxy.applied == 0, (
+            "a deleted graph must not be re-issued into")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+# ── 6b. delete_point — the hard delete and the orphan-tag GC ─────────────────
+
+
+def test_a_rebuild_abort_on_delete_point_is_retried(tmp_path):
+    """``delete_point``'s DETACH DELETE is retried.
+
+    A dropped hard delete leaves the claim LIVE on the map while the caller was
+    told the delete failed — but the event and journal halves below it have
+    already recorded a ``PointRetracted`` / ``EntityMutated(delete)``, so a
+    later replay hard-deletes a Point the live graph still answers for. The two
+    stores disagree, and the live one is the stale half.
+    """
+    sdk = _sdk(tmp_path, "deletept")
+    try:
+        pid = sdk.create_point("statement", "a claim to be deleted")["id"]
+        proj, proxy = _abort_once(sdk, _DELETE_POINT_NEEDLE)
+        try:
+            found = sdk.delete_point(pid)
+        finally:
+            proj.g = proxy._real
+        assert found is True, "the delete must report the point as found"
+        assert proxy.matching >= 2, "the aborted DELETE was never re-issued"
+        assert proxy.applied == 1, (
+            "exactly one application — re-deleting an absent node is a no-op")
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN count(n)",
+            params={"id": pid}).result_set
+        assert rows and rows[0][0] == 0, "the point must be gone after the retry"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_rebuild_abort_on_the_orphan_tag_gc_is_retried(tmp_path):
+    """``delete_point``'s orphan-tag GC is retried.
+
+    The sweep removes the ``:Tag`` nodes a delete left with no incoming
+    ``TAGGED`` edge. A dropped sweep leaves orphan tags accumulating in
+    ``list_tags`` — the exact residue #485 added the GC to prevent.
+    """
+    sdk = _sdk(tmp_path, "taggc")
+    try:
+        pid = sdk.create_point(
+            "statement", "a tagged claim", tags=["alpha"])["id"]
+        proj = sdk._get_proj()
+        before = proj.g.query(
+            "MATCH (t:Tag {name:'alpha'}) RETURN count(t)").result_set
+        assert before and before[0][0] == 1, (
+            "the fixture must mint the :Tag so the GC is reachable")
+        proxy = _AbortOnceGraph(proj.g, _TAG_GC_NEEDLE, present=True)
+        proj.g = proxy
+        try:
+            found = sdk.delete_point(pid)
+        finally:
+            proj.g = proxy._real
+        assert found is True
+        assert proxy.matching >= 2, (
+            "the aborted tag GC was never re-issued — the fixture point's "
+            "TAGGED edge did not reach the sweep")
+        assert proxy.applied == 1, "exactly one application"
+        after = proj.g.query(
+            "MATCH (t:Tag {name:'alpha'}) RETURN count(t)").result_set
+        assert after and after[0][0] == 0, (
+            "the orphan tag must be swept after the retry")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_deterministic_error_on_delete_point_is_not_retried(tmp_path):
+    """The negative control: a non-abort error is never re-issued.
+
+    ``WRONGTYPE`` is not an engine abort and does not prove the statement failed
+    to land, so the allow-list predicate refuses it and the error surfaces on
+    the FIRST attempt. This is what keeps the retry from becoming a
+    retry-everything loop.
+    """
+    sdk = _sdk(tmp_path, "deletewrong")
+    try:
+        pid = sdk.create_point("statement", "a claim with a wrongtype")["id"]
+        proj = sdk._get_proj()
+        proxy = _DeterministicGraph(proj.g, _DELETE_POINT_NEEDLE)
+        proj.g = proxy
+        try:
+            with pytest.raises(redis_exc.ResponseError, match="WRONGTYPE"):
+                sdk.delete_point(pid)
+        finally:
+            proj.g = proxy._real
+        assert proxy.matching == 1, (
+            "a deterministic error must be attempted exactly once, never "
+            "re-issued")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+# ── 6c. promote_point — the CAS promotion SET ────────────────────────────────
+
+
+def test_a_rebuild_abort_on_the_promote_cas_is_retried(tmp_path):
+    """``promote_point``'s CAS ``status draft → live`` SET is retried.
+
+    A dropped CAS leaves the claim draft while the caller is told the promotion
+    failed — but EP's draft filter excludes it, so the claim the reviewer
+    approved conveys nothing to the graph. Re-issuing is safe because an engine
+    ABORT means the CAS did not land, so the ``status = 'draft'`` predicate is
+    re-evaluated against unchanged state and matches exactly once.
+    """
+    sdk = _sdk(tmp_path, "promote")
+    try:
+        pid = sdk.create_point(
+            "statement", "a draft claim awaiting review", status="draft")["id"]
+        proj, proxy = _abort_once(sdk, _PROMOTE_CAS_NEEDLE)
+        try:
+            result = sdk.promote_point(pid)
+        finally:
+            proj.g = proxy._real
+        assert result.get("promoted") is True, result
+        assert proxy.matching >= 2, "the aborted CAS was never re-issued"
+        assert proxy.applied == 1, "exactly one application — no double CAS"
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.status",
+            params={"id": pid}).result_set
+        assert rows and rows[0][0] == "live", "the promotion must land"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+# ── 6d. create_operator — the node, its edges, and the source promote ────────
+
+
+def _two_points(sdk, tag: str) -> tuple[str, str]:
+    a = sdk.create_point("statement", f"{tag} source claim")["id"]
+    b = sdk.create_point("statement", f"{tag} target claim")["id"]
+    return a, b
+
+
+def test_a_rebuild_abort_on_the_operator_create_is_retried(tmp_path):
+    """``create_operator``'s bare ``CREATE (o:Point)`` is retried.
+
+    The operator is the bridge every EP message travels over: a dropped create
+    leaves the two claims unconnected while the caller's response carries no
+    operator at all — and the edge writes below it never run. The id is minted
+    once, so a re-issue names the same node; admissible ONLY on
+    ``retryable_aborted_write``, which proves the statement did not land.
+    """
+    sdk = _sdk(tmp_path, "opcreate")
+    try:
+        a, b = _two_points(sdk, "opcreate")
+        proj, proxy = _abort_once(sdk, _OPERATOR_CREATE_NEEDLE)
+        try:
+            result = sdk.create_operator("IMPL", a, [b])
+        finally:
+            proj.g = proxy._real
+        op_id = result.get("id")
+        assert op_id, result
+        assert proxy.matching >= 2, (
+            "the aborted operator CREATE was never re-issued")
+        assert proxy.applied == 1, (
+            "exactly one application — a re-issued bare CREATE must not mint "
+            "a second operator")
+        rows = proj.g.query(
+            "MATCH (o:Point {id:$id}) RETURN count(o)",
+            params={"id": op_id}).result_set
+        assert rows and rows[0][0] == 1, (
+            "exactly one operator node must exist after the retry")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_rebuild_abort_on_the_operator_edges_is_retried(tmp_path):
+    """``create_operator``'s typed-edge + ``INPUT`` mirror statement is retried.
+
+    One statement writes BOTH halves the factor graph needs (the typed edge and
+    its reverse ``INPUT`` mirror). A dropped pair leaves an operator with no
+    inputs — EP cannot derive a factor from it, and the operator's own
+    creation-time ``ep_dirty`` flag masks the loss live while a rebuilt graph
+    has no mask at all.
+    """
+    sdk = _sdk(tmp_path, "opedge")
+    try:
+        a, b = _two_points(sdk, "opedge")
+        proj, proxy = _abort_once(sdk, _OPERATOR_EDGE_NEEDLE)
+        try:
+            result = sdk.create_operator("IMPL", a, [b])
+        finally:
+            proj.g = proxy._real
+        op_id = result.get("id")
+        # Two endpoints ⇒ the statement runs once per input (source + target),
+        # so the abort on the FIRST is re-issued and the SECOND applies: 3
+        # matches (2 statements + 1 re-issue) and 2 applications. The per-
+        # endpoint count assertions below are what prove the re-issue did not
+        # DOUBLE either edge.
+        assert proxy.matching >= 3, (
+            "the aborted edge statement was never re-issued")
+        assert proxy.applied == 2, (
+            "exactly one application per endpoint — no doubled edge")
+        rows = proj.g.query(
+            "MATCH (o:Point {id:$o})-[:IMPL]->(a:Point {id:$a}) "
+            "RETURN count(*)",
+            params={"a": a, "o": op_id}).result_set
+        assert rows and rows[0][0] == 1, "the typed edge must exist exactly once"
+        mirror = proj.g.query(
+            "MATCH (b:Point {id:$b})-[:INPUT]->(o:Point {id:$o}) "
+            "RETURN count(*)",
+            params={"b": b, "o": op_id}).result_set
+        assert mirror and mirror[0][0] == 1, (
+            "the INPUT mirror must exist exactly once")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_rebuild_abort_on_the_operator_source_promote_is_retried(tmp_path):
+    """``create_operator``'s never-set-status source promote SET is retried.
+
+    Legacy graphs carry status-less Points; the first operator edge fills that
+    status in with the live default. A dropped SET leaves the source status-less,
+    where the strict grounding selector excludes it while a rebuilt one (whose
+    fold coalesces to 'live') includes it — the rebuild alone changes the
+    operator's participation (#5089).
+    """
+    sdk = _sdk(tmp_path, "oppromote")
+    try:
+        a, b = _two_points(sdk, "oppromote")
+        proj = sdk._get_proj()
+        # The legacy shape this clause exists for: a source with NO status.
+        proj.g.query("MATCH (n:Point {id:$id}) REMOVE n.status",
+                     params={"id": a})
+        proxy = _AbortOnceGraph(proj.g, _OPERATOR_PROMOTE_NEEDLE, present=True)
+        proj.g = proxy
+        try:
+            sdk.create_operator("IMPL", a, [b])
+        finally:
+            proj.g = proxy._real
+        assert proxy.matching >= 2, (
+            "the aborted source-promote SET was never re-issued")
+        assert proxy.applied == 1, "exactly one application"
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.status",
+            params={"id": a}).result_set
+        assert rows and rows[0][0] == "live", (
+            "the status-less source must be promoted to live")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+# ── 6e. mitigate_operator — the mitigation Point and its edge pair ───────────
+
+
+def _operator(sdk, tag: str) -> str:
+    a, b = _two_points(sdk, tag)
+    return sdk.create_operator("IMPL", a, [b])["id"]
+
+
+def test_a_rebuild_abort_on_the_mitigation_create_is_retried(tmp_path):
+    """``mitigate_operator``'s bare ``CREATE (m:Point)`` is retried.
+
+    A dropped create loses the dampener entirely while the caller is told the
+    mitigation failed — and because the id is minted once, a re-issue names the
+    same node (bare CREATE ⇒ ``retryable_aborted_write`` only). A duplicate here
+    would DOUBLE the dampening, which is the failure the idempotency argument
+    exists to exclude.
+    """
+    sdk = _sdk(tmp_path, "mitcreate")
+    try:
+        op_id = _operator(sdk, "mitcreate")
+        proj, proxy = _abort_once(sdk, _MITIGATION_CREATE_NEEDLE)
+        try:
+            result = sdk.mitigate_operator(op_id, "weak evidence", strength=0.3)
+        finally:
+            proj.g = proxy._real
+        mid = result.get("id")
+        assert mid, result
+        assert proxy.matching >= 2, (
+            "the aborted mitigation CREATE was never re-issued")
+        assert proxy.applied == 1, (
+            "exactly one application — a re-issued bare CREATE must not mint "
+            "a second mitigation Point")
+        rows = proj.g.query(
+            "MATCH (m:Point {id:$id}) RETURN count(m)",
+            params={"id": mid}).result_set
+        assert rows and rows[0][0] == 1, (
+            "exactly one mitigation Point must exist after the retry")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_rebuild_abort_on_the_mitigation_edges_is_retried(tmp_path):
+    """``mitigate_operator``'s IMPL / ``mitigated_by`` edge pair is retried.
+
+    The pair is what makes the mitigation reachable from the operator it damps
+    (``compute_operator_weight`` walks ``(op)-[:mitigated_by]->(m)``). A dropped
+    pair leaves a mitigation Point connected to nothing — recorded, but inert.
+    """
+    sdk = _sdk(tmp_path, "mitedge")
+    try:
+        op_id = _operator(sdk, "mitedge")
+        proj, proxy = _abort_once(sdk, _MITIGATION_EDGE_NEEDLE)
+        try:
+            result = sdk.mitigate_operator(op_id, "weak evidence", strength=0.3)
+        finally:
+            proj.g = proxy._real
+        mid = result.get("id")
+        assert proxy.matching >= 2, (
+            "the aborted mitigation edge pair was never re-issued")
+        assert proxy.applied == 1, "exactly one application — no doubled edge"
+        rows = proj.g.query(
+            "MATCH (op:Point {id:$op})-[:mitigated_by]->(m:Point {id:$mid}) "
+            "RETURN count(*)",
+            params={"op": op_id, "mid": mid}).result_set
+        assert rows and rows[0][0] == 1, (
+            "the mitigated_by edge must exist exactly once")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+# ── 6f. the extractedFrom legs of the entity and document doors ──────────────
+
+
+def test_a_rebuild_abort_on_the_create_entity_link_source_is_retried(tmp_path):
+    """``create_entity``'s document ``_link_source`` leg is retried (#8171).
+
+    The entity itself lands, so a dropped provenance edge leaves a document the
+    auditor reads as a provenance GAP: the ``extractedFrom`` edge is the only
+    thing connecting it to its source. ``_link_source`` MERGEs the Source stub
+    on its url and the edge on the (node, Source) pair, so a re-issue
+    converges — the same funnel ``create_point`` already rides.
+    """
+    sdk = _sdk(tmp_path, "entlink")
+    try:
+        proj, proxy = _abort_once(sdk, _LINK_SOURCE_NEEDLE)
+        try:
+            result = sdk.create_entity(
+                "document", "A Document", documentKind="report",
+                extractedFrom="doc://entity")
+        finally:
+            proj.g = proxy._real
+        node = result.get("node") or {}
+        did = node.get("id") or node.get("eventId")
+        assert did, result
+        assert proxy.matching >= 2, (
+            "the aborted extractedFrom MERGE was never re-issued")
+        assert proxy.applied == 1, "exactly one application — MERGE must not double"
+        rows = proj.g.query(
+            "MATCH (n:Source {url:$url})<-[r:extractedFrom]-(d:Source {id:$id}) "
+            "RETURN count(r)",
+            params={"url": "doc://entity", "id": did}).result_set
+        assert rows and rows[0][0] == 1, (
+            "exactly one extractedFrom edge to exactly one Source must exist")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_rebuild_abort_on_the_create_document_link_source_is_retried(tmp_path):
+    """``create_document``'s ``_link_source`` leg is retried (#394).
+
+    Parity with ``create_entity``'s document leg: same MERGE-idempotent writer,
+    same bounded retry, so the two doors cannot disagree about whether a
+    dropped abort costs the provenance edge.
+    """
+    sdk = _sdk(tmp_path, "doclink")
+    try:
+        proj, proxy = _abort_once(sdk, _LINK_SOURCE_NEEDLE)
+        try:
+            result = sdk.create_document(
+                "A Document", "report", extractedFrom="doc://document")
+        finally:
+            proj.g = proxy._real
+        assert result, result
+        assert proxy.matching >= 2, (
+            "the aborted extractedFrom MERGE was never re-issued")
+        assert proxy.applied == 1, "exactly one application"
+        # Address the edge by the SOURCE URL (the document's own id spelling is
+        # the door's, not this test's) and prove exactly one edge from exactly
+        # one document.
+        rows = proj.g.query(
+            "MATCH (n:Source {url:$url})<-[r:extractedFrom]-(d) "
+            "RETURN count(r), count(distinct d)",
+            params={"url": "doc://document"}).result_set
+        assert rows and rows[0][0] == 1 and rows[0][1] == 1, (
+            "exactly one extractedFrom edge to exactly one Source must exist")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
