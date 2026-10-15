@@ -33,6 +33,52 @@ raw conversation
      dependency order (entities → events → points → operators).
 ```
 
+G5 record — the live S4 stage (#8500)
+-------------------------------------
+The v4 design (``docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md``) removes S4
+from its step list — *"There is no S4 — do not restore one"*; its eight steps
+are S0·S1·S2.1·S2.2·S2.3·S3·S5·S6. That is the v4 TARGET STATE. This module runs
+a stage under the S4 slot number, and the two must not be read as one stage:
+
+  * the design's removed *"S4 — granularity review"* was folded into S2.2/S2.3
+    by §4.0's purpose test;
+  * THIS module's ``run_s4`` is the GAP REVIEWER — a second extraction pass over
+    (story + S3 search results + S2 embed list) whose output is unioned with
+    S2's by ``merge_embed_lists`` (E4 — "S4 merges, not replaces", #1536).
+
+Measured at HEAD (symbols are authoritative, line numbers a convenience — this
+module's numbering moves): ``tests/test_extractor_v4_s4_stage_claims.py``
+resolves the call-site, flag and consumption claims below against the tree, so a
+change that falsifies one of them reds a test instead of being discovered; the
+``merge_embed_lists`` collision semantics are pinned by the E4 tests in
+``tests/test_extractor_v2.py``:
+
+  * S4 runs whenever a story exists — the ``run_s4`` call sits under
+    ``if story:`` with NO flag gate.
+  * ``TORTOISE_S4_DELTA`` (``_s4_delta_enabled``) selects the delta vs
+    complete-list contract of S4's OUTPUT, NOT whether S4 runs. ``=0`` does not
+    disable S4. There is no S4-specific off switch.
+  * On the route that reaches ``extract_session_v2``, S4 is skipped only as a
+    SIDE EFFECT of three other paths, none of them an "S4 switch": (i)
+    ``TORTOISE_EXTRACTOR=v1``; (ii) passing ``summary=`` — both take the v1
+    dispatch (``sdk.py``); (iii) an empty conversation, which returns before S1.
+    Other ``capture_session`` lanes never enter this extractor at all — the
+    keyless/no-provider branch, the already-captured replay branch, and the
+    ``TORTOISE_SESSION_EXTRACTOR=m2`` branch (``_extract_session_llm``) — so
+    they are not S4 skips of this route.
+  * ``merge_embed_lists``'s union IS consumed: S2 items S4 omitted are
+    preserved, and S4 wins on identity-key collision. Dropping it without a
+    successor loses the E4 property, not merely a function.
+
+ORDERING OBLIGATION (§4.3 G5's S4 clause, tracked at **#8500**): removing
+``run_s4`` is a v4 MIGRATION DELIVERABLE, not a cleanup — it must not leave the
+step list before its successor lands, or the pipeline loses gap-filling and the
+E4 merge property in the gap. **Which side is authoritative until that migration
+lands is #8500's OPEN QUESTION — this record does not decide it.** What this
+record does state is the measured shipped state: ``run_s4`` is what runs today,
+so it must not be deleted on the strength of the design doc alone; a lane that
+needs the precedence settled asks the owner on **#8500**.
+
 Owner confirmations honored (issue #1350): flash runs 4 prompts (S1-S4), S5
 is execution; temperature 0.0 (via tests.model_adapters MODELS); S3 reads the
 REAL backend; chains warn + repair, hard-block never; solar-pro4 parked;
@@ -41,10 +87,12 @@ chains; single-flash path; no max_tokens caps.
 
 Master-list note: the v2 master list (subjects/points/events/chains) lives
 here as ``build_master_list()`` — an overlay over the v1
-``compile_value_brief()`` (which stays the kinds+granularity contract for the
-v1 enforcer; adding non-kind sections to it would pollute
-``value_extractor._object_kind_vocab``). The expansion is delivered by this
-module per design doc §3.
+``compile_value_brief()``, which stays the kinds+granularity contract for the
+v1 enforcer. A non-kind section may ride that brief ONLY when it is declared in
+``value_extractor.RESERVED_BRIEF_KEYS``, which ``_object_kind_vocab`` skips:
+every brief key is otherwise read as an objectKind form, so an unreserved
+section silently widens the closed kind vocabulary (#4894). The expansion is
+delivered by this module per design doc §3.
 
 Builder capability catalog note (#2004 W8 / epic #1976 DM-5): this module is
 referenced in the builder capability catalog (onboarding) — catalog module
@@ -390,16 +438,76 @@ OPERATOR_SEMANTICS_RULE = (
 )
 
 
-def _s2s4_rules() -> str:
+def _s2s4_rules(master: dict | None = None) -> str:
     """The shared rule block inserted at the {anti_routine} slot of the S2
     and S4 mapping prompts: the anti-routine NOOP gate (#2424) paired with
     the value-fidelity rule (#2453) and the operator-structure rule (#2552).
     One source, all stages — S2 and S4 map with the SAME operator semantics
     (the #2424 residual clause-level strip and the operator rules live in
-    the shared blocks, so every mapping stage carries them)."""
-    return (ANTI_ROUTINE_EXCLUSION + "\n\n" + VALUE_FIDELITY_RULE
-            + "\n\n" + OPERATOR_SEMANTICS_RULE
-            + "\n\n" + SHORT_SESSION_FACT_RULE)
+    the shared blocks, so every mapping stage carries them).
+
+    #4894 / #1026: ``master`` carries the pack's DECLARED value-brief hints
+    (``extraction.valueGate`` / ``extraction.promptFragments``, compiled into
+    the brief's reserved ``pack_hints`` section). They ride THIS slot because
+    it is the slot that states the value policy — a pack's keep/drop hints and
+    instruction snippets are policy, not vocabulary, so they must sit where
+    the policy does and not in the master render. ``None``
+    (or a master whose packs declare nothing — every shipped pack today)
+    renders the pre-#4894 block byte-for-byte.
+    """
+    block = (ANTI_ROUTINE_EXCLUSION + "\n\n" + VALUE_FIDELITY_RULE
+             + "\n\n" + OPERATOR_SEMANTICS_RULE
+             + "\n\n" + SHORT_SESSION_FACT_RULE)
+    hints = _pack_hints_text(master)
+    return f"{block}\n\n{hints}" if hints else block
+
+
+def _pack_hints_text(master: dict | None) -> str:
+    """The pack-authored value-brief hints, as a prompt block (or "").
+
+    The consumer half of the #1026 extraction slots (#4894).
+    ``extraction.valueGate`` is the STRUCTURED form of what
+    ``ontology.memory_granularity`` states in prose, and
+    ``extraction.promptFragments`` are the pack's instruction snippets; both
+    are declared *for the value brief* and until now NOTHING read them, so a
+    pack author could declare either and see nothing happen — a declaration
+    that read exactly like a shipped mechanism.
+
+    ⛔ These are HINTS, never a mint-time drop rule (#1026's recorded ruling:
+    *"the pack declares which kinds its artefacts are; no name patterns;
+    nothing is dropped at mint"*). Nothing here removes an artefact, and
+    nothing here is parsed as a predicate — the mechanical, artefact-level
+    gate is ``tortoise/value_gate.py``, whose provenance is
+    ``memory_granularity``. This block only tells the mapper what a valuable
+    utterance looks like in the pack's domain.
+
+    Sorted by namespace so a compile-order change (the pack-manifest glob is
+    readdir-dependent) cannot reorder the prompt.
+    """
+    hints = (master or {}).get("pack_hints") or {}
+    if not isinstance(hints, dict):
+        return ""
+    lines: list[str] = []
+    for ns in sorted(hints):
+        h = hints.get(ns) or {}
+        if not isinstance(h, dict):
+            continue
+        keep = [str(x) for x in (h.get("keep") or [])]
+        drop = [str(x) for x in (h.get("drop") or [])]
+        frags = [str(x) for x in (h.get("fragments") or [])]
+        if keep:
+            lines.append(f"- {ns} — KEEP: " + "; ".join(keep))
+        if drop:
+            lines.append(f"- {ns} — DROP: " + "; ".join(drop))
+        for frag in frags:
+            lines.append(f"- {ns}: {frag}")
+    if not lines:
+        return ""
+    return (
+        "PACK VALUE HINTS (declared by the installed packs for their own "
+        "domain — these JUDGE utterances and never remove an artefact):\n"
+        + "\n".join(lines)
+    )
 
 
 CORE_OBJECT_KEYS = (
@@ -457,8 +565,13 @@ def _build_master_from_brief(brief: dict,
     and pack_kinds keeps the brief's insertion order (prompt-visible)."""
     objects = {k: _desc(brief, k) for k in CORE_OBJECT_KEYS}
     pack_kinds = {}
+    # #4894: the brief's RESERVED, non-kind sections are skipped by the SAME
+    # set ``value_extractor`` uses to keep them out of the objectKind
+    # vocabulary — the brief's own module owns the reservation, so a new
+    # non-kind section lands in one place and both readers follow it.
+    from tortoise.value_extractor import RESERVED_BRIEF_KEYS
     for k in brief:
-        if k == "memory_granularity":
+        if k in RESERVED_BRIEF_KEYS:
             continue
         if k in CORE_OBJECT_KEYS or k.startswith("core:"):
             objects.setdefault(k, _desc(brief, k))
@@ -473,6 +586,12 @@ def _build_master_from_brief(brief: dict,
         "chains": {name: {"path": list(c["path"]), "note": c["note"]}
                    for name, c in CHAINS.items()},
         "memory_granularity": dict(brief.get("memory_granularity", {})),
+        # #4894 / #1026: the packs' DECLARED value-brief hints (valueGate /
+        # promptFragments). Carried verbatim on the master so the S1/S2/S4
+        # render sites read one compiled source; empty for every pack that
+        # declares neither, which is every shipped pack today.
+        "pack_hints": {ns: dict(h) for ns, h in
+                       (brief.get("pack_hints") or {}).items()},
         # E2 (#1534): user-personal-state vocabulary — the Tier-A classification
         # hint criterion. NOT kinds (master_kind_forms' section tuple excludes
         # it); rendered into S2/S4 prompt context only.
@@ -517,9 +636,18 @@ def build_master_list(sdk=None) -> dict:
     ``_make_sdk(namespace=org_id)`` — no separate identity argument to
     mismatch). The tenant path NEVER reads or writes the process-global
     ``_MASTER_LIST_CACHE`` (#1154: a tenant-scoped compile must not poison
-    the shared memo); the #1350 perf guard rides the tenant-view memo (per
-    (graph_identity, pack_config_version), invalidated on :PackManifest
-    write) instead.
+    the shared memo); it rides the tenant-view memo instead — the key and
+    its invalidation are defined by
+    ``tortoise/pack_manifest_store.py::tenant_view``. That key is the
+    two-tuple ``(graph_identity, pack_config_version)``, whose ``version``
+    hashes the tenant's ``(namespace, version, sha256)`` manifest tuples
+    TOGETHER WITH the #2714 approval-set key — so a pack install/uninstall,
+    or a change to the graph's data union, recompiles the view. ⚠️ The
+    #1350 perf guard does NOT cover the whole call: ``tenant_view`` computes
+    the approval set BEFORE the memo lookup, so on a graph that HAS
+    ``:PackInstall`` records a memo HIT still pays the record read plus one
+    whole-graph kind scan per property (8). Only the manifest read and the
+    brief compile are cached — see ``tenant_view``'s ⚠️ paragraph.
     """
     if sdk is None:
         import copy
@@ -948,7 +1076,11 @@ def _granularity_text(master: dict | None = None) -> str:
     g = master.get("memory_granularity", {})
     out = "\n".join(f"- {ns}: {txt}" for ns, txt in g.items())
     head = f"{out}\n{STATE_VALUE_CARVE_OUT}" if out else STATE_VALUE_CARVE_OUT
-    return head + "\n" + SHORT_SESSION_FACT_RULE
+    tail = head + "\n" + SHORT_SESSION_FACT_RULE
+    # #4894: the pack's declared value-brief hints ride the SAME slot as the
+    # prose granularity declaration they are the structured form of.
+    hints = _pack_hints_text(master)
+    return f"{tail}\n\n{hints}" if hints else tail
 
 
 # ── Session-date anchoring (E1, #1533) ────────────────────────────────────
@@ -1494,7 +1626,7 @@ def render_s2_prompt(master: dict | None = None, *,
                 master, story, core_only=core_only))
             .replace("{pack_namespaces}", pack_ns)
             .replace("{chains_text}", chains)
-            .replace("{anti_routine}", _s2s4_rules())
+            .replace("{anti_routine}", _s2s4_rules(master))
             .replace("{date_anchor}", _date_anchor(
                 session_date, include_emission_rules=True))
             .replace("{output_contract}", contract)
@@ -2597,7 +2729,7 @@ def render_s4_prompt(story: str, search: dict, embed_list: dict,
             .replace("{master_list}", _render_master(
                 master, story, core_only=core_only))
             .replace("{chains_text}", chains)
-            .replace("{anti_routine}", _s2s4_rules())
+            .replace("{anti_routine}", _s2s4_rules(master))
             .replace("{story}", story)
             .replace("{search_results}", _render_search_results(search))
             .replace("{embed_list_json}", json.dumps(embed_list, indent=1))
@@ -3048,6 +3180,100 @@ def _source_turn_overlap(turn: str, quote: str) -> float:
     if not ta or not tb:
         return 0.0
     return len(ta & tb) / min(len(ta), len(tb))
+
+
+def _verbatim_span_in_turn(turn_text: str, quote: str) -> tuple[int, int] | None:
+    """#2684: the CHARACTER OFFSETS of ``quote`` inside ``turn_text`` — the
+    ADDRESS half of the E3 verbatim anchor.
+
+    ``_resolve_source_turn`` proves a quote is *in* a turn (matching on the
+    whitespace-collapsed, lowercased text); this returns *where*, in the
+    turn's OWN coordinates, so the value can be re-read/re-fetched instead of
+    re-searched (the E4 #5007 pointer, whose offsets address the Source's raw
+    text). Deliberately tolerant of whitespace RUNS and case — exactly the
+    normalisations the anchor test applies — so the two cannot disagree on
+    which occurrences are verbatim. ``None`` when the quote is not
+    verbatim-present (the >=0.6 overlap band): a paraphrase has no address,
+    and saying so is the honest answer.
+    """
+    q = str(quote or "").strip()
+    t = str(turn_text or "")
+    if not q or not t:
+        return None
+    tokens = q.split()
+    if not tokens:
+        return None
+    pattern = r"\s+".join(re.escape(tok) for tok in tokens)
+    m = re.search(pattern, t, flags=re.IGNORECASE)
+    if m is None:
+        return None
+    return (m.start(), m.end())
+
+
+def _carries_value(*texts: object) -> bool:
+    """#2684: True when any text carries a value-shaped token — a number, a
+    count, a price, a quantity+unit, a clock, a version, a concrete date.
+
+    Reuses the PRODUCTION value engine (``_value_bindings``, live on the
+    E5/E7 contradiction + consolidation path) rather than minting a second
+    canonicaliser: a parallel value layer is the explicitly forbidden shape
+    (``docs/epics/2026-08-20-1509-extractor-v3/00-scope.md``, owner — ``never
+    create a parallel layer doing the same thing with redundant machinery``;
+    ``vet_gate`` cites the same line). Its measured limits are the reason the
+    SPAN is the deliverable: ``_value_bindings`` sees ``twelve million`` as
+    ``12`` (no magnitude) and misses ``1,234`` — detection is enough here,
+    because the span carries the value VERBATIM.
+    """
+    return any(_value_bindings(str(t)) for t in texts if t)
+
+
+def _turn_text_by_index(edus: list[dict] | None, index: int) -> str:
+    """The raw text of the transcript turn carrying ``index`` ("" when the
+    turn does not exist). Resolved by INDEX VALUE, not list position — see
+    ``_resolve_source_turn`` on why those can diverge."""
+    if not edus:
+        return ""
+    return next((str(e.get("text") or "") for e in edus
+                 if e.get("index") == index), "")
+
+
+def _value_verbatim_span(content: str, quote: str, turn_idx: int | None,
+                         edus: list[dict] | None,
+                         *, warnings: list[str]) -> tuple[int, int] | None:
+    """#2684: the verbatim source span of a VALUE-BEARING point — the offsets
+    of the point's own ``quote`` inside the resolved source turn, so any
+    consumer can re-read the exact value rather than trusting (or
+    re-searching) a distillation.
+
+    Only a VERBATIM anchor yields a span. The >=0.6 token-overlap band proves
+    a turn is *about* the claim, never that the claim's words are in it — so a
+    band-resolved value has no address, and that absence is REPORTED. The
+    warning is the point of this branch: the band route is otherwise SILENT
+    (``_resolve_source_turn`` returns a turn and says nothing), and the route
+    misses by construction exactly when the value was REWRITTEN —
+    ``"12M events for Halcyon"`` against a turn holding ``"twelve million
+    events for Halcyon"`` scores 0.50 and resolves to no turn while the
+    verbatim quote scores 0.80 and resolves (#2817 scoping, measured). A
+    silent band pass would leave no trace of the aggregate-numerator class
+    this slice exists to protect.
+
+    ⚠️ Reach: the span reaches a consumer only where the read path carries
+    point provenance. The eval lane does (#2684 wired it); the PRODUCT ask
+    lane's hits carry no ``quote``/``source_turn_id`` at all, so neither the
+    span nor Slice A's own-source legs can fire there — measured and filed as
+    #8658, deliberately not fixed here.
+    """
+    if not _carries_value(content, quote):
+        return None
+    if turn_idx is None:
+        return None          # the anchor failure already warned
+    span = _verbatim_span_in_turn(_turn_text_by_index(edus, turn_idx), quote)
+    if span is None and quote:
+        warnings.append(
+            f"value-bearing point '{str(content)[:60]}' resolved to turn "
+            f"{turn_idx} by the token-overlap band, not a verbatim anchor — "
+            "it carries no source span (the value cannot be re-read verbatim)")
+    return span
 
 
 def _content_id(prefix: str, content: str) -> str:
@@ -5645,30 +5871,66 @@ def _resolve_superseded(ref: str, search: dict, *, kind: str = "") -> dict | Non
 
 
 def _resolve_retraction(ref: dict, search: dict,
-                        *, warnings: list[str]) -> dict | None:
-    """D5: resolve an embed-list retraction ref to an S3 prior POINT using
-    the never-guess discipline: by id (unique), else normalized-content
-    match; 0 or >1 matches → None (the caller warns + fails open). S3 only
-    returns live priors (terminal excluded at the search layer, #1391), so
-    a resolved deletion target is live by construction."""
+                        *, warnings: list[str],
+                        session_points: list[dict] | None = None) -> dict | None:
+    """D5: resolve an embed-list retraction ref to a POINT using the
+    never-guess discipline: by id (unique), else normalized-content match;
+    0 or >1 matches → None (the caller warns + fails open).
+
+    Resolution runs against the S3 search results FIRST (priors that existed
+    BEFORE this capture's writes) and then, additively, against the points
+    THIS session is about to emit (``session_points`` — #8039): the embed
+    list's own ``retractions`` contract says "the exact prior claim" and the
+    prompt's example is "scratch that", so a withdrawal of a fact first
+    stated in THIS conversation is in-contract — but such a fact has no S3
+    prior, so without the same-session leg the ref fail-opened and the fact
+    was written and never retracted (the exact staleness E7 exists to
+    prevent). S3-first ordering keeps a CROSS-session retraction resolving to
+    the S3 prior, byte-identical to the pre-#8039 behaviour.
+
+    This is NOT the F2 supersede boundary: F2 governs the CORRECTS channel
+    (same-session REVERSALS are state/validity semantics, never a point
+    supersede — see ``_resolve_point_supersede``), and a retraction is a
+    DELETE-soft tombstone, not a CORRECTS record. The two are separate
+    channels and the prompt already restricts only ``supersedes`` to
+    cross-session.
+
+    S3 returns live priors only (terminal excluded at the search layer,
+    #1391); same-session points are live by construction (they are being
+    written by this payload), so a resolved deletion target is live by
+    construction on both legs."""
     rid = str(ref.get("id") or "").strip()
     content = str(ref.get("content") or "").strip()
     points = [p for p in (search or {}).get("points", []) or []
               if isinstance(p, dict) and p.get("id")]
+    session = [p for p in (session_points or []) or []
+               if isinstance(p, dict) and p.get("id")]
     if rid:
         for p in points:
             if str(p.get("id")) == rid:
                 return p
-        warnings.append(f"retraction id={rid!r} matches no S3 prior — "
-                        "skipped (fail-open)")
+        for p in session:
+            if str(p.get("id")) == rid:
+                return p
+        warnings.append(f"retraction id={rid!r} matches no S3 prior or "
+                        "same-session point — skipped (fail-open)")
         return None
     if content:
         norm = _norm(content)
+        # S3 priors FIRST (cross-session behaviour unchanged); only when no
+        # prior matches does the same-session list answer. The session leg
+        # is 0-or-1 by construction (`execute_embed` dedupes payload points on
+        # `_norm(content)`), so it can never introduce an ambiguity the S3
+        # leg's never-guess guard has to resolve.
         matches = [p for p in points
                    if _norm(str(p.get("content") or "")) == norm]
         if not matches:
+            matches = [p for p in session
+                       if _norm(str(p.get("content") or "")) == norm]
+        if not matches:
             warnings.append(f"retraction content {content[:60]!r} matches no "
-                            "S3 prior — skipped (fail-open)")
+                            "S3 prior or same-session point — skipped "
+                            "(fail-open)")
             return None
         if len(matches) > 1:
             warnings.append(f"retraction content {content[:60]!r} is "
@@ -6392,6 +6654,17 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "search_keys": search_keys,
             "source_turn_id": turn_idx,
         }
+        # #2684 (Slice B): a VALUE-BEARING point carries the verbatim source
+        # SPAN — the offsets of its own quote inside the resolved turn — so a
+        # consumer can re-read the exact value instead of re-deriving it from
+        # a distillation (the aggregation-numerator class: "300 vs 100",
+        # "$60 vs $12"). Only a VERBATIM anchor yields one; absent = the point
+        # has no address, never a fabricated offset (#5007's all-or-nothing
+        # contract, validated at the commit boundary).
+        _span = _value_verbatim_span(content, quote, turn_idx, edus,
+                                     warnings=warnings)
+        if _span is not None:
+            pt_entry["span_start"], pt_entry["span_end"] = _span
         # E2 (#1534): Tier-A state-value marker — classification hint,
         # A-only emission (absence = Tier-B default → zero-diff payloads for
         # non-Tier-A sessions). Fail-loud guard: a Tier-A point without a
@@ -6619,9 +6892,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                     f"minted endpoint ({where}) has no transcript anchor — "
                     "left unquoted (no source_turn_id)")
             else:
-                _turn_text = next(
-                    (str(e.get("text") or "") for e in edus
-                     if e.get("index") == _turn), "")
+                _turn_text = _turn_text_by_index(edus, _turn)
                 _anchor = re.sub(r"\s+", " ", content[:200].strip().lower())
                 _verbatim = bool(_anchor) and re.sub(
                     r"\s+", " ", _turn_text.lower()).find(_anchor) >= 0
@@ -6801,12 +7072,17 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # Never from content alone: only the embed list's additive `retractions`
     # refs (resolved with the never-guess discipline) produce deletions.
     # Records stay RESULT-level (D8) — the Layer-1 payload does not grow.
+    # #8039: `payload_points` (the points THIS session emits, final ids, post
+    # repair/NOOP/prune) is the same-session resolution leg, so a retraction
+    # of a fact first stated in this conversation resolves instead of
+    # fail-opening.
     deletions: list[dict] = []
     for ref in embed_list.get("retractions", []) or []:
         if not isinstance(ref, dict):
             warnings.append(f"non-dict retraction ref {ref!r} skipped")
             continue
-        prior = _resolve_retraction(ref, search, warnings=warnings)
+        prior = _resolve_retraction(ref, search, warnings=warnings,
+                                    session_points=payload_points)
         if prior is None:
             continue
         rid = str(prior.get("id") or "").strip()
@@ -7442,8 +7718,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
 
     # ── S2.2 VET — post-S4 union pass (#5005), the authoritative one. S4 is a
     # second extraction pass (the live ``run_s4`` gap-filler — distinct from
-    # the design's REMOVED "S4 — granularity review"; see the G5 record in the
-    # module docstring), so VET runs again on the union to gate what S4 added.
+    # the design's REMOVED "S4 — granularity review"; see the ``G5 record — the
+    # live S4 stage (#8500)`` in the module docstring), so VET runs again on the
+    # union to gate what S4 added.
     # ``vet_s2_pool`` carries the S2 pass's removals forward: without it, an
     # operator S4 re-added against an S2-discarded item would be re-minted by
     # execute_embed, and an entity S4 started referencing would 422 the

@@ -5,6 +5,10 @@ property anywhere — the graph namespace IS the team partition (plan-review P2)
 """
 import json
 
+import pytest
+
+from tortoise import event_store
+
 
 def _events(proj):
     # plan-review P2: no org_id property — the graph namespace IS the partition
@@ -272,6 +276,397 @@ def test_purged_seq_cursor_expires(sdk_factory, tmp_path):
     deleted = event_store.purge_expired(proj, retention_days=30)
     assert deleted == 1
     # 3. the stale cursor (seq 1) is now below the watermark → expired
-    import pytest
     with pytest.raises(ValueError, match="cursor expired"):
         sdk.poll_events(after=stale)
+
+
+# ── #5379: the seq allocator has a ceiling ─────────────────────────────────
+#
+# `next_seq` used to be an unbounded `m.last_seq + 1`. Both ways out of the
+# event-store integer domain are UNDELIVERABLE through `read_after`'s
+# `seq > cursor`, i.e. the #4653 harm (an event that exists and is never
+# delivered, with no 410 to tell the subscriber):
+#
+# * Above `MAX_SEQ` (2**53 - 1) the `seq` RANGE index compares in double
+#   precision, so a cursor that lands just below such a seq skips it silently —
+#   `2**53 + 1` rounds to `2**53` and fails `seq > 2**53`.
+# * At INT64_MAX the bump wrapped NEGATIVE, and no accepted cursor can ever
+#   match a negative seq.
+#
+# The tests below pin the refusal at the allocator (not a capped-but-returned
+# value, which would reuse a seq already issued), the delivery property that
+# motivated it — walked page-by-page with the lossy index INSTALLED, since the
+# index is what makes the read lossy — and the watermark arithmetic that the
+# same out-of-domain counter feeds.
+
+
+def _counter(proj):
+    """`(last_seq, first_seq)` of the :GraphEventMeta node, or None when absent."""
+    rows = proj.g.query(
+        "MATCH (m:GraphEventMeta) RETURN m.last_seq, m.first_seq").result_set
+    return tuple(rows[0]) if rows else None
+
+
+def _set_counter(proj, last_seq, first_seq=1):
+    """Seed the allocator directly — the shape a live/restored counter has.
+
+    The seed is ASSERTED immediately: the embedded engine silently drops some
+    extreme overwrites (a negative target onto a property holding INT64_MAX),
+    so an ignored setup write must fail as a SETUP error here rather than
+    surface later as a confusing assertion about the code under test.
+    """
+    proj.g.query(
+        "MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first",
+        params={"last": last_seq, "first": first_seq})
+    seeded = _counter(proj)
+    assert seeded is not None and seeded[0] == last_seq, (
+        f"the counter seed did not land: asked for last_seq={last_seq!r}, the "
+        f"engine holds {seeded!r} — a seed the engine silently ignores is a "
+        f"setup failure, not a result")
+
+
+def _deliver_all(proj, page=1, max_pages=50):
+    """Walk the delivery cursor exactly as a subscriber does — one page at a
+    time via `read_after`, following `next_cursor` (the last seq of the page).
+
+    A page size of 1 is what makes the walk see the index loss: a single wide
+    page (`limit=100`) jumps the cursor to the LAST seq and never re-queries
+    across the boundary, so the skipped row is invisible.
+    """
+    from tortoise import event_store as _es
+
+    seqs: list[int] = []
+    cursor = 0
+    for _ in range(max_pages):
+        evs = _es.read_after(proj, cursor, limit=page)
+        if not evs:
+            return seqs
+        seqs.extend(e["seq"] for e in evs)
+        cursor = evs[-1]["seq"]
+    raise AssertionError("the delivery walk never drained — cursor did not advance")
+
+
+def test_next_seq_refuses_at_the_ceiling(sdk_factory, tmp_path):
+    """#5379: `MAX_SEQ` is the last legal seq; the next call REFUSES.
+
+    FAILING VALUE: the counter at `MAX_SEQ` was bumped to `MAX_SEQ + 1` and
+    returned, i.e. the allocator minted the first seq the `seq` range index
+    cannot compare exactly. Capping the stored value while still returning it
+    is not a fix — the emitter would be handed a seq the store already issued
+    (#4653).
+    """
+    from tortoise.event_store import MAX_SEQ
+
+    sdk = sdk_factory(tmp_path, ensure_schema=True)
+    proj = sdk._get_proj()
+    _set_counter(proj, MAX_SEQ - 1)
+    assert event_store.next_seq(proj) == MAX_SEQ, (
+        "a counter at MAX_SEQ - 1 must still hand out MAX_SEQ — it is the last "
+        "exactly-comparable seq in the domain")
+    with pytest.raises(ValueError, match="exhausted"):
+        event_store.next_seq(proj)
+    assert _counter(proj) == (MAX_SEQ, 1), (
+        "a refusal must leave the allocator where it was — pre-fix this call "
+        "wrote and returned MAX_SEQ + 1 (undeliverable through the index)")
+
+
+def test_next_seq_refuses_a_counter_at_int64_max_instead_of_wrapping(
+        sdk_factory, tmp_path):
+    """#5379: the bump at INT64_MAX wrapped NEGATIVE rather than refusing.
+
+    FAILING VALUE: `MAX_INT64 + 1` in the graph wrapped to `-9223372036854775808`
+    and became the next event's seq. No cursor the codec accepts is negative
+    (`_decode_cursor` rejects one), so `seq > cursor` can never deliver it and
+    the counter could never recover on its own — it stayed negative and kept
+    handing out negative seqs.
+    """
+    from tortoise.event_store import MAX_INT64
+
+    sdk = sdk_factory(tmp_path, ensure_schema=True)
+    proj = sdk._get_proj()
+    _set_counter(proj, MAX_INT64)
+    with pytest.raises(ValueError, match="exhausted"):
+        event_store.next_seq(proj)
+    assert _counter(proj) == (MAX_INT64, 1), (
+        "the counter must be left at INT64_MAX — pre-fix the bump moved it to "
+        "INT64_MIN")
+
+
+def test_next_seq_refuses_a_negative_counter(sdk_factory, tmp_path):
+    """#5379: a counter already below the domain is refused, not bumped.
+
+    REACHABLE: this is exactly what the pre-fix wrap left on disk (see the
+    INT64_MAX test above). Bumping it would keep issuing negative seqs, which
+    is the same undeliverable shape as the wrap itself; re-seeding it here
+    could re-issue a seq an existing :GraphEvent already uses.
+    """
+    sdk = sdk_factory(tmp_path, ensure_schema=True)
+    proj = sdk._get_proj()
+    _set_counter(proj, -(2 ** 63))
+    with pytest.raises(ValueError, match="exhausted"):
+        event_store.next_seq(proj)
+    assert _counter(proj) == (-(2 ** 63), 1), "a refusal must not move it"
+
+
+def test_every_allocated_seq_survives_the_indexed_delivery_walk(
+        sdk_factory, tmp_path):
+    """#5379 end-to-end: every seq the allocator HANDS OUT is delivered.
+
+    Walks the cursor one page at a time with the `seq` RANGE index installed
+    (`ensure_schema=True`) — the index is what makes the read lossy above
+    2**53. FAILING VALUE / pre-fix: the allocator hands out `MAX_SEQ`, `2**53`
+    and `2**53 + 1`; the walk delivers the first two, SKIPS `2**53 + 1` (it
+    rounds to `2**53` as a double, failing `seq > 2**53`), and the subscriber
+    reads `[]` forever while `read_after(2**53 - 1)` still returns the row.
+    Post-fix the allocator refuses the seq above `MAX_SEQ`, so the walk
+    delivers everything it issued.
+    """
+    from tortoise.event_store import MAX_SEQ
+
+    sdk = sdk_factory(tmp_path, ensure_schema=True)
+    proj = sdk._get_proj()
+    _set_counter(proj, MAX_SEQ - 1)
+
+    issued: list[int] = []
+    refusals = 0
+    for _ in range(4):  # 3 past the counter's start: the ceiling must bite
+        try:
+            seq = event_store.next_seq(proj)
+        except ValueError:
+            refusals += 1
+            continue
+        issued.append(seq)
+        event_store.append_event(
+            proj, seq, "PointAdded", {"id": f"p{seq}"}, f"ev-{seq}")
+
+    delivered = _deliver_all(proj)
+    assert delivered == issued, (
+        f"the indexed delivery walk dropped {sorted(set(issued) - set(delivered))} "
+        f"of the seqs the allocator issued ({issued} issued, {delivered} "
+        f"delivered) — an event that exists and is never delivered")
+    assert issued and max(issued) <= MAX_SEQ, (
+        f"the allocator must never issue a seq above MAX_SEQ (issued {issued})")
+    assert refusals >= 1, (
+        "the ceiling must be reached and refused — pre-fix all 4 calls were "
+        "handed a seq")
+
+
+def test_seq_range_index_skips_an_exact_int_above_2_pow_53(sdk_factory, tmp_path):
+    """The ENGINE behaviour ``MAX_SEQ`` exists for — a tripwire, not our code.
+
+    ``MAX_SEQ`` rests on numeric range comparison being done in DOUBLE
+    PRECISION: `2**53 + 1` is not representable as a double (it rounds to
+    `2**53`), so a comparison against `2**53` cannot see that row. That is why
+    the ceiling is ``2**53 - 1`` rather than "whenever an int64 runs out".
+
+    The premise is pinned in the form that is INDEPENDENT of the planner and of
+    the engine build: the comparison is forced to doubles explicitly
+    (``toFloat(e.seq) > $after`` with a float bound) instead of relying on the
+    engine choosing its `seq` RANGE index for an int-vs-int predicate. The
+    int-vs-int form is engine- and platform-dependent — some bundled/embedded
+    builds compare int64 exactly and return the row at `2**53 + 1` while the
+    production image drops it — so a red there would misdirect a maintainer to
+    "revisit MAX_SEQ" for what is an environment artefact (#5379 review). What
+    this DOES catch is the premise itself becoming false: an engine whose
+    numeric comparison is exact would return the row even as a double, and then
+    ``MAX_SEQ`` should be re-derived.
+    """
+    from tortoise.event_store import MAX_SEQ
+
+    sdk = sdk_factory(tmp_path, ensure_schema=True)
+    proj = sdk._get_proj()
+    base = 2 ** 53
+    assert base > MAX_SEQ, "the ceiling must sit below the first lossy seq"
+    # Engine-independent part of the premise: 2**53 + 1 is not a double.
+    assert float(base + 1) == float(base), (
+        "2**53 + 1 must not be representable as a double")
+    for seq in (base, base + 1, base + 2):
+        proj.g.query("CREATE (:GraphEvent {seq:$s, event_id:$e})",
+                     params={"s": seq, "e": f"ev-{seq}"})
+    got = [r[0] for r in proj.g.query(
+        "MATCH (e:GraphEvent) WHERE toFloat(e.seq) > $after "
+        "RETURN e.seq ORDER BY e.seq ASC",
+        params={"after": float(base)}).result_set]
+    assert got == [base + 2], (
+        f"the engine's double-precision range comparison no longer drops the "
+        f"row at 2**53 + 1 (got {got}) — re-derive whether MAX_SEQ is still "
+        f"needed")
+
+
+def test_refresh_first_seq_saturates_a_counter_at_int64_max(sdk_factory, tmp_path):
+    """#5379: the INT64_MAX (wrapped) counter must not wrap the purge floor.
+
+    FAILING VALUE: `_refresh_first_seq` computed `m.last_seq + 1` in the graph,
+    so a counter at INT64_MAX (what an exhausted allocator looks like on disk)
+    wrote `first_seq = -9223372036854775808`. `poll_events`'s
+    `after_seq < first_seq` guard can then never fire — no accepted cursor is
+    below a negative floor — so a subscriber parked above a truncated stream
+    read `[]` forever instead of getting the truthful 410.
+
+    Each out-of-domain counter gets its OWN fresh graph: the embedded engine
+    silently DROPS a negative overwrite of a property holding INT64_MAX (the
+    seed would not land), and an ignored setup write must not surface as a
+    confusing assertion about `_refresh_first_seq`.
+    """
+    from tortoise.event_store import MAX_INT64, _refresh_first_seq
+
+    sdk = sdk_factory(tmp_path)
+    proj = sdk._get_proj()
+    _set_counter(proj, MAX_INT64)
+    _refresh_first_seq(proj)
+    assert _counter(proj) == (MAX_INT64, MAX_INT64), (
+        "the empty-log floor saturates at the top of the first_seq domain "
+        "(MAX_INT64) — never a wrapped negative")
+
+
+def test_refresh_first_seq_saturates_a_negative_counter(sdk_factory, tmp_path):
+    """#5379: a counter below the domain saturates the floor, never 0.
+
+    A floor of 0 cannot fire `poll_events`' expiry guard at all — every
+    reachable cursor is `>= 1` (`after_seq == 0` is the "from the start"
+    sentinel that SKIPS the check), so `1 < 0` is false and the subscriber
+    parked above the truncated stream reads `[]` forever with no 410. The
+    allocator REFUSES a negative counter, so its next write is unreachable and
+    EVERY reachable cursor is genuinely expired: the floor saturates above the
+    whole cursor range, exactly as the wrap branch does.
+    """
+    from tortoise.event_store import MAX_INT64, _refresh_first_seq
+
+    sdk = sdk_factory(tmp_path)
+    proj = sdk._get_proj()
+    _set_counter(proj, -(2 ** 63))
+    _refresh_first_seq(proj)
+    assert _counter(proj) == (-(2 ** 63), MAX_INT64), (
+        "a counter below the domain saturates the floor above every reachable "
+        "cursor — a floor of 0 would leave the 410 guard unable to fire")
+
+
+def test_negative_counter_floor_still_expires_a_cursor(sdk_factory, tmp_path):
+    """#5379 review: the saturated negative-counter floor answers 410.
+
+    Pins the DELIVERY contract, not just the number: a subscriber whose cursor
+    sits above the truncated stream must get `cursor expired` (410) rather than
+    `[]` forever — the #4653 harm the change exists to remove. FAILING VALUE
+    on a floor of 0: `poll_events` returns `{"events": []}` where the 410 is
+    required.
+    """
+    from tortoise.event_store import MAX_INT64, _refresh_first_seq
+
+    sdk = sdk_factory(tmp_path)
+    proj = sdk._get_proj()
+    _set_counter(proj, -(2 ** 63))
+    _refresh_first_seq(proj)
+    assert _counter(proj) == (-(2 ** 63), MAX_INT64), "seed must land"
+
+    with pytest.raises(ValueError, match="cursor expired"):
+        sdk.poll_events(after=sdk._encode_cursor(5))
+    with pytest.raises(ValueError, match="cursor expired"):
+        sdk.poll_events(after=sdk._encode_cursor(2 ** 60))
+    # The `after=None` sentinel stays exempt (it reads from the start).
+    assert sdk.poll_events()["events"] == []
+
+
+def test_refresh_first_seq_keeps_a_floor_above_max_seq(sdk_factory, tmp_path):
+    """#5379: the normal contract is unchanged, including above MAX_SEQ.
+
+    The last legal write leaves a floor of `MAX_SEQ + 1` — `first_seq` is
+    legitimately ABOVE `MAX_SEQ` (MAX_SEQ's own docstring) and is bounded only
+    by `MAX_INT64`.
+    """
+    from tortoise.event_store import MAX_SEQ, _refresh_first_seq
+
+    sdk = sdk_factory(tmp_path)
+    proj = sdk._get_proj()
+    _set_counter(proj, MAX_SEQ)
+    _refresh_first_seq(proj)
+    assert _counter(proj) == (MAX_SEQ, MAX_SEQ + 1)
+
+
+def test_exhausted_allocator_never_reuses_a_seq_on_emit(sdk_factory, tmp_path):
+    """#5379: at the ceiling the emit FAILS rather than re-issuing a seq.
+
+    `_emit_event` treats the graph store as best-effort, so the mutation still
+    succeeds — but NO graph event may be appended and the counter must not
+    move: a capped seq handed back to the emitter would reuse an ordering key
+    the store already issued (#4653's collision), and reusing it is exactly
+    what a `CASE` that saturates `last_seq` would do on every later emit.
+    """
+    from tortoise.event_store import MAX_SEQ
+
+    sdk = sdk_factory(tmp_path, ensure_schema=True)
+    sdk.create_point("statement", "before the ceiling")
+    proj = sdk._get_proj()
+    before = [(e["seq"], e["event_id"]) for e in event_store.read_after(proj, 0)]
+    assert before, "the fixture must really emit an event"
+
+    _set_counter(proj, MAX_SEQ)
+    sdk.create_point("statement", "at the ceiling")  # mutation continues
+
+    assert [(e["seq"], e["event_id"])
+            for e in event_store.read_after(proj, 0)] == before, (
+        "no graph event may be appended when the allocator refuses")
+    assert _counter(proj) == (MAX_SEQ, 1), "the refusal must not move the counter"
+
+
+def test_next_seq_ceiling_is_atomic_across_workers_live_falkor():
+    """#5379: concurrent emitters split the remaining domain exactly.
+
+    The grant decision must be in the SAME query as the bump. A read-then-bump
+    implementation lets two workers read `MAX_SEQ - 1` and both bump, so the
+    second writes `MAX_SEQ + 1` — the first undeliverable seq, and the exact
+    race this ceiling exists to remove. Starts 8 workers at `MAX_SEQ - 3` and
+    asserts exactly 3 DISTINCT grants, 5 refusals, and a counter that never
+    left the domain. Runs in CI's `test-concurrency-falkor` job, which
+    provisions the live URI and selects this nodeid explicitly (see
+    `.github/workflows/python-ci.yml`) — skips visibly everywhere else, since
+    the embedded redislite client is not multi-connection-safe (see
+    sdk_factory).
+    """
+    import os  # noqa: I001
+    import threading
+
+    from _live_utils import _skip_unless_live_uri
+    from tortoise.event_store import MAX_SEQ
+    from tortoise.projection import FalkorProjection
+    from tortoise.sdk import TortoiseSDK
+
+    _skip_unless_live_uri()
+    uri = os.environ["TORTOISE_DB_URI"]
+    namespace = "test_seq_ceiling"
+
+    # Seed the counter deterministically before the workers race.
+    proj = FalkorProjection.from_uri(uri, graph_name=f"{namespace}_tortoise")
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj.g.query(
+        "MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = 1",
+        params={"last": MAX_SEQ - 3})
+    proj.close()
+
+    granted: list[int] = []
+    refused: list[int] = []
+    errors: list[str] = []
+
+    def worker(i):
+        try:
+            s = TortoiseSDK(namespace=namespace)
+            try:
+                granted.append(event_store.next_seq(s._get_proj()))
+            finally:
+                s.close()
+        except ValueError:
+            refused.append(i)
+        except Exception as e:  # pragma: no cover
+            errors.append(f"{type(e).__name__}: {e}")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+
+    assert not errors, errors
+    assert sorted(granted) == [MAX_SEQ - 2, MAX_SEQ - 1, MAX_SEQ], (
+        f"the 3 remaining seqs must be handed out once each, contiguously — "
+        f"got {sorted(granted)}")
+    assert len(refused) == 5, (
+        f"the other 5 workers must be refused, not handed a duplicate — "
+        f"granted {sorted(granted)}, refused {len(refused)}")
+    assert len(set(granted)) == len(granted), "no seq may be issued twice"

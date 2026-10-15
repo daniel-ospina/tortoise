@@ -38,6 +38,10 @@ RETIRED_SDK_METHODS: dict[str, str] = {
     # `docs/product/beta-sdk-surface.md` row 11 (`poll_events`); cited by
     # `tools/sdk_rename_table.py` region `r8`.
     "events_poll": "poll_events",
+    # #4282 phase 2.1 — the point-in-time read. Approved target: the beta doc's own
+    # rename ledger (`| `restore_point_at` | → row 7 **`get_historical_knowledge`** |`);
+    # cited by `tools/sdk_rename_table.py` region `r3_restore`.
+    "restore_point_at": "get_historical_knowledge",
 }
 
 

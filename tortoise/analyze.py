@@ -38,9 +38,19 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["strongest", "best argument", "most support", "evidence for", "supports"],
         "description": "Find claims supporting a target via IMPL chains, ranked by confidence",
         "subgraph_vars": ["supporter"],
+        # #6871: the operator's typed edges ARE its input set — idx 0 is the
+        # operator's SOURCE, idx >= 1 its targets — so "the claim supporting a
+        # target" is the idx=0 endpoint and the supported claim is an idx>=1
+        # one. Without the two role guards a plain identity guard
+        # (target.id <> supporter.id) also matches INVERSELY — the operator's
+        # own source served as the SUPPORTER of a target: querying the source
+        # returned the target as its supporter, and `tortoise_analyze` answered
+        # with the claim's own hypothesis as its evidence.
         "cypher": """
-            MATCH (supporter:Point)<-[:IMPL]-(op:Point {op_type:\"IMPL\"})-[:IMPL]->(target:Point)
-            WHERE target.id <> supporter.id
+            MATCH (supporter:Point)<-[r_in:IMPL]-(op:Point {op_type:\"IMPL\"})-[r_out:IMPL]->(target:Point)
+            WHERE coalesce(r_in.idx, 0) = 0
+              AND coalesce(r_out.idx, 0) >= 1
+              AND target.id <> supporter.id
               AND target.content CONTAINS $entity
               AND coalesce(supporter.confidence, 0.5) > 0.0
             RETURN supporter.id, supporter.content, coalesce(supporter.confidence,0.5) as conf
@@ -84,6 +94,17 @@ TEMPLATES: dict[str, dict] = {
         # would dominate "most uncertain" on include-terminal surfaces — the
         # shared live.py terminal predicate excludes them ("uncertain" is for
         # LIVE claims).
+        # The WHERE is a FILTER — "this claim carries persisted EP state" —
+        # not a measurement claim, so a #2199 declared baseline (prior-only)
+        # is a legitimate candidate here: its variance is real and worth
+        # ranking. The reported `conf`, however, must be the canonical belief
+        # mean every other surface reads (#2206); `coalesce(c.confidence,0.5)`
+        # reported 0.5 for a prior-only 0.75 claim — the residual #2206-class
+        # divergence this fixes (#3415). The belief expression coerces with
+        # toFloat: FalkorDB `/` is INTEGER division when both operands are ints
+        # (unlike Python), so a prior persisted as ints (set_point_baseline(2,1),
+        # or the legacy 49705bf6e tier_map) truncated 2/3 → 0 — worse than the
+        # neutral fallback it replaced. Mirrors annotate_ep_batch's guard.
         "cypher": f"""
             MATCH (c:Point)
             WHERE c.is_operator = false
@@ -93,7 +114,12 @@ TEMPLATES: dict[str, dict] = {
                  coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
             WITH c, a, b, (a * b) / 
                ((a + b)^2 * (a + b + 1)) as variance
-            RETURN c.id, c.content, coalesce(c.confidence,0.5) as conf, variance
+            RETURN c.id, c.content,
+                   coalesce(c.confidence,
+                            CASE WHEN a + b > 0
+                                 THEN toFloat(a) / (a + b) ELSE 0.5 END)
+                     as conf,
+                   variance
             ORDER BY variance DESC LIMIT $limit
         """,
         "format": lambda rows: _format_uncertain(rows),
@@ -102,9 +128,15 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["evidence for", "supports", "basis", "foundation", "backing", "chain"],
         "description": "Trace IMPL support chain back to root evidence for a claim",
         "subgraph_vars": ["evidence"],
+        # #6871: same role guard as `strongest_for` above — the evidence is the
+        # operator's idx=0 endpoint, the chained claim an idx>=1 one. Without
+        # it, asking for the evidence chain of the SOURCE returned its own
+        # targets as its foundation.
         "cypher": """
-            MATCH (evidence:Point)<-[:IMPL]-(op:Point {op_type:\"IMPL\"})-[:IMPL]->(target:Point)
-            WHERE target.id <> evidence.id
+            MATCH (evidence:Point)<-[r_in:IMPL]-(op:Point {op_type:\"IMPL\"})-[r_out:IMPL]->(target:Point)
+            WHERE coalesce(r_in.idx, 0) = 0
+              AND coalesce(r_out.idx, 0) >= 1
+              AND target.id <> evidence.id
               AND target.content CONTAINS $entity
               AND evidence.is_operator = false
             RETURN evidence.id, evidence.content, coalesce(evidence.confidence,0.5) as conf
@@ -117,16 +149,25 @@ TEMPLATES: dict[str, dict] = {
         "description": "Show confidence changes by comparing node properties over time",
         "subgraph_vars": ["c"],
         # #2490: exclude decayed terminals from the confidence timeline (see
-        # most_uncertain — the shared live.py terminal predicate).
+        # most_uncertain — the shared live.py terminal predicate). #3415: the
+        # reported conf is the canonical belief mean (posterior→prior
+        # coalesce, #2206), never the neutral 0.5 — a prior-only 0.75 claim
+        # used to print conf=0.50 beside its own α=3/β=1 columns. toFloat on
+        # the numerator mirrors annotate_ep_batch: FalkorDB integer division
+        # would truncate an int prior mean (2/3 → 0) — see most_uncertain.
         "cypher": f"""
             MATCH (c:Point)
             WHERE c.content CONTAINS $entity
               AND {_terminal_excluded('c.status')}
               AND (c.posterior_alpha IS NOT NULL OR c.ep_alpha IS NOT NULL)
-            RETURN c.id, c.content, coalesce(c.confidence,0.5) as conf,
-                   coalesce(c.posterior_alpha, c.ep_alpha, 1.0) as a,
-                   coalesce(c.posterior_beta, c.ep_beta, 1.0) as b,
-                   c.createdAt
+            WITH c, coalesce(c.posterior_alpha, c.ep_alpha, 1.0) AS a,
+                 coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
+            RETURN c.id, c.content,
+                   coalesce(c.confidence,
+                            CASE WHEN a + b > 0
+                                 THEN toFloat(a) / (a + b) ELSE 0.5 END)
+                     as conf,
+                   a, b, c.createdAt
             ORDER BY c.createdAt DESC LIMIT $limit
         """,
         "format": lambda rows: _format_timeline(rows),
@@ -388,12 +429,14 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
         posteriors with green tests, §5.6 cycle-3).
 
     A9 traversal (epic #902 §5.6): the selector ALSO walks operator-less
-    direct edges — DIRECTION-RESPECTING: NAND edges traversed both
-directions ALWAYS; IMPL edges traversed both directions ONLY when the
-    edge's stored ``direction`` ≠ ``"unidirectional"`` (a unidirectional
-    direct IMPL edge must NOT back-propagate into its source — mirrors
-    §4.3's EP read coalesce(r.direction,'bidirectional') and the operator-
-    path selector's direction handling). The direct-edge traversal expands
+    direct edges — DIRECTION-RESPECTING (#7852): a direct edge is walked
+    forward only where its stored ``direction`` flows forward
+    (``->``/``<->`` and their legacy aliases) and backward only where it
+    flows backward (``<-``/``<->`` and their aliases); ``-`` (no confidence
+    transfers) is walked NEITHER way. The one historical exception is NAND:
+    it keeps its always-both legacy behaviour (never back-propagating into a
+    forward-only IMPL source is an IMPL rule), minus the new ``-``. The
+    direct-edge traversal expands
     the frontier like the operator BFS does, so mixed subgraphs select
     operators AND direct factors together; a direct-edge-only subgraph
     yields ZERO operator ids + non-empty factor anchors (the return
@@ -544,7 +587,10 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
             # mirroring the operator-mediated dirs. NAND is ALWAYS both
             # (matching the operator BFS's NAND bidirectionality).
             # forward: (frontier) -[rel]-> (plain neighbor); every rel type
-            # traverses forward from the frontier point.
+            # traverses forward from the frontier point. #7852: only where the
+            # edge's direction actually flows forward (`->`/`<->` and their
+            # legacy aliases) — a backward-only `<-` edge is never walked the
+            # wrong way.
             if rel == "NAND" or direction in ("outgoing", "both"):
                 rows = proj.g.query(
                     f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
@@ -554,6 +600,10 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                     "AND a.op_type IS NULL "
                     "AND (b.is_operator IS NULL OR b.is_operator = false) "
                     "AND b.op_type IS NULL "
+                    "AND (type(r) = 'NAND' "
+                    "     AND coalesce(r.direction, 'bidirectional') <> '-' "
+                    "     OR coalesce(r.direction, 'bidirectional') IN "
+                    "        ['bidirectional', '<->', '->', 'unidirectional']) "
                     "RETURN DISTINCT b.id, a.id, type(r)",
                     params={"frontier": frontier_list},
                 ).result_set
@@ -562,8 +612,8 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                         new_points.add(bid)
                     factor_anchors.add((aid, bid, rtype))
             # backward: (plain neighbor) -[rel]-> (frontier); NAND always;
-            # IMPL only when the edge is NOT unidirectional (never
-            # back-propagate into a unidirectional edge's source).
+            # IMPL only where the edge flows BACKWARD (`<-`/`<->` and their
+            # legacy aliases — never back-propagate into a forward-only edge).
             if rel == "NAND" or direction in ("incoming", "both"):
                 rows = proj.g.query(
                     f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
@@ -574,7 +624,9 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                     "AND (b.is_operator IS NULL OR b.is_operator = false) "
                     "AND b.op_type IS NULL "
                     "AND (type(r) = 'NAND' "
-                    "     OR coalesce(r.direction, 'bidirectional') <> 'unidirectional') "
+                    "     AND coalesce(r.direction, 'bidirectional') <> '-' "
+                    "     OR coalesce(r.direction, 'bidirectional') IN "
+                    "        ['bidirectional', '<->', '<-']) "
                     "RETURN DISTINCT a.id, b.id, type(r)",
                     params={"frontier": frontier_list},
                 ).result_set

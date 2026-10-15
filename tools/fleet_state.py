@@ -859,19 +859,48 @@ def _run(cmd: Sequence[str], timeout: int = 60) -> str:
     return p.stdout if p.returncode == 0 else ""
 
 
-def load_registry(path: Path = REGISTRY) -> list[tuple[str, str, str]]:
-    """``label<TAB>workspace<TAB>issue-label`` rows (comments ignored)."""
-    rows: list[tuple[str, str, str]] = []
+class RegistryRows(list):
+    """``load_registry`` rows carrying the READ'S provenance (#7738/#7957 H5).
+
+    A plain ``[]`` cannot distinguish "the registry lists no lanes" from "the
+    registry could not be read". The first is a real (if unusual) roster; the
+    second means the lane population is UNKNOWN, and every consumer that OFFERS a
+    lane or asserts that a lane holds nothing would otherwise answer from a read
+    that never happened. The same provenance the workspace list carries
+    (``WorkspaceMap``, #7738) and the board carries (``github_measured``, #7957)
+    travels here, so the caller can REFUSE rather than assert an empty fleet.
+    """
+
+    measured: bool
+    error: str
+
+    def __init__(self, *args: Any, measured: bool = False, error: str = "", **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.measured = measured
+        self.error = error
+
+
+def load_registry(path: Path = REGISTRY) -> RegistryRows:
+    """``label<TAB>workspace<TAB>issue-label`` rows (comments ignored).
+
+    The read's PROVENANCE travels with the rows. An ``OSError`` is reported as
+    ``measured=False`` with the cause — never swallowed into an empty list that
+    reads as "no lanes" (the fail-open class #7738 removed from
+    ``cmux_workspaces``). A readable file with no rows is ``measured=True``: an
+    empty registry is an answer, a failed read is not.
+    """
     try:
-        for line in path.read_text(errors="ignore").splitlines():
-            if not line or line.startswith("#") or "\t" not in line:
-                continue
-            parts = [p.strip() for p in line.split("\t")]
-            if len(parts) >= 2 and parts[1]:
-                rows.append((parts[0], parts[1], parts[2] if len(parts) > 2 else ""))
-    except OSError:
-        pass
-    return rows
+        text = path.read_text(errors="ignore")
+    except OSError as exc:
+        return RegistryRows(error=f"{type(exc).__name__}: {exc}")
+    rows: list[tuple[str, str, str]] = []
+    for line in text.splitlines():
+        if not line or line.startswith("#") or "\t" not in line:
+            continue
+        parts = [p.strip() for p in line.split("\t")]
+        if len(parts) >= 2 and parts[1]:
+            rows.append((parts[0], parts[1], parts[2] if len(parts) > 2 else ""))
+    return RegistryRows(rows, measured=True)
 
 
 class WorkspaceMap(dict):
@@ -1190,6 +1219,13 @@ def build_state(
 ) -> dict[str, Any]:
     """Build the joined fleet state. Every live source degrades to empty."""
     registry = load_registry()
+    # THE ROSTER'S OWN PROVENANCE. A registry read that failed enumerates ZERO
+    # lanes, and every consumer below would then answer "no lane holds it" and "no
+    # free capacity" from a read that never happened. Carry the fact (the same
+    # shape as the workspace list and the board) so a reader can refuse. The
+    # tolerant default keeps a legacy or monkeypatched plain list MEASURED.
+    registry_measured = bool(getattr(registry, "measured", True))
+    registry_error = str(getattr(registry, "error", "") or "")
     workspaces = cmux_workspaces()
     # #7738: workspace-existence reconciliation is only sound when the live list
     # was actually READ. An unreadable list (e.g. the beat's launchd context cannot
@@ -1554,6 +1590,11 @@ def build_state(
             # failed read can never be served as an answer by a later reader.
             "github_measured": github_measured,
             "github_error": github_error,
+            # THE LANE ROSTER'S OWN PROVENANCE (same rule, same source class): a
+            # registry read that failed enumerates NO lanes and must be a NAMED
+            # failure a reader can refuse on, never an empty fleet.
+            "registry_measured": registry_measured,
+            "registry_error": registry_error,
         },
         "conflicts": conflicts,
         "conflict_claimants": {str(n): who for n, who in conflict_claimants.items()},
@@ -1573,6 +1614,7 @@ def build_state(
             "retired": sum(1 for t in terminal_lanes if t["state"] == "RETIRED"),
             "workspaces_measured": workspaces_measured,
             "github_measured": github_measured,
+            "registry_measured": registry_measured,
         },
     }
 
@@ -1650,6 +1692,7 @@ def _load_or_build(args: argparse.Namespace) -> dict[str, Any]:
     # read is never cached), and never from `build`, which owns its own write path.
     if (
         github_provenance(state)["measured"]
+        and registry_provenance(state)["measured"]
         and getattr(args, "cmd", None) != "build"
         and _write_state_json(path, state)
     ):
@@ -1815,6 +1858,22 @@ def github_provenance(state: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def registry_provenance(state: Mapping[str, Any]) -> dict[str, Any]:
+    """Did the LANE ROSTER this state was built from actually read (#8246)?
+
+    Same tolerant reading as ``github_provenance``: a cache written before this
+    field existed carries no provenance and is treated as MEASURED, so a legacy
+    cache cannot wedge the fleet — only an EXPLICIT failure makes a reader refuse.
+    """
+    rec = state.get("reconciliation") if isinstance(state, Mapping) else None
+    if not isinstance(rec, Mapping) or "registry_measured" not in rec:
+        return {"measured": True, "error": ""}
+    return {
+        "measured": bool(rec.get("registry_measured")),
+        "error": str(rec.get("registry_error") or ""),
+    }
+
+
 def payload_freshness(state: Mapping[str, Any]) -> dict[str, Any]:
     """The freshness block for a JSON payload (H1 for the MACHINE channel).
 
@@ -1848,6 +1907,27 @@ def _board_readable(state: Mapping[str, Any], cmd: str, what: str) -> bool:
     print(
         f"{cmd}: GitHub is UNREADABLE ({gp['error'] or 'cause unknown'}) — {what}; "
         "nothing is asserted rather than asserted empty (#7957 H5)",
+        file=sys.stderr,
+    )
+    return False
+
+
+def _registry_readable(state: Mapping[str, Any], cmd: str, what: str) -> bool:
+    """True when the LANE ROSTER read may be answered from. A failed read is not.
+
+    ``load_registry`` used to swallow an ``OSError`` into ``[]``, which made an
+    unreadable registry indistinguishable from a fleet with no lanes: every command
+    that asserts "no free lane", "no lane holds it", "no ownership conflicts",
+    "no orphans", "no lane matching that name", "nothing to bind" or
+    "no session-partition breaks" answered from a read that never happened.
+    Same polarity as ``_board_readable`` (#7957 H5).
+    """
+    rp = registry_provenance(state)
+    if rp["measured"]:
+        return True
+    print(
+        f"{cmd}: the lane registry is UNREADABLE ({rp['error'] or 'cause unknown'}) — "
+        f"{what}; nothing is asserted rather than asserted empty (#7957 H5)",
         file=sys.stderr,
     )
     return False
@@ -1919,6 +1999,19 @@ def cmd_build(args: argparse.Namespace) -> int:
         print(
             "⛔ NOT CACHED: the GitHub board could not be read "
             f"({gp['error'] or 'cause unknown'}) — a failed read is never written as "
+            f"fact (#7957 H5); {out} is left untouched",
+            file=sys.stderr,
+        )
+        return 2
+    # And the ROSTER, for the same reason: a cached zero-lane state would be served
+    # as a fresh fleet for the whole TTL, dark.
+    rp = registry_provenance(state)
+    if not rp["measured"]:
+        if args.json:
+            print(json.dumps(state, indent=2, default=str))
+        print(
+            "⛔ NOT CACHED: the lane registry could not be read "
+            f"({rp['error'] or 'cause unknown'}) — a failed read is never written as "
             f"fact (#7957 H5); {out} is left untouched",
             file=sys.stderr,
         )
@@ -2054,6 +2147,12 @@ def cmd_who(args: argparse.Namespace) -> int:
     # The board being unreadable is exactly when a claim looks absent.
     if not _board_readable(state, "who", f"cannot say whether a lane holds #{args.number}"):
         return 2
+    # #8246 / PR #8594 review: the ROSTER is the OTHER source behind "no lane holds
+    # it". `index` is built from `lanes`, and `lanes` comes from the registry, so an
+    # unreadable registry yields an empty index and manufactures the same false
+    # negative as an unread board — a lane picks up work another lane already holds.
+    if not _registry_readable(state, "who", f"cannot say whether a lane holds #{args.number}"):
+        return 2
     if args.json:
         print(json.dumps({"number": args.number, "kind": None, "lanes": [], "evidence": {},
                           "freshness": payload_freshness(state)}))
@@ -2075,6 +2174,11 @@ def cmd_conflicts(args: argparse.Namespace) -> int:
     # An empty conflict list is an ALL-CLEAR; it must not be manufactured by a board
     # that could not be read (#7957 H5).
     if not _board_readable(state, "conflicts", "cannot rule out ownership conflicts"):
+        return 2
+    # ...and the ROSTER behind them: `conflict_claimants` is derived from `lanes`, so
+    # an unreadable registry reports "no ownership conflicts" — an all-clear from a
+    # read that never happened (#8246 / PR #8594 review).
+    if not _registry_readable(state, "conflicts", "cannot rule out ownership conflicts"):
         return 2
     cmap = conflict_map(state)
     live = lane_live_map(state)
@@ -2113,6 +2217,14 @@ def _find_lane(state: Mapping[str, Any], needle: str) -> dict[str, Any] | None:
 
 def cmd_lane(args: argparse.Namespace) -> int:
     state = _load_or_build(args)
+    # A NEGATIVE LANE LOOKUP IS ROSTER-DERIVED, so an unreadable roster must refuse
+    # BEFORE the search. `state["lanes"]` is built solely from the registry rows, so an
+    # unread roster enumerates zero lanes and `no lane matching ...` is an existence
+    # verdict manufactured from a read that never happened (PR #8594 review P2).
+    if not _registry_readable(
+        state, "lane", f"cannot say whether a lane named {args.lane!r} exists"
+    ):
+        return 2
     lane = _find_lane(state, args.lane)
     if lane is None:
         print(f"no lane matching {args.lane!r}", file=sys.stderr)
@@ -2170,6 +2282,12 @@ def cmd_free(args: argparse.Namespace) -> int:
     # capacity — the #7158 class. Refuse instead of offering it.
     if not _board_readable(state, "free", "cannot tell a working lane from idle capacity"):
         return 2
+    # SECONDLY the ROSTER. The board answers "is this lane busy?"; the registry
+    # answers "which lanes EXIST?". An unreadable registry enumerates zero lanes, so
+    # this command would report a fully-busy fleet — the same fail-open as an unread
+    # board, one source over.
+    if not _registry_readable(state, "free", "cannot enumerate the lanes that could take work"):
+        return 2
     # A lane record we cannot read is NOT free (fail-closed, the same polarity as every
     # other unmeasured signal in this module) — and a malformed cache degrades rather
     # than crashing the one command whose answer is "send work here".
@@ -2211,6 +2329,11 @@ def cmd_orphans(args: argparse.Namespace) -> int:
     # board is a false all-clear (#7957 H5).
     if not _board_readable(state, "orphans", "cannot detect work with no live owner"):
         return 2
+    # ...and the ROSTER behind the owners: `orphan_report` decides "no live owner"
+    # from `lanes`, so an unreadable registry reports a claimed PR as unowned (or
+    # reports `none` from a fixture state) — never an answer (#8246 / PR #8594 review).
+    if not _registry_readable(state, "orphans", "cannot detect work with no live owner"):
+        return 2
     print(json.dumps(state["orphans"], indent=2, default=str) if args.json else "\n".join(
         f"  [{o['kind']}] {o.get('number', o.get('lane', '?'))}: {o['reason']}" for o in state["orphans"]
     ) or "  none")
@@ -2219,6 +2342,12 @@ def cmd_orphans(args: argparse.Namespace) -> int:
 
 def cmd_violations(args: argparse.Namespace) -> int:
     state = _load_or_build(args)
+    # `violations` comes from `resolve_sessions(rows, ...)`, where `rows` is exactly
+    # `load_registry()`'s output: an unreadable registry yields zero rows, hence zero
+    # claimed sessions, hence zero violations — the old code printed `none` on rc=0,
+    # byte-identical to a measured, genuinely-clean roster (PR #8594 review P2).
+    if not _registry_readable(state, "violations", "cannot detect session-partition breaks"):
+        return 2
     print(json.dumps(state["violations"], indent=2) if args.json else "\n".join(
         f"  {v['session'][:8]}… -> {', '.join(v['lanes'])}" for v in state["violations"]
     ) or "  none")
@@ -2246,6 +2375,15 @@ def cmd_bind(args: argparse.Namespace) -> int:
     than none. ``--all`` repairs every live lane whose binding is missing.
     """
     state = _load_or_build(args)
+    # `--all` repairs every live lane whose binding is missing: it is derived ENTIRELY from
+    # the roster. An unread roster enumerates zero lanes, so the old code printed
+    # `nothing to bind` and exited 0 -- "no lane needed repair" from a read that never
+    # happened (PR #8594 review P2). A non-`--all` bind takes an explicit workspace/session
+    # and does not read the roster, so it is left alone.
+    if args.all and not _registry_readable(
+        state, "bind", "cannot repair the lanes whose session binding is missing"
+    ):
+        return 2
     targets: list[tuple[str, str, str, str, Path]] = []
     results: list[dict[str, Any]] = []
     if args.all:

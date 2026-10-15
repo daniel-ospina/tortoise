@@ -32,6 +32,7 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import require_answered, transport_wait_bound_s
 from tortoise.activation_scorecard import (
     assert_no_activation_claim,
     roll_up_cohort,
@@ -1393,10 +1394,50 @@ def test_default_window_is_24h(client):
 
     assert timedelta(hours=24) == DEFAULT_WINDOW
     assert timedelta(days=90) == MAX_WINDOW
-    body = client.get("/v1/activation/scorecard").json()
+    # #5049: `GET /v1/activation/scorecard` is not exempt from the transport
+    # wait bound — a 504 refusal carries the refusal body, so the pre-fix
+    # `client.get(...).json()["window"]` read a KeyError as a FAIL (measured on
+    # main at dfb7244d2a). `require_answered` turns that non-answer into the
+    # declared INCONCLUSIVE; every other response is returned untouched.
+    r = require_answered(
+        client.get("/v1/activation/scorecard"),
+        what="GET /v1/activation/scorecard answered")
+    body = r.json()
     since = datetime.fromisoformat(body["window"]["since"])
     until = datetime.fromisoformat(body["window"]["until"])
     assert until - since == timedelta(hours=24), (since, until)
+
+
+class _BoundRefusalClient:
+    """The site's own request, answered by the product's transport refusal."""
+
+    def __init__(self) -> None:
+        from tortoise import mcp_auth
+
+        self.status_code = 504
+        self.text = mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE
+
+    def get(self, *_args, **_kwargs):
+        return self
+
+    def json(self) -> dict:
+        return {"detail": self.text}
+
+
+def test_default_window_is_inconclusive_when_the_bound_refuses():
+    """#5049: a bound reached with no answer SKIPs — it never FAILs.
+
+    Deterministic: the site's request is answered by the refusal itself, so no
+    load is needed. Pre-fix this site did `client.get(...).json()["window"]`, so
+    the same input raised `KeyError: 'window'` — a bare FAIL that read as a
+    scorecard regression. Removing `require_answered` from the site makes this
+    pin go RED with that KeyError, which is the must-fail leg.
+    """
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        test_default_window_is_24h(_BoundRefusalClient())
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert f"{transport_wait_bound_s():g}" in message
 
 
 # ── The analytics write-path repair ───────────────────────────────────────

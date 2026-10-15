@@ -1368,9 +1368,10 @@ def test_ready_probe_inner_bound_is_strictly_below_the_outer_bound(selfhost, mon
 
     A value above the outer bound is not a bound at all (the outer would win the
     race and park the worker), and a value below the client's connect timeout
-    would abort an ordinary connect before it starts (host lane, 2.0s; the
-    embedded UDS lane keeps redis-py's own 5s default and is NOT covered by the
-    floor).
+    would abort an ordinary connect before it starts (2.0s on BOTH lanes since
+    #3421 — the embedded UDS lane's connect bound now reaches its pool exactly
+    as the host lane's reaches the constructor; before it, that lane carried no
+    connect bound of ours at all, so there was nothing to be below).
 
     ``outer`` is read from the MODULE ATTRIBUTE, not the source literal: the
     literal is always the shipped 6.0, so a bound checked against it cannot see

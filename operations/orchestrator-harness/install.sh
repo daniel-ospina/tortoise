@@ -14,16 +14,29 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 O="${O:-$HOME/orchestrator}"
-REPO="${REPO:-/Users/home/eldato/tortoise}"
+REPO="${REPO:-/Users/danielospina/Documents/GitHub/tortoise}"
 OR="${OR:-daniel-ospina/tortoise}"
 
-MAX_LOAD="${MAX_LOAD:-16}"
+# sanity ceiling only; the swap/RAM gates below are the real constraint.
+# Portable core count, IDENTICAL to orch-loop.sh's line. install.sh itself refuses to run off macOS
+# (it renders a launchd plist), but selftest §7 EVALUATES this assignment on whatever host runs the
+# suite and compares it with the loop's — so on a Linux host a divergence here would resolve
+# MAX_LOAD=40 against the loop's cores*10 and fail a check for a difference with no runtime effect.
+# sysctl -n hw.ncpu is a macOS-only key and sysctl is absent from a minimal Linux userland
+# (debian:stable-slim ships no procps): in the LOOP that silently pinned _NCPU=4, MAX_LOAD=40 (#1702).
+_NCPU="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
+MAX_LOAD="${MAX_LOAD:-$(( _NCPU * 10 ))}"
 MAX_LANES="${MAX_LANES:-4}"
 MAX_REVIEW="${MAX_REVIEW:-4}"
 MERGE_PRIORITY_AT="${MERGE_PRIORITY_AT:-10}"
+# 1 = a P0-blocker at the backlog head is dispatched even above MERGE_PRIORITY_AT; 0 restores the
+# unconditional gate. Rendered into the plist like every other tunable: launchd gives no shell env,
+# so an env-only kill switch is unreachable on the installed box (README §4).
+P0_BYPASS_MERGE_PRIORITY="${P0_BYPASS_MERGE_PRIORITY:-1}"
 MAX_FIX="${MAX_FIX:-3}"
 MAX_FIX_TRIES="${MAX_FIX_TRIES:-3}"
 MIN_SWAP_FREE="${MIN_SWAP_FREE:-600}"
+MIN_MEM_FREE_MB="${MIN_MEM_FREE_MB:-512}"
 BATCH="${BATCH:-2}"
 CYC="${CYC:-240}"
 
@@ -55,6 +68,119 @@ for bin in tmux gh pi; do
 done
 command -v uv >/dev/null 2>&1 && ok "uv" || warn "uv not found — lane.sh needs it to sync each worktree"
 gh auth status >/dev/null 2>&1 && ok "gh authenticated" || die "gh is not authenticated"
+
+# ── the daemon's PATH ────────────────────────────────────────────────────────────
+# ⛔ launchd gives a process NO shell environment, so every binary the daemon shells out to must be
+# findable on the PATH baked into the plist. The original version hardcoded three brew dirs, which
+# was correct only because gh/uv/pi happened to be brew-installed on the box it was built on.
+# On a box where they live under the user's own prefix the loop does NOT fail loudly — it reads an
+# EMPTY QUEUE: `OPEN_N="$(gh pr list ... 2>/dev/null)"` yields "" and `${OPEN_N:=0}` turns that
+# into 0, so the sweep logs `[scope] open=0 -> OWN` while the queue is full and the loop idles.
+# Measured 2026-10-12 on a second box: 25 open PRs invisible; `pi` missing would also have broken
+# every lane spawn and `uv` every worktree sync. Resolve the real directories instead of assuming.
+# Three traps here, and ALL fail silently at runtime rather than loudly at install time:
+#  (1) `command -v` can return a WRAPPER, not the tool. Where `gh` is the pi agent shim
+#      (~/.pi/agent/shims/gh), the resolved directory is the SHIM's — and the shim locates the real
+#      gh by scanning PATH minus its own directory, finds nothing, and exits 127. The loop then
+#      reads an empty queue and logs `[scope] open=0 -> OWN`. A shimmed tool therefore needs the
+#      directory of its REAL binary on the PATH too.
+#  (2) `command -v` can return a NON-ABSOLUTE name (a shell function/alias), and `dirname` of that
+#      is `.` — baking the current directory into an unattended daemon's PATH.
+#  (3) ⛔ A shim directory must NEVER be baked into the daemon PATH at all — under launchd the shim
+#      can be UNEXECUTABLE. ~/.pi/agent/shims/gh is a symlink INTO ~/Documents, and macOS TCC
+#      (Transparency, Consent & Control) blocks launchd from reading ~/Documents, so the daemon
+#      gets `bash: ~/.pi/agent/shims/gh: Operation not permitted` — EPERM (a TCC denial on the
+#      symlink's TARGET), NOT a missing file or permission bit. The install shell is interactive
+#      and CAN read ~/Documents, so the probe-by-execution below SUCCEEDS and install reports OK:
+#      a FALSE GREEN for exactly the silent failure this block exists to prevent (the daemon later
+#      reads an empty queue and idles at open=0). No install-time probe can see the EPERM, so the
+#      exclusion below — not a stronger probe — is the guard. add_dir() therefore refuses every
+#      `*/shims`, `*/shims/*` and `*/.pi/*` directory while the "resolve PAST a wrapper" loop keeps
+#      adding the REAL binary's directory, so the tool is still findable. Do not "simplify" this
+#      exclusion away: it is invisible to every check that runs before launchd does.
+add_dir() {
+  case "$1" in /*) ;; *) return 0 ;; esac
+  # ⛔ Trap (3): a shim / ~/.pi directory is EPERM under launchd (macOS TCC on ~/Documents). The
+  # real binary's directory is added separately, so dropping the shim does not lose the tool.
+  # Test the PHYSICAL path (pwd -P), not the name: a PATH entry that is a SYMLINK to the shim
+  # directory matches none of the name patterns, and without this it slips through AND suppresses
+  # the real binary (the resolve-past loop keys off the same patterns). Store the LOGICAL path so
+  # the version-independent pi symlink is not pinned to a version-stamped target.
+  local _phys
+  _phys="$(cd "$1" 2>/dev/null && pwd -P)" || return 0
+  case "$_phys" in ""|*/shims|*/shims/*|*/.pi/*) return 0 ;; esac
+  case ":$DAEMON_PATH:" in *":$1:"*) ;; *) DAEMON_PATH="$DAEMON_PATH:$1" ;; esac
+}
+DAEMON_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# Prefer the version-independent pi symlink: a resolved version-stamped pi-node directory is pinned
+# to today's version, and a pi upgrade would leave the daemon on a stale (or missing) one.
+if [ -x "$HOME/.local/share/pi-node/current/bin/pi" ]; then
+  command -v pi >/dev/null 2>&1 && add_dir "$HOME/.local/share/pi-node/current/bin"
+fi
+for bin in tmux gh uv pi; do
+  # ⛔ Resolve the BINARY, not a shell function/alias. `command -v` reports an exported function
+  # REGARDLESS of PATH (and a BARE name for it), so with a `gh`/`pi` function in the environment the
+  # real binary's directory would never be found AND the name would be unusable. `type -P` searches
+  # PATH ONLY (ignoring functions/aliases) and returns an absolute path — exactly what launchd will
+  # exec — so trap (2) (a `.`-dirname from a bare name) cannot arise; the `/*` guard stays as
+  # defence in depth.
+  p="$(type -P "$bin" 2>/dev/null)" || continue
+  case "$p" in /*) ;; *) continue ;; esac
+  add_dir "$(cd "$(dirname "$p")" 2>/dev/null && pwd)"
+done
+# Resolve PAST a wrapper: add the first PATH entry holding a real executable of that name outside a
+# shim/.pi directory, so the shim can find it. Tested on the PHYSICAL path like add_dir(), so a
+# symlink TO a shim directory is recognised as a shim too.
+for bin in gh pi uv tmux; do
+  p="$(type -P "$bin" 2>/dev/null)" || continue
+  case "$p" in /*) ;; *) continue ;; esac
+  _pd="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)" || continue
+  case "$_pd" in
+    */shims|*/shims/*|*/.pi/*)
+      _oldifs="$IFS"; IFS=:
+      # `for d in $PATH` word-splits on `:` and then GLOBS each entry: an entry containing `*`
+      # would expand to directories that are not PATH entries. Disable globbing for the scan.
+      case $- in *f*) _had_noglob=1 ;; *) _had_noglob=0 ;; esac
+      set -f
+      for d in $PATH; do
+        [ -n "$d" ] || continue
+        _dd="$(cd "$d" 2>/dev/null && pwd -P)" || continue
+        case "$_dd" in ""|*/shims|*/shims/*|*/.pi/*) continue ;; esac
+        if [ -x "$d/$bin" ]; then add_dir "$d"; break; fi
+      done
+      [ "$_had_noglob" = 1 ] || set +f
+      IFS="$_oldifs" ;;
+  esac
+done
+ok "daemon PATH: $DAEMON_PATH"
+# ⛔ PROBE BY EXECUTION AND BY ABSOLUTE PATH. Resolving a name is not running it, and `command -v`
+# cannot answer the daemon's question: it reports an EXPORTED SHELL FUNCTION (which launchd never
+# sees), and executed by bare name it would run the function instead of the daemon's binary — a
+# false green. `type -P` under the daemon PATH returns the absolute binary launchd will exec
+# (ignoring functions/aliases); each is then EXECUTED. A shim/wrapper directory that does not match
+# the exclusion patterns (cmux's `cmux-cli-shims` is a real one) is caught here because its tool
+# exits 127. uv is optional (warned above): its failure WARNS, and is never fatal. Still BLIND to
+# trap (3) — TCC refuses the read only when LAUNCHD does it, not when an interactive shell does.
+for bin in tmux uv pi gh; do
+  command -v "$bin" >/dev/null 2>&1 || continue     # not present in this shell at all
+  # ⛔ `|| true`: install.sh runs under `set -euo pipefail`, and `type -P` returns non-zero for a
+  # tool that is not on $DAEMON_PATH. Unguarded, that bare assignment aborts the script AT THIS
+  # LINE — before the `if [ -n "$_p" ]` test below — so the operator gets a bare rc=1 with no
+  # diagnostic, and the optional `uv` (documented and warned as non-fatal above) becomes fatal.
+  _p="$(PATH="$DAEMON_PATH" type -P "$bin" 2>/dev/null || true)"
+  case "$_p" in /*) ;; *) _p="" ;; esac
+  # tmux takes -V; the rest take --version. Either way it must actually EXECUTE.
+  _vflag="--version"; [ "$bin" = "tmux" ] && _vflag="-V"
+  # ⛔ Execute under the DAEMON PATH, not this shell's: a wrapper that DELEGATES by name (strip
+  # its own dir, `exec $bin`) would find the tool on the interactive PATH and exit 0 while launchd
+  # gets 127 — the same false green one layer in. The prefix reproduces the daemon's environment.
+  if [ -n "$_p" ] && PATH="$DAEMON_PATH" "$_p" "$_vflag" >/dev/null 2>&1; then continue; fi
+  if [ "$bin" = "uv" ]; then
+    warn "daemon PATH cannot run uv — lane.sh will not sync worktrees: $DAEMON_PATH"
+  else
+    die "daemon PATH cannot run $bin: $DAEMON_PATH"
+  fi
+done
 
 # ── the merge authority ──────────────────────────────────────────────────────────
 # The harness can review and record, but it cannot MERGE without the gate key.
@@ -119,13 +245,16 @@ sed \
   -e "s|__REPO__|$(esc "$REPO")|g" \
   -e "s|__OR__|$(esc "$OR")|g" \
   -e "s|__HOME__|$(esc "$HOME")|g" \
+  -e "s|__PATH__|$(esc "$DAEMON_PATH")|g" \
   -e "s|__MAX_LOAD__|$MAX_LOAD|g" \
   -e "s|__MAX_LANES__|$MAX_LANES|g" \
   -e "s|__MAX_REVIEW__|$MAX_REVIEW|g" \
   -e "s|__MERGE_PRIORITY_AT__|$MERGE_PRIORITY_AT|g" \
+  -e "s|__P0_BYPASS_MERGE_PRIORITY__|$P0_BYPASS_MERGE_PRIORITY|g" \
   -e "s|__MAX_FIX__|$MAX_FIX|g" \
   -e "s|__MAX_FIX_TRIES__|$MAX_FIX_TRIES|g" \
   -e "s|__MIN_SWAP_FREE__|$MIN_SWAP_FREE|g" \
+  -e "s|__MIN_MEM_FREE_MB__|$MIN_MEM_FREE_MB|g" \
   -e "s|__BATCH__|$BATCH|g" \
   -e "s|__CYC__|$CYC|g" \
   "$TEMPLATE" > "$PLIST"
@@ -136,7 +265,7 @@ ok "plist valid"
 # invokes, not just orch-loop.sh. A drift here is silent and serious: a fix applied only to the
 # shipped copy (e.g. the fail-closed ai-review-gate classifier) would never reach the running box.
 DRIFTED=""
-for f in orch-loop.sh dispatch-merge.sh lane.sh chain-merge.sh merge-one.sh fix-one.sh refresh-candidates.sh adopt-fix.sh; do
+for f in orch-loop.sh dispatch-merge.sh lane.sh chain-merge.sh merge-one.sh fix-one.sh refresh-candidates.sh adopt-fix.sh merged-not-closed.sh spawn-gate.sh; do
   [ -f "$O/$f" ] || { DRIFTED="$DRIFTED $f(missing)"; continue; }
   diff -q "$HERE/$f" "$O/$f" >/dev/null 2>&1 || DRIFTED="$DRIFTED $f"
 done
@@ -153,8 +282,8 @@ cat <<EOF
   harness   $O
   repo      $REPO   ($OR)
   limits    lanes=$MAX_LANES review=$MAX_REVIEW fix=$MAX_FIX fix_tries=$MAX_FIX_TRIES
-            max_load=$MAX_LOAD min_swap_free=${MIN_SWAP_FREE}M batch=$BATCH cycle=${CYC}s
-            merge_priority_at=${MERGE_PRIORITY_AT} open PRs
+            max_load=$MAX_LOAD min_swap_free=${MIN_SWAP_FREE}M min_mem_free_mb=${MIN_MEM_FREE_MB}M batch=$BATCH cycle=${CYC}s
+            merge_priority_at=${MERGE_PRIORITY_AT} open PRs   p0_bypass_merge_priority=${P0_BYPASS_MERGE_PRIORITY}
 
 The loop is NOT running. To start it:
 

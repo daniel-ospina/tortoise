@@ -42,6 +42,10 @@ PYTHON_CI = ROOT / ".github" / "workflows" / "python-ci.yml"
 PMV = ROOT / ".github" / "workflows" / "post-merge-validation.yml"
 ACTION_DIR = ROOT / ".github" / "actions"
 
+# The one engine pin every provisioned job resolves to (#6386). Named once so
+# the guard cannot disagree with itself about which version is canon.
+FALKORDB_PIN = "falkordb/falkordb-server:v4.20.6"
+
 # (workflow, job, uri_graph expected on the provision step['with'], legacy)
 # `legacy` is the EFFECTIVE value: the fast/slow/validate jobs replace a
 # two-service `services:` block (passworded + passwordless legacy), while
@@ -222,17 +226,51 @@ def test_services_bearing_job_provisions_ephemerally(wf_path, job_name, uri_grap
     )
 
 
-def test_python_ci_jobs_keep_the_v4206_image_pin():
-    """Each caller keeps its own image pin — the provision step must not
-    silently switch the shared services jobs to another FalkorDB build."""
-    for _wf, job_name, _g, _l in PROVISIONED_JOBS:
-        if _wf is not PYTHON_CI:
-            continue
-        job = _job(PYTHON_CI, job_name)
+def test_every_provisioned_job_pins_the_v4206_image():
+    """#6386: EVERY provisioned job must test the SAME immutable engine pin.
+
+    The failure this prevents is measured, not hypothetical. #6673 replaced
+    this repo's `services:` blocks with `.github/actions/falkordb-provision`
+    and carried each block's image over verbatim, so `post-merge-validation`
+    kept `falkordb/falkordb-server:latest` while python-ci moved to `v4.20.6`.
+    The tag then floated to engine 6.x, whose `reply.rs` panic killed the
+    container mid-suite: on main, run 38494033413 (2026-10-14), the validate
+    job failed at `114 passed, 0 failed` with `Error 111 connecting to
+    localhost:32768. Connection refused`, and teardown then found ONE
+    container where the action had started two. A post-merge lane running a
+    different engine from the pre-merge gate reports engine drift as a
+    product regression on an unchanged tree.
+
+    Two holes are closed, because one assertion cannot see both:
+
+    1. a CALLER must not override the pin with a floating tag — this is the
+       pmv site above, and the assertion that used to exist here skipped it
+       (`if _wf is not PYTHON_CI: continue`);
+    2. the ACTION DEFAULT is a pin too — the four python-ci jobs pass no
+       `image` at all, so a default that moved would silently move the gate's
+       engine with no commit to this repo. Its value is therefore read from
+       action.yml, never assumed.
+    """
+    prov_action = yaml.safe_load(
+        (ACTION_DIR / "falkordb-provision" / "action.yml").read_text())
+    action_default = prov_action["inputs"]["image"]["default"]
+    assert action_default == FALKORDB_PIN, (
+        "the action default is the engine every job that passes no `image` "
+        f"runs against — expected {FALKORDB_PIN!r}, got {action_default!r}"
+    )
+
+    for wf_path, job_name, _g, _l in PROVISIONED_JOBS:
+        job = _job(wf_path, job_name)
         prov = next(s for s in job["steps"]
                     if str(s.get("uses", "")).endswith("falkordb-provision"))
-        assert (prov.get("with") or {}).get("image", "falkordb/falkordb-server:v4.20.6") \
-            == "falkordb/falkordb-server:v4.20.6"
+        image = (prov.get("with") or {}).get("image", action_default)
+        assert image == FALKORDB_PIN, (
+            f"{wf_path.name}:{job_name} provisions {image!r}, not the CI pin "
+            f"{FALKORDB_PIN!r}. Every lane must test the engine the gate "
+            "approved: a floating `:latest` moved to engine 6.0.0 underneath "
+            "an unchanged tree and its panic killed the container mid-suite "
+            "(#6386)."
+        )
 
 
 @pytest.mark.parametrize("wf_path", [PYTHON_CI, PMV], ids=["python-ci", "pmv"])

@@ -60,6 +60,42 @@ def test_projection_still_works_with_guard_active():
             pass
 
 
+def test_production_projection_client_goes_through_the_guard_seam():
+    """#6882: the embedded production projection client carries the guard marker.
+
+    ``tests/test_bounded_raw_clients_3065.py`` pins the SOURCE (a raw
+    ``FalkorDB(...)`` reds an AST scan over the package); this pins the
+    ARTIFACT — the client the embedded production branch builds is the guarded
+    one. Reverting ``guarded_client(FalkorDB, …)`` to ``FalkorDB(…)`` there
+    unguards ``proj.db.select_graph(...)`` (the dominant path: SDK registry
+    handles, ``hosted_api``, ``backup_sweep``, ``session_indexer``, the doctor
+    probe) and, MEASURED on the reviewed head, left the entire #3595 guard suite
+    green. This is that missing falsifier, and it lives here because this file
+    is carve-out AND redirect-exempt, so the run is genuinely embedded (the
+    construction the assertion exercises is the embedded one).
+    """
+    import os
+    import tempfile
+
+    from tortoise.cypher_guard import _GUARDED_CLIENT_MARKER, _carries_marker
+    from tortoise.projection import FalkorProjection
+
+    path = os.path.join(tempfile.mkdtemp(), "guard-seam.db")
+    proj = FalkorProjection(path)
+    try:
+        assert _carries_marker(proj.db, _GUARDED_CLIENT_MARKER), (
+            "the production projection client is not the guarded one — a raw "
+            "FalkorDB(...) unguards proj.db.select_graph(...) with the guard "
+            "suite green (#6882)")
+    finally:
+        proj.close()
+        for suffix in (".db", ".db.settings"):
+            try:  # noqa: SIM105
+                os.remove(path + suffix)
+            except OSError:
+                pass
+
+
 def test_direct_redislite_import_before_tortoise_bypasses():
     """Importing redislite.falkordb_client.FalkorDB BEFORE tortoise yields the
     unwrapped original — documented bypass (pre-commit grep covers it)."""

@@ -11,6 +11,24 @@ from tortoise.alert_store import AlertStore
 from tortoise.hosted_backup import MemoryStorage
 
 
+@pytest.fixture(autouse=True)
+def _pre_3146_window(monkeypatch):
+    """Pin the recovery window to 1 for the LIFECYCLE tests in this module.
+
+    #3146 made recovery a hysteresis condition, so a window-declared kind
+    (``STALE``, ``R2_DOWN``, ...) now needs N consecutive healthy observations
+    to clear. The tests here exercise the resolve MECHANICS — close, delete,
+    telegram, cooldown, aliases, authority — not the window, and they would
+    otherwise have to call ``resolve_incident`` twice to reach the path they
+    assert on. ``ALERT_RECOVERY_STREAK=1`` is the config contract's own "clear
+    now" lever, so pinning it here keeps each test asserting exactly one
+    behaviour (the resolve mechanism) while the window gets its own dedicated
+    tests below (``test_recovery_window_*``), which delete this override and
+    exercise the DECLARED default.
+    """
+    monkeypatch.setenv("ALERT_RECOVERY_STREAK", "1")
+
+
 class _FakeChannels:
     def __init__(self):
         self.issues: dict[int, str] = {}      # number -> title
@@ -440,111 +458,22 @@ def test_a_filed_incident_is_adopted_from_the_object_without_any_search():
     assert ch.closed, "resolution still works while the search is down"
 
 
-# ── #3033: the documented taxonomy must match the emitted one ─────────────────
-
-
-_ALERT_SOURCES = ("tortoise/alert_store.py", "tortoise/backup_watcher.py",
-                  "tortoise/backup_sweep.py", "tortoise/hosted_api.py",
-                  # #3981's operator-facing kinds are emitted by these modules and
-                  # documented in the runbook, so the #3033 drift scan must see
-                  # their writers rather than read them as unemittable.
-                  "tortoise/cohort_cost.py", "tortoise/operator_alert.py")
-_DRIVER = ".github/scripts/registry-cron.sh"
-def _dead_kinds_documented() -> set[str]:
-    """The kinds the runbook itself declares writer-less (#3033).
-
-    Parsed from the runbook rather than hardcoded: a revert of the runbook's
-    "Kinds with no writer" section must fail the drift test below, not silently
-    re-exempt the kinds.
-    """
-    import re
-    from pathlib import Path
-
-    doc = (Path(__file__).resolve().parent.parent
-           / "docs/ops/registry-backup-dr.md").read_text()
-    section = doc.split("### Kinds with no writer", 1)
-    assert len(section) == 2, "the 'Kinds with no writer' section must exist"
-    return {m.group(1) for m in re.finditer(r"\|\s*`([A-Z][A-Z0-9_]+)`\s*\|", section[1])}
-
-
-def _documented_kinds() -> set[str]:
-    """Kinds in the runbook's triage table (first column, ALL_CAPS tokens)."""
-    import re
-    from pathlib import Path
-
-    doc = (Path(__file__).resolve().parent.parent
-           / "docs/ops/registry-backup-dr.md").read_text()
-    table = doc.split("## Alert taxonomy + triage", 1)[1].split("### How incidents CLOSE", 1)[0]
-    return {m.group(1) for m in re.finditer(r"^\|\s*([A-Z][A-Z0-9_]{3,})\s*\|", table, re.M)}
-
-
-def _emittable_kinds() -> set[str]:
-    """Kinds any producer can actually open/resolve — scanned from the emitters.
-
-    Deliberately mechanical: a kind that exists only in a doc or a test must not
-    count as "monitored".
-    """
-    import re
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parent.parent
-    kinds: set[str] = set()
-    for rel in _ALERT_SOURCES:
-        text = (root / rel).read_text()
-        kinds |= set(re.findall(r'(?:open_incident|resolve_incident)\(\s*"([A-Z][A-Z0-9_]+)"', text))
-        # The watcher's per-leg containment helper takes the op as a string
-        # (`_alert_leg("open_incident", "STALE", key)`) — the call-site pattern
-        # above cannot see it, so a refactor into that helper must not silently
-        # read as "this kind lost its writer".
-        kinds |= set(re.findall(r'_alert_leg\(\s*"(?:open|resolve)_incident",\s*"([A-Z][A-Z0-9_]+)"', text))
-        kinds |= set(re.findall(r'"kind":\s*"([A-Z][A-Z0-9_]+)"', text))
-        # Kinds named by a module constant (e.g. `_DRILL_FAILED_KIND`), which the
-        # call-site scan cannot see.
-        kinds |= set(re.findall(r'_KIND\s*=\s*"([A-Z][A-Z0-9_]+)"', text))
-    driver = (root / _DRIVER).read_text()
-    kinds |= set(re.findall(r'\bfile_alert\s+([A-Z][A-Z0-9_]+)\s', driver))
-    kinds |= set(re.findall(r'\bresolve_global\s+([A-Z][A-Z0-9_]+)\s', driver))
-    return kinds
-
-
-def test_documented_kinds_have_a_writer():
-    """#3033: every kind in the runbook's triage table must have a writer.
-
-    A documented-but-unemittable kind is corrosive: the operator believes a
-    condition will page when it cannot, and the test suite gains a green
-    assertion with no production referent.
-    """
-    documented = _documented_kinds()
-    emittable = _emittable_kinds()
-    dead = _dead_kinds_documented()
-    assert dead == {"ALERTER_DOWN", "LIVENESS_NO_WORK"}, (
-        f"the runbook's writer-less list changed: {dead} — update this test's expectation"
-    )
-    assert "STALE" in documented and "STALE" in emittable, "the scan itself must work"
-    offenders = sorted(documented - emittable - dead)
-    assert not offenders, (
-        f"documented but never emitted: {offenders} — give them a writer or move "
-        "them to the 'Kinds with no writer' section"
-    )
-
-
-def test_dead_kinds_are_documented_as_dead():
-    """#3033: the two unemittable kinds must be marked NOT EMITTED, not left
-    looking live in the triage table."""
-    from pathlib import Path
-
-    doc = (Path(__file__).resolve().parent.parent
-           / "docs/ops/registry-backup-dr.md").read_text()
-    dead_section = doc.split("### Kinds with no writer", 1)
-    assert len(dead_section) == 2, "the 'Kinds with no writer' section must exist"
-    body = dead_section[1]
-    for kind in _dead_kinds_documented():
-        assert f"`{kind}`" in body, f"{kind} must be listed as writer-less"
-    table = doc.split("## Alert taxonomy + triage", 1)[1].split("### How incidents CLOSE", 1)[0]
-    for kind in _dead_kinds_documented():
-        row = [ln for ln in table.splitlines() if ln.startswith(f"| {kind} |")]
-        assert row, f"{kind} must keep a triage row"
-        assert "NOT EMITTED" in row[0], f"{kind}'s triage cell must say NOT EMITTED"
+# ── the documented taxonomy must match the emitted one ──────────────────────
+#
+# #4780: the #3033 checks that used to live here (a regex scan of the emitters
+# plus two hand-listed dead kinds) are SUPERSEDED by the incident-kind registry
+# and its generated checks, which assert the runbook ⇄ code set equality and the
+# emitted flag in BOTH directions instead of only for the kinds listed by hand:
+#
+#     tortoise/incident_kinds.py        (the one declaration site)
+#     tests/test_incident_kinds.py      (the generated checks)
+#
+# The replacement also removes the reason those checks were fragile here: they
+# matched bare kind literals in the emitters, which #4780 deleted — every filing
+# call site now passes a registry constant, so a literal-matching scan would have
+# read as "every kind lost its writer". `tests/test_alert_store.py` keeps the
+# cross-language OWNER contract (`test_kind_owner_contract_with_driver`), which
+# is a different property (who may RESOLVE a kind, not who emits one).
 
 
 # ── #3030 review: the bounded-open-set API + resolve failure semantics ───────
@@ -707,6 +636,9 @@ def test_a_failed_close_is_not_retried_until_the_cooldown_expires():
 
 _CANONICAL_KEY = "ops/alerts/R2_DOWN/_.json"
 _DRIVER_KEY = "ops/alerts/R2_DOWN/global.json"  # legacy alias spelling
+# #3147: the driver-owned LISTING tier, used by the two-tier ownership tests.
+_UNLISTABLE_CANONICAL_KEY = "ops/alerts/R2_UNLISTABLE/_.json"
+_UNLISTABLE_ALIAS_KEY = "ops/alerts/R2_UNLISTABLE/global.json"
 
 
 def test_platform_incident_key_contract():
@@ -770,6 +702,22 @@ def test_real_subject_named_global_never_cross_adopts_a_platform_incident():
     assert list(ch2.issues.values()) == ["[DR] R2_DOWN — global"]
 
 
+def _sentinel(storage, kind, issue_number, writer=None, *, key="global"):
+    """Seed the R2 create-once object a writer's filing path writes for ``kind``.
+
+    Same shape as :func:`_driver_sentinel`, generalised to any kind so the #3147
+    two-tier ownership tests can seed `R2_UNLISTABLE` as well as `R2_DOWN`.
+    """
+    payload = {
+        "kind": kind,
+        "issue_number": issue_number,
+        "filed_at": "2026-09-10T00:00:00Z",
+    }
+    if writer is not None:
+        payload["writer"] = writer
+    storage.upload(f"ops/alerts/{kind}/{key}.json", json.dumps(payload).encode())
+
+
 def _driver_sentinel(storage, issue_number, writer=None):
     """Seed the R2 object the bash DR driver's `file_alert` writes.
 
@@ -778,14 +726,7 @@ def _driver_sentinel(storage, issue_number, writer=None):
     under the legacy `global` alias so the alias-consulting paths are the ones
     exercised.
     """
-    payload = {
-        "kind": "R2_DOWN",
-        "issue_number": issue_number,
-        "filed_at": "2026-09-10T00:00:00Z",
-    }
-    if writer is not None:
-        payload["writer"] = writer
-    storage.upload(_DRIVER_KEY, json.dumps(payload).encode())
+    _sentinel(storage, "R2_DOWN", issue_number, writer)
 
 
 class _RefilingStorage(MemoryStorage):
@@ -1092,35 +1033,76 @@ def test_become_filer_writes_the_canonical_key():
 
 
 def test_resolve_refuses_a_kind_owned_by_another_writer():
-    """#3127: the watcher cannot clear R2_DOWN — its probe covers the wrong thing.
+    """#3127/#3147: the watcher cannot clear R2_UNLISTABLE — its probe is wrong.
 
     A reachability check cannot distinguish "R2 unreachable" from "the key
-    cannot ListObjects", so the watcher's all-clear may be false. Pre-fix it
+    cannot ListObjects", so the watcher's all-clear of the LISTING tier would be
+    false. Pre-#3147 both tiers shared one `R2_DOWN` key; the split gives each
+    its own owner, and this pins the side the watcher must NOT clear. Pre-fix it
     deleted only its own spelling; once both writers shared one key it would
     close the driver's issue and the driver would re-file — one duplicate pair
     per hour, with a real storage fault recorded as resolved.
     """
     ch = _FakeChannels()
     storage = MemoryStorage()
-    _driver_sentinel(storage, 7, writer="driver")
-    ch.issues[7] = "[DR] R2_DOWN"
+    _sentinel(storage, "R2_UNLISTABLE", 7, writer="driver")
+    ch.issues[7] = "[DR] R2_UNLISTABLE"
     store = _store(ch, storage, writer="watcher")
 
-    assert store.resolve_incident("R2_DOWN") is False
+    assert store.resolve_incident("R2_UNLISTABLE") is False
     assert ch.closed == []
-    assert storage.download(_DRIVER_KEY), "the sentinel must survive the refusal"
+    assert storage.download(_UNLISTABLE_ALIAS_KEY), "the sentinel must survive the refusal"
 
 
 def test_resolve_allowed_for_the_declared_owner():
+    """#3147: the driver owns R2_UNLISTABLE and may clear it."""
     ch = _FakeChannels()
     storage = MemoryStorage()
-    _driver_sentinel(storage, 7, writer="driver")
+    _sentinel(storage, "R2_UNLISTABLE", 7, writer="driver")
     store = _store(ch, storage, writer="driver")
+
+    assert store.resolve_incident("R2_UNLISTABLE") is True
+    assert ch.closed == [7]
+    with pytest.raises(KeyError):
+        storage.download(_UNLISTABLE_ALIAS_KEY)
+
+
+def test_watcher_can_clear_the_reachability_tier_it_owns():
+    """#3147 indicator 2: the watcher legitimately clears the kind it evidences.
+
+    R2_DOWN's meaning narrowed to the reachability tier, whose owner is the
+    WATCHER — its own R2 read IS the reachability probe. Before the split this
+    resolve was refused (the driver owned the kind) and ADR-011 recorded the
+    resulting stranding as an accepted cost; the split removes the need for the
+    refusal. The other direction is pinned by
+    `test_resolve_refuses_a_kind_owned_by_another_writer`.
+    """
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    _sentinel(storage, "R2_DOWN", 7, writer="watcher")
+    store = _store(ch, storage, writer="watcher")
 
     assert store.resolve_incident("R2_DOWN") is True
     assert ch.closed == [7]
     with pytest.raises(KeyError):
         storage.download(_DRIVER_KEY)
+
+
+def test_driver_cannot_clear_the_reachability_tier_it_only_files():
+    """#3147 indicator 4: the driver FILED R2_DOWN but must not clear it.
+
+    The watcher owns the reachability tier, so the driver's passing preflight is
+    not the evidence that clears it — `resolve_global` refuses and leaves the
+    sentinel intact.
+    """
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    _sentinel(storage, "R2_DOWN", 7, writer="driver")
+    store = _store(ch, storage, writer="driver")
+
+    assert store.resolve_incident("R2_DOWN") is False
+    assert ch.closed == []
+    assert storage.download(_DRIVER_KEY), "the sentinel must survive the refusal"
 
 
 def test_resolve_refuses_even_a_sentinel_the_caller_itself_opened():
@@ -1130,18 +1112,18 @@ def test_resolve_refuses_even_a_sentinel_the_caller_itself_opened():
     found three ways the self-asserted filed-by note went wrong — stamped by an
     adopter, surviving a placeholder that was never filed, outliving the issue
     it described — each letting a non-owner clear a kind it has no evidence
-    about. The accepted cost: with the driver disabled, a watcher-filed R2_DOWN
-    stays open until a driver run clears it. That is correct — if the driver is
-    off, the evidence that storage recovered does not exist.
+    about. #3147 keeps the rule per TIER: a watcher-filed R2_UNLISTABLE stays
+    open until a driver run clears it — correct, because the watcher's probe does
+    not measure the pool the listing tier is about.
     """
     ch = _FakeChannels()
     storage = MemoryStorage()
-    _driver_sentinel(storage, 7, writer="watcher")
+    _sentinel(storage, "R2_UNLISTABLE", 7, writer="watcher")
     store = _store(ch, storage, writer="watcher")
 
-    assert store.resolve_incident("R2_DOWN") is False
+    assert store.resolve_incident("R2_UNLISTABLE") is False
     assert ch.closed == []
-    assert storage.download(_DRIVER_KEY), "the sentinel survives the refusal"
+    assert storage.download(_UNLISTABLE_ALIAS_KEY), "the sentinel survives the refusal"
 
 
 def test_owned_kind_still_resolves_for_its_owner():
@@ -1163,11 +1145,12 @@ def test_resolve_tolerates_a_corrupt_issue_number():
     ch = _FakeChannels()
     storage = MemoryStorage()
     storage.upload(
-        _DRIVER_KEY, json.dumps({"kind": "R2_DOWN", "issue_number": "abc"}).encode(),
+        _UNLISTABLE_ALIAS_KEY,
+        json.dumps({"kind": "R2_UNLISTABLE", "issue_number": "abc"}).encode(),
     )
     store = _store(ch, storage, writer="driver")
 
-    assert store.resolve_incident("R2_DOWN") is True  # must not raise
+    assert store.resolve_incident("R2_UNLISTABLE") is True  # must not raise
     assert ch.closed == []
 
 
@@ -1177,17 +1160,18 @@ def test_non_owner_that_adopts_an_issue_does_not_gain_authority():
     The watcher creates its own placeholder, then the GH-search fallback finds
     the DRIVER's already-filed open issue and adopts its number. Stamping the
     watcher as the sentinel's `writer` made the provenance carve-out pass, so
-    the watcher could close the driver's `R2_DOWN` on its weaker reachability
+    the watcher could close the driver's `R2_UNLISTABLE` on its weaker
+    reachability
     probe — the false recovery the guard exists to stop, one layer deeper. This
     reproduced against the previous commit.
     """
     ch = _FakeChannels()
     storage = MemoryStorage()
-    ch.issues[50] = "[DR] R2_DOWN"  # filed by the driver, still open
+    ch.issues[50] = "[DR] R2_UNLISTABLE"  # filed by the driver, still open
     store = _store(ch, storage, issue_open=lambda n: True, writer="watcher")
 
-    store.open_incident("R2_DOWN")
-    sentinel = json.loads(storage.download(_CANONICAL_KEY))
+    store.open_incident("R2_UNLISTABLE")
+    sentinel = json.loads(storage.download(_UNLISTABLE_CANONICAL_KEY))
     assert sentinel["issue_number"] == 50, "the driver's issue is adopted, not re-filed"
     assert len(ch.issues) == 1
     assert "writer" not in sentinel, "an adopter must not claim provenance"
@@ -1196,12 +1180,12 @@ def test_non_owner_that_adopts_an_issue_does_not_gain_authority():
     # second poll short-circuits on the ADOPTION path (the sentinel now names
     # the still-open issue #50), so it does not announce again.
     assert len(ch.telegram) == 1
-    store.open_incident("R2_DOWN")
+    store.open_incident("R2_UNLISTABLE")
     assert len(ch.telegram) == 1, "an already-open adopted incident is not re-announced"
 
-    # ...and the authority check falls through to KIND_OWNERS: R2_DOWN is the
-    # driver's, and the watcher cannot clear it.
-    assert store.resolve_incident("R2_DOWN") is False
+    # ...and the authority check falls through to KIND_OWNERS: R2_UNLISTABLE is
+    # the driver's, and the watcher cannot clear it.
+    assert store.resolve_incident("R2_UNLISTABLE") is False
     assert ch.closed == []
 
 
@@ -1424,18 +1408,18 @@ def test_skipped_fresh_does_not_assert_the_sentinel_is_live():
     ch = _FakeChannels()
     storage = MemoryStorage()
     # The driver's sentinel names issue 7 … which is already CLOSED.
-    _driver_sentinel(storage, 7, writer="driver")
-    ch.issues[7] = "[DR] R2_DOWN"
+    _sentinel(storage, "R2_UNLISTABLE", 7, writer="driver")
+    ch.issues[7] = "[DR] R2_UNLISTABLE"
     ch.closed.append(7)
-    # The watcher does not own R2_DOWN, so its resolve must refuse.
+    # The watcher does not own R2_UNLISTABLE, so its resolve must refuse.
     store = _store(ch, storage, writer="watcher",
                    issue_open=lambda n: n not in ch.closed)
 
-    assert store.resolve_incident_state("R2_DOWN") is ResolveOutcome.SKIPPED_FRESH
+    assert store.resolve_incident_state("R2_UNLISTABLE") is ResolveOutcome.SKIPPED_FRESH
     assert ch.closed == [7], (
         "the refusal must not close anything — the sentinel already names a "
         "closed issue and a refusal resolves nothing")
-    assert storage.download(_DRIVER_KEY), (
+    assert storage.download(_UNLISTABLE_ALIAS_KEY), (
         "the sentinel must survive the refusal — SKIPPED_FRESH left it untouched")
 
 
@@ -1668,3 +1652,158 @@ def test_body_preserves_backup_key_but_scrubs_a_credential():
     assert key in body
     assert _TOKEN_3293 not in body
     assert "[REDACTED:github_token]" in body
+
+
+# ── #3146: recovery hysteresis (the store's own window) ─────────────────────
+# These delete the module's ``ALERT_RECOVERY_STREAK=1`` pin (the config's own
+# "clear now" lever) so the DECLARED per-kind window is what runs.
+
+
+def _streak_state(storage, kind, org=""):
+    from tortoise.alert_store import DEDUP_PREFIX, PLATFORM_ALIASES
+
+    key = f"{DEDUP_PREFIX}{kind}/{org or PLATFORM_ALIASES[0]}.json"
+    try:
+        raw = storage.download(key)
+    except KeyError:
+        return None
+    return json.loads(raw) if raw else None
+
+
+def test_recovery_window_needs_consecutive_healthy_observations(monkeypatch):
+    """#3146 acceptance, store side: ONE healthy poll must not clear an incident.
+
+    ``STALE`` is in the threshold-driven DR plane (window 2), so the first
+    healthy observation counts and the second closes — and the counter rides on
+    the incident's own sentinel so it dies with the incident.
+    """
+    from tortoise.alert_store import ResolveOutcome
+
+    monkeypatch.delenv("ALERT_RECOVERY_STREAK", raising=False)
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    assert store.open_incident("STALE", "team_x") is True
+    filed = list(ch.issues)[0]  # noqa: RUF015
+
+    assert store.resolve_incident_state("STALE", "team_x") is ResolveOutcome.SKIPPED_WINDOW
+    assert ch.closed == [], "one healthy observation must not close the issue"
+    assert len(ch.telegram) == 1, "no 'resolved' push before the window is met"
+    assert _streak_state(storage, "STALE", "team_x")["healthy_streak"] == 1
+
+    assert store.resolve_incident_state("STALE", "team_x") is ResolveOutcome.RESOLVED
+    assert ch.closed == [filed]
+    assert len(ch.telegram) == 2
+    assert _streak_state(storage, "STALE", "team_x") is None, "delete-to-resolve"
+
+
+def test_recovery_window_resets_when_the_condition_is_still_unhealthy(monkeypatch):
+    """An unhealthy observation RESETS the count: alternating readings never clear.
+
+    This is the flap the window exists to suppress. Without the reset at the
+    dedup path, healthy-run-1 + unhealthy + healthy-run-2 would accumulate to 2
+    and clear on readings that were never consecutive.
+    """
+    from tortoise.alert_store import ResolveOutcome
+
+    monkeypatch.delenv("ALERT_RECOVERY_STREAK", raising=False)
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+
+    for _ in range(3):
+        store.open_incident("STALE", "team_x")          # condition still true
+        assert store.resolve_incident_state("STALE", "team_x") is ResolveOutcome.SKIPPED_WINDOW
+        assert _streak_state(storage, "STALE", "team_x")["healthy_streak"] == 1, (
+            "the count must restart at 1 on every healthy observation")
+    assert ch.closed == [], "a flapping condition must never clear"
+    assert len(ch.issues) == 1, "and it must never file a second issue"
+
+    # Two consecutive healthy observations (no open in between) DO clear.
+    assert store.resolve_incident_state("STALE", "team_x") is ResolveOutcome.RESOLVED
+    assert len(ch.closed) == 1
+
+
+def test_recovery_window_is_not_applied_outside_the_dr_plane(monkeypatch):
+    """A human-triggered resolve clears on the first observation (window 1).
+
+    ``DATA_LOSS_CANDIDATE`` is resolved by the operator re-baselining; a window
+    would make them do it twice, which is why the boundary excludes it and why
+    the field default (1) is what applies when no override is configured.
+    """
+    from tortoise.alert_store import ResolveOutcome
+
+    monkeypatch.delenv("ALERT_RECOVERY_STREAK", raising=False)
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    store.open_incident("DATA_LOSS_CANDIDATE", "team_x")
+    assert store.resolve_incident_state(
+        "DATA_LOSS_CANDIDATE", "team_x") is ResolveOutcome.RESOLVED
+    assert len(ch.closed) == 1
+
+
+def test_recovery_window_honours_the_per_kind_override(monkeypatch):
+    """``ALERT_RECOVERY_STREAKS`` sets one kind's window without touching others."""
+    from tortoise.alert_store import ResolveOutcome
+
+    monkeypatch.delenv("ALERT_RECOVERY_STREAK", raising=False)
+    monkeypatch.setenv("ALERT_RECOVERY_STREAKS", "STALE=3")
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    store.open_incident("STALE", "team_x")
+    for expected in (1, 2):
+        assert store.resolve_incident_state(
+            "STALE", "team_x") is ResolveOutcome.SKIPPED_WINDOW
+        assert _streak_state(storage, "STALE", "team_x")["healthy_streak"] == expected
+    assert store.resolve_incident_state("STALE", "team_x") is ResolveOutcome.RESOLVED
+
+
+def test_streak_reader_prefers_a_present_healthy_streak_even_at_zero():
+    """#3146 review ISSUE 3: the reset spelling (``healthy_streak: 0``) is authoritative.
+
+    Both spellings can coexist for one deploy cycle (the driver's legacy
+    ``fresh_streak`` beside the new ``healthy_streak``). If the reader skipped a
+    present ``0`` and fell through to a leftover ``fresh_streak: 1``, the window
+    gate would compute ``1 + 1 = 2`` and clear on a SINGLE healthy observation —
+    the fabricated recovery the reset exists to prevent. The bash twin's
+    ``.healthy_streak // .fresh_streak`` prefers the explicit ``0``; so must this.
+    """
+    from tortoise.alert_store import _streak_of
+
+    assert _streak_of({"healthy_streak": 0, "fresh_streak": 1}) == 0, (
+        "a present healthy_streak of 0 must win over a stale fresh_streak sibling")
+    assert _streak_of({"healthy_streak": 2, "fresh_streak": 5}) == 2
+    # the fallback is real: only an ABSENT (or null) new spelling falls through
+    assert _streak_of({"fresh_streak": 1}) == 1
+    assert _streak_of({"healthy_streak": None, "fresh_streak": 1}) == 1
+    assert _streak_of({}) == 0
+
+
+def test_recovery_reset_is_not_defeated_by_a_leftover_fresh_streak(monkeypatch):
+    """#3146 review ISSUE 3, end to end: the reset survives the fallback.
+
+    Seeded with ``healthy_streak: 0`` beside ``fresh_streak: 1``, one healthy
+    observation must count as 1/2 and keep the incident open. Pre-fix the reader
+    returned 1, the gate computed 2/2 and the incident was RESOLVED.
+    """
+    from tortoise.alert_store import DEDUP_PREFIX, ResolveOutcome
+
+    monkeypatch.delenv("ALERT_RECOVERY_STREAK", raising=False)
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    store.open_incident("STALE", "team_x")
+    key = f"{DEDUP_PREFIX}STALE/team_x.json"
+    state = json.loads(storage.download(key))
+    state["healthy_streak"] = 0
+    state["fresh_streak"] = 1
+    storage.upload(key, json.dumps(state).encode(),
+                   content_type="application/json")
+
+    assert store.resolve_incident_state(
+        "STALE", "team_x") is ResolveOutcome.SKIPPED_WINDOW, (
+        "the reset count (0) must not be overridden by the legacy sibling")
+    assert ch.closed == [], "one healthy observation must not close the incident"
+    assert _streak_state(storage, "STALE", "team_x")["healthy_streak"] == 1

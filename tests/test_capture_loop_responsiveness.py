@@ -44,6 +44,8 @@ from contextlib import suppress
 import httpx
 import pytest
 
+from tests._verdict import require_answered
+
 # Hosted-surface tests reuse test_hosted_api's authenticated TestClient
 # fixture (temp-DB SDK patching + the session-recording consent seed), which
 # also installs the module-level env (pepper/encryption key) on import.
@@ -1782,6 +1784,18 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
             seen.append(graph_name)
             self.graph_name = graph_name
 
+        def _bind_journal(self, journal_path):
+            """#7951 §17.1: the projection contract `_get_proj` arms.
+
+            Binding is UNCONDITIONAL and fail-closed on the real
+            ``FalkorProjection`` (a journal-backed cache refuses an undeclared
+            fold), so a double standing in for it must carry the same entry
+            point. Recording the path rather than ignoring it keeps this stub
+            honest about having been bound, and the caller stays
+            non-defensive: a real projection always has this method.
+            """
+            self.bound_journal = journal_path
+
     monkeypatch.setattr(sdk_mod, "FalkorProjection", _RecordingProj)
 
     def _opened(namespace=None, graph_name=None):
@@ -1791,6 +1805,11 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
         sdk._db_path = ":memory:"
         sdk._namespace = namespace
         sdk._graph_name = graph_name
+        # #7951 §17.1: ``_get_proj`` binds the journal at construction, so a
+        # bare ``__new__`` stand-in must carry the attribute a real ``__init__``
+        # always sets — ``None`` = journal-less, the unarmed lane this mapping
+        # guard deliberately exercises.
+        sdk._event_log_path = None
         seen.clear()
         sdk._get_proj()
         return seen[-1]
@@ -2215,6 +2234,13 @@ def _measure_capture_graph_work(monkeypatch, turns: int, sid: str):
     resp = asyncio.run(_run())
     monkeypatch.setattr(graph_cls, "query", orig_query)
     monkeypatch.setattr(sdk_mod, "_write_capture_turns", orig_writer)
+    # #5049: the capture route is not exempt from the transport wait bound, so a
+    # 504 here is a non-answer — INCONCLUSIVE, never the bare FAIL every caller
+    # (both `_measure_on_loop_graph_work` and this helper's direct callers)
+    # would otherwise read off `resp.status_code`. Converting the LOWER seam
+    # covers every caller; converting the wrapper alone left the direct callers
+    # reading the refusal as a FAIL.
+    require_answered(resp, what=f"POST /v1/sessions answered (capture {sid})")
     return resp, records, writer_threads
 
 

@@ -386,6 +386,13 @@ const suites = [
   // runs, and "the suite exists" is then mistaken for "the suite passes".
   // Add the entry in the same commit as the file.
   '20261012000006_recover_team_key_expiry.sql',  // #4550
+  // #3025 — the OAuth mint as ONE transaction (`redeem_oauth_code` /
+  // `rotate_oauth_refresh`), including the two ATOMICITY DRILLS a functional-only
+  // suite would miss: a failure mid-function leaves zero new rows and an unset
+  // `used_at`. NOTE: this list is EXPLICIT, not a glob — a suite file that is not
+  // named here never runs, and "the suite exists" is then mistaken for "the suite
+  // passes". Add the entry in the same commit as the file.
+  '20261013000002_oauth_mint_rpcs.sql',  // #3025
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');

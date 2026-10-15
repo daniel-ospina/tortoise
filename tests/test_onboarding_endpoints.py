@@ -15,6 +15,7 @@ import pytest  # noqa: I001
 from fastapi.testclient import TestClient
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import require_answered
 from tortoise.hosted_api import app, _make_sdk
 from tortoise.sdk import TortoiseSDK
 
@@ -485,7 +486,8 @@ def test_off_switch_patch_stops_capture_409(client, monkeypatch):
     assert r0.status_code == 200, r0.text
     conv = [{"role": "user", "content": "we decided to ship the memory capture slice"},
             {"role": "assistant", "content": "agreed — capture is default-on now"}]
-    r1 = client.post("/v1/sessions", json={"conversation": conv})
+    r1 = require_answered(client.post("/v1/sessions", json={"conversation": conv}),
+                          what="POST /v1/sessions answered")
     assert r1.status_code == 200, r1.text
     sessions_after_on = _make_sdk(namespace="test-team-1")._get_proj().g.query(
         "MATCH (s:Session) RETURN count(s)").result_set[0][0]
@@ -771,6 +773,10 @@ _STATE_KEY_TABLE: dict[str, tuple[str, object]] = {
     # harness is added without them (no PATCH field ⇒ the 403 refusal for that
     # key can never be asserted, and the key would be silently untested).
     "session_capture_receipt_openclaw": ("session_capture_receipt_openclaw", "2026-08-25T00:00:00Z"),
+    # #2121: Hermes joins the vocabulary for the same reason as OpenClaw above
+    # — its derived server-owned keys need a PATCH field or the 403 refusal for
+    # them can never be asserted (the coverage guard below is what reds).
+    "session_capture_receipt_hermes": ("session_capture_receipt_hermes", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_claude": ("session_capture_last_error_claude", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_claude-desktop": ("session_capture_last_error_claude_desktop", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_claude-web": ("session_capture_last_error_claude_web", "2026-08-25T00:00:00Z"),
@@ -778,6 +784,7 @@ _STATE_KEY_TABLE: dict[str, tuple[str, object]] = {
     "session_capture_last_error_cursor": ("session_capture_last_error_cursor", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_pi": ("session_capture_last_error_pi", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_openclaw": ("session_capture_last_error_openclaw", "2026-08-25T00:00:00Z"),
+    "session_capture_last_error_hermes": ("session_capture_last_error_hermes", "2026-08-25T00:00:00Z"),
     "install_probe_claude": ("install_probe_claude", "2026-08-25T00:00:00Z"),
     "install_probe_pi": ("install_probe_pi", "2026-08-25T00:00:00Z"),
     # #1893: persisted source-scope keys (short repo names / {repo, branch}).
@@ -1293,16 +1300,16 @@ def test_cross_surface_harness_vocab_contract():
     # The analytics vocabulary is the DASHBOARD copy-attribution beacon's set —
     # it must stay exactly the wizard's leaf population (asserted below), so it
     # is unchanged.  The SessionRequest vocabulary is a SUPERSET: #2120 added
-    # OpenClaw, whose seam ships no live dashboard copy row (the plugin installs
-    # sessions through `tortoise sessions import`, and the archived-reference
-    # HARNESS_INSTALL entry is not rendered), so there is no copy to attribute
-    # and no leaf to add.
+    # OpenClaw and #2121 added Hermes, neither of which ships a live dashboard
+    # copy row (both install through `tortoise sessions import`, and no
+    # HARNESS_INSTALL entry is rendered for them), so there is no copy to
+    # attribute and no leaf to add.
     assert set(_HARNESS_ANALYTICS_VALUES) == {
         "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
     }
     assert frozenset({
         "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
-        "openclaw",
+        "openclaw", "hermes",
     }) == _SESSION_HARNESS_VALUES
 
     # 2. the WIZARD contract (#2936). The client declares only the EXCEPTIONS

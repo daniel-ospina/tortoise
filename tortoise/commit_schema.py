@@ -442,7 +442,7 @@ def validate_validity_window(valid_from: object, valid_to: object) -> None:
     :func:`validate_span`: the span guard covers the integer character-offset
     axis, this one covers the temporal interval.
 
-    The predicate is the read path's own. ``restore_point_at``'s ``_covers``
+    The predicate is the read path's own. ``get_historical_knowledge``'s ``_covers``
     orders the two bounds with ``tortoise.search_engine._created_sort_key``
     and gates presence with ``is not None``; this guard uses the SAME measure
     and the SAME presence predicate, so its boundary IS the read path's. A
@@ -625,7 +625,11 @@ class Operator(BaseModel):
     src: str
     dst: str
     op_type: Literal["IMPL", "NAND", "MITIGATES"]
-    direction: Literal["unidirectional", "bidirectional"] | None = None
+    # #7852: the Layer-1 direction vocabulary — the model's four values plus
+    # the two legacy aliases. Must stay equal to `live.ACCEPTED_DIRECTION_VALUES`;
+    # `tests/test_direction_storage_7852.py` pins the two sets, so widening one
+    # without the other reds instead of silently rejecting a valid token.
+    direction: Literal["unidirectional", "bidirectional", "->", "<-", "<->", "-"] | None = None
     target: OperatorTarget | None = None
     strength: float | None = Field(default=None, ge=0.10, le=0.50)
 

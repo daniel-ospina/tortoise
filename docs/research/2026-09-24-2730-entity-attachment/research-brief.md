@@ -4,7 +4,7 @@ type: engineering
 domain: platform
 doc_status: draft
 created: 2026-09-24
-updated: 2026-09-24
+updated: 2026-10-14
 subjects.team: epistemic-team
 issue: "#2730"
 aboutSubjects: Tortoise entity resolution (S3 RESOLVE), extractor v4 write path
@@ -25,7 +25,7 @@ aboutObjects: EXTRACTOR-V4-ARCHITECTURE.md, entity-attachment, #3584 opaque id, 
 
 **Graph access:** the hosted MCP (`https://api.premiselabs.co/mcp/`) via `Authorization: Bearer $TORTOISE_MCP_API_KEY`. ⚠️ **The committed `.mcp.json` points at `${TORTOISE_API_KEY}`, which is unset in this environment** — the key present is `TORTOISE_MCP_API_KEY`. This is a **config gap, filed as [#5153](https://github.com/daniel-ospina/tortoise/issues/5153)** — the read above used the credential that exists; it did not change the plan or the config.
 
-**Citation pin:** every code locator in this brief was re-read at **HEAD `c4580b083`** (2026-09-24) immediately before filing.
+**Citation pin:** every code locator in this brief was re-read at **HEAD `c4580b083`** (2026-09-24) immediately before filing; the **alias addendum** locators (§3.3 E12, §4 X9, §6.7) were re-read at **HEAD `9eb19478a`** (2026-10-14).
 
 **Precedence (per the alignment material on #2730 and #4333):** `docs/ONTOLOGY.md` → **#5013 (D10)** → `docs/architecture/{STORAGE,EXTRACTOR-V4}-ARCHITECTURE.md` → this issue.
 
@@ -146,6 +146,7 @@ And the `the <X>` class is **mostly non-referential mentions promoted to nodes**
 | **HIGH** | **E9** | **Jev is already integrated in this repo, for a typed gate** — `tools/collision_preflight.py`: `JEV_MODEL = "jev-1.13.0"`, a `noul` question, calibrated thresholds (CLEAN `p < 0.50`, COLLISION `p ≥ 0.70`), batch ≤ 40, fail-closed degradation, cache keyed on prompt version. **The typed-decision seam is proven in-repo.** | `tools/collision_preflight.py:459+` |
 | **MEDIUM** ⚠️ emerging | **E10** | **Entity reference is a *mention*, not a name** — the extractor doc already records that an Object's failure mode is **NON-REFERENCE** (an Object minted from a negated sentence, *"timeout is not on macOS"*), and that an **origins link is the detector**. | `EXTRACTOR-V4-ARCHITECTURE.md` §2.4.3 |
 | **HIGH** | **E11** | **The connection layer is the product and is kept** — so a resolution fix may not "solve" volume by deleting entity links. The cost is solved in the storage layer. | `STORAGE-ARCHITECTURE.md` §11; `OVERRIDES:` on #4333 |
+| **HIGH** | **E12** | **Alias handling is destructive and has no graph representation.** Phase 2 rewrites the embed list's entity names to the canonical name and the original surface form is **lost** (`_apply_entity_resolution`) — so a later document using the formal name re-`MERGE`s on it and can mint a *second* node. There is **no** `sameAs`/`hasAlias`/`alias` predicate in the edge allowlist, so an alias cannot be recorded. The deterministic phase matches on `_norm(name)` (whitespace-collapse + lowercase **only**) plus `kind` — no legal-suffix/honorific folding, no initial expansion; the only alias logic is the phase-2 LLM instruction *"resolve ONLY confident aliases: case/variant/abbreviation forms"*. | `extractor_v2.py` (`_apply_entity_resolution`, `_find_existing_entity`, `_RESOLUTION_SYSTEM`); `projection/edges.py:247` (`_VALID_EDGE_PREDICATES`) |
 
 **Direction of the fix, from the evidence:** two of the three defects are *mechanical and already decided* (E1→E3 is #3584; E4 is a prompt/context change), and only the third (candidate generation scoped and recall-measured) is genuinely new design. **None of it requires replacing S3.**
 
@@ -211,6 +212,13 @@ Microsoft GraphRAG matches entities by **exact name and type only**; maintainers
 
 **⇒ For us:** there is **no drop-in reference implementation** for scoped entity resolution (the predecessor brief's X9 still holds). We assemble it from ER primitives; expecting a product to copy is not realistic. This is a *build* item, not an *adopt* item.
 
+### X9 — Alias/nickname normalisation is a deterministic commodity, and it is a *name* transformation, not an entity decision **[MEDIUM — 2 independent categories]**
+
+Large-scale record-linkage work treats **name transformation** (nickname → canonical, title/suffix stripping) as a first-class, cheap matching step, and standardisation libraries exist. One measured study over 68 M records found that transforming names to include the most common nicknames raised F1 from 0.807 to **0.905** while holding precision. → the alias rung should be a **deterministic table plus roster-driven initial expansion**, not an LLM call: cost ≈ 0, and a model adds a hallucination surface to what is a table lookup.
+*Sources (carried from the predecessor brief's X8; the primary citation below was re-read 2026-10-14):* PMC10148307, *The Impact of Name Transformation on Match Rates Within a Large Consumer Database* (AMIA Annu Symp Proc 2022); `corp-names` (PyPI); MatchLogic, *Name Standardization*.
+
+**⇒ For us:** the alias rung is the cheapest rung of the ladder and should never be delegated to the adjudicator (§6.7). Its failure mode when done wrong is not a wrong link but a **lost surface form** — which is why the alias must be *recorded*, not collapsed (E12).
+
 ---
 
 ## 5. The contradiction test — run FIRST, per finding
@@ -228,6 +236,8 @@ Each candidate practice below was tested against the recorded decisions **before
 | **Quarantine placeholders within a scope, promote only via a declared mapping** | ❌ **No** — the `OVERRIDES` on #4333 protects the *connection* layer, not the placeholder policy; X5 is externally convergent | **ADOPT** | Nothing in the record contradicts it. A `"Produto 1"` resolved globally is *provably wrong* (X5). |
 | **Entity-keyed review queue, post-ingest, fail-closed writes meanwhile** | ❌ **No** | **ADOPT** | Matches `#1370` (*"no subject > wrong subject"*), `#2349` policy 3, and X3. |
 | **A second constant for a similarity threshold** | ✅ **YES — an existing constant** (`tortoise.embeddings.DEFAULT_THRESHOLD = 0.72`) | ⛔ **REFUSED** | Do not invent a second constant; reuse the existing one if/when the vector leg is used. |
+| **Deterministic alias normalisation recorded against the opaque id** (predecessor tier (b)) | ❌ **No** — `#3584` requires identity to be the opaque id, and recording `surfaceForm → id` **honours** it; recording a scoped *name-key* is the refused variant (first row) | **ADOPT** | The predecessor's alias rung survives reconciliation in shape; its one constraint is that an alias attaches to the **id** and never re-derives identity from the name. |
+| **A declared name-pattern slot for entity-name shape** (pattern-based filtering/classification at mint) | ✅ **YES — `#1026`**: *"keep the slot, as declared entity types only … no name patterns; nothing is dropped at mint."* | ⛔ **REFUSED** — carried as a manifest-validation refusal (`REFUSED_EXTRACTION_KEYS`), not a slot | The per-kind surface forms already have one READ home (`ontology.kindDefs.<kind>.synonyms`/`.examples`, rendered by `compile_kind_index_spec` — `#4894`); a pattern list would both re-open a decided refusal and create a second source of truth for one value. |
 
 **Adoption gate (one line, per the template):** **adopt** the scoped-candidate + Jev-SELECT + placeholder-quarantine + entity-review-queue findings (no recorded decision reached, convergent, aligned); **owner question** for the entity-vector leg — it rides on **V1**, which `STORAGE-ARCHITECTURE.md` **§12.1c records as *"NOT DECIDED — owner's call"*** and §14.3 lists under **Open**, so it is an *open question this research feeds*, **not a decided one awaiting implementation and not a reopen**; **refuse** the scope-first *identity key* (contradicts #3584) and any replacement of the resolution step (owner sequencing).
 
@@ -236,6 +246,18 @@ Each candidate practice below was tested against the recorded decisions **before
 ## 6. Recommendation — what S3 should resolve *to*
 
 **The one-sentence answer: resolve a *mention* to an *opaque entity id* (per `#3584`), chosen from a *scoped, kind-typed, high-recall candidate set*, using the *narrative and the source envelope* as the disambiguating context — and attach the new context to that id.**
+
+**The ladder — scoped exact → alias → embedding/similarity → adjudication → review queue — with each rung's gate.** Deterministic rungs run first, a rung fires only when the rungs above it returned nothing, and the fail-closed default is to leave the mention unresolved rather than guess (`#1370`, X3). The target asks for this ladder; the predecessor stated it, and the rungs below restate it reconciled against `#3584`.
+
+| rung | mechanism | fires when | gate | § |
+|---|---|---|---|---|
+| **1. scoped exact** | `_find_existing_entity` (kind-typed, normalised-name equality) over a **scope-filtered** candidate set | always, first | exact after normalisation *within scope*; `ambiguous → None` (never guess) | §6.2 |
+| **2. alias** | deterministic surface-form folding + roster-driven initials/role expansion + Envelope `entityAliases` | rung 1 misses | auto-link only on an asserted mapping or an unambiguous, scope-internal transform | §6.7 |
+| **3. embedding / similarity** | `compute_embedding(name)` top-k within scope × kind compatibility | rungs 1–2 miss | ⚠️ **OWNER QUESTION — rides on V1** (`STORAGE-ARCHITECTURE.md` §12.1c); if used, reuse `tortoise.embeddings.DEFAULT_THRESHOLD` | §5, §6.2 |
+| **4. adjudication** | Jev `Choice` SELECT over the scoped candidate set, with the quote + slot + roster | rung 3 lands in the mid band, or rungs 1–3 miss | must return a candidate id **and** the narrative quote; self-reported probability alone never auto-links | §6.3 |
+| **5. review queue** | entity-keyed, post-ingest, evidence-carrying | everything else | never auto-resolved; writes fail closed meanwhile | §6.6 |
+
+⚠️ **This is not the predecessor's ladder.** The predecessor's rung 1 was a **scope-keyed identity**; that is refused here because it contradicts `#3584` (§5). Scope is now a *candidate-generation filter*, not an identity key.
 
 Ordered by load-bearing weight (not by cost):
 
@@ -272,6 +294,26 @@ Materialise a scope-local proxy (`isPlaceholder: true`), never auto-link it cros
 ### 6.6 The ambiguous tail — an entity-keyed review queue, post-ingest, non-blocking **[HIGH]**
 
 Today `tortoise_list_dedup_candidates` / `approve_merge` are **Point**-keyed (predecessor E8). The queue must be **entity**-keyed, evidence-carrying, agent-drained, never auto-resolved (`#2349` policy 3, `#2696` §2). **Writes stay fail-closed meanwhile** (`#1370`).
+
+### 6.7 Alias resolution — deterministic first, and recorded non-destructively *(ladder rung 2; re-measured at HEAD)* **[HIGH]**
+
+The issue's mandate names **alias resolution** explicitly, and it is the one rung the predecessor brief covered that this brief's reconciliation did not restate. Re-measured at HEAD `9eb19478a` (E12):
+
+- **Aliasing is destructive today.** `_apply_entity_resolution` rewrites the embed list's entity names to the canonical name and the original surface form is **lost** — so a later document using the formal name re-`MERGE`s on it and can mint a **second** node (the SPLIT half of §3.2).
+- **There is no alias relation.** `_VALID_EDGE_PREDICATES` (`projection/edges.py:247`) carries no `sameAs`/`hasAlias`/`alias` predicate, so an alias cannot be recorded as an edge.
+- **The deterministic phase is name equality, not alias normalisation.** `_find_existing_entity` matches on `_norm(name)` — whitespace-collapse and lowercase only — plus `kind`; there is no punctuation/legal-suffix/honorific folding and no initial expansion.
+- **The only alias handling is the phase-2 LLM**, whose system prompt asks it to resolve "confident aliases: same referent, case/variant/abbreviation forms" from a candidate table carrying only `id | name | kind` (E4). That is exactly the shape X7 warns degrades.
+
+**Recommendation — make rung 2 deterministic and non-destructive:**
+
+1. **Deterministic folding** — casefold, whitespace, punctuation, legal suffixes (Ltda/Inc/S.A.), honorifics (Dr./Sr.), applied within an asserted scope only.
+2. **Roster-driven expansion** — `T.E.` → the roster's full name via `participants[].name`/`initials`; `the CEO` → the roster's role holder. The disambiguating evidence is the roster, not the string (X7, §6.4).
+3. **Record the alias, do not collapse it** — attach the surface form to the **opaque entity id** (`#3584`) as a recorded alias carrying provenance + confidence, so the formal name does not re-mint. The surface form is evidence; losing it is what makes today's collapse irreversible.
+4. **Gate** — auto-link only when the alias is (i) supplied by the Envelope (`entityAliases` / `participants[].aliases[]`), or (ii) an unambiguous deterministic transform of a *scope-internal* candidate. Anything else → §6.6.
+
+⚠️ **Reconciled against `#3584`:** an alias maps a **surface form to an opaque id**; it never re-derives identity from the name. Storing `surfaceForm → id` is consistent with the decision; storing a scoped name-key is not (§5).
+
+⚠️ **Do not hard-code a parallel rule set — read the surface that already exists and is read.** Per-kind surface forms have exactly one READ home: `ontology.kindDefs.<kind>.synonyms` and `.examples`, which `compile_kind_index_spec` (`tortoise/value_extractor.py:293`) renders into the classification surface. The alias fold draws its per-kind forms from there rather than declaring a competing list. The extraction block's `entityCues` is declarable but **has no consumer by design** (`#4894`) — a cue declared there does not reach the classifier, and a second declared spelling of the same value is the second-source-of-truth defect that decision refuses. A name-pattern slot is not a candidate at all: `#1026` ruled *"no name patterns; nothing is dropped at mint"*, and a name-pattern declaration is **refused at manifest validation** (`pack_registry.REFUSED_EXTRACTION_KEYS`) rather than carried as a slot.
 
 ---
 
@@ -315,6 +357,7 @@ Today `tortoise_list_dedup_candidates` / `approve_merge` are **Point**-keyed (pr
 |---|---|---|
 | 62.3 % of Objects carry a leading article; names are unique by construction | **HIGH** | live enumeration (§3.1–3.2), n = 7,859 |
 | Identity is still name-keyed; `#3584` unimplemented | **HIGH** | code E1/E2 + the decision doc |
+| Aliasing is destructive; no alias relation exists; the deterministic phase does no alias folding | **HIGH** | code E12 (`_apply_entity_resolution`, `_VALID_EDGE_PREDICATES`, `_find_existing_entity`) |
 | The resolver prompt carries no context | **HIGH** | code E4 |
 | Blocking/candidate recall is the first-order fix | **HIGH** | X1 (3+), plus X7 adversarial |
 | LLM ER should pick from a supplied, bounded candidate list | **HIGH** | X2 (3+) |
@@ -323,7 +366,7 @@ Today `tortoise_list_dedup_candidates` / `approve_merge` are **Point**-keyed (pr
 | Jev's value is typed routing/cost, not accuracy | **MEDIUM** ⚠️ emerging | X6 + E9 |
 | No off-the-shelf scoped-ER reference exists | **LOW** ⚠️ single-source | X8 + predecessor X9 |
 
-**Adoption gate line:** `Adoption gate: adopt (scoped candidates · Jev SELECT · placeholder quarantine · entity review queue) | owner question (entity-vector leg — rides on V1, which §12.1c records as NOT DECIDED) | refuse (scope-first identity key — contradicts #3584; replacing S3 — owner sequencing)`.
+**Adoption gate line:** `Adoption gate: adopt (scoped candidates · deterministic alias normalisation bound to the opaque id · Jev SELECT · placeholder quarantine · entity review queue) | owner question (entity-vector leg — rides on V1, which §12.1c records as NOT DECIDED) | refuse (scope-first identity key — contradicts #3584; replacing S3 — owner sequencing)`.
 
 ---
 

@@ -764,7 +764,7 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
         spk = (p.get("speaker") or ""
                or (props.get(turn_ref, {}).get("speaker") or ""
                    if turn_ref else ""))
-        annotated.append({
+        entry: dict = {
             "id": h["id"],
             "content": h["content"],
             # M7 (#1527, D2): the leg that produced this hit is never empty —
@@ -777,6 +777,9 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
             "has_answer": p.get("has_answer", False),
             # E3: quote/search_keys pass through (R2 consumer); source_turn_id
             # + speaker are the derivation surface the reader decoration uses.
+            # #2684 (Slice B): the verbatim span pointer (#5007's
+            # ``span_start``/``span_end``) rides the same surface, added below
+            # only when present so a spanless hit's key set is unchanged.
             "quote": p.get("quote", ""),
             "search_keys": p.get("search_keys") or [],
             "source_turn_id": turn_ref,
@@ -796,14 +799,25 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
             # (``retract_point`` writes status='retracted' and no window and
             # no CORRECTS edge). Sourced from the search PAYLOAD (which
             # carries it), never from ``point_props_for_hits`` (which does
-            # not fetch it). Additive key — the annotated key set is 18.
+            # not fetch it). Additive key — the annotated key set is 18, or 20
+            # when the point carries a verbatim span (#2684, added below).
             "status": h.get("status") or "",
             # E6 (#1538) D7: promoted validity-window fields — additive,
             # only when present (undated hits render no [valid …] marker).
             "valid_from": h.get("valid_from") or "",
             "valid_to": h.get("valid_to") or "",
             "expired_at": h.get("expired_at") or "",
-        })
+        }
+        # #2684 (Slice B): the value-bearing verbatim SPAN — the offsets of
+        # the point's own quote inside its source turn, surfaced WITH the
+        # point. It is what lets ``package_evidence_pool`` and every
+        # downstream consumer re-read the exact value instead of re-deriving
+        # it from the distillation (the aggregation-numerator class).
+        # Additive, all-or-nothing: a spanless point emits neither key.
+        if p.get("span_start") is not None and p.get("span_end") is not None:
+            entry["span_start"] = p["span_start"]
+            entry["span_end"] = p["span_end"]
+        annotated.append(entry)
     return annotated
 
 
@@ -1125,6 +1139,38 @@ def _vector_retrieve(sdk: TortoiseSDK, question: dict, qid: str, *,
     }
     return out
 
+
+def resolve_rerank_arm_pool_limit(
+    *,
+    rerank_pool: int,
+    max_k: int,
+    pool_size: int | None = None,
+) -> int:
+    """The rerank arm's FETCH depth — the pool knob floored at the baseline.
+
+    #2992: ``--rerank`` without ``--rerank-pool`` used to replace the #1947
+    baseline fetch depth (``DEFAULT_POOL_SIZE`` = 120, env
+    ``TORTOISE_LME_POOL_SIZE``) with the 40-item rerank default, so turning
+    the reranker on silently discarded the deepening unless the caller also
+    passed ``--rerank-pool 120``. The reranker can only reorder the
+    candidates it is handed, so a pool below the baseline is a strict
+    candidate loss: the baseline depth is the FLOOR for this arm and the
+    rerank-pool knob can only RAISE it.
+
+    Single-sourced with ``run.py::_resolve_rerank`` so the recorded (and
+    fingerprinted) ``config["pool_size"]`` is EXACTLY the depth the
+    retrieve path fetches (methodology == actual == fingerprint).
+    """
+    baseline = resolve_pool_size(
+        max_k,
+        pool_size=pool_size,
+        env_name="TORTOISE_LME_POOL_SIZE",
+        default=DEFAULT_POOL_SIZE,
+        exact=False,
+    )
+    return max(rerank_pool, baseline)
+
+
 def retrieve_for_question(
     sdk: TortoiseSDK,
     question: dict,
@@ -1400,9 +1446,13 @@ def retrieve_for_question(
     pool_override = (rerank_pool if rerank_pool is not None
                      else _env_int("TORTOISE_LME_RERANK_POOL", 40))
     if rerank_on and scorer is not None:
-        # applied arm — the deep pool (default 2x the baseline 20) gives the
-        # reranker reorderable headroom (D4)
-        pool_limit = max(pool_override, max(ks))
+        # applied arm — the deep pool gives the reranker reorderable
+        # headroom (D4), and it is FLOORED at the #1947 baseline fetch depth
+        # (#2992): the reranker can only reorder what it is handed, so a
+        # pool below the baseline is a strict candidate loss (the 40-item
+        # rerank default must never collapse the deepened pool).
+        pool_limit = resolve_rerank_arm_pool_limit(
+            rerank_pool=pool_override, max_k=max(ks), pool_size=pool_size)
     elif (rerank_pool is not None) and not rerank_on:
         # pool-only isolation arm (--rerank off --rerank-pool N): deeper
         # pool, baseline ordering, hits truncated to top_k (OQ5)

@@ -4,8 +4,12 @@
 // claimed `profile.jsx`, which carries no account-deletion code and is not
 // touched by this change). It is a `.js` module written with
 // `React.createElement` (no JSX) for the SAME reason as `overviewEmptyAction.js`:
-// the dashboard suite is `node --test` with no JSX transform and no jsdom, so a
-// `.jsx` component cannot be imported and rendered by the guard. Here the guard
+// the `node --test` suite has no JSX transform and no jsdom, so a `.jsx`
+// component cannot be imported and rendered by a `node --test` guard. (Since
+// #4915 the package ALSO has a jsdom/render lane — `npm run test:dom`,
+// `src/*.test.jsx` — which CAN import a `.jsx` component; this control stays a
+// createElement module so BOTH runners can render it, with `node --test` the
+// primary.) Here the guard
 // is an EXECUTED render (`react-dom/server`) of the real component — the copy
 // and the two actions are read off the element tree React produces, not grepped
 // out of source text.

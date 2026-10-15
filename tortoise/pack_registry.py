@@ -21,6 +21,12 @@ from typing import Any
 import yaml
 
 from .source_credibility import SOURCE_KIND_DEFAULTS
+from .status_folds import (
+    StatusFoldIndex,
+    bare_lifecycle_kind_collisions,
+    build_status_fold_index,
+    validate_status_decl,
+)
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +102,16 @@ CANONICAL_ACTION_KINDS = frozenset({
     "meet", "experiment", "deploy", "review", "other",
 })
 
+# Pack-DECLARATION entity vocabulary — NOT the graph-label vocabulary. This is the
+# type a pack's edge (`from`/`to`) and a bare kind reference may name, and it is
+# deliberately kept distinct from the labels a query leg serves:
+#   * ``Document`` stays here ON PURPOSE (D10, ONTOLOGY v3.15 §4.4). A pack may
+#     declare an edge from/to a document; the WRITE path routes that to a
+#     ``:Source`` keyed ``url`` (``sdk._create_entity``), and the READ path maps
+#     ``document`` → ``:Source`` (``security.ENTITY_TYPE_LABELS``). Removing the
+#     spelling here would break pack declarations over a label that no longer
+#     exists, so it is a declaration alias, not a live graph label.
+#   * ``Action`` likewise names a declared kind, not a node label.
 VALID_ENTITY_TYPES = frozenset({
     "Subject", "Object", "Action", "Point", "Event", "Document", "Source",
 })
@@ -150,9 +166,13 @@ LEGACY_KIND_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 # kindDefs value keys (R6 §3.1/§3.5)
+# `statuses`/`folds` are the #2729 lifecycle declaration: a pack declares a
+# kind's status vocabulary and the event kinds that drive it (see
+# `tortoise/status_folds.py` — the ONE home of the fold contract).
 VALID_KINDDEF_KEYS = frozenset({
     "description", "synonyms", "examples", "nearMisses",
     "extractable", "storeAs", "enforcement",
+    "statuses", "folds",
 })
 
 # storeAs values — what stream bucket a kind belongs to (R6 §3.1)
@@ -285,6 +305,31 @@ SEMANTICS_TRANSITION: dict[str, str] = {
     "holds": "ownedBy",
     "funds": "transacts",
 }
+
+# ── #7551 — the operator-LABEL declared vocabulary ───────────────────────
+# `create_operator`'s declaredness check answers ONE question: is this label
+# **declared** — not "is it shaped like a verb", and (the defect) not "does an
+# installed pack happen to declare it". It consulted pack relations ONLY, so
+# EVERY core predicate read as undeclared and the warning carried no
+# information: `supports` — the convention ONTOLOGY §8 gives evidence→claim —
+# warned exactly like an invented name, and a lane with no reachable declared
+# predicate invented one (`measures`; #7551, ≈25 such edges).
+#
+# The set is DERIVED, never re-transcribed, so it cannot drift from its two
+# sources: the mechanism pair (§3.9 "Epistemic edges (operators): IMPL, NAND")
+# UNIONED with the CLOSED Layer-2 semantics vocabulary (§8) — the "(+ semantic
+# label)" §3.9 admits. Widening the accepted vocabulary is therefore a change
+# to `SEMANTICS_VALUES` or `CORE_PREDICATES` (and to §8's table, which the
+# guard pins) — not a quiet addition here.
+#
+# A RETIRED spelling (`opposes` / `produces` / `holds` / `funds`, see
+# `SEMANTICS_TRANSITION`) is deliberately ABSENT: it must keep warning so the
+# caller learns the canonical word.
+#
+# Declaredness is not shape. §8's reification table governs which edges ought
+# to carry an operator; a `label` outside that shape is odd but still
+# *declared*, and this check was never a shape gate (warn-not-block, #1934).
+CORE_OPERATOR_LABELS = CORE_PREDICATES | SEMANTICS_VALUES
 
 # ── Layer 3 — the relation write-path verdict (#2766) ─────────────────────
 # A pack `ontology.relations[]` entry is only *real* if some runtime surface
@@ -530,7 +575,7 @@ class PackManifest:
 
     # Manifest v3 (R6 §3.1): per-kind extractor metadata, keyed by pack-local
     # kind name. Allowed value keys: description, synonyms, examples,
-    # nearMisses, extractable, storeAs, enforcement.
+    # nearMisses, extractable, storeAs, enforcement, statuses, folds.
     kind_defs: dict[str, dict] = dataclasses.field(default_factory=dict)
 
     # Manifest v3 (R6 §3.2): first-class business-logic chains.
@@ -781,6 +826,9 @@ class PackRegistry:
     """
 
     def __init__(self, packs_dir: Path | str):
+        # #2729: warnings collected during `_validate` (which runs before the
+        # PackManifest exists) and published in `load_all`. Reset per load.
+        self._pending_lifecycle_warnings: dict[str, list[str]] = {}
         self.packs_dir = Path(packs_dir)
         self.packs: dict[str, PackManifest] = {}
         self.errors: dict[str, list[str]] = {}  # namespace → error messages
@@ -792,6 +840,15 @@ class PackRegistry:
         # than "warnings" because the hosted install path reads it as a
         # FAIL-CLOSED refusal (see pack_manifest_store.validate_manifest).
         self.unresolved_refs: dict[str, list[str]] = {}
+        # #2729: namespace → NON-BLOCKING lifecycle declarations. A pack whose
+        # declared `statuses` reuses a word from the shared/connector
+        # vocabulary loads (the kind owns its own state — see
+        # `status_folds.SHARED_CONNECTOR_STATUS_WORDS`), but the overlap must
+        # be visible rather than silent. Errors (unknown fold status, orphan
+        # fold event, malformed lists) still isolate the pack via `errors`.
+        self.lifecycle_warnings: dict[str, list[str]] = {}
+        # #2729: lazily compiled `StatusFoldIndex` (invalidated on reload).
+        self._status_fold_index = None
         # #1930: set by domain_loader._get_registry when the TORTOISE_PACKS_DIR
         # leg was unusable (0 valid packs / load failure) and the registry
         # fell back to the default catalog — a queryable diagnostic for ops.
@@ -839,6 +896,9 @@ class PackRegistry:
         self.packs = {}
         self.errors = {}
         self.unresolved_refs = {}
+        self.lifecycle_warnings = {}
+        self._pending_lifecycle_warnings = {}
+        self._status_fold_index = None
         count = 0
         for manifest_path in sorted(self.packs_dir.glob("*/manifest.yaml")):
             ns = manifest_path.parent.name
@@ -868,6 +928,47 @@ class PackRegistry:
             for ns in [ns for ns, pack in self.packs.items() if ns in self.errors]:
                 del self.packs[ns]
                 count -= 1
+        # #2729: publish the non-blocking lifecycle warnings for SURVIVING
+        # packs only (a pack isolated for a hard error has its warnings
+        # dropped with it). `_pending_lifecycle_warnings` is the channel
+        # `_validate` writes into — the PackManifest does not exist yet at
+        # validation time.
+        self.lifecycle_warnings = {
+            ns: list(msgs)
+            for ns, msgs in self._pending_lifecycle_warnings.items()
+            if ns in self.packs
+        }
+        # #2729 review P2: a bare object-kind name a lifecycle is declared for
+        # by more than one pack is ambiguous at the fold — the index matches
+        # the bare spelling for BOTH packs (`kind_forms_for`) and the last
+        # declaring pack wins. Record it on the same non-blocking channel: a
+        # namespaced Object is never ambiguous, so this is a warning rather
+        # than a pack-isolating error.
+        for bare, owners in bare_lifecycle_kind_collisions(self.packs).items():
+            for ns in owners:
+                co_claimants = [o for o in owners if o != ns]
+                self.lifecycle_warnings.setdefault(ns, []).append(
+                    f"object kind '{bare}' is declared with a lifecycle by "
+                    f"multiple packs ({', '.join(owners)}) — a BARE-spelled "
+                    f"`objectKind` cannot be attributed to one of them, so "
+                    f"the fold applies the last declaring pack's rule "
+                    f"(co-claiming pack(s): {', '.join(co_claimants)}; use the "
+                    f"namespaced spelling or declare the lifecycle in one "
+                    f"pack)"
+                )
+        if self.lifecycle_warnings:
+            _warn_packs_once(
+                ("lifecycle-vocabulary", str(self.packs_dir),
+                 tuple(sorted((ns, tuple(msgs))
+                              for ns, msgs in self.lifecycle_warnings.items()))),
+                "pack registry %s: %d pack(s) carry a non-blocking lifecycle "
+                "declaration note — a `statuses` word shared with the connector "
+                "vocabulary, or a bare object kind claimed by more than one "
+                "pack (see registry.lifecycle_warnings): %s",
+                self.packs_dir, len(self.lifecycle_warnings),
+                "; ".join(f"{ns}: {msgs[0]}"
+                          for ns, msgs in sorted(self.lifecycle_warnings.items())),
+            )
         self._build_kind_expansions()
         # #1930 (epic #1891 WF-2 / E2E-2): a pack isolated by R-16 must never
         # be silent — every consumer surfaces the startup warning (registry.errors
@@ -898,6 +999,20 @@ class PackRegistry:
                     for ns, msgs in sorted(self.unresolved_refs.items())),
             )
         return count
+
+    @property
+    def status_fold_index(self) -> StatusFoldIndex:
+        """#2729: the compiled pack-declared ``event kind → status`` surface.
+
+        Lazily built from the loaded (R-16-filtered) packs and cached on the
+        registry; ``load_all`` resets the cache. Consumed by the projection's
+        Object-status fold (``projection/entities.py::_fold_object_status``) —
+        the ONE reader, so live writes and rebuild replay compile the same
+        index from the same pack set.
+        """
+        if self._status_fold_index is None:
+            self._status_fold_index = build_status_fold_index(self.packs)
+        return self._status_fold_index
 
     def _load_one(self, path: Path) -> PackManifest:
         raw = yaml.safe_load(path.read_text()) or {}
@@ -1271,6 +1386,34 @@ class PackRegistry:
                             f"{', '.join(sorted(VALID_ENFORCEMENT_LEVELS))}, "
                             f"got {spec['enforcement']!r}"
                         )
+                    # #2729: the per-kind lifecycle declaration. Errors isolate
+                    # the pack (unknown fold status / orphan fold event /
+                    # malformed shape); the shared-vocabulary overlap is a
+                    # warning stashed in `_pending_lifecycle_warnings` and
+                    # published by `load_all` into `lifecycle_warnings` (the
+                    # PackManifest does not exist yet at this point).
+                    if "statuses" in spec or "folds" in spec:
+                        # Filter to the string entries the ontology loop above
+                        # has already validated: an unhashable entry here
+                        # (``eventKinds: [[1]]``) would make ``set()`` raise
+                        # ``TypeError`` out of ``_validate``, whose contract is
+                        # to RETURN its error list. The invalid value is
+                        # already recorded as an ``ontology.<field>`` error by
+                        # the loop at the top of this section.
+                        _decl_errors, _decl_warnings = validate_status_decl(
+                            kind, spec,
+                            namespace=ns,
+                            declared_event_kinds={
+                                k for k in ont.get("eventKinds", [])
+                                if isinstance(k, str) and k},
+                            declared_object_kinds={
+                                k for k in ont.get("objectKinds", [])
+                                if isinstance(k, str) and k},
+                        )
+                        errors.extend(_decl_errors)
+                        if _decl_warnings:
+                            self._pending_lifecycle_warnings.setdefault(
+                                ns, []).extend(_decl_warnings)
                     # nearMisses targets resolve post-load (cross-pack pass)
 
             # ── Manifest v3 (R6 §3.2/§3.5): chains validation ────────────
@@ -1502,7 +1645,11 @@ class PackRegistry:
         # valueGate: this pack's keep/drop HINTS for the value brief — what a
         # valuable utterance looks like in this domain. It is NOT a mint-time
         # drop rule: no hint can remove an artefact, only inform the
-        # utterance-level value gate.
+        # utterance-level value gate. CONSUMED (§ #4894):
+        # ``compile_value_brief`` carries it into the brief's reserved
+        # ``pack_hints`` section and extractor_v2 renders it into the S1/S2/S4
+        # value-brief slot. It stays a hint — the mechanical, artefact-level
+        # predicate is ``tortoise/value_gate.py``, and no hint becomes a rule.
         value_gate = extraction.get("valueGate")
         if value_gate is not None and not isinstance(value_gate, dict):
             errors.append("extraction.valueGate must be a map")
@@ -1521,9 +1668,10 @@ class PackRegistry:
                     )
 
         # promptFragments: pack-authored instruction snippets declared for the
-        # value brief. Capped on BOTH words and characters so a pack cannot
-        # inflate every brief it activates — and cannot evade the word cap by
-        # shipping one whitespace-free blob.
+        # value brief. CONSUMED (§ #4894) into the same S1/S2/S4 slot as the
+        # `valueGate` hints. Capped on BOTH words and characters so a pack
+        # cannot inflate every brief it activates — and cannot evade the word
+        # cap by shipping one whitespace-free blob.
         fragments = extraction.get("promptFragments")
         if fragments is not None and not isinstance(fragments, list):
             errors.append("extraction.promptFragments must be a list")

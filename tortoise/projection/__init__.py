@@ -35,18 +35,25 @@ from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
     _guard_execute_command,
     _guard_numeric_params,  # #7174: the store's numeric domain, same seam
     _guard_unsupported_cypher,
+    _predicate_barrier_required,  # #7162: engine-version gate for the barrier
+    _predicate_drop_barrier,  # #7162: the predicate-drop normaliser
     _skip_cypher_quoted,  # noqa: F401  re-export: the scanner's public test surface
     _unsupported_cypher_operator,  # noqa: F401  re-export
     guarded_client,
     tolerates_altered_numbers,  # #7174/#5011: the replay/apply exemption
 )
 from tortoise.env_truthy import FALSY, env_flag  # #4097: the declared truthy contract
+from tortoise.index_catalogue import (  # #3154/#522/#3441: the ONE presence check
+    index_catalogue_has_field,
+    index_row_has_field,
+)
 from tortoise.vector_write import (  # #4520: the ONE clear-then-set vector seam
     clear_then_set_prefix,
     set_embedding_clause,
 )
 from tortoise.projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_DELETE_MISS,
+    SHAPE_EDGE_MESSAGE_MISS,
     SHAPE_POINT_BELIEF_MISS,
     SHAPE_STATE_OP_MISS,
     SHAPE_UNIMPLEMENTED_OP,
@@ -175,9 +182,12 @@ def _bounded_server_socket_kwargs() -> dict[str, float | None]:
     (parsed by ``_resolve_socket_timeout``, which fails loud on a typo) with
     ``_socket_timeouts()`` supplying the default.
 
-    NOT for the embedded (unix-socket) lane: redis-py does not forward
-    ``socket_connect_timeout`` for a unix socket (see that branch), so the
-    embedded client deliberately carries only the read bound.
+    NOT for the embedded (unix-socket) lane: redis-py's ``Redis.__init__``
+    drops ``socket_connect_timeout`` on that branch (see
+    ``_apply_embedded_connect_timeout``), so passing this pair there would
+    wire a connect bound that does not exist — the embedded lane delivers its
+    connect bound to the POOL instead (#3421) and takes its read bound from
+    ``_socket_timeouts()`` directly, as it always has.
     """
     connect_to, read_to = _socket_timeouts()
     return {
@@ -361,6 +371,72 @@ def _embedded_retry():
     )
 
 
+def _apply_embedded_connect_timeout(db, connect_to: float | None) -> bool:
+    """Deliver a socket CONNECT bound to an EMBEDDED client's pool (#3421).
+
+    Why this is not a constructor kwarg — measured, not inferred, on the
+    pinned ``redis 7.4.1``: ``redis.Redis.__init__`` assembles its
+    ``ConnectionPool`` kwargs as an explicit dict and on the unix-socket
+    branch adds ONLY ``path``/``connection_class``. ``socket_connect_timeout``
+    is added in the TCP/SSL branch alone, so
+    ``Redis(unix_socket_path=..., socket_connect_timeout=1.5)`` leaves the pool
+    kwargs WITHOUT the key and the built connection at
+    ``socket_connect_timeout=None``. redislite rewrites its call to
+    ``unix_socket_path=`` (``RedisMixin.__init__``), so the embedded lane goes
+    down that branch and ``UnixDomainSocketConnection._connect`` did
+    ``sock.settimeout(None)`` — an UNBOUNDED connect, not the "redis-py's own
+    5s default" this branch used to claim. The connection class itself already
+    honours the kwarg (``UnixDomainSocketConnection(path=...,
+    socket_connect_timeout=1.5)`` → ``1.5``); only the delivery was missing.
+
+    Two writes, both required:
+
+    * the pool's ``connection_kwargs``, so every connection built from now on
+      carries the bound (``make_connection`` hands a COPY of that dict to the
+      connection class);
+    * drop the connections the pool ALREADY holds. redislite PINGS the daemon
+      during construction (``_wait_for_server_start``), so the pool owns a
+      live connection built WITHOUT the bound — and ``get_connection`` hands a
+      pooled connection back before it ever makes a new one, so mutating the
+      kwargs alone would leave the whole client on the unbounded connect leg:
+      exactly the "bound that looks wired but is not" this helper exists to
+      prevent (a live connection cannot be repaired in place through redis-py's
+      public API, so it is closed and rebuilt).
+
+    Returns ``False`` when no real pool is reachable — a duck-typed/mock
+    construction in tests. A real client always has one, and the
+    daemon-backed test asserts the bound on the connection the pool actually
+    hands out, so a silent no-op here fails a test rather than shipping.
+
+    ``connect_to`` is the ALREADY-RESOLVED value: this seam writes it verbatim
+    (a literal ``None`` stays ``None``) and is deliberately not a second
+    resolution point. Its caller passes ``_socket_timeouts()[0]``, which is
+    fail-closed — every non-positive/non-numeric spelling of
+    ``TORTOISE_FALKORDB_CONNECT_TIMEOUT_S`` becomes the 2.0s default, never
+    ``None`` (see ``_socket_timeouts`` and
+    ``test_embedded_connect_knob_is_fail_closed``). So this lane is bounded by
+    default and has no opt-out; the ``none``/``off``/``0`` opt-out is the
+    per-lane ``TORTOISE_DB_SOCKET_CONNECT_TIMEOUT`` knob, which this lane does
+    not consult.
+    """
+    for holder in (getattr(db, "client", None),
+                   getattr(db, "connection", None), db):
+        pool = getattr(holder, "connection_pool", None)
+        kwargs = getattr(pool, "connection_kwargs", None)
+        if isinstance(kwargs, dict):
+            break
+    else:
+        return False
+    kwargs["socket_connect_timeout"] = connect_to
+    # Close the pre-bound connections (fds), then forget them so the next
+    # command builds a fresh one from the corrected kwargs. ``reset()`` alone
+    # would leak the open sockets to the GC; ``disconnect()`` alone would hand
+    # the stale connection back on the next ``get_connection()``.
+    pool.disconnect()
+    pool.reset()
+    return True
+
+
 def _socket_timeouts() -> tuple[float, float]:
     """``(socket_connect_timeout, socket_timeout)`` from env, with defaults.
 
@@ -372,6 +448,19 @@ def _socket_timeouts() -> tuple[float, float]:
     mean the same and an ``inf`` socket timeout raises ``OverflowError`` inside
     redis-py, bricking the client at boot; ``1e-9`` times out every operation
     before it can complete).
+
+    Both values reach BOTH lanes — the host branch as constructor kwargs, the
+    embedded branch as the retry-bounded read kwarg plus a pool-level connect
+    delivery (``_apply_embedded_connect_timeout``, #3421). Where a value lands
+    per lane is the only asymmetry; neither lane silently ignores one.
+
+    These two knobs are FAIL-CLOSED BY DESIGN and have NO ``none``/``off``/``0``
+    opt-out: every such spelling is a fallback to the default above, which is
+    the contract ``.env.example`` declares for them ("Non-positive/non-numeric
+    values fall back to the default rather than disabling the bound"). The
+    ``none``/``off`` opt-out belongs to the PER-LANE ``TORTOISE_DB_SOCKET_*``
+    knobs (``_resolve_socket_timeout``), which the embedded lane does not
+    consult for connect — do not read a disabled bound into this pair.
     """
     def _one(name: str, default: float) -> float:
         raw = os.environ.get(name)
@@ -466,12 +555,12 @@ def _reset_vector_gap_warnings() -> None:
 # A query is a bulk wipe when it contains DETACH DELETE but has NO property map
 # ({...} — e.g. MATCH (n:Label {id:$id})) and NO real WHERE clause.
 # A WHERE clause is "real" only if it references a property (n.xxx) or a
-# parameter ($id) or CONTAINS / ``IN (`` — tautologies (WHERE true, WHERE 1=1)
-# don't count. Note ``IN [list]`` is NOT recognized (only ``IN (``), so a
-# scoped delete whose only reference is `id(n) IN [..]` is misclassified as a
-# bulk wipe (#3007).
+# parameter ($id) or CONTAINS / ``IN (...)`` / ``IN [...]`` — tautologies
+# (WHERE true, WHERE 1=1) don't count. ``IN [list]`` was NOT recognized before
+# #3007 (only ``IN (``), so a scoped delete whose only reference was
+# `id(n) IN [..]` / `labels(n)[0] IN [..]` was misclassified as a bulk wipe.
 _WHERE_REAL_RE = re.compile(
-    r"\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_]|CONTAINS|IN\s*\(",
+    r"\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_]|CONTAINS|IN\s*[\(\[]",
     re.IGNORECASE,
 )
 # #3037/#8223: the property-map exemption is anchored to the statement's
@@ -564,14 +653,89 @@ def _strip_call_subqueries(statement: str) -> str:
         text = text[:m.start()] + " " * (end - m.start()) + text[end:]
 
 
+# ── #3007: delete-target-aware scoping ──────────────────────────────────────
+# A ``DETACH DELETE`` may name several variables (``DETACH DELETE n, m``); each
+# is a separate target. The clause tail is read up to the next clause keyword so
+# ``DELETE n RETURN count(*)`` yields ``n``, never ``RETURN``/``count``.
+_DELETE_CLAUSE_RE = re.compile(r"\bDETACH\s+DELETE\b(.*)$", re.IGNORECASE | re.S)
+#: Clause keywords that TERMINATE a DELETE target list (and must never be read
+#: as a variable name). Longest-first is irrelevant here: ``\b`` anchors each.
+_CLAUSE_STOP_RE = re.compile(
+    r"\b(?:RETURN|WITH|ORDER|SKIP|LIMIT|WHERE|SET|CREATE|MERGE|UNWIND|MATCH|"
+    r"OPTIONAL|FOREACH|CALL|DETACH|DELETE|REMOVE|UNION|USE|LOAD|DROP)\b",
+    re.IGNORECASE,
+)
+_VAR_NAME_RE = re.compile(r"[A-Za-z_]\w*")
+#: A label on a variable's OWN node/relationship pattern: ``(n:Label)``,
+#: ``(n :Label1:Label2)``, ``[r:IMPL]``, ``(n:$param)``. The bracket must be a
+#: node/rel pattern delimiter immediately before the variable, so a label word
+#: elsewhere in the statement cannot satisfy it.
+_VAR_LABEL_RE = r"[\(\[]\s*{var}\s*:(?:\s*(?:[A-Za-z_]\w*|\$[A-Za-z_]\w*))+"
+#: A ``WITH <projection> ... LIMIT`` block. ``LIMIT`` bounds the rows that flow
+#: forward, so it scopes whatever the projection carries FROM that point.
+_WITH_LIMIT_RE = re.compile(r"\bWITH\b(.*?)\bLIMIT\b", re.IGNORECASE | re.S)
+
+
+def _delete_targets(text: str) -> tuple[list[str], int]:
+    """(deleted variable names, index of the ``DETACH DELETE`` clause, or -1).
+
+    Read from the already-masked, CALL-stripped ``text`` so a keyword inside a
+    string/comment cannot become a variable name (#3037).
+    """
+    m = _DELETE_CLAUSE_RE.search(text)
+    if m is None:
+        return [], -1
+    tail = m.group(1)
+    stop = _CLAUSE_STOP_RE.search(tail)
+    if stop is not None:
+        tail = tail[: stop.start()]
+    return _VAR_NAME_RE.findall(tail), m.start()
+
+
+def _var_is_scoped(text: str, var: str, delete_at: int) -> bool:
+    """True when ``var`` is provably a proper subset of the graph (#3007).
+
+    Three lexical scoping signals, each anchored to the DELETED variable:
+
+    (a)  a LABEL on the variable's own pattern — ``MATCH (n:GraphEvent) ...
+         DETACH DELETE n``;
+    (a') a LABEL PREDICATE on it — ``WHERE n:Point``; and
+    (b)  a ``WITH <var> ... LIMIT`` bound on it — ``WITH n ... LIMIT $overflow``.
+
+    A label or a LIMIT that constrains a DIFFERENT variable must NOT exempt the
+    wipe: ``MATCH (x:Foo) WITH x MATCH (n) DETACH DELETE n`` and
+    ``MATCH (n) WITH n LIMIT 10 MATCH (m) DETACH DELETE m`` each still delete
+    every node. That is why the check is per-target rather than a substring
+    test over the whole statement.
+    """
+    name = re.escape(var)
+    if re.search(_VAR_LABEL_RE.format(var=name), text) is not None:
+        return True
+    if re.search(r"\bWHERE\s+" + name + r"\b\s*:", text, re.IGNORECASE) is not None:
+        return True
+    # Only a WITH *before* the DELETE can bound the rows it deletes.
+    for wm in _WITH_LIMIT_RE.finditer(text[:delete_at]):
+        if re.search(r"\b" + name + r"\b", wm.group(1)) is not None:
+            return True
+    return False
+
+
 def _is_bulk_wipe(cypher: str) -> bool:
-    """True when ``cypher`` may delete EVERY node of the graph (#99/#3037).
+    """True when ``cypher`` may delete EVERY node of the graph (#99/#3037/#3007).
 
     Bulk = contains DETACH DELETE and carries no targeting construct: a
-    property map on a node/relationship pattern, or a real WHERE clause. The
-    verdict is made on structure, not on raw text — comments, string literals,
-    backtick identifiers and ``CALL { ... }`` subqueries are blanked first, so
-    a stray ``{`` in any of them cannot exempt a whole-graph wipe (#3037).
+    property map on a node/relationship pattern, a real WHERE clause, or a
+    label/LIMIT scope on the DELETED variable itself. The verdict is made on
+    structure, not on raw text — comments, string literals, backtick
+    identifiers and ``CALL { ... }`` subqueries are blanked first, so a stray
+    ``{`` in any of them cannot exempt a whole-graph wipe (#3037).
+
+    #3007: a label-scoped / LIMIT-bounded delete (``MATCH (n:GraphEvent) WITH n
+    ORDER BY n.seq ASC LIMIT $overflow DETACH DELETE n``) is a maintenance
+    delete of a SUBGRAPH, not a whole-graph wipe — classifying it bulk made the
+    event-retention cap a silent no-op on every non-test server graph. The
+    scoping must be on the DELETED variable; a label on another pattern (this
+    is the #8215 shape) does not exempt.
     """
     # Fast path: the overwhelming majority of statements are reads. A DETACH
     # DELETE cannot be MASKED INTO existence, so a raw-text miss proves the
@@ -602,7 +766,13 @@ def _is_bulk_wipe(cypher: str) -> bool:
         return False
     # Real WHERE clause (property/param/CONTAINS/IN reference) => targeted
     m = re.search(r"WHERE\s+(.+) ", text + " ", re.IGNORECASE)
-    if m and _WHERE_REAL_RE.search(m.group(1)):  # noqa: SIM103
+    if m and _WHERE_REAL_RE.search(m.group(1)):
+        return False
+    # #3007: label/LIMIT scope on the DELETED variable => targeted. Every
+    # target must be scoped: `MATCH (n:L), (m) DETACH DELETE n, m` still
+    # deletes the graph (m is unconstrained), so `all`, never `any`.
+    targets, delete_at = _delete_targets(text)
+    if targets and all(_var_is_scoped(text, v, delete_at) for v in targets):  # noqa: SIM103
         return False
     return True
 
@@ -2368,12 +2538,16 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 #     decision on ``_is_bulk_wipe``'s scope (#3007/#3037), because more verbs
 #     applying a classifier with those two defects would REFUSE more
 #     legitimate operations than it catches.
-#   * ``_is_bulk_wipe`` over-classifies label/LIMIT/WITH-scoped deletes and
-#     ``WHERE id(n) IN [..]``-scoped ones, so ``event_store.purge_overflow`` is
+#   * ``_is_bulk_wipe`` USED TO over-classify label/LIMIT/WITH-scoped deletes and
+#     ``WHERE id(n) IN [..]``-scoped ones, so ``event_store.purge_overflow`` was
 #     refused on a non-test server graph and
-#     its callers swallow it (the hosted sweeper at DEBUG, the SDK lazy hook at
-#     WARNING) — the per-team event cap no-ops without a build failure
-#     (tracked: #3007).
+#     its callers swallowed it (the hosted sweeper at DEBUG, the SDK lazy hook at
+#     WARNING) — the per-team event cap no-op'd without a build failure.
+#     FIXED by #3007: the classifier is now delete-target aware (a label on the
+#     DELETED variable's own pattern, or a ``WITH <var> … LIMIT`` bound on it,
+#     exempts) and ``IN [list]`` is recognized as a real WHERE reference. A
+#     label/LIMIT on a DIFFERENT variable still does not exempt (the #8215
+#     shape), and a bare ``MATCH (n) DETACH DELETE n`` is still bulk.
 #   * ``_is_bulk_wipe`` also UNDER-classified (FIXED by #3037 + #8223): a bare
 #     ``"{" in cypher`` exemption meant a whole-graph wipe whose text contains
 #     a brace (``MATCH (n) DETACH DELETE n // {``, ``CALL { MATCH (n) DETACH
@@ -2830,6 +3004,128 @@ def _journal_safe_params(params, cypher=None):
     return out
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# #7951 §17.1 — THE SINGLE-WRITER GUARD. Read this before adding a fold or a
+# raw cache write.
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# THE RULE (`docs/architecture/STORAGE-ARCHITECTURE.md` §17.1 — a consequence
+# of the §2.0 owner ruling of 2026-10-08: **Postgres is the system of record;
+# FalkorDB is a derived hot cache**):
+#
+#   > every write goes to the truth store first, and the cache is projected
+#   > from it.
+#
+# The reason is definitional, not stylistic:
+#
+#   > **A derived cache that is also written to directly is not derived.**
+#
+# §3 already states the protocol for the derived TABLES — *"Writes go to the
+# truth first, then project"* — and §17.1 extends it to the CACHE. `#8127`
+# built the chokepoint (`TortoiseSDK._apply_and_journal`, journal-first then
+# project) and `#8315` enumerated the doors to the fold. **This guard is step
+# three: enforce it, so a direct cache write FAILS rather than merely being
+# discouraged.**
+#
+# WHY A RUNTIME GATE AND NOT A BIGGER LIST. The failure mode is not one bad
+# writer; it is that a *new* unjournaled writer can appear silently. A
+# lexical/AST inventory cannot be sound by construction (the terminal finding
+# of `#8315`, accepted), so this enforcement is RUNTIME and FAIL-CLOSED: a
+# fold on a **journal-backed** projection is refused unless the caller has
+# declared that it is a sanctioned projection of the journal —
+#
+#   * `_live_write_scope(...)` — opened by the live doors that append FIRST and
+#     fold second (`TortoiseSDK._apply_and_journal`, `_doc_write`,
+#     `_create_entity`, `EventAPI._emit`, `ConversationMiner._emit_event`).
+#     The append is the COMMIT POINT (the ordering contract at the top of
+#     `tortoise/sdk.py`); the scope is opened immediately AFTER it, around the
+#     fold that follows — so the journal write is never inside the scope that
+#     authorizes the cache write, it strictly precedes it.
+#   * `_replay_write_scope()` — opened by the replay engines (`rebuild`,
+#     `recover_from_log`, `backup.restore`, `_cmd_reconcile`), whose records
+#     came FROM the journal and must not journal again.
+#
+# The declaration is not a bypass flag: it is a per-call `with` block (no
+# instance attribute, constructor argument or env var can set it), and the
+# gate REFUSES BY DEFAULT — so a writer that forgets to declare itself fails
+# closed, which is the direction the definitional rule requires.
+#
+# SCOPE — STATED SO IT IS NOT OVER-READ. This closes the FOLD
+# (`FalkorProjection.apply`) and the public raw-query lane
+# (`FalkorProjection.query`) for a journal-backed projection. It does NOT yet
+# refuse a mutating statement issued straight at the guarded handle
+# (`proj.g.query(...)`). That handle is *also* the live path of every SDK
+# writer — `create_point`'s `CREATE (:Point)`, `update_point`'s
+# `SET n += $props` — so a blanket refusal there would break the product's own
+# write path, not a violation of it: the SDK's live doors journal (or carry
+# the recorded apply-first exception), and there is no runtime signal at the
+# handle that separates a journaled live write from a direct one. Converting
+# that 300+-site surface is §17.1's mechanism (1), the atomic write, and it is
+# recorded as still-open on `#7951` rather than papered over here.
+#
+# ⛔ THE RESIDUAL IS THREE ESCAPES, NOT ONE — named so it is stated, not
+# discovered. A writer that wants to write this cache directly has:
+#   1. `proj.g.query("CREATE …")`     — the guarded handle itself (the SDK's
+#      own live lane, above);
+#   2. `proj.g._g.query("CREATE …")`  — one private hop past the handle into
+#      the raw `_GuardedGraph`;
+#   3. `proj.db.select_graph(<g>).query("CREATE …")` — straight at the
+#      falkordb client, naming ANY graph.
+# All three are verified ALLOWED against a journal-backed projection. (2) and
+# (3) are the same class as (1) — they bypass the same fold — and none of the
+# three is guarded in this increment. They are the surface §17.1's atomic
+# write has to close; a lexical inventory cannot, because each is one hop
+# below anything a runtime signal is placed on.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class DirectCacheWriteRefused(RuntimeError):
+    """§17.1: a write reached the derived cache without authorization.
+
+    Raised when a fold (`FalkorProjection.apply`) or a mutating statement on
+    the public raw-query lane (`FalkorProjection.query`) is issued against a
+    **journal-backed** projection outside a sanctioned scope. The projection is
+    the derived cache of a journal; a write it did not receive through its
+    journal is the second writer §17.1 forbids.
+    """
+
+
+#: The single-writer authorization for the current context. ``None`` = no
+#: sanctioned projection is in flight, so the default is REFUSAL. A ContextVar
+#: (not an instance or `threading.local` attribute) so a concurrent thread
+#: writing through the same projection sees the default and is refused rather
+#: than inheriting another thread's authorization — the same thread-isolation
+#: property the #7951 replay anchors were moved to in round 3.
+_CACHE_WRITE_AUTHORIZED: ContextVar[str | None] = ContextVar(
+    "tortoise_cache_write_authorized", default=None)
+
+
+@contextlib.contextmanager
+def _cache_write_authorized(reason: str):
+    """Declare the enclosed writes a sanctioned projection of the journal.
+
+    ``reason`` is carried for the refusal message and for a test that asserts
+    the live doors declare themselves. Entry is always paired with a ``reset``
+    in a ``finally``, so a raising fold can never leave the scope armed over
+    the caller's next write.
+    """
+    token = _CACHE_WRITE_AUTHORIZED.set(reason)
+    try:
+        yield
+    finally:
+        _CACHE_WRITE_AUTHORIZED.reset(token)
+
+
+def _live_write_scope(reason: str = "live-door"):
+    """The live doors' scope: journal appended first, then the fold."""
+    return _cache_write_authorized(reason)
+
+
+def _replay_write_scope():
+    """The replay engines' scope: the record came FROM the journal."""
+    return _cache_write_authorized("replay")
+
+
 class _GuardedGraph:
     """Wrapper around the FalkorDB Graph handle that guards bulk graph-wipe queries.
 
@@ -2884,6 +3180,7 @@ class _GuardedGraph:
         # ``cypher_guard._guard_unsupported_cypher`` — shared with the guarded
         # handles so the two paths cannot drift.
         _guard_unsupported_cypher(cypher)
+        cypher = self._bar(cypher)
         # #7951 R2-P1: observe the fold's OWN Source mint at the write
         # chokepoint. Every replay path that materialises a `:Source` writes
         # through this handle, so the anchor is derived from what was actually
@@ -2917,6 +3214,7 @@ class _GuardedGraph:
         # rather than relying on the inner handle's class.
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
+        cypher = self._bar(cypher)
         return self._g.ro_query(
             cypher, params=_journal_safe_params(params, cypher), timeout=timeout
         )
@@ -2926,6 +3224,7 @@ class _GuardedGraph:
         # reaching `_query` directly must not slip past the refusal either.
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
+        cypher = self._bar(cypher)
         return self._g._query(
             cypher, params=_journal_safe_params(params, cypher),
             timeout=timeout, read_only=read_only,
@@ -2936,11 +3235,13 @@ class _GuardedGraph:
         # `_query`, so they carry their own refusal.
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
+        cypher = self._bar(cypher)
         return self._g.profile(cypher, params=_journal_safe_params(params, cypher))
 
     def explain(self, cypher: str, params=None):
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
+        cypher = self._bar(cypher)
         return self._g.explain(cypher, params=_journal_safe_params(params, cypher))
 
     def execute_command(self, *args, **kwargs):
@@ -2948,11 +3249,25 @@ class _GuardedGraph:
         # `GRAPH.QUERY` / `GRAPH.PROFILE` / ... too, and the guarded handles
         # beneath `self._g` already intercept it — but keep the wrapper's own
         # refusal complete rather than depending on the inner handle's class.
-        _guard_execute_command(args)
+        # #7162: the returned args carry the `WITH *` barrier when the shape
+        # needs it, so they — not the original `args` — are what gets dispatched.
+        args = _guard_execute_command(args, getattr(self._g, "client", None))
         return self._g.execute_command(*args, **kwargs)
 
     def __getattr__(self, name):
         return getattr(self._g, name)
+
+    def _bar(self, cypher: str) -> str:
+        """#7162: the `WITH *` barrier, when this handle's engine needs it.
+
+        The inner handle is guarded too, so this normally runs a second (cheap,
+        idempotent) pass; it exists so the `proj.g` path stays complete even when
+        a lightweight stub is wrapped here, matching the wrapper's own
+        "refuse on its own rather than depend on the inner class" convention.
+        """
+        if _predicate_barrier_required(self._g):
+            return _predicate_drop_barrier(cypher)
+        return cypher
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS, parse_uri_userinfo  # noqa: E402, I001
 from tortoise.fork_slot import is_fork_refusal  # noqa: E402
@@ -2988,6 +3303,23 @@ _POINT_RANGE_INDEX_PROPS: tuple[str, ...] = (
     "id",
     "pointKind",
     "content_hash",
+    # #6110/#8400: `key` is the per-kind dedup IDENTITY supplied to
+    # `create_point(key=…)`. `_resolve_dedup_hit` tries the key leg FIRST, so
+    # this index is on the hot path of every key-bearing write. Without it the
+    # leg is a label scan filtered by the low-cardinality `pointKind` index —
+    # measured on embedded FalkorDB at 60k Points: 8.11 ms/op vs 0.20 ms/op
+    # once this index exists, i.e. the key leg ran ~40x slower than the
+    # index-backed content-hash lookup it precedes (#8400 review P2).
+    #
+    # ⛔ NOT the kind-field index the #522 policy declined. That decision is a
+    # measured 3.15x write slowdown for `status`/`op_type` — low-cardinality
+    # props stamped on EVERY Point write. `key` is a high-cardinality IDENTITY,
+    # sparse (only key-bearing writes carry it), a peer of the already-indexed
+    # `content_hash`. The index is declared here AND in
+    # `_REQUIRED_RANGE_INDEXES` below, so a pre-#8400 graph reports
+    # not-current and takes the one-time sweep that creates it (#4465) rather
+    # than skipping the DDL forever.
+    "key",
 )
 
 _RANGE_INDEX_LABEL_PROPS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -3514,7 +3846,11 @@ from tortoise.projection.entities import (  # noqa: E402, I001
     _EntityHandlers,
     _is_persistable_prop_value,
     _PERSISTABLE_MAX_DEPTH,
+    _stated_tags,
+    _store_holds_prop_value,
     _usable_instant,
+    gated_promote_payload,
+    promote_status_applies,
 )
 from tortoise.projection.edges import _EdgeHandlers  # noqa: E402
 from tortoise.projection.grounding import _GroundingMixin  # noqa: E402
@@ -4028,6 +4364,13 @@ _NO_POINT_FOLD = _NO_PROJECTION_FOLD | frozenset({
     # ``apply``/``rebuild_all``, but a Session node is not a Point, so this
     # ``{id: point}`` index has no representation for it.
     "SessionDeleted",
+    # #5380: the EP edge-message write-back / invalidation. A real fold in
+    # both graph engines (``_fold_edge_message_changed``), but its target is a
+    # RELATIONSHIP (``src``/``tgt``/``rel``, or a bulk scope) and this
+    # ``{id: point}`` index has no edge representation at all — the same
+    # reason ``DirectEdgeCreated``/``DirectEdgeRepoint`` are listed above. It
+    # is NOT in ``_NO_PROJECTION_FOLD``: the graph engines DO fold it.
+    "EdgeMessageChanged",
 })
 
 
@@ -4575,6 +4918,53 @@ def journal_first_materialization(events) -> dict[tuple[str, str], int]:
             if isinstance(eid, str) and eid:
                 first.setdefault((_ENTITY_CREATION_EVENT_LABEL[t], eid), seq)
     return first
+
+
+def journal_recreate_seqs(events) -> set[int]:
+    """Journal seqs of Point/Operator creations that FOLLOW a hard delete of
+    the same id — the creations ``rebuild_all`` pass 1a treats as a
+    RE-creation (a FRESH node live, so its #4042 wipe applies).
+
+    Mirrors pass 1a's ordered ``pending_deleted`` scan (#4042 / #3860):
+    a Point-kind hard delete (``EntityMutated`` op=delete through
+    ``_owns_point``, or a ``PointsMerged`` merge id) ARMS the id, and the NEXT
+    creation of that id consumes the arm — the creation is admitted by the same
+    ``_writable_id`` gate pass 1a applies BEFORE computing ``is_recreate``
+    (#8317 review round 4). A bare same-id re-emit (no delete between) is
+    therefore NOT a recreate — which is what ``_apply_one``'s
+    ``journal_recreate`` gate reads to decide whether a ``tags`` value the
+    payload does not state survives (the writer's ``MERGE`` preserves it) or is
+    wiped (a recreate is a fresh node). Reading it any other way either leaks a
+    dead incarnation's tag or drops a live one.
+
+    ``seq`` is the enumerate index over the SAME ordered ``events`` list the
+    replay engines walk (the seq space ``journal_hard_delete_seqs`` documents),
+    so a fold can ask ``seq in journal_recreate_seqs(events)``.
+    """
+    armed: set[str] = set()
+    recreate: set[int] = set()
+    for seq, raw in enumerate(events):
+        ev = _norm(raw) if isinstance(raw, dict) else {}
+        t = ev.get("type")
+        if t == "EntityMutated" and ev.get("op") == "delete":
+            rid = ev.get("id")
+            if isinstance(rid, str) and _owns_point(ev.get("label")):
+                armed.add(rid)
+        elif t == "PointsMerged":
+            for mid in ev.get("merge_ids") or []:
+                if isinstance(mid, str):
+                    armed.add(mid)
+        elif t in ("PointAdded", "OperatorAdded"):
+            p = ev.get("point")
+            # `_writable_id` mirrors pass 1a, which gates a creation on it
+            # BEFORE computing `is_recreate` — a non-writable id never
+            # materialises a node, so it must not consume the arm (#8317 review
+            # round 4).
+            if (isinstance(p, dict) and isinstance(p.get("id"), str)
+                    and _writable_id(p["id"]) and p["id"] in armed):
+                recreate.add(seq)
+                armed.discard(p["id"])
+    return recreate
 
 
 def _journal_forward_reference(first_materialized, seq, label, rid) -> bool:
@@ -5270,7 +5660,8 @@ def _apply_one(points: dict[str, dict], ev: dict,
                | None = None,
                journal_seq: int | None = None,
                journal_existence: dict | None = None,
-               entities: dict | None = None) -> None:
+               entities: dict | None = None,
+               journal_recreate: bool = False) -> None:
     """Fold ONE normalized journal record into the pure point index.
 
     ``journal_first_materialized`` / ``journal_seq`` are the whole-journal
@@ -5328,6 +5719,32 @@ def _apply_one(points: dict[str, dict], ev: dict,
         # Phase 1 stop-writes: strip context from v2+ events (#49)
         if ev.get("projection_version", 0) >= 2:
             p.pop("context", None)
+        # #8317 review rounds 3-4: `_upsert_point_props`'s `tags` clause is
+        # `_stated_tags`-gated, so an ABSENT key, an explicit `None` and a value
+        # the store cannot hold all write NO property — and pass 1a MERGEs, so
+        # the node's existing list SURVIVES. Replacing the entry outright
+        # dropped it from the journal view while the graph kept it, so
+        # `check_consistency` red a faithful graph whose `action` ("replay the
+        # journal") reproduces exactly that graph. Mirror the WRITER'S OUTCOME,
+        # not the key's presence: keying on `"tags" not in p` alone left
+        # `tags: null` (and an unwritable value) folded as a CLEAR, reachable
+        # from the ordinary ingest seam — `EventAPI.add_point(id=…, tags=None)`
+        # (#8317 review round 4). The omitted-key shape is reachable too: the
+        # capture turn loop re-emits `PointAdded` for an existing turn with a
+        # hand-built snapshot that carries no `tags` (`sdk.py`).
+        #
+        # The ONE exception is a RE-creation (`journal_recreate`): the graph
+        # wipes `n.tags` there (the #4042 pass-1a wipe, which clears `tags`
+        # alongside the other four), so the fold must drop it too, or the fix
+        # would leak a dead incarnation's tag. The caller derives that flag from
+        # the same ordered `pending_deleted` boundary the projection uses
+        # (`journal_recreate_seqs`).
+        if not journal_recreate:
+            _wrote_tags, _ = _stated_tags(p)
+            if not _wrote_tags:
+                prev = points.get(p["id"])
+                if isinstance(prev, dict) and "tags" in prev:
+                    p = {**p, "tags": prev["tags"]}
         points[p["id"]] = p
         # Flatten speaker from point's provenance into node data
         # #331: non-dict provenance (null/string) must not crash flattening.
@@ -5377,6 +5794,19 @@ def _apply_one(points: dict[str, dict], ev: dict,
             _ms = ev.get("mitigation_strength")
             if "mitigation_strength" in ev and _annotator_value_ok(_ms):
                 p["mitigation_strength"] = _ms
+            # #2897: fold a `tags` EDIT — parity with `_revise_point` (the
+            # graph fold) and with the live `update_point`. `tags` is COMPARED
+            # by `check_consistency` (it is no longer in
+            # `_UNCARRIED_CONTENT_PROPS`), so a fold that ignored the edit
+            # reported a FALSE `content` divergence on the ordinary tag-edit
+            # path — with an `action` ("reconcile by replaying the journal")
+            # that could never clear it, because replay produces exactly the
+            # graph that is already there (#8317 review P1, reproduced).
+            # Presence-conditional, like the clause above: an explicit `None`
+            # is the documented clear and folds as an absent value, which
+            # `_canonical_point_fields` drops on BOTH sides.
+            if "tags" in ev:
+                p["tags"] = ev["tags"]
     elif t == "OperatorAnnotated":
         # #3689: the explicit annotation record — parity with apply() /
         # rebuild_all pass-1b. A plain property write on the operator's
@@ -5761,9 +6191,13 @@ def fold_with_entities(events: list[dict]) -> tuple[dict[str, dict], dict]:
     durable step — one ``(label, id)`` index deriving ``log_points`` /
     ``db_points`` / ``_compare_views`` / the fingerprint from a single view —
     stays open on #7936 and is deliberately NOT smuggled in here: re-keying the
-    digest would move ``content_hash`` for every existing baseline, and the
-    sidecar has no format-migration path (a bumped ``format_version`` is
-    untrusted forever and the baseline is never re-recorded).
+    digest would move ``content_hash`` for every existing baseline, which
+    entails a ``format_version`` bump — and since #8268/#7936 that is no longer
+    a dead end. A predecessor format appended to
+    ``consistency._PROJECTION_STATE_FORMAT_HISTORY`` is MIGRATED: the next
+    healthy recording run re-baselines at the current format and reports
+    ``state_superseded_format``. Only an UNKNOWN or FUTURE ``format_version``
+    stays untrusted and is never re-recorded.
 
     ``entities`` is a BATCH/replay view: it is built from the journal's ordered
     existence boundary, which the one-record incremental path does not have.
@@ -5776,12 +6210,17 @@ def fold_with_entities(events: list[dict]) -> tuple[dict[str, dict], dict]:
     # (re-creation and deletes on either side of the write), and rebuilding it
     # per record is the O(N²) class this module already fixed.
     existence = journal_epistemic_existence(events)
+    # #8317 review round 3: the re-creation boundary, so `_apply_one` preserves a
+    # prop (`tags`) the payload states no WRITABLE value for on a bare re-emit,
+    # and drops it on a real delete→recreate — exactly as the graph writer does.
+    recreate_seqs = journal_recreate_seqs(events)
     for seq, ev in enumerate(events):
         _apply_one(points, ev,
                    journal_first_materialized=first_materialized,
                    journal_seq=seq,
                    journal_existence=existence,
-                   entities=entities)
+                   entities=entities,
+                   journal_recreate=seq in recreate_seqs)
     return points, entities
 
 
@@ -5939,6 +6378,46 @@ class RebuildDroppedEpisodicPoints(RuntimeError):
     message an operator can act on, which is why ``tortoise.__main__``'s
     ``_cmd_rebuild`` handles it rather than letting a driver traceback out.
     """
+
+
+class WipePreconditionRefused(RuntimeError):
+    """#3044: ``rebuild_all(require_empty=True)`` found the graph non-empty.
+
+    The auto-recovery route (``tortoise.consistency.recover_from_log``)
+    reaches its destructive ``rebuild_all`` branch only after proving the graph
+    held 0 nodes — but that probe runs in another module, BEFORE the whole
+    journal parse. Emptiness is therefore a claim about the past by the time
+    the statement that depends on it is issued, and nothing re-validated it at
+    the wipe itself.
+
+    This is that re-validation. With ``require_empty=True`` the caller asserts
+    "there is nothing here to destroy"; the wipe refuses if the assertion no
+    longer holds. It is raised BEFORE the #2943 sidecar is written and before
+    any destructive statement, so the store is untouched and any pre-existing
+    rescue file is preserved.
+
+    It exists because ``rebuild_all``'s wipe is unconditional over EVERY label
+    while its pre-wipe snapshot covers only the sections ``_SNAPSHOT_SECTIONS``
+    names (graph-only ``:Point``, ``:Batch``, ``:Session``, the onboarding
+    pair, the config registry, the ``:GraphEventMeta`` high-water mark and
+    ``:TeamMeta``; the journal-replayable labels are re-created by the replay
+    itself). The residual is therefore ``:GraphEvent`` rows — the raw event
+    log, which no replay pass recreates (#4664) — plus any label outside that
+    tuple. A node from either group that appears between the emptiness probe
+    and the wipe would be destroyed with no record of it anywhere.
+    """
+
+    def __init__(self, *args, db_points: int | None = None):
+        super().__init__(*args)
+        # #3044 review (P2): the MEASUREMENT this refusal was raised on travels
+        # WITH the exception, because ``recover_from_log`` reports it to the
+        # operator as ``db_points``. Re-deriving that count at the caller with
+        # ``_node_count()`` would flatten the very absent/NULL count row this
+        # guard refuses on to ``0`` — telling the operator the store is EMPTY
+        # in the same message that says its count could not be MEASURED. `None`
+        # here therefore means UNMEASURABLE, and a refusal raised without the
+        # field (e.g. a test double) reports `None` rather than a fabricated 0.
+        self.db_points = db_points
 
 
 # #3947 review: the journal event types whose replay CREATES a Point/Operator
@@ -6303,6 +6782,39 @@ class FalkorProjection(
     non-disposable server graph.
     """
 
+    # #7951 §17.1: whether this projection is the DERIVED CACHE OF A CONFIGURED
+    # JOURNAL, and so under the single-writer guard. A CLASS attribute (not set
+    # in ``__init__``) so the ``object.__new__`` guard stubs that skip
+    # ``__init__`` do not raise `AttributeError` — the same property the
+    # `_replay_*` ContextVar properties have.
+    #
+    # ⛔ READ THE POLARITY — the two defaults point OPPOSITE ways:
+    #   * ``_journal_backed = False`` here is the PERMISSIVE default. A
+    #     projection that never bound a journal is NOT under the guard, because
+    #     with no journal there is no truth store for its cache to be ahead of
+    #     (§17.1 has nothing to enforce). Only ``_bind_journal`` sets it
+    #     ``True``, and only a live door that OWNS a journal calls it.
+    #   * the REFUSAL lives in the authorization ContextVar
+    #     (``_CACHE_WRITE_AUTHORIZED``, default ``None`` = refusal), and it is
+    #     read ONLY on the ``_journal_backed`` branch. So the gate refuses by
+    #     default *given a journal*, which is the fail-closed direction.
+    # A stub that skips ``__init__`` therefore reads "no journal configured"
+    # and is ALLOWED to fold — it is not silently authorized against a bound
+    # journal (it cannot be: nothing turned ``True``), and no stub can flip the
+    # refusal off on a projection whose journal really was bound.
+    _journal_backed: bool = False
+
+    def _bind_journal(self, journal_path: str | None) -> None:
+        """Mark this projection as the derived cache of a journal (`#7951`).
+
+        Called by the live doors that OWN a journal (`TortoiseSDK._get_proj`
+        when an event log is configured). It does not enable a bypass — it
+        ARMS the guard: from this point a fold or a mutating raw-query on this
+        projection is refused unless the caller declares a sanctioned scope
+        (``_live_write_scope`` / ``_replay_write_scope``).
+        """
+        self._journal_backed = bool(journal_path)
+
     # #7951 round 3: the replay anchors are CONTEXT-LOCAL (ContextVar), not
     # instance attributes. `rebuild_all` runs with them armed on its own
     # thread/context; another thread writing through the same `_GuardedGraph`
@@ -6564,8 +7076,12 @@ class FalkorProjection(
             ) if (path != ":memory:" and aof_enabled) else None
             # #3350: the embedded client was built with NO socket timeouts of
             # OUR choosing, so every blocking call on it was bounded only by
-            # redis-py's own implicit connection default (5s) — invisible to
-            # operators, and multiplied by the client's retry policy.
+            # redis-py's connection default as it stood then — believed 5s at
+            # that earlier pin (a dependency-era value, not a fact about the
+            # current client: a bare `redislite.Redis` measures
+            # `socket_timeout is None` on the pin this repo resolves today) —
+            # invisible to operators, and multiplied by the client's retry
+            # policy.
             # Measured against a SIGSTOPped embedded daemon: one `RETURN 1`
             # blocked ~59s, outliving the /health probe's 1.5s outer bound by
             # ~40x and parking the probe worker that whole time (#3350).
@@ -6579,16 +7095,13 @@ class FalkorProjection(
             # the worst case is a knowable `2 x socket_timeout`, not an
             # 11x-multiplied dependency default.
             #
-            # NOT passed here: `socket_connect_timeout`. redis-py 8's
-            # ConnectionPool does not forward it for a unix-domain socket
-            # (verified: `Redis(unix_socket_path=..., socket_connect_timeout=
-            # 1.5)` leaves `conn.socket_connect_timeout` at redis-py's own 5s
-            # default), so passing it would be a bound that looks wired but
-            # is not — the trap this change exists to remove. Its own 5s
-            # default still applies, and a local UDS connect cannot be the
-            # black hole: the read leg is. (Operators wanting that leg too
-            # need a custom connection class — filed separately.)
-            read_to = _socket_timeouts()[1]
+            # NOT passed here: `socket_connect_timeout`. redis-py's
+            # `Redis.__init__` drops it on the unix-socket branch (measured on
+            # the pinned redis 7.4.1 — see `_apply_embedded_connect_timeout`),
+            # so passing it in these kwargs would be a bound that looks wired
+            # but is not: the trap this change exists to remove. It is
+            # delivered to the POOL below instead (#3421).
+            connect_to, read_to = _socket_timeouts()
             # #3595: build through `cypher_guard.guarded_client` — the ONE
             # client-construction seam — so every handle this client yields
             # (here and from the direct `proj.db.select_graph(...)` sites
@@ -6605,6 +7118,12 @@ class FalkorProjection(
                 socket_timeout=read_to,
                 retry=_embedded_retry(),
             )
+            # #3421: the CONNECT leg goes to the pool rather than the vendor
+            # call — see the helper's docstring for the measurement that makes
+            # the constructor kwarg a no-op. Before this, the embedded lane's
+            # connect leg was unbounded (`sock.settimeout(None)`), so
+            # TORTOISE_FALKORDB_CONNECT_TIMEOUT_S had no effect on it at all.
+            _apply_embedded_connect_timeout(self.db, connect_to)
         elif host is not None:
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
@@ -7052,9 +7571,39 @@ class FalkorProjection(
                     # rolled back by `recover_from_log`, so this really is an
                     # empty DB here rather than a half-built one that a later
                     # open would serve as "already has nodes".
-                    logger.warning(
-                        "empty embedded DB not auto-recovered: %s",
-                        result.get("reason"))
+                    #
+                    # #3044 review: NOT every decline leaves an empty store.
+                    # The #7929 rollback is itself REFUSED when the sidecar is
+                    # already retired, and the #3044 pre-wipe refusal never ran
+                    # a replay to roll back — both leave the nodes they found
+                    # in place. `db_points` is the field that says which shape
+                    # the operator is looking at, so describe the store from
+                    # the MEASURED count: telling them it is "empty" at the
+                    # moment they must not lose what is in it is the same lie
+                    # about the store #7929 removed from the count.
+                    # #3044 review: `db_points is None` is UNMEASURABLE, not
+                    # empty — `recover_from_log` passes `None` through on a dead
+                    # backend (a count that raises, or a post-replay count the
+                    # backend never answered), and calling that store "empty"
+                    # tells the operator to ignore nodes that are in fact still
+                    # there. Three shapes, three messages.
+                    measured = result.get("db_points")
+                    if measured is None:
+                        logger.warning(
+                            "embedded DB NOT auto-recovered and its node "
+                            "count is UNMEASURABLE (left untouched, NOT "
+                            "verified empty): %s",
+                            result.get("reason"))
+                    elif measured:
+                        logger.warning(
+                            "embedded DB NOT auto-recovered with %s node(s) "
+                            "still in the store (left untouched, NOT empty): "
+                            "%s",
+                            measured, result.get("reason"))
+                    else:
+                        logger.warning(
+                            "empty embedded DB not auto-recovered: %s",
+                            result.get("reason"))
 
     def _recover_or_raise(self, events_dir: str) -> None:
         """Run recover_from_log, fail loud if it did not recover.
@@ -7158,6 +7707,28 @@ class FalkorProjection(
               journal_object_deleted=None, journal_first_materialized=None,
               journal_seq: int | None = None,
               journal_existence=None) -> None:
+        # #7951 §17.1 — THE SINGLE-WRITER GATE (fail-closed, default REFUSAL).
+        # A fold is the cache WRITE of the record/cache split, so on a
+        # journal-backed projection it is legal only when a sanctioned scope is
+        # in flight: a live door that appended to the journal FIRST (the
+        # chokepoint), or a replay engine whose record came FROM the journal.
+        # A direct `proj.apply(ev)` with neither is the "hidden door" class the
+        # door inventory (`#8315`) names as the remaining S2 failure mode — it
+        # would put the DERIVED store ahead of the TRUTH with no repair path,
+        # and it now RAISES instead of silently folding.
+        if self._journal_backed and _CACHE_WRITE_AUTHORIZED.get() is None:
+            raise DirectCacheWriteRefused(
+                "Refusing a DIRECT fold: `FalkorProjection.apply` was called "
+                "with no sanctioned write scope in flight. This projection is "
+                "the derived cache of a journal, and §17.1 requires every "
+                "write to go to the truth store first — "
+                "docs/architecture/STORAGE-ARCHITECTURE.md §17.1: a derived "
+                "cache that is also written to directly is not derived. Live "
+                "writers must append first and fold through "
+                "`TortoiseSDK._apply_and_journal` (or `EventAPI._emit`); replay "
+                "engines must run inside `_replay_write_scope()`. event_type="
+                f"{(event or {}).get('type')!r}"
+            )
         # #3585 re-review (cycle 2, FIX A): `journal_object_surviving` is
         # ``(ids, names)`` of every Object the WHOLE journal leaves in place,
         # and `journal_object_deleted` the ids it hard-deletes. They are
@@ -7307,9 +7878,17 @@ class FalkorProjection(
             # #785: re-apply the full promoted snapshot (status live +
             # reviewed + promotedAt) — rebuild parity for reviewer-gated
             # promotions (PointRetracted-style lifecycle event).
+            # #6239: the STATUS half is gated on live's own promote
+            # precondition — a promote replayed over a status it could not
+            # have overwritten live (a supersede is status-TERMINAL) is a
+            # status no-op, or this chronological arm re-livens a Point
+            # ``rebuild_all``'s sweep leaves terminal. The rest of the
+            # snapshot still folds, exactly as that sweep's inline pass has
+            # always applied it.
             p = ev.get("point")
             if isinstance(p, dict) and _writable_id(p.get("id")):
-                self._upsert(p)
+                self._upsert(gated_promote_payload(
+                    p, self._point_status(p["id"])))
             elif isinstance(p, dict):
                 # #7369: a truthy-but-unwritable id is skipped, not MERGEd —
                 # the skip must be observable (see `_log_identity_skip`).
@@ -7513,6 +8092,35 @@ class FalkorProjection(
                         id=_cc_rid,
                         detail="apply: belief write-back matched no Point",
                     )
+        elif t == "EdgeMessageChanged":
+            # #5380: the EP edge-message write-back / invalidation. Folded
+            # INLINE here — this engine feeds an in-order journal to
+            # ``apply()`` one record at a time, so the target edge exists by
+            # the time its message record arrives (the operator edge is
+            # PRECEDENT). A ``set`` miss is RECORDED and warned, never
+            # refused: a plain direct edge is legitimately absent (A10 #1048 —
+            # ``DirectEdgeCreated`` is not folded by this engine at all, so
+            # the EDGE is lost and refusing here would block recovery of a
+            # journal whose loss this fold does not cause), and a
+            # hard-deleted edge is gone live too. The shape is EXEMPT in
+            # ``nonfolded.EXEMPT_SHAPES`` with its degraded guarantee written
+            # down; ``rebuild_all``'s deferred sweep carries the same
+            # disposition.
+            if (self._fold_edge_message_changed(ev) == 0
+                    and ev.get("op") == "set"):
+                record_non_folded(
+                    SHAPE_EDGE_MESSAGE_MISS,
+                    event_id=ev.get("event_id"),
+                    event_type="EdgeMessageChanged", seq=journal_seq,
+                    id=ev.get("id"), op=ev.get("op"),
+                    detail="apply: edge-message write matched no edge",
+                )
+                logger.warning(
+                    "apply: EdgeMessageChanged matched no edge "
+                    "(event_id=%s src=%r tgt=%r rel=%r) — the edge was not "
+                    "re-created by any journaled event (#5380)",
+                    ev.get("event_id"), ev.get("src"), ev.get("tgt"),
+                    ev.get("rel"))
         elif t in _NO_PROJECTION_FOLD:
             # Recognized, intentionally folded elsewhere or not at all: the
             # audit-only markers, the JSONL-only batch snapshot replayed in
@@ -7716,6 +8324,28 @@ class FalkorProjection(
     @_fail_closed("rebuild(log)")
     @tolerates_altered_numbers
     def rebuild(self, log, *, confirm_destructive: bool = False) -> None:
+        """#7951 §17.1: the REPLAY entry point for one EventLog.
+
+        A thin wrapper that opens the replay scope and delegates to
+        ``_replay_log``. The replay's records CAME FROM the journal, so they
+        are authorized to be folded — and, by the ordering contract's exception
+        1, they must NOT be journaled again. Opening the scope here (rather
+        than at each `apply` call) means a fold added to any of this engine's
+        helpers is covered without a second declaration.
+
+        #7174/#5011: BOTH markers are declared on THIS public name, not on the
+        private ``_replay_log`` — ``rebuild`` is the whole-journal replay engine
+        the exemption set names (``cypher_guard.tolerates_altered_numbers``'
+        docstring and ``test_7174_param_boundary_numeric_guard``), and the guard
+        reads the MODULE-LEVEL attribute. ``functools.wraps`` on the marker
+        wrappers is the documented thing the guard inspects, so placing them on
+        the wrapper keeps the exemption on the public entry point while the
+        implementation stays extracted.
+        """
+        with _replay_write_scope():
+            self._replay_log(log, confirm_destructive=confirm_destructive)
+
+    def _replay_log(self, log, *, confirm_destructive: bool = False) -> None:
         """Wipe the graph and replay one EventLog. DESTRUCTIVE.
 
         #2944: the wipe is gated by L1 — the caller MUST pass
@@ -7984,7 +8614,8 @@ class FalkorProjection(
     @_fail_closed("rebuild_all")
     @tolerates_altered_numbers
     def rebuild_all(self, log_dir: str, *,
-                    confirm_destructive: bool = False) -> dict:
+                    confirm_destructive: bool = False,
+                    require_empty: bool = False) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.
 
         #3585 (R8/R9): the whole fold runs inside the non-folded-event
@@ -7996,6 +8627,17 @@ class FalkorProjection(
         the wipe on an explicit per-call opt-in — the caller MUST pass
         ``confirm_destructive=True`` (default refuses). L2 still refuses a
         non-disposable server graph even with the token.
+
+        ``require_empty=True`` (#3044) adds a second, independent precondition
+        for callers that only know the graph was empty EARLIER (the
+        ``consistency.recover_from_log`` auto-recovery route proves 0 nodes
+        before a journal parse that can take seconds): the wipe re-validates
+        that claim immediately before the sidecar write and the destructive
+        statement, and refuses with :class:`WipePreconditionRefused` if the
+        graph gained nodes since. The check precedes the #2943 sidecar write,
+        so a refusal leaves no rescue file behind (the existing pre-wipe-guard
+        convention). Default ``False``: an operator rebuild legitimately runs
+        on a populated graph.
 
         Two-pass: creates all Point nodes first (pass 1), then operator edges
         and all other event types second (pass 2), so cross-file operator→Point
@@ -8030,6 +8672,15 @@ class FalkorProjection(
         or a refused wipe all abort BEFORE the wipe. See
         ``_PREWIPE_SNAPSHOT_FILENAME``.
         """
+        # #3044 review (P1): the recovery route's caller
+        # (`consistency.recover_from_log`) has to tell a PRE-wipe failure from
+        # a post-wipe one. `_roll_back_declined_replay` is sound only once the
+        # destructive statement has been issued; before it, a node a writer
+        # landed in the #3044 window is still present, and rolling back would
+        # destroy exactly what `require_empty` refuses to. Reset before
+        # anything that can fail, so an early return can never inherit a stale
+        # value from a previous call.
+        self._rebuild_wiped = False
         import os  # noqa: I001
         from tortoise.log import EventLog
 
@@ -8052,6 +8703,26 @@ class FalkorProjection(
         # turns a durability bug into permanent data loss).
         episodic_before = self._episodic_point_ids()
 
+        # #5380 indicator 4: a journal that PREDATES edge-message journaling
+        # carries no ``EdgeMessageChanged`` record, so the replay cannot
+        # restore the EP seeds the pre-wipe graph holds — and, with the node
+        # half already restored by #2884, the result LOOKS restored. Capture
+        # the pre-wipe population so ``rebuild_all`` can REPORT the drop it is
+        # about to perform instead of performing it silently. Read, never
+        # proven-absent: the count is informational, so a read that cannot
+        # answer reports "unknown" rather than aborting a recovery.
+        try:
+            _ep_edges_before_rows = self.g.query(
+                "MATCH ()-[r:IMPL|NAND]->() "
+                "WHERE r.msg_alpha IS NOT NULL OR r.msg_beta IS NOT NULL "
+                "   OR r.back_msg_alpha IS NOT NULL "
+                "   OR r.back_msg_beta IS NOT NULL "
+                "RETURN count(r)").result_set
+            ep_bearing_edges_before = (
+                int(_ep_edges_before_rows[0][0])
+                if _ep_edges_before_rows else 0)
+        except Exception:  # noqa: BLE001, RUF100
+            ep_bearing_edges_before = None
         # ── #548: snapshot existing graph BEFORE wiping ──────────────
         # SDK-created points written via Cypher may have no corresponding
         # event in the JSONL log. Snapshot them now so they survive the
@@ -8668,6 +9339,58 @@ class FalkorProjection(
         self._assert_test_graph(
             "REFUSING to run bulk DETACH DELETE on non-test graph")
 
+        # #3044: the recovery route's emptiness claim, re-validated AT the
+        # operation that depends on it. `recover_from_log` proves 0 nodes
+        # before a journal parse that can take seconds; this re-checks just
+        # before the wipe (and before the sidecar write, so a refusal strands
+        # no rescue file — see the convention above). Opt-in only: a rebuild
+        # an operator asked for runs on a populated graph by design, so this
+        # must never be unconditional. The refusal is raised before ANY
+        # destructive statement, so the store is untouched.
+        if require_empty:
+            _rows = self.g.query("MATCH (n) RETURN count(n)").result_set
+            # #3044 review: an ABSENT/NULL count row is UNMEASURABLE, not zero.
+            # This is deliberately STRICTER than the probe it re-validates:
+            # `_node_count` (consistency.py) flattens the SAME shape to 0 and
+            # reserves `None` for a query that RAISED, so the two readers of
+            # one query disagree here on purpose. The probe's 0 is exactly the
+            # claim this guard exists to re-validate, so a count row the guard
+            # never received is no evidence of emptiness — flattening it to 0
+            # here would let a wipe proceed on a store the guard never
+            # actually saw as empty. That is the fail-closed choice. A query
+            # that RAISES was already fail-closed (the exception propagates).
+            # The measurement this refusal was raised on travels ON the
+            # exception, so `recover_from_log` reports the guard's own answer
+            # instead of re-querying with the flattening helper.
+            _measured = (int(_rows[0][0])
+                         if _rows and _rows[0][0] is not None else None)
+            if _measured is None:
+                raise WipePreconditionRefused(
+                    "rebuild_all was called with require_empty=True, but the "
+                    "graph's node count could not be MEASURED — refusing to "
+                    "wipe (#3044). An unmeasurable store is not an empty "
+                    "one: the caller proved this graph EMPTY before the "
+                    "journal parse, and a wipe issued on an unverified count "
+                    "is exactly the destruction that guard exists to "
+                    "prevent. Re-run recovery once the backend responds, or "
+                    "rebuild explicitly with `tortoise rebuild --dir <dir>`.",
+                    db_points=_measured,
+                )
+            if _measured:
+                raise WipePreconditionRefused(
+                    f"rebuild_all was called with require_empty=True, but the "
+                    f"graph holds {_measured} node(s) — refusing to wipe "
+                    f"(#3044). The caller proved this graph EMPTY before the "
+                    f"journal parse; a node appearing since then would be "
+                    f"destroyed with no record — the pre-wipe snapshot "
+                    f"covers only the labels in _SNAPSHOT_SECTIONS, so "
+                    f":GraphEvent rows and any label outside that set are "
+                    f"lost. Re-run recovery when no writer is "
+                    f"active, or rebuild explicitly with "
+                    f"`tortoise rebuild --dir <dir>`.",
+                    db_points=_measured,
+                )
+
         # Persist immediately before the destructive wipe: after DETACH DELETE
         # these nodes exist nowhere else, so replay must be able to recover
         # them from disk even if THIS process dies. A write failure aborts the
@@ -8824,6 +9547,10 @@ class FalkorProjection(
             episodic_before | recovered_session_turns, events,
             snapshot_ids=snapshot_ids)
 
+        # The destructive statement is about to be issued: from here a failure
+        # can land on a partially wiped graph, which is the #7929 rollback
+        # shape the recovery route is allowed to undo (#3044 review, P1).
+        self._rebuild_wiped = True
         self._wipe_all_nodes(confirm_destructive=confirm_destructive,
                              operation="rebuild_all")
 
@@ -8891,6 +9618,9 @@ class FalkorProjection(
         last_embed_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
         last_hash_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
         last_ms_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
+        # #2897: the same class as `last_ms_write_by_source`, for `tags` — the
+        # last creation whose own clause actually WROTE the tag list.
+        last_tags_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
         # #4305: id-WIDE (cross-file) journal-owned derived markers for the
         # pass-1b restore tail. The per-source anchors above are a WITHIN-file
         # chronology boundary; the restore tail runs AFTER every journal file,
@@ -9072,11 +9802,24 @@ class FalkorProjection(
                     # (The dead incarnation's `extractedFrom` EDGE is a
                     # separate, PRE-EXISTING pass-2 resurrection — see the
                     # change's residual note; this wipe is the node-prop half.)
+                    #
+                    # #2897: `tags` is wiped here too. Its own clause is
+                    # presence-and-store gated and pass 2 re-derives the
+                    # `:Tag`/`TAGGED`
+                    # half from the node's value, so a re-creation that omits
+                    # `tags` would otherwise resurrect the dead incarnation's
+                    # tag list AND its edges — state the journal never authored
+                    # for that incarnation. This is the explicit rule the #3817
+                    # negative control said a restore would need ("a restore
+                    # needs an explicit rule for state the journal never
+                    # authored"), and it is the same premise as the sibling
+                    # fields: a re-creation is a FRESH node live.
                     self.g.query(
                         "MATCH (n:Point {id:$id}) "
                         "SET n.embedding = NULL, n.content_hash = NULL, "
                         "    n.embedding_verbatim = NULL, "
-                        "    n.sourceVersionTransit = NULL",
+                        "    n.sourceVersionTransit = NULL, "
+                        "    n.tags = NULL",
                         params={"id": p["id"]})
                 # Property parity with apply()/apply_one (#330): the shared
                 # helper writes ALL node properties incl. authoredBy,
@@ -9113,6 +9856,11 @@ class FalkorProjection(
                     # test would wrongly count as a write).
                     if "mitigation_strength" in persisted_extras:
                         last_ms_write_by_source[key] = seq
+                    # #2897: `tags` rides the same reported set (its own
+                    # explicit clause placed it there) — the pass-1b boundary
+                    # for a tag EDIT.
+                    if "tags" in persisted_extras:
+                        last_tags_write_by_source[key] = seq
                     # #4305: the id-wide counterpart (see the sets'
                     # declaration). A re-creation explicitly cleared both
                     # conditional fields before the upsert, so it owns them
@@ -9164,6 +9912,15 @@ class FalkorProjection(
         # reproduced in this worktree (the name-only fold did not apply here at
         # all), so this half is reasoned, not empirically pinned, and has no test.
         _state_folds: dict = {}
+        # #6239: ``{id: [(seq, promote_payload), …]}`` for the ``PointPromoted``
+        # records of a Point (journal-append order, like ``_state_folds``). The
+        # status-only fold the post-supersede re-fold needs: a promote is a
+        # status WRITER, and the sweep that follows pass-1b folds the
+        # terminal ``superseded`` unconditionally, so a promote the journal
+        # places AFTER that supersede must be able to restore ``status='live'``
+        # when a later ``restatus`` legalized it (the live-reachable shape
+        # ``supersede → update_entity(status='draft') → promote_point``).
+        _promote_folds: dict = {}
         _supersede_seq: dict = {}
         # #3664: EntityLinked records are deferred to a trailing sweep that
         # runs after PASS 2 (see the sweep before pass 2b). The deferral is
@@ -9187,6 +9944,22 @@ class FalkorProjection(
         # ms; JSONL carries no seq). Same events list pass-1a enumerates ⇒
         # identical seq space as last_recreate_seq.
         point_re_stamp_folds: list[tuple[int, dict]] = []
+        # #5380: EP edge-message write-backs / invalidations, DEFERRED to a
+        # trailing sweep that runs AFTER pass-2b. Inline pass-1b folding
+        # cannot work here: pass-1a hoists every Point/Operator creation (so
+        # an OPERATOR edge exists by pass-1b), but pass-2b re-creates a
+        # TRANSFERRED direct edge from its ``DirectEdgeRepoint`` descriptor
+        # (A10 #1048), so an edge that only exists by pass-2b would be missed
+        # inline. (``DirectEdgeCreated`` — plain direct-edge BASE creation —
+        # is folded by NEITHER engine: it is JSONL-only and its replay stays
+        # deferred (A10 #1048), so those edges are lost on rebuild by that
+        # pre-existing gap. That loss is the ``EXEMPT_SHAPES`` rationale for
+        # an edge-message MISS, not a reason to defer this sweep.)
+        # The sweep runs after EVERY edge-creating pass, so the edge set is
+        # final; records are buffered WITH their journal seq and replayed in
+        # journal order, which is what makes a ``clear`` followed by a
+        # ``set`` land on the ``set`` (last writer wins, per edge).
+        edge_message_events: list[tuple[int, dict]] = []
         # #2488: per-id highest journal seq of a same-id INLINE updatedAt
         # writer (PointRevised / PointPromoted — pass-1b applies both
         # inline; they never enter the deferred list); a PointInvalidated
@@ -9331,6 +10104,17 @@ class FalkorProjection(
                     if _prom_anchor is not None and seq <= _prom_anchor:
                         _prom_props = {k: v for k, v in p.items()
                                        if k not in BELIEF_PROPS}
+                    # #6239: record the promote as a status writer for the
+                    # post-supersede re-fold, and withhold its ``status`` where
+                    # live could not have written it (see
+                    # ``promote_status_applies``). The inline position still
+                    # sees the PRE-sweep graph, so the sweep can clobber a
+                    # legal promote — the re-fold restores it, in seq order
+                    # with any later ``restatus``.
+                    if isinstance(p["id"], str):
+                        _promote_folds.setdefault(p["id"], []).append((seq, p))
+                    _prom_props = gated_promote_payload(
+                        _prom_props, self._point_status(p["id"]))
                     wrote_embedding, wrote_content_hash, _prom_extras = (
                         self._upsert_point_props(_prom_props))
                     # #4305: id-wide journal-owned derived marks. #5004: the
@@ -9534,6 +10318,7 @@ class FalkorProjection(
                 skip_embedding = False
                 skip_hash = False
                 skip_mitigation_strength = False
+                skip_tags = False
                 if isinstance(rid, str) and src is not None:
                     # #3860 composition: a PointRevised revises a ``:Point``,
                     # so its anchor key carries the same kind-scoped inner key
@@ -9568,6 +10353,15 @@ class FalkorProjection(
                         skip_mitigation_strength = (
                             last_recreate_seq_by_source.get(key, -1) > seq
                             or last_ms_write_by_source.get(key, -1) > seq)
+                        # #2897: `tags` is the same class again — an open-set
+                        # prop whose clause writes only when the payload
+                        # STATES a persistable value. The anchor is the
+                        # creation that actually WROTE it (read from the
+                        # writer's reported key set, never a second copy of
+                        # its own condition).
+                        skip_tags = (
+                            last_recreate_seq_by_source.get(key, -1) > seq
+                            or last_tags_write_by_source.get(key, -1) > seq)
                 wrote_embedding, wrote_content_hash = self._revise_point(
                     ev, set_updated_at=True,
                     skip_annotator_dims=(
@@ -9583,7 +10377,8 @@ class FalkorProjection(
                     skip_content=superseded,
                     skip_embedding=skip_embedding,
                     skip_hash=skip_hash,
-                    skip_mitigation_strength=skip_mitigation_strength)
+                    skip_mitigation_strength=skip_mitigation_strength,
+                    skip_tags=skip_tags)
                 if isinstance(rid, str):
                     # #4305: id-wide journal-owned derived marks — the revision
                     # wrote (or explicitly wiped) each field it was not told
@@ -9703,6 +10498,13 @@ class FalkorProjection(
                         "journaled event (legacy journal, unjournaled "
                         "producer, or delete race)",
                         ev.get("event_id"), ev.get("id"))
+            elif t == "EdgeMessageChanged":
+                # #5380: buffered — see ``edge_message_events`` above. The fold
+                # is a per-edge SET of absolute values (presence-conditional,
+                # ``None`` = the journaled clear) or a bulk scoped REMOVE, both
+                # idempotent, so deferring past pass-2b changes nothing except
+                # making the target edge exist.
+                edge_message_events.append((seq, ev))
             elif t == "EventRecorded":
                 self._upsert_event(ev)
             elif t == "SubjectAdded":
@@ -10100,9 +10902,22 @@ class FalkorProjection(
         # gate covers every such record. Events re-fold in seq order (each
         # `_state_folds` list is append-ordered), so the LAST journaled writer
         # wins — exactly as live and `apply()` resolve it.
-        for (_ujm_label, _ujm_id), _ujm_events in _state_folds.items():
-            if _ujm_label != "Point":
-                continue
+        #
+        # #6239: a ``PointPromoted`` after the surviving supersede is a status
+        # writer TOO, and before this change the re-fold's own comment was
+        # false — the re-fold keyed only on ``_state_folds``, so a promote the
+        # journal places AFTER a later ``restatus`` was invisible and the
+        # restatus clobbered it. Merging the two families into ONE seq-ordered
+        # pass is what makes "the last journaled status writer wins" true. The
+        # promote contributes its STATUS only (the inline pass already folded
+        # its content/derived props at its chronological position, so re-folding
+        # the whole snapshot here would clobber a LATER ``PointRevised``), and
+        # the status is written only where live could have written it
+        # (``promote_status_applies``).
+        _point_refold_ids = {
+            _id for (_lbl, _id) in _state_folds if _lbl == "Point"}
+        _point_refold_ids |= set(_promote_folds)
+        for _ujm_id in _point_refold_ids:
             _psup = supersede_last.get(_ujm_id)
             if _psup is None:
                 continue
@@ -10119,12 +10934,25 @@ class FalkorProjection(
                     params={"i": _ujm_id}).result_set:
                 continue
             _psup_seq = _psup[0]
-            for _seq, _ev in _ujm_events:
-                if _seq > _psup_seq:
+            _refold_writers: list[tuple[int, str, dict]] = [
+                (s, "state", e)
+                for s, e in _state_folds.get(("Point", _ujm_id), [])]
+            _refold_writers.extend(
+                (s, "promote", e)
+                for s, e in _promote_folds.get(_ujm_id, []))
+            for _seq, _kind, _ev in sorted(_refold_writers,
+                                           key=lambda w: w[0]):
+                if _seq <= _psup_seq:
+                    continue
+                if _kind == "state":
                     self._fold_entity_mutation(
                         _ev,
                         journal_first_materialized=first_materialized,
                         journal_seq=_seq)
+                elif promote_status_applies(self._point_status(_ujm_id)):
+                    self.g.query(
+                        "MATCH (n:Point {id:$id}) SET n.status = 'live'",
+                        params={"id": _ujm_id})
 
         # fold_seq[old_id] = journal seq of the id's surviving supersede fold
         # (pass-2b re-point discriminator; bound to the supersede-kind
@@ -10909,7 +11737,9 @@ class FalkorProjection(
         # DirectEdgeRepoint descriptor replay — AFTER pass-2 rebuilt operator
         # edges from operator PointAdded snapshots whose stored
         # operator.inputs STILL NAME THE OLD point (live supersede's transfer
-        # is CREATE+DELETE graph mutation only — operator.inputs is never
+        # is MERGE+DELETE graph mutation only — idx-keyed at the typed leg,
+        # and it re-points the reverse INPUT mirror too (#6180) — so
+        # operator.inputs is never
         # updated and no operator snapshot is re-emitted), so every
         # transferred operator edge re-materialized at the OLD point (the
         # edge-topology half of the #2423 resurrection).
@@ -10989,6 +11819,11 @@ class FalkorProjection(
                 # live successor (transitive chain resolution), so folds
                 # stay order-independent (#2249).
                 repoints: list[tuple] = []  # (op_id, rel_type, idx, rid, old_id, new_id, op_label)
+                # #6180: the reverse INPUT mirrors re-point too, one row per
+                # `(old)-[:INPUT]->(op)` edge, same discriminator/carve-outs as
+                # the typed leg. Driven by the INPUT edges themselves so the
+                # replay mirrors live `supersede_point`'s 2a-INPUT loop exactly.
+                input_repoints: list[tuple] = []  # (op_id, idx, rid, old_id, new_id, op_label)
                 for _, ev in supersede_last.values():
                     oid = ev.get("id")
                     if not isinstance(oid, str):
@@ -11003,8 +11838,12 @@ class FalkorProjection(
                         params={"id": oid},
                     ).result_set
                     for row in rows:
-                        # r.idx can be null (legacy edge) — Cypher handles a
-                        # null idx in the pattern; validate ONLY the rel type.
+                        # r.idx may be null (e.g. mitigate_operator's
+                        # idx-less edges) — a null idx canNOT ride an `{idx}`
+                        # pattern (`MERGE {idx:null}` is refused, and
+                        # `MATCH {idx:null}` never matches), so the legs below
+                        # merge on the bare pattern and delete by ID.
+                        # Validate ONLY the rel type here.
                         validate_rel_type(row[1])
                         op_seq = operator_created_seq.get(row[0])
                         if op_seq is not None and fseq is not None \
@@ -11013,6 +11852,18 @@ class FalkorProjection(
                         repoints.append(
                             (row[0], row[1], row[2], row[3], oid, final_id,
                              row[4]))
+                    for row in self.g.query(
+                        "MATCH (old:Point {id:$id})-[ri:INPUT]->"
+                        "(op:Point {is_operator:true}) "
+                        "RETURN op.id, ri.idx, ID(ri), op.label",
+                        params={"id": oid},
+                    ).result_set:
+                        op_seq = operator_created_seq.get(row[0])
+                        if op_seq is not None and fseq is not None \
+                                and op_seq > fseq:
+                            continue  # operator postdates the supersede
+                        input_repoints.append(
+                            (row[0], row[1], row[2], oid, final_id, row[3]))
                 repointed_seen: set[tuple] = set()
                 for (op_id, rtype, idx, rid, oid, nid, op_label) in repoints:
                     # alreadyDecided ops keep their dedup-context edge on the
@@ -11030,16 +11881,58 @@ class FalkorProjection(
                     if key in repointed_seen:
                         continue
                     repointed_seen.add(key)
+                    # #6180: MERGE, not CREATE — mirror live's 2a exactly, so a
+                    # successor that already carries the shared edge collapses
+                    # onto it instead of doubling (idx rides the pattern, so
+                    # parallel same-type legs at different idx stay distinct).
+                    # #6180 null-idx leg: an idx-less edge (mitigate_operator)
+                    # cannot ride an `{idx:null}` pattern — MERGE refuses a null
+                    # property and MATCH never matches it — so merge on the
+                    # bare pattern, exactly as live's 2a does.
+                    if idx is None:
+                        self.g.query(
+                            f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$nid}}) "
+                            f"MERGE (op)-[:{rtype}]->(new)",
+                            params={"op_id": op_id, "nid": nid},
+                        )
+                    else:
+                        self.g.query(
+                            f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$nid}}) "
+                            f"MERGE (op)-[:{rtype} {{idx:$idx}}]->(new)",
+                            params={"op_id": op_id, "nid": nid, "idx": idx},
+                        )
                     self.g.query(
-                        f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$nid}}) "
-                        f"CREATE (op)-[:{rtype} {{idx:$idx}}]->(new)",
-                        params={"op_id": op_id, "nid": nid, "idx": idx},
-                    )
-                    self.g.query(
-                        f"MATCH (op:Point {{id:$op_id}})-[r:{rtype} {{idx:$idx}}]->"
+                        f"MATCH (op:Point {{id:$op_id}})-[r:{rtype}]->"
                         f"(old:Point {{id:$oid}}) WHERE ID(r)=$rid DELETE r",
-                        params={"op_id": op_id, "oid": oid, "idx": idx,
-                                "rid": rid},
+                        params={"op_id": op_id, "oid": oid, "rid": rid},
+                    )
+                input_seen: set[tuple] = set()
+                for (op_id, idx, rid, oid, nid, op_label) in input_repoints:
+                    if op_label == "alreadyDecided":
+                        continue
+                    key = (op_id, idx, nid)
+                    if key in input_seen:
+                        continue
+                    input_seen.add(key)
+                    # #6180 null-idx leg (mirror live's 2a-INPUT): merge on the
+                    # bare pattern when the mirror carries no idx.
+                    if idx is None:
+                        self.g.query(
+                            "MATCH (new:Point {id:$nid}), (op:Point {id:$op_id}) "
+                            "MERGE (new)-[:INPUT]->(op)",
+                            params={"nid": nid, "op_id": op_id},
+                        )
+                    else:
+                        self.g.query(
+                            "MATCH (new:Point {id:$nid}), (op:Point {id:$op_id}) "
+                            "MERGE (new)-[:INPUT {idx:$idx}]->(op)",
+                            params={"nid": nid, "op_id": op_id, "idx": idx},
+                        )
+                    self.g.query(
+                        "MATCH (old:Point {id:$oid})-[ri:INPUT]->"
+                        "(op:Point {id:$op_id}) "
+                        "WHERE ID(ri) = $rid DELETE ri",
+                        params={"oid": oid, "op_id": op_id, "rid": rid},
                     )
 
             if direct_repoint_events:
@@ -11234,6 +12127,98 @@ class FalkorProjection(
                             f"(b:Point {{id:$b}}) SET r += $attrs",
                             params={"a": src_f, "b": tgt_f, "attrs": attrs},
                         )
+
+        # ── #5380: replay the EP edge-message write-backs ─────────────
+        # AFTER every edge-creating pass (pass-1a hoists operator edges;
+        # pass-2b re-creates transferred direct edges), in JOURNAL ORDER, so
+        # the last writer per edge wins and a ``clear`` before a later ``set``
+        # does not clobber it. Deferred rather than folded in pass-1b because
+        # a plain DIRECT edge exists only after pass-2 — see
+        # ``edge_message_events`` at its declaration.
+        _edge_msg_journaled = bool(edge_message_events)
+        for _em_seq, _em_ev in edge_message_events:
+            self._replay_seq = _em_seq
+            _em_ev = self._norm(_em_ev)
+            if self._fold_edge_message_changed(_em_ev) == 0 \
+                    and _em_ev.get("op") == "set":
+                # RECORDED and warned, never refused — see
+                # ``_fold_edge_message_changed``: a plain direct edge is
+                # legitimately absent (A10 #1048), and a hard-deleted edge is
+                # gone live too, so a refusal here would block recovery of a
+                # journal whose edge loss this fold does not cause. Exempt in
+                # ``nonfolded.EXEMPT_SHAPES``; the record is what makes the
+                # miss visible at the run boundary
+                # (``assert_no_non_folded`` names every exempt record) and in
+                # this rebuild's post-replay dressed-edge report — NOT to
+                # ``check_consistency``, whose ``_apply_one``-based journal
+                # side never calls the edge-message fold.
+                record_non_folded(
+                    SHAPE_EDGE_MESSAGE_MISS,
+                    event_id=_em_ev.get("event_id"),
+                    event_type="EdgeMessageChanged", seq=_em_seq,
+                    id=_em_ev.get("id"), op=_em_ev.get("op"),
+                    detail="rebuild: edge-message write matched no edge",
+                )
+                logger.warning(
+                    "rebuild: EdgeMessageChanged matched no edge "
+                    "(event_id=%s src=%r tgt=%r rel=%r) — the edge was not "
+                    "re-created by any journaled event (#5380)",
+                    _em_ev.get("event_id"), _em_ev.get("src"),
+                    _em_ev.get("tgt"), _em_ev.get("rel"))
+        # #5380 indicator 4 (the MIXED case): the report below is gated on
+        # ``not _edge_msg_journaled`` — zero records or nothing. Once a
+        # #5380-era journal has recorded even ONE edge message that flag stays
+        # False forever, so the aggregate report can never fire again —
+        # INCLUDING for the pre-#5380 dressed edges still resident in the graph
+        # that the journal never mentions. Those lose their message state
+        # across the wipe+replay with no report: the realistic migration case
+        # (old dressed edges + a post-upgrade journal), and precisely the
+        # "looks restored" outcome the pre-wipe capture exists to prevent.
+        # Compare the post-replay population against that capture instead, so
+        # the drop is reported whenever it actually happened, whatever the
+        # journal holds. The per-record ``miss`` warning above covers only a
+        # `set` whose OWN edge is missing — never an edge the journal does not
+        # mention at all.
+        if ep_bearing_edges_before:
+            try:
+                _ep_edges_after_rows = self.g.query(
+                    "MATCH ()-[r:IMPL|NAND]->() "
+                    "WHERE r.msg_alpha IS NOT NULL OR r.msg_beta IS NOT NULL "
+                    "   OR r.back_msg_alpha IS NOT NULL "
+                    "   OR r.back_msg_beta IS NOT NULL "
+                    "RETURN count(r)").result_set
+                ep_bearing_edges_after = (
+                    int(_ep_edges_after_rows[0][0])
+                    if _ep_edges_after_rows else 0)
+            except Exception:  # noqa: BLE001, RUF100
+                ep_bearing_edges_after = None
+            if (ep_bearing_edges_after is not None
+                    and ep_bearing_edges_after < ep_bearing_edges_before):
+                logger.warning(
+                    "rebuild: the pre-wipe graph carried %d edge(s) with EP "
+                    "message state but the rebuilt graph holds only %d — %d "
+                    "dressed edge(s) were NOT restored (#5380). A pre-#5380 "
+                    "journal carries no EdgeMessageChanged record for them, "
+                    "and this report is deliberately NOT gated on that: it "
+                    "fires whenever the state actually dropped, including the "
+                    "mixed case (an upgraded journal plus older dressed "
+                    "edges).",
+                    ep_bearing_edges_before, ep_bearing_edges_after,
+                    ep_bearing_edges_before - ep_bearing_edges_after)
+        if not _edge_msg_journaled and ep_bearing_edges_before:
+            # #5380 indicator 4 — the pre-fix journal. The rebuild has ALREADY
+            # dropped the state by this point (there is no record to fold), so
+            # this is a report, not a gate: fail only loud-and-named would make
+            # every existing production journal unrecoverable, which is the
+            # opposite of what a durability fix may do.
+            logger.warning(
+                "rebuild: the pre-wipe graph carried %d edge(s) with EP "
+                "message state but the journal holds NO EdgeMessageChanged "
+                "record — the edge-level belief state was NOT restored. The "
+                "node posteriors ARE (the #2884 fold), so the result looks "
+                "restored: the journal predates #5380, and the next EP run "
+                "warm-starts from bare edges instead of the pre-rebuild "
+                "seeds.", ep_bearing_edges_before)
 
         # ── #7951: re-assert the journal's session hard-deletes ───────
         # AFTER every replay pass. Pass 2 re-derives edges from EVERY
@@ -11630,6 +12615,26 @@ class FalkorProjection(
         }
 
     def query(self, cypher: str, **params):
+        # #7951 §17.1 — the public raw-query lane is closed for a
+        # journal-backed projection. This is the door the SDK does NOT use
+        # (`proj.g.query` is the SDK's write lane); it is the raw lane a caller
+        # reaches for when it wants to write the cache without the projection,
+        # and a mutating statement here is exactly the second writer §17.1
+        # forbids. Reads pass unchanged; the classifier is the same
+        # conservative `_statement_writes` the parameter gate uses, so an
+        # unreadable statement fails CLOSED.
+        if self._journal_backed and _CACHE_WRITE_AUTHORIZED.get() is None \
+                and _statement_writes(cypher):
+            raise DirectCacheWriteRefused(
+                "Refusing a mutating statement on the raw-query lane: "
+                "`FalkorProjection.query` bypasses the projection and this "
+                "projection is the derived cache of a journal "
+                "(docs/architecture/STORAGE-ARCHITECTURE.md §17.1). Write "
+                "through the journal instead (`TortoiseSDK._apply_and_journal` "
+                "or the SDK's public write API); replay engines run inside "
+                "`_replay_write_scope()`. statement="
+                + " ".join((cypher or "").split())[:160]
+            )
         # L2 guard (#99): refuse bulk graph-wipe on non-test graphs. There is
         # NO bypass attribute (#2944 removed `_skip_guard`): this path is
         # unconditional, exactly like _GuardedGraph.query. The authorized
@@ -12042,6 +13047,11 @@ class FalkorProjection(
         ("Point", "id", "RANGE"),
         ("Point", "pointKind", "RANGE"),
         ("Point", "content_hash", "RANGE"),
+        # #8400: the #6110 key identity's index must be REQUIRED, not merely
+        # created — otherwise a pre-#8400 graph reads current and the sweep
+        # that creates it is skipped forever (#4465), silently leaving the
+        # keyed-write hot path on the unindexed label scan this index removes.
+        ("Point", "key", "RANGE"),
         ("Point", "lastDreamedAt", "RANGE"),
         ("Subject", "id", "RANGE"),
         ("Subject", "name", "RANGE"),
@@ -12155,7 +13165,7 @@ class FalkorProjection(
             # question, so it fails the probe rather than guessing.
             if not row or len(row) < 3 or not isinstance(row[2], dict):
                 return False
-            label, props, kinds = str(row[0]), row[1] or (), row[2]
+            label, kinds = str(row[0]), row[2]
             # #3154: a boolean is_operator index is never VALID — its presence
             # (single or composite, so either column can carry it) means the
             # purge below still has work to do. Match the property name
@@ -12166,11 +13176,13 @@ class FalkorProjection(
             # detector this purge feeds (``hosted_backup
             # ._audit_copied_boolean_indexes``) matches exactly for the same
             # reason; the DROP below only targets the two exact forms.
-            if any(str(p) == "is_operator" for p in props):
+            # #3441: the presence question itself is the ONE shared definition
+            # (``tortoise.index_catalogue``), so "exactly" cannot drift between
+            # the two sites — this row walk reads BOTH catalogue columns
+            # through it.
+            if index_row_has_field(row, "is_operator"):
                 return False
             for prop, prop_kinds in kinds.items():
-                if str(prop) == "is_operator":
-                    return False
                 for kind in prop_kinds or ():
                     present.add((label, str(prop), str(kind).upper()))
         required = set(self._REQUIRED_RANGE_INDEXES)
@@ -12456,7 +13468,35 @@ class FalkorProjection(
         )
 
     def _ensure_indexes(self) -> None:
-        """Create indexes on frequently-filtered Point properties.
+        """Create this store's indexes, and resolve its vector-index handle.
+
+        ⛔ The historical opening line — *"Create indexes on frequently-filtered
+        Point properties"* — under-described the function badly enough that its
+        vector half had to be re-derived BY HAND from `CALL db.indexes()` plus
+        two functions (#4997), and lane L2 (#5094) cites the line as its
+        evidence that the gap read as intended rather than as drift. What this
+        function actually issues, in full:
+
+          * RANGE indexes on canonical entity keys — ``Point``
+            (``_POINT_RANGE_INDEX_PROPS``, plus the plain ``Point.lastDreamedAt``
+            staleness index, epic 903-C2, #1240); the four entity labels
+            ``_RANGE_INDEX_LABEL_PROPS`` names — ``Subject``, ``Object``,
+            ``Event``, ``Source`` (#327); and two ``Session`` keys
+            (``actor_user_id``, #2600; ``id``, #3947);
+          * FULL-TEXT indexes on the FIVE labels ``_FULLTEXT_INDEX_LABEL_FIELDS``
+            names — ``Point``, ``Event``, ``Subject``, ``Object``, ``Source``;
+          * the VECTOR index on ``Point.embedding`` ONLY, resolved or created by
+            ``_ensure_vector_index_api``, which then MEASURES the engine's
+            vector-index inventory against the labels the vector leg SERVES
+            (``ENTITY_TYPE_LABELS.values()``) and reports the gap (#4997).
+
+        ⛔ The vector index stays ``Point``-only ON PURPOSE. Whether the other
+        served labels (``Object`` / ``Event`` / ``Subject`` / ``Source``) should
+        carry one is the owner's OPEN decision V1
+        (``docs/architecture/STORAGE-ARCHITECTURE.md`` §12.1c / §14.3, raised
+        2026-09-24) — this store MAKES THE GAP A FACT (``_vector_indexed_labels``;
+        every served label absent from that set full-scans) and never spends that
+        decision. See ``_record_vector_index_inventory``.
 
         Wraps CREATE INDEX in try/except because FalkorDB raises
         "Attribute 'X' is already indexed" rather than silently no-opping.
@@ -12599,11 +13639,16 @@ class FalkorProjection(
         if getattr(self, "_is_embedded", False):
             try:
                 _rows = self.g.query("CALL db.indexes()").result_set
-                _needs_repair = any(
-                    _row and _row[0] == "Point"
-                    and "is_operator" in str(_row[1])
-                    for _row in _rows
-                )
+                # #3441: the presence question is answered by the ONE shared
+                # definition (``tortoise.index_catalogue``) — an EXACT
+                # field-name match. The substring form this replaced
+                # (``"is_operator" in str(_row[1])``) also matched an unrelated
+                # indexed property such as ``is_operator_flag`` and fired this
+                # sweep for nothing: a bounded no-op, because none of the
+                # permutations below can name that property, but 260 wasted
+                # DROP attempts on every full sweep (measured).
+                _needs_repair = index_catalogue_has_field(
+                    _rows, "is_operator", label="Point")
                 if _needs_repair:
                     import itertools as _it
                     _fields = ("id", "pointKind", "content_hash",
@@ -13067,7 +14112,8 @@ class FalkorProjection(
                       skip_content: bool = False,
                       skip_embedding: bool = False,
                       skip_hash: bool = False,
-                      skip_mitigation_strength: bool = False) -> tuple[bool, bool]:
+                      skip_mitigation_strength: bool = False,
+                      skip_tags: bool = False) -> tuple[bool, bool]:
         """Apply PointRevised event — update content, context, and re-compute embedding.
 
         ``skip_annotator_dims`` (#3689): suppress ONLY the annotator-dim
@@ -13115,10 +14161,10 @@ class FalkorProjection(
 
         This flag governs only whether the REVISION folds. A recreate that
         omits the property still leaves the dead incarnation's value on the
-        node, because the pass-1a recreate wipe clears only
-        embedding/content_hash/embedding_verbatim/sourceVersionTransit — a
-        pre-existing gap general to every open-set prop (#4042 class), not
-        something this flag can reach.
+        node for most open-set props, because the pass-1a recreate wipe clears
+        only embedding/content_hash/embedding_verbatim/sourceVersionTransit
+        (plus ``tags``, added by #2897) — a pre-existing gap general to every
+        OTHER open-set prop (#4042 class), not something this flag can reach.
 
         Returns ``(embedding_written, content_hash_written)`` (#4305) — the
         same conditional-write outcome ``_upsert_point_props`` reports, and
@@ -13184,6 +14230,54 @@ class FalkorProjection(
             set_clauses.append(
                 "n.mitigation_strength = $mitigation_strength")
             params["mitigation_strength"] = ev["mitigation_strength"]
+        # #2897 (OD-4 disposition #3856 — ADOPT): fold a `tags` EDIT. The
+        # PointRevised payload carries the NEW list (`update_point(tags=…)`,
+        # whose live write is `SET n += $props`), and pass 1a has already
+        # written the point's CREATION list; without this clause a rebuild
+        # leaves the creation list on the node and pass 2 then re-creates the
+        # edges for a tag the journal REMOVED — the #3299/#2488 resurrection
+        # class. `skip_tags` is the SAME boundary as `mitigation_strength`: a
+        # later same-file creation that actually WROTE tags, or a hard
+        # delete→recreate, owns the final value, so a dead incarnation's tag
+        # cannot leak onto the re-created node.
+        # PRESENCE-based, mirroring the live `update_point` EXACTLY: an explicit
+        # `None` is the documented clear (`SET n += {tags: null}` removes the
+        # property live, measured) and must remove it here — a list-only clause
+        # skipped the clear, so pass 1a's creation list survived on the node and
+        # pass 2 resurrected the tag (#8317 review P1, reproduced).
+        # A NON-PERSISTABLE value clears too: the driver degrades a value it
+        # cannot send to null before dispatch (#7369), so live's map-merge
+        # REMOVES the property (measured: `update_point(tags={"a": 1})` leaves
+        # `'tags' IN keys(n)` False). Without this leg the replay kept pass 1a's
+        # creation list where live had removed it — and the checker reported the
+        # mismatch as an unclearable `divergence="content"` (#8317 review
+        # round 2). The value is REPORTED as uncarried by `consistency._uncarried`
+        # rather than silently dropped.
+        wrote_tags = False
+        if not skip_tags and "tags" in ev:
+            # The gate is `_store_holds_prop_value` — the SAME predicate
+            # `_stated_tags` uses on the add arm, so the two arms cannot
+            # disagree. A value the `#7369` transport gate refuses (a map, a NUL
+            # string, a non-finite float) is what live's `SET n += $props`
+            # nulls, so it REMOVES the property (measured: `update_point(tags={
+            # "a": 1})` leaves `'tags' IN keys(n)` False). An `int` outside
+            # INT64 is included because its OUTCOME is not uniform: FalkorDB
+            # 4.16–4.20 (embedded `falkordblite 0.10.0`, `v4.20.6`) CLAMPS it,
+            # while FalkorDB 6.x RAISES `Failed to parse the value of parameter
+            # 'tags'` (both measured at #8317 review round 5 — writing it would
+            # abort the rebuild after the wipe on a 6.x engine). ⚠️ Attribute
+            # this to the VERSION, never to a "lane":
+            # `FalkorProjection.__init__` redirects a path-based projection onto
+            # `TORTOISE_DB_URI` when that variable is set, so an "embedded lane"
+            # run can be measuring docker. A fold must not write a value whose
+            # fate differs by engine.
+            if ev["tags"] is None \
+                    or not _store_holds_prop_value(ev["tags"]):
+                set_clauses.append("n.tags = NULL")
+            else:
+                set_clauses.append("n.tags = $tags")
+                params["tags"] = ev["tags"]
+                wrote_tags = True
 
         if new_content is not None:
             # Re-compute embedding when content changes (even to empty — wipe
@@ -13205,13 +14299,14 @@ class FalkorProjection(
                     params["embedding"] = emb  # None = wipe stale embedding for empty content
                 except Exception:
                     params["embedding"] = None  # wipe stale embedding on failure (#19)
-                # #4521: cast with `vecf32()` like every other Point embedding
-                # writer. Without it the recomputed vector landed as a plain
-                # Cypher `List`, and `vec.euclideanDistance` — search_engine's
-                # per-row dense leg — raises "Type mismatch: expected Null or
-                # Vectorf32 but was List", aborting the WHOLE query. So ONE
-                # revised node degraded the entire Point dense leg to FTS-only
-                # recall for that graph, not just its own row. The `CASE` keeps
+                # #4521: cast with `vecf32()` like every other server-owned Point
+                # embedding writer, so a server-owned vector is always the typed shape —
+                # a bare `List` node is absent from the Point HNSW index at all
+                # (#8429). Before #8316 the flip to `List` also aborted the
+                # whole dense READ (`Type mismatch: expected Null or Vectorf32
+                # but was List`); the read boundary now normalises a right-width
+                # `List`, so only a wrong width or a non-numeric value still
+                # aborts the MATCH (#8430). The `CASE` keeps
                 # this clause's existing wipe-on-None semantics (`$embedding` is
                 # None for empty content and on encoder failure) while casting
                 # every real vector — `vecf32(NULL)` is not relied upon.
@@ -13291,6 +14386,31 @@ class FalkorProjection(
             f"SET {', '.join(set_clauses)}",
             params=params,
         )
+        # #2897: reconcile the `:Tag`/`TAGGED` half for a tag EDIT — AFTER the
+        # property write, so the edges match what the node now holds (the live
+        # `update_point` runs the same two steps). Placed outside the atomic
+        # query for the same reason as the live path: the edge sync is a
+        # multi-statement MERGE/DELETE sweep, not a single SET.
+        if not skip_tags and "tags" in ev and (
+                not ev["tags"] or wrote_tags):
+            # The argument is the LIVE expression (`sdk.update_point` →
+            # `self._sync_tags(proj, id, props["tags"] or [])`): a falsy value
+            # (`None`/`""`) normalises to `[]` and clears the edges, a list or
+            # tuple syncs, and a truthy non-array is a no-op at THIS call on
+            # both paths.
+            # ⚠️ Gated on `wrote_tags`, not merely `"tags" in ev` (#8317 review
+            # round 3): for a value the transport gate REFUSES — a corrupt or
+            # foreign journal's `tags: [{"a": 1}]` / `[null]` — the sync would
+            # send a map/null as the `:Tag` MERGE key, and a MERGE KEY cannot be
+            # null-nulled by `_journal_safe_params`, so `MERGE` raises and
+            # ABORTS the rebuild AFTER the wipe. Same class the content and dim
+            # clauses above refuse to crash on (#325/#3689 review P1): a
+            # malformed record must DROP, never strand the recovery.
+            # ⚠️ The truthy non-ARRAY case (`tags: "scalar"`) is not overall
+            # parity: the live node KEEPS its existing edges while a
+            # `rebuild_all` mints none (a `rebuild(log)` keeps them). The bound
+            # is stated on `_sync_tags`, which owns it — #8333.
+            self._sync_tags(pid, ev["tags"] or [])
         return wrote_embedding, wrote_content_hash
 
     def _delete_entity_by_id(self, id_val: str,
@@ -13401,7 +14521,7 @@ class FalkorProjection(
             # The clause is the SAME `SET n += $s` the live write ran, on the
             # SAME map — so live and replay cannot disagree on removals or on
             # value typing (a `properties(n)` snapshot would: a removed key is
-            # absent from it, and a VectorF32 comes back as a plain list).
+            # absent from it, and a Vectorf32 comes back as a plain list).
             if not isinstance(rid, str):
                 return 0                                   # #331 parity
             if not (isinstance(label, str) and label in _CANONICAL_ENTITY_LABELS):

@@ -51,7 +51,7 @@ must NOT be routed into it:
   vector**: the guard REMOVES the property and the ``SET`` then reads the
   property the clear just removed. ``graph-scripts/backfill_embeddings.py``
   holds one, ``_repair_legacy_event_embeddings`` (the pre-#244 plain-``List``
-  → ``VectorF32`` repair), named as out of scope at its definition.
+  → ``Vectorf32`` repair), named as out of scope at its definition.
 * **NULL wipe** — a write whose incoming vector is NULL sets the property to
   NULL rather than replacing its value; the seam's guarantee (that a new vector
   LANDS) does not govern it. Writers that ALSO overwrite still route their
@@ -64,27 +64,40 @@ must NOT be routed into it:
 ``List``. Two branches, with different dispositions:
 
 * **Derived — CLOSED.** ``update_point(content=…)`` re-encodes the content
-  (#4208) and the bare SET used to store the new embedding as a ``List``.
-  Measured: ``create_point`` stores ``Vectorf32``, the content edit flips
-  ``typeof`` to ``List``, and the failure surfaces on the next dense READ,
-  where ``vec.euclideanDistance`` raises ``Type mismatch: expected Null or
-  VectorF32 but was List`` — so ONE content edit degraded the whole Point dense
-  leg to FTS-only. The DERIVED vector is now routed through this seam: the
-  ``embedding`` key is stripped from the verbatim merge and written with
+  (#4208) and the bare SET used to store the new embedding as a ``List``,
+  which flipped ``typeof`` from ``Vectorf32`` to ``List`` on ONE content
+  edit. The DERIVED vector is now routed through this seam: the ``embedding``
+  key is stripped from the verbatim merge and written with
   :func:`clear_then_set_prefix` + :func:`set_embedding_clause`
   (``preserve_on_null=False``), exactly as ``_revise_point`` is, while every
   other key keeps the caller-supplied-patch ``SET n += $props`` semantics. Both
-  halves are required: the ``vecf32()`` cast fixes the type, and the clear
-  lands the small-Δ overwrite the embedded engine would otherwise DISCARD.
-* **Caller-supplied — deliberately OPEN.** The verbatim ``embedding`` prop
-  (``update_point`` with an explicit vector, and the ``update_entity`` Point
-  branch, which never derives) still passes the caller's vector through RAW.
-  That is a **recorded decision** (PR #3018's TYPE CHANGE GUARD: a
-  caller-owned float64 list must not be silently narrowed through ``vecf32``),
-  not an oversight — reversing it is the #5046/#5048 reopen, never a quiet
-  re-route through :func:`set_embedding_clause`. It is the #4521 class (a
-  plain-list write, not the small-Δ overwrite this seam fixes), so it must NOT
-  be assumed covered by this seam.
+  halves are required: the ``vecf32()`` cast keeps a server-owned value in the
+  typed shape every other SERVER-OWNED writer produces (the caller-supplied
+  branch below deliberately stores a plain ``List`` — PR #3018) — a bare
+  ``List`` node is absent from the Point HNSW index cohort (#8429) — and the
+  clear lands the small-Δ
+  overwrite the embedded engine would otherwise DISCARD. (Before #8316 that
+  flip also made the next dense READ raise ``Type mismatch: expected Null or
+  Vectorf32 but was List``; the read boundary now normalises a right-width
+  ``List``, so only a wrong width or a non-numeric value still aborts the
+  MATCH — #8430.)
+* **Caller-supplied — WRITE verbatim, READ normalised.** The verbatim
+  ``embedding`` prop (``update_point`` with an explicit vector, and the
+  ``update_entity`` Point branch, which never derives) still passes the
+  caller's vector through RAW. That is a **recorded decision** (PR #3018's
+  TYPE CHANGE GUARD: a caller-owned float64 list must not be silently narrowed
+  through ``vecf32``), not an oversight — reversing it is the #5046/#5048
+  reopen, never a quiet re-route through :func:`set_embedding_clause`. It is
+  the #4521 class (a plain-list write, not the small-Δ overwrite this seam
+  fixes), so it must NOT be assumed covered by the WRITE helpers above.
+
+  The defect that verbatim write used to cause is fixed at the READ boundary
+  instead (:func:`stored_embedding_vector_expr`, #8316): the stored plain
+  ``List`` made ``vec.euclideanDistance`` raise ``Type mismatch: expected Null
+  or Vectorf32 but was List`` for the WHOLE ``MATCH``, so ONE caller-vectored
+  Point degraded the entire dense leg — every other Point included — to
+  FTS-only recall. The stored value is untouched (the decision stands); only
+  the distance expression normalises the shape it reads.
 
 Two shapes, one invariant
 -------------------------
@@ -105,6 +118,15 @@ Two shapes, one invariant
 :func:`set_embedding_clause` is the canonical ``… = CASE WHEN … THEN
 vecf32(…) …`` SET clause, so the clear and the set are written once, together.
 
+:func:`stored_embedding_vector_expr` is the READ counterpart of the same shape
+contract: the one Cypher expression a dense read must use for a stored
+embedding, so BOTH shapes this seam permits — the ``Vectorf32`` every server
+writer lands and the verbatim plain ``List`` a caller may own — are comparable.
+A scan/brute-force read must never spell ``<alias>.embedding`` directly (see the
+function). The HNSW index arm is served typed rows only — a ``List`` node is not
+in the index at all, which is a separate cohort gap (#8429), not a second read
+to normalise.
+
 This is an interim correctness fix on the path that exists between now and the
 recorded ``STORE-DEC`` architecture (the vector leg leaves the graph — Postgres
 holds the record, FalkorDB a derived hot cache). It is not a competing
@@ -118,6 +140,7 @@ __all__ = [
     "clear_embedding",
     "clear_then_set_prefix",
     "set_embedding_clause",
+    "stored_embedding_vector_expr",
 ]
 
 #: The node property every embedding writer targets.
@@ -190,4 +213,40 @@ def set_embedding_clause(alias: str,
     return (
         f"{alias}.{EMBEDDING_PROPERTY} = CASE WHEN {vector_expr} IS NOT NULL "
         f"THEN vecf32({vector_expr}) ELSE {else_branch} END"
+    )
+
+
+def stored_embedding_vector_expr(alias: str) -> str:
+    """The READ half of the shape contract — ``<alias>.embedding`` as a vector.
+
+    ``alias`` is the node binding of the caller's ``MATCH`` (``n``). Returns a
+    Cypher expression that is the stored embedding as a ``Vectorf32`` whichever
+    of the two shapes this seam permits is on the node:
+
+    * a plain ``List`` — the VERBATIM caller-owned value (PR #3018's recorded
+      decision) — is cast once through ``vecf32()``; a read spelled
+      ``<alias>.embedding`` would raise ``Type mismatch: expected Null or
+      Vectorf32 but was List`` and abort the WHOLE ``MATCH``, so one such node
+      would degrade the entire dense leg to FTS-only recall (#8316);
+    * a ``Vectorf32`` — every server-computed embedding — is returned
+      unchanged.
+
+    Why an expression and not a write-side fix: narrowing the caller's value at
+    the write boundary is the #5046/#5048 reopen, never a quiet re-route
+    through :func:`set_embedding_clause` (see the module docstring).
+
+    ⛔ Do NOT "simplify" this to ``CASE WHEN typeof(…) = 'Vectorf32' THEN …
+    ELSE vecf32(…) END``. BOTH engines evaluate BOTH ``CASE`` arms, so the
+    ``vecf32`` arm runs on every already-typed row and the whole query raises
+    ``Type mismatch: expected List or Null but was Vectorf32`` (measured on
+    embedded FalkorDBLite and on FalkorDB 6.x). The list-comprehension FILTER
+    is lazy on both engines, which is why the shape test is expressed as one.
+
+    Callers must filter ``WHERE <alias>.embedding IS NOT NULL`` (the dense read
+    does): a NULL embedding yields NULL here, like any null Cypher argument.
+    """
+    prop = f"{alias}.{EMBEDDING_PROPERTY}"
+    return (
+        f"coalesce([_v IN [{prop}] WHERE typeof(_v) = 'List' | vecf32(_v)][0], "
+        f"{prop})"
     )

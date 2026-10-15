@@ -27,7 +27,13 @@ per-GRAPH — state, dumps, and retention are graph-scoped, #2313):
 - Label-level drift guard (#661): per-label node-count checks with
   absolute-count-aware thresholds — a <50% wipe of a low-count label
   (e.g. Invitation) that passes the overall >50% guard still fires
-  DATA_LOSS_CANDIDATE.
+  DATA_LOSS_CANDIDATE. Triage and disposition for it: the
+  ``DATA_LOSS_CANDIDATE`` row of docs/ops/registry-backup-dr.md. Which field
+  to read there follows the TRIGGER: this per-label path emits both
+  ``overall_drop_pct`` and ``label_breaches``, while the overall >50% / >0 → 0
+  paths emit ``drop_pct`` and no ``label_breaches`` key at all — so a detail
+  carrying ``label_breaches`` is a label-path incident whatever its headline
+  percentage, and one without that key is not.
 - Enumeration-delta guard: a prior org count > 0 → 0 fires an incident (a
   wiped enumeration source must not degrade silently to chronic NO_ORGS).
 - Per-org serialization via the caller's lock factory.
@@ -52,12 +58,21 @@ from .graph_storage import (
     record_graph_storage,
 )  # #5331 metering ledger
 from .hosted_backup import (
+    _CONTENT_NODE_PREDICATE,
     _delete_backup_objects,
     _is_supabase_source,
     create_backup,
     mirror_backup,
     prune_backups,
     source_dialect,
+)
+from .incident_kinds import (
+    KIND_DATA_LOSS_CANDIDATE,
+    KIND_ENUM_DELTA,
+    KIND_GRAPH_NAME_RESOLUTION_FAIL,
+    KIND_NO_ELIGIBLE_TEAMS,
+    KIND_P0_GUARD_FAIL,
+    KIND_SIZE_GUARD_ABORT,
 )
 from .retention import RESTORE_WINDOW_DAYS  # #4179 single window authority
 
@@ -189,6 +204,62 @@ def _check_per_label_drift(
                     "threshold": f"drift>{drift_pct*100:.0f}%",
                 }
     return breaches or None
+
+
+#: The per-label count read. ONE query for the two surfaces that must agree on
+#: the #661 guard's baseline: :func:`_backup_graph` PERSISTS it on a successful
+#: backup, and ``hosted_api.backups_rebaseline`` REFRESHES it so a re-baseline
+#: actually re-arms the guard. Sharing it means a re-baseline can never write a
+#: baseline shaped differently from the one the next sweep compares against.
+# The #661 guard compares this against a baseline written by the same sweep, so
+# it must count the SAME node set `node_count` does. A bare `MATCH (n)` did not:
+# it counted the projection's own bookkeeping (`EpMeta` / `GraphEventMeta` /
+# `TeamMeta`, plus `Meta` nodes keyed `point_fts_v2` / `event_fts_v2`), which is
+# not content. The two surfaces could then disagree about whether the marker
+# exists — a projection opened on the org graph MERGEs `point_fts_v2` into it —
+# and `Meta: 1 → 0` is a breach, because a label whose previous count is below
+# the floor fires on ANY drop. That re-fires the very DATA_LOSS_CANDIDATE the
+# baseline exists to clear, and it deletes the next run's archive when it does.
+# The predicate is ``hosted_backup._CONTENT_NODE_PREDICATE`` — the SAME
+# textual definition ``_COUNT_DATA_NODES_QUERY`` is built from — over the SAME
+# ``_EXPORT_SKIP_LABELS`` / ``_EXPORT_SKIP_META_KEYS`` constants, so the
+# per-label baseline and ``node_count`` cannot drift apart about what is
+# content (#8595).
+_LABEL_COUNT_QUERY = (
+    f"MATCH (n) WHERE {_CONTENT_NODE_PREDICATE} "
+    "UNWIND labels(n) AS lbl RETURN lbl, count(*) ORDER BY lbl"
+)
+
+
+def query_label_counts(graph) -> dict[str, int]:
+    """Per-label node counts for a graph handle — the #661 drift guard's input.
+
+    A server-side AGGREGATE grouped by label, like
+    :func:`tortoise.hosted_backup.count_data_nodes` but NOT the same shape: it
+    returns **one row per distinct label**, not one row, so its result is
+    bounded by the label count rather than the node count — that is what keeps
+    it clear of FalkorDB's ``RESULTSET_SIZE`` cap. It counts that function's
+    node set — the
+    content set, with the projection's bookkeeping excluded — because the #661
+    guard compares labels across runs and a marker that appears or disappears
+    with a projection is not data loss.
+
+    Raises on a query failure — the CALLERS decide what a failed read means, and
+    they differ on purpose. :func:`_backup_graph` continues without a label
+    baseline (the overall-count guards still ran, and the next successful backup
+    re-establishes it), while ``backups_rebaseline`` fails the request: a
+    baseline left at its pre-drop value would re-fire the incident the operator
+    just cleared, deleting the next run's archive and filing a NEW issue.
+    """
+    from tortoise.hosted_api import (
+        _EXPORT_SKIP_LABELS,
+        _EXPORT_SKIP_META_KEYS,
+    )
+    rows = graph.query(_LABEL_COUNT_QUERY, params={
+        "skip_labels": sorted(str(l) for l in _EXPORT_SKIP_LABELS),  # noqa: E741
+        "meta_keys": sorted(str(k) for k in _EXPORT_SKIP_META_KEYS),
+    }).result_set
+    return {str(r[0]): int(r[1]) for r in rows if r and r[0]}
 
 
 def _refuse_wrong_dialect(source) -> None:
@@ -769,7 +840,7 @@ def _backup_graph(
     if count > config.size_guard_max_nodes:
         incidents.append(
             {
-                "kind": "SIZE_GUARD_ABORT",
+                "kind": KIND_SIZE_GUARD_ABORT,
                 "org_id": org_id,
                 "graph_id": graph_id,
                 "detail": {"count": count, "max": config.size_guard_max_nodes,
@@ -786,10 +857,7 @@ def _backup_graph(
     # ── Query per-label counts (before dump — same snapshot window). ──
     label_counts: dict[str, int] = {}
     try:
-        rows = g.query(
-            "MATCH (n) UNWIND labels(n) AS lbl RETURN lbl, count(*) ORDER BY lbl"
-        ).result_set
-        label_counts = {str(r[0]): int(r[1]) for r in rows if r and r[0]}
+        label_counts = query_label_counts(g)
     except Exception:
         logger.warning("per-label count query failed for %s — continuing", graph_name)
 
@@ -820,7 +888,7 @@ def _backup_graph(
             _delete_uploaded(storage, org_id, backup_id)
         incidents.append(
             {
-                "kind": "P0_GUARD_FAIL",
+                "kind": KIND_P0_GUARD_FAIL,
                 "org_id": org_id,
                 "graph_id": graph_id,
                 "detail": {
@@ -847,7 +915,7 @@ def _backup_graph(
             # A >0 → 0 transition is the #101-empty class: incident, not signal.
             incidents.append(
                 {
-                    "kind": "DATA_LOSS_CANDIDATE",
+                    "kind": KIND_DATA_LOSS_CANDIDATE,
                     "org_id": org_id,
                     "graph_id": graph_id,
                     "detail": {"previous": prev_node_count, "now": 0, "drop_pct": 100},
@@ -862,7 +930,7 @@ def _backup_graph(
         _delete_uploaded(storage, org_id, manifest.get("backup_id", ""))
         incidents.append(
             {
-                "kind": "DATA_LOSS_CANDIDATE",
+                "kind": KIND_DATA_LOSS_CANDIDATE,
                 "org_id": org_id,
                 "graph_id": graph_id,
                 "detail": {
@@ -885,7 +953,7 @@ def _backup_graph(
             _delete_uploaded(storage, org_id, manifest.get("backup_id", ""))
             incidents.append(
                 {
-                    "kind": "DATA_LOSS_CANDIDATE",
+                    "kind": KIND_DATA_LOSS_CANDIDATE,
                     "org_id": org_id,
                     "graph_id": graph_id,
                     "detail": {
@@ -1335,7 +1403,7 @@ def run_backup_sweep(
         if config.org_sweep_enabled:
             incidents.append(
                 {
-                    "kind": "NO_ELIGIBLE_TEAMS",
+                    "kind": KIND_NO_ELIGIBLE_TEAMS,
                     "org_id": "",
                     "detail": {"message": "team sweep enabled but 0 eligible (Pro) teams found"},
                 }
@@ -1358,7 +1426,7 @@ def run_backup_sweep(
                 # are empty before the flip.)
             incidents.append(
                 {
-                    "kind": "ENUM_DELTA",
+                    "kind": KIND_ENUM_DELTA,
                     "org_id": "",
                     "detail": {"previous": prev_team_count, "now": 0},
                 }
@@ -1410,7 +1478,7 @@ def run_backup_sweep(
     if resolution_failures and resolution_failures == len(org_ids):
         incidents.append(
             {
-                "kind": "GRAPH_NAME_RESOLUTION_FAIL",
+                "kind": KIND_GRAPH_NAME_RESOLUTION_FAIL,
                 "org_id": "",
                 "detail": {
                     "message": (
@@ -1508,9 +1576,9 @@ def run_backup_sweep(
 #: sweep is the authority on its own guards — a run that completed and did not
 #: emit a kind IS the "condition cleared" evidence (delete-to-resolve).
 SWEEP_RESOLVABLE_GLOBAL_KINDS = (
-    "ENUM_DELTA",
-    "NO_ELIGIBLE_TEAMS",
-    "GRAPH_NAME_RESOLUTION_FAIL",
+    KIND_ENUM_DELTA,
+    KIND_NO_ELIGIBLE_TEAMS,
+    KIND_GRAPH_NAME_RESOLUTION_FAIL,
 )
 
 
@@ -1593,8 +1661,8 @@ def sweep_resolutions(result: dict[str, Any]) -> list[tuple[str, str]]:
             if not (isinstance(gres, dict) and gres.get("p0_checked")):
                 continue
             subject = graph_subject(org_id, gid)
-            if ("P0_GUARD_FAIL", subject) not in emitted:
-                cleared.append(("P0_GUARD_FAIL", subject))
+            if (KIND_P0_GUARD_FAIL, subject) not in emitted:
+                cleared.append((KIND_P0_GUARD_FAIL, subject))
     return cleared
 
 

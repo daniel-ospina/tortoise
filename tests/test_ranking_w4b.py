@@ -585,6 +585,76 @@ def _run_fts_graph(sdk, flag_on: bool, monkeypatch=None):
         "zebra finch migration", limit=10, order_by="graph")
 
 
+def test_integration_fused_path_applies_contested_boost(
+    ranked_sdk, monkeypatch, force_embedder_on,
+):
+    """FUSED-path coverage (#7704): the SDK FUSES, and the boost still applies.
+
+    ``test_integration_conflict_relevant_query_outranks_twin`` pins the ORDER
+    on a single-leg read (``force_sparse_tfidf``).  This is the other path: a
+    dense leg is present (``force_embedder_on``, the #3223 seam), so
+    ``len(raw_results) > 1``, the SDK calls ``rrf_fusion``, and the result set
+    reports ``match_source="rrf"``.  Before this test the fused path — the
+    SHIPPED hybrid path — had no W4-b coverage at all (#7629, #7704).
+
+    The ORDERING claim is deliberately NOT asserted here.  The twins are
+    content-identical, so they TIE on every leg; each leg's own ``ORDER BY
+    score DESC, node.<id> ASC`` tie-break (#3019) hands the lower-ULID twin
+    rank 0, and RRF (rank-based, ``1/(k+rank+1)``) converts that one-rank
+    difference into a post-fusion min-max similarity gap that can EXCEED the
+    boost's final-score contribution.  Measured on this fixture: similarity
+    gap 0.0377 => 0.0188 of final score, vs the boost's 0.0175 — so the
+    contested twin ranks BELOW its twin on this path and the outcome is
+    decided by the id tie-break, not the contested signal (#7704).  That gap
+    is a product decision (boost magnitude / fusion tie semantics) and is
+    tracked on #7704; this test pins the path-independent contract instead.
+
+    What IS asserted, on the fused path: the twins tie on every leg (the
+    precondition above), the contested twin carries exactly
+    ``W4_CONTESTED_BOOST``, its final score moves by exactly
+    ``W4_CONTESTED_BOOST x graph_boost_weight``, and the calm twin is
+    untouched.
+    """
+    calm, hot, _cc = _seed_twin_conflict(
+        ranked_sdk, "zebra finch flocking behavior is social, not migratory")
+    off = _run_fts_graph(ranked_sdk, flag_on=False)
+    by_off = {r["id"]: r for r in off}
+    monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
+    results = ranked_sdk.tortoise_fts_query(
+        "zebra finch migration", limit=10, order_by="graph")
+    by_id = {r["id"]: r for r in results}
+    assert hot in by_id and calm in by_id, (
+        f"FIXTURE NOT REACHED: a twin is missing from the fused pool "
+        f"{sorted(by_id)}")
+    # Say which path this test measured (#7629's lesson): the fused path is the
+    # one under test here, and it must not silently degrade to single-leg.
+    assert {r.get("match_source") for r in results} == {"rrf"}, (
+        "fixture precondition changed: this test is the FUSED-path coverage "
+        "(#7704) and only means something when the SDK actually fuses — the "
+        "single-leg claim is covered by "
+        "test_integration_conflict_relevant_query_outranks_twin")
+    # Precondition the #7704 divergence rests on: the content-identical twins
+    # tie on EVERY leg, so any fused relevance difference between them is the
+    # legs' id tie-break, not a relevance signal.  If a leg stops tying, this
+    # test no longer exercises the mechanism it is named for.
+    leg_scores = [
+        {k: r["scores"].get(k) for k in ("fts", "vector")}
+        for r in (by_id[calm], by_id[hot])
+    ]
+    assert leg_scores[0] == leg_scores[1], (
+        f"the twins no longer tie on every leg, so this test no longer "
+        f"exercises the #7704 mechanism: {leg_scores}")
+    on_hot = by_id[hot]["graph_ranking"]
+    on_calm = by_id[calm]["graph_ranking"]
+    # Causal assertions (path-independent — they hold on both the single-leg
+    # and the fused read): the boost applied, and only to the contested twin.
+    assert on_hot["w4_contested_boost"] == W4_CONTESTED_BOOST
+    assert "w4_contested_boost" not in on_calm
+    assert on_calm["final_score"] == by_off[calm]["graph_ranking"]["final_score"]
+    assert on_hot["final_score"] - by_off[hot]["graph_ranking"]["final_score"] == pytest.approx(
+        W4_CONTESTED_BOOST * 0.35, abs=2e-3)
+
+
 def test_integration_w4_enrich_false_suppresses_boost_with_flag_on(ranked_sdk, monkeypatch):
     """P1 (second-model gate): w4_enrich=False must suppress the boost even
     with TORTOISE_W4_ENRICHMENT=1 — order and the why-layer keys must never

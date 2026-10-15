@@ -95,6 +95,12 @@ def embedding_identity() -> tuple[str | None, str | None]:
 #: materialise an unbounded list. Far larger than any real width.
 _MAX_JOURNALLED_VECTOR_LEN = 8192
 
+#: #5277: bound on the diagnostic string kept in ``EmbeddingModel._last_error``.
+#: A backstop only — the REQUIRED branch stores the short ``failure_kind``
+#: instead, because ``EmbedderUnavailableError`` interpolates ``last_error``
+#: into its own message and storing that re-nests the whole prior chain.
+_MAX_LAST_ERROR_LEN = 500
+
 
 def stamp_journal_embedding(payload: dict, *, creating: bool) -> dict:
     """#5004: normalise and stamp a point payload's embedding + its identity.
@@ -316,7 +322,13 @@ class EmbeddingModel:
     start. Failures are NOT permanent — the next get() call creates a fresh
     instance and retries.
 
-    Embeddings are OPTIONAL — point creation and search must never depend on them.
+    Embeddings are OPTIONAL — unless a process armed
+    ``TORTOISE_EMBEDDING_MODEL_REQUIRED``: point creation never depends on them,
+    and the non-retrieval seams (semantic dedup #880, pairwise similarity and
+    cross-lens matching #399) degrade to deterministic TF-IDF. That flag's ONE
+    exception is the READ path, which raises
+    :class:`~tortoise.exceptions.EmbedderUnavailableError` instead of returning
+    a keyword-only result it cannot label (#4861).
     """
     _instance: "EmbeddingModel | None" = None  # noqa: UP037
     _model = None
@@ -364,11 +376,11 @@ class EmbeddingModel:
         return env_flag("TORTOISE_EMBEDDING_MODEL_REQUIRED", False)
 
     @classmethod
-    def _unavailable(cls, *, context: str) -> "EmbeddingModel | None":  # noqa: UP037
+    def _unavailable(cls, *, context: str) -> None:
         """The single exit for "no model": ``None``, or raise when REQUIRED.
 
-        #4861 — every ``None`` path in :meth:`get` returns through here, so its
-        four origins (the outer and in-lock negative caches, and the transient
+        #4861 — every ``None`` exit in :meth:`get` returns through here, so its
+        three exits (the outer and in-lock negative caches, and the transient
         load failure) cannot drift apart: a REQUIRED process fails by name, at
         the point of use, instead of silently running keyword-only while a
         green run and a runner-down run stay indistinguishable.
@@ -391,6 +403,31 @@ class EmbeddingModel:
         )
 
     @classmethod
+    def absent_reason(cls) -> str:
+        """The leg-trace reason for a ``None`` returned by :meth:`get` (#5275).
+
+        ``get()`` returns ``None`` from one of three exits and records WHY in
+        ``_last_failure_kind``: ``not_installed`` (the environment never had
+        the embedder — a designed absence) vs ``load_failed`` / ``load_timeout``
+        (it had it and the load broke). The read path
+        used to stamp every origin with the single ``no_embedder`` term (the
+        *designed-absence* reason), so a **present-but-broken** embedder
+        (``load_failed`` / ``load_timeout``) was indistinguishable from one the
+        environment never had — the conflation the adjacent R3 (#1542) D4
+        comment forbids.
+
+        Only a failure this process actually observed is attributed: with no
+        recorded load attempt (``_last_failed_at`` unset) the process has no
+        attributable failure to report and the term stays ``no_embedder``.
+        ``not_installed`` also keeps ``no_embedder`` — that IS the designed
+        absence the term names.
+        """
+        if cls._last_failed_at is None:
+            return "no_embedder"
+        kind = cls._last_failure_kind
+        return "no_embedder" if not kind or kind == "not_installed" else kind
+
+    @classmethod
     def get(cls, load_timeout: float | None = None) -> "EmbeddingModel | None":  # noqa: UP037
         """Get or create the singleton. Returns None if model unavailable.
 
@@ -407,6 +444,14 @@ class EmbeddingModel:
                 passes a longer window (cold-start torch import on a 2GB VM
                 can exceed 30s, #545); request paths keep the default so
                 latency stays bounded.
+
+        Raises:
+            EmbedderUnavailableError: when ``TORTOISE_EMBEDDING_MODEL_REQUIRED``
+                is truthy and the model cannot be loaded (#4861). That raise is
+                the flag's whole point — an armed process must not be handed a
+                keyword-only result it cannot tell apart from hybrid retrieval.
+                UNSET (the default), every exit still returns ``None`` and the
+                caller degrades exactly as before.
         """
         timeout = load_timeout if load_timeout is not None else cls._LOAD_TIMEOUT_S
         now = time.monotonic()
@@ -450,7 +495,7 @@ class EmbeddingModel:
             cls._last_failure_kind = None
             cls._last_error = None
         if model is None:
-            # #4861: the transient-failure exit — the last of the four origins,
+            # #4861: the transient-failure exit — the last of the three exits,
             # and the one a REQUIRED runner hits when the load itself broke.
             return cls._unavailable(context="load failed (timeout/OOM)")
         return model
@@ -476,7 +521,16 @@ class EmbeddingModel:
             with cls.background_load():
                 model = cls.get(load_timeout=load_timeout)
         except Exception as exc:  # noqa: BLE001, RUF100 — warm-up is non-fatal
-            cls._last_error = f"{type(exc).__name__}: {exc}"
+            # #5277: ``_unavailable`` interpolates ``_last_error`` into the
+            # EmbedderUnavailableError message, so storing that message here
+            # re-nests the ENTIRE prior chain on every warm-up cycle — the
+            # stored string grows without bound and is re-emitted on every
+            # later raise/log. Keep the cause short: the failure kind for the
+            # REQUIRED refusal, and a bounded ``Type: message`` otherwise.
+            if isinstance(exc, EmbedderUnavailableError):
+                cls._last_error = f"{type(exc).__name__}: {exc.failure_kind}"
+            else:
+                cls._last_error = f"{type(exc).__name__}: {exc}"[:_MAX_LAST_ERROR_LEN]
             logger.warning(
                 "embedder warm-up raised — the vector leg is unavailable and "
                 "single-leg (keyword-only) reads must be declared (#2952): %s",
@@ -744,11 +798,25 @@ class EmbeddingModel:
         finally:
             type(self)._one_time_setup_in_progress.clear()
 
-    def encode(self, texts: list[str], batch_size: int = 32):
-        """Encode texts to embeddings. Returns numpy array or None."""
+    def encode(self, texts: list[str], batch_size: int = 32,
+               show_progress_bar: bool = False):
+        """Encode texts to embeddings. Returns numpy array or None.
+
+        ``show_progress_bar`` is accepted and FORWARDED so this signature
+        matches the ``SentenceTransformer.encode`` it delegates to (#5321).
+
+        Callers do NOT reach the encoder through here — they call :meth:`get`,
+        which returns the loaded inner model itself (so their
+        ``show_progress_bar=False`` binds there and the model branch runs).
+        This method is for an explicitly held instance; its previous signature
+        rejected the very kwarg the inner encoder takes, and reading THAT
+        signature is what produced #5321's false "all dense legs degrade to
+        TF-IDF" diagnosis.
+        """
         if self._model is None:
             return None
-        return self._model.encode(texts, batch_size=batch_size, show_progress_bar=False)
+        return self._model.encode(
+            texts, batch_size=batch_size, show_progress_bar=show_progress_bar)
 
 
 def _truncate_for_embedding(content: str, max_tokens: int) -> str:
@@ -973,7 +1041,18 @@ def _encode(texts: list[str]) -> tuple[np.ndarray, bool]:
     """
     if not texts:
         return np.zeros((0, 0)), False
-    model = EmbeddingModel.get()
+    try:
+        model = EmbeddingModel.get()
+    except EmbedderUnavailableError:
+        # #5277: ``_encode`` is a NON-RETRIEVAL surface — semantic dedup
+        # (#880), pairwise similarity and cross-lens candidate generation
+        # (#399) — and its contract above is to degrade to deterministic
+        # TF-IDF, never to refuse. The REQUIRED flag exists so a *retrieval*
+        # result cannot be misread as hybrid; it must not hard-fail every
+        # non-retrieval caller. The read path resolves the embedder WITHOUT
+        # this handler (``search_points`` → ``fallback_tfidf``), so #5275's
+        # named refusal still propagates there.
+        model = None
     if model is not None:
         try:
             vecs = model.encode(texts, show_progress_bar=False)
@@ -1054,8 +1133,21 @@ def search_points(
     *,
     threshold: float = 0.3,
     limit: int = 10,
+    force_sparse: bool = False,
 ) -> list[dict]:
-    """Semantic search over Points. Returns ranked [{id, content, similarity, snippet}, ...]."""
+    """Semantic search over Points. Returns ranked [{id, content, similarity, snippet}, ...].
+
+    #2678: ``force_sparse=True`` PINS the sklearn TF-IDF leg — the embedder is
+    not resolved at all, so the scorer is the deterministic token-overlap one
+    even when an embedder is cached. Default-``False`` keeps the #399 dual mode
+    (``EmbeddingModel.get`` decides), which is what production tiers and their
+    tests pin.
+
+    Callers that NAME a sparse strategy (the retrieval eval's ``tfidf`` arm,
+    any isolation harness) must pass ``True``: otherwise the label lies about
+    the scorer that produced the ranking, and the same arm silently becomes a
+    second semantic arm whenever the embedder happens to be cached (#2678).
+    """
     if not points:
         return []
 
@@ -1068,7 +1160,13 @@ def search_points(
     # jointly fitting on [query] + texts lets the query enter the vocabulary,
     # shifting idf and silently reordering results (verified: ~2% reorders,
     # ~38% threshold changes at 0.3 on random corpora).
-    model = EmbeddingModel.get()
+    #
+    # #2678: force_sparse skips the resolution ENTIRELY rather than resolving
+    # and ignoring the model — resolving it would load an embedder in a process
+    # that asked for the token-overlap scorer, and under
+    # TORTOISE_EMBEDDING_MODEL_REQUIRED=1 it would raise the #5275 refusal for a
+    # caller that never wanted the dense leg.
+    model = None if force_sparse else EmbeddingModel.get()
     if model is not None:
         try:
             vecs = np.asarray(model.encode([query] + texts, show_progress_bar=False),  # noqa: RUF005
@@ -1077,6 +1175,8 @@ def search_points(
         except Exception:  # noqa: BLE001, RUF100
             model = None
     if model is None:
+        # #2678: this is the deterministic SPARSE leg — content ∪ search_keys
+        # was already applied by the caller's ``index_text`` where required.
         try:
             TfidfVectorizer = import_tfidf_vectorizer()
             tv = TfidfVectorizer()

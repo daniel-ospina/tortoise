@@ -65,10 +65,12 @@ AND THE CASE THE MARKER DID NOT RUN
 byte-identical default of §2.0, under which the cache is complete and the marker
 CANNOT fire), or the store was never reachable (covered by
 ``cache_reachable=False``). It is *not* an assertion of ``hot``: the decision
-records ``marker=None`` so a consumer can see residency was never established.
-With no residency signal the router falls back to §12.4's behaviour — the
-pre-existing route — which is what "byte-identical when the marker is off"
-requires.
+records ``marker=None`` so a consumer can see residency was never established,
+and it carries its OWN reason (``unassessed``) rather than ``resident`` — a
+consumer keyed on ``reason`` must not read a residency verdict from a marker
+that never ran. With no residency signal the router falls back to §12.4's
+behaviour — the pre-existing route — which is what "byte-identical when the
+marker is off" requires.
 
 WHAT THIS MODULE DELIBERATELY IS NOT
 ====================================
@@ -104,6 +106,7 @@ __all__ = [
     "REASON_INSUFFICIENCY",
     "REASON_RESIDENCY_MISS",
     "REASON_RESIDENT",
+    "REASON_UNASSESSED",
     "ROUTES",
     "ROUTE_ESCALATE_TIER",
     "ROUTE_FETCH_RECORD",
@@ -122,13 +125,18 @@ ROUTES: tuple[str, ...] = (ROUTE_SERVE, ROUTE_FETCH_RECORD, ROUTE_ESCALATE_TIER)
 
 #: WHY the route fired — so the two events, and the outage, stay distinguishable
 #: *at the point where the decision is made*.
-REASON_RESIDENT = "resident"                  # nothing to repair
+REASON_RESIDENT = "resident"                  # the marker was hot — nothing to repair
 REASON_RESIDENCY_MISS = "residency-miss"      # outside the known-hot set
 REASON_CACHE_UNREACHABLE = "cache-unreachable"  # the store could not answer
 REASON_INSUFFICIENCY = "insufficiency"        # resident, but the evidence is short
+#: NOT ASSESSED is not "resident": the marker never ran, so there is no
+#: residency claim to make. The route is the same (``serve``); the *reason*
+#: must not read as a positive verdict a ``reason``-keyed consumer never got.
+REASON_UNASSESSED = "unassessed"              # the marker was never read
 REASONS: tuple[str, ...] = (
     REASON_RESIDENT, REASON_RESIDENCY_MISS,
     REASON_CACHE_UNREACHABLE, REASON_INSUFFICIENCY,
+    REASON_UNASSESSED,
 )
 
 #: The sufficiency verdict is a three-state fact, not a boolean: `True` the
@@ -167,6 +175,13 @@ class ResidencyRoute:
         if self.reason not in REASONS:
             raise ValueError(
                 f"reason must be one of {REASONS}, got {self.reason!r}")
+        # The module's rule is that an unknown marker is REFUSED, and this type
+        # is in ``__all__`` — so the TYPE must enforce it, not only the factory.
+        # A directly-constructed decision must not carry an unvalidated verdict.
+        if self.marker is not None and self.marker not in RESIDENCY_VERDICTS:
+            raise ValueError(
+                f"marker must be one of {RESIDENCY_VERDICTS} or None, got "
+                f"{self.marker!r}")
 
     @property
     def serves(self) -> bool:
@@ -206,7 +221,10 @@ def route_residency(*, marker: str | None, sufficient: bool | None = None,
     3. **resident (or unassessed) and the evidence is short** → ``escalate-tier``
        (``insufficiency``) — §12.4's existing repair, reached only once
        residency has been established (or was never in question).
-    4. otherwise → ``serve`` (``resident``).
+    4. otherwise → ``serve`` — ``resident`` when the marker is ``hot``, or
+       ``unassessed`` when the marker is ``None``. NOT ASSESSED is not a
+       residency claim, so it may not be reported as one; the route is the
+       same either way.
 
     An unknown marker is REFUSED: a typo'd verdict must not silently take a
     branch, because a wrong route is a wrong answer.
@@ -229,6 +247,14 @@ def route_residency(*, marker: str | None, sufficient: bool | None = None,
     if sufficient is _INSUFFICIENT:
         return ResidencyRoute(
             route=ROUTE_ESCALATE_TIER, reason=REASON_INSUFFICIENCY,
+            marker=marker, sufficiency=sufficient, coordinate=coordinate)
+
+    if marker is None:
+        # Never ``resident``: the marker did not run, so no residency claim was
+        # made. `.marker is None` already preserves the distinction; the reason
+        # must name the truth too, or a `reason`-keyed consumer reads a claim.
+        return ResidencyRoute(
+            route=ROUTE_SERVE, reason=REASON_UNASSESSED,
             marker=marker, sufficiency=sufficient, coordinate=coordinate)
 
     return ResidencyRoute(

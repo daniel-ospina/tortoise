@@ -26,7 +26,8 @@ reproduces that latch and fails against the old implementation.
 
 Plus the lockstep guard: the model/revision the CI provisions must be the exact
 pair `tortoise/embeddings.py` ships (#1349 T10 — a drifted pin would serve the
-WRONG embedder from the cache).
+WRONG embedder from the cache). The same guard covers the third copy of that
+pair, the `Dockerfile.hosted` bake, since it is the one production loads (#4809).
 """
 from __future__ import annotations
 
@@ -51,8 +52,16 @@ _SCRIPT = _ROOT / "tools" / "embedder_provision.py"
 _WORKFLOWS = _ROOT / ".github" / "workflows"
 # Every workflow that provisions the embedder. The same heredoc lived in five
 # jobs across these two files; a fix that lands in only one of them is the drift
-# this list exists to catch.
-_PROVISIONING_WORKFLOWS = ("python-ci.yml", "post-merge-validation.yml")
+# this list exists to catch. `perf-lane.yml` (#3992) and `evals-on-demand.yml`
+# are provisioning sites too: the perf lane and the on-demand evals lane each
+# run `tests/test_perf_lane_volunteer_context.py`, which fails closed on a
+# keyword-only read path, so both must provision before they measure.
+_PROVISIONING_WORKFLOWS = (
+    "python-ci.yml",
+    "post-merge-validation.yml",
+    "perf-lane.yml",
+    "evals-on-demand.yml",
+)
 # The four python-ci jobs that provision the embedder for the dense leg.
 _EMBEDDER_JOBS = ("test", "test-slow", "test-concurrency-falkor", "test-carve-out")
 
@@ -272,6 +281,35 @@ def test_pins_match_the_shipped_embedder():
     assert ep.REVISION == embeddings.EMBEDDING_MODEL_REVISION
 
 
+def test_dockerfile_bake_matches_the_shipped_embedder():
+    """#4809 — the THIRD hardcoded copy of the pin is the image bake (#1349 T10).
+
+    `tools/embedder_provision.py` (`test_pins_match_the_shipped_embedder`) and
+    `tools/embedder_probe.py` (`test_probe_models_registry_spec_locked`) each
+    assert their pin against `tortoise/embeddings.py`. `Dockerfile.hosted` — the
+    copy that decides which weights PRODUCTION loads — did not, so a drifted
+    literal there would silently ship an embedder the VULN-001 pin does not
+    name. The bake is deliberately fetched from the Hub at build time (#4809
+    decision, recorded at the bake site); this is the guard that keeps the pin
+    it fetches the SHIPPED one.
+    """
+    from tortoise import embeddings
+
+    dockerfile = (_ROOT / "Dockerfile.hosted").read_text(encoding="utf-8")
+    bake = [
+        line
+        for line in dockerfile.splitlines()
+        if "SentenceTransformer(" in line and not line.lstrip().startswith("#")
+    ]
+    assert len(bake) == 1, f"expected exactly one build-time bake, found {len(bake)}"
+    assert f"'{embeddings.EMBEDDING_MODEL}'" in bake[0], bake[0]
+    assert f"revision='{embeddings.EMBEDDING_MODEL_REVISION}'" in bake[0], bake[0]
+    # The org-qualified cache dir the FATAL guard asserts is derived from the
+    # same model id; #160-followup was a mismatch between the two.
+    cache_dir = "models--" + embeddings.EMBEDDING_MODEL.replace("/", "--")
+    assert f"/app/model/{cache_dir}" in dockerfile, cache_dir
+
+
 # ── Wiring: the workflows cannot silently go back to a quiet degrade ─────
 
 
@@ -468,6 +506,41 @@ def test_carrier_jobs_and_steps_cannot_mask_the_gate():
                         f"neither shares the gate's condition ({gate_if!r}) nor is "
                         "always()-guarded — it could run while the gate is skipped"
                     )
+
+
+def test_no_provisioning_workflow_latches_offline_before_the_gate():
+    """The gate's download fallback only exists while `HF_HUB_OFFLINE` is unset
+    AT IMPORT. `huggingface_hub` freezes that variable into a module constant,
+    so a workflow- or job-level pair makes the whole download loop dead: every
+    retry fails without a packet leaving the process, and a cache miss on the
+    pinned model can never be recovered by the very step that exists to recover
+    it (#2573, the failure this module removes).
+
+    This is the wiring half of `test_download_path_survives_the_offline_env_latch`:
+    that test proves the SCRIPT downloads when the vars are absent; this proves
+    the workflows do not set them where the gate step would inherit them. It
+    fails against the pre-fix `perf-lane.yml` / `evals-on-demand.yml`, which set
+    the pair in the workflow `env:` — i.e. on the provision step too.
+    """
+    for name in _PROVISIONING_WORKFLOWS:
+        wf = _workflow(name)
+        wf_env = wf.get("env") or {}
+        for var in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+            assert var not in wf_env, (
+                f"{name}: workflow-level {var}={wf_env[var]!r} latches offline mode "
+                "for the embedder gate step, whose whole job is to download a cache "
+                "miss — set it on the pytest step instead (#2573)"
+            )
+        for job_name, job in wf["jobs"].items():
+            if not _gate_steps(job):
+                continue
+            job_env = job.get("env") or {}
+            for var in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+                assert var not in job_env, (
+                    f"{name}:{job_name}: job-level {var}={job_env[var]!r} reaches the "
+                    "gate step and makes its download fallback dead — scope it to the "
+                    "pytest step (#2573)"
+                )
 
 
 def test_gate_tool_has_a_ci_carveout():
@@ -908,7 +981,7 @@ def test_every_watchdog_margin_sits_between_the_backoff_budget_and_the_step_cap(
     budget) or to 600 (= the cap) both fail; verified by mutation.
     """
     checked = 0
-    for name in ("python-ci.yml", "post-merge-validation.yml"):
+    for name in _PROVISIONING_WORKFLOWS:
         for job, step in _all_gate_steps(name):
             where = f"{name}:{job}"
             assert "TORTOISE_EMBEDDER_WATCHDOG_S" in (step.get("env") or {}), (
@@ -936,4 +1009,4 @@ def test_every_watchdog_margin_sits_between_the_backoff_budget_and_the_step_cap(
                 f"{where}: watchdog {armed}s is outside ({budget}s, {cap}s)"
             )
             checked += 1
-    assert checked == 5, f"expected 5 embedder gate steps, found {checked}"
+    assert checked == 7, f"expected 7 embedder gate steps, found {checked}"

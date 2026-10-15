@@ -40,9 +40,17 @@ _SCHEMA_ATTR = "_tortoise_event_schema"
 #   this guard exists to prevent — events that exist and are never delivered —
 #   with no 410 to tell the subscriber. `MAX_SEQ` is the last counter value for
 #   which the immediately following `seq` is still compared exactly.
-# * INT64 (the wrap ceiling). ``next_seq`` is `m.last_seq + 1` in 64-bit
-#   arithmetic, so a counter at INT64_MAX WRAPS to INT64_MIN on the next bump —
-#   there is no saturating step (reproduced on FalkorDB 4.20.4).
+# * INT64 (the wrap ceiling). The bump is `m.last_seq + 1` in 64-bit
+#   arithmetic, so a counter at INT64_MAX would WRAP to INT64_MIN — there is no
+#   saturating step in the engine (reproduced on FalkorDB 4.20.4).
+#
+# Both ceilings are enforced ON THE ALLOCATOR by ``next_seq`` (#5379): a bump
+# that would leave the domain is REFUSED (``ValueError``) rather than written,
+# so no undeliverable ``seq`` can be minted at all, and the counter is left
+# where it is for the repair path to fix. Enforcing it at the reference point is
+# what makes the domain an invariant of the STORE rather than of the two rebuild
+# boundaries above — they can only bound what a wipe CARRY, never what a live
+# emitter is handed.
 #
 # ``first_seq`` is NOT bumped and is compared app-side in `poll_events` (never
 # through the index), so it may legitimately sit ABOVE ``MAX_SEQ`` — e.g.
@@ -92,14 +100,88 @@ def next_seq(proj) -> int:
     One `:GraphEventMeta` node per graph holds last_seq; MERGE ON CREATE/MATCH
     bumps it in a single GRAPH.QUERY. (Atomicity against the deployed FalkorDB
     version is tracked in the plan Open Items; the concurrency test pins it.)
+
+    #5379 — the bump REFUSES (``ValueError``) rather than writing a ``last_seq``
+    outside the store's integer domain ``0 .. MAX_SEQ``. Without this the
+    allocator had no ceiling, and BOTH ways out of the domain are undeliverable
+    through `read_after`'s `seq > cursor` — the #4653 harm (an event that exists
+    and is never delivered, with no 410 to tell the subscriber):
+
+    * Above ``MAX_SEQ`` the `seq` range index compares in double precision, so
+      the seq is silently skipped by a cursor that landed just below it (§
+      ``MAX_SEQ``).
+    * At INT64_MAX the bump WRAPS NEGATIVE, and a negative seq can never satisfy
+      `seq > cursor` for any cursor the cursor codec accepts
+      (`_decode_cursor` rejects negatives).
+
+    Refusing on the ALLOCATOR — not capping the stored value — is the point: a
+    capped-but-returned seq would hand the emitter a seq the store ALREADY
+    issued, which is the #4653 collision (two events, one ordering key), and a
+    `CASE` that saturates `last_seq` would keep the counter permanently at the
+    top so every later emit reused it.
+
+    A counter ALREADY outside the domain — negative (e.g. after a bump the
+    pre-#5379 code wrapped), or above ``MAX_SEQ`` (a hand-written or restored
+    one) — is refused too, and left UNCHANGED rather than bumped or repaired:
+    a refusal must not move the allocator, and re-seeding it here could
+    re-issue the seq of an existing `:GraphEvent` (``reestablish_watermark``
+    owns repair). A property of another type is refused, never coerced:
+    `'5' + 1` cannot be compared, so reporting a seq the node does not hold
+    would be a false success (the same refusal `reestablish_watermark` makes).
+
+    The refusal cannot race a concurrent emitter because the bump and the grant
+    decision are ONE query. The `granted` marker is computed from the counter's
+    PRE-increment value (`prev`, bound before the `SET`), which is the only way
+    to tell "this call handed out ``MAX_SEQ``" from "the counter was already at
+    ``MAX_SEQ`` and nothing moved" — both leave `last_seq` at ``MAX_SEQ``
+    afterwards. Concurrent emitters therefore split the remaining domain
+    exactly: each granted bump moves the counter, so the last legal seq is
+    handed out once (the live counter test pins it).
     """
     rows = proj.g.query(
+        # `ON CREATE SET m.last_seq = 0` seeds the PRE-increment value, so the
+        # one CASE below grants `1` to a fresh graph exactly as the pre-#5379
+        # `ON CREATE SET m.last_seq = 1` did; the node is never observable at 0
+        # (the seed and the SET are one query, and the counter is only ever
+        # visible through this call's RETURN, which sees the post-SET value).
+        #
+        # `prev >= 0 AND prev < $max` — never `$max > prev`. FalkorDB 4.20.x
+        # compares an int64 property holding the wrapped `-9223372036854775807`
+        # region (and a parameter as extreme as INT64_MAX) as NEITHER `<` nor
+        # `>=` against a positive constant, so the reversed form would read a
+        # negative counter as "below the cap" and grant it. The form below is
+        # verified correct for every int64 region a counter can hold (#5379).
         "MERGE (m:GraphEventMeta) "
-        "ON CREATE SET m.last_seq = 1, m.first_seq = 1 "
-        "ON MATCH SET m.last_seq = m.last_seq + 1 "
-        "RETURN m.last_seq"
+        "ON CREATE SET m.last_seq = 0, m.first_seq = 1 "
+        "WITH m, m.last_seq AS prev "
+        "SET m.last_seq = CASE WHEN prev >= 0 AND prev < $max "
+        "THEN prev + 1 ELSE prev END "
+        "RETURN m.last_seq, prev >= 0 AND prev < $max AS granted",
+        params={"max": MAX_SEQ},
     ).result_set
-    return int(rows[0][0])
+    seq, granted = rows[0] if rows else (None, None)
+    # `bool` is excluded for the same reason `_validate_event_meta_entry`
+    # excludes it: it is an int subclass, and a boolean counter is a corrupt
+    # property, not a position.
+    if isinstance(seq, bool) or not isinstance(seq, (int, float)):
+        raise ValueError(
+            f"the :GraphEventMeta.last_seq is {seq!r} ({type(seq).__name__}), "
+            f"not a number — the allocator cannot be bumped and must be "
+            f"repaired before use (#3902's `_restore_event_meta` fallback owns "
+            f"the legacy shape)")
+    if granted is not True:
+        raise ValueError(
+            f"the event-store seq allocator is exhausted: "
+            f":GraphEventMeta.last_seq is {int(seq)} and an allocation needs "
+            f"0 <= last_seq < {MAX_SEQ}; the next seq it would hand out is "
+            f"undeliverable — above {MAX_SEQ} the `seq` range index no longer "
+            f"compares exactly (double precision), and a negative counter can "
+            f"never satisfy `seq > cursor`. Refusing to mint it (#5379): the "
+            f"counter must be repaired BY HAND before emitting — this allocator "
+            f"only ever raises `last_seq`, and `reestablish_watermark` REFUSES "
+            f"an out-of-domain counter instead of lowering it, so neither can "
+            f"repair this state")
+    return int(seq)
 
 
 def capture_watermark(proj) -> dict | None:
@@ -424,13 +506,46 @@ def _refresh_first_seq(proj) -> None:
     first_seq = min surviving seq, or last_seq + 1 when the graph is empty
     (every cursor below the next write is then expired). Lets poll_events
     return 410 even when the graph has been fully purged.
+
+    #5379 — the empty-log floor is computed so the addition can neither WRAP
+    nor leave the `first_seq` domain ``0 .. MAX_INT64``. This runs after a
+    purge, i.e. against the counter as it is ON DISK, which can be one a
+    previous build already wrapped to `INT64_MIN` or a hand-written value above
+    ``MAX_SEQ``: ``next_seq`` refuses to bump such a counter but does not repair
+    it, and a purge does not either. A bare `m.last_seq + 1` at INT64_MAX wrapped
+    to `INT64_MIN`, so the floor became NEGATIVE and `poll_events`'s
+    `after_seq < first_seq` guard could never fire (no accepted cursor is below
+    a negative floor) — a subscriber parked above a truncated stream then read
+    `[]` forever instead of getting the truthful 410, which is the #4653 harm
+    reached through the watermark rather than through the allocator. The
+    overflow is detected by the wrap itself (`m.last_seq + 1 < 0`), NOT by a
+    comparison against an INT64_MAX bound — FalkorDB 4.20.x mis-evaluates those
+    (see `next_seq`) — and the floor is saturated at ``MAX_INT64``, the top of
+    the domain and legitimately ABOVE ``MAX_SEQ`` (§ ``MAX_SEQ``).
+
+    A counter ALREADY below the domain saturates the same way, and the reason is
+    the 410 contract itself: ``next_seq`` REFUSES such a counter, so its next
+    write is unreachable, and every accepted cursor (every cursor is `>= 1`;
+    `after_seq == 0` is the "from the start" sentinel that SKIPS the guard) is
+    genuinely expired. Raising the floor to ``0`` — as an earlier draft did —
+    left `poll_events`' `after_seq < first_seq` test unable to fire for ANY
+    reachable cursor (`1 < 0` is false), so a subscriber parked above the
+    truncated stream still read `[]` forever with no 410: the exact #4653 harm
+    this change exists to remove, just reached through the already-negative
+    branch instead of the wrap branch. Saturation makes both out-of-domain
+    inputs produce a floor above every cursor, so both answer 410.
     """
     try:  # noqa: SIM105
         proj.g.query(
             "MATCH (m:GraphEventMeta) "
             "OPTIONAL MATCH (e:GraphEvent) "
-            "WITH m, min(e.seq) AS mn "
-            "SET m.first_seq = coalesce(mn, m.last_seq + 1)"
+            "WITH m, min(e.seq) AS mn, "
+            "CASE WHEN m.last_seq < 0 THEN $max_int64 "
+            "WHEN m.last_seq + 1 < 0 THEN $max_int64 "
+            "ELSE m.last_seq + 1 END AS nxt "
+            "WITH m, coalesce(mn, nxt) AS floor "
+            "SET m.first_seq = CASE WHEN floor < 0 THEN 0 ELSE floor END",
+            params={"max_int64": MAX_INT64},
         )
     except Exception:  # noqa: BLE001, RUF100
         pass  # best-effort watermark

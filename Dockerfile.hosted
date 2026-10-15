@@ -58,6 +58,31 @@ RUN set -eu; \
 # requirements.txt (deploy-slim intent). Lock-pinning the extras too is a
 # separate follow-up if the index drift ever bites.
 COPY pyproject.toml .
+
+# #4809 DECISION — the bake below reaches huggingface.co BY CHOICE.
+#
+# It is the last HF egress in the DEPLOY chain and that is deliberate:
+# bge-small-en-v1.5 is third-party weights whose canonical, revision-addressable
+# home is the Hub; the revision is commit-pinned (5c38ec7c, lockstep with
+# tortoise/embeddings.py EMBEDDING_MODEL_REVISION — guarded by
+# tests/test_embedder_provision.py::test_dockerfile_bake_matches_the_shipped_embedder);
+# and the BAKE is what takes the network out of RUNTIME — the runtime download in
+# 69aefae hung in Fly's sandboxed network and was reverted in 0da50a0.
+#
+# The alternatives were evaluated and NOT taken: serving the artefact as a
+# hash-verified GitHub Release asset (#2898 §D) or as a digest-addressed OCI
+# artefact in GHCR (#4808) was implemented in PR #4839 and closed UNMERGED —
+# #2898's 2026-09-23 ruling is "no repair is made here" for the egress half, and
+# #4808 was closed under it. Swapping the source here would re-expand a narrowed
+# scope: that needs a reopen argued with the owner FIRST, never a quiet
+# substitution in this file.
+# #4809's own premise was wrong, measured 2026-10-11 on 41b1e051c: #2898 did NOT
+# remove the TEST-time HF dependency — main still restores
+# `hf-embedding-cache-v2-*` and downloads at tools/embedder_provision.py:277, so
+# this bake is not the only HF egress and replacing it would not close the class.
+# Reopen triggers: an OBSERVED build-time HF egress failure, or a model-revision
+# rotation (the pin then needs a new artefact regardless).
+# OVERRIDES: vendoring third-party build inputs / hermetic network-free image builds — the pinned third-party weights are fetched from their canonical upstream at bake time instead of being mirrored in-repo, because a mirror needs its own publish + integrity path and that path was ruled out for the sibling CI half (#2898, 2026-09-23).
 RUN pip install --no-cache-dir '.[embeddings]' '.[backups]' '.[postgres]' \
     # Both HF_HOME and SENTENCE_TRANSFORMERS_HOME must point at /app/model so
     # the build-time download lands EXACTLY where runtime looks: ST uses

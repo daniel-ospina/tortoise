@@ -14,7 +14,13 @@
 // Run (Node >= 22.6):
 //   node --experimental-strip-types tests/test_blog_markdown.mjs
 
-import { renderMarkdown, extractFaq, faqPageJsonLd, articleJsonLd, jsonLd } from "../website/functions/blog/_lib.ts";
+import { readFileSync } from "node:fs";
+
+import { renderMarkdown, extractFaq, faqPageJsonLd, articleJsonLd, jsonLd, extractVideo, validHref } from "../website/functions/blog/_lib.ts";
+import { VIDEO_EMBED_ORIGINS } from "../website/functions/blog/_shared/video.ts";
+// The marketing project's policy — the one `blog/_lib.ts` `ok()` stamps on every
+// article response, so it is the policy that decides whether the embed displays.
+import { RELAXED_CSP } from "../website/functions/_shared/security-headers.ts";
 
 let failures = 0;
 const ok = (msg) => console.log(`  ✓ ${msg}`);
@@ -589,6 +595,608 @@ console.log("JSON-LD cannot break out of its script element");
   assert(!tag.includes("</script><script>"), "a `</script>` in the content is neutralised");
   assert(tag.includes("\\u003c"), "angle brackets are escaped as unicode");
   assert(tag.startsWith('<script type="application/ld+json">'), "the tag is a JSON-LD script");
+}
+
+// ── House style: the shapes the already-published articles use ────────────
+// Recognised so an existing article gains real links and a styled answer box
+// with NO body edit — the CMS has no revision history and no read path
+// (tortoise#8002), so rewriting a body to introduce the markers would be an
+// unrecoverable write performed blind.
+console.log("house-style table of contents");
+{
+  const md = [
+    "**Table of contents**",
+    "",
+    "1. First section",
+    "2. Second section",
+    "",
+    "## First section",
+    "",
+    "## Second section",
+  ].join("\n");
+  const html = renderMarkdown(md);
+  assertEq((html.match(/<ol>/g) ?? []).length, 1, "the hand-written list is replaced, not duplicated");
+  assert(html.includes('<nav class="toc"'), "a linked TOC is generated from the house-style marker");
+  assert(html.includes('<a href="#first-section">First section</a>'), "the generated entries link to the heading anchors");
+  // Assert the shape the marker ACTUALLY renders pre-fix. `"Table of contents
+  // </p>"` was inert: the paragraph renders `<p><strong>Table of contents
+  // </strong></p>`, so `</strong>` sits between the text and `</p>` and the
+  // substring never matched — the old assertion passed on the broken renderer.
+  assert(
+    !html.includes("<strong>Table of contents</strong>"),
+    "the marker paragraph itself is not emitted",
+  );
+
+  // The guard: a marker with no list under it stays ordinary prose, so a
+  // sentence that happens to read "Table of contents" is not eaten.
+  const bare = renderMarkdown("**Table of contents**\n\nJust prose after it.");
+  assert(!bare.includes('<nav class="toc"'), "a marker with no list generates no TOC");
+  assert(bare.includes("Table of contents"), "...and the paragraph is left alone");
+
+  // This input MUST carry a list: without one the list lookahead rejects it and
+  // the `^…$` anchor is never exercised at all.
+  assert(
+    !renderMarkdown("See the Table of contents for details.\n\n1. A\n\n## A").includes('<nav class="toc"'),
+    "the phrase inside a sentence does not trigger a TOC",
+  );
+
+  // TipTap writes the bold as `\*\*…\*\*`; matching on the raw source (rather
+  // than on plainText, where the asterisks stay literal) recognises it.
+  assert(
+    renderMarkdown("\\*\\*Table of contents\\*\\*\n\n1. A\n\n## A").includes('<nav class="toc"'),
+    "the editor's backslash-escaped marker spelling is recognised too",
+  );
+
+  // Authored markup that merely RENDERS as "Table of contents" is not a marker.
+  assert(
+    !renderMarkdown("[Table of contents](#x)\n\n1. A\n\n## A").includes('<nav class="toc"'),
+    "a link whose text is 'Table of contents' is not a marker",
+  );
+  assert(
+    !renderMarkdown("![Table of contents](cover.png)\n\n1. A\n\n## A").includes('<nav class="toc"'),
+    "an image whose alt is 'Table of contents' is not a marker",
+  );
+  // Markdown does not break a paragraph at a newline, so a wrapped sentence's
+  // tail line is not its own paragraph — and must not be eaten.
+  const wrapped = renderMarkdown(
+    "This guide explains the whole model.\nTable of contents\n\n1. Setup\n\n## Setup",
+  );
+  assert(!wrapped.includes('<nav class="toc"'), "a wrapped paragraph's tail line is not a marker");
+  assert(wrapped.includes("<ol><li>Setup</li></ol>"), "...and its list is left intact");
+  // The BOLDED tail spelling reaches the regex (the unbolded one is rejected for
+  // an unrelated reason), so the `^…$` anchor alone does not stop it: it must
+  // not START a block either. Pre-fix this split the paragraph in two and ate the
+  // list beneath it, because the tail was tested without checking `paragraphBuf`.
+  const boldWrapped = renderMarkdown(
+    "Every section below is listed in the\n**Table of contents**\n\n1. Setup\n\n## Setup",
+  );
+  assert(!boldWrapped.includes('<nav class="toc"'), "a wrapped paragraph's bolded tail line is not a marker");
+  assert(boldWrapped.includes("<ol><li>Setup</li></ol>"), "...and its list is left intact");
+  assert(
+    boldWrapped.includes("<p>Every section below is listed in the\n<strong>Table of contents</strong></p>"),
+    "...and the wrapped paragraph stays one paragraph",
+  );
+
+  // No H2 ⇒ the generated nav would be empty, so the author's label AND list
+  // must survive rather than be deleted in exchange for nothing.
+  const noH2 = renderMarkdown(
+    "**Table of contents**\n\n1. Alpha\n2. Beta\n\n### Alpha\n\n### Beta",
+  );
+  assert(!noH2.includes('<nav class="toc"'), "a marker with no H2 generates no TOC");
+  assert(
+    noH2.includes("<strong>Table of contents</strong>") &&
+      noH2.includes("<ol><li>Alpha</li><li>Beta</li></ol>"),
+    "with no H2 the author's label and list are preserved",
+  );
+
+  // A loose (blank-separated) hand-written list is ONE list; the generated nav
+  // must replace all of it, not just the first contiguous run.
+  const loose = renderMarkdown(
+    "**Table of contents**\n\n1. First\n\n2. Second\n\n## First\n\n## Second",
+  );
+  assertEq((loose.match(/<ol>/g) ?? []).length, 1, "a loose hand-written list is fully replaced (no stray tail)");
+  assert(!loose.includes("<li>Second</li>"), "no leftover list item survives the marker");
+
+  // Indented nested items belong to the list too.
+  const nested = renderMarkdown("**Table of contents**\n\n- First\n  - Nested\n- Third\n\n## H");
+  assert(!nested.includes("Nested"), "indented nested TOC items are consumed with the list");
+  assert(!nested.includes("<p>  -"), "no raw list marker leaks into a paragraph");
+
+  // A top-level item of a DIFFERENT marker type under the marker is a SEPARATE
+  // list — the renderer's ordered branch ends at `-` just as its bullet branch
+  // ends at `1.` — so the nav must not swallow it. Pre-fix `consumeTocList`
+  // crossed the blank line by item shape alone and deleted the authored list.
+  const mixed = renderMarkdown(
+    "**Table of contents**\n\n1. Alpha\n2. Beta\n\n- Real bullet one\n- Real bullet two\n\n## Alpha",
+  );
+  assert(mixed.includes('<nav class="toc"'), "the marker still generates its nav above a mixed list pair");
+  assert(
+    mixed.includes("<ul><li>Real bullet one</li><li>Real bullet two</li></ul>"),
+    "a bulleted list after the TOC's ordered list is not consumed",
+  );
+  const mixedReverse = renderMarkdown(
+    "**Table of contents**\n\n- Alpha\n- Beta\n\n1. Real item one\n2. Real item two\n\n## Alpha",
+  );
+  assert(
+    mixedReverse.includes("<ol><li>Real item one</li><li>Real item two</li></ol>"),
+    "an ordered list after the TOC's bullet list is not consumed",
+  );
+
+  // Two markers must both be filled, not have the first overwritten by the second.
+  const twoMarkers = renderMarkdown(
+    "**Table of contents**\n\n1. A\n\n## A\n\n**Table of contents**\n\n1. B\n\n## B",
+  );
+  assertEq((twoMarkers.match(/<nav class="toc"/g) ?? []).length, 2, "two markers each render a nav");
+}
+
+console.log("house-style answer box");
+{
+  assertEq(
+    renderMarkdown("> **Quick answer:** Agent memory retains information."),
+    '<aside class="callout callout-answer"><p class="callout-label">Quick answer</p>' +
+      "<p>Agent memory retains information.</p></aside>",
+    "`> **Quick answer:** …` renders as the answer box, with the label not duplicated",
+  );
+  assert(
+    renderMarkdown("> \\*\\*Quick answer:\\*\\* Short.").includes("callout-answer"),
+    "the editor's backslash-escaped spelling is recognised too",
+  );
+  assert(
+    renderMarkdown("> Quick answer: no bold.").includes("callout-answer"),
+    "the bold is optional — the label is the marker",
+  );
+  // Exact render, not `!includes("Quick answer:</p>")`: that substring never
+  // matched even when the marker DID survive (the emitted label is
+  // `<p class="callout-label">Quick answer</p>`, no colon), so the old assertion
+  // passed on the pre-fix renderer too and proved nothing.
+  assertEq(
+    renderMarkdown("> **Quick answer:** x"),
+    '<aside class="callout callout-answer"><p class="callout-label">Quick answer</p><p>x</p></aside>',
+    "the stripped marker text does not survive into the body",
+  );
+  // The colon bounds the label. A word that merely STARTS with "answer" is
+  // prose: the pre-fix regex matched the prefix and sliced it off the body.
+  assertEq(
+    renderMarkdown("> Quick answers are hard."),
+    "<blockquote>Quick answers are hard.</blockquote>",
+    "the word 'answers' is not amputated and stays prose",
+  );
+  for (const prose of [
+    "> Quick answering takes practice.",
+    "> Quick answerable claims need care.",
+    "> Quick answer is hard.",
+    "> **Quick answers** are hard.",
+  ]) {
+    const rendered = renderMarkdown(prose);
+    assert(
+      rendered.startsWith("<blockquote>") && !rendered.includes("callout-answer"),
+      `prose beginning with "Quick answer" is not the answer box: ${prose}`,
+    );
+  }
+  // A body-leading bold/underscore run must not be consumed as the label's
+  // closing delimiter — the delimiter is bound to the opening one.
+  assertEq(
+    renderMarkdown("> Quick answer: **Bold** start of the body."),
+    '<aside class="callout callout-answer"><p class="callout-label">Quick answer</p>' +
+      "<p><strong>Bold</strong> start of the body.</p></aside>",
+    "a body-leading bold delimiter is not consumed as the label's closing bold",
+  );
+  assert(
+    renderMarkdown("> Quick answer: __init__ runs first.").includes("<p>__init__ runs first.</p>"),
+    "a body-leading underscore run survives the colon-only spelling",
+  );
+  assert(
+    renderMarkdown("> **Quick answer:** **Bold** start.").includes("<p><strong>Bold</strong> start.</p>"),
+    "the bolded spelling still leaves a body-leading bold intact",
+  );
+  // The closing delimiter glyph is consumed in EXACTLY ONE position, or the
+  // second copy reaches past the colon and eats a BODY-leading `**` / `__`:
+  // the pre-fix regex published `> **Quick answer**: **Bold** start.` as
+  // `Bold** start.` (first word amputated, literal delimiter leaked). These
+  // colon-outside-the-bold spellings are the regression cases for that.
+  assertEq(
+    renderMarkdown("> **Quick answer**: **Bold** start."),
+    '<aside class="callout callout-answer"><p class="callout-label">Quick answer</p>' +
+      "<p><strong>Bold</strong> start.</p></aside>",
+    "the colon-outside-bold spelling does not eat the body's leading bold",
+  );
+  assertEq(
+    renderMarkdown("> **Quick answer** : **Bold** start."),
+    '<aside class="callout callout-answer"><p class="callout-label">Quick answer</p>' +
+      "<p><strong>Bold</strong> start.</p></aside>",
+    "a space before the colon does not widen the consumed span",
+  );
+  assertEq(
+    renderMarkdown("> __Quick answer__: __init__ runs first."),
+    '<aside class="callout callout-answer"><p class="callout-label">Quick answer</p>' +
+      "<p>__init__ runs first.</p></aside>",
+    "the underscore spelling does not eat the body's leading underscore run",
+  );
+  assertEq(
+    renderMarkdown("> \\*\\*Quick answer\\*\\*: \\*\\*Bold\\*\\* start."),
+    '<aside class="callout callout-answer"><p class="callout-label">Quick answer</p>' +
+      "<p>**Bold** start.</p></aside>",
+    "the escaped spelling does not amputate the body's first word",
+  );
+  // The marker must be the START of the blockquote, not anywhere inside it.
+  assertEq(
+    renderMarkdown("> Some context first.\n> **Quick answer:** x"),
+    "<blockquote>Some context first. <strong>Quick answer:</strong> x</blockquote>",
+    "a marker mid-quote is left as an ordinary blockquote",
+  );
+  assertEq(
+    renderMarkdown("> Just a quote."),
+    "<blockquote>Just a quote.</blockquote>",
+    "a plain blockquote is still untouched",
+  );
+  assert(
+    renderMarkdown("> [!ANSWER] Explicit marker.").includes('class="callout callout-answer"'),
+    "the explicit [!ANSWER] marker still works (no regression)",
+  );
+}
+
+// ── #7751: video embed + VideoObject ───────────────────────────────────────
+console.log("");
+console.log("video embed marker + VideoObject structured data (#7751)");
+{
+  const YT = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+
+  // The marker renders an iframe and never leaks as literal text.
+  const out = renderMarkdown(`Before.\n\n[[video: ${YT}]]\n\nAfter.`);
+  assert(out.includes("<iframe"), "the video marker renders an iframe");
+  assert(out.includes("video-embed"), "the embed is wrapped for responsive layout");
+  assert(
+    out.includes("https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"),
+    "the src is the privacy-preserving constructed embed URL",
+  );
+  assert(!out.includes("[[video"), "the marker text is not left in the output");
+  assert(out.includes("Before.") && out.includes("After."), "surrounding prose survives");
+
+  // Escaped brackets, as TipTap writes them.
+  const escaped = renderMarkdown(`\\[\\[video: ${YT}\\]\\]`);
+  assert(escaped.includes("<iframe"), "TipTap-escaped brackets are recognised too");
+
+  // ⛔ THE SECURITY PROPERTY: the src is CONSTRUCTED from a validated id, so an
+  // author cannot point the iframe at another origin, whatever they type.
+  for (const hostile of [
+    "[[video: javascript:alert(1)]]",
+    "[[video: https://evil.example.com/watch?v=dQw4w9WgXcQ]]",
+    "[[video: https://www.youtube.com/watch?v=<script>]]",
+    "[[video: data:text/html,<script>alert(1)</script>]]",
+    "[[video: //evil.example.com/embed/x]]",
+  ]) {
+    const h = renderMarkdown(hostile);
+    assert(!h.includes("<iframe"), `no iframe for a rejected payload: ${hostile}`);
+    // The rejected marker falls through as ORDINARY TEXT (like an unknown
+    // `[!X]` alert), so the URL string legitimately appears as visible prose.
+    // What must never happen is an iframe POINTING somewhere off-site — so the
+    // assertion is on the src, not on the presence of the text.
+    const src = /<iframe[^>]*src="([^"]*)"/.exec(h);
+    assert(src === null, `no off-site iframe src for: ${hostile}`);
+  }
+
+  // Providers: every accepted YouTube shape, plus Vimeo.
+  for (const [url, id] of [
+    ["https://youtu.be/dQw4w9WgXcQ", "dQw4w9WgXcQ"],
+    ["https://www.youtube.com/embed/dQw4w9WgXcQ", "dQw4w9WgXcQ"],
+    ["https://www.youtube.com/shorts/dQw4w9WgXcQ", "dQw4w9WgXcQ"],
+    ["https://m.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"],
+  ]) {
+    const refs = extractVideo(`[[video: ${url}]]`);
+    assertEq(refs.length, 1, `recognised: ${url}`);
+    assertEq(refs[0]?.id, id, `id extracted from ${url}`);
+  }
+  const vimeo = extractVideo("[[video: https://vimeo.com/123456789]]");
+  assertEq(vimeo[0]?.provider, "vimeo", "Vimeo is recognised");
+  assertEq(
+    vimeo[0]?.embedUrl,
+    "https://player.vimeo.com/video/123456789",
+    "Vimeo embed URL is constructed",
+  );
+  assertEq(vimeo[0]?.thumbnailUrl, null, "Vimeo has no derivable thumbnail (not fabricated)");
+  assertEq(
+    extractVideo(`[[video: ${YT}]]`)[0]?.thumbnailUrl,
+    "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+    "YouTube thumbnail is hqdefault, the poster every uploaded video has",
+  );
+  assert(
+    !extractVideo(`[[video: ${YT}]]`)[0]?.thumbnailUrl.includes("maxresdefault"),
+    "never maxresdefault — it 404s for SD-only videos, and thumbnailUrl is required",
+  );
+
+  // Optional metadata, recognised by SHAPE so the common case needs no ceremony.
+  const withMeta = extractVideo(`[[video: ${YT} | My interview | PT12M34S | 2026-10-10]]`);
+  assertEq(withMeta[0]?.title, "My interview", "an explicit video title is picked up");
+  assertEq(withMeta[0]?.duration, "PT12M34S", "the ISO duration is picked up");
+  assertEq(withMeta[0]?.uploadDate, "2026-10-10", "the upload date is picked up");
+  // Out of order, and a non-ISO duration is not mistaken for one.
+  const shuffled = extractVideo(`[[video: ${YT} | 2026-10-10 | 12 minutes]]`);
+  assertEq(shuffled[0]?.uploadDate, "2026-10-10", "fields are order-independent");
+  assertEq(shuffled[0]?.title, "12 minutes", "a non-ISO duration is treated as the title");
+  assertEq(shuffled[0]?.duration, null, "a non-ISO duration is not accepted");
+
+  // A marker inside a FENCE is code, not an embed.
+  assertEq(
+    extractVideo("```\n[[video: " + YT + "]]\n```").length,
+    0,
+    "a marker inside a fenced code block is not an embed",
+  );
+  assertEq(extractVideo("no marker here").length, 0, "a body with no marker yields no video");
+
+  // ── the embed and the structured data cannot disagree about what is code ──
+  // (#8379 finding 4: `renderMarkdown` opened a fence on the RAW line while
+  // `extractVideo` opened it on the TRIMMED line, so a 1–3 space indented fence
+  // — valid CommonMark, the shape a list item produces — rendered a live iframe
+  // with NO VideoObject. Each body below asserts the two agree, which is the
+  // property the old suite never checked.)
+  const indented = "   ```\n[[video: " + YT + "]]\n   ```";
+  assertEq(
+    (renderMarkdown(indented).match(/<iframe/g) || []).length,
+    0,
+    "a 1–3 space indented fence renders as code, not as an embed",
+  );
+  assertEq(extractVideo(indented).length, 0, "...and its marker is not a video ref either");
+
+  // The structured data joins the existing builders rather than replacing them.
+  const post = {
+    id: "1",
+    slug: "a-post",
+    title: "The State of Agentic Memory",
+    body: `[[video: ${YT}]]\n\nProse.`,
+    excerpt: "An excerpt.",
+    cover_image_url: null,
+    tags: ["agent-memory"],
+    author: null,
+    meta_title: null,
+    meta_description: "A description.",
+    published_at: "2026-10-12T00:00:00Z",
+    updated_at: "2026-10-12T00:00:00Z",
+  };
+  const nodes = articleJsonLd(post, "https://tortoise.premiselabs.co/blog/a-post");
+  const types = nodes.map((n) => n["@type"]);
+  assertEq(types.includes("VideoObject"), true, "VideoObject is emitted for an article with a video");
+  assertEq(types.includes("BlogPosting"), true, "BlogPosting is still emitted alongside it");
+  assertEq(types.includes("BreadcrumbList"), true, "BreadcrumbList is still emitted");
+
+  const video = nodes.find((n) => n["@type"] === "VideoObject");
+  assertEq(video.name, post.title, "name falls back to the article title");
+  assertEq(video.description, "A description.", "description falls back to meta_description");
+  assertEq(video.uploadDate, "2026-10-12T00:00:00Z", "uploadDate falls back to published_at");
+  assertEq(video.embedUrl, "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ", "embedUrl is the constructed one");
+  assertEq(
+    Array.isArray(video.thumbnailUrl) && video.thumbnailUrl[0] === "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+    true,
+    "thumbnailUrl is derived for YouTube (hqdefault, the guaranteed poster)",
+  );
+
+  // ⛔ #8379 finding 1: the marker's URL and title are AUTHOR text, and TipTap
+  // escapes the characters that would re-parse as markup — `_` (a legal
+  // YouTube id character), `*`, `~`, `[`. Every other author-facing text path in
+  // `_lib.ts` unescapes; the marker did not, so an escaped title reached the
+  // iframe `title` and `VideoObject.name` with its backslashes intact, and an id
+  // containing `_` was not recognised at all. This is the shape the blog-admin
+  // serializer actually writes (`\[\[video: … \]\]`, `abc\_def\_gh1`).
+  const escapedMarker =
+    "\\[\\[video: https://youtu.be/abc\\_def\\_gh1 | Episode 2: \\*the\\* finale | PT12M34S\\]\\]";
+  const escRef = extractVideo(escapedMarker);
+  assertEq(escRef.length, 1, "an escaped marker whose id contains `_` is still recognised");
+  assertEq(escRef[0]?.id, "abc_def_gh1", "the escaped underscore in the id is undone");
+  assertEq(escRef[0]?.title, "Episode 2: *the* finale", "the escaped title is unescaped");
+  assertEq(
+    escRef[0]?.duration,
+    "PT12M34S",
+    "the duration is still recognised beside an escaped title",
+  );
+  const escHtml = renderMarkdown(escapedMarker);
+  assert(escHtml.includes("<iframe"), "the escaped marker embeds");
+  assert(
+    escHtml.includes('title="Episode 2: *the* finale"'),
+    "the iframe title is the author's title, not its escaped form",
+  );
+  assert(!escHtml.includes("\\*the\\*"), "no escape backslash leaks into the iframe title");
+  const escVideo = articleJsonLd(
+    { ...post, body: `${escapedMarker}\n\nProse.` },
+    "https://x/blog/a",
+  ).find((n) => n["@type"] === "VideoObject");
+  assertEq(
+    escVideo?.name,
+    "Episode 2: *the* finale",
+    "VideoObject.name is the unescaped title, not the editor's escaped form",
+  );
+
+  // ── the embed and the structured data cannot disagree about what is code ──
+  // (#8379 finding 4: `renderMarkdown` opened a fence on the RAW line while
+  // `extractVideo` opened it on the TRIMMED line, so a 1–3 space indented fence
+  // — valid CommonMark, the shape a list item produces — rendered a live iframe
+  // with NO VideoObject. Each body below asserts the two agree, which is the
+  // property the old suite never checked.)
+  for (const body of [`[[video: ${YT}]]`, "```\n[[video: " + YT + "]]\n```", indented]) {
+    const embeds = (renderMarkdown(body).match(/<iframe/g) || []).length;
+    const refs = extractVideo(body).length;
+    assertEq(refs, embeds, `embed count and extracted-ref count agree for: ${JSON.stringify(body)}`);
+    const videoNodes = articleJsonLd({ ...post, body }, "https://x/blog/a").filter(
+      (n) => n["@type"] === "VideoObject",
+    );
+    assertEq(
+      videoNodes.length,
+      embeds,
+      `one VideoObject per rendered embed for: ${JSON.stringify(body)}`,
+    );
+  }
+
+  // Two markers render two iframes, so BOTH videos need structured data — the
+  // old code took only `[video]` (the first) and silently dropped the rest.
+  const twoVideos = articleJsonLd(
+    { ...post, body: `[[video: ${YT}]]\n\n[[video: https://vimeo.com/123456789]]` },
+    "https://x/blog/a",
+  ).filter((n) => n["@type"] === "VideoObject");
+  assertEq(twoVideos.length, 2, "one VideoObject per embedded video, not one for the body");
+  assertEq(
+    twoVideos.map((n) => n.embedUrl).join(" "),
+    "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ https://player.vimeo.com/video/123456789",
+    "both videos are described, in embed order",
+  );
+  // The same video twice embeds twice but is described ONCE (no duplicate node).
+  const sameTwice = articleJsonLd(
+    { ...post, body: `[[video: ${YT}]]\n\n[[video: ${YT}]]` },
+    "https://x/blog/a",
+  ).filter((n) => n["@type"] === "VideoObject");
+  assertEq(sameTwice.length, 1, "a repeated marker does not duplicate its VideoObject");
+
+  // No video → no node. Absence must not be invented.
+  const noVideo = articleJsonLd({ ...post, body: "Just prose." }, "https://x/blog/a");
+  assertEq(
+    noVideo.some((n) => n["@type"] === "VideoObject"),
+    false,
+    "an article with no video emits no VideoObject",
+  );
+
+  // The schema cannot break out of its <script>.
+  const hostileTitle = articleJsonLd(
+    { ...post, title: "Bad </script><script>alert(1)</script>" },
+    "https://x/blog/a",
+  );
+  const rendered = hostileTitle.map(jsonLd).join("");
+  assertEq(rendered.includes("</script><script>alert(1)"), false, "a hostile title cannot close the script tag");
+}
+
+// ── the served CSP must admit every embed origin the renderer can emit ─────
+// (#8379 finding 1: a restrictive `frame-src` — not `default-src` — governs the
+// iframe, so an embed origin missing here is CSP-BLOCKED on the live article
+// while every string-level assertion stays green. The origins come from the
+// renderer itself, so a new provider reddens this until the policy admits it.)
+console.log("");
+console.log("every embed origin the renderer can emit is admitted by the served CSP");
+{
+  const frameSrc = RELAXED_CSP.split("; ").find(
+    (d) => d === "frame-src" || d.startsWith("frame-src "),
+  );
+  assert(frameSrc !== undefined, "RELAXED_CSP declares a frame-src directive (not just default-src)");
+  const admitted = new Set(frameSrc.replace(/^frame-src\s*/, "").split(/\s+/).filter(Boolean));
+  const origins = Object.values(VIDEO_EMBED_ORIGINS);
+  assert(origins.length >= 2, "the renderer advertises its embed origins at runtime");
+  for (const origin of origins) {
+    assert(
+      admitted.has(origin),
+      `${origin} is admitted by RELAXED_CSP frame-src — otherwise the embed is CSP-blocked`,
+    );
+  }
+}
+
+// ── #8313: relative links, without weakening the scheme rejection ──────────
+console.log("");
+console.log("relative + internal links resolve; non-http schemes stay rejected (#8313)");
+{
+  const hrefOf = (md) => (/<a href="([^"]*)"/.exec(renderMarkdown(md)) ?? [])[1];
+
+  // The defect: every relative reference became a literal "#" — silently. The
+  // stored markdown was correct, so it was invisible in the CMS.
+  assertEq(hrefOf("[x](#a-heading)"), "#a-heading", "an in-page anchor keeps its fragment");
+  assertEq(hrefOf("[x](/blog/other)"), "/blog/other", "an absolute-path internal link resolves");
+  assertEq(
+    hrefOf("[x](/blog/state-of-agentic-memory-2026-transcript)"),
+    "/blog/state-of-agentic-memory-2026-transcript",
+    "the transcript link that #7751's convention depends on resolves",
+  );
+  assertEq(hrefOf("[x](relative/page)"), "relative/page", "a bare relative path resolves");
+
+  // An internal link must NOT be treated as external (it was, on every link).
+  assertEq(
+    renderMarkdown("[x](/blog/other)").includes("target=\"_blank\""),
+    false,
+    "an internal link does not open a new tab",
+  );
+  assertEq(
+    renderMarkdown("[x](https://example.com/a)").includes("target=\"_blank\""),
+    true,
+    "an external link still opens a new tab",
+  );
+  assertEq(
+    renderMarkdown("[x](https://example.com/a)").includes("rel=\"noopener\""),
+    true,
+    "an external link still carries rel=noopener",
+  );
+
+  // ⛔ NON-NEGOTIABLE: the fix must NOT be a fail-open. The scheme check that
+  // made this defect also blocked these, and it has to keep blocking them.
+  for (const bad of [
+    "javascript:alert(1)",
+    "JaVaScRiPt:alert(1)",
+    "vbscript:msgbox(1)",
+    "data:text/html,<script>alert(1)</script>",
+    "//evil.example.com/x",
+    "file:///etc/passwd",
+    // Backslashes are path separators to WHATWG URL parsing for special
+    // schemes, so these resolve off-origin exactly like `//evil.example.com/x`
+    // while failing a literal `startsWith("//")` (#8379 finding 1).
+    "\\/\\/evil.example.com/x",
+    "\\\\evil.example.com/x",
+  ]) {
+    assertEq(hrefOf(`[x](${bad})`), "#", `still rejected: ${bad}`);
+  }
+
+  // A backslash spelling of an ABSOLUTE https link is the same link to a
+  // browser (WHATWG URL treats `\` as `/` for special schemes), so it is
+  // rejected outright rather than normalised — and a rejected reference must
+  // never be presented as an external link.
+  const backslashedAbsolute = renderMarkdown("[x](https:\\/\\/example.com/a)");
+  assertEq(
+    /<a href="([^"]*)"/.exec(backslashedAbsolute)?.[1],
+    "#",
+    "a backslash-escaped absolute href is rejected, not normalised",
+  );
+  assert(
+    backslashedAbsolute.includes('target="_blank"') === false,
+    "a rejected backslash reference does not get the external shape",
+  );
+  // …and the predicate rejects both protocol-relative backslash spellings.
+  assertEq(validHref("\\/\\/evil.example.com/x"), false, "validHref rejects `\\/\\/host`");
+  assertEq(validHref("\\\\evil.example.com/x"), false, "validHref rejects `\\\\host`");
+  // Control characters cannot be smuggled into an href. Asserted on the
+  // predicate directly: a NUL is stripped by `escapeHtml` before the link regex
+  // runs, so there is no anchor to inspect at all — the property is that the
+  // href is never ACCEPTED, not that it is replaced with "#".
+  assertEq(validHref("/blog/a\u0000b"), false, "a NUL byte in an href is rejected");
+  assertEq(validHref("/blog/a b"), false, "a space in an href is rejected");
+  assertEq(validHref("/blog/a\nb"), false, "a newline in an href is rejected");
+  assertEq(validHref(""), false, "an empty href is rejected");
+}
+
+// ── The authoring contract's own examples render as documented (#8379) ─────
+// docs/blog-authoring.md makes a promise per example, and the renderer makes
+// those promises executable. A placeholder id that is not a real provider id,
+// or a heading rule the renderer does not implement, is a defect in the
+// contract even when every other assertion in this suite passes.
+console.log("");
+console.log("docs/blog-authoring.md examples render as the page claims");
+{
+  const doc = readFileSync(new URL("../docs/blog-authoring.md", import.meta.url), "utf8");
+  const blocks = [...doc.matchAll(/^```[^\n]*\n([\s\S]*?)^```\s*$/gm)].map((m) => m[1].trim());
+  const videoExamples = blocks.filter((b) => b.includes("[[video:"));
+
+  assert(videoExamples.length >= 2, "the contract documents at least two video examples");
+  for (const example of videoExamples) {
+    const firstLine = example.split("\n")[0];
+    const html = renderMarkdown(example);
+    assert(html.includes("<iframe"), `the documented video example embeds: ${firstLine}`);
+    assert(
+      !html.includes("[[video"),
+      `the documented video example's marker is consumed, not published as text: ${firstLine}`,
+    );
+    assert(
+      extractVideo(example).length >= 1,
+      `the documented video example yields a VideoObject source: ${firstLine}`,
+    );
+  }
+
+  // The Basics table's heading row (`##`–`####` → `<h2>`–`<h4>`; the post title
+  // supplies the page's <h1>). The page previously claimed `#`–`####` →
+  // `<h1>`–`<h4>`, which the renderer falsifies (a lone `#` is not a heading)
+  // and which contradicted the page's own anchors paragraph.
+  assert(/`##`–`####` headings/.test(doc), "the Basics table documents `##`–`####`, not `#`–`####`");
+  assert(renderMarkdown("## Two").includes('<h2 id="two">Two</h2>'), "`##` renders an <h2>");
+  assert(renderMarkdown("#### Four").includes('<h4 id="four">Four</h4>'), "`####` renders an <h4>");
+  assert(!renderMarkdown("# One").includes("<h1"), "a lone `#` is not a heading");
 }
 
 console.log("");

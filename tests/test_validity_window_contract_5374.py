@@ -6,7 +6,7 @@ interval rule
     _created_sort_key(validTo) >= _created_sort_key(validFrom)
 
 with equality allowed and presence via ``is not None`` — the exact predicate
-``restore_point_at``'s ``_covers`` assumes (``tortoise/sdk.py``). The temporal
+``get_historical_knowledge``'s ``_covers`` assumes (``tortoise/sdk.py``). The temporal
 axis is the analogue of ``commit_schema.validate_span``'s integer character-offset
 axis.
 
@@ -34,7 +34,7 @@ Class-B test doctrine — every test answers BOTH:
       NOT be refused; a predicate that refuses everything reds.
   (2) *Does the fixture reach it?*  Yes — every pair is passed literally to the
       declared function, and the read-path agreement test persists the pair and
-      then asks ``restore_point_at``.
+      then asks ``get_historical_knowledge``.
 
 Runnable with:
   TORTOISE_DB_URI='docker://:falkordb@localhost:16720/tortoise_test_matrix' \\
@@ -107,13 +107,13 @@ def _props(sdk: TortoiseSDK, pid: str) -> dict:
 def _covers_at(sdk: TortoiseSDK, pid: str, instant: str) -> bool:
     """Whether the read path resolves ``pid`` at ``instant``.
 
-    ``restore_point_at`` is the observable of `_covers`: a window that covers
+    ``get_historical_knowledge`` is the observable of `_covers`: a window that covers
     the instant resolves to the point; one that does not reports honest
     absence. Driving it (instead of re-deriving `_covers` here) is what makes
     the agreement assertion a comparison against the read path rather than a
     restatement of the guard.
     """
-    return sdk.restore_point_at(pid, instant)["found"] is True
+    return sdk.get_historical_knowledge(pid, instant)["found"] is True
 
 
 # ── the declared predicate: boundary cases ─────────────────────────────
@@ -248,7 +248,7 @@ def test_declaration_agrees_with_the_read_path_covers(sdk, vf, vt, request):
     The contract's whole justification is that a persisted inverted window
     ``[validFrom, validTo]`` (``validTo < validFrom``) covers no instant and
     so disappears from every temporal query. This test PERSISTS the pair on a
-    real ``:Point`` and asks the read path (``restore_point_at`` →
+    real ``:Point`` and asks the read path (``get_historical_knowledge`` →
     ``_covers``) which instants it resolves, then compares that against the
     declaration's verdict:
 
@@ -268,7 +268,7 @@ def test_declaration_agrees_with_the_read_path_covers(sdk, vf, vt, request):
     (2) *Does the fixture reach it?*  Yes — the pair is written straight onto
         the ``:Point`` node (bypassing every writer, so this test measures the
         READ path's coverage rather than any writer's acceptance policy), and
-        each grid instant is passed to ``restore_point_at``.
+        each grid instant is passed to ``get_historical_knowledge``.
     """
     pair_id = request.node.callspec.id
     pid = f"pt_vw5374_agree_{pair_id}"

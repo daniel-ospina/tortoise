@@ -77,6 +77,9 @@ from tortoise.fork_slot import (
     is_fork_refusal,
     recover_fork_slot,
 )
+from tortoise.index_catalogue import (  # #3154/#3441: the ONE presence check
+    index_catalogue_has_field,
+)
 from tortoise.vector_write import (  # #4520: the ONE clear-then-set vector seam
     clear_then_set_prefix,
     set_embedding_clause,
@@ -1754,22 +1757,16 @@ def _audit_copied_boolean_indexes(
         the two known boolean-index forms), so the re-check would report
         "still present" and raise — the same post-swap user-visible failure
         as the count race this function replaced (#3154 review P2).
+
+        #3441: the match itself is the ONE shared definition
+        (``tortoise.index_catalogue``), imported here instead of restated, so
+        this site and ``projection._ensure_indexes``' embedded repair sweep
+        cannot drift apart — restating it is how the repair sweep kept the
+        substring form after this site was fixed.
         """
-        rows = g.query("CALL db.indexes()").result_set
-        for row in rows:
-            if not row or row[0] != "Point":
-                continue
-            fields = row[1]
-            if isinstance(fields, str):
-                # Defensive: a stringified field list is tokenised, not
-                # substring-matched, so `is_operator_flag` cannot match.
-                fields = [
-                    f.strip().strip("[]'\"")
-                    for f in fields.strip("[]").split(",")
-                ]
-            if any(str(f) == "is_operator" for f in (fields or ())):
-                return True
-        return False
+        return index_catalogue_has_field(
+            g.query("CALL db.indexes()").result_set, "is_operator",
+            label="Point")
 
     def _probe() -> tuple[int, int]:
         """Diagnostic only — NEVER gates the repair. Two separate count()
@@ -2435,15 +2432,24 @@ def _graph_copy_with_restore_bound(db, src_name: str, dst_name: str, *,
             pass
 
 
+#: The Cypher predicate naming a graph's CONTENT nodes — the complement of
+#: ``hosted_api._is_export_skip_node``. This is its ONE textual definition:
+#: ``_COUNT_DATA_NODES_QUERY`` below counts the set, and
+#: ``backup_sweep.query_label_counts`` breaks the same set down per label for
+#: the #661 drift guard's baseline, so the scalar and the per-label surfaces
+#: cannot drift apart about which nodes are content (#8595).
+_CONTENT_NODE_PREDICATE = (
+    "NOT any(l IN labels(n) WHERE l IN $skip_labels) "
+    "AND NOT ('Meta' IN labels(n) AND n.key IS NOT NULL "
+    "AND n.key IN $meta_keys)"
+)
+
 #: The cap-immune data-node count query. Module-level so a test can assert
 #: its ONE-ROW AGGREGATE shape (which is what makes it immune to the
 #: server-global ``RESULTSET_SIZE`` cap) WITHOUT mutating that server-global
 #: setting (#4233).
 _COUNT_DATA_NODES_QUERY = (
-    "MATCH (n) WHERE NOT any(l IN labels(n) WHERE l IN $skip_labels) "
-    "AND NOT ('Meta' IN labels(n) AND n.key IS NOT NULL "
-    "AND n.key IN $meta_keys) "
-    "RETURN count(n)"
+    f"MATCH (n) WHERE {_CONTENT_NODE_PREDICATE} RETURN count(n)"
 )
 
 

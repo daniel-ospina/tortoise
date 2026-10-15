@@ -509,6 +509,9 @@ def _cmd_reconcile(args):
     try:
         from tortoise.log import EventLog, TornTailResurrectionError, refuse_torn_tail_revival  # noqa: I001
         from tortoise.projection import FalkorProjection
+        # #7951 §17.1: `reconcile` replays records ALREADY in the journal, so
+        # its folds are authorized by the replay scope.
+        from tortoise.projection import _replay_write_scope
     except ImportError:
         print("Tortoise not installed. Run: pip install -e negation-game-explorations/tortoise", file=sys.stderr)
         return 1
@@ -547,7 +550,8 @@ def _cmd_reconcile(args):
         applied = 0
         for ev in event_entries:
             if ev["event"]["eventId"] not in existing:
-                proj.apply(ev)
+                with _replay_write_scope():
+                    proj.apply(ev)
                 applied += 1
 
         total = len(event_entries)
@@ -2960,10 +2964,15 @@ def _cmd_install_hooks(args) -> int:
     # that `else` branch): `tortoise install pi --uninstall` would otherwise
     # inspect — and could rewrite — `<dir>/.cline/hooks/UserPromptSubmit`.
     if uninstall and harness == "pi":
+        # Derived from the install contract, never retyped (#3502). The
+        # `cursor` and `openclaw` sibling branches below already interpolate
+        # their layout; a literal here names a file the installer no longer
+        # writes the moment the contract's `install_name` moves — the exact
+        # hardcoded-copy drift class #3502 exists to close.
         print("pi has no shell-hook read seam — nothing for --uninstall to "
               "remove. The pi capture extension (~/.pi/agent/extensions/"
-              "tortoise-capture.ts) is left in place; delete that file to "
-              "uninstall it.")
+              f"{_pi_capture_extension_name()}) is left in place; delete that "
+              "file to uninstall it.")
         return 0
     # `cursor` has no shell-hook read seam either: routing `--uninstall` to
     # `_install_read_hook` exited 1 with "no shell-hook read seam" while the
@@ -3074,15 +3083,53 @@ def _cmd_install_hooks(args) -> int:
     return _install_read_hook(args)
 
 
+#: Why a Pi restart must be a NEW terminal rather than a ``/reload``.
+#: ``/reload`` DOES re-scan extensions/config/skills/MCP registrations — the
+#: pi docs say auto-discovered extensions can be hot-reloaded with it — but it
+#: keeps the process environment the launching shell handed Pi, and the capture
+#: extension reads ``TORTOISE_API_KEY`` from exactly there, so a reload
+#: silently keeps the stale or empty key. Declared ONCE (#3502): the install
+#: report and ``tortoise setup``'s harness block both print it, and they used
+#: to disagree — `tortoise setup` said "Run /reload in Pi to activate", which
+#: the dashboard's Pi setup (``website/apps/dashboard/src/harnesses.js``)
+#: already contradicted. Same hardcoded-prose drift class as the phantom
+#: extension name this module used to advertise.
+_PI_RESTART_GUIDANCE = (
+    "Restart Pi from a NEW terminal — a /reload re-scans extensions but "
+    "keeps the environment (that is where TORTOISE_API_KEY lives)."
+)
+
 #: Pi's capture seam is its whole install; the MCP wiring is set up by the
 #: dashboard (or ``tortoise setup``), and the extension only loads in a fresh
 #: Pi process. Printed after a real (non-dry-run) run, whether or not that run
 #: wrote the file.
 _PI_MCP_GUIDANCE = (
     "The Tortoise MCP config comes from the dashboard's Pi setup (or "
-    "`tortoise setup`); restart Pi from a NEW terminal — a /reload keeps the "
-    "old environment."
+    "`tortoise setup`). " + _PI_RESTART_GUIDANCE
 )
+
+
+def _pi_capture_extension_name() -> str:
+    """The Pi capture extension's REAL install name — never a literal (#3502).
+
+    Derived from the install contract's single declaration
+    (``hook_install.ARTIFACT_CONTRACTS["pi"].install_name``, re-exported as
+    ``capture_install.PI_EXTENSION_NAME``), so every sentence the installer
+    prints about the extension names the file the installer actually writes.
+
+    This module used to hardcode ``tortoise-context`` — an extension that has
+    never existed anywhere in this repo or in agent-infra — and promise a
+    per-turn context injection the SHIPPED extension does not do. Pi's
+    extension API does have that seam (``before_agent_start`` can inject a
+    message, and our own extensions use it); what is missing is Tortoise's
+    wiring of it (#2119, still open). Saying otherwise is a false claim about
+    the harness, not honest copy. Nothing failed when the prose drifted from
+    the artifact because nothing coupled the two; deriving it here is that
+    coupling.
+    """
+    from tortoise.capture_install import PI_EXTENSION_NAME
+
+    return PI_EXTENSION_NAME
 
 
 def _install_capture_seam(args, install_capture) -> int:
@@ -3285,7 +3332,7 @@ def _install_read_hook_impl(args) -> int:
     - The shipped hook path is shlex-quoted into every registration command
       so spaces/quotes in the install path cannot break the harness exec.
     """
-    import json as _json, shlex as _shlex, sys as _sys  # noqa: E401, I001
+    import json as _json, shlex as _shlex, shutil as _shutil, sys as _sys  # noqa: E401, I001
     from pathlib import Path as _P
 
     # #3918: every WRITE below goes through the shipped atomic helper — a
@@ -3326,13 +3373,20 @@ def _install_read_hook_impl(args) -> int:
               "(UserPromptSubmit → volunteer-turn.sh devin; Claude-hooks "
               "output contract)")
         print("  tortoise install pi      → ~/.pi/agent/extensions/"
-              "tortoise-capture.ts (the capture extension; Pi has no "
-              "shell-hook read seam)")
+              f"{_pi_capture_extension_name()} (the capture extension; Pi has "
+              "no shell-hook read seam)")
         print("  tortoise install cursor  → ~/.cursor/hooks.json "
               "(the sessionEnd capture hook + the sessionStart cold-context "
               "injection hook; Cursor has no per-turn shell-hook read seam — "
               "its beforeSubmitPrompt event cannot inject. IDE-ONLY: Cursor "
               "cloud agent sessions are not captured)")
+        print("  tortoise install hermes  → <dir>/.hermes/plugins/"
+              "tortoise-volunteer/ (the pre_llm_call PLUGIN — Hermes' per-turn "
+              "injection surface; import with `tortoise sessions import "
+              "--harness hermes --file <state.db>`. ACTIVATION: a project "
+              "install needs HERMES_ENABLE_PROJECT_PLUGINS=1 AND "
+              "`hermes plugins enable tortoise-volunteer` — Hermes plugins "
+              "are opt-in, so the directory alone injects nothing)")
         print("Other seams (docs/matrix only, this wave): "
               "gemini, opencode — see "
               "docs/research/2026-09-01-gbrain-learnings/platform-seams.md")
@@ -3341,7 +3395,11 @@ def _install_read_hook_impl(args) -> int:
     root = _P(getattr(args, "dir", "."))
     harness = args.harness
     script = Path(__file__).resolve().parent / "claude-hooks" / "volunteer-turn.sh"
-    if not script.exists():
+    # The shared shell hook is only read by the command-shaped seams. Hermes'
+    # read half is a Python plugin that never executes it, so gating the
+    # install on a file it does not use reported an unrelated failure on any
+    # surface shipping the plugin without the shared hook (#2121 review P3).
+    if harness != "hermes" and not script.exists():
         print(f"volunteer-turn.sh not found at {script} — cannot install",
               file=_sys.stderr)
         return 1
@@ -3385,6 +3443,18 @@ def _install_read_hook_impl(args) -> int:
                                     "command": f"{quoted_script} devin"}]}]
     elif harness == "cline":
         target = root / ".cline" / "hooks" / "UserPromptSubmit"
+        registration = None
+    elif harness == "hermes":
+        # Hermes' per-turn surface is the ``pre_llm_call`` PLUGIN hook — a
+        # Python callback, not a shell command (verified against hermes-agent
+        # @ main 2026-10-11: plugins/AGENTS.md + website/docs/developer-guide/
+        # plugins/index.md + agent/turn_context.py). There is therefore no
+        # config file whose "command" can point at volunteer-turn.sh: the read
+        # half installs the shipped plugin DIRECTORY, which Hermes discovers
+        # from ``<root>/.hermes/plugins/`` (project) or ``$HERMES_HOME/plugins/``
+        # (global). ``registration`` stays None — the JSON-merge path below is
+        # for the command-shaped harnesses only.
+        target = root / ".hermes" / "plugins" / "tortoise-volunteer"
         registration = None
     else:
         # Never let a harness with no read seam fall into the cline target —
@@ -3549,6 +3619,107 @@ def _install_read_hook_impl(args) -> int:
             print(f"Installed {target}")
             print("Then enable hooks in Cline settings (Hook feature) — "
                   "project .cline/hooks or global ~/.cline/hooks both work.")
+        return 0
+
+    # ── hermes: a directory PLUGIN (plugin.yaml + __init__.py), not a
+    #    command registration. See the target assignment above for why.
+    #    Ownership is the shipped marker line: an existing
+    #    ``tortoise-volunteer`` directory this installer cannot prove it wrote
+    #    is never overwritten and never deleted (#2383's rule applied to a
+    #    directory-shaped seam). ──────────────────────────────────────────
+    if harness == "hermes":
+        src_dir = Path(__file__).resolve().parent / "hermes-plugin"
+        bundled = {name: src_dir / name
+                   for name in ("plugin.yaml", "__init__.py")}
+        missing = sorted(n for n, p in bundled.items() if not p.is_file())
+        if missing:
+            print(f"shipped Hermes plugin not found ({', '.join(missing)} "
+                  f"under {src_dir}) — cannot install", file=_sys.stderr)
+            return 1
+        marker = "tortoise-hermes-plugin"
+        if target.exists() and not target.is_dir():
+            print(f"{target} exists and is not a directory — refusing to "
+                  "touch it.", file=_sys.stderr)
+            return 1
+        ours = False
+        if target.is_dir():
+            try:
+                ours = marker in (target / "__init__.py").read_text(
+                    encoding="utf-8", errors="replace")
+            except OSError:
+                ours = False
+            if not ours:
+                if uninstall:
+                    print(f"{target} is not our {marker} plugin — refusing "
+                          "to delete it.", file=_sys.stderr)
+                else:
+                    print(f"{target} already exists and is not our "
+                          f"{marker} plugin — refusing to overwrite it. "
+                          "Move it aside or install into another dir.",
+                          file=_sys.stderr)
+                return 1
+        if dry:
+            verb = "uninstall from" if uninstall else "write"
+            print(f"[dry-run] would {verb} {target}:")
+            for name in sorted(bundled):
+                print(f"  {name}")
+            return 0
+        if uninstall:
+            # Remove ONLY the files this installer wrote. Anything else left in
+            # the directory (a user's extra module, a __pycache__ Hermes's own
+            # import created) keeps the directory alive — an uninstall must
+            # never delete config it cannot prove it created.
+            for name in bundled:
+                (target / name).unlink(missing_ok=True)
+            cache = target / "__pycache__"
+            if cache.is_dir():
+                _shutil.rmtree(cache, ignore_errors=True)
+            leftovers = sorted(p.name for p in target.iterdir())
+            if leftovers:
+                print(f"Removed the {marker} plugin files from {target} — "
+                      f"left unrelated files in place: "
+                      f"{', '.join(leftovers)}")
+            else:
+                target.rmdir()
+                print(f"Removed {target}")
+            return 0
+        if target.is_symlink() and not target.exists():
+            # #2121 review: a DANGLING in-root symlink at the plugin path is
+            # neither a directory nor a file — ``exists()`` follows the link
+            # and is False, so the ownership guards above skip it and the
+            # ``mkdir(exist_ok=True)`` below re-raises ``FileExistsError``
+            # (opaque, rc 1) while the write-free dry run reports success
+            # over the same tree. The file seams REPLACE a dangling leaf
+            # symlink (``_atomic_write_text`` → ``os.replace``); a
+            # directory-shaped seam does the same — drop the dead link and
+            # create the real dir. The symlink-escape guard above already
+            # refused any link resolving OUTSIDE the install root.
+            target.unlink()
+        target.mkdir(parents=True, exist_ok=True)
+        for name, src in sorted(bundled.items()):
+            # #3918: ATOMIC write, like every other seam in this function.
+            # `write_text` truncates in place (a crash/ENOSPC mid-write can
+            # leave a truncated plugin), and it writes THROUGH a leaf symlink
+            # in `target` — the guard above only walks root → target, never
+            # the leaf files. `os.replace` closes both.
+            _atomic_write_text(target / name, src.read_text(encoding="utf-8"))
+        print(f"{'Updated' if ours else 'Installed'} {target}")
+        print("Hermes discovers project plugins from ./.hermes/plugins/ (and "
+              "global ones from $HERMES_HOME/plugins/). Validate with "
+              "`hermes plugins doctor --ci`; session ingestion is "
+              "`tortoise sessions import --harness hermes --file <state.db>`.")
+        # Hermes loads plugins through TWO opt-ins, and this installer
+        # performs neither: project plugins are OFF by default
+        # (``HERMES_ENABLE_PROJECT_PLUGINS``, plugins_discovery.py)
+        # and non-bundled plugins are opt-in via ``plugins.enabled``
+        # (``gate_manifest``). Printing success without them is an inert
+        # install read as a working seam (#3808 R13, #2121 review P1).
+        print("ACTIVATION (required — Hermes plugins are opt-in; without "
+              "both steps this plugin is discovered but never loaded and "
+              "injects nothing): set HERMES_ENABLE_PROJECT_PLUGINS=1 in the "
+              "environment Hermes runs in (project plugins are disabled by "
+              "default), then run `hermes plugins enable "
+              "tortoise-volunteer` and restart Hermes.")
         return 0
 
     # ── codex / claude: JSON registration file (merge-aware). ──────────
@@ -4405,8 +4576,9 @@ def _session_post(api_key: str, api_url: str):
 
     Returns a ``handle(payload) -> PostOutcome`` so the spool never knows the
     transport: network/timeout failures come back with ``status=None`` (the
-    spool retries with backoff), HTTP errors keep their status (permanent 4xx
-    are discarded *with a reason*, not retried).
+    spool retries with backoff), HTTP errors keep their status (a permanent 4xx
+    is recorded and the entry is marked terminal and KEPT — never unlinked,
+    #7708).
     """
     import json as _json
     from http.client import HTTPException
@@ -4727,7 +4899,7 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         capture_consent_enabled,
         record_capture_declined,
     )
-    from tortoise.capture_spool import flush_spool, read_spool_meta
+    from tortoise.capture_spool import _terminal_marker, flush_spool, read_spool_meta
     if not capture_consent_enabled():
         # Durable + one-time: a stale copied hook discards this stderr
         # (`2>/dev/null`), so the same notice is also written to
@@ -4766,6 +4938,15 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         if meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key"):
             print(f"Session {session_id} already filed — nothing to capture.")
             return 0
+        tf = _terminal_marker(meta)
+        if tf is not None:
+            print(f"capture refused permanently (kept, not retried): session "
+                  f"{session_id} — {tf.get('detail') or tf.get('reason') or ''}",
+                  file=_sys.stderr)
+            print("re-file with 'tortoise session drain --retry-terminal' once "
+                  "the refusal is fixed", file=_sys.stderr)
+            print(f"Spooled session: {session_id}")
+            return 0
         print(f"capture deferred: session {session_id} is spooled (backoff window) "
               "and will retry", file=_sys.stderr)
         print(f"Spooled session: {session_id}")
@@ -4773,6 +4954,19 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
     if not outcome.ok:
         if summary.lost:
             return 1
+        # A PERMANENT refusal (#7708) is terminal and non-destructive: the
+        # capture is KEPT on disk but will NOT be retried, so the transient
+        # "will retry" wording below would be a lie to the operator.
+        _terminal_now = read_spool_meta(root, session_id) or {}
+        tf = _terminal_marker(_terminal_now)
+        if tf is not None:
+            print(f"capture refused permanently (kept, not retried): session "
+                  f"{session_id} — {tf.get('detail') or tf.get('reason') or ''}",
+                  file=_sys.stderr)
+            print("re-file with 'tortoise session drain --retry-terminal' once "
+                  "the refusal is fixed", file=_sys.stderr)
+            print(f"Spooled session: {session_id}")
+            return 0
         # TRANSIENT (network / 5xx / retryable 4xx): the capture is DURABLE in
         # the spool — report the deferral honestly and exit 0 (the data is not
         # lost; the hook must never be blocked by a capture failure).
@@ -4922,7 +5116,8 @@ def _cmd_session_drain_best_effort(args) -> int:
                   "#3660)", file=_sys.stderr)
             return 0
         return _cmd_session_drain(api_key, api_url,
-                                  getattr(args, "exclude_session_id", None))
+                                  getattr(args, "exclude_session_id", None),
+                                  getattr(args, "retry_terminal", False))
     except Exception as e:
         print(f"spool drain: nothing filed — {e}", file=_sys.stderr)
         return 0
@@ -4984,7 +5179,8 @@ def _record_drain_deferrals(root, summary) -> None:
 
 
 def _cmd_session_drain(api_key: str, api_url: str,
-                       exclude_session_id: str | None = None) -> int:
+                       exclude_session_id: str | None = None,
+                       retry_terminal: bool = False) -> int:
     """Replay every spooled session that has not been filed (#3963).
 
     This is the "next opportunity" the SessionStart hook wires in: an
@@ -4998,6 +5194,13 @@ def _cmd_session_drain(api_key: str, api_url: str,
     after a `--resume`/`clear`/`compact` would be stored but never mined. The
     drain files OTHER sessions only, exactly as the Pi leg's `session_start`
     flush does.
+
+    ``retry_terminal`` (#7708 follow-up) clears every ``terminal_failure``
+    marker before flushing. A permanent refusal marks an entry terminal and NOT
+    retried — correct while the refusal's cause is live, but a client-side fix
+    (a corrected lane/harness) would make the same payload fileable and nothing
+    ever un-set the marker, so the capture stayed stranded. This is the
+    supported exit; it is a no-op when no entry is terminal.
     """
     import sys as _sys
 
@@ -5014,7 +5217,7 @@ def _cmd_session_drain(api_key: str, api_url: str,
         capture_consent_enabled,
         record_capture_declined,
     )
-    from tortoise.capture_spool import flush_spool, spool_dir
+    from tortoise.capture_spool import flush_spool, reset_terminal_entries, spool_dir
     if not capture_consent_enabled():
         record_capture_declined()
         print(f"spool drain: capture declined — {CAPTURE_DECLINED_HINT}",
@@ -5022,6 +5225,14 @@ def _cmd_session_drain(api_key: str, api_url: str,
         return 0
 
     root = spool_dir()
+    if retry_terminal:
+        # #7708 follow-up: the ONE supported exit from `terminal_failure`. The
+        # entry is KEPT either way — this only removes the "do not retry" mark
+        # and re-arms the window so THIS drain attempts it.
+        cleared = reset_terminal_entries(root)
+        print(f"spool drain: cleared terminal state on {cleared} "
+              f"entr{'y' if cleared == 1 else 'ies'} — retrying",
+              file=_sys.stderr)
     summary = flush_spool(root, _session_post(api_key, api_url),
                           exclude_session_id=exclude_session_id)
     # #4197: a store-only 2xx delivered by THIS drain is the same silent loss
@@ -5040,13 +5251,15 @@ def _cmd_session_drain(api_key: str, api_url: str,
         print(f"spool refusal: {r['session_id']} — {r['detail']}",
               file=_sys.stderr)
     if summary.attempted or summary.discarded or summary.probe_refusals \
-            or summary.held_by_backoff:
+            or summary.held_by_backoff or summary.terminal:
         print(
             f"spool drain: filed {summary.filed}, deferred {summary.deferred}, "
             f"skipped {summary.skipped} "
             f"({summary.held_by_backoff} waiting on backoff), "
             f"held back {summary.held_back}, "
             f"probe refusals {len(summary.probe_refusals)}, "
+            f"terminal {summary.terminal} (kept, not retried; re-file with "
+            f"'tortoise session drain --retry-terminal'), "
             f"discarded {len(summary.discarded)}",
             file=_sys.stderr,
         )
@@ -6246,7 +6459,9 @@ def _cmd_sessions_import(args) -> int:
     from urllib.error import URLError, HTTPError
     from http.client import HTTPException as _HTTPException
 
-    from tortoise.session_import import MAX_TURNS, parse_transcript, window_turns
+    from tortoise.session_import import (
+        MAX_TURNS, hermes_selected_session_id, parse_transcript,
+        window_turns)
     # #3615: this is the SECOND transcript-upload primitive (same
     # POST /v1/sessions) — it carries the same explicit-consent gate so it
     # cannot be used as a consent bypass for the first.
@@ -6269,7 +6484,25 @@ def _cmd_sessions_import(args) -> int:
     # claude-desktop). Resolved BEFORE the existence check so a missing file
     # still records its breadcrumb under the right harness.
     harness = {"desktop": "claude-desktop"}.get(args.harness, args.harness)
-    if not file_path.exists():
+    # #2121: Hermes is the ONE many-sessions-per-file store, so its argument
+    # may carry the documented `::<session-id>` selector. The composite string
+    # is not a filesystem path, so resolve it BEFORE the existence check (and
+    # before the content-hash read) — otherwise the selector that the `--file`
+    # help text and `parse_hermes` both advertise dies here with a misleading
+    # "Session file not found". `parse_transcript` still receives the FULL
+    # argument (it re-splits); we resolve only for the existence check and the
+    # DB path the key is derived from.
+    read_path = file_path
+    if harness == "hermes":
+        from tortoise.session_import.parsers import _hermes_split_selector
+        db_path, _selector = _hermes_split_selector(file_path)
+        # `parse_hermes` accepts the store DIRECTORY too (it appends state.db);
+        # read/hash the real DB file in that case.
+        read_path = db_path / "state.db" if db_path.is_dir() else db_path
+        check_path = db_path
+    else:
+        check_path = file_path
+    if not check_path.exists():
         print(f"Session file not found: {args.file}", file=_sys.stderr)
         _record_capture_error(harness, f"session file not found: {args.file}")
         return 1
@@ -6301,9 +6534,27 @@ def _cmd_sessions_import(args) -> int:
             file=_sys.stderr,
         )
 
-    raw = file_path.read_bytes()
+    if harness == "hermes":
+        # #2121: a Hermes store holds MANY sessions and MUTATES as Hermes runs,
+        # so hashing the store FILE is not a per-session key — `<db>` (newest)
+        # and `<db>::<that same id>` derived two ids for ONE session (filed
+        # twice), an unrelated session's appended turn re-keyed it, and a live
+        # WAL store's byte-identical main file made a genuine re-import look
+        # "already imported". Key on the SESSION the argument resolves to plus
+        # its parsed turns, identically for both spellings (#2121 review).
+        try:
+            resolved_session = hermes_selected_session_id(str(file_path))
+        except ValueError:
+            # parse_transcript already succeeded, so this is unreachable in
+            # practice; fall back to a content-only key rather than failing.
+            resolved_session = ""
+        key_material = ("hermes\x00" + resolved_session + "\x00"
+                        + _json.dumps(turns, ensure_ascii=False,
+                                      sort_keys=True)).encode("utf-8")
+    else:
+        key_material = read_path.read_bytes()
     session_id = args.session_id or (
-        "imp_" + hashlib.sha256(raw).hexdigest()[:12])
+        "imp_" + hashlib.sha256(key_material).hexdigest()[:12])
 
     # Local receipt — 2xx-only (a failed POST must never look imported).
     receipt = _import_receipt_for(session_id)
@@ -6371,6 +6622,7 @@ def _cmd_sessions_import(args) -> int:
                 RETRY_MAX_SECONDS,
                 Snapshot,
                 _backoff_ms,
+                _terminal_marker,
                 capture_key,
                 classify_failure,
                 read_spool_meta,
@@ -6417,7 +6669,17 @@ def _cmd_sessions_import(args) -> int:
             meta = read_spool_meta(root, session_id) or {}
             already_filed = bool(meta.get("filed_key")) and \
                 meta.get("filed_key") == capture_key(session_id, spool_turns)
-            if already_filed:
+            if _terminal_marker(meta) is not None:
+                # #7708: a previous permanent refusal is terminal and the entry
+                # is KEPT but never retried, so telling the operator to run a
+                # drain (the else-branch below) would send them in a circle.
+                print(f"Spooled session: {session_id} — a previous filing was "
+                      "refused permanently; the capture is kept and is NOT "
+                      "retried (running a drain will not file it — re-file with "
+                      "'tortoise session drain --retry-terminal' once the "
+                      "refusal is fixed).",
+                      file=_sys.stderr)
+            elif already_filed:
                 print(f"Session {session_id} is already filed; the spooled copy "
                       "is a no-op.", file=_sys.stderr)
             else:
@@ -7528,23 +7790,38 @@ def _cmd_onboard(args) -> int:
         from tortoise._embedded import EMBEDDED_FALLBACK_NOTICE
         print()
         print(EMBEDDED_FALLBACK_NOTICE)
-    print()
-    print("Tortoise is ready. Agents can now:")
-    print("  • Query the graph via tortoise_suggest_entry_points()")
-    print("  • File decisions with tortoise_create_point()")
-    print("  • Auto-capture via tortoise-context extension")
-    print()
-    print("Next: tortoise serve    — start MCP server for agents")
-    print("      tortoise setup    — configure per-role memory")
-    print()
+    for line in _onboard_ready_lines():
+        print(line)
+    return 0
+
+
+def _onboard_ready_lines() -> list[str]:
+    """The ``tortoise onboard`` completion banner, as the exact lines printed.
+
+    A function rather than inline ``print`` calls so the #3502 extension-name
+    drift guard reads the text the user actually sees without re-running the
+    wizard — the banner is a surface that advertises an extension, so it has
+    to be gradeable by the same test as the harness block.
+    """
     # #544/#1998 (M8) / #4365: reference the ONE live onboarding document.
     # It is INSTRUCTIONS the agent reads — the skill installer ships the three
     # reusable capabilities only, never onboarding. Hand its markdown to your
     # agent after connecting it to the local MCP server (the archived prompt is
     # retired — never two live scripts).
-    print("Onboarding instructions — give this document to your agent to complete setup:")
-    print("  https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md")
-    return 0
+    return [
+        "",
+        "Tortoise is ready. Agents can now:",
+        "  • Query the graph via tortoise_suggest_entry_points()",
+        "  • File decisions with tortoise_create_point()",
+        f"  • Auto-capture via {_pi_capture_extension_name()} extension",
+        "",
+        "Next: tortoise serve    — start MCP server for agents",
+        "      tortoise setup    — configure per-role memory",
+        "",
+        "Onboarding instructions — give this document to your agent to "
+        "complete setup:",
+        "  https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md",
+    ]
 
 
 def _cmd_verify(args):
@@ -8273,9 +8550,28 @@ def _print_harness_instructions(harness: str) -> None:
     if harness == "pi" or harness == "multiple":
         print()
         print("Pi:")
-        print("  ✅ tortoise-context extension auto-injects context when you mention issues.")
-        print("  Run /reload in Pi to activate.")
-        print("  Or call tortoise_help() anytime.")
+        # #3502: the name is DERIVED from the install contract
+        # (``_pi_capture_extension_name``), never written as prose. This block
+        # used to advertise a `tortoise-context` extension that has never
+        # existed and promise a per-turn auto-injection the SHIPPED extension
+        # does not do — the install path's one product promise, made falsely to
+        # the harness we ourselves run on. It also told the user to `/reload` to
+        # activate it, contradicting both the install report and the dashboard's
+        # Pi setup.
+        #
+        # The replacement says what the extension DOES, and scopes the gap to
+        # Tortoise's wiring, NOT to Pi: Pi's extension API has a per-turn
+        # injection seam (``before_agent_start`` injects a message, and our own
+        # `skill-enforcer`/`loop-enforcer`/`cmux-session` extensions use it), so
+        # "Pi cannot inject" would be a false impossibility claim of the same
+        # class as the promise it replaces. What is missing is Tortoise's use of
+        # that seam (#2119, still open).
+        _pi_ext = _pi_capture_extension_name()
+        print(f"  ✅ {_pi_ext} extension captures your sessions into Tortoise.")
+        print(f"  {_PI_RESTART_GUIDANCE}")
+        print("  It files your sessions; it does not inject context per turn yet")
+        print("  (#2119). Call tortoise_help() or the Tortoise MCP tools when you")
+        print("  want graph context.")
         print("  Add tortoise MCP to your .mcp.json:")
         print("    " + _json.dumps(_harness_stdio_config("pi"), indent=4).replace("\n", "\n    "))
     if harness == "claude" or harness == "multiple":
@@ -10296,6 +10592,12 @@ def main(argv: list[str] | None = None) -> int:
     # capture_install.CAPTURE_SEAM — one definition, never a second list that
     # could drift.
     from tortoise.session_verify import HARNESSES
+    # #7708 follow-up: the harness a spool entry may claim is the SERVER's closed
+    # set — the spool mirrors it (`capture_spool.SESSION_HARNESSES`) and
+    # `_normalise_harness` coerces anything else. Rejecting an unknown harness at
+    # the CLI makes a typo VISIBLE at the input instead of silently stored (and
+    # then either 422'd or coerced).
+    from tortoise.capture_spool import SESSION_HARNESSES
 
     uri_schemes_hint = ", ".join(f"{s}://" for s in SUPPORTED_URI_SCHEMES)
 
@@ -10541,8 +10843,10 @@ def main(argv: list[str] | None = None) -> int:
     isess.add_argument("--metadata", action="store_true",
                        help="Run LLM metadata extraction (default: keyword-only — sweep never burns LLM tokens)")
     # tortoise index directory — the unified index path (epic #900 T8, §6.5)
-    idir = idx_sp.add_parser("directory",
-                             help="Index a corpus directory of .md files as Sources + Events/Documents (unified index path)")
+    idir = idx_sp.add_parser(
+        "directory",
+        help="Index a corpus directory of .md files as Sources + Events "
+             "(documents are document Sources — D10); unified index path")
     idir.add_argument("corpus_dir", nargs="?", default=None,
                       help="Corpus directory (default: TORTOISE_INGEST_BASE_DIR — the hook passes positionally)")
     idir.add_argument("--db", default=None,
@@ -10580,7 +10884,7 @@ def main(argv: list[str] | None = None) -> int:
     # its harness (per-harness receipts). Both optional — the no-arg form
     # stays legacy-compatible (SessionRequest defaults).
     session_capture.add_argument(
-        "--harness", default=None,
+        "--harness", default=None, choices=[*sorted(SESSION_HARNESSES), "desktop"],
         help="Harness that produced the transcript (claude, codex, pi, ...) — "
              "per-harness receipts (#1727)")
     session_capture.add_argument(
@@ -10610,6 +10914,12 @@ def main(argv: list[str] | None = None) -> int:
         "--exclude-session-id", default=None,
         help="Session id to leave alone (the LIVE session — filing it would "
              "make the server replay it and skip extraction)")
+    session_drain.add_argument(
+        "--retry-terminal", action="store_true",
+        help="Clear the `terminal_failure` marker (set by a permanent refusal, "
+             "#7708) on every spooled entry and retry it now. The supported "
+             "exit for a capture stranded by a refusal a fix has since made "
+             "fileable; the transcript is always kept)")
     # #3963: the CHEAP per-turn capture. The Claude Code `UserPromptSubmit` hook
     # calls this: spool the transcript locally, no network. Filing is deferred
     # to the drain (SessionStart) or the final flush (session capture).
@@ -10618,7 +10928,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Spool a transcript locally without filing it (#3963)")
     session_spool.add_argument("--file", required=True, help="Transcript file path")
     session_spool.add_argument(
-        "--harness", default="claude",
+        "--harness", default="claude", choices=[*sorted(SESSION_HARNESSES), "desktop"],
         help="Harness that produced the transcript (default: claude)")
     session_spool.add_argument(
         "--session-id", default=None,
@@ -10690,7 +11000,8 @@ def main(argv: list[str] | None = None) -> int:
              "(requires TORTOISE_CAPTURE=1 — explicit consent; a credential "
              "is not consent)")
     sess_import.add_argument("--file", required=True,
-                             help="Path to the session transcript (JSONL or text)")
+                             help="Path to the session transcript (JSONL, text, "
+                                  "or a Hermes state.db[::session-id])")
     # #2120 review P1: the accepted harnesses are DERIVED from the parser
     # registry, never re-listed. The hand-maintained list that stood here had
     # already fallen behind it: `openclaw` parsed correctly, but
@@ -10703,7 +11014,9 @@ def main(argv: list[str] | None = None) -> int:
         "--harness", required=True,
         choices=[*_SESSION_IMPORT_PARSERS, "desktop"],
         help="Harness format to parse (each harness has its own record "
-             "shape; 'desktop' is an alias for claude-desktop)")
+             "shape; 'desktop' is an alias for claude-desktop; 'hermes' reads "
+             "$HERMES_HOME/state.db and selects its most recent session "
+             "unless the path carries '::<session-id>')")
     sess_import.add_argument(
         "--session-id", default=None,
         help="Explicit idempotency key (default: content-hash derived)")
@@ -10755,9 +11068,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Install a harness seam (per-turn memory hook + session capture)")
     inst.add_argument(
         "harness", nargs="?",
-        choices=["codex", "claude", "cline", "devin", "cursor", "pi", "openclaw"],
+        choices=["codex", "claude", "cline", "devin", "cursor", "pi",
+                 "hermes", "openclaw"],
         help="Harness to install (codex | claude | cline | devin | cursor | "
-             "pi | openclaw)")
+             "pi | hermes | openclaw)")
     inst.add_argument(
         "--dir", default=".",
         help="Project directory to install into (default: cwd)")
@@ -10833,10 +11147,15 @@ def main(argv: list[str] | None = None) -> int:
     dc.add_argument("--criteria", help="JSON dict of criteria")
     dc.add_argument("--findings", help="JSON dict of findings")
     dc.add_argument("--edges", help="JSON list of edges, e.g. '[\"crit:1\", \"IMPL\", \"opt:a\"]' or full edge dicts")
-    dc.add_argument("--direction", choices=["bidirectional", "unidirectional"], default=None,
+    from tortoise.live import ACCEPTED_DIRECTION_VALUES  # #7852 the shared direction vocabulary
+    dc.add_argument("--direction", choices=sorted(ACCEPTED_DIRECTION_VALUES), default=None,
                     help="Direction recorded on every operator this run wires (#7813): "
-                         "'bidirectional' (mutual, the default when omitted) or "
-                         "'unidirectional' (directed attack — no back-pressure).")
+                         "the Layer-1 four-value vocabulary (#7852) — '->' "
+                         "(source→target), '<-' (target→source), '<->' (both, "
+                         "the default when omitted) or '-' (none: no confidence "
+                         "transfers) — plus the legacy aliases 'bidirectional' "
+                         "(≡'<->') and 'unidirectional' (≡'->'). "
+                         "Use the --direction=VALUE form for the arrow tokens.")
     dc.add_argument("--context-free", action="store_true",
                     help="Deprecated no-op — context-free (explicit factors) is the only mode since #49 Phase 2",)
     dc.add_argument("--db", help=(
@@ -10882,6 +11201,31 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if result["ok"]:
             print(f"\u2713 Consistent: {result['log_points']} points in both log and graph")
+            # #2897 review round 2: a green verdict says nothing about the
+            # BASELINE half of the invariant. An untrusted sidecar (a torn
+            # file, a malformed watermark/digest, a planted FIFO/symlink, an
+            # UNKNOWN or FUTURE format) makes `read_projection_state` error, so
+            # every run ADOPTS and `state_recorded` stays False — the baseline
+            # check is silently INERT. Printing only the green tick hid that;
+            # `baseline_warning` names it and the recovery. A KNOWN predecessor
+            # format is no longer in that class (#8268/#7936): it is MIGRATED
+            # (re-baselined here) rather than inert, and warned as such.
+            from tortoise.consistency import baseline_warning
+            _warn = baseline_warning(result, args.log)
+            if _warn:
+                print(f"  \u26a0 {_warn}", file=_sys.stderr)
+            # #2897 review round 4: a green verdict must also say what the
+            # projection did NOT carry. `uncarried_journal_fields` holds the KEY
+            # NAMES (the reasons live on the returned dict), and nothing printed
+            # them before this — so "the drop is named, not silent" was true
+            # only of the API while the operator's only surface showed a bare
+            # tick. A dropped field is not a divergence (the exit code is
+            # unchanged), but it is not nothing: name it.
+            _drops = result.get("uncarried_journal_fields") or []
+            if _drops:
+                print("  \u26a0 journal fields not carried by the projection "
+                      f"(reasons in the report): {', '.join(_drops)}",
+                      file=_sys.stderr)
             return 0
         else:
             # #3585 review: a `non-folded` divergence is counts-equal and

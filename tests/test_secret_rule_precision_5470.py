@@ -15,6 +15,16 @@ its 40-char floor cannot match a real 32-char DeepSeek key. The alternative fix
 used: it stops matching a real 32-char key glued to ``_``/``-`` — a leak, pinned
 below.
 
+The ORDER fix closed only a ``-``/``_`` tail. daniel-ospina's 2026-10-02
+measurement on that reviewed head showed the class surviving for every OTHER
+separator (``sk-<32>`` + one of 18 non-body separators + ``ABCDEFGH``: the whole
+tail in cleartext with one redaction reported) and kept #5470 open as the record
+of it. ``_SK_TAIL`` closes that: the family's span continues across a separator
+RUN and the credential-alphabet run after it. The separator sweep, the two
+deliberate costs (a code suffix is taken; a SPACE still ends the span) and the
+one recorded residual (a run interrupted by a non-body character) are pinned
+below.
+
 #5471 — the bare ``Bearer <token>`` rule's body was any 24+ char space-free
 span, so it redacted ordinary hyphen/underscore-joined lowercase identifiers
 (``authentication-middleware-component-v2``) and inflated the per-session
@@ -34,7 +44,10 @@ does the same).
 """
 from __future__ import annotations
 
-from tortoise.security import _SECRET_SHAPES, redact_secrets
+import re
+import string
+
+from tortoise.security import _SECRET_SHAPES, _SK_TAIL, redact_secrets
 
 _ALNUM = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
 
@@ -157,6 +170,195 @@ def test_sk_body_length_sweep_32_to_44_leaves_no_tail():
         out, counts = redact_secrets(token)
         assert out == "[REDACTED:deepseek_api_key]", (token, out)
         assert tail not in out, (token, out)
+
+
+# ── #5470 residual — the tail behind a NON-body separator (daniel-ospina) ───
+#
+# The ORDER fix above closed a `-`/`_` tail only. These tests are the closure of
+# the REST of the family: every printable separator, on all three rules.
+
+#: Every printable character that is neither alphanumeric nor whitespace — i.e.
+#: every character that can sit between a `sk-` body and a tail. Derived rather
+#: than listed so the sweep cannot be narrowed to the 18 that were probed. ASCII
+#: only: a non-ASCII separator is outside every rule's alphabet here.
+_SEPARATORS = tuple(c for c in string.printable
+                    if not c.isalnum() and not c.isspace())
+
+_SK_FAMILY = ("deepseek_api_key", "openai_api_key", "anthropic_api_key")
+
+
+def test_a_sk_token_s_tail_is_consumed_after_every_separator():
+    """#5470 residual, CLOSED: the tail may not survive after ANY separator.
+
+    daniel-ospina's 2026-10-02 measurement: for ``sk-<32>`` + ONE non-body
+    separator + ``ABCDEFGH`` the whole tail stayed in cleartext while
+    ``capture_redactions`` reported one redaction, closed only for ``-``/``_``.
+    All three rules of the family are swept here, at each rule's own width.
+    """
+    run32 = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"
+    tail = "ABCDEFGH"                       # the measurement's own 8-char tail
+    assert len(run32) == 32, "premise: a DeepSeek-width body"
+    assert len(_SEPARATORS) >= 30, _SEPARATORS
+    for label, prefix, body in (
+            ("deepseek", "sk-", run32),
+            ("openai", "sk-", "a" * 45),
+            ("anthropic", "sk-ant-api03-", "A" * 93)):
+        for sep in _SEPARATORS:
+            token = _join(prefix, body, sep, tail)
+            out, counts = redact_secrets(token)
+            assert out.startswith("[REDACTED:") and out.endswith("]"), (
+                label, sep, out)
+            assert tail not in out, f"{label}/{sep!r}: tail left: {out!r}"
+            assert sep + tail not in out, (label, sep, out)
+            assert _no_slice_survives(token, out), (label, sep, out)
+            assert set(counts) <= set(_SK_FAMILY), (label, sep, counts)
+            assert sum(counts.values()) == 1, (label, sep, counts)
+
+
+def test_the_continuation_needs_a_SEPARATOR_an_alnum_tail_is_still_declined():
+    """The no-separator CONCATENATION residual is a different class, and stays.
+
+    ``sk-<32>ABC`` is one alnum run the family declines (``ABC`` is outside the
+    lowercase body class, and the generic rule's 40 floor cannot reach 35
+    chars). That residual is recorded in the #4911 scoping doc, where an AWS id
+    with a character appended and no separator is the same shape; it is NOT
+    #5470's, and entering the continuation without a separator would be a
+    different trade. The lowercase form IS one body (35 lowercase chars), so it
+    goes — the pin is on the boundary, not on the length.
+    """
+    declined = _join("sk-", "a" * 32, "ABC")
+    assert redact_secrets(declined) == (declined, {})
+    one_body = _join("sk-", "a" * 32, "abc")
+    out, counts = redact_secrets(one_body)
+    assert out == "[REDACTED:deepseek_api_key]", out
+    assert counts == {"deepseek_api_key": 1}, counts
+
+
+def test_the_continuation_is_bought_at_a_recorded_precision_cost():
+    """PINNED PRECISION COST, not a contract (see ``_SK_TAIL`` in security.py).
+
+    The continuation takes a punctuation-plus-run suffix of a real key, and it
+    does NOT cross whitespace. Both directions are pinned: a future change to
+    either must consciously move THIS line, and the reason the trade is
+    accepted is that the anchor is a 32+-character credential-shaped run —
+    prose cannot reach it — while a partial redaction that still reports
+    success is the failure the control exists to prevent.
+    """
+    key = _join("sk-", "a" * 32)
+    # Cost: a code suffix glued to a real key is consumed with it.
+    out, _counts = redact_secrets(key + ".strip()")
+    assert out == "[REDACTED:deepseek_api_key]()", out
+    # No cost across whitespace: the span ends at the token terminator, so
+    # ordinary prose after a pasted key is byte-identical.
+    prose = f"export K={key} && run the task-queue-backlog report"
+    out, counts = redact_secrets(prose)
+    assert out == ("export K=[REDACTED:deepseek_api_key]"
+                   " && run the task-queue-backlog report"), out
+    assert counts == {"deepseek_api_key": 1}, counts
+
+
+def test_a_run_interrupted_by_a_non_body_character_is_a_recorded_residual():
+    """PINNED RESIDUAL, not a contract: one separator run, one tail run.
+
+    The continuation is a flat pair of classes — a separator RUN and the run of
+    credential-alphabet characters after it — because a nested quantifier would
+    break the module's LINEAR rule. So a credential-shaped run that is
+    INTERRUPTED by a character no rule here treats as credential material
+    (``^``) is not reached a second time, and the text after it survives while
+    the count reports the redaction. Recorded because the accepted direction is
+    deliberate (closing it needs a non-space wildcard, which eats a whole
+    unspaced line) and because a future tightening must consciously change THIS
+    line rather than discover the residual.
+    """
+    interrupted = _join("sk-", "a" * 32, "!a^b")
+    out, counts = redact_secrets(interrupted)
+    assert out == "[REDACTED:deepseek_api_key]^b", (
+        "if this now consumes `^b`, the residual was tightened — move this test "
+        f"into the sweep above rather than loosening it: {out!r}")
+    assert counts == {"deepseek_api_key": 1}, counts
+
+
+# ── The continuation's alphabet is DERIVED from the table, so drift is red ──
+
+#: Rules whose quantified character classes are NOT credential bodies, with the
+#: reason. Everything else carrying a quantified, non-negated class is treated
+#: as a body alphabet and must be covered by ``_SK_TAIL``.
+_NON_BODY_CLASS_RULES = {
+    # `connection_url`'s measured positions are STRUCTURAL — the user, the port
+    # and the HOST (its `[0-9A-Fa-f:.]` is an IPv6 host) — and its one real body,
+    # the password, is a NEGATED (hence unbounded) class that the extractor
+    # skips. `:` and the host `.` therefore say nothing about what a credential
+    # BODY may contain.
+    "connection_url",
+}
+
+_CLASS_RE = re.compile(r"(?<!\\)\[((?:\\.|[^\]])*)\]"
+                       r"(?=[{+*])")
+
+
+def _class_members(cls: str) -> set[str] | None:
+    """The characters a regex class denotes, or ``None`` if it is unbounded."""
+    out: set[str] = set()
+    i = 0
+    while i < len(cls):
+        char = cls[i]
+        if char == "\\":
+            nxt = cls[i + 1]
+            if nxt == "w":
+                out.update(string.ascii_letters + string.digits + "_")
+            elif nxt == "d":
+                out.update(string.digits)
+            elif nxt in "sS":
+                return None            # `[\s\S]` of `private_key`
+            else:
+                out.add(nxt)
+            i += 2
+            continue
+        if i + 2 < len(cls) and cls[i + 1] == "-":
+            out.update(chr(o) for o in range(ord(char), ord(cls[i + 2]) + 1))
+            i += 3
+            continue
+        out.add(char)
+        i += 1
+    return out
+
+
+def test_the_sk_tail_class_covers_the_tables_bounded_body_alphabet():
+    """``_SK_TAIL``'s claim is MAXIMALITY, so it is re-derived, not asserted.
+
+    The continuation's whole claim is that it consumes every character this
+    table treats as credential material anywhere, so no sibling rule could have
+    consumed more of the run. A future rule with a wider BODY class re-opens
+    #5470's class for the `sk-` family; this makes that a red test here instead
+    of a silent re-opening.
+    """
+    union: set[str] = set()
+    for kind, pattern, _repl in _SECRET_SHAPES:
+        if kind in _NON_BODY_CLASS_RULES:
+            continue
+        for match in _CLASS_RE.finditer(pattern.pattern):
+            members = _class_members(match.group(1))
+            if members is not None:
+                union |= members
+    assert union, "premise: the extractor found no quantified body class"
+    # A WHITESPACE character is the token TERMINATOR, not body material: the
+    # `private_key` LABEL class (`[A-Za-z0-9 ._-]{0,40}`) is the only source,
+    # and a label is structural. A body cannot contain the terminator the whole
+    # table is built on.
+    union = {c for c in union if not c.isspace()}
+
+    tail_match = re.search(r"\[((?:\\.|[^\]])*)\]\*", _SK_TAIL)
+    assert tail_match is not None, _SK_TAIL
+    tail = _class_members(tail_match.group(1))
+    assert tail is not None, _SK_TAIL
+
+    missing = union - tail
+    assert not missing, (
+        f"the `sk-` tail class no longer covers this table's bounded body "
+        f"alphabet — missing {sorted(missing)!r}. Widen `_SK_TAIL` in "
+        "tortoise/security.py (#5470's class re-opens otherwise), or, if the "
+        "new class is a STRUCTURAL position rather than a credential body, add "
+        "its kind to _NON_BODY_CLASS_RULES with the reason.")
 
 
 # ── #5471 — the bare `Bearer` rule fires on credentials, not on prose ───────

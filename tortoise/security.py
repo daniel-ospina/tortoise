@@ -210,7 +210,8 @@ _DOC_ID_MAX = 255
 
 
 def validate_document_id(doc_id: str) -> str:
-    """Validate a Document node id minted from tenant/event input.
+    """Validate a document id minted from tenant/event input (D10: the id is the
+    ``url`` of a document ``:Source``; there is no ``:Document`` node).
 
     Accepts ULIDs and operator file basenames (leading ``._-``, non-ASCII).
     Rejects anything that could resolve to a host path (``/``, ``\\``, ``..``,
@@ -729,6 +730,55 @@ _CONNECTION_URL_REPLACEMENT = (
 #      is the recall gap this trade accepts, recorded here rather than implied;
 #      it is pinned by ``test_a_delimiter_after_the_at_bounds_the_url``.
 
+# ── #5470 — the ``sk-`` family's TAIL CONTINUATION ────────────────────────
+#
+# Every vendor-anchored ``sk-`` rule stops at the first character outside ITS
+# body alphabet, but ``(?![A-Za-z0-9])`` ACCEPTS a following separator. For a
+# token whose body continues past that class — ``sk-<32 lowercase>.<8 more>`` —
+# the rule therefore replaced only the PREFIX and LEFT THE TAIL in the stored
+# turn while ``capture_redactions`` reported the secret as handled: exactly the
+# false-assurance class the module header warns about. The ``-``/``_`` tails
+# were closed by a dedicated filler rule in PR #5775; daniel-ospina's
+# 2026-10-02 measurement on that reviewed head (`sk-<32>` + ONE of 18 non-body
+# separators + ``ABCDEFGH``) showed the WHOLE tail still survives for every
+# other separator, and kept #5470 open as the record of it. This group is that
+# closure, applied to the whole family.
+#
+# The separator is a RUN of characters that is neither whitespace nor a body
+# character (``[^\sA-Za-z0-9]+``). A SPACE is deliberately NOT a separator: it
+# is the canonical token terminator, no credential body contains one, so the
+# run after it is a separate token rather than a continuation. The run (rather
+# than a single character) is what closes ``sk-<32>!^ABCDEFGH`` — two flat
+# classes, so per-candidate work stays CONSTANT and the LINEAR rule holds.
+#
+# The tail's class IS the terminator — it does not defer to ``(?![A-Za-z0-9])``
+# alone. It is the union of every BOUNDED body alphabet in this table:
+# ``[A-Za-z0-9_-]`` (the ``sk-``/OAuth/GitHub/HF bodies), ``.`` (``jwt``,
+# ``slack`` ``xoxe``), ``/``/``+``/``=`` (``aws_secret_access_key``,
+# ``bearer_token``). So the span is MAXIMAL over every character this table
+# treats as credential material anywhere, and stops only at a character no rule
+# in it treats as credential material. That is what makes this a closure of
+# #5470's class rather than one more special case: no sibling rule could have
+# consumed more of the run. A drift test re-derives that union from the table
+# (``test_the_sk_tail_class_covers_the_tables_bounded_body_alphabet``), so a
+# future rule with a wider body class is a red test, not a silent re-opening.
+#
+# ⛔ ONE separator RUN and ONE tail run, and NO nested quantifier (nothing
+# repeats a group that itself repeats). The module's LINEAR rule bounds
+# per-candidate work by a constant, so a credential-shaped run that is
+# INTERRUPTED by a non-body character (``sk-<32>!a^b``) is not consumed by a
+# second pass: by this table's own body definition the text after that
+# character is a separate token. Recorded and pinned (never silently relied on)
+# in ``tests/test_secret_rule_precision_5470.py``.
+#
+# ⛔ The precision cost is real and deliberate: the continuation can take a
+# punctuation-plus-run suffix of a real key (``sk-<32>.strip()`` loses
+# ``.strip``). Accepted because the anchor is a 32+-character credential-shaped
+# run (prose cannot reach it), and because a partial redaction that still
+# reports success is the failure this control exists to prevent — the marker
+# makes the span visibly incomplete rather than silently cut.
+_SK_TAIL = r"(?:[^\sA-Za-z0-9]+[A-Za-z0-9_./+=-]*)?"
+
 #: ``(kind, pattern, replacement)`` — ordered, and the ORDER IS LOAD-BEARING.
 _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # ── Tortoise's OWN minted credentials ───────────────────────────────────
@@ -827,7 +877,8 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
      _REDACTION_VALUE.format(kind="tortoise_signup_token")),
     # Anthropic — BEFORE the generic `sk-` (see the ordering rule above).
     ("anthropic_api_key",
-     re.compile(r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9])"),
+     re.compile(r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{20,}" + _SK_TAIL
+                + r"(?![A-Za-z0-9])"),
      _REDACTION_VALUE.format(kind="anthropic_api_key")),
     # OpenAI / OpenRouter. The lookbehind is LOAD-BEARING: `disk-…`, `risk-…`
     # and `task-…` all contain the substring `sk-` (the measured #4911 false
@@ -843,43 +894,13 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # leaving the tail in cleartext while the count reported a redaction — the
     # false-assurance class the module header warns about. The generic rule's
     # 40-char floor cannot match a real 32-char DeepSeek key, so the reorder
-    # costs no DeepSeek coverage.
+    # costs no DeepSeek coverage. ``_SK_TAIL`` (the block above the table) then
+    # takes the sub-40 case (``sk-<32>-A``, the shape the removed filler rule
+    # existed for) as well as every non-body separator the filler never covered.
     ("openai_api_key",
-     re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{40,}(?![A-Za-z0-9])"),
+     re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{40,}" + _SK_TAIL
+                + r"(?![A-Za-z0-9])"),
      _REDACTION_VALUE.format(kind="openai_api_key")),
-    # ⛔ THE TAIL FILLER for the sub-40 gap the generic floor leaves (found in
-    # review of #5470). The generic rule needs 40 body chars; a `sk-` token
-    # whose ``run + separator + tail`` is UNDER 40 is therefore invisible to it.
-    # The plain deepseek rule below still matches the 32+ run, its
-    # ``(?![A-Za-z0-9])`` terminator ACCEPTS the separator, and it replaces the
-    # run ALONE — the tail is then unrecoverable because the ``sk-`` anchor is
-    # gone and the receipt still reports one redaction
-    # (``sk-<32>-A`` -> ``[REDACTED:deepseek_api_key]-A``).
-    # This rule consumes the separator-run AND everything after it, so the whole
-    # token goes. It sits AFTER the generic rule (so the ``>= 40``-char case keeps
-    # the wide label and the wide span) and BEFORE the plain deepseek rule (so
-    # the separable tail is consumed before the plain rule can claim the run).
-    #
-    # ⛔ Do NOT narrow its tail class to a ``(?![A-Za-z0-9_-])`` terminator: that
-    # would stop matching a real key glued to a ``_suffix`` — the recall
-    # regression already rejected for the plain deepseek rule (#5470). The
-    # greedy tail class IS the terminator here: it consumes to the end of the
-    # BODY ALPHABET.
-    #
-    # ⛔ "to the end of the body alphabet" is the whole claim — NOT "no part of the
-    # token survives" (review round 12). The class is ``[A-Za-z0-9_-]*``, so it stops
-    # at ANY character outside it, and a key followed by such a character keeps its
-    # tail in cleartext while the count reports a redaction — #5470's class:
-    # ``redact_secrets("sk-" + "a"*32 + "." + "ABCDEFGH")`` →
-    # ``('[REDACTED:deepseek_api_key].ABCDEFGH', {'deepseek_api_key': 1})``. The same
-    # holds for the generic ``openai``/``anthropic`` rules, and for ``+ / = ! ~ : , ;``
-    # ``( [ ' | @ #`` and space. No known vendor body carries those after the key, and
-    # the sweep test only suffixes with ``-``/``_``, so this is recorded rather than
-    # silently relied on: widening the filler to the terminator's implicit alphabet is
-    # a recall/precision decision, not a comment fix.
-    ("deepseek_api_key",
-     re.compile(r"(?<![A-Za-z0-9])sk-[a-z0-9]{32,}[-_][A-Za-z0-9_-]*"),
-     _REDACTION_VALUE.format(kind="deepseek_api_key")),
     # DeepSeek — the body is EXACTLY 32 LOWERCASE alnum characters, which sits
     # BELOW the generic `sk-` rule's 40 floor, so without this rule a pasted
     # DeepSeek key was stored verbatim with `capture_redactions: 0` (found in
@@ -903,11 +924,12 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # `(?![A-Za-z0-9_-])` was the other candidate and it REGRESSES recall — a
     # real 32-char key glued to `_suffix` then matches nothing at all (pinned by
     # `test_a_credential_touching_a_word_character_is_still_redacted`).
-    # The SEPARABLE-TAIL variant sits BETWEEN the generic rule and this one, so a
-    # run followed by `-`/`_` whose combined body is under 40 is consumed whole
-    # before this rule can claim the run alone (the tail-filler comment above).
+    # ``_SK_TAIL`` then consumes the separable tail — `-`/`_` AND every other
+    # non-body separator — before this rule's run could be claimed alone; it
+    # subsumes the separate filler rule that covered only `-`/`_`.
     ("deepseek_api_key",
-     re.compile(r"(?<![A-Za-z0-9])sk-[a-z0-9]{32,}(?![A-Za-z0-9])"),
+     re.compile(r"(?<![A-Za-z0-9])sk-[a-z0-9]{32,}" + _SK_TAIL
+                + r"(?![A-Za-z0-9])"),
      _REDACTION_VALUE.format(kind="deepseek_api_key")),
     # Supabase secret key (the ``sb_secret_`` form; ``sb_publishable_`` is public
     # by design and is deliberately left alone). This repo IS a Supabase-backed

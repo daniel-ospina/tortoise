@@ -125,6 +125,11 @@ def _install_alert_store(monkeypatch):
     A real store (not a fake) so the dedup contract under test is the store's
     own create-once behavior — same approach as tests/test_alert_store.py.
     Returns (filed_titles, telegram_texts).
+
+    #4778: the sink's seam is the ALERT-only builder
+    (``hosted_api._incident_alert_store``), NOT the sweep-gated raw chain, so
+    that is what this installs. The old ``_backup_config_safe`` stub is gone —
+    the seam does not consult it.
     """
     from tortoise import hosted_api as ha
     from tortoise.alert_store import AlertStore
@@ -145,8 +150,7 @@ def _install_alert_store(monkeypatch):
         push_telegram=pushed.append,
         repo="daniel-ospina/tortoise",
     )
-    monkeypatch.setattr(ha, "_backup_config_safe", lambda: object())
-    monkeypatch.setattr(ha, "_alert_store_from", lambda cfg: store)
+    monkeypatch.setattr(ha, "_incident_alert_store", lambda *a, **k: store)
     return filed, pushed
 
 
@@ -182,26 +186,70 @@ def test_billing_send_failure_alert_never_raises(monkeypatch, caplog):
     """
     from tortoise import hosted_api as ha
 
-    def boom(cfg):
+    def boom(*a, **k):
         raise RuntimeError("r2 down")
 
     def boom_post(url, **kwargs):
         raise RuntimeError("network down")
 
-    monkeypatch.setattr(ha, "_backup_config_safe", lambda: object())
-    monkeypatch.setattr(ha, "_alert_store_from", boom)
+    monkeypatch.setattr(ha, "_incident_alert_store", boom)
     monkeypatch.setattr(notify.httpx, "post", boom_post)
     with caplog.at_level(logging.WARNING):
         notify.notify_billing_event("billing_cancel", TEAM)  # must not raise
     assert any("incident filing failed" in r.message for r in caplog.records)
 
 
-def test_file_incident_returns_false_when_sink_disabled(monkeypatch):
-    """No backup config -> the sink is off; filing is a no-op, not an error."""
+def test_file_incident_returns_false_when_there_is_no_alert_channel(monkeypatch):
+    """No CHANNEL -> filing is a no-op, not an error (#4778).
+
+    The D5a distinction this pins: the absence of a backup SWEEP config is not
+    the absence of an alert channel. The sink asks the ALERT-only seam, so the
+    sweep switch is irrelevant here — only a missing channel (no
+    ``DR_ISSUES_PAT``, or an unusable object store) turns filing off.
+
+    NON-VACUOUS BY CONSTRUCTION: the raw pre-#4778 chain is fully ARMED here —
+    a truthy sweep config and a store whose ``open_incident`` answers ``True``
+    are both stubbed — so the raw chain would FILE and return ``True``. The
+    only thing that can make this ``False`` is the seam's own ``None``. On the
+    pre-fix code (raw ``_backup_config_safe() -> _alert_store_from``) this
+    test FAILS; an ambient-unconfigured environment cannot satisfy it.
+    """
     from tortoise import hosted_api as ha
 
-    monkeypatch.setattr(ha, "_backup_config_safe", lambda: None)
+    class _WouldFile:
+        def open_incident(self, kind, org_id="", detail=None):
+            return True  # the raw chain WOULD file — the seam must forbid it
+
+    monkeypatch.setattr(ha, "_backup_config_safe", lambda: object())
+    monkeypatch.setattr(ha, "_alert_store_from", lambda *a, **k: _WouldFile())
+    monkeypatch.setattr(ha, "_incident_alert_store", lambda *a, **k: None)
     assert notify.file_incident("ANY_KIND") is False
+
+
+def test_file_incident_files_while_the_backup_sweep_is_off(monkeypatch):
+    """#4778 (D5a): a billing incident is filed even with ``cfg is None``.
+
+    ``_backup_config_safe()`` answers None whenever ``BACKUP_SWEEP_ENABLED`` is
+    off — the production default. The old chain read the config first and
+    returned False, so a billing notification that never left the building was
+    INVISIBLE on exactly those deployments. The filer now resolves its channel
+    through the ALERT-only seam, which is ungated on the sweep switch.
+    """
+    from tortoise import hosted_api as ha
+
+    class _Store:
+        def __init__(self):
+            self.opened = []
+
+        def open_incident(self, kind, org_id="", detail=None):
+            self.opened.append((kind, org_id, detail))
+            return True
+
+    store = _Store()
+    monkeypatch.setattr(ha, "_backup_config_safe", lambda: None)
+    monkeypatch.setattr(ha, "_incident_alert_store", lambda *a, **k: store)
+    assert notify.file_incident("BILLING_SEND_FAILED", "org-1", {"x": 1}) is True
+    assert store.opened == [("BILLING_SEND_FAILED", "org-1", {"x": 1})]
 
 
 def test_telegram_failure_swallowed(monkeypatch, caplog):
@@ -353,6 +401,40 @@ def test_abuse_review_needed_files_a_tracked_incident(monkeypatch):
     assert "abuse_review_needed" in filed[0]
     assert "abuse_suspended" not in filed[0]
     assert any("review" in p.lower() for p in pushed), pushed
+
+
+def test_abuse_incident_is_filed_while_the_backup_sweep_is_off(monkeypatch):
+    """#4778 (D5a): the abuse incident is filed with ``cfg is None``.
+
+    The abuse path REBUILDS the channel rather than calling
+    ``notify.file_incident``, so it needed its own fix. It is a request-path
+    decision — an abuse breach has nothing to do with whether backups run — and
+    the old chain made it invisible on a sweep-disabled deployment (the
+    production default).
+    """
+    from tortoise import hosted_api as ha
+
+    class _Store:
+        def __init__(self):
+            self.opened = []
+
+        def open_incident(self, kind, org_id="", detail=None):
+            self.opened.append((kind, org_id, detail))
+            return True
+
+    store = _Store()
+    monkeypatch.setattr(notify, "telegram_send",
+                        lambda bot_token, chat_id, text, timeout=15.0: None)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABC")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    monkeypatch.setattr(ha, "_backup_config_safe", lambda: None)
+    monkeypatch.setattr(ha, "_incident_alert_store", lambda *a, **k: store)
+
+    notify.notify_abuse("abuse_review_needed", {"org_id": "team_123"},
+                        {"rule": "point_create", "count": 501})
+
+    assert [k for k, _, _ in store.opened] == ["abuse_review_needed"]
+    assert store.opened[0][1] == "team_123", store.opened
 
 
 def test_operator_suspend_notification_leg_is_still_wired(monkeypatch):

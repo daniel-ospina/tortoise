@@ -25,9 +25,12 @@
 #
 # Deferred mechanisms (declared as intent, never invented here):
 #   - Per-kind status folds (event kind → Object.status) are pack-declared folds:
-#     #2729 (mechanism), generalised by #2792. Until they land, each kindDef
-#     description states the intended lifecycle in prose and this pack declares NO
-#     fold surface.
+#     #2729 lands the mechanism. Each state-bearing kind below declares its
+#     `statuses` vocabulary and (where the pack has the driving event) its
+#     `folds`; the kindDef description keeps the prose for the extractor.
+#     A kind with `statuses` OWNS its Object state: the built-in connector fold
+#     no longer applies to it, so `github.issue.closed` cannot re-label a
+#     venture Object with the connector's `completed`.
 #   - Value fields (committed/released amounts, valuation) need a declared
 #     property surface: #2818, behind #2782. Until then the amount is not
 #     declared here.
@@ -101,6 +104,7 @@ ontology:
         The fund's stake in — and ongoing relationship with — a company it backs.
         This is the portfolio position, not the company: the company itself is a
         core Subject. Lifecycle: prospective → invested → active → written-off.
+      statuses: [prospective, invested, active, written-off]
       synonyms:
       - portfolio company
       - portfolio position
@@ -121,6 +125,7 @@ ontology:
         A multi-milestone initiative under an investment that produces
         deliverables — an R&D programme, product line, platform or brand.
         Lifecycle: proposed → prioritized → active → paused / deprioritized.
+      statuses: [proposed, prioritized, active, paused, deprioritized]
       synonyms:
       - programme
       - platform
@@ -141,6 +146,7 @@ ontology:
         A produced or protected thing a programme owns — a product, technology,
         dataset, patent family or other intellectual property. Lifecycle:
         idea → developing → validated → protected → licensed.
+      statuses: [idea, developing, validated, protected, licensed]
       synonyms:
       - product
       - technology
@@ -164,6 +170,7 @@ ontology:
         programme or company: a grant, term of award, priced round, SAFE,
         convertible note or loan. Lifecycle: prospect → applied → awarded →
         active → closed.
+      statuses: [prospect, applied, awarded, active, closed]
       synonyms:
       - grant
       - term of award
@@ -191,6 +198,10 @@ ontology:
         conditions-met → released (a denial is recorded as a terminal
         non-release). The actual movement of money is the `disbursement` event,
         never a property of this Object.
+      statuses: [pending, conditions-met, released, denied]
+      folds:
+      - event: disbursement
+        status: released
       synonyms:
       - parcel
       - installment
@@ -211,6 +222,10 @@ ontology:
         that unlocks the next parcel. Lifecycle: unmet → met. Satisfaction is
         recorded as the dated `conditionMet` event; this Object holds the
         current position.
+      statuses: [unmet, met]
+      folds:
+      - event: conditionMet
+        status: met
       synonyms:
       - requirement
       - precondition
@@ -233,6 +248,10 @@ ontology:
         An owned, dated commitment produced by a meeting or a review — the
         "next steps" list. Lifecycle: open → in-progress → done. Completion is
         recorded as the dated `actionItemCompleted` event.
+      statuses: [open, in-progress, done]
+      folds:
+      - event: actionItemCompleted
+        status: done
       synonyms:
       - action item
       - next step
@@ -363,8 +382,8 @@ ontology:
 
   # ── Chains ────────────────────────────────────────────────────────────────
   # Kind-path chains the extractor respects when connecting entities. The
-  # per-kind STATE lifecycle is not expressible here — chains are kind paths —
-  # so the lifecycle lives in each kindDef description until #2729/#2792.
+  # per-kind STATE lifecycle is now declared machine-readably per kind
+  # (`statuses` / `folds` above, #2729); chains remain kind paths.
   chains:
   - id: ventureFundingFlow
     name: Funding Flow

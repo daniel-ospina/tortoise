@@ -168,7 +168,7 @@ CITES_ANCHOR_LITERAL: dict[str, tuple[str, str]] = {
     'r1_canon': ('canonical-sdk-methods.md', '| R1 | `search_knowledge` | #1 | `tortoise_fts_query`, `suggest_entry_points`, `search_sessions`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` |'),
     'r2': ('beta-sdk-surface.md', '| `query`, `paginated_query`, `query_points_by_tag` | 3 | → `list_knowledge`. |'),
     'r3': ('beta-sdk-surface.md', '| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` | ~6 | → `check_confidence` for the confidence view; **`recall_subgraph` is dropped, not folded** — `explore_connections` answers that question. The gaps question is flagged in "Named but not solved". |'),
-    'r3_canon': ('canonical-sdk-methods.md', '| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `get_provenance_chain`, `provenance`, `belief_timeline`, `restore_point_at` |'),
+    'r3_canon': ('canonical-sdk-methods.md', '| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `get_provenance_chain`, `provenance`, `belief_timeline`, `get_historical_knowledge` |'),
     'r3_context': ('beta-sdk-surface.md', '| `provenance`, `belief_timeline`, `session_context`, `volunteer_context` | 4 | → `check_confidence` where they are confidence context; `poll_events` where they are a timeline. |'),
     'r3_drop_subgraph': ('beta-sdk-surface.md', '**`recall_subgraph` is dropped, not folded** — `explore_connections` answers that question. The gaps question is flagged in "Named but not solved". |'),
     'r3_restore': ('beta-sdk-surface.md', '| `restore_point_at` | → row 7 **`get_historical_knowledge`**. A **read**, not a write — it returns the version of a claim valid on a date and mutates nothing. |'),
@@ -184,7 +184,7 @@ CITES_ANCHOR_LITERAL: dict[str, tuple[str, str]] = {
     'r8': ('beta-sdk-surface.md', '| `events_poll` | → row 11 `poll_events`. |'),
     'r9': ('beta-sdk-surface.md', "| `list_batch`, `list_batches` | 2 | → `list_knowledge(kind='batch')`. The batch contents come back inline in the bounded, paged page. |"),
     't_n2': ('canonical-sdk-methods.md', '| N2 | `graph` | `graph_list`, `graph_count`, `graph_delete`, `graph_restore`, `trash_graphs`, `graph_set_name`, `graph_set_recording`, `graph_key_ids`, `graph_active_key_count` |'),
-    't_r3': ('canonical-sdk-methods.md', '| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `get_provenance_chain`, `provenance`, `belief_timeline`, `restore_point_at` |'),
+    't_r3': ('canonical-sdk-methods.md', '| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `get_provenance_chain`, `provenance`, `belief_timeline`, `get_historical_knowledge` |'),
     't_r5': ('canonical-sdk-methods.md', '| R5 | `explore_connections` | #5 | `expand_relationships`, `traverse`, `get_owned_entities`, `get_org_structure` |'),
     't_r6': ('canonical-sdk-methods.md', '| R6 | `graph_overview` | #6 | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_relations`, `list_topics`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `validate_domain`, `dream_health_check`, `dream_health_state`, `test_guard` |'),
     't_w15': ('canonical-sdk-methods.md', '| W15 | `adjust_relationship` | #21 | `operator_action`, `mitigate_operator`, `annotate_operator` | keep, collapse |'),
@@ -243,7 +243,7 @@ CITATION_REGION_LITERAL: dict[str, str] = {
     'r1_canon': '| R1 | `search_knowledge` | #1 | `tortoise_fts_query`, `suggest_entry_points`, `search_sessions`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` | keep, collapse |',
     'r2': '| `query`, `paginated_query`, `query_points_by_tag` | 3 | → `list_knowledge`. |',
     'r3': '| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` | ~6 | → `check_confidence` for the confidence view; **`recall_subgraph` is dropped, not folded** — `explore_connections` answers that question. The gaps question is flagged in "Named but not solved". |',
-    'r3_canon': '| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `get_provenance_chain`, `provenance`, `belief_timeline`, `restore_point_at` | keep, collapse — absorbs the confidence reads and both provenance methods |',
+    'r3_canon': '| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `get_provenance_chain`, `provenance`, `belief_timeline`, `get_historical_knowledge` | keep, collapse — absorbs the confidence reads and both provenance methods |',
     'r3_context': '| `provenance`, `belief_timeline`, `session_context`, `volunteer_context` | 4 | → `check_confidence` where they are confidence context; `poll_events` where they are a timeline. |',
     'r3_drop_subgraph': '| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` | ~6 | → `check_confidence` for the confidence view; **`recall_subgraph` is dropped, not folded** — `explore_connections` answers that question. The gaps question is flagged in "Named but not solved". |',
     'r3_restore': '| `restore_point_at` | → row 7 **`get_historical_knowledge`**. A **read**, not a write — it returns the version of a claim valid on a date and mutates nothing. |',
@@ -259,7 +259,7 @@ CITATION_REGION_LITERAL: dict[str, str] = {
     'r8': '| `events_poll` | → row 11 `poll_events`. |',
     'r9': "| `list_batch`, `list_batches` | 2 | → `list_knowledge(kind='batch')`. The batch contents come back inline in the bounded, paged page. |",
     't_n2': '| N2 | `graph` | `graph_list`, `graph_count`, `graph_delete`, `graph_restore`, `trash_graphs`, `graph_set_name`, `graph_set_recording`, `graph_key_ids`, `graph_active_key_count` |',
-    't_r3': '| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `get_provenance_chain`, `provenance`, `belief_timeline`, `restore_point_at` | keep, collapse — absorbs the confidence reads and both provenance methods |',
+    't_r3': '| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `get_provenance_chain`, `provenance`, `belief_timeline`, `get_historical_knowledge` | keep, collapse — absorbs the confidence reads and both provenance methods |',
     't_r5': '| R5 | `explore_connections` | #5 | `expand_relationships`, `traverse`, `get_owned_entities`, `get_org_structure` | keep, collapse |',
     't_r6': '| R6 | `graph_overview` | #6 | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_relations`, `list_topics`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `validate_domain`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, collapse — `test_guard` is test infrastructure kept for the safety guard, not a capability |',
     't_w15': '| W15 | `adjust_relationship` | #21 | `operator_action`, `mitigate_operator`, `annotate_operator` | keep, collapse |',
@@ -357,10 +357,11 @@ ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
     'expand_relationships': ('explore_connections', '`beta-sdk-surface.md` — “\\| `traverse`, `expand_relationships`, `get_org_structure` \\| 3 \\| → `explore_connections`. \\|”'),
     'file_decision': ('write_question', '`beta-sdk-surface.md` — “\\| `file_decision` \\| → rows 20/21 **`write_question`** + **`record_decision`**. It was filing a *question* and calling it a decision. \\|”'),
     'file_human_approval': ('record_decision', '`beta-sdk-surface.md` — “\\| `file_human_approval` \\| 1 \\| → `record_decision`. \\|”'),
-    'get_confidence': ('check_confidence', '`canonical-sdk-methods.md` — “\\| R3 \\| `recall_beliefs` \\| #3 \\| `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `get_provenance_chain`, `provenance`, `belief_timeline`, `restore_point_at` \\| keep, collapse — absorbs the confidence reads and both provenance methods \\|”'),
+    'get_confidence': ('check_confidence', '`canonical-sdk-methods.md` — “\\| R3 \\| `recall_beliefs` \\| #3 \\| `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `get_provenance_chain`, `provenance`, `belief_timeline`, `get_historical_knowledge` \\| keep, collapse — absorbs the confidence reads and both provenance methods \\|”'),
     'get_cross_lens_candidates': ('review_link_candidates', '`beta-sdk-surface.md` — “\\| `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` \\| 3 \\| → `review_link_candidates`. \\|”'),
     'get_entity': ('get_entity', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the 26 exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **4** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`) have a prefixed equivalent. So it is **26 of 26 by name**, or **22 of 26** if you normalise the prefix. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
     'get_events': ('get_entity', '`beta-sdk-surface.md` — “\\| narrow readers (`get_session`, `get_events`, `get_owned_entities`, `get_provenance_chain`, …) \\| ~8 \\| → `get_entity`, except where a genuinely different shape is returned. \\|”'),
+    'get_historical_knowledge': ('get_historical_knowledge', '`beta-sdk-surface.md` — “\\| `restore_point_at` \\| → row 7 **`get_historical_knowledge`**. A **read**, not a write — it returns the version of a claim valid on a date and mutates nothing. \\|”'),
     'get_org_structure': ('explore_connections', '`beta-sdk-surface.md` — “\\| `traverse`, `expand_relationships`, `get_org_structure` \\| 3 \\| → `explore_connections`. \\|”'),
     'get_owned_entities': ('get_entity', '`beta-sdk-surface.md` — “\\| narrow readers (`get_session`, `get_events`, `get_owned_entities`, `get_provenance_chain`, …) \\| ~8 \\| → `get_entity`, except where a genuinely different shape is returned. \\|”'),
     'get_point': ('get_entity', '`canonical-sdk-methods.md` — “\\| R4 \\| `get_entity` \\| #4 \\| `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` \\| keep, collapse \\|”'),
@@ -427,9 +428,8 @@ ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
     'reconcile_sessions': ('', '`beta-sdk-surface.md` — “\\| `backfill_v25`, `backfill_sources`, `backfill_about_entities`, `reconcile_sessions` \\| 4 \\| One-shot migrations. Run once, then dead code carrying a public promise. \\|”'),
     'record_calibration': ('', '—'),
     'resolve_id': ('get_entity', '`canonical-sdk-methods.md` — “\\| R4 \\| `get_entity` \\| #4 \\| `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` \\| keep, collapse \\|”'),
-    'restore_point_at': ('get_historical_knowledge', '`beta-sdk-surface.md` — “\\| `restore_point_at` \\| → row 7 **`get_historical_knowledge`**. A **read**, not a write — it returns the version of a claim valid on a date and mutates nothing. \\|”'),
     'retract_point': ('update_knowledge', "`beta-sdk-surface.md` — “\\| `retract_point`, `invalidate_point` \\| 2 \\| → fields on `update_knowledge`. **Zep's shape:** retraction is `invalid_at`/`expired_at` on the existing update, not a separate verb. \\|”"),
-    'retrieval_legs': ('check_confidence', '`canonical-sdk-methods.md` — “\\| R3 \\| `recall_beliefs` \\| #3 \\| `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `get_provenance_chain`, `provenance`, `belief_timeline`, `restore_point_at` \\| keep, collapse — absorbs the confidence reads and both provenance methods \\|”'),
+    'retrieval_legs': ('check_confidence', '`canonical-sdk-methods.md` — “\\| R3 \\| `recall_beliefs` \\| #3 \\| `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `get_provenance_chain`, `provenance`, `belief_timeline`, `get_historical_knowledge` \\| keep, collapse — absorbs the confidence reads and both provenance methods \\|”'),
     'review_connections': ('review_link_candidates', '`beta-sdk-surface.md` — “\\| `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` \\| 3 \\| → `review_link_candidates`. \\|”'),
     'search_sessions': ('search_knowledge', '`beta-sdk-surface.md` — “\\| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` \\| 5 \\| → `search_knowledge`. \\|”'),
     'session_context': ('check_confidence', '`beta-sdk-surface.md` — “\\| `provenance`, `belief_timeline`, `session_context`, `volunteer_context` \\| 4 \\| → `check_confidence` where they are confidence context; `poll_events` where they are a timeline. \\|”'),
@@ -550,6 +550,152 @@ def generator_module():
 
 
 # ─────────────────────────────────────────────────────────────────────
+# THE VOCABULARY GUARD — a malformed declaration must fail LOUD, at its one home
+# (#4722: `basis` was a declared axis the guard did not name, so a `basis`-less file
+# walked past it and died as a bare `KeyError` in the `AXIS_VALUES` comprehension —
+# at import, with no readable message, while the legend renders a `Basis` row from it).
+# ─────────────────────────────────────────────────────────────────────
+def _declared_axes() -> tuple[str, ...]:
+    """The axes the VOCABULARY FILE declares — read here, never from the generator."""
+    return tuple(_vocabulary_doc()["axes"])
+
+
+def _vocabulary_doc() -> dict:
+    """A fresh parse of the real declaration, as the oracle for the tests below."""
+    import yaml
+
+    return yaml.safe_load(
+        (ROOT / "config" / "disposition-vocabulary.yml").read_text(encoding="utf-8")
+    )
+
+
+def _write_vocabulary(tmp_path: Path, doc: dict) -> Path:
+    import yaml
+
+    path = tmp_path / "disposition-vocabulary.yml"
+    path.write_text(yaml.safe_dump(doc), encoding="utf-8")
+    return path
+
+
+# Parametrised over the axes THE FILE declares, not a literal triple: a declared axis is
+# exactly the unit the guard must cover, so a fourth one is checked the moment it is
+# declared. A literal here would pin today's three and re-arm the very omission the
+# reported defect was (`lifecycle`/`visibility` were named while `basis` was not).
+DECLARED_AXES = _declared_axes()
+
+
+@pytest.mark.parametrize("axis", DECLARED_AXES)
+def test_every_declared_axis_without_values_fails_loud(
+    generator_module, monkeypatch, tmp_path: Path, axis: str
+) -> None:
+    """A declared axis with no `values` must raise the guard, naming the axis.
+
+    Reproduced before the fix (#4722): `_load_vocabulary()` returned CLEANLY for a
+    vocabulary with `axes.basis.values` removed, and the failure surfaced one line later
+    as `KeyError: 'values'` in `AXIS_VALUES = {axis: tuple(spec["values"]) …}` — the
+    intended `SystemExit` never fired. The message must name the axis, because the file
+    is the only thing that knows which axis is wrong.
+    """
+    doc = _vocabulary_doc()
+    del doc["axes"][axis]["values"]
+    monkeypatch.setattr(generator_module, "VOCAB_PATH", _write_vocabulary(tmp_path, doc))
+    with pytest.raises(SystemExit) as excinfo:
+        generator_module._load_vocabulary()
+    assert f"`{axis}`" in str(excinfo.value), (
+        f"the guard fired but did not name the axis it rejected: {excinfo.value}"
+    )
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        pytest.param("values-empty", id="axis-values-empty"),
+        pytest.param("axes-not-a-mapping", id="axes-not-a-mapping"),
+        pytest.param("axes-empty", id="axes-empty"),
+        pytest.param("axis-missing", id="axis-missing"),
+        pytest.param("axis-spec-not-a-mapping", id="axis-spec-not-a-mapping"),
+        pytest.param("axis-question-missing", id="axis-question-missing"),
+        pytest.param("delete-values-missing", id="delete-instruction-values-missing"),
+        pytest.param("delete-question-missing", id="delete-instruction-question-missing"),
+        pytest.param("dispositions-empty", id="dispositions-empty"),
+    ],
+)
+def test_a_structurally_malformed_vocabulary_fails_loud(
+    generator_module, monkeypatch, tmp_path: Path, broken: str
+) -> None:
+    """Every block the guard reads must raise `SystemExit`, never a bare exception.
+
+    The reported defect's SHAPE is a guard that skips a block the module then reads, so
+    the neighbouring blocks are checked rather than just the one that was reported: an
+    empty `values` (an empty legend cell and `AXIS_VALUES[axis] == ()` — no crash at
+    all), a non-mapping `axes` or axis spec (an `AttributeError` where the guard should
+    have spoken), `delete_instruction.values` — the `DELETE_VALUES` read one line below
+    `AXIS_VALUES`, with the identical hole — and an empty `dispositions`, where every row
+    would silently fall through to the implicit UNCHANGED/RENAMED pair in `_disposition`
+    and the `—` caveat would render an empty list of unstaked axes.
+
+    Four more cover the blocks `render()` reads BY NAME rather than iterating: an empty
+    `axes` table, an axis the legend renders but the file omits, and a missing `question`
+    on an axis and on `delete_instruction` (render reads both `values` and `question`).
+    Before the fix each of these returned CLEANLY from `_load_vocabulary()` and died as
+    `KeyError: 'lifecycle'` / `'basis'` / `'question'` in `render()` — the identical
+    fail-silently-then-crash shape, one level up from the reported defect.
+    """
+    doc = _vocabulary_doc()
+    if broken == "values-empty":
+        doc["axes"]["basis"]["values"] = {}
+    elif broken == "axes-not-a-mapping":
+        doc["axes"] = list(doc["axes"])
+    elif broken == "axes-empty":
+        doc["axes"] = {}
+    elif broken == "axis-missing":
+        del doc["axes"]["basis"]
+    elif broken == "axis-spec-not-a-mapping":
+        doc["axes"]["basis"] = "stated"
+    elif broken == "axis-question-missing":
+        del doc["axes"]["basis"]["question"]
+    elif broken == "delete-values-missing":
+        del doc["delete_instruction"]["values"]
+    elif broken == "delete-question-missing":
+        del doc["delete_instruction"]["question"]
+    elif broken == "dispositions-empty":
+        doc["dispositions"] = {}
+    else:  # pragma: no cover — a param added without a mutation
+        raise AssertionError(f"no mutation is defined for {broken!r}")
+    monkeypatch.setattr(generator_module, "VOCAB_PATH", _write_vocabulary(tmp_path, doc))
+    with pytest.raises(SystemExit) as excinfo:
+        generator_module._load_vocabulary()
+    assert str(excinfo.value), "the guard exited without a message"
+
+
+def test_every_legend_axis_the_render_reads_is_required(
+    generator_module, monkeypatch, tmp_path: Path
+) -> None:
+    """A legend axis the FILE omits must raise the guard, for every name render reads.
+
+    `LEGEND_AXES` is the tuple `render()` iterates and `_load_vocabulary()` requires, so
+    looping over the module's own tuple keeps the test in step with the renderer: a name
+    added to the legend is checked here without editing this test. The reported defect's
+    shape was a guard that skipped a block the module then reads; the previous guard
+    iterated the file's axes, so removing one was invisible to it until `render()` died
+    as a bare `KeyError`. Reproduced pre-fix: `_load_vocabulary()` returned CLEANLY for
+    `axes` with any legend axis deleted.
+    """
+    assert generator_module.LEGEND_AXES, "the renderer names no axes to check"
+    for axis in generator_module.LEGEND_AXES:
+        doc = _vocabulary_doc()
+        del doc["axes"][axis]
+        monkeypatch.setattr(
+            generator_module, "VOCAB_PATH", _write_vocabulary(tmp_path, doc)
+        )
+        with pytest.raises(SystemExit) as excinfo:
+            generator_module._load_vocabulary()
+        assert axis in str(excinfo.value), (
+            f"the guard did not name the deleted legend axis `{axis}`: {excinfo.value}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────
 # THE GATE — `--check` must be clean, and must RED on drift
 # ─────────────────────────────────────────────────────────────────────
 def test_check_mode_is_clean() -> None:
@@ -653,6 +799,7 @@ TARGETS_LITERAL: dict[str, str] = {
     'get_cross_lens_candidates': 'review_link_candidates',
     'get_entity': 'get_entity',
     'get_events': 'get_entity',
+    'get_historical_knowledge': 'get_historical_knowledge',
     'get_org_structure': 'explore_connections',
     'get_owned_entities': 'get_entity',
     'get_point': 'get_entity',
@@ -719,7 +866,6 @@ TARGETS_LITERAL: dict[str, str] = {
     'reconcile_sessions': '',
     'record_calibration': '',
     'resolve_id': 'get_entity',
-    'restore_point_at': 'get_historical_knowledge',
     'retract_point': 'update_knowledge',
     'retrieval_legs': 'check_confidence',
     'review_connections': 'review_link_candidates',
@@ -807,6 +953,7 @@ AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
     'get_cross_lens_candidates': ('deprecated', 'public', 'stated', 'retain'),
     'get_entity': ('stable', 'public', 'stated', 'retain'),
     'get_events': ('deprecated', 'public', 'stated', 'retain'),
+    'get_historical_knowledge': ('stable', 'public', 'stated', 'retain'),
     'get_org_structure': ('deprecated', 'public', 'stated', 'retain'),
     'get_owned_entities': ('deprecated', 'public', 'stated', 'retain'),
     'get_point': ('deprecated', 'public', 'stated', 'retain'),
@@ -873,7 +1020,6 @@ AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
     'reconcile_sessions': ('removed', 'internal', 'stated', 'delete'),
     'record_calibration': ('—', '—', 'unbacked', '—'),
     'resolve_id': ('deprecated', 'public', 'stated', 'retain'),
-    'restore_point_at': ('deprecated', 'public', 'stated', 'retain'),
     'retract_point': ('deprecated', 'public', 'stated', 'retain'),
     'retrieval_legs': ('deprecated', 'public', 'stated', 'retain'),
     'review_connections': ('deprecated', 'public', 'stated', 'retain'),
@@ -914,7 +1060,7 @@ AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
 C3_TENSIONS_LITERAL = {
     "get_owned_entities": ("get_entity", "explore_connections"),
     "get_provenance_chain": ("get_entity", "check_confidence"),
-    "restore_point_at": ("get_historical_knowledge", "check_confidence"),
+    "get_historical_knowledge": ("get_historical_knowledge", "check_confidence"),
     "list_sources": ("list_knowledge", "graph_overview"),
     "test_guard": ("RELOCATED", "graph_overview"),
     "graph_set_recording": ("update_memory_graph", "kept, inside the control-plane block"),
@@ -942,7 +1088,7 @@ def test_part_c3_tensions_are_read() -> None:
     for name, marker in (
         ("get_owned_entities", r"\| R5 \| `explore_connections`"),
         ("get_provenance_chain", r"\| R3 \| `recall_beliefs`"),
-        ("restore_point_at", r"\| R3 \| `recall_beliefs`"),
+        ("get_historical_knowledge", r"\| R3 \| `recall_beliefs`"),
         ("list_sources", r"\| R6 \| `graph_overview`"),
         ("test_guard", r"\| R6 \| `graph_overview`"),
         ("graph_set_recording", r"\| N2 \| `graph`"),
@@ -1073,9 +1219,9 @@ def test_structural_counts_and_the_summary_sentence_are_read() -> None:
     distinct, no_def, c1_total, exists, non_target = (int(g) for g in m.groups())
     # The summary counts DISTINCT DESTINATIONS; C1 lists METHODS. They differ by the
     # targets that have no `def` but are never a destination (`Tortoise`,
-    # `check_connection`, `create_memory_graph`) — so 32 vs 35 is correct, and the
-    # sentence must say which is which rather than attributing 32 to C1.
-    assert c1_total == 35, f"Part C1 lists {c1_total} Phase-2 methods, expected 35"
+    # `check_connection`, `create_memory_graph`) — so 31 vs 34 is correct, and the
+    # sentence must say which is which rather than attributing 31 to C1.
+    assert c1_total == 34, f"Part C1 lists {c1_total} Phase-2 methods, expected 34"
     assert c1_total == no_def + 3, (
         f"C1's {c1_total} and the summary's {no_def} destinations should differ by exactly "
         f"the 3 never-a-destination targets"
@@ -1084,10 +1230,11 @@ def test_structural_counts_and_the_summary_sentence_are_read() -> None:
         f"the summary's parts ({no_def}+{exists}+{non_target}) do not sum to its "
         f"distinct-destination count ({distinct})"
     )
-    # Each part is pinned, not just the sum. `exists` is now 5, not 2, because an
+    # Each part is pinned, not just the sum. `exists` is now 6, not 2, because an
     # UNCHANGED row's Target is the method's own name (`create_entity`, `get_entity`,
-    # `approve_merge`, `close`, `poll_events`) rather than the old `UNCHANGED` token.
-    assert (distinct, no_def, exists, non_target) == (40, 32, 5, 3), (
+    # `approve_merge`, `close`, `poll_events`, `get_historical_knowledge`) rather than
+    # the old `UNCHANGED` token.
+    assert (distinct, no_def, exists, non_target) == (40, 31, 6, 3), (
         "the destination summary moved: "
         f"{distinct} destinations = {no_def} no-def + {exists} existing + {non_target} other"
     )
@@ -1384,6 +1531,51 @@ def test_the_axes_are_consistent_with_the_declared_vocabulary() -> None:
             assert r["target"] == "", f"{r['name']}: a contested row states no destination"
 
 
+def test_the_em_dash_caveat_states_the_cells_the_declaration_leaves_unstaked() -> None:
+    """The legend's `—` caveat must claim exactly the cells the DECLARATION leaves null.
+
+    The sentence it replaced said a `—` marks "an `unbacked` or `contested` row", and the
+    prose test above pinned it VERBATIM — so the pin held the wording still while the
+    wording contradicted the rendering: `contested` states `basis: contested` and
+    `delete: retain`, so only its `Lifecycle` and `Visibility` cells render `—`. A
+    wording pin cannot catch that, and did not. This derives the unstaked cells from
+    `config/disposition-vocabulary.yml` and requires the rendered claim to name exactly
+    them, so the caveat is checked against the file that decides it rather than against
+    what someone last typed (#4722).
+    """
+    vocab = _vocabulary_doc()
+    # The three axes the legend renders as cells a `—` can occupy. `Basis` is not one:
+    # a row's basis is declared by its disposition or computed from its citation, so it
+    # always carries an evidence value. The clauses below must claim these three axes
+    # and NO others — including not `Basis`, which is the over-statement that was filed.
+    state_axes = ("lifecycle", "visibility", "delete")
+    expected = {
+        spec.get("basis", key.lower()): {
+            a.capitalize() for a in state_axes if spec.get(a) is None
+        }
+        for key, spec in vocab["dispositions"].items()
+    }
+    expected = {name: cells for name, cells in expected.items() if cells}
+    assert expected, (
+        "no disposition leaves an axis unstaked — the caveat describes nothing and this "
+        "check is inert"
+    )
+    claimed = {
+        name: set(re.findall(r"`([A-Za-z_]+)`", cells))
+        for name, cells in re.findall(r"`([a-z_]+)` leaves ([^;(]+)", _doc())
+    }
+    assert claimed == expected, (
+        "the `—` caveat does not match what the declaration leaves unstaked:\n"
+        f"  caveat claims: {claimed}\n  declaration:   {expected}"
+    )
+    assert "`Basis` is never `—`" in _doc(), (
+        "the caveat no longer states that the `Basis` cell never renders `—`"
+    )
+    assert all(r["basis"] != "—" for r in part_a_rows()), (
+        "a row renders `—` in its `Basis` cell — the caveat's claim is now false"
+    )
+
+
 def test_the_axes_are_pinned() -> None:
     """Every row's lifecycle/visibility/basis/delete cells equal the pinned literal.
 
@@ -1454,16 +1646,16 @@ def test_prose_counts_are_the_literals_the_doc_claims() -> None:
     for pattern in (
         r"(?<![\d])150 public methods",
         r"(?<![\d])40 target methods",
-        r"(?<![\d])116 of the 150 are renames",
-        r"\*\*5\*\* are already targets \(unchanged\)",
+        r"(?<![\d])115 of the 150 are renames",
+        r"\*\*6\*\* are already targets \(unchanged\)",
         r"\*\*25\*\* are discarded with a rationale \(lifecycle `removed` · "
         r"visibility `internal` · delete `delete`\)",
         r"\*\*0\*\* are live but \*\*unlisted\*\* \(visibility `unlisted` — NOT deleted\)",
         r"\*\*1\*\* is \*\*relocated\*\* out of the product SDK \(visibility `internal`\)",
         r"\*\*0\*\* are \*\*contested\*\* \(the docs name conflicting destinations\)",
         r"\*\*3\*\* have no destination",
-        r"only \*\*5\*\* of them exist on `TortoiseSDK` today",
-        r"\*\*35\*\* are Phase 2 work",
+        r"only \*\*6\*\* of them exist on `TortoiseSDK` today",
+        r"\*\*34\*\* are Phase 2 work",
     ):
         assert re.search(pattern, text), f"the headline no longer says {pattern!r}"
 
@@ -1484,8 +1676,8 @@ def test_the_unread_cells_and_the_row_ordinals_are_pinned() -> None:
         f"Part A's row ordinals are {ordinals[:5]}…{ordinals[-2:]}, expected 1..150"
     )
     c1 = text.split("### C1")[1].split("### C2")[0]
-    assert c1.count("| no `def` on `TortoiseSDK` today |") == 35, (
-        "C1's status column no longer repeats its one true statement on all 35 rows"
+    assert c1.count("| no `def` on `TortoiseSDK` today |") == 34, (
+        "C1's status column no longer repeats its one true statement on all 34 rows"
     )
     c4 = text.split("### C4")[1].split("### C5")[0]
     for name, referent in (
@@ -1503,9 +1695,9 @@ def test_the_unread_cells_and_the_row_ordinals_are_pinned() -> None:
 
     rows = part_a_rows()
     # The old flat enum is gone: a row is now classified by its AXES, so these counts are
-    # read off lifecycle/visibility/delete rather than a single token. The five UNCHANGED
+    # read off lifecycle/visibility/delete rather than a single token. The six UNCHANGED
     # rows carry their own name as the target (they are already on the target surface).
-    assert sum(1 for r in rows if r["target"] == r["name"]) == 5
+    assert sum(1 for r in rows if r["target"] == r["name"]) == 6
     assert sum(1 for r in rows if r["lifecycle"] == "removed"
                and r["delete"] == "delete") == 25
     assert sum(1 for r in rows if r["visibility"] == "unlisted") == 0
@@ -1619,7 +1811,7 @@ def test_part_c1_lists_exactly_the_targets_with_no_def() -> None:
     Expected values are recomputed here from the beta doc + a fresh AST walk.
     """
     expected = set(targets_independently()) - set(public_methods_independently())
-    assert len(expected) == 35
+    assert len(expected) == 34
     listed = set(_first_column(_section("C1 — target methods with no `def` on `TortoiseSDK`")))
     assert listed == expected, (
         "Part C1 does not list exactly the target methods with no `def`.\n"
@@ -1716,7 +1908,7 @@ def test_load_bearing_mappings_are_literal() -> None:
         "tortoise_fts_query": "search_knowledge",
         "close": "close",
         # Rows where the two docs disagree, or a capricious rewrite is easy.
-        "restore_point_at": "get_historical_knowledge",
+        "get_historical_knowledge": "get_historical_knowledge",
         "list_sources": "list_knowledge",
         "test_guard": "",
         "recall_subgraph": "",
@@ -2340,7 +2532,7 @@ def test_legend_structural_prose_and_reproduce_block_are_read() -> None:
         "“not on the public surface” and “DELETE this” at once, so one word carried a "
         "visibility fact and a delete COMMAND. Now the visibility is `internal` **and** "
         "the delete instruction is `delete`, each in its own cell. A `—` in an axis cell "
-        "means the doc states nothing for that axis (an `unbacked` or `contested` row)."
+        "means the declared disposition leaves that axis unstaked:"
     ) in doc, "the axes-independence rationale changed or was dropped"
     assert (
         "`Target` names the destination method; `—` means no destination is stated."

@@ -146,6 +146,7 @@ _RESOURCE_LOG_RE = re.compile(r"Failed to load resource")
 
 # ── Lazy playwright import — bare collection must never error. ─────────────
 from playwright.sync_api import Page, expect  # noqa: E402
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError  # noqa: E402
 
 # ── Tortoise-host check contract (cycle-4 P2-1). ───────────────────────────
 TORTISE_HOST_CHECK = os.environ.get("TORTISE_HOST_CHECK") == "1"
@@ -218,7 +219,7 @@ PRIVACY_DRAFT = DRAFTS_DIR / "2026-08-08-657-privacy-draft.md"
 
 LEGAL_PAGES = ("/privacy", "/tos", "/license", "/dpa", "/security")
 FOOTER_LINK_HREFS = ("/privacy", "/tos", "/license", "/dpa", "/security")
-PRODUCT_ROOT_MARKER = "Memory that makes your agents"
+PRODUCT_ROOT_MARKER = "Agent memory that"
 PRODUCT_ROOT_MARKER_LOWER = PRODUCT_ROOT_MARKER.lower()
 FOOTER_SELECTOR = "footer, .legal-footer, .footer"
 # The ABSOLUTE canonical Pricing Page URL (reviewer P2): the relative
@@ -454,10 +455,22 @@ def _goto(page: Page, url: str, status: int = 200) -> str:
     stale edge response is not a defect — the external-crawl check below retries for
     the same reason. Without this, the two unconditional production assertions added
     for #3950 could redden the post-deploy job on a blip (review finding, #3962).
+
+    A transient navigation TIMEOUT is retried the same way. `page.goto` raises
+    `TimeoutError` before it can report a status, so the status retry below never
+    saw the flake that reddened `test_company_root_links_to_the_blog` in #8384
+    (the same SHA passed on the prior run); the helper's contract is "one retry
+    on a transient failure", and a hang is one.
     """
-    resp = page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-    if resp is None or resp.status != status:
+    try:
         resp = page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+    except PlaywrightTimeoutError:
+        resp = None
+    if resp is None or resp.status != status:
+        try:
+            resp = page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        except PlaywrightTimeoutError:
+            resp = None
     assert resp is not None, f"{url} produced no response"
     assert resp.status == status, f"{url} returned {resp.status} (expected {status})"
     return page.content()
@@ -756,7 +769,7 @@ def test_company_host_legal_pages_redirect_to_tortoise(page: Page) -> None:
     #4054.
 
     TORTOISE_ONLY (docs, FAQ, security, self-hosted, the 5 legal pages,
-    aviso-privacidad, signin, design-partners-intro) is canonical on
+    aviso-privacidad, signin, design-partners-intro, investors) is canonical on
     tortoise.premiselabs.co.
     APP_ONLY (auth, signup, welcome, invite-accept) moved to the APP origin —
     the BFF and the three pages it serves live in the `tortoise-dashboard`
@@ -774,7 +787,7 @@ def test_company_host_legal_pages_redirect_to_tortoise(page: Page) -> None:
     prod_company = urlsplit(BASE_URL).hostname == "premiselabs.co"
     tortoise_only = ("/docs", "/faq", "/security", "/self-hosted", "/privacy",
                      "/tos", "/license", "/dpa", "/aviso-privacidad", "/signin",
-                     "/design-partners-intro")
+                     "/design-partners-intro", "/investors")
     app_only = ("/auth", "/signup", "/welcome", "/invite-accept")
 
     for path in tortoise_only + app_only:

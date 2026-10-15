@@ -124,11 +124,20 @@ def graph():
         g.query("CALL db.idx.fulltext.createNodeIndex('Object', 'name')")
     # Object vector index — production creates one for Point only, so this is
     # the leg's index path; a failure degrades to brute-force, which is fine.
+    # ⛔ Keep this statement BALANCED: the trailing literal is NOT an f-string,
+    # so it needs ONE closing brace. It carried TWO (`'cosine'}}`) until
+    # 2026-10-12, which the engine rejects (`Invalid input '}'` on 4.20.6;
+    # `query with more than one statement is not supported` on 6.0.x) and
+    # `suppress` hid — so the Object vector index was NEVER created here. On
+    # 4.20.6 that was masked by the scan fallback (`queryNodes` RAISES); on
+    # 6.0.x `queryNodes` returns an EMPTY result instead of raising, so no
+    # fallback fired and the three vector-leg tests below failed with an empty
+    # set (measured: 4.20.6 green / 6.0.2 four red).
     with contextlib.suppress(Exception):
         g.query(
             "CREATE VECTOR INDEX FOR (o:Object) ON (o.embedding) "
             f"OPTIONS {{dimension: {EMBEDDING_DIM}, "
-            "similarityFunction: 'cosine'}}")
+            "similarityFunction: 'cosine'}")
     for st in [*sorted(CANONICAL_OBJECT_TERMINAL), "live"]:
         g.query(
             "CREATE (o:Object {id:$id, name:$name, status:$st, "

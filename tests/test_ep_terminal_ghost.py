@@ -571,8 +571,11 @@ def test_superseded_rebuild_decay_parity(sup_2490):
     resurrect — the PointSuperseded fold decays the re-stamped node."""
     _, events, sdk = sup_2490
     a = sdk.create_point(
-        "statement", "measured old A", status="live",
-        ep_alpha=10.0, ep_beta=1.0, baseline_set=True)["id"]
+        "statement", "measured old A", status="live")["id"]
+    # #6151 review round 6 P1: the belief quartet is server-managed and refused
+    # through `create_point(**props)`. An explicit measured prior is set through
+    # the dedicated writer, exactly as a caller must.
+    sdk.set_point_baseline(a, 10.0, 1.0)
     succ = sdk.create_point("statement", "successor A'", status="live")["id"]
     sdk.supersede_point(a, succ)
     pre = ep_store(sdk, a)
@@ -596,8 +599,8 @@ def test_retracted_rebuild_decay_parity(sup_2490):
     rebuild replay (retract fold-decay must not go untested)."""
     _, events, sdk = sup_2490
     a = sdk.create_point(
-        "statement", "measured retract A", status="live",
-        ep_alpha=10.0, ep_beta=1.0, baseline_set=True)["id"]
+        "statement", "measured retract A", status="live")["id"]
+    sdk.set_point_baseline(a, 10.0, 1.0)  # dedicated writer (#6151 round 6 P1)
     sdk.retract_point(a)
     pre = ep_store(sdk, a)
     assert pre["posterior_alpha"] == 1.0 and pre["confidence"] == 0.5

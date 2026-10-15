@@ -96,6 +96,9 @@ FLY_TOML = _fixture("fly.toml", _FLY_TOML)
 REAL_MANIFEST = REPO_ROOT / ".github" / "scripts" / "fly-managed-secrets.txt"
 REAL_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-hosted.yml"
 REAL_FLY_TOML = REPO_ROOT / "fly.toml"
+#: The orientation table an operator reads before §2's rotation recipes. Its
+#: GitHub Actions column is a CLAIM about the manifest's `gh-secret:` names.
+REAL_RUNBOOK = REPO_ROOT / "docs" / "infra-runbook.md"
 
 
 def _secrets_file(names: list[str], name: str) -> Path:
@@ -113,6 +116,78 @@ def _declared_gh_names(manifest: Path) -> set[str]:
         if len(parts) == 2 and parts[1].startswith("gh-secret:"):
             names.add(parts[1].split(":", 1)[1])
     return names
+
+
+def _manifest_sources(manifest: Path) -> dict[str, str]:
+    """`{Fly variable: source token}` for every declaration in the manifest.
+
+    The Fly NAME is the key (not the `gh-secret:<GH_NAME>` payload): a doc row
+    names the Fly variable, and for `GITHUB_CLIENT_ID ← gh-secret:GH_CLIENT_ID`
+    the two differ — keying on the payload would silently skip that row.
+    """
+    sources: dict[str, str] = {}
+    for line in manifest.read_text().splitlines():
+        parts = line.split("#", 1)[0].split()
+        if len(parts) == 2:
+            sources[parts[0]] = parts[1]
+    return sources
+
+
+#: A Secrets Matrix row: `| NAME | tortoise-y4mjjq | FalkorDB Cloud | GitHub |`.
+_SECRETS_MATRIX_ROW_RE = re.compile(
+    r"^\|\s*([A-Z][A-Z0-9_]*)\s*\|([^|]*)\|([^|]*)\|([^|]*)\|\s*$",
+    re.MULTILINE,
+)
+
+#: A Secrets Matrix GitHub Actions cell declares a GitHub home only when it
+#: carries the matrix's home marker (`✅`). Everything else — the em dash, ASCII
+#: `-`, `n/a`, `none`, an empty cell, or the dash with a trailing note — tells an
+#: operator the same thing as `—` does, and for a `gh-secret:` name that is
+#: false. Requiring the POSITIVE marker is fail-closed: the earlier `"—" in
+#: github` substring test let every other no-home spelling slip through (#8614
+#: review, P2), and an unrecognised cell now reds instead of passing by
+#: omission. Pinned by
+#: `test_the_secrets_matrix_guard_rejects_every_no_home_spelling`.
+_GITHUB_HOME_MARKER = "✅"
+
+
+def _declares_github_home(github_cell: str) -> bool:
+    """True when a Secrets Matrix GitHub Actions cell names a GitHub home."""
+    return _GITHUB_HOME_MARKER in github_cell
+
+#: A `fly secrets set <NAME>=<value>` whose value is a COMMAND SUBSTITUTION.
+#: For a `gh-secret:` name that value cannot be the GitHub secret's (it did not
+#: exist when the line ran), so the next deploy re-stages GitHub's value over it.
+#: Only `$(…)` is matched — `fly secrets set NAME="$NEW"` (a value first written
+#: to GitHub) is the correct shape and must not trip this.
+#:
+#: The COMMAND is matched in every equivalent spelling the runbook itself uses:
+#: `fly` and `flyctl` (`docs/infra-runbook.md` documents the deploy's own call as
+#: `flyctl secrets set --stage … --app tortoise-y4mjjq`), and any flags between
+#: `set` and the assignment (`--stage`, `-a <app>`, …). The earlier
+#: `set\s+([A-Z…])=` anchor crossed neither, so `flyctl secrets set NAME=$(…)`
+#: and `fly secrets set --stage NAME=$(…)` both passed the guard named for them
+#: (#8614 review, P2 — the silent-revert class). The widening is itself pinned by
+#: `test_the_fly_minted_guard_rejects_every_equivalent_spelling`.
+_INLINE_GENERATED_SECRET_RE = re.compile(
+    r"\bfly(?:ctl)?\s+secrets\s+set\b[^\n]*?([A-Z][A-Z0-9_]*)\s*=\s*\"?\$\("
+)
+
+
+def _secrets_matrix_rows() -> list[tuple[str, str, str, str]]:
+    """(name, fly, falkordb, github) for the runbook's Secrets Matrix rows.
+
+    Scoped to the section, so a table elsewhere in the 2k-line runbook cannot
+    satisfy (or fail) this test by accident.
+    """
+    text = REAL_RUNBOOK.read_text()
+    section = text.split("## Secrets Matrix", 1)
+    assert len(section) == 2, "docs/infra-runbook.md has no `## Secrets Matrix` section"
+    body = section[1].split("\n## ", 1)[0]
+    return [
+        (name, fly.strip(), falkordb.strip(), github.strip())
+        for name, fly, falkordb, github in _SECRETS_MATRIX_ROW_RE.findall(body)
+    ]
 
 
 def _referenced_secret_names(workflow: Path) -> set[str]:
@@ -1989,3 +2064,408 @@ def test_fly_only_ref_hash_is_not_treated_as_a_comment():
         ),
     )
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_secrets_matrix_github_column_agrees_with_the_manifest():
+    """A `gh-secret:` name must not be shown as having NO GitHub home.
+
+    The Secrets Matrix is the orientation table an operator reads before §2's
+    rotation recipes; `.github/scripts/fly-managed-secrets.txt` is the declared
+    inventory the deploy's drift gate enforces. A row whose **GitHub Actions**
+    column reads "—" while the manifest declares `gh-secret:` for that Fly name
+    states the opposite of the gate — and it is not cosmetic: until the #8614
+    review finding, `FASTAPI_INTERNAL_KEY` and `TORTOISE_SECRET_PEPPER` were
+    printed that way, so the Fly-only rotation recipe looked CORRECT for exactly
+    those two names (a Fly-only rotation is silently reverted by the next
+    deploy). `BILLING_FROM_EMAIL` read the same way.
+
+    Derived from the manifest on every run — never from a list maintained here —
+    so a new `gh-secret:` declaration that lands with a no-home GitHub cell
+    fails at review time instead of misleading an operator mid-rotation. The
+    "no home" test is the CELL: a row declares a GitHub home only by carrying
+    the matrix's `✅` marker, so `—`, ASCII `-`, `n/a`, `none`, an empty cell and
+    the dash with a trailing note all red alike (#8614 review, P2 — matching only
+    the em dash let the other spellings merge green).
+    """
+    sources = _manifest_sources(REAL_MANIFEST)
+    gh_names = {n for n, s in sources.items() if s.startswith("gh-secret:")}
+    assert gh_names, "the shipped manifest declares no gh-secret: name — the reader is wrong"
+
+    rows = _secrets_matrix_rows()
+    # Non-vacuity: a parser that found no rows would pass this test forever.
+    assert len(rows) >= 10, f"parsed only {len(rows)} Secrets Matrix rows"
+    seen = {name for name, *_ in rows}
+    # A row DELETED to silence this test must not pass it either.
+    for required in ("FASTAPI_INTERNAL_KEY", "TORTOISE_SECRET_PEPPER"):
+        assert required in seen, f"{required} is missing from the Secrets Matrix"
+
+    offenders = [
+        f"{name}: manifest says {sources[name]!r} but the GitHub Actions column "
+        f"reads {github!r}"
+        for name, _fly, _fdb, github in rows
+        if name in gh_names and not _declares_github_home(github)
+    ]
+    assert not offenders, (
+        "the Secrets Matrix tells an operator these names have no GitHub Actions "
+        "home, while the manifest declares them `gh-secret:` (and §2 rotates them "
+        "GitHub-first):\n  " + "\n  ".join(offenders)
+    )
+
+
+def _runbook_with_matrix_github_cell(name: str, cell: str) -> str:
+    """The runbook with `name`'s Secrets Matrix GitHub Actions cell set to `cell`.
+
+    Used to prove the matrix guard reds on each no-home spelling; the row is
+    located through the same parser the guard uses, and a missing name raises
+    rather than returning an unmutated runbook (which would make the probe
+    vacuous).
+    """
+    lines = REAL_RUNBOOK.read_text().splitlines()
+    for i, line in enumerate(lines):
+        row = _SECRETS_MATRIX_ROW_RE.match(line)
+        if row and row.group(1) == name:
+            lines[i] = (
+                f"| {name} | {row.group(2).strip()} | {row.group(3).strip()} | {cell} |"
+            )
+            return "\n".join(lines)
+    raise AssertionError(f"{name} is not in the Secrets Matrix — the probe is stale")
+
+
+def test_the_secrets_matrix_guard_rejects_every_no_home_spelling(monkeypatch):
+    """The widened "no GitHub home" test must red on every equivalent spelling.
+
+    #8614 review (P2): the guard matched only the em dash, so a `gh-secret:` row
+    whose GitHub Actions column read ASCII `-`, `n/a`, `none` or nothing said
+    the same false thing and merged green. This pins the widening end-to-end —
+    the real guard, run against the runbook with that one cell changed — so
+    going back to a substring/regex test reds here. The same run asserts a real
+    GitHub home (`✅`) does NOT red, so the cell test cannot be satisfied by
+    flagging every row.
+    """
+    module = sys.modules[__name__]
+    for index, cell in enumerate(
+        ("—", "-", "–", "n/a", "N/A", "none", "", "— (not managed)")
+    ):
+        fixture = _fixture(
+            f"runbook-matrix-{index}.md",
+            _runbook_with_matrix_github_cell("FASTAPI_INTERNAL_KEY", cell),
+        )
+        monkeypatch.setattr(module, "REAL_RUNBOOK", fixture)
+        try:
+            test_secrets_matrix_github_column_agrees_with_the_manifest()
+        except AssertionError:
+            continue
+        raise AssertionError(
+            f"a `gh-secret:` row whose GitHub Actions column reads {cell!r} was "
+            "not caught — the offender still merges green (#8614 review, P2)"
+        )
+    # Control: the real shape (`✅`) is a GitHub home, not an offence.
+    control = _fixture(
+        "runbook-matrix-home.md",
+        _runbook_with_matrix_github_cell("FASTAPI_INTERNAL_KEY", "✅"),
+    )
+    monkeypatch.setattr(module, "REAL_RUNBOOK", control)
+    test_secrets_matrix_github_column_agrees_with_the_manifest()
+
+
+def _fly_minted_offenders(runbook_text: str, gh_names: set[str]) -> list[str]:
+    """Runbook lines that set a `gh-secret:` name on Fly from a value minted there.
+
+    Factored out of the guard so the recipe matcher can be pinned against every
+    equivalent spelling (`fly`/`flyctl`, flags before the assignment) and against
+    the correct shape, which must stay unflagged.
+    """
+    offenders = []
+    for lineno, line in enumerate(runbook_text.splitlines(), 1):
+        match = _INLINE_GENERATED_SECRET_RE.search(line)
+        if match and match.group(1) in gh_names:
+            offenders.append(f"line {lineno}: {line.strip()}")
+    return offenders
+
+
+def test_no_gh_secret_name_is_given_a_value_generated_only_on_fly():
+    """A `gh-secret:` name must never be set on Fly from a value minted there.
+
+    Any spelling of `fly secrets set NAME=$(openssl rand -hex 32)` — `flyctl`,
+    flags before the assignment — writes a value only Fly holds: the GitHub
+    secret is not touched, and the next `deploy-hosted` run re-stages GitHub's
+    value over it — a rotation that silently reverts. This was the #8614 review
+    finding in BOTH places it occurs (§1's provisioning block and §2's rotation
+    recipes), so the two are bound together here rather than corrected one at a
+    time. The runbook's own deploy command is the `flyctl secrets set --stage …`
+    spelling, so the recipe matcher accepts it (see
+    `test_the_fly_minted_guard_rejects_every_equivalent_spelling`).
+
+    Only names the manifest declares `gh-secret:` are checked — the premise is
+    the manifest, never a list maintained in this test — and a name with another
+    declared source is a different contract (§8.3), so it is out of scope by
+    construction.
+    """
+    sources = _manifest_sources(REAL_MANIFEST)
+    gh_names = {n for n, s in sources.items() if s.startswith("gh-secret:")}
+    assert gh_names, "the shipped manifest declares no gh-secret: name — the reader is wrong"
+
+    offenders = _fly_minted_offenders(REAL_RUNBOOK.read_text(), gh_names)
+    assert not offenders, (
+        "these lines give a `gh-secret:` name a value that exists only on Fly — the "
+        "GitHub secret is not updated, so the next deploy reverts the rotation:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_the_fly_minted_guard_rejects_every_equivalent_spelling(monkeypatch):
+    """The runbook recipe matcher must red on every equivalent spelling.
+
+    #8614 review (P2): the pattern anchored the name immediately after
+    `fly secrets set`, so `flyctl secrets set NAME=$(…)` and
+    `fly secrets set --stage NAME=$(…)` — the very defect the guard is named for,
+    in spellings the runbook itself uses (`flyctl secrets set --stage …` is
+    documented as the deploy's own command) — both passed. This runs the real
+    guard against the real runbook with each recipe appended, and asserts the
+    correct shape (`NAME="$NEW"`, the value written to GitHub first by the `NEW=…`
+    line §2 teaches) is NOT flagged, so a matcher widened into a false positive
+    fails here too.
+    """
+    sources = _manifest_sources(REAL_MANIFEST)
+    gh_names = {n for n, s in sources.items() if s.startswith("gh-secret:")}
+    assert gh_names, "the shipped manifest declares no gh-secret: name — the reader is wrong"
+    name = "FASTAPI_INTERNAL_KEY"
+    assert name in gh_names, f"{name} is no longer a gh-secret: name — the probe is stale"
+
+    runbook = REAL_RUNBOOK.read_text()
+    module = sys.modules[__name__]
+    for spelling in (
+        f"fly secrets set {name}=$(openssl rand -hex 32) -a tortoise-y4mjjq",
+        f"flyctl secrets set {name}=$(openssl rand -hex 32) -a tortoise-y4mjjq",
+        f"fly secrets set --stage {name}=$(openssl rand -hex 32) -a tortoise-y4mjjq",
+        f"flyctl secrets set --stage {name}=$(openssl rand -hex 32) -a tortoise-y4mjjq",
+    ):
+        fixture = _fixture("runbook-fly-minted.md", runbook + "\n" + spelling + "\n")
+        monkeypatch.setattr(module, "REAL_RUNBOOK", fixture)
+        try:
+            test_no_gh_secret_name_is_given_a_value_generated_only_on_fly()
+        except AssertionError:
+            continue
+        raise AssertionError(
+            f"this spelling sets a `gh-secret:` name on Fly from a value minted "
+            f"there but the guard does not match it — the silent revert it exists "
+            f"to catch merges green (#8614 review, P2): {spelling!r}"
+        )
+
+    # Control: the correct recipe (§2's `NEW=…` then `NAME="$NEW"`) must pass.
+    correct = runbook + f'\nfly secrets set {name}="$NEW" --stage -a tortoise-y4mjjq\n'
+    monkeypatch.setattr(module, "REAL_RUNBOOK", _fixture("runbook-correct.md", correct))
+    test_no_gh_secret_name_is_given_a_value_generated_only_on_fly()
+
+
+def _runbook_workflow_scope_paragraph() -> str:
+    """The §2 paragraph that scopes which names GitHub manages.
+
+    Anchored on its opening sentence, not a line number, so the guard keeps
+    reading the same paragraph as the runbook grows around it.
+    """
+    text = REAL_RUNBOOK.read_text()
+    start = text.index("The scope is the `gh-secret:` token")
+    end = text.index("**One value, two homes", start)
+    return text[start:end]
+
+
+#: An assignment into the secrets-set payload: `ARGS+=(<NAME>=…`.
+_WORKFLOW_ARG_ASSIGN_RE = re.compile(r"ARGS\+=\(([A-Z][A-Z0-9_]*)=")
+
+
+def _workflow_arg_staging(workflow: Path) -> dict[str, str]:
+    """Classify every ARGS staging in the deploy as `unconditional`/`guarded`.
+
+    A name is UNCONDITIONAL when every path through the `Set all app secrets on
+    Fly.io` step assigns it into `ARGS` (so the next deploy always re-stages
+    it), and GUARDED when some run leaves it out — `BACKUP_SWEEP_ENABLED` is
+    assigned only inside the all-backup-secrets conjunction, so an incomplete
+    secret set skips the assignment and Fly keeps whatever value was there.
+
+    Derived from the workflow's own shell (its `if`/`else` structure and any
+    `&& ARGS+=(…)` inline guard), never from a list kept here, so §2's
+    "re-staged on every run" claim is bound to what the deploy does (#8614
+    review).
+    """
+    frames: list[dict] = []
+    by_id: dict[int, dict] = {}
+    #: name -> one list of enclosing-frame ids per assignment site
+    sites: dict[str, list[list[int]]] = {}
+    for line in workflow.read_text().splitlines():
+        stripped = line.strip()
+        if stripped == "fi":
+            if frames:
+                frames.pop()
+            continue
+        if re.match(r"^(else|elif)\b", stripped):
+            if frames:
+                frames[-1]["branch"] = "else"
+            continue
+        if re.match(r"^if\b", stripped) and re.search(r";\s*then\s*$", stripped):
+            frame = {"branch": "then", "branches": {"then": set(), "else": set()}}
+            frames.append(frame)
+            by_id[id(frame)] = frame
+            continue
+        match = _WORKFLOW_ARG_ASSIGN_RE.search(line)
+        if not match:
+            continue
+        name = match.group(1)
+        inline_guarded = "&&" in line[: match.start()]
+        ids = []
+        for frame in frames:
+            frame["branches"][frame["branch"]].add(name)
+            ids.append(id(frame))
+        sites.setdefault(name, []).append(ids)
+        if inline_guarded:
+            sites[name].append([-1])  # sentinel: inline `&&` guard, never unconditional
+    staging: dict[str, str] = {}
+    for name, id_lists in sites.items():
+        guarded = any(
+            fid == -1
+            or name not in by_id[fid]["branches"]["then"]
+            or name not in by_id[fid]["branches"]["else"]
+            for ids in id_lists
+            for fid in ids
+        )
+        staging[name] = "guarded" if guarded else "unconditional"
+    return staging
+
+
+def test_workflow_names_with_a_github_override_are_not_called_secretless():
+    """§2 must not deny the GitHub secret a `workflow` name actually has.
+
+    The round-2 scoping paragraph replaced "every secret on Fly is managed from
+    GitHub" with per-token statements — but ended with "None of them has a
+    GitHub Actions secret to update", which is the same false universal for the
+    `workflow` token: the manifest's own comment above
+    `TORTOISE_SESSION_LLM_MODEL` (the only `workflow` name with a GitHub
+    counterpart) says "a GitHub secret may still override it",
+    `deploy-hosted.yml` reads exactly such a secret, and §4.6 of this same
+    document documents that override. Derived from the manifest + the real
+    workflow, never from a list kept here, so a future `workflow` name the
+    deploy reads from `secrets.X` fails this at review time instead of
+    misleading an operator (#8614 review).
+
+    The same paragraph must not deny that re-staging either: the head under
+    review said "none is re-staged the way a `gh-secret:` name is", which the
+    deploy contradicts for the very name the paragraph is about — it assigns
+    `TORTOISE_SESSION_LLM_MODEL` into the same `flyctl secrets set --stage`
+    payload every `gh-secret:` name rides, so an operator would read a Fly-side
+    change to it as surviving when the next deploy reverts it (the #4126
+    confusion in the opposite direction).
+    """
+    sources = _manifest_sources(REAL_MANIFEST)
+    workflow_names = {n for n, s in sources.items() if s == "workflow"}
+    assert workflow_names, (
+        "the shipped manifest declares no `workflow` name — the reader is wrong"
+    )
+    workflow_text = REAL_WORKFLOW.read_text()
+    overridden = {
+        n for n in workflow_names if re.search(rf"secrets\.{re.escape(n)}\b", workflow_text)
+    }
+    assert overridden, (
+        "no `workflow` name is read from a GitHub secret in deploy-hosted.yml — "
+        "the manifest reader or this rule is stale, so the guard would pass vacuously"
+    )
+
+    para = _runbook_workflow_scope_paragraph()
+    for name in sorted(overridden):
+        assert name in para, (
+            f"§2 tells an operator the `workflow` names have no GitHub secret, but "
+            f"`{name}` is read from `secrets.{name}` by the deploy — name the override "
+            f"(or drop the absolute) so the two statements cannot be read as alternatives"
+        )
+    assert "None of them has a GitHub Actions secret to update" not in para, (
+        "the §2 scope paragraph asserts no `workflow` name has a GitHub Actions "
+        f"secret to update, while the manifest + deploy define one for {sorted(overridden)} "
+        "(#8614 review)"
+    )
+
+    # The deploy RE-STAGES a `workflow` name when it assigns it into the
+    # secrets-set payload — the same `flyctl secrets set --stage "${ARGS[@]}"` a
+    # `gh-secret:` name rides. So §2 must not tell an operator a Fly-only value
+    # for one of those names survives. Derived from the workflow (both branches
+    # of the model conditional use the same `ARGS+=(<NAME>=` shape), so a name
+    # that stops being re-staged drops out instead of making this vacuous.
+    restaged = {
+        n for n in overridden if re.search(rf"ARGS\+=\({re.escape(n)}=", workflow_text)
+    }
+    assert restaged, (
+        "no overridden `workflow` name is assigned into the secrets-set payload — "
+        "the workflow reader is stale, so this half of the guard would pass vacuously"
+    )
+    assert "none is re-staged the way a `gh-secret:` name is" not in para, (
+        "the §2 scope paragraph says no `workflow` name is re-staged the way a "
+        f"`gh-secret:` name is, but the deploy assigns {sorted(restaged)} into the "
+        "same `flyctl secrets set --stage` payload — a Fly-only value for one of "
+        "them is reverted by the next deploy exactly like a `gh-secret:` one "
+        "(#8614 review)"
+    )
+    sentences = re.split(r"(?<=\.)\s+", para)
+    for name in sorted(restaged):
+        assert any(name in s and "re-stag" in s for s in sentences), (
+            f"the §2 scope paragraph does not say `{name}` is re-staged by the "
+            "deploy — an operator reading it would believe a Fly-only value for "
+            "that name survives when the next deploy overwrites it (#8614 review)"
+        )
+
+
+def test_workflow_names_whose_staging_is_conditional_are_not_called_unconditional():
+    """§2 must not claim a conditionally-staged `workflow` name is re-staged.
+
+    The round-4 text said the deploy "still re-stages them on every run", and
+    closed with "a Fly-only value set for a `workflow` name is reverted by the
+    next deploy exactly like a `gh-secret:` one". That is false for
+    `BACKUP_SWEEP_ENABLED`, a `workflow` name the same sentence enumerates: the
+    deploy assigns it only inside the all-backup-secrets conjunction, so an
+    incomplete secret set skips the assignment and Fly keeps the old value
+    (fail-closed, #4259 review / `docs/durability-posture.md`). Derived from
+    the workflow, so the claim is bound to the deploy and this guard fails
+    closed if no `workflow` name is guarded any more (#8614 review).
+    """
+    sources = _manifest_sources(REAL_MANIFEST)
+    workflow_names = {n for n, s in sources.items() if s == "workflow"}
+    assert workflow_names, (
+        "the shipped manifest declares no `workflow` name — the reader is wrong"
+    )
+    staging = _workflow_arg_staging(REAL_WORKFLOW)
+    staged = {n for n in workflow_names if n in staging}
+    assert staged, (
+        "no `workflow` name is assigned into the secrets-set payload — the "
+        "workflow reader is stale, so this guard would pass vacuously"
+    )
+    guarded = {n for n in staged if staging[n] == "guarded"}
+    unconditional = staged - guarded
+    assert guarded, (
+        "no `workflow` name is staged only inside a guard — the workflow reader "
+        "is stale, so the conditional-staging clause §2 must carry would pass "
+        "vacuously"
+    )
+    assert unconditional, (
+        "no `workflow` name is staged unconditionally — the workflow reader is "
+        "stale, so the unconditional half of §2 would pass vacuously"
+    )
+
+    para = _runbook_workflow_scope_paragraph()
+    sentences = re.split(r"(?<=\.)\s+", para)
+    for name in sorted(guarded):
+        touched = [s for s in sentences if name in s]
+        assert touched, (
+            f"§2 does not mention the conditionally-staged `workflow` name `{name}` — "
+            "an operator cannot tell that its staging rule differs (#8614 review)"
+        )
+        assert not any(
+            re.search(r"every run|exactly like a `gh-secret:`", s) for s in touched
+        ), (
+            f"§2 claims `{name}` is re-staged on every run / reverted exactly like "
+            "a `gh-secret:` one, but the deploy assigns it only inside a guard and "
+            "otherwise leaves the Fly value untouched (#8614 review)"
+        )
+        assert any(
+            re.search(r"only when|only if|otherwise|unless", s) for s in touched
+        ), (
+            f"§2 names `{name}` but does not state its staging condition — an "
+            "operator would read a Fly-only value for it as reverted when the "
+            "deploy actually leaves it as-is (#8614 review)"
+        )

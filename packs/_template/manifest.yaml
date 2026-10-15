@@ -53,7 +53,7 @@ ontology:
   # Map keyed by pack-local kind name. Keys must be declared in one of this
   # pack's *Kinds lists (or be a core kind this pack's chains reference, e.g.
   # `workflow`). All fields optional. Allowed keys: description, synonyms,
-  # examples, nearMisses, extractable, storeAs, enforcement.
+  # examples, nearMisses, extractable, storeAs, enforcement, statuses, folds.
   #   - description:  one line of what the kind IS (this is prompt material)
   #   - synonyms:     normalized aliases — deterministic near-miss catch
   #   - examples:     concrete instance examples for the classifier
@@ -71,15 +71,30 @@ ontology:
   #                   entity; eventKinds → event) — review P2, PR #978
   #   - enforcement:  warn|retry|block — overrides the pack-wide default
   # Example:
-  #   kindDefs:
-  #     concept:
-  #       description: "A reusable idea the domain cares about"
-  #       synonyms: ["notion"]
-  #       examples: ["..."]
-  #       nearMisses: [otherKind]
-  #       extractable: true
-  #       storeAs: entity
-  #       enforcement: retry
+  #     kindDefs:
+  #       concept:
+  #         description: "A reusable idea the domain cares about"
+  #         synonyms: ["notion"]
+  #         examples: ["..."]
+  #         nearMisses: [otherKind]
+  #         extractable: true
+  #         storeAs: entity
+  #         enforcement: retry
+  #         # #2729 per-kind state lifecycle: the kind's closed status
+  #         # vocabulary, plus the event kinds THAT THIS PACK declares which
+  #         # fold the status. Only a kind listed in this pack's
+  #         # `objectKinds` may declare these keys (the fold dispatches on
+  #         # the namespaced kind, and a core/non-Object kind has none).
+  #         # A kind with `statuses` owns its Object state:
+  #         # the built-in connector fold no longer applies to it.
+  #         statuses: [draft, active, retired]
+  #         folds:
+  #           - event: otherKindApproved   # bare or self-ns (`mydomain:...`);
+  #             # must be an event kind THIS pack declares, and one fold per
+  #             # event per kind (a duplicate event is a validation error —
+  #             # `otherKindApproved` and `mydomain:otherKindApproved` are
+  #             # the same event, and case variants too)
+  #             status: active           # must be one of `statuses`
   kindDefs: {}
 
   # ── memory_granularity (epic #1891 #1931) ──────────────────────────────
@@ -230,12 +245,24 @@ extraction:
 #                      ⚠️ NOTE — per-kind surface forms ALREADY have a home the
 #                      classifier reads: `ontology.kindDefs.<kind>.synonyms`
 #                      and `.examples`, which compile_kind_index_spec renders
-#                      into the classification surface. Nothing reads
-#                      `entityCues` yet. Until a consumer migrates, declaring
-#                      this block ALONE does not reach the classifier — put the
-#                      forms in kindDefs.synonyms/examples.
+#                      into the classification surface.
+#                      ⛔ `entityCues` deliberately has NO consumer (#4894)
+#                      and is NOT waiting for one: per-kind forms already have
+#                      a READ home above, so rendering this block as well would
+#                      create the second source of truth for one value that
+#                      #4894's own review warns about. Declaring `entityCues`
+#                      alone does not reach the classifier — put the forms in
+#                      kindDefs.synonyms/examples. (The slot is kept — #1026's
+#                      ruling — so a manifest declaring it still validates and
+#                      round-trips rather than being refused as unknown.)
 #   relationTemplates: pack-typical edge shapes, so the extractor recognizes
 #                      the domain's IMPL/NAND phrasings.
+#                      ⛔ Deliberately NO consumer (#4894), for the same
+#                      reason: a predicate + mechanism pair is ALREADY declared
+#                      and READ in `ontology.relations` (whose write-path
+#                      verdict is enforced — #2766), so a second declared
+#                      spelling of the same pair would be a second source of
+#                      truth. It validates and round-trips; it does not render.
 #                        predicate:        the domain verb
 #                        mechanism:        IMPL | NAND — the same pair
 #                                          `ontology.relations` accepts.
@@ -249,19 +276,24 @@ extraction:
 #                      looks like in this domain. It judges utterances and never
 #                      removes an artefact.
 #                      ⚠️ This is the STRUCTURED form of a decision the pack may
-#                      already declare as `ontology.memory_granularity`, and
-#                      **memory_granularity is the one that is actually read**:
-#                      extractor_v2 renders it into the S1 prompt. Note
-#                      value_gate.py itself reads NO pack manifest — it is a
-#                      stdlib-only leaf whose identifier rules keep their policy
-#                      provenance declared elsewhere: issue/PR numbers and commit
-#                      hashes by the dev pack's memory_granularity, paths and ids
-#                      by extractor_v2's landed #2453 clause. Nothing reads
-#                      `valueGate` yet, so declaring this block ALONE changes
-#                      nothing — set memory_granularity as well.
+#                      already declare as `ontology.memory_granularity`
+#                      (the same policy in prose). Both are READ (§ #4894):
+#                      extractor_v2 renders `memory_granularity` into the S1
+#                      prompt and these hints into the S1/S2/S4 value-brief
+#                      slot (`_granularity_text` / `_s2s4_rules` via the brief's
+#                      reserved `pack_hints` section), so keep/drop reach the
+#                      mapper. That is their ONLY consumer by design — nothing
+#                      turns a hint into a rule (see the ⛔ above). Note
+#                      value_gate.py reads NO pack manifest — it is a
+#                      stdlib-only leaf whose identifier
+#                      rules keep their policy provenance declared elsewhere:
+#                      issue/PR numbers and commit hashes by the dev pack's
+#                      memory_granularity, paths and ids by extractor_v2's
+#                      landed #2453 clause — so a hint can never remove an
+#                      artefact at mint, and does not need to.
 #   promptFragments:   ["..."] — pack-authored instruction snippets DECLARED
-#                      for the value brief. NOTE: no consumer reads the v3.1
-#                      slots yet — they validate and normalize, nothing more.
+#                      for the value brief, and rendered there (§ #4894) into
+#                      the same S1/S2/S4 slot as the `valueGate` hints.
 #                      Capped on BOTH words and characters: ~120 words / 480
 #                      chars each, ~600 words / 2400 chars in total. The word
 #                      count is a proxy, not a tokenizer, which is why the

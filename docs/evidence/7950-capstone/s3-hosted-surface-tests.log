@@ -1,0 +1,12 @@
+timeout func_only: False
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 6 items
+
+tests/test_residency_marker.py::TestHostedSearchRoute::test_both_fields_are_absent_by_default PASSED [ 16%]
+tests/test_residency_marker.py::TestHostedSearchRoute::test_the_residency_field_rides_the_response_when_enabled PASSED [ 33%]
+tests/test_residency_marker.py::TestHostedSearchRoute::test_the_status_flag_alone_does_not_emit_the_marker PASSED [ 50%]
+tests/test_residency_marker.py::TestHostedSearchRoute::test_a_down_store_still_names_the_impairment_with_only_residency_on PASSED [ 66%]
+tests/test_residency_marker.py::TestHostedSearchRoute::test_the_down_store_impairment_is_absent_when_both_flags_are_off PASSED [ 83%]
+tests/test_residency_marker.py::TestHostedSearchRoute::test_both_fields_ride_when_both_flags_are_on PASSED [100%]
+
+============================== 6 passed in 5.10s ===============================

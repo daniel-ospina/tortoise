@@ -233,6 +233,17 @@ SHARED_MODULES = (
     # select `core` only, and a break it induced in an api/eval/ep test would
     # never run on the PR that made it (#1349/#3332/#3910 under-selection class).
     "tests/_signal_hygiene.py",
+    # #7357: the canonical-store guard (`tests/_canonical_store_guard.py`) is
+    # imported at conftest MODULE level and REFUSES THE SESSION for any surface
+    # whose `TORTOISE_DB_URI` targets the fleet's map instance (loopback
+    # port 16379). Same class as `_verdict.py` / `_signal_hygiene.py` above and
+    # enforced by
+    # `tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`:
+    # not a `test_*.py` file, so the manifest never classifies it — without this
+    # entry a change to the guard would select `core` only, and a break it
+    # induced in an api/eval/ep session would never run on the PR that made it
+    # (#1349/#3332/#3910 under-selection class).
+    "tests/_canonical_store_guard.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",
@@ -358,10 +369,50 @@ SOURCE_PATTERNS = {
                    "website/functions/blog/_shared/meta-contract.ts",
                    "website/functions/blog/_shared/seo-constraints.ts",
                    "website/functions/blog/_shared/seo-keywords.ts",
+                   # #8293: the keyword split moved the DATA to `keywords.ts` and
+                   # the shared agent-key check + limiter to `agent-auth.ts`.
+                   # `agent-auth.ts` is now the single copy of a security
+                   # primitive that `posts/[[path]].ts` executes and that
+                   # `test_blog_agent_delete_guard.py` drives; `keywords.ts` is
+                   # the file a keyword-research pass edits. Without these
+                   # entries a lone edit to either selects NO surface
+                   # (surfaces=[], full=False) and the guard never runs on the
+                   # change it exists to catch — the #1349/#3332 silent-drop
+                   # class the sibling entries above close. Named as individual
+                   # files, not a glob: `select()` matches with `startswith`.
+                   "website/functions/blog/_shared/agent-auth.ts",
+                   "website/functions/blog/_shared/keywords.ts",
                    "website/functions/blog/_shared/slug.ts",
                    "website/functions/contact/submit.ts",
                    "website/website_architecture.md",
                    "docs/auth-architecture.md",
+                   # #3329: `test_capacity_page.py` pins the public capacity page and
+                   # derives its write-concurrency figure from
+                   # `tests/test_embedded_concurrency.py`'s own coverage. `docs/` is in
+                   # NON_PYTHON_PREFIXES and is not itself a pattern, so without this
+                   # CONCRETE entry a `docs/capacity.md`-only edit selects NO surface and
+                   # the guard is asleep on the one change it exists to catch (exactly
+                   # the requirement #3329 states: every published number stays bound to
+                   # its source).
+                   "docs/capacity.md",
+                   # #3329: the same guard pins the write-concurrency figure in the
+                   # self-hosted quickstart (and `.env.example`, which falls through to a
+                   # FULL selection). `docs/` is in NON_PYTHON_PREFIXES, so a
+                   # quickstart-only diff would otherwise select NOTHING and leave the
+                   # figure unpinned in the file a self-hoster actually reads.
+                   "docs/quickstart-selfhosted.md",
+                   # #3329: the guard DERIVES the published write-concurrency figure
+                   # from this test file's own loop bound, so a change to it can
+                   # invalidate the prose the guard pins. Without this entry a
+                   # `tests/test_embedded_concurrency.py`-only diff matched only
+                   # the `tests/` -> `core` fallback and did NOT select
+                   # `test_capacity_page.py` — a PR that bumped the coverage to
+                   # six writers and left the docs stale merged green, and the
+                   # drift surfaced only on the post-merge `push` full run (the
+                   # #3442 shape). Same #1349/#3332/#3616 class: the derived
+                   # source needs the same reachability guarantee as the docs it
+                   # feeds (#8492).
+                   "tests/test_embedded_concurrency.py",
                    # #3524: `test_oauth_consent_bridge.py` also pins the two auth
                    # records its subject is specified in — the consent bridge spec
                    # (`docs/engineering/auth/consent-identity-bridge.md`) and the
@@ -376,6 +427,21 @@ SOURCE_PATTERNS = {
                    # `startswith` and has no glob support.
                    "docs/engineering/auth/consent-identity-bridge.md",
                    "docs/ops/auth-email-flows.md",
+                   # #8334 review (P2, Finding 1): `test_csp_plan_doc_consistency.py`
+                   # guards the CSP plan doc's copyable policy blocks. `docs/` is in
+                   # NON_PYTHON_PREFIXES and is not itself a pattern, so without this
+                   # CONCRETE entry (the `docs/auth-architecture.md` shape above) a
+                   # docs-only edit to the plan doc selects NO surface and the guard never
+                   # runs on the only change that can break it — which is exactly what the
+                   # registration comment in `config/ci-surfaces.yml` claimed it did.
+                   "docs/plans/2026-09-22-3525-csp-no-store.md",
+                   # #8379 (finding 2): `test_blog_authoring_doc.py` renders the
+                   # blog authoring contract with a real CommonMark parser. `docs/` is
+                   # in NON_PYTHON_PREFIXES and is not itself a pattern, so without this
+                   # CONCRETE entry a docs-only edit to the contract selects NO surface
+                   # and the guard never runs on the only change that can break it —
+                   # the same silent-drop class as the two docs records above.
+                   "docs/blog-authoring.md",
                    # The guards read the moved Functions themselves — and not only
                    # the gate: `test_admin_return_to.py` reads the gate by exact
                    # path and derives the console's mount path from its directory,
@@ -500,6 +566,13 @@ SOURCE_PATTERNS = {
                    # touching only this page selects no surface and the id guard
                    # never executes on it.
                    "website/design-partners-intro.html",
+                   # The investor one-pager (#8568). Same reasoning as the
+                   # design-partner entry directly above: `noindex`, so it is out
+                   # of the #3950 blog guard's scope — but NOT out of the
+                   # element-id uniqueness guard, whose scope is every served
+                   # document. Without this entry a PR touching only this page
+                   # selects no surface and the id guard never executes on it.
+                   "website/investors.html",
                    # The shared href extractor both blog-guard layers call
                    # (tests/test_website_docs_consistency.py here, and
                    # tests/e2e/test_legal_pages.py in the separate `legal-e2e`
@@ -656,6 +729,13 @@ SOURCE_PATTERNS = {
             # this entry a retrieval_metering.py-only diff matched no pattern,
             # fell through to `core`, and skipped the guard that pins it — the
             # #7076 self-guard class the test below refuses.
+            # #8544: the self-host off-box backup DRIVER. Its guard
+            # (tests/test_selfhost_backup.py) is registered in `api`, and it is
+            # armed from `tortoise/selfhost.py` (already an entry above) — but a
+            # selfhost_backup.py-only diff would otherwise match no pattern and
+            # fall through to `core`, skipping the guard that pins it (the
+            # #2938/#3154/#4367 silent-drop class).
+            "tortoise/selfhost_backup.py",
             "tortoise/retrieval_metering.py",
             "tortoise/transport.py",
             # #2938: EventAPI — the append surface `ingest.py`, `mining.py`,
@@ -860,6 +940,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # as tools/queue_resweep.py above. Pinned by
              # tests/test_ci_selection.py::test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1.
              "tools/install-queue-reconcile-schedule.sh",
+             # PR #8427 review Finding 4: tools/graph_write_repair.py and its
+             # launchd installer own tests/test_graph_write_repair.py (registered
+             # `core`) -- the probe classification that authorises a repair, the
+             # `--quiet` count contract, and the installer's XML escaping /
+             # interval validation / lint-before-move / load verification.
+             # `tools/` is swallowed by NON_PYTHON_PREFIXES and no SOURCE_PATTERNS
+             # entry matches either path, so a tool-only or INSTALLER-only change
+             # selected NO surface and fell back to tier-1 smoke: the guard would
+             # never run on the very change that can weaken it. Same
+             # #1349/#3332/#3616 silent-drop class as the queue-reconcile installer
+             # entry above. Pinned by
+             # tests/test_ci_selection.py::test_graph_write_repair_tool_change_selects_core_not_tier1.
+             "tools/graph_write_repair.py",
+             "tools/install-graph-write-repair-schedule.sh",
              # #3036: oauth.py is pinned by BOTH api-registered tests
              # (test_oauth_mcp.py, test_oauth_token_fault.py, ...) and core
              # (test_control_plane_offload_3498.py), so the SOURCE_PATTERNS
@@ -891,9 +985,86 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # class). Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "supabase/migrations/2026101200000",
-             "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md")
-
-# Paths that are NOT python-relevant (docs/config PRs skip the matrix).
+             # #8263: the FORWARD record migration that adds `status` to
+             # `subject.props`'s refusal. It sorts OUTSIDE the
+             # `2026101200000` prefix above, and `supabase/` is in
+             # NON_PYTHON_PREFIXES, so without its own entry a
+             # forward-migration-only change would select NO surface and the two
+             # readers (`test_record_projection.py`,
+             # `test_record_schema_placement.py`) would not run on the very
+             # change that can drift them — the same #1349/#3332/#3616
+             # silent-drop class as the entry above. Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
+             "supabase/migrations/20261014000001_record_subject_props_no_derived.sql",
+             "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
+             # #8469 review P1: the orchestrator harness's shipped shell scripts
+             # (lane.sh, merged-not-closed.sh, refresh-candidates.sh, orch-loop.sh,
+             # install.sh, selftest.sh) own tests/test_orchestrator_harness.py,
+             # which is `core`-registered. `operations/` is a flat
+             # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches these
+             # scripts, so an `operations/**`-only diff filtered to `changed == []`,
+             # took the docs-only early return, and fell back to tier-1 smoke —
+             # which does NOT contain that file. The registration under `core`
+             # does NOT fix it: a name in a surface's test_files only runs when
+             # that surface is ALREADY selected; it cannot select the surface.
+             # Measured before this entry: `_sel(["operations/orchestrator-harness/
+             # lane.sh"])` -> surfaces=[], test_files=33, harness test absent. This
+             # is the repo's own documented remedy (the #1349/#3332/#3616
+             # silent-drop class), the same shape as tools/queue_resweep.py and
+             # tools/drift-guard.py above. Pinned by
+             # tests/test_ci_selection.py::test_orchestrator_harness_change_selects_core_not_tier1.
+             "operations/orchestrator-harness/",
+             # PR #8594 review P2: the fail-closed dispatcher's review copy
+             # (tools/agent-infra-queue-dispatch.py) owns
+             # tests/test_queue_dispatch_fail_closed.py, and tools/fleet_state.py
+             # owns tests/test_fleet_state.py — BOTH `core`-registered. `tools/` is a
+             # flat NON_PYTHON_PREFIXES entry and neither path matches a
+             # SOURCE_PATTERNS row, so each one's own change came back with
+             # `changed == []`, took the docs-only early return and fell back to
+             # tier-1 smoke: the guards pinning the lane-read fail-closed and the
+             # registry-provenance refusals never ran on the very files that can
+             # weaken them. Same #1349/#3332/#3616 silent-drop class as
+             # tools/queue_resweep.py above. Pinned by
+             # tests/test_ci_selection.py::test_queue_dispatch_and_fleet_state_change_select_core_not_tier1.
+             "tools/agent-infra-queue-dispatch.py",
+             "tools/fleet_state.py",
+             # #7950 / PR #8609 review P1: the capstone end-to-end probe
+             # (docs/evidence/7950-capstone/probes/e2e_chain_probe.py) owns
+             # tests/test_7950_capstone_probe.py, registered `core` — the DB-free
+             # pin asserting the probe's two reconciliation readers map the REAL
+             # property sets (not `{}` placeholders, which make
+             # `field_mismatches` structurally zero). `docs/` is a flat
+             # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches the
+             # probe, so a PROBE-ONLY change came back with `changed == []` and
+             # took the docs-only early return: `select()` returned NO surface
+             # and the pin never ran on the exact file it guards — reverting the
+             # readers to the pre-fix `{}` shape landed with the pin silent (the
+             # #1349/#3332/#3616 silent-drop class, the same shape as the
+             # migrations/placement-doc entries above and
+             # docs/research/1714-solution-converge.md). A SOURCE_PATTERNS entry
+             # could not fix it: `_selection_relevant()` deliberately skips the
+             # `core` surface, and the probe's guard is `core`-registered.
+             # Pinned by
+             # tests/test_ci_selection.py::test_capstone_probe_change_selects_core_not_tier1.
+             "docs/evidence/7950-capstone/probes/",
+             # #4030: `supabase/config.toml` is the committed LOCAL-stack config,
+             # and every env var it resolves by `env(NAME)` substitution must be
+             # declared in `.env.example` — the guard for that pair
+             # (tests/test_env_contract_covers_supabase_config.py) is
+             # `core`-registered. `supabase/` is a flat NON_PYTHON_PREFIXES entry
+             # and the path matches no SOURCE_PATTERNS row, so a CONFIG-ONLY
+             # change came back with `changed == []` and took the docs-only early
+             # return: `select()` returned NO surface and the guard never ran on
+             # the half of the pair it exists to hold (the #1349/#3332/#3616
+             # silent-drop class, the same shape as the migrations/placement-doc
+             # entries above). A SOURCE_PATTERNS entry cannot fix it —
+             # `_selection_relevant()` deliberately skips the `core` surface.
+             # Measured before this entry: `select(["supabase/config.toml"])` ->
+             # surfaces=[], full=False, 40 test files, the guard absent. `core` is
+             # the right surface rather than a cost concern: config.toml is edited
+             # rarely (9 commits ever as of 2026-10-14). Pinned by
+             # tests/test_ci_selection.py::test_supabase_config_change_selects_core_not_tier1.
+             "supabase/config.toml")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
@@ -1667,15 +1838,17 @@ def carve_out_files(manifest: dict) -> set[str]:
 
 
 def on_demand_files(manifest: dict) -> set[str]:
-    """Files that run only from `.github/workflows/evals-on-demand.yml`.
+    """Files excluded from every PRE-MERGE leg — a lane with two runners.
 
-    Excluded from every PRE-MERGE leg (fast halves, slow, carve-out). The
-    accessor exists so `fast_pool`, `push_legs` and `leg_coverage_issues`
-    read the lane through ONE definition: three independent
-    `manifest.get("on_demand", [])` reads are three places for the lane to be
-    half-adopted, and a half-adopted lane is worse than no lane — the file is
-    excluded from the gate and claimed by nothing, so it silently stops
-    running anywhere at all."""
+    Runs from `.github/workflows/evals-on-demand.yml` and (for the perf lane)
+    `.github/workflows/perf-lane.yml`; the callers below only need "this file
+    is in a lane, not on the merge gate", so both runners read through this
+    ONE membership test. The accessor exists so `fast_pool`, `push_legs` and
+    `leg_coverage_issues` read the lane through ONE definition: three
+    independent `manifest.get("on_demand", [])` reads are three places for the
+    lane to be half-adopted, and a half-adopted lane is worse than no lane —
+    the file is excluded from the gate and claimed by nothing, so it silently
+    stops running anywhere at all."""
     # `on_demand:` with NO entries parses to None, not [] — YAML's empty value.
     # `manifest.get("on_demand", [])` returns that None (the key IS present),
     # and `set(None)` raises TypeError, so the guard that exists to NAME an

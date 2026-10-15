@@ -83,6 +83,12 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
+from tortoise.incident_kinds import (
+    KIND_ABUSE_DECISION_FAULT,
+    KIND_ABUSE_ENFORCEMENT_FAULT,
+    KIND_ABUSE_REVIEW_NEEDED,
+)
+
 logger = logging.getLogger(__name__)
 
 EVENT_POINT_CREATE = "point_create"
@@ -257,23 +263,25 @@ def suspended_message() -> str:
 #: incident): ``record_event`` in :meth:`AbuseEngine.record_point_create` (a
 #: recording-leg drop — folding it into ``UNMETERED_INCREMENT`` would break
 #: ``tests/test_metering_window_admission.py::test_mcp_abuse_failure_is_not_
-#: reported_as_a_dropped_increment``), ``_notify`` (the notification leg, and
-#: the sweep-gated sibling of #4778), ``MemoryAbuseStore._durable``, and the
+#: reported_as_a_dropped_increment``), ``_notify`` (the notification leg — after
+#: #4778 it reaches the un-gated ``_incident_alert_store`` seam and is NOT
+#: sweep-gated; the residual is only "no ``DR_ISSUES_PAT``, or an unusable
+#: object store"), ``MemoryAbuseStore._durable``, and the
 #: R3/R8/geo trackers — all different defect classes from "the enforcement
 #: decision could not complete".
 DECISION_FAULT_LANES: dict[str, tuple[str, str]] = {
-    "window_sum": ("ABUSE_DECISION_FAULT", "return_none"),
-    "clean_window_episode_end": ("ABUSE_DECISION_FAULT", "return_none"),
-    "latest_flag_at": ("ABUSE_DECISION_FAULT", "reflag"),
-    "rule_event_between": ("ABUSE_DECISION_FAULT", "continuity_true"),
-    "flag_org": ("ABUSE_ENFORCEMENT_FAULT", "return_flag"),
+    "window_sum": (KIND_ABUSE_DECISION_FAULT, "return_none"),
+    "clean_window_episode_end": (KIND_ABUSE_DECISION_FAULT, "return_none"),
+    "latest_flag_at": (KIND_ABUSE_DECISION_FAULT, "reflag"),
+    "rule_event_between": (KIND_ABUSE_DECISION_FAULT, "continuity_true"),
+    "flag_org": (KIND_ABUSE_ENFORCEMENT_FAULT, "return_flag"),
 }
 
 #: Defensive default only: every lane is declared above, so this is unreachable
 #: in practice and the source-scan fence REDs if an undeclared lane is emitted.
 #: It is NOT a third real kind — an undeclared lane must not silently disappear,
 #: so it reports as the decision kind with ``fallback="unknown"``.
-_UNKNOWN_LANE_KIND = "ABUSE_DECISION_FAULT"
+_UNKNOWN_LANE_KIND = KIND_ABUSE_DECISION_FAULT
 
 #: Traceback-suppression window (seconds) for the fault ERROR record. The
 #: COMPACT record still fires on EVERY occurrence — it is the residual for a
@@ -768,8 +776,11 @@ def _alert_dict(row: dict) -> dict:
         #
         # Round 6: the promise "and will be in touch" was removed. Delivery of
         # the operator signal is BEST-EFFORT — the durable dashboard row is
-        # written first, but the ops notification depends on channel config and
-        # the tracked ops incident is sweep-gated (#4778). A customer-facing
+        # written first, but the ops notification depends on channel config.
+        # #4778 routed the tracked ops incident through the un-gated
+        # `_incident_alert_store` seam, so it is not sweep-gated: it is absent
+        # only when no alert channel can be built at all (no `DR_ISSUES_PAT`,
+        # or an unusable object store). A customer-facing
         # string must not promise a human follow-up the plumbing cannot
         # guarantee; it now states what IS true (nothing was disabled) and
         # leaves the route where the customer can reach us.
@@ -978,7 +989,7 @@ class AbuseEngine:
         # through the durable ``suspended_at`` read (the 403), not through this
         # engine and not through ``mark_suspended`` (see the delta-14 note).
         if self._claim_notify(org_id, rule, EVENT_REVIEW, now, window_s):
-            self._notify("abuse_review_needed", org_id, details)
+            self._notify(KIND_ABUSE_REVIEW_NEEDED, org_id, details)
         return "breach"
 
     def _flag(self, org_id: str, rule: str, details: dict, now: datetime,
@@ -1026,7 +1037,7 @@ class AbuseEngine:
         # as well as a chat notification: an escalation that reaches only the
         # chat channel is invisible to whoever is reading the abuse list.
         # Best-effort, like every other event-record leg.
-        if kind == "abuse_review_needed":
+        if kind == KIND_ABUSE_REVIEW_NEEDED:
             try:
                 self.store.record_event(org_id, EVENT_REVIEW, details=details)
             except Exception:

@@ -6,7 +6,9 @@
 // Kept as a pure derivation so the decision is executable in node tests (no
 // React renderer in this suite).
 // Landed since: the header tier badge + error-banner route (#4331 / #4639),
-// which now share nudgeRoute/headerUpgradeEligible in upsellGate.js.
+// which now share nudgeRoute/headerUpgradeEligible in upsellGate.js — plus
+// #4773's per-tier resolution of the header control itself
+// (headerUpgradeCta).
 
 export const CHECKOUT_UNAVAILABLE_REASON =
   'Card checkout is temporarily unavailable — try again shortly'
@@ -66,6 +68,38 @@ export function nextUpgradeTier(currentTier, priceIds, orderedTiers) {
     if (priceId) return { tier, priceId }
   }
   return null
+}
+
+/**
+ * #4773: the tier the header's upgrade control sells.
+ *
+ * FREE/ANON ONLY — a paid team is suppressed entirely by
+ * `headerUpgradeEligible` (#4639, upsellGate.js) — and pinned to `pro`, the
+ * server's own default checkout tier (`_default_checkout_price_id`: pro
+ * monthly, #310 Task 9 / the #1623 billing plan). Pinning it HERE is what
+ * makes the control honest: the price it opens is looked up FOR THIS TIER in
+ * the server's per-tier map, so the tier the label names and the price id it
+ * posts are the same tier by construction.
+ */
+export const HEADER_UPGRADE_TIER = 'pro'
+
+/**
+ * #4773: the header upgrade control, resolved from the server's PER-TIER map.
+ *
+ * The defect: the control gated on the singular `team.checkout_price_id` — a
+ * field the server fills with whatever its CURRENT default happens to be —
+ * while its label named a different tier. The moment that default is any tier
+ * but the advertised one (or the header offers a per-tier upgrade), the
+ * control opens checkout for the wrong price. Resolving the target tier's OWN
+ * id removes the failure mode: the label and the price cannot disagree,
+ * because only one tier is involved.
+ *
+ * `priceId` is `''` when the deployment does not sell the target tier (a
+ * legitimately partial catalog, #2789 — pro absent); the caller then renders
+ * the plain badge rather than a control with no checkout behind it.
+ */
+export function headerUpgradeCta(team, tier = HEADER_UPGRADE_TIER) {
+  return { tier, priceId: team?.checkout_price_ids?.[tier] || '' }
 }
 
 /**

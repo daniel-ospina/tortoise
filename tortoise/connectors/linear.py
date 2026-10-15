@@ -6,6 +6,7 @@ Requires: LINEAR_API_KEY env var. Zero Python deps outside stdlib.
 from __future__ import annotations  # noqa: I001
 
 import json
+import hashlib
 import logging
 import os
 import urllib.request
@@ -186,12 +187,22 @@ class LinearConnector:
         participants = [assignee.get("email", "")] if assignee.get("email") else []
 
         normalized_state = state.replace(" ", "_").lower()
+        # #8010: the Linear poll already fetches `description`, but the payload
+        # carried only the title (capped at 200), so a description-only edit —
+        # or a title edit past char 200 — left the `:Source` version untouched
+        # and every derived Event read `current` (the false-`current` §4.6
+        # forbids). `textDigest` is the FULL text's hash (title + description),
+        # so the edit is detected and nothing raw is copied (`_EVENT_HANDLED`
+        # keeps it off the node). Full, not a prefix: a prefix would miss every
+        # edit past the bound.
+        full_text = f"{title}\x00{issue.get('description') or ''}"
         return {
             "type": "EventRecorded",
             "eventId": f"linear-issue-{ident}",
             "eventKind": f"linear.issue.{'completed' if ended else normalized_state}",
             "subject": f"issue:linear:{ident}",
             "object": title[:200],
+            "textDigest": hashlib.sha256(full_text.encode("utf-8")).hexdigest(),
             "startedAt": created,
             "endedAt": ended,
             "source": f"linear:{team_key}",

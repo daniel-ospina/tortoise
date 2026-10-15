@@ -14,7 +14,7 @@ issue: 1862
 
 **Findings date:** 2026-08-28
 **Keywords analyzed:** 164 (136 taxonomy-tiered in §4.1–4.12 + 28 value-prop layer in §4.13)
-**Actionable in module:** 147 — `website/functions/blog/_shared/seo-keywords.ts` carries the 147 injection-ready keywords; the 17 excluded are 4 skip terms (extreme competition), 3 T3-watch head terms (agent memory / semantic memory / episodic memory — generic heads better as content topics than meta injection), 1 near-duplicate (agent memory vs rag ⊂ rag vs agent memory), 5 Domain-confidence brand-line phrases (content vocabulary, not search targets), and 4 value-prop content-only terms (behavioral state decay, runtime continuous learning, agents that need less supervision, memory instead of model scale — research/Domain vocabulary that shapes content, not meta).
+**Actionable in module:** 147 — `website/functions/blog/_shared/keywords.ts` carries the 147 injection-ready keywords (`seo-keywords.ts` is the consumer that re-exports it, #8293); the 17 excluded are 4 skip terms (extreme competition), 3 T3-watch head terms (agent memory / semantic memory / episodic memory — generic heads better as content topics than meta injection), 1 near-duplicate (agent memory vs rag ⊂ rag vs agent memory), 5 Domain-confidence brand-line phrases (content vocabulary, not search targets), and 4 value-prop content-only terms (behavioral state decay, runtime continuous learning, agents that need less supervision, memory instead of model scale — research/Domain vocabulary that shapes content, not meta).
 **Data sources:** GSC (tortoise.premiselabs.co — empty, new domain) · SERP analysis (live, 2026-08-28) · domain taxonomy inventory (docs/ONTOLOGY.md, website surfaces, blog epic scope)
 **Methodology port:** ElDato `KEYWORD_RESEARCH_MASTER.md` (2026-07, 1,414 keywords analyzed) — **methodology only, keywords are Tortoise-specific**
 
@@ -430,7 +430,7 @@ Per scoping plan step 7. Run as a fresh-context adversarial pass; findings below
 
 - Seed list built from **ontology + product surfaces only** (§2) — no tourism/marketplace vocabulary by construction.
 - Full keyword corpus grepped for ElDato cluster terms: `riviera maya`, `playa del carmen`, `cenote`, `beach club`, `deals`, `restaurant`, `hotel`, `city names (cancun/tulum/cozumel/puerto aventuras)`, `tulum`, `playa` → **0 matches**.
-- `seo-keywords.ts` module keys = the 12 taxonomy tags above; values verified to contain no marketplace terms.
+- `keywords.ts` module keys = the 12 taxonomy tags above; values verified to contain no marketplace terms.
 
 ---
 
@@ -440,7 +440,7 @@ Per scoping plan step 7. Run as a fresh-context adversarial pass; findings below
 |---|---|---|
 | Master doc | `docs/research/2026-08-28-tortoise-blog-keywords/research.md` (this file) | ✅ |
 | Docs index pointer | `docs/00_index.md` row | ✅ |
-| Machine module | `website/functions/blog/_shared/seo-keywords.ts` (`TagKeywords`, `TAG_KEYWORDS` — actionable arrays only; tiers/evidence live in this doc) | ✅ |
+| Machine module | `website/functions/blog/_shared/keywords.ts` (the DATA; `seo-keywords.ts` re-exports it as the stable import surface, #8293) (`TagKeywords`, `TAG_KEYWORDS` — actionable arrays only; tiers/evidence live in this doc) | ✅ |
 | Contract vs #1861 | module shape matches `import { TAG_KEYWORDS } from "../_shared/seo-keywords"`; content-driven fallback when a tag has no entry (see module docstring) | ✅ |
 
 **Consumed by:** #1861 (keyword injection into generate-seo prompt builder), future content-pipeline automation (deferred epic), blog content strategy.

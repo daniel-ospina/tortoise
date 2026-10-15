@@ -69,6 +69,30 @@ MANIFEST_WIRE_CAP_BYTES = MAX_MANIFEST_BYTES * 6 + 4096
 # Ontology-only v1: tenant uploads must not carry code entrypoints.
 _ONTOLOGY_ONLY_KEYS = ("connectors", "tools")
 
+
+def _tenant_fold_declarations(raw: dict) -> list[str]:
+    """Kind names carrying a #2729 ``statuses``/``folds`` declaration.
+
+    Used by the tenant policy below to REFUSE the declaration on the hosted
+    (graph-native) route, whose fold index never sees it.
+    """
+    ont = raw.get("ontology")
+    if not isinstance(ont, dict):
+        return []
+    kind_defs = ont.get("kindDefs")
+    if not isinstance(kind_defs, dict):
+        return []
+    # `key=str`: a YAML map may carry a non-string key (`1:`), and `sorted()`
+    # over a mixed key set raises `TypeError` — out of a helper that runs
+    # BEFORE the shared validator, so the raise would replace its diagnostic
+    # (and surface as an unhandled error on the tenant upload route). The
+    # shared validator reports the offending key by name.
+    return sorted(
+        (k for k, spec in kind_defs.items()
+         if isinstance(spec, dict) and ("statuses" in spec or "folds" in spec)),
+        key=str,
+    )
+
 # ── Tenant-view memoization (#1154 + #1350) ────────────────────────────────
 # Key: (tenant_identity, pack_config_version) → compiled view. The shared
 # catalog is NOT in the key (it is cached-global read-only, safe to share);
@@ -253,18 +277,21 @@ def validate_manifest(
 
     # Tenant policy (plan §4): reserved namespaces. The starter set is the
     # canonical collision surface (a tenant pack named `dev` would collide
-    # with the starter `dev` PackInstall); ``core`` and
-    # ``memory_granularity`` are reserved because the #2031 tenant-view
-    # compile overlays tenant kinds onto ``compile_value_brief``'s dicts,
-    # where a tenant ``core`` namespace would shadow the canonical core
-    # vocabulary and a ``memory_granularity`` namespace would shadow the
-    # brief's reserved granularity key.
+    # with the starter `dev` PackInstall); ``core`` and the brief's RESERVED
+    # non-kind sections (``value_extractor.RESERVED_BRIEF_KEYS`` —
+    # ``memory_granularity``, ``pack_hints``) are reserved because the #2031
+    # tenant-view compile overlays tenant kinds onto
+    # ``compile_value_brief``'s dicts, where a tenant ``core`` namespace would
+    # shadow the canonical core vocabulary and a namespace named after a
+    # reserved brief section would shadow that section's key. The tuple is
+    # written out rather than imported so this module stays free of the pack
+    # compile (the #4894 test pins the two lists against each other).
     from tortoise.pack_state import DEFAULT_STARTER_PACKS
     if ns in DEFAULT_STARTER_PACKS:
         return ManifestValidation(
             False, namespace=ns,
             errors=[f"namespace '{ns}' is a reserved starter pack — pick a different name"])
-    if ns in ("core", "memory_granularity"):
+    if ns in ("core", "memory_granularity", "pack_hints"):
         return ManifestValidation(
             False, namespace=ns,
             errors=[f"namespace '{ns}' is a reserved namespace — pick a different name"])
@@ -277,6 +304,31 @@ def validate_manifest(
                 errors=[f"connector/tool entrypoints are not allowed on tenant "
                         f"packs (ontology-only v1) — remove '{key}'"])
 
+    # #2729 review P2 — the per-kind status fold is a CATALOG-only surface.
+    # `status_folds.build_status_fold_index` compiles from `PackRegistry.packs`
+    # (the filesystem catalog). A hosted manifest is graph-native: this module
+    # stores it as a `:PackManifest` and `value_extractor.compile_value_brief(
+    # tenant_manifests=...)` compiles it per graph. It never enters a
+    # `PackRegistry`, so a fold declared here would install, mint its kinds,
+    # and then be completely INERT — no fold fires and `status_fold_unapplied`
+    # is unreachable (it only reports folds present in the index). That is the
+    # silent no-op `validate_status_decl` refuses for the core-kind case, and
+    # acceptance is the signal the declaration will work. Refuse it on THIS
+    # route with the limitation named, so a pack author is told rather than
+    # left with a pack that validates and never folds.
+    _fold_decls = _tenant_fold_declarations(raw)
+    if _fold_decls:
+        return ManifestValidation(
+            False, namespace=ns,
+            errors=[
+                f"kindDefs '{k}': 'statuses'/'folds' is not supported on a "
+                f"hosted (graph-native) tenant pack — the fold index is "
+                f"compiled from the process filesystem catalog, which a "
+                f"tenant manifest never enters, so the declaration would "
+                f"install and then be inert. Remove 'statuses'/'folds' from "
+                f"this kind, or install the pack self-hosted under "
+                f"TORTOISE_PACKS_DIR"
+                for k in _fold_decls])
     # Shared validator via temp-dir registry (schema + cross-pack).
     with tempfile.TemporaryDirectory(prefix="tortoise-manifest-") as td:
         td_root = Path(td).resolve()

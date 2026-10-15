@@ -6,14 +6,16 @@ import {
   WIZARD_STEPS, WIZARD_FORK_OPTIONS, BUILD_CATALOG_PLACEHOLDER,
   resolveBuildCatalog, orgNameError, LEGACY_LABELS, forkStepState,
   durableKeyName,
-  wizardStageLabel, wizardStepSub,
+  wizardStageLabel, wizardStepSub, wizardStepAnnouncement,
 } from './wizardFlow.js'
 
-test('EXACTLY 4 human steps in the plan order (org-create → fork → connect → done)', () => {
-  assert.equal(WIZARD_STEPS.length, 4)
+test('#3513: FIVE human steps — data-sources at index 3, done at index 4', () => {
+  assert.equal(WIZARD_STEPS.length, 5)
   assert.deepEqual(WIZARD_STEPS.map((s) => s.id), [
-    'org-create', 'fork', 'connect', 'done',
+    'org-create', 'fork', 'connect', 'data-sources', 'done',
   ])
+  assert.equal(WIZARD_STEPS[3].id, 'data-sources')
+  assert.equal(WIZARD_STEPS[4].id, 'done')
 })
 
 test('every step has a label + sub (renderable)', () => {
@@ -170,13 +172,26 @@ test('#2325 (review P2): labels never exceed the server\'s 64-char clamp, and th
 // above the lede "your agent isn't connected yet" — the headline said the
 // opposite of the state. The overrides are pure logic, so they are unit-tested
 // here instead of pinned by a source grep.
+test('#3513: the sr-only announcement derives its count from WIZARD_STEPS — "of 5", never a literal', () => {
+  assert.equal(wizardStepAnnouncement(0, { hasOrg: false }), 'Step 1 of 5: Create your Organization')
+  assert.equal(wizardStepAnnouncement(3, {}), 'Step 4 of 5: Choose your memory sources')
+  assert.equal(wizardStepAnnouncement(4, { connected: true }), "Step 5 of 5: You're all set")
+  // the announcement and the visible <h1> share one derivation, so they cannot
+  // drift (the #2912 rule); the done-step overrides still apply here.
+  assert.equal(wizardStepAnnouncement(4, { paused: true }), 'Step 5 of 5: Setup paused — no connection observed yet')
+})
+
 test('#2912 + #3428: wizardStageLabel names the stage, with org-holding, paused and not-connected overrides', () => {
-  // the plain case: the step's own label, for every step EXCEPT step 3, whose
-  // own label is a connection CLAIM (asserted separately below).
+  // the plain case: the step's own label, for every step EXCEPT the done step,
+  // whose own label is a connection CLAIM (asserted separately below).
   for (const [i, s] of WIZARD_STEPS.entries()) {
-    if (i === 3) continue
+    if (i === 4) continue
     assert.equal(wizardStageLabel(i), s.label, `step ${i} label`)
   }
+  // #3513: the new data-sources step is a plain step (no override).
+  assert.equal(wizardStageLabel(3), WIZARD_STEPS[3].label)
+  assert.equal(wizardStageLabel(3, { paused: true }), WIZARD_STEPS[3].label,
+    'the paused override is done-step-only and must not leak into data-sources')
   // step 0 on an org-holding account is a read-only summary
   assert.equal(wizardStageLabel(0, { hasOrg: true }), 'Your Organization')
   assert.equal(wizardStageLabel(0, { hasOrg: false }), WIZARD_STEPS[0].label)
@@ -187,7 +202,7 @@ test('#2912 + #3428: wizardStageLabel names the stage, with org-holding, paused 
   // cycle 6 (item 2): the observation phrasing — the categorical "your agent is
   // not connected yet" is false for a captured session, and the body beneath it
   // refuses to assert the absence.
-  assert.equal(wizardStageLabel(3, { paused: true }),
+  assert.equal(wizardStageLabel(4, { paused: true }),
     'Setup paused — no connection observed yet')
   // #3428/#2937 (lane B3): "You're all set" is a harness-connected CLAIM, and
   // the DELETED human writer used to manufacture it from a click. Step 3 may
@@ -199,31 +214,31 @@ test('#2912 + #3428: wizardStageLabel names the stage, with org-holding, paused 
   // wording ("Not connected yet" / "Setup paused — your agent is not connected
   // yet") fails here — pinning one arm while the other over-claims is exactly
   // how the self-fork contradiction survived cycle 5.
-  assert.equal(wizardStageLabel(3), 'No connection observed yet')
-  assert.equal(wizardStageLabel(3, { connected: false }), 'No connection observed yet')
-  assert.equal(wizardStageLabel(3, { connected: true }), "You're all set")
+  assert.equal(wizardStageLabel(4), 'No connection observed yet')
+  assert.equal(wizardStageLabel(4, { connected: false }), 'No connection observed yet')
+  assert.equal(wizardStageLabel(4, { connected: true }), "You're all set")
   // review cycle 4 (item 13) + cycle 6 (item 2): BOTH forks state what was
   // OBSERVED, so the `buildFork` input no longer changes the outcome — it stays
   // in the signature because both call sites pass it (wizardArchived.test.js
   // pins that call shape). MUTATION: reintroducing a fork-specific label in
   // either direction fails the matching assertion below.
-  assert.equal(wizardStageLabel(3, { buildFork: true }), 'No connection observed yet')
-  assert.equal(wizardStageLabel(3, { buildFork: false }), 'No connection observed yet')
+  assert.equal(wizardStageLabel(4, { buildFork: true }), 'No connection observed yet')
+  assert.equal(wizardStageLabel(4, { buildFork: false }), 'No connection observed yet')
   // `connected` outranks every fork/paused arm.
-  assert.equal(wizardStageLabel(3, { buildFork: true, connected: true }), "You're all set")
-  assert.equal(wizardStageLabel(3, { buildFork: true, paused: true }),
+  assert.equal(wizardStageLabel(4, { buildFork: true, connected: true }), "You're all set")
+  assert.equal(wizardStageLabel(4, { buildFork: true, paused: true }),
     'Setup paused — no connection observed yet')
   // the paused arm is fork-INDEPENDENT now (cycle 6 item 2): a self-fork skip
   // reads the same observation, never the categorical sentence.
-  assert.equal(wizardStageLabel(3, { buildFork: false, paused: true }),
+  assert.equal(wizardStageLabel(4, { buildFork: false, paused: true }),
     'Setup paused — no connection observed yet')
   // a server connection OUTRANKS a local skip (#2361 r3): a connected org that
   // pressed Skip must read as connected, never as paused. The two flags must
   // not compose into the false reading.
-  assert.equal(wizardStageLabel(3, { connected: true, paused: true }), "You're all set")
+  assert.equal(wizardStageLabel(4, { connected: true, paused: true }), "You're all set")
   // paused only applies to the done step
   assert.equal(wizardStageLabel(2, { paused: true }), WIZARD_STEPS[2].label)
-  // `connected` is likewise a step-3-only override
+  // `connected` is likewise a done-step-only override
   assert.equal(wizardStageLabel(2, { connected: true }), WIZARD_STEPS[2].label)
   // the three step-2 ledes are distinct — the header says what each fork does
   assert.equal(WIZARD_STEPS[2].sub, 'Pick which harness to connect.')
@@ -231,11 +246,23 @@ test('#2912 + #3428: wizardStageLabel names the stage, with org-holding, paused 
 })
 
 test('#2912 (PR-gate UX): the done-step sub does not repeat the card body verbatim', () => {
-  // the step-3 body ends with "Open Settings → Setup guide to follow what
+  // the done-step body ends with "Open Settings → Setup guide to follow what
   // happens next"; the header sub used to end with the same sentence, so one
   // viewport stated it twice.
-  assert.ok(!/Open Settings/.test(WIZARD_STEPS[3].sub),
+  assert.ok(!/Open Settings/.test(WIZARD_STEPS[4].sub),
     'the Settings pointer belongs to the card body only')
+})
+
+test('#2912/#3513 (PR-gate UX): the data-sources sub does not restate its card body', () => {
+  // The Data-sources body (main.jsx) says "Choose what Tortoise should remember.
+  // Everything here is optional and can be changed any time from Settings →
+  // Memory sources." The header sub must state something else — the guided
+  // action belongs in exactly one of the two.
+  const sub = WIZARD_STEPS[3].sub
+  for (const restated of [/choose/i, /pick/i, /optional/i, /change/i, /any time/i, /Settings/]) {
+    assert.ok(!restated.test(sub),
+      `the data-sources lede restates the card body: ${sub}`)
+  }
 })
 
 // ── #3725: the header lede is a pure decision, executed here ─────────────────
@@ -248,21 +275,21 @@ test('#2912 (PR-gate UX): the done-step sub does not repeat the card body verbat
 // who does the work. `wizardStepSub` returns the string (or null) the header
 // renders, so the contradiction is now observable by EXECUTION rather than by
 // a grep on a render condition.
-test('#3725: the step-3 lede is suppressed on the BUILD fork (its body says keep calling the SDK)', () => {
+test('#3725: the done-step lede is suppressed on the BUILD fork (its body says keep calling the SDK)', () => {
   // the exact regression: build fork + server-observed connection.
-  const buildForkLede = wizardStepSub(3, { connected: true, buildFork: true })
+  const buildForkLede = wizardStepSub(4, { connected: true, buildFork: true })
   assert.equal(buildForkLede, null,
     'the build fork hands over to no agent — its lede must not say one takes over')
   // the assertion the browser shows: no lede string can name an agent there.
   assert.ok(buildForkLede === null || !/agent/i.test(buildForkLede),
     'no "agent" subject may render above the build-fork body')
   // the self fork still renders the step's own sub (the suppression is
-  // fork-scoped, not a blanket delete of the step-3 lede).
-  assert.equal(wizardStepSub(3, { connected: true, buildFork: false }), WIZARD_STEPS[3].sub)
+  // fork-scoped, not a blanket delete of the done-step lede).
+  assert.equal(wizardStepSub(4, { connected: true, buildFork: false }), WIZARD_STEPS[4].sub)
   // and the build fork WITHOUT a connection is suppressed by the connection
   // arm exactly as the self fork is (both are null; the body carries the state).
-  assert.equal(wizardStepSub(3, { connected: false, buildFork: true }), null)
-  assert.equal(wizardStepSub(3, { connected: false, buildFork: false }), null)
+  assert.equal(wizardStepSub(4, { connected: false, buildFork: true }), null)
+  assert.equal(wizardStepSub(4, { connected: false, buildFork: false }), null)
 })
 
 test('#3725: wizardStepSub carries every pre-existing head-lede arm', () => {
@@ -275,14 +302,18 @@ test('#3725: wizardStepSub carries every pre-existing head-lede arm', () => {
   assert.equal(wizardStepSub(0, { hasOrg: false }), WIZARD_STEPS[0].sub)
   // #3428: no observed connection ⇒ no lede, on EITHER fork, and the default
   // is the honest one (a caller that forgets `connected` understates).
-  assert.equal(wizardStepSub(3), null)
-  assert.equal(wizardStepSub(3, { connected: false }), null)
-  assert.equal(wizardStepSub(3, { connected: true }), WIZARD_STEPS[3].sub,
+  assert.equal(wizardStepSub(4), null)
+  assert.equal(wizardStepSub(4, { connected: false }), null)
+  assert.equal(wizardStepSub(4, { connected: true }), WIZARD_STEPS[4].sub,
     'buildFork defaults false — a self-fork caller keeps the step sub')
-  // hasOrg is a step-0-only override; connected/buildFork are step-3-only, so
+  // hasOrg is a step-0-only override; connected/buildFork are done-step-only, so
   // neither leaks into another step's lede (the #2912 leak class).
   assert.equal(wizardStepSub(2, { connected: true, buildFork: true }), WIZARD_STEPS[2].sub)
   assert.equal(wizardStepSub(1, { hasOrg: true }), WIZARD_STEPS[1].sub)
+  // #3513: the data-sources step renders its own sub unconditionally — the
+  // done-step overrides must not reach it.
+  assert.equal(wizardStepSub(3), WIZARD_STEPS[3].sub)
+  assert.equal(wizardStepSub(3, { connected: true, buildFork: true }), WIZARD_STEPS[3].sub)
 })
 
 test('#3725: the build-fork suppression does not leave the step-3 lede empty without a reason', () => {
@@ -292,6 +323,6 @@ test('#3725: the build-fork suppression does not leave the step-3 lede empty wit
   // — whose body closes with "Keep calling the SDK from your app." — is
   // suppressed. Pinned together so a future edit that nulls BOTH (blanking the
   // self-fork header) or NEITHER (restoring the contradiction) reds here.
-  assert.notEqual(wizardStepSub(3, { connected: true, buildFork: false }), null)
-  assert.equal(wizardStepSub(3, { connected: true, buildFork: true }), null)
+  assert.notEqual(wizardStepSub(4, { connected: true, buildFork: false }), null)
+  assert.equal(wizardStepSub(4, { connected: true, buildFork: true }), null)
 })

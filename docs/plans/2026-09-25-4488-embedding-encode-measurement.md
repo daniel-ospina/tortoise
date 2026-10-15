@@ -28,6 +28,7 @@ aboutObjects: "#4488, #5045"
 
 - **Counted:** `EmbeddingModel.encode` reached through `compute_embeddings` — the store-vector funnel used by `sdk.create_point`, the capture turn batch, `api.py`, and `projection/entities.py`.
 - **Excluded, with reason:** `_encode` / `search_points` / `kind_index._DefaultEncoder.encode` pass `show_progress_bar=False`, which `EmbeddingModel.encode` does not accept → `TypeError` → TF-IDF (**#5321**), so they run **no model work** today; `sdk.py:14358` and `fallback_snapshot` are read/query-side. If #5321 is fixed, extending the measurement to those paths is a follow-up (and the same hook design applies).
+  - **CORRECTION (2026-10-13, #5321 investigation) — the reason above is FALSE; kept only as what was believed at scoping time.** `EmbeddingModel.get()` returns the loaded inner `SentenceTransformer` (`ec2c03a60`, #7871, 2026-08-06), NOT the `EmbeddingModel` wrapper whose signature scoping inspected — so `show_progress_bar=False` binds, and `_encode` / `_DefaultEncoder.encode` report `degraded=False` (pinned by `tests/test_5321_embedder_accessor_liveness.py`). Those paths **do** run model work, so the exclusion is a SCOPE choice to be revisited as an extension of this measurement on **#5045** — not a bug waiting to be fixed.
 
 ### Pattern Research
 

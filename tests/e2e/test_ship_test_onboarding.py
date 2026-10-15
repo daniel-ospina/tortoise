@@ -76,6 +76,7 @@ if not os.environ.get("RUN_DASHBOARD_E2E"):
 from tests.e2e.test_dashboard_onboarding import (
     DURABLE_ROW,
     _goto_local_dashboard,
+    _skip_data_sources_to_done,
     _walk_to_connect,
     _wire,
 )
@@ -362,7 +363,9 @@ def test_no_surface_claims_a_connection_before_the_server_observed_one(page: Pag
     # #3232: the walk lands on the default Claude Code leaf, which now renders the
     # restart/verify block — its advance reads "Done — Continue to dashboard".
     page.get_by_role("button", name="Done — Continue to dashboard").click()
-    expect(page.locator("div.done")).to_be_visible(timeout=10_000)
+    # #3513: the connect advance lands on the Data-sources step; take its Skip
+    # to reach done (index 4).
+    _skip_data_sources_to_done(page)
 
     ui = read_connection_surface(page)
     assert ui == NOT_CONNECTED, (
@@ -444,7 +447,9 @@ def test_client_never_asserts_harness_connected_on_the_wire(page: Page) -> None:
     # #3232: same as the negative direction above — the default leaf is Claude
     # Code, whose three-block shape advances with the "Done" label.
     page.get_by_role("button", name="Done — Continue to dashboard").click()
-    expect(page.locator("div.done")).to_be_visible(timeout=10_000)
+    # #3513: the connect advance lands on the Data-sources step; take its Skip
+    # to reach done (index 4).
+    _skip_data_sources_to_done(page)
 
     # POSITIVE CONTROL — the capture channel was live: the fork click wrote a
     # checkpoint. Without this, a silently dead capture would make the negative

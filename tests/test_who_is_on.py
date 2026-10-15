@@ -49,7 +49,19 @@ for a in "$@"; do
 done
 case "$1 $2" in
   "pr list") f="$d/${state:-open}_prs.json" ;;
-  "api --paginate") f="$d/closed_prs.json" ;;
+  "api --paginate")
+    # #8560: the landed surface's TARGETED, PAGINATED timeline query
+    # (`gh api --paginate --slurp repos/<slug>/issues/<N>/timeline?...`). It is
+    # served from its OWN fixture — a slurped ARRAY OF PAGES — so it cannot be
+    # confused with the ADVISORY closed-PR sample (the `api -i` request below).
+    # `GH_STUB_TIMELINE_FAIL=1` makes this the UNQUERYABLE case: the landed
+    # surface is BLOCKING, so the verb must answer INCOMPLETE naming it, never
+    # "nobody".
+    if [ "${GH_STUB_TIMELINE_FAIL:-0}" = "1" ]; then
+      echo "gh-stub: read tcp 127.0.0.1:1->20.26.156.210:443: read: connection reset by peer" >&2
+      exit 1
+    fi
+    f="$d/timeline.json" ;;
   # #5251: the closed-PR surface is ONE bounded request with `-i`, whose own
   # `Link` header supplies the total. `-i` prints the status line and headers,
   # then a blank line, then the body — and the pre-flight REQUIRES that
@@ -115,10 +127,15 @@ class WhoIsOnTest(unittest.TestCase):
         self.gh = self._write_exec(self.gh_dir / "gh", GH_STUB)
         (self.gh_dir / "open_prs.json").write_text("[]")
         (self.gh_dir / "closed_prs.json").write_text("[]")
+        # #8560: one empty timeline page — what `gh api --paginate --slurp`
+        # returns for an issue with no events, so the landed surface reads
+        # CLEAN by default. A test that wants landed evidence overwrites it.
+        (self.gh_dir / "timeline.json").write_text("[[]]")
         (self.gh_dir / "issue.json").write_text(json.dumps({
             "number": ISSUE,
             "title": "florfenicol dosing audit",
             "state": "OPEN",
+            "stateReason": None,
             "url": f"https://example.invalid/issues/{ISSUE}",
             "assignees": [],
             "comments": [],
@@ -195,12 +212,15 @@ class WhoIsOnTest(unittest.TestCase):
     # ── runners ──────────────────────────────────────────────────────────────
 
     def run_tool(self, *args, tool: Path = TOOL, gh: Path | None = None,
-                 git_bin: Path | None = None):
+                 git_bin: Path | None = None, env_extra: dict | None = None):
         cmd = [PYTHON, str(tool), *[str(a) for a in args],
                "--repo", str(self.repo), "--gh", str(gh or self.gh)]
         if git_bin is not None:
             cmd += ["--git", str(git_bin)]
-        proc = subprocess.run(cmd, capture_output=True, text=True, env=self._env(),
+        env = self._env()
+        if env_extra:
+            env.update(env_extra)
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=env,
                               timeout=120)
         return proc.returncode, proc.stdout + proc.stderr
 
@@ -684,6 +704,163 @@ exec {self.gh} "$@"
         # …and the remote half must not assert absence for that unread surface.
         self.assertNotIn("(no remote branch, open/closed PR", out)
         self.assertIn("could NOT be read in full", out)
+
+    # ── #8560: the landed fact, mirrored from the gate ───────────────────────
+
+    def _closed_issue(self, state_reason: str | None = "COMPLETED") -> None:
+        """A CLOSED issue, with its `stateReason` as `gh issue view --json`
+        returns it: `COMPLETED` (the work was done) or `NOT_PLANNED` (declined or
+        superseded). The default is the COMMON case, so a test that wants the
+        not-planned wording opts in (#8560 review)."""
+        (self.gh_dir / "issue.json").write_text(json.dumps({
+            "number": ISSUE,
+            "title": "florfenicol dosing audit",
+            "state": "CLOSED",
+            "stateReason": state_reason,
+            "url": f"https://example.invalid/issues/{ISSUE}",
+            "assignees": [],
+            "comments": [],
+        }))
+
+    def _merged_timeline_pr(self, number: int = 777) -> None:
+        """One slurped page holding a MERGED cross-reference naming #ISSUE."""
+        (self.gh_dir / "timeline.json").write_text(json.dumps([[
+            {
+                "event": "cross-referenced",
+                "source": {"issue": {
+                    "number": number,
+                    "title": f"fix: shipped (#{ISSUE})",
+                    "state": "closed",
+                    "pull_request": {
+                        "url": f"https://api.github.invalid/repos/o/r/pulls/{number}",
+                        "html_url": f"https://github.invalid/o/r/pull/{number}",
+                        "merged_at": "2026-10-05T09:19:18Z",
+                    },
+                }},
+            },
+        ]]))
+
+    def test_a_closed_issue_answers_landed_not_nobody(self):
+        """#8560: a CLOSED issue is not "nobody" — it is DONE. The answering
+        verb must name the same terminal fact the gate refuses on, at rc 0 (the
+        question HAS an answer)."""
+        self._closed_issue()
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("LANDED — the work appears ALREADY SHIPPED", out)
+        self.assertIn("closed as COMPLETED", out)
+        self.assertIn("ANSWER: already landed", out)
+        self.assertNotIn("ANSWER: nobody", out)
+        self.assertNotIn("holder(s) are ALSO present", out)
+
+    def test_the_landed_answer_names_the_issue_state_as_the_only_authority(self):
+        """#8629 review (P2): this verb prints the LANDED contract to a reader
+        deciding whether to dispatch. It used to say the answer could come from
+        "the issue's own state, or a MERGED PR the PAGINATED timeline ties to
+        it" — but #8625 demoted that arm to an ADVISORY, so on any LANDED answer
+        the printed sentence described a source that cannot produce it. The
+        verb's own module docstring made the same claim; both are pinned here so
+        the two cannot drift back apart (the docstrings are the contract, and
+        `_landed_wording` is shared with the gate).
+        """
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "who_is_on_landed_contract", TOOL)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        # ⛔ #8629 review (F5): normalize BEFORE matching. These phrases pin the
+        # docstring's MEANING, but `assertIn("its own\n        state is CLOSED",
+        # …)` pinned an exact line wrap, so a meaning-preserving rewrap turned it
+        # RED — and this repo has already had a commit whose only job was
+        # rewrapping a paragraph (1bbaad59f). Flatten first; assert on phrases.
+        flat_doc = " ".join((mod.__doc__ or "").split())
+        self.assertNotIn("or a MERGED PR the paginated timeline ties to it",
+                         flat_doc)
+        self.assertIn("its own state is CLOSED", flat_doc)
+        self._closed_issue()
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("the issue's OWN STATE, and nothing else", out)
+        self.assertNotIn("or a MERGED PR the", out)
+        self.assertNotIn("PAGINATED timeline ties to it", out)
+
+    def test_a_not_planned_closure_is_not_answered_as_shipped(self):
+        """#8560 review: `NOT_PLANNED` means the issue was DECLINED or
+        SUPERSEDED — the work did not ship. The answer is still terminal (rc 0,
+        not "nobody"), but it must not claim a shipment that never happened."""
+        self._closed_issue(state_reason="NOT_PLANNED")
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("LANDED — the issue was CLOSED AS NOT PLANNED", out)
+        self.assertNotIn("ALREADY SHIPPED", out)
+        self.assertIn("ANSWER: already closed (not planned)", out)
+        self.assertNotIn("ANSWER: nobody", out)
+        self.assertNotIn("do NOT dispatch onto shipped work", out)
+
+    def test_a_closed_issue_with_an_unknown_reason_makes_no_shipment_claim(self):
+        """#8560 review: `CLOSED` with an unavailable / unrecognised
+        `stateReason` is TERMINAL, but the tool did not OBSERVE a shipment.
+        The gate's own `_landed_conclusion` stays neutral for it, and this verb
+        must not re-introduce the claim the gate refuses to make — the tail
+        line and the ANSWER line are part of the same terminal fact (this
+        mirrors the gate's
+        `test_closed_with_an_unknown_reason_makes_no_shipment_claim`)."""
+        self._closed_issue(state_reason=None)
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("LANDED — the work item is TERMINAL (closed)", out)
+        self.assertNotIn("ALREADY SHIPPED", out)
+        # The two extra claim lines the gate does NOT print on this input.
+        self.assertNotIn("do NOT dispatch onto shipped work", out)
+        self.assertIn("do NOT dispatch onto a terminal work item", out)
+        self.assertIn("ANSWER: already closed —", out)
+        self.assertNotIn("ANSWER: already landed", out)
+        self.assertNotIn("(not planned)", out)
+        self.assertNotIn("ANSWER: nobody", out)
+
+    def test_landed_surface_failure_answers_incomplete(self):
+        """The landed surface is BLOCKING: an unqueryable timeline must answer
+        INCOMPLETE (rc 2) naming `issue landed` — never "nobody". The gate's
+        fail-closed posture must hold through this verb too (#8560 review)."""
+        rc, out = self.run_tool(ISSUE, env_extra={"GH_STUB_TIMELINE_FAIL": "1"})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("ANSWER INCOMPLETE", out)
+        self.assertIn("issue landed", out)
+        self.assertNotIn("ANSWER: nobody", out)
+
+    def test_a_merged_timeline_pr_on_an_open_issue_is_an_advisory(self):
+        """#8625: an OPEN issue whose merged PR names it in the title is NOT
+        landed — a reference is not a closure. The verb reports the advisory and
+        still answers "nobody": a merged PR is not a holder either."""
+        self._merged_timeline_pr()
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("[merged PRs naming an OPEN issue]", out)
+        self.assertIn("PR #777", out)
+        self.assertIn("ANSWER: nobody", out)
+        self.assertNotIn("ANSWER: already landed", out)
+
+    def test_landed_with_a_coexisting_holder_names_both(self):
+        """A terminal signal and a live holder CAN coexist. The gate says so
+        explicitly ("ALSO present"); this verb must not deny a holder it just
+        displayed above — the two describe the same input."""
+        self._closed_issue()
+        self.local_branch(f"fix/{ISSUE}-strand")
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ANSWER: already landed", out)
+        self.assertIn("holder(s) are ALSO present", out)
+
+    def test_landed_with_an_unreadable_blocking_surface_still_answers_incomplete(self):
+        """A landed fact does not license an INCOMPLETE answer to read as
+        complete: when a non-advisory surface could not be read, the verb stays
+        rc 2 and says the landed fact is ALSO present."""
+        self._closed_issue()
+        (self.gh_dir / "open_prs.json").write_text("{not json")
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("ANSWER INCOMPLETE", out)
+        self.assertIn("ALSO reported as LANDED", out)
 
     def test_wrapper_runs_the_same_verb(self):
         self.local_branch(f"fix/{ISSUE}-strand")

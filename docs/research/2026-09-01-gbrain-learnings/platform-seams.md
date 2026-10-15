@@ -30,8 +30,12 @@ have no shell-hook surface: their seam is an in-process plugin/extension, so
 framing does not apply to them. Each row below states its own mechanism; do
 not infer one from this diagram.
 
+For a harness whose per-turn surface is a native PLUGIN rather than a shell
+command (Hermes, #2121), the callback invokes the same `tortoise volunteer`
+CLI directly — the arrow on the left is the only part that differs.
+
 Install (agent-first onboarding, #2123/#2124 mandate): `tortoise install
-<harness>` for codex / claude / cline / devin / pi / openclaw / cursor. Everything else
+<harness>` for codex / claude / cline / devin / cursor / hermes / pi / openclaw. Everything else
 in this matrix is the documented manual registration.
 
 One shape note for reading the table: `codex`, `claude` and `devin` are all
@@ -54,7 +58,7 @@ warns when a claude registration would make the reflex fire twice per turn.
 | #2119 | Pi (pi-coding-agent) | session lifecycle only (no per-turn prompt hook in the extension API today) | `~/.pi/agent/extensions/` TS extension | n/a — per-turn injection not reachable via extension API | MCP pull + session-start digest (existing) + documented limitation |
 | #2122 | Cursor | `sessionStart` → `additional_context`; per-turn `beforeSubmitPrompt` is observe/block ONLY | `~/.cursor/hooks.json` (flat script entries, absolute command; project `.cursor/hooks.json` is workspace-trust-gated) | `{"additional_context": …}` (snake_case) on `sessionStart` | **shipped** — `tortoise install cursor` registers the `sessionStart` cold-context hook (contract v4) *plus* the `sessionEnd` capture hook; per-turn push stays Cursor-blocked (watch item) |
 | #2120 | OpenClaw | **native plugin** — per-turn hook `before_prompt_build` → `{prependContext}` (in-process; OpenClaw has NO shell-hook surface) | `~/.openclaw/extensions/tortoise/` (plugin dir; `openclaw.plugin.json` + entry `index.mjs`) → `before_prompt_build`; capture via the `llm_output` hook → `$OPENCLAW_STATE_DIR/tortoise/turns/<session>.jsonl` (one file per session) → `tortoise sessions import --harness openclaw <file>` | `PluginHookBeforePromptBuildResult.prependContext` | **shipped** — `tortoise install openclaw` writes the plugin + `plugins.entries.tortoise.enabled`; injection graded by `tortoise/openclaw-plugin/index.test.mjs`, install by `tests/test_openclaw_seam.py` |
-| #2121 | Hermes | `pre_llm_call` (agents-hub) | `.agents.yml` actions | tool-result text = the block | hook output mapping documented; parser entry added |
+| #2121 | Hermes | `pre_llm_call` (directory plugin: `register(ctx)` + `ctx.register_hook`) | `<dir>/.hermes/plugins/tortoise-volunteer/` (`plugin.yaml` + `__init__.py`, written by `tortoise install hermes`) | the callback RETURNS `{"context": "<block>"}`, injected into the current turn's user message | written by `install hermes`, but **INERT until two opt-ins** (`HERMES_ENABLE_PROJECT_PLUGINS=1` + `hermes plugins enable tortoise-volunteer`) — the installer prints both; ingestion: `tortoise sessions import --harness hermes --file <state.db>` (reads `$HERMES_HOME/state.db` read-only) |
 | #2124* | Gemini CLI / OpenCode / other Claude-hooks-compatibles | `UserPromptSubmit`/equivalent | harness-specific | harness-specific | shared script's default emits the bare block (harmless where unsupported) |
 | #2125 | Frameworks (SDK-level middleware: Google ADK / LangGraph / Semantic Kernel) | ADK `before_model_callback`; LangGraph pre-model node; SK Prompt Render Filter | project code imports `tortoise/framework.py` and registers the returned hook | the reflex `block` appended to the prompt (ADK: request instructions; LangGraph: one appended message; SK: `rendered_prompt` prefix) | shipped, **opt-in** — `tortoise/framework.py` + the `#2125` seam grade |
 
@@ -112,6 +116,66 @@ Two further findings from the same pass:
    `tortoise_ask` absent. The why-contract on those three is graded by
    `tests/test_w4_why_enrichment.py` (the #2101 successor).
 
+### #2121 Hermes — corrected contract (2026-10-11, primary source)
+
+The wave-1 row above previously read "`pre_llm_call` (agents-hub) /
+`.agents.yml` actions / tool-result text = the block / hook output mapping
+documented; **parser entry added**". Two claims in it were wrong and are
+corrected here:
+
+1. **No parser entry existed.** A fleet-wide search for a Hermes parser
+   returned nothing (`git log --all -S"parse_hermes"` is empty; no
+   `hermes` reference in `tortoise/` or `tests/` outside unrelated
+   fixtures), so the status was aspirational, not shipped. The parser
+   (`tortoise/session_import/parsers.py::parse_hermes`) and the
+   `--harness hermes` CLI choice land with #2121.
+2. **`.agents.yml` actions is not a Hermes surface.** Code search across
+   `NousResearch/hermes-agent` returns 0 hits for `agents.yml` /
+   `agents-hub`; the injection surface is the `pre_llm_call` PLUGIN hook,
+   which is REGISTERED FROM PYTHON, not from a YAML action, and whose
+   RETURN VALUE (not a tool result) carries the block:
+   * `website/docs/developer-guide/plugins/index.md` §"`pre_llm_call`
+     context injection" — "Per-hook context is capped at `10,000`
+     characters by default. Anything above the cap is written to
+     `$HERMES_HOME/hook_outputs/<session_id>/<uuid>.txt`";
+   * `plugins/AGENTS.md` — general plugins live in `plugins/<name>/`,
+     `~/.hermes/plugins/`, `./.hermes/plugins/`; `register(ctx)` registers
+     `pre_llm_call`;
+   * `agent/turn_context.py::_collect_pre_llm_call_context` — the callback's
+     `{"context": ...}` (or string) is appended to the CURRENT turn's user
+     message; a raising callback is caught and logged (fail-open);
+   * `hermes_state.py` — `DEFAULT_DB_PATH = get_hermes_home() / "state.db"`,
+     and `hermes_state_common.py` carries the `sessions` / `messages` DDL
+     the parser reads (live transcript = `messages.active = 1`, ordered by
+     `id`, which the store itself uses — `timestamp` is not monotonic).
+
+Because Hermes' read seam is a Python plugin rather than a shell command,
+the seam does NOT add a `hermes` arm to `volunteer-turn.sh` (that would be
+dead code) — the plugin invokes the SAME `tortoise volunteer` CLI the shell
+hook does, with the harness `session_id` passed through for the reflex's
+cross-turn re-mention suppression. Ingestion rides `tortoise sessions import`
+as the wave-1 note on #2121 prescribes (no hook-driven live capture).
+
+**Activation is TWO opt-ins, and the installer names both (correction
+2026-10-12).** A `tortoise install hermes` write is not by itself a live
+seam, because Hermes gates plugin loading twice
+(`hermes_cli/plugins_discovery.py` @ main): project plugins under
+`./.hermes/plugins/` are scanned only when `HERMES_ENABLE_PROJECT_PLUGINS`
+is enabled (disabled by default), and a non-bundled manifest is loaded only
+when its key is in `plugins.enabled` (`gate_manifest` — "not enabled in
+config (run `hermes plugins enable <lookup_key>` to activate)"; upstream
+docs: "plugins are opt-in"). So the install prints the two required steps
+(`HERMES_ENABLE_PROJECT_PLUGINS=1` and
+`hermes plugins enable tortoise-volunteer`), and the plugin writes the same
+`capture-errors/<harness>-install.json` (`kind: install-inert`) breadcrumb the
+shipped shell hooks write when its reflex cannot resolve — an inert install
+must leave evidence, never read as a working seam (#4314). Caveat
+(2026-10-13): unlike the shell seams, whose `session-start.sh` renders the
+record, a capture-less Python plugin has **no automated reader** — `session
+verify` enumerates `capture_install.CAPTURE_SEAM` (no `hermes` arm) and the
+Python renderer owns only `capture-failure`; the record is operator-inspectable
+at its canonical slot, and the reader is tracked by #8360.
+
 ## Fail-open / fail-closed posture (all seams)
 
 ### Correction log — #2120's OpenClaw row (re-measured 2026-10-11)
@@ -143,10 +207,10 @@ spool would file every session as one merged conversation — and
 `tortoise sessions import --harness openclaw` parses THAT, which keeps consent,
 receipts, provenance and REPHRASE dedup in the one existing import pipeline.
 
-- **Content fail-open**: any reflex failure (unreachable, misconfig, empty
+* **Content fail-open**: any reflex failure (unreachable, misconfig, empty
   graph, nothing above the confidence gate) → the hook emits NOTHING and
   exits 0. The agent turn proceeds untouched.
-- **Auth fail-closed**: hosted capture/auth channels keep their own deny
+* **Auth fail-closed**: hosted capture/auth channels keep their own deny
   rules. The hook process carries no credentials of its own, but the reflex
   it invokes transmits the Bearer identity resolved from ONE source chain
   (#2369 D1, hardened): a file-sourced key transmits only to the SAME
@@ -159,7 +223,7 @@ receipts, provenance and REPHRASE dedup in the one existing import pipeline.
   relays to the harness log, so a future redirect is loud at run time.
   Env alone (a bare `TORTOISE_API_KEY`) still never flips the hook to
   hosted mode (#1708 D1b).
-- W4 user-exposure opt-in: per-turn injection ships behind the `install`
+* W4 user-exposure opt-in: per-turn injection ships behind the `install`
   command — nothing auto-registers.
 
 ## Frameworks (#2125) — SDK-level middleware, injection only
@@ -229,3 +293,9 @@ The framework seams are graded the same way by
 all three adapters through the REAL `sdk_reflex` provider and asserts the
 identical block lands in each framework's prompt, plus the fail-open / opt-in /
 window-bounding contract.
+
+The Hermes seam grades the same way at its own surface:
+`tests/test_hermes_seam.py` installs the shipped plugin into a temp root,
+imports it, fakes the reflex CLI, and asserts the `register(ctx)` →
+`pre_llm_call` → `{"context": ...}` path (plus the cap, fail-open, and the
+`parse_hermes` ingest leg over a real SQLite `state.db`).

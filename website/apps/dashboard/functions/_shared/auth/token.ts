@@ -29,6 +29,23 @@ import { refreshSession, isRefreshTokenDead } from "./supabase";
 /** Refresh this many ms before actual expiry, to avoid using a token mid-flight. */
 const REFRESH_SKEW_MS = 60_000;
 
+/**
+ * In-flight refreshes, keyed by session handle — property 1, single-flight.
+ *
+ * Concurrent callers for the SAME handle must share ONE provider refresh
+ * instead of each POSTing the same rotating refresh token. Supabase rotates
+ * refresh tokens single-use with only a ~10 s reuse tolerance, so two concurrent
+ * refreshes outside that window earn `refresh_token_already_used` — which the
+ * classifier below reads as a DEAD session, so every racing caller answers 401
+ * and clears the cookie. That is exactly the #3485 sign-out these properties
+ * exist to prevent.
+ *
+ * This map is PER ISOLATE. The D1 CAS further down is the cross-isolate half: a
+ * second isolate cannot see this map, so it may still reach the provider, and the
+ * CAS makes its write a no-op and makes it re-read the winner's token.
+ */
+const inFlightRefreshes = new Map<string, Promise<TokenResult>>();
+
 export interface TokenRow {
   handle: string;
   refresh_token: string;
@@ -78,6 +95,11 @@ export async function invalidateCachedToken(
   env: Env,
   handle: string,
   cooldownMs = 30_000,
+  // Injected so the cooldown window is testable without wall-clock dependence:
+  // a real-clock test that happens to span the 30 s window reports a false red
+  // that is indistinguishable from the genuine "cooldown predicate dropped"
+  // regression signature.
+  now = Date.now(),
 ): Promise<void> {
   if (!env.SESSIONS) return;
   try {
@@ -90,7 +112,6 @@ export async function invalidateCachedToken(
     // GoTrue's reuse-detection can then kill the entire session family. Within
     // the window the cached token is left alone, so the retry returns the same
     // 503 without touching the provider.
-    const now = Date.now();
     await env.SESSIONS.prepare(
       "UPDATE sessions SET access_token = NULL, access_token_expires_at = NULL, " +
         "token_rejected_at = ?2 " +
@@ -146,7 +167,33 @@ export async function getAccessTokenForSession(
     return { ok: true, accessToken: row.access_token };
   }
 
-  // Refresh (rotation-safe).
+  // Property 1 — single-flight. A concurrent caller for the SAME handle joins
+  // the running refresh instead of issuing a second one, so exactly one rotating
+  // refresh token is spent per stale generation. Checked and set synchronously
+  // (no `await` between), so two callers cannot both miss it and both refresh.
+  const running = inFlightRefreshes.get(handle);
+  if (running) return running;
+  const refresh = refreshAndPersist(env, handle, row).finally(() => {
+    inFlightRefreshes.delete(handle);
+  });
+  inFlightRefreshes.set(handle, refresh);
+  return refresh;
+}
+
+/**
+ * The refresh-and-persist body, shared by every concurrent caller for a handle.
+ *
+ * Rotation-safe in two independent layers:
+ *  - this isolate's `inFlightRefreshes` map dedupes concurrent callers here;
+ *  - the D1 CAS on the OLD refresh token makes a cross-isolate loser's write a
+ *    no-op, and the loser re-reads the winner's token rather than clobbering it.
+ */
+async function refreshAndPersist(
+  env: Env,
+  handle: string,
+  row: TokenRow,
+): Promise<TokenResult> {
+  const now = Date.now();
   const refreshed = await refreshSession(env, row.refresh_token);
   if (!refreshed.ok) {
     // Retryable (5xx/429/network) is a SERVER fault.

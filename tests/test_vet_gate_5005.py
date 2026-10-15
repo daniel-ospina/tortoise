@@ -112,8 +112,9 @@ def _assert_layer1_invariant(embed_list: dict) -> None:
 def test_vocabulary_is_the_owner_adopted_O4_set():
     assert {"KEEP", "NOOP", "DISCARD", "MERGE"} == vg.OUTCOMES
     assert vg.RENARRATE in vg.BATCH_OUTCOMES
-    # ⛔ A4 (§16.2): MERGE-INTO-EXISTING is the uncorrected VET/S3 circularity
-    # and must never be emitted from this position.
+    # ⛔ A4 (§16.2, corrected): MERGE-INTO-EXISTING was the VET/S3 circularity
+    # and must never be emitted from this position. The VERDICT ``MERGE`` is
+    # admissible; the ACTION is not (§S2.2, #5092).
     assert "MERGE-INTO-EXISTING" not in vg.OUTCOMES
     assert "MERGE-INTO-EXISTING" not in vg.BATCH_OUTCOMES
 

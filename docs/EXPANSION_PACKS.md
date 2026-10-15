@@ -30,7 +30,7 @@ ontology:
   extends: core              # always 'core'
   objectKinds: [contract]    # entity nouns → Object nodes
   pointKinds: [rationale]    # claims/decisions → Point nodes
-  eventKinds: [ruleRevised]  # what happened → Event nodes
+  eventKinds: [ruleRevised, contractSigned]  # what happened → Event nodes
   documentKinds: []          # document subclasses
   subclassOf: {}             # e.g. {epic: Project}
   equivalentTo: {}           # e.g. {issue: [pm:issue]} — cross-pack identity
@@ -39,6 +39,10 @@ ontology:
       description: A commercial agreement between parties
       synonyms: [deal, agreement]
       nearMisses: [standard]   # confusable kinds → classifier guidance
+      statuses: [draft, signed, terminated]   # this kind's status vocabulary (#2729)
+      folds:                  # event kind → status (must be in `statuses`)
+        - event: contractSigned
+          status: signed
   relations:                 # epistemic edge declarations (IMPL/NAND)
     - predicate: groundedIn
       mechanism: IMPL
@@ -178,6 +182,141 @@ With `TORTOISE_CLASSIFY_LATER=1` the pack vocabulary and the chains leave the S2
 
 Resolution order for a kind: `kindDefs[].enforcement` → `extraction.enforcement.kinds` → `extraction.enforcement.default` → `warn`.
 
+## Per-kind status folds — pack-declared Object state (#2729)
+
+An Object has a current state (`Object.status`), folded from the lifecycle events that name it.
+Before #2729 the fold vocabulary was a hand-typed producer→status map in the engine
+(`github.issue.open`/`reopened` → `in_progress`; `github.issue.closed`/`pm:cardCompleted` →
+`completed`), so a domain pack could not declare its own kind's lifecycle. A pack now declares it:
+
+```yaml
+kindDefs:
+  tranche:
+    statuses: [pending, conditions-met, released, denied]   # closed vocabulary
+    folds:
+      - event: disbursement      # a bare event kind of THIS pack (or self_ns:event)
+        status: released         # must be one of `statuses`
+```
+
+The rules (`tortoise/status_folds.py` is the single implementation; `tortoise/pack_registry.py`
+validates it at load):
+
+- **`statuses`** is a non-empty list of unique strings — the kind's closed status vocabulary.
+  The declaration is machine-read by the fold dispatcher and by `PackRegistry.status_fold_index`.
+- **`folds`** is a non-empty list of `{event, status}`. `status` must be in the same kind's
+  `statuses`; `event` must be an event kind **this pack declares** (bare `disbursement` or
+  self-namespaced `mydomain:disbursement`). An unknown status or an orphan event (a fold key no
+  pack declares) is a validation **error** — the pack is isolated, exactly as for an undeclared
+  `kindDefs` key.
+- **A kind that declares `statuses` owns its state.** The built-in connector folds still apply to
+  every Object whose kind declares **no** lifecycle (so a pack-less graph behaves exactly as
+  before), but they are **suppressed** for a lifecycle-declaring kind. This is deliberate: the
+  connector vocabulary already spells `open`→`in_progress` and `closed`→`completed`, so a new kind
+  reusing those words would otherwise silently inherit the wrong lifecycle.
+- **Dispatch is on the namespaced kind** (`mydomain:tranche`), so two packs declaring the same
+  bare kind name do not collide for an Object whose stored `objectKind` carries the namespace. The
+  index is also **form-widened** (a bare-spelled `objectKind` folds by the same rule — see
+  "Event-kind spelling" below), so if two packs declare a lifecycle for the **same bare kind
+  name**, a bare-spelled Object matches both and the last declaring pack (catalog order) wins.
+  That cross-pack collision is recorded as a **warning** on `PackRegistry.lifecycle_warnings` at
+  load; the shipped catalog has none. A namespaced `objectKind` is unambiguous, so use the
+  namespaced spelling when a bare name is shared.
+- **Reusing a shared vocabulary word is DETECTED.** If `statuses` contains `open`, `closed`,
+  `active`, `pending`, `in_progress` or `completed`, the registry records an explicit
+  **warning** (`PackRegistry.lifecycle_warnings`) — not an error, because an owner-approved
+  lifecycle may legitimately reuse the spelling with a different meaning, and the kind owns its
+  state either way. Rename the status, or record why the overlap is intended.
+- **A declared fold whose explicit `object` target names no Object of its kind is reported** —
+  the kind's #1934 enforcement level is resolved and recorded in the violation detail, and the
+  violation is emitted with code `status_fold_unapplied`, rather than silently doing nothing.
+  ⚠️ The level does not currently change behaviour: `emit_violation` logs at WARNING and nothing
+  consumes the code, so `warn`/`retry`/`block` are identical here (there is no retry loop on the
+  projection write path). It is a recorded level, not a routed ladder. An `about_entities` target
+  that does not match the declaring kind is folded silently and is **not** a violation. A miss is
+  suppressed when another declared fold for the **same event** folded *any* target (two packs that
+  share a bare event kind name both appear under the widened event key): the non-matching kind is
+  simply not this Object's kind, so it is not a real signal.
+
+**Scope of the declaration.** The fold index is compiled from the process **catalog** (every
+loaded pack), not from a graph's `:PackInstall` approval set. That is deliberate: a kind already
+stored in a graph keeps folding even if the pack's approval is later revoked, because the
+declaration describes the kind's lifecycle and a status fold is a cache over the events that name
+the Object — stranding existing state would be a data bug, not a security win. The graph's approved
+pack set still gates **extraction** (which kinds may be minted), unchanged.
+
+Because the index is catalog-only, a **hosted (graph-native) tenant pack cannot declare
+`statuses`/`folds`**: it lives as a `:PackManifest` in the tenant graph and is compiled per graph by
+`compile_value_brief(tenant_manifests=…)`, so it never enters a `PackRegistry`. The tenant upload
+route therefore **refuses** the declaration with an error naming the limitation rather than
+accepting it and installing an inert pack — acceptance is the signal that the declaration will
+work. Install such a pack self-hosted under `TORTOISE_PACKS_DIR` (or remove the two keys).
+
+**Event-kind spelling.** A fold's `event` may be declared bare (`disbursement`) or self-namespaced
+(`venture:disbursement`), and the **runtime** event kind may be either spelling, in any case: the
+fold index is keyed case-insensitively on both forms, because the classification write gate admits
+both (`_event_kind_forms`) and the extraction commit strips the namespace before writing
+(`sdk.py::_extract_session_v2`). The same widening applies to `objectKind`, so a bare-spelled
+Object is folded by the same rule as its namespaced twin and is equally suppressed from the built-in
+connector fold. An **extracted** event (a payload event carrying `about_entities` and no `object`)
+folds a declared rule onto any `about_entities` target that is an Object of the declaring kind;
+a miss is reported only for the event's **explicit** `object`.
+
+The terminal-status guard is unchanged: a `superseded`/`deprecated`/`archived`/`retracted` Object is
+never resurrected by any fold (#2164/#3309). Objects are name-keyed, so a state change that is a
+**new** thing is a supersession, not a fold.
+
+## Per-graph pack selection (#2728)
+
+Which packs a graph allows is **per graph**, and stored graph-natively: one
+`(:PackInstall {namespace, version, status, source})` per namespace, plus one
+`(:PackSelection {revision})` marker whose **presence** means "deliberately
+configured". The marker is the whole point — without it an explicit *empty* set
+is indistinguishable from "never configured", which is what made "remove all"
+unreachable before #2728.
+
+- **Statuses.** `active` = approved and enforced; `disabled` = approved but
+extraction-off; `removed` = a tombstone — absent from the introspection list,
+kept for audit. **Removal is expressed by omitting the namespace from the
+desired set**, never by a status the caller sends.
+- **Resolution contract** (`pack_state.resolved_pack_set`): no marker → the
+catalog union (the back-compat fallback — every pre-#318, self-hosted and
+restored graph, #2714 indicator 3); marker present → the `active` records **∪**
+the namespaces already in the graph's data. The data leg is what keeps
+historical points writable after a pack is disabled.
+- **`set_graph_packs` is the only path that moves the revision.** Every seeding
+path (`get_tenant_packs`'s self-heal *and* `ensure_tenant_packs` — the
+provision retry, the Supabase control plane, and
+`graph-scripts/backfill_pack_installs.py`) skips a graph that carries a marker,
+so a re-run cannot resurrect a pack the user removed or disabled.
+  ⚠️ **Still open — out-of-band writers change the configurable set WITHOUT
+  moving the marker.** `POST /v1/packs/manifests`
+  (`pack_manifest_store.upsert_tenant_manifest`, widens) and
+  `hosted_api._apply_import_pack_config` (re-activates on restore — the
+export/import gap the PR body names) write `:PackInstall` directly. On a graph
+that has both a `:PackSelection` marker and one of these writers, a `PUT`
+holding revision `N` can therefore still return `200` while erasing a
+namespace added after its read. Until they route through `set_graph_packs` (or
+bump the marker under `_pack_selection_lock`), `revision` is not a *complete*
+change signal, and *"no write path may alter the configurable set without
+moving the marker"* is the target these paths must meet — not a property that
+holds today. (`pack_manifest_store.delete_tenant_manifest` narrows the set the
+same way, but it currently has NO caller and no route — a latent writer to bind
+when a delete surface is added, not a live gap.)
+- **Concurrency:** both the first configuration and every later one move the
+marker with a conditional compare-and-swap (`_cas_first_selection` /
+`_bump_selection`) *before* any install record is written, so a worker that
+loses a race gets a `409` and has written nothing.
+- **Management surface:** `GET` / `PUT /v1/graphs/{graph_id}/packs`. Owner/admin
+(session) or a key carrying `team:manage`; a graph-bound key is refused on
+mutation, so C5 #2114's boundary holds. `PUT` is a full desired-state replace
+and **requires** `expected_revision` — a mismatch is a `409` with the current
+revision, so two admins cannot silently erase each other's set. Each change
+writes one audit record.
+
+> The dashboard Settings → **Configured packs** view (the modal that lists,
+> adds, disables and removes packs per graph) is #2728's remaining product
+> surface. The state model and the REST surface above are what it renders.
+
 ## Chains
 
 A chain is an ordered kind path the extractor respects when connecting `about_entities`. Example: the agent-ops `ruleLifecycle` chain `[rule, rationale, ruleRevised]` — a rule must be grounded in its rationale. The chain enforcer rewires reverse-order pairs deterministically (never invents, never drops) and warns on violations. Steps resolve to your pack's kinds, core kinds, or exactly-one other pack's kinds (ambiguous bare names are validation errors — use `ns:kind`).
@@ -199,6 +338,10 @@ A chain is an ordered kind path the extractor respects when connecting `about_en
 | Hosted | `POST /v1/packs/manifests` / `tortoise_pack_install` (MCP) | same manifest format; ontology-only v1 (no connectors/tools) |
 
 Both surfaces run the same shared validator. A pack that validates locally installs on either.
+**One declared exception:** `statuses`/`folds` (#2729) are a filesystem-catalog surface — the fold
+index is compiled from the process catalog, which a graph-native tenant manifest never enters — so
+the hosted install route **refuses** them with an error naming the limitation instead of accepting a
+declaration that would be inert.
 
 ## Reserved namespaces
 

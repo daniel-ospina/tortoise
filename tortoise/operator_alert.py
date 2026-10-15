@@ -40,22 +40,32 @@ import threading
 import time
 from typing import Any
 
+from tortoise.incident_kinds import (
+    KIND_ABUSE_DECISION_FAULT,
+    KIND_ABUSE_ENFORCEMENT_FAULT,
+    KIND_BILLING_NOTIFY_REFUSED,
+    KIND_PROVIDER_BILLING_EXHAUSTED,
+    KIND_UNMETERED_INCREMENT,
+)
+
 _logger = logging.getLogger("tortoise.operator_alert")
 
-#: The incident KIND for a dropped metering increment (#3981). Declared HERE,
-#: not in ``tortoise.metering``, because the import-guard fallbacks that most
-#: need it exist precisely because importing ``tortoise.metering`` FAILED — a
-#: constant living there is unreachable exactly where it is used, and the
-#: guarded import would swallow the ``NameError`` into a silent drop. The kind
-#: string IS the R2 dedup key (``ops/alerts/{kind}/{org}.json``), so there is
-#: one definition and the runbook row is pinned to it by
-#: ``tests/test_operator_alert.py::test_kind_constants_match_the_runbook``.
-UNMETERED_INCREMENT_KIND = "UNMETERED_INCREMENT"
+#: The incident KIND for a dropped metering increment (#3981). The VALUE is
+#: declared in ``tortoise.incident_kinds`` (#4780) — the one declaration site;
+#: this name is kept because it is imported by tests and by the import-guarded
+#: fallbacks.
+#:
+#: It lives in the registry, NOT in ``tortoise.metering``, because the
+#: import-guard fallbacks that most need it exist precisely because importing
+#: ``tortoise.metering`` FAILED — a constant living there is unreachable exactly
+#: where it is used, and the guarded import would swallow the ``NameError``
+#: into a silent drop. The kind string IS the R2 dedup key
+#: (``ops/alerts/{kind}/{org}.json``), so there is one definition and the
+#: runbook row is pinned to it by ``tests/test_incident_kinds.py``.
+UNMETERED_INCREMENT_KIND = KIND_UNMETERED_INCREMENT
 
-#: The incident KINDS for a fault on the abuse ENFORCEMENT path (#4872). Declared
-#: HERE beside ``UNMETERED_INCREMENT_KIND`` so every operator-alert kind has one
-#: definition and one home for the runbook pin
-#: (``tests/test_operator_alert.py::test_kind_constants_match_the_runbook``).
+#: The incident KINDS for a fault on the abuse ENFORCEMENT path (#4872).
+#: Declared in the registry beside every other kind and home to the runbook pin.
 #:
 #: TWO kinds, not one, because the incident BODY is written create-once: a DEDUP
 #: hit never rewrites ``detail`` (``alert_store.AlertStore.open_incident_state``),
@@ -73,8 +83,8 @@ UNMETERED_INCREMENT_KIND = "UNMETERED_INCREMENT"
 #: decision fault are different conditions with different runbook actions, and
 #: the R2-unreachable adoption path resolves an incident by GitHub search on the
 #: subject suffix.
-ABUSE_DECISION_FAULT_KIND = "ABUSE_DECISION_FAULT"
-ABUSE_ENFORCEMENT_FAULT_KIND = "ABUSE_ENFORCEMENT_FAULT"
+ABUSE_DECISION_FAULT_KIND = KIND_ABUSE_DECISION_FAULT
+ABUSE_ENFORCEMENT_FAULT_KIND = KIND_ABUSE_ENFORCEMENT_FAULT
 
 #: The incident KIND for a Stripe billing notification the #3498 offload seam
 #: REFUSED (#4456). The event is already CLAIMED when the notify is submitted
@@ -83,7 +93,7 @@ ABUSE_ENFORCEMENT_FAULT_KIND = "ABUSE_ENFORCEMENT_FAULT"
 #: is never told its plan changed. The seam's public ``refused``
 #: discriminator distinguishes this real drop from a plain bound miss (where
 #: the worker still completes the send), and this is the escalation path.
-BILLING_NOTIFY_REFUSED_KIND = "BILLING_NOTIFY_REFUSED"
+BILLING_NOTIFY_REFUSED_KIND = KIND_BILLING_NOTIFY_REFUSED
 
 #: The incident KIND for a PROVIDER BILLING EXHAUSTION observed on a serving
 #: lane (#3873). The trigger is the provider's OWN refusal — an HTTP 402, or an
@@ -104,7 +114,7 @@ BILLING_NOTIFY_REFUSED_KIND = "BILLING_NOTIFY_REFUSED"
 #: ``provider``, ``error_type``, ``status``, ``has_alternative`` — because the
 #: incident body is durable and an exception MESSAGE is attacker-influenceable
 #: text.
-PROVIDER_BILLING_EXHAUSTED_KIND = "PROVIDER_BILLING_EXHAUSTED"
+PROVIDER_BILLING_EXHAUSTED_KIND = KIND_PROVIDER_BILLING_EXHAUSTED
 
 #: Repeat-suppression windows (seconds). A recorded incident holds the long
 #: window; an attempt that recorded NOTHING re-arms on the short one, so a

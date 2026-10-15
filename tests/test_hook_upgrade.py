@@ -2060,6 +2060,550 @@ class TestDeclaredThreatSurface:
             command, "session-end.sh", ".claude/hooks", root) is False
 
     @pytest.mark.parametrize("command", [
+        "$OTHER_PROJECT/.claude/hooks/session-end.sh",
+        "${OTHER_PROJECT}/.claude/hooks/session-end.sh",
+    ])
+    def test_unknown_var_path_is_not_a_registration(
+            self, tmp_path, monkeypatch, command):
+        """CLASS 1 (fail-open), third reproduction: a ``$VAR``-prefixed path is
+        ours only when the variable IS the project root.
+
+        For any other variable the value is unknowable, and the directory-suffix
+        fallback read ``$OTHER_PROJECT/.claude/hooks/session-end.sh`` as our
+        registration: ``detect_install`` reported the install current and
+        ``upgrade_install`` stamped the timeout onto the FOREIGN entry while the
+        real entry was never added — a silent no-capture.  The verdict is
+        ground-truthed by EXECUTING the form: ``$OTHER_PROJECT`` names a
+        DIFFERENT project whose hook touches a different marker, so bash runs
+        that hook and NOT ours, and the matcher must agree.
+
+        MUTATION: restore the ``$VAR`` directory-suffix fallback (accept any
+        token starting with ``$`` by suffix) → the foreign entry is judged ours
+        → no ``missing-hook-entry`` and no real entry appended → RED.
+        """
+        other = tmp_path / "other-project"
+        foreign = other / ".claude" / "hooks" / "session-end.sh"
+        foreign.parent.mkdir(parents=True)
+        foreign_marker = other / "FOREIGN-MARKER"
+        foreign.write_text(
+            f"#!/bin/bash\ntouch {shlex.quote(str(foreign_marker))}\n")
+        foreign.chmod(0o755)
+        monkeypatch.setenv("OTHER_PROJECT", str(other))
+        root = _old_install(tmp_path)
+        completed = subprocess.run(
+            ["bash", "-c", command], capture_output=True, text=True,
+            timeout=30, cwd=str(root))
+        assert foreign_marker.exists(), (
+            f"ground truth changed: {command!r} did not run the FOREIGN hook "
+            f"(stderr={completed.stderr!r})")
+        assert hook_install._invokes_script(
+            command, "session-end.sh", ".claude/hooks", root) is False
+
+        # The observable consequence: the dead entry is not mistaken for ours,
+        # so a REAL registration is appended instead of a timeout being
+        # stamped onto the foreign one.
+        doc = {"hooks": {"SessionEnd": [{"matcher": "", "hooks": [
+            {"type": "command", "command": command,
+             "timeout": 60}]}]}}
+        (root / ".claude" / "settings.json").write_text(json.dumps(doc))
+        assert any(
+            f.kind == "missing-hook-entry" and f.script == "session-end.sh"
+            for f in detect_install(root))
+        upgrade_install(root)
+        assert len(_settings(root)["hooks"]["SessionEnd"]) == 2
+
+    @pytest.mark.parametrize("command", [
+        "command -v {rel}; {rel}",   # the query does not end the command line
+        "bash -v {rel}",             # verbose-and-execute (a boolean -v)
+        "/bin/bash -v {rel}",
+    ])
+    def test_query_then_invocation_is_ours(self, tmp_path, command):
+        """CLASS 2 (false negative): ``command -v <hook>`` QUERIES the name; it
+        does not stop the rest of the command line.  The old guard returned
+        from the whole classification, so ``command -v <hook>; <hook>`` (bash
+        runs the second one) was judged foreign: ``detect_install`` emitted a
+        blocking ``missing-hook-entry`` for a WORKING install and
+        ``upgrade_install`` appended a duplicate — the hook then ran twice.
+
+        Ground-truthed by EXECUTING the form: the installed hook touches a
+        marker, so bash running it is observable, and the matcher must agree.
+
+        MUTATION: restore ``return False`` for the ``command -v``/``-V`` guard
+        (instead of clearing ``expect_cmd``) → the invocation after ``;`` is
+        never reached → the matcher says foreign → RED.
+        """
+        rel = ".claude/hooks/session-end.sh"
+        root = tmp_path / "project"
+        hook = root / Path(rel)
+        hook.parent.mkdir(parents=True)
+        marker = root / "MARKER"
+        hook.write_text(f"#!/bin/bash\ntouch {shlex.quote(str(marker))}\n")
+        hook.chmod(0o755)
+        command = command.format(rel=rel)
+        completed = subprocess.run(
+            ["bash", "-c", command], capture_output=True, text=True,
+            timeout=30, cwd=str(root))
+        assert marker.exists(), (
+            f"ground truth changed: {command!r} did not execute the hook "
+            f"(stderr={completed.stderr!r})")
+        assert hook_install._invokes_script(
+            command, "session-end.sh", ".claude/hooks", root) is True
+
+        # The observable consequence: no blocking ``missing-hook-entry`` for a
+        # working install, and no duplicate registration.
+        doc = {"hooks": {"SessionEnd": [{"matcher": "", "hooks": [
+            {"type": "command", "command": command, "timeout": 60}]}]}}
+        installed = _old_install(tmp_path, settings=doc)
+        assert not [f for f in detect_install(installed)
+                    if f.kind == "missing-hook-entry"
+                    and f.script == "session-end.sh"]
+        upgrade_install(installed)
+        assert len(_settings(installed)["hooks"]["SessionEnd"]) == 1
+
+    @pytest.mark.parametrize("command,executes", [
+        ("command -p {rel}", True),      # -p is BOOLEAN: the hook still runs
+        ("command -- {rel}", True),      # -- ends its options: the hook runs
+        ("command -p -v {rel}", False),  # -v makes it a QUERY: nothing runs
+        ("command -pv {rel}", False),    # clustered -p -v is also a query
+        ("command -V {rel}", False),     # -V is the query spelling
+        # A repeated ``p`` CLUSTER is the same boolean as the ``-p -p``
+        # singleton: bash runs the hook, so judging it foreign appended a
+        # DUPLICATE registration.
+        ("command -pp {rel}", True),
+        ("command -ppp {rel}", True),
+        ("command -p -p {rel}", True),
+        # ... and a cluster carrying a query letter is a QUERY.
+        ("command -pp -v {rel}", False),
+        ("command -pV {rel}", False),    # the UPPERCASE query letter counts
+        ("command -Vp {rel}", False),
+        ("command -p -pV -p {rel}", False),
+        # ``--`` ENDS the builtin's options: the next word is the COMMAND NAME.
+        # ``command -- -p <hook>`` runs ``-p`` (not found) and nothing executes.
+        ("command -- -p {rel}", False),
+        ("command -p -- -p {rel}", False),
+        ("command -- -- {rel}", False),
+        ("command -- -v {rel}", False),
+        # An option NOT in ``command``'s grammar is a usage error that aborts
+        # the simple command; the hook must not be read as executed.
+        ("command -o X {rel}", False),
+        ("command -p -o X {rel}", False),
+        ("command - -v {rel}", False),   # a lone ``-`` is the command name
+        # Shell-KEYWORD contexts still run the BUILTIN, so these remain ours.
+        ("time command -p {rel}", True),
+        ("eval command -p {rel}", True),
+        ("bash -c 'command -p {rel}'", True),
+    ])
+    def test_command_option_arity_matches_bash_ground_truth(
+            self, tmp_path, command, executes):
+        """``command`` is a shell BUILTIN, so its own grammar applies: ``-p``
+        is BOOLEAN (default PATH) and ``-v``/``-V`` is a QUERY.  Reading ``-p``
+        through the generic argument-taking default inverted both halves of the
+        guard — ``command -p <hook>`` was judged foreign (bash runs it → a
+        DUPLICATE registration) and ``command -p -v <hook>`` was judged ours
+        (bash runs nothing → the silent no-capture this module exists to
+        prevent).
+
+        Verified by EXECUTING each form, so the assertion is the observable
+        verdict, not the source text.  The added params pin the rest of the
+        builtin's grammar: a ``p``-cluster, the ``--`` terminator (after which an
+        option-shaped OPERAND is the command name, NOT a builtin flag —
+        ``command -- -p <hook>``), an uppercase query cluster, and an invalid
+        option.
+
+        MUTATION: drop the ``launcher_word == "command"`` option block so
+        ``-p`` falls to the generic "consume" default → ``command -p <hook>``
+        turns foreign and ``command -p -v <hook>`` turns ours → RED on both.
+        Reverting any single added rule (``--`` handling, the all-``p``
+        cluster, the case-insensitive query letter, the unknown-option arm)
+        REDs exactly its own params.
+        """
+        rel = ".claude/hooks/session-end.sh"
+        root = tmp_path / "project"
+        hook = root / Path(rel)
+        hook.parent.mkdir(parents=True)
+        marker = root / "MARKER"
+        hook.write_text(f"#!/bin/bash\ntouch {shlex.quote(str(marker))}\n")
+        hook.chmod(0o755)
+        command = command.format(rel=rel)
+        completed = subprocess.run(
+            ["bash", "-c", command], capture_output=True, text=True,
+            timeout=30, cwd=str(root))
+        assert marker.exists() is executes, (
+            f"ground truth changed: {command!r} did not behave as expected "
+            f"(stderr={completed.stderr!r})")
+        assert hook_install._invokes_script(
+            command, "session-end.sh", ".claude/hooks", root) is executes
+
+    @pytest.mark.parametrize("command,executes", [
+        # ``&&`` runs its RHS when the query SUCCEEDS — and for an installed
+        # hook it does (``command -v`` prints the path), so the hook runs.
+        ("command -v {rel} && {rel}", True),
+        # ``||`` runs its RHS only when the query FAILS, which for an installed
+        # hook it never does: bash reaches nothing, so the entry is DEAD.
+        ("command -v {rel} || {rel}", False),
+        ("command -V {rel} || {rel}", False),
+        # ``!`` INVERTS the query, so the conditional flips with it.
+        ("! command -v {rel} && {rel}", False),
+        ("! command -v {rel} || {rel}", True),
+        # Unconditional separators always re-arm (the case this PR fixed).
+        ("command -v {rel}; {rel}", True),
+        ("command -v {rel} | {rel}", True),
+        # The query's exit status belongs to its OPERAND, not to the operator:
+        # a name it cannot resolve makes the query FAIL, so the ``&&`` RHS of
+        # these NEVER runs.  Reading success out of the operator alone judged
+        # the dead RHS ours — a silent no-capture (`upgrade_install` leaves the
+        # installation current while bash captures nothing).
+        ("command -v nosuchtool12345 && {rel}", False),
+        ("command -V nosuchtool12345 && {rel}", False),
+        ("! command -v nosuchtool12345 || {rel}", False),
+        # The RHS a conditional DID run has an unknowable status of its own, so
+        # the list's status is no longer provable and the following ``||`` must
+        # not be read as reaching the hook.
+        ("command -v {rel} && true || {rel}", False),
+    ])
+    def test_query_conditional_rhs_matches_bash_ground_truth(
+            self, tmp_path, command, executes):
+        """A ``command -v``/``-V`` QUERY's exit status makes a following ``&&``
+        / ``||`` CONDITIONAL, and ``!`` inverts it.
+
+        ``command -v <hook> || <hook>`` is the fail-open: the query SUCCEEDS for
+        an installed hook, so bash never reaches the RHS — yet re-arming
+        executable position at every separator judged the dead RHS ours.
+        ``detect_install`` then emitted no ``missing-hook-entry`` and
+        ``upgrade_install`` appended no working registration: a silent
+        no-capture while the status read healthy.  ``origin/main`` returned
+        ``False`` for this line (the old hard stop), so the new block
+        introduced it.
+
+        The status is a property of the query's OPERAND, never of the operator.
+        ``command -v nosuchtool && <hook>`` was judged ours because the query
+        was ASSUMED to succeed; bash fails the query and runs nothing.  Only an
+        operand that resolves to OUR installed hook proves success, so the
+        operand is classified and any unprovable status keeps the whole AND-OR
+        list foreign (fail closed — a false "missing" only appends a duplicate
+        registration).
+
+        The boundary spellings of that dead RHS — a group, command substitution,
+        backtick or a newline continuation — are pinned separately by
+        :meth:`test_query_conditional_rhs_boundary_matches_bash_ground_truth`.
+
+        Ground-truthed by EXECUTING the form (the hook touches a marker).
+
+        MUTATION: assume the query succeeds from the operator alone (drop the
+        operand classification) → the ``nosuchtool &&`` params and the
+        ``&& true ||`` chain turn ours → RED; re-arm unconditionally at every
+        separator (drop the ``run_rhs`` computation) → the ``||`` and
+        ``! … &&`` params turn ours → RED; never re-arming at ``&&`` likewise
+        REDs the ``&&`` / ``! … ||`` params.
+        """
+        rel = ".claude/hooks/session-end.sh"
+        root = tmp_path / "project"
+        hook = root / Path(rel)
+        hook.parent.mkdir(parents=True)
+        marker = root / "MARKER"
+        hook.write_text(f"#!/bin/bash\ntouch {shlex.quote(str(marker))}\n")
+        hook.chmod(0o755)
+        command = command.format(rel=rel)
+        completed = subprocess.run(
+            ["bash", "-c", command], capture_output=True, text=True,
+            timeout=30, cwd=str(root))
+        assert marker.exists() is executes, (
+            f"ground truth changed: {command!r} did not behave as expected "
+            f"(stderr={completed.stderr!r})")
+        assert hook_install._invokes_script(
+            command, "session-end.sh", ".claude/hooks", root) is executes
+
+        # The observable consequence for the DEAD-entry forms: they are
+        # reported missing and REPAIRED, instead of the install being read as
+        # current while bash never runs the hook.
+        if executes:
+            return
+        doc = {"hooks": {"SessionEnd": [{"matcher": "", "hooks": [
+            {"type": "command", "command": command, "timeout": 60}]}]}}
+        installed = _old_install(tmp_path, settings=doc)
+        assert any(
+            f.kind == "missing-hook-entry" and f.script == "session-end.sh"
+            for f in detect_install(installed))
+        upgrade_install(installed)
+        assert len(_settings(installed)["hooks"]["SessionEnd"]) == 2
+
+    @pytest.mark.parametrize("command,executes", [
+        # A boundary OPENER (a subshell, a brace group, a command substitution,
+        # a backtick) does not START a new command position — it CONTINUES the
+        # one before it.  An RHS bash never entered therefore stays dead INSIDE
+        # the group: re-arming executable position at the opener judged the
+        # group's contents ours while bash never entered it (a silent
+        # no-capture).
+        ("command -v nosuch12345 && ( {rel} )", False),
+        ("command -v nosuch12345 && {{ {rel}; }}", False),
+        ("command -v nosuch12345 && $({rel})", False),
+        ("command -v nosuch12345 && `{rel}`", False),
+        ("command -v {rel} || ( {rel} )", False),
+        ("command -v {rel} || {{ {rel}; }}", False),
+        ("! command -v {rel} && ( {rel} )", False),
+        # A newline after an operator is a CONTINUATION of the same list, not a
+        # fresh command position (`_split_command` used to rewrite it to `;`).
+        ("command -v nosuch12345 &&\n{rel}", False),
+        # A ``;`` INSIDE a group bash never entered is dead too — the group is
+        # the RHS, so nothing inside it runs, however it is separated.
+        ("command -v nosuch12345 && ( nosuch12345 ; {rel} )", False),
+        ("command -v nosuch12345 && ( ( {rel} ) )", False),
+        ("command -v nosuch12345 && ( {rel} || {rel} )", False),
+        # ... while a group the command line DOES enter still executes ours.
+        ("( {rel} )", True),
+        ("{{ {rel}; }}", True),
+        ("command -v {rel} && ( {rel} )", True),
+        ("command -v {rel} && {{ {rel}; }}", True),
+        ("command -v {rel} && $({rel})", True),
+        ("command -v {rel} && `{rel}`", True),
+        ("command -v {rel} ; ( {rel} )", True),
+        ("command -v {rel} &&\n{rel}", True),
+        ("command -v {rel} && ( nosuch12345 ; {rel} )", True),
+    ])
+    def test_query_conditional_rhs_boundary_matches_bash_ground_truth(
+            self, tmp_path, command, executes):
+        """The RHS a ``command -v``/``-V`` query did NOT enter must stay dead
+        across a boundary OPENER.
+
+        ``command -v nosuchtool && ( <hook> )`` is the same dead RHS as
+        ``command -v nosuchtool && <hook>``, spelled with a subshell/brace /
+        command-substitution / backtick boundary (or a newline continuation).
+        Re-arming executable position at such a boundary judged the group's
+        contents ours, so ``detect_install`` emitted no ``missing-hook-entry``
+        while bash never entered the group — the silent no-capture this module
+        exists to prevent.  A ``;`` INSIDE the unentered group is dead too, so
+        the state is scoped to the grouping level rather than reset at every
+        separator.
+
+        Ground-truthed by EXECUTING each form (the hook touches a marker).
+
+        MUTATION: re-arm unconditionally at a group / substitution boundary
+        (drop the ``group_dead``/``list_dead`` opener handling and reset
+        ``expect_cmd = True`` there) → the ``False`` params turn ours → RED;
+        rewrite a newline after an operator to ``;`` again (drop the
+        continuation check in ``_split_command``) → the ``&&\n`` params turn
+        ours → RED.  The ``True`` params are regression pins: a group the line
+        DOES enter must still execute ours.
+        """
+        rel = ".claude/hooks/session-end.sh"
+        root = tmp_path / "project"
+        hook = root / Path(rel)
+        hook.parent.mkdir(parents=True)
+        marker = root / "MARKER"
+        hook.write_text(f"#!/bin/bash\ntouch {shlex.quote(str(marker))}\n")
+        hook.chmod(0o755)
+        command = command.format(rel=rel)
+        completed = subprocess.run(
+            ["bash", "-c", command], capture_output=True, text=True,
+            timeout=30, cwd=str(root))
+        assert marker.exists() is executes, (
+            f"ground truth changed: {command!r} did not behave as expected "
+            f"(stderr={completed.stderr!r})")
+        assert hook_install._invokes_script(
+            command, "session-end.sh", ".claude/hooks", root) is executes
+
+        # The observable consequence for the DEAD-entry forms: they are
+        # reported missing and REPAIRED, instead of the install being read as
+        # current while bash never runs the hook.
+        if executes:
+            return
+        doc = {"hooks": {"SessionEnd": [{"matcher": "", "hooks": [
+            {"type": "command", "command": command, "timeout": 60}]}]}}
+        installed = _old_install(tmp_path, settings=doc)
+        assert any(
+            f.kind == "missing-hook-entry" and f.script == "session-end.sh"
+            for f in detect_install(installed))
+        upgrade_install(installed)
+        assert len(_settings(installed)["hooks"]["SessionEnd"]) == 2
+
+    @pytest.mark.parametrize("command", [
+        "env -i command -p {rel}",
+        "nohup command -p {rel}",
+        "xargs -n 1 command -p {rel}",
+        "bash command -p {rel}",
+    ])
+    def test_command_after_a_program_launcher_is_not_the_builtin(
+            self, tmp_path, command):
+        """``command`` after a PROGRAM launcher names an EXTERNAL program, not
+        the shell builtin, so a following ``-p`` is not a builtin option and the
+        hook is never executed as ours.
+
+        ``env -i command -p <hook>`` (also ``nohup``/``xargs``/``bash``) makes
+        the launcher exec a NEW program named ``command``; where no such program
+        exists bash runs nothing.  Reading ``-p`` as the builtin's BOOLEAN
+        option left the hook in executable position and reported a healthy
+        install while capturing nothing.
+
+        NO bash ground truth here, deliberately: on a box whose PATH carries a
+        ``command`` shim (or an ``/usr/bin/command``) the form DOES run the
+        hook, so bash's own answer is environment-dependent.  The matcher cannot
+        prove a ``command`` PROGRAM exists, and the module's declared asymmetry
+        makes the conservative verdict the correct one (a false "missing" only
+        appends a duplicate registration).
+
+        MUTATION: drop the ``builtin_reachable`` gate (treat every ``command``
+        as the builtin) → the hook is read as executed → RED.
+        """
+        rel = ".claude/hooks/session-end.sh"
+        root = tmp_path / "project"
+        hook = root / Path(rel)
+        hook.parent.mkdir(parents=True)
+        hook.write_text("#!/bin/bash\n:\n")
+        hook.chmod(0o755)
+        command = command.format(rel=rel)
+        assert hook_install._invokes_script(
+            command, "session-end.sh", ".claude/hooks", root) is False
+
+    @pytest.mark.parametrize("command,executes", [
+        ("'$PWD/{rel}'", False),                     # single quotes: LITERAL
+        ("'$CLAUDE_PROJECT_DIR/{rel}'", False),
+        ('"$PWD/{rel}"', True),                      # double quotes: expands
+        ("$PWD/{rel}", True),                        # bare expansion
+    ])
+    def test_single_quoted_var_path_is_literal(self, tmp_path, command,
+                                               executes):
+        """bash does not expand ``$VAR`` inside SINGLE quotes, so
+        ``'$PWD/.claude/hooks/session-end.sh'`` is the literal filename
+        ``$PWD/.claude/hooks/session-end.sh`` and bash runs nothing.
+
+        ``_split_command`` folded single- and double-quoting into one ``quoted``
+        flag, so the matcher resolved the ``$VAR`` and judged the dead entry
+        ours — a silent no-capture.  The quote KIND is now carried on the token
+        and a single-quoted leading ``$`` is never expanded, while a
+        double-quoted one still is.
+
+        Ground-truthed by EXECUTING each form.
+
+        MUTATION: drop ``lead_literal`` from the token (or ignore it in
+        :func:`_token_is_our_script`) → the single-quoted params are judged
+        ours → RED.
+        """
+        rel = ".claude/hooks/session-end.sh"
+        root = tmp_path / "project"
+        hook = root / Path(rel)
+        hook.parent.mkdir(parents=True)
+        marker = root / "MARKER"
+        hook.write_text(f"#!/bin/bash\ntouch {shlex.quote(str(marker))}\n")
+        hook.chmod(0o755)
+        command = command.format(rel=rel)
+        env = dict(os.environ)
+        env["CLAUDE_PROJECT_DIR"] = str(root)
+        completed = subprocess.run(
+            ["bash", "-c", command], capture_output=True, text=True,
+            timeout=30, cwd=str(root), env=env)
+        assert marker.exists() is executes, (
+            f"ground truth changed: {command!r} did not behave as expected "
+            f"(stderr={completed.stderr!r})")
+        assert hook_install._invokes_script(
+            command, "session-end.sh", ".claude/hooks", root) is executes
+
+    @pytest.mark.parametrize("command,executes", [
+        ('"\\$PWD/{rel}"', False),   # escaped inside double quotes: LITERAL
+        ("\\$PWD/{rel}", False),     # unquoted escape: pin (see docstring)
+        ('"$PWD/{rel}"', True),      # unescaped double quotes: expands
+        ("$PWD/{rel}", True),        # unescaped bare: expands
+    ])
+    def test_escaped_dollar_var_path_is_literal(self, tmp_path, command,
+                                                executes):
+        """An escaped ``$`` inside DOUBLE quotes is literal to bash:
+        ``"\\$PWD/.claude/hooks/session-end.sh"`` is the literal filename
+        ``$PWD/…`` (no expansion), so bash runs nothing — but the matcher
+        stripped the backslash in ``_split_command`` and resolved the ``$VAR``,
+        judging the dead entry ours.
+
+        This is the same axis as the single-quote spelling (bash expands the
+        ``$`` or it does not), so a leading escaped ``$`` marks the token's
+        ``$`` as literal rather than merely carrying the quote kind.
+        Ground-truthed by EXECUTING each form.
+
+        The UNQUOTED escape param is a regression pin, not signal: the splitter
+        already emits the unquoted backslash as its own token (which consumes
+        executable position), so it is fail-closed before and after this fix.
+
+        MUTATION: drop the escaped-``$`` literal flag from ``_split_command``
+        (or ignore ``lead_literal`` in :func:`_token_is_our_script`) → the
+        double-quoted escaped param is judged ours → RED.
+        """
+        rel = ".claude/hooks/session-end.sh"
+        root = tmp_path / "project"
+        hook = root / Path(rel)
+        hook.parent.mkdir(parents=True)
+        marker = root / "MARKER"
+        hook.write_text(f"#!/bin/bash\ntouch {shlex.quote(str(marker))}\n")
+        hook.chmod(0o755)
+        command = command.format(rel=rel)
+        env = dict(os.environ)
+        env["CLAUDE_PROJECT_DIR"] = str(root)
+        completed = subprocess.run(
+            ["bash", "-c", command], capture_output=True, text=True,
+            timeout=30, cwd=str(root), env=env)
+        assert marker.exists() is executes, (
+            f"ground truth changed: {command!r} did not behave as expected "
+            f"(stderr={completed.stderr!r})")
+        assert hook_install._invokes_script(
+            command, "session-end.sh", ".claude/hooks", root) is executes
+
+    @pytest.mark.parametrize("command,executes", [
+        # ``command`` has NO argument-taking option: an invalid one is a USAGE
+        # ERROR that aborts the simple command (exit 2), so a following ``&&``
+        # is skipped while ``||`` runs.
+        ("command -o X {rel} && {rel}", False),
+        ("command -p -o X {rel} && {rel}", False),
+        ("command -P X {rel} && {rel}", False),
+        ("command - -v {rel} && {rel}", False),
+        ("command -o X {rel} || {rel}", True),
+        ("command -o X {rel}; {rel}", True),
+        # The isolated form stays dead (the abort itself).
+        ("command -o X {rel}", False),
+        ("command -p -o X {rel}", False),
+    ])
+    def test_command_usage_error_status_matches_bash_ground_truth(
+            self, tmp_path, command, executes):
+        """A ``command`` usage error is an EXIT STATUS, not just a dead word: a
+        following ``&&`` RHS is skipped and a ``||`` RHS runs.  The new
+        invalid-option arm modelled the abort but not its status, so
+        ``command -o X <hook> && <hook>`` re-armed unconditionally and read the
+        dead RHS as ours — the silent no-capture this module exists to prevent.
+        The usage error now records a PROVEN list failure, so ``&&`` is skipped
+        and ``||`` still runs.
+
+        Ground-truthed by EXECUTING each form (the hook touches a marker).
+
+        MUTATION: drop ``list_status = "failure"`` from the invalid-option arm →
+        the four ``&&`` params turn ours → RED (the ``||`` and ``;`` params are
+        regression pins: they agree with bash before and after).
+        """
+        rel = ".claude/hooks/session-end.sh"
+        root = tmp_path / "project"
+        hook = root / Path(rel)
+        hook.parent.mkdir(parents=True)
+        marker = root / "MARKER"
+        hook.write_text(f"#!/bin/bash\ntouch {shlex.quote(str(marker))}\n")
+        hook.chmod(0o755)
+        command = command.format(rel=rel)
+        completed = subprocess.run(
+            ["bash", "-c", command], capture_output=True, text=True,
+            timeout=30, cwd=str(root))
+        assert marker.exists() is executes, (
+            f"ground truth changed: {command!r} did not behave as expected "
+            f"(stderr={completed.stderr!r})")
+        assert hook_install._invokes_script(
+            command, "session-end.sh", ".claude/hooks", root) is executes
+
+        if executes:
+            return
+        # The observable consequence: the dead entry is reported missing and a
+        # REAL registration is appended instead of the install reading current.
+        doc = {"hooks": {"SessionEnd": [{"matcher": "", "hooks": [
+            {"type": "command", "command": command, "timeout": 60}]}]}}
+        installed = _old_install(tmp_path, settings=doc)
+        assert any(
+            f.kind == "missing-hook-entry" and f.script == "session-end.sh"
+            for f in detect_install(installed))
+        upgrade_install(installed)
+        assert len(_settings(installed)["hooks"]["SessionEnd"]) == 2
+
+    @pytest.mark.parametrize("command", [
         "/bin/bash {abs}",
         "/usr/bin/env bash {abs}",
         "/bin/sh -c '{abs}'",

@@ -1,6 +1,6 @@
 """#1727 Slice 2 (Task 15) — T2 historical-session backfill parsers.
 
-``tortoise sessions import --harness codex|claude-desktop|cursor|pi|openclaw``
+``tortoise sessions import --harness codex|claude-desktop|cursor|hermes|pi|openclaw``
 stages a
 harness's session store into conversation turns, POSTs to hosted
 ``/v1/sessions`` with a deterministic idempotency key, and writes a LOCAL
@@ -19,9 +19,11 @@ from __future__ import annotations
 from .parsers import (
     MAX_TURNS,
     PARSERS,
+    hermes_selected_session_id,
     parse_claude_desktop,
     parse_codex,
     parse_cursor,
+    parse_hermes,
     parse_openclaw,
     parse_pi,
     parse_transcript,
@@ -31,9 +33,11 @@ from .parsers import (
 __all__ = [
     "MAX_TURNS",
     "PARSERS",
+    "hermes_selected_session_id",
     "parse_claude_desktop",
     "parse_codex",
     "parse_cursor",
+    "parse_hermes",
     "parse_openclaw",
     "parse_pi",
     "parse_transcript",

@@ -14,7 +14,7 @@ import { errorMessage, headerUpgradeEligible, nudgeRoute, shouldNudgeUpgrade } f
 // card, the usage bar, and the at/near-limit nudge). Pure, node --test
 // unit-tested (nodeUsage.test.js).
 import { nextUpgradePlan, nodeBarColor, nodeNudge, nodeUsage, nodeUsageText } from './nodeUsage.js'
-import { CANONICAL_MCP_URL, CAPTURE_OPT_IN_LINE, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_REQUIRES_OPT_IN, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, analyticsHarnessOf, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
+import { CANONICAL_MCP_URL, CAPTURE_OPT_IN_LINE, HARNESS_CAPTURE_REQUIRES_OPT_IN, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, analyticsHarnessOf, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #4880/#4365: the wizard's agent-facing copy is a RENDERED value the guards
 // assert — main.jsx is JSX and cannot be imported by `node --test`, so parsing
 // it as source is the mechanism that produced five false greens.
@@ -23,7 +23,11 @@ import { WIZARD_CAPTIONS, wizardPromptText, wizardWorkflowsText } from './wizard
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
 // removed with the consent gate (default-ON, ToS-covered).
-import { captureStatusForHarness, captureClaimForHarness, captureStatusLabelForHarness, harnessAttributionForHarness, captureErrorForHarness } from './captureStatus.js'
+import { captureClaimForHarness, captureStatusLabelForHarness } from './captureStatus.js'
+// #4915: the per-harness status rows are their own module so the DOM lane
+// (harnessDisclosureDom.test.jsx) can render them; main.jsx cannot be imported
+// by a test (it mounts the whole application at module scope).
+import { HarnessStatusCard } from './harnessStatusCard.jsx'
 import { setupGuide } from './setupGuide.js'
 // #2005 (W9): the resume/entry-step derivation shared by the wizard's re-entry
 // doors — ONE function so the Setup pill, the re-entry card and the Settings
@@ -54,9 +58,18 @@ import { OverviewEmptyActions, GraphMissingEmptyStateActions, SDK_DOCS_HREF, res
 import { MemberEmptyStateKeyNote, OwnerEmptyStateKeyNote, ownerCardProps, keyTabAffordance, graphMissingCta,
   REENTRY_BUILD_LEAD_IN, REENTRY_SELF_LEAD_IN, REENTRY_KEYED_LEAD_IN,
   GRAPH_MISSING_BUILD_LEAD_IN, GRAPH_MISSING_SELF_LEAD_IN } from './onboardingEmptyStateKeyNote.js'
-// #1997 (W1): the 4 human onboarding steps — pure structure + copy + fork
+// #1997 (W1): the human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
-import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel, wizardStepSub } from './wizardFlow.js'
+import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel, wizardStepSub, wizardStepAnnouncement } from './wizardFlow.js'
+// #3513 (epic #1714 R1): the integration tile inventory + the grid's pure
+// presentation rules (order, the coming-soon bound, state-bearing aria-labels,
+// the monogram fallback). node --test unit-tested (integrationsGrid.test.js).
+import {
+  COMING_SOON_DIALOG_BODY, COMING_SOON_DIALOG_FOOTNOTE, COMING_SOON_DIALOG_TITLE,
+  DATA_SOURCES_ORDER, INTEGRATION_STATE,
+  comingSoonShowMoreLabel, orderedTiles, tileActionLabel, tileAriaLabel, tileByKey, tileMark,
+  tileStatus, visibleComingSoon,
+} from './integrationsGrid.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
 // unit-tested (memorySourcesStatus.test.js).
 import { docsIndexedLabel, docsSourceOn, formatRelativeTime, issuesSourceOn, jobStatusLine } from './memorySourcesStatus.js'
@@ -77,8 +90,9 @@ import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName, reveal
 import { allowanceLine, upgradeNoticeFrom, rotateCapNoticeFrom, existingKeyNoteFrom, capRevokeFirstClause } from './keyAllowance.js'
 // #4335: the billing CTA's honest-unavailable derivation — one pure source so
 // the three render sites cannot drift (see billingCta.js).
-import { COMPARE_PLANS_URL, CHECKOUT_UNAVAILABLE_REASON, checkoutCtaFor, capNoticeUpgrade } from './billingCta.js'
+import { COMPARE_PLANS_URL, CHECKOUT_UNAVAILABLE_REASON, checkoutCtaFor, capNoticeUpgrade, headerUpgradeCta } from './billingCta.js'
 import {
+  BACKUP_LOADING_FLOOR_MS,
   canManageGraphKeys,
   deleteTypedMatches,
   graphBackupCellState,
@@ -87,9 +101,13 @@ import {
   graphKeyPanelEmptyLine,
   graphKeysSuppressed,
   graphMintBody,
+  graphRecordingBody,
+  graphRecordingLabel,
+  graphRecordingState,
   graphsMeter,
   sortedGraphRows,
   sortedTrashRows,
+  teamBackupsEnabled,
   tierCreateLocked,
   TRASH_GRACE_DAYS,
   trashDaysLeft,
@@ -113,7 +131,7 @@ import { GithubDisconnectControl } from './githubDisconnect.js'
 // #2392: minimal a11y focus management for the dialog family — capture the
 // opening trigger, restore focus to it on close (pure, node --test
 // unit-tested — dialogFocus.test.js).
-import { rememberFocusedTrigger, rememberRestoreTarget, restoreFocus } from './dialogFocus.js'
+import { rememberFocusedTrigger, rememberRestoreTarget, restoreFocus, containTabFocus, applyBackgroundInert } from './dialogFocus.js'
 // #3501/#4054: the BFF session gate — the ONE place a `/api/session` response is
 // interpreted, and the ONE place a redirect to /auth is authorized. Pure and
 // node --test unit-tested (sessionGate.test.js). This is the client half of the
@@ -267,7 +285,7 @@ function keyRowDisclosure(row, fallbackName) {
 // capturedSessions.test.js) for the Settings Captured-sessions home.
 import {
   removeSession, sessionRowMeta, transcriptModel,
-  turnRoleClass, kindBadgeClass, DELETE_CONFIRM,
+  turnRoleClass, kindBadgeClass, DELETE_CONFIRM_WORD, DELETE_CONSEQUENCES,
 } from './capturedSessions.js'
 // #2001 (W5): the Setup-guide card mirror — ONE shared derivation
 // (setupGuide.js, node --test) of the graph-held FLOW state. Renders the
@@ -431,18 +449,63 @@ function OverviewNextActionCard({ state, loading, onOpenSettings }) {
   )
 }
 
-// #2000 (W4) review P2-6: the Backups summary relocated from the Overview to
-// the API Keys tab. It needs its OWN 15s loading floor — the old Overview
-// card's frameStale latch only ticks while the Overview tab is mounted
-// (#1842/#1923), so the relocated card can never rely on it. Local floor:
-// skeleton for 15s, then the honest '—' frame.
-function BackupsCard({ status, count }) {
-  const [stale, setStale] = React.useState(false)
+// ── #3376: ONE shared 30s clock for every relative-time label ─────────────
+// The Graphs Last-backup column used to own a `setInterval(30_000)` PER ROW
+// (#1894 pattern): N graphs → N timers AND N independent leaf re-renders per
+// tick, with a second copy of the same interval in MemorySources. This
+// module-level store starts ONE interval when the first consumer subscribes
+// and clears it when the last unsubscribes — every consumer re-renders on the
+// same tick. `useSyncExternalStore` needs a referentially stable snapshot, so
+// the cached epoch-ms value only changes inside the interval callback; the
+// server snapshot mirrors it (no SSR clock skew).
+const NOW_TICK_MS = 30_000
+let nowTickValue = Date.now()
+let nowTickTimer = null
+const nowTickSubscribers = new Set()
+function subscribeNowTick(cb) {
+  nowTickSubscribers.add(cb)
+  if (nowTickTimer === null) {
+    nowTickTimer = setInterval(() => {
+      nowTickValue = Date.now()
+      for (const fn of nowTickSubscribers) fn()
+    }, NOW_TICK_MS)
+  }
+  return () => {
+    nowTickSubscribers.delete(cb)
+    if (nowTickSubscribers.size === 0 && nowTickTimer !== null) {
+      clearInterval(nowTickTimer)
+      nowTickTimer = null
+    }
+  }
+}
+const getNowTick = () => nowTickValue
+function useNowTick() {
+  return React.useSyncExternalStore(subscribeNowTick, getNowTick, getNowTick)
+}
+
+// #3376 (2): the shared LOADING FLOOR latch. ONE implementation and ONE
+// constant (BACKUP_LOADING_FLOOR_MS) so the Graphs Last-backup column and the
+// API-Keys BackupsCard resolve on the same window — a hung /v1/backups used to
+// show the card's `—` at 15s while the column stayed `…` forever. Returns true
+// once `active` has been continuously true for `ms`; resets when it is not.
+function useLoadingFloor(active, ms = BACKUP_LOADING_FLOOR_MS) {
+  const [reached, setReached] = React.useState(false)
   React.useEffect(() => {
-    if (status !== 'loading') { setStale(false); return undefined }
-    const t = setTimeout(() => setStale(true), 15_000)
+    if (!active) { setReached(false); return undefined }
+    const t = setTimeout(() => setReached(true), ms)
     return () => clearTimeout(t)
-  }, [status])
+  }, [active, ms])
+  return reached
+}
+
+// #2000 (W4) review P2-6: the Backups summary relocated from the Overview to
+// the API Keys tab. It needs its OWN loading floor — the old Overview card's
+// frameStale latch only ticks while the Overview tab is mounted (#1842/#1923),
+// so the relocated card can never rely on it. The floor is now SHARED with the
+// Graphs Last-backup column (#3376) so the two backups surfaces cannot
+// disagree: skeleton for BACKUP_LOADING_FLOOR_MS, then the honest '—' frame.
+function BackupsCard({ status, count }) {
+  const stale = useLoadingFloor(status === 'loading')
   const value = status === 'ok' ? (count || 'none')
     : (status === 'loading' && !stale) ? <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />
       : '—'
@@ -474,6 +537,7 @@ function SettingsTab(props) {
     selectedSessionId, onViewSession, onClearSessionDetail,
     sessionDetail, detailLoading, sessionDetailError,
     onDeleteSession, deletingSessionId, sessionsActionError,
+    onClearSessionsActionError,
   } = props
   const reposNote = githubConnected
     ? (github.repos != null ? `${github.repos} repos available`
@@ -485,6 +549,19 @@ function SettingsTab(props) {
   // mirrors the App-level sessionDetail/selectedSessionId (kept in the App
   // so team switches + logouts clear it in one place).
   const openSessionId = selectedSessionId ? String(selectedSessionId) : null
+  // #3885 (e): deleting the RAW transcript is armed by a TYPE-TO-CONFIRM
+  // modal — the same gate the product uses to delete a whole graph (#2701) —
+  // not a native window.confirm. State is per-row and validated against the
+  // live `sessions` list: a successful DELETE removes the row and closes the
+  // dialog, a failed one leaves it armed with its reason rendered inside it.
+  const [confirmSessionId, setConfirmSessionId] = React.useState(null)
+  const [sessionConfirmTyped, setSessionConfirmTyped] = React.useState('')
+  // #3885 (e) review P3-2b: "the dialog is armed" is NOT "confirmSessionId is
+  // set" — the modal returns null the moment its session leaves the live list,
+  // while `confirmSessionId` stays truthy. Gate the page-level copy on the
+  // dialog that ACTUALLY renders, so a delete reason can never be suppressed
+  // with no surface left to show it (exactly one visible surface, always).
+  const sessionDeleteArmed = !!confirmSessionId && sessions.some((x) => String(x.id) === confirmSessionId)
   return (
     <section className="settings" aria-label="Settings">
       <h2>Settings</h2>
@@ -683,8 +760,14 @@ function SettingsTab(props) {
                         style={{ color: 'var(--red,#f87171)' }}
                         disabled={!!deletingSessionId}
                         onClick={() => {
-                          if (!window.confirm(DELETE_CONFIRM)) return
-                          onDeleteSession(s.id)
+                          // #3885 (e): arm the type-to-confirm modal — the
+                          // deletion itself only runs from the gated dialog.
+                          // Review P3-2c: clear the previous delete's reason
+                          // FIRST — otherwise session A's failure would appear
+                          // inside the dialog armed for session B.
+                          onClearSessionsActionError()
+                          setConfirmSessionId(sid)
+                          setSessionConfirmTyped('')
                         }}>
                         {deleting ? 'Deleting…' : 'Delete'}
                       </button>
@@ -695,8 +778,14 @@ function SettingsTab(props) {
             </ul>
             {/* #2002 (W6): delete action error surfaces under the list (row-
                 level, never a fabricated success) + the transcript panel for
-                the open session (loading / honest error / transcript body). */}
-            {sessionsActionError && (
+                the open session (loading / honest error / transcript body).
+                #3885 (e) review P3-2: while the delete dialog is armed the same
+                reason renders INSIDE it (the backdrop paints over this line),
+                so this copy is suppressed then — one announcement, always on
+                the visible surface. The condition is `!sessionDeleteArmed`,
+                not `!confirmSessionId`: the dialog can be closed by its session
+                leaving the list while `confirmSessionId` stays set. */}
+            {sessionsActionError && !sessionDeleteArmed && (
               <p className="error" role="alert" style={{ marginTop: '0.5rem' }}>{sessionsActionError}</p>
             )}
             {openSessionId && (
@@ -709,6 +798,68 @@ function SettingsTab(props) {
                 onClose={onClearSessionDetail}
               />
             )}
+            {/* #3885 (e): the raw-delete confirmation. Owner requirement:
+                deleting the raw needs STRONG confirmation, consistent with
+                the graph-delete pattern (#2701) and applying to EVERY storage
+                mode — the gate is about the consequence, not about who holds
+                the bytes. Same `.graph-delete-modal` CSS vocabulary and the
+                same `deleteTypedMatches` gate as the graph modal, but the required
+                word is PASSED IN from capturedSessions.js (DELETE_CONFIRM_WORD)
+                so the word rendered and the word required are one value; the
+                consequence lines come from the same module, so copy and
+                tripwire cannot drift. A failure keeps the dialog armed AND
+                renders its reason INSIDE the dialog — the page-level banner
+                sits under this backdrop, so a reason left there would be
+                unreadable while the gate stays up. The dialog renders only
+                while its session is still listed, so a successful DELETE
+                closes it and a failed one keeps it armed. */}
+            {confirmSessionId && (() => {
+              const ds = sessions.find((x) => String(x.id) === confirmSessionId)
+              if (!ds) return null
+              const sessionTypedOk = deleteTypedMatches(sessionConfirmTyped, DELETE_CONFIRM_WORD)
+              const sessionBusy = deletingSessionId === confirmSessionId
+              return (
+                <div className="modal-backdrop" onClick={() => { if (!sessionBusy) { setConfirmSessionId(null); setSessionConfirmTyped('') } }}>
+                  <div className="modal graph-delete-modal session-delete-modal" role="dialog" aria-modal="true" aria-label="Delete captured session" onClick={(e) => e.stopPropagation()}>
+                    <h3>Delete this captured session?</h3>
+                    <p className="danger-note">This cannot be undone — think before you confirm.</p>
+                    <ul className="dim small">
+                      {DELETE_CONSEQUENCES.map((line) => <li key={line}>{line}</li>)}
+                    </ul>
+                    <p className="dim small" style={{ margin: '0.6rem 0 0.4rem' }}>
+                      Type <code>{DELETE_CONFIRM_WORD}</code> to confirm:
+                    </p>
+                    <input
+                      autoFocus
+                      className="delete-confirm-input"
+                      value={sessionConfirmTyped}
+                      aria-label={`Type ${DELETE_CONFIRM_WORD} to confirm`}
+                      onChange={(e) => setSessionConfirmTyped(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && sessionTypedOk && !sessionBusy) { e.preventDefault(); onDeleteSession(ds.id) }
+                        if (e.key === 'Escape' && !sessionBusy) { setConfirmSessionId(null); setSessionConfirmTyped('') }
+                      }}
+                    />
+                    <div className="new-key-actions" style={{ marginTop: '0.8rem' }}>
+                      <button type="button" className="ghost" disabled={sessionBusy} onClick={() => { setConfirmSessionId(null); setSessionConfirmTyped('') }}>Cancel</button>
+                      <button
+                        type="button"
+                        className="danger"
+                        disabled={!sessionTypedOk || sessionBusy}
+                        onClick={() => onDeleteSession(ds.id)}
+                      >{sessionBusy ? 'Deleting…' : 'Delete session'}</button>
+                    </div>
+                    {/* #3885 (e) review P3-2: the failure reason renders HERE,
+                        not only under the list — `.modal-backdrop` is a fixed,
+                        70%-opaque, z-60 layer, so a reason painted in the page
+                        flow is unreadable while the gate is still armed. */}
+                    {sessionsActionError && (
+                      <p className="error" role="alert" style={{ margin: '0.8rem 0 0' }}>{sessionsActionError}</p>
+                    )}
+                  </div>
+                </div>
+              )
+            })()}
           </>
         )}
       </section>
@@ -1278,6 +1429,8 @@ function App() {
     // reconciles, re-enables the button, and the painted DOM is focusable.
     // (The ref holds a JS reference to the element — it survives the deferred
     // callback: the element isn't GC'd until the ref is cleared.)
+    // #2577: the same deferral also lands AFTER ReauthDialog's inert cleanup, so
+    // the background is focusable again by the time the restore runs.
     requestAnimationFrame(() => restoreFocus(reauthRestoreRef))
   }
   // #1765 review P1: the pre-reauth session user id (verify the provider
@@ -1721,12 +1874,16 @@ function claimIntentInFlight() {
   // with no observed edge. The guard that a graph-down `'unavailable'` string
   // never reads as connected lives in the helper.
   const serverHarnessConnected = harnessConnectionObserved(onboarding)
-  // `wizardPaused` is set ONLY by the connect step's THREE live "Skip for now"
-  // escapes — the keyless/owner nav, the cap-remedy nav, and the main
-  // per-harness nav (`setWizardPaused(true)` has exactly three call sites) — so
-  // it now means exactly "the user skipped the connect step" — no session-local
-  // assertion can suppress it any more. (review cycle 1 P2-7: the count was
-  // stated as two, which made the invariant unauditable.)
+  // `wizardPaused` is set ONLY by a live Skip escape — the connect step's THREE
+  // "Skip for now" navs (the keyless/owner nav, the cap-remedy nav, and the
+  // main per-harness nav) PLUS the Data-sources step's own Skip
+  // (`setWizardPaused(true)` has exactly FOUR call sites, #3513) — so it means
+  // "the user skipped PAST an optional setup step". `effectivelyPaused` below
+  // combines it with the server observation, so a skipped-but-connected user
+  // still reads as connected (connect → Back → Skip must not read as paused)
+  // and no session-local assertion can suppress it any more. (review cycle 1
+  // P2-7: the count was stated as two, which made the invariant unauditable;
+  // #3513 added the fourth call site and this line had been left stating three.)
   const effectivelyPaused = wizardPaused && !serverHarnessConnected
   // #3428 (lane B3, option (a)): the success screen's capture sentence is
   // DERIVED, never asserted — 'present' | 'future' | 'install-pending' | 'none'
@@ -1747,7 +1904,7 @@ function claimIntentInFlight() {
   // step (a re-opener may have connected in a prior session) so the paused
   // gate reads fresh server truth.
   React.useEffect(() => {
-    if (welcomeMode && authed && wizardStep === 3 && !onboardingRefreshedAtDoneRef.current) {
+    if (welcomeMode && authed && wizardStep === 4 && !onboardingRefreshedAtDoneRef.current) {
       onboardingRefreshedAtDoneRef.current = true
       refreshOnboarding().catch(() => {})
     }
@@ -1782,7 +1939,7 @@ function claimIntentInFlight() {
   const wizardConnectPollInFlightRef = React.useRef(false)
   const [wizardConnectPollStalled, setWizardConnectPollStalled] = React.useState(false)
   React.useEffect(() => {
-    if (!(welcomeMode && authed) || wizardStep !== 3 || serverHarnessConnected) return
+    if (!(welcomeMode && authed) || wizardStep !== 4 || serverHarnessConnected) return
     // review cycle 4 (item 9): the failure/stall state was NEVER reset, so it
     // out-lived the effect that produced it. Reachable false state: a user sees
     // ≥3 failed checks, presses Back, re-enters step 3, and the connection
@@ -1897,15 +2054,15 @@ function claimIntentInFlight() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wizardStep, welcomeMode, authed, serverHarnessConnected])
   // #3428/#2937 (lane B3, review cycle 8 item 5): the stall flag was reset ONLY
-  // inside the poll effect's setup, which early-returns when `wizardStep !== 3`.
-  // Leaving step 3 after a stall therefore kept the flag set, and re-entering
+  // inside the poll effect's setup, which early-returns when `wizardStep !== 4`.
+  // Leaving step 4 after a stall therefore kept the flag set, and re-entering
   // committed ONE paint frame with the live region already containing the
   // message (not announced — the a11y reason the region is mounted up front)
   // and the body rendering the softened clause the poll was about to retract.
   // Clear it where the step is LEFT, so re-entry starts from the not-stalled
   // state and the frame cannot render a withdrawn promise.
   React.useEffect(() => {
-    if (wizardStep !== 3) setWizardConnectPollStalled(false)
+    if (wizardStep !== 4) setWizardConnectPollStalled(false)
   }, [wizardStep])
   // #2361 review-r3 (P2-2): wizardPaused must not out-live a real connection —
   // connect → Back → Skip must still show 'connected', not 'paused'.
@@ -1950,8 +2107,13 @@ function claimIntentInFlight() {
     // the user sits on step 3 re-runs the announcement with the SAME arm the
     // <h1> just rendered. It used to be body-only (a later-declared const in a
     // deps array is the #2426 TDZ white-screen), which let the two disagree.
-    const label = wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork })
-    setWizardStepAnnounce(`Step ${wizardStep + 1} of 4: ${label}`)
+    // #3513: the count AND the label are one derivation (`wizardStepAnnouncement`
+    // composes `wizardStageLabel` with the count from WIZARD_STEPS). Before
+    // this the count was a bare "of 4" literal, so inserting a step made
+    // screen readers announce four steps while sighted users saw five. The
+    // label still comes from the SAME derivation the visible <h1> uses, so the
+    // two cannot drift (the #2361/#2912 rule this effect already depended on).
+    setWizardStepAnnounce(wizardStepAnnouncement(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork }))
     if (!wizardFocusInit.current) {
       wizardFocusInit.current = true
       // #3728 review (P2): seed the last-announced step HERE. The init run
@@ -2452,6 +2614,40 @@ function claimIntentInFlight() {
   // mid-copy. Track the pointerdown origin — only a press that began on the
   // backdrop itself may dismiss.
   const revealBackdropPressRef = React.useRef(false)
+  // #2577 (a11y): the APG dialog-modal remainder — while a modal is open its
+  // tab sequence is contained (containTabFocus) and everything behind it is
+  // inert (applyBackgroundInert), which is the half a keydown handler cannot
+  // do: `inert` removes the background from the accessibility tree, so a
+  // screen reader's virtual cursor cannot reach it either. One effect per
+  // dialog, cleaned up on close; the background is restored to exactly its
+  // prior state (a pre-existing inert is never stripped).
+  //
+  // The release is HELD in a ref because the close path must run it BEFORE
+  // restoreFocus: an element inside an inert subtree is not focusable, so a
+  // synchronous restore while the background is still marked silently no-ops
+  // — a #2392 regression a real browser would show and jsdom cannot (it does
+  // not model inert). The effect cleanup re-runs the same one-shot release
+  // harmlessly.
+  const createTeamDialogRef = React.useRef(null)
+  const createTeamInertRef = React.useRef(null)
+  React.useEffect(() => {
+    if (!createTeamOpen || typeof document === 'undefined') return undefined
+    const el = createTeamDialogRef.current
+    if (!el) return undefined
+    const release = applyBackgroundInert(el, document)
+    createTeamInertRef.current = release
+    return () => { createTeamInertRef.current = null; release() }
+  }, [createTeamOpen])
+  const revealKeyDialogRef = React.useRef(null)
+  const revealKeyInertRef = React.useRef(null)
+  React.useEffect(() => {
+    if (!revealKey || typeof document === 'undefined') return undefined
+    const el = revealKeyDialogRef.current
+    if (!el) return undefined
+    const release = applyBackgroundInert(el, document)
+    revealKeyInertRef.current = release
+    return () => { revealKeyInertRef.current = null; release() }
+  }, [revealKey])
   // #2392 (a11y): the single create-team/reveal-key close path — every close
   // (backdrop, Escape, Cancel/Upgrade, success, Copy & done, I saved it)
   // restores focus to the opening trigger instead of dropping it on <body>.
@@ -2460,6 +2656,7 @@ function claimIntentInFlight() {
     setCreateTeamMode('name')
     setCreateTeamPlan('')
     setCreateTeamLimitOrgId('')
+    if (createTeamInertRef.current) createTeamInertRef.current()
     restoreFocus(createTeamRestoreRef)
   }
   // NOTE: the logout/team-switch revealKey clears (below) deliberately do NOT
@@ -2467,6 +2664,7 @@ function claimIntentInFlight() {
   // dismissals, so no focus restore is wanted there.
   function closeRevealKey() {
     setRevealKey(null)
+    if (revealKeyInertRef.current) revealKeyInertRef.current()
     restoreFocus(revealRestoreRef)
   }
   const orgIdRef = React.useRef(null)
@@ -3142,14 +3340,22 @@ function claimIntentInFlight() {
   const graphUpgradePriceId = graphUpgrade
     ? (team?.checkout_price_ids?.[graphUpgrade.tier] || '')
     : ''
+  // #4773: the header control's OWN target — the tier it advertises resolved to
+  // that tier's price id from the server's per-tier map. Deliberately NOT
+  // `team.checkout_price_id`: that singular field is merely the server's
+  // current default, so a control wired to it opens whatever price the server
+  // happens to send while its label names another tier (the P2 from #4639).
+  const headerUpgrade = headerUpgradeCta(team)
   // `hasUpgrade` keeps the nudge copy honest: no "upgrade for a higher
   // allowance" promise when no plan above the current one is purchasable
   // (top tier, or an empty catalog).
   const nodeHint = nodeNudge(team, Boolean(nodeNext))
 
-  // #1623: parameterized upgrade — the header Upgrade button uses the
-  // server-resolved default (team.checkout_price_id); the Billing page and
-  // welcome plan step pass a per-tier price id from team.checkout_price_ids.
+  // #1623: parameterized upgrade — the Billing page, the welcome plan step,
+  // the node nudge and (since #4773) the header all pass a per-tier price id
+  // from team.checkout_price_ids. The only caller left on the server's
+  // singular default is the error banner's generic "Upgrade plan" nudge
+  // (`upgrade()` below), whose copy names no tier.
   async function upgradeToPrice(priceId) {
     // #4386: a missing price id is NOT a silent no-op. Every render site
     // disables/skips the control when no checkout is possible, so this branch
@@ -3456,7 +3662,7 @@ function claimIntentInFlight() {
   // #1997 (W1): LEGACY #1643 step labels — ARCHIVED-not-deleted (A0 rollback
   // path, epic §8; the DE2E-1 archived-not-deleted assertion greps this +
   // the LEGACY_WIZARD_ARCHIVED marker below). The LIVE wizard renders
-  // WIZARD_STEPS (wizardFlow.js) — 4 human steps.
+  // WIZARD_STEPS (wizardFlow.js) — 5 human steps.
   const wizardSteps = ['Connect your tool', 'Memory sources', 'Your agent\'s toolkit', 'Seed your graph', 'You\'re set']
   // #1997 (W1): ARCHIVED flag — the legacy #1643 wizard render JSX below
   // is the A0 gate's rollback surface (partial revert restores it); it is
@@ -4066,9 +4272,9 @@ function claimIntentInFlight() {
   // the defaults from the session when the seed step is first entered
   // (ONCE — a deliberate clear + Back/Next must not re-populate).
   // #1997 (W1): the seed step is ARCHIVED — this effect must not fire on the
-  // live connect step (wizardStep 3 is now connect-consent, not seed); gate
-  // it on LEGACY_WIZARD_ARCHIVED so the A0 rollback path stays clean
-  // (review P2).
+  // live data-sources step (#3513 renumbered it to index 3; it was
+  // connect-consent before); gate it on LEGACY_WIZARD_ARCHIVED so the A0
+  // rollback path stays clean (review P2).
   const seedPrefilledRef = React.useRef(false)
   React.useEffect(() => {
     if (!LEGACY_WIZARD_ARCHIVED) return
@@ -5443,9 +5649,12 @@ function claimIntentInFlight() {
       if (forkId === 'unsure') {
         // no fork consumed — refresh so the projection carries fork_unsure_at
         // (the card's deferred hint + the Setup-guide fork row need it), then
-        // advance like a self pick (there is no catalog to show).
+        // advance straight to the DONE step (index 4, #3513 renumbered it from
+        // 3) — a deferral sets up nothing, so it skips the connect step AND the
+        // new Data-sources step (there is no catalog to show and no pick to
+        // make).
         refreshOnboarding().catch(() => {})
-        setWizardStep(3)
+        setWizardStep(4)
         return
       }
       setWizardForkChosen(forkId)
@@ -6142,6 +6351,50 @@ function claimIntentInFlight() {
       if (orgIdRef.current !== _teamAtCall) return // stale switch — error belongs to the old team
       setGraphs((gs) => gs.map((x) => x.graph_id === graphId ? { ...x, name: prev } : x))
       setError((e && e.message) || 'Couldn\'t rename the graph — try again.')
+    }
+  }
+
+  // #2650: per-graph session-recording override — the human Graphs-tab surface
+  // for the C6 #2115 / #2302 setting. Mirrors renameGraph's contract: PATCH
+  // /v1/graphs/{id} with ONLY {recording} (never echo stale row fields — a
+  // recording change must not touch the name/auth state), optimistic local
+  // update with revert-on-error into the page-level banner, and the #2230
+  // team pin captured at call (a mid-flight switch must not flip the new
+  // team's row nor land the error under the wrong header). Server: session
+  // owner/admin or a team:manage key; the body is strict true|false|null
+  // (null = clear the override and inherit the team default).
+  async function setGraphRecording(graphId, nextState) {
+    const _teamAtCall = currentOrgId
+    setError('')
+    const cur = graphs.find((g2) => g2.graph_id === graphId)
+    if (!cur) return
+    // Optimistic update in the server's own value space (bool | null).
+    const next = graphRecordingBody(nextState).recording
+    const prevState = graphRecordingState(cur)
+    const prev = prevState === 'inherit' ? null : prevState === 'on'
+    if (prev === next) return
+    setGraphs((gs) => gs.map((x) => x.graph_id === graphId ? { ...x, recording: next } : x))
+    try {
+      const q = (sessionTokenRef.current && _teamAtCall) ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
+      const updated = await api(`/v1/graphs/${encodeURIComponent(graphId)}${q}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        useSession: true, // recording is owner/admin-managed (session JWT — mirror rename/key management)
+        body: JSON.stringify({ recording: next }),
+      })
+      if (orgIdRef.current !== _teamAtCall) return // stale switch — don't touch the new team's state
+      // Reconcile with the server echo. The recording-only PATCH keeps the
+      // pre-#2701 {graph_id, recording} shape, so `recording` is authoritative
+      // when present (a false/absent field must not be read as success).
+      if (updated && updated.graph_id === graphId && 'recording' in updated) {
+        const echoed = updated.recording === true ? true
+          : updated.recording === false ? false : null
+        setGraphs((gs) => gs.map((x) => x.graph_id === graphId ? { ...x, recording: echoed } : x))
+      }
+    } catch (e) {
+      if (orgIdRef.current !== _teamAtCall) return // stale switch — error belongs to the old team
+      setGraphs((gs) => gs.map((x) => x.graph_id === graphId ? { ...x, recording: prev } : x))
+      setError((e && e.message) || 'Couldn\'t change recording for this graph — try again.')
     }
   }
 
@@ -8007,6 +8260,51 @@ function claimIntentInFlight() {
         ? (connectGate.mode === 'existing' ? wizardExistingKeyAffordance : wizardNoKeyAffordance)
         : wizardPasteRow
 
+  // #3513: the MemorySources prop bundle is built ONCE and spread at the TWO
+  // LIVE mounts (Settings → Memory sources and the wizard's Data-sources step),
+  // so those cannot drift into partially-installed states. The dead
+  // LEGACY_WIZARD_ARCHIVED rollback block is NOT a spread site: it renders its
+  // own deliberate INLINE subset (it omits `onToggleCaptureExtract`), so the
+  // shared bundle does not cover it. The `order` prop is explicit (the pinned
+  // ship order) — the component must not rely on the inventory array literal's
+  // incidental order.
+  //
+  // `wizardHarness: null` is the SETTINGS default: Settings never knows the
+  // user's harness, so no row is marked "current" there. The wizard mount
+  // OVERRIDES it with the connect-step pick (`harnessPickEstablished ?
+  // wizardHarness : null`) — the wizard is the one mount that knows it, and
+  // only when a pick was actually established (a skipped connect step and the
+  // 'claude' default are never presented as a user choice).
+  const memorySourcesProps = {
+    state: onboarding,
+    loading: onboardingLoading,
+    wizardHarness: null,  // Settings default; the wizard mount overrides it
+    github: wizardGithub,
+    issuesWantOn,
+    docsWantOn,
+    indexJob,
+    docsJob,
+    memoryBusy,
+    memoryErrors,
+    onToggleIssues: toggleIssues,
+    onToggleDocs: toggleDocs,
+    onToggleSessions: toggleSessionRecording,
+    onToggleCaptureExtract: toggleCaptureExtract,
+    onConnectGithub: wizardConnectGithub,
+    onIndexDocs: indexDocs,
+    onReindexGithub: reindexGithub,
+    reposList,
+    reposLoaded,
+    reposLoadFailed,
+    branchLists,
+    docsScope,
+    issuesScope,
+    onDocsScopeChange: handleDocsScopeChange,
+    onIssuesScopeChange: handleIssuesScopeChange,
+    onLoadBranches: loadBranches,
+    order: DATA_SOURCES_ORDER,
+  }
+
   if (welcomeMode && authed) {
     // #2323 (Option B): name-first first-run — the welcome card renders the
     // W1 wizard, never the key. There is NO mount provisioning (#1566's
@@ -8079,8 +8377,8 @@ function claimIntentInFlight() {
                   {(() => {
                     // Step 0 on an org-holding account is a read-only summary
                     // whose body already says "You're set up in <org>…" — a
-                    // second line here would repeat it. Same for step 3 without
-                    // an observed connection: its <h1> already names the state
+                    // second line here would repeat it. Same for step 4 (done)
+                    // without an observed connection: its <h1> already names the state
                     // (wizardStageLabel's paused / not-connected arms) and
                     // the body carries the recovery (PR-gate UX: the old paused
                     // lede restated both). Review cycle 1 P1-1: keying this on
@@ -8174,9 +8472,9 @@ function claimIntentInFlight() {
                 <span className="sr-only" role="status" aria-live="polite">
                   {welcomeProvisioning ? 'Creating your organization' : (welcomeHasOrg && shownOrgName ? `${shownOrgName} is set up` : '')}
                 </span>
-                {/* #1997 (W1): the 4 HUMAN steps (epic plan P1) — org-create/join
-                    → fork card → connect-consent → done (orientation removed per
-                    epic #2534).
+                {/* #1997 (W1): the 5 HUMAN steps (epic plan P1) — org-create/join
+                    → fork card → connect-consent → data-sources (#3513) → done
+                    (orientation removed per epic #2534).
                     All other steps (install/seed/decide) are agent-side or
                     archived. Copy from wizardFlow.js (DE2E-2: 'Organization',
                     never 'team'/'workspace' in user-facing labels). */}
@@ -8731,7 +9029,36 @@ function claimIntentInFlight() {
                     </div>
                   )))}
 
+                  {/* #3513 (epic #1714 R1): the Data-sources step. The grid is
+                      the SAME MemorySources component Settings mounts — one
+                      presentation of the source list in the product, no
+                      competing toggle list. Continue does NOT block on an
+                      incomplete connection (blocking an opt-in wizard is worse
+                      than a partial state); BOTH Continue and Skip advance to
+                      `done` (index 4), and the done step names what did not
+                      finish. */}
                   {wizardStep === 3 && (
+                    <div className="data-sources">
+                      <p className="dim" style={{ lineHeight: 1.6 }}>
+                        Choose what Tortoise should remember. Everything here is optional and can be
+                        changed any time from Settings → Memory sources.
+                      </p>
+                      <MemorySources
+                        {...memorySourcesProps}
+                        order={DATA_SOURCES_ORDER}
+                        wizardHarness={harnessPickEstablished ? wizardHarness : null}
+                      />
+                      <div className="wizard-nav">
+                        <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
+                        <div className="wizard-nav-actions">
+                          <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(4) }}>Skip</button>
+                          <button type="button" className="btn-primary" onClick={() => setWizardStep(4)}>Continue →</button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {wizardStep === 4 && (
                     <div className="done">
                       {isBuildFork ? (
                         // #3428/#2937 (lane B3, review cycle 2 P1-2): the build
@@ -8892,8 +9219,24 @@ function claimIntentInFlight() {
                             : ''}
                         </p>
                       )}
+                      {/* #3513: the incomplete-setup variant. Continue and Skip
+                          both reach `done` WITHOUT blocking, so this step must
+                          name what did not finish instead of silently passing.
+                          The affordance goes back to the grid (index 3), where
+                          the unfinished tile carries its own honest state. */}
+                      {!githubConnected && (
+                        <p className="dim" style={{ lineHeight: 1.6 }}>
+                          GitHub was not connected, so issue and document indexing will start once the
+                          connection completes.{' '}
+                          <button type="button" className="small" onClick={() => setWizardStep(3)}>Back to sources</button>
+                        </p>
+                      )}
                       <div className="wizard-nav">
-                        <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
+                        {/* #3513: Back from `done` lands on the Data-sources step
+                            (index 3) — the step before it — never on connect.
+                            The renumbered guard is regression-tested: it must not
+                            re-fire the advance. */}
+                        <button type="button" className="ghost" onClick={() => setWizardStep(3)}>← Back</button>
                       </div>
                       <div className="wizard-actions">
                         {/* #3428 (lane B3): the only real control is deliberately
@@ -9535,8 +9878,17 @@ function claimIntentInFlight() {
                  aria-describedby={createTeamMode === 'limit' ? 'create-org-desc-limit'
                    : createTeamMode === 'purchase' ? 'create-org-desc-purchase'
                    : undefined}
+                 ref={createTeamDialogRef}
+                 tabIndex={-1}
                  onClick={(e) => e.stopPropagation()}
-                 onKeyDown={(e) => { if (e.key === 'Escape' && !createTeamBusy) closeCreateTeam() }}>
+                 onKeyDown={(e) => {
+                   // #2577: APG modal containment — wrap Tab/Shift+Tab at the
+                   // dialog boundary. Background is inert too
+                   // (applyBackgroundInert), so this keeps focus inside even
+                   // when the browser would otherwise hand it to the url bar.
+                   if (e.key === 'Tab') { if (containTabFocus(e.currentTarget, { shiftKey: e.shiftKey })) e.preventDefault() }
+                   else if (e.key === 'Escape' && !createTeamBusy) closeCreateTeam()
+                 }}>
               {createTeamMode === 'limit' ? (
                 <>
                   {/* #2789 (code-review): each mode's heading is the dialog's
@@ -9626,11 +9978,17 @@ function claimIntentInFlight() {
             marketing pricing page (a link there is a dead end, and it was the
             upsell the owner hit on Solo). A paid tier shows its name only.
             The redundant header plan-management button (#1290) is REMOVED —
-            the Billing tab owns that. An absent checkout price id shows the
-            plain badge rather than a dead control. */}
-        {team && headerUpgradeEligible(team) && team.checkout_price_id ? (
-          <button className="tier-badge" onClick={upgrade} disabled={checkoutPending}>
-            {checkoutPending ? 'Opening checkout…' : `${TIER_LABELS[team.tier] || team.tier || 'free'} tier · Upgrade`}
+            the Billing tab owns that.
+            #4773: the control's tier and its price id come from ONE
+            resolution (`headerUpgradeCta`) — the advertised tier's own id in
+            the server's per-tier map — so the label can never name a tier
+            other than the one checkout will be opened for. The tier is named
+            in the label for exactly that reason, and a deployment that does
+            not sell it (a partial catalog, #2789) shows the plain badge
+            rather than a dead control. */}
+        {team && headerUpgradeEligible(team) && headerUpgrade.priceId ? (
+          <button className="tier-badge" onClick={() => upgradeToPrice(headerUpgrade.priceId)} disabled={checkoutPending}>
+            {checkoutPending ? 'Opening checkout…' : `Upgrade to ${TIER_LABELS[headerUpgrade.tier] || headerUpgrade.tier}`}
           </button>
         ) : team ? (
           <span className={`tier-badge${team.tier === 'team' ? ' tier-team' : ''}`}>
@@ -9962,34 +10320,8 @@ function claimIntentInFlight() {
             onDeleteSession={deleteCapturedSession}
             deletingSessionId={sessionDeletingId}
             sessionsActionError={sessionsActionError}
-            memorySourcesProps={{
-              state: onboarding,
-              loading: onboardingLoading,
-              wizardHarness: null,  // Settings never knows the user's harness — no spurious "current" highlight
-              github: wizardGithub,
-              issuesWantOn,
-              docsWantOn,
-              indexJob,
-              docsJob,
-              memoryBusy,
-              memoryErrors,
-              onToggleIssues: toggleIssues,
-              onToggleDocs: toggleDocs,
-              onToggleSessions: toggleSessionRecording,
-              onToggleCaptureExtract: toggleCaptureExtract,
-              onConnectGithub: wizardConnectGithub,
-              onIndexDocs: indexDocs,
-              onReindexGithub: reindexGithub,
-              reposList,
-              reposLoaded,
-              reposLoadFailed,
-              branchLists,
-              docsScope,
-              issuesScope,
-              onDocsScopeChange: handleDocsScopeChange,
-              onIssuesScopeChange: handleIssuesScopeChange,
-              onLoadBranches: loadBranches,
-            }}
+            onClearSessionsActionError={() => setSessionsActionError(null)}
+            memorySourcesProps={memorySourcesProps}
           />
         )}
 
@@ -10370,12 +10702,12 @@ function claimIntentInFlight() {
             )}
             <div className="graphs-table-wrap">
             <table>
-              <thead><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Status</th><th scope="col">Keys</th><th scope="col">Last backup</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
+              <thead><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Status</th><th scope="col">Keys</th><th scope="col">Last backup</th><th scope="col">Recording</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
               <tbody>
-                {graphsStatus === 'loading' && authMode === 'session' && <tr><td colSpan="6" className="dim">Loading graphs…</td></tr>}
-                {graphsStatus === 'denied' && <tr><td colSpan="6" className="dim">Graph list is only visible to members.</td></tr>}
-                {graphsStatus === 'error' && <tr><td colSpan="6" className="dim">Couldn't load graphs — check your connection and try again.</td></tr>}
-                {graphsStatus === 'ok' && graphs.length === 0 && <tr><td colSpan="6" className="dim">No graphs yet — create your first one above.</td></tr>}
+                {graphsStatus === 'loading' && authMode === 'session' && <tr><td colSpan="7" className="dim">Loading graphs…</td></tr>}
+                {graphsStatus === 'denied' && <tr><td colSpan="7" className="dim">Graph list is only visible to members.</td></tr>}
+                {graphsStatus === 'error' && <tr><td colSpan="7" className="dim">Couldn't load graphs — check your connection and try again.</td></tr>}
+                {graphsStatus === 'ok' && graphs.length === 0 && <tr><td colSpan="7" className="dim">No graphs yet — create your first one above.</td></tr>}
                 {graphsStatus === 'ok' && sortedGraphRows(graphs).map((g) => (
                   <tr key={g.graph_id} className={confirmDeleteId === g.graph_id ? 'graph-delete-arm' : undefined}>
                     <td>
@@ -10440,7 +10772,37 @@ function claimIntentInFlight() {
                         g.key_count != null ? g.key_count : '—'
                       )}
                     </td>
-                    <GraphBackupCell g={g} summary={graphBackups} status={backupsStatus} />
+                    <GraphBackupCell g={g} summary={graphBackups} status={backupsStatus} backupsEnabled={teamBackupsEnabled(team)} />
+                    {/* #2650: per-graph session-recording override. Owner/admin
+                        get the three-state control (on / off / inherit — the
+                        server's strict true|false|null body); every member
+                        sees the honest read-only value. The server 403s a
+                        non-owner write, so the control is gated by the same
+                        role the PATCH requires — the UI lock mirrors, never
+                        precedes, the API. The default graph is settable too
+                        (recording is per-graph, incl. graph 0). */}
+                    <td>
+                      {isOwnerAdmin ? (
+                        <select
+                          className="graph-recording-select"
+                          value={graphRecordingState(g)}
+                          data-recording-state={graphRecordingState(g)}
+                          aria-label={`Session recording for graph ${g.name || g.graph_id}`}
+                          onChange={(e) => setGraphRecording(g.graph_id, e.target.value)}
+                        >
+                          <option value="inherit">Inherit</option>
+                          <option value="on">On</option>
+                          <option value="off">Off</option>
+                        </select>
+                      ) : (
+                        <span
+                          className="dim small"
+                          title="Only owners and admins can change per-graph session recording."
+                        >
+                          {graphRecordingLabel(g)}
+                        </span>
+                      )}
+                    </td>
                     <td className="graph-actions">
                       {canManageGraphKeys(g) && (
                         <button
@@ -10626,6 +10988,35 @@ function claimIntentInFlight() {
                           <ul className="dim small">
                             <li>Deleted: {trashInspect.deleted_at ? fmtTime(trashInspect.deleted_at) : '—'}</li>
                             <li>Restorable archives: {trashInspect.archive_count != null ? trashInspect.archive_count : 0}</li>
+                            {/* #3103 DECISION — this line deliberately keeps the
+                                ENGINE terms, and must NOT be swept to the #2361
+                                memories anchor. The numbers are the backup
+                                ARTIFACT's own counts (latest_backup.node_count /
+                                edge_count): every data node the dump projection
+                                carries — Points INCLUDING operators, Session
+                                nodes, capture receipts — minus the three
+                                export-skip bookkeeping labels. That is NOT the
+                                memory count: the Memories card reads
+                                team.point_count, the :Point-only, demo-excluded
+                                count, which INCLUDES operator Points (operators
+                                ARE :Point; the non-operator filter belongs to
+                                the separate "Nodes used" metric, #4331). That
+                                the card therefore counts operators as
+                                "Memories" is a separate observation, filed as
+                                #8573 — not settled by this decision.
+                                Relabelling would assert a number that is not the
+                                memory count — the exact false-equivalence the
+                                billing cards already avoid (Nodes used from the
+                                server node metric vs Memories from point_count,
+                                #4331). The sibling edge count has no user-facing
+                                anchor at all (#2361 anchored only the stored
+                                object), so relabelling the node half alone would
+                                MIX two vocabularies in one phrase — worse than
+                                today. Pinned by the #3103 test in
+                                overview.test.js — read it before relabelling.
+                                OVERRIDES: sweep-every-user-facing-surface-to-the-
+                                anchor (#2361) — deliberately NOT applied here,
+                                this panel is an artifact-side diagnostic. */}
                             {trashInspect.latest_backup ? (
                               <li>
                                 Latest backup:{' '}
@@ -10738,8 +11129,14 @@ function claimIntentInFlight() {
                      }
                    }}>
                 <div className="modal" role="dialog" aria-modal="true" aria-label="New key — shown once"
+                     ref={revealKeyDialogRef}
+                     tabIndex={-1}
                      onClick={(e) => e.stopPropagation()}
-                     onKeyDown={(e) => { if (e.key === 'Escape') closeRevealKey() }}>
+                     onKeyDown={(e) => {
+                       // #2577: APG modal containment (see create-team).
+                       if (e.key === 'Tab') { if (containTabFocus(e.currentTarget, { shiftKey: e.shiftKey })) e.preventDefault() }
+                       else if (e.key === 'Escape') closeRevealKey()
+                     }}>
                   <h2>{revealKey.title}</h2>
                   <p className="dim small">Your new key — <strong>shown once</strong>. Copy it now; you won't see it again.</p>
                   <code className="key-value">{revealKeyReveal}</code>
@@ -11036,25 +11433,31 @@ function claimIntentInFlight() {
   )
 }
 
-// #2784: per-graph "last backup". Its own 30s ticker (the #1894 pattern)
-// keeps the relative label true on a long-lived session; never an App-scope
-// interval — App already declares `now`, and a second interval there would
-// re-render the whole dashboard every 30s. The label text comes only from
-// graphBackupCellState: this component never invents a state claim. The cell
-// carries its own aria-label because the state's full explanation lives in the
-// tooltip, which is unreachable for keyboard/AT users on a non-focusable cell.
-function GraphBackupCell({ g, summary, status }) {
-  const [now, setNow] = React.useState(Date.now())
-  React.useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 30_000)
-    return () => clearInterval(t)
-  }, [])
-  const state = graphBackupCellState(g, summary, status, now)
+// #2784: per-graph "last backup". #3376: the ticker is the ONE shared
+// `useNowTick()` clock (module-level; one `setInterval` for the whole app) —
+// NOT a per-row interval, and never an App-scope one (App already declares
+// `now` for the 1s overview skeleton, and a second interval there would
+// re-render the whole dashboard on every backup tick). The label text comes
+// only from graphBackupCellState: this component never invents a state claim.
+// #3376 (2): the loading `…` now has the shared BACKUP_LOADING_FLOOR_MS
+// terminal floor (useLoadingFloor) so a hung list resolves like the
+// BackupsCard instead of showing `…` forever. The cell keeps its own
+// aria-label AND an sr-only copy of the same explanation, because the tooltip
+// is unreachable for keyboard/AT users on a non-focusable cell and the
+// visible glyph (`…`/`—`) carries no meaning in a table read-out.
+function GraphBackupCell({ g, summary, status, backupsEnabled }) {
+  const now = useNowTick()
+  const loadingFloorHit = useLoadingFloor(status === 'loading')
+  const state = graphBackupCellState(g, summary, status, now, backupsEnabled, loadingFloorHit)
   return (
     <td className="graph-backup" title={state.title} aria-label={state.title}>
-      <span className={state.kind === 'ok' || state.kind === 'none' ? 'small' : 'dim small'}>
+      <span
+        className={state.kind === 'ok' || state.kind === 'none' ? 'small' : 'dim small'}
+        aria-hidden="true"
+      >
         {state.label}
       </span>
+      <span className="sr-only">{state.title}</span>
     </td>
   )
 }
@@ -11083,16 +11486,49 @@ function MemorySources(props) {
     onToggleCaptureExtract = null,
     onConnectGithub, onIndexDocs, onReindexGithub,
     onDocsScopeChange, onIssuesScopeChange, onLoadBranches,
+    // #3513: the grid's explicit render order (both mounts pass
+    // DATA_SOURCES_ORDER) — the wizard renders status + the disclosure, and the
+    // Settings mount renders the SAME grid, so an existing user sees ONE
+    // presentation of the source list. The order is a prop, never the array
+    // literal's incidental order (a render-order assertion depends on that).
+    // (review P2: a `surface` prop used to sit here and was never read by this
+    // component — both mounts render byte-identical output — so it was dropped
+    // rather than left looking load-bearing.)
+    order = DATA_SOURCES_ORDER,
   } = props
 
   // #1894: relative-time ticker — keeps "Indexed · 2 min ago" and the job
   // status lines fresh WITHOUT a poll or reload. Declared BEFORE the early
-  // returns (hooks rules: loading/state guards return early).
-  const [now, setNow] = React.useState(Date.now())
-  React.useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 30_000)
-    return () => clearInterval(t)
-  }, [])
+  // returns (hooks rules: loading/state guards return early). #3376: the
+  // shared useNowTick() clock (ONE module-level interval for the whole app,
+  // also driving the Graphs Last-backup column) replaces the local copy.
+  const now = useNowTick()
+
+  // #3513: the grid's own state. Hooks are declared BEFORE the early returns
+  // (rules of hooks — the loading/state guards return early below).
+  //
+  // `openTile` is the one expanded tile's SOURCE id; the recording tile is
+  // expanded by default at both mounts (the pinned sibling-panel contract), so
+  // the Sessions control is reachable without a click. A shipped tile opens ONE
+  // panel at a time; a coming-soon tile opens the demand dialog instead (its
+  // activation is the demand signal, #3514) and no panel.
+  const [openTile, setOpenTile] = React.useState('sessions')
+  const [comingSoonKey, setComingSoonKey] = React.useState(null)
+  const [comingSoonExpanded, setComingSoonExpanded] = React.useState(false)
+  // #2392: restore focus to the tile that opened the dialog (dialogFocus.js),
+  // and close it on Escape. The expanded coming-soon state resets on close
+  // (per-open, never persisted).
+  const comingSoonRestoreRef = React.useRef(null)
+  const closeComingSoon = () => {
+    setComingSoonKey(null)
+    setComingSoonExpanded(false)
+    requestAnimationFrame(() => restoreFocus(comingSoonRestoreRef))
+  }
+  const openComingSoon = (key, trigger) => {
+    rememberFocusedTrigger(comingSoonRestoreRef, undefined)
+    if (trigger) rememberRestoreTarget(comingSoonRestoreRef, trigger)
+    setComingSoonKey(key)
+  }
 
   if (loading) {
     return <div className="memory-sources"><p className="dim">Loading memory sources…</p></div>
@@ -11123,16 +11559,99 @@ function MemorySources(props) {
   const docsLabel = docsIndexedLabel(state, now)
   const githubLastIndexed = formatRelativeTime(state.github_indexed_at, now)
 
-  const status = (h) => captureStatusForHarness(state, h)
-  const lastError = (h) => captureErrorForHarness(state, h)
-  // #3700: the per-row harness attribution — rendered beside the harness name.
-  // Never inside the `role="alert"` failure sentence (see captureStatus.js).
-  const harnessAttribution = (h) => harnessAttributionForHarness(state, h)
+  // #4915: `status` / `lastError` / `harnessAttribution` moved into
+  // `HarnessStatusCard` with the rows that read them: the derivations are only
+  // ever consumed by a row, and keeping them here would have left three local
+  // bindings that nothing in this component calls.
+
+  // #3513: the grid's data. The shipped group is ordered by the explicit
+  // `order` prop; the coming-soon group is bounded (COMING_SOON_VISIBLE_LIMIT)
+  // with the remainder behind "Show more". The four state inputs are the SAME
+  // values the switches below render, so a tile's state and its panel cannot
+  // disagree.
+  const tileStatusInputs = { sessionsOn, issuesOn, docsOn, githubConnected }
+  const shippedGridTiles = orderedTiles(order).filter((t) => t.state === INTEGRATION_STATE.SHIPPED)
+  const comingSoon = visibleComingSoon({ expanded: comingSoonExpanded })
+  const gridTiles = [...shippedGridTiles, ...comingSoon.shown]
+  const comingSoonTile = comingSoonKey ? tileByKey(comingSoonKey) : null
 
   return (
     <div className="memory-sources">
+      {/* #3513 (epic #1714 R1): the integration TILE GRID is the source list —
+          the single presentation in the product (this same component mounts in
+          the wizard's Data-sources step AND in Settings). Built on the two
+          primitives that already existed: `.plans-grid` (the grid skeleton)
+          and `.harness-surface` (the button-tile interaction). Every tile is a
+          real <button> in the tab order — not a roving-tabindex composite —
+          because these are independent actions, not a data grid. */}
+      <ul className="integrations-grid" aria-label="Memory sources">
+        {gridTiles.map((t) => {
+          const isComingSoon = t.state === INTEGRATION_STATE.COMING_SOON
+          const mark = tileMark(t)
+          const open = !isComingSoon && openTile === t.source
+          return (
+            <li key={t.key}>
+              <button
+                type="button"
+                className={'integration-tile'
+                  + (isComingSoon ? ' coming-soon' : '')
+                  + (open ? ' active' : '')}
+                data-integration-key={t.key}
+                data-state={tileStatus(t, tileStatusInputs)}
+                aria-label={tileAriaLabel(t, tileStatusInputs)}
+                aria-expanded={isComingSoon ? undefined : open}
+                aria-controls={isComingSoon ? undefined : `integration-panel-${t.source}`}
+                onClick={(e) => (isComingSoon ? openComingSoon(t.key, e.currentTarget) : setOpenTile(t.source))}
+              >
+                {/* the fixed-size logo slot: a REAL logo when a brand kit
+                    lands (tileMark returns the descriptor only when the tile
+                    declares one), the monogram otherwise — never a broken
+                    <img>, and never the literal '?' the logo branch used to
+                    print while discarding the descriptor (review P2). */}
+                {mark.kind === 'logo'
+                  ? <img className="integration-mark" src={mark.src} alt="" aria-hidden="true" />
+                  : <span className="integration-mark" aria-hidden="true">{mark.text}</span>}
+                <span className="integration-tile-body">
+                  <span className="integration-name">{t.name}</span>
+                  <span className="integration-desc">{t.description}</span>
+                  {/* the state badge: "Coming soon" on an unbuilt tile, the
+                      state-derived action label on a shipped one. NEVER an
+                      opacity-muted or disabled tile — a faded tile reads as
+                      disabled and would suppress the click that IS the signal. */}
+                  <span className="integration-badge">
+                    {isComingSoon ? 'Coming soon' : tileActionLabel(t, tileStatusInputs)}
+                  </span>
+                </span>
+              </button>
+            </li>
+          )
+        })}
+      </ul>
+      {/* The bound must not hide the demand signal: tiles revealed here are the
+          same buttons as the first paint, so their click is identical. The
+          control renders ONLY when it reveals something — an inert control is
+          worse than an absent one. */}
+      {comingSoon.overBound && (
+        <button
+          type="button"
+          className="ghost small"
+          aria-expanded={comingSoonExpanded}
+          onClick={() => setComingSoonExpanded((v) => !v)}
+        >
+          {comingSoonShowMoreLabel({ expanded: comingSoonExpanded, hidden: comingSoon.hidden })}
+        </button>
+      )}
+      {/* GAP-7: the disclosure is product transparency, not a consent gate — it
+          states what is recorded and where to view/delete it. The delete path
+          EXISTS: Settings → Captured sessions (SettingsTab home 4). Always
+          visible, on both surfaces, so neither mount can drop the promise. */}
+      <p className="dim small integration-disclosure">
+        Captured sessions are filed to your Organization's graph. View or delete them any time in
+        Settings → Captured sessions.
+      </p>
+
       {/* ── Issues toggle ── */}
-      <div className="toggle-row">
+      <div className="toggle-row integration-panel" id="integration-panel-issues" hidden={openTile !== 'issues'}>
         <button
           type="button"
           className="switch"
@@ -11219,7 +11738,7 @@ function MemorySources(props) {
       </div>
 
       {/* ── Docs toggle ── */}
-      <div className="toggle-row">
+      <div className="toggle-row integration-panel" id="integration-panel-docs" hidden={openTile !== 'docs'}>
         <button
           type="button"
           className="switch"
@@ -11348,7 +11867,7 @@ function MemorySources(props) {
       </div>
 
       {/* ── Sessions toggle (off-switch; default ON per ToS — per-harness status) ── */}
-      <div className="toggle-row">
+      <div className="toggle-row integration-panel" id="integration-panel-sessions" hidden={openTile !== 'sessions'}>
         <button
           type="button"
           className="switch"
@@ -11370,63 +11889,11 @@ function MemorySources(props) {
               : '.'}
           </p>
           {memoryErrors.sessions && <p className="error" role="alert">{memoryErrors.sessions}</p>}
-          <div className="harness-statuses">
-            {HARNESS_ORDER.map((h) => {
-              const st = status(h)
-              const supported = !!HARNESS_CAPTURE_SUPPORT[h]
-              const isCurrent = wizardHarness && h === wizardHarness
-              // #2912 (review cycle 4 P2): a `wizardHarness === 'codexDesktop'`
-              // alias used to live here, aliasing the Codex Desktop surface onto
-              // the 'codex' row. It was unreachable: HARNESS_ORDER has no
-              // codexDesktop row, the Settings call site passes
-              // `wizardHarness: null` on purpose, and the only other call site is
-              // the LEGACY_WIZARD_ARCHIVED rollback block, which is fed solely by
-              // HARNESS_ORDER leaves. If a surface leaf ever reaches this row,
-              // wire the alias through a unit-tested helper instead of a
-              // source-grep tripwire.
-              return (
-                <div key={h} className={`harness-status status-${st}${isCurrent ? ' current' : ''}`}>
-                  {/* review P2-5: the polite live region is scoped to the HEAD
-                      — the harness name, its disclosure and the state word — so
-                      it still does not announce the whole multi-line snippet
-                      below. That is a deliberate OVERRIDE of P2-5 (PR #1830),
-                      which moved the region OFF the container and ONTO the
-                      state pill: its hazard was the multi-line snippet, and the
-                      #3700 disclosure must be announced with the state it
-                      qualifies. Moving the region to the head keeps the snippet
-                      out while covering the name and the disclosure.
-                      review P2-3: unsupported harnesses render the REASON,
-                      with no pill and no failure line (an unsupported harness
-                      has no install path, so a per-harness claim would
-                      contradict the reason). That guard is what
-                      `harnessAttributionForHarness` mirrors, so an unsupported
-                      row makes no per-harness claim and needs no disclosure.
-                      #3700: the row NAMES a harness whose value is a caller
-                      declaration, so the disclosure (`harnessAttribution`) sits
-                      in the same group as the name — one flex item, so
-                      `space-between` separates the name group from the pill —
-                      and the state word stays plain; the attribution is what
-                      keeps the row from reading as a server-observed harness. */}
-                  <div className="harness-status-head" aria-live="polite">
-                    <span className="harness-status-name" id={`harness-note-${h}`}>
-                      <strong>{HARNESS_NAMES[h]}</strong>
-                      {harnessAttribution(h) && (
-                        <span className="dim small">· {harnessAttribution(h)}</span>
-                      )}
-                    </span>
-                    {supported && <span className="capture-state">{captureStatusLabelForHarness(state, h)}</span>}
-                  </div>
-                  {!supported && <p className="dim small">{HARNESS_CAPTURE_REASON[h]}</p>}
-                  {supported && st === 'install-pending' && sessionsOn && (
-                    <pre className="snippet">{HARNESS_CAPTURE_INSTALL[h]}</pre>
-                  )}
-                  {/* #3700: the alert's description is the row's name group
-                      (name + disclosure). */}
-                  {supported && lastError(h) && <p className="error small" role="alert" aria-describedby={`harness-note-${h}`}>{lastError(h)}</p>}
-                </div>
-              )
-            })}
-          </div>
+          {/* #4915: the rows live in their own module so the DOM lane can
+              render them. The markup this component produces is the block that
+              used to sit inline here — byte-identical output, one import.
+              See `harnessStatusCard.jsx` for why the extraction exists. */}
+          <HarnessStatusCard state={state} sessionsOn={sessionsOn} wizardHarness={wizardHarness} />
         </div>
       </div>
 
@@ -11436,7 +11903,7 @@ function MemorySources(props) {
           the turns, skip extraction. Rendered only where a handler exists —
           the archived wizard passes none, so an inert switch is not shown. ── */}
       {onToggleCaptureExtract && (
-      <div className="toggle-row">
+      <div className="toggle-row integration-panel" hidden={openTile !== 'sessions'}>
         <button
           type="button"
           className="switch"
@@ -11465,6 +11932,37 @@ function MemorySources(props) {
       </div>
       )}
       {/* ── End extraction toggle (#4258) ── */}
+
+      {/* #3513: the coming-soon dialog SHELL + a11y contract. The modal contract
+          is pinned by the issue: role=dialog, aria-modal, aria-labelledby on the
+          "Not available yet" heading, initial focus INTO the dialog, Escape
+          closes (returning focus to the invoking tile via dialogFocus.js), and
+          the expansion resets per open. The post-action states are #3514's —
+          this shell carries no posting primary. */}
+      {comingSoonTile && (
+        <div
+          className="integration-modal-backdrop"
+          onMouseDown={(e) => { if (e.target === e.currentTarget) closeComingSoon() }}
+        >
+          <div
+            className="integration-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="integration-modal-title"
+            aria-describedby="integration-modal-body"
+            onKeyDown={(e) => { if (e.key === 'Escape') closeComingSoon() }}
+          >
+            <h3 id="integration-modal-title">{COMING_SOON_DIALOG_TITLE}</h3>
+            <p id="integration-modal-body">
+              <strong>{comingSoonTile.name}.</strong> {COMING_SOON_DIALOG_BODY}
+            </p>
+            <p className="dim small">{COMING_SOON_DIALOG_FOOTNOTE}</p>
+            <div className="wizard-actions">
+              <button type="button" className="btn-primary" autoFocus onClick={closeComingSoon}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

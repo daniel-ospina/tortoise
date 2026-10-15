@@ -92,7 +92,7 @@ class TestSingleSourceOfTruth:
         into `tortoise/onboarding/SKILL.md`.
 
         ONE exemption, named rather than implied: the `first_capture_line` is
-        ALSO quoted in SKILL.md §7 because `test_onboarding_variants.py` pins
+        ALSO quoted in SKILL.md §8 because `test_onboarding_variants.py` pins
         that literal as the W2 copy contract (#2002). It is exempt ONLY in the
         two SKILL copies, and the test below asserts the quote is byte-equal
         to the render — so the exemption is a pinned equality, not a hole.
@@ -120,15 +120,15 @@ class TestSingleSourceOfTruth:
     def test_the_w2_pinned_line_in_the_skill_equals_the_template(self):
         """The one exemption above is a PINNED EQUALITY, not a hole.
 
-        SKILL.md §7 quotes the W2 copy contract literal (#2002). If either
+        SKILL.md §8 quotes the W2 copy contract literal (#2002). If either
         side is edited alone the two diverge and this reds — so the quote
         cannot drift away from the template it is supposed to render.
-        Mutation: change the template wording without editing SKILL.md §7.
+        Mutation: change the template wording without editing SKILL.md §8.
         """
         rendered = cd.render_first_capture_line(
             harness="claude", hosted=True, api_host=None)
         assert f'> "{rendered}"' in SKILL.read_text(encoding="utf-8"), (
-            "SKILL.md §7 no longer quotes the template's first_capture_line "
+            "SKILL.md §8 no longer quotes the template's first_capture_line "
             f"verbatim (template renders: {rendered!r})")
         assert rendered in MIRROR.read_text(encoding="utf-8")
 
@@ -199,7 +199,7 @@ class TestRuntimeDrivenRender:
             assert fact in text, f"the disclosure omits {fact!r}: {text}"
 
     def test_the_first_capture_line_is_the_pinned_w6_wording(self):
-        """The once-per-org line (§7) keeps the shipped wording while its home
+        """The once-per-org line (§8) keeps the shipped wording while its home
         moves into the JSON. Mutation: paraphrase the template."""
         assert cd.render_first_capture_line(
             harness="pi", hosted=True, api_host="api.example.com") == (
