@@ -638,7 +638,8 @@ def _run_main(mod, proj, *argv):
     one. The injected name is lane-agnostic and keeps this file docker-able
     (it leaves the embedded allowlist at P4).
     """
-    mod._connect_falkordb = lambda uri: (proj.db, proj.graph_name)
+    mod._connect_falkordb = lambda uri: (
+        proj.db, proj.graph_name, proj.required_embedding_dim)
     return mod.main([*argv, "--graph", proj.graph_name])
 
 
@@ -780,3 +781,86 @@ def test_dry_run_plain_counts_missing_rows_only(proj, monkeypatch, capsys):
     assert "1 nodes would be embedded" in out, out
     assert _embedding(g, "Point", "id", "p1") == pytest.approx([0.1] * 384)
     assert _embedding(g, "Point", "id", "p2") is None
+
+
+# ── Store width guard (#4289) ───────────────────────────────────────
+
+class _WrongWidthEmbed:
+    """A non-384 encoder — the shape a rotated/foreign embedder produces."""
+
+    def __init__(self, width: int):
+        self.width = width
+        self.calls: list[str] = []
+
+    def __call__(self, text: str) -> list[float]:
+        self.calls.append(str(text))
+        return [0.25] * self.width
+
+
+def test_indexed_store_declines_a_non_384_encoder(proj, monkeypatch):
+    """#4289: the sweep applies the store's declared width like any writer.
+
+    Before this fix the backfill called the raw ``compute_embedding`` seam and
+    wrote whatever width came back, for an INDEXED Point — the one Point
+    writer with no width guard (#4280 put the check at the store-scoped
+    entry points). A store declaring ``EMBEDDING_DIM`` must decline the
+    wrong-width vector (row skipped, nothing written); the SAME encoder into
+    an index-less store (``required_dim=None`` — the brute-force read lane)
+    must be KEPT, because dropping it there is the regression #4280 fixed.
+    """
+    from tortoise.embeddings import EMBEDDING_DIM
+
+    g = _g(proj)
+    _create(g, "Point", {"id": "p1", "content": "alpha"})
+    mod = _load_backfill()
+    wrong = _WrongWidthEmbed(EMBEDDING_DIM - 1)
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", wrong)
+
+    # Indexed store: the wrong width is declined, nothing is stored.
+    indexed = mod._backfill_graph(
+        proj.db, proj.graph_name, ["Point"], 0, 500,
+        required_dim=EMBEDDING_DIM)
+    assert indexed["updated"] == 0, indexed
+    assert indexed["skipped"] == 1, indexed
+    assert indexed["per_label"]["Point"] == 0, indexed
+    assert _embedding(g, "Point", "id", "p1") is None
+    assert wrong.calls == ["alpha"], wrong.calls
+
+    # Index-less store: the encoder's own width governs — kept, not dropped.
+    indexless = mod._backfill_graph(
+        proj.db, proj.graph_name, ["Point"], 0, 500, required_dim=None)
+    assert indexless["updated"] == 1, indexless
+    assert indexless["skipped"] == 0, indexless
+    stored = _embedding(g, "Point", "id", "p1")
+    assert stored is not None
+    assert len(stored) == EMBEDDING_DIM - 1
+
+
+def test_cli_threads_the_store_width_into_the_sweep(
+        proj, monkeypatch, capsys):
+    """#4289: ``main`` must hand the STORE's declared width to the sweep.
+
+    The unit test above calls ``_backfill_graph`` directly, so it cannot catch
+    a wiring gap at the ``_connect_falkordb`` / ``main`` call sites — and the
+    pre-fix call sites never consulted the projection at all. This drives the
+    CLI: an indexed store + a wrong-width encoder must write no vector, which
+    is only true if the declared width actually reached the row encoder.
+    """
+    from tortoise.embeddings import EMBEDDING_DIM
+    from tortoise.projection import FalkorProjection
+
+    g = _g(proj)
+    _create(g, "Point", {"id": "p1", "content": "alpha"})
+    mod = _load_backfill()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding",
+                        _WrongWidthEmbed(EMBEDDING_DIM - 1))
+    # The store DECLARES a width (an index exists) without needing a real one
+    # on the embedded fixture lane — #4280's own test shape.
+    monkeypatch.setattr(FalkorProjection, "required_embedding_dim",
+                        property(lambda self: EMBEDDING_DIM))
+
+    rc = _run_main(mod, proj, "--uri", "docker://dummy")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "0 scanned, 0 embedded, 1 skipped" in out, out
+    assert _embedding(g, "Point", "id", "p1") is None
