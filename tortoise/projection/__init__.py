@@ -3045,7 +3045,11 @@ def _journal_safe_params(params, cypher=None):
 #
 #   * `_live_write_scope(...)` — opened by the live doors that append FIRST and
 #     fold second (`TortoiseSDK._apply_and_journal`, `_doc_write`,
-#     `_create_entity`, `EventAPI._emit`, `ConversationMiner._emit_event`).
+#     `_create_entity`, `EventAPI._emit`, `ConversationMiner._emit_event`), and
+#     by `TortoiseSDK.create_point` (#7951), whose scope is a RESERVED marker
+#     today — its `CREATE` still runs on the raw guarded handle, so the scope
+#     authorizes nothing yet; it becomes load-bearing when increment 3 replaces
+#     the `CREATE` with the fold.
 #     The append is the COMMIT POINT (the ordering contract at the top of
 #     `tortoise/sdk.py`); the scope is opened immediately AFTER it, around the
 #     fold that follows — so the journal write is never inside the scope that
@@ -3066,8 +3070,8 @@ def _journal_safe_params(params, cypher=None):
 # (`proj.g.query(...)`). That handle is *also* the live path of every SDK
 # writer — `create_point`'s `CREATE (:Point)`, `update_point`'s
 # `SET n += $props` — so a blanket refusal there would break the product's own
-# write path, not a violation of it: the SDK's live doors journal (or carry
-# the recorded apply-first exception), and there is no runtime signal at the
+# write path, not a violation of it: the SDK's live doors journal, and there is
+# no runtime signal at the
 # handle that separates a journaled live write from a direct one. Converting
 # that 300+-site surface is §17.1's mechanism (1), the atomic write, and it is
 # recorded as still-open on `#7951` rather than papered over here.
@@ -4099,6 +4103,77 @@ def _value_ok(val, _depth: int = 0) -> bool:
         # tags=["a", None])` aborted on the raw handle for exactly this.
         return all(v is not None and _value_ok(v, _depth + 1) for v in val)
     return _annotator_value_ok(val) or _engine_coerces(val)
+
+
+class _UnstoredValue:
+    """Sentinel: the store keeps NO property for this value (#7951)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return "<unstored>"
+
+
+#: Returned by :func:`_stored_prop_value` for a value no property can hold.
+_UNSTORED = _UnstoredValue()
+
+
+def _stored_prop_value(val):
+    """The value FalkorDB STORES for ``val``, or :data:`_UNSTORED`.
+
+    #7951 §17.1 appends the `PointAdded` record BEFORE the `CREATE`, so the
+    payload can no longer be the post-`CREATE` `get_point` read-back — the
+    APPLIED value. It must state what the `CREATE` is about to write instead,
+    and "what the store holds" is THREE outcomes, not one:
+
+      * a JSON-native value the engine takes verbatim (``str``/``bool``/
+        ``int``/finite ``float``, and arrays of those) — kept as-is;
+      * a value the driver INLINES as ``str(val)`` and the engine parses as a
+        numeric/bool literal — ``Decimal("1.5")`` -> ``1.5``,
+        ``Fraction(5, 1)`` -> ``5``, ``np.int64(7)`` -> ``7``,
+        ``np.bool_(True)`` -> ``True``. The store holds the PARSED literal, so
+        the record must too: the raw object is not JSON-encodable and
+        ``EventLog.append`` passes no ``default=``, so journaling it destroyed
+        the append AND the cache write behind it (#7951 review P1);
+      * a value no property can hold — a null (a Cypher null property is not
+        stored), a map/bytes/set, a non-finite float, a NUL/lone-surrogate
+        string, a null inside an array, or anything else whose ``str()`` is
+        not a literal — for which the store holds NOTHING, so the record must
+        OMIT the key.
+
+    OMIT rather than record ``None``: the historic read-back payload omitted a
+    dropped property, and ``consistency.check_consistency`` reads a journal key
+    the node does not carry as ``uncarried_journal_fields``
+    (``_UNCARRIED_NULL`` / ``_UNCARRIED_NON_PERSISTABLE``) — so recording the
+    value the store REFUSED would manufacture exactly the asymmetry this
+    function exists to avoid (#7951 review, secondary symptom: a nested dict
+    that ``json`` accepts but the engine drops was journalled as a real
+    property the node never had).
+
+    The predicates are the boundary's OWN (``_value_ok`` / ``_engine_coerces``),
+    so a new accept-or-reject rule cannot be taught to the transport gate and
+    missed here.
+    """
+    if val is None:
+        return _UNSTORED
+    if isinstance(val, (list, tuple)):
+        # `_value_ok` already walks every leaf (and refuses a null INSIDE an
+        # array, which the engine rejects); reusing it keeps the array rule in
+        # one home. Every leaf it admits is storable — verbatim or coerced —
+        # so the recursion below cannot produce `_UNSTORED`.
+        if not _value_ok(val):
+            return _UNSTORED
+        return [_stored_prop_value(item) for item in val]
+    if _annotator_value_ok(val):
+        return val
+    if not _engine_coerces(val):
+        return _UNSTORED
+    text = str(val)
+    if text in _LITERAL_BOOLS:
+        return text == "True"
+    if "." in text or "e" in text or "E" in text:
+        return float(text)
+    return int(text)
 
 
 def _writable_at_parse(val, _depth: int = 0) -> bool:

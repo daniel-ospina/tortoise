@@ -102,12 +102,20 @@ class _AbortOnceGraph:
         return getattr(self._real, name)
 
 
-def _sdk(tmp_path, tag: str):
-    """A real SDK on the configured lane (a live URI, else embedded)."""
+def _sdk(tmp_path, tag: str, *, journal: bool = False):
+    """A real SDK on the configured lane (a live URI, else embedded).
+
+    ``journal=True`` wires a JSONL journal — the only shape in which a
+    ``record_committed`` claim can be true.
+    """
     uri = os.environ.get("TORTOISE_DB_URI")
+    events_dir = tmp_path / f"{tag}-events"
+    if journal:
+        events_dir.mkdir()
     return TortoiseSDK(
         None if uri else str(tmp_path / f"{tag}.db"),
         namespace=f"test_7209_{tag}_{uuid.uuid4().hex[:8]}",
+        event_log_path=str(events_dir / "events.jsonl") if journal else None,
     )
 
 
@@ -141,21 +149,55 @@ def test_create_point_raises_when_its_own_write_is_not_readable(tmp_path):
         assert ei.value.graph == proj.graph_name
         assert ei.value.point_id and ei.value.point_id in msg
         assert proj.graph_name in msg
-        assert "did not land" in msg
+        # #7951 review I1: this fixture wires NO journal, so nothing was
+        # appended — the read-back miss is a genuinely LOST write, and the
+        # `record_committed=False` arm (re-issue) is the honest report.
+        assert "no rebuild record was committed" in msg
+        assert ei.value.record_committed is False, (
+            "this fixture has NO journal, so no record was committed — the "
+            "caller must re-issue, not treat the write as committed")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
 
 
-def test_create_point_journals_no_point_that_is_not_there(tmp_path):
-    """The guard fires BEFORE the journal write — no ``PointAdded`` for a ghost.
+def test_a_journal_less_sdk_never_claims_the_record_is_committed(tmp_path):
+    """#7951 review P1 — `record_committed` must be FALSE with no journal.
 
-    A ``PointAdded`` recorded for a Point the graph does not hold is a journal
-    record with no node behind it: a rebuild would "restore" a Point that never
-    existed, and `derived == replay(journal)` would be false in the other
-    direction. The guard sits before ``_emit_event`` so this cannot happen.
+    With no `event_log_path` there is no rebuild source: `_emit_event` returns
+    at `if log is None` and nothing is appended. A read-back miss is then a
+    genuinely LOST write, so the error must NOT tell the caller the TRUTH holds
+    it (the pre-#7951 guidance — re-issue — is the correct one).
     """
-    sdk = _sdk(tmp_path, "nojournal")
+    sdk = _sdk(tmp_path, "journalless")
+    try:
+        assert sdk._get_event_log() is None, "the fixture must be journal-less"
+        sdk.get_point = lambda _id: {}
+        with pytest.raises(WriteNotLandedError) as ei:
+            sdk.create_point("observation", "a finding with no durable home")
+        assert ei.value.record_committed is False, (
+            "no journal is configured, so no record was committed and a replay "
+            "cannot heal the miss — the caller must re-issue")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_create_point_journals_the_record_before_a_cache_readback_miss(tmp_path):
+    """#7951 — the record is the COMMIT POINT: a read-back miss does NOT un-journal it.
+
+    Since the §17.1 outbox ordering, ``create_point`` appends its ``PointAdded``
+    record BEFORE the cache write. A read-back miss after that append means the
+    TRUTH holds the record and the cache merely has not materialised it — the
+    replay-healable window — so the record MUST be there and the error MUST say
+    so (``record_committed=True``).
+
+    Before #7951 the guard sat BEFORE ``_emit_event``, so a phantom ``PointAdded``
+    could never be recorded; that behaviour is now the OTHER arm
+    (``record_committed=False`` — the append itself failed), pinned in
+    ``tests/test_7951_create_point_outbox.py``.
+    """
+    sdk = _sdk(tmp_path, "nojournal", journal=True)
     try:
         emitted: list[str] = []
         real_emit = sdk._emit_event
@@ -167,12 +209,16 @@ def test_create_point_journals_no_point_that_is_not_there(tmp_path):
         sdk._emit_event = _spy
         sdk.get_point = lambda _id: {}
 
-        with pytest.raises(WriteNotLandedError):
+        with pytest.raises(WriteNotLandedError) as ei:
             sdk.create_point("observation", "another finding that never landed")
 
-        assert "PointAdded" not in emitted, (
-            "a PointAdded event was journaled for a Point the graph does not "
-            "hold — the guard must sit before the journal write (#7209)")
+        assert "PointAdded" in emitted, (
+            "the outbox ordering appends the record BEFORE the cache write, so "
+            "the record must be emitted even when the read-back misses (#7951)")
+        assert ei.value.record_committed is True, (
+            "the record WAS appended (a journal is configured and the append "
+            "did not fail), so the error must report it as committed — a "
+            "replay heals the cache (#7951)")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()

@@ -441,28 +441,64 @@ class WriteNotLandedError(RuntimeError):
     What the SDK can do — and now does — is refuse to REPORT that success.
     ``create_point`` verifies its own write against the read-back it already
     performs: an unreadable Point raises this error naming the graph and the
-    id, and the ``PointAdded`` event is never journaled for a point that is not
-    there, so a rebuild cannot resurrect a journal record the graph never had.
+    id.
 
-    Loud by construction: a caller that sees this error knows the write did NOT
-    land and may safely re-issue it (``create_point`` is content-hash
-    idempotent under ``dedup=True``). It is never raised for a read-back that
+    #7951 — TWO ARMS, and they must not be confused. Since the §17.1 outbox
+    ordering, ``create_point`` appends its ``PointAdded`` record BEFORE the
+    ``CREATE``:
+
+    * **no record was committed** (``record_committed=False``, the default) —
+      either the journal append failed (and the cache write was then skipped by
+      the §17.1 ordering), or no journal is configured, in which case the
+      read-back miss is a genuinely LOST write. Re-issuing is correct.
+    * **read-back empty after a COMMITTED append** (``record_committed=True``)
+      — the TRUTH holds the record and the cache merely has not materialised
+      it. A replay heals it (the ordering contract's replay-healable window),
+      so this must NOT be read as "the write is gone"; a blind re-issue would
+      append a SECOND ``PointAdded``. Callers that distinguish the arms key on
+      :attr:`record_committed`.
+
+    Loud by construction: a caller that sees this error knows the cache did
+    not materialise the write. It is never raised for a read-back that
     SUCCEEDED.
     """
 
     def __init__(self, point_id: str, graph: str | None = None,
-                 detail: str = "") -> None:
+                 detail: str = "", *, record_committed: bool = False) -> None:
         self.point_id = point_id
         self.graph = graph
         self.detail = detail
+        self.record_committed = record_committed
         _where = f" on graph {graph!r}" if graph else ""
+        if record_committed:
+            _cause = (
+                "the cache did not materialise the write (the graph is being "
+                "replaced/rebuilt, or it was replaced between the write and "
+                "the read-back)"
+            )
+            _contract = (
+                "The PointAdded record WAS appended before the cache write "
+                "(the #7951 §17.1 outbox ordering), so the TRUTH holds this "
+                "write and a replay will materialise it — do NOT re-issue "
+                "blindly (that would append a second record); treat the "
+                "write as COMMITTED and let the projection catch up."
+            )
+        else:
+            _cause = (
+                "no rebuild record was committed for it — the JSONL journal "
+                "append FAILED (and the #7951 §17.1 ordering then skipped the "
+                "cache write), or this SDK has no journal configured at all, so "
+                "the write has no durable home"
+            )
+            _contract = (
+                "The caller must not treat this call as successful: if the "
+                "Point is not in the cache, re-issue it (`dedup=True` is "
+                "content-hash idempotent). (A `:GraphEvent` may have been "
+                "written first by `_emit_event` — a declared residual, not a "
+                "committed rebuild record.)"
+            )
         super().__init__(
-            f"create_point: the Point {point_id!r} was written{_where} but is "
-            f"NOT READABLE on the read-back that immediately follows its own "
-            f"CREATE — the write did not land (the graph is being "
-            f"replaced/rebuilt, or it was replaced between the write and the "
-            f"read-back). No Point exists and nothing was journaled; do NOT "
-            f"treat this call as successful — re-issue it (dedup=True is "
-            f"content-hash idempotent). (#7209)"
+            f"create_point: the Point {point_id!r} was not committed{_where}: "
+            f"{_cause}. {_contract} (#7209)"
             + (f" [{detail}]" if detail else "")
         )

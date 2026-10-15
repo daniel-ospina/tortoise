@@ -11,12 +11,45 @@ re-exports ``retryable_transient`` / ``call_with_predicate`` /
 ``WriteStageRetriesExhausted`` unchanged from ``tools/longmem_eval/errors.py``
 and keeps its own run knobs (``INGEST_WRITE_RETRIES`` etc.) eval-side.
 
-⚠️ PARTIALLY WIRED (#7405): ``TortoiseSDK._graph_write_with_retry`` retries
-``create_point``'s two direct writes through ``retryable_aborted_write``.
-Wiring the remaining write surfaces — ``_post_commit`` (tortoise/sdk.py) and
-the capture/commit graph writes — is separate work (audit G8); those paths'
-robustness today remains idempotent-MERGE + ``client_commit_id`` replay +
-server-side dedup.
+⚠️ PARTIALLY WIRED (#7405): Wired:
+
+  * ``create_point``'s direct writes — the ``CREATE (:Point)``, the
+    ``TAGGED`` edges (``_sync_tags``) and the ``extractedFrom`` edge
+    (``_link_source``);
+  * ``_advance_ep_version``'s ``MERGE (:EpMeta)``;
+  * the capture lane's graph writes, all in ``tortoise/sdk.py`` — the
+    ``:Session`` MERGE (``_write_session_and_turns``), the batched
+    ``UNWIND $turns`` turn store and the stale-turn ``DETACH DELETE`` sweep
+    (``_write_capture_turns``), and ``TortoiseSDK.capture_session``'s
+    follow-up provenance/state stamps (the minted-point ``eventId`` stamp,
+    the operator ``eventId`` stamps, the ``retry_failed_capture`` provenance
+    heal, the ``entity_links_*`` counters, and the
+    ``capture_ok``/``capture_extractor`` SET);
+  * ``_post_commit`` — the ``POST /v1/sessions/commit`` transmission — on
+    ``retryable_transient`` (the transport-class predicate; it is not a graph
+    write, so the graph-state-gated ``retryable_aborted_write`` does not
+    apply). Re-issuing is safe by construction: the same deterministic
+    ``client_commit_id`` rides every attempt and the server serializes on it
+    atomically (``CommitRecordStore.acquire``).
+
+⛔ NOT covered — ``_mark_dirty``'s own dirty-persist SET (its default path
+reaches the wired ``_advance_ep_version``, but the SET itself is bare),
+``promote_point``, ``merge_points``, ``mitigate_operator``, ``delete_point``,
+the operator/supersede/annotate writers, ``_create_entity``'s fold
+``proj.apply(event)`` (``tortoise/sdk.py:24686``), ``create_entity``'s
+``_link_source`` (``sdk.py:25771``), ``create_document``'s ``_link_source``
+(``sdk.py:28434``), ``_doc_write``'s ``proj.apply`` (``sdk.py:27589``),
+``_apply_and_journal``'s ``proj.apply`` (``sdk.py:5927``), and the remaining
+direct ``proj.g.query`` write sites across ``tortoise/`` are still
+un-retried: a write abort there raises (or is downgraded by the caller's own
+``except``) exactly as before. Those paths' robustness today remains
+idempotent-MERGE + server-side dedup.
+
+Re-issuing is only safe for a statement whose abort means it DID NOT LAND.
+That is what ``retryable_aborted_write`` proves and what makes it admissible
+on a bare ``CREATE``; the transport-class ``retryable_transient`` does NOT
+prove it (a lost reply is not a lost write) and must never be pointed at a
+non-idempotent statement — see that predicate's docstring.
 """
 from __future__ import annotations
 
