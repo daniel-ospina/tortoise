@@ -476,13 +476,20 @@ _SESSION_COOKIE_LITERAL = "sb-tortoise-auth-token"
 # This matches the DEFINITION, not a use of it: a CALL SITE ends at `)`, which
 # is followed by `;`, `.` or end-of-statement, so requiring the parameter list
 # to CLOSE and then be followed by a body opener (`{` or `=>`) excludes it.
-# #8701 review (P2): the prior `[:(=]` character class contained `(`, so a call
-# like `s.setItem(key, v);` matched the `(` arm and was reported as an adapter
-# copy — a false positive whose only legal resolution was to rename the
-# argument (the registration pin `_extract_fn_body` still demands a real
-# definition). Pinned by test_router_detector_matches_definitions_not_call_sites.
+# #8701 review (P2, cycle 1): the prior `[:(=]` character class contained `(`,
+# so a call like `s.setItem(key, v);` matched the `(` arm and was reported as
+# an adapter copy — a false positive whose only legal resolution was to rename
+# the argument (the registration pin `_extract_fn_body` still demands a real
+# definition).
+# #8701 review (P2, cycle 2): `[^)]*` still SPANNED a nested delimiter in the
+# parameter text, so `store.setItem(key, () => { … })` reached the inner `)`
+# and then the body opener and matched too — the same false positive via an
+# ordinary JS call with a callback/object argument. The parameter text must
+# not span `(`/`{`, so both delimiters are in the negated class as well.
+# Pinned by test_router_detector_matches_definitions_not_call_sites.
 _ROUTER_METHOD = re.compile(
-    r"\b(?:setItem|removeItem)\s*(?::|=)?\s*(?:function\s*)?\([^)]*\bkey\b[^)]*\)\s*(?:\{|=>)"
+    r"\b(?:setItem|removeItem)\s*(?::|=)?\s*(?:function\s*)?"
+    r"\([^(){}]*\bkey\b[^(){}]*\)\s*(?:\{|=>)"
 )
 _COOKIE_ASSIGNMENT = re.compile(r"document\s*\.\s*cookie\s*=[^=]")
 
@@ -553,6 +560,12 @@ def test_router_detector_matches_definitions_not_call_sites() -> None:
     (`old = re.compile(r"\\b(?:setItem|removeItem)\\s*[:(=]\\s*(?:function\\s*)?\\(?\\s*key\\b")`),
     which matches every call below; the fixed pattern requires the parameter
     list to close and be followed by a body opener.
+
+    #8701 review (P2, cycle 2): a `[^)]*` parameter text still SPANNED a nested
+    delimiter, so an ordinary `setItem(key, cb)` / `setItem(key, { … })` call
+    whose argument list carries its own parens matched at the first inner `)`
+    and was reported as a copy. The parameter text now forbids `(`/`{` as well
+    (`[^(){}]*`), and the nested-paren call sites below pin it.
     """
     # Call sites: a use of the adapter, not the adapter itself.
     call_sites = (
@@ -561,6 +574,11 @@ def test_router_detector_matches_definitions_not_call_sites() -> None:
         "store.setItem(key, value);",
         "this.removeItem(key);",
         "s.setItem(\n  key,\n  v\n);",
+        # #8701 review (P2, cycle 2): argument lists with NESTED parens/braces —
+        # ordinary JS that matched the pre-cycle-2 `[^)]*` pattern.
+        "store.setItem(key, () => { doThing(); });",
+        "store.setItem(key, { onError: (e) => { log(e); } });",
+        "wrap.removeItem(key, function (err) { report(err); });",
     )
     for code in call_sites:
         assert not _ROUTER_METHOD.search(code), (
@@ -600,6 +618,24 @@ def test_router_detector_matches_definitions_not_call_sites() -> None:
         "is renaming the caller's argument (#8701 review P2)"
     )
 
+    # #8701 review (P2, cycle 2): the same false positive via a callback/object
+    # argument whose list holds its own parens — the vector the `[^)]*` pattern
+    # missed. The method half must stay silent so the branch does not fire.
+    nested_false_positive = "\n".join(
+        [
+            "widget.setItem(key, () => { render(); });",
+            "if (t.key === key) { render(); }",
+        ]
+    )
+    assert not (
+        _ROUTER_METHOD.search(nested_false_positive)
+        and _ROUTER_KEY_CMP.search(nested_false_positive)
+    ), (
+        "a file that only USES an adapter with a callback argument was reported "
+        "as a router copy — no legal registration exists (#8701 review P2, "
+        "cycle 2)"
+    )
+
 
 def test_every_storage_adapter_copy_is_registered() -> None:
     """#5735: `_ROUTER_CASES` is the contract's declared home — a copy of the
@@ -627,6 +663,18 @@ def test_every_storage_adapter_copy_is_registered() -> None:
     assert OAUTH in copies and "router" in copies[OAUTH], (
         f"the one live adapter copy ({OAUTH.relative_to(REPO_ROOT)}) was NOT "
         "detected as a router — the detector is dead, so its silence proves nothing"
+    )
+    # #8701 review (P2): pin the WRITER detector too. `oauth.py` is the only
+    # product source that hits it, so if `_SESSION_COOKIE_LITERAL` /
+    # `_COOKIE_ASSIGNMENT` regress, `unregistered`, `stale` and `decorative`
+    # all stay empty and the test above reads as clean while the whole
+    # `cookie-writer` failure shape (#5735's "no routing — writes any key") goes
+    # unwatched. This assertion is what makes a dead writer detector fail.
+    assert OAUTH in copies and "cookie-writer" in copies[OAUTH], (
+        f"the one live adapter copy ({OAUTH.relative_to(REPO_ROOT)}) was NOT "
+        "detected as a cookie-writer — that detector is dead, so its silence "
+        "proves nothing and a `document.cookie` writer that names the session "
+        "cookie would land unregistered (#8701 review P2)"
     )
 
     unregistered = sorted(copies.keys() - registered)
