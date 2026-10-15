@@ -55,7 +55,7 @@ def NAND(a, b, content=None):
 # ── Q1: Shared state as episodic implementation vs separate coordination layer ──
 
 print("=== Q1 ===")
-q1_unified   = P("[CONFIDENCE:HIGH] Unified pipeline — shared state IS memory: event log serves as both coordination backbone and agent episodic memory. Single source of truth, replay-enables debugging, simpler operational surface. Evidence: MAN+ESM architecture uses event log for both state reconstruction and agent choreography. Trade-off: coordination events and memory events share same schema — tight coupling, harder to tune independently. See: Kafka as both event bus and message queue pattern.")
+q1_unified   = P("[CONFIDENCE:HIGH] Unified pipeline — shared state IS memory: event log serves as both coordination backbone and agent episodic memory. Single reconstruction source, replay-enables debugging, simpler operational surface. Evidence: MAN+ESM architecture uses event log for both state reconstruction and agent choreography. Trade-off: coordination events and memory events share same schema — tight coupling, harder to tune independently. See: Kafka as both event bus and message queue pattern.")
 q1_separate  = P("[CONFIDENCE:HIGH] Separate layers — coordination events (low-latency, choreography) and knowledge events (enrichment, long-term) have different SLAs, processing patterns, and schemas. Evidence: event-driven architecture best practice is to separate operational planes from reasoning planes. Coordination is irregular/asynchronous; knowledge processing follows pipeline pattern. Mixing creates architectural friction.")
 q1_sla       = P("[CONFIDENCE:MEDIUM] Different SLAs: coordination needs immediate response (saga pattern, distributed transactions); knowledge events tolerate batching and higher latency. Evidence: event maturity models distinguish raw→validated→enriched→curated, which coordination events skip entirely.")
 q1_unified_benefit  = P("[CONFIDENCE:MEDIUM] Unified pipeline benefit: cross-referencing. When coordination events and knowledge events live in the same log, you can ask 'what knowledge was available when this coordination decision was made?' — impossible if they're in separate pipelines. This is the audit/time-travel advantage.")
@@ -91,7 +91,11 @@ IMPL(q3_hybrid, q3_jsonl, "hybrid preserves the JSONL as reconstruction source")
 IMPL(q3_hybrid, q3_falkor, "hybrid uses FalkorDB for query")
 IMPL(q3_jsonl, q3_replay, "JSONL enables replay via append-only immutability")
 IMPL(q3_falkor, q3_query, "FalkorDB enables graph-native queries")
-NAND(q3_jsonl, q3_falkor, "the two roles are distinct: reconstruction source (JSONL) vs durability authority (store) — neither substitutes for the other")
+# No NAND here (#4308): under docs/durability-posture.md the JSONL
+# (reconstruction source) and the store (durability authority) are complementary
+# roles, not competing ones — q3_hybrid IMPLs both — so a contradiction edge
+# would write a false conflict into the graph. The rejected "pick one canonical
+# store" framing is the architecture the authority exists to end.
 
 # ── Q4: One Tortoise instance vs per-agent instances ──
 
@@ -111,7 +115,7 @@ IMPL(q4_hybrid_kg, q4_peragent, "hybrid preserves per-agent isolation")
 # ── Cross-question connections ──
 
 print("=== Cross-Q ===")
-# Q3 (JSONL as SOT) supports Q2 (single pipeline easier with file-based log)
+# Q3 (JSONL as reconstruction source) supports Q2 (single pipeline easier with file-based log)
 IMPL(q3_jsonl, q2_single, "JSONL log-first naturally supports single pipeline")
 # Q1 (separate layers) supports Q2 (multiple pipelines map to separate coordination/knowledge)
 IMPL(q1_separate, q2_multi, "separate layers naturally map to multiple pipelines")

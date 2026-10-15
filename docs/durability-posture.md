@@ -525,7 +525,11 @@ runnable `graph-scripts/` scripts outside the scan, and both still asserted the
 JSONL was the source of truth. They are *executable* statements —
 `add_convergence_evidence.py` writes its research claims into the graph — not
 archive records, so the rule binds them: they now carry the reconstruction
-framing, and the directory is a scan root so the claim cannot return. Archive
+framing, and the directory is a scan root so the gate-visible claim cannot
+return. Because the gate matches a claim SHAPE inside a 40-char window (below),
+the two sentinels are also pinned window-independently
+(`test_graph_scripts_sentinels_carry_no_source_of_truth`) — the pre-fix
+`add_convergence_evidence.py` residual sat outside that window. Archive
 records (`docs/plans/`, `docs/scoping/`, `docs/epics/`) and the test suite's
 session-journal vocabulary stay out of scope — the former are point-in-time
 records, the latter is a real non-durability claim (the file journal **is** the

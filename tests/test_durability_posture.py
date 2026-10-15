@@ -28,6 +28,10 @@ gate. They are *executable* statements — ``add_convergence_evidence.py`` write
 its research claims into the graph — not archive records, so the authority rule
 binds them, and they are now both scanned and reworded to the reconstruction
 framing (``JSONL = reconstruction source``, ``store = durability authority``).
+Because ``CLAIM_RE`` matches a claim SHAPE inside a 40-char window (the doc's
+own scoping note), the two sentinels are ALSO pinned by window-independent
+regression tests — the pre-fix residual at ``add_convergence_evidence.py:58``
+sat ~80 chars from its subject and the regex could not see it (review finding).
 Archive records (``docs/plans/``, ``docs/scoping/``, ``docs/epics/``) and the
 test-suite's session-journal vocabulary stay out of scope: the former are
 point-in-time records, the latter is a real non-durability claim (the file
@@ -182,6 +186,56 @@ def test_no_durability_source_of_truth_claim_outside_the_canonical_doc():
         "the durability authority is " + CANONICAL_DOC_REL + " — delete the "
         "claim and link the canonical doc, or the contradiction is back:\n"
         + "\n".join(offenders)
+    )
+
+
+# ── 2b. the two #4308 sentinels, pinned window-independently ────────────────
+
+# ``CLAIM_RE``'s 40-char window is the gate's SCOPE, not a licence for the
+# same claim with more prose between subject and predicate (the canonical doc
+# says so: "The gate matches a CLAIM SHAPE, not durability claims in general").
+# #4308 closed the residual in these two runnable scripts, so pin the residual
+# where it was found: in either sentinel the phrase must be absent at ANY
+# distance. The pre-fix ``q1_unified`` (:58) carried it ~80 chars out and was
+# invisible to the gate (review finding).
+_GRAPH_SCRIPTS_SENTINELS = (
+    "graph-scripts/add_convergence_evidence.py",
+    "graph-scripts/baseline_scan.py",
+)
+
+
+def test_graph_scripts_sentinels_carry_no_source_of_truth():
+    offenders: list[str] = []
+    for rel in _GRAPH_SCRIPTS_SENTINELS:
+        text = (REPO / rel).read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if "source of truth" in line.lower():
+                offenders.append(f"{rel}:{lineno}: {line.strip()[:120]}")
+    assert not offenders, (
+        "the durability authority is " + CANONICAL_DOC_REL + " — the two "
+        "#4308 scripts carry the reconstruction framing, so no window may "
+        "restore 'source of truth':\n" + "\n".join(offenders)
+    )
+
+
+def test_convergence_q3_roles_are_not_written_as_a_contradiction():
+    """``NAND`` means "A contradicts B". Under the authority the JSONL
+    (reconstruction source) and the store (durability authority) are
+    COMPLEMENTARY roles, so a ``NAND`` between ``q3_jsonl`` and ``q3_falkor``
+    asserts a conflict the authority denies — and the same file's
+    ``q3_hybrid`` supports both. The pre-fix Q3 reword left exactly that
+    (review finding: the edge's content asserted non-contradiction)."""
+    rel = "graph-scripts/add_convergence_evidence.py"
+    offenders: list[str] = []
+    for lineno, line in enumerate((REPO / rel).read_text(encoding="utf-8").splitlines(), 1):
+        if not line.lstrip().startswith("NAND("):
+            continue
+        if {"q3_jsonl", "q3_falkor"} <= set(re.findall(r"q3_\w+", line)):
+            offenders.append(f"{rel}:{lineno}: {line.strip()[:120]}")
+    assert not offenders, (
+        "q3_jsonl (reconstruction source) and q3_falkor (durable store) are "
+        "complementary under " + CANONICAL_DOC_REL + " — a NAND between them "
+        "asserts a false conflict:\n" + "\n".join(offenders)
     )
 
 
