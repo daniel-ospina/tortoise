@@ -24035,9 +24035,11 @@ class TortoiseSDK:
         ``nudges`` lists top related Points (by name/content token overlap) with
         a suggested IMPL/NAND/mitigate relation — advisory only, never enforced.
 
-        Returns ``{node, nudges}`` plus ``advisories`` when the write declared
-        no source and no provenance — see ``_provenance_advisory``. Advisory
-        only: never a block, and it never changes what is stored.
+        Returns ``{node, nudges}`` plus ``advisories`` when the write carries a
+        provenance gap this door can report — see ``_provenance_advisory``
+        (``no_source`` only for documents, where its remedy is real;
+        ``extracted_from_inert`` on any type that declares an unwired ref).
+        Advisory only: never a block, and it never changes what is stored.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         # #8171 (review P1/P2): the ref must be shape-checked BEFORE any write
@@ -24203,7 +24205,13 @@ class TortoiseSDK:
 
     def _provenance_advisory(self, node: dict, props: dict,
                              *, entity_type: str | None = None) -> dict:
-        """Advisory when a write lands with no source and no provenance.
+        """Advisory for a provenance gap this door can report.
+
+        ``no_source`` for a document write that declared no materializable
+        source (the remedy the message names actually works there), and
+        ``extracted_from_inert`` when any type declares an ``extractedFrom``
+        this door does not wire. A type this door cannot source at all gets no
+        ``no_source`` note — see the branch below.
 
         Returns ``{}`` when the node carries provenance that this door can
         HONOUR, and ``{"advisories": [...]}`` when it does not. Never raises,
@@ -24217,9 +24225,21 @@ class TortoiseSDK:
         "sourced" made the advisory silent about exactly the invented-provenance
         gap it exists to report: the node asserts a source nothing can traverse
         to, which is worse than declaring none (design contract #3).
+
+        ``no_source`` is given only where the door has a remedy (review P1).
+        ``extractedFrom`` is the only source this door materializes, and only a
+        document write can. For a ``subject``/``object``/``event`` the
+        ``no_source`` message would name ``extractedFrom='session:<id>'`` — a
+        fix the door CANNOT honour: applying it swaps this advisory for
+        ``extracted_from_inert`` and leaves the gap exactly where it was. An
+        advisory that fires on every write of 3 of the 4 types, with inert
+        advice, is the noise the design note warns "is how an advisory stops
+        changing behaviour", so there is no note to give. A declared-but-inert
+        ref is still reported (the ``extracted_from_inert`` branch below).
         """
         _ref = props.get("extractedFrom")
-        if _ref and self._ENTITY_SOURCE_LABELS.get(entity_type or ""):
+        _source_label = self._ENTITY_SOURCE_LABELS.get(entity_type or "")
+        if _ref and _source_label:
             return {}
         if _ref:
             # Declared, but INERT for this type: no writer honours it.
@@ -24239,6 +24259,21 @@ class TortoiseSDK:
                 ),
                 "advisory": True,
             }]}
+        # ── no_source: only where this door HAS a remedy (review P1) ─────
+        # `extractedFrom` is the only source this door materializes, and only a
+        # document write can (`_ENTITY_SOURCE_LABELS`). For subject/object/event
+        # a `no_source` advisory would name `extractedFrom='session:<id>'` — a
+        # fix the door cannot honour: applying it swaps this advisory for the
+        # `extracted_from_inert` branch above and leaves the provenance gap
+        # exactly where it was. An advisory that fires on EVERY write of 3 of
+        # the 4 types and whose advice is inert is the noise the design note
+        # warns "is how an advisory stops changing behaviour". So a type this
+        # door cannot source gets no `no_source` note: a Subject has no source
+        # predicate at all, and Event/Object provenance goes through a separate
+        # `references` writer, never this door's `extractedFrom`. (A
+        # declared-but-unwireable ref is still reported just above.)
+        if not _source_label:
+            return {}
         # ⛔ NO `session_id` BYPASS (review P1). An earlier revision returned
         # `{}` here on the reasoning that "`create_point` infers `session:<id>`"
         # (#3263). That inference lives ONLY in `create_point` — and
@@ -24261,7 +24296,7 @@ class TortoiseSDK:
         )
         # NOTE: no analogous hint for `sourceKind`. It IS still present in
         # `props` here, but it is not materializable — the WRITE's passthrough
-        # discards it (`_SOURCE_HANDLED`, `projection/entities.py:914`) and no
+        # discards it (`projection/entities.py::_SOURCE_HANDLED`) and no
         # SET clause writes it (`_upsert_document`/`_upsert_source`) — so it
         # cannot buy silence. There is deliberately no branch keyed on it; the
         # caller is told in the door's docstring that `sourceKind` is not
@@ -24270,7 +24305,7 @@ class TortoiseSDK:
         # treated a declared `sourceKind` as provenance on a document and
         # returned `{}` — on the D10 reasoning that a document IS a `:Source`.
         # MEASURED on the head tree: NEITHER document door stores it.
-        # `sourceKind` is in `_SOURCE_HANDLED` (`projection/entities.py:915`) and
+        # `sourceKind` is in `projection/entities.py::_SOURCE_HANDLED` and
         # is denied the document upsert's open passthrough, and
         # `_upsert_document`'s fixed SET clause never writes it — so a document
         # created through either door with `sourceKind` only ends with no
@@ -24350,14 +24385,32 @@ class TortoiseSDK:
         return [{k: r[k] for k in ("candidate", "suggested_relation", "reason")}
                 for r in scored[:limit]]
 
+    def _flat_entity_result(self, result: dict) -> dict:
+        """Bare node a legacy ``create_*`` alias returns, plus #8171 advisories.
+
+        The aliases historically unwrapped ``create_entity(...)["node"]``,
+        which DROPS the top-level ``advisories`` key — so the alias MCP tools
+        (``tortoise_create_subject`` / ``-object`` / ``-event``) never surfaced
+        an advisory the identical ``create_entity`` write did (review P2).
+        ``create_document`` returns the flat node WITH the advisory; this
+        restores that shape on the three legacy doors. Additive: with no
+        advisory the return is the same node the alias returned before.
+        """
+        node = dict(result["node"])
+        _adv = result.get("advisories")
+        if _adv:
+            node["advisories"] = _adv
+        return node
+
     def create_subject(self, name: str, subjectKind: str = "other", **props) -> dict:
         """Thin alias for create_entity(type='subject') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
             raise ValueError(
                 "'is_episodic' is a server-managed field and cannot be set via props.")
-        return self.create_entity("subject", name,
-                                  subjectKind=subjectKind, **props)["node"]
+        return self._flat_entity_result(
+            self.create_entity("subject", name,
+                               subjectKind=subjectKind, **props))
 
     def create_object(self, name: str, objectKind: str = "other", **props) -> dict:
         """Thin alias for create_entity(type='object') — epic #888 W2."""
@@ -24365,8 +24418,9 @@ class TortoiseSDK:
         if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
             raise ValueError(
                 "'is_episodic' is a server-managed field and cannot be set via props.")
-        return self.create_entity("object", name,
-                                  objectKind=objectKind, **props)["node"]
+        return self._flat_entity_result(
+            self.create_entity("object", name,
+                               objectKind=objectKind, **props))
 
     def create_event(self, name: str, eventKind: str, *, is_episodic: bool | None = None,
                       _server_id: str | None = None, **props) -> dict:
@@ -24399,9 +24453,10 @@ class TortoiseSDK:
                 "via props.")
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
-        return self.create_entity("event", name,
-                                  eventKind=eventKind, _server_id=_server_id,
-                                  **props)["node"]
+        return self._flat_entity_result(
+            self.create_entity("event", name,
+                               eventKind=eventKind, _server_id=_server_id,
+                               **props))
 
 
     # ── Session Indexing (AgentSession) ─────────────────────────

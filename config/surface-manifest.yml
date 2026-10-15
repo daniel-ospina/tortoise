@@ -186,12 +186,24 @@ response_fields:
 # runtime, so this entry is the only record of what we now tell agents we return.
 - response: tortoise_create_entity
   field: advisories
-  emitted_when: 'the write landed with no provenance this door can MATERIALIZE — {advisories: [{code, node_id, message, advisory}]}, advisory-only (never a block, never a refusal, never a change to what was stored). Two codes: `no_source` (nothing declared, and no materializable session source) and `extracted_from_inert` (an extractedFrom WAS declared but the type is not one this door wires). Sourcedness is whether the door MATERIALIZES the ref, not the mere presence of the field: only type=document mints a :Source, so subject/object/event declaring extractedFrom are correctly advised (#8171)'
+  emitted_when: 'a write this door cannot source is flagged — {advisories: [{code, node_id, message, advisory}]}, advisory-only (never a block, never a refusal, never a change to what was stored). `no_source` fires ONLY for type=document (the sole type this door materializes extractedFrom for); its message names `extractedFrom=''session:<id>''`. `extracted_from_inert` fires on ANY type when an extractedFrom WAS declared but the type is not one this door wires (subject/object/event). A type this door cannot source at all (subject/object/event with nothing declared) is NOT advised — there is no in-door remedy to name, so a note would be noise (#8171, review P1)'
   unchanged_when_off: 'n/a — not flag-gated; the key is ABSENT on a write the door can source, so a sourced response stays byte-identical'
 - response: tortoise_create_document
   field: advisories
   emitted_when: 'the same condition on the alias door — this door always materializes a declared extractedFrom as a :Source (D10), so only the `no_source` code can fire here; the payload comes from the shared `_provenance_advisory` (#8171)'
   unchanged_when_off: 'n/a — not flag-gated; the key is ABSENT on a sourced document write, so that response stays byte-identical'
+- response: tortoise_create_subject
+  field: advisories
+  emitted_when: 'the alias door now surfaces the same advisory as create_entity(type=''subject'') — `extracted_from_inert` when the write declares an extractedFrom this door does not wire (subject writes have no `no_source`, see tortoise_create_entity). Additive key; the node properties are unchanged (#8171, review P2)'
+  unchanged_when_off: 'n/a — not flag-gated; the key is ABSENT when there is no advisory, so the response stays byte-identical'
+- response: tortoise_create_object
+  field: advisories
+  emitted_when: 'the alias door now surfaces the same advisory as create_entity(type=''object'') — `extracted_from_inert` when the write declares an extractedFrom this door does not wire (object writes have no `no_source`, see tortoise_create_entity). Additive key; the node properties are unchanged (#8171, review P2)'
+  unchanged_when_off: 'n/a — not flag-gated; the key is ABSENT when there is no advisory, so the response stays byte-identical'
+- response: tortoise_create_event
+  field: advisories
+  emitted_when: 'the alias door now surfaces the same advisory as create_entity(type=''event'') — `extracted_from_inert` when the write declares an extractedFrom this door does not wire (event writes have no `no_source`, see tortoise_create_entity). Additive key; the node properties are unchanged (#8171, review P2)'
+  unchanged_when_off: 'n/a — not flag-gated; the key is ABSENT when there is no advisory, so the response stays byte-identical'
 approval_status: approved
 approval_principal: daniel-ospina
 approval_pr: '4120'

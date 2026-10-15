@@ -1609,6 +1609,24 @@ def test_the_8171_advisory_field_is_recorded_on_both_create_doors():
         )
 
 
+def test_the_8171_alias_doors_record_the_advisory():
+    """The three legacy alias doors surface `advisories` — so record them too.
+
+    #8171 review P2: `create_subject`/`create_object`/`create_event` now return
+    the same top-level ``advisories`` key as ``create_entity``. A returned
+    field that is not recorded has no approval behind it and the carve-out
+    does not cover it (CONTRIBUTING.md), so pin the record. Fails on the
+    pre-fix manifest, which records only the two entity/document doors.
+    """
+    recorded = {(rf["response"], rf["field"]) for rf in _manifest()["response_fields"]}
+    for response in ("tortoise_create_subject", "tortoise_create_object",
+                     "tortoise_create_event"):
+        assert (response, "advisories") in recorded, (
+            f"the `advisories` field {response} returns is not recorded in "
+            "config/surface-manifest.yml::response_fields"
+        )
+
+
 def test_the_response_fields_block_is_the_UNION_not_one_side_of_a_union_merge():
     """A `merge=union` duplicate silently drops a whole side (#5373, PR #8221 review).
 

@@ -218,11 +218,11 @@ def test_a_sourced_write_carries_no_advisory(tmp_path):
 # now ONE function all three doors call, so the rules cannot drift apart.
 
 
-def test_a_bare_source_kind_does_not_silence_the_advisory_on_any_type(tmp_path):
-    """`sourceKind` is NOT provenance on ANY of these doors — advise it.
+def test_a_bare_source_kind_does_not_silence_the_advisory_on_a_document(tmp_path):
+    """`sourceKind` is NOT provenance — it must not silence `no_source`.
 
     `sourceKind` is a Source-registry property, and NEITHER document door
-    stores it: it is in `_SOURCE_HANDLED` (`projection/entities.py:915`) and so
+    stores it: it is in `projection/entities.py::_SOURCE_HANDLED` and so
     is denied the document upsert's open passthrough, while `_upsert_document`'s
     fixed SET clause never writes it. MEASURED: a document created through
     either door with `sourceKind` only ends with no `sourceKind` property, no
@@ -230,19 +230,21 @@ def test_a_bare_source_kind_does_not_silence_the_advisory_on_any_type(tmp_path):
 
     So keying silence on it — first unconditionally, then gated on the type —
     was a borrowed-capability bypass on a write with no provenance at all. The
-    gate is deleted; only a materializable `extractedFrom` counts, and the
-    caller is told why the `sourceKind` they passed did not.
+    gate is deleted; only a materializable `extractedFrom` counts.
+
+    (Non-document types are not advised at all — see
+    `test_no_source_is_only_advised_where_the_remedy_works` — so the document
+    door is the only one that can still be advised, and the one pinned here.)
 
     MUTATION THAT MUST RED: restore a `sourceKind` branch that returns `{}`.
     """
     sdk = _sdk(tmp_path)
-    for _type in ("subject", "document"):
-        res = sdk.create_entity(type=_type, name=f"Bare kind {_type}",
-                                documentKind="note", sourceKind="agentSession")
-        advisories = res.get("advisories") or []
-        assert advisories, (
-            f"type={_type}: sourceKind is not stored, so this is unsourced")
-        assert advisories[0].get("code") == "no_source"
+    res = sdk.create_entity(type="document", name="Bare kind doc",
+                            documentKind="note", sourceKind="agentSession")
+    advisories = res.get("advisories") or []
+    assert advisories, (
+        "sourceKind is not stored, so this document write is unsourced")
+    assert advisories[0].get("code") == "no_source"
 
 
 def test_an_inert_extracted_from_on_a_non_document_still_advises(tmp_path):
@@ -269,6 +271,54 @@ def test_an_inert_extracted_from_on_a_non_document_still_advises(tmp_path):
         "a declared ref that this door cannot wire is a provenance gap")
     assert advisories[0].get("code") == "extracted_from_inert"
     assert advisories[0].get("node_id"), "the advisory must name the node"
+
+
+def test_no_source_is_only_advised_where_the_remedy_works(tmp_path):
+    """An advisory's remedy must be applicable, or the note is noise (P1).
+
+    `_ENTITY_SOURCE_LABELS` is document-only, so `extractedFrom` is the only
+    source this door can materialize. A `no_source` advisory on a
+    subject/object/event would name `extractedFrom='session:<id>'` as the fix —
+    but applying it swaps `no_source` for `extracted_from_inert` and leaves the
+    provenance gap exactly where it was. Following the advice must remove the
+    condition; so `no_source` fires only where its remedy actually does.
+
+    For a document, re-writing with the named ref yields no advisory. For a
+    subject/object/event there is no in-door remedy, so no `no_source` is
+    given; a *declared* ref is still reported as `extracted_from_inert`.
+
+    MUTATION THAT MUST RED: delete the `if not _source_label: return {}` guard
+    in `_provenance_advisory` — subject/object/event then carry `no_source`,
+    whose remedy is inert for them.
+    """
+    sdk = _sdk(tmp_path)
+
+    # Document: the named remedy is real — applying it removes the condition.
+    first = sdk.create_entity(type="document", name="Doc A", documentKind="note")
+    adv = (first.get("advisories") or [{}])[0]
+    assert adv.get("code") == "no_source"
+    assert "session:<session_id>" in adv.get("message", "")
+    second = sdk.create_entity(
+        type="document", name="Doc B", documentKind="note",
+        extractedFrom="session:remedy")
+    assert not (second.get("advisories") or []), (
+        "the remedy the document advisory names must actually remove the "
+        "condition it reports")
+
+    # Non-document: no in-door remedy exists, so no `no_source` is given.
+    for t, extra in (("subject", {}), ("object", {}),
+                     ("event", {"eventKind": "note"})):
+        res = sdk.create_entity(type=t, name=f"Plain {t}", **extra)
+        codes = [a.get("code") for a in (res.get("advisories") or [])]
+        assert "no_source" not in codes, (
+            f"type={t}: no_source names extractedFrom='session:<id>', which "
+            "this door cannot wire — applying it would swap to "
+            "extracted_from_inert, not remove the condition")
+        # A declared ref is still reported as inert — the actionable case.
+        inert = sdk.create_entity(type=t, name=f"Inert {t}",
+                                  extractedFrom="session:inert", **extra)
+        assert (inert.get("advisories") or [{}])[0].get("code") == \
+            "extracted_from_inert"
 
 
 def test_a_non_string_source_ref_is_refused_pre_write(tmp_path):
@@ -479,3 +529,35 @@ def test_create_document_with_a_source_is_not_advised(tmp_path):
     res = sdk.create_document("Sourced alias doc", "note",
                               extractedFrom="corpus://notes/8171-alias")
     assert not (res.get("advisories") or [])
+
+
+def test_alias_doors_deliver_the_advisory(tmp_path):
+    """`create_subject`/`create_object`/`create_event` must surface advisories.
+
+    The three alias doors returned ``create_entity(...)["node"]`` and thereby
+    DROPPED the top-level ``advisories`` key — so the identical write advised
+    through ``create_entity`` but not through the alias. The alias MCP tools
+    (`tortoise_create_subject` / `-object` / `-event`) forward that return, so
+    an agent writing through them never saw the note; an advisory that reaches
+    only some of the doors cannot change behaviour.
+
+    MUTATION THAT MUST RED: unwrap ``["node"]`` again — the key is absent, so
+    the assertion has no advisory to read.
+
+    (A subject/object/event with nothing declared is not advised at all — see
+    `test_no_source_is_only_advised_where_the_remedy_works` — so a DECLARED
+    ref this door cannot wire is the actionable advisory these types produce,
+    and that is what is pinned here.)
+    """
+    sdk = _sdk(tmp_path)
+    cases = (
+        (sdk.create_subject, ("Alias subject", "person")),
+        (sdk.create_object, ("Alias object", "product")),
+        (sdk.create_event, ("Alias event", "meeting")),
+    )
+    for create, args in cases:
+        res = create(*args, extractedFrom="session:alias-advised")
+        assert (res.get("advisories") or [{}])[0].get("code") == \
+            "extracted_from_inert", (
+                f"{create.__name__}: the alias door dropped the advisory the "
+                "same write surfaces through create_entity")
