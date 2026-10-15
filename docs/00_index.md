@@ -107,6 +107,7 @@ aboutObjects: tortoise
 | Tortoise agent daemon epic research — OAuth/attribution second-pass verdict + industry code audit (#2554, 2026-09-08) | `docs/research/2026-09-08-tortoise-agent-daemon.md` |
 | Actor attribution in agent-memory graphs — industry code audit (Zep/Mem0/Letta/LangMem/basic-memory, #2554) | `docs/research/memory-attribution-industry-findings.md` |
 | Standard-harness reuse audit — do we need to invent the battery's key decisions (#1416, 2026-09-10) | `docs/research/2026-09-10-standard-harness-reuse-audit.md` |
+| **Team permission management (#2427)** — the control-plane role/permission model: the endpoint→permission matrix for the key lifecycle, roles as bundles, the key **holder** field vs the minter (`created_by`), the compromise Replace/Revoke semantics, the contradiction-test rulings (member durable mint = reopen #2297; external ReBAC = reopen #2083), and the over-scope call for v1 (end-customer tier deferred to #8693) | `docs/research/2026-10-15-2427-team-permission-model.md` |
 | Epic #2554 scoping (REVISED) — keyless agent connect via per-agent OAuth + human attribution on the graph | `docs/scoping/tortoise-agent-daemon.md` |
 | #2600 Attribution Phase 1 scoping — resolver human actor; sessions + write-events stamped (epic #2554 v1 gate) | `docs/scoping-2600-attribution-phase1.md` |
 | #2789 one free organization per person — scoping (double diamond, Design 2 = webhook-provisioned org) | `docs/scoping/2026-09-10-2789-one-free-org.md` |

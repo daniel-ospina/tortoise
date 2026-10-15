@@ -3282,6 +3282,16 @@ def tortoise_create_entity(type: str, name: str, props: Any = None) -> dict:
     Event entities wire about* edges from aboutSubject/aboutObject/aboutPoint/
     aboutDocument props. Returns {node, nudges} — nudges suggest IMPL/NAND/
     mitigate connections to related Points (advisory, not enforced).
+
+    Also returns ``advisories`` when the write lands with no source this door
+    can honour — no materializable ``extractedFrom`` — ADVISORY only, it never
+    blocks the write. A ``session_id`` or ``sourceKind`` does NOT count: only
+    ``create_point`` derives a source from a session_id, and ``sourceKind`` is
+    not stored on these nodes. MATERIALIZATION IS DOCUMENT-ONLY: for
+    ``type='document'``, pass ``props={"extractedFrom": "session:<session_id>"}``
+    explicitly and the ``:Source`` is materialized for you (#8171). For
+    subject/object/event a declared ref is INERT — no ``:Source`` is created and
+    the response carries an ``extracted_from_inert`` advisory instead.
     """
     props = _parse(props)
     _reject = _reject_server_managed_props(props)

@@ -217,10 +217,36 @@ response_fields:
     key keeps its value
 - response: tortoise_create_operator
   field: direction_basis
-  emitted_when: always on the hosted path — the same basis, on the operator the tool returns (#7852 W1, owner-approved
-    "w1 yes approved" 2026-10-09)
-  unchanged_when_off: n/a — not flag-gated; the tool returns the operator properties, so every pre-existing key
-    keeps its value
+  emitted_when: 'always on the hosted path — the same basis, on the operator the tool returns (#7852 W1,
+    owner-approved "w1 yes approved" 2026-10-09)'
+  unchanged_when_off: n/a — not flag-gated; the tool returns the operator properties, so every pre-existing
+    key keeps its value
+# #8171: the write-time provenance advisory. Deliberately NOT inside a tool's
+# handler — it is emitted in the SDK layer (`TortoiseSDK._provenance_advisory`,
+# called by `create_entity` and `create_document`), so the D2 carve-out holds:
+# no tool is added and no SDK method is added. Recorded here for the same reason
+# as every other response-field addition — nothing inspects response bodies at
+# runtime, so this entry is the only record of what we now tell agents we return.
+- response: tortoise_create_entity
+  field: advisories
+  emitted_when: 'a write this door cannot source is flagged — {advisories: [{code, node_id, message, advisory}]}, advisory-only (never a block, never a refusal, never a change to what was stored). `no_source` fires ONLY for type=document (the sole type this door materializes extractedFrom for); its message names `extractedFrom=''session:<id>''`. `extracted_from_inert` fires on ANY type when an extractedFrom WAS declared but the type is not one this door wires (subject/object/event). A type this door cannot source at all (subject/object/event with nothing declared) is NOT advised — there is no in-door remedy to name, so a note would be noise (#8171, review P1)'
+  unchanged_when_off: 'n/a — not flag-gated; the key is ABSENT on a write the door can source, so a sourced response stays byte-identical'
+- response: tortoise_create_document
+  field: advisories
+  emitted_when: 'the same condition on the alias door — this door always materializes a declared extractedFrom as a :Source (D10), so only the `no_source` code can fire here; the payload comes from the shared `_provenance_advisory` (#8171)'
+  unchanged_when_off: 'n/a — not flag-gated; the key is ABSENT on a sourced document write, so that response stays byte-identical'
+- response: tortoise_create_subject
+  field: advisories
+  emitted_when: 'the alias door now surfaces the same advisory as create_entity(type=''subject'') — `extracted_from_inert` when the write declares an extractedFrom this door does not wire (subject writes have no `no_source`, see tortoise_create_entity). Additive key; the node properties are unchanged (#8171, review P2)'
+  unchanged_when_off: 'n/a — not flag-gated; the key is ABSENT when there is no advisory, so the response stays byte-identical'
+- response: tortoise_create_object
+  field: advisories
+  emitted_when: 'the alias door now surfaces the same advisory as create_entity(type=''object'') — `extracted_from_inert` when the write declares an extractedFrom this door does not wire (object writes have no `no_source`, see tortoise_create_entity). Additive key; the node properties are unchanged (#8171, review P2)'
+  unchanged_when_off: 'n/a — not flag-gated; the key is ABSENT when there is no advisory, so the response stays byte-identical'
+- response: tortoise_create_event
+  field: advisories
+  emitted_when: 'the alias door now surfaces the same advisory as create_entity(type=''event'') — `extracted_from_inert` when the write declares an extractedFrom this door does not wire (event writes have no `no_source`, see tortoise_create_entity). Additive key; the node properties are unchanged (#8171, review P2)'
+  unchanged_when_off: 'n/a — not flag-gated; the key is ABSENT when there is no advisory, so the response stays byte-identical'
 # #8482: the repair at the dispatch seam moves a failure the tool's own advertised
 # output schema cannot carry off `structured_content` and onto the ERROR channel. The
 # status/prose half needs no record (it ships in `content`, which an error result always
@@ -1187,7 +1213,7 @@ rows:
   cluster_note: group `fetch-by-id` is split across ['graph', 'sessions']; proposed family `graph` — waits for your
     approval
 - name: tortoise_create_entity
-  served_from: tortoise/mcp_server.py:79f1a88a819f3e87
+  served_from: tortoise/mcp_server.py:e518adbb8ee1dd4d
   served_attributes: 764058954f66db36
   family: graph
   family_rank: 2
@@ -1199,7 +1225,9 @@ rows:
   cluster: create
   canonical: true
   job: 'Create an entity — type: subject|object|event|document. Event entities wire about* edges from aboutSubject/aboutObject/aboutPoint/aboutDocument
-    props. Returns {node, nudges} — nudges suggest IMPL/NAND/mitigate connections to related Points (advisory).'
+    props. Returns {node, nudges, advisories?} — nudges suggest IMPL/NAND/mitigate connections to related Points; advisories notes a write that declared no
+    source and no provenance (advisory only, never a block). For type=''document'', declaring extractedFrom materializes the :Source (#8171); on
+    subject/object/event it is inert and an extracted_from_inert advisory is returned.'
   dependency: declares TortoiseSDK.create_entity (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
