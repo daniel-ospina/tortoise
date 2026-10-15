@@ -1073,7 +1073,24 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # the right surface rather than a cost concern: config.toml is edited
              # rarely (9 commits ever as of 2026-10-14). Pinned by
              # tests/test_ci_selection.py::test_supabase_config_change_selects_core_not_tier1.
-             "supabase/config.toml")
+             "supabase/config.toml",
+             # PR #8744 review P2: the SQL↔Python contract guard
+             # (`tests/test_postgres_storage.py`, registered `core`) reads the
+             # migration TEXT to pin the two RPC names and the `p_since` /
+             # `p_until` parameter names — a rename on either side makes
+             # PostgREST 404 the wrapper at runtime, and the PGlite suite cannot
+             # see it (it calls the functions positionally). BOTH paths sit
+             # under NON_PYTHON_PREFIXES (`supabase/`, `docs/`) and match no
+             # SOURCE_PATTERNS row, so before these entries a migration-only or
+             # doc-only change came back with `changed == []`, took the
+             # docs-only early return and fell back to tier-1 smoke — the guard
+             # never ran on the very change that can rename the contract (the
+             # #1349/#3332/#3616 silent-drop class). A name in a surface's
+             # test_files only runs when that surface is ALREADY selected, so
+             # the `core` registration could not fix it. Pinned by
+             # tests/test_ci_selection.py::test_postgres_storage_guard_runs_on_migration_or_doc_change.
+             "supabase/migrations/20261015000001_postgres_storage_footprint.sql",
+             "docs/ops/postgres-storage-measurement.md")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",

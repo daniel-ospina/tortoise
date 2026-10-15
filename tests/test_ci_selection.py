@@ -1319,6 +1319,32 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         assert "test_record_projection.py" in r["test_files"], (changed, r)
 
 
+def test_postgres_storage_guard_runs_on_migration_or_doc_change():
+    # PR #8744 review P2: `tests/test_postgres_storage.py` pins the SQL↔Python
+    # contract — the two RPC names and the `p_since`/`p_until` parameter names
+    # read from the migration text. A rename on either side makes PostgREST 404
+    # the wrapper at runtime, and the PGlite suite cannot catch it (it calls the
+    # functions positionally). Both paths are under NON_PYTHON_PREFIXES
+    # (`supabase/`, `docs/`) and match no SOURCE_PATTERNS row, so before the
+    # CORE_ALSO entries a change to either side ALONE selected NO surface and
+    # took the docs-only early return — the guard never ran on the very change
+    # it exists to catch (the #1349/#3332/#3616 silent-drop class; a name in a
+    # surface's test_files only runs when that surface is ALREADY selected, so
+    # the `core` registration could not fix it).
+    #
+    # Measured before the entries: `_sel([...])` -> surfaces=[], full=False,
+    # 43 test files, test_postgres_storage.py absent.
+    # Mutation check: removing either CORE_ALSO entry fails its arm below.
+    for changed in (
+        "supabase/migrations/20261015000001_postgres_storage_footprint.sql",
+        "docs/ops/postgres-storage-measurement.md",
+    ):
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert r["surfaces"] == ["core"], (changed, r)
+        assert "test_postgres_storage.py" in r["test_files"], (changed, r)
+
+
 def test_a_linter_policy_file_at_any_depth_runs_the_full_matrix():
     # #7435 review P1 (with its round-6 correction): cli2 reads a `.markdownlint*`
     # config from ANY directory on the path to a linted file, and a more specific

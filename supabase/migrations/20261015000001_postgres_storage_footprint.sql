@@ -101,6 +101,13 @@ GRANT EXECUTE ON FUNCTION public.postgres_storage_footprint()
 --    `sum` over an empty set is NULL → coalesce to 0; `jsonb_object_agg` over
 --    an empty set is NULL → coalesce to `{}`, so a window with no rows reads
 --    as a measured ZERO rather than as an absent key.
+--    ⛔ NO `ORDER BY` is attached to the aggregate, deliberately: `jsonb`
+--    stores an OBJECT's keys in its own canonical order (length, then
+--    bytewise) and DISCARDS the aggregate's sort, so an `ORDER BY cnt DESC`
+--    would be inert and would advertise a ranking the type cannot deliver.
+--    `rows_by_org` is an unordered mapping; a count-ordered result would have
+--    to be an ARRAY (as `cohort_org_ids_since` returns), which this function
+--    deliberately is not. See `docs/ops/postgres-storage-measurement.md`.
 -- ============================================================================
 CREATE OR REPLACE FUNCTION public.analytics_events_rows_by_org(
     p_since timestamptz,
@@ -117,7 +124,7 @@ AS $$
         'until',       p_until,
         'total_rows',  coalesce(sum(g.cnt), 0),
         'rows_by_org', coalesce(
-                           jsonb_object_agg(g.org_id, g.cnt ORDER BY g.cnt DESC),
+                           jsonb_object_agg(g.org_id, g.cnt),
                            '{}'::jsonb)
     )
       FROM (

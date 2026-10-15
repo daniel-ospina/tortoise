@@ -1326,9 +1326,13 @@ surfaces:
   # (tortoise/postgres_storage.py + the two read RPCs in migration
   # 20261015000001). Dual-registered with `api`: a change to the new module
   # selects no named pattern and falls to `core`, so `core` is the surface that
-  # MUST run this guard on its own source's diff (`core` is also what a
-  # docs-only change selects — `docs/` is a NON_PYTHON_PREFIX and the doc entry
-  # in docs/00_index.md carries the retention finding).
+  # MUST run this guard on its own source's diff. The SQL↔Python contract half
+  # reads the migration text, so the migration and the ops doc are BOTH in
+  # `tools/ci_selection.py::CORE_ALSO` and select `core` on their own diff.
+  # (An earlier version of this comment claimed `core` is "also what a
+  # docs-only change selects" — that is false: a general `docs/` change is a
+  # NON_PYTHON_PREFIX and takes the tier-1 smoke return. Only the CORE_ALSO
+  # paths below select `core`; #8744 review P2.)
   - test_postgres_storage.py
   # #3634: guards the graph-name ownership vocabulary (the prefix sets that
   # authorise a sweep) — the register, the deny-safe residue predicate, and the
@@ -5203,13 +5207,18 @@ durations:
   # samples push-to-main runs only). Hermetic — no DB, no network, no PGlite
   # (the SQL is asserted separately by the PGlite suite, which does not run in
   # this pool) — so its own per-test cost is what the map should carry, not a
-  # pytest session total. Locally measured 2026-10-15: the file's own tests sum
-  # to < 0.1s (31 tests, all pure parsing/fail-soft assertions); the 8.8s
-  # "setup" pytest prints is the SESSION-scoped conftest boot, which CI pays
-  # once for the whole shard and which other hermetic rows in this map (e.g.
-  # test_cypher_regex_guard_3595.py: 0.2) likewise exclude. Refresh from the
-  # first post-merge run that includes it.
-  test_postgres_storage.py: 0.2  # unmeasured
+  # pytest session total. Locally measured 2026-10-15: 34 cases across 22 test
+  # functions; the two `test_the_real_seam_*` cases stand up a real local
+  # `HTTPServer` and issue real HTTP requests (~0.5-0.6s each), the other 32
+  # cases are parsing/fail-soft assertions under 5ms, so the file's own test
+  # calls sum to ≈1.1s. (An earlier version of this comment said "31 tests, all
+  # pure parsing/fail-soft", summing to < 0.1s — wrong on the count and on the
+  # characterisation, the cause of the understated 0.2 weight; #8744 review P3.)
+  # The ~3.3s "setup" pytest prints is the SESSION-scoped conftest boot, which
+  # CI pays once for the whole shard and which other hermetic rows in this map
+  # (e.g. test_cypher_regex_guard_3595.py: 0.2) likewise exclude. Refresh from
+  # the first post-merge run that includes it.
+  test_postgres_storage.py: 1.1  # unmeasured
   test_heavy_import_guard.py: 6.8
   test_hook_run_observation.py: 5.4
   test_hook_stderr_5919.py: 0.3

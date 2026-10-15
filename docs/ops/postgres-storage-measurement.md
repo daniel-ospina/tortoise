@@ -75,9 +75,12 @@ select jsonb_pretty(analytics_events_rows_by_org(now() - interval '7 days'));
 ```
 
 Returns `since`, `until` (null when the window is open-ended), `total_rows` and
-`rows_by_org` — an **exact** `count(*)` per org, ordered by count descending. The
-window is **half-open** `[since, until)`. An empty window is a measured `0` and
-`{}` — never an absent key.
+`rows_by_org` — an **exact** `count(*)` per org, returned as a JSON **object
+keyed by `org_id`**. `jsonb` stores an object's keys in its own canonical order
+(length, then bytewise) and discards any aggregate `ORDER BY`, so **object key
+order is not a guarantee** — read `rows_by_org` as an unordered mapping, not a
+ranking. The window is **half-open** `[since, until)`. An empty window is a
+measured `0` and `{}` — never an absent key.
 
 ## The attribution boundary — read this before quoting a per-org byte figure
 

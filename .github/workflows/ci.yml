@@ -1738,10 +1738,18 @@ jobs:
       # boot budget (empty /tmp/wrangler.log = cold npx install never finished;
       # #2211 hit this 4x in a row 2026-09-04). --version is fast; the
       # readiness loop below retries twice at 240s each.
+      #
+      # ⛔ PIN THE EXACT VERSION THE BOOT USES (4.127.0), not a floating `@4`.
+      # A floating pre-warm fetched a DIFFERENT wrangler (4.151.0 on
+      # 2026-10-15) and left the boot's pinned install un-warmed; that install
+      # failed on a runner and the npx shim emitted `sh: 1: wrangler: not
+      # found`, timing out both attempts on a PR that touched no website file
+      # (#8744). Warming the pinned version also lets the retry reuse a
+      # COMPLETE cache entry instead of a half-written one.
       - name: Pre-warm wrangler toolchain
         run: |
-          npx --yes wrangler@4 --version
-          npx --yes wrangler@4 pages dev --help >/dev/null
+          npx --yes wrangler@4.127.0 --version
+          npx --yes wrangler@4.127.0 pages dev --help >/dev/null
       - name: Start wrangler pages dev preview (website/ = Pages root)
         run: |
           cd website
@@ -1779,6 +1787,15 @@ jobs:
             # with > anyway, and deleting after the LAST attempt would remove
             # the only evidence before the final cat (review P1 — a double
             # failure must still surface wrangler's own diagnostics).
+            #
+            # #8744: an npx cache entry left half-written by a failed install
+            # cannot be recovered by REUSING it — the retry relaunched npx,
+            # the shim re-ran, and `sh: 1: wrangler: not found` repeated
+            # identically until the job reddened on a PR that touched no
+            # website file. Clear the npx cache so attempt 2 is a genuinely
+            # clean install (from the warm tarball cache), which is what the
+            # retry was always meant to be.
+            rm -rf "$(npm config get cache)/_npx"
             sleep 3
           done
           # Final cleanup: flush the log + free :8788 before surfacing it
