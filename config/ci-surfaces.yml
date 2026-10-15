@@ -2441,6 +2441,11 @@ surfaces:
   - test_3844_annotation_injection.py  # #3844: reader-evidence annotation prefix cannot be forged by a newline in speaker/session_date OR the validity marker (hermetic, no DB)
   - test_6252_body_fence.py  # #6252: body-side sibling of #3844 — the block BODY is fenced so stored content cannot forge a block-scope line (hermetic, no DB); dual core+sdk because tortoise/retrieval.py is SOURCE_PATTERNS["sdk"]
   - test_review_connections.py
+  # #2354: the uncertainty-verdict layer (`tortoise/review_verdicts.py`) rides
+  # the mining correction-conflict candidate path and the existing review verbs.
+  # `review_verdicts.py` matches no SOURCE_PATTERNS entry, so a change to it
+  # selects the `core` fallback — registered here so the E2E runs on it.
+  - test_review_verdicts_2354.py
   - test_round_trip_parity.py
   - test_run_protocol.py
   - test_sdk_adapter_cap.py
