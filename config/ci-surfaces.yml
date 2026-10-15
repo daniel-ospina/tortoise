@@ -4411,6 +4411,7 @@ durations:
   test_eval_retrieval_budget.py: 2.0
   test_export_delete.py: 3.2
   test_review_connections.py: 3.7
+  test_review_verdicts_2354.py: 140.3  # #2354: measured here (24 tests, 136.47s wall, embedded lane, 2026-10-15; 140.29s at 23 tests) — a real weight, not the flat 2.0 default; the weekly ci-timing sweep re-derives it from junit
   test_battery_report_writers.py: 2.2
   test_de2e6_temporal.py: 3.0
   test_direct_edge.py: 1.7

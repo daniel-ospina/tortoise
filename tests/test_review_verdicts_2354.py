@@ -327,8 +327,102 @@ class TestVerdictMapping:
         rep = layer.sweep(batch_id=batch_id)
         assert rep["auto_accepted"] == 0 and rep["batch_quarantined"]
 
+    def test_keep_refused_on_terminal_candidate_without_side_effects(
+            self, sdk):
+        """#2354 review P1: `keep` on a terminal candidate half-applied.
+
+        The pre-fix order (approve_merge → promote_point → raise) stamped
+        ``temporal_reviewed='merge'`` and journaled ``DedupeRecorded`` before
+        discovering ``not_draft``, so the candidate vanished from BOTH review
+        surfaces with no decision recorded — the exact limbo #2354 removes.
+        The refusal must now be side-effect-free.
+        """
+        _seed_candidate(sdk, "rv-term", "rv-prior")
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:'rv-term'}) SET n.status = 'retracted'")
+        layer = VerdictLayer(sdk)
+        layer.mark_queued("rv-term")
+        with pytest.raises(ValueError, match="not_draft"):
+            layer.decide("rv-term", VERDICT_KEEP, decided_by="probe")
+        props = _props(sdk, "rv-term")
+        assert props["status"] == "retracted"        # never promoted
+        assert props.get("temporal_reviewed") is None  # no phantom review
+        assert props["reviewDecision"] == DECISION_QUEUED  # still a decision
+        assert props.get("reviewVerdict") is None
+        # The candidate is still a queued decision an operator can reach, and
+        # re-issuing the refusal is side-effect-free.
+        assert [p["id"] for p in layer.pending(
+            candidate_type="temporal")] == ["rv-term"]
+        log = sdk._get_event_log().read_all()
+        assert not any(e.get("type") == "DedupeRecorded" for e in log), log
+
+    def test_keep_refused_on_operator_candidate_without_side_effects(self, sdk):
+        """The other ``promote_point`` block reason, same no-side-effect rule."""
+        _seed_candidate(sdk, "rv-op", "rv-prior")
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:'rv-op'}) SET n.is_operator = true")
+        layer = VerdictLayer(sdk)
+        layer.mark_queued("rv-op")
+        with pytest.raises(ValueError, match="is_operator"):
+            layer.decide("rv-op", VERDICT_KEEP)
+        props = _props(sdk, "rv-op")
+        assert props.get("temporal_reviewed") is None
+        assert props["reviewDecision"] == DECISION_QUEUED
+        log = sdk._get_event_log().read_all()
+        assert not any(e.get("type") == "DedupeRecorded" for e in log), log
+
+    def test_keep_rolls_back_the_review_write_on_a_lost_promotion_race(
+            self, sdk, monkeypatch):
+        """A quarantine landing between the read and the CAS must not strand it.
+
+        The pre-check cannot see a race, so the post-promotion refusal still
+        exists — but it now restores the review state ``approve_merge`` wrote,
+        instead of leaving a reviewed-but-unpromoted candidate behind.
+        """
+        _seed_candidate(sdk, "rv-race", "rv-prior")
+        layer = VerdictLayer(sdk)
+        layer.mark_queued("rv-race")
+        monkeypatch.setattr(
+            sdk, "promote_point",
+            lambda pid: {"id": pid, "promoted": False, "blocked": True,
+                         "reason": "batch_quarantined"})
+        with pytest.raises(ValueError, match="could not be promoted"):
+            layer.decide("rv-race", VERDICT_KEEP)
+        props = _props(sdk, "rv-race")
+        assert props.get("temporal_reviewed") is None
+        assert not props.get("reviewed")
+        assert props["reviewDecision"] == DECISION_QUEUED
+        assert props.get("reviewVerdict") is None
+
 
 # ── indicator 3: deterministic drainer, never auto-resolves ─────────
+class TestSweepFailureSurfaced:
+    def test_mining_surfaces_sweep_failure(self, sdk, tmp_path, monkeypatch):
+        """#2354 review P2: a failed sweep must not read as "queued nothing".
+
+        Pre-fix, ``mine()`` swallowed the exception and returned
+        ``verdict_sweep: None`` only, so a caller could not distinguish a
+        sweep that never ran from one that queued zero candidates — the
+        pre-#2354 limbo with a log line. The failure is now surfaced under
+        its own key, like the W-2 dedup block's ``dedup_error``.
+        """
+        import tortoise.review_verdicts as rv
+
+        def _boom(self, **kwargs):
+            raise RuntimeError("graph exploded")
+
+        monkeypatch.setattr(rv.VerdictLayer, "sweep", _boom)
+        res = _mine(sdk, D1_TX, "rv-sweep-error", T1, str(tmp_path))
+        assert res["verdict_sweep"] is None
+        assert res["verdict_sweep_error"]
+        assert "graph exploded" in res["verdict_sweep_error"]
+
+    def test_mining_reports_no_sweep_error_on_success(self, sdk, tmp_path):
+        res = _mine(sdk, D1_TX, "rv-sweep-ok", T1, str(tmp_path))
+        assert res["verdict_sweep"] is not None
+        assert res["verdict_sweep_error"] is None
+
+
 class TestDeterministicDrainer:
     def test_empty_drain_resolves_nothing(self, sdk):
         _seed_candidate(sdk, "rv-a", "rv-prior")

@@ -392,12 +392,19 @@ class ConversationMiner:
         # opted in (default off) — it never closes or rejects a queued
         # decision. See tortoise/review_verdicts.py.
         verdict_sweep = None
+        verdict_sweep_error = None
         if api.projection is not None and point_ids and sdk is not None:
             try:
                 from .review_verdicts import VerdictLayer
                 verdict_sweep = VerdictLayer(sdk).sweep(batch_id=batch_id)
-            except Exception:
+            except Exception as exc:
+                # Surface it like the W-2 dedup block does (:337): a sweep that
+                # never ran must not be indistinguishable from "queued nothing".
+                # `verdict_sweep is None` alone is a silent limbo restatement
+                # (every candidate stays temporal_reviewed IS NULL, and the
+                # batch is already committed by the W-3 gate, so nothing retries).
                 logger.exception("verdict sweep failed for batch %s", batch_id)
+                verdict_sweep_error = f"verdict sweep failed: {exc}"
 
         return {
             "events": len(events),
@@ -420,6 +427,7 @@ class ConversationMiner:
             "temporal_replacements": (temporal_report or {}).get(
                 "replacement_candidates", 0),
             "verdict_sweep": verdict_sweep,
+            "verdict_sweep_error": verdict_sweep_error,
         }
 
     # ── Phase-4 temporal belief wiring (W-4, #786, DE2E-6) ────────

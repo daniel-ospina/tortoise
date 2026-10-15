@@ -249,6 +249,33 @@ class VerdictLayer:
             return status.get("reason") or "batch quarantined"
         return None
 
+    def _keep_refusal(self, props: dict) -> str | None:
+        """Why ``promote_point`` would refuse this candidate, or None.
+
+        Mirrors ``promote_point``'s own block reasons EXACTLY and in its own
+        order (``is_operator`` → already-live no-op → ``not_draft`` →
+        ``batch_quarantined``), so ``keep`` can be refused BEFORE any durable
+        review write or journal emit. Without this, `keep` half-applies: the
+        pre-write ``approve_merge`` stamps ``temporal_reviewed='merge'`` (and
+        emits ``DedupeRecorded``), which drops the candidate out of
+        ``list_dedup_candidates``, and the promotion is then blocked — so the
+        candidate lands in NO review surface (the limbo #2354 exists to
+        eliminate) and re-issuing ``keep`` can never recover it.
+        """
+        if props.get("is_operator") or props.get("op_type"):
+            return "is_operator"
+        status = props.get("status")
+        if status == "live":
+            # ``promote_point`` no-ops (already_live, blocked=False) BEFORE the
+            # quarantine check, so a live candidate has no refusal here.
+            return None
+        if status != "draft":
+            return f"not_draft (status {status!r})"
+        reason = self._batch_quarantined(props)
+        if reason:
+            return f"batch quarantined ({reason})"
+        return None
+
     # ── queue ───────────────────────────────────────────────────────
     def mark_queued(self, candidate_id: str, *, posterior: dict | None = None,
                     reason: str | None = None) -> dict:
@@ -316,9 +343,10 @@ class VerdictLayer:
         """Apply one explicit verdict and record its provenance on both points.
 
         Raises ``ValueError`` for an out-of-vocabulary verdict, a non-candidate,
-        a candidate already decided with a DIFFERENT verdict, or a ``keep`` on a
-        candidate whose batch is quarantined (``promote_point`` would block
-        anyway — refusing here keeps the verdict from half-applying).
+        a candidate already decided with a DIFFERENT verdict, or a ``keep`` on
+        a candidate ``promote_point`` would refuse (an operator node, a
+        terminal/absent status, or a quarantined batch) — refused BEFORE any
+        durable write so the verdict cannot half-apply.
         """
         if verdict not in VERDICT_VALUES:
             raise ValueError(
@@ -340,16 +368,34 @@ class VerdictLayer:
         applied: dict = {}
 
         if verdict == VERDICT_KEEP:
-            blocked = self._batch_quarantined(props)
+            # Resolve promotability FIRST, before any durable write: the
+            # promotion wire needs ``*_reviewed='merge'`` set before
+            # ``promote_point`` runs (Variant C), so approval cannot be
+            # reordered after it — the refusal must instead precede both.
+            blocked = self._keep_refusal(props)
             if blocked:
                 raise ValueError(
-                    f"candidate {candidate_id!r} batch is quarantined "
-                    f"({blocked}) — keep refused; the candidate stays queued")
+                    f"candidate {candidate_id!r} cannot be kept: {blocked} — "
+                    f"keep refused with no side effects; the candidate stays "
+                    f"queued")
+            review_key = "temporal_reviewed" if is_temporal else "dedup_reviewed"
+            prior_review = props.get(review_key)
+            prior_reviewed = props.get("reviewed")
             self.sdk.approve_merge(candidate_id, action="merge")
             applied = self.sdk.promote_point(candidate_id)
             if applied.get("blocked"):
-                # Defensive: a quarantine that landed after the read must not
-                # leave the candidate reviewed-but-unpromoted.
+                # Lost the read-then-CAS race (a quarantine landed between the
+                # check above and promote_point's own). Roll the review write
+                # back so the candidate is NOT left reviewed-but-unpromoted,
+                # then surface the refusal. The ``DedupeRecorded`` emit inside
+                # approve_merge cannot be unjournaled — it remains an audit
+                # record of an attempted merge.
+                self._proj.g.query(
+                    f"MATCH (n:Point {{id:$id}}) "
+                    f"SET n.{review_key} = $prior, n.reviewed = $reviewed",
+                    params={"id": candidate_id, "prior": prior_review,
+                            "reviewed": prior_reviewed},
+                )
                 raise ValueError(
                     f"candidate {candidate_id!r} could not be promoted: "
                     f"{applied.get('reason') or 'blocked'}")
