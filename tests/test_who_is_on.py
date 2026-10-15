@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +37,23 @@ WRAPPER = ROOT / "tools" / "who-is-on.sh"
 GATE = ROOT / "tools" / "collision_preflight.py"
 PYTHON = sys.executable
 ISSUE = 4242
+#: The slug the fixture's git remote resolves to; the board fixture stamps it.
+SLUG = "acme/example"
+
+_GATE = None
+
+
+def _gate_module():
+    """The pre-flight module, imported once — for the SHARED constants the parity
+    assertions pin (`WEAK_HIT_KINDS`). Importing it appends the repo root to
+    `sys.path` and imports `fleet_state`, which is why it is loaded once here and
+    not per test."""
+    global _GATE
+    if _GATE is None:
+        sys.path.insert(0, str(ROOT / "tools"))
+        import collision_preflight as _cp
+        _GATE = _cp
+    return _GATE
 
 # Minimal gh stub: the calls the pre-flight's GitHub surfaces make.
 GH_STUB = r"""#!/usr/bin/env bash
@@ -140,11 +158,78 @@ class WhoIsOnTest(unittest.TestCase):
             "assignees": [],
             "comments": [],
         }))
+        # ⛔ THE CLAIM GATE READS A FLEET BOARD, AND `HOME` IS THIS TEMP DIR.
+        # Without a fresh, answerable board (`$HOME/.pi/agent/state/
+        # fleet-state.json`) every run REBUILDS — and this fixture has no lane
+        # registry to read, so the gate would answer INCOMPLETE and the whole
+        # "nobody holds it" family of answers would be unreachable. The default
+        # board here answers "no lane is attributed to this issue".
+        self._write_fleet_board()
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
     # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _write_fleet_board(self, issues=None, lanes=None, repo=SLUG) -> Path:
+        """Write the claim gate's board at `$HOME/.pi/agent/state`.
+
+        Only the fields `collision_preflight._read_board` / `_holders_from_board`
+        consume: `repo` (the stamp `_board_is_for_repo` compares against the
+        queried slug — a mismatch forces a rebuild), `reconciliation` (both reads
+        measured), `index.issues` (attribution) and `lanes` (liveness).
+        `generated_at` is NOW, so the board is fresh inside
+        `fleet_state.STATE_FRESH_S` and no run pays a REBUILD.
+        """
+        path = self.tmp / ".pi" / "agent" / "state" / "fleet-state.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "generated_at": datetime.now(UTC).isoformat(),
+            "repo": repo,
+            # `orphans` is REQUIRED by `_board_can_answer` (an absent orphan report
+            # would leave the board's liveness provenance unknown): `build_state`
+            # always writes it, and an empty list is what a readable live-session
+            # store produces.
+            "orphans": [],
+            "reconciliation": {"registry_measured": True,
+                               "github_measured": True,
+                               # The board must also stamp its OPEN-ISSUE coverage:
+                               # `_board_can_answer` refuses an unstamped board
+                               # (a pre-#8175 cache cannot prove it saw every
+                               # open issue) and this fixture's boards are meant
+                               # to be SERVED, not rebuilt.
+                               "open_issues_truncated": False,
+                               "open_issues_read": 1,
+                               "open_issues_limit": 2000},
+            "index": {"issues": {
+                str(number): {
+                    "lanes": [label for label, _ in entries],
+                    "evidence": {label: evidence for label, evidence in entries},
+                }
+                for number, entries in (issues or {}).items()
+            }},
+            "lanes": [
+                {
+                    "identity": {"lane": spec["label"]},
+                    "terminal": ({"state": spec["terminal"],
+                                  "reason": spec.get("reason", "")}
+                                 if spec.get("terminal") else {}),
+                    "liveness": {
+                        "liveness_measured": spec.get("live") is not None},
+                    # A measured lane is a RESOLVED session (`bound` True with a
+                    # sid); a lane with no record is the real sessionless shape
+                    # (`pid_alive: False` by default, `bound: False`, `sid: None`),
+                    # matching `fleet_state.build_state`.
+                    "session": ({"pi_pid": 1, "pid_alive": bool(spec["live"]),
+                                 "sid": f"sid-{spec['label']}", "bound": True}
+                                if spec.get("live") is not None else
+                                {"pi_pid": None, "pid_alive": False,
+                                 "sid": None, "bound": False}),
+                }
+                for spec in (lanes or ())
+            ],
+        }))
+        return path
 
     def _env(self) -> dict:
         """Host-independent child env: no COLLISION_PREFLIGHT_* leak, no global
@@ -577,6 +662,9 @@ exit 0
         that asserts absence for a read that never happened, and the LOCAL block
         is the section this tool exists for, so a reader who skims it would take
         "nobody" from it."""
+        # The board must be stamped for the SAME slug, or the claim gate rebuilds
+        # it with live gh/cmux — a real 12 s rebuild inside a unit test.
+        self._write_fleet_board(repo="acme/other")
         proc = subprocess.run(
             [PYTHON, str(TOOL), str(ISSUE), "--repo", "acme/other",
              "--gh", str(self.gh)], capture_output=True, text=True,
@@ -649,7 +737,8 @@ exit 0
         self.assertNotIn("\u009b", out)
 
     def test_an_unread_remote_surface_is_not_rendered_as_absent(self):
-        """`(no remote branch, open/closed PR, assignee or claim comment)` asserts
+        """`(no remote branch, open/closed PR, assignee or live holder on the
+        fleet board)` asserts
         ABSENCE for the whole remote half. If a BLOCKING remote surface could not
         be queried, that line is exactly the fail-open the LOCAL block guards
         against: a reader skimming it takes "nobody" from a read that never
@@ -680,6 +769,95 @@ exit 0
         rc, out = self.run_tool(ISSUE)
         self.assertEqual(rc, 0, out)
         self.assertIn("ANSWER: nobody", out)
+
+    def test_a_pr_body_prose_mention_is_reported_as_the_prose_bucket(self):
+        """The POSITIVE arm of the kind split (#8175 review): a run whose only
+        weak hit is a PR body that merely cross-references the issue must name the
+        PROSE bucket and not the non-prose kinds. Without this, the bucket's
+        comparison could be dead or inverted and every test here would still pass."""
+        (self.gh_dir / "closed_prs.json").write_text(json.dumps([{
+            "number": 778,
+            "title": "chore: unrelated",
+            "body": f"(restored in #{ISSUE})",
+            "state": "closed",
+            "url": "https://example.invalid/pulls/778",
+            "headRefName": "chore/unrelated",
+            "headSha": "deadbeef",
+            "mergedAt": None,
+            "closingIssuesReferences": [],
+        }]))
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ANSWER: nobody", out)
+        self.assertIn(_gate_module().WEAK_KIND_PROSE_ONLY, out)
+        self.assertNotIn(_gate_module().WEAK_HIT_KINDS, out)
+
+    def test_a_stopped_holder_is_not_reported_as_prose(self):
+        """#8175: a board-verified holder whose writer has STOPPED is a WEAK,
+        non-blocking hit, so this verb must NOT describe it as a "prose-only
+        cross-reference" — that is a different thing and misdescribes what the
+        board measured. A reader who sees "prose-only" and a stopped holder in
+        the same sentence cannot tell whether real work was detected."""
+        self._write_fleet_board(
+            issues={ISSUE: [("lane-parked", "branch slug fix/4242-x")]},
+            lanes=[{"label": "lane-parked", "live": False}],
+        )
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ANSWER: nobody", out)
+        self.assertIn("WEAK SIGNALS", out)
+        # The KIND PHRASES are shared with `format_report` (`cp.WEAK_HIT_KINDS`,
+        # `cp.WEAK_KIND_PROSE_ONLY`), so asserting the constants is what makes
+        # this a parity test rather than a second copy of the prose that can
+        # drift from it — and asserting the PROSE kind is ABSENT is what makes
+        # the assertion able to fail: the heading must name only the kinds the
+        # run actually hit, or a stopped holder reads as prose-only.
+        self.assertIn(_gate_module().WEAK_HIT_KINDS, out)
+        self.assertIn("has STOPPED", out)
+        self.assertNotIn(_gate_module().WEAK_KIND_PROSE_ONLY, out)
+
+    def test_a_lane_label_containing_prose_is_not_reported_as_prose_only(self):
+        """The KIND is structured (`Hit.kind`), never a substring of the detail —
+        and the detail embeds the lane label, which is free-form registry text in
+        this fleet ("1 Capture write doors"). A stopped holder on a lane named
+        "12 Prose naturalisation" used to print as a "prose-only cross-reference"
+        and never mention the non-prose kinds at all."""
+        self._write_fleet_board(
+            issues={ISSUE: [("12 Prose naturalisation",
+                             "branch slug fix/1-prose")]},
+            lanes=[{"label": "12 Prose naturalisation", "live": False}],
+        )
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("has STOPPED", out)
+        self.assertIn(_gate_module().WEAK_HIT_KINDS, out)
+        self.assertNotIn(_gate_module().WEAK_KIND_PROSE_ONLY, out)
+
+    def test_a_live_board_holder_is_answered_as_a_holder(self):
+        """The other half of the claim gate the parity contract depends on: a
+        board-verified holder whose writer is still running IS a holder here, and
+        this verb must count it — the gate exits 1 on the same input."""
+        self._write_fleet_board(
+            issues={ISSUE: [("lane-live", "branch slug fix/4242-x")]},
+            lanes=[{"label": "lane-live", "live": True}],
+        )
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ANSWER: 1 holder(s)", out)
+        self.assertIn("lane-live", out)
+
+    def test_an_unmeasured_holder_makes_the_answer_incomplete(self):
+        """A lane the board attributed but could not measure is NOT "nobody": the
+        gate answers INCOMPLETE (exit 2) and this verb must not answer "nobody"
+        at rc 0 for the same input."""
+        self._write_fleet_board(
+            issues={ISSUE: [("lane-unknown", "branch slug fix/4242-x")]},
+            lanes=[{"label": "lane-unknown", "live": None}],
+        )
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("ANSWER INCOMPLETE", out)
+        self.assertNotIn("ANSWER: nobody", out)
 
     def test_the_answer_does_not_claim_completeness_it_does_not_have(self):
         """The final ANSWER line must not assert completeness it does not have.

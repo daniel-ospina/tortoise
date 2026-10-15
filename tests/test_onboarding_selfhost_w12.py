@@ -579,3 +579,94 @@ class TestMcpTools:
             state = tortoise_onboarding_state()
         assert state["onboarding_complete"] is True
         assert "decide-completed" in state["completed_steps"]
+
+
+# ── 4. the capture controls are OBSERVABLE, not merely persisted ──
+
+class TestOperationalObservability:
+    """#8686: a setting the user cannot see is not a setting.
+
+    The defect came in two halves, and BOTH had to be closed. The write was a
+    bare ``MATCH ... SET`` on a node a self-hosted install never has — 0 rows
+    matched, *without error*, over an echo that re-added the value it had just
+    been asked to set. Once that landed, the state read STILL could not show
+    the setting, because this projection was FLOW-only.
+
+    These tests drive the real MCP-tool entry point and read the value back
+    through the real reader, so neither half can silently re-open.
+    """
+
+    def test_the_recording_toggle_is_observable_through_the_state_read(self, db_env):
+        from tortoise.hosted_api import _update_onboarding_state
+        sdk = _sdk()
+        try:
+            sh.ensure_selfhost_onboarding(sdk)
+        finally:
+            sdk.close()
+
+        # EXACTLY what mcp_server.tortoise_onboarding_session_recording calls.
+        _update_onboarding_state(SELFHOST_ORG_ID, session_recording=False,
+                                 capture_revised=True)
+
+        sdk = _sdk()
+        try:
+            state = sh.read_selfhost_state(sdk)
+        finally:
+            sdk.close()
+        assert state["operational"]["session_recording"] is False, (
+            "the self-hosted state read cannot show the setting it just stored "
+            "— that is the #8686 false ACK with a fresh coat of paint")
+
+    def test_the_toggle_survives_an_unrelated_write(self, db_env):
+        """The second half of #8686: the value must not revert. The CAS read
+        leg had no selfhost branch, so it handed back the DEFAULT set
+        (session_recording=True) and the next write merged it straight back
+        over the stored False."""
+        from tortoise.hosted_api import _update_onboarding_state
+        sdk = _sdk()
+        try:
+            sh.ensure_selfhost_onboarding(sdk)
+        finally:
+            sdk.close()
+
+        _update_onboarding_state(SELFHOST_ORG_ID, session_recording=False,
+                                 capture_revised=True)
+        _update_onboarding_state(SELFHOST_ORG_ID, demo_created=True)
+
+        sdk = _sdk()
+        try:
+            state = sh.read_selfhost_state(sdk)
+        finally:
+            sdk.close()
+        assert state["operational"]["session_recording"] is False, (
+            "an unrelated write reverted the switch — the user is told OFF and "
+            "recording resumed")
+        assert state["operational"]["demo_created"] is True
+
+    def test_an_untouched_deployment_reports_no_operational_keys(self, db_env):
+        """An absent key means the documented DEFAULT applies. This layer must
+        not invent one — the disclosure renderer owns the wording for 'unset',
+        and a fabricated value here is how a reader starts lying."""
+        sdk = _sdk()
+        try:
+            sh.ensure_selfhost_onboarding(sdk)
+            state = sh.read_selfhost_state(sdk)
+        finally:
+            sdk.close()
+        assert state["operational"] == {}
+
+    def test_graph_down_is_unavailable_never_an_empty_dict(self):
+        """`{}` reads as 'nothing is set'; the graph being DOWN is a different
+        fact. Fabricating an empty dict would turn an outage into a silent
+        'your settings are gone'."""
+
+        class _DeadProj:
+            def query(self, *_a, **_k):
+                raise RuntimeError("graph down")
+
+        class _DeadSdk:
+            def _get_proj(self):
+                return _DeadProj()
+
+        state = sh.read_selfhost_state(_DeadSdk())
+        assert state["operational"] == "unavailable"

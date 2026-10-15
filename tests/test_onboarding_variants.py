@@ -108,11 +108,19 @@ def assert_copies_parity(canonical: Path, mirror: Path) -> None:
     to catch. Both sides are asserted to EXIST before either is read, so a
     missing file raises a named failure instead of a bare FileNotFoundError from
     the comparison — the difference between a diagnosis and a traceback.
+
+    The comparison is over BYTES, not decoded text (#3673 Target: "byte-identical"
+    and "0 fail-open paths"). `Path.read_text()` opens with universal-newline
+    translation, so `b"a\n"` and `b"a\r\n"` read EQUAL — a CRLF mirror passed
+    this gate while the bytes actually served differed from the canonical.
+    Measured: those two payloads are unequal as bytes and equal via `read_text`.
+    `read_bytes()` is the same one-line read with no normalisation step left to
+    fail open. A binary read also keeps the DIR / absent cases failing (OSError /
+    a named AssertionError), which is the fail-closed behaviour asserted below.
     """
     assert canonical.exists(), f"canonical copy missing: {canonical}"
     assert mirror.exists(), f"deploy mirror missing: {mirror}"
-    assert mirror.read_text(encoding="utf-8") == canonical.read_text(
-        encoding="utf-8"), (
+    assert mirror.read_bytes() == canonical.read_bytes(), (
         f"parity broken: {mirror} drifted from {canonical}")
 
 
@@ -154,6 +162,27 @@ def test_parity_gate_fails_closed_on_a_missing_or_unreadable_copy(tmp_path):
     mirror.unlink()
     mirror.mkdir()
     with pytest.raises(OSError):
+        assert_copies_parity(canon, mirror)
+
+
+def test_parity_gate_compares_bytes_not_newline_normalised_text(tmp_path):
+    """#3673 Target "0 fail-open paths": the contract is BYTE-identity.
+
+    A gate that reads TEXT cannot see a line-ending difference: `read_text()`
+    applies universal-newline translation, so a mirror committed with CRLF read
+    EQUAL to an LF canonical while the bytes served differed. That is not the
+    comparison the gate claims to make, so it is a fail-open path and not a
+    nicety. The payloads below differ ONLY by line ending — provably unequal as
+    bytes and equal as text — so this test is what stops `assert_copies_parity`
+    reverting to `read_text()`.
+    """
+    canon = tmp_path / "canonical.md"
+    mirror = tmp_path / "mirror.md"
+    canon.write_bytes(b"line one\nline two\n")
+    mirror.write_bytes(b"line one\r\nline two\r\n")
+    assert canon.read_text(encoding="utf-8") == mirror.read_text(
+        encoding="utf-8"), "precondition: the payloads differ only by newline"
+    with pytest.raises(AssertionError, match="drifted"):
         assert_copies_parity(canon, mirror)
 
 

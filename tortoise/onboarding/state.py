@@ -18,10 +18,13 @@ result with ``.result_set`` and ``.stats``. Importable without hosted_api
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from collections.abc import Iterable
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 # ── canonical vocabulary ─────────────────────────────────────
 
@@ -140,6 +143,11 @@ ONBOARDING_NODE_LABEL = "OnboardingState"
 ONBOARDING_STEP_LABEL = "OnboardingStep"
 COMPLETED_STEP_EDGE = "COMPLETED_STEP"
 ONBOARDS_EDGE = "onboards"  # OnboardingState → Organization Subject (W3 seed writes)
+
+#: The #3912 write-ahead repair stamp `remove_decide_completed_edge` sets on the
+#: OnboardingState node — declared ONCE so the writer and every reader name the
+#: same property. ``count_stamped_repairs`` is the DR reader (#8660).
+DECIDE_COMPLETED_REMOVED_AT = "decide_completed_removed_at"
 
 # default node shape (byte-identical across eager init + create-on-write)
 _NODE_DEFAULTS: dict[str, Any] = {
@@ -698,6 +706,101 @@ def write_member_progress(graph: Any, org_id: str, user_id: str,
         return merged
 
 
+#: Node property holding a deployment's OPERATIONAL onboarding keys
+#: (``session_recording``, ``capture_extract``, ...).
+#:
+#: The HOSTED control plane keeps these in a jsonb blob on the team record.
+#: A self-hosted install has no control plane (#8686, decided 2026-10-15), so
+#: they live on the SAME ``:OnboardingState`` node as the FLOW keys — one store
+#: per deployment, which is what every comparable does (GitLab, PostHog,
+#: Cognee, Letta: self-hosted settings are operator-managed in the
+#: deployment's own store; no product requires a vendor control plane).
+OPERATIONAL_PROP = "operational_state"
+
+
+def read_operational_state(graph: Any, org_id: str) -> dict[str, Any]:
+    """OPERATIONAL onboarding keys, or ``{}`` when the node or property is
+    absent. Raises on graph failure — the caller decides 'unavailable' vs
+    defaults, the same contract ``read_onboarding_node`` keeps."""
+    return operational_from_node(read_onboarding_node(graph, org_id))
+
+
+def operational_from_node(node: dict[str, Any] | None) -> dict[str, Any]:
+    """The OPERATIONAL keys carried by an ALREADY-READ node.
+
+    Use this when you hold the node: ``read_operational_state`` re-reads the
+    same row, which on the state read paths costs a third Cypher round trip and
+    — worse — sits OUTSIDE the caller's graph-down guard, so a failure between
+    the two reads escapes a function whose whole contract is to turn a graph
+    failure into a VALUE (#8741 review)."""
+    return _decode_operational((node or {}).get(OPERATIONAL_PROP))
+
+
+def _decode_operational(raw: Any) -> dict[str, Any]:
+    """FalkorDB node properties must be primitives, so the blob is a JSON
+    string (#498). A dict is accepted too. Anything unparseable is REPORTED and
+    read as empty rather than raising into a capture hot path — an unreadable
+    setting must never take the whole read down."""
+    if raw is None or raw == "":
+        return {}
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "replace")
+    if not isinstance(raw, str):
+        _logger.warning("operational_state is %s, not JSON — reading as empty",
+                        type(raw).__name__)
+        return {}
+    try:
+        data = json.loads(raw)
+    except RecursionError:
+        # Adversarially deep nesting (~20k levels) raises RecursionError, which
+        # is neither TypeError nor ValueError. It must not reach the capture
+        # read path.
+        _logger.warning("operational_state nesting is too deep to parse — "
+                        "reading as empty")
+        return {}
+    except (TypeError, ValueError):
+        _logger.warning("operational_state is not valid JSON — reading as empty")
+        return {}
+    if not isinstance(data, dict):
+        # Parseable but the wrong shape ("[1,2]", "3", "null"): REPORTED, not
+        # silently dropped — the docstring promises unparseable input is loud.
+        _logger.warning("operational_state parsed to %s, not an object — "
+                        "reading as empty", type(data).__name__)
+        return {}
+    return data
+
+
+def write_operational_state(graph: Any, org_id: str,
+                            fields: dict[str, Any]) -> None:
+    """Persist OPERATIONAL keys, CREATE-ON-WRITE (#8686).
+
+    The create-on-write is the fix, not a detail. The hosted write leg is a
+    bare ``MATCH (t:Team {id: $id}) SET ...``; an install with no control-plane
+    record matched NOTHING **without error**, so the caller's echo re-added the
+    value it was asked to set and the tool reported success over a write that
+    never happened — a false ACK on the only capture control a user has.
+
+    ``ensure_onboarding_state_node`` is the seam this module already uses for
+    exactly this reason (see ``write_status``: "absent-node orgs must not
+    silently no-op"), so the operational write goes through it too."""
+    if not isinstance(fields, dict) or not fields:
+        return
+    ensure_onboarding_state_node(graph, org_id)
+    with _org_lock(org_id):
+        # The READ must be inside the lock too (review P2): read-merge-write
+        # with the read outside interleaves as read/read/write/write and one
+        # caller's keys are silently lost. `write_member_progress` reads inside
+        # this same lock; this now matches it.
+        merged = read_operational_state(graph, org_id)
+        merged.update(fields)
+        _run(graph,
+             f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
+             f"SET n.{OPERATIONAL_PROP} = $blob",
+             {"org_id": org_id, "blob": json.dumps(merged)})
+
+
 def write_status(graph: Any, org_id: str, status: str, *,
                  status_from_mirror: bool | None = None) -> None:
     """Server-owned, MONOTONIC status write: 'complete' can never regress to
@@ -826,8 +929,27 @@ REPAIR_REASON_FALSE_DECIDE = "false-decide-completed (#3912)"
 
 
 def _utcnow_iso() -> str:
-    from datetime import datetime
     return datetime.now(UTC).isoformat()
+
+
+def _iso_utc(value: Any) -> datetime | None:
+    """Parse an ISO-8601 timestamp to an aware UTC datetime, or ``None``.
+
+    Tolerates the ``Z`` suffix as well as ``+00:00`` (the stamp/``updated_at``
+    writers emit the latter; tests and hand-written fixtures use the former)
+    and reads a naive value as UTC. ``None`` on anything unparseable so a
+    caller that is comparing bounds fails closed instead of comparing halves of
+    one.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        ts = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    return ts.astimezone(UTC)
 
 
 def decision_evidence(graph: Any, org_id: str) -> dict[str, Any]:
@@ -928,7 +1050,7 @@ def find_false_decide_completion(graph: Any, org_id: str,
             and not _gate_satisfied(node, steps)
             and not _legacy_grandfathered(legacy_complete, steps))
         half_repaired = bool(false_completion
-                             and node.get("decide_completed_removed_at"))
+                             and node.get(DECIDE_COMPLETED_REMOVED_AT))
         if half_repaired:
             verdict = "false"
         elif false_completion:
@@ -1045,7 +1167,7 @@ def remove_decide_completed_edge(graph: Any, org_id: str, *,
         # Write-ahead intent BEFORE the destructive write.
         _run(graph,
              f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
-             "SET n.decide_completed_removed_at = $at, "
+             f"SET n.{DECIDE_COMPLETED_REMOVED_AT} = $at, "
              "    n.decide_completed_removed_reason = $reason",
              {"org_id": org_id, "at": at, "reason": reason})
         _run(graph,
@@ -1057,6 +1179,98 @@ def remove_decide_completed_edge(graph: Any, org_id: str, *,
              {"org_id": org_id})
         _prune_orphan_decide_step(graph, org_id)
     return True
+
+
+def count_stamped_repairs(graph: Any, org_id: str | None = None, *,
+                          newer_than: str | None = None) -> int:
+    """COMPLETED #3912 onboarding repairs in a graph — one per repaired org.
+
+    A repair is counted when BOTH hold for an OnboardingState node in the
+    graph (scoped to ``org_id`` when given):
+
+    1. it carries the write-ahead repair stamp
+       (``DECIDE_COMPLETED_REMOVED_AT``); and
+    2. its ``decide-completed`` step node is GONE — the repair's destructive
+       act has actually landed.
+
+    (2) is not decoration: ``remove_decide_completed_edge`` writes the stamp
+    BEFORE the DELETE, and the delete and the orphan prune are separate round
+    trips, so a crash between them leaves a stamped node whose step node is
+    STILL PRESENT. Such a stamp removed nothing and must not account for a
+    label drop.
+
+    ``remove_decide_completed_edge`` stamps ``decide_completed_removed_at`` on
+    the OnboardingState node (write-ahead of the DELETE) precisely so a later
+    reader can tell a repaired org from one that simply never reached the
+    step. The DR per-label drift guard (#661) is that later reader and could
+    not tell them apart (#8660): it compares per-label node counts across
+    sweeps, so a deliberate, stamped `decide-completed` `OnboardingStep`
+    removal read as DATA_LOSS_CANDIDATE — which deletes the just-uploaded
+    archive and, because the guard returns before the baseline write, re-fires
+    on every subsequent sweep.
+
+    ``org_id`` restricts the read to one org's node (the same key the repair
+    writer matches on); ``None`` counts every completed repair in the graph.
+
+    The count is COMPLETED repairs, not repair EVENTS: a re-stamp overwrites
+    and a repaired org contributes one, so it is a LOWER bound on how many
+    repairs ever ran. It is an UPPER bound (a CEILING) on the label delta a
+    repair window may explain: ``_prune_orphan_decide_step`` deletes only nodes
+    matching ``step_id: 'decide-completed'``, and that node is ``MERGE``d
+    uniquely per org, so a counted repair removed AT MOST one node — and an org
+    whose node is absent for some less benign reason is counted too. A caller
+    must therefore never explain a drop LARGER than this count; a drop within
+    it is treated as the repair's own removal (the residual below).
+
+    ``newer_than`` restricts the count to stamps STRICTLY after an ISO
+    timestamp. It exists for ONE caller: the DR drift guard's window on a
+    baseline written before the completed-repair count was recorded (see
+    ``_COMPLETED_REPAIRS_KEY`` in `tortoise.backup_sweep`) — where the stamp
+    time is the only available reference. An unparseable ``newer_than`` counts
+    NOTHING (fail-closed: an unbounded window must not explain a drop), and a
+    stamp whose own timestamp will not parse is skipped for the same reason.
+
+    DELIBERATE LIMITATION — the attribution is LABEL-level. The sweep's
+    baseline is a per-label CENSUS, not a node-identity set, so within the ONE
+    sweep that absorbs a repair's drop, a coincident loss of a DIFFERENT
+    `OnboardingStep` node on an already-repaired org is indistinguishable from
+    the repair's own removal. Across sweeps there is no free pass: a caller
+    that windows on the DELTA of this count (see
+    `tortoise/backup_sweep.py::_explain_repair_stamped_breaches`) stops
+    explaining the moment the baseline records the repair. That residual is
+    documented for the operator (docs/ops/registry-backup-dr.md); removing it
+    needs a baseline schema change (per-step identities), not another query
+    here.
+
+    Raises on a graph failure — the caller decides what an unreadable stamp
+    means, and for the drift guard it means the drop is NOT explained
+    (fail-closed toward firing).
+    """
+    if org_id is None:
+        res = _run(graph,
+                   f"MATCH (n:{ONBOARDING_NODE_LABEL}) "
+                   f"WHERE n.{DECIDE_COMPLETED_REMOVED_AT} IS NOT NULL "
+                   f"OPTIONAL MATCH (s:{ONBOARDING_STEP_LABEL} "
+                   "{org_id: n.org_id, step_id: 'decide-completed'}) "
+                   "WITH n, count(s) AS refs WHERE refs = 0 "
+                   f"RETURN n.{DECIDE_COMPLETED_REMOVED_AT}")
+    else:
+        res = _run(graph,
+                   f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
+                   f"WHERE n.{DECIDE_COMPLETED_REMOVED_AT} IS NOT NULL "
+                   f"OPTIONAL MATCH (s:{ONBOARDING_STEP_LABEL} "
+                   "{org_id: $org_id, step_id: 'decide-completed'}) "
+                   "WITH n, count(s) AS refs WHERE refs = 0 "
+                   f"RETURN n.{DECIDE_COMPLETED_REMOVED_AT}",
+                   {"org_id": org_id})
+    stamps = [row[0] for row in res.result_set if row and row[0]]
+    if newer_than is None:
+        return len(stamps)
+    cutoff = _iso_utc(newer_than)
+    if cutoff is None:
+        return 0
+    return sum(1 for raw in stamps
+               if (ts := _iso_utc(raw)) is not None and ts > cutoff)
 
 
 def regress_status(graph: Any, org_id: str, *, reason: str,
@@ -1083,7 +1297,7 @@ def regress_status(graph: Any, org_id: str, *, reason: str,
         res = _run(graph,
                    f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
                    "WHERE n.status = $complete "
-                   "  AND n.decide_completed_removed_at IS NOT NULL "
+                   f"  AND n.{DECIDE_COMPLETED_REMOVED_AT} IS NOT NULL "
                    "SET n.status = $to, "
                    "    n.status_regressed_at = $at, "
                    "    n.status_regressed_from = $complete, "

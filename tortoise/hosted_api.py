@@ -26435,6 +26435,17 @@ def _get_onboarding_state(org_id: str) -> dict:
         # so this pop cannot mutate the stored row.)
         stored.pop(_STATE_VERSION_KEY, None)
         return stored
+    from tortoise.mcp_auth import SELFHOST_ORG_ID
+    if org_id == SELFHOST_ORG_ID:
+        # #8686: same store as the write above. Merged OVER the defaults so an
+        # unset key keeps its documented default (`session_recording` is
+        # default-ON, #1927) instead of reading as absent.
+        from tortoise.onboarding import state as _ob_state
+        merged = _onboarding_defaults()
+        merged.update(_ob_state.read_operational_state(_org_proj(org_id),
+                                                      org_id))
+        merged.pop(_STATE_VERSION_KEY, None)
+        return merged
     import json as _json
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
@@ -26752,6 +26763,22 @@ def _read_onboarding_state_and_version(org_id: str) -> tuple[dict, int | None]:
         state = dict(stored)
         state.pop(_STATE_VERSION_KEY, None)
         return state, (version if isinstance(version, int) else 0)
+    from tortoise.mcp_auth import SELFHOST_ORG_ID
+    if org_id == SELFHOST_ORG_ID:
+        # #8686 (review P1): this leg MUST agree with `_write_onboarding_state`
+        # and `_get_onboarding_state`. The CAS fallback composes the dict it
+        # writes from HERE; without this branch it handed back the full DEFAULT
+        # set (session_recording=True among it), and `write_operational_state`'s
+        # merge then wrote those stale defaults straight back over a stored
+        # `False` -- the off-switch reverted on the next, unrelated write. The
+        # version stays None because the identity IS absent self-hosted, which
+        # is exactly the documented no-op case the caller preserves.
+        from tortoise.onboarding import state as _ob_state
+        merged = _onboarding_defaults()
+        merged.update(_ob_state.read_operational_state(_org_proj(org_id),
+                                                      org_id))
+        merged.pop(_STATE_VERSION_KEY, None)
+        return merged, None
     import json as _json
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
@@ -26893,6 +26920,17 @@ def _write_onboarding_state(org_id: str, state: dict) -> None:
     )
     if is_supabase_enabled():
         _sb_write(get_control_plane(), org_id, state)
+        return
+    from tortoise.mcp_auth import SELFHOST_ORG_ID
+    if org_id == SELFHOST_ORG_ID:
+        # #8686: a self-hosted install has no control-plane team record, so the
+        # registry MATCH below matched NOTHING -- without error. The caller's
+        # echo then re-added the value it had just been asked to set, and the
+        # tool reported success over a write that never happened: a false ACK
+        # on the only capture control a user has. The deployment's own store is
+        # the :OnboardingState node it already owns (create-on-write seam).
+        from tortoise.onboarding import state as _ob_state
+        _ob_state.write_operational_state(_org_proj(org_id), org_id, state)
         return
     import json as _json
     sdk = _make_sdk(namespace="registry")
@@ -34372,6 +34410,7 @@ async def backups_rebaseline(request: Request):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Re-baseline rejected: {e}")  # noqa: B904
     from tortoise.backup_sweep import (
+        _COMPLETED_REPAIRS_KEY,
         _graph_state_key,
         _write_json,
         query_label_counts,
@@ -34413,7 +34452,7 @@ async def backups_rebaseline(request: Request):
         # true.
         graph_name = row["graph_name"]
 
-        def _current_counts() -> tuple[int, dict[str, int]]:
+        def _current_counts() -> tuple[int, dict[str, int], int]:
             # #8595 review P1: BOTH reads — the total and the per-label
             # baseline the #661 guard compares against — in ONE hand-off, so
             # the label query cannot be left inline on the loop (the same
@@ -34421,10 +34460,18 @@ async def backups_rebaseline(request: Request):
             # RAISES out of the helper and fails the request: writing
             # `node_count` with an unrefreshed label baseline would re-fire
             # the incident this call exists to clear.
+            # #8660: the third read is the completed-repair count, the count
+            # window's reference. It is refreshed here for the SAME #8595
+            # reason — a re-baseline must write the baseline shape the next
+            # sweep compares against, or the guard's count window reopens.
+            from tortoise.onboarding.state import count_stamped_repairs
+            graph_handle = db.select_graph(graph_name)
             return (count_data_nodes(db, graph_name),
-                    query_label_counts(db.select_graph(graph_name)))
+                    query_label_counts(graph_handle),
+                    count_stamped_repairs(graph_handle))
 
-        count, label_counts = await asyncio.to_thread(_current_counts)
+        count, label_counts, completed_repairs = await asyncio.to_thread(
+            _current_counts)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"graph unavailable: {e}")  # noqa: B904
     state = {
@@ -34439,6 +34486,10 @@ async def backups_rebaseline(request: Request):
           else read_graph_state(storage, org_id, graph_id)),
         "node_count": count,
         "label_counts": label_counts,
+        # #8660: refresh the count window's reference alongside the label
+        # baseline, so a re-baseline closes it the same way a sweep's success
+        # path does.
+        _COMPLETED_REPAIRS_KEY: completed_repairs,
         "updated_at": datetime.now(UTC).isoformat(),
     }
     _write_json(storage, _graph_state_key(org_id, graph_id), state)

@@ -554,12 +554,18 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
     advisory_partial = [s for s in surfaces
                         if s.authority == cp.AUTHORITY_ADVISORY
                         and (s.status == cp.STATUS_INCOMPLETE or s.truncated)]
-    # A holder is a NUMBER match (strong); a weak prose cross-reference is
-    # explicitly not work — the gate says so too, and counting it would answer
-    # "someone is on it" for a passing mention. There is no keyword arm to
-    # consider: #3504 deleted the lexical arm, and with it the `keyword`
-    # strength and the per-surface `blind` flag (only the keywords surface
-    # could ever set it), so neither can occur here and neither is reported.
+    # A holder is a NUMBER match (strong); a weak hit is explicitly not work —
+    # the gate says so too, and counting one would answer "someone is on it" for
+    # a passing mention. ⛔ THE WEAK SET IS NOT ALL PROSE (#8175): since the claim
+    # gate reads the HOLDER, a board-verified holder that has STOPPED is
+    # reported as a WEAK, non-blocking hit — so the heading below splits the set
+    # on `Hit.kind` (the gate's own structured marker) and names only the kinds
+    # THIS run hit. A substring test over the detail text was the bug: that text
+    # embeds the lane label.
+    # There is no keyword arm to consider: #3504 deleted the lexical arm, and
+    # with it the `keyword` strength and the per-surface `blind` flag (only the
+    # keywords surface could ever set it), so neither can occur here and neither
+    # is reported.
     strong = [
         (s, h) for s in surfaces for h in s.hits
         if h.strength == "strong" and s.name != cp.SURFACE_LANDED
@@ -641,7 +647,10 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
                 + ", ".join(_clean(s.name) for s in remote_unread)
                 + " could NOT be read in full — see below)")
         else:
-            lines.append("  (no remote branch, open/closed PR, assignee or claim comment)")
+            lines.append(
+                "  (no remote branch, open/closed PR, assignee or live holder on "
+                "the fleet board)"
+            )
     if landed:
         # The conclusion is the GATE's own (`_landed_conclusion`), so the two
         # verbs cannot drift into describing the same terminal fact differently
@@ -664,9 +673,24 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
                      + ("shipped work." if wording == "shipment"
                         else "a terminal work item."))
     if weak and not holders:
+        # ⛔ NAME ONLY THE KINDS THAT ARE ACTUALLY HERE. The heading used to list
+        # every weak kind — including "or a prose-only cross-reference" — beside
+        # a stopped holder, which misdescribes what the board measured: a reader
+        # cannot tell a detected-but-stopped lane from a comment that only
+        # mentioned the issue number. The split is `Hit.kind`, the SAME
+        # structured marker `collision_preflight.format_report` uses, and the
+        # kind phrases are ITS constants, so the two reports cannot drift apart.
         lines.append("")
-        lines.append(f"WEAK SIGNALS (non-blocking — prose is not work): {len(weak)} "
-                     "prose-only cross-reference(s); these do NOT make #N held.")
+        rest = [pair for pair in weak if pair[1].kind != "prose-body"]
+        prose = [pair for pair in weak if pair[1].kind == "prose-body"]
+        kinds = []
+        if rest:
+            kinds.append(f"{len(rest)} non-prose weak hit(s) — {cp.WEAK_HIT_KINDS}")
+        if prose:
+            kinds.append(f"{len(prose)} {cp.WEAK_KIND_PROSE_ONLY}(s)")
+        lines.append(
+            f"WEAK SIGNALS (reported, non-blocking — these are NOT a holder): "
+            f"{'; '.join(kinds)}; none of these make #{issue} held.")
     if incomplete:
         lines.append("")
         lines.append("INCOMPLETE SURFACES — could not be queried:")

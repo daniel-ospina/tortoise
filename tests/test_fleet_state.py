@@ -1593,3 +1593,56 @@ def test_payload_freshness_is_computed_from_the_state_not_trusted_from_prose() -
     assert annotated["stale"] is False and annotated["rebuilt"] is True
 
     assert fs.payload_freshness(3)["stale"] is True, "a non-state is never current"
+
+
+# ---------------------------------------------------------------------------
+# #8175 — was the OPEN-ISSUE read WIDE ENOUGH to prove a negative?
+# ---------------------------------------------------------------------------
+
+def _issues_build(monkeypatch, rows: int):
+    """Build a state whose open-issue read returned exactly `rows` rows."""
+    monkeypatch.setattr(fs, "load_registry", lambda: [])
+    monkeypatch.setattr(fs, "cmux_workspaces", lambda: fs.WorkspaceMap(
+        {"WS": {"cwd": "/tmp/a"}}, measured=True))
+    monkeypatch.setattr(fs, "pane_bindings", lambda: {})
+    monkeypatch.setattr(fs, "live_sessions", lambda: {})
+    monkeypatch.setattr(fs, "load_overrides", lambda: {})
+    monkeypatch.setattr(fs, "session_index", lambda: ({}, {}))
+    monkeypatch.setattr(fs, "worktrees", lambda _root: {})
+    monkeypatch.setattr(fs, "open_prs", lambda _repo, limit=400: fs.GitHubRows(
+        [], measured=True))
+    monkeypatch.setattr(
+        fs, "open_issues",
+        lambda _repo, limit=fs.OPEN_ISSUES_LIMIT: fs.GitHubRows(
+            [{"number": n + 1} for n in range(rows)], measured=True))
+    return fs.build_state(repo="o/r", repo_root="/tmp", orch_ws="",
+                          sample_s=0.0, do_pane=False)
+
+
+def test_an_open_issue_read_at_the_cap_is_stamped_as_truncated(monkeypatch) -> None:
+    """`attribute_claims` gates every attribution on membership in the open-issue
+    read, so a read that hit the cap cannot support "no lane is attributed to issue
+    N" for an N it never saw. Exactly-at-limit is indistinguishable from truncated,
+    so it is stamped as truncated — and the board carries the numbers a refusing
+    reader prints (#8175)."""
+    st = _issues_build(monkeypatch, fs.OPEN_ISSUES_LIMIT)
+    rec = st["reconciliation"]
+    assert rec["open_issues_truncated"] is True
+    assert rec["open_issues_read"] == fs.OPEN_ISSUES_LIMIT
+    assert rec["open_issues_limit"] == fs.OPEN_ISSUES_LIMIT
+
+
+def test_an_open_issue_read_below_the_cap_is_not_truncated(monkeypatch) -> None:
+    """The normal case (989 open issues against a limit of 2000 on 2026-10-14):
+    absence from `index.issues` IS a measured "nobody", so the flag must be exactly
+    False — not merely absent — because `collision_preflight._board_can_answer`
+    refuses a board that does not stamp its coverage."""
+    st = _issues_build(monkeypatch, 3)
+    rec = st["reconciliation"]
+    assert rec["open_issues_truncated"] is False
+    assert rec["open_issues_read"] == 3
+    assert rec["open_issues_limit"] == fs.OPEN_ISSUES_LIMIT
+    assert fs.OPEN_ISSUES_LIMIT > 989, (
+        "the limit must clear this repo's open-issue count, or every board is "
+        "truncated and every absent issue refuses"
+    )

@@ -5345,13 +5345,29 @@ def _cmd_session_disclosure(args) -> int:
             )
             with urlopen(req, timeout=15) as resp:
                 body = _json.loads(resp.read())
-            state = body.get("onboarding") or {}
-            # Absent key reads the product default (default-ON, #1927) — the
-            # same `.get(..., True)` the capture gate itself uses, so the
-            # disclosure and the data plane cannot disagree about "on".
-            recording = bool(state.get("session_recording", True))
-            install_probe = state.get(probe_key) or None
-            state_read = "ok"
+            # #8741: read BOTH response shapes. The hosted route wraps the
+            # projection in an "onboarding" envelope; the self-hosted route
+            # returns it FLAT (there is no control-plane envelope to wrap), and
+            # its operational keys are nested under "operational". Reading only
+            # the hosted shape made a self-hosted reader fall through to the
+            # default (ON) and tell a user their recording was ON while the
+            # stored setting said OFF — the exact false statement this
+            # disclosure exists to prevent.
+            state = body.get("onboarding") or body
+            operational = state.get("operational")
+            if operational == "unavailable":
+                # The graph is down. The setting is UNKNOWN, not ON: leaving
+                # ``recording`` None is what makes the renderer say it could not
+                # read the state instead of asserting one it never observed.
+                state_read = "unavailable"
+            else:
+                store = operational if isinstance(operational, dict) else state
+                # Absent key reads the product default (default-ON, #1927) — the
+                # same `.get(..., True)` the capture gate itself uses, so the
+                # disclosure and the data plane cannot disagree about "on".
+                recording = bool(store.get("session_recording", True))
+                install_probe = state.get(probe_key) or None
+                state_read = "ok"
         except HTTPError as e:
             state_read = f"http-error-{e.code}"
         except URLError as e:
