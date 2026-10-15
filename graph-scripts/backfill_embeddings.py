@@ -13,6 +13,10 @@ wrong-width encoder yields NO vector (the row is skipped, never written); on
 the index-less brute-force lanes (embedded / engine < 4.x / failed index
 creation) the encoder's own width governs and is kept.
 
+The width is a PER-GRAPH fact, so it is resolved for the graph being written
+(``_required_dim_for_graph``), not once from the URI (``--all-tenants`` and
+``--graph <other>`` diverge — see ``_connect_falkordb``).
+
 Two operating modes:
 - Default (NULL-only): only nodes where `embedding IS NULL` are touched, so
   re-running after a partial failure is safe and never recomputes existing
@@ -234,9 +238,25 @@ def _connect_falkordb(uri: str):
     write paths do (#4280). It is derived from whether the store has a Point
     HNSW vector index — ``None`` on the index-less lanes (embedded / engine
     < 4.x / failed index creation), which is exactly where the read path
-    brute-force scans and any self-consistent width is storable. The index's
-    existence is a property of the DEPLOYMENT, so the value is shared by
-    every graph this sweep touches (the ``--all-tenants`` loop included).
+    brute-force scans and any self-consistent width is storable.
+
+    ⛔ It is a PER-GRAPH fact, NOT a deployment-wide one (#4289 review):
+    ``required_embedding_dim`` is read off ``self._vector_index_api``, which
+    ``FalkorProjection._ensure_vector_index_api`` resolves by issuing the
+    create-index DDL against the projection's OWN graph (``self.g``). The
+    value returned here therefore describes **the URI's graph only**. A sweep
+    whose target graph differs (``--graph <other>``, or any ``org_{id}``
+    iteration of ``--all-tenants``) must ask THAT graph instead — see
+    :func:`_required_dim_for_graph`. Reusing this value for another graph is
+    wrong in BOTH directions:
+
+      * URI graph indexed, target graph not → the target's brute-force read
+        lane can hold the encoder's own width, yet the URI graph's
+        ``EMBEDDING_DIM`` guard would silently DROP those vectors — the #4280
+        regression shape;
+      * URI graph index-less, target graph indexed → ``None`` here hands a
+        wrong-width vector to ``vecf32`` for an INDEXED Point — the #4289 hole
+        left unguarded for that target.
     """
     from tortoise.projection import FalkorProjection
 
@@ -244,6 +264,35 @@ def _connect_falkordb(uri: str):
     # proj.db (public FalkorDB client) + proj.graph_name (public) — NOT the
     # private _db/_graph_name (code-review P0 fix: _db doesn't exist).
     return proj.db, proj.graph_name, proj.required_embedding_dim
+
+
+def _required_dim_for_graph(uri: str, graph_name: str, *,
+                            default_graph: str | None = None,
+                            default_dim: int | None = None) -> int | None:
+    """Resolve the STORE-declared vector width for ONE target graph (#4289).
+
+    ``FalkorProjection.required_embedding_dim`` is a PER-GRAPH fact (see
+    :func:`_connect_falkordb`): the property is read off the projection's own
+    graph, which ``_ensure_vector_index_api`` probes/creates the Point HNSW
+    index on. So the width a sweep must obey is the width of the graph it is
+    about to WRITE, not the URI's. This opens a projection bound to
+    ``graph_name`` (``FalkorProjection.from_uri(uri, graph_name=...)``), reads
+    the property, and releases the connection.
+
+    ``default_graph`` / ``default_dim`` short-circuit the common single-graph
+    run: when the target IS the URI's graph the value already read by
+    :func:`_connect_falkordb` is correct and no second connection is opened.
+    """
+    if default_graph is not None and graph_name == default_graph:
+        return default_dim
+
+    from tortoise.projection import FalkorProjection
+
+    proj = FalkorProjection.from_uri(uri, graph_name=graph_name)
+    try:
+        return proj.required_embedding_dim
+    finally:
+        proj.close()
 
 
 # ── Index-time text composition (composition parity, #1349 T12) ────
@@ -461,8 +510,9 @@ def _backfill_graph(db, graph_name: str, labels: list[str],
     meeting exclusion applies in both modes.
 
     ``required_dim`` (#4289) is the STORE-declared width this sweep must obey
-    — ``FalkorProjection.required_embedding_dim``, threaded in from
-    :func:`_connect_falkordb`. Every row is encoded through
+    — ``FalkorProjection.required_embedding_dim`` for **this** graph, threaded
+    in by :func:`main` from :func:`_required_dim_for_graph`. Every row is
+    encoded through
     :func:`tortoise.embeddings.encode_for_store`, so this operator write path
     applies the same width guard as the SDK write paths (#4280): a vector the
     store's index cannot hold becomes ``None`` (counted as ``skipped``; the
@@ -572,9 +622,10 @@ def _force_reembed_graph(db, graph_name: str, labels: list[str],
     """Force-mode flow for one graph: NULL-only repair → meeting purge →
     all-rows pass (#1349 T12).
 
-    ``required_dim`` (#4289) is threaded into both passes so neither leg can
-    bypass the store's width guard. Ordering is load-bearing: the NULL-only
-    repair pass applies the SAME meeting exclusion and runs BEFORE the purge
+    ``required_dim`` (#4289) is the width of THIS graph (resolved per target by
+    :func:`_required_dim_for_graph`) and is threaded into both passes so
+    neither leg can bypass the store's width guard. Ordering is load-bearing:
+    the NULL-only repair pass applies the SAME meeting exclusion and runs BEFORE the purge
     leg, so a repair-after-purge can never re-embed just-purged meetings.
     Returns aggregate stats for the completeness marker (per-label re-embedded
     counts, purge count, repair skips).
@@ -705,7 +756,7 @@ def main(argv: list[str] | None = None) -> int:
     # connecting — the pre-fix config matched 0 rows and silently no-opped.
     _validate_config()
 
-    db, default_graph, required_dim = _connect_falkordb(args.uri)  # noqa: RUF059
+    db, default_graph, default_dim = _connect_falkordb(args.uri)
 
     # Resolve which surfaces to embed — every entity surface with embedding
     # support. These are SURFACE keys, not node labels (#5126): ``Document``
@@ -776,6 +827,9 @@ def main(argv: list[str] | None = None) -> int:
                 org_id = row[0]
                 graph_name = f"org_{org_id}"
                 print(f"\n── Team: {org_id} → {graph_name} ──")
+                required_dim = _required_dim_for_graph(
+                    args.uri, graph_name,
+                    default_graph=default_graph, default_dim=default_dim)
                 _merge_stats(
                     stats,
                     _force_reembed_graph(db, graph_name, labels,
@@ -785,6 +839,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             graph_name = args.graph
             print(f"Backfill (force-re-embed): {graph_name}")
+            required_dim = _required_dim_for_graph(
+                args.uri, graph_name,
+                default_graph=default_graph, default_dim=default_dim)
             _merge_stats(
                 stats,
                 _force_reembed_graph(db, graph_name, labels,
@@ -811,6 +868,9 @@ def main(argv: list[str] | None = None) -> int:
             org_id = row[0]
             graph_name = f"org_{org_id}"
             print(f"\n── Team: {org_id} → {graph_name} ──")
+            required_dim = _required_dim_for_graph(
+                args.uri, graph_name,
+                default_graph=default_graph, default_dim=default_dim)
             s = _backfill_graph(db, graph_name, labels,
                                 args.limit, args.batch_size,
                                 required_dim=required_dim)
@@ -820,6 +880,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         graph_name = args.graph
         print(f"Backfill: {graph_name}")
+        required_dim = _required_dim_for_graph(
+            args.uri, graph_name,
+            default_graph=default_graph, default_dim=default_dim)
         s = _backfill_graph(db, graph_name, labels,
                             args.limit, args.batch_size,
                             required_dim=required_dim)

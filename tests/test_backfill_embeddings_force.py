@@ -864,3 +864,82 @@ def test_cli_threads_the_store_width_into_the_sweep(
     out = capsys.readouterr().out
     assert "0 scanned, 0 embedded, 1 skipped" in out, out
     assert _embedding(g, "Point", "id", "p1") is None
+
+
+def test_required_dim_for_graph_binds_the_projection_to_the_target(
+        monkeypatch):
+    """#4289 review: the width is resolved from the graph being WRITTEN.
+
+    ``required_embedding_dim`` is read off the projection's OWN graph, so the
+    resolver must open the projection bound to the target graph and release
+    it — not reuse the URI graph's value.
+    """
+    from tortoise.projection import FalkorProjection
+
+    mod = _load_backfill()
+    seen: list[str | None] = []
+    built: dict[str, object] = {}
+
+    class _FakeProj:
+        def __init__(self, graph_name):
+            self.graph_name = graph_name
+            # The per-graph fact under test: only org_acme is indexed.
+            self.required_embedding_dim = 384 if graph_name == "org_acme" else None
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    def fake_from_uri(uri, graph_name=None):
+        seen.append(graph_name)
+        proj = _FakeProj(graph_name)
+        built[graph_name] = proj
+        return proj
+
+    monkeypatch.setattr(FalkorProjection, "from_uri",
+                        staticmethod(fake_from_uri))
+    assert mod._required_dim_for_graph("docker://dummy", "org_acme") == 384
+    assert seen == ["org_acme"], seen
+    assert built["org_acme"].closed is True
+
+
+def test_all_tenants_resolves_the_width_per_target_graph(
+        proj, monkeypatch, capsys):
+    """#4289 review: an ``--all-tenants`` sweep must ask each ``org_{id}``
+    graph, not reuse the URI graph's width.
+
+    URI graph index-less (``required_dim=None``) and tenant graph indexed
+    (``EMBEDDING_DIM``): pre-fix ``main`` reused the URI graph's ``None``, so
+    the wrong-width vector was written into an INDEXED tenant graph — the
+    #4289 hole left open for every target that is not the URI's graph.
+    """
+    from tortoise.embeddings import EMBEDDING_DIM
+
+    proj.db.select_graph("registry").query("CREATE (n:Team {id: 'acme'})")
+    tenant_graph = "org_acme"
+    tenant = proj.db.select_graph(tenant_graph)
+    _create(tenant, "Point", {"id": "p1", "content": "alpha"})
+
+    mod = _load_backfill()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding",
+                        _WrongWidthEmbed(EMBEDDING_DIM - 1))
+    # The URI's graph (what `_connect_falkordb` opens) is index-less.
+    mod._connect_falkordb = lambda uri: (proj.db, proj.graph_name, None)
+    asked: list[str] = []
+
+    def fake_resolver(uri, graph_name, *, default_graph=None,
+                      default_dim=None):
+        asked.append(graph_name)
+        return EMBEDDING_DIM
+
+    # raising=False: pre-fix the resolver does not exist — the test must fail
+    # on the assertion below (the vector WAS written), not on this setattr.
+    monkeypatch.setattr(mod, "_required_dim_for_graph", fake_resolver,
+                        raising=False)
+
+    rc = mod.main(["--all-tenants", "--uri", "docker://dummy"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert asked == [tenant_graph], asked
+    assert "0 scanned, 0 embedded, 1 skipped" in out, out
+    assert _embedding(tenant, "Point", "id", "p1") is None
