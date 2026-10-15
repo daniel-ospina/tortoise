@@ -151,8 +151,14 @@ projects:
         type: env_vars
         envs: [production]
         note: >-
-          Supabase redirect_to. Defaults to <origin>/auth/callback, which is the
-          colocated-topology decision (ADR-001).
+          Supabase redirect_to. Defaults to <origin>/auth/callback — the
+          colocated topology: `app.premiselabs.co` is the single session-bearing
+          origin (#3501 / #4054). In-repo record: docs/auth-architecture.md §2.1
+          and website/website_architecture.md §1. The owner ruling (2026-09-14)
+          is in the private `premise-labs` repo,
+          engineering/auth/archive/problem-definition.md §5 — not "ADR-001",
+          which resolves to nothing in this repo and, where it does exist, is
+          banner-marked "PARTLY SUPERSEDED — for topology" (#4328).
 
       # Required: /api/v1/* answers `503 proxy_not_configured` without it, and the
       # proxy at website/apps/dashboard/functions/api/v1/[[path]].ts depends on it. It is SET in
@@ -299,8 +305,10 @@ projects:
         type: env_vars
         envs: [production]
         note: >-
-          Supabase redirect_to. Defaults to <origin>/auth/callback
-          (colocated topology, ADR-001).
+          Supabase redirect_to. Defaults to <origin>/auth/callback — see the
+          marketing-project entry above for the colocated-topology citation
+          (one session-bearing origin, #3501 / #4054; "ADR-001" resolves to
+          nothing in this repo — #4328).
 
       # #4171: the /blog/api/* Token Handler proxy forwards to the marketing
       # origin. Defaulted in code to https://tortoise.premiselabs.co, so absence
