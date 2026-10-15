@@ -158,10 +158,19 @@ Per `AGENTS.md` decision protocol: **research first → contradiction test → a
 | **D3** | **Where do embeddings live — are they journaled?** | Both branches break a stated claim (cost vs reproducibility). | B1.6 |
 | **D4** | **Is abstraction (altitude) per-item or per-batch?** | The measured 10× rests on a **per-item conjunction**; the design moved it to per-batch. | A5 |
 | **D5** | **Should `Object` names carry span-provenance?** | The "names cannot be deformed" premise is falsified. | A6 |
-| **D6** | **Where does the mechanical DISCARD gate live — S2.2 (pre-lookup) or E7 (post-lookup)?** | The doc asserts both; and pre-lookup placement cannot satisfy `#4899`'s decision-relevance criterion. | B2.4, B2.22, E2 |
+| **D6** | ✅ **ANSWERED — see the disposition under this table.** **Where does the mechanical DISCARD gate live — S2.2 (pre-lookup) or E7 (post-lookup)?** | The doc asserts both; and pre-lookup placement cannot satisfy `#4899`'s decision-relevance criterion. | B2.4, B2.22, E2 |
 | **D7** | **Should exact dedup against the graph also run first (as a distinct step)?** | A missed cheapest-first step; likely yes, and cheap. | B2.3 |
 | **D8** | **How is the reduction target set and evidenced?** | Currently unsourced and n=28; volume alone is a gameable metric. | A5, B2.8, B2.16 |
 
+> ### ✅ D6 — ANSWERED 2026-09-25; disposition RE-VERIFIED against the code 2026-10-13 (`#5198`)
+>
+> **The site is `S2.2b VET` — the pre-lookup position. `E7` is not the gate's home.**
+>
+> - **The record:** `#4899` — *"DECISION RECORD … **DEC-1** — Gate site = **`S2.2b`**, the existing VET seam. **Not E7**"* (2026-09-25), carrying its own `OVERRIDES:` line against that issue's title.
+> - **The implementation** (so this is not a claimed disposition — the class §E below warns about): PR `#5237`, merge commit `ea70025aa` — the identifier-only predicate is `tortoise/value_gate.py:370` (`mechanical_verdict`), called from `tortoise/vet_gate.py:469` (`vet_candidates`, Level-2, **before** the arbiter); `tortoise/extractor_v2.py` (`_run_vet_pass`, inside `extract_session_v2`) runs that pass **before** the classify pass and before S3 RESOLVE.
+> - **What this does to this review's two feeding P1s — do NOT re-apply them verbatim:** **`B2.4`** (constraint 3 vs the false-positive paragraph) is discharged by the three safeguards the gate actually carries — flag-gated, every discard records its `rule_id`, and the counterfactual is recoverable (extractor doc §4.2; `#4899` DEC-1/DEC-2). **`B2.22`** (*"the `#4899` false-positive requirement has no mechanism"*) is discharged by **DEC-2's identifier-ONLY predicate** (the whole-residue test): a rule that never fires on semantic content does **not** delegate the decision-relevance judgement `#2453` requires to a pre-lookup regex. **The definite-description (`^the <X>`) half is deliberately NOT mechanical** and remains `#4894`'s.
+> - **⇒ `D6`'s framing is superseded, not cosmetically patched.** The question presumed *"the doc asserts both"*; the extractor doc asserts **one** site as of `#5198`, which corrected §15's issue map — the last row still saying `E7` — and §4.2's withdrawal of the retention-floor requirement **O2** had already rejected. Guard: `tests/test_extractor_v4_step_list_consistency.py`.
+>
 > # ⛔ §E — READ THIS BEFORE APPLYING ANYTHING ABOVE: THIS REVIEW CONTAINED ERRORS, AND APPLYING THEM VERBATIM DAMAGED THE ARTIFACTS
 >
 > **A second review cycle (2026-09-24, four fresh-context reviewers + two gap analysts) checked the *corrections* this review produced, not the original text. Five were false, and three trace here.**

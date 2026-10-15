@@ -16,10 +16,24 @@
  * account-existence oracle. GoTrue already answers 200 for an address with no
  * pending confirmation, and this route preserves that: a non-retryable provider
  * refusal is folded into the SAME 200. A provider 429 is folded too — see the
- * note below — because GoTrue's `over_email_send_rate_limit` applies to the
- * ADDRESS being mailed, so surfacing it would be an oracle in its own right.
+ * note below — because GoTrue answers an unknown address `200 {}` EARLY (before
+ * it ever reaches the email send), so a surfaced refusal WOULD be an oracle.
  * Only an infrastructure fault may differ, and a 503 reveals nothing about the
  * address.
+ *
+ * ⚠️ CORRECTED MECHANISM (#4161). The 429 is NOT per-address: GoTrue gates the
+ * send on `limiterOpts.Email.Allow()`, a limiter with no key argument at all
+ * (supabase/auth `internal/api/mail.go`), so `over_email_send_rate_limit` is ONE
+ * project-wide bucket. The differential that makes it an oracle is the EARLY 200
+ * for an address with no account — an address that exists reaches
+ * `resend.go`'s send and can be refused, an address that does not never can.
+ * Same fold, corrected reason; see `_shared/auth/mail-throttle.ts` for the
+ * source read and the full argument.
+ *
+ * THE CLIENT'S 429 COMES FROM THE BFF (#4161) — the address-independent throttle
+ * in `_shared/auth/mail-throttle.ts`. Without it this route could only ever
+ * answer 200 for a well-formed address, so the page's `429` branch was dead and
+ * a throttled user was told "Resent — check your inbox" when nothing was sent.
  *
  * `type` is pinned to `signup` (the canonical GoTrue value) in the shared
  * primitive — this route cannot be asked to resend any other flow.
@@ -30,11 +44,13 @@
  *   403  cross-origin request rejected (see `_shared/auth/csrf.ts`)
  *   405  not a POST
  *   415  non-JSON Content-Type (an HTML form cannot send `application/json`)
+ *   429  the BFF's own address-independent email throttle refused (#4161)
  *   503  provider / configuration unreachable. NEVER 4xx, and still no oracle.
  */
 import { type Env, json } from "../_shared/auth/session";
 import { guardStateChangingRequest } from "../_shared/auth/csrf";
 import { appOrigin, isProviderFault, resendConfirmation } from "../_shared/auth/email-flows";
+import { mailThrottle } from "../_shared/auth/mail-throttle";
 
 /**
  * A deliberately shallow address check. The authoritative validation is
@@ -71,16 +87,30 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
   const email = (body.email as string).trim();
 
+  // --- the BFF's OWN throttle (#4161), BEFORE the provider call --------------
+  // Keyed on the caller, never on the address: the answer then carries no
+  // account signal (see the module header for why the caller is the right key,
+  // and what an address-keyed counter would cost). A throttled caller is
+  // refused honestly instead of being told an email it will never receive is on
+  // its way — and GoTrue is not contacted at all while the budget is spent.
+  const throttled = await mailThrottle(request, env, "resend");
+  if (throttled) return throttled;
+
   // The confirmation link lands on the BFF's own handler.
   const result = await resendConfirmation(env, email, `${appOrigin(env)}/auth/confirm`);
 
   if (!result.ok) {
-    // A provider 429 on /resend is GoTrue's `over_email_send_rate_limit`,
-    // applied to the ADDRESS being mailed. Surfacing it (as 429, or as the 503
-    // the retryable classification would produce) makes this an existence
-    // oracle: repeated resends for a KNOWN address 429 while an UNKNOWN address
-    // keeps answering 200. Fold it into the SAME enumeration-safe 200 so both
-    // address classes are byte-identical.
+    // A provider 429 on /resend is GoTrue's `over_email_send_rate_limit` from
+    // its PROJECT-WIDE email bucket (not per-address — see the header).
+    // Surfacing it (as 429, or as the 503 the retryable classification would
+    // produce) makes this an existence oracle: an address that exists reaches
+    // GoTrue's limiter and can be refused, while an address that does not is
+    // answered `200 {}` early and never can. Fold it into the SAME
+    // enumeration-safe 200 so both address classes are byte-identical.
+    //
+    // The honest 429 on this route is the BFF throttle's, above — it is charged
+    // for every caller regardless of the address, so it can answer truthfully
+    // without answering differently.
     if (result.status === 429) return json({ ok: true });
 
     if (isProviderFault(result.status, result.retryable)) {

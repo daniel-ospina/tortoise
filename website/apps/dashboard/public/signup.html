@@ -907,6 +907,11 @@
     // literal (TDZ: the map evaluates at script load; a `const` referenced
     // before its declaration kills the whole inline script — the #527 class).
     const EMAIL_BUCKET_RATE_LIMIT_COPY = "Signup emails are temporarily exhausted (too many signups right now). Try again in about an hour.";
+    // #4161: the BFF's own, CALLER-scoped mail throttle is not GoTrue's project-
+    // wide email bucket and not a credential failure. Its copy must not name a
+    // flow (a password reset is not a signup), so it is single-sourced here and
+    // used by the reset modal and the resend note alike.
+    const MAIL_RATE_LIMIT_COPY = "Email limit reached — try again in about an hour.";
     const NETWORK_RATE_LIMIT_COPY = "Too many attempts from this network. Please wait about an hour and try again.";
     const AUTH_ERROR_MAP = [
       {
@@ -1843,9 +1848,16 @@
       try {
         const resp = await bffPost("/auth/reset", { email: email });
         if (resp.status === 429) {
-          const err = bffError(resp.data);
-          setLoginRateLimitLockout(err);
-          showModalError(isEmailBucketError(err) ? humanizeAuthError(err) : loginRateLimitMessage());
+          // #4161: this 429 is the BFF's caller-scoped mail throttle. It must
+          // NOT charge the LOGIN lockout: that bucket is for credential
+          // attempts, and applyLoginRateLimitLockout() disables #btn-submit
+          // (sign-in) while it holds — so a recovery request would lock the user
+          // out of signing in for an hour over an email budget that says nothing
+          // about their password. The copy is flow-neutral: "Signup emails are
+          // temporarily exhausted" is false on a password-reset request. The
+          // throttle is enforced server-side for the rest of the window, so a
+          // repeated click is refused without a client lockout to police it.
+          showModalError(MAIL_RATE_LIMIT_COPY);
           return;
         }
         if (resp.status === 400) {
@@ -1862,7 +1874,13 @@
           return;
         }
         const note = document.getElementById("modal-note");
-        note.textContent = "Reset link sent — check your inbox (and spam).";
+        // #4161: NEVER claim an email was sent. A 200 here means "accepted" —
+        // GoTrue answers 200 for an address with no account (its own
+        // non-enumeration defense), and the BFF folds a provider refusal into
+        // the same 200. Conditional copy is the only shape that is TRUE in every
+        // case, and it is the same copy the recovery flow already uses.
+        note.textContent =
+          "If an account exists for that email, a reset link is on its way. Check your inbox (and spam).";
       } catch (e) {
         showModalError((e && e.message) || "Something went wrong — try again.");
       } finally {
@@ -1945,7 +1963,7 @@
           const err = bffError(resp.data);
           setRateLimitLockout(err);
           document.getElementById("resend-note").textContent = isEmailBucketError(err)
-            ? "Email limit reached — try again in about an hour."
+            ? MAIL_RATE_LIMIT_COPY
             : "Email limit reached — try again in a minute.";
           return;
         }
@@ -1959,7 +1977,10 @@
           document.getElementById("resend-note").textContent = "Could not resend — try again shortly.";
           return;
         }
-        document.getElementById("resend-note").textContent = "Resent — check your inbox (limit applies).";
+        // #4161: same rule as the reset modal — a 200 is "accepted", not
+        // "delivered", so the copy must not assert that an email arrived.
+        document.getElementById("resend-note").textContent =
+          "If your address still needs confirming, a new link is on its way. Check your inbox (and spam).";
       } catch (e) {
         document.getElementById("resend-note").textContent = "Could not resend — try again shortly.";
       } finally {

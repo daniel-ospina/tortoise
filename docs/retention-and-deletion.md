@@ -57,12 +57,16 @@ The horizon is **path-dependent**, and the difference matters:
 | **Product-usage record** — the per-capture / per-team `capture_cost` rows in `analytics_events` (#3843) | **no default window** — the record is kept; on an account/team erasure the **identity layer is hard-deleted and the row is retained decoupled** (the table has **no FK** to `organizations`, so no cascade reaches it, and the `organizations` row carrying the name is deleted) | `tortoise/supabase_control.py` `purge_org_control_plane` — it deletes `api_keys` / `org_memberships` / `invitations` and then the `organizations` row via `purge_org_record`, and deliberately **never touches `analytics_events`** |
 | **Second-region mirror** (shipped; `BACKUP_MIRROR_ENABLED` default **off**) | deletion **not propagated** (append-only) | `docs/ops/registry-backup-dr.md` |
 | **Auth session store** — an expired row in the D1 `sessions` table (the opaque handle + its refresh token) | deleted **24 hours after its own `expires_at`**; a **revoked** row is never deleted early, so it survives the session's whole declared life (400 days, `SESSION_MAX_AGE_S`) | `website/apps/dashboard/functions/_shared/auth/session.ts` `SESSION_SWEEP_GRACE_S` |
+| **Auth mail throttle** — a window-salted SHA-256 pseudonym of the caller's `CF-Connecting-IP` in the D1 `auth_mail_throttle` table (#4161) | deleted **after its own one-hour window** (plus the following window, the prune predicate's grace); reclaimed by `pruneExpired`, which runs on the request that creates the bucket as well as on a refusal, so it is a function of **time**, not of traffic | `website/apps/dashboard/functions/_shared/auth/mail-throttle.ts` `MAIL_THROTTLE_WINDOW_S` |
 
 The **auth session store** row is the store's own garbage collection, not a promise
 window: it bounds how long a dead handle (and the credential it carries) stays readable
-in D1. It says nothing about user content, and no customer copy states it — the store's
-declared lifetime is a session's `expires_at` (400 days) plus this grace, and revocation
-does not shorten it. See `docs/engineering/auth/d1-session-store.md` §5a.
+in D1. The **auth mail throttle** row is the same class of collection, one layer weaker
+still — what it holds is a per-window pseudonym of a client, never a credential or
+content. Neither says anything about user content, and no customer copy states either:
+the session store's declared lifetime is a session's `expires_at` (400 days) plus this
+grace, and revocation does not shorten it. See `docs/engineering/auth/d1-session-store.md`
+§5a.
 
 > **Restore window ≠ retention window.** R1 forbids retaining user **content**
 > for any length. The 7 days are an **undo** offer, never a claim that we keep
