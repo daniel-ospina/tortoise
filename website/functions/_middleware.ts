@@ -186,8 +186,16 @@ export const onRequest: PagesFunction = async (context) => {
   // on THIS origin while the links that reach it are not, so a 404 only turns a
   // stale bookmark or a pre-cutover email link into a dead end. The inbound
   // query reaches this worker's logs either way, so the status code buys no
-  // security — the guard is the identity provider's redirect allowlist (only the
-  // app origin may be an authorized target), audited by #8680.
+  // security.
+  //
+  // What keeps the redirect safe is upstream of it: GoTrue refuses a
+  // `redirect_to` it does not recognise, so the guard is the identity provider's
+  // redirect allow-list. The property that MUST hold is that no allow-list entry
+  // authorises a code for THIS origin's `/auth/callback`. The entries required
+  // today are recorded in `docs/ops/auth-email-flows.md` §3 — which still lists
+  // `https://tortoise.premiselabs.co` for legacy links, so the list is wider than
+  // the app origin — and #8680 is the OPEN audit that confirms the legacy
+  // `/auth/callback` entry can be removed. That audit is not closed.
   //
   // 302, NOT 301 — a deliberate departure from the ordinary "moved ⇒ 301"
   // practice, which is why the OVERRIDES marker for it lives on #3501 / #3521 /
