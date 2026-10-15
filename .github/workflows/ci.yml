@@ -219,7 +219,7 @@ jobs:
                   startswith("packs/"),
               ),
               # welcome-e2e (wrangler preview of website/ + mocked playwright
-              # + the two edge-function node harnesses). Separate-app changes
+              # + the three edge-function node harnesses). Separate-app changes
               # under website/apps/ do NOT trigger it — dashboard-js-tests
               # covers dashboard; blog-admin has no gated suite. (#2160 P3-1:
               # excluded website/apps/ wholesale, not dashboard only.)
@@ -235,9 +235,8 @@ jobs:
                          # needs a path entry or a test-only PR would not run it.
                          "tests/test_blog_markdown.mjs",
                          "docs/blog-authoring.md",
-                         # #8293: the SEO keyword + agent-limiter harness — same
-                         # reason as #4481 above.
-                         "tests/test_blog_seo_meta.mjs"),
+                         # #8293: the SEO keyword + agent-limiter harness.
+                         "tests/test_blog_seo_meta.mjs", "tests/test_deck_view.mjs"),
                   # #3501: the BFF auth suites live here and had NO path entry —
                   # a suite-only PR could not trigger the job that runs them.
                   startswith("tests/e2e/auth/"),
@@ -246,6 +245,7 @@ jobs:
                          "tests/e2e/test_auth_cross_origin_cookie.py"),
                   startswith("supabase/functions/waitlist-subscribe/"),
                   startswith("supabase/functions/tenant-provision/"),
+                  startswith("supabase/functions/deck-view/"),
                   # #2810: the edge-function harnesses above import these stubs
                   # (supabase-js.ts, _shared/lookup.ts) — the stub is an input to
                   # the subject under test, so a stub-only PR must still run them.
@@ -1699,6 +1699,10 @@ jobs:
           AUTH_CLICKTHROUGH: "1"
       - name: Run waitlist edge-function behavioral harness (#373)
         run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
+      - name: Run deck-view edge-function behavioral harness (#8732)
+        # The only enforcement of "a view never touches the mailing list": the
+        # gate writes deck_views, and joining the list stays a separate act.
+        run: node --experimental-strip-types tests/test_deck_view.mjs
       - name: Run tenant-provision CORS runtime harness (#1110)
         run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
       - name: Run blog SSR markdown renderer harness (#4481)

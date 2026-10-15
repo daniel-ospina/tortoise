@@ -50,10 +50,11 @@ LOCKFILE = REPO_ROOT / "tools" / "ts" / "package-lock.json"
 CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 JOB = "website-functions-typecheck"
-#: The job rides the existing `website` gate: the `changes` gate script sits ~90
-#: bytes under GitHub's hard 21000-byte cap on a compiled `run:` scalar (#6253),
-#: so a new output key would have cost headroom the next editor needs. `website`
-#: already covers `website/functions/**`; `tools/ts/` is added to it below.
+#: The job rides the existing `website` gate: the `changes` gate script runs close
+#: to GitHub's hard 21000-byte cap on a compiled `run:` scalar (#6253, #8734), so
+#: the headroom a new output key would have cost belongs to the next editor. The
+#: cap is pinned in tests/test_ci_selection.py — measure there, not here.
+#: `website` already covers `website/functions/**`; `tools/ts/` is added below.
 GATE_OUTPUT = "website"
 
 #: A real file of the guarded tree, and the project's own config.

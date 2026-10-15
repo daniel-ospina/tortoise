@@ -11,6 +11,7 @@ migrations and function changes as production operations.
 |--------------------|---------------------------------|-------------------|
 | tenant-provision   | Auth hook (after_user_created)  | false (self-auth) |
 | waitlist-subscribe | Landing waitlist capture (#373) | false (anon POST) |
+| deck-view          | Gated deck view capture (#8732) | false (anon POST) |
 
 ### tenant-provision caller auth (#802)
 
@@ -70,6 +71,9 @@ supabase secrets set --project-ref ybetwichurajbfswfeqa \
 
 `hp` is a honeypot (must stay empty for humans).
 `cf-turnstile-response` is only sent when `TURNSTILE_SITE_KEY` is set.
+`source` is optional and allow-listed (`landing_page` — the default — or
+`investors`): it records which surface the signup came from, since more than one
+page feeds this list. An unrecognised value falls back to `landing_page`.
 
 Responses:
 
@@ -165,6 +169,8 @@ automated flip and turns that run red.
 supabase db push --project-ref ybetwichurajbfswfeqa
 supabase functions deploy waitlist-subscribe \
   --project-ref ybetwichurajbfswfeqa --no-verify-jwt
+supabase functions deploy deck-view \
+  --project-ref ybetwichurajbfswfeqa --no-verify-jwt
 gh workflow run deploy-hosted.yml --ref main   # the app flip, after a FAILED co-move
 ```
 
@@ -185,3 +191,22 @@ gh workflow run deploy-hosted.yml --ref main   # the app flip, after a FAILED co
 6. Resubmit the same email -> "Already subscribed" message, no second email.
 7. Unsubscribe is a mailto (`hello@premiselabs.co`) processed manually —
    the operator removes the row / excludes the address from launch sends.
+
+### deck-view contract (#8732)
+
+`POST /functions/v1/deck-view` with a JSON body:
+
+```json
+{
+  "email": "reader@example.com",
+  "hp": "",
+  "deck": "investors"
+}
+```
+
+Writes one row to `deck_views` (append-only) and returns 200 `{ok:true}`. It
+sends **no** email and never touches `waitlist_subscribers`: opening a gated deck
+records a view, and joining the mailing list stays a separate act (`POST
+/functions/v1/waitlist-subscribe`, with `source: "investors"` when it comes from
+the same page). `deck` is allow-listed and falls back to `investors`. There is no
+captcha on this endpoint; the honeypot and a per-IP limit are what bound it.

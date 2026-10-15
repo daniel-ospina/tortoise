@@ -20,6 +20,12 @@ const ORIGIN_SUFFIXES = [".premise-labs.pages.dev"];
 const LOCAL_ORIGINS = ["http://localhost:8788", "http://127.0.0.1:8788"];
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Attribution is written straight into the row an operator reads, so the client
+// picks from this list rather than naming its own source: an unknown or absent
+// value falls back to the landing page, which is what every row meant before
+// the `source` field was accepted. Adding a surface means adding it here.
+const ALLOWED_SOURCES = ["landing_page", "investors"];
+const DEFAULT_SOURCE = "landing_page";
 const MAX_BODY_BYTES = 8192; // Turnstile tokens can reach 2048 chars
 const RATE_LIMIT_MAX = 10; // requests per IP per window (best-effort baseline)
 const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000; // 1 hour
@@ -34,6 +40,7 @@ export type Env = Record<string, string | undefined>;
 interface SubscribeBody {
   email?: unknown;
   hp?: unknown;
+  source?: unknown;
   "cf-turnstile-response"?: string;
 }
 
@@ -223,6 +230,13 @@ export async function handle(req: Request, env: Env): Promise<Response> {
     return json({ error: "Invalid email address" }, 400, corsOrigin);
   }
 
+  // Attribution. Coerced rather than validated-with-a-400: a source the server
+  // does not recognise is a client bug, not a reason to refuse a real
+  // subscriber, and the fallback is the pre-existing behaviour.
+  const source = typeof body.source === "string" && ALLOWED_SOURCES.includes(body.source)
+    ? body.source
+    : DEFAULT_SOURCE;
+
   // Honeypot — filled by bots; silent success, nothing stored, no email.
   // Non-string hp values are also bots (a JSON-literate bot can send any type).
   const hp = typeof body.hp === "string"
@@ -295,7 +309,7 @@ export async function handle(req: Request, env: Env): Promise<Response> {
           "Authorization": `Bearer ${serviceKey}`,
           "Prefer": "return=representation, resolution=ignore-duplicates",
         },
-        body: JSON.stringify({ email, source: "landing_page" }),
+        body: JSON.stringify({ email, source }),
       },
     );
     const text = await res.text();
