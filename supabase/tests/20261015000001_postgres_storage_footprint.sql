@@ -5,14 +5,22 @@
 -- migration first), so the assertions exercise the shipped text — not a Python
 -- copy of it. Every check RAISEs on failure; the harness is ON_ERROR_STOP.
 
--- ── Seed: known analytics rows across two orgs and a window boundary ──────
+-- ── Seed: known analytics rows across three orgs and BOTH window bounds ──
 -- `created_at` is explicit so the window predicates are deterministic; the
 -- append-only trigger permits INSERT (only UPDATE/DELETE are refused).
+--
+-- The seed deliberately puts a row EXACTLY ON the window's `p_until`
+-- (org-b at 05-04, the boundary used below) and a row BEFORE its `p_since`
+-- (org-c at 04-01). Only a seeded row ON the bound can distinguish a
+-- half-open `< p_until` from an inclusive `<= p_until`: without it, a future
+-- `<` → `<=` refactor would double-count every boundary row between adjacent
+-- windows and this suite stayed green.
 INSERT INTO public.analytics_events (org_id, event_name, created_at) VALUES
     ('4492-org-a', 'capture_graph_ops', '2026-05-01T00:00:00+00:00'),
     ('4492-org-a', 'mcp_tool_call',     '2026-05-02T00:00:00+00:00'),
     ('4492-org-a', 'mcp_tool_call',     '2026-05-10T00:00:00+00:00'),
     ('4492-org-b', 'capture_graph_ops', '2026-05-03T00:00:00+00:00'),
+    ('4492-org-b', 'mcp_tool_call',     '2026-05-04T00:00:00+00:00'),
     ('4492-org-c', 'capture_graph_ops', '2026-04-01T00:00:00+00:00');
 
 DO $$
@@ -85,12 +93,22 @@ BEGIN
        OR (ev -> 'rows_by_org' ->> '4492-org-b')::int <> 1 THEN
         RAISE EXCEPTION '#4492: per-org split is wrong: %', ev -> 'rows_by_org';
     END IF;
-    -- The boundary is HALF-OPEN: the 05-04 row is not in [05-01, 05-04).
-    IF (ev -> 'rows_by_org' ->> '4492-org-c') IS NOT NULL THEN
-        RAISE EXCEPTION '#4492: org-c leaked into the window: %',
+    -- UPPER bound is HALF-OPEN: [05-01, 05-04) — org-b has a row EXACTLY at
+    -- p_until (05-04) that must NOT be counted, so org-b reads 1 (its 05-03
+    -- row), not 2. This is the ONLY assertion a seeded row on the bound can
+    -- make: flipping `<` → `<=` in the function reds here.
+    IF (ev -> 'rows_by_org' ->> '4492-org-b')::int <> 1 THEN
+        RAISE EXCEPTION '#4492: the half-open UPPER bound is not honoured — '
+            'org-b has a row exactly at p_until (05-04) and must be excluded: %',
             ev -> 'rows_by_org';
     END IF;
-    -- The 05-10 row is excluded (upper bound honoured), the 04-01 row too.
+    -- LOWER bound: org-c's only row is 04-01, BEFORE `p_since`, so it must not
+    -- appear at all. This is the LOWER-bound check (not the half-open one).
+    IF (ev -> 'rows_by_org' ->> '4492-org-c') IS NOT NULL THEN
+        RAISE EXCEPTION '#4492: org-c (row before p_since) leaked into the window: %',
+            ev -> 'rows_by_org';
+    END IF;
+    -- The 05-10 row is excluded (upper bound honoured for org-a).
     IF (ev -> 'rows_by_org' ->> '4492-org-a')::int <> 2 THEN
         RAISE EXCEPTION '#4492: upper bound not honoured for org-a: %', ev;
     END IF;
@@ -101,8 +119,10 @@ BEGIN
     IF (ev ->> 'until') IS NOT NULL THEN
         RAISE EXCEPTION '#4492: until must read null for an open window: %', ev;
     END IF;
-    IF (ev ->> 'total_rows')::int <> 4 THEN
-        RAISE EXCEPTION '#4492: open window total_rows is % (expected 4)',
+    -- 5 = org-a 05-01/05-02/05-10, org-b 05-03/05-04 (the boundary row IS
+    -- included when `p_until` is NULL).
+    IF (ev ->> 'total_rows')::int <> 5 THEN
+        RAISE EXCEPTION '#4492: open window total_rows is % (expected 5)',
             ev ->> 'total_rows';
     END IF;
 
@@ -131,11 +151,28 @@ BEGIN
            'service_role', 'public.postgres_storage_footprint()', 'EXECUTE') THEN
         RAISE EXCEPTION '#4492: postgres_storage_footprint is NOT callable by service_role';
     END IF;
+    -- The PGlite bootstrap installs `ALTER DEFAULT PRIVILEGES ... GRANT
+    -- EXECUTE ON FUNCTIONS TO anon, authenticated, service_role`, so a new
+    -- function is granted to `authenticated` BY DEFAULT; the migration's
+    -- REVOKE ... FROM public, anon, authenticated is the only thing that
+    -- removes it. `authenticated` is the logged-in-customer role and this RPC
+    -- has no org filter (it counts EVERY org), so it is the role that matters
+    -- most — dropping it from that REVOKE must red here.
     IF pg_catalog.has_function_privilege(
            'anon',
            'public.analytics_events_rows_by_org(timestamptz, timestamptz)',
+           'EXECUTE')
+       OR pg_catalog.has_function_privilege(
+           'authenticated',
+           'public.analytics_events_rows_by_org(timestamptz, timestamptz)',
            'EXECUTE') THEN
-        RAISE EXCEPTION '#4492: analytics_events_rows_by_org is callable by anon';
+        RAISE EXCEPTION '#4492: analytics_events_rows_by_org is callable by a customer role';
+    END IF;
+    IF NOT pg_catalog.has_function_privilege(
+           'service_role',
+           'public.analytics_events_rows_by_org(timestamptz, timestamptz)',
+           'EXECUTE') THEN
+        RAISE EXCEPTION '#4492: analytics_events_rows_by_org is NOT callable by service_role';
     END IF;
 
     -- ── 7. The retention finding, asserted: the table is still append-only ─

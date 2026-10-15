@@ -61,6 +61,15 @@ must never fail a request; a failure is returned as a reading with ``ok=False``
 and an ``error`` string (logged at DEBUG), never propagated. The pure parsers
 (:func:`parse_storage_snapshot`, :func:`parse_row_growth`) DO raise, so a
 malformed payload fails its reading rather than masquerading as a zero.
+
+⛔ **A FAILED READING'S ZEROS ARE PLACEHOLDERS, NOT A MEASUREMENT.**
+:func:`_failed_storage_reading` carries ``database_bytes=0`` and
+:func:`_failed_growth` carries ``total_rows=0``; those zeros exist because the
+fields are non-optional, NOT because zero was observed. ``ok=False`` (and
+``error``) is the ONLY thing that distinguishes "unmeasured" from a measured
+zero — a caller that reads a count or
+:meth:`AnalyticsRowGrowth.for_org` without first checking ``ok`` sees "0 rows",
+not "unmeasured".
 """
 
 from __future__ import annotations
@@ -360,6 +369,13 @@ def measure_postgres_storage(cp: Any) -> PostgresStorageReading:
 def _failed_growth(
     since: str, until: str | None, measured_at: str, error: Any
 ) -> AnalyticsRowGrowth:
+    """A total, zero-valued growth reading carrying the failure — never raises.
+
+    The zeros here (``total_rows=0``, empty ``rows_by_org``) are PLACEHOLDERS
+    that exist because the fields are non-optional — they are not a measured
+    zero. They travel with ``ok=False`` and ``error``, which the caller must
+    branch on before reading any count.
+    """
     return AnalyticsRowGrowth(
         since=since,
         until=until,
@@ -396,7 +412,12 @@ class AnalyticsRowGrowth:
     retention_finding: str = RETENTION_FINDING
 
     def for_org(self, org_id: str) -> int:
-        """The org's exact row count in the window (0 when it had none)."""
+        """The org's exact row count in the window (0 when it had none).
+
+        On a FAILED reading (``ok=False``) this returns 0 for every org — that
+        0 is a placeholder for "unmeasured", not a measured "no rows". Check
+        ``ok`` (or ``error``) before treating the value as a measurement.
+        """
         return self.rows_by_org.get(org_id, 0)
 
     def as_dict(self) -> dict[str, Any]:
