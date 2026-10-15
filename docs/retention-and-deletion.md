@@ -285,8 +285,8 @@ whole directory, is always safe and costs one re-embed. It is exempt from the
 "link or be a named constant" rule by the same logic as the operational event
 store.
 
-It is nonetheless **bounded**, because its key space is tenant-growable: after
-#5163 the spec varies per graph's installed-namespace gate, so `persist` added
+It is nonetheless **bounded**, because its key space is tenant-growable: the
+spec varies per graph's installed-namespace gate (#5163), so `persist` added
 one npz per distinct gate and nothing deleted one (#7351). `persist` now sweeps
 the directory to `_MAX_PERSISTED_INDEXES` least-recently-used files (recency is
 refreshed on `load`, so a hot gate's index is not evicted for merely being the
