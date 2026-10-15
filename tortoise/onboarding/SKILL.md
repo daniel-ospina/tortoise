@@ -46,7 +46,9 @@ follows after you run or paste it — nothing is installed into a skills dir.
 ## 1. Read OnboardingState first (resume, never restart)
 
 Before installing anything, read the organization's onboarding state so you
-resume where the flow left off — onboarding is stateful and idempotent:
+resume where the flow left off — onboarding is stateful and idempotent.
+(**Self-hosted only:** your daemon must already be up, because it is what
+serves the read — install first, see the self-hosted bullet below.)
 
 - **Hosted, MCP-connected agents:** call `tortoise_onboarding_state` (the MCP
   read tool) when it is listed. It returns the FLOW projection: `fork`
@@ -71,11 +73,19 @@ resume where the flow left off — onboarding is stateful and idempotent:
   is the EVAL-ONLY fallback (section 3a), never a durable setup. The daemon is
   what SERVES the state read, so it has to be up before you can read anything.
   **Then READ the state and resume, never restart:** the daemon serves the
-  SAME registry paths the hosted surface does — `GET /v1/onboarding/state`
+  state read and the seed — `GET /v1/onboarding/state`
   and `POST /v1/onboarding/seed` (`org_name` + `person_name`, both required) —
   authorized with `Authorization: Bearer $TORTOISE_API_KEY` (required once the
   daemon has a key set; optional while it stays loopback-bound with none,
-  section 3a). Do NOT checkpoint: the daemon serves no checkpoint route, and
+  section 3a). **Those two are all it serves:** the other hosted onboarding
+  routes — `PATCH /v1/onboarding/state`, `session-recording`, the GitHub
+  connect/status routes, and the checkpoint — have NO self-hosted twin, so
+  §5's `PATCH` guidance is hosted-only. **The session-recording MCP tool is
+  LISTED on the self-hosted daemon, but its write does NOT land there** — the
+  self-hosted deployment has no control-plane `Team` node for it to write, and
+  the write is a `MATCH`-no-op that still reports success — so do not rely on
+  it to change the setting self-hosted.
+  Do NOT checkpoint: the daemon serves no checkpoint route, and
   the self-hosted lane records `harness-connected` / `first-points-filed`
   server-side itself. The self-hosted init owns the onboarding node
   (`fork='self'` default, no fork card).
@@ -238,8 +248,9 @@ and the dashboard wizard (`website/apps/dashboard/src/harnesses.js`).
 > checkpoint route (`tortoise/selfhost_api.py`). The self-hosted lane records
 > `harness-connected` / `first-points-filed` server-side itself
 > (`tortoise/onboarding/selfhost.py`), so there is nothing for the client to
-> checkpoint. `connection-written` is never written there, which is why §1's
-> `restart_pending` row does not apply to a self-hosted install.
+> checkpoint. `connection-written` is never written self-hosted, so §1's
+> `restart_pending` **`true`** row cannot fire there — the `'unavailable'` row
+> still does, on a graph-down read.
 
 ### Claude Code (self-install)
 
