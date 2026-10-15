@@ -11,8 +11,7 @@ re-exports ``retryable_transient`` / ``call_with_predicate`` /
 ``WriteStageRetriesExhausted`` unchanged from ``tools/longmem_eval/errors.py``
 and keeps its own run knobs (``INGEST_WRITE_RETRIES`` etc.) eval-side.
 
-⚠️ PARTIALLY WIRED (#7405): the bounded write retry covers the SDK's CREATE,
-CAPTURE and COMMIT write surfaces — and nothing beyond them. Wired:
+⚠️ PARTIALLY WIRED (#7405): Wired:
 
   * ``create_point``'s direct writes — the ``CREATE (:Point)``, the
     ``TAGGED`` edges (``_sync_tags``) and the ``extractedFrom`` edge
@@ -36,11 +35,15 @@ CAPTURE and COMMIT write surfaces — and nothing beyond them. Wired:
 ⛔ NOT covered — ``_mark_dirty``'s own dirty-persist SET (its default path
 reaches the wired ``_advance_ep_version``, but the SET itself is bare),
 ``promote_point``, ``merge_points``, ``mitigate_operator``, ``delete_point``,
-the operator/supersede/annotate writers, and the remaining direct
-``proj.g.query`` write sites across ``tortoise/`` are still un-retried: a
-write abort there raises (or is downgraded by the caller's own ``except``)
-exactly as before. Those paths' robustness today remains idempotent-MERGE +
-server-side dedup.
+the operator/supersede/annotate writers, ``_create_entity``'s fold
+``proj.apply(event)`` (``tortoise/sdk.py:24686``), ``create_entity``'s
+``_link_source`` (``sdk.py:25771``), ``create_document``'s ``_link_source``
+(``sdk.py:28434``), ``_doc_write``'s ``proj.apply`` (``sdk.py:27589``),
+``_apply_and_journal``'s ``proj.apply`` (``sdk.py:5927``), and the remaining
+direct ``proj.g.query`` write sites across ``tortoise/`` are still
+un-retried: a write abort there raises (or is downgraded by the caller's own
+``except``) exactly as before. Those paths' robustness today remains
+idempotent-MERGE + server-side dedup.
 
 Re-issuing is only safe for a statement whose abort means it DID NOT LAND.
 That is what ``retryable_aborted_write`` proves and what makes it admissible

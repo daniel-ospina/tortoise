@@ -2433,17 +2433,18 @@ surfaces:
   - test_time_aware_eval_2520.py  # #2520: the eval-lane reorder placement + census (C6, docker-lane)
   - test_time_aware_run_2520.py  # #2520: the run-layer arm wiring (C6; hermetic + docker legs)
   - test_retrieval.py
-  # #7209: DUAL-REGISTERED with `sdk` (whose SOURCE_PATTERNS own
-  # `tortoise/sdk.py`). `tortoise/exceptions.py` is a SHARED_MODULE consumed by
-  # every surface, so the fail-loud guard's exception type must run wherever the
-  # leaf changes — a named-surface match REPLACES the `core` fallback otherwise.
+  # #7209: DUAL-REGISTERED with `sdk` (`tortoise/sdk.py` is a SHARED_MODULE, so
+  # a change to it selects this file). `tortoise/exceptions.py` is a
+  # SHARED_MODULE consumed by every surface, so the fail-loud guard's exception
+  # type must run wherever the leaf changes — a named-surface match REPLACES the
+  # `core` fallback otherwise.
   - test_7209_write_landing.py
-  # #7405 (audit G8): DUAL-REGISTERED with `sdk` (whose SOURCE_PATTERNS own
-  # `tortoise/sdk.py`). `tortoise/retry.py` matches no SOURCE_PATTERNS, so a
-  # retry.py-only change falls through to the `core` fallback — and this file
-  # pins the RETRY WIRING, so that change must run it. (The `core`
-  # registration is load-bearing, not redundant with the `sdk` one: without it
-  # a retry.py-only diff runs neither.)
+  # #7405 (audit G8): DUAL-REGISTERED with `sdk` (`tortoise/sdk.py` is a
+  # SHARED_MODULE, so a change to it selects this file). `tortoise/retry.py`
+  # matches no SOURCE_PATTERNS, so a retry.py-only change falls through to the
+  # `core` fallback — and this file pins the RETRY WIRING, so that change must
+  # run it. (The `core` registration is load-bearing, not redundant with the
+  # `sdk` one: without it a retry.py-only diff runs neither.)
   - test_7405_remaining_writes.py
   - test_retrieval_determinism_2952.py  # #2952: ranking determinism w.r.t. elapsed wall-clock (hermetic, no DB)
   - test_3844_annotation_injection.py  # #3844: reader-evidence annotation prefix cannot be forged by a newline in speaker/session_date OR the validity marker (hermetic, no DB)
