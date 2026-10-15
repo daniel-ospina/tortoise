@@ -7,7 +7,7 @@ status: live
 tags: [tortoise, onboarding, mcp, harness, install, self-hosted, connect, onboarding-state, decide]
 summary: "The ONE live Tortoise onboarding script — reads onboarding state, self-adjudicates the harness, installs/connects (self-hosted: Docker-first, Compose + FalkorDB; embedded = eval-only fallback), verifies via tortoise_health, checkpoints harness-connected, and runs the generic MCP-tool decide protocol."
 created: 2026-09-02
-updated: 2026-10-11
+updated: 2026-10-14
 allowed-tools: read write bash
 ---
 
@@ -66,14 +66,18 @@ resume where the flow left off — onboarding is stateful and idempotent:
   only:** a ChatGPT connector never takes this header and has no key to send —
   if you are ChatGPT, ignore this bullet and the #1701 note beneath the harness
   table applies instead.
-- **Self-hosted:** the daemon serves the SAME registry paths the hosted
-  surface does — `GET /v1/onboarding/state` and `POST /v1/onboarding/seed`
-  (both `Authorization: Bearer $TORTOISE_API_KEY`; the seed takes
-  `org_name` + `person_name`, both required) — so READ the state and resume,
-  never restart. Install the SUPPORTED path first —
-  Docker Compose daemon + FalkorDB sidecar (section 3a) — then connect +
-  verify. Embedded without Docker is the EVAL-ONLY fallback (section 3a),
-  never a durable setup. The self-hosted init owns the onboarding node
+- **Self-hosted:** install the SUPPORTED path FIRST —
+  Docker Compose daemon + FalkorDB sidecar (section 3a). Embedded without Docker
+  is the EVAL-ONLY fallback (section 3a), never a durable setup. The daemon is
+  what SERVES the state read, so it has to be up before you can read anything.
+  **Then READ the state and resume, never restart:** the daemon serves the
+  SAME registry paths the hosted surface does — `GET /v1/onboarding/state`
+  and `POST /v1/onboarding/seed` (`org_name` + `person_name`, both required) —
+  authorized with `Authorization: Bearer $TORTOISE_API_KEY` (required once the
+  daemon has a key set; optional while it stays loopback-bound with none,
+  section 3a). Do NOT checkpoint: the daemon serves no checkpoint route, and
+  the self-hosted lane records `harness-connected` / `first-points-filed`
+  server-side itself. The self-hosted init owns the onboarding node
   (`fork='self'` default, no fork card).
 
 Branch on what you find:
@@ -228,6 +232,14 @@ and the dashboard wizard (`website/apps/dashboard/src/harnesses.js`).
 > `tortoise_health` succeeds in the NEW session. **Teach-human harnesses
 > (Claude Desktop / Claude Web / ChatGPT) have no config write and no REST
 > surface — they never record this step.**
+>
+> **Self-hosted: do NOT POST this step.** The hosted URL above would 401 — a
+> self-hosted session's key belongs to its OWN daemon, and the daemon serves no
+> checkpoint route (`tortoise/selfhost_api.py`). The self-hosted lane records
+> `harness-connected` / `first-points-filed` server-side itself
+> (`tortoise/onboarding/selfhost.py`), so there is nothing for the client to
+> checkpoint. `connection-written` is never written there, which is why §1's
+> `restart_pending` row does not apply to a self-hosted install.
 
 ### Claude Code (self-install)
 
@@ -561,8 +573,9 @@ connection verify fails → retry with diagnostic + honest error (never a
 silent skip); self-hosted daemon unreachable → the compose stack is not up
 (or TORTOISE_DB_URI points at a dead sidecar) — run `docker compose up -d`
 (section 3a) and re-verify, never silently "fix" it by pointing at
-embedded; state read unavailable (self-hosted) → skip checkpoint (W12 owns
-the self-hosted node).
+embedded; state read unavailable (self-hosted) → re-read before acting, and do
+NOT checkpoint — the daemon serves no checkpoint route, and the self-hosted
+lane records `harness-connected` / `first-points-filed` server-side itself.
 
 ## 5. Capture setup — ask, then install in the prompt (#3517)
 
