@@ -247,6 +247,38 @@ def test_invalidate_point_accepts_an_unknown_end(lane):
     assert props["validToPrecision"] == "unknown"
 
 
+def test_supersede_unknown_end_is_not_refused_by_the_inversion_guard(lane):
+    """#2350 review P2: ``valid_to_precision='unknown'`` stamps NO end, so the
+    #5358/#4021 inversion guard's premise ("persisting it would leave an
+    inverted window") is false of the write — the guard must be SKIPPED, as
+    ``invalidate_point`` already does for the same marker. Pre-fix
+    ``supersede_point`` resolved the precision AFTER the guard and raised
+    ``InvertedSupersedeWindow`` on a request that persists ``validTo=None``,
+    while the identical call at the sibling door succeeded. The no-kwarg
+    control below pins that the guard is still enforced for a REAL end."""
+    from tortoise.sdk import InvertedSupersedeWindow
+
+    sdk, _events = lane
+    old = sdk.create_point("statement", "old", validFrom="2025-01-01")
+    # the successor's start precedes the predecessor's → an inverted window IF
+    # an end were stamped (it is not, under the 'unknown' marker).
+    new = sdk.create_point("statement", "new", validFrom="2024-01-01")
+    sdk.supersede_point(old["id"], new["id"], valid_to_precision="unknown")
+    props = _window_props(sdk, old["id"])
+    assert props["validTo"] is None
+    assert props["validToPrecision"] == "unknown"
+    assert sdk.get_historical_knowledge(
+        old["id"], "2025-06-01")["chain"][0]["end_state"] == "unknown"
+
+    # control — the guard is still enforced for a REAL end: the same inverted
+    # pair WITHOUT the 'unknown' marker is refused (so the skip is scoped to
+    # the no-end-stamped write, not a blanket bypass).
+    old2 = sdk.create_point("statement", "old2", validFrom="2025-01-01")
+    new2 = sdk.create_point("statement", "new2", validFrom="2024-01-01")
+    with pytest.raises(InvertedSupersedeWindow):
+        sdk.supersede_point(old2["id"], new2["id"])
+
+
 # ── no re-stamp of pre-existing windows ──────────────────────────────────
 
 def test_supersession_leaves_the_predecessors_own_start_untouched(lane):
@@ -285,6 +317,68 @@ def test_invalidated_unknown_precision_survives_rebuild(lane):
 
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _window_props(sdk, old["id"]) == live
+
+
+def test_update_door_precision_survives_rebuild_and_stays_ended_unknown(lane):
+    """#2350 review P1: a precision written through the ``update_point`` DOOR
+    must replay. The ``PointRevised`` fold built its props only from
+    content/annotator/belief/``mitigation_strength``/``tags``, so replay
+    dropped a precision the live path wrote and ``end_state`` flipped
+    ``unknown`` -> ``open`` — an un-datable end read as still-true (#2349
+    fabricated coverage). ``check_consistency`` (whose reference view is the
+    same pure fold) also red the healthy live graph. Fails on pre-fix code:
+    rebuilt ``validToPrecision`` is ``None``, ``end_state`` is ``open``, and
+    the checker reports a ``validToPrecision`` divergence."""
+    from tortoise.consistency import check_consistency
+
+    sdk, events = lane
+    p = sdk.create_point("statement", "a", validFrom="2024-01-01")
+    sdk.update_point(p["id"], validToPrecision="unknown")
+    # non-vacuous: the LIVE write landed (the update door persisted it).
+    assert _window_props(sdk, p["id"])["validToPrecision"] == "unknown"
+    assert sdk.get_historical_knowledge(
+        p["id"], "2025-01-01")["chain"][0]["end_state"] == "unknown"
+    # (a) the durability check must not red a graph the live path wrote.
+    assert check_consistency(str(events / "events.jsonl"),
+                             sdk._get_proj())["ok"]
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    # (b) live == rebuilt, and the end is STILL ended-unknown, not open.
+    assert _window_props(sdk, p["id"])["validToPrecision"] == "unknown"
+    after = sdk.get_historical_knowledge(p["id"], "2025-01-01")
+    assert after["chain"][0]["end_state"] == "unknown"
+    assert after["end_state_unknown"] is True
+
+
+def test_update_door_start_precision_survives_rebuild(lane):
+    """#2350 review P1, start-end leg: the same update door must carry
+    ``validFromPrecision`` through replay (pre-fix it rebuilt to ``None``)."""
+    sdk, events = lane
+    p = sdk.create_point("statement", "a", validFrom="2024-01-01")
+    sdk.update_point(p["id"], validFromPrecision="year")
+    assert _window_props(sdk, p["id"])["validFromPrecision"] == "year"
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _window_props(sdk, p["id"])["validFromPrecision"] == "year"
+    assert sdk.get_historical_knowledge(
+        p["id"], A_DATE)["chain"][0]["valid_from_precision"] == "year"
+
+
+def test_update_door_precision_clear_replays_as_absent(lane):
+    """#2350 review P1: presence-conditional, like the live ``SET n += $props``
+    — an explicit ``None`` is the documented CLEAR and folds as absent on
+    BOTH replay engines, not as a stale value."""
+    sdk, events = lane
+    p = sdk.create_point("statement", "a", validFrom="2024-01-01",
+                         validFromPrecision="year",
+                         validToPrecision="unknown")
+    sdk.update_point(p["id"], validToPrecision=None)
+    assert _window_props(sdk, p["id"])["validToPrecision"] is None
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _window_props(sdk, p["id"])["validToPrecision"] is None
+    # the untouched sibling is not clobbered by the one-ended update.
+    assert _window_props(sdk, p["id"])["validFromPrecision"] == "year"
 
 
 # ── search / recall annotation ───────────────────────────────────────────
@@ -341,6 +435,52 @@ def test_undated_hits_emit_no_precision_keys(lane):
     hit = next(r for r in _scan(sdk) if r["id"] == p["id"])
     for key in ("valid_from_precision", "valid_to_precision", "end_state"):
         assert key not in hit, (key, hit)
+
+
+def test_get_historical_knowledge_nearest_does_not_gain_an_unrecorded_content_key(lane):
+    """#2350 review P2: ``nearest``'s pre-#2350 shape was
+    ``{id, valid_from, valid_to, malformed}`` — it never carried ``content``
+    (``valid_point``/``candidates`` did). Routing it through ``window_entry``
+    with the default ``include_content=True`` silently grew a public reply
+    field nobody recorded (CONTRIBUTING.md makes that a reviewing obligation,
+    and no check can see an unrecorded field). Pre-fix this asserted key set
+    contained ``content``."""
+    sdk, _events = lane
+    p = sdk.create_point("statement", "claim", validFrom="2024-06-01")
+    out = sdk.get_historical_knowledge(p["id"], "2020-01-01")
+    assert out["status"] == "absent"
+    assert "nearest" in out
+    assert "content" not in out["nearest"], sorted(out["nearest"])
+    # the additive precision triple IS the intended delta on nearest.
+    assert out["nearest"]["valid_from_precision"] == "day"
+    assert out["nearest"]["end_state"] == "open"
+
+
+def test_embedded_fallback_decorates_a_falsey_but_present_start(lane):
+    """#2350 review P2: the degraded TF-IDF fallback decoration owed the same
+    precision block as the primary ``SearchResult.to_dict`` gate, but its gate
+    omitted ``valid_from_precision``. For a falsey-but-PRESENT start
+    (``validFrom=''``) the fetched state is
+    ``valid_from=None, valid_from_precision='day', end_state='open'``, so the
+    primary path emitted the block and the fallback emitted NEITHER key — the
+    cross-surface drift this feature exists to remove, on the fourth surface.
+    Pre-fix ``valid_from_precision``/``end_state`` were absent here."""
+    from tortoise.sdk import _decorate_fallback_hits
+
+    sdk, _events = lane
+    p = sdk.create_point("statement", "empty start", validFrom="")
+    assert _props(sdk, p["id"])["validFrom"] == ""
+
+    hits = _decorate_fallback_hits([{"id": p["id"]}], sdk._get_proj().g)
+    assert hits[0]["valid_from_precision"] == "day"
+    assert hits[0]["end_state"] == "open"
+
+    # control — an undated hit still gains NO window keys (the gate is not a
+    # blanket emit).
+    q = sdk.create_point("statement", "timeless")
+    plain = _decorate_fallback_hits([{"id": q["id"]}], sdk._get_proj().g)
+    for key in ("valid_from_precision", "valid_to_precision", "end_state"):
+        assert key not in plain[0], (key, plain[0])
 
 
 def test_assembly_window_rows_carry_the_precision_block(lane):

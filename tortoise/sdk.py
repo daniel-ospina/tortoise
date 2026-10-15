@@ -4409,6 +4409,7 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
         # 3-state end the primary decoration carries — the embedded fallback
         # must not relabel an ended-unknown window as still-true.
         if (st.get("valid_from") or st.get("valid_to")
+                or st.get("valid_from_precision")
                 or st.get("valid_to_precision")):
             if st.get("valid_from_precision"):
                 r["valid_from_precision"] = st["valid_from_precision"]
@@ -4861,7 +4862,8 @@ def _supersede_window_start_source(stored_vf, successor_created_at):
 
 
 def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
-                          stored_vf, successor_created_at, now):
+                          stored_vf, successor_created_at, now,
+                          skip_inversion_guard: bool = False):
     """Resolve the predecessor's window END and refuse an inverted window (#4021).
 
     #4021 — the supersession stamped ``old.validTo`` from the SUCCESSOR's
@@ -4944,6 +4946,15 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     an orderable instant rather than an end no query can order — see the branch
     comments below.)
 
+    ``skip_inversion_guard`` (#2350): the caller is stamping NO end at all
+    (``valid_to_precision='unknown'`` — the closed-unknown marker, which
+    persists ``validTo = None``). The guard's own premise is "persisting
+    ``succ_vf`` would leave an inverted window", and that premise is false of
+    a write that stamps no end — so it is skipped, exactly as
+    ``invalidate_point`` skips its #5358 sibling guard in the same case. The
+    resolved ``succ_vf`` is still RETURNED (it rides the record's
+    informational ``valid_from``), only the refusal is suppressed.
+
     Raises ``ValueError`` BEFORE any mutation at either call site, so no
     event is journaled and no half-write survives a refusal.
 
@@ -4995,7 +5006,7 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
         # that the guard measures that RESOLVED value — so the numeric case is
         # NOT an inversion.
         succ_vf = now if _resolved is _WRITER_CLOCK else _resolved
-    if old_vfs:
+    if old_vfs and not skip_inversion_guard:
         k_succ = _created_sort_key(succ_vf)
         # A NUMERIC KWARG can still resolve unparseable here and is
         # DELIBERATELY left that way (see above and B3): the guard measures the
@@ -10593,16 +10604,15 @@ class TortoiseSDK:
         # MATCHes and stamps them all, and row order is server-dependent
         # (the #5358 sibling loops over the same fan-out for this reason).
         old_vfs = [r[0] for r in old_vf_rows]
-        succ_vf = _supersede_window_end(
-            old_id=old_id, new_id=new_id, old_vfs=old_vfs,
-            valid_from=valid_from, stored_vf=stored_vf,
-            successor_created_at=(vf_rows[0][1] if vf_rows else None),
-            now=now,
-        )
         # #2350 (E-prec): resolve the precision of the predecessor's stamped
-        # END. ``'unknown'`` is the closed-unknown marker: the window ENDED but
-        # carries no datable instant, so NO ``validTo`` is fabricated (the
-        # 'half-honest dates are worse than none' rule). Otherwise the
+        # END BEFORE the inverted-window guard. ``'unknown'`` is the
+        # closed-unknown marker: the window ENDED but carries no datable
+        # instant, so NO ``validTo`` is fabricated (the 'half-honest dates are
+        # worse than none' rule) — and because no end is persisted, the
+        # inversion guard's premise cannot hold, so it is SKIPPED, mirroring
+        # ``invalidate_point``. (Pre-fix the guard ran first and refused a
+        # request that writes no end at all: fail-closed, but wrong for its
+        # stated reason and unreachable at the sibling door.) Otherwise the
         # predecessor's end IS the successor's start, so it inherits the
         # successor's declared start precision when the caller does not state
         # one — the precision travels with the contiguous boundary.
@@ -10610,12 +10620,17 @@ class TortoiseSDK:
         from .validity import normalize_precision as _normalize_precision
         end_precision = _normalize_precision(
             valid_to_precision, field="valid_to_precision")
-        if end_precision == _PREC_UNKNOWN:
-            stamp_valid_to = None
-        else:
-            if end_precision is None and vf_rows:
-                end_precision = vf_rows[0][2] or None
-            stamp_valid_to = succ_vf
+        if end_precision is None and vf_rows:
+            end_precision = vf_rows[0][2] or None
+        _end_is_unknown = end_precision == _PREC_UNKNOWN
+        succ_vf = _supersede_window_end(
+            old_id=old_id, new_id=new_id, old_vfs=old_vfs,
+            valid_from=valid_from, stored_vf=stored_vf,
+            successor_created_at=(vf_rows[0][1] if vf_rows else None),
+            now=now,
+            skip_inversion_guard=_end_is_unknown,
+        )
+        stamp_valid_to = None if _end_is_unknown else succ_vf
         # #2423 (rebuild-parity fix): kwargs-style emission (id + extra keys)
         # so the FULL payload rides the JSONL line — the previous dict-style
         # emission only reached the :GraphEvent store (payload) while the
@@ -22434,9 +22449,13 @@ class TortoiseSDK:
         def window_entry(e: dict, *, include_content: bool = True) -> dict:
             """One reply entry carrying the #2350 precision block.
 
-            ``chain`` entries never carried ``content``; the resolved entries
-            (``valid_point``/``candidates``/``nearest``) always did. The
-            precision fields are ADDITIVE on every one of them.
+            ``chain`` entries never carried ``content``; ``valid_point`` and
+            ``candidates`` always did, while ``nearest`` did NOT (its pre-#2350
+            shape was ``{id, valid_from, valid_to, malformed}``) and stays
+            that way — passing ``include_content=False`` for it keeps this
+            PR's reply-shape change to the additive precision triple alone,
+            rather than silently growing a public field nobody recorded
+            (CONTRIBUTING.md: an added response field must still be recorded).
             """
             entry = {"id": e["id"], "valid_from": e["valid_from"],
                      "valid_to": e["valid_to"],
@@ -22525,7 +22544,7 @@ class TortoiseSDK:
                 best = dist
                 nearest = e
         if nearest is not None:
-            out["nearest"] = {**window_entry(nearest),
+            out["nearest"] = {**window_entry(nearest, include_content=False),
                                "malformed": _inverted(nearest["valid_from"],
                                                       nearest["valid_to"])}
         return out
