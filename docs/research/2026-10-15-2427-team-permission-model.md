@@ -19,6 +19,11 @@ relatedIssues: "#2427, #2446, #2297, #2366, #2380, #2426, #2307, #2535, #4628, #
 > **Measurement tree:** branch `feat/2427-tm`, base `639137d4d` (main). Every "as built
 > today" claim below carries a `file:line` measured on that tree; the external findings
 > carry their date and source.
+> **Corrected (review round 1, 2026-10-15):** §2.3 item 1 — `rotate` bounds the credential's
+> privilege **class**, not its expiry. Expiry is body-settable on rotate (`expires_in` 1..366
+> days or an ISO `expires_at`, `hosted_api.py:11365`, `:11413-11414`) and a bootstrap row can
+> never be rotated at all (409, `:11374-11384`). §4.1 gains the `org.read` row that the §4.2
+> `member` bundle references.
 > **Search tool:** `web_search` with `model="sonar"` — **rung 2**. Rung 1
 > (`mcp__seo-intelligence__perplexity_research`) is unavailable on this machine
 > (`seo-intelligence` is not in the MCP catalog); rung 3 (`exa`) was not needed.
@@ -35,7 +40,7 @@ four of its premises were measured and need correcting before the design is read
 
 | Body premise | Measured 2026-10-15 | Consequence |
 |---|---|---|
-| "configurable expiry (#2426) is the natural building block" (future) | **Landed.** `_validate_mint_expiry` on any mint class; expiry is **immutable after creation** (no PATCH-expiry); `rotate` inherits the displaced row's **absolute** `expires_at` | Expiry is available now, and `rotate` already cannot extend it. "Refresh = extend" is therefore not a missing feature but a rejected one |
+| "configurable expiry (#2426) is the natural building block" (future) | **Landed.** `_validate_mint_expiry` on any mint class; expiry is **immutable after creation** (no PATCH-expiry); `rotate` inherits the displaced row's `expires_at` **only when the body omits one** (`hosted_api.py:11365`, `:11413-11414`) | Expiry is available now. "Refresh = extend" in place is not a missing feature but a rejected one — but note that `rotate` **does** accept a body-set expiry, so it can mint a longer-lived replacement (§2.3 item 1) |
 | member key surfaces are the open gap (#2366/#2307) | **Partly overtaken.** #2426 shipped, and **#2446 already exists** — "member self-service keys — rotate/replace + turn off OWN keys (phase 2 of the #2427 permission model)" | Phase 2 is filed. This brief must answer what phase 2's design premise (`created_by`) actually reaches, and what phases 3+ are |
 | "end customers of apps built on Tortoise" | **No end-user auth layer exists.** #557 (sub-tenancy epic) is open and unbuilt; #524 (OAuth 2.1) open | The end-customer tier is a **v2 design**, not a v1 permission-table change |
 | key list is an owner-only surface | **Not server-side.** `GET /v1/team/keys` is `_require_keys_manage` only — a **member session passes** (`_require_keys_manage` returns early when `key_id is None`, `hosted_api.py:5830-5836`). Only the *dashboard* hides it | `keys.read` is already member-visible in the API. A permission model must decide the inventory-visibility question explicitly, not inherit it by accident |
@@ -103,11 +108,29 @@ is checked again in §5 option B.
 
 ### 2.3 Measured safety properties the permission model must not break
 
-1. **Rotate cannot widen.** The replacement inherits the displaced row's `graph_id`, its
-   `scopes ∩ child policy`, its `delegation_depth`, `created_via`, and its **absolute**
-   `expires_at` when the body omits one (`hosted_api.py:11395-11414`). A member rotating a
-   bootstrap key therefore gets a key that expires at the *same instant*, not a fresh 24h —
-   the ephemeral credential cannot be laundered into a durable one through `rotate`.
+1. **Rotate cannot widen the credential's privilege CLASS — but expiry is body-settable and
+   is NOT bounded by the displaced row.** The replacement inherits the displaced row's
+   `graph_id`, its `scopes ∩ child policy`, its `delegation_depth` and `created_via`; a
+   body-supplied `graph_id`/`scopes` is rejected 422 precisely so that class cannot be widened
+   (`hosted_api.py:11353-11362`, inheritance at `:11386-11415`). Expiry is a separate matter:
+   the handler parses the body's expiry FIRST
+   (`expires_at = _validate_mint_expiry(payload)`, `:11365` — accepting `expires_in` 1..366 days
+   or an ISO `expires_at`, `:4452-4510`) and only inherits the displaced row's value when the
+   body omitted one (`if expires_at is None: expires_at = row.get("expires_at")`,
+   `:11413-11414`), then passes it to `_mint_key(..., expires_at=expires_at, ...)`
+   (`:11423-11428`). **No comparison is made against the displaced row's expiry**, so a rotate
+   can extend a credential's lifetime by up to 366 days. What is inherited — and cannot widen —
+   is the privilege *class*, exactly as the endpoint's own docstring states ("the body cannot
+   set privilege").
+   **The bootstrap illustration is unreachable.** A bootstrap row can never be rotated:
+   `quota.api_key_occupies_slot` returns False for `created_via == 'bootstrap'`
+   (`tortoise/quota.py:487-527`), so the handler 409s "API key is not active — rotate requires a
+   live key that occupies a key slot" (`:11374-11384`) *before* any expiry inheritance runs. The
+   guard that makes the ephemeral credential non-launderable through `rotate` is therefore the
+   **cap predicate, not expiry inheritance** — and by the same predicate a member cannot
+   re-mint their own bootstrap key through `rotate` at all (§8, phase 2). Expiry-widening is a
+   real, currently-unbounded path for any key that *does* occupy a slot; #2446's member replace
+   path must therefore bound it (see §4.2, §8).
 2. **Rotate is cap-neutral and atomic.** The replacement consumes the released slot and the
    displaced row is claimed in one operation, with compensation on a lost claim
    (`:11421-11480`, #4355).
@@ -169,6 +192,7 @@ Permissions are the primitive; today's role checks become their coarse bindings.
 
 | Permission | Ends up gating | Today's gate |
 |---|---|---|
+| `org.read` | org overview: tier, usage, limits (`GET /v1/team`) | `get_current_org_session_ungated` — ungated; a member session passes (`hosted_api.py:6329`, `:8917`) |
 | `keys.mint.team` | mint an org-owned (or owner-class) key | `_require_owner_admin_if_session` + D13 |
 | `keys.mint.own` | mint a key the caller holds (bounded) | bootstrap lane only (24h) |
 | `keys.read.own` | list the caller's own keys | none (own-slice new) |
@@ -190,7 +214,7 @@ Permissions are the primitive; today's role checks become their coarse bindings.
 |---|---|
 | `owner` | every permission |
 | `admin` | every permission **except** `org.export`, `org.delete` |
-| `member` | `org.read`, `keys.read.own`, `keys.rotate.own`, `keys.revoke.own`, `keys.toggle.own`, `keys.audit.read` — **plus `keys.mint.own`, which requires the reopen in §6, and without it a member can only manage a key an owner assigned to them** |
+| `member` | `org.read`, `keys.read.own`, `keys.rotate.own`, `keys.revoke.own`, `keys.toggle.own`, `keys.audit.read` — **plus `keys.mint.own`, which requires the reopen in §6, and without it a member can only manage a key an owner assigned to them**. `keys.rotate.own` carries an additional constraint the rotate primitive does not supply: **replacement expiry ≤ displaced expiry** (§2.3 item 1) — otherwise a member's rotate could launder an expiring own key into a durable one |
 
 **Keep strict.** `org.export` and `org.delete` stay bound to the `owner` role, exactly as
 today: both are irreversible or whole-tenant disclosures (`_require_owner`,
@@ -226,9 +250,9 @@ membership table, which is both a data-protection and a UX error.
 
 | Word | What it should mean | Supported today |
 |---|---|---|
-| **Replace / rotate** | one action: new secret, same powers (graph, scopes, delegation, **same absolute expiry**), old secret dead | yes — `rotate` primitive, atomic and cap-neutral |
+| **Replace / rotate** | one action: new secret, same powers (graph, scopes, delegation), old secret dead. Expiry is **not** inherited when the body carries one — the primitive can lengthen it (≤366 days), so "same expiry" must be enforced by the caller (§2.3 item 1) | yes — `rotate` primitive, atomic and cap-neutral |
 | **Revoke** | terminal: the secret is dead; recovery is a replace | yes |
-| **Refresh** | **ambiguous and partly incoherent.** If it means "extend the existing key's life", the answer is *no*: expiry is immutable by design (#2426), and an extendable secret is not time-bounded. If it means "get a working secret again", it is `replace` | `replace` only |
+| **Refresh** | **ambiguous and partly incoherent.** If it means "extend the existing key in place", the answer is *no*: expiry is immutable in place by design (#2426). If it means "mint a replacement with a later expiry", `rotate` can already do that by body (§2.3 item 1) — which is exactly why the caller, not the primitive, must decide whether that is allowed. If it means "get a working secret again", it is `replace` | `replace` only |
 | **Cascade** | revoking a parent kills its delegated children | **no** — §2.4, filed as #8694 |
 
 **The "my key leaked" moment, as a two-step and a one-step.** Planned rotation keeps the
@@ -311,7 +335,7 @@ Run **first**, before cost or fit, per the user-questions protocol.
 | In the owner's framing | Verdict |
 |---|---|
 | "end customers of the applications built by your customers can rotate a key" | **OVER-SCOPED for v1.** Needs an end-user auth layer that does not exist (#557 open/unbuilt, #524 open). It is also not a role in the customer's org (§4.3). v1 = team members only |
-| "refresh it if it gets compromised" | **Partly incoherent.** Refresh ≠ extend (expiry is immutable by design, §4.4). v1 vocabulary: **Replace** and **Revoke**; drop "Refresh" from the UI entirely |
+| "refresh it if it gets compromised" | **Partly incoherent.** Refresh ≠ extend in place (expiry is immutable in place, §4.4 — but a body-set expiry on `rotate` *can* lengthen a replacement, §2.3 item 1). v1 vocabulary: **Replace** and **Revoke**; drop "Refresh" from the UI entirely |
 | permission grants per member | **OVER-SCOPED (defer to phase 4).** The permission *vocabulary* is v1; grants need recertification machinery (§5 option A2) |
 | "super admin or owner" as two tiers | **Moot.** There is no super-admin tier and none is needed; `owner` is already the strict tier and `admin` the delegated one |
 | a ReBAC/Zanzibar engine | **OUT OF SCOPE** and contradicting a recorded `OVERRIDES:` ruling (§6) |
@@ -326,7 +350,7 @@ field (`owner_user_id`) and the org-owned/shared-key rule; member replace-own an
 |---|---|---|
 | 0 | configurable expiry + `isManagedKey` (#2426) | **LANDED** |
 | 1 | this brief — the model, the matrix, the over-scope call | **this doc** |
-| 2 | member self-service on **own** keys: replace + turn-off (#2446) | filed, open — **needs the holder-field correction of §4.2 to be reachable** |
+| 2 | member self-service on **own** keys: replace + turn-off (#2446) | filed, open — **needs the holder-field correction of §4.2 to be reachable, and a decision on the bootstrap 409 below** |
 | 3 | the permission vocabulary + `authorize(principal, permission, surface)` + role bundles; every gate in §2.2 re-expressed | **filed by this brief as #8692** |
 | 4 | per-member grant exceptions (only if phase 3 shows a real need) | not filed, deliberately |
 | 4b | revocation cascade to delegated children | **filed as #8694** |
@@ -335,6 +359,20 @@ field (`owner_user_id`) and the org-owned/shared-key rule; member replace-own an
 Sequencing note: phase 2 can land before phase 3 — #2446 only needs the **holder field**, not
 the whole vocabulary. Phase 3 is the prerequisite for any *new* capability (e.g. an "own"
 slice broader than replace/turn-off).
+
+**Phase 2 open question — member replace cannot reach a bootstrap holder through `rotate`.**
+`rotate` 409s on any row `api_key_occupies_slot` rejects, and that predicate excludes
+`created_via='bootstrap'` (`tortoise/quota.py:487-527`; `hosted_api.py:11374-11384`). The
+bootstrap key is the only durable-ephemeral credential a member holds today (§1), so a member
+self-service replace built on the admin `rotate` route would 409 on exactly the case §1 is
+about. Two ways out, and this needs a decision rather than a silent widening:
+
+- **Keep the 409** (provisional recommendation) and give members a distinct replace that mints
+  through the bootstrap lane with a bounded expiry — the cap predicate is what keeps rotation
+  slot-neutral, and relaxing it for members reopens the cap hole the 409 was added to close.
+- **Extend `rotate` to the bootstrap lane** with an explicit bounded expiry (≤ the displaced
+  row's), which is a change to the cap predicate and therefore belongs in a decision, not in a
+  phase-2 implementation detail.
 
 ## 9. Gaps and risks this closes, and what was filed
 
@@ -364,7 +402,7 @@ slice broader than replace/turn-off).
 
 | Claim | Confidence | Basis |
 |---|---|---|
-| Today's gates, the `created_by`-only ownership, the absolute-expiry inheritance of `rotate`, the absent parent-liveness check | **High** | measured on this tree (`hosted_api.py`, `0007_api_keys.sql`), each cited by line |
+| Today's gates, the `created_by`-only ownership, the class-only inheritance of `rotate` (expiry is body-settable and unbounded by the displaced row, `:11365`/`:11413-11414`), the bootstrap 409 (`quota.py:487-527`), the absent parent-liveness check | **High** | measured on this tree (`hosted_api.py`, `quota.py`, `0007_api_keys.sql`), each cited by line |
 | User-owned vs org-owned credential separation; roles-as-bundles; short-lived-credential convergence | **High** | three or more independent vendor sources (Datadog, Supabase, GitHub) and independent practitioner guidance |
 | RFC 8693 as the tenant-of-tenant mechanism | **Medium** | normative spec plus two independent secondary sources; not validated against a comparable that ships it for exactly this tier |
 | "Replace is the right one-step compromise UX" | **High** for the mechanism, **medium** for the copy | the primitive is atomic and cap-neutral; the wording is a UX decision, not a research finding |
