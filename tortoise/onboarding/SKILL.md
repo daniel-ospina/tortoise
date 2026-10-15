@@ -639,11 +639,11 @@ setting, even after an earlier decline (see the re-enable pin below).
    - CLI agent (no MCP tool listed yet): `PATCH /v1/onboarding/state` with
      `{"session_recording": true}`
    Both write `session_recording` + `capture_revised`, and nothing else.
-   **Self-hosted: NEITHER path changes the setting.** The MCP tool is listed
-   but its write does not land — the self-hosted deployment has no control-plane
-   node for it to write — and the daemon serves no `PATCH` route. The tool
-   returns a success ACK for either value (#8686). So on a self-hosted install, do
-   NOT report the setting as changed: say it could not be applied.
+   **Self-hosted: the MCP tool path works (#8686).** The write lands on the
+   deployment's own `:OnboardingState` node (create-on-write), and the state
+   read reports it under `operational`. The daemon still serves no `PATCH`
+   route, so the CLI path is hosted-only — use the MCP tool self-hosted. You
+   may report the setting as changed.
 4. **Fire the install probe BEFORE you report success.**
    `tortoise session probe --harness <harness>` (the existing
    `POST /v1/sessions/install-probe` route — no new endpoint). Without this the
@@ -667,16 +667,14 @@ setting, even after an earlier decline (see the re-enable pin below).
    `PATCH /v1/onboarding/state` with `{"session_recording": false}`). That is
    `session_recording=false` + `capture_revised=true`, exactly the yes-branch
    key set with the opposite value — never a different set of keys.
-   **Self-hosted: the decline does NOT persist** — same reason as the yes-branch
-   above (#8686). Do NOT tell the user recording is off when the write did not
-   land; say the setting could not be applied and that recording continues.
+   **Self-hosted: the decline persists (#8686)** — the MCP tool writes the same
+   key set as hosted, onto the deployment's own node. You may confirm it took.
 3. **Confirm honestly** with
    `tortoise session disclosure --harness <harness> --kind declined`: nothing was
    installed, and the rendered text selects its state sentence from the LIVE
-   `session_recording` flag — OFF only when it is off, ON when the preference
-   could not be applied (self-hosted, #8686), and its own wording when the flag
-   could not be read. Print it as rendered; do NOT assert the recording state
-   from the user's answer alone.
+   `session_recording` flag — OFF only when it is off, ON when it is on, and its
+   own wording when the flag could not be read. Print it as rendered; do NOT
+   assert the recording state from the user's answer alone.
 
 ### The re-enable path is pinned
 
@@ -686,10 +684,9 @@ time through the tool, through the dashboard toggle, or by answering this ask
 yes. An implementation that short-circuits on `capture_revised` would strand
 them, so the parity test asserts the re-enable write lands.
 
-**Self-hosted, this path is inert: the re-enable write does not land either
-(#8686).** The rule above describes the HOSTED contract. Self-hosted, do not
-promise re-enabling through the tool — the write reports success and does
-nothing, so the user would be told they are recording again when they are not.
+**Self-hosted, this path works too (#8686)** — the re-enable write lands on the
+same owned node, so the tool, the dashboard toggle and a "yes" to this ask all
+reach the one state path.
 
 ### The off-switch is ONE shared fact, never re-typed
 
@@ -710,14 +707,15 @@ asks the **same question, in the same order**, so the two surfaces expose
 a consent gate — every source is optional and reversible, and the user can
 change it any time from `Settings → Memory sources`.
 
-> **Self-hosted caveat:** the question is asked the same way, but the FIRST tile
-> (`session_recording`, section 5) cannot currently be *changed* on a
-> self-hosted install — the write does not land and reports success anyway
-> (#8686). Do not promise reversibility for that tile self-hosted; report the
-> setting as read-only until #8686 is fixed. Self-hosted the OTHER tiles have no
-> write path either (their only writer is the dashboard `PATCH /v1/onboarding/state`,
-> which the daemon does not mount, and `tortoise_onboarding_github_connect` has no
-> self-hosted team context) — so do not promise changes to those either.
+> **Self-hosted caveat:** the question is asked the same way, and the FIRST tile
+> (`session_recording`, section 5) is a **real, observable switch** on a
+> self-hosted install — the write lands, and the state read reports the stored
+> operational keys under `operational` (`tortoise_onboarding_state` /
+> `GET /v1/onboarding/state`), so reversibility **may** be promised for that
+> tile (#8686). Self-hosted the OTHER tiles still have no write path: their
+> only writer is the dashboard `PATCH /v1/onboarding/state`, which the daemon
+> does not mount, and `tortoise_onboarding_github_connect` has no self-hosted
+> team context — so do not promise changes to those.
 
 The pinned order and the per-source state keys are the dashboard's tile
 inventory (`website/apps/dashboard/src/integrationsGrid.js`, one declaration
@@ -737,9 +735,9 @@ connect** — turning issues off never disconnects GitHub for documents (the
   the projection is off, not enabled); a "yes" writes the per-source enable
   intent through the same tool surface the hosted wizard uses
   (`tortoise_onboarding_session_recording` / the onboarding-state path) — one state path,
-  never a second copy of the flag. **Self-hosted: the write does not land for
-  the agent-session-recording tile (#8686)** — honour the answer, but report
-  the setting as not applied rather than claiming it was.
+  never a second copy of the flag. **Self-hosted: this tile's write lands
+  (#8686)** — the agent-session-recording toggle writes through the owned
+  onboarding-state node, so you may report the answer as applied.
 - **An unbuilt integration is never faked.** Anything not in the inventory
   above is **coming soon**: say so plainly, honour a "yes" as interest rather
   than as a setup step, and **never** present it as available or connect it.
@@ -766,22 +764,22 @@ The dashboard's job is to **show** what exists and its state; the **wiring**
 (connect, enable, scope, start an index) lives in the backend and is reachable
 from the **tool surface**, so an agent can do it without any per-integration UI
 flow. Each integration this document covers is enable/connectable **and**
-state-readable from that surface — **(hosted only)**: the daemon serves no
-onboarding *enable/connect* write route at all, so none of the enable/connect
-legs below works self-hosted. (It does serve the onboarding FLOW: read it with
-`tortoise_onboarding_state`, and file the two seed anchors with
-`POST /v1/onboarding/seed` — section 1.)
+state-readable from that surface — **with ONE exception: the daemon serves no
+onboarding *enable/connect* write route at all, so none of the connect legs
+below works self-hosted** (agent-session recording does, because it writes
+through the owned onboarding-state node, not a connect route — #8686). (It does
+serve the onboarding FLOW: read it with `tortoise_onboarding_state`, and file
+the two seed anchors with `POST /v1/onboarding/seed` — section 1.)
 
 - **GitHub issues** — `tortoise_onboarding_github_connect` (OAuth) then
   `tortoise_onboarding_github_index`; read `tortoise_onboarding_github_status`
   (or `tortoise_onboarding_state`).
 - **Agent-session recording** — `tortoise_onboarding_session_recording`
-  (`enabled`); read it back from `tortoise_onboarding_state`. **Self-hosted:
-  the tool is LISTED, but neither the WRITE nor the READ-BACK of this setting
-  works there** — `session_recording` is an operational key and is NOT in the
-  self-hosted projection (which serves FLOW keys only), and the write does not
-  land (#8686). Do not treat this source as enable/disable-able, do not read
-  it back, and do not report the setting as changed.
+  (`enabled`); read it back from `tortoise_onboarding_state`, which reports the
+  stored operational keys under `operational` (#8686). **Self-hosted this is the
+  ONE connect-style leg that works** — both the write and the read-back land on
+  the deployment's own node. Both were fixed by #8686; before it, the write
+  no-opped and reported success anyway.
 - **GitHub documents** — the enable route (`POST /v1/index/docs`) and its job
   status have **no MCP tool yet**; adding one expands the agent-facing surface
   and needs owner approval plus a `config/surface-manifest.yml` re-cut
