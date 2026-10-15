@@ -270,8 +270,10 @@ def _explain_repair_stamped_breaches(
     stamp timestamp is used ONLY as a fallback for a baseline written before the
     count was recorded (:func:`_repair_count_and_window`), where no count delta
     exists to compute; it goes out of use once an accepted sweep RECORDS the
-    count (on a count-read failure there is no count to record, so the fallback
-    stays in force — see that function).
+    count — and a failed read does not necessarily postpone that: with a prior
+    value the count is carried forward and recorded, and only with NO prior
+    value is there nothing to record, leaving the fallback in force (see that
+    function).
 
     The BOUND (not equality) is because the census is a NET count: a repair
     landing while an ``OnboardingStep`` node is ADDED shows a smaller delta, so
