@@ -157,8 +157,8 @@ its edges), and a test pins that scope.
 6. **The pre-existing replay-parity defect the fold exposed** (cycle-2 P0): `_POINT_DENY` drops
    `ep_alpha`/`ep_beta`/`baseline_set`/`baseline_source` on replay (`entities.py:1502-1510`, no SET
    clause), so a `rebuild_all` does not restore the `#2199` baseline the live create wrote. **Not
-   introduced here** (this increment does not fold live); recorded as a finding with its own home, not
-   absorbed. It is why replacing the `CREATE` with the fold was rejected for this increment.
+   introduced here** (this increment does not fold live); **Filed: #8699.** It is why replacing the
+   `CREATE` with the fold was rejected for this increment.
 7. **The append-failure arm leaves an orphan `:GraphEvent`** (round-3 verify P1). `_emit_event` writes
    the `:GraphEvent` store BEFORE the JSONL append (`sdk.py:5653-5683` vs `5814`), so when the JSONL
    append fails and the cache write is now skipped, the graph event store holds a `PointAdded` for a
@@ -175,6 +175,11 @@ its edges), and a test pins that scope.
    `CREATE` will hold, and one class — a number the numeric domain ALTERS (an int outside INT64) — is
    still refused by the guarded handle on the cache write after a committed append (#5011 reports that
    divergence; it is not introduced here).
+10. **The SIBLING doors still gate on the `_journal_write_failures` counter delta** (`_doc_write`,
+    `_apply_and_journal`, `_create_entity`). `create_point` now gates on `_emit_event`'s returned
+    per-call outcome (`True`/`False`/`None`), which removes the shared-state read for this door; the
+    same change to the siblings is a separate increment because their gates are pinned by their own
+    tests. The shared root — concurrent appends on one instance — is **#5612**.
 
 ## 7. Next increments (recorded so the next lane does not re-derive)
 

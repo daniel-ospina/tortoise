@@ -238,11 +238,14 @@ def _journal_snapshot_from_create_map(
     `_emit_event`, and the new commit gate then skipped the cache write — one
     unlucky prop value silently destroyed the whole Point.
 
-    EMBEDDING is not an exception. A `vecf32($embedding)` vector rides RAW —
-    `_stored_prop_value` never narrows one, exactly as the record's `embedding`
-    has always been (the replay re-narrows it,
-    `projection/entities.py::_upsert_point_props`, and `embedding_verbatim`
-    already tells the replay which of the two forms was written). A null or
+    EMBEDDING is not an exception, and the RAW form is DELIBERATE. A
+    `vecf32($embedding)` vector rides RAW — `_stored_prop_value` never narrows
+    one. (This DIFFERS from the pre-#7951 record, whose `embedding` came from
+    the post-CREATE `get_point` read-back and was therefore `vecf32`-narrowed;
+    the raw intent is the more faithful record.) It is replay-safe: the replay
+    re-narrows it (`projection/entities.py::_upsert_point_props`), `consistency`
+    compares at the stored width, and `embedding_verbatim` already tells the
+    replay which of the two forms was written. A null or
     unusable vector is omitted here and re-added as an explicit `None` by the
     producer's own `setdefault` in `_emit_event` (PRESENCE IS OWNERSHIP,
     #5004), so the key is still on every snapshot a PointAdded emits.
@@ -418,8 +421,11 @@ def _journal_write_failure_warning(count: int) -> str:
     without this the disclosure would exist only on the SDK lane), naming that
     THIS capture's records never reached the journal and a later rebuild will
     therefore lose them. Deliberately independent of the capture's ``ok`` flag:
-    the graph write persisted, and marking it failed would trip the #2335
-    TRUE-retry gate over a write that was in fact persisted.
+    it NAMES the journal residue; the outcome is decided by what actually
+    persisted. (#7951: since §17.1's outbox ordering a failed append means the
+    cache write is skipped too, so a capture that raises this warning is now
+    normally ``partial`` — the warning remains additive, never a substitute for
+    the outcome.)
     """
     return (
         f"journal append failed {count}x — this capture is live-only and will "
@@ -2725,10 +2731,12 @@ _GRAPH_EVENT_TYPES = frozenset({
 # It can therefore NEVER journal itself — a replayed record would journal
 # itself, grow the log on every rebuild, and make replay non-idempotent at the
 # log level. The fold cannot know whether it is live or a replay; only the
-# CALLER does. So the order is drawn at the caller-side live doors. The two
-# that state it explicitly are:
+# CALLER does. So the order is drawn at the caller-side live doors. Those that
+# state it explicitly are (the authoritative inventory is the §17.1 guard's
+# opener list in `tortoise/projection/__init__.py`):
 #   * `EventAPI._emit`                      (tortoise/api.py)
 #   * `TortoiseSDK._apply_and_journal` / `_journal_entity_event` (this module)
+#   * `TortoiseSDK._doc_write`, `_create_entity`, `create_point` (this module)
 # The live doors that do NOT yet conform are listed under KNOWN DEVIATIONS at
 # the end of this block.
 #
@@ -5631,11 +5639,20 @@ class TortoiseSDK:
     def _emit_event(self, type_: str, payload: dict | None = None, *,
                     point: dict | None = None,
                     id: str | None = None,
-                    recorded_ts: str | None = None, **extra) -> None:
+                    recorded_ts: str | None = None, **extra) -> bool | None:
         """Unified event emission: JSONL rebuild log (#548) + graph event store (#432).
 
         Both stores are best-effort — failures log and continue (never crash
         the mutation).
+
+        **Return value (the #7951 commit signal):** ``True`` when the record was
+        appended to a configured JSONL journal, ``False`` when a configured
+        journal's append RAISED, and ``None`` when there is nothing to log or no
+        journal is configured. The per-call value — not a delta of
+        ``_journal_write_failures`` — is what a live door must gate its cache
+        write on: a shared instance counter can be incremented by a CONCURRENT
+        writer (#5612), which would report a committed record as failed and
+        invite a duplicate re-issue.
 
         Two call styles supported:
         1. ``_emit_event("PointAdded", {"id": ..., ...})``
@@ -5721,10 +5738,11 @@ class TortoiseSDK:
 
         # ── JSONL event log (#548) ─────────────────────────────────
         if point is None and id is None:
-            return  # nothing meaningful to log
+            return None  # nothing meaningful to log
         log = self._get_event_log()
         if log is None:
-            return
+            # No journal configured: there is no rebuild source to commit to.
+            return None
         from .ids import ulid, now_iso  # noqa: I001
         event: dict = {
             "event_id": ulid(),
@@ -5815,6 +5833,7 @@ class TortoiseSDK:
             event["actor_user_id"] = _jsonl_actor
         try:
             log.append(event)
+            return True
         except Exception as exc:
             # The graph mutation already succeeded — a log-write failure must
             # not crash the caller or pretend the write failed. Rebuild parity
@@ -5851,6 +5870,10 @@ class TortoiseSDK:
                 "LIVE-ONLY and will not survive a rebuild (#4240)",
                 type_, self._event_log_path, exc,
             )
+            # #7951 review I3: the PER-CALL outcome. A caller gating a fold on
+            # "committed?" must read THIS, not the shared counter above, whose
+            # before/after delta can be moved by another thread's failure.
+            return False
 
     def _journal_entity_event(self, event: dict) -> None:
         """Append a canonical entity record to the journal (the WRITE half).
@@ -5896,10 +5919,10 @@ class TortoiseSDK:
         truth first, then project."* `docs/architecture/STORAGE-ARCHITECTURE.md`
         §17.1 mechanism (1) closes even this window with one atomic write.
 
-        A record whose payload cannot exist before the fold (`create_point`'s
-        post-apply snapshot) is the ONE permitted apply-first case — see the
-        contract's exception 2; it does NOT come through this door's normal
-        mode.
+        The one shape the module-top contract still names as exception 2
+        (POST-APPLY-SNAPSHOT PAYLOAD) has NO production site today: `create_point`
+        was the last, and #7951 moved it to the outbox ordering. This door's
+        normal mode is never apply-first.
 
         ``journal=False`` folds WITHOUT appending: for a replay-safe
         RE-application of an already-registered record (the GitHub indexer's
@@ -6605,8 +6628,10 @@ class TortoiseSDK:
         #
         # #5256: the extractedFrom read-version is resolved from the :Source
         # HERE, on the LIVE path only, and carried in the CREATE map — i.e. in
-        # the Point's OWN journaled snapshot (`get_point` rides it into the
-        # PointAdded payload below). The replay must never re-read the Source:
+        # the Point's OWN journaled snapshot (`_journal_snapshot_from_create_map`
+        # copies it into the PointAdded payload below — the payload is the write
+        # intent, NOT the read-back; the later `get_point` is the write-landed
+        # proof only). The replay must never re-read the Source:
         # `_upsert_source`'s in-place contentHash bump is unjournalled (#5024),
         # so a Source read at rebuild time may hold a NEWER hash than the one
         # this Point was actually read from. A Source that does not exist yet
@@ -6726,25 +6751,36 @@ class TortoiseSDK:
         # ── #7951 §17.1 — THE OUTBOX ORDERING (docs/architecture/STORAGE-ARCHITECTURE.md) ──
         # THE APPEND IS THE COMMIT POINT. The `PointAdded` record is built from
         # the SAME `_create_map`/`_create_params` the CREATE below writes and is
-        # appended BEFORE any cache write, so the DERIVED store can never lead
-        # the TRUTH. This is the outbox form of §17.1's mechanism (1): the
+        # appended BEFORE any `:Point` cache write (`CREATE`/`MERGE` on `:Point`
+        # and its edges), so the derived store cannot lead the truth for the
+        # Point statements. NOTE the scope — the pre-append control-plane writes
+        # (`_advance_ep_version`'s `:EpMeta`, `_emit_event`'s `:GraphEvent`, the
+        # `:Source` adopt-on-touch) are the declared residuals of plan §3/§6.5,
+        # and they DO precede the append. This is the outbox form of §17.1's mechanism (1): the
         # journal append is the transaction, and the cache write that follows
         # materialises exactly the record's own properties. The old post-CREATE
         # `get_point` read-back could not be journalled first — it does not
         # exist until the cache has already been written, which is how
         # `create_point` came to be the recorded apply-first deviation.
-        # If the append fails the cache is NOT written (`_journal_write_failures`
-        # delta, the `_doc_write` template): the record could not be committed,
-        # so the derived store must not be written. ⚠️ `_emit_event` writes the
+        # If the append fails the cache is NOT written (the append's own
+        # returned outcome — the `_doc_write` template used a counter delta;
+        # this door reads the per-call signal, see F1): the record could not be
+        # committed, so the derived store must not be written. ⚠️ `_emit_event` writes the
         # `:GraphEvent` store BEFORE the JSONL append, so this arm leaves a
         # `:GraphEvent` for a Point that was never written — a DECLARED residual
         # (plan §6.7), not a committed rebuild record: the JSONL journal (the
         # rebuild source) holds nothing.
         _intended = _journal_snapshot_from_create_map(_create_map, _create_params)
-        _failures_before = self._journal_write_failures
-        self._emit_event("PointAdded", {"id": pid, "kind": kind, "content_hash": ch},
-                         point=_intended)
-        if self._journal_write_failures > _failures_before:
+        # The append's OWN outcome is the commit signal — a per-call value, not
+        # a delta of the shared `_journal_write_failures` counter: a concurrent
+        # writer on the same instance can increment that counter between the
+        # read and the check, which would report THIS call's committed record as
+        # failed and invite a duplicate re-issue (#5612; the sibling doors still
+        # use the delta — plan §6.10).
+        _record_committed = self._emit_event(
+            "PointAdded", {"id": pid, "kind": kind, "content_hash": ch},
+            point=_intended)
+        if _record_committed is False:
             from .exceptions import WriteNotLandedError
             raise WriteNotLandedError(pid, getattr(proj, "graph_name", None))
         # #7951 §17.1: the cache write runs inside the live-write scope — the
@@ -6873,7 +6909,7 @@ class TortoiseSDK:
         if not _snapshot:
             from .exceptions import WriteNotLandedError
             raise WriteNotLandedError(pid, getattr(proj, "graph_name", None),
-                                      record_committed=True)
+                                      record_committed=bool(_record_committed))
         if _source_change_notices:
             # #5516: the notice is TRANSIENT — it rides the write result the
             # writer sees, on a COPY, so the journaled snapshot above and every

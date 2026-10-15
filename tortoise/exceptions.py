@@ -447,10 +447,11 @@ class WriteNotLandedError(RuntimeError):
     ordering, ``create_point`` appends its ``PointAdded`` record BEFORE the
     ``CREATE``:
 
-    * **append failed** (``record_committed=False``, the default) — nothing
-      was journaled and the cache was not written. Re-issuing the call is
-      correct and safe.
-    * **read-back empty after a committed append** (``record_committed=True``)
+    * **no record was committed** (``record_committed=False``, the default) —
+      either the journal append failed (and the cache write was then skipped by
+      the §17.1 ordering), or no journal is configured, in which case the
+      read-back miss is a genuinely LOST write. Re-issuing is correct.
+    * **read-back empty after a COMMITTED append** (``record_committed=True``)
       — the TRUTH holds the record and the cache merely has not materialised
       it. A replay heals it (the ordering contract's replay-healable window),
       so this must NOT be read as "the write is gone"; a blind re-issue would
@@ -484,15 +485,17 @@ class WriteNotLandedError(RuntimeError):
             )
         else:
             _cause = (
-                "the journal append FAILED, so the cache write was skipped by "
-                "the #7951 §17.1 ordering and no Point was written"
+                "no rebuild record was committed for it — the JSONL journal "
+                "append FAILED (and the #7951 §17.1 ordering then skipped the "
+                "cache write), or this SDK has no journal configured at all, so "
+                "the write has no durable home"
             )
             _contract = (
-                "No Point exists and no JSONL record was journaled (a "
-                "`:GraphEvent` may have been written first by `_emit_event` — "
-                "a declared residual, not a committed rebuild record); do NOT "
-                "treat this call as successful — re-issue it (dedup=True is "
-                "content-hash idempotent)."
+                "The caller must not treat this call as successful: if the "
+                "Point is not in the cache, re-issue it (`dedup=True` is "
+                "content-hash idempotent). (A `:GraphEvent` may have been "
+                "written first by `_emit_event` — a declared residual, not a "
+                "committed rebuild record.)"
             )
         super().__init__(
             f"create_point: the Point {point_id!r} was not committed{_where}: "

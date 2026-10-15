@@ -144,12 +144,13 @@ def test_create_point_appends_the_record_before_the_cache_write(env, monkeypatch
 def test_a_failed_append_does_not_write_the_cache(env, monkeypatch):
     """Derived can never LEAD truth: no record ⇒ no cache write.
 
-    The journal append is the COMMIT POINT (`_journal_write_failures` delta, the
-    `_doc_write` template). If it fails, the cache must not be written — the one
-    arm where `WriteNotLandedError(record_committed=False)` is literally true.
+    The journal append is the COMMIT POINT (the append's own per-call outcome —
+    `_emit_event` returns `False`). If it fails, the cache must not be written —
+    the one arm where `WriteNotLandedError(record_committed=False)` is literally
+    true.
 
-    MUTATION: drop the `_journal_write_failures > _failures_before` gate and the
-    Point is written with no record — `_count(...) == 1`.
+    MUTATION: drop the per-call outcome gate (`_record_committed is False`) and
+    the Point is written with no record — `_count(...) == 1`.
     """
     from tortoise.exceptions import WriteNotLandedError
 
@@ -312,12 +313,13 @@ def test_the_journaled_payload_matches_the_live_node_and_replays(env, monkeypatc
     _skip = {
         "updatedAt", "embedding",
         # ⚠️ PRE-EXISTING replay-parity defect, declared as residual 6 of
-        # `docs/plans/2026-10-14-7951-atomic-write-outbox.md`: the replay fold
-        # drops the EP-owned / baseline fields (`_POINT_DENY`, no SET clause),
-        # so a `rebuild_all` does not restore the `#2199` baseline the live
-        # create wrote. NOT introduced by #7951 (the record carries them; the
-        # fold drops them) — excluded here rather than silently ignored so the
-        # exclusion is visible, and pinned for its own fix in increment 3.
+        # `docs/plans/2026-10-14-7951-atomic-write-outbox.md` and filed as
+        # tortoise#8699: the replay fold drops the EP-owned / baseline fields
+        # (`_POINT_DENY`, no SET clause), so a `rebuild_all` does not restore
+        # the `#2199` baseline the live create wrote. NOT introduced by #7951
+        # (the record carries them; the fold drops them) — excluded here rather
+        # than silently ignored so the exclusion is visible. DELETE these two
+        # entries when #8699 lands.
         "ep_alpha", "ep_beta", "baseline_set", "baseline_source",
     }
     assert ({k: v for k, v in live.items() if k not in _skip}

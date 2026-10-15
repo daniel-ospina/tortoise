@@ -3045,7 +3045,11 @@ def _journal_safe_params(params, cypher=None):
 #
 #   * `_live_write_scope(...)` — opened by the live doors that append FIRST and
 #     fold second (`TortoiseSDK._apply_and_journal`, `_doc_write`,
-#     `_create_entity`, `EventAPI._emit`, `ConversationMiner._emit_event`).
+#     `_create_entity`, `EventAPI._emit`, `ConversationMiner._emit_event`), and
+#     by `TortoiseSDK.create_point` (#7951), whose scope is a RESERVED marker
+#     today — its `CREATE` still runs on the raw guarded handle, so the scope
+#     authorizes nothing yet; it becomes load-bearing when increment 3 replaces
+#     the `CREATE` with the fold.
 #     The append is the COMMIT POINT (the ordering contract at the top of
 #     `tortoise/sdk.py`); the scope is opened immediately AFTER it, around the
 #     fold that follows — so the journal write is never inside the scope that
@@ -3066,8 +3070,8 @@ def _journal_safe_params(params, cypher=None):
 # (`proj.g.query(...)`). That handle is *also* the live path of every SDK
 # writer — `create_point`'s `CREATE (:Point)`, `update_point`'s
 # `SET n += $props` — so a blanket refusal there would break the product's own
-# write path, not a violation of it: the SDK's live doors journal (or carry
-# the recorded apply-first exception), and there is no runtime signal at the
+# write path, not a violation of it: the SDK's live doors journal, and there is
+# no runtime signal at the
 # handle that separates a journaled live write from a direct one. Converting
 # that 300+-site surface is §17.1's mechanism (1), the atomic write, and it is
 # recorded as still-open on `#7951` rather than papered over here.
