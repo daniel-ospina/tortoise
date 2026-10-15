@@ -26763,6 +26763,22 @@ def _read_onboarding_state_and_version(org_id: str) -> tuple[dict, int | None]:
         state = dict(stored)
         state.pop(_STATE_VERSION_KEY, None)
         return state, (version if isinstance(version, int) else 0)
+    from tortoise.mcp_auth import SELFHOST_ORG_ID
+    if org_id == SELFHOST_ORG_ID:
+        # #8686 (review P1): this leg MUST agree with `_write_onboarding_state`
+        # and `_get_onboarding_state`. The CAS fallback composes the dict it
+        # writes from HERE; without this branch it handed back the full DEFAULT
+        # set (session_recording=True among it), and `write_operational_state`'s
+        # merge then wrote those stale defaults straight back over a stored
+        # `False` -- the off-switch reverted on the next, unrelated write. The
+        # version stays None because the identity IS absent self-hosted, which
+        # is exactly the documented no-op case the caller preserves.
+        from tortoise.onboarding import state as _ob_state
+        merged = _onboarding_defaults()
+        merged.update(_ob_state.read_operational_state(_org_proj(org_id),
+                                                      org_id))
+        merged.pop(_STATE_VERSION_KEY, None)
+        return merged, None
     import json as _json
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(

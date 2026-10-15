@@ -124,3 +124,28 @@ def test_an_unreadable_blob_reads_as_empty_and_never_raises(raw):
 def test_a_json_blob_round_trips():
     assert st._decode_operational(json.dumps({"session_recording": True})) == {
         "session_recording": True}
+
+
+def test_the_cas_read_leg_agrees_with_the_store(monkeypatch):
+    """#8686 review P1 — THE REGRESSION TEST THAT WAS MISSING.
+
+    `_read_onboarding_state_and_version` is what the CAS fallback composes the
+    dict it writes FROM. Without a selfhost branch it returned the full DEFAULT
+    set (session_recording=True among it), and the write's merge put those stale
+    defaults straight back over a stored False — the off-switch silently
+    reverted on the next, unrelated write.
+
+    This pins the read leg to the STORE, not to the defaults.
+    """
+    ha = pytest.importorskip("tortoise.hosted_api")
+    g = _FakeGraph()
+    st.write_operational_state(g, "selfhost", {"session_recording": False})
+    monkeypatch.setattr(ha, "_org_proj", lambda org_id: g)
+
+    state, version = ha._read_onboarding_state_and_version("selfhost")
+
+    assert state["session_recording"] is False, (
+        "the CAS read leg handed back the DEFAULT (True) instead of the stored "
+        "False — this is the revert that made the switch a lie")
+    assert version is None, "selfhost identity is absent; version must be None"
+    assert "capture_extract" in state, "defaults must still be merged underneath"

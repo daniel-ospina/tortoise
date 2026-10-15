@@ -738,10 +738,23 @@ def _decode_operational(raw: Any) -> dict[str, Any]:
         return {}
     try:
         data = json.loads(raw)
+    except RecursionError:
+        # Adversarially deep nesting (~20k levels) raises RecursionError, which
+        # is neither TypeError nor ValueError. It must not reach the capture
+        # read path.
+        _logger.warning("operational_state nesting is too deep to parse — "
+                        "reading as empty")
+        return {}
     except (TypeError, ValueError):
         _logger.warning("operational_state is not valid JSON — reading as empty")
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        # Parseable but the wrong shape ("[1,2]", "3", "null"): REPORTED, not
+        # silently dropped — the docstring promises unparseable input is loud.
+        _logger.warning("operational_state parsed to %s, not an object — "
+                        "reading as empty", type(data).__name__)
+        return {}
+    return data
 
 
 def write_operational_state(graph: Any, org_id: str,
@@ -760,9 +773,13 @@ def write_operational_state(graph: Any, org_id: str,
     if not isinstance(fields, dict) or not fields:
         return
     ensure_onboarding_state_node(graph, org_id)
-    merged = read_operational_state(graph, org_id)
-    merged.update(fields)
     with _org_lock(org_id):
+        # The READ must be inside the lock too (review P2): read-merge-write
+        # with the read outside interleaves as read/read/write/write and one
+        # caller's keys are silently lost. `write_member_progress` reads inside
+        # this same lock; this now matches it.
+        merged = read_operational_state(graph, org_id)
+        merged.update(fields)
         _run(graph,
              f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
              f"SET n.{OPERATIONAL_PROP} = $blob",
