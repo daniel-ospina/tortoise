@@ -5923,9 +5923,12 @@ def _apply_one(points: dict[str, dict], ev: dict,
             #     journal") that could never clear it — the #5048/#3817 class.
             # Presence-conditional: an explicit `None` is the documented clear
             # and folds as an absent value, which `_canonical_point_fields`
-            # drops on BOTH sides.
+            # drops on BOTH sides. The writability gate is the SAME
+            # `_annotator_value_ok` `mitigation_strength` uses (it keeps
+            # `None`, so a clear still folds): a corrupt journal's
+            # non-persistable value must DROP, never strand the rebuild.
             for _pk in ("validFromPrecision", "validToPrecision"):
-                if _pk in ev:
+                if _pk in ev and _annotator_value_ok(ev[_pk]):
                     p[_pk] = ev[_pk]
     elif t == "OperatorAnnotated":
         # #3689: the explicit annotation record — parity with apply() /
@@ -14607,10 +14610,12 @@ class FalkorProjection(
         # same-file creation that omitted the prop never cleared it live, so
         # it must not suppress this revision's value — hence one flag per
         # prop rather than one shared anchor.
-        if not skip_valid_from_precision and "validFromPrecision" in ev:
+        if (not skip_valid_from_precision and "validFromPrecision" in ev
+                and _annotator_value_ok(ev["validFromPrecision"])):
             set_clauses.append("n.validFromPrecision = $validFromPrecision")
             params["validFromPrecision"] = ev["validFromPrecision"]
-        if not skip_valid_to_precision and "validToPrecision" in ev:
+        if (not skip_valid_to_precision and "validToPrecision" in ev
+                and _annotator_value_ok(ev["validToPrecision"])):
             set_clauses.append("n.validToPrecision = $validToPrecision")
             params["validToPrecision"] = ev["validToPrecision"]
 
