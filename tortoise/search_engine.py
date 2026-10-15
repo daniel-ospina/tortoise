@@ -722,8 +722,13 @@ class SearchResult:
         # carries window information at all — undated points stay byte-
         # identical (no keys), a dated point states its end state so a
         # still-true window (``open``) is never confused with one whose end is
-        # un-datable (``unknown``).
-        if (self.valid_from or self.valid_to or self.valid_to_precision):
+        # un-datable (``unknown``). ``valid_from_precision`` is INCLUDED in the
+        # gate: a falsey-but-present start (``""``) is a real bound for the
+        # ONE read-projection home, so the resolved ``day`` must reach the
+        # wire — gating on a truthy ``valid_from`` alone silently dropped the
+        # block on that surface only (the cross-surface drift of #2350).
+        if (self.valid_from or self.valid_to or self.valid_to_precision
+                or self.valid_from_precision):
             if self.valid_from_precision:
                 d["valid_from_precision"] = self.valid_from_precision
             if self.valid_to_precision:
@@ -3404,9 +3409,16 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             st.setdefault("expired_at", row[4] or None)
             # #2350 (E-prec): the additive precision block, resolved by the ONE
             # read-projection home so search/recall annotation cannot drift
-            # from ``get_historical_knowledge``/``assembly``.
+            # from ``get_historical_knowledge``/``assembly``. The bounds are
+            # passed RAW: ``window_read_fields``' presence gate is
+            # ``is not None`` (a falsey-but-present bound — ``""``, ``0`` —
+            # is a REAL bound, matching ``_covers`` and
+            # ``_assert_window_start_not_inverted``). Pre-normalizing with
+            # ``or None`` here made the same stored window read ``day`` in
+            # assembly / ``get_historical_knowledge`` and ``None`` here — the
+            # exact cross-surface drift this module exists to prevent.
             _wf = window_read_fields(
-                row[2] or None, row[3] or None,
+                row[2], row[3],
                 row[21] if len(row) > 21 else None,
                 row[22] if len(row) > 22 else None,
             )

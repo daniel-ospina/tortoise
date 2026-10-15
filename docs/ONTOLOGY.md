@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.27"
+title: "Tortoise — Canonical Ontology v3.28"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-10-14
+updated: 2026-10-15
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.27
+# Tortoise — Canonical Ontology v3.28
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).

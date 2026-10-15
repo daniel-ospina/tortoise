@@ -54,6 +54,25 @@ response_fields:
   unchanged_when_off: n/a — not flag-gated; the key is absent on every non-outdated hit, so those responses stay
     byte-identical
 - response: tortoise_search
+  field: valid_from_precision
+  emitted_when: '#2350 — the hit is a Point carrying a validity window whose start precision is resolvable: one
+    of year|month|day (a legacy bare-ISO start reads as day). Emitted with the same block as valid_to_precision
+    and end_state, whenever valid_from / valid_to / valid_from_precision / valid_to_precision is present'
+  unchanged_when_off: n/a — not flag-gated; an undated hit stays byte-identical (no window keys at all), never
+    a defaulted value
+- response: tortoise_search
+  field: valid_to_precision
+  emitted_when: '#2350 — the end precision of the hit''s validity window: year|month|day, or the end-only `unknown`
+    marker (the window ENDED but is un-datable). Emitted with the same block as valid_from_precision and end_state'
+  unchanged_when_off: n/a — not flag-gated; absent when the point declares no end precision, so those hits stay
+    byte-identical
+- response: tortoise_search
+  field: end_state
+  emitted_when: '#2350 — the 3-state window end, one of open|known|unknown (tortoise/validity.py is its ONE home),
+    emitted whenever the point carries ANY window information so an ended-unknown window is never read as
+    still-true (the #2349 fabricated-coverage hazard)'
+  unchanged_when_off: n/a — not flag-gated; the key is absent on undated hits (byte-identical), never defaulted
+- response: tortoise_search
   field: provenance.currency
   emitted_when: 'TORTOISE_SEARCH_PROVENANCE is truthy (1/true/yes/on; unset or 0 means off) AND the hit is a Point
     — the §4.6 AGGREGATE over the Point''s `extractedFrom` links: current (every link current, at least one link),
@@ -120,6 +139,22 @@ response_fields:
   unchanged_when_off: 'NO for the ambiguous reply, yes for the found and absent replies — not flag-gated. On the
     found and absent replies the value is unchanged; on the ambiguous reply `found` changed from ABSENT to True,
     which is the deliberate #7818 contract fix (a consumer must branch on `status`, not on `found` alone)'
+- response: sdk:get_historical_knowledge
+  field: chain[].valid_from_precision / chain[].valid_to_precision / chain[].end_state (and the same triple on valid_point / candidates / nearest)
+  emitted_when: '#2350 — the additive precision block on EVERY chain entry and on each resolved entry: valid_from_precision
+    (year|month|day), valid_to_precision (year|month|day or the end-only `unknown`), end_state (open|known|unknown).
+    Resolved by `window_read_fields` in tortoise/validity.py, the ONE read-projection home'
+  unchanged_when_off: n/a — not flag-gated; additive keys, and a legacy dated window still reads as day / open
+- response: sdk:get_historical_knowledge
+  field: end_state_unknown
+  emitted_when: '#2350 — only when at least one COVERING candidate''s end is un-datable (validToPrecision = unknown
+    with no validTo); true, and always alongside indeterminate_end_ids'
+  unchanged_when_off: yes — absent when no covering candidate has an unknown end, so those replies stay byte-identical
+- response: sdk:get_historical_knowledge
+  field: indeterminate_end_ids
+  emitted_when: the same condition as end_state_unknown, always alongside it — the ids of the covering candidates
+    whose end is un-datable (#2350)
+  unchanged_when_off: yes — absent when no covering candidate has an unknown end
 - response: sdk:capture_session
   field: graph_ops
   emitted_when: always on the SDK path — the capture's measured graph-operation count as {total, by_phase}, added

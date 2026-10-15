@@ -1323,6 +1323,19 @@ def _fold_journal(events: list[dict]) -> dict:
             if t in ("PointSuperseded", "PointInvalidated"):
                 entry["outdated"] = True
                 entry["validTo"] = ev.get("valid_to")
+                # #2350: `validToPrecision` rides the SAME node the live writers
+                # stamp (`sdk.py` `invalidate_point`/`supersede_point` SET
+                # `n.validToPrecision`, and the graph/replay folds restore it).
+                # Mirroring `validTo` keeps this reference (the ground truth
+                # `check_consistency` compares the graph against) able to state
+                # it: without this the key was graph-ONLY, in neither
+                # `_EXCLUSION_REASONS` nor `_ONE_SIDED_REASONS`, so a health
+                # check reddened every precision-carrying terminalizer with a
+                # divergence its own advice could not clear — the #5048/#3817
+                # class. A `None` value is dropped by `_canonical_point_fields`
+                # (the writer cannot persist a null property), so the legacy
+                # no-precision path stays symmetric-absent.
+                entry["validToPrecision"] = ev.get("valid_to_precision")
                 # Only when the journal states it: the writer falls back to a
                 # wall-clock `_now_iso()`, which the journal cannot state.
                 if ev.get("expired_at"):

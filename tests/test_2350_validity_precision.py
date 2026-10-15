@@ -356,6 +356,72 @@ def test_assembly_window_rows_carry_the_precision_block(lane):
     assert row["valid_to_precision"] == "unknown"
 
 
+def test_falsey_but_present_bound_resolves_identically_on_all_three_read_paths(lane):
+    """#2350 review P2: the ONE read-projection home gates on ``is not None``
+    (a falsey-but-PRESENT bound — ``validFrom=""`` — is a REAL bound, the
+    same predicate ``_covers`` orders with), so search/recall, assembly and
+    ``get_historical_knowledge`` must resolve the SAME stored window the same
+    way. Pre-fix, ``fetch_point_epistemic_state`` pre-normalized with
+    ``or None`` (precision ``None``) and ``SearchResult.to_dict`` dropped the
+    block entirely, while the other two surfaces said ``day``/``open`` — the
+    exact cross-surface drift the module exists to prevent."""
+    sdk, _events = lane
+    from tortoise.assembly import docker_walker_port
+
+    p = sdk.create_point("statement", "empty start", validFrom="")
+    # non-vacuous: the empty string is STORED (a falsey-but-present bound),
+    # not refused and not normalized away at the write boundary.
+    assert _props(sdk, p["id"])["validFrom"] == ""
+
+    # 1. get_historical_knowledge (raw bound)
+    gk = sdk.get_historical_knowledge(p["id"], A_DATE)
+    assert gk["chain"][0]["valid_from_precision"] == "day"
+    assert gk["chain"][0]["end_state"] == "open"
+
+    # 2. assembly window rows (raw bound)
+    port = docker_walker_port(sdk)
+    today = datetime.date.today()
+    row = next(r for r in port.window_rows(today, today) if r["id"] == p["id"])
+    assert row["valid_from_precision"] == "day"
+    assert row["end_state"] == "open"
+
+    # 3. search/recall wire — the outlier pre-fix
+    hit = next(r for r in _scan(sdk) if r["id"] == p["id"])
+    assert hit["valid_from_precision"] == "day"
+    assert hit["end_state"] == "open"
+
+
+def test_check_consistency_reference_fold_states_the_terminalizer_precision(lane):
+    """#2350 review P1: ``check_consistency``'s reference fold must state
+    ``validToPrecision`` on every precision-carrying terminalizer.
+
+    The live writers (``invalidate_point`` / ``supersede_point``) SET
+    ``n.validToPrecision`` and the graph/replay folds restore it, so a
+    reference fold that omits it reports a graph the live path itself wrote
+    as diverged — with advice ("replay the journal") that cannot clear it,
+    the #5048/#3817 class. Fails on the pre-fix fold, where ``validToPrecision``
+    is graph-only and lands in ``fields``."""
+    from tortoise.consistency import check_consistency
+
+    sdk, events = lane
+    # (a) invalidate with the closed-unknown end
+    a = sdk.create_point("statement", "a", validFrom="2024-01-01")
+    other = sdk.create_point("statement", "other", validFrom="2024-06-01")
+    sdk.invalidate_point(a["id"], other["id"], valid_to_precision="unknown")
+    # (b) supersede inheriting a declared precision from the successor's start
+    b = sdk.create_point("statement", "b", validFrom="2024-02-01")
+    c = sdk.create_point("statement", "c", validFrom="2025-03-01",
+                         validFromPrecision="month")
+    sdk.supersede_point(b["id"], c["id"])
+    # (c) a legacy supersede with NO precision stays symmetric-absent
+    d = sdk.create_point("statement", "d", validFrom="2024-03-01")
+    e = sdk.create_point("statement", "e", validFrom="2026-01-01")
+    sdk.supersede_point(d["id"], e["id"])
+
+    result = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+    assert result["ok"], result.get("divergent_points")
+
+
 # ── surface discipline (no new MCP tool; params on existing verbs only) ───
 
 def test_no_new_mcp_tool_was_added_for_precision():
@@ -375,6 +441,31 @@ def test_precision_is_an_optional_param_on_existing_write_verbs():
                for p in inspect.signature(TortoiseSDK.create_point).parameters.values())
     assert any(p.kind is inspect.Parameter.VAR_KEYWORD
                for p in inspect.signature(TortoiseSDK.update_point).parameters.values())
+
+
+# ── the ONTOLOGY record: the doc self-identifies as its newest changelog ──
+
+def test_ontology_version_matches_its_newest_changelog():
+    """#2350 review P2: the canonical doc must self-identify as the version of
+    its NEWEST changelog entry — the convention its own history follows
+    (``98e46c089`` bumped title+H1 to v3.27 with Changelog v3.27; ``cd5d7a7aa``
+    for v3.26). The #2350 diff added Changelog v3.28 while leaving the
+    frontmatter title and H1 at v3.27. Fails on the pre-fix doc."""
+    import re
+    from pathlib import Path
+
+    doc = (Path(__file__).resolve().parent.parent
+           / "docs" / "ONTOLOGY.md").read_text(encoding="utf-8")
+    title = re.search(r'^title: "Tortoise — Canonical Ontology v([\d.]+)"',
+                      doc, re.M)
+    h1 = re.search(r'^# Tortoise — Canonical Ontology v([\d.]+)$', doc, re.M)
+    assert title, "ONTOLOGY frontmatter title is missing"
+    assert h1, "ONTOLOGY H1 is missing"
+    changelog = re.findall(r"Changelog v([\d.]+) \(", doc)
+    assert changelog, "ONTOLOGY carries no changelog entries"
+    newest = max(changelog, key=lambda v: tuple(int(x) for x in v.split(".")))
+    assert title.group(1) == newest, (title.group(1), newest)
+    assert h1.group(1) == newest, (h1.group(1), newest)
 
 
 if __name__ == "__main__":  # pragma: no cover

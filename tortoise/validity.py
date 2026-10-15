@@ -188,6 +188,13 @@ def window_read_fields(
     be merged into an existing entry; the legacy default (no precision props,
     a dated bound) yields ``day`` for a present bound and ``open`` for an
     absent end — the pre-#2350 reading.
+
+    Callers pass the bounds RAW. The presence gate is ``is not None`` (inside
+    ``effective_precision``/``end_state``), so a falsey-but-present bound —
+    ``""``, ``0`` — is a REAL bound and reads as ``day``, the same predicate
+    ``_covers`` orders with. Pre-normalizing at a call site (``bound or
+    None``) makes the same stored window resolve differently per surface,
+    which is the drift this home exists to prevent (#2350 review P2).
     """
     return {
         "valid_from_precision": effective_precision(valid_from, valid_from_precision),
