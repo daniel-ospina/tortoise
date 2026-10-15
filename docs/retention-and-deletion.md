@@ -21,6 +21,8 @@ related:
     note: "Owner ruling: account memory is the ACCOUNT's property — a person's erasure deletes the identity layer and severs the analytics linkage, and never reaches into the account's memory. The account-side PII filter / selective delete is DEFERRED (not prioritised); this document carries the boundary so a well-meaning adjacent change cannot quietly reverse it."
   - issue: 8032
     note: "Auth-session-store GC grace registered 2026-10-12: the D1 `sessions` table keeps a dead row for a grace past its own `expires_at` before deleting it. An implementation window for an internal credential store — registered here because this document is where a window may be stated, but it is NOT one of the deletion promise's windows and changes no customer-facing wording."
+  - issue: 7351
+    note: "Derived kind-index cache registered 2026-10-15: `data/kind_index/*.npz` is regenerable from its spec — bounded LRU (a named constant), never user content, and carrying no retention window. Registered so an ops reader can see that deleting it is always safe."
 ---
 
 # Retention and Deletion — the one promise
@@ -272,6 +274,23 @@ this is **credential hygiene**, a different axis from the deletion promise above
 and it is exempt from the "link or be a named constant" rule by the same logic
 as the operational event store. The control-plane audit trail lives in
 `audit_events`; no deletion here destroys an audit record.
+
+## A different axis: the derived kind-index cache (#7351)
+
+`DEFAULT_CACHE_DIR` (`data/kind_index/*.npz`, `tortoise/kind_index.py`) is the
+classifier's content-addressed kind-embedding index. Every file is **derived** —
+regenerated from its spec on demand — so it is not user content, holds no
+personal data, and carries **no retention window**: deleting any file, or the
+whole directory, is always safe and costs one re-embed. It is exempt from the
+"link or be a named constant" rule by the same logic as the operational event
+store.
+
+It is nonetheless **bounded**, because its key space is tenant-growable: the
+spec varies per graph's installed-namespace gate (#5163), so `persist` added
+one npz per distinct gate and nothing deleted one (#7351). `persist` now sweeps
+the directory to `_MAX_PERSISTED_INDEXES` least-recently-used files (recency is
+refreshed on `load`, so a hot gate's index is not evicted for merely being the
+oldest *write*), and eviction is a re-embed, never a wrong answer.
 
 ## A different axis: the product-usage record (#3843)
 
