@@ -24,6 +24,9 @@ data/migrations/
 # untracked; it is ignored, not tracked, so a fresh clone installs from the lockfile.)
 website/apps/dashboard/node_modules/
 website/apps/blog-admin/node_modules/
+# #4311: the pinned TypeScript toolchain for `website/functions/**` (tsconfig +
+# lockfile live here because a file under website/ is staged for public upload).
+tools/ts/node_modules/
 .venv/
 
 # #3775: the dashboard bundle is GENERATED, not source. Vite builds it from

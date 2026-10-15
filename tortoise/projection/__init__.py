@@ -1140,12 +1140,21 @@ def _config_classes() -> tuple[_ConfigClass, ...]:
         # safe.
         from tortoise.pack_manifest_store import PACK_MANIFEST_LABEL
         from tortoise.pack_state import PACK_INSTALL_LABEL
+        from tortoise.pipeline import PIPELINE_LABEL, PIPELINE_STAGE_LABEL
         from tortoise.residency import DECLARATION_META_KEY
         from tortoise.sdk import TortoiseSDK
 
         classes = (
             _ConfigClass(PACK_INSTALL_LABEL, "namespace"),
             _ConfigClass(PACK_MANIFEST_LABEL, "namespace"),
+            # #2792: per-graph pipelines are graph-resident authoritative
+            # configuration (the tenant owns its stage list), non-journaled and
+            # not re-derivable — so they enrol here, or a rebuild silently
+            # reverts a customised pipeline to the pack default. Stages carry
+            # their own `pipelineKey` (denormalised, no edge) precisely because
+            # this registry captures nodes only.
+            _ConfigClass(PIPELINE_LABEL, "pipelineKey"),
+            _ConfigClass(PIPELINE_STAGE_LABEL, "stageKey"),
             # `:Meta` is SHARED with derived markers (the FTS keys), so this
             # class is key-scoped: a label-wide read would sweep them in.
             # `residency` (#7952) is the completeness marker's declared
@@ -14711,8 +14720,9 @@ class FalkorProjection(
         ALL four factor-extraction call sites. Terminal points are excluded
         UNCONDITIONALLY (#2422): ``_live_only`` returns the terminal-exclusion
         fragment even under the include_draft escape hatch, so drafts are
-        re-included but retracted/superseded/outdated/archived points (and
-        the ``outdated=true`` flag) never feed SVBP factors.
+        re-included but retracted/superseded/outdated/archived/deprecated
+        points (the canonical ``live.TERMINAL_EXCLUDED_STATUSES``, plus the
+        ``outdated=true`` flag) never feed SVBP factors.
         """
         # Query 1: all operator IDs and types (single query, O(1) round-trip).
         # #689/#2422: terminal operators never feed EP factors (retracted /

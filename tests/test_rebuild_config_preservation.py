@@ -250,12 +250,20 @@ def test_config_registry_covers_domain_writers(tmp_path):
     from tortoise import pack_manifest_store, pack_state
     from tortoise.pack_manifest_store import PACK_MANIFEST_LABEL
     from tortoise.pack_state import PACK_INSTALL_LABEL
+    from tortoise.pipeline import PIPELINE_LABEL, PIPELINE_STAGE_LABEL
     from tortoise.projection import _CONFIG_RESET_KEY, _config_classes
     from tortoise.residency import DECLARATION_META_KEY
     from tortoise.sdk import TortoiseSDK
 
     classes = {c.label: c for c in _config_classes()}
-    assert set(classes) == {PACK_INSTALL_LABEL, PACK_MANIFEST_LABEL, "Meta"}
+    assert set(classes) == {
+        PACK_INSTALL_LABEL, PACK_MANIFEST_LABEL, "Meta",
+        PIPELINE_LABEL, PIPELINE_STAGE_LABEL,
+    }
+    # #2792: per-graph pipelines are authoritative config (a rebuild must not
+    # silently revert a customised stage list to the pack default).
+    assert classes[PIPELINE_LABEL].identity_prop == "pipelineKey"
+    assert classes[PIPELINE_STAGE_LABEL].identity_prop == "stageKey"
 
     meta = classes["Meta"]
     assert meta.identity_prop == "key"

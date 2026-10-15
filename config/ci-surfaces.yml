@@ -2371,6 +2371,12 @@ surfaces:
   # and pack_state/pack_manifest_store are the writer modules whose labels
   # the registry must agree with.
   - test_rebuild_config_preservation.py
+  # #2792: configurable per-graph pipelines. The subject is
+  # `tortoise/pipeline.py` (+ the `kindDefs.pipeline` validation in
+  # `pack_registry.py` and the `:Pipeline`/`:PipelineStage` enrolment in
+  # `projection/__init__.py`) — none matches a named SOURCE_PATTERN, so the
+  # change falls through to `core` and this arm is what runs it.
+  - test_pipeline_2792.py
   # #4653: the same wipe+replay drives the `event_meta` sidecar section and the
   # watermark re-derivation, both in tortoise/projection/ (core fallback) over
   # tortoise/event_store.py's allocator.
@@ -3026,6 +3032,16 @@ surfaces:
   # environment cannot express the cross-agent 403 (one key) or archived→409
   # (the agent API cannot archive) — those cases live here.
   - test_blog_agent_delete_guard.py
+  # #4311: the CREATE status narrowing, executed against the same Function. The
+  # fix moved the invariant into a type (PostStatus); a type fixes the SHAPE and
+  # says nothing about the behaviour callers depend on, so the draft default,
+  # the refusal of an invalid status, and the published-only rules are driven
+  # here. Same Node harness, same Function, no wrangler/network/DB.
+  - test_blog_post_status_validation.py
+  # #4311: the strict tsc project + CI job that typecheck website/functions/**
+  # (tools/ts/README.md). A gate is worth what its wiring is worth, so the
+  # tsconfig, the pinned toolchain and the workflow job are pinned here too.
+  - test_website_functions_typecheck.py
   - test_dashboard_unknown_address.py
   # #2409: the public contact form. The handler's behaviour — the byte ceiling
   # (including what it SPENDS), the rate limiter, the honeypot, the transport —
@@ -3634,6 +3650,7 @@ slow_files:
 - test_pack_shipping_wheel.py
 - test_projection.py
 - test_rebuild_config_preservation.py  # #2814: drives the real full rebuild_all wipe+replay
+- test_pipeline_2792.py  # #2792: per-graph pipeline config + stage movement over the embedded EntityMutated journal/rebuild
 - test_rebuild_parity_fail_loud_3585.py  # #3585: 76 tests driving real FalkorDB rebuild/recover cycles (~36s on a healthy docker lane MEASURED 2026-10-08 WHEN THE FILE COLLECTED 47; it now collects 76, of which #7719 contributed 10 (66 -> 76), so ~36s is a LOWER bound and the committed 45.0 weight predates those 10 — refresh with `tools/ci_timing.py --refresh-durations`; the earlier ~470-720s figures were taken on this host at load ~97 — see its durations note)
 - test_projection_embedded_socket_timeout.py  # #3350: embedded lane socket timeout (carve-out)
 - test_projection_lifecycle.py
@@ -3812,6 +3829,11 @@ carve_out:
 # carve-out is load-bearing — the pins exercise the real unconditional wipe,
 # which the server-side bulk-wipe guard refuses on a non-test graph).
 - test_rebuild_config_preservation.py
+# #2792: configurable per-graph pipelines — the state pins drive the real
+# `EntityMutated` journal + `rebuild_all` replay, so the embedded carve-out is
+# load-bearing (a URI-set lane would redirect the construction and lose the
+# replay). Mirror of the `test_pipeline_2792` rows above.
+- test_pipeline_2792.py
 # #7852 W1: the Layer-2 `semantics` write-path guard is embedded-only — the
 # fixture builds `TortoiseSDK(<tmpfile>)` and drives the real `rebuild_all`
 # replay, so the carve-out is load-bearing (a URI-set lane would redirect it).
@@ -4829,6 +4851,8 @@ durations:
   test_ask_spotcheck_seed_shape.py: 0.3
   test_battery_recall_wiring.py: 0.3
   test_blog_agent_delete_guard.py: 2.5
+  test_blog_post_status_validation.py: 2.5  # #4311: analogue estimate (same Node type-stripping harness as test_blog_agent_delete_guard.py); refresh from the first post-merge junit artifact
+  test_website_functions_typecheck.py: 2.0  # #4311: analogue estimate (measured 1.9s locally — JSON/YAML reads + the executed gate script); refresh from the first post-merge junit artifact
   test_capture_cost_measurement.py: 4.3
   test_capture_entity_attachment_3664.py: 5.9
   test_capture_install.py: 16.6

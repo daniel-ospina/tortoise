@@ -65,6 +65,7 @@ from .sdk_retired import retirement_hint
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import _live_only  # #6597 dream coverage closure mirrors EP liveness
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
+from .live import _current_status_clause  # #4058 canonical current-status allow-list
 from .live import epistemic_label_queries  # #7853 epistemic-label id sweep
 from .live import epistemic_disjunction  # #7853 epistemic-label traversal clause
 from .live import ACCEPTED_DIRECTION_VALUES  # #7852 Layer-1 four-value direction set
@@ -250,8 +251,15 @@ BASELINE_SOURCE_DISPLAY: dict[str, str] = {
 # — terminal states plus the legacy outdated flag (supersede/invalidate set
 # status='superseded'/'outdated' AND/OR outdated=true). draft/live are the
 # only statuses a connection to is NOT stale.
-STALE_TERMINAL_STATUSES = frozenset(
-    {'retracted', 'superseded', 'outdated', 'archived'})
+#
+# #4058: derived from the canonical Point exclusion, never a second literal.
+# The by-value copy that used to sit here was ``live.TERMINAL_STATUS_VALUES``,
+# so it OMITTED the legacy ``deprecated``: a connection to a deprecated Point
+# was not flagged stale while every read surface (search, recall, EP) excluded
+# that Point as non-current — the same "a reader re-declares a subset" class as
+# #2901. The canonical set is
+# live.TERMINAL_EXCLUDED_STATUSES = TERMINAL_STATUS_VALUES | {deprecated}.
+STALE_TERMINAL_STATUSES = TERMINAL_EXCLUDED_STATUSES
 
 # The structural rels `supersede_point` transfers in its 2b leg (#122). Single
 # source of truth for the WRITER and for every mirror of it: the MCP dry-run
@@ -2879,8 +2887,9 @@ def _raise_update_point_status_error(proj, id: str) -> None:
 
     #1088: an already-LIVE point is short-circuited in ``update_point``
     (idempotent no-op), so the only statuses that reach this error are the
-    TERMINAL ones (retracted / superseded / outdated / archived) — a terminal
-    point is never resurrected by update_point.
+    TERMINAL ones (``live.TERMINAL_EXCLUDED_STATUSES``: retracted /
+    superseded / outdated / archived / deprecated) — a terminal point is never
+    resurrected by update_point.
     """
     exists = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN count(n)", params={"id": id},
@@ -10783,7 +10792,8 @@ class TortoiseSDK:
           - operator node → blocked {blocked: True, reason: "is_operator"} —
             operators only go live via the R16 endpoint gate (matching
             retract_point's operator rejection)
-          - terminal (retracted/superseded/outdated/archived) → blocked
+          - not draft/live (terminal — retracted/superseded/outdated/archived,
+            or the legacy `deprecated` — or an absent status) → blocked
             {blocked: True, reason: "not_draft"}
           - Point belongs to a QUARANTINED batch → blocked
             {blocked: True, reason: "batch_quarantined", batch_id} — quarantine
@@ -12251,10 +12261,10 @@ class TortoiseSDK:
         for full-scan mode with EP annotation.
 
         #1391: the default exclusion now covers ALL terminal statuses
-        (retracted, superseded, outdated, archived) — stale claims are not
-        served as current. include_retracted (name kept for compat) surfaces
-        them for audit. Use a raw Cypher query via proj.g.query() to inspect
-        tombstones.
+        (``live.TERMINAL_EXCLUDED_STATUSES``: retracted, superseded, outdated,
+        archived, deprecated) — stale claims are not served as current.
+        include_retracted (name kept for compat) surfaces them for audit. Use
+        a raw Cypher query via proj.g.query() to inspect tombstones.
         """
         proj = self._get_proj()
         clauses = self._operator_scope_clauses(kind)
@@ -12307,7 +12317,8 @@ class TortoiseSDK:
         #432 Task 2: retracted points (status='retracted') are EXCLUDED by
         default — pass include_retracted=True, or an explicit status= filter,
         to surface tombstones. #1391: the default exclusion now covers ALL
-        terminal statuses (retracted, superseded, outdated, archived).
+        terminal statuses (``live.TERMINAL_EXCLUDED_STATUSES``: retracted,
+        superseded, outdated, archived, deprecated).
         """
         # #1914: invalid pagination params fail cleanly instead of looping
         # (limit=0 → hasMore = skip + 0 < total always True on non-empty
@@ -14961,7 +14972,7 @@ class TortoiseSDK:
             "size(targets) < size($inputs)",
             "all(x IN targets WHERE x IN $inputs)",
             "size(targets) > 0",
-            "(o.status IS NULL OR o.status IN ['draft', 'live'])",
+            _current_status_clause("o.status"),
         ]
         if label is not None:
             pcond.append("o.label = $label")
@@ -15479,8 +15490,11 @@ class TortoiseSDK:
             EP signals. Flags IMPL/NAND edges (operator-mediated OR direct
             per the reification rule) where:
               * stale         — edge incident to a retracted/superseded/
-                                outdated/archived Point (or legacy
-                                outdated=true flag). suggested_action is
+                                outdated/archived/deprecated Point (or the
+                                legacy outdated=true flag). STALE_TERMINAL_STATUSES
+                                is the canonical exclusion set, so this list
+                                tracks it — the legacy `deprecated` member
+                                included (#4058). suggested_action is
                                 "re-point" when a CORRECTS successor exists,
                                 else "prune".
               * contested     — edge incident to a claim with high posterior
@@ -15718,7 +15732,7 @@ class TortoiseSDK:
             "MATCH (p:Point)-[:extractedFrom]->(s:Source) "
             "WHERE p.is_operator = false "
             "  AND p.embedding IS NOT NULL "
-            "  AND (p.status IS NULL OR p.status IN ['draft', 'live']) "
+            f"  AND {_current_status_clause('p.status')} "
             "  AND (p.outdated IS NULL OR p.outdated = false) "
             "  AND s.sourceKind IN $registered "
             "RETURN p.id, p.content, p.status, s.id, s.url, s.sourceKind, "
@@ -15828,7 +15842,7 @@ class TortoiseSDK:
         rows = proj.g.query(
             "MATCH (n:Point) "
             "WHERE n.is_operator = false "
-            "  AND (n.status IS NULL OR n.status IN ['draft', 'live']) "
+            f"  AND {_current_status_clause('n.status')} "
             "  AND (n.outdated IS NULL OR n.outdated = false) "
             "RETURN n.id, n.content, n.status, n.updatedAt",
         ).result_set
@@ -22039,7 +22053,24 @@ class TortoiseSDK:
 
     # Status values excluded from the UC1 "current state" view by default.
     # `retracted` is additionally hard-excluded at the retrieval layer (#689).
-    STATE_EXCLUDED_STATUS = frozenset({"superseded", "deprecated", "retracted"})
+    #
+    # #4058: a NARROWING of the canonical Point exclusion
+    # (``live.TERMINAL_EXCLUDED_STATUSES``), DERIVED rather than re-literalised
+    # so a status added to the Point vocabulary cannot drift out of it. The two
+    # omitted members are not a visibility promise: this set is an ADDITIONAL,
+    # narrower filter applied on top of the canonical one — ``tortoise_fts_query``
+    # applies ``live.TERMINAL_EXCLUDED_STATUSES`` at the retrieval layer whenever
+    # ``include_terminal=False`` (this set's only active mode; it is ``None``
+    # once ``include_superseded`` is set), and
+    # ``fallback_snapshot.search_snapshot`` composes the canonical set with
+    # ``exclude_status`` — so an ``outdated``/``archived`` Point is excluded by
+    # the canonical layer and this set can never widen the read. Measured
+    # 2026-10-14 (#4058, embedded lane): an archived or outdated Point is absent
+    # from the default state view and present under ``include_superseded=True``.
+    # This is also the value the #3308 pin computes
+    # (``OBJECT_TERMINAL_STATUSES - {"archived"}``).
+    STATE_EXCLUDED_STATUS = TERMINAL_EXCLUDED_STATUSES - {
+        "outdated", "archived"}
     # About-edge family used for object-centric linking (mirrors
     # ranking.ABOUT_EDGE_TYPES and supersede_point's about* structural rels).
     _ABOUT_TYPES = "aboutSubject|aboutObject|aboutAction|aboutEvent|aboutPoint|aboutDocument"
