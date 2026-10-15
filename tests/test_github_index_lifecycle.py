@@ -1368,11 +1368,19 @@ def test_baseexception_exit_persists_cursors_and_schedules_eviction(
     the per-repo cursors are only persisted at that ONE site. A cancelled run
     therefore lost every cursor it had accumulated (repos already walked and
     committed to the graph), and its ``_INDEX_JOBS``/``_INDEX_JOB_OWNERS``
-    entry was never evicted. Pre-#4709 both ran in the walk try's ``finally``,
-    which is the language guarantee this test pins.
+    entry was never evicted.
 
-    Pre-fix this test FAILS: nothing is persisted, so the seeded-empty cursor
-    stays empty.
+    This pins two properties. (1) The #1792 P2 durability guarantee — a
+    ``BaseException`` exit still persists the accumulated cursors and arms
+    eviction — which the pre-#4709 ``finally`` already held, so this half is a
+    forward-looking guard, not a falsification of main. It is a real
+    regression pin for this PR's own intermediate revision (``cf9460a25``),
+    which moved the persist out of the ``finally`` entirely and so persisted
+    NOTHING on this exit. (2) The #4709 leg the pre-#4709 code could NOT
+    satisfy: the persist now rides the index job's OWN pool, so it runs on a
+    ``tortoise-index`` worker, where pre-#4709 it ran INLINE on the loop (a
+    ``MainThread`` name). The thread-name assertion below fails on the
+    pre-#4709 shape.
 
     The cancel is injected by raising ``asyncio.CancelledError`` from the
     second repo's walk — the same ``BaseException`` class and the same exit
@@ -1394,10 +1402,23 @@ def test_baseexception_exit_persists_cursors_and_schedules_eviction(
     from tortoise.hosted_api import _INDEX_JOB_OWNERS
 
     # seed indexed state so the walk visits BOTH repos (otherwise the
-    # first-run ONE-repo bound walks repo1 only and the cancel never fires)
+    # first-run ONE-repo bound walks repo1 only and the cancel never fires).
+    # Seeded BEFORE the recording patch so its `MainThread` call is not counted.
     ha._update_onboarding_state(client.org_id, _echo=False, github_indexed=True)
     # shrink the eviction delay so the ``call_later`` is observable
     monkeypatch.setattr(ha, "_INDEX_JOB_EVICT_S", 0.05)
+
+    # record WHERE the BaseException-exit persist runs: pre-#4709 it ran INLINE
+    # on the loop (``MainThread``); the #4709 fix routes it through
+    # ``_run_off_loop(_INDEX_EXECUTOR, ...)`` (``tortoise-index_*``)
+    write_threads: list[str] = []
+    real_update = ha._update_onboarding_state
+
+    def _recording_update(*args, **kwargs):
+        write_threads.append(threading.current_thread().name)
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(ha, "_update_onboarding_state", _recording_update)
 
     orig_index_repo = GitHubIndexer.index_repo
 
@@ -1414,6 +1435,17 @@ def test_baseexception_exit_persists_cursors_and_schedules_eviction(
         with pytest.raises(asyncio.CancelledError):
             loop.run_until_complete(
                 ha._run_indexing(job_id, client.org_id, "acme", None))
+
+        assert write_threads, (
+            "the BaseException exit persisted NOTHING — the accumulated "
+            "cursors were lost (#1792 P2); pre-#4709 the walk try's `finally` "
+            "still wrote them")
+        assert all(n.startswith(_INDEX_THREAD_PREFIX) for n in write_threads), (
+            f"the BaseException-exit persist ran on {write_threads!r} — "
+            f"pre-#4709 it ran INLINE on the loop (a `MainThread` name), and "
+            f"`asyncio.to_thread` would name the loop's SHARED default "
+            f"executor (`asyncio_*`); the #4709 fix rides the index job's OWN "
+            f"pool (`{_INDEX_THREAD_PREFIX}*`) (#4709)")
 
         state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
         cursor = state.get("github_index_cursor") or {}

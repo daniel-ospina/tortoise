@@ -1122,16 +1122,28 @@ def _carries_index_state_updates(call: ast.Call) -> bool:
 #: ``_UNBOUNDED_OFFLOAD_SEAMS`` is by CALLEE NAME only, so
 #: ``asyncio.wait_for(_run_off_loop(...), timeout=...)`` reads as the unbounded
 #: seam. That is the exact shape the recorded NO-BOUND decision forbids, so the
-#: pins check the seam's ANCESTORS too.
+#: pins check the seam's ANCESTORS too. ``asyncio.timeout`` is an async context
+#: manager, so its real shape is ``async with asyncio.timeout(N): await seam`` —
+#: the seam is in the ``with`` BODY, never in the call's arguments — and both
+#: shapes are detected by ``_bound_wrapper_around`` below (#4709 review P3).
 _BOUND_WRAPPER_CALLEES = frozenset({"wait_for", "timeout"})
 
 
 def _bound_wrapper_around(call: ast.Call, node: ast.AST) -> str | None:
-    """The timeout-wrapper callee enclosing ``call`` as an argument, if any.
+    """The timeout-wrapper callee enclosing ``call``, if any.
 
-    Walks the PARENT chain (AST has no parent pointers) and reports a wrapper
-    whose arguments contain ``call``. A wrapper in the same expression that
-    does NOT contain the call (e.g. a bound on some other await) is ignored.
+    Walks the PARENT chain (AST has no parent pointers) and reports either
+    shape a bound can take:
+
+    * a CALL wrapper whose arguments contain ``call`` —
+      ``asyncio.wait_for(seam, timeout=...)``; and
+    * a ``with``/``async with`` whose context expression is a bound callee and
+      whose BODY contains ``call`` — ``async with asyncio.timeout(N): await
+      seam`` (``asyncio.timeout`` is a context manager, so the seam is never an
+      argument of its call and callee-name membership alone cannot see it).
+
+    A wrapper in the same expression that does NOT enclose the call (e.g. a
+    bound on some other await) is ignored.
     """
     parents: dict[ast.AST, ast.AST] = {}
     for parent in ast.walk(node):
@@ -1145,8 +1157,47 @@ def _bound_wrapper_around(call: ast.Call, node: ast.AST) -> str | None:
             args = [*parent.args, *(k.value for k in parent.keywords)]
             if any(current in ast.walk(a) for a in args):
                 return _callee_name(parent.func)
+        if isinstance(parent, (ast.With, ast.AsyncWith)) \
+                and any(current in ast.walk(stmt) for stmt in parent.body):
+            for item in parent.items:
+                if isinstance(item.context_expr, ast.Call) \
+                        and _callee_name(item.context_expr.func) \
+                        in _BOUND_WRAPPER_CALLEES:
+                    return _callee_name(item.context_expr.func)
         current = parent
     return None
+
+
+def test_bound_wrapper_detects_both_timeout_shapes():
+    """#4709 review P3: the NO-BOUND pin must see BOTH bound shapes.
+
+    ``asyncio.wait_for(seam, timeout=...)`` puts the seam in the wrapper's
+    ARGUMENTS; ``async with asyncio.timeout(N): await seam`` puts it in the
+    ``with`` BODY. The pins' failure text names both, so both must be
+    detectable — the pre-fix helper matched only the argument shape and left
+    the context-manager spelling (``asyncio.timeout``, the modern one) green
+    over a real bound (#2863/CPython #87185).
+    """
+    module = ast.parse(
+        "async def f(seam):\n"
+        "    await asyncio.wait_for(seam(), timeout=30)\n"
+        "    async with asyncio.timeout(30):\n"
+        "        await seam()\n"
+        "    await seam()\n"
+    )
+    func = module.body[0]
+    seam_calls = [
+        c for c in ast.walk(func)
+        if isinstance(c, ast.Call) and _callee_name(c.func) == "seam"]
+    assert len(seam_calls) == 3, seam_calls
+    assert {
+        _bound_wrapper_around(c, func) for c in seam_calls
+    } == {"wait_for", "timeout", None}, (
+        "the `asyncio.wait_for(seam, ...)` ARGUMENT shape and the `async with "
+        "asyncio.timeout(...): await seam` BODY shape must both be detected, "
+        "and an unbound `await seam()` must still report None — pre-fix the "
+        "`timeout` shape returned None, so the NO-BOUND pin stayed green "
+        "over a real bound (#4709 review P3)")
 
 
 def test_run_indexing_residual_is_named_head_on():
