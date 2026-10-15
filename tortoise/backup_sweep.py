@@ -267,9 +267,11 @@ def _explain_repair_stamped_breaches(
     the #8660 false positive forever. The count delta has no such gap — the
     repair is not counted until its node is actually gone, so it is first
     explained on the sweep that sees the drop, whichever sweep that is. The
-    stamp timestamp is used ONLY as a one-time fallback for a baseline written
-    before the count was recorded (:func:`_repair_count_and_window`), where no
-    count delta exists to compute.
+    stamp timestamp is used ONLY as a fallback for a baseline written before the
+    count was recorded (:func:`_repair_count_and_window`), where no count delta
+    exists to compute; it goes out of use once an accepted sweep RECORDS the
+    count (on a count-read failure there is no count to record, so the fallback
+    stays in force — see that function).
 
     The BOUND (not equality) is because the census is a NET count: a repair
     landing while an ``OnboardingStep`` node is ADDED shows a smaller delta, so
@@ -1033,7 +1035,9 @@ def _backup_graph(
     # keep explaining one future loss per sweep forever. A pre-#8660 baseline
     # has no count, so the window falls back to the repair's stamp time against
     # the baseline's `updated_at` — and closes if even that is unusable. A read
-    # failure carries the prior value forward (window stays closed). ──
+    # failure carries a PRIOR value forward and closes the window; with no
+    # prior value there is nothing to carry, so the field is left unrecorded
+    # (never a fabricated 0) and the stamp fallback stays in force. ──
 
     completed_repairs, repairs_since_baseline = _repair_count_and_window(g, prior)
 
