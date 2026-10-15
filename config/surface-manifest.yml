@@ -247,10 +247,6 @@ response_fields:
   field: advisories
   emitted_when: 'the alias door now surfaces the same advisory as create_entity(type=''event'') — `extracted_from_inert` when the write declares an extractedFrom this door does not wire (event writes have no `no_source`, see tortoise_create_entity). Additive key; the node properties are unchanged (#8171, review P2)'
   unchanged_when_off: 'n/a — not flag-gated; the key is ABSENT when there is no advisory, so the response stays byte-identical'
-  emitted_when: always on the hosted path — the same basis, on the operator the tool returns (#7852 W1, owner-approved
-    "w1 yes approved" 2026-10-09)
-  unchanged_when_off: n/a — not flag-gated; the tool returns the operator properties, so every pre-existing key
-    keeps its value
 # #8482: the repair at the dispatch seam moves a failure the tool's own advertised
 # output schema cannot carry off `structured_content` and onto the ERROR channel. The
 # status/prose half needs no record (it ships in `content`, which an error result always
