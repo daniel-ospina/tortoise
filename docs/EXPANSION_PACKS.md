@@ -43,6 +43,12 @@ ontology:
       folds:                  # event kind → status (must be in `statuses`)
         - event: contractSigned
           status: signed
+      pipeline:                # #2792: optional stage lifecycle for a stage-driven kind
+        defaultStage: stg_draft
+        stages:
+          - {id: stg_draft,  label: Draft,  order: 1, slot: entry}
+          - {id: stg_active, label: Active, order: 2, slot: active}
+          - {id: stg_done,   label: Done,   order: 3, slot: terminal, outcome: won}
   relations:                 # epistemic edge declarations (IMPL/NAND)
     - predicate: groundedIn
       mechanism: IMPL
@@ -67,6 +73,44 @@ extraction:
 
 1. **`memory_granularity` at the top level** — the value-brief compiler reads `ontology.memory_granularity`. Top-level is silently ignored. (The `_template` teaches the correct placement — copy it.)
 2. **A `kindDefs` key not declared in `objectKinds`/`pointKinds`/etc.** — the validator rejects it. Every kindDefs key must be a declared kind.
+
+## Declaring a per-kind stage pipeline (#2792)
+
+A stage-driven kind (a deal, an investment, a tranche, an action item) can declare its **default
+lifecycle** under `kindDefs[<kind>].pipeline`. The pack ships sensible defaults; each graph may
+**override** them (add / rename / reorder / retire a stage) without a code change or a pack release —
+the CRM model (Salesforce stages / HubSpot deal pipelines / Jira workflows).
+
+The model has two tiers: a small **canonical slot** vocabulary the graph understands, and the
+**tenant stage list** a graph owns.
+
+| field | required | meaning |
+|---|---|---|
+| `stages[].id` | ✅ | stable, immutable identity. Anchoring keys on this, never on the label, so a rename never moves an Object. Unique within the pipeline; must not contain the composite stage key's separator (`&#124;`). |
+| `stages[].label` | ✅ | the tenant-visible name (renameable). |
+| `stages[].order` | ✅ | integer; the forward/regression judgement for future moves. Values must be **unique and non-negative** — a tie would make a move between the two stages neither forward nor backward, so it is refused on the declaration path and by `add_stage(..., order=…)` alike. |
+| `stages[].slot` | ✅ | one of `entry`, `active`, `suspended`, `terminal`. Canonical and fixed. |
+| `stages[].outcome` | terminal only | required iff `slot: terminal`, one of `won`, `lost`, `withdrawn`, `completed`. |
+| `defaultStage` | optional | the declared default stage id. **Declaration-only in this change**: it is validated and stored, and read back by the mutators (it cannot be retired), but nothing applies it to a new Object yet — the stage a new Object enters is set by `advance_stage`, and a null stage reference is a no-op. The Graph Settings surface that consumes it is #2728. |
+
+State and history: the **current** stage is a property on the Object (`pipelineStageId`,
+`pipelineSlot`, `pipelineOutcome`, `pipelineStageSince`, `isClosed`) so a query always returns one
+answer; the **history** is the dated journal. A terminal stage is **sticky** — a passing later
+mention cannot resurrect a closed thing; only an explicit reopen does. Stickiness keys on the
+Object's durable `isClosed` marker **as well as** the resolved stage's slot, so a pack release that
+reclassifies the stage's slot cannot resurrect a closed Object. A stage reported by
+extraction that is not in the effective list is **captured for review** (`pipelineStagePending`),
+never dropped and never auto-adopted.
+
+Drift fails closed: an Object whose stored stage no longer resolves in the effective pipeline is
+**refused**, not advanced (skipping the guards is the resurrection vector), and a pipeline key that
+does not equal the Object's namespaced `objectKind` is refused too. That refusal deliberately has no
+public escape hatch in this change — a repair verb belongs to the Graph Settings surface (#2728).
+
+The canonical slot/outcome vocabulary and the shape rules live in `tortoise/pipeline.py`; the pack
+key is opt-in and validated exactly like the other `kindDefs` keys. The Settings UI that edits a
+graph's stages is #2728; the hardcoded connector `Object.status` fold is #2729 (a separate axis —
+pipeline stage is not `Object.status`).
 
 ## Declaring a relation — writable, or explicitly declaration-only (#2766)
 

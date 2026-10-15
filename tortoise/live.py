@@ -6,11 +6,13 @@ factor-extraction time EP would propagate drafts into live posteriors
 (nuclear-risk mitigation R1/R7/R8, insight-mining epic §4.5).
 
 Terminal Points (``retracted`` / ``superseded`` / ``archived`` / ``outdated``
-status, or the legacy ``outdated=true`` flag that ``invalidate_point`` writes
-without touching status) must NEVER contribute — a dead claim's ghost must
-not vote (eval-spec P6.3; ontology §5 terminal states; #2422). The terminal
-exclusion is UNCONDITIONAL: ``include_draft=True`` re-includes DRAFTS only,
-never terminal points.
+status, the legacy ``deprecated`` status, or the legacy ``outdated=true`` flag
+that ``invalidate_point`` writes without touching status) must NEVER
+contribute — a dead claim's ghost must not vote (eval-spec P6.3; ontology §5
+terminal states; #2422). The canonical set is ``TERMINAL_EXCLUDED_STATUSES``
+(``TERMINAL_STATUS_VALUES | {"deprecated"}``). The terminal exclusion is
+UNCONDITIONAL: ``include_draft=True`` re-includes DRAFTS only, never terminal
+points.
 
 The predicate is shared across ALL FOUR call sites so ``include_draft=True``
 re-includes drafts identically everywhere:
@@ -32,6 +34,14 @@ from __future__ import annotations
 # audit_beta_gate, 1714_dedup_observation) and a superseded/outdated claim was
 # then served as the CURRENT statement. Import ``TERMINAL_EXCLUDED_STATUSES``
 # from HERE instead.
+#
+# The partition has TWO canonical halves, and BOTH are imported, never
+# re-spelled: the terminal DENY-list (``TERMINAL_EXCLUDED_STATUSES`` /
+# ``_terminal_excluded``) and the CURRENT allow-list
+# (``CURRENT_POINT_STATUS_VALUES`` / ``_current_status_clause``). A hand-written
+# ``IN ['draft', 'live']`` at a call site is the allow-list's mirror of the same
+# defect — a status added to the vocabulary is silently DROPPED — and three
+# such literals lived in ``tortoise/sdk.py`` until #4058.
 #
 # live.py is the LEAF status module: ``tortoise/sdk.py`` imports it (sdk.py:
 # ``from .live import TERMINAL_EXCLUDED_STATUSES``), so the module can be
@@ -222,6 +232,29 @@ def _alive_flag(clause: str) -> str:
     in a single parenthesized boolean, safe to negate).
     """
     return f"(CASE WHEN {_terminal_expression(clause)} THEN false ELSE true END)"
+
+
+def _current_status_clause(clause: str) -> str:
+    """Cypher predicate: the node's status is CURRENT (or absent).
+
+    The ALLOW-LIST half of the #2901 partition — the exact counterpart of
+    ``_terminal_excluded``'s deny-list — derived from
+    ``CURRENT_POINT_STATUS_VALUES``. A status added to the Point vocabulary and
+    classified current by the parity test in
+    ``tests/test_terminal_status_vocabulary.py`` is admitted here with no second
+    edit; a hand-written ``IN ['draft', 'live']`` at a call site silently DROPS
+    it (the mirror image of the #2901 defect — three such literals lived in
+    ``tortoise/sdk.py`` until #4058).
+
+    An ABSENT status is current (legacy nodes — the same NULL handling as
+    ``_terminal_excluded``). The allow-list is deliberately NOT the negation of
+    the deny-list: an UNKNOWN status (neither declared current nor terminal) is
+    dropped here but admitted by ``NOT _terminal_excluded``, so the two are not
+    interchangeable — a caller that wants "not terminal" must call
+    ``_terminal_excluded``.
+    """
+    members = ", ".join(f"'{s}'" for s in sorted(CURRENT_POINT_STATUS_VALUES))
+    return f"({clause} IS NULL OR {clause} IN [{members}])"
 
 
 def is_draft_status(status) -> bool:

@@ -623,6 +623,9 @@ def test_no_redirect_stems_registry_exact():
         # #2814: authoritative-config durability across rebuild_all (embedded
         # carve-out — see config/ci-surfaces.yml `carve_out:`).
         "test_rebuild_config_preservation",
+        # #2792: per-graph storage + stage movement over the embedded
+        # EntityMutated journal/rebuild replay (see carve_out).
+        "test_pipeline_2792",
         "test_redis_guard",
         "test_smoke_embedded",
         # #3644: the version-window pins construct embedded stores and assert

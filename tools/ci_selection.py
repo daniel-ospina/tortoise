@@ -637,6 +637,15 @@ SOURCE_PATTERNS = {
                    # the checker) must select this surface, or the ratchet that
                    # classifies the new entry never runs on the PR that owns it.
                    "tools/check_pages_upload_root.py",
+                   # #4311: the strict tsc project + pinned toolchain that
+                   # typecheck website/functions/** live in tools/ts/ (outside the
+                   # Pages upload root — see tools/ts/README.md). `tools/` is a
+                   # flat NON_PYTHON_PREFIXES entry, so without this an edit to
+                   # the project (removing `strict`, dropping a dependency)
+                   # selects NO surface (`surfaces=[]`, `full=False`) and its guard
+                   # never runs on the change that disarms it — the
+                   # #3261/#3616/#8334 silent-drop class.
+                   "tools/ts/",
                    "config/pages-upload-classification.txt"),
     # NOTE: .github/workflows/deploy-pages.yml is deliberately NOT listed above.
     # A review pointed out that adding it would be a coverage DOWNGRADE: an

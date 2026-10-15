@@ -63,7 +63,12 @@ Pre-auth flows are a second table in the same database: `auth_flows` (`flow_id`,
 server-side and the `__Host-authflow` cookie is *bound* to a live row, which is what makes
 "cookie exists" insufficient. `email_flow_pending` is the third: the verified email link held
 for the consent step, whose `refresh_token` is a live credential. Both pre-auth tables carry an
-`expires_at` index, and both are swept once it passes (§5a).
+`expires_at` index, and both are swept once it passes (§5a). A fourth table, `auth_mail_throttle`,
+is not a pre-auth flow at all: it is the CALLER-scoped mail-request counter the BFF keeps for
+`/auth/reset` and `/auth/resend` (#4161) — a window-salted SHA-256 pseudonym of `CF-Connecting-IP`
+plus a hit count per one-hour window. It has no `expires_at`: it is reclaimed by window (§5a), and
+it is the one reader of this binding that deliberately does **not** answer 503 when it is absent
+(§5).
 
 ## 2. Migration path — this project has no `wrangler.toml`, deliberately
 
@@ -81,7 +86,9 @@ Four legs, all live:
    (sessions + token columns + `idx_sessions_user` + `idx_sessions_expires`), `ensureFlowTable`
    (`/auth/start`; it also calls `ensurePendingTable`, because this route sweeps that table's
    expired rows — §5a), `ensurePendingTable` (`/auth/confirm`), `ensureLinkFlowTable`
-   (`/auth/link`), `ensureAuthFlowIndexes`. Only `CREATE … IF NOT EXISTS` and
+   (`/auth/link`), `ensureAuthFlowIndexes`, `ensureThrottleTable` (`/auth/reset`,
+   `/auth/resend`; the fourth table, mirrored by `website/migrations/0002_auth_mail_throttle.sql`).
+   Only `CREATE … IF NOT EXISTS` and
    `ALTER TABLE ADD COLUMN` — never a destructive change. A fresh local database is
    self-establishing instead of mysteriously broken.
 2. **Explicit apply, for a real migration.** `wrangler d1 execute SESSIONS --file website/migrations/0001_auth_sessions.sql`
@@ -173,6 +180,13 @@ touches the store follows it:
 
 - `env.SESSIONS` missing → `503 session_store_unavailable` (`/welcome`, `/auth/confirm`,
   `/auth/password`, …) — never a redirect to `/auth`.
+- **One reader deliberately does NOT answer 503: `_shared/auth/mail-throttle.ts`** (#4161). A
+  missing or unreachable `SESSIONS` binding makes `/auth/reset` and `/auth/resend` **fail open**
+  (no throttle) rather than fail the mail flow — a throttle-store gap must not become a mail
+  outage (the #3485 class) — and failing open changes no security property, because both routes
+  still fold the provider refusal exactly as before. The fault is logged (`console.warn`), and
+  `config/required-bindings.yml` records that this binding's absence is a hard failure for every
+  other reader and a loss of throttling for these two.
 - A **throw** from `prepare/bind/first/run` → `503 session_store_unavailable`
   (`getAccessTokenForSession` returns `{ok:false, reason:"unavailable"}`; `resolveSession` returns
   `{unavailable:true}` for the same case). The convenience wrapper `getSessionUserId` collapses
@@ -202,6 +216,7 @@ the `sweepExpiredFlows` call" is not the whole fix — the PREDICATE is the fix:
 | `auth_flows` (#3647) | `expires_at < now` | the flow's declared life | `/auth/callback` refuses an expired row and `/auth/start` never reads one, so no live flow can be collected. |
 | `email_flow_pending` (#8032) | `expires_at < now` | the pending record's declared life | its only reader — `/auth/confirm` POST — refuses a row past `expires_at`, and nothing else reads the table. **The severity angle differs:** the row's payload is the flow's `refresh_token`, so an expired row was retaining a usable credential — `RECOVERY_MAX_AGE_S` bounds replay of the RECORD, not the token it carries. |
 | `sessions` (#8032) | `expires_at < now - SESSION_SWEEP_GRACE_S` | the session's declared life **plus a grace** | a reader deliberately looks at a row *after* its TTL: `/api/session` and `/api/profile` answer `session_expired` (a distinct 401 from `not_signed_in`) and revoke the row. The grace is what keeps that reachable, and it is the window upstream applies too (GoTrue deletes a session's row only after its expiry). |
+| `auth_mail_throttle` (#4161) | `window_start < floor(now, 1h) - 1h` | the caller's window, **plus the following one** | the row is a per-(route, caller, window) counter, not a credential: nothing reads it after its window, so the one-window grace is what makes the predicate a simple index range (`idx_auth_mail_throttle_window`). Reclaimed by `pruneExpired` from `/auth/reset` and `/auth/resend` — on the CREATING insert (`hits === 1`), which is the normal-traffic path, as well as on a trip — so retention is a function of time, not of the abuse pattern. |
 
 **The policy, stated once.** A `sessions` row is deleted after its own `expires_at` plus the
 grace held in `SESSION_SWEEP_GRACE_S`. **Revocation is never the trigger**, because revocation
@@ -214,15 +229,19 @@ is registered in `docs/retention-and-deletion.md` and is never restated here. Th
 store's own garbage collection: it is not one of the deletion *promise*'s windows, and it
 changes no customer-facing wording.
 
-**Where the sweeps run, and why there.** None of the three adds a route or a schedule.
+**Where the sweeps run, and why there.** None of the four adds a route or a schedule.
 `sweepExpiredFlows` and `sweepExpiredPending` run on `/auth/start` — the one auth path a
 schedule already drives (the #3628 probe, every 5 minutes), so collection is unconditional and
 stops only when the auth store stops being used at all. `sweepExpiredSessions` runs inside
 `createSession`, the single waist every session-minting route passes through (`/auth/callback`,
 `/auth/confirm`, `/auth/password`, `/auth/api-key`, `/auth/signup`): coupling it there gives a
-sixth route collection for free and leaves no five call sites to drift apart. Each sweep is
+sixth route collection for free and leaves no five call sites to drift apart. `pruneExpired` runs
+on the two routes that write `auth_mail_throttle`, from the request that CREATES a bucket
+(`hits === 1`) as well as from a refused one — a trip-gated prune alone would make reclamation
+depend on the abuse pattern rather than on time. Each sweep is
 capped by `FLOW_SWEEP_LIMIT` per call and drains the next slice on the next call, so a backlog
-is bounded work per request rather than one request draining years of rows.
+is bounded work per request rather than one request draining years of rows; `pruneExpired` is
+capped the same way, at `PRUNE_LIMIT` rows per statement and `PRUNE_MAX_BATCHES` per request.
 
 The cost argument for each sweep is its index — `idx_sessions_expires`,
 `idx_email_flow_pending_expires`, `idx_auth_flows_expires` — so each is created **where its
@@ -270,8 +289,8 @@ what "the largest table in the store" would otherwise have meant.
 | **Database** | `tortoise-sessions` — id `c16d027e-8c66-4f3d-aeda-5772ea54e101`, created 2026-09-16. |
 | **Bindings declared** | `config/required-bindings.yml`: `SESSIONS` / `d1_databases` / `required` for `premise-labs` **and** `tortoise-dashboard`, envs `production` + `preview`. Plus `SUPABASE_URL`, `SUPABASE_ANON_KEY` (`production`) for the token exchange the store's refresh leg performs. |
 | **Gate** | `tools/check_pages_bindings.py --manifest config/required-bindings.yml --project <name>`, run **before** deploy in `.github/workflows/deploy-pages.yml`; exit 2 = "could not determine" = fail closed. |
-| **Tables** | `sessions`, `auth_flows`, `email_flow_pending` (all created by the runtime bootstraps; `website/migrations/0001_auth_sessions.sql` mirrors them). |
-| **Row lifecycle** | every row of all three tables is deleted once its own `expires_at` has passed (§5a) — by `sweepExpiredSessions`, `sweepExpiredFlows` and `sweepExpiredPending`, on `/auth/start` and inside `createSession`. No cron, no scheduled worker, no route of its own. |
+| **Tables** | `sessions`, `auth_flows`, `email_flow_pending`, `auth_mail_throttle` (#4161) — all created by the runtime bootstraps; `website/migrations/0001_auth_sessions.sql` mirrors the first three and `website/migrations/0002_auth_mail_throttle.sql` mirrors the fourth. |
+| **Row lifecycle** | the three `expires_at` tables: every row is deleted once its own `expires_at` has passed (§5a) — by `sweepExpiredSessions`, `sweepExpiredFlows` and `sweepExpiredPending`, on `/auth/start` and inside `createSession`. `auth_mail_throttle` has no `expires_at`: its rows are reclaimed by `pruneExpired` (window predicate, bounded batches) from the two routes that write them, reached by the creating insert (`hits === 1`) as well as by a trip. No cron, no scheduled worker, no route of its own. |
 | **Verified by execution** | Gate 1b: read-after-write, `casRevokeChanges: 1`, `casIdempotent: true`, `bulkRevokeChanges: 1`. Evidence: `docs/engineering/auth-spike/GATE1-RESULT.md`. |
 | **Vendor docs read at** | `developers.cloudflare.com/d1/best-practices/read-replication/`, `developers.cloudflare.com/d1/platform/limits/` (2026-10-10). |
 

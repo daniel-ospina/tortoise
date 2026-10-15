@@ -46,8 +46,10 @@ MOCK_URL = ""
 KNOWN = {"email": "known@example.test"}
 UNKNOWN = {"email": "nobody@example.test"}
 REFUSED = {"email": "refused@example.test"}  # mock answers 422 user_not_found
-# The mock answers 429 for this address ONLY — GoTrue's `over_email_send_rate_limit`
-# is per ADDRESS, so the route must not let it distinguish accounts.
+# The mock answers 429 for this address ONLY. Real GoTrue's email limiter is
+# PROJECT-WIDE and has no key (#4161), so this is a deliberate
+# over-approximation: it reproduces the differential a real refusal can produce
+# (a refusal a fresh address would not get), which is what the fold must survive.
 RATELIMITED = {"email": "ratelimited@example.test"}
 
 
@@ -253,21 +255,23 @@ def test_malformed_input_is_400_and_gotrue_is_not_called(stack, payload):
     )
 
 
-def test_a_per_address_provider_429_is_an_indistinguishable_200(stack):
-    """A per-ADDRESS provider 429 must not leak existence (#4104).
+def test_a_provider_email_bucket_429_is_an_indistinguishable_200(stack):
+    """A provider 429 must not leak existence (#4104).
 
-    GoTrue's `over_email_send_rate_limit` is applied to the address being
-    mailed, so a 503 (what the retryable classification used to produce) would
-    make repeated resets for a KNOWN address differ from an UNKNOWN one — an
-    account-existence oracle, which this route explicitly promises not to be.
-    The mock answers 429 for `ratelimited@example.test` ONLY.
+    The refusal is GoTrue's PROJECT-WIDE `over_email_send_rate_limit` — a limiter
+    with no key — but the oracle is real anyway: `/recover` answers an address
+    with no account `200 {}` EARLY, before the email send, so an address that
+    exists can be refused while one that does not never can (#4161;
+    `_shared/auth/mail-throttle.ts` carries the source read). Folding it into the
+    200 keeps both address classes byte-identical. The mock answers 429 for
+    `ratelimited@example.test` ONLY.
     """
     _calls(reset=True)
     s_normal, b_normal, _ = _post(APP, "/auth/reset", KNOWN)
     s_limited, b_limited, _ = _post(APP, "/auth/reset", RATELIMITED)
 
     assert s_limited == 200, (
-        f"a per-address provider 429 must be folded into the enumeration-safe "
+        f"a provider refusal must be folded into the enumeration-safe "
         f"200, got {s_limited} {b_limited}"
     )
     assert s_normal == 200, f"the normal address must also be 200, got {s_normal} {b_normal}"

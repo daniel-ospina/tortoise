@@ -146,15 +146,20 @@ _PREDICATE_CONSUMERS = {
 }
 
 
-def _executable_string_constants(path: Path) -> list[tuple[int, str]]:
+def _executable_string_constants_from_source(
+        source: str) -> list[tuple[int, str]]:
     """String constants a module can put into a query — docstrings excluded.
 
     A re-declared status subset is a *code* literal; a prose mention in a
     docstring is not. Distinguishing them by AST (rather than by line-splitting
     on ``#``) makes the guard immune to formatting: a collection rendered one
     literal per line is still caught.
+
+    Takes SOURCE (not a path) so a guard can be exercised against a synthetic
+    snippet — the detector's own coverage is then pinned, not just its run
+    over one file.
     """
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(source)
     docstrings = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
@@ -170,6 +175,12 @@ def _executable_string_constants(path: Path) -> list[tuple[int, str]]:
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
         and id(node) not in docstrings
     ]
+
+
+def _executable_string_constants(path: Path) -> list[tuple[int, str]]:
+    """``_executable_string_constants_from_source`` over a file on disk."""
+    return _executable_string_constants_from_source(
+        path.read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("label", sorted(_PREDICATE_CONSUMERS))
@@ -366,10 +377,11 @@ def test_read_surface_exclude_set_is_derived_from_the_object_vocabulary() -> Non
     """#3308: ``TortoiseSDK.STATE_EXCLUDED_STATUS`` must not drift from the
     canonical OBJECT declaration.
 
-    It is a hand-written literal in ``sdk.py``, and the read surface's own
-    comment forbids re-literalising a vocabulary ("a copy is how the read
-    surface drifts from search"). The literal is deliberately the Object set
-    MINUS ``archived``, so the expectation is *computed* from
+    It is DERIVED in ``sdk.py`` (#4058: ``TERMINAL_EXCLUDED_STATUSES -
+    {"outdated", "archived"}``), not a hand-written literal, and the read
+    surface's own comment forbids re-literalising a vocabulary ("a copy is how
+    the read surface drifts from search"). The derived set is deliberately the
+    Object set MINUS ``archived``, so the expectation is *computed* from
     ``OBJECT_TERMINAL_STATUSES`` — never restated, so re-typing it cannot pass.
     """
     expected = OBJECT_TERMINAL_STATUSES - _ARCHIVED_VISIBLE_ON_READ
@@ -525,3 +537,425 @@ def test_python_mirror_truthiness_of_non_boolean_flags() -> None:
     assert is_terminal_status("live", 0) is False  # falsy residual: numeric
     assert is_terminal_status("live", "") is False  # falsy residual: empty str
     assert is_terminal_status("live", None) is False
+
+
+# ── 6. #4058 — the remaining sdk.py re-declarations are bound to the ────────
+#          canonical sets (the #2901 mirror: a reader re-deriving its own
+#          subset, and the allow-list omitting a future current status).
+
+def test_stale_terminal_statuses_is_the_canonical_point_exclusion() -> None:
+    """#4058 residual 1 — ``review_connections(mode=prune)``'s staleness set.
+
+    It used to be a by-value copy of ``TERMINAL_STATUS_VALUES``, so it omitted
+    the legacy ``deprecated``: a connection to a deprecated Point was not
+    flagged stale although every read surface excluded that Point. It must be
+    the canonical exclusion itself (not merely equal to it) so the
+    ``deprecated`` member cannot drift out again.
+    """
+    from tortoise.sdk import STALE_TERMINAL_STATUSES
+
+    assert STALE_TERMINAL_STATUSES is TERMINAL_EXCLUDED_STATUSES
+    assert "deprecated" in STALE_TERMINAL_STATUSES
+    assert is_terminal_status("deprecated") is True
+
+
+def test_state_excluded_status_cannot_name_a_current_point_status() -> None:
+    """#4058 residual 2 — the state view's additional filter.
+
+    It is a NARROWING of the canonical Point exclusion, so it may never name a
+    status the vocabulary calls CURRENT (that would hide a live claim), and
+    every member it omits must be a Point-vocabulary TERMINAL status — i.e.
+    one the canonical retrieval layer excludes before this narrower filter is
+    ever applied. Anything else would be a status the state view silently
+    leaks.
+    """
+    excluded = TortoiseSDK.STATE_EXCLUDED_STATUS
+    assert excluded <= TERMINAL_EXCLUDED_STATUSES, (
+        "the state view excludes a status the canonical Point exclusion does "
+        f"not: {sorted(excluded - TERMINAL_EXCLUDED_STATUSES)}"
+    )
+    assert not (excluded & CURRENT_POINT_STATUS_VALUES), (
+        "the state view would hide a CURRENT status: "
+        f"{sorted(excluded & CURRENT_POINT_STATUS_VALUES)}"
+    )
+    assert (TERMINAL_EXCLUDED_STATUSES - excluded) <= TERMINAL_STATUS_VALUES
+    # The legacy member #2901 ruled must be excluded is still excluded.
+    assert "deprecated" in excluded
+
+
+def test_sdk_admits_every_current_status_through_the_canonical_builder() -> None:
+    """#4058 residual 3 — the allow-list half of the partition.
+
+    Three Point pools in ``sdk.py`` hand-wrote ``IN ['draft', 'live']``, so a
+    status added to ``POINT_STATUS_VALUES`` and classified current by the
+    parity test above would have been silently DROPPED by them. The canonical
+    builder must admit exactly the current vocabulary (and, being an
+    allow-list, drop an unknown status).
+    """
+    from tortoise.live import _current_status_clause
+
+    clause = _current_status_clause("x.status")
+    admitted = set(re.findall(r"'([^']+)'", clause))
+    assert admitted == set(CURRENT_POINT_STATUS_VALUES)
+    assert "outdated" not in admitted
+    assert is_terminal_status("outdated") is True
+    # An absent status is current (legacy nodes) — the allow-list keeps the
+    # NULL branch the hand-written literal carried.
+    assert "x.status IS NULL" in clause
+
+
+def test_current_status_clause_derives_from_the_canonical_vocabulary() -> None:
+    """#8662 P3 — pin the builder's DERIVATION, not only its rendered value.
+
+    ``_current_status_clause`` renders the identical string whether it iterates
+    ``CURRENT_POINT_STATUS_VALUES`` or hardcodes the two members, so the value
+    assertion above cannot see a re-literalisation of ``live.py`` — the one file
+    that is supposed to be the single source of truth. Mirror the
+    ``STATE_EXCLUDED_STATUS`` derivation pin: the body must ITERATE the
+    canonical vocabulary, so a hand-written allow-list REDs even when its value
+    happens to match today.
+    """
+    source = (_REPO_ROOT / "tortoise" / "live.py").read_text(encoding="utf-8")
+    fn = next((n for n in ast.walk(ast.parse(source))
+               if isinstance(n, ast.FunctionDef)
+               and n.name == "_current_status_clause"), None)
+    assert fn is not None, "_current_status_clause not found in live.py"
+    derives = any(
+        any(isinstance(n, ast.Name) and n.id == "CURRENT_POINT_STATUS_VALUES"
+            for n in ast.walk(comp.iter))
+        for comp in ast.walk(fn) if isinstance(comp, ast.comprehension)
+    )
+    assert derives, (
+        "_current_status_clause must DERIVE from CURRENT_POINT_STATUS_VALUES "
+        "(iterate it), not re-literalise the allow-list — a hand-written list "
+        "drops a status added to the vocabulary: "
+        f"{ast.unparse(fn)[:200]}"
+    )
+
+
+# An inline `IN [...]` list — its member tokens are extracted from the span, so
+# order, quote style, whitespace and a wrapping `(...)` cannot evade the guard
+# (the review of #8662 measured the old single-spelling regex being bypassed by
+# `IN ['live', 'draft']`, `IN ["draft", "live"]` and `IN ['draft','live']`).
+_INLINE_LIST = re.compile(r"\bIN\s*\(?\s*\[([^\]]*)\]", re.IGNORECASE)
+_QUOTED_TOKEN = re.compile(r"""['\"]([^'\"]+)['\"]""")
+
+
+def _current_status_allow_list_redeclarations(
+        source: str) -> list[tuple[int, str, list[str]]]:
+    """Inline ``IN [...]`` enumerations of the FULL CURRENT Point vocabulary.
+
+    The #2901-mirror shape is an inline allow-list that names EVERY current
+    status; the canonical ``live._current_status_clause`` owns it now.
+    Detection is formatting-INSENSITIVE by construction: the list is located as
+    a span and its quoted tokens extracted, so member order, quote style,
+    whitespace and a wrapping ``(...)`` cannot hide a re-declaration.
+
+    The polarity is SUPERSET-of-the-canonical-vocabulary, deliberately: the
+    defect is a literal that enumerates ALL current statuses, so a status later
+    added to the vocabulary is silently dropped. A list naming a PROPER SUBSET
+    (``IN ['live']`` — published-only; ``IN ['draft']`` — drafts-only) is a
+    different, legitimate question the canonical builder does NOT answer, so it
+    must not be flagged — and neither is a list whose members are not statuses
+    (``IN ['Point', 'Object']``).
+
+    Only executable (non-docstring) string constants are scanned, and only a
+    list literal contained in ONE constant — a list split across an f-string
+    interpolation is outside this guard's scope (named, not silently claimed).
+    """
+    canonical = set(CURRENT_POINT_STATUS_VALUES)
+    offenders: list[tuple[int, str, list[str]]] = []
+    for lineno, value in _executable_string_constants_from_source(source):
+        for match in _INLINE_LIST.finditer(value):
+            members = _QUOTED_TOKEN.findall(match.group(1))
+            if canonical <= set(members):
+                offenders.append((lineno, value, members))
+    return offenders
+
+
+def test_no_sdk_query_re_declares_the_current_status_allow_list() -> None:
+    """The #2901-mirror shape cannot reappear in ``sdk.py`` in any spelling.
+
+    An inline ``IN [...]`` that enumerates EVERY current status is the
+    allow-list re-declaration #4058 removes — it drops a future current status
+    with no edit anywhere. Only the canonical builder (which renders the
+    literal) may contain it. The scan is formatting-insensitive (order, quote
+    style, whitespace, a wrapping ``(...)``), not a single-spelling line regex:
+    the review of #8662 measured the old regex missing ``IN ['live', 'draft']``,
+    ``IN ["draft", "live"]`` and ``IN ['draft','live']``. A list naming a
+    PROPER SUBSET of the vocabulary (``IN ['live']``) is a different, legitimate
+    question and is not flagged.
+    """
+    source = (_REPO_ROOT / "tortoise" / "sdk.py").read_text(encoding="utf-8")
+    offenders = _current_status_allow_list_redeclarations(source)
+    assert not offenders, (
+        "sdk.py re-declares the current-status allow-list: call "
+        f"live._current_status_clause instead — {offenders}"
+    )
+
+
+@pytest.mark.parametrize("literal", [
+    "IN ['draft', 'live']",          # the pre-fix spelling
+    "IN ['live', 'draft']",          # order differs
+    'IN ["draft", "live"]',          # double quotes
+    "IN ['draft','live']",           # no space after the comma
+    "IN [ 'draft' , 'live' ]",       # extra whitespace
+    "IN [\n                    'draft',\n                    'live',\n                ]",
+    "IN (['draft', 'live'])",        # parenthesised list expression
+    "IN ['draft', 'live', 'retracted']",  # SUPERSET — still names every current
+    "IN ['archived', 'live', 'draft']",   # superset, unordered
+])
+def test_inline_current_allow_list_is_caught_in_every_spelling(literal: str) -> None:
+    """The guard is formatting-insensitive, not one exact spelling.
+
+    Every variant is a real evasion of the pre-#8662 line regex; the two
+    superset cases are the ones the FIRST cut of the AST guard missed (its
+    subset polarity flagged only an exact-or-smaller list). This pins the
+    detector's coverage, so a revert to the single-spelling regex REDs here.
+    """
+    source = (
+        "def q():\n"
+        "    return " + repr(f"MATCH (n:Point) WHERE {literal} RETURN n") + "\n"
+    )
+    assert _current_status_allow_list_redeclarations(source), literal
+
+
+@pytest.mark.parametrize("literal", [
+    "IN ['Point', 'Object']",          # node labels — a different question
+    "IN ['retracted', 'superseded']",  # terminal deny-list, not the allow-list
+    "IN [$ids]",                        # bound parameter, no literal members
+    "IN ['live']",                      # PROPER SUBSET — published-only filter
+    "IN ['draft']",                     # PROPER SUBSET — drafts-only filter
+])
+def test_inline_list_without_current_vocabulary_is_not_flagged(literal: str) -> None:
+    """The guard does not fire on lists that are not the FULL current allow-list.
+
+    A proper subset is a deliberate narrower question (``IN ['live']`` /
+    ``IN ['draft']``) the canonical builder does NOT answer — it also admits the
+    other current status — so flagging it would demand a fix that silently
+    WIDENS the predicate.
+    """
+    source = (
+        "def q():\n"
+        "    return " + repr(f"MATCH (n) WHERE n.x {literal} RETURN n") + "\n"
+    )
+    assert not _current_status_allow_list_redeclarations(source), literal
+
+
+def test_docstring_mention_of_the_allow_list_is_not_an_offender() -> None:
+    """A prose mention is not a re-declaration — the scan is over code only."""
+    source = (
+        "def q():\n"
+        '    """Legacy code once used IN [\'draft\', \'live\']."""\n'
+        "    return 1\n"
+    )
+    assert not _current_status_allow_list_redeclarations(source)
+
+
+
+# ── 7. #8662 review — the contract text and the DERIVATION, not just ────────
+#          values (a value-only pin cannot see a re-literalisation, because
+#          the pre-fix literal has the same value as the derived set).
+
+def _function_docstring(source: str, name: str) -> str:
+    """The docstring of ``name`` in ``source``, or an explicit assertion."""
+    for node in ast.walk(ast.parse(source)):
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == name):
+            return ast.get_docstring(node, clean=True) or ""
+    raise AssertionError(f"{name} not found in the scanned source")
+
+
+#: Reader-facing prose that documents the canonical terminal predicate. The
+#: #8662 review found these still enumerating the PRE-#4058 four-member set
+#: (``deprecated`` omitted) while the code path they describe excludes it.
+#: Registering them turns "the next instance is found by review" into "found by
+#: CI". ``review_connections`` is pinned separately — its bullet-scoped check is
+#: stricter than this whole-docstring one — so it is not duplicated here.
+_TERMINAL_CONTRACT_DOCSTRINGS = {
+    # The canonical module's own docstring — the first place a reader meets
+    # the predicate.
+    "live module docstring": (_REPO_ROOT / "tortoise" / "live.py", None),
+    "TortoiseSDK.query": (_REPO_ROOT / "tortoise" / "sdk.py", "query"),
+    "TortoiseSDK.paginated_query": (
+        _REPO_ROOT / "tortoise" / "sdk.py", "paginated_query"),
+    "TortoiseSDK._raise_update_point_status_error": (
+        _REPO_ROOT / "tortoise" / "sdk.py",
+        "_raise_update_point_status_error"),
+    "analyze._derived_live_operators": (
+        _REPO_ROOT / "tortoise" / "analyze.py", "_derived_live_operators"),
+    "FalkorProjection.extract_svbp_factors": (
+        _REPO_ROOT / "tortoise" / "projection" / "__init__.py",
+        "extract_svbp_factors"),
+}
+
+
+def _contract_docstring(source: str, name: str | None) -> str:
+    """The named function's docstring, or the MODULE docstring when ``name``
+    is ``None`` (``live.py``'s module docstring is itself contract text)."""
+    if name is None:
+        return ast.get_docstring(ast.parse(source), clean=True) or ""
+    return _function_docstring(source, name)
+
+
+def _terminal_contract_statuses_missing(doc: str) -> list[str]:
+    """Canonical terminal statuses ``doc`` neither names nor cites.
+
+    Empty when the prose cites ``TERMINAL_EXCLUDED_STATUSES`` (the reader can
+    follow the constant) or names every member. The statuses are matched
+    against ``live.TERMINAL_EXCLUDED_STATUSES`` itself — never against the set
+    the prose happens to describe — so an enumeration that silently drops a
+    member (the #8662 defect: the code excluded five, the prose named four)
+    REDs. Whitespace is normalised, so a re-wrapped enumeration is still seen.
+    """
+    normalized = re.sub(r"\s+", " ", doc)
+    if "TERMINAL_EXCLUDED_STATUSES" in normalized:
+        return []
+    return sorted(s for s in TERMINAL_EXCLUDED_STATUSES if s not in normalized)
+
+
+def test_review_connections_contract_names_every_stale_status() -> None:
+    """#8662 P2 — the contract text must name every member of the set.
+
+    ``review_connections(mode=prune)``'s only reader-facing definition of
+    ``stale`` is its docstring enumeration. #4058 rebased
+    ``STALE_TERMINAL_STATUSES`` onto the canonical exclusion, which added the
+    legacy ``deprecated`` — the enumeration named four of the five, so an agent
+    reading the SDK was told a deprecated-incident edge would NOT surface as
+    stale. Every member must be named.
+    """
+    doc = re.sub(r"\s+", " ", _function_docstring(
+        (_REPO_ROOT / "tortoise" / "sdk.py").read_text(encoding="utf-8"),
+        "review_connections"))
+    assert "* stale" in doc and "* contested" in doc, (
+        "review_connections no longer documents the mode=prune "
+        "stale/contested bullets, so this pin cannot bind the stale "
+        "contract to STALE_TERMINAL_STATUSES. Update the pin with the new "
+        "contract text."
+    )
+    stale_bullet = doc.split("* stale", 1)[1].split("* contested", 1)[0]
+    # Either enumerate every member, or cite the canonical constant: the
+    # invariant is that no member is OMITTED from the reader-visible contract
+    # (the pre-fix text enumerated four of the five and cited nothing).
+    if "STALE_TERMINAL_STATUSES" in stale_bullet:
+        return
+    # Iterate the CANONICAL exclusion, not ``STALE_TERMINAL_STATUSES``: a pin
+    # that iterates the set under test cannot see a member that set is missing
+    # (the pre-fix docstring and the pre-fix 4-member set agreed with each
+    # other while both understated the canonical five).
+    missing = sorted(s for s in TERMINAL_EXCLUDED_STATUSES if s not in stale_bullet)
+    assert not missing, (
+        "the review_connections(mode=prune) stale enumeration omits "
+        f"{missing} — a reader is told those statuses do not surface as "
+        "stale. Name every member of STALE_TERMINAL_STATUSES in the docstring, "
+        "or cite STALE_TERMINAL_STATUSES itself."
+    )
+
+
+@pytest.mark.parametrize("label", sorted(_TERMINAL_CONTRACT_DOCSTRINGS))
+def test_terminal_contract_docstring_names_every_canonical_status(
+        label: str) -> None:
+    """#8662 P3 — every reader-facing enumeration must name the full set.
+
+    Each registered docstring describes a code path that excludes
+    ``live.TERMINAL_EXCLUDED_STATUSES``. The pre-fix prose named four of the
+    five (the legacy ``deprecated`` omitted), so an agent reading
+    ``TortoiseSDK.query`` was told a ``deprecated`` Point is served while the
+    predicate excludes it. The review's suggestion — a
+    ``_PREDICATE_CONSUMERS``-style registry — is what this test enforces, so
+    the next understated enumeration is caught rather than found by review.
+    """
+    path, name = _TERMINAL_CONTRACT_DOCSTRINGS[label]
+    doc = _contract_docstring(path.read_text(encoding="utf-8"), name)
+    missing = _terminal_contract_statuses_missing(doc)
+    assert not missing, (
+        f"{label}: the reader-facing enumeration omits {missing} — the code "
+        "path excludes them, so the contract tells a reader a non-current "
+        "status IS served. Name every member of "
+        "live.TERMINAL_EXCLUDED_STATUSES, or cite the constant."
+    )
+
+
+@pytest.mark.parametrize("doc,expected", [
+    # the #8662 defect shape: the pre-#4058 four-member enumeration
+    ("terminal statuses (retracted, superseded, outdated, archived)",
+     ["deprecated"]),
+    # the fixed shape — every member named, comma-separated
+    ("terminal statuses "
+     "(retracted, superseded, outdated, archived, deprecated)", []),
+    # the fixed shape — every member named, slash-separated
+    ("terminal (retracted/superseded/outdated/archived/deprecated)", []),
+    # citing the constant is an accepted alternative to enumerating
+    ("excluded by live.TERMINAL_EXCLUDED_STATUSES", []),
+])
+def test_contract_checker_detects_an_understated_enumeration(
+        doc: str, expected: list[str]) -> None:
+    """The registry checker itself is pinned, so the guard is not vacuous.
+
+    Detection is formatting-insensitive (both separators are covered) and the
+    set it iterates is the CANONICAL one, so an omitted member is caught even
+    when the prose set was previously accurate — the #8662 defect.
+    """
+    assert _terminal_contract_statuses_missing(doc) == expected
+
+
+def test_state_excluded_status_derives_from_the_canonical_exclusion() -> None:
+    """#8662 P3 — pin the DERIVATION, not only the value.
+
+    The pre-#4058 literal ``frozenset({"superseded", "deprecated",
+    "retracted"})`` is EQUAL to ``TERMINAL_EXCLUDED_STATUSES - {"outdated",
+    "archived"}``, so every value/inclusion assertion passes on the pre-fix
+    code and a re-literalisation lands green — the exact drift the derivation
+    exists to prevent. The claim the definition makes ("DERIVED rather than
+    re-literalised") is pinned structurally: the assignment's RHS must subtract
+    the canonical exclusion, and may name only the members the state view
+    deliberately keeps visible — so a status added to the vocabulary lands in
+    the set automatically, and a hand-written ``frozenset`` REDs.
+    """
+    source = (_REPO_ROOT / "tortoise" / "sdk.py").read_text(encoding="utf-8")
+    assignments = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        # AnnAssign carries one target (``t: T = v``) — an annotation on the
+        # definition must not read as "the derivation disappeared".
+        targets = [node.target] if isinstance(node, ast.AnnAssign) else node.targets
+        if any(isinstance(t, ast.Name) and t.id == "STATE_EXCLUDED_STATUS"
+               for t in targets):
+            assignments.append(node)
+    assert len(assignments) == 1, (
+        f"expected exactly one STATE_EXCLUDED_STATUS assignment, "
+        f"found {len(assignments)}"
+    )
+    rhs = assignments[0].value
+    assert isinstance(rhs, ast.BinOp) and isinstance(rhs.op, ast.Sub), (
+        "STATE_EXCLUDED_STATUS must DERIVE from the canonical Point exclusion "
+        "(TERMINAL_EXCLUDED_STATUSES - {...}), not re-literalise it — a "
+        "hand-written set drifts when the vocabulary grows: "
+        f"{ast.unparse(rhs)[:160]}"
+    )
+    assert (isinstance(rhs.left, ast.Name)
+            and rhs.left.id == "TERMINAL_EXCLUDED_STATUSES") \
+        or (isinstance(rhs.left, ast.Attribute)
+            and rhs.left.attr == "TERMINAL_EXCLUDED_STATUSES"), ast.unparse(rhs)
+    rhs_set = rhs.right
+    # Accept the set literal or its set(...)/frozenset(...) spelling — the
+    # invariant is "subtract the canonical exclusion", not one syntax.
+    if (isinstance(rhs_set, ast.Call) and isinstance(rhs_set.func, ast.Name)
+            and rhs_set.func.id in {"set", "frozenset"}
+            and len(rhs_set.args) == 1):
+        rhs_set = rhs_set.args[0]
+    assert isinstance(rhs_set, ast.Set), ast.unparse(rhs)
+    assert all(isinstance(elt, ast.Constant) for elt in rhs_set.elts), (
+        "STATE_EXCLUDED_STATUS may only subtract a set of string literals: "
+        f"{ast.unparse(rhs_set)}"
+    )
+    deliberately_visible = {elt.value for elt in rhs_set.elts}
+    assert deliberately_visible == {"outdated", "archived"}, (
+        "the state view may only drop the members it deliberately keeps "
+        f"visible (the #3308 pin): {sorted(deliberately_visible)}"
+    )
+    # And the VALUE tracks the LIVE canonical set, not the vocabulary as it was
+    # when a hand-written literal was first spelled out.
+    expected = TERMINAL_EXCLUDED_STATUSES - deliberately_visible
+    assert expected == TortoiseSDK.STATE_EXCLUDED_STATUS

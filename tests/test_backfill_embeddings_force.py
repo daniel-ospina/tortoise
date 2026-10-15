@@ -146,9 +146,16 @@ def _fixture_embedded_key(label: str) -> str:
 
 
 def _backfill_run(mod, proj, labels=None, *, force=False):
-    """Drive the backfill's internal per-graph runner (NULL-only or force)."""
+    """Drive the backfill's internal per-graph runner (NULL-only or force).
+
+    The embedded fixture lane has no width-fixing index, so the store-declared
+    width is ``None`` and the encoder's own width governs (#4280's
+    dimension-agnostic brute-force lane) — stated explicitly, since
+    ``_backfill_graph``'s ``required_dim`` is keyword-only and required.
+    """
     return mod._backfill_graph(
-        proj.db, proj.graph_name, labels or _LABELS, 0, 500, force=force)
+        proj.db, proj.graph_name, labels or _LABELS, 0, 500, force=force,
+        required_dim=None)
 
 
 # ── WHERE-predicate flip (NULL-only vs all-rows) ────────────────────
@@ -563,7 +570,7 @@ def test_force_purges_meeting_embeddings_and_excludes_meetings(proj, monkeypatch
     monkeypatch.setattr("tortoise.embeddings.compute_embedding", fake)
 
     stats = mod._force_reembed_graph(
-        proj.db, proj.graph_name, _LABELS, 0, 500)
+        proj.db, proj.graph_name, _LABELS, 0, 500, required_dim=None)
     assert stats["meeting_purged"] == 2
     # Meetings were never encoded; NULL-kind + non-meeting rows were.
     assert "standup" not in fake.calls and "retro" not in fake.calls
@@ -594,7 +601,8 @@ def test_post_purge_run_vector_query_excludes_meetings(proj, monkeypatch):
     mod = _load_backfill()
     fake = _FakeEmbed()
     monkeypatch.setattr("tortoise.embeddings.compute_embedding", fake)
-    mod._force_reembed_graph(proj.db, proj.graph_name, _LABELS, 0, 500)
+    mod._force_reembed_graph(proj.db, proj.graph_name, _LABELS, 0, 500,
+                             required_dim=None)
 
     search_engine.reset_circuit_breakers()  # test isolation (#249)
     qv = fake("deploy debrief svc-api")
@@ -638,7 +646,8 @@ def _run_main(mod, proj, *argv):
     one. The injected name is lane-agnostic and keeps this file docker-able
     (it leaves the embedded allowlist at P4).
     """
-    mod._connect_falkordb = lambda uri: (proj.db, proj.graph_name)
+    mod._connect_falkordb = lambda uri: (
+        proj.db, proj.graph_name, proj.required_embedding_dim)
     return mod.main([*argv, "--graph", proj.graph_name])
 
 
@@ -780,3 +789,183 @@ def test_dry_run_plain_counts_missing_rows_only(proj, monkeypatch, capsys):
     assert "1 nodes would be embedded" in out, out
     assert _embedding(g, "Point", "id", "p1") == pytest.approx([0.1] * 384)
     assert _embedding(g, "Point", "id", "p2") is None
+
+
+# ── Store width guard (#4289) ───────────────────────────────────────
+
+class _WrongWidthEmbed:
+    """A non-384 encoder — the shape a rotated/foreign embedder produces."""
+
+    def __init__(self, width: int):
+        self.width = width
+        self.calls: list[str] = []
+
+    def __call__(self, text: str) -> list[float]:
+        self.calls.append(str(text))
+        return [0.25] * self.width
+
+
+def test_indexed_store_declines_a_non_384_encoder(proj, monkeypatch):
+    """#4289: the sweep applies the store's declared width like any writer.
+
+    Before this fix the backfill called the raw ``compute_embedding`` seam and
+    wrote whatever width came back, for an INDEXED Point — the one Point
+    writer with no width guard (#4280 put the check at the store-scoped
+    entry points). A store declaring ``EMBEDDING_DIM`` must decline the
+    wrong-width vector (row skipped, nothing written); the SAME encoder into
+    an index-less store (``required_dim=None`` — the brute-force read lane)
+    must be KEPT, because dropping it there is the regression #4280 fixed.
+    """
+    from tortoise.embeddings import EMBEDDING_DIM
+
+    g = _g(proj)
+    _create(g, "Point", {"id": "p1", "content": "alpha"})
+    mod = _load_backfill()
+    wrong = _WrongWidthEmbed(EMBEDDING_DIM - 1)
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", wrong)
+
+    # Indexed store: the wrong width is declined, nothing is stored.
+    indexed = mod._backfill_graph(
+        proj.db, proj.graph_name, ["Point"], 0, 500,
+        required_dim=EMBEDDING_DIM)
+    assert indexed["updated"] == 0, indexed
+    assert indexed["skipped"] == 1, indexed
+    assert indexed["per_label"]["Point"] == 0, indexed
+    assert _embedding(g, "Point", "id", "p1") is None
+    assert wrong.calls == ["alpha"], wrong.calls
+
+    # Index-less store: the encoder's own width governs — kept, not dropped.
+    indexless = mod._backfill_graph(
+        proj.db, proj.graph_name, ["Point"], 0, 500, required_dim=None)
+    assert indexless["updated"] == 1, indexless
+    assert indexless["skipped"] == 0, indexless
+    stored = _embedding(g, "Point", "id", "p1")
+    assert stored is not None
+    assert len(stored) == EMBEDDING_DIM - 1
+
+
+def test_backfill_graph_requires_an_explicit_store_width(proj):
+    """#4289 review (P3): the width must be STATED, never implicitly defaulted.
+
+    ``required_dim=None`` means one measured thing — "this store has no
+    width-fixing index" — and must not double as "the caller forgot". A
+    default of ``None`` lets a future caller omit the width and silently write
+    a wrong-width vector into an INDEXED store: the #4289 hole, re-opened.
+    ``required_dim`` is therefore keyword-only and REQUIRED, so the omission
+    is a ``TypeError`` at the call site.
+
+    Pre-fix this fails: the call below returned normally (the default ``None``
+    meant "no guard"), so no ``TypeError`` was raised.
+    """
+    mod = _load_backfill()
+    with pytest.raises(TypeError):
+        mod._backfill_graph(proj.db, proj.graph_name, ["Point"], 0, 500)
+
+
+def test_cli_threads_the_store_width_into_the_sweep(
+        proj, monkeypatch, capsys):
+    """#4289: ``main`` must hand the STORE's declared width to the sweep.
+
+    The unit test above calls ``_backfill_graph`` directly, so it cannot catch
+    a wiring gap at the ``_connect_falkordb`` / ``main`` call sites — and the
+    pre-fix call sites never consulted the projection at all. This drives the
+    CLI: an indexed store + a wrong-width encoder must write no vector, which
+    is only true if the declared width actually reached the row encoder.
+    """
+    from tortoise.embeddings import EMBEDDING_DIM
+    from tortoise.projection import FalkorProjection
+
+    g = _g(proj)
+    _create(g, "Point", {"id": "p1", "content": "alpha"})
+    mod = _load_backfill()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding",
+                        _WrongWidthEmbed(EMBEDDING_DIM - 1))
+    # The store DECLARES a width (an index exists) without needing a real one
+    # on the embedded fixture lane — #4280's own test shape.
+    monkeypatch.setattr(FalkorProjection, "required_embedding_dim",
+                        property(lambda self: EMBEDDING_DIM))
+
+    rc = _run_main(mod, proj, "--uri", "docker://dummy")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "0 scanned, 0 embedded, 1 skipped" in out, out
+    assert _embedding(g, "Point", "id", "p1") is None
+
+
+def test_required_dim_for_graph_binds_the_projection_to_the_target(
+        monkeypatch):
+    """#4289 review: the width is resolved from the graph being WRITTEN.
+
+    ``required_embedding_dim`` is read off the projection's OWN graph, so the
+    resolver must open the projection bound to the target graph and release
+    it — not reuse the URI graph's value.
+    """
+    from tortoise.projection import FalkorProjection
+
+    mod = _load_backfill()
+    seen: list[str | None] = []
+    built: dict[str, object] = {}
+
+    class _FakeProj:
+        def __init__(self, graph_name):
+            self.graph_name = graph_name
+            # The per-graph fact under test: only org_acme is indexed.
+            self.required_embedding_dim = 384 if graph_name == "org_acme" else None
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    def fake_from_uri(uri, graph_name=None):
+        seen.append(graph_name)
+        proj = _FakeProj(graph_name)
+        built[graph_name] = proj
+        return proj
+
+    monkeypatch.setattr(FalkorProjection, "from_uri",
+                        staticmethod(fake_from_uri))
+    assert mod._required_dim_for_graph("docker://dummy", "org_acme") == 384
+    assert seen == ["org_acme"], seen
+    assert built["org_acme"].closed is True
+
+
+def test_all_tenants_resolves_the_width_per_target_graph(
+        proj, monkeypatch, capsys):
+    """#4289 review: an ``--all-tenants`` sweep must ask each ``org_{id}``
+    graph, not reuse the URI graph's width.
+
+    URI graph index-less (``required_dim=None``) and tenant graph indexed
+    (``EMBEDDING_DIM``): pre-fix ``main`` reused the URI graph's ``None``, so
+    the wrong-width vector was written into an INDEXED tenant graph — the
+    #4289 hole left open for every target that is not the URI's graph.
+    """
+    from tortoise.embeddings import EMBEDDING_DIM
+
+    proj.db.select_graph("registry").query("CREATE (n:Team {id: 'acme'})")
+    tenant_graph = "org_acme"
+    tenant = proj.db.select_graph(tenant_graph)
+    _create(tenant, "Point", {"id": "p1", "content": "alpha"})
+
+    mod = _load_backfill()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding",
+                        _WrongWidthEmbed(EMBEDDING_DIM - 1))
+    # The URI's graph (what `_connect_falkordb` opens) is index-less.
+    mod._connect_falkordb = lambda uri: (proj.db, proj.graph_name, None)
+    asked: list[str] = []
+
+    def fake_resolver(uri, graph_name, *, default_graph=None,
+                      default_dim=None):
+        asked.append(graph_name)
+        return EMBEDDING_DIM
+
+    # raising=False: pre-fix the resolver does not exist — the test must fail
+    # on the assertion below (the vector WAS written), not on this setattr.
+    monkeypatch.setattr(mod, "_required_dim_for_graph", fake_resolver,
+                        raising=False)
+
+    rc = mod.main(["--all-tenants", "--uri", "docker://dummy"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert asked == [tenant_graph], asked
+    assert "0 scanned, 0 embedded, 1 skipped" in out, out
+    assert _embedding(tenant, "Point", "id", "p1") is None

@@ -355,6 +355,7 @@ future "agent has its own graph" work must resolve it deliberately.
 
 ## §9 What this doc does not claim
 
+- It does **not** cover the **control plane**. This doc is the data-plane authorization model (§2.2 item 2 defers per-user slices). The control-plane role/permission model for the key and member surfaces — the permission vocabulary, roles as bundles, and the key **holder** field — is #2427: `docs/research/2026-10-15-2427-team-permission-model.md`.
 - It does **not** claim the fine-grained layer should be built now. §7 defers it,
   and §4 records why the industry default (an external policy engine) is not
   adopted yet.

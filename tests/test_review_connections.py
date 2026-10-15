@@ -8,8 +8,8 @@ product/2026-08-11-tooling-surface-consolidation.md, PR #912):
                  agent decides; never creates.
   - mode=prune:  flag ILLOGICAL/stale connections via EP signals:
                    * stale          — edge incident to a retracted/superseded/
-                                      outdated/archived point (terminal or
-                                      legacy outdated flag)
+                                      outdated/archived/deprecated point
+                                      (terminal or legacy outdated flag)
                    * contested      — edge incident to a claim with high
                                       posterior variance (stored EP params)
                                       or a claim with an incoming NAND edge
@@ -29,6 +29,8 @@ Docker required.
 from __future__ import annotations
 
 import pytest
+
+from tortoise.live import TERMINAL_EXCLUDED_STATUSES
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -364,6 +366,43 @@ def test_prune_flags_stale_outdated_flag(sdk_factory, tmp_path):
     assert e["detail"]["status"] == "outdated"
     assert e["suggested_action"] == "re-point"
     assert e["detail"]["successor"] == replacement["id"]
+
+
+@pytest.mark.parametrize("status", sorted(TERMINAL_EXCLUDED_STATUSES))
+def test_prune_flags_a_stale_edge_for_every_canonical_stale_status(
+        sdk_factory, tmp_path, status):
+    """#8662: EVERY member of the canonical Point exclusion flags a stale edge.
+
+    The pre-#4058 ``STALE_TERMINAL_STATUSES`` was a by-value copy of
+    ``TERMINAL_STATUS_VALUES`` and so omitted the legacy ``deprecated`` — a
+    connection to a deprecated Point was NOT flagged stale while every read
+    surface excluded that Point. Parametrising over the CANONICAL exclusion
+    (not over ``STALE_TERMINAL_STATUSES``) is what makes this test fail on the
+    pre-fix code: a test that iterates the set under test cannot see a missing
+    member, and a set that merely contains the right strings proves nothing
+    (module doctrine). ``status`` is written directly because no SDK write
+    path mints ``deprecated`` — it is legacy graph data
+    (``live.LEGACY_NON_CURRENT_STATUS_VALUES``).
+    """
+    sdk = sdk_factory(tmp_path)
+    src = sdk.create_point("statement", "live source claim")
+    victim = sdk.create_point("statement", f"a {status} claim")
+    sdk.create_operator("IMPL", src["id"], [victim["id"]])
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.status=$status",
+        params={"id": victim["id"], "status": status},
+    )
+
+    result = sdk.review_connections(mode="prune")
+    stale = _edge_prune(result["prune"], "stale")
+    hits = [e for e in stale if e["to"] == victim["id"]]
+    assert len(hits) == 1, (
+        f"expected 1 stale entry for status={status}, got {stale}")
+    e = hits[0]
+    assert e["from"] == src["id"]
+    assert e["suggested_action"] == "prune"  # no CORRECTS successor
+    assert e["detail"]["stale_endpoint"] == victim["id"]
+    assert e["detail"]["status"] == status
 
 
 def test_prune_legacy_operator_without_idx(sdk_factory, tmp_path):

@@ -15,8 +15,25 @@ declares those 11 bodies in ``_OFFLOADED_ASYNC_BODIES`` — that file owns the A
 inventory and fails if any of them goes back inline. (``_run_indexing`` was a
 12th member until round-4 review found its declaration VACUOUS: its dominant
 graph work is ``indexer.index_repo``'s projection walk, one level down in
-another module, plus two sync-helper ``_update_onboarding_state`` writes neither
-scan can see. It is now a declared residual under #4709.)
+another module, plus the ``_update_onboarding_state`` writes neither scan can
+see. It is now a declared residual under #4709 — and post-#4709 the walk
+(``_project_items``, which also carries the O(file) journal registration read
+``_journal_registered_entities`` as its first statement) and the two
+``_update_onboarding_state`` writes ARE off the loop: the walk in one worker
+hand-off inside ``index_repo``, the writes on the index job's own pool
+(``_run_off_loop(_INDEX_EXECUTOR, ...)`` + ``_echo=False``), never the loop's
+shared default executor — and the single cursor persist runs BEFORE the
+terminal ``completed``/``failed`` status write. What stays INLINE is the
+``_make_sdk`` construction,
+the ``_get_proj()`` attach handed to ``backfill_legacy_closed`` and the
+``_relink_sessions_after_index`` pass — all three the same tortoise#7500
+constraint, because a worker-thread construction or attach resolves the
+embedded per-test store from a stale pooled-thread stem — plus
+``backfill_legacy_closed``'s OWN one-time SCAN (two full-:Event reads plus a
+journaled mint per row), which is NOT #7500-bound and stays inline only
+because the ``github_legacy_backfill_done`` marker bounds it to one run per
+org. The AST pin
+``test_run_indexing_residual_is_named_head_on`` in that file holds this shape.)
 
 This file adds the BEHAVIOURAL half, in the same style as that file: the
 seam's OWN view of the loop (``asyncio.get_running_loop()`` succeeds only on
