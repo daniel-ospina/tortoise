@@ -394,11 +394,17 @@ def test_a_fresh_create_appends_exactly_one_record(env):
 # ── T8: the record states what the STORE HOLDS, not the raw caller object ──
 #
 # The append is the commit point, so a payload the record cannot encode does
-# not merely lose the record — the new gate SKIPS the cache write, and one
-# unlucky prop value destroys the whole Point (#7951 review P1). And a value
-# `json` accepts but the engine DROPS was journalled as a property the node
-# never had (the review's secondary symptom). The payload is therefore built
-# from the store's own outcome, not from the caller's object.
+# not merely lose the record — the per-call append gate SKIPS the cache write,
+# and one unlucky prop value destroys the whole Point (#7951 review P1). And a
+# value `json` accepts but the engine DROPS must not be journalled as a
+# property the node never had (the review's secondary symptom). The payload is
+# therefore built from the store's own outcome, not from the caller's object.
+#
+# ⚠️ These are MUTATION GUARDS, NOT pre-change detectors. On `origin/main` the
+# payload IS the post-`CREATE` `get_point` read-back, so the offending object
+# never reaches `json.dumps` and EVERY test below PASSES there (measured, #7951
+# review). Each reddens only under the mutation it names (journal the raw
+# caller value) — do not read them as pinning a `main` defect.
 
 @pytest.mark.parametrize("propname, value", [
     ("when", datetime.datetime(2026, 10, 14, 12, 0, 0)),
@@ -409,13 +415,15 @@ def test_a_fresh_create_appends_exactly_one_record(env):
 def test_a_non_json_encodable_prop_does_not_destroy_the_write(env, propname, value):
     """A raw caller value must not turn a create into a LOST write.
 
-    PRE-FIX (measured on `origin/main` this test must redden): the payload is
-    the caller's own object, `json.dumps` raises inside `_emit_event`, the
-    `_journal_write_failures` delta trips the new commit gate, and
-    `create_point` raises `WriteNotLandedError` with the Point NEVER written.
+    MUTATION GUARD, not a pre-change detector. On `origin/main` the payload IS
+    the post-`CREATE` `get_point` read-back, so the offending object never
+    reaches `json.dumps` and this PASSES there (measured, #7951 review) — it
+    does not pin a `main` defect.
 
-    MUTATION: journal the raw param again and this fails on the raise (and on
-    the empty node count).
+    MUTATION: journal the raw caller value and this fails on the raise (and on
+    the empty node count): `json.dumps` raises inside `_emit_event`, the
+    per-call append gate reports `False`, and `create_point` raises
+    `WriteNotLandedError` with the Point NEVER written.
     """
     sdk, events = env
     proj = sdk._get_proj()
@@ -442,12 +450,15 @@ def test_the_record_states_only_what_the_store_will_hold(env):
     """live(write) == record: the payload must not claim a dropped property.
 
     `extra={"inner": 1}` is JSON-encodable but FalkorDB DROPS it (`_value_ok`
-    refuses a map), so the live node has no `extra`. PRE-FIX the record carried
-    it anyway — and `check_consistency` named it
-    (`uncarried_journal_fields: ['extra']`), a journal/graph asymmetry no replay
-    could close (#7951 review, secondary symptom).
+    refuses a map), so the live node has no `extra`. A record that carried it
+    anyway would be a journal/graph asymmetry no replay could close — and
+    `check_consistency` would name it (`uncarried_journal_fields: ['extra']`;
+    #7951 review, secondary symptom).
 
-    MUTATION: journal the raw param and the `payload` assertions fail (the
+    MUTATION GUARD, not a pre-change detector: on `origin/main` the payload is
+    the read-back, so the dropped map never reaches the record and this PASSES
+    there (measured, #7951 review). It reddens under the mutation it names:
+    journal the raw param and the `payload` assertions fail (the
     `check_consistency` half still passes, because a carried-but-dropped field
     is reported, not failed).
     """
@@ -475,10 +486,11 @@ def test_the_record_states_only_what_the_store_will_hold(env):
 def test_a_driver_coerced_number_is_recorded_as_the_store_holds_it(env):
     """`Decimal("1.5")` is stored as the float literal, so the record says 1.5.
 
-    PRE-FIX the raw `Decimal` reached `json.dumps` and the write was lost.
+    MUTATION GUARD, not a pre-change detector: on `origin/main` the payload is
+    the read-back (`1.5`), so this PASSES there (measured, #7951 review).
 
-    MUTATION: journal the raw param and this raises `WriteNotLandedError`
-    before the comparisons.
+    MUTATION: journal the raw param and the append gate raises
+    `WriteNotLandedError` before the comparisons.
     """
     sdk, events = env
     pid = sdk.create_point("statement", "a claim with a Decimal",
@@ -496,10 +508,14 @@ def test_a_driver_coerced_number_is_recorded_as_the_store_holds_it(env):
 def test_the_snapshot_builder_states_the_stored_form_not_the_raw_param():
     """The builder is JSON-safe BY CONSTRUCTION — a unit pin on the seam.
 
-    PRE-FIX: `json.dumps(payload)` raised `TypeError: Object of type Decimal
-    is not JSON serializable`, and the dropped key was present.
+    MUTATION GUARD, not a pre-change detector: the builder did not exist on
+    `origin/main` (the pre-#7951 record was the read-back), so there is no
+    pre-change revision for this unit to redden on. It reddens under the
+    mutation it names.
 
-    MUTATION: return the param verbatim and both halves fail.
+    MUTATION: return the param verbatim and both halves fail —
+    `json.dumps(payload)` raises `TypeError: Object of type Decimal is not
+    JSON serializable`, and the dropped key is present.
     """
     payload = _journal_snapshot_from_create_map(
         {"ok": "$_cp0", "dropped": "$_cp1", "null": "$_cp2",

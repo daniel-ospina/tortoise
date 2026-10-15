@@ -70,9 +70,11 @@ After this increment (fresh-create path only):
    `ep_dirty*`, `sourceVersionTransit`, caller props; `content_hash` rides `props` and is recomputed on
    replay by `_POINT_DENY`, #2795);
 3. **`_emit_event("PointAdded", {"id", "kind", "content_hash"}, point=payload)` — the COMMIT POINT.**
-   If the append failed (`_journal_write_failures` delta — the JSONL `log.append` handler,
-   `sdk.py:5752-5760` — the `_doc_write` template, `sdk.py:27259`), the cache is **NOT** written;
-   `create_point` returns without a node (derived can never precede truth);
+   If the append failed, the cache is **NOT** written; `create_point` returns without a node (derived
+   can never precede truth). The signal is `_emit_event`'s **returned per-call outcome** (`False` on a
+   failed append; the JSONL `log.append` handler, `sdk.py:5752-5760`) — NOT the shared
+   `_journal_write_failures` counter delta, which a concurrent writer on the same instance can move
+   (`#5612`); the sibling doors still use the delta (§6.10);
 4. the cache write — `CREATE (n:Point …)`, `_sync_tags`, `_link_source` — **unchanged**, but now wrapped
    in `with _live_write_scope("create_point"):` so the door declares itself to the §17.1 guard;
 5. `get_point(pid)` read-back (unchanged) as the write-landed proof; `_mark_dirty` / in-memory mirrors
@@ -122,7 +124,7 @@ its edges), and a test pins that scope.
 | T5 | the commit survives a failed cache write | force the `CREATE` to fail once; assert the journal holds the record and a later `rebuild_all` materialises the node | **YES** |
 | T6 | a double append (two `PointAdded` per create) | exactly one line per fresh create (`dedup=False`) — mutation guard | no (guard) |
 | T7 | the pre-fold payload is not the record actually replayed | `rebuild_all` on the journal materialises the point (T5 covers the failure arm; this is the happy arm) | **YES** |
-| T8 | a raw caller prop value destroys the append (non-JSON) or is journalled as a property the store DROPS | a `datetime`/`Decimal`/`bytes`/`set` prop lands the write, appends one encodable record and does not touch `_journal_write_failures`; a nested-dict prop is OMITTED from the record; a driver-coerced number rides as the parsed literal | **YES** |
+| T8 | the record carries the RAW caller object, so it either (a) breaks the append on a non-JSON value or (b) claims a property the store DROPS | a `datetime`/`Decimal`/`bytes`/`set` prop lands the write, appends one encodable record and does not touch `_journal_write_failures`; a nested-dict prop is OMITTED from the record; a driver-coerced number rides as the parsed literal | no (guard — a MUTATION guard, NOT a pre-change detector: on `origin/main` the payload IS the post-`CREATE` read-back, so the offending object never reaches `json.dumps` and the test passes there (measured by the #8697 review). It reddens only under the mutation it names: journal the raw caller value) |
 
 ## 5. Wiring Check
 
@@ -171,10 +173,14 @@ its edges), and a test pins that scope.
    fold — the same parity class as (6). `create_point`'s return shape is unchanged by this increment.
 9. **The payload states the store's OUTCOME, not the raw caller object** (the #7951 review P1).   `_journal_snapshot_from_create_map` puts every value through `projection._stored_prop_value`, so a
    JSON-native value rides verbatim, a driver-coerced number rides as the parsed literal, and a value
-   the store keeps no property for is OMITTED. The residual is deliberate: the record states what the
-   `CREATE` will hold, and one class — a number the numeric domain ALTERS (an int outside INT64) — is
-   still refused by the guarded handle on the cache write after a committed append (#5011 reports that
-   divergence; it is not introduced here).
+   the store keeps no property for is OMITTED. **CLOSED for caller props by `_sanitize_props`, not by the
+   guarded handle**: a number the numeric domain ALTERS (an int outside INT64) is refused at prop
+   INTAKE (`tortoise/sdk.py::_sanitize_props` → `numeric_domain.reject_unrepresentable_number`, #4647)
+   BEFORE any append, so the "refused on the cache write after a committed append" ordering is NOT
+   reachable on `create_point`. Measured on the #8697 head for `2**70`, `{"k": 2**70}`, `[2**70]`,
+   `Fraction(2**70)` and `Decimal(2**70)`: `ValueError` with `journal_delta == 0`, zero `PointAdded`
+   records. The one remaining route to that ordering is a future non-prop `_create_map` value (a
+   server-side expression, which the builder fails closed on) — named, not claimed closed.
 10. **The SIBLING doors still gate on the `_journal_write_failures` counter delta** (`_doc_write`,
     `_apply_and_journal`, `_create_entity`). `create_point` now gates on `_emit_event`'s returned
     per-call outcome (`True`/`False`/`None`), which removes the shared-state read for this door; the

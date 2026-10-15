@@ -11,9 +11,10 @@ aboutObjects: "#7951, #7950, STORAGE-ARCHITECTURE.md §17.1, tortoise/sdk.py cre
 
 # #7951 increment 1 — the outbox ordering on `create_point`
 
-**Measured at:** branch `fix/7951-atomic-write-outbox` off `origin/main` `72e42deea`, 2026-10-14.
-Embedded lane (`TORTOISE_DB_URI` unset, `TORTOISE_TEST_CARVE_OUT=1`) — no server needed, so the
-demonstration is reproducible by any lane.
+**Measured at:** branch `fix/7951-atomic-write-outbox` off `origin/main` `72e42deea`, 2026-10-14;
+the probe output and the test count re-measured 2026-10-15 at the #8697 review-fix head. Embedded
+lane (`TORTOISE_DB_URI` unset, `TORTOISE_TEST_CARVE_OUT=1`) — no server needed, so the demonstration
+is reproducible by any lane.
 
 **What this proves, and what it does not.** It proves the §17.1 **ordering** on the highest-traffic
 write path (`create_point`): the journal record is appended before any Point cache write, and the
@@ -31,6 +32,8 @@ create_point order:              ['journal-PointAdded', 'cache-Point-write']
 ORDERING VERDICT: JOURNAL-FIRST
 journal PointAdded records:      1
 rebuild_all materialised Point:  1
+live/replay property map match:  True
+live/replay edge set match:      True (2 edges)
 REPLAY VERDICT: RECORD REPRODUCES THE LIVE NODE
 failed cache write raised:        RuntimeError
 record committed despite failure: 1
@@ -48,7 +51,7 @@ advisories which the headline block omits). Exit code `0`.
 | line | it is the failing criterion of… | how it would fail |
 |---|---|---|
 | `order: ['journal-PointAdded', 'cache-Point-write']` | S1's ordering | on `origin/main` the order is reversed (`cache` first) — the capstone's `test_create_point_is_apply_first_a_recorded_deviation` pinned exactly that |
-| `REPLAY VERDICT: RECORD REPRODUCES THE LIVE NODE` | `derived = replay(journal)` | the record's payload is now built from the write intent (`_create_map`), so a replay folds it to the same node |
+| `REPLAY VERDICT: RECORD REPRODUCES THE LIVE NODE` | `derived = replay(journal)` | the probe compares the live and replayed node as a full property MAP **and** the outgoing EDGE SET `(type, target, edge-properties)` (`live/replay property map match` / `live/replay edge set match`), mirroring `tests/test_7951_create_point_outbox.py` T3b — a presence COUNT alone cannot fail on a property or edge mismatch, so it is not this criterion |
 | `COMMIT VERDICT: COMMITTED + REPLAY-HEALABLE` | §17.1's crash window | with the cache write forced to fail, the record still stands and a later `rebuild_all` materialises the Point. On `origin/main` the append came *after* the write, so a failed write left **no record** — the write was gone with no repair path |
 
 ## Tests (the gates those lines are drawn from)
@@ -57,12 +60,13 @@ advisories which the headline block omits). Exit code `0`.
 $ env -u TORTOISE_DB_URI TORTOISE_TEST_CARVE_OUT=1 uv run pytest \
     tests/test_7951_create_point_outbox.py tests/test_7209_write_landing.py \
     tests/test_7951_enforce_atomic_write.py -q
-32 passed
+40 passed
 ```
 
-`tests/test_7951_create_point_outbox.py` carries the seven threat classes declared in the plan
-(T1 ordering, T2 failed-append, T3a key set / T3b live-vs-replay maps + edge set, T4 unknown form,
-T5 commit survives a failed cache write, T6 one record, T7 payload-is-the-record).
+`tests/test_7951_create_point_outbox.py` carries the threat rows declared in the plan (T1–T8; T3
+splits into T3a payload completeness / T3b live-vs-replay maps + edge set): T1 ordering, T2
+failed-append, T4 unknown form, T5 commit survives a failed cache write, T6 one record, T7
+payload-is-the-record, T8 record-states-what-the-store-holds.
 
 ## The residual, shown rather than hidden
 
