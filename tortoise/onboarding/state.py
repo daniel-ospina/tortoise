@@ -932,7 +932,7 @@ def find_false_decide_completion(graph: Any, org_id: str,
             and not _gate_satisfied(node, steps)
             and not _legacy_grandfathered(legacy_complete, steps))
         half_repaired = bool(false_completion
-                             and node.get("decide_completed_removed_at"))
+                             and node.get(DECIDE_COMPLETED_REMOVED_AT))
         if half_repaired:
             verdict = "false"
         elif false_completion:
@@ -1063,27 +1063,22 @@ def remove_decide_completed_edge(graph: Any, org_id: str, *,
     return True
 
 
-def _iso_utc(value: Any) -> datetime | None:
-    """Parse an ISO-8601 timestamp to an aware UTC datetime, or ``None``.
+def count_stamped_repairs(graph: Any, org_id: str | None = None) -> int:
+    """COMPLETED #3912 onboarding repairs in a graph — one per repaired org.
 
-    Accepts both spellings this seam writes — ``Z`` and ``+00:00`` — and reads
-    a naive value as UTC. ``None`` on anything unparseable so the caller fails
-    closed instead of comparing halves of a bound.
-    """
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        ts = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=UTC)
-    return ts.astimezone(UTC)
+    A repair is counted when BOTH hold for an OnboardingState node in the
+    graph (scoped to ``org_id`` when given):
 
+    1. it carries the write-ahead repair stamp
+       (``DECIDE_COMPLETED_REMOVED_AT``); and
+    2. its ``decide-completed`` step node is GONE — the repair's destructive
+       act has actually landed.
 
-def count_stamped_repairs(graph: Any, org_id: str | None = None, *,
-                          after: str | None = None) -> int:
-    """The #3912 repair stamps visible in a graph — one per repaired org.
+    (2) is not decoration: ``remove_decide_completed_edge`` writes the stamp
+    BEFORE the DELETE, and the delete and the orphan prune are separate round
+    trips, so a crash between them leaves a stamped node whose step node is
+    STILL PRESENT. Such a stamp removed nothing and must not account for a
+    label drop.
 
     ``remove_decide_completed_edge`` stamps ``decide_completed_removed_at`` on
     the OnboardingState node (write-ahead of the DELETE) precisely so a later
@@ -1096,24 +1091,22 @@ def count_stamped_repairs(graph: Any, org_id: str | None = None, *,
     on every subsequent sweep.
 
     ``org_id`` restricts the read to one org's node (the same key the repair
-    writer matches on); ``None`` counts every stamped node in the graph.
-
-    ``after`` is the WINDOW: only a stamp strictly NEWER than this ISO
-    timestamp is counted. The caller passes the baseline's ``updated_at``, so
-    the count is "repairs that can have caused a drop SINCE the last
-    baseline". Without it a repaired org would keep a permanent free pass for
-    one `OnboardingStep` deletion — the stamp is durable and never cleared —
-    and a genuine wipe of the label years later would be masked. An
-    unparseable ``after`` counts NOTHING (fail-closed: an unbounded window must
-    not explain a drop), and a stamp whose own timestamp will not parse is
-    skipped for the same reason.
+    writer matches on); ``None`` counts every completed repair in the graph.
 
     The count is stamped NODES, not repair EVENTS: a re-stamp overwrites, so
     it is a LOWER bound on how many repairs ever ran. It is an UPPER bound on
     how many `OnboardingStep` nodes those repairs deleted — the orphan prune
     ``_prune_orphan_decide_step`` only removes a node that has no remaining
-    referrer — which is why the caller treats it as a ceiling on the label
-    delta it may explain, never as licence to explain a larger drop.
+    referrer — so the caller treats it as a CEILING on the label delta it may
+    explain, never as licence to explain a larger drop.
+
+    DELIBERATE LIMITATION — the attribution is LABEL-level. The sweep's
+    baseline is a per-label CENSUS, not a node-identity set, so a loss of a
+    DIFFERENT `OnboardingStep` node on an already-repaired org is
+    indistinguishable from the repair's own removal, and a drop no larger than
+    this count is absorbed. That residual is documented for the operator
+    (docs/ops/registry-backup-dr.md); removing it needs a baseline schema
+    change (per-step identities), not another query here.
 
     Raises on a graph failure — the caller decides what an unreadable stamp
     means, and for the drift guard it means the drop is NOT explained
@@ -1123,21 +1116,21 @@ def count_stamped_repairs(graph: Any, org_id: str | None = None, *,
         res = _run(graph,
                    f"MATCH (n:{ONBOARDING_NODE_LABEL}) "
                    f"WHERE n.{DECIDE_COMPLETED_REMOVED_AT} IS NOT NULL "
-                   f"RETURN n.{DECIDE_COMPLETED_REMOVED_AT}")
+                   f"OPTIONAL MATCH (s:{ONBOARDING_STEP_LABEL} "
+                   "{org_id: n.org_id, step_id: 'decide-completed'}) "
+                   "WITH n, count(s) AS refs WHERE refs = 0 "
+                   "RETURN count(n)")
     else:
         res = _run(graph,
                    f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
                    f"WHERE n.{DECIDE_COMPLETED_REMOVED_AT} IS NOT NULL "
-                   f"RETURN n.{DECIDE_COMPLETED_REMOVED_AT}",
+                   f"OPTIONAL MATCH (s:{ONBOARDING_STEP_LABEL} "
+                   "{org_id: $org_id, step_id: 'decide-completed'}) "
+                   "WITH n, count(s) AS refs WHERE refs = 0 "
+                   "RETURN count(n)",
                    {"org_id": org_id})
-    stamps = [row[0] for row in res.result_set if row and row[0]]
-    if after is None:
-        return len(stamps)
-    cutoff = _iso_utc(after)
-    if cutoff is None:
-        return 0
-    return sum(1 for raw in stamps
-               if (ts := _iso_utc(raw)) is not None and ts > cutoff)
+    rows = res.result_set
+    return int(rows[0][0]) if rows and rows[0] and rows[0][0] else 0
 
 
 def regress_status(graph: Any, org_id: str, *, reason: str,
@@ -1164,7 +1157,7 @@ def regress_status(graph: Any, org_id: str, *, reason: str,
         res = _run(graph,
                    f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
                    "WHERE n.status = $complete "
-                   "  AND n.decide_completed_removed_at IS NOT NULL "
+                   f"  AND n.{DECIDE_COMPLETED_REMOVED_AT} IS NOT NULL "
                    "SET n.status = $to, "
                    "    n.status_regressed_at = $at, "
                    "    n.status_regressed_from = $complete, "

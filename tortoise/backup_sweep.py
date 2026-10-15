@@ -243,9 +243,17 @@ def _explain_repair_stamped_breaches(
     label; replacing (2) with a label skip would turn a genuine wipe of
     ``OnboardingStep`` into a silent non-incident. The BOUND (rather than
     equality) matters in the other direction too: the orphan prune is
-    CONDITIONAL, so a repair whose step node was left in place would, under an
-    equality rule, leave a legitimate drop unexplained — re-firing the incident
-    and deleting each sweep's archive, the #8660 failure itself.
+    CONDITIONAL, so a repair whose stamped org has a single-node drop would,
+    under an equality rule, leave a legitimate drop unexplained — re-firing the
+    incident and deleting each sweep's archive, the #8660 failure itself.
+
+    DELIBERATE LIMITATION: ``stamped_repairs`` counts COMPLETED repairs
+    (``count_stamped_repairs``), and the guard's baseline is a per-label
+    census, not node identities — so on an already-repaired org a loss of a
+    DIFFERENT ``OnboardingStep`` node, of no more than this many nodes, is
+    absorbed. That residual is documented in
+    docs/ops/registry-backup-dr.md; removing it needs per-step identities in
+    the baseline, not a different rule here.
 
     Pure — the graph read lives in :func:`_stamped_repair_attribution`.
     """
@@ -265,14 +273,8 @@ def _stamped_repair_attribution(
     graph,
     org_id: str,
     breaches: dict[str, dict[str, Any]],
-    *,
-    since: str | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Read this graph's repair stamp and return the breaches it explains.
-
-    ``since`` is the last baseline's ``updated_at``: only a repair stamped
-    AFTER it can have caused the current cross-run drop, so a durable stamp
-    from an earlier era does not keep explaining later label losses forever.
+    """Read this graph's completed repairs and return the breaches they explain.
 
     The stamp is read ONLY when the stamped label actually breached — an
     unrelated label's drop needs no stamp read, and a query that is not needed
@@ -283,7 +285,7 @@ def _stamped_repair_attribution(
     if _REPAIR_STAMPED_LABEL not in breaches:
         return {}
     try:
-        stamped = count_stamped_repairs(graph, org_id, after=since)
+        stamped = count_stamped_repairs(graph, org_id)
     except Exception:
         logger.warning(
             "repair-stamp read failed for %s — no breach explained by it",
@@ -1045,7 +1047,7 @@ def _backup_graph(
             # BEFORE the baseline write — re-fires on EVERY sweep. Attribute
             # the drop first; only the residual is data loss.
             explained_breaches = _stamped_repair_attribution(
-                g, org_id, breaches, since=prior.get("updated_at"))
+                g, org_id, breaches)
             unexplained = {
                 label: breach for label, breach in breaches.items()
                 if label not in explained_breaches
@@ -1157,9 +1159,9 @@ def _backup_graph(
         "coverage": manifest.get("coverage"),
         # #8660: present ONLY when an audited repair explained a per-label drop
         # on this backup — the archive was accepted anyway and the baseline
-        # advanced. Absent on an ordinary backed-up run, so its presence is the
-        # signal, and an operator reading /status sees a repair was absorbed
-        # rather than a silent count change.
+        # advanced. Absent on an ordinary backed-up run, so its presence in the
+        # sweep RESPONSE is the signal; /status does not carry per-graph
+        # results, so the WARNING line below is the app-log trace.
         **({"label_drift_explained": explained_breaches}
            if explained_breaches else {}),
     }

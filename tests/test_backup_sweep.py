@@ -922,9 +922,10 @@ def test_explain_repair_stamped_breaches_unit():
 
 
 def test_count_stamped_repairs_reads_the_stamp(shared_proj):
-    """`count_stamped_repairs` counts OnboardingState nodes carrying the #3912
-    stamp, and nothing else — the datum the drift guard attributes from — and
-    bounds the count by a window so an old stamp cannot explain a later drop."""
+    """`count_stamped_repairs` counts COMPLETED #3912 repairs: an
+    OnboardingState node that both carries the repair stamp AND whose
+    `decide-completed` step node is GONE. A write-ahead stamp whose step node is
+    still present removed nothing and is not counted."""
     with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         if shared_proj is None:
             return
@@ -940,24 +941,25 @@ def test_count_stamped_repairs_reads_the_stamp(shared_proj):
         assert count_stamped_repairs(g, "team_x") == 0
         assert count_stamped_repairs(g) == 0
 
+        # A write-ahead stamp with the step node STILL PRESENT (a crash between
+        # the edge DELETE and the orphan prune) removed nothing → not counted.
         g.query(
             "MATCH (s:OnboardingState {org_id:'team_x'}) "
             "SET s.decide_completed_removed_at = '2026-09-19T05:31:29Z'")
+        g.query(
+            "MATCH (s:OnboardingState {org_id:'team_x'}) "
+            "CREATE (s)-[:COMPLETED_STEP]->(o:OnboardingStep "
+            "{org_id:'team_x', step_id:'decide-completed'})")
+        assert count_stamped_repairs(g, "team_x") == 0
+
+        # The prune lands — the repair is now complete and counts.
+        g.query(
+            "MATCH (o:OnboardingStep "
+            "{org_id:'team_x', step_id:'decide-completed'}) DELETE o")
         assert count_stamped_repairs(g, "team_x") == 1
         assert count_stamped_repairs(g) == 1
         # Scoping: a stamp on another org's node is not this org's repair.
         assert count_stamped_repairs(g, "team_other") == 0
-
-        # The WINDOW: only a repair newer than the last baseline can have
-        # caused the current drop. Without this a durable stamp keeps a
-        # permanent free pass for one OnboardingStep deletion.
-        assert count_stamped_repairs(
-            g, "team_x", after="2026-09-19T05:00:00+00:00") == 1
-        assert count_stamped_repairs(
-            g, "team_x", after="2026-09-19T06:00:00+00:00") == 0
-        # An unparseable bound explains nothing (fail-closed), and a stamp the
-        # window leaves out is never counted.
-        assert count_stamped_repairs(g, "team_x", after="not-a-timestamp") == 0
 
 
 def _seed_repair_shape(proj) -> tuple:
@@ -1045,15 +1047,13 @@ def test_sweep_stamped_repair_explains_label_drop(shared_proj):
         #     on the next sweep.
         assert read_org_state(store, "team_x")["label_counts"]["OnboardingStep"] == 3
 
-        # (4) …and the guard is NOT blinded: a SECOND, unstamped drop of the
-        #     same label now fires. The stamp was absorbed into the baseline,
-        #     and a genuine wipe measured from it is still data loss. (This is
-        #     why the attribution is WINDOWED by the last baseline: a bare
-        #     count would keep explaining one `OnboardingStep` deletion per
-        #     repaired org forever.)
-        proj.db.select_graph(_team_graph("team_x")).query(
-            "MATCH (o:OnboardingStep {org_id:'team_x', step_id:'step-2'}) "
-            "DELETE o")
+        # (4) …and the guard is NOT blinded: a drop LARGER than the stamp can
+        #     account for still fires. The stamp accounts for at most ONE
+        #     pruned step node per repaired org, so a two-node loss measured
+        #     from the post-repair baseline is data loss, not a repair.
+        q = proj.db.select_graph(_team_graph("team_x")).query
+        q("MATCH (o:OnboardingStep {org_id:'team_x', step_id:'step-1'}) DELETE o")
+        q("MATCH (o:OnboardingStep {org_id:'team_x', step_id:'step-2'}) DELETE o")
         res3 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
                                 config=_config())
         org_res3 = res3["results"]["team_x"]
@@ -1061,6 +1061,63 @@ def test_sweep_stamped_repair_explains_label_drop(shared_proj):
         inc = next(i for i in res3["incidents"]
                    if i["kind"] == "DATA_LOSS_CANDIDATE")
         assert "OnboardingStep" in inc["detail"]["label_breaches"]
+
+
+def test_sweep_half_repaired_org_prune_is_explained(shared_proj):
+    """#8660: a repair that was interrupted BETWEEN its stamp and its orphan
+    prune, and whose prune lands after an intervening baseline, is still
+    explained when the label does drop.
+
+    The stamp is write-ahead; the edge DELETE and the orphan prune are separate
+    round trips, so a crash between them leaves a stamped org whose
+    `decide-completed` step node is STILL PRESENT (a sweep in that state sees
+    no drop and advances the baseline), and a later retry
+    (`repair_false_decide_completion` → `_prune_orphan_decide_step`) finishes
+    the prune WITHOUT touching the stamp. The attribution must still explain
+    that drop — it is the repair's own removal — or the guard re-fires forever
+    on a half-repaired org, which is the #8660 failure mode. This is why the
+    rule keys on the step node's absence rather than on a stamp/newer-than-
+    baseline window: the window would exclude the older stamp here and
+    re-fire.
+    """
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
+        store = MemoryStorage()
+        reg, _g = _seed_repair_shape(proj)
+
+        res1 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                                config=_config())
+        assert res1["results"]["team_x"]["status"] == "backed_up"
+
+        # The repair's write-ahead stamp + edge removal, then a crash BEFORE
+        # the orphan prune — the step node survives.
+        team_g = proj.db.select_graph(_team_graph("team_x"))
+        team_g.query(
+            "MATCH (s:OnboardingState {org_id:'team_x'})"
+            "-[e:COMPLETED_STEP]->(o:OnboardingStep "
+            "{org_id:'team_x', step_id:'decide-completed'}) "
+            "SET s.decide_completed_removed_at = '2026-09-19T05:31:29Z' "
+            "DELETE e")
+
+        # The intervening sweep sees NO label drop (the node is still there) and
+        # advances the baseline past the stamp.
+        res2 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                                config=_config())
+        assert res2["results"]["team_x"]["status"] == "backed_up"
+        assert read_org_state(store, "team_x")["label_counts"]["OnboardingStep"] == 4
+
+        # The retry's prune lands, with no re-stamp.
+        team_g.query(
+            "MATCH (o:OnboardingStep {org_id:'team_x', step_id:'decide-completed'}) "
+            "DELETE o")
+        res3 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                                config=_config())
+        org_res3 = res3["results"]["team_x"]
+        assert org_res3["status"] == "backed_up", org_res3
+        assert not any(i["kind"] == "DATA_LOSS_CANDIDATE" for i in res3["incidents"])
+        assert read_org_state(store, "team_x")["label_counts"]["OnboardingStep"] == 3
 
 
 def test_sweep_unstamped_label_drop_still_fires(shared_proj):
