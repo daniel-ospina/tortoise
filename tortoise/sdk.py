@@ -9016,12 +9016,21 @@ class TortoiseSDK:
                 # mint an id the operators never reference (P2 r2 note).
                 ev_id = f"ev_{content_hash(content[:1000])[:62]}"
             try:
+                # #2729: the payload event's `about_entities` is passed through
+                # so the projection's pack-declared status fold can fire on the
+                # entities the event concerns (an extracted venture/meeting
+                # lifecycle event carries `about_entities` and no `object` prop).
+                # `about_entities` is a #228 meta key — the projection handles it
+                # as a fold input and `_persist_extra_props` never stores it.
+                # NOTE: it is NOT materialized as an `about*` edge on this path
+                # (a separate, pre-existing gap — #8653).
                 self.create_event(
                     content[:80],
                     str(ev.get("eventKind", "core:occurrence")).rsplit(":", 1)[-1],
                     sessionId=session_id, is_episodic=True,
                     _server_id=ev_id or None,
                     content=content,
+                    about_entities=list(ev.get("about_entities") or []),
                 )
             except Exception as exc:  # noqa: BLE001, RUF100 — non-fatal like
                 # the entity loop above: an event write failure is

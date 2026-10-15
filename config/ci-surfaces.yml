@@ -2511,6 +2511,14 @@ surfaces:
   - test_slack_connector.py
   - test_sparse.py
   - test_status_projection.py
+  # #2729: pack-declared per-kind Object status folds — manifest validation
+  # (unknown status / orphan fold event isolate the pack; a shared-vocabulary
+  # overlap is a recorded warning), built-in connector-fold parity, namespaced-
+  # kind dispatch, and the end-to-end venture fold. `core` is the home: the
+  # pack registry + `tortoise/status_folds.py` + the projection fold;
+  # `test_status_projection.py` above is the sibling that pins the pre-#2729
+  # fold behaviour this mechanism must preserve.
+  - test_status_folds_2729.py
   - test_read_status.py  # #3892 (B6): the read-path status contract — the recorded four terms on search/recall (tortoise/read_status.py + tortoise/sdk.py; dual-registered with `api` for the hosted /v1/search field)
   # #7952 (§17.2 / §17.3): the completeness marker (`not-hot`, never an empty
   # result) and the second divergence surface (Postgres truth ↔ FalkorDB cache,
@@ -4278,6 +4286,13 @@ durations:
   test_write_consolidation.py: 5.3
   test_value_extractor.py: 4.8
   test_venture_pack.py: 2.0  # unmeasured — new in #3419; no sweep has collected it, so it carries the flat default exactly as an absent key would, which is main's own weight for it. Do NOT substitute a local timing here: a measured-on-this-box 67.2 was recorded first, and it is a SHARD-LAYOUT input, so it moved tests/test_tortoise_search.py into the same shard as tests/test_subject_layer_read_surfaces_4889.py and exposed a pre-existing embedded-lane isolation leak (#3750 family) that main's grouping keeps apart. A weight that does not model CI must not be used to decide what runs together.
+  # #2729: same rule as the entry directly above — unmeasured, carries the flat
+  # default exactly as an absent key would. The explicit entry is REQUIRED, not
+  # cosmetic: the file is new to the fast pool and an absent key lowers
+  # `durations` coverage below the 90% floor (#3400). Do NOT substitute a
+  # measured-on-this-box timing; the weight is a shard-layout input that must
+  # model CI, not this box.
+  test_status_folds_2729.py: 2.0
   test_pack_state.py: 5.1
   test_pack_selection_by_graph.py: 2.0  # unmeasured — new in #2728; no sweep has collected it, so it carries the flat default exactly as an absent key would. Do NOT substitute a local timing here: the weight is a SHARD-LAYOUT input, and the #3419 venture-pack precedent (a local 67.2 that re-grouped unrelated files and exposed a pre-existing embedded-lane isolation leak) is why an unmeasured new file stays at the flat default until a junit sweep measures it.
   test_skip_guard.py: 16.0

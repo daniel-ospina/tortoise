@@ -86,8 +86,8 @@ def _reset_rerank_state(force_sparse_tfidf):
     test (the module globals are the real get_scorer state).
 
     #2772: pin the sparse TF-IDF baseline (``EmbeddingModel.get`` -> None,
-    the ``tests/eval/retrieval/test_oracle.py`` ``_force_sparse_tfidf``
-    pattern #2573 established). The pool-size pins in this module (q0 = 4
+    the ``_force_sparse_tfidf`` pattern #2573 established in
+    ``tests/eval/retrieval/test_oracle.py``). The pool-size pins in this module (q0 = 4
     hits, q2 = 2 hits) were calibrated on 2026-08-22 while the CI bge cache
     was evicted and the suite ran TF-IDF-degraded; once the embedder cache
     was restored (#2573) the vector leg surfaced the rest of each corpus'
