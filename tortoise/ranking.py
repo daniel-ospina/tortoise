@@ -100,11 +100,12 @@ DEFAULT_HALF_LIFE_DAYS = 30.0
 # graph, same query, 404 points, dense leg live: the contested twin ranks
 # BELOW its twin at limit=4 (delta 0.0157) and at the shipped default limit=10
 # (delta 0.0013), and ABOVE it at limit>=40 (delta -0.0041), the gap shrinking
-# as the page grows.  On the 4-row E2E-1 fixture it ranks below
-# at every limit 2..40.  Raising the boost does not repair this: the required
-# magnitude is unbounded as the page shrinks — a 2-row page normalizes the two
-# rows to similarity 0.0 and 1.0, needing a graph-boost increment > 1.43 where
-# ``graph_boost`` is capped at 1.0 (measured delta 0.4825 of final score).
+# as the page grows.  On the fixture with 40 filler rows (a 44-point graph) it
+# ranks below at every limit 2..40 (+0.0056 at limit=40).  Raising the boost
+# does not repair this: the required magnitude is unbounded as the page shrinks
+# — a 2-row page normalizes the two rows to similarity 0.0 and 1.0, needing a
+# graph-boost increment > 1.43 where ``graph_boost`` is capped at 1.0 (measured
+# delta 0.4825 of final score).
 #
 # Every listed remedy is blocked by a RECORDED decision, which is why this is
 # reported rather than enacted: (1) boost inside fusion = score-based fusion,
