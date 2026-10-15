@@ -642,7 +642,7 @@ setting, even after an earlier decline (see the re-enable pin below).
    **Self-hosted: NEITHER path changes the setting.** The MCP tool is listed
    but its write does not land — the self-hosted deployment has no control-plane
    node for it to write — and the daemon serves no `PATCH` route. The tool
-   returns a success ACK either way (#8686). So on a self-hosted install, do
+   returns a success ACK for either value (#8686). So on a self-hosted install, do
    NOT report the setting as changed: say it could not be applied.
 4. **Fire the install probe BEFORE you report success.**
    `tortoise session probe --harness <harness>` (the existing
@@ -674,6 +674,12 @@ setting, even after an earlier decline (see the re-enable pin below).
    `tortoise session disclosure --harness <harness> --kind declined`: nothing was
    installed, nothing will be recorded, and the setting stays visible where the
    user can turn it back on.
+   **Self-hosted: that wording is FALSE — do not print it verbatim.** The
+   `declined_confirmation` text is a fixed template and always says the setting
+   is "currently OFF"; it does not read the live flag, and self-hosted the
+   setting is ON (the decline did not persist — #8686). Say instead that the
+   preference could not be applied and that recording continues, and point the
+   user at where to turn it off once the write works.
 
 ### The re-enable path is pinned
 
@@ -711,7 +717,10 @@ change it any time from `Settings → Memory sources`.
 > (`session_recording`, section 5) cannot currently be *changed* on a
 > self-hosted install — the write does not land and reports success anyway
 > (#8686). Do not promise reversibility for that tile self-hosted; report the
-> setting as read-only until #8686 is fixed. The other tiles are unaffected.
+> setting as read-only until #8686 is fixed. Self-hosted the OTHER tiles have no
+> write path either (their only writer is the dashboard `PATCH /v1/onboarding/state`,
+> which the daemon does not mount, and `tortoise_onboarding_github_connect` has no
+> self-hosted team context) — so do not promise changes to those either.
 
 The pinned order and the per-source state keys are the dashboard's tile
 inventory (`website/apps/dashboard/src/integrationsGrid.js`, one declaration
@@ -760,17 +769,22 @@ The dashboard's job is to **show** what exists and its state; the **wiring**
 (connect, enable, scope, start an index) lives in the backend and is reachable
 from the **tool surface**, so an agent can do it without any per-integration UI
 flow. Each integration this document covers is enable/connectable **and**
-state-readable from that surface **(hosted — the self-hosted note on
-agent-session recording below is the one exception):**
+state-readable from that surface — **(hosted only)**: the daemon serves no
+onboarding *enable/connect* write route at all, so none of the enable/connect
+legs below works self-hosted. (It does serve the onboarding FLOW: read it with
+`tortoise_onboarding_state`, and file the two seed anchors with
+`POST /v1/onboarding/seed` — section 1.)
 
 - **GitHub issues** — `tortoise_onboarding_github_connect` (OAuth) then
   `tortoise_onboarding_github_index`; read `tortoise_onboarding_github_status`
   (or `tortoise_onboarding_state`).
 - **Agent-session recording** — `tortoise_onboarding_session_recording`
   (`enabled`); read it back from `tortoise_onboarding_state`. **Self-hosted:
-  the tool is LISTED and the read works, but the WRITE does not land (#8686)**
-  — do not treat this source as enable/disable-able there, and do not report
-  the setting as changed.
+  the tool is LISTED, but neither the WRITE nor the READ-BACK of this setting
+  works there** — `session_recording` is an operational key and is NOT in the
+  self-hosted projection (which serves FLOW keys only), and the write does not
+  land (#8686). Do not treat this source as enable/disable-able, do not read
+  it back, and do not report the setting as changed.
 - **GitHub documents** — the enable route (`POST /v1/index/docs`) and its job
   status have **no MCP tool yet**; adding one expands the agent-facing surface
   and needs owner approval plus a `config/surface-manifest.yml` re-cut
