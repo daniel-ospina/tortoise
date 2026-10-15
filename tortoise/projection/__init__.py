@@ -1140,12 +1140,21 @@ def _config_classes() -> tuple[_ConfigClass, ...]:
         # safe.
         from tortoise.pack_manifest_store import PACK_MANIFEST_LABEL
         from tortoise.pack_state import PACK_INSTALL_LABEL
+        from tortoise.pipeline import PIPELINE_LABEL, PIPELINE_STAGE_LABEL
         from tortoise.residency import DECLARATION_META_KEY
         from tortoise.sdk import TortoiseSDK
 
         classes = (
             _ConfigClass(PACK_INSTALL_LABEL, "namespace"),
             _ConfigClass(PACK_MANIFEST_LABEL, "namespace"),
+            # #2792: per-graph pipelines are graph-resident authoritative
+            # configuration (the tenant owns its stage list), non-journaled and
+            # not re-derivable — so they enrol here, or a rebuild silently
+            # reverts a customised pipeline to the pack default. Stages carry
+            # their own `pipelineKey` (denormalised, no edge) precisely because
+            # this registry captures nodes only.
+            _ConfigClass(PIPELINE_LABEL, "pipelineKey"),
+            _ConfigClass(PIPELINE_STAGE_LABEL, "stageKey"),
             # `:Meta` is SHARED with derived markers (the FTS keys), so this
             # class is key-scoped: a label-wide read would sweep them in.
             # `residency` (#7952) is the completeness marker's declared

@@ -181,6 +181,22 @@ export const onRequest: PagesFunction = async (context) => {
   // pre-cutover email link, or a relative link resolved against the marketing
   // host used to hit.
   //
+  // NOT a 404, deliberately (#4328). Removing a dormant OAuth endpoint is the
+  // OAuth-BCP default, and it is the wrong control here: the endpoint is dormant
+  // on THIS origin while the links that reach it are not, so a 404 only turns a
+  // stale bookmark or a pre-cutover email link into a dead end. The inbound
+  // query reaches this worker's logs either way, so the status code buys no
+  // security.
+  //
+  // What keeps the redirect safe is upstream of it: GoTrue refuses a
+  // `redirect_to` it does not recognise, so the guard is the identity provider's
+  // redirect allow-list. The property that MUST hold is that no allow-list entry
+  // authorises a code for THIS origin's `/auth/callback`. The entries required
+  // today are recorded in `docs/ops/auth-email-flows.md` §3 — which still lists
+  // `https://tortoise.premiselabs.co` for legacy links, so the list is wider than
+  // the app origin — and #8680 is the OPEN audit that confirms the legacy
+  // `/auth/callback` entry can be removed. That audit is not closed.
+  //
   // 302, NOT 301 — a deliberate departure from the ordinary "moved ⇒ 301"
   // practice, which is why the OVERRIDES marker for it lives on #3501 / #3521 /
   // #4409 and in `SCOPE.md` §12: a 301 is browser-persistent and CANNOT be

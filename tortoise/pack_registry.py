@@ -173,6 +173,10 @@ VALID_KINDDEF_KEYS = frozenset({
     "description", "synonyms", "examples", "nearMisses",
     "extractable", "storeAs", "enforcement",
     "statuses", "folds",
+    # #2792: a stage-driven kind may declare its default stage lifecycle. The
+    # canonical slot vocabulary and the shape rules live in
+    # ``tortoise/pipeline.py`` (one home); this key only opts the kind in.
+    "pipeline",
 })
 
 # storeAs values — what stream bucket a kind belongs to (R6 §3.1)
@@ -575,7 +579,8 @@ class PackManifest:
 
     # Manifest v3 (R6 §3.1): per-kind extractor metadata, keyed by pack-local
     # kind name. Allowed value keys: description, synonyms, examples,
-    # nearMisses, extractable, storeAs, enforcement, statuses, folds.
+    # nearMisses, extractable, storeAs, enforcement, statuses, folds,
+    # pipeline (#2792).
     kind_defs: dict[str, dict] = dataclasses.field(default_factory=dict)
 
     # Manifest v3 (R6 §3.2): first-class business-logic chains.
@@ -1386,6 +1391,14 @@ class PackRegistry:
                             f"{', '.join(sorted(VALID_ENFORCEMENT_LEVELS))}, "
                             f"got {spec['enforcement']!r}"
                         )
+                    # #2792: a declared stage pipeline is validated by the
+                    # pipeline module (canonical slots, terminal outcomes,
+                    # unique ids, a default that exists). Shape only — the
+                    # per-graph override layer reads it at runtime.
+                    if "pipeline" in spec:
+                        from tortoise.pipeline import validate_pipeline_decl
+                        for perr in validate_pipeline_decl(spec["pipeline"]):
+                            errors.append(f"kindDefs '{kind}': {perr}")
                     # #2729: the per-kind lifecycle declaration. Errors isolate
                     # the pack (unknown fold status / orphan fold event /
                     # malformed shape); the shared-vocabulary overlap is a

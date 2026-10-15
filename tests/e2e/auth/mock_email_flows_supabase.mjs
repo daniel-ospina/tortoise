@@ -168,9 +168,11 @@ const server = createServer((req, res) => {
       if (fault === 500) return json(res, 500, { error: "injected_provider_outage" });
       if (fault === 401) return json(res, 401, { error: "Invalid API key" });
       if (fault === 429) {
-        // GoTrue's `over_email_send_rate_limit`, applied to the ADDRESS being
-        // mailed. Real GoTrue brackets this with a Retry-After; the route must
-        // fold it into the enumeration-safe 200 rather than leak it.
+        // GoTrue's `over_email_send_rate_limit`. NOTE (#4161): the real limiter
+        // is PROJECT-WIDE (`limiterOpts.Email.Allow()` takes no key), not
+        // per-address — the fault injector deliberately refuses EVERYTHING,
+        // which is that shape. Bracketed with a Retry-After the way real GoTrue
+        // does it.
         const payload = JSON.stringify({
           error_code: "over_email_send_rate_limit",
           msg: "Email rate limit exceeded",
@@ -182,10 +184,13 @@ const server = createServer((req, res) => {
         return json(res, 422, { error_code: "user_not_found", msg: "No such user" });
       }
       if (email === "ratelimited@example.test") {
-        // GoTrue's `over_email_send_rate_limit` is applied to the ADDRESS being
-        // mailed, so it fires for THIS address and not for an unknown one — the
-        // differential the route must not leak. Bracketed with Retry-After the
-        // way real GoTrue does it.
+        // An OVER-APPROXIMATION of GoTrue's refusal (#4161): the real email
+        // limiter is project-wide and has no key, so it does not fire per
+        // address. What this reproduces is the DIFFERENTIAL a real refusal can
+        // produce — an address that reaches the email send can be refused while
+        // an address with no account is answered `200 {}` EARLY and never can —
+        // which is the property the route's fold has to survive. Bracketed with
+        // Retry-After the way real GoTrue does it.
         const limited = JSON.stringify({
           error_code: "over_email_send_rate_limit",
           msg: "Email rate limit exceeded",

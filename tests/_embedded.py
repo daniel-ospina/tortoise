@@ -376,6 +376,11 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # embedded-only in practice (the bulk-wipe guard refuses non-test graphs in
     # server mode), so its survival pins must never flip to the server lane.
     "test_rebuild_config_preservation",
+    # #2792: per-graph pipelines — the state pins build a real embedded store and
+    # drive the `EntityMutated` journal + `rebuild_all` replay, so the carve-out
+    # is load-bearing (a URI-set lane would redirect the construction). Mirror of
+    # the `carve_out:` entry in config/ci-surfaces.yml.
+    "test_pipeline_2792",
     # #7852 W1: the Layer-2 `semantics` write path resolves the direction from the
     # declared meaning and records the basis as `direction_basis`. The fixture
     # builds `TortoiseSDK(<tmpfile>)` and drives the real `rebuild_all` replay, so

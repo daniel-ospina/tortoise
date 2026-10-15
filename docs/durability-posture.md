@@ -120,6 +120,8 @@ build whose read set excludes it refuses on a retired file until it is deleted.
 |---|---|
 | `:PackInstall` | `namespace` |
 | `:PackManifest` | `namespace` |
+| `:Pipeline` | `pipelineKey` |
+| `:PipelineStage` | `stageKey` (composite `pipelineKey\|stageId` — the declared `stageId` is pack-local, so two pipelines may share one) |
 | `:Meta{key:'calibration_milestone'}` | `key` |
 | `:Meta{key:'config_reset'}` | `key` |
 | `:Meta{key:'residency'}` | `key` |
@@ -352,6 +354,10 @@ not enumerated here.
 MATCH (p:PackInstall) RETURN 'PackInstall' AS cls, p.namespace AS ident
 UNION ALL
 MATCH (m:PackManifest) RETURN 'PackManifest' AS cls, m.namespace AS ident
+UNION ALL
+MATCH (p:Pipeline) RETURN 'Pipeline' AS cls, p.pipelineKey AS ident
+UNION ALL
+MATCH (s:PipelineStage) RETURN 'PipelineStage' AS cls, s.stageKey AS ident
 UNION ALL
 MATCH (x:Meta) WHERE x.key IN ['calibration_milestone', 'config_reset', 'residency']
 RETURN 'Meta' AS cls, x.key AS ident
