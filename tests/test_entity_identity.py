@@ -884,6 +884,34 @@ _ALLOWED_KEYED = {
         # see it. The read is dispositioned in that module's seam.
         'self._persist_extra_props( "MATCH (n:Subject {name: $name})", {"name": name}, ev, self._SUBJECT_HANDLED, )': 1,
         'self._persist_extra_props( "MATCH (n:Object {name: $name})", {"name": name}, ev, self._OBJECT_HANDLED, )': 1,
+        # #2729: the pack-declared fold dispatcher. `_fold_object_status`
+        # MATCHes the Event's target by NAME (the prop the event carries) and
+        # guards on the declaring kind, case-folded + form-widened
+        # (`toLower(o.objectKind) IN $kinds` covers `venture:tranche` and bare
+        # `tranche`). It is a lifecycle fold, not an identity resolve — it
+        # writes `Object.status` for a kind whose lifecycle the pack declared,
+        # and the terminal guard (below) is carried into the same predicate.
+        # Owned by S3 with the connector folds it generalizes; the pre-#2729
+        # literal built-in statements it replaced are REMOVED, not left stale.
+        #
+        # #2729 review P1: the kind comparison goes through `toStringOrNull`
+        # (NOT `toLower` on the raw property) because a payload-supplied
+        # non-string `objectKind` made `toLower` raise `Type mismatch` and
+        # abort the whole event write — a failure mode the pre-#2729 built-in
+        # fold never had (it never read `objectKind`). Same sites, same S3
+        # ownership; only the coercion is new.
+        'rows = self.g.query( "MATCH (o:Object {name:$n}) " "WHERE toLower(toStringOrNull(o.objectKind)) IN $kinds " " AND (o.status IS NULL OR NOT (o.status IN $excluded)) " "SET o.status = $status " "RETURN count(o) AS n", params={"n": target_name, "kinds": kinds, "status": status, "excluded": excluded}, ).result_set': 1,
+        # The companion MISS probe (distinguishes "the terminal guard refused"
+        # from "no Object of the declaring kind exists", which is reported as
+        # `status_fold_unapplied`). Same name-keyed MATCH, same disposition.
+        'present = self.g.query( "MATCH (o:Object {name:$n}) " "WHERE toLower(toStringOrNull(o.objectKind)) IN $kinds " "RETURN count(o) AS n", params={"n": target_name, "kinds": kinds}, ).result_set': 1,
+        # The built-in connector compatibility half — parametrized by #2729
+        # (was the two literal `SET o.status='in_progress'`/`'completed'`
+        # statements this PR replaced). Same name-keyed coordinate, same S3
+        # ownership; the `$declared` guard is what makes a declared-lifecycle
+        # kind own its state. The `IS NULL` disjuncts keep the pre-#2729
+        # tolerance for an absent OR non-string `objectKind` (#2729 review P1).
+        'self.g.query( "MATCH (o:Object {name:$n}) " "WHERE (o.objectKind IS NULL " " OR toStringOrNull(o.objectKind) IS NULL " " OR NOT (toLower(toStringOrNull(o.objectKind)) IN $declared)) " " AND (o.status IS NULL OR NOT (o.status IN $excluded)) " "SET o.status=$status", params={"n": name, "status": builtin_status, "declared": sorted(index.kind_forms), "excluded": excluded}, )': 1,
         'result = self.g.query( "MATCH (o:Object {name:$name}) " + live, params={"name": name, **common_params})': 2,
         'self.g.query( "MATCH (s:Subject {name:$name}), (e:Event {eventId:$eid}) " "MERGE (s)-[:performs]->(e)", params={"name": subj, "eid": eid}, )': 1,
         'self.g.query( "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) " "MERGE (e)-[:produces]->(o)", params={"name": obj, "eid": eid}, )': 1,
@@ -897,8 +925,6 @@ _ALLOWED_KEYED = {
         # `live` uses for Points (`TERMINAL_EXCLUDED_STATUSES` also carries
         # `outdated`), so it does not make this predicate drift-free against
         # the resolver. Do not restate it as "the same constant".
-        'self.g.query( "MATCH (o:Object {name:$n}) " "WHERE (o.status IS NULL OR NOT (o.status IN $excluded)) " "SET o.status=\'in_progress\'", params={"n": _obj_name, "excluded": _terminal_object_statuses()})': 1,
-        'self.g.query( "MATCH (o:Object {name:$n}) " "WHERE (o.status IS NULL OR NOT (o.status IN $excluded)) " "SET o.status=\'completed\'", params={"n": _obj_name, "excluded": _terminal_object_statuses()})': 1,
         'self.g.query( "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) " "MERGE (e)-[:uses]->(o)", params={"name": use_name, "eid": eid}, )': 1,
         'self.g.query( "MATCH (s:Subject {name: $name}), (e:Event {eventId: $eid}) " "MERGE (s)-[:participatesIn]->(e)", params={"name": subj, "eid": eid}, )': 1,
     },

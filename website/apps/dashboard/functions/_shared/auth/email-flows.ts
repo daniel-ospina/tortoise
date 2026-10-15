@@ -100,10 +100,20 @@ function redirectQuery(redirectTo?: string): string {
  * user-signal refusal (e.g. unknown address) and is safe to ignore.
  *
  * ⚠️ 429 IS SPECIAL-CASED BY THE MAIL-SENDING ROUTES, BEFORE this predicate.
- * GoTrue's `over_email_send_rate_limit` applies to the ADDRESS being mailed, so
- * for `/recover` and `/resend` a 429 is folded into the enumeration-safe 200
- * rather than classified here — surfacing it would make a known address
- * distinguishable from an unknown one. See `auth/reset.ts` and `auth/resend.ts`.
+ * GoTrue answers an address with no account `200 {}` EARLY — before its email
+ * send, and therefore before its email limiter — while an address that DOES
+ * exist reaches the send and can be refused. That asymmetry is what makes a
+ * surfaced refusal an existence oracle, so `/recover` and `/resend` fold it into
+ * the enumeration-safe 200. See `auth/reset.ts` and `auth/resend.ts`.
+ *
+ * ⚠️ THE LIMITER ITSELF IS PROJECT-WIDE, NOT PER-ADDRESS (#4161). The routes'
+ * original comments attributed the refusal to a per-address bucket; GoTrue's
+ * `sendEmail` gates on `limiterOpts.Email.Allow()`, a limiter with NO key
+ * argument (`ratelimit.New(config.RateLimitEmailSent)` — supabase/auth
+ * `internal/api/mail.go`, `internal/api/apilimiter/apilimiter.go`), so it is one
+ * bucket shared by the whole project. That is the shape THIS module's own
+ * header always described for signup ("project-wide-bucketed SMTP", #801/#863);
+ * the per-address attribution was the anomaly. Read 2026-10-13.
  */
 export function isProviderFault(status: number, retryable: boolean): boolean {
   return retryable || status === 401 || status === 403 || status === 404;

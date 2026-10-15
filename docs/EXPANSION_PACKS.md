@@ -30,7 +30,7 @@ ontology:
   extends: core              # always 'core'
   objectKinds: [contract]    # entity nouns → Object nodes
   pointKinds: [rationale]    # claims/decisions → Point nodes
-  eventKinds: [ruleRevised]  # what happened → Event nodes
+  eventKinds: [ruleRevised, contractSigned]  # what happened → Event nodes
   documentKinds: []          # document subclasses
   subclassOf: {}             # e.g. {epic: Project}
   equivalentTo: {}           # e.g. {issue: [pm:issue]} — cross-pack identity
@@ -39,6 +39,16 @@ ontology:
       description: A commercial agreement between parties
       synonyms: [deal, agreement]
       nearMisses: [standard]   # confusable kinds → classifier guidance
+      statuses: [draft, signed, terminated]   # this kind's status vocabulary (#2729)
+      folds:                  # event kind → status (must be in `statuses`)
+        - event: contractSigned
+          status: signed
+      pipeline:                # #2792: optional stage lifecycle for a stage-driven kind
+        defaultStage: stg_draft
+        stages:
+          - {id: stg_draft,  label: Draft,  order: 1, slot: entry}
+          - {id: stg_active, label: Active, order: 2, slot: active}
+          - {id: stg_done,   label: Done,   order: 3, slot: terminal, outcome: won}
   relations:                 # epistemic edge declarations (IMPL/NAND)
     - predicate: groundedIn
       mechanism: IMPL
@@ -63,6 +73,44 @@ extraction:
 
 1. **`memory_granularity` at the top level** — the value-brief compiler reads `ontology.memory_granularity`. Top-level is silently ignored. (The `_template` teaches the correct placement — copy it.)
 2. **A `kindDefs` key not declared in `objectKinds`/`pointKinds`/etc.** — the validator rejects it. Every kindDefs key must be a declared kind.
+
+## Declaring a per-kind stage pipeline (#2792)
+
+A stage-driven kind (a deal, an investment, a tranche, an action item) can declare its **default
+lifecycle** under `kindDefs[<kind>].pipeline`. The pack ships sensible defaults; each graph may
+**override** them (add / rename / reorder / retire a stage) without a code change or a pack release —
+the CRM model (Salesforce stages / HubSpot deal pipelines / Jira workflows).
+
+The model has two tiers: a small **canonical slot** vocabulary the graph understands, and the
+**tenant stage list** a graph owns.
+
+| field | required | meaning |
+|---|---|---|
+| `stages[].id` | ✅ | stable, immutable identity. Anchoring keys on this, never on the label, so a rename never moves an Object. Unique within the pipeline; must not contain the composite stage key's separator (`&#124;`). |
+| `stages[].label` | ✅ | the tenant-visible name (renameable). |
+| `stages[].order` | ✅ | integer; the forward/regression judgement for future moves. Values must be **unique and non-negative** — a tie would make a move between the two stages neither forward nor backward, so it is refused on the declaration path and by `add_stage(..., order=…)` alike. |
+| `stages[].slot` | ✅ | one of `entry`, `active`, `suspended`, `terminal`. Canonical and fixed. |
+| `stages[].outcome` | terminal only | required iff `slot: terminal`, one of `won`, `lost`, `withdrawn`, `completed`. |
+| `defaultStage` | optional | the declared default stage id. **Declaration-only in this change**: it is validated and stored, and read back by the mutators (it cannot be retired), but nothing applies it to a new Object yet — the stage a new Object enters is set by `advance_stage`, and a null stage reference is a no-op. The Graph Settings surface that consumes it is #2728. |
+
+State and history: the **current** stage is a property on the Object (`pipelineStageId`,
+`pipelineSlot`, `pipelineOutcome`, `pipelineStageSince`, `isClosed`) so a query always returns one
+answer; the **history** is the dated journal. A terminal stage is **sticky** — a passing later
+mention cannot resurrect a closed thing; only an explicit reopen does. Stickiness keys on the
+Object's durable `isClosed` marker **as well as** the resolved stage's slot, so a pack release that
+reclassifies the stage's slot cannot resurrect a closed Object. A stage reported by
+extraction that is not in the effective list is **captured for review** (`pipelineStagePending`),
+never dropped and never auto-adopted.
+
+Drift fails closed: an Object whose stored stage no longer resolves in the effective pipeline is
+**refused**, not advanced (skipping the guards is the resurrection vector), and a pipeline key that
+does not equal the Object's namespaced `objectKind` is refused too. That refusal deliberately has no
+public escape hatch in this change — a repair verb belongs to the Graph Settings surface (#2728).
+
+The canonical slot/outcome vocabulary and the shape rules live in `tortoise/pipeline.py`; the pack
+key is opt-in and validated exactly like the other `kindDefs` keys. The Settings UI that edits a
+graph's stages is #2728; the hardcoded connector `Object.status` fold is #2729 (a separate axis —
+pipeline stage is not `Object.status`).
 
 ## Declaring a relation — writable, or explicitly declaration-only (#2766)
 
@@ -178,6 +226,89 @@ With `TORTOISE_CLASSIFY_LATER=1` the pack vocabulary and the chains leave the S2
 
 Resolution order for a kind: `kindDefs[].enforcement` → `extraction.enforcement.kinds` → `extraction.enforcement.default` → `warn`.
 
+## Per-kind status folds — pack-declared Object state (#2729)
+
+An Object has a current state (`Object.status`), folded from the lifecycle events that name it.
+Before #2729 the fold vocabulary was a hand-typed producer→status map in the engine
+(`github.issue.open`/`reopened` → `in_progress`; `github.issue.closed`/`pm:cardCompleted` →
+`completed`), so a domain pack could not declare its own kind's lifecycle. A pack now declares it:
+
+```yaml
+kindDefs:
+  tranche:
+    statuses: [pending, conditions-met, released, denied]   # closed vocabulary
+    folds:
+      - event: disbursement      # a bare event kind of THIS pack (or self_ns:event)
+        status: released         # must be one of `statuses`
+```
+
+The rules (`tortoise/status_folds.py` is the single implementation; `tortoise/pack_registry.py`
+validates it at load):
+
+- **`statuses`** is a non-empty list of unique strings — the kind's closed status vocabulary.
+  The declaration is machine-read by the fold dispatcher and by `PackRegistry.status_fold_index`.
+- **`folds`** is a non-empty list of `{event, status}`. `status` must be in the same kind's
+  `statuses`; `event` must be an event kind **this pack declares** (bare `disbursement` or
+  self-namespaced `mydomain:disbursement`). An unknown status or an orphan event (a fold key no
+  pack declares) is a validation **error** — the pack is isolated, exactly as for an undeclared
+  `kindDefs` key.
+- **A kind that declares `statuses` owns its state.** The built-in connector folds still apply to
+  every Object whose kind declares **no** lifecycle (so a pack-less graph behaves exactly as
+  before), but they are **suppressed** for a lifecycle-declaring kind. This is deliberate: the
+  connector vocabulary already spells `open`→`in_progress` and `closed`→`completed`, so a new kind
+  reusing those words would otherwise silently inherit the wrong lifecycle.
+- **Dispatch is on the namespaced kind** (`mydomain:tranche`), so two packs declaring the same
+  bare kind name do not collide for an Object whose stored `objectKind` carries the namespace. The
+  index is also **form-widened** (a bare-spelled `objectKind` folds by the same rule — see
+  "Event-kind spelling" below), so if two packs declare a lifecycle for the **same bare kind
+  name**, a bare-spelled Object matches both and the last declaring pack (catalog order) wins.
+  That cross-pack collision is recorded as a **warning** on `PackRegistry.lifecycle_warnings` at
+  load; the shipped catalog has none. A namespaced `objectKind` is unambiguous, so use the
+  namespaced spelling when a bare name is shared.
+- **Reusing a shared vocabulary word is DETECTED.** If `statuses` contains `open`, `closed`,
+  `active`, `pending`, `in_progress` or `completed`, the registry records an explicit
+  **warning** (`PackRegistry.lifecycle_warnings`) — not an error, because an owner-approved
+  lifecycle may legitimately reuse the spelling with a different meaning, and the kind owns its
+  state either way. Rename the status, or record why the overlap is intended.
+- **A declared fold whose explicit `object` target names no Object of its kind is reported** —
+  the kind's #1934 enforcement level is resolved and recorded in the violation detail, and the
+  violation is emitted with code `status_fold_unapplied`, rather than silently doing nothing.
+  ⚠️ The level does not currently change behaviour: `emit_violation` logs at WARNING and nothing
+  consumes the code, so `warn`/`retry`/`block` are identical here (there is no retry loop on the
+  projection write path). It is a recorded level, not a routed ladder. An `about_entities` target
+  that does not match the declaring kind is folded silently and is **not** a violation. A miss is
+  suppressed when another declared fold for the **same event** folded *any* target (two packs that
+  share a bare event kind name both appear under the widened event key): the non-matching kind is
+  simply not this Object's kind, so it is not a real signal.
+
+**Scope of the declaration.** The fold index is compiled from the process **catalog** (every
+loaded pack), not from a graph's `:PackInstall` approval set. That is deliberate: a kind already
+stored in a graph keeps folding even if the pack's approval is later revoked, because the
+declaration describes the kind's lifecycle and a status fold is a cache over the events that name
+the Object — stranding existing state would be a data bug, not a security win. The graph's approved
+pack set still gates **extraction** (which kinds may be minted), unchanged.
+
+Because the index is catalog-only, a **hosted (graph-native) tenant pack cannot declare
+`statuses`/`folds`**: it lives as a `:PackManifest` in the tenant graph and is compiled per graph by
+`compile_value_brief(tenant_manifests=…)`, so it never enters a `PackRegistry`. The tenant upload
+route therefore **refuses** the declaration with an error naming the limitation rather than
+accepting it and installing an inert pack — acceptance is the signal that the declaration will
+work. Install such a pack self-hosted under `TORTOISE_PACKS_DIR` (or remove the two keys).
+
+**Event-kind spelling.** A fold's `event` may be declared bare (`disbursement`) or self-namespaced
+(`venture:disbursement`), and the **runtime** event kind may be either spelling, in any case: the
+fold index is keyed case-insensitively on both forms, because the classification write gate admits
+both (`_event_kind_forms`) and the extraction commit strips the namespace before writing
+(`sdk.py::_extract_session_v2`). The same widening applies to `objectKind`, so a bare-spelled
+Object is folded by the same rule as its namespaced twin and is equally suppressed from the built-in
+connector fold. An **extracted** event (a payload event carrying `about_entities` and no `object`)
+folds a declared rule onto any `about_entities` target that is an Object of the declaring kind;
+a miss is reported only for the event's **explicit** `object`.
+
+The terminal-status guard is unchanged: a `superseded`/`deprecated`/`archived`/`retracted` Object is
+never resurrected by any fold (#2164/#3309). Objects are name-keyed, so a state change that is a
+**new** thing is a supersession, not a fold.
+
 ## Per-graph pack selection (#2728)
 
 Which packs a graph allows is **per graph**, and stored graph-natively: one
@@ -251,6 +382,10 @@ A chain is an ordered kind path the extractor respects when connecting `about_en
 | Hosted | `POST /v1/packs/manifests` / `tortoise_pack_install` (MCP) | same manifest format; ontology-only v1 (no connectors/tools) |
 
 Both surfaces run the same shared validator. A pack that validates locally installs on either.
+**One declared exception:** `statuses`/`folds` (#2729) are a filesystem-catalog surface — the fold
+index is compiled from the process catalog, which a graph-native tenant manifest never enters — so
+the hosted install route **refuses** them with an error naming the limitation instead of accepting a
+declaration that would be inert.
 
 ## Reserved namespaces
 

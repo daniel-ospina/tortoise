@@ -2288,9 +2288,12 @@ def force_sparse_tfidf(monkeypatch):
     treats a failed HF download as a WARN and lets the suite run
     TF-IDF-degraded), so any test pinning exact retrieval pool sizes must
     pin the embedder state or it is environment-dependent. Request this
-    fixture in such a test; assertions are unchanged (this is the
-    ``tests/eval/retrieval/test_oracle.py`` ``_force_sparse_tfidf`` pattern
-    promoted to a shared named home — older inline copies predate it).
+    fixture in such a test; assertions are unchanged (this promotes
+    #2573's inline ``_force_sparse_tfidf`` pattern from
+    ``tests/eval/retrieval/test_oracle.py`` to a shared named home — older
+    inline copies predate it; #2678 retired the eval arm's copy in favour
+    of the ``force_sparse=True`` seam, so this fixture's remaining callers
+    are the pin-exact-pool tests).
     """
     from tortoise.embeddings import EmbeddingModel
     monkeypatch.setattr(EmbeddingModel, "get", classmethod(

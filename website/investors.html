@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Investor Presentation — Tortoise</title>
-  <meta name="description" content="Investor presentation — Tortoise, the cognitive layer for agentic organizations.">
+  <title>Investors Presentation — Tortoise</title>
+  <meta name="description" content="Investors presentation — Tortoise, cognitive layer for agentic organizations.">
   <meta name="theme-color" content="#060b14">
   <!-- noindex, deliberately — same reason as the design-partner one-pager this
        page is forked from. Both are OUTREACH DOCUMENTS delivered by link to
@@ -19,8 +19,8 @@
   <meta name="robots" content="noindex,follow">
   <link rel="canonical" href="https://tortoise.premiselabs.co/investors">
   <link rel="icon" type="image/png" href="/logo.png">
-  <meta property="og:title" content="Investor Presentation — Tortoise">
-  <meta property="og:description" content="Tortoise — the cognitive layer for agentic organizations.">
+  <meta property="og:title" content="Investors Presentation — Tortoise">
+  <meta property="og:description" content="Tortoise — cognitive layer for agentic organizations.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://tortoise.premiselabs.co/investors">
   <!-- A summary_large_image card is UNSATISFIABLE without an image, so the card
@@ -47,7 +47,7 @@
   <meta property="og:image" content="https://tortoise.premiselabs.co/assets/investors-og.jpg">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Investor Presentation — Tortoise, the cognitive layer for agentic organizations.">
+  <meta property="og:image:alt" content="Investors Presentation — Tortoise, cognitive layer for agentic organizations.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:image" content="https://tortoise.premiselabs.co/assets/investors-og.jpg">
   <style>
@@ -211,25 +211,24 @@
 
     p { max-width: 68ch; }
     p + p { margin-top: 1.15rem; }
+    /* A paragraph that follows a list needs the same 1.15rem the list itself
+       opens with: the capability gaps close on a sentence after their bullets,
+       and without this it sits flush against them (0px at every width). */
+    ul + p { margin-top: 1.15rem; }
 
-    /* The Market Gaps intro is prose, not a list item, so the anti-widow wrap
-       is declared for it separately. Without it the sentence ends on
-       "operations" alone — 84px of a 272px measure — at 320-342px and
-       394-486px; with it the hyphen the author already wrote in "AI-forward"
-       may break, and the last line becomes "forward operations" (152px). A
-       hyphen break there is not novel: at 343-393px the measure forces one.
-       Swept at every width from 320px to 540px plus 620/768/1280/1600, the
-       line count and element height are unchanged and the wrap at 620px and
-       above is identical. */
-    #market-gaps p { text-wrap: pretty; }
+    /* The Capability Gaps closing sentence is prose, not a list item, so the
+       anti-widow wrap is declared for it separately. Without it the sentence
+       ends on "ontologies." alone — 93px of a 572px measure at 620px, 99px of
+       612px at 768px; with it the last line is "modeling ontologies." (169px
+       and 181px). Swept at every width from 320px to 540px plus
+       620/768/1280/1600, it changes the last line at 63 of the 225 widths and
+       the line count and element height at none. */
+    #capability-gaps p { text-wrap: pretty; }
 
-    /* ── The solution block's opening sentence ────────────────────────────
-       The source copy titles every block EXCEPT this one ("Tortoise provides an
-       agent-native cognitive layer: reasoning, memory, learning." has no
-       heading above it — the other five do). Inventing a title would be copy
-       the author did not write, so the sentence itself anchors the section:
-       serif and white like an `h2`, one step down in size so it is legible as
-       a statement rather than read as a heading. */
+    /* ── The solution block's opening statement ──────────────────────────
+       The one block opening on the page that is a sentence rather than a
+       label, so it is set serif and white like an `h2` but one step down in
+       size: it anchors the section without reading as a section title. */
     .lede {
       font-family: var(--serif);
       font-size: clamp(1.1rem, 2.2vw, 1.3rem);
@@ -239,18 +238,19 @@
     }
 
     /* ── Plain bulleted lists ─────────────────────────────────────────────
-       For the parallel one-line claims (the coordination problems, the market
-       gaps) and for the GTM proof points and biography lines. The marker is
-       the accent dot, at the same visual weight as the ↑/↓ markers below.
+       For the parallel one-line claims (the coordination problem, the
+       capability gaps, the why-now shifts) and for the Progress and biography
+       lines. The marker is the accent dot, at the same visual weight as the
+       ↑/↓ markers below.
        `text-wrap: pretty` re-breaks a paragraph to avoid ending it on a short
-       lone word, which this copy does easily: the third market gap ended on
-       "teams." alone — 55px against a 591px measure — and now ends at 146px.
-       The declaration on the list carries no `.profile` exception, because the
-       trade it makes is not one a wider measure fixes — the Wedge proof point's
-       middle line holds ~156px of ink whether the measure is 262px or 272px —
-       so a narrower column reset would buy nothing. Line count and element
-       height are unchanged for all 14 items across the page's 5 `.bullets`
-       lists, from 320px to 1600px. */
+       lone word, which this copy does easily: the third capability gap ends on
+       "modeling." alone — 82px against a 592px measure — and with the
+       declaration ends at 165px. The list carries no `.profile` exception
+       because the `.profile` cells want it too — the Progress "1M+ views" line
+       ends on "leads" alone, 43px of a 262px measure, and ends at 113px with
+       it. Line count and element height are unchanged for all 17 items across
+       the page's 6 `.bullets` lists at any of the 225 widths swept, 320px to
+       1600px. */
     .bullets { list-style: none; margin-top: 1.15rem; }
     .bullets li { display: flex; gap: 0.7rem; align-items: baseline; font-size: 0.95rem; text-wrap: pretty; }
     .bullets li + li { margin-top: 0.4rem; }
@@ -258,16 +258,6 @@
     /* The leading term of a claim is bolded so the parallel gaps are scannable
        without reading each sentence. */
     .bullets strong { color: #fff; font-weight: 600; }
-
-    /* ── The why-now shifts ───────────────────────────────────────────────
-       Each item is a before → after claim plus the sentence that supports it.
-       The claim leads on its own line, the sentence sits beneath it in the
-       secondary colour, so the three shifts can be read as pairs rather than
-       as run-on paragraphs. It is the same `.bullets` list and accent dot as
-       everywhere else on the page; the claim's white/600 already comes from
-       `.bullets strong`, so only the line break is declared here. */
-    .shifts .claim { display: block; }
-    .shifts .why { display: block; margin-top: 0.2rem; color: var(--text-dim); }
 
     /* ── The six outcomes ─────────────────────────────────────────────── */
     .outcomes {
@@ -291,12 +281,23 @@
     }
     .profile p { font-size: 0.9rem; }
     .profile p strong { color: #fff; font-weight: 600; }
+    /* A cell's sentences are short and sit in a narrow column, so they end on a
+       lone word easily: without this the GTM sentences finish on "agents."
+       (61px of a 282px cell) and "capabilities." (113px of 590px). Same
+       re-break as `.bullets li` and `#capability-gaps p`; it changes no line
+       count and no cell height at any width. */
+    .profile p { text-wrap: pretty; }
     /* The `.bullets` base size is 0.95rem, which is right under the 15px body
-       copy but wrong inside this grid: a `.profile` cell's own text is
-       `.profile p` at 0.9rem, so an unscoped list made the Wedge column's
-       proof points render LARGER than the sentence they support and broke the
-       uniformity every other cell in this grid has. Match the cell. */
+       copy but wrong inside this grid: a cell's own text is `.profile p` at
+       0.9rem, so an unscoped list renders larger than the sentences beside it.
+       Match the cell. The Progress cells carry the page's only such lists. */
     .profile .bullets li { font-size: 0.9rem; }
+    /* Three labelled motions in a two-column grid leave the second half of the
+       last row empty — the only unbalanced grid on the page, since Progress
+       below it holds two cells. The third cell spans both columns instead, so
+       the block has no void. Inert at and below 620px, where the grid is one
+       column. */
+    #gtm .profile > div:last-child { grid-column: 1 / -1; }
 
     /* ── Footer ───────────────────────────────────────────────────────── */
     /* `footer.wrap`, NOT a bare `footer`: the element also carries `.wrap`, whose
@@ -359,8 +360,8 @@
     <div class="doc">
       <div class="wrap doc-grid">
         <div>
-          <h1>Investor presentation</h1>
-          <p class="doc-sub"><strong>Tortoise</strong> - the cognitive layer for agentic organizations</p>
+          <h1>Investors presentation</h1>
+          <p class="doc-sub"><strong>Tortoise</strong> - cognitive layer for agentic organizations</p>
         </div>
 
         <figure class="video">
@@ -400,24 +401,37 @@
     <section id="problem">
       <div class="wrap">
         <h2>The Problem</h2>
-        <p>Agents can make decisions. They struggle to keep them consistent as things change.</p>
+        <p>Agents make decisions faster than they can keep them consistent.</p>
         <p>More agents, faster execution → More assumptions and dependencies → coordination failures at machine speed:</p>
         <ul class="bullets">
           <li><span>Local fixes that create problems elsewhere</span></li>
-          <li><span>Repeated work and outdated decisions</span></li>
+          <li><span>Repeated work and incoherent decisions</span></li>
           <li><span>Self-propagating Bureaucracy</span></li>
         </ul>
+      </div>
+    </section>
+
+    <!-- ══ Capability gaps ═════════════════════════════════════════════ -->
+    <section id="capability-gaps">
+      <div class="wrap">
+        <h2>Capability Gaps</h2>
+        <ul class="bullets">
+          <li><span><strong>Harnesses</strong> coordinate execution, but reasoning is agent-local.</span></li>
+          <li><span><strong>Agent Memory Systems</strong> retrieve information, but don&rsquo;t model its logical implications.</span></li>
+          <li><span><strong>Enterprise Intelligence Platforms</strong> model business operations and decisions, but assume substantial integration and ontology modeling.</span></li>
+        </ul>
+        <p>Agentic organizations lack a system for agents to reason within the broader organizational context, without spending months modeling ontologies.</p>
       </div>
     </section>
 
     <!-- ══ Why now ═════════════════════════════════════════════════════ -->
     <section id="why-now">
       <div class="wrap">
-        <h2>WHY NOW</h2>
-        <ul class="bullets shifts">
-          <li><span><strong class="claim">Large teams → Small teams, enterprise-scale complexity</strong><span class="why">Lean teams operate functions previously requiring entire departments.</span></span></li>
-          <li><span><strong class="claim">Periodic coordination → Continuous adaptation</strong><span class="why">Work moves faster than human coordination cycles.</span></span></li>
-          <li><span><strong class="claim">Human knowledge → Machine-computable understanding</strong><span class="why">Collective reasoning and organizational learning, not just information retrieval.</span></span></li>
+        <h2>Why Now</h2>
+        <ul class="bullets">
+          <li><span><strong>Lean teams → Large agent workforces</strong></span></li>
+          <li><span><strong>Human-paced bureaucracy → Machine-speed coordination</strong></span></li>
+          <li><span><strong>Human knowledge → Machine-computable understanding</strong></span></li>
         </ul>
       </div>
     </section>
@@ -425,9 +439,10 @@
     <!-- ══ The solution ════════════════════════════════════════════════ -->
     <section id="solution">
       <div class="wrap">
-        <p class="lede">Tortoise provides an agent-native cognitive layer: reasoning, memory, learning.</p>
-        <p>Connect documents, systems of record, BI, agent sessions, or conversation streams. Tortoise builds a logical model of your organization (plug-and-play epistemics).</p>
-        <p>Agents can compute over broad organizational context, unlocking autonomy, distributed reasoning, and learning. Your organization operates coherently at machine speed.</p>
+        <p class="lede">Tortoise provides a cognitive layer for collective reasoning, memory, and learning</p>
+        <p>Get started in 5 minutes, enabling your agents to make complex decisions and build on previous reasoning across sessions. Gradually connect documents, systems of record, BI, and conversation streams.</p>
+        <p>Tortoise continuously builds a logical model of your organization. When something changes, beliefs propagate, and the system knows what else is affected.</p>
+        <p>Agents can reason across organizational knowledge, make better decisions, and coordinate at machine speed.</p>
 
         <div class="outcomes">
           <ul class="up">
@@ -444,19 +459,6 @@
       </div>
     </section>
 
-    <!-- ══ Market gaps ═════════════════════════════════════════════════ -->
-    <section id="market-gaps">
-      <div class="wrap">
-        <h2>Market Gaps</h2>
-        <p>Plug-and-play context and organizational intelligence for AI-native and AI-forward operations</p>
-        <ul class="bullets">
-          <li><span><strong>Harnesses</strong> coordinate execution, but reasoning is agent-local.</span></li>
-          <li><span><strong>Memory systems</strong> retrieve information, but don&rsquo;t model its logical implications.</span></li>
-          <li><span><strong>Enterprise Intelligence platforms</strong> model business operations and decisions, but require substantial infrastructure and dedicated teams.</span></li>
-        </ul>
-      </div>
-    </section>
-
     <!-- ══ GTM ═════════════════════════════════════════════════════════ -->
     <section id="gtm">
       <div class="wrap">
@@ -465,15 +467,38 @@
           <div>
             <h3>Wedge</h3>
             <p>AI-native startups and developers running multiple agents.</p>
-            <ul class="bullets">
-              <li><span>Viral content: 1m+ views on a single tweet</span></li>
-              <li><span>1 design partner (team) &amp; 20+ beta testers (individuals) waiting</span></li>
-            </ul>
           </div>
           <div>
             <h3>Expansion</h3>
-            <p>Agent memory → Shared team reasoning → Organizational cognitive infrastructure.</p>
-            <p>Monetization through managed infrastructure, usage, and enterprise capabilities.</p>
+            <p>One-person&rsquo;s agents → Shared team reasoning → Organization-wide cognitive infrastructure.</p>
+          </div>
+          <div>
+            <h3>Monetization</h3>
+            <p>Usage-based hosting, managed infrastructure, and enterprise capabilities.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ Progress ════════════════════════════════════════════════════ -->
+    <section id="progress">
+      <div class="wrap">
+        <h2>Progress</h2>
+        <div class="profile">
+          <div>
+            <h3>Early demand</h3>
+            <ul class="bullets">
+              <li><span>20+ prospective beta testers</span></li>
+              <li><span>1 team design partner providing data &amp; feedback</span></li>
+              <li><span>Enterprise discussions underway</span></li>
+            </ul>
+          </div>
+          <div>
+            <h3>Product &amp; distribution</h3>
+            <ul class="bullets">
+              <li><span>Working alpha, beta in development</span></li>
+              <li><span>1M+ views on founder-led content, generating inbound leads</span></li>
+            </ul>
           </div>
         </div>
       </div>

@@ -493,7 +493,8 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
         its connected points (IMPL|NAND neighbors, both directions) are live.
         "Live" matches the shared #780/#2422 ``_live_only`` semantics
         (live.py): ``status IS NULL OR status <> 'draft'`` AND NOT terminal
-        (retracted/superseded/outdated/archived status or the
+        (retracted/superseded/outdated/archived/deprecated status — the
+        canonical ``live.TERMINAL_EXCLUDED_STATUSES`` — or the
         ``outdated=true`` flag) — legacy pre-#780 nodes without a stored
         status are LIVE (the entity write path defaults
         ``coalesce($st, n.status, 'live')``). The predicate is UNCONDITIONAL

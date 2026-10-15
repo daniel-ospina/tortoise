@@ -101,6 +101,9 @@ import {
   graphKeyPanelEmptyLine,
   graphKeysSuppressed,
   graphMintBody,
+  graphRecordingBody,
+  graphRecordingLabel,
+  graphRecordingState,
   graphsMeter,
   sortedGraphRows,
   sortedTrashRows,
@@ -128,7 +131,7 @@ import { GithubDisconnectControl } from './githubDisconnect.js'
 // #2392: minimal a11y focus management for the dialog family — capture the
 // opening trigger, restore focus to it on close (pure, node --test
 // unit-tested — dialogFocus.test.js).
-import { rememberFocusedTrigger, rememberRestoreTarget, restoreFocus } from './dialogFocus.js'
+import { rememberFocusedTrigger, rememberRestoreTarget, restoreFocus, containTabFocus, applyBackgroundInert } from './dialogFocus.js'
 // #3501/#4054: the BFF session gate — the ONE place a `/api/session` response is
 // interpreted, and the ONE place a redirect to /auth is authorized. Pure and
 // node --test unit-tested (sessionGate.test.js). This is the client half of the
@@ -1426,6 +1429,8 @@ function App() {
     // reconciles, re-enables the button, and the painted DOM is focusable.
     // (The ref holds a JS reference to the element — it survives the deferred
     // callback: the element isn't GC'd until the ref is cleared.)
+    // #2577: the same deferral also lands AFTER ReauthDialog's inert cleanup, so
+    // the background is focusable again by the time the restore runs.
     requestAnimationFrame(() => restoreFocus(reauthRestoreRef))
   }
   // #1765 review P1: the pre-reauth session user id (verify the provider
@@ -2609,6 +2614,40 @@ function claimIntentInFlight() {
   // mid-copy. Track the pointerdown origin — only a press that began on the
   // backdrop itself may dismiss.
   const revealBackdropPressRef = React.useRef(false)
+  // #2577 (a11y): the APG dialog-modal remainder — while a modal is open its
+  // tab sequence is contained (containTabFocus) and everything behind it is
+  // inert (applyBackgroundInert), which is the half a keydown handler cannot
+  // do: `inert` removes the background from the accessibility tree, so a
+  // screen reader's virtual cursor cannot reach it either. One effect per
+  // dialog, cleaned up on close; the background is restored to exactly its
+  // prior state (a pre-existing inert is never stripped).
+  //
+  // The release is HELD in a ref because the close path must run it BEFORE
+  // restoreFocus: an element inside an inert subtree is not focusable, so a
+  // synchronous restore while the background is still marked silently no-ops
+  // — a #2392 regression a real browser would show and jsdom cannot (it does
+  // not model inert). The effect cleanup re-runs the same one-shot release
+  // harmlessly.
+  const createTeamDialogRef = React.useRef(null)
+  const createTeamInertRef = React.useRef(null)
+  React.useEffect(() => {
+    if (!createTeamOpen || typeof document === 'undefined') return undefined
+    const el = createTeamDialogRef.current
+    if (!el) return undefined
+    const release = applyBackgroundInert(el, document)
+    createTeamInertRef.current = release
+    return () => { createTeamInertRef.current = null; release() }
+  }, [createTeamOpen])
+  const revealKeyDialogRef = React.useRef(null)
+  const revealKeyInertRef = React.useRef(null)
+  React.useEffect(() => {
+    if (!revealKey || typeof document === 'undefined') return undefined
+    const el = revealKeyDialogRef.current
+    if (!el) return undefined
+    const release = applyBackgroundInert(el, document)
+    revealKeyInertRef.current = release
+    return () => { revealKeyInertRef.current = null; release() }
+  }, [revealKey])
   // #2392 (a11y): the single create-team/reveal-key close path — every close
   // (backdrop, Escape, Cancel/Upgrade, success, Copy & done, I saved it)
   // restores focus to the opening trigger instead of dropping it on <body>.
@@ -2617,6 +2656,7 @@ function claimIntentInFlight() {
     setCreateTeamMode('name')
     setCreateTeamPlan('')
     setCreateTeamLimitOrgId('')
+    if (createTeamInertRef.current) createTeamInertRef.current()
     restoreFocus(createTeamRestoreRef)
   }
   // NOTE: the logout/team-switch revealKey clears (below) deliberately do NOT
@@ -2624,6 +2664,7 @@ function claimIntentInFlight() {
   // dismissals, so no focus restore is wanted there.
   function closeRevealKey() {
     setRevealKey(null)
+    if (revealKeyInertRef.current) revealKeyInertRef.current()
     restoreFocus(revealRestoreRef)
   }
   const orgIdRef = React.useRef(null)
@@ -6313,6 +6354,50 @@ function claimIntentInFlight() {
     }
   }
 
+  // #2650: per-graph session-recording override — the human Graphs-tab surface
+  // for the C6 #2115 / #2302 setting. Mirrors renameGraph's contract: PATCH
+  // /v1/graphs/{id} with ONLY {recording} (never echo stale row fields — a
+  // recording change must not touch the name/auth state), optimistic local
+  // update with revert-on-error into the page-level banner, and the #2230
+  // team pin captured at call (a mid-flight switch must not flip the new
+  // team's row nor land the error under the wrong header). Server: session
+  // owner/admin or a team:manage key; the body is strict true|false|null
+  // (null = clear the override and inherit the team default).
+  async function setGraphRecording(graphId, nextState) {
+    const _teamAtCall = currentOrgId
+    setError('')
+    const cur = graphs.find((g2) => g2.graph_id === graphId)
+    if (!cur) return
+    // Optimistic update in the server's own value space (bool | null).
+    const next = graphRecordingBody(nextState).recording
+    const prevState = graphRecordingState(cur)
+    const prev = prevState === 'inherit' ? null : prevState === 'on'
+    if (prev === next) return
+    setGraphs((gs) => gs.map((x) => x.graph_id === graphId ? { ...x, recording: next } : x))
+    try {
+      const q = (sessionTokenRef.current && _teamAtCall) ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
+      const updated = await api(`/v1/graphs/${encodeURIComponent(graphId)}${q}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        useSession: true, // recording is owner/admin-managed (session JWT — mirror rename/key management)
+        body: JSON.stringify({ recording: next }),
+      })
+      if (orgIdRef.current !== _teamAtCall) return // stale switch — don't touch the new team's state
+      // Reconcile with the server echo. The recording-only PATCH keeps the
+      // pre-#2701 {graph_id, recording} shape, so `recording` is authoritative
+      // when present (a false/absent field must not be read as success).
+      if (updated && updated.graph_id === graphId && 'recording' in updated) {
+        const echoed = updated.recording === true ? true
+          : updated.recording === false ? false : null
+        setGraphs((gs) => gs.map((x) => x.graph_id === graphId ? { ...x, recording: echoed } : x))
+      }
+    } catch (e) {
+      if (orgIdRef.current !== _teamAtCall) return // stale switch — error belongs to the old team
+      setGraphs((gs) => gs.map((x) => x.graph_id === graphId ? { ...x, recording: prev } : x))
+      setError((e && e.message) || 'Couldn\'t change recording for this graph — try again.')
+    }
+  }
+
   // Delete a CUSTOM graph (indicator 4). The default graph row never shows
   // the action (graphs.js graphCanDelete — its 🗑 renders disabled) and the
   // server 403s the default as a code guard. #2701: the row's 🗑 opens a
@@ -9793,8 +9878,17 @@ function claimIntentInFlight() {
                  aria-describedby={createTeamMode === 'limit' ? 'create-org-desc-limit'
                    : createTeamMode === 'purchase' ? 'create-org-desc-purchase'
                    : undefined}
+                 ref={createTeamDialogRef}
+                 tabIndex={-1}
                  onClick={(e) => e.stopPropagation()}
-                 onKeyDown={(e) => { if (e.key === 'Escape' && !createTeamBusy) closeCreateTeam() }}>
+                 onKeyDown={(e) => {
+                   // #2577: APG modal containment — wrap Tab/Shift+Tab at the
+                   // dialog boundary. Background is inert too
+                   // (applyBackgroundInert), so this keeps focus inside even
+                   // when the browser would otherwise hand it to the url bar.
+                   if (e.key === 'Tab') { if (containTabFocus(e.currentTarget, { shiftKey: e.shiftKey })) e.preventDefault() }
+                   else if (e.key === 'Escape' && !createTeamBusy) closeCreateTeam()
+                 }}>
               {createTeamMode === 'limit' ? (
                 <>
                   {/* #2789 (code-review): each mode's heading is the dialog's
@@ -10608,12 +10702,12 @@ function claimIntentInFlight() {
             )}
             <div className="graphs-table-wrap">
             <table>
-              <thead><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Status</th><th scope="col">Keys</th><th scope="col">Last backup</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
+              <thead><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Status</th><th scope="col">Keys</th><th scope="col">Last backup</th><th scope="col">Recording</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
               <tbody>
-                {graphsStatus === 'loading' && authMode === 'session' && <tr><td colSpan="6" className="dim">Loading graphs…</td></tr>}
-                {graphsStatus === 'denied' && <tr><td colSpan="6" className="dim">Graph list is only visible to members.</td></tr>}
-                {graphsStatus === 'error' && <tr><td colSpan="6" className="dim">Couldn't load graphs — check your connection and try again.</td></tr>}
-                {graphsStatus === 'ok' && graphs.length === 0 && <tr><td colSpan="6" className="dim">No graphs yet — create your first one above.</td></tr>}
+                {graphsStatus === 'loading' && authMode === 'session' && <tr><td colSpan="7" className="dim">Loading graphs…</td></tr>}
+                {graphsStatus === 'denied' && <tr><td colSpan="7" className="dim">Graph list is only visible to members.</td></tr>}
+                {graphsStatus === 'error' && <tr><td colSpan="7" className="dim">Couldn't load graphs — check your connection and try again.</td></tr>}
+                {graphsStatus === 'ok' && graphs.length === 0 && <tr><td colSpan="7" className="dim">No graphs yet — create your first one above.</td></tr>}
                 {graphsStatus === 'ok' && sortedGraphRows(graphs).map((g) => (
                   <tr key={g.graph_id} className={confirmDeleteId === g.graph_id ? 'graph-delete-arm' : undefined}>
                     <td>
@@ -10679,6 +10773,36 @@ function claimIntentInFlight() {
                       )}
                     </td>
                     <GraphBackupCell g={g} summary={graphBackups} status={backupsStatus} backupsEnabled={teamBackupsEnabled(team)} />
+                    {/* #2650: per-graph session-recording override. Owner/admin
+                        get the three-state control (on / off / inherit — the
+                        server's strict true|false|null body); every member
+                        sees the honest read-only value. The server 403s a
+                        non-owner write, so the control is gated by the same
+                        role the PATCH requires — the UI lock mirrors, never
+                        precedes, the API. The default graph is settable too
+                        (recording is per-graph, incl. graph 0). */}
+                    <td>
+                      {isOwnerAdmin ? (
+                        <select
+                          className="graph-recording-select"
+                          value={graphRecordingState(g)}
+                          data-recording-state={graphRecordingState(g)}
+                          aria-label={`Session recording for graph ${g.name || g.graph_id}`}
+                          onChange={(e) => setGraphRecording(g.graph_id, e.target.value)}
+                        >
+                          <option value="inherit">Inherit</option>
+                          <option value="on">On</option>
+                          <option value="off">Off</option>
+                        </select>
+                      ) : (
+                        <span
+                          className="dim small"
+                          title="Only owners and admins can change per-graph session recording."
+                        >
+                          {graphRecordingLabel(g)}
+                        </span>
+                      )}
+                    </td>
                     <td className="graph-actions">
                       {canManageGraphKeys(g) && (
                         <button
@@ -11005,8 +11129,14 @@ function claimIntentInFlight() {
                      }
                    }}>
                 <div className="modal" role="dialog" aria-modal="true" aria-label="New key — shown once"
+                     ref={revealKeyDialogRef}
+                     tabIndex={-1}
                      onClick={(e) => e.stopPropagation()}
-                     onKeyDown={(e) => { if (e.key === 'Escape') closeRevealKey() }}>
+                     onKeyDown={(e) => {
+                       // #2577: APG modal containment (see create-team).
+                       if (e.key === 'Tab') { if (containTabFocus(e.currentTarget, { shiftKey: e.shiftKey })) e.preventDefault() }
+                       else if (e.key === 'Escape') closeRevealKey()
+                     }}>
                   <h2>{revealKey.title}</h2>
                   <p className="dim small">Your new key — <strong>shown once</strong>. Copy it now; you won't see it again.</p>
                   <code className="key-value">{revealKeyReveal}</code>

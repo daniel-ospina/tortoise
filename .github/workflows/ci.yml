@@ -235,14 +235,11 @@ jobs:
                          # needs a path entry or a test-only PR would not run it.
                          "tests/test_blog_markdown.mjs",
                          "docs/blog-authoring.md",
-                         # #8293: the SEO keyword + agent-limiter harness. Same
-                         # reason as #4481 above — its subjects live under
-                         # website/ but a harness-only PR still needs this entry
-                         # or the assertions never run.
+                         # #8293: the SEO keyword + agent-limiter harness — same
+                         # reason as #4481 above.
                          "tests/test_blog_seo_meta.mjs"),
-                  # #3501: the BFF auth suites live here and had NO path entry,
-                  # so a PR touching only them could not trigger the job that
-                  # runs them — the job would be skipped, not failed.
+                  # #3501: the BFF auth suites live here and had NO path entry —
+                  # a suite-only PR could not trigger the job that runs them.
                   startswith("tests/e2e/auth/"),
                   isfile("tests/test_no_legacy_token_path.py"),
                   isfile("tests/e2e/test_auth_bff_clickthrough.py",
@@ -250,11 +247,14 @@ jobs:
                   startswith("supabase/functions/waitlist-subscribe/"),
                   startswith("supabase/functions/tenant-provision/"),
                   # #2810: the edge-function harnesses above import these stubs
-                  # (supabase-js.ts, _shared/lookup.ts). Without a path entry a
-                  # PR touching ONLY a stub would skip the job that runs them —
-                  # the stub is an input to the subject under test, and a broken
-                  # stub is exactly the change this job exists to catch.
+                  # (supabase-js.ts, _shared/lookup.ts) — the stub is an input to
+                  # the subject under test, so a stub-only PR must still run them.
                   startswith("tests/edge-function-stubs/"),
+                  # #4311: the strict tsc project for website/functions/** lives in
+                  # tools/ts/ — kept OUTSIDE the Pages upload root (tools/ts/README.md)
+                  # — so a change to the project or its pinned toolchain runs the
+                  # `website-functions-typecheck` job too.
+                  startswith("tools/ts/"),
                   startswith("supabase/functions/_shared/"),
               ),
               # hosted-e2e (boots uvicorn tortoise.hosted_api:app; engine
@@ -1495,6 +1495,61 @@ jobs:
           done
           test -f docs/EXPANSION_PACKS.md || { echo "::error::EXPANSION_PACKS.md missing"; exit 1; }
           echo "doc-consistency OK"
+
+  # #4311: `website/functions/**` is the production edge surface (agent write
+  # API, admin gate, cache purge, contact form) and NOTHING typechecked it — no
+  # CI job, and the blog-admin SPA's `tsc --noEmit` does not include it. The
+  # strict project already FAILED on `main`:
+  #
+  #   blog/api/posts/[[path]].ts: error TS2322: Type 'string' is not assignable
+  #   to type '"draft" | "published"'.
+  #
+  # — invisible until runtime, on the one tree whose failures are a 500 at the
+  # edge with no test in front of it.
+  #
+  # It rides the EXISTING `website` gate rather than a new `changes` output: that
+  # job's inline gate script already sits within about a hundred bytes of
+  # GitHub's hard 21000-byte cap on a COMPILED `run:` scalar, and exceeding it
+  # makes GitHub refuse to LOAD ci.yml — ZERO jobs, every required context
+  # unproducible (#6253, pinned by tests/test_ci_selection.py::test_expression_
+  # bearing_run_scalars_stay_under_githubs_21000_byte_cap). A new output key
+  # would spend headroom the next editor needs, so this change instead adds the
+  # `tools/ts/` entry to the `website` predicate (which already covers
+  # `website/functions/**`) and tightens prose elsewhere in that step to leave it
+  # no larger. The `tools/ts/` entry is what makes a change to the tsc project
+  # itself (strict, include, the pinned toolchain) run this job too.
+  #
+  # The tsc project + pinned toolchain live in `tools/ts/` OUTSIDE `website/` on
+  # purpose: everything under `website/` is STAGED for public upload
+  # (`rsync -a website/ → $STAGE`, deploy-pages.yml), so a tsconfig.json or
+  # package.json placed next to the Functions would be served at
+  # /functions/tsconfig.json — the same reason config/required-bindings.yml lives
+  # in config/ (tests/test_pages_bindings.py pins that).
+  website-functions-typecheck:
+    needs: changes
+    if: needs.changes.outputs.website == 'true'  # #4311: website/functions/** + tools/ts/ (the tsc project)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tools/ts/package-lock.json
+      # `npm ci` is lockfile-pinned: the exact TypeScript and workers-types
+      # revisions are a REVIEWED artifact, so the strictness of this gate cannot
+      # drift without a diff (the same pinning rule as the wrangler/ruff pins).
+      - name: Install the pinned TypeScript toolchain
+        run: |
+          cd tools/ts
+          npm ci --no-audit --no-fund
+      # No `--noEmit` flag here: it is a compilerOption in the project
+      # (`noEmit: true`), and the project's `include` is the whole Functions
+      # tree — an empty match is a hard tsc error, never a silent pass.
+      - name: Typecheck website/functions (strict, Workers globals)
+        run: |
+          cd tools/ts
+          ./node_modules/.bin/tsc -p tsconfig.website-functions.json
 
   welcome-e2e:
     needs: changes

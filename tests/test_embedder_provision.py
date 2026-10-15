@@ -52,8 +52,16 @@ _SCRIPT = _ROOT / "tools" / "embedder_provision.py"
 _WORKFLOWS = _ROOT / ".github" / "workflows"
 # Every workflow that provisions the embedder. The same heredoc lived in five
 # jobs across these two files; a fix that lands in only one of them is the drift
-# this list exists to catch.
-_PROVISIONING_WORKFLOWS = ("python-ci.yml", "post-merge-validation.yml")
+# this list exists to catch. `perf-lane.yml` (#3992) and `evals-on-demand.yml`
+# are provisioning sites too: the perf lane and the on-demand evals lane each
+# run `tests/test_perf_lane_volunteer_context.py`, which fails closed on a
+# keyword-only read path, so both must provision before they measure.
+_PROVISIONING_WORKFLOWS = (
+    "python-ci.yml",
+    "post-merge-validation.yml",
+    "perf-lane.yml",
+    "evals-on-demand.yml",
+)
 # The four python-ci jobs that provision the embedder for the dense leg.
 _EMBEDDER_JOBS = ("test", "test-slow", "test-concurrency-falkor", "test-carve-out")
 
@@ -500,6 +508,41 @@ def test_carrier_jobs_and_steps_cannot_mask_the_gate():
                     )
 
 
+def test_no_provisioning_workflow_latches_offline_before_the_gate():
+    """The gate's download fallback only exists while `HF_HUB_OFFLINE` is unset
+    AT IMPORT. `huggingface_hub` freezes that variable into a module constant,
+    so a workflow- or job-level pair makes the whole download loop dead: every
+    retry fails without a packet leaving the process, and a cache miss on the
+    pinned model can never be recovered by the very step that exists to recover
+    it (#2573, the failure this module removes).
+
+    This is the wiring half of `test_download_path_survives_the_offline_env_latch`:
+    that test proves the SCRIPT downloads when the vars are absent; this proves
+    the workflows do not set them where the gate step would inherit them. It
+    fails against the pre-fix `perf-lane.yml` / `evals-on-demand.yml`, which set
+    the pair in the workflow `env:` — i.e. on the provision step too.
+    """
+    for name in _PROVISIONING_WORKFLOWS:
+        wf = _workflow(name)
+        wf_env = wf.get("env") or {}
+        for var in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+            assert var not in wf_env, (
+                f"{name}: workflow-level {var}={wf_env[var]!r} latches offline mode "
+                "for the embedder gate step, whose whole job is to download a cache "
+                "miss — set it on the pytest step instead (#2573)"
+            )
+        for job_name, job in wf["jobs"].items():
+            if not _gate_steps(job):
+                continue
+            job_env = job.get("env") or {}
+            for var in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+                assert var not in job_env, (
+                    f"{name}:{job_name}: job-level {var}={job_env[var]!r} reaches the "
+                    "gate step and makes its download fallback dead — scope it to the "
+                    "pytest step (#2573)"
+                )
+
+
 def test_gate_tool_has_a_ci_carveout():
     """#3261 silent-drop class: without a TOOL_CARVEOUTS entry a gate-only change
     classifies as docs-only, and this very test file never runs on the PR that
@@ -938,7 +981,7 @@ def test_every_watchdog_margin_sits_between_the_backoff_budget_and_the_step_cap(
     budget) or to 600 (= the cap) both fail; verified by mutation.
     """
     checked = 0
-    for name in ("python-ci.yml", "post-merge-validation.yml"):
+    for name in _PROVISIONING_WORKFLOWS:
         for job, step in _all_gate_steps(name):
             where = f"{name}:{job}"
             assert "TORTOISE_EMBEDDER_WATCHDOG_S" in (step.get("env") or {}), (
@@ -966,4 +1009,4 @@ def test_every_watchdog_margin_sits_between_the_backoff_budget_and_the_step_cap(
                 f"{where}: watchdog {armed}s is outside ({budget}s, {cap}s)"
             )
             checked += 1
-    assert checked == 5, f"expected 5 embedder gate steps, found {checked}"
+    assert checked == 7, f"expected 7 embedder gate steps, found {checked}"

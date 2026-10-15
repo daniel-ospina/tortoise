@@ -43,6 +43,11 @@ MIDDLEWARE = REPO_ROOT / "website" / "functions" / "_middleware.ts"
 APP_ORIGIN = "https://app.premiselabs.co"
 TORTOISE_HOST = "tortoise.premiselabs.co"
 COMPANY_HOST = "premiselabs.co"
+#: The repo's record of the Supabase redirect allow-list the `/auth/*` comment
+#: names as the guard (docs/ops/auth-email-flows.md §3), and the OPEN audit of
+#: that property.
+ALLOWLIST_RECORD = REPO_ROOT / "docs" / "ops" / "auth-email-flows.md"
+AUDIT_ISSUE = "#8680"
 
 # Drives the REAL exported onRequest under Node's type-stripping loader. The
 # middleware's `/` branch would fetch ASSETS, but every case here returns before
@@ -259,3 +264,82 @@ def test_auth_subtree_is_not_a_prefix_false_positive(path: str) -> None:
     (res,) = _run([_case(path)])
     assert res["location"] is None, f"{path} was swept into the /auth redirect: {res}"
     assert res["status"] != 302 or res["next"] == "next", f"{path} was redirected: {res}"
+
+
+# ── The safety claim in the `/auth/*` rationale must match the record ───────
+# `docs/ops/auth-email-flows.md` §3 is the repo's record of the Supabase redirect
+# allow-list. The `/auth/*` comment explains the 302 by naming that allow-list as
+# the guard that keeps the redirect safe (#4328) — a load-bearing claim, because a
+# lane reading this file is meant to be able to rely on it. #8680 is the OPEN audit
+# of that same property ("is https://tortoise.premiselabs.co/auth/callback still in
+# the allow-list?"), and it states the property is UNVERIFIED and conditional.
+# An earlier revision of the comment asserted it as settled ("only the app origin
+# may be an authorized target") while §3 requires entries on
+# `tortoise.premiselabs.co` and `api.premiselabs.co` — the very host this branch
+# serves. The claim and the record must not be free to drift apart.
+
+
+def _auth_branch_comment() -> str:
+    """The contiguous `//` block immediately above the `/auth/` 302 branch.
+
+    Scoped to that block rather than the whole file so an unrelated comment
+    elsewhere cannot satisfy — or break — the claim this guard pins.
+    """
+    lines = MIDDLEWARE.read_text(encoding="utf-8").splitlines()
+    branch = next(
+        (i for i, line in enumerate(lines) if 'url.pathname.startsWith("/auth/")' in line),
+        None,
+    )
+    assert branch is not None, (
+        "the `/auth/` branch is gone from website/functions/_middleware.ts — the routing this "
+        "rationale justifies no longer exists, so this guard has no subject"
+    )
+    start = branch
+    while start > 0 and lines[start - 1].lstrip().startswith("//"):
+        start -= 1
+    assert start < branch, "the `/auth/` branch lost its rationale comment entirely"
+    return "\n".join(lines[start:branch])
+
+
+def test_the_auth_comment_names_the_allowlist_record_as_the_open_audit() -> None:
+    """The guard the `/auth/*` comment names must match `docs/ops/auth-email-flows.md` §3.
+
+    #8680 (the open audit of the allow-list) records the property as unverified
+    and conditional; §3 records required entries outside the app origin. A comment
+    that asserts the property as present-tense fact therefore contradicts both, and
+    a lane reading the routing decision could close the audit as already done.
+    The fix is to state the property that must hold against the record.
+    """
+    record = ALLOWLIST_RECORD.read_text(encoding="utf-8")
+    section = record.split("## 3. Redirect allowlist", 1)
+    assert len(section) == 2, (
+        "docs/ops/auth-email-flows.md no longer has a '## 3. Redirect allowlist' section — the "
+        "record this guard checks the comment against has moved"
+    )
+    table = section[1].split("## 4.", 1)[0]
+    # Guard the guard: the refuting fact must still be in the record, or this test
+    # could pass for the wrong reason once the allow-list itself changes.
+    assert TORTOISE_HOST in table, (
+        f"§3 of the allow-list record no longer names {TORTOISE_HOST} — the fact that the list "
+        "is wider than the app origin is gone, so re-derive this guard before trusting it"
+    )
+
+    comment = _auth_branch_comment()
+    assert "auth-email-flows.md" in comment, (
+        "the `/auth/*` rationale names the redirect allow-list as the guard keeping the 302 "
+        f"safe but does not cite the repo's record of that list (docs/ops/auth-email-flows.md "
+        f"§3) and the OPEN audit ({AUDIT_ISSUE}) of the same property — an uncited claim "
+        "reads as settled"
+    )
+    assert AUDIT_ISSUE in comment, (
+        f"the `/auth/*` rationale no longer names {AUDIT_ISSUE}, the open audit of the "
+        "allow-list property it relies on — the comment then states a security control as a "
+        "fact with nothing recording that it is unverified"
+    )
+    assert "only the app origin" not in comment, (
+        "the `/auth/*` rationale asserts that only the app origin may be an authorized "
+        f"redirect target, but docs/ops/auth-email-flows.md §3 requires entries on "
+        f"{TORTOISE_HOST} and api.premiselabs.co. State the property that MUST hold and the "
+        f"open audit ({AUDIT_ISSUE}); do not assert a control the record contradicts "
+        "(#8682 review, P1)"
+    )

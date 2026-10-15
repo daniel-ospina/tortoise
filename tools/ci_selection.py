@@ -637,6 +637,15 @@ SOURCE_PATTERNS = {
                    # the checker) must select this surface, or the ratchet that
                    # classifies the new entry never runs on the PR that owns it.
                    "tools/check_pages_upload_root.py",
+                   # #4311: the strict tsc project + pinned toolchain that
+                   # typecheck website/functions/** live in tools/ts/ (outside the
+                   # Pages upload root — see tools/ts/README.md). `tools/` is a
+                   # flat NON_PYTHON_PREFIXES entry, so without this an edit to
+                   # the project (removing `strict`, dropping a dependency)
+                   # selects NO surface (`surfaces=[]`, `full=False`) and its guard
+                   # never runs on the change that disarms it — the
+                   # #3261/#3616/#8334 silent-drop class.
+                   "tools/ts/",
                    "config/pages-upload-classification.txt"),
     # NOTE: .github/workflows/deploy-pages.yml is deliberately NOT listed above.
     # A review pointed out that adding it would be a coverage DOWNGRADE: an
@@ -1838,15 +1847,17 @@ def carve_out_files(manifest: dict) -> set[str]:
 
 
 def on_demand_files(manifest: dict) -> set[str]:
-    """Files that run only from `.github/workflows/evals-on-demand.yml`.
+    """Files excluded from every PRE-MERGE leg — a lane with two runners.
 
-    Excluded from every PRE-MERGE leg (fast halves, slow, carve-out). The
-    accessor exists so `fast_pool`, `push_legs` and `leg_coverage_issues`
-    read the lane through ONE definition: three independent
-    `manifest.get("on_demand", [])` reads are three places for the lane to be
-    half-adopted, and a half-adopted lane is worse than no lane — the file is
-    excluded from the gate and claimed by nothing, so it silently stops
-    running anywhere at all."""
+    Runs from `.github/workflows/evals-on-demand.yml` and (for the perf lane)
+    `.github/workflows/perf-lane.yml`; the callers below only need "this file
+    is in a lane, not on the merge gate", so both runners read through this
+    ONE membership test. The accessor exists so `fast_pool`, `push_legs` and
+    `leg_coverage_issues` read the lane through ONE definition: three
+    independent `manifest.get("on_demand", [])` reads are three places for the
+    lane to be half-adopted, and a half-adopted lane is worse than no lane —
+    the file is excluded from the gate and claimed by nothing, so it silently
+    stops running anywhere at all."""
     # `on_demand:` with NO entries parses to None, not [] — YAML's empty value.
     # `manifest.get("on_demand", [])` returns that None (the key IS present),
     # and `set(None)` raises TypeError, so the guard that exists to NAME an

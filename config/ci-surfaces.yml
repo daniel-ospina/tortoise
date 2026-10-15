@@ -2049,21 +2049,41 @@ surfaces:
   # diff takes `select()`'s early return, so `tier1` is where it must live;
   # `core` is its home for the code diffs that can re-rotate a passage.
   - test_extractor_v4_citation_rot.py
-  # #8495: the FOURTH guard over the same document — §4.4's per-step failure
+  # #8500: the FOURTH guard over the same document — the S4 divergence. The doc
+  # says *"There is no S4"*, the shipped pipeline runs one whenever a story
+  # exists, and the drift marker recording that (#8498) is PROSE: nothing failed
+  # when the code changed, so its behavioural claims were free to rot — and its
+  # citations had already moved by the time the marker landed (it cited
+  # `4c801fb18` figures the tree no longer had). #8506's citation-rot guard checks
+  # that a quoted SYMBOL exists; it checks no behavioural claim at all. This file
+  # resolves, with `ast`, the claims a lane would act on destructively: the
+  # `if story:` call gate (no flag gate), `TORTOISE_S4_DELTA` as the OUTPUT
+  # contract rather than an off switch, the consumed `merge_embed_lists` union
+  # (assigned AND still the value that reaches `result["embed_list"]`), and the
+  # three side-effect bypass paths on the route into `extract_session_v2` (the
+  # `sdk.py` v1/`summary=` arm is pinned as a ROUTING to the S4-less path, not
+  # just as a predicate) — plus the module docstring's
+  # `G5 record — the live S4 stage (#8500)`, the record the S4 call site names
+  # (before this change it named a record that did not exist). Same docs-only
+  # reason as the three guards above: a `docs/`-only diff takes `select()`'s early
+  # return, so `tier1` is where it must live; `core` is its home for the code
+  # diffs that can falsify a claim.
+  - test_extractor_v4_s4_stage_claims.py
+  # #8495: the FIFTH guard over the same document — §4.4's per-step failure
   # policy. Pins that every §4.0 canonical step keeps a declared direction, that
   # the three invariants and the re-narrate tie-break survive, and that `HOLD` is
-  # not silently added to `vet_gate.OUTCOMES`. Same docs-only reason as the three
+  # not silently added to `vet_gate.OUTCOMES`. Same docs-only reason as the
   # guards above: a `docs/`-only diff takes `select()`'s early return, so `tier1`
   # is where it must live; `core` is its home for the code diffs (a fixed
   # `_render_search_results`, or a new step) that can re-rot the passage.
   - test_extractor_v4_failure_policy.py
-  # #8496: the FOURTH guard over the same document — the G4 reconciliation
+  # #8496: the SIXTH guard over the same document — the G4 reconciliation
   # (append-only raw layer vs credential redaction). Pins the stated design
   # choice (R1–R4: redact BEFORE the append, retention-erasure for the
   # already-persisted case, `(scanned, total)` coverage, Postgres home) AND the
   # code ground it rests on (`redact_secrets` marker + idempotence, and
   # `_capture_turn_texts` storing the marker). Same docs-only reason as the
-  # three guards above: a `docs/`-only diff takes `select()`'s early return, so
+  # guards above: a `docs/`-only diff takes `select()`'s early return, so
   # `tier1` is where it must live; `core` is its home for the code diffs that
   # can revert the scrub the ruling assumes.
   - test_extractor_v4_redaction_reconciliation.py
@@ -2351,6 +2371,12 @@ surfaces:
   # and pack_state/pack_manifest_store are the writer modules whose labels
   # the registry must agree with.
   - test_rebuild_config_preservation.py
+  # #2792: configurable per-graph pipelines. The subject is
+  # `tortoise/pipeline.py` (+ the `kindDefs.pipeline` validation in
+  # `pack_registry.py` and the `:Pipeline`/`:PipelineStage` enrolment in
+  # `projection/__init__.py`) — none matches a named SOURCE_PATTERN, so the
+  # change falls through to `core` and this arm is what runs it.
+  - test_pipeline_2792.py
   # #4653: the same wipe+replay drives the `event_meta` sidecar section and the
   # watermark re-derivation, both in tortoise/projection/ (core fallback) over
   # tortoise/event_store.py's allocator.
@@ -2491,6 +2517,14 @@ surfaces:
   - test_slack_connector.py
   - test_sparse.py
   - test_status_projection.py
+  # #2729: pack-declared per-kind Object status folds — manifest validation
+  # (unknown status / orphan fold event isolate the pack; a shared-vocabulary
+  # overlap is a recorded warning), built-in connector-fold parity, namespaced-
+  # kind dispatch, and the end-to-end venture fold. `core` is the home: the
+  # pack registry + `tortoise/status_folds.py` + the projection fold;
+  # `test_status_projection.py` above is the sibling that pins the pre-#2729
+  # fold behaviour this mechanism must preserve.
+  - test_status_folds_2729.py
   - test_read_status.py  # #3892 (B6): the read-path status contract — the recorded four terms on search/recall (tortoise/read_status.py + tortoise/sdk.py; dual-registered with `api` for the hosted /v1/search field)
   # #7952 (§17.2 / §17.3): the completeness marker (`not-hot`, never an empty
   # result) and the second divergence surface (Postgres truth ↔ FalkorDB cache,
@@ -2998,6 +3032,16 @@ surfaces:
   # environment cannot express the cross-agent 403 (one key) or archived→409
   # (the agent API cannot archive) — those cases live here.
   - test_blog_agent_delete_guard.py
+  # #4311: the CREATE status narrowing, executed against the same Function. The
+  # fix moved the invariant into a type (PostStatus); a type fixes the SHAPE and
+  # says nothing about the behaviour callers depend on, so the draft default,
+  # the refusal of an invalid status, and the published-only rules are driven
+  # here. Same Node harness, same Function, no wrangler/network/DB.
+  - test_blog_post_status_validation.py
+  # #4311: the strict tsc project + CI job that typecheck website/functions/**
+  # (tools/ts/README.md). A gate is worth what its wiring is worth, so the
+  # tsconfig, the pinned toolchain and the workflow job are pinned here too.
+  - test_website_functions_typecheck.py
   - test_dashboard_unknown_address.py
   # #2409: the public contact form. The handler's behaviour — the byte ceiling
   # (including what it SPENDS), the rate limiter, the honeypot, the transport —
@@ -3561,6 +3605,10 @@ tier1:
 # and the same docs-only PR is exactly the change that can re-introduce a
 # retracted passage.
 - test_extractor_v4_citation_rot.py
+# #8500: the same document's S4-divergence guard (`core` above) — same no-DB,
+# `ast`-only shape, and the same docs-only PR is exactly the change that can
+# falsify a claim it pins (or tidy the marker away).
+- test_extractor_v4_s4_stage_claims.py
 # #8495: the same document's per-step FAILURE-POLICY guard (`core` above) — same
 # no-DB shape, and the same docs-only PR is exactly the change that can drop or
 # contradict the declared policy.
@@ -3602,6 +3650,7 @@ slow_files:
 - test_pack_shipping_wheel.py
 - test_projection.py
 - test_rebuild_config_preservation.py  # #2814: drives the real full rebuild_all wipe+replay
+- test_pipeline_2792.py  # #2792: per-graph pipeline config + stage movement over the embedded EntityMutated journal/rebuild
 - test_rebuild_parity_fail_loud_3585.py  # #3585: 76 tests driving real FalkorDB rebuild/recover cycles (~36s on a healthy docker lane MEASURED 2026-10-08 WHEN THE FILE COLLECTED 47; it now collects 76, of which #7719 contributed 10 (66 -> 76), so ~36s is a LOWER bound and the committed 45.0 weight predates those 10 — refresh with `tools/ci_timing.py --refresh-durations`; the earlier ~470-720s figures were taken on this host at load ~97 — see its durations note)
 - test_projection_embedded_socket_timeout.py  # #3350: embedded lane socket timeout (carve-out)
 - test_projection_lifecycle.py
@@ -3780,6 +3829,11 @@ carve_out:
 # carve-out is load-bearing — the pins exercise the real unconditional wipe,
 # which the server-side bulk-wipe guard refuses on a non-test graph).
 - test_rebuild_config_preservation.py
+# #2792: configurable per-graph pipelines — the state pins drive the real
+# `EntityMutated` journal + `rebuild_all` replay, so the embedded carve-out is
+# load-bearing (a URI-set lane would redirect the construction and lose the
+# replay). Mirror of the `test_pipeline_2792` rows above.
+- test_pipeline_2792.py
 # #7852 W1: the Layer-2 `semantics` write-path guard is embedded-only — the
 # fixture builds `TortoiseSDK(<tmpfile>)` and drives the real `rebuild_all`
 # replay, so the carve-out is load-bearing (a URI-set lane would redirect it).
@@ -4254,6 +4308,13 @@ durations:
   test_write_consolidation.py: 5.3
   test_value_extractor.py: 4.8
   test_venture_pack.py: 2.0  # unmeasured — new in #3419; no sweep has collected it, so it carries the flat default exactly as an absent key would, which is main's own weight for it. Do NOT substitute a local timing here: a measured-on-this-box 67.2 was recorded first, and it is a SHARD-LAYOUT input, so it moved tests/test_tortoise_search.py into the same shard as tests/test_subject_layer_read_surfaces_4889.py and exposed a pre-existing embedded-lane isolation leak (#3750 family) that main's grouping keeps apart. A weight that does not model CI must not be used to decide what runs together.
+  # #2729: same rule as the entry directly above — unmeasured, carries the flat
+  # default exactly as an absent key would. The explicit entry is REQUIRED, not
+  # cosmetic: the file is new to the fast pool and an absent key lowers
+  # `durations` coverage below the 90% floor (#3400). Do NOT substitute a
+  # measured-on-this-box timing; the weight is a shard-layout input that must
+  # model CI, not this box.
+  test_status_folds_2729.py: 2.0
   test_pack_state.py: 5.1
   test_pack_selection_by_graph.py: 2.0  # unmeasured — new in #2728; no sweep has collected it, so it carries the flat default exactly as an absent key would. Do NOT substitute a local timing here: the weight is a SHARD-LAYOUT input, and the #3419 venture-pack precedent (a local 67.2 that re-grouped unrelated files and exposed a pre-existing embedded-lane isolation leak) is why an unmeasured new file stays at the flat default until a junit sweep measures it.
   test_skip_guard.py: 16.0
@@ -4551,6 +4612,7 @@ durations:
   test_extractor_v4_step_list_consistency.py: 0.1  # #5092: two fenced blocks + one paragraph read; measured 0.01s of test body (session setup excluded)
   test_extractor_v4_doc_citations.py: 0.1  # #8498 review P2: one row + two module assertions; same no-DB shape as the step-list guard
   test_extractor_v4_citation_rot.py: 0.1  # #8506: doc-text scans + a handful of file reads; same no-DB shape as the two guards above
+  test_extractor_v4_s4_stage_claims.py: 0.1  # #8500: `ast` walks over two source files + doc-text scans; no DB, same shape as the three v4 guards above
   test_extractor_v4_failure_policy.py: 0.1  # #8495: §4.4 doc-text scan + two module reads; same no-DB shape as the three guards above
   test_extractor_v4_redaction_reconciliation.py: 0.3  # #8496: one section read + a marker/idempotence check; the `tortoise.sdk` import (~0.12s) is the only cost
   test_entity_attachment_brief_claims.py: 0.1  # #8639 review P1: doc-text scan + three regex block reads; same no-DB shape as the extractor-v4 guards above
@@ -4789,6 +4851,8 @@ durations:
   test_ask_spotcheck_seed_shape.py: 0.3
   test_battery_recall_wiring.py: 0.3
   test_blog_agent_delete_guard.py: 2.5
+  test_blog_post_status_validation.py: 2.5  # #4311: analogue estimate (same Node type-stripping harness as test_blog_agent_delete_guard.py); refresh from the first post-merge junit artifact
+  test_website_functions_typecheck.py: 2.0  # #4311: analogue estimate (measured 1.9s locally — JSON/YAML reads + the executed gate script); refresh from the first post-merge junit artifact
   test_capture_cost_measurement.py: 4.3
   test_capture_entity_attachment_3664.py: 5.9
   test_capture_install.py: 16.6
@@ -5076,8 +5140,19 @@ durations:
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
 # A file here is excluded from EVERY pre-merge leg (fast halves, slow, carve-
-# out). It is run only by `.github/workflows/evals-on-demand.yml`
-# (`workflow_dispatch`), which is the point.
+# out). It runs from the on-demand RUNNERS — `.github/workflows/
+# evals-on-demand.yml` and, for the perf lane, `.github/workflows/perf-lane.yml`
+# (both `workflow_dispatch`; the perf lane is also nightly) — and that is the
+# point.
+#
+# KNOWN AND DELIBERATE, recorded because it is a real surface: `post-merge-
+# validation.yml` ignores only `slow_files` + `tests/e2e`, so it COLLECTS this
+# lane on every merge to main (it provisions the embedder, so it is not the
+# evals-lane dense-leg failure). That is accepted, not overlooked: post-merge is
+# warn-only (no gate impact) and is the only place a lane file would otherwise
+# never run without a human dispatch, while the dedicated perf lane stays the
+# SLO's owner. The cost accepted: a shared-runner wall-clock red can appear on
+# main-validation WITHOUT the perf lane's 2-attempt retry.
 #
 # WHY A LANE AND NOT JUST DELETING IT FROM slow_files: `fast_pool()` is
 # defined as "everything not slow / env-broken / carve-out", so removing a
@@ -5100,8 +5175,19 @@ durations:
 #
 #   The genuinely cheap eval unit tests (schema / metrics / grading, all
 #   sub-second) stay in the merge path — they are real contracts.
+#
+#   tests/test_perf_lane_volunteer_context.py — the DEDICATED PERF LANE (#3992).
+#   The #2080 plan assigns the hard wall-clock SLO for POST /v1/context
+#   ("assert <= 300 ms p95", median of 3 runs of 50) to a dedicated perf lane
+#   and says in the same sentence that the lane is "generously margined,
+#   retry-tolerant" while the BLOCKING CI assertions are the MECHANISM ones
+#   (fail-open degraded_reason, zero-LLM read path). A wall-clock assertion on
+#   a shared runner is exactly what this lane exists to keep OFF the merge
+#   gate — and before #3992 the lane the plan named did not exist at all, so
+#   the SLO was unverifiable. It runs from .github/workflows/perf-lane.yml.
 on_demand:
   - eval/retrieval/test_integration.py
+  - test_perf_lane_volunteer_context.py
 
 # ── #6133: DECLARED SLEEP IS NOT GATE COST, AND NOT THE FLOOR ──
 #
