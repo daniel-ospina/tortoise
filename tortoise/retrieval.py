@@ -57,6 +57,7 @@ from tortoise.coverage_loop import (
 )
 
 from .env_truthy import env_flag  # #4097: the declared truthy contract
+from .validity import END_UNKNOWN, PRECISION_UNKNOWN  # #2350: the 3-state end
 
 #: token-count estimator (matches the reader-context alignment invariant):
 #: rough LLM token ≈ whitespace tokens, plus a 10% markup allowance for
@@ -908,6 +909,14 @@ def _validity_marker(h: dict) -> str:
       - live hit with ``valid_from`` → ``[valid since <from>]``
       - superseded hit → ``[valid <from> → <to>]``; with ``expired_at`` →
         ``[valid <from> → <to>; expired <tx-date>]``
+      - an ENDED-but-un-datable window (``end_state == 'unknown'``, i.e.
+        ``validToPrecision='unknown'`` with no ``validTo``) →
+        ``[valid since <from>; end unknown]`` (with ``expired_at`` →
+        ``…; expired <tx-date>; end unknown``). #2350: the marker is
+        interpolated into the reader evidence, so ``[valid since <from>]``
+        asserts the claim is STILL TRUE — rendering an un-datable end that
+        way would fabricate coverage, the exact hazard the 3-state end
+        exists to prevent.
       - undated hits → NO validity marker (byte-identical rendering)
     ISO date strings (YYYY-MM-DD — the dataset/``when`` normalization): no
     full timestamps in the reader context; timestamps stay on the graph
@@ -936,6 +945,14 @@ def _validity_marker(h: dict) -> str:
                 marks.append(f"[valid {vfd} → {vtd}; expired {exd}]")
             else:
                 marks.append(f"[valid {vfd} → {vtd}]")
+        elif ((h.get("end_state") or "") == END_UNKNOWN
+              or (h.get("valid_to_precision") or "") == PRECISION_UNKNOWN):
+            # #2350: ENDED but un-datable — never relabel as still-true.
+            if ex:
+                exd = ex[:10] if len(ex) > 10 else ex
+                marks.append(f"[valid since {vfd}; expired {exd}; end unknown]")
+            else:
+                marks.append(f"[valid since {vfd}; end unknown]")
         else:
             marks.append(f"[valid since {vfd}]")
     return " ".join(marks)

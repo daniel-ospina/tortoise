@@ -295,6 +295,25 @@ def _scan(sdk, **kw):
                                   include_terminal=True, **kw)
 
 
+def test_reader_marker_does_not_relabel_invalidated_unknown_as_still_true(lane):
+    """#2350: the reader-facing ``[valid …]`` marker must not render an
+    invalidated-un-datable window as still-true, and must keep the
+    transaction-time expiry date (``invalidate_point`` stamps ``expiredAt``)."""
+    from tortoise.retrieval import _validity_marker
+
+    sdk, _events = lane
+    old = sdk.create_point("statement", "old", validFrom="2024-01-01")
+    other = sdk.create_point("statement", "other", validFrom="2024-06-01")
+    sdk.invalidate_point(old["id"], other["id"], valid_to_precision="unknown")
+    hit = next(r for r in _scan(sdk) if r["id"] == old["id"])
+    assert hit["end_state"] == "unknown"
+    assert hit["valid_to_precision"] == "unknown"
+    marker = _validity_marker(hit)
+    # the SUPERSEDED BY marker renders first, so match the window half.
+    assert "[valid since 2024-01-01; expired " in marker
+    assert marker.endswith("; end unknown]")
+
+
 def test_search_annotation_distinguishes_open_from_unknown(lane):
     sdk, _events = lane
     still = sdk.create_point("statement", "still", validFrom="2024-01-01")

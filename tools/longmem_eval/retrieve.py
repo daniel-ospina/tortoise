@@ -799,14 +799,23 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
             # (``retract_point`` writes status='retracted' and no window and
             # no CORRECTS edge). Sourced from the search PAYLOAD (which
             # carries it), never from ``point_props_for_hits`` (which does
-            # not fetch it). Additive key — the annotated key set is 18, or 20
-            # when the point carries a verbatim span (#2684, added below).
+            # not fetch it). Additive key — the annotated key set is 21 (18
+            # + the #2350 precision/end-state triple, added below), or 23 when
+            # the point carries a verbatim span (#2684, added below).
             "status": h.get("status") or "",
             # E6 (#1538) D7: promoted validity-window fields — additive,
             # only when present (undated hits render no [valid …] marker).
             "valid_from": h.get("valid_from") or "",
             "valid_to": h.get("valid_to") or "",
             "expired_at": h.get("expired_at") or "",
+            # #2350 (E-prec): the 3-state end rides the annotated surface too,
+            # or the eval lane's reader cannot render an ended-unknown window
+            # as distinct from a still-true one (``_validity_marker`` reads
+            # these keys). Sourced from the search payload — the same place
+            # the window fields above come from.
+            "valid_from_precision": h.get("valid_from_precision") or "",
+            "valid_to_precision": h.get("valid_to_precision") or "",
+            "end_state": h.get("end_state") or "",
         }
         # #2684 (Slice B): the value-bearing verbatim SPAN — the offsets of
         # the point's own quote inside its source turn, surfaced WITH the
@@ -828,7 +837,7 @@ def annotate_pool_additions(hits: list[dict], props: dict, dates: list[str],
     needs the eval lane's annotation readers, so a product home would force
     a product→harness import).
 
-    Delegates to :func:`_annotate_hits` (all 18 annotated keys — including
+    Delegates to :func:`_annotate_hits` (all 21 annotated keys — including
     ``session_date``, which is derived from the QUESTION's ``haystack_dates``
     and is not derivable from ``proj`` or the point props, hence the
     required ``dates`` argument) and then stamps ``match_source`` — the
