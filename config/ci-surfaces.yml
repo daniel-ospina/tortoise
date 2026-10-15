@@ -644,6 +644,14 @@ surfaces:
   # `api` (metering/supabase seam) and `core` (the new module's default surface), so
   # a change to EITHER select this file.
   - test_graph_storage.py
+  # #4492: the Postgres storage footprint + per-org analytics row-growth meter —
+  # the two READ RPCs live in tortoise/supabase_control.py's control-plane seam
+  # (an `api` SOURCE_PATTERN) while the new wrapper module
+  # (tortoise/postgres_storage.py) matches no pattern and falls to `core`.
+  # Registered on BOTH so a change to EITHER half runs the guard that pins the
+  # SQL↔Python contract (the RPC/param names) — the #2938/#3154 silent-drop
+  # class. See the `core` entry for the other half.
+  - test_postgres_storage.py
   - test_oauth_mcp.py
   - test_oauth_token_fault.py  # #2863: /oauth/token fault-injection suite (fake CP + local HTTPServer seam)
   - test_oauth_redemption_state.py  # #3027: durable redemption state machine + reconciler (fake CP, no live DB)
@@ -1302,6 +1310,14 @@ surfaces:
   # supabase graph-storage lane). Dual-registered with `api`: a change to the new
   # module selects no api-owned pattern, so `core` is the surface that must run it.
   - test_graph_storage.py
+  # #4492: the Postgres storage footprint + per-org analytics row-growth meter
+  # (tortoise/postgres_storage.py + the two read RPCs in migration
+  # 20261015000001). Dual-registered with `api`: a change to the new module
+  # selects no named pattern and falls to `core`, so `core` is the surface that
+  # MUST run this guard on its own source's diff (`core` is also what a
+  # docs-only change selects — `docs/` is a NON_PYTHON_PREFIX and the doc entry
+  # in docs/00_index.md carries the retention finding).
+  - test_postgres_storage.py
   # #3634: guards the graph-name ownership vocabulary (the prefix sets that
   # authorise a sweep) — the register, the deny-safe residue predicate, and the
   # AST pin keeping the opt-in legacy sweep out of every default path.
@@ -5171,6 +5187,17 @@ durations:
   test_extractor_embed_coerce_5060.py: 0.6
   test_graph_name_ownership.py: 0.1
   test_graph_storage.py: 5.2
+  # #4492: added by a PR, so no CI reading exists yet (`--refresh-durations`
+  # samples push-to-main runs only). Hermetic — no DB, no network, no PGlite
+  # (the SQL is asserted separately by the PGlite suite, which does not run in
+  # this pool) — so its own per-test cost is what the map should carry, not a
+  # pytest session total. Locally measured 2026-10-15: the file's own tests sum
+  # to < 0.1s (31 tests, all pure parsing/fail-soft assertions); the 8.8s
+  # "setup" pytest prints is the SESSION-scoped conftest boot, which CI pays
+  # once for the whole shard and which other hermetic rows in this map (e.g.
+  # test_cypher_regex_guard_3595.py: 0.2) likewise exclude. Refresh from the
+  # first post-merge run that includes it.
+  test_postgres_storage.py: 0.2  # unmeasured
   test_heavy_import_guard.py: 6.8
   test_hook_run_observation.py: 5.4
   test_hook_stderr_5919.py: 0.3
