@@ -1576,6 +1576,14 @@ class _EntityHandlers:
         # log a FALSE `"Point prop %r is not declared"` drift warning on every
         # rebuild.
         "credibility",
+        # #2350 (E-prec): the per-end validity precision declaration. It rides
+        # the PointAdded snapshot as a plain string prop and the open-set
+        # passthrough restores it, so declaring it is warning-suppression only
+        # — but without it a rebuild logs a FALSE `"Point prop %r is not
+        # declared"` drift warning for a documented part of the window
+        # contract. ``validToPrecision='unknown'`` is the 3-state end's
+        # closed-unknown marker and must survive rebuild verbatim.
+        "validFromPrecision", "validToPrecision",
         # #6151 defect 2: the #2199 system-default provision, recorded on a
         # decide part BORN live (no explicit status). `_apply_source_
         # inheritance` re-injects the default ONLY where this marker says one
@@ -3102,6 +3110,11 @@ class _EntityHandlers:
         # too. updatedAt mirrors the live stamp block (supersede-time now,
         # journaled on the line via the ts fallback).
         valid_to = ev.get("valid_to")
+        # #2350 (E-prec): the journaled per-end precision rides the SAME record.
+        # ``None`` when the record predates the field — writing it clears the
+        # property, which is the legacy node's own state, so a pre-#2350
+        # journal replays byte-identically.
+        valid_to_precision = ev.get("valid_to_precision")
         expired_at = _journal_instant(ev, "expired_at")
         updated_at = _journal_instant(ev)
         # ``skip_updated_at`` is the SAME seq-gate ``_fold_point_invalidated``
@@ -3117,12 +3130,16 @@ class _EntityHandlers:
         # ``fold_deferred_corrects_edges`` / the pass-1b sweep).
         if skip_updated_at:
             set_clause = ("SET n.status='superseded', n.outdated=true, "
-                          "n.validTo=$vt, n.expiredAt=$ea ")
-            params = {"id": oid, "vt": valid_to, "ea": expired_at}
+                          "n.validTo=$vt, n.validToPrecision=$vtp, "
+                          "n.expiredAt=$ea ")
+            params = {"id": oid, "vt": valid_to, "vtp": valid_to_precision,
+                      "ea": expired_at}
         else:
             set_clause = ("SET n.status='superseded', n.outdated=true, "
-                          "n.validTo=$vt, n.expiredAt=$ea, n.updatedAt=$ua ")
-            params = {"id": oid, "vt": valid_to, "ea": expired_at,
+                          "n.validTo=$vt, n.validToPrecision=$vtp, "
+                          "n.expiredAt=$ea, n.updatedAt=$ua ")
+            params = {"id": oid, "vt": valid_to, "vtp": valid_to_precision,
+                      "ea": expired_at,
                       "ua": updated_at}
         result = self.g.query(
             "MATCH (n:Point {id:$id}) " + set_clause + "RETURN n.id LIMIT 1",
@@ -3216,20 +3233,28 @@ class _EntityHandlers:
         # replayed verbatim). validTo/expiredAt fall back like supersede;
         # updatedAt reads the ts key (the emit passes ts=now).
         valid_to = ev.get("valid_to")
+        # #2350 (E-prec): the journaled per-end precision, replayed verbatim
+        # (None on a pre-#2350 record — clearing a property the legacy node
+        # never had, so the replay stays exact).
+        valid_to_precision = ev.get("valid_to_precision")
         expired_at = _journal_instant(ev, "expired_at")
         updated_at = _journal_instant(ev)
         if skip_updated_at:
             # A later same-id PointRevised/PointPromoted already stamped
             # updatedAt (inline, pass-1b) — omit the column so this fold
             # cannot clobber the newer stamp with the older invalidate ts.
-            set_clause = ("SET n.outdated=true, n.validTo=$vt, n.expiredAt=$ea ")
-            params = {"id": oid, "vt": valid_to, "ea": expired_at}
+            set_clause = ("SET n.outdated=true, n.validTo=$vt, "
+                          "n.validToPrecision=$vtp, n.expiredAt=$ea ")
+            params = {"id": oid, "vt": valid_to, "vtp": valid_to_precision,
+                      "ea": expired_at}
         else:
             # Unconditional updatedAt write: this sweep fold is the id's last
             # journal writer → exact live parity (supersede's precedent).
             set_clause = ("SET n.outdated=true, n.validTo=$vt, "
+                          "n.validToPrecision=$vtp, "
                           "n.expiredAt=$ea, n.updatedAt=$ua ")
-            params = {"id": oid, "vt": valid_to, "ea": expired_at,
+            params = {"id": oid, "vt": valid_to, "vtp": valid_to_precision,
+                      "ea": expired_at,
                       "ua": updated_at}
         result = self.g.query(
             "MATCH (n:Point {id:$id}) " + set_clause + "RETURN n.id LIMIT 1",

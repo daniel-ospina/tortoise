@@ -18,6 +18,7 @@ from typing import Any, Literal
 
 from .env_truthy import is_truthy
 from .security import entity_label, validate_entity_type
+from .validity import window_read_fields  # #2350: ONE read-projection home
 # #8316: the READ half of the stored-embedding shape seam. A caller-supplied
 # embedding is stored VERBATIM as a plain Cypher `List` (PR #3018's recorded
 # decision) and a read spelled `<alias>.embedding` makes
@@ -631,6 +632,15 @@ class SearchResult:
     valid_from: str = ""
     valid_to: str = ""
     expired_at: str = ""
+    # #2350 (E-prec): the additive per-end precision layer + the 3-state end
+    # (``open`` | ``known`` | ``unknown``). Empty means the precision was not
+    # declared (legacy window — ``valid_from``/``valid_to`` read as day
+    # precision, the pre-#2350 default); ``end_state`` is emitted whenever the
+    # point carries ANY window information, so an ended-unknown window is
+    # distinguishable from a still-true one on the wire.
+    valid_from_precision: str = ""
+    valid_to_precision: str = ""
+    end_state: str = ""
     subject: dict | None = None  # {id, name, kind} | None — ≤1 hop, fail-closed (D10)
     # #4889: the fail-loud counterpart to an absent ``subject``. Emitted only
     # when the whole batch resolved no subject AND the graph has no
@@ -708,6 +718,23 @@ class SearchResult:
             d["valid_to"] = self.valid_to
         if self.expired_at:
             d["expired_at"] = self.expired_at
+        # #2350 (E-prec): the precision block, emitted only when the point
+        # carries window information at all — undated points stay byte-
+        # identical (no keys), a dated point states its end state so a
+        # still-true window (``open``) is never confused with one whose end is
+        # un-datable (``unknown``). ``valid_from_precision`` is INCLUDED in the
+        # gate: a falsey-but-present start (``""``) is a real bound for the
+        # ONE read-projection home, so the resolved ``day`` must reach the
+        # wire — gating on a truthy ``valid_from`` alone silently dropped the
+        # block on that surface only (the cross-surface drift of #2350).
+        if (self.valid_from or self.valid_to or self.valid_to_precision
+                or self.valid_from_precision):
+            if self.valid_from_precision:
+                d["valid_from_precision"] = self.valid_from_precision
+            if self.valid_to_precision:
+                d["valid_to_precision"] = self.valid_to_precision
+            if self.end_state:
+                d["end_state"] = self.end_state
         if self.subject:
             d["subject"] = self.subject
         # #4889: loud counterpart to the absent ``subject`` key above — only
@@ -3356,7 +3383,11 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             "  coalesce(n.outdated, false), "
             # #1423: the Subject's own lifecycle status, appended AFTER #2294's
             # index-18 flag so neither addition shifts the other's mapping.
-            "  s.status, es.status",
+            "  s.status, es.status, "
+            # #2350 (E-prec): the per-end precision declaration, appended
+            # LAST so every index above is untouched. Read into the additive
+            # precision block by ``window_read_fields`` below.
+            "  n.validFromPrecision, n.validToPrecision",
             params={"ids": point_ids},
             timeout=_DECORATION_TIMEOUT_MS,
         ).result_set
@@ -3376,6 +3407,24 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             st.setdefault("valid_from", row[2] or None)
             st.setdefault("valid_to", row[3] or None)
             st.setdefault("expired_at", row[4] or None)
+            # #2350 (E-prec): the additive precision block, resolved by the ONE
+            # read-projection home so search/recall annotation cannot drift
+            # from ``get_historical_knowledge``/``assembly``. The bounds are
+            # passed RAW: ``window_read_fields``' presence gate is
+            # ``is not None`` (a falsey-but-present bound — ``""``, ``0`` —
+            # is a REAL bound, matching ``_covers`` and
+            # ``_assert_window_start_not_inverted``). Pre-normalizing with
+            # ``or None`` here made the same stored window read ``day`` in
+            # assembly / ``get_historical_knowledge`` and ``None`` here — the
+            # exact cross-surface drift this module exists to prevent.
+            _wf = window_read_fields(
+                row[2], row[3],
+                row[21] if len(row) > 21 else None,
+                row[22] if len(row) > 22 else None,
+            )
+            st.setdefault("valid_from_precision", _wf["valid_from_precision"])
+            st.setdefault("valid_to_precision", _wf["valid_to_precision"])
+            st.setdefault("end_state", _wf["end_state"])
             old_id, old_content, old_created = row[5], row[6], row[7]
             new_id, new_status, new_content, new_created = row[8], row[9], row[10], row[11]
             if old_id and old_id not in {s["id"] for s in st["supersedes"]}:

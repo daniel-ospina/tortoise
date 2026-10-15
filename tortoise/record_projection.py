@@ -426,7 +426,8 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
                   # as the predecessor's own `validFrom`. The old point's
                   # `validFrom` already rides `PointAdded`; writing the
                   # successor's start here would invert/rewrite the window.
-                  from_payload=frozenset({"valid_to", "expired_at"}),
+                  from_payload=frozenset({"valid_to", "expired_at",
+                                          "valid_to_precision"}),
                   renames=(("superseded_by", "new_id"),)),
         note="§17.5 names this record as the carrier of `validTo`/`expiredAt`/"
              "`outdated`; the fold replays them verbatim "
@@ -437,7 +438,8 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
     "PointInvalidated": Mutation(
         NodePatch(Node("point", "Point", "id"), key_from="id",
                   literals=(("outdated", True),),
-                  from_payload=frozenset({"valid_to", "expired_at"}),
+                  from_payload=frozenset({"valid_to", "expired_at",
+                                          "valid_to_precision"}),
                   renames=(("superseded_by", "corrected_by"),)),
         note="#2488 — `outdated` flag + CORRECTS; no status change. §17.5's "
              "carrier for `validTo`/`expiredAt` — the fold replays both "

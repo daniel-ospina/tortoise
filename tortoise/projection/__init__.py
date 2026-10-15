@@ -5907,6 +5907,29 @@ def _apply_one(points: dict[str, dict], ev: dict,
             # `_canonical_point_fields` drops on BOTH sides.
             if "tags" in ev:
                 p["tags"] = ev["tags"]
+            # #2350 (E-prec): fold the per-end validity-precision EDIT — the
+            # same class as `tags` above, and it must ride the SAME pure-fold
+            # arm the graph fold uses, or the two replay engines disagree.
+            # `update_point(id, validToPrecision="unknown")` writes the prop
+            # LIVE (its per-key `SET n += $props`) and the `PointRevised`
+            # payload carries it, but this fold built its props only from
+            # content/annotator/belief/`mitigation_strength`/`tags`, so:
+            #   * the GRAPH rebuild dropped it and `end_state` flipped
+            #     `unknown` -> `open`, i.e. "an un-datable end read as
+            #     still-true" (#2349 fabricated coverage) — the exact hazard
+            #     the 3-state end exists to prevent; and
+            #   * `check_consistency` (this fold is its reference view) red a
+            #     graph the live path itself wrote, with advice ("replay the
+            #     journal") that could never clear it — the #5048/#3817 class.
+            # Presence-conditional: an explicit `None` is the documented clear
+            # and folds as an absent value, which `_canonical_point_fields`
+            # drops on BOTH sides. The writability gate is the SAME
+            # `_annotator_value_ok` `mitigation_strength` uses (it keeps
+            # `None`, so a clear still folds): a corrupt journal's
+            # non-persistable value must DROP, never strand the rebuild.
+            for _pk in ("validFromPrecision", "validToPrecision"):
+                if _pk in ev and _annotator_value_ok(ev[_pk]):
+                    p[_pk] = ev[_pk]
     elif t == "OperatorAnnotated":
         # #3689: the explicit annotation record — parity with apply() /
         # rebuild_all pass-1b. A plain property write on the operator's
@@ -9723,6 +9746,12 @@ class FalkorProjection(
         # #2897: the same class as `last_ms_write_by_source`, for `tags` — the
         # last creation whose own clause actually WROTE the tag list.
         last_tags_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
+        # #2350 (E-prec): the same open-set conditional-write class again, one
+        # anchor per end (a creation that wrote only ONE of the two props did
+        # not clear the other live, so a single shared anchor would
+        # over-suppress the revision's value for the prop nobody restated).
+        last_vfp_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
+        last_vtp_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
         # #4305: id-WIDE (cross-file) journal-owned derived markers for the
         # pass-1b restore tail. The per-source anchors above are a WITHIN-file
         # chronology boundary; the restore tail runs AFTER every journal file,
@@ -9963,6 +9992,15 @@ class FalkorProjection(
                     # for a tag EDIT.
                     if "tags" in persisted_extras:
                         last_tags_write_by_source[key] = seq
+                    # #2350 (E-prec): the two per-end precision props ride the
+                    # same reported set — the passthrough writes each only when
+                    # the creation payload carries a non-None value, so the
+                    # pass-1b boundary for a precision EDIT is the creation
+                    # that actually WROTE that end.
+                    if "validFromPrecision" in persisted_extras:
+                        last_vfp_write_by_source[key] = seq
+                    if "validToPrecision" in persisted_extras:
+                        last_vtp_write_by_source[key] = seq
                     # #4305: the id-wide counterpart (see the sets'
                     # declaration). A re-creation explicitly cleared both
                     # conditional fields before the upsert, so it owns them
@@ -10428,6 +10466,8 @@ class FalkorProjection(
                 skip_hash = False
                 skip_mitigation_strength = False
                 skip_tags = False
+                skip_valid_from_precision = False
+                skip_valid_to_precision = False
                 if isinstance(rid, str) and src is not None:
                     # #3860 composition: a PointRevised revises a ``:Point``,
                     # so its anchor key carries the same kind-scoped inner key
@@ -10471,6 +10511,17 @@ class FalkorProjection(
                         skip_tags = (
                             last_recreate_seq_by_source.get(key, -1) > seq
                             or last_tags_write_by_source.get(key, -1) > seq)
+                        # #2350 (E-prec): each per-end precision prop is the
+                        # same open-set conditional-write class — its own
+                        # anchor, so a creation that restated only ONE end
+                        # does not suppress the revision's value for the
+                        # other.
+                        skip_valid_from_precision = (
+                            last_recreate_seq_by_source.get(key, -1) > seq
+                            or last_vfp_write_by_source.get(key, -1) > seq)
+                        skip_valid_to_precision = (
+                            last_recreate_seq_by_source.get(key, -1) > seq
+                            or last_vtp_write_by_source.get(key, -1) > seq)
                 wrote_embedding, wrote_content_hash = self._revise_point(
                     ev, set_updated_at=True,
                     skip_annotator_dims=(
@@ -10487,7 +10538,9 @@ class FalkorProjection(
                     skip_embedding=skip_embedding,
                     skip_hash=skip_hash,
                     skip_mitigation_strength=skip_mitigation_strength,
-                    skip_tags=skip_tags)
+                    skip_tags=skip_tags,
+                    skip_valid_from_precision=skip_valid_from_precision,
+                    skip_valid_to_precision=skip_valid_to_precision)
                 if isinstance(rid, str):
                     # #4305: id-wide journal-owned derived marks — the revision
                     # wrote (or explicitly wiped) each field it was not told
@@ -14362,7 +14415,10 @@ class FalkorProjection(
                       skip_embedding: bool = False,
                       skip_hash: bool = False,
                       skip_mitigation_strength: bool = False,
-                      skip_tags: bool = False) -> tuple[bool, bool]:
+                      skip_tags: bool = False,
+                      skip_valid_from_precision: bool = False,
+                      skip_valid_to_precision: bool = False
+                      ) -> tuple[bool, bool]:
         """Apply PointRevised event — update content, context, and re-compute embedding.
 
         ``skip_annotator_dims`` (#3689): suppress ONLY the annotator-dim
@@ -14414,6 +14470,17 @@ class FalkorProjection(
         only embedding/content_hash/embedding_verbatim/sourceVersionTransit
         (plus ``tags``, added by #2897) — a pre-existing gap general to every
         OTHER open-set prop (#4042 class), not something this flag can reach.
+
+        ``skip_valid_from_precision`` / ``skip_valid_to_precision`` (#2350)
+        are the SAME open-set, conditionally-written class again: each prop
+        is persisted by the open-set passthrough only when the payload
+        carries a non-None value, and `update_point` writes it LIVE via
+        `SET n += $props`. The boundary for each is therefore the creation
+        that actually WROTE that prop (read from the writer's reported key
+        set), or a hard delete->recreate. Without the fold, a precision
+        written through the update door was dropped by replay and
+        `end_state` flipped `unknown` -> `open` (fabricated coverage,
+        #2349) while `check_consistency` red the healthy live graph.
 
         Returns ``(embedding_written, content_hash_written)`` (#4305) — the
         same conditional-write outcome ``_upsert_point_props`` reports, and
@@ -14527,6 +14594,30 @@ class FalkorProjection(
                 set_clauses.append("n.tags = $tags")
                 params["tags"] = ev["tags"]
                 wrote_tags = True
+
+        # #2350 (E-prec): fold a per-end validity-precision EDIT. The
+        # PointRevised payload carries it (`update_point(id,
+        # validToPrecision="unknown")` writes it LIVE via `SET n += $props`),
+        # but this fold built clauses only from content/embedding/hash/
+        # annotator/belief/`mitigation_strength`/`tags`, so a rebuild dropped
+        # it and `end_state` flipped `unknown` -> `open` — the "un-datable end
+        # read as still-true" fabricated-coverage hazard (#2349) the 3-state
+        # end exists to prevent, reintroduced on the one replay door this
+        # feature did not extend. Presence-conditional, mirroring the live
+        # `SET n += $props`: an explicit `None` is the documented clear and
+        # removes the property here too. Each prop has its OWN skip boundary
+        # (the same open-set class as `tags` / `mitigation_strength`): a later
+        # same-file creation that omitted the prop never cleared it live, so
+        # it must not suppress this revision's value — hence one flag per
+        # prop rather than one shared anchor.
+        if (not skip_valid_from_precision and "validFromPrecision" in ev
+                and _annotator_value_ok(ev["validFromPrecision"])):
+            set_clauses.append("n.validFromPrecision = $validFromPrecision")
+            params["validFromPrecision"] = ev["validFromPrecision"]
+        if (not skip_valid_to_precision and "validToPrecision" in ev
+                and _annotator_value_ok(ev["validToPrecision"])):
+            set_clauses.append("n.validToPrecision = $validToPrecision")
+            params["validToPrecision"] = ev["validToPrecision"]
 
         if new_content is not None:
             # Re-compute embedding when content changes (even to empty — wipe

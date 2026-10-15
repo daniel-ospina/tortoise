@@ -268,6 +268,56 @@ def test_marker_strings_via_full_scan_decoration(sdk):
     assert "[valid since 2026-06-14]" in _validity_marker(new_hit)
 
 
+def test_marker_distinguishes_still_open_from_ended_unknown(sdk):
+    """#2350: the reader-facing ``[valid …]`` marker must not relabel an
+    ended-unknown window as still-true.
+
+    Both points share a start; one is still open, the other is closed at an
+    un-datable time (``validToPrecision='unknown'``, no ``validTo``). The
+    marker is interpolated into the agent's evidence, so byte-identical
+    markers would assert the ended claim is still true — the fabricated-
+    coverage anti-pattern the 3-state end exists to prevent.
+    """
+    from tools.longmem_eval.retrieve import _validity_marker
+
+    still = sdk.create_point("statement", "still true",
+                             validFrom="2026-06-14")
+    ended = sdk.create_point("statement", "ended, un-datable",
+                             validFrom="2026-06-14",
+                             validToPrecision="unknown")
+
+    hits = {r["id"]: r for r in _scan(sdk)}
+    still_hit, ended_hit = hits[still["id"]], hits[ended["id"]]
+    # non-vacuous: the distinction is on the promoted hit dict
+    assert still_hit["end_state"] == "open"
+    assert ended_hit["end_state"] == "unknown"
+    assert ended_hit["valid_to_precision"] == "unknown"
+    assert "valid_to" not in ended_hit
+
+    assert _validity_marker(still_hit) == "[valid since 2026-06-14]"
+    assert _validity_marker(ended_hit) == \
+        "[valid since 2026-06-14; end unknown]"
+    assert _validity_marker(ended_hit) != _validity_marker(still_hit)
+
+
+def test_eval_annotation_forwards_the_end_state_for_the_marker(sdk):
+    """#2350: the eval lane rebuilds each hit into a fixed key set, so
+    ``_annotate_hits`` must forward the precision/end-state keys or
+    ``render_context`` cannot render the distinction on that surface."""
+    from tools.longmem_eval.retrieve import _annotate_hits, _validity_marker
+
+    ended = sdk.create_point("statement", "ended, un-datable",
+                             validFrom="2026-06-14",
+                             validToPrecision="unknown")
+    hits = _scan(sdk, include_terminal=True)
+    annotated = _annotate_hits(hits, {}, [])
+    entry = next(e for e in annotated if e["id"] == ended["id"])
+    assert entry["end_state"] == "unknown"
+    assert entry["valid_to_precision"] == "unknown"
+    assert _validity_marker(entry) == \
+        "[valid since 2026-06-14; end unknown]"
+
+
 def test_provenance_flag_is_absent_by_default_and_additive_when_on(sdk, monkeypatch):
     """Objectives 5/9 + owner decision #3837 (source + when learned + confidence).
 

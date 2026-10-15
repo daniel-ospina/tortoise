@@ -758,7 +758,7 @@ def test_chunk_kind_is_single_sourced_across_all_four_consumers():
 # ── annotate_pool_additions: the whole-dict no-regression proof ─────────
 def test_annotate_pool_additions_is_whole_dict_identical_except_leg():
     """#2517: the C3-1 annotation extraction must reproduce EVERY annotated
-    key (18), not a subset — ``session_date`` in particular is derived from
+    key (21), not a subset — ``session_date`` in particular is derived from
     the QUESTION's ``haystack_dates`` via ``lme_session_index``, so a
     4-field golden would pass while it silently emptied."""
     from tools.longmem_eval.retrieve import (
@@ -775,7 +775,7 @@ def test_annotate_pool_additions_is_whole_dict_identical_except_leg():
     base = _annotate_hits([dict(hits[0])], props, dates)[0]
     added = annotate_pool_additions(
         [dict(hits[0])], props, dates, match_source="session")[0]
-    assert len(base) == 18 and len(added) == 18  # +status (C6 #2520)
+    assert len(base) == 21 and len(added) == 21  # +status (C6 #2520) +the #2350 triple
     assert set(base) == set(added)
     assert "status" in base  # the C6 key is present BY NAME
     for key in base:
