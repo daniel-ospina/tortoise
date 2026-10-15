@@ -4,6 +4,10 @@
 
 Fires 4 architectural questions, maps trade-offs, tags confidence,
 connects with IMPL (supports) and NAND (contradicts).
+
+Durability framing (#4308): the JSONL is the **reconstruction source**; the
+store is the **durability authority** — see ``docs/durability-posture.md``
+(#2881). The Q3 options below are worded to that authority.
 """
 from __future__ import annotations
 
@@ -74,20 +78,20 @@ IMPL(q2_multi, q2_isolation, "multiple pipelines enable isolation")
 IMPL(q2_single, q2_correlation, "single pipeline simplifies correlation")
 NAND(q2_single, q2_isolation, "single pipeline prevents domain isolation")
 
-# ── Q3: JSONL vs FalkorDB as source of truth ──
+# ── Q3: JSONL as reconstruction source vs FalkorDB as the durable store ──
 
 print("=== Q3 ===")
-q3_jsonl    = P("[CONFIDENCE:HIGH] JSONL as source of truth: append-only file, zero dependencies, grep-able, replay-friendly, git-diffable. Every event is a self-contained JSON line. The current state is a projection (fold). Evidence: Event sourcing canonical pattern — the log is the database. Trade-off: querying requires full replay or external index; compaction is manual; no built-in concurrency control.")
-q3_falkor   = P("[CONFIDENCE:HIGH] FalkorDB as source of truth: graph-native with openCypher queries, indexed traversal, GraphBLAS sparse-matrix engine. Points and operators live as nodes and typed edges. Evidence: FalkorDBLite is embedded (zero-config), same graph portable to server FalkorDB. Trade-off: requires a running database; schema evolution is more constrained; the graph is a snapshot, not a replayable log.")
-q3_hybrid   = P("[CONFIDENCE:HIGH] Hybrid: JSONL is the source of truth; FalkorDB is a derived projection. Already the Tortoise design. Event log is append-only, immutable, replayable. FalkorDB is rebuilt from the log on demand. Evidence: This is the architecture Tortoise committed to (2026-07-07). Trade-off: eventual consistency between log and projection; rebuild cost grows with log size.")
+q3_jsonl    = P("[CONFIDENCE:HIGH] JSONL as reconstruction source: append-only file, zero dependencies, grep-able, replay-friendly, git-diffable. Every event is a self-contained JSON line. The current state is a projection (fold). Evidence: Event sourcing canonical pattern — the log rebuilds a projection under changed fold logic. Trade-off: querying requires full replay or external index; compaction is manual; no built-in concurrency control.")
+q3_falkor   = P("[CONFIDENCE:HIGH] FalkorDB as the durable store: graph-native with openCypher queries, indexed traversal, GraphBLAS sparse-matrix engine. Points and operators live as nodes and typed edges. Evidence: FalkorDBLite is embedded (zero-config), same graph portable to server FalkorDB. Trade-off: requires a running database; schema evolution is more constrained; the store is not a replayable log, so reconstruction under changed fold logic needs the JSONL.")
+q3_hybrid   = P("[CONFIDENCE:HIGH] Hybrid — the JSONL is the reconstruction source; the FalkorDB store is the durability authority. Already the Tortoise design. Event log is append-only, immutable, replayable. FalkorDB is rebuilt from the log on demand. Evidence: This is the architecture Tortoise committed to (2026-07-07); the authority is stated in docs/durability-posture.md (#2881). Trade-off: eventual consistency between log and projection; rebuild cost grows with log size.")
 q3_replay   = P("[CONFIDENCE:HIGH] Replay is the JSONL advantage. You can re-extract with a different model version and append new points without losing the old ones — the log is an immutable ledger. FalkorDB-only stores would require migration scripts. Evidence: Tortoise idempotency design (input-keyed, version-superseded replay). This is the core argument for log-first.")
 q3_query    = P("[CONFIDENCE:MEDIUM] Query is the FalkorDB advantage. graph-native queries (pathfinding, centrality, grounding computation via GraphBLAS) are impossible against raw JSONL without an index. But the projection pattern already solves this: query FalkorDB, trust the log.")
 
-IMPL(q3_hybrid, q3_jsonl, "hybrid preserves JSONL as source of truth")
+IMPL(q3_hybrid, q3_jsonl, "hybrid preserves the JSONL as reconstruction source")
 IMPL(q3_hybrid, q3_falkor, "hybrid uses FalkorDB for query")
 IMPL(q3_jsonl, q3_replay, "JSONL enables replay via append-only immutability")
 IMPL(q3_falkor, q3_query, "FalkorDB enables graph-native queries")
-NAND(q3_jsonl, q3_falkor, "mutual exclusivity as SOT: you pick one canonical store")
+NAND(q3_jsonl, q3_falkor, "the two roles are distinct: reconstruction source (JSONL) vs durability authority (store) — neither substitutes for the other")
 
 # ── Q4: One Tortoise instance vs per-agent instances ──
 

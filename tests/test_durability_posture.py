@@ -21,6 +21,18 @@ owner's ERE, verbatim::
 
 The extension lives in ``CLAIM_RE`` below and is pinned by the positive test.
 
+A SECOND extension is the scan root ``graph-scripts/`` (#4308). The owner's
+§6 root list covered the contract surfaces only, so the two runnable scripts
+that still asserted "the JSONL is the source of truth" were invisible to the
+gate. They are *executable* statements — ``add_convergence_evidence.py`` writes
+its research claims into the graph — not archive records, so the authority rule
+binds them, and they are now both scanned and reworded to the reconstruction
+framing (``JSONL = reconstruction source``, ``store = durability authority``).
+Archive records (``docs/plans/``, ``docs/scoping/``, ``docs/epics/``) and the
+test-suite's session-journal vocabulary stay out of scope: the former are
+point-in-time records, the latter is a real non-durability claim (the file
+journal IS the source of truth for a test session's created-graph ownership).
+
 The gate is deliberately **scoped, not global**: the bare phrase is used
 hundreds of times repo-wide for unrelated things (pack schemas, eval specs, the
 legitimate "corpus files (source of truth)" at
@@ -52,8 +64,11 @@ CLAIM_RE = re.compile(
     re.IGNORECASE,
 )
 
-# The owner's root list, verbatim: one recursive dir, one glob, five files.
-SCAN_DIRS = ("tortoise",)
+# The owner's root list, verbatim: one recursive dir, one glob, five files —
+# plus `graph-scripts/` (#4308, the second documented extension: runnable
+# scripts whose correctness claims about the system are executable, not
+# archival).
+SCAN_DIRS = ("tortoise", "graph-scripts")
 SCAN_GLOBS = ("docs/quickstart-*.md",)
 SCAN_FILES = (
     "README.md",
@@ -144,6 +159,9 @@ def test_scan_reaches_the_declared_roots():
         "docs/infra-runbook.md",
         "docs/data-safety.md",
         "docs/ONTOLOGY.md",
+        # #4308 — the runnable scripts that carried the claim outside §6's roots
+        "graph-scripts/add_convergence_evidence.py",
+        "graph-scripts/baseline_scan.py",
     ):
         assert sentinel in scanned, f"scan root is too narrow — missing {sentinel}"
 
