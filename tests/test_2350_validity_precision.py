@@ -565,10 +565,55 @@ def test_check_consistency_reference_fold_states_the_terminalizer_precision(lane
 # ── surface discipline (no new MCP tool; params on existing verbs only) ───
 
 def test_no_new_mcp_tool_was_added_for_precision():
+    """#2350 indicator 4: the feature grows SDK *arguments* on existing validity
+    write verbs, not the MCP tool surface.
+
+    The guard the review rejected asserted only that no tool *name contains the
+    substring* ``"precision"`` — true of any registry and false evidence for
+    "no new tool" (a tool named ``tortoise_set_validity_window`` passed it).
+    This pins the actual delta: the registered tool-name set must equal the
+    frozen baseline ``config/surface-manifest.yml`` records (cut under the #4282
+    approval mandate). A committed registry-only addition — the un-approved
+    shape — reds here whatever the tool is named.
+
+    Non-vacuity: an injected entry with no ``"precision"`` substring is shown
+    to be caught by the same comparison the test asserts, then the registry is
+    restored.
+    """
+    import dataclasses
+    from pathlib import Path
+
+    import yaml
+
     from tortoise.tool_registry import TOOL_REGISTRY
 
-    names = {t.name for t in TOOL_REGISTRY}
-    assert not any("precision" in n.lower() for n in names), sorted(names)
+    baseline = yaml.safe_load(
+        (Path(__file__).resolve().parent.parent
+         / "config" / "surface-manifest.yml").read_text(encoding="utf-8"))
+    recorded = {str(r["name"]) for r in baseline["rows"]
+                if not str(r["name"]).startswith("sdk:")}
+
+    def surface_grew(registry) -> bool:
+        return {t.name for t in registry} != recorded
+
+    assert not surface_grew(TOOL_REGISTRY), (
+        "the MCP tool surface changed — #2350 is additive at the SDK-argument "
+        "level only (supersede_point/invalidate_point gained a kwarg). "
+        f"registered={sorted(t.name for t in TOOL_REGISTRY)} "
+        f"recorded={sorted(recorded)}"
+    )
+
+    original = list(TOOL_REGISTRY)
+    try:
+        TOOL_REGISTRY.append(dataclasses.replace(
+            TOOL_REGISTRY[0], name="tortoise_set_validity_window"))
+        assert surface_grew(TOOL_REGISTRY), (
+            "a new tool whose name omits 'precision' was not detected — the "
+            "rejected substring guard's failure mode"
+        )
+    finally:
+        TOOL_REGISTRY[:] = original
+    assert not surface_grew(TOOL_REGISTRY), "the registry was not restored"
 
 
 def test_precision_is_an_optional_param_on_existing_write_verbs():
@@ -583,29 +628,34 @@ def test_precision_is_an_optional_param_on_existing_write_verbs():
                for p in inspect.signature(TortoiseSDK.update_point).parameters.values())
 
 
-# ── the ONTOLOGY record: the doc self-identifies as its newest changelog ──
+# ── the ONTOLOGY record: the doc records THIS feature where its convention says ──
 
-def test_ontology_version_matches_its_newest_changelog():
-    """#2350 review P2: the canonical doc must self-identify as the version of
-    its NEWEST changelog entry — the convention its own history follows
-    (``98e46c089`` bumped title+H1 to v3.27 with Changelog v3.27; ``cd5d7a7aa``
-    for v3.26). The #2350 diff added Changelog v3.28 while leaving the
-    frontmatter title and H1 at v3.27. Fails on the pre-fix doc."""
+def test_ontology_records_the_2350_precision_layer():
+    """#2350 review P2: the canonical ONTOLOGY doc is where this feature's
+    contract is stated, and the doc's own convention is that the change it
+    records is named in the changelog AND spelled out in the body. The
+    re-targeted invariant: the v3.28 changelog entry names #2350, and §4.7
+    carries the per-end-precision / 3-state-end paragraph referencing its home
+    module.
+
+    Fails on the pre-#2350 doc (merge base ``ce9d97e0``): there the v3.28 entry
+    names only #3998, and neither the §4.7 heading, ``validToPrecision`` nor
+    ``tortoise/validity.py`` appears. The previous version of this test asserted
+    a v3.27→v3.28 bump that #3998 had already shipped on main, so it could not
+    fail for #2350."""
     import re
     from pathlib import Path
 
     doc = (Path(__file__).resolve().parent.parent
            / "docs" / "ONTOLOGY.md").read_text(encoding="utf-8")
-    title = re.search(r'^title: "Tortoise — Canonical Ontology v([\d.]+)"',
-                      doc, re.M)
-    h1 = re.search(r'^# Tortoise — Canonical Ontology v([\d.]+)$', doc, re.M)
-    assert title, "ONTOLOGY frontmatter title is missing"
-    assert h1, "ONTOLOGY H1 is missing"
-    changelog = re.findall(r"Changelog v([\d.]+) \(", doc)
-    assert changelog, "ONTOLOGY carries no changelog entries"
-    newest = max(changelog, key=lambda v: tuple(int(x) for x in v.split(".")))
-    assert title.group(1) == newest, (title.group(1), newest)
-    assert h1.group(1) == newest, (h1.group(1), newest)
+    v328 = re.search(r"Changelog v3\.28 \(([^)]*)\)", doc)
+    assert v328, "ONTOLOGY carries no Changelog v3.28 entry"
+    assert "#2350" in v328.group(1), (
+        "the v3.28 changelog entry does not record #2350: " + v328.group(1))
+    assert "Per-end precision and the 3-state end" in doc, (
+        "§4.7 does not carry the #2350 precision / 3-state-end paragraph")
+    assert "validToPrecision" in doc
+    assert "tortoise/validity.py" in doc
 
 
 if __name__ == "__main__":  # pragma: no cover
