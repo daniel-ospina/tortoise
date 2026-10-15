@@ -837,9 +837,11 @@ def _utcnow_iso() -> str:
 def _iso_utc(value: Any) -> datetime | None:
     """Parse an ISO-8601 timestamp to an aware UTC datetime, or ``None``.
 
-    Accepts both spellings this seam writes — ``Z`` and ``+00:00`` — and reads
-    a naive value as UTC. ``None`` on anything unparseable so a caller that is
-    comparing bounds fails closed instead of comparing halves of one.
+    Tolerates the ``Z`` suffix as well as ``+00:00`` (the stamp/``updated_at``
+    writers emit the latter; tests and hand-written fixtures use the former)
+    and reads a naive value as UTC. ``None`` on anything unparseable so a
+    caller that is comparing bounds fails closed instead of comparing halves of
+    one.
     """
     if not isinstance(value, str) or not value.strip():
         return None

@@ -226,10 +226,12 @@ _REPAIR_STAMPED_LABEL = ONBOARDING_STEP_LABEL
 #: The per-graph `state.json` field carrying the number of COMPLETED #3912
 #: repairs at the time the baseline was taken
 #: (:func:`tortoise.onboarding.state.count_stamped_repairs`). The guard explains
-#: a drop only when repairs have landed SINCE the baseline — a COUNT window, not
-#: a timestamp one (see :func:`_explain_repair_stamped_breaches`). A baseline
-#: written before this field existed reads as 0, which can only explain the
-#: repairs that are already visible on the next sweep — never more.
+#: a drop only when repairs have landed SINCE the baseline — a COUNT window (see
+#: :func:`_explain_repair_stamped_breaches`). A baseline written before this
+#: field existed carries no count, and the guard falls back to the repair's own
+#: stamp time against the baseline's ``updated_at`` (see
+#: :func:`_repair_count_and_window`) — so the field is written only when the
+#: count is actually known, never as a fabricated 0.
 _COMPLETED_REPAIRS_KEY = "completed_repairs"
 
 
@@ -256,15 +258,18 @@ def _explain_repair_stamped_breaches(
     ``OnboardingStep`` into a silent non-incident.
 
     ⛔ WHY THE WINDOW IS A COUNT AND NOT A TIMESTAMP. ``repairs_since_baseline``
-    is the DELTA of the completed-repair count, ``now - at baseline`` — NOT
-    "repairs stamped after the baseline's ``updated_at``". A stamp is
+    is normally the DELTA of the completed-repair count, ``now - at baseline`` —
+    NOT "repairs stamped after the baseline's ``updated_at``". A stamp is
     WRITE-AHEAD of the DELETE, so its timestamp dates the STAMP, not the
     removal: repair at T2, crash before the prune, a sweep at T3 (no label
     drop, so the baseline advances past T2), the retry's prune at T4 with NO
     re-stamp, and a timestamp window at T5 excludes the T2 stamp and re-fires
     the #8660 false positive forever. The count delta has no such gap — the
     repair is not counted until its node is actually gone, so it is first
-    explained on the sweep that sees the drop, whichever sweep that is.
+    explained on the sweep that sees the drop, whichever sweep that is. The
+    stamp timestamp is used ONLY as a one-time fallback for a baseline written
+    before the count was recorded (:func:`_repair_count_and_window`), where no
+    count delta exists to compute.
 
     The BOUND (not equality) is because the census is a NET count: a repair
     landing while an ``OnboardingStep`` node is ADDED shows a smaller delta, so
@@ -301,13 +306,17 @@ def _explain_repair_stamped_breaches(
     return explained
 
 
-def _repair_count_and_window(graph, prior: dict[str, Any]) -> tuple[int, int]:
+def _repair_count_and_window(graph, prior: dict[str, Any],
+                             ) -> tuple[int | None, int]:
     """This graph's COMPLETED repair count, and the COUNT WINDOW for the guard.
 
     Returns ``(now, repairs_since_baseline)``. ``now`` goes into the baseline
-    (:data:`_COMPLETED_REPAIRS_KEY`) so the next sweep measures against it;
-    ``repairs_since_baseline`` is what :func:`_explain_repair_stamped_breaches`
-    may explain.
+    (:data:`_COMPLETED_REPAIRS_KEY`) so the next sweep measures against it —
+    ``None`` when the count could not be read AND the baseline had none, so the
+    caller must leave the field ABSENT rather than write a fabricated 0 (which
+    would turn a legacy baseline into a 0 baseline and disable the timestamp
+    fallback below). ``repairs_since_baseline`` is what
+    :func:`_explain_repair_stamped_breaches` may explain.
 
     ``now - baseline`` is the window. The baseline is ABSENT on a state file
     written before this field existed — every production baseline at deploy
@@ -319,24 +328,33 @@ def _repair_count_and_window(graph, prior: dict[str, Any]) -> tuple[int, int]:
     sweep and absorb a fresh loss. When the key is absent we therefore fall
     back to the repair's own TIMESTAMP against the baseline's ``updated_at`` —
     the one reference a pre-#8660 state carries — and close the window (0) when
-    even that is unusable. Once a sweep records the count the timestamp is
-    never consulted again.
+    even that is unusable. Once an ACCEPTED sweep records the count the
+    timestamp is never consulted again.
 
-    On a read failure the baseline value is CARRIED FORWARD and the window is
-    closed (0): writing a fresh 0 would make every already-completed repair
-    look newly landed and over-explain, whereas carrying forward keeps the
-    guard fail-closed toward firing. The value self-heals on the next
+    On a primary read failure the baseline value is CARRIED FORWARD and the
+    window is closed (0): writing a fresh 0 would make every already-completed
+    repair look newly landed and over-explain, whereas carrying forward keeps
+    the guard fail-closed toward firing. When the baseline itself has no value
+    there is nothing to carry, so ``now`` is returned as ``None`` (the caller
+    omits the field) rather than as 0 — that keeps the legacy timestamp
+    fallback in force on the next sweep. The value self-heals on the next
     successful read.
     """
     baseline = prior.get(_COMPLETED_REPAIRS_KEY)
     try:
         now = int(count_stamped_repairs(graph))
     except Exception:
-        carried = int(baseline) if baseline is not None else 0
+        if baseline is not None:
+            logger.warning(
+                "completed-repair count read failed — carrying forward %d, the "
+                "count window stays closed (fail-closed)", int(baseline),
+                exc_info=True)
+            return int(baseline), 0
         logger.warning(
-            "completed-repair count read failed — carrying forward %d, the "
-            "count window stays closed (fail-closed)", carried, exc_info=True)
-        return carried, 0
+            "completed-repair count read failed and the baseline has none — "
+            "leaving the field unrecorded so the legacy timestamp fallback "
+            "still applies (window closed this sweep)", exc_info=True)
+        return None, 0
     if baseline is not None:
         return now, max(0, now - int(baseline))
     updated_at = prior.get("updated_at")
@@ -1187,9 +1205,12 @@ def _backup_graph(
         "counts": {"nodes": node_count, "edges": manifest.get("edge_count")},
         "label_counts": label_counts,
         # #8660: the completed-repair count at THIS baseline — the reference the
-        # next sweep measures `repairs_since_baseline` against. Absent on a
-        # pre-#8660 baseline, which reads as 0.
-        _COMPLETED_REPAIRS_KEY: completed_repairs,
+        # next sweep measures `repairs_since_baseline` against. Written ONLY
+        # when the count is known: on a legacy baseline whose count could not be
+        # read, omitting the key keeps the timestamp fallback in force, whereas
+        # writing 0 would turn it into a 0 baseline and re-open the window.
+        **({_COMPLETED_REPAIRS_KEY: completed_repairs}
+           if completed_repairs is not None else {}),
         # graph_name names the dumped FalkorDB graph — the watcher uses the
         # DEFAULT graph's state graph_name to disambiguate legacy flat
         # manifests (custom-era on-demand dumps must not gate org freshness).

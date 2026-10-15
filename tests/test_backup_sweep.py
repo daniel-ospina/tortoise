@@ -1199,9 +1199,13 @@ def test_sweep_recurring_single_node_loss_fires(shared_proj):
 def test_sweep_legacy_baseline_explains_a_repair_completed_after_it(shared_proj):
     """#8660 migration: the #4132–#4135 shape — a baseline written BEFORE the
     repair, with no `completed_repairs` field (every production baseline at
-    deploy time). The repair's drop must be explained, and the field recorded,
-    so the one-time fallback (the stamp time against the baseline's
-    `updated_at`) is used exactly once.
+    deploy time). The repair's drop must be EXPLAINED (this pins the OUTCOME:
+    the alternative — treating an absent count as "unknown" and failing closed
+    — would re-fire the very incident the fix targets) and the field recorded,
+    so the fallback is not consulted again.
+
+    The no-over-explanation half of the fallback is pinned by
+    `..._does_not_mask_a_later_loss` and `..._without_updated_at_closes_the_window`.
     """
     with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         if shared_proj is None:
@@ -1215,7 +1219,7 @@ def test_sweep_legacy_baseline_explains_a_repair_completed_after_it(shared_proj)
         store.upload(
             _graph_state_key("team_x", "default"),
             json.dumps({
-                "node_count": 24,
+                "node_count": 25,
                 "label_counts": {"Point": 20, "OnboardingState": 1,
                                   "OnboardingStep": 4},
                 "updated_at": "2000-01-01T00:00:00+00:00",
@@ -1292,6 +1296,48 @@ def test_sweep_legacy_baseline_without_updated_at_closes_the_window(shared_proj)
                                 config=_config())
         assert res["results"]["team_x"]["status"] == "data_loss_candidate", \
             res["results"]["team_x"]
+
+
+def test_sweep_repair_count_read_failure_leaves_a_legacy_baseline_legacy(monkeypatch, shared_proj):
+    """#8660: a failed completed-repair count read must NOT persist a fabricated
+    `completed_repairs: 0` on a legacy baseline.
+
+    Absent and 0 are different now: 0 means "the baseline knew of no
+    completed repairs", so writing it would turn the legacy baseline into a 0
+    baseline and, on the NEXT sweep, explain a drop with the graph's WHOLE
+    historical repair count (the over-explanation the fallback exists to
+    prevent). With nothing to carry forward the field must be left absent.
+    """
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
+        store = MemoryStorage()
+        reg, _team_g = _seed_repair_shape(proj)
+        # Legacy baseline whose counts MATCH the graph, so nothing breaches and
+        # the run is accepted (the only path that writes state).
+        store.upload(
+            _graph_state_key("team_x", "default"),
+            json.dumps({
+                "node_count": 24,
+                "label_counts": {"Point": 20, "OnboardingState": 1,
+                                  "OnboardingStep": 4},
+                "updated_at": "2000-01-01T00:00:00+00:00",
+            }).encode(),
+        )
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("graph unavailable")
+
+        monkeypatch.setattr(backup_sweep, "count_stamped_repairs", _boom)
+        res = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                                config=_config())
+        org_res = res["results"]["team_x"]
+        assert org_res["status"] == "backed_up", org_res
+        state = read_graph_state(store, "team_x", "default")
+        assert "completed_repairs" not in state, (
+            f"a failed count read on a legacy baseline fabricated a 0: "
+            f"{state.get('completed_repairs')!r}")
 
 
 def test_sweep_unstamped_label_drop_still_fires(shared_proj):
