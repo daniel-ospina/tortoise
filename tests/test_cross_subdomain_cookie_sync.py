@@ -469,12 +469,21 @@ _SCAN_SUFFIXES = {".py", ".html", ".js", ".ts", ".tsx", ".jsx", ".mjs"}
 # the writer detector — as the deleted bridge and console adapter did.
 _SESSION_COOKIE_LITERAL = "sb-tortoise-auth-token"
 
-# A storage-adapter METHOD that takes a `key`, in any of the styles this repo
-# uses (`setItem(key, value) {`, `setItem: (key: string) => {`,
-# `setItem: function (key, value) {`). A CALL SITE (`setItem(key, value);`) has
-# `(` where this requires one of `:(=`, so it is not matched — the detector
-# looks for the definition, not a use of it.
-_ROUTER_METHOD = re.compile(r"\b(?:setItem|removeItem)\s*[:(=]\s*(?:function\s*)?\(?\s*key\b")
+# A storage-adapter METHOD DEFINITION that takes a `key`, in any of the styles
+# this repo uses (`setItem(key, value) {`, `setItem: (key: string) => {`,
+# `setItem: function (key, value) {`, `setItem = function (key, value) {`).
+#
+# This matches the DEFINITION, not a use of it: a CALL SITE ends at `)`, which
+# is followed by `;`, `.` or end-of-statement, so requiring the parameter list
+# to CLOSE and then be followed by a body opener (`{` or `=>`) excludes it.
+# #8701 review (P2): the prior `[:(=]` character class contained `(`, so a call
+# like `s.setItem(key, v);` matched the `(` arm and was reported as an adapter
+# copy — a false positive whose only legal resolution was to rename the
+# argument (the registration pin `_extract_fn_body` still demands a real
+# definition). Pinned by test_router_detector_matches_definitions_not_call_sites.
+_ROUTER_METHOD = re.compile(
+    r"\b(?:setItem|removeItem)\s*(?::|=)?\s*(?:function\s*)?\([^)]*\bkey\b[^)]*\)\s*(?:\{|=>)"
+)
 _COOKIE_ASSIGNMENT = re.compile(r"document\s*\.\s*cookie\s*=[^=]")
 
 
@@ -529,6 +538,67 @@ def _adapter_copies() -> tuple[dict[Path, set[str]], int]:
         if hits:
             copies[path] = hits
     return copies, len(sources)
+
+
+def test_router_detector_matches_definitions_not_call_sites() -> None:
+    """#8701 review (P2): `_ROUTER_METHOD` must match the adapter DEFINITION,
+    not a call site.
+
+    The old pattern's `[:(=]` character class contained `(`, so a call like
+    `s.setItem(key, v);` matched and the file was reported as an unregistered
+    copy. That is a false positive with no legal resolution: registering it
+    cannot succeed because `test_key_identity_router_allows_only_the_session_key`
+    resolves the entry through `_extract_fn_body`, which asserts a real
+    `setItem`/`removeItem` definition. This test FAILS on the pre-fix regex
+    (`old = re.compile(r"\\b(?:setItem|removeItem)\\s*[:(=]\\s*(?:function\\s*)?\\(?\\s*key\\b")`),
+    which matches every call below; the fixed pattern requires the parameter
+    list to close and be followed by a body opener.
+    """
+    # Call sites: a use of the adapter, not the adapter itself.
+    call_sites = (
+        "s.setItem(key, v);",
+        "s.removeItem(key);",
+        "store.setItem(key, value);",
+        "this.removeItem(key);",
+        "s.setItem(\n  key,\n  v\n);",
+    )
+    for code in call_sites:
+        assert not _ROUTER_METHOD.search(code), (
+            f"the detector matched a CALL SITE ({code!r}) — a file that merely "
+            "uses a storage adapter would be reported as an unregistered copy, "
+            "and registering it cannot succeed (#8701 review P2)"
+        )
+
+    # Definitions, in every style this repo uses — these MUST match.
+    definitions = (
+        "setItem(key, value) {",
+        "removeItem(key) {",
+        "setItem: function (key, value) {",
+        "setItem: (key: string) => {",
+        "setItem = function (key, value) {",
+    )
+    for code in definitions:
+        assert _ROUTER_METHOD.search(code), (
+            f"the detector missed a real adapter DEFINITION ({code!r}) — a new "
+            "copy in that style would land unguarded (#5735)"
+        )
+
+    # The end-to-end ROUTER branch: a file that only CALLS an adapter and
+    # contains an unrelated `key === <id>` comparison must not be flagged. That
+    # combination is exactly the reviewer's false-positive vector (a call site
+    # + a property access such as `t.key === key`) — with the regex fixed, the
+    # method half no longer fires, so the branch stays silent.
+    false_positive = "\n".join(
+        [
+            "widget.setItem(key, payload);",
+            "if (t.key === key) { render(); }",
+        ]
+    )
+    assert not (_ROUTER_METHOD.search(false_positive) and _ROUTER_KEY_CMP.search(false_positive)), (
+        "a file that only USES an adapter (call site + a `key ===` comparison) "
+        "was reported as a router copy — a false positive whose only legal fix "
+        "is renaming the caller's argument (#8701 review P2)"
+    )
 
 
 def test_every_storage_adapter_copy_is_registered() -> None:

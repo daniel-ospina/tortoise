@@ -3573,6 +3573,19 @@ tier1:
 # above, so tier1 is the correct lane. Pinned by
 # tests/test_ci_selection.py::test_fly_secret_drift_gate_runs_on_a_runbook_only_diff.
 - test_fly_secret_drift.py
+# #8701 review (P1): `test_cross_subdomain_cookie_sync.py` gates the completeness
+# of the key-routing storage-adapter registry (#5735). Its own detector scans a
+# NEW file the moment one lands — but a new file under `website/assets/` (or any
+# `NON_PYTHON_PREFIXES` root) matches no SOURCE_PATTERNS entry, so a diff that
+# ADDED such a copy came back as `changed == []` and took the docs-only early
+# return (tier1 ONLY). The gate was therefore asleep on the exact change it
+# exists to catch: a fourth adapter copy in a new file would merge green and
+# only red `main` post-merge (the #1349/#3332/#3616/#4309 silent-drop class,
+# the same shape as `test_fly_secret_drift.py` above). It is a fast, no-DB,
+# source-only file scan (measured weight 0.2 in the durations map), so tier1 is
+# the correct lane. Pinned by
+# tests/test_ci_selection.py::test_cross_subdomain_cookie_sync_gate_runs_on_a_new_file_diff.
+- test_cross_subdomain_cookie_sync.py
 - test_guard.py
 - test_harness_mcp_config.py
 - test_ids.py

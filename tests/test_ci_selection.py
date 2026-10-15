@@ -129,6 +129,13 @@ def test_docs_scanning_gates_stay_in_tier1():
         "or a `fly secrets set NAME=$(openssl rand …)` recipe merges green "
         "(#4309 class)"
     )
+    assert "test_cross_subdomain_cookie_sync.py" in tier1, (
+        "#8701 review (P1): the key-routing adapter registry-completeness gate "
+        "must be in tier1 — it scans for a new adapter copy, but a new file "
+        "under a NON_PYTHON_PREFIXES root (e.g. website/assets/) selects no "
+        "surface, so a diff that ONLY adds the copy runs tier1 only; without "
+        "this registration the fourth copy merges green (#4309 class)"
+    )
 
 
 def test_fly_secret_drift_gate_runs_on_a_runbook_only_diff():
@@ -155,6 +162,31 @@ def test_fly_secret_drift_gate_runs_on_a_runbook_only_diff():
         "a docs/infra-runbook.md-only diff must select the guards that bind its "
         "prose (`test_fly_secret_drift.py`) — otherwise a docs-only edit that "
         "re-breaks a claim it pins merges green (#8614 review, #4309 class)"
+    )
+
+
+def test_cross_subdomain_cookie_sync_gate_runs_on_a_new_file_diff():
+    """#8701 review (P1): the adapter registry-completeness gate must run on the
+    diff that ADDS a fourth copy, even when that copy lands in a new file under
+    a NON_PYTHON_PREFIXES root.
+
+    `test_every_storage_adapter_copy_is_registered` scans product sources for a
+    storage adapter and fails on any copy not in `_ROUTER_CASES`. But a NEW file
+    under `website/assets/` matches no SOURCE_PATTERNS entry, so
+    `_keep_changed` drops it, `changed` comes back empty, and `select()` takes
+    the docs-only early return — tier1 ONLY. Registered in `api`/`onboarding`
+    but not `tier1`, the gate was asleep on the exact change it exists to catch:
+    a fourth copy would merge green and only red `main` post-merge (the
+    #1349/#3332/#3616/#4309 silent-drop class). Dropping the tier1 entry
+    re-opens that hole.
+    """
+    r = _sel(["website/assets/__probe_router_copy.js"])
+    assert r["full"] is False
+    assert r["surfaces"] == []
+    assert "test_cross_subdomain_cookie_sync.py" in r["test_files"], (
+        "a diff that only ADDS an adapter copy in a new website/assets/ file must "
+        "select the registry-completeness gate — otherwise the fourth copy merges "
+        "green (#8701 review P1, #4309 class)"
     )
 
 
