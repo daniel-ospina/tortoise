@@ -834,6 +834,24 @@ def _utcnow_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _iso_utc(value: Any) -> datetime | None:
+    """Parse an ISO-8601 timestamp to an aware UTC datetime, or ``None``.
+
+    Accepts both spellings this seam writes — ``Z`` and ``+00:00`` — and reads
+    a naive value as UTC. ``None`` on anything unparseable so a caller that is
+    comparing bounds fails closed instead of comparing halves of one.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        ts = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    return ts.astimezone(UTC)
+
+
 def decision_evidence(graph: Any, org_id: str) -> dict[str, Any]:
     """Positive evidence that this graph observed a decision (read-only).
 
@@ -1063,7 +1081,8 @@ def remove_decide_completed_edge(graph: Any, org_id: str, *,
     return True
 
 
-def count_stamped_repairs(graph: Any, org_id: str | None = None) -> int:
+def count_stamped_repairs(graph: Any, org_id: str | None = None, *,
+                          newer_than: str | None = None) -> int:
     """COMPLETED #3912 onboarding repairs in a graph — one per repaired org.
 
     A repair is counted when BOTH hold for an OnboardingState node in the
@@ -1095,11 +1114,21 @@ def count_stamped_repairs(graph: Any, org_id: str | None = None) -> int:
 
     The count is COMPLETED repairs, not repair EVENTS: a re-stamp overwrites
     and a repaired org contributes one, so it is a LOWER bound on how many
-    repairs ever ran. It is also a LOWER bound on how many `OnboardingStep`
-    nodes those repairs deleted — each counted repair's `decide-completed` node
-    is gone, and one prune can take more than one node — so a caller comparing
-    a label delta against the count compares against a floor, and a delta that
-    exceeds it is NOT explained (fail-closed toward firing).
+    repairs ever ran. It is an UPPER bound (a CEILING) on the label delta a
+    repair window may explain: ``_prune_orphan_decide_step`` deletes only nodes
+    matching ``step_id: 'decide-completed'``, and that node is ``MERGE``d
+    uniquely per org, so a counted repair removed AT MOST one node — and an org
+    whose node is absent for some less benign reason is counted too. A caller
+    must therefore never explain a drop LARGER than this count; a drop within
+    it is treated as the repair's own removal (the residual below).
+
+    ``newer_than`` restricts the count to stamps STRICTLY after an ISO
+    timestamp. It exists for ONE caller: the DR drift guard's window on a
+    baseline written before the completed-repair count was recorded (see
+    ``_COMPLETED_REPAIRS_KEY`` in `tortoise.backup_sweep`) — where the stamp
+    time is the only available reference. An unparseable ``newer_than`` counts
+    NOTHING (fail-closed: an unbounded window must not explain a drop), and a
+    stamp whose own timestamp will not parse is skipped for the same reason.
 
     DELIBERATE LIMITATION — the attribution is LABEL-level. The sweep's
     baseline is a per-label CENSUS, not a node-identity set, so within the ONE
@@ -1124,7 +1153,7 @@ def count_stamped_repairs(graph: Any, org_id: str | None = None) -> int:
                    f"OPTIONAL MATCH (s:{ONBOARDING_STEP_LABEL} "
                    "{org_id: n.org_id, step_id: 'decide-completed'}) "
                    "WITH n, count(s) AS refs WHERE refs = 0 "
-                   "RETURN count(n)")
+                   f"RETURN n.{DECIDE_COMPLETED_REMOVED_AT}")
     else:
         res = _run(graph,
                    f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
@@ -1132,10 +1161,16 @@ def count_stamped_repairs(graph: Any, org_id: str | None = None) -> int:
                    f"OPTIONAL MATCH (s:{ONBOARDING_STEP_LABEL} "
                    "{org_id: $org_id, step_id: 'decide-completed'}) "
                    "WITH n, count(s) AS refs WHERE refs = 0 "
-                   "RETURN count(n)",
+                   f"RETURN n.{DECIDE_COMPLETED_REMOVED_AT}",
                    {"org_id": org_id})
-    rows = res.result_set
-    return int(rows[0][0]) if rows and rows[0] and rows[0][0] else 0
+    stamps = [row[0] for row in res.result_set if row and row[0]]
+    if newer_than is None:
+        return len(stamps)
+    cutoff = _iso_utc(newer_than)
+    if cutoff is None:
+        return 0
+    return sum(1 for raw in stamps
+               if (ts := _iso_utc(raw)) is not None and ts > cutoff)
 
 
 def regress_status(graph: Any, org_id: str, *, reason: str,

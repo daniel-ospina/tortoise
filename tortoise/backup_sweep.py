@@ -266,14 +266,20 @@ def _explain_repair_stamped_breaches(
     repair is not counted until its node is actually gone, so it is first
     explained on the sweep that sees the drop, whichever sweep that is.
 
-    The BOUND (not equality) is right because the census is a NET count: a
-    repair landing while an ``OnboardingStep`` node is added shows a smaller
-    delta, and one repair's orphan prune can remove MORE than one node — so a
-    drop is explained only when it does not exceed the repairs that landed. A
-    larger drop fires (fail-closed). Once the baseline advances past a repair
-    it can never explain another drop: the NEXT single-node loss is a fresh
-    ``delta`` with ``repairs_since_baseline == 0`` and fires (pinned by
+    The BOUND (not equality) is because the census is a NET count: a repair
+    landing while an ``OnboardingStep`` node is ADDED shows a smaller delta, so
+    a drop is explained only when it does not exceed the repairs that landed. A
+    drop ABOVE the count fires. Once the baseline advances past a repair it can
+    never explain another drop: the NEXT single-node loss is a fresh ``delta``
+    with ``repairs_since_baseline == 0`` and fires (pinned by
     ``test_sweep_recurring_single_node_loss_fires``).
+
+    ⚠️ The bound is a CEILING, not a proof, and the direction of the risk is
+    FAIL-OPEN: a counted repair's node can be absent for a less benign reason
+    and still be counted, so a drop no larger than the count may be a loss the
+    repairs did not cause. That is the residual below, and it is why the count
+    is an UPPER bound on the explainable drop — never treat a larger count as
+    licence to explain more.
 
     DELIBERATE LIMITATION: the baseline is a per-label census, not node
     identities, so within the ONE sweep that absorbs a repair's drop, a
@@ -281,7 +287,7 @@ def _explain_repair_stamped_breaches(
     visible. Across sweeps there is no free pass. Documented in
     docs/ops/registry-backup-dr.md.
 
-    Pure — the count read lives in :func:`_completed_repairs`.
+    Pure — the count and window live in :func:`_repair_count_and_window`.
     """
     if repairs_since_baseline <= 0:
         return {}
@@ -295,25 +301,56 @@ def _explain_repair_stamped_breaches(
     return explained
 
 
-def _completed_repairs(graph, prior: dict[str, Any]) -> int:
-    """This graph's COMPLETED #3912 repair count, for the count window.
+def _repair_count_and_window(graph, prior: dict[str, Any]) -> tuple[int, int]:
+    """This graph's COMPLETED repair count, and the COUNT WINDOW for the guard.
 
-    Reads :func:`tortoise.onboarding.state.count_stamped_repairs` and stores the
-    value on every accepted backup so the next sweep measures the delta against
-    it. On a read failure it CARRIES THE BASELINE VALUE FORWARD rather than
-    returning 0: writing 0 would make every already-completed repair look
-    freshly landed on the next sweep and over-explain, whereas carrying forward
-    keeps the window closed and the guard fail-closed toward firing. The value
-    self-heals on the next successful read.
+    Returns ``(now, repairs_since_baseline)``. ``now`` goes into the baseline
+    (:data:`_COMPLETED_REPAIRS_KEY`) so the next sweep measures against it;
+    ``repairs_since_baseline`` is what :func:`_explain_repair_stamped_breaches`
+    may explain.
+
+    ``now - baseline`` is the window. The baseline is ABSENT on a state file
+    written before this field existed — every production baseline at deploy
+    time — so an absent key must NOT be read as the integer 0: on the very orgs
+    #8660 targets (the #4132–#4135 repair, whose pre-fix fire never advanced
+    ``label_counts``) that would explain the repair's drop, which is the point
+    of the fix, but on an org whose repair completed BEFORE its baseline was
+    taken it would credit the WHOLE historical repair count to the current
+    sweep and absorb a fresh loss. When the key is absent we therefore fall
+    back to the repair's own TIMESTAMP against the baseline's ``updated_at`` —
+    the one reference a pre-#8660 state carries — and close the window (0) when
+    even that is unusable. Once a sweep records the count the timestamp is
+    never consulted again.
+
+    On a read failure the baseline value is CARRIED FORWARD and the window is
+    closed (0): writing a fresh 0 would make every already-completed repair
+    look newly landed and over-explain, whereas carrying forward keeps the
+    guard fail-closed toward firing. The value self-heals on the next
+    successful read.
     """
-    baseline = int(prior.get(_COMPLETED_REPAIRS_KEY) or 0)
+    baseline = prior.get(_COMPLETED_REPAIRS_KEY)
     try:
-        return int(count_stamped_repairs(graph))
+        now = int(count_stamped_repairs(graph))
     except Exception:
+        carried = int(baseline) if baseline is not None else 0
         logger.warning(
             "completed-repair count read failed — carrying forward %d, the "
-            "count window stays closed (fail-closed)", baseline, exc_info=True)
-        return baseline
+            "count window stays closed (fail-closed)", carried, exc_info=True)
+        return carried, 0
+    if baseline is not None:
+        return now, max(0, now - int(baseline))
+    updated_at = prior.get("updated_at")
+    if not updated_at:
+        # No count AND no reference time: the baseline is unusable, so the
+        # window is closed rather than thrown wide open (fail-closed).
+        return now, 0
+    try:
+        return now, int(count_stamped_repairs(graph, newer_than=updated_at))
+    except Exception:
+        logger.warning(
+            "legacy-baseline repair-stamp read failed — no drop explained by "
+            "it (fail-closed)", exc_info=True)
+        return now, 0
 
 
 #: The per-label count read. ONE query for the two surfaces that must agree on
@@ -975,13 +1012,12 @@ def _backup_graph(
     # window as the label census, and persist it on this accepted backup. The
     # guard explains a label drop only up to the repairs that landed SINCE the
     # baseline, so the baseline must carry this count or every repair would
-    # keep explaining one future loss per sweep forever. A read failure carries
-    # the prior value forward (window stays closed). ──
+    # keep explaining one future loss per sweep forever. A pre-#8660 baseline
+    # has no count, so the window falls back to the repair's stamp time against
+    # the baseline's `updated_at` — and closes if even that is unusable. A read
+    # failure carries the prior value forward (window stays closed). ──
 
-    completed_repairs = _completed_repairs(g, prior)
-    repairs_since_baseline = (
-        completed_repairs - int(prior.get(_COMPLETED_REPAIRS_KEY) or 0)
-    )
+    completed_repairs, repairs_since_baseline = _repair_count_and_window(g, prior)
 
     # ── Dump via the shipped pipeline (registry-stream-key, not GH-key, #661). ──
     proj = SimpleNamespace(g=g)

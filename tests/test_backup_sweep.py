@@ -18,6 +18,7 @@ from tortoise.backup_sweep import (
     _check_per_label_drift,
     _drop_purged_graphs_from_ops_state,
     _explain_repair_stamped_breaches,
+    _graph_state_key,
     _noop_ops_state_write,
     _stamp_purged,
     _write_flat_index_filtered,
@@ -971,6 +972,16 @@ def test_count_stamped_repairs_reads_the_stamp(shared_proj):
         # Scoping: a stamp on another org's node is not this org's repair.
         assert count_stamped_repairs(g, "team_other") == 0
 
+        # `newer_than` — the #8660 migration fallback for a baseline written
+        # before the count was recorded: only a stamp STRICTLY after the bound
+        # counts, and an unparseable bound counts nothing (fail-closed).
+        assert count_stamped_repairs(
+            g, "team_x", newer_than="2026-09-19T05:00:00+00:00") == 1
+        assert count_stamped_repairs(
+            g, "team_x", newer_than="2026-09-19T06:00:00+00:00") == 0
+        assert count_stamped_repairs(
+            g, "team_x", newer_than="not-a-timestamp") == 0
+
 
 def _seed_repair_shape(proj) -> tuple:
     """Seed the #4132–#4135 production shape: 20 Point + 1 OnboardingState +
@@ -1183,6 +1194,104 @@ def test_sweep_recurring_single_node_loss_fires(shared_proj):
         assert (inc["detail"]["label_breaches"]["OnboardingStep"]
                 ["previous"], inc["detail"]["label_breaches"]
                 ["OnboardingStep"]["now"]) == (3, 2)
+
+
+def test_sweep_legacy_baseline_explains_a_repair_completed_after_it(shared_proj):
+    """#8660 migration: the #4132–#4135 shape — a baseline written BEFORE the
+    repair, with no `completed_repairs` field (every production baseline at
+    deploy time). The repair's drop must be explained, and the field recorded,
+    so the one-time fallback (the stamp time against the baseline's
+    `updated_at`) is used exactly once.
+    """
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
+        store = MemoryStorage()
+        reg, team_g = _seed_repair_shape(proj)
+        _apply_stamped_repair(team_g)  # node gone; stamp = now
+        # A pre-#8660 baseline: count 4 (the repair had not landed) and a stamp
+        # FORWARD of the repair — the baseline predates it.
+        store.upload(
+            _graph_state_key("team_x", "default"),
+            json.dumps({
+                "node_count": 24,
+                "label_counts": {"Point": 20, "OnboardingState": 1,
+                                  "OnboardingStep": 4},
+                "updated_at": "2000-01-01T00:00:00+00:00",
+            }).encode(),
+        )
+        res = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                                config=_config())
+        org_res = res["results"]["team_x"]
+        assert org_res["status"] == "backed_up", org_res
+        assert not any(i["kind"] == "DATA_LOSS_CANDIDATE" for i in res["incidents"])
+        state = read_graph_state(store, "team_x", "default")
+        assert state["completed_repairs"] == 1
+        assert state["label_counts"]["OnboardingStep"] == 3
+
+
+def test_sweep_legacy_baseline_does_not_mask_a_later_loss(shared_proj):
+    """#8660 migration, the OTHER direction: a pre-#8660 baseline whose
+    `updated_at` is AFTER the repair's stamp already reflects that repair, so
+    the count must NOT be credited to this sweep. A fresh one-node loss fires.
+    """
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
+        store = MemoryStorage()
+        reg, team_g = _seed_repair_shape(proj)
+        _apply_stamped_repair(team_g)
+        store.upload(
+            _graph_state_key("team_x", "default"),
+            json.dumps({
+                "node_count": 24,
+                "label_counts": {"Point": 20, "OnboardingState": 1,
+                                  "OnboardingStep": 3},
+                "updated_at": "2999-01-01T00:00:00+00:00",  # after the stamp
+            }).encode(),
+        )
+        team_g.query(
+            "MATCH (o:OnboardingStep {org_id:'team_x', step_id:'step-1'}) "
+            "DELETE o")
+        res = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                                config=_config())
+        assert res["results"]["team_x"]["status"] == "data_loss_candidate", \
+            res["results"]["team_x"]
+        assert "completed_repairs" not in read_graph_state(
+            store, "team_x", "default"), (
+            "a fire must not advance the baseline")
+
+
+def test_sweep_legacy_baseline_without_updated_at_closes_the_window(shared_proj):
+    """#8660 migration: a baseline with NEITHER a repair count NOR a usable
+    `updated_at` has no reference for the window, so the window is CLOSED and a
+    drop fires (fail-closed) rather than being explained by every historical
+    repair.
+    """
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        proj = _make_env(None, shared_proj)
+        store = MemoryStorage()
+        reg, team_g = _seed_repair_shape(proj)
+        _apply_stamped_repair(team_g)
+        store.upload(
+            _graph_state_key("team_x", "default"),
+            json.dumps({
+                "node_count": 24,
+                "label_counts": {"Point": 20, "OnboardingState": 1,
+                                  "OnboardingStep": 3},
+            }).encode(),
+        )
+        team_g.query(
+            "MATCH (o:OnboardingStep {org_id:'team_x', step_id:'step-1'}) "
+            "DELETE o")
+        res = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                                config=_config())
+        assert res["results"]["team_x"]["status"] == "data_loss_candidate", \
+            res["results"]["team_x"]
 
 
 def test_sweep_unstamped_label_drop_still_fires(shared_proj):
