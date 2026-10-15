@@ -471,6 +471,11 @@ def test_outcomes_to_report_golden_shape():
         # reader context) rides the projection parallel to
         # reader_evidence@k — o.get-based, None on golden outcomes.
         "reader_surface@k": None,
+        # #2516 (C1, amended): the fact-grain answer-evidence leg rides the
+        # projection parallel to reader_evidence@k — o.get-based, None on
+        # golden outcomes (absent until an outcome carries it; pre-#2516
+        # checkpoints render).
+        "answer_evidence@k": None,
         "breaker_open": None,
         "dropped_reason": None,
         # #1786: o.get-based projection — the golden input outcome lacks

@@ -42,6 +42,21 @@ def _fresh_state(tmp_path) -> rp.ProtocolState:
     return rp.ProtocolState(tmp_path / "state.json")
 
 
+@pytest.fixture(autouse=True)
+def _cached_corpus(monkeypatch):
+    """#2516 (C1): the step-3 pilot slice reads the CACHED corpus
+    (``download=False``). Tests run against the committed MINI fixture (5
+    questions, 4 question types) so every stratified-slice path is exercised
+    without a 49 MB download. The missing-cache refusal is pinned by its own
+    test, which re-patches this loader."""
+    from tools.longmem_eval import dataset as ds
+    real = ds.load_dataset
+    monkeypatch.setattr(
+        ds, "load_dataset",
+        lambda split="s", **kw: _mini() if not kw.get("data_path") else real(
+            split, **kw))
+
+
 # ── 1. run_protocol state machine ───────────────────────────────────────────
 
 def test_state_machine_initial_and_resume(tmp_path):
@@ -134,7 +149,7 @@ def test_run_step_commands_are_bytecode_free(tmp_path):
 
 def test_build_command_uses_base_runner_flags(tmp_path):
     """Run-step commands must use flags that exist on the BASE runner (no
-    M2–M8 dependency): --split/--limit/--ingest-mode/--checkpoint/--output."""
+    M2–M8 dependency): --data/--split/--ingest-mode/--checkpoint/--output."""
     state = _fresh_state(tmp_path)
     for s in (rp.STEPS_BY_NUMBER[3], rp.STEPS_BY_NUMBER[5]):
         cmd = rp.build_command(s, [], state=state)
@@ -142,13 +157,86 @@ def test_build_command_uses_base_runner_flags(tmp_path):
         joined = " ".join(cmd)
         assert "--ingest-mode v2" in joined
         assert "--checkpoint" in joined and "--output" in joined
-        assert "--limit" in joined or "baseline" in joined  # pilot limits, baseline doesn't
-    # step 3 (pilot) limits to 50 questions
+    # step 3 (pilot) is a TYPE-STRATIFIED subset file — never the split head
+    # (#2516: `--limit 50` measured ~100% single-session-user)
     pilot = rp.build_command(rp.STEPS_BY_NUMBER[3], [], state=state)
-    assert "--limit 50" in " ".join(pilot)
-    # step 5 (baseline) runs the full split (no --limit)
+    assert "--limit 50" not in " ".join(pilot)
+    assert "--data" in " ".join(pilot)
+    assert "pilot_stratified_50.json" in " ".join(pilot)
+    # step 5 (baseline) runs the full split (no --limit, no --data subset)
     base = rp.build_command(rp.STEPS_BY_NUMBER[5], [], state=state)
     assert "--limit" not in " ".join(base)
+    assert "--data" not in " ".join(base)
+
+
+def test_pilot_slice_is_type_stratified_not_a_head_slice(tmp_path):
+    """#2516 (C1): the pilot slice must span the question types.
+
+    The MEASURED artifact this replaces (2026-09-07, epic-scope doc §1):
+    ``--limit 50`` took the first 50 rows of the official split — all
+    ``single-session-user``, near-ceiling, zero diagnostic signal — so every
+    pilot iteration measured a slice that structurally could not see the
+    multi-session tail the program targets. RED mutation: go back to a head
+    slice (``--limit``, or source-order-first-n) → the type count collapses
+    to 1 and this fails.
+    """
+    state = _fresh_state(tmp_path)
+    subset, composition = rp._build_stratified_slice(
+        state, n=50, materialize=True)
+    assert Path(subset).is_file()
+    loaded = json.loads(Path(subset).read_text(encoding="utf-8"))
+    assert len(loaded) == len(_mini())          # the fake corpus is smaller
+    assert sum(composition.values()) == len(loaded)
+    # every type in the corpus is represented — the property a head slice lacks
+    assert set(composition) == {"single-session-user", "multi-session",
+                                "temporal-reasoning", "knowledge-update"}
+
+
+def test_pilot_slice_refuses_a_single_type_corpus(tmp_path):
+    """#2516 (C1): a slice spanning one question type is REFUSED — it cannot
+    measure a category it does not contain, so accepting it would recreate
+    the head-slice defect the mandate exists to prevent."""
+    state = _fresh_state(tmp_path)
+    with pytest.raises(SystemExit, match="must span"):
+        rp._build_stratified_slice(
+            state, n=5, instances=[
+                {"question_id": f"q{i}", "question_type": "single-session-user"}
+                for i in range(5)])
+
+
+def test_pilot_slice_refuses_without_a_cached_corpus(tmp_path, monkeypatch):
+    """#2516 (C1): no cached corpus ⇒ a LOUD refusal, never a silent fallback
+    to ``--limit n`` (the head slice IS the defect)."""
+    from tools.longmem_eval import dataset as ds
+
+    def _boom(*a, **kw):
+        raise FileNotFoundError("no cached corpus")
+    monkeypatch.setattr(ds, "load_dataset", _boom)
+    state = _fresh_state(tmp_path)
+    with pytest.raises(SystemExit, match="cached"):
+        rp.build_command(rp.STEPS_BY_NUMBER[3], [], state=state)
+
+
+def test_stratified_slice_indices_round_robin_and_deterministic():
+    """#2516 (C1): the selector round-robins the types (so a small gate
+    category is never starved), returns SOURCE order (stable identity), is
+    deterministic, and is total (a slice shorter than ``n`` returns what
+    exists rather than padding)."""
+    types = (["single-session-user"] * 100 + ["multi-session"] * 40
+             + ["knowledge-update"] * 4 + ["single-session-preference"] * 3)
+    idx = rp.stratified_slice_indices(types, n=50)
+    assert len(idx) == 50
+    assert idx == sorted(idx)                      # source order
+    assert idx == rp.stratified_slice_indices(types, n=50)   # deterministic
+    comp = rp.stratified_slice_composition(types, idx)
+    # every type present is represented, including the 3-question tail one
+    assert comp == {"knowledge-update": 4, "multi-session": 21,
+                    "single-session-preference": 3,
+                    "single-session-user": 22}
+    # a slice longer than the corpus is total, not padded
+    tiny = rp.stratified_slice_indices(["a", "b"], n=10)
+    assert tiny == [0, 1]
+    assert rp.stratified_slice_indices(types, n=0) == []
 
 
 def test_confirmation_subset_from_recorded_runs(tmp_path):
@@ -178,9 +266,11 @@ def test_confirmation_subset_from_recorded_runs(tmp_path):
     # q2 in both pilot and regression — union dedupes
     assert "q2" in subset_qids and subset_qids == {"q1", "q2", "q3", "qX", "qY"}
 
-    # the writer filters a dataset to the set
-    instances = [{"question_id": "q1"}, {"question_id": "qX"},
-                 {"question_id": "nope"}]
+    # the writer filters a dataset to the set, and #2516 refuses a
+    # confirmation slice that spans only one question type
+    instances = [{"question_id": "q1", "question_type": "multi-session"},
+                 {"question_id": "qX", "question_type": "knowledge-update"},
+                 {"question_id": "nope", "question_type": "multi-session"}]
     subset = rp._build_confirmation_subset(state, run_dir, instances=instances)
     data = json.loads(subset.read_text(encoding="utf-8"))
     assert {q["question_id"] for q in data} == {"q1", "qX"}
@@ -453,6 +543,11 @@ def test_cmd_run_records_resume_quality_scan(tmp_path, monkeypatch, capsys):
     assert run["resume_quality"]["truncated"] == 0
     assert run["resume_quality"]["qids"] == ["q-dead"]
     assert run["resume_quality"]["checked"] == 2
+    # #2516 (C1): the measured slice's question-type composition is recorded
+    # with the run (the pilot is a TYPE-STRATIFIED subset, not the head)
+    assert run["slice_composition"] == {
+        "knowledge-update": 1, "multi-session": 1,
+        "single-session-user": 2, "temporal-reasoning": 1}
 
 
 def test_checkpoint_resume_quality_guard_rails(tmp_path):

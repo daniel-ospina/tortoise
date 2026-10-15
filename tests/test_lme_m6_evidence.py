@@ -1253,3 +1253,252 @@ def test_healthy52_evidence_sessions_equivalent_to_answer_ids():
         assert len(q["answer_session_ids"]) == 1
         # the single answer session's id is in the haystack session ids
         assert q["answer_session_ids"][0] in q["haystack_session_ids"]
+
+
+# ── #2516 (C1, amended): the FACT-GRAIN answer-evidence leg ────────────────
+
+def test_answer_evidence_lexical_leg_semantics():
+    """#2516: ``answer_evidence_in_context`` — 1.0 when the assembled reader
+    context shares >=3 CONTIGUOUS verbatim words with the gold answer, else
+    0.0; N/A (None) when there is no gold answer to look for (so an
+    abstention/`_abs` question is dropped from the mean, never counted as a
+    miss — the D3 instrument's 'answerable questions only' denominator)."""
+    ctx = ("(session date 2023-05-01) user: I bought a blue ceramic mug and "
+           "two candles at the market. assistant: noted.")
+    # 3 contiguous words verbatim → present
+    assert ev.answer_evidence_in_context(ctx, "a blue ceramic mug") == 1.0
+    # 2 contiguous words only → below the floor, ABSENT (lexical floor)
+    assert ev.answer_evidence_in_context(ctx, "blue ceramic") == 0.0
+    # a non-contiguous bag of the same words is NOT a span
+    assert ev.answer_evidence_in_context(ctx, "ceramic a blue") == 0.0
+    # punctuation cannot break a span that IS verbatim (tokenizer strips it)
+    assert ev.answer_evidence_in_context("the total was 42 dollars.",
+                                         "was 42 dollars") == 1.0
+    assert ev.answer_evidence_in_context("the total was 42 dollars.",
+                                         "42 dollars.") == 0.0  # 2 words
+    # casing/whitespace insensitive
+    assert ev.answer_evidence_in_context(ctx, "BLUE   CERAMIC MUG") == 1.0
+    # no gold answer → N/A (None), never 0.0
+    assert ev.answer_evidence_in_context(ctx, "") is None
+    assert ev.answer_evidence_in_context(ctx, "   ") is None
+    assert ev.answer_evidence_in_context(ctx, None) is None
+    # empty context is a MISS (0.0): the reader was given nothing to find it in
+    assert ev.answer_evidence_in_context("", "a blue ceramic mug") == 0.0
+
+
+def test_answer_evidence_floor_is_configurable():
+    """The contiguous-span floor is a parameter (default 3) — the D3
+    instrument reports its sensitivity at other floors, so the eval leg must
+    be able to reproduce them."""
+    ctx = "the answer is two candles"
+    assert ev.answer_evidence_in_context(ctx, "two candles", min_words=2) == 1.0
+    assert ev.answer_evidence_in_context(ctx, "two candles", min_words=3) == 0.0
+    assert ev.longest_common_span(ctx, "two candles", min_words=1) == \
+        "two candles"
+    assert ev.longest_common_span("", "x") is None
+    assert ev.longest_common_span("x", "") is None
+
+
+def test_answer_evidence_parity_with_d3_instrument():
+    """#2516: the eval harness's span helper and the D3 instrument's
+    (`tools/ask_shape_rate.py::longest_common_span`) must agree EXACTLY —
+    same tokenizer, same algorithm, same floor. They measure the same
+    construct on different lanes (A′ cohort vs the D3 fixture), so a drift
+    between them would make the two lanes non-comparable without either
+    number looking wrong."""
+    import importlib.util
+
+    from tools.longmem_eval import evidence as ev_mod
+    spec = importlib.util.spec_from_file_location(
+        "ask_shape_rate_2516",
+        Path(__file__).resolve().parent.parent / "tools" / "ask_shape_rate.py")
+    d3 = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(d3)
+
+    cases = [
+        ("I bought a blue ceramic mug and two candles", "a blue ceramic mug"),
+        ("the total was 42 dollars.", "42 dollars."),
+        ("nothing shared here", "entirely different words"),
+        ("", "a blue mug"),
+        ("a blue mug", ""),
+        ("Five trips to the gym.", "five trips"),
+        ("El Dato is in Madrid", "madrid"),
+        ("one two three four five", "three four five six"),
+        ("aaaa bbbb", "aaaa bbbb cccc"),
+    ]
+    for context, answer in cases:
+        for floor in (1, 2, 3, 4):
+            assert ev_mod.longest_common_span(
+                context, answer, min_words=floor) == d3.longest_common_span(
+                    context, answer, min_words=floor), (context, answer, floor)
+    # the D3 readout's own reported rule (>=3 words counts as present) is the
+    # eval leg's default floor
+    assert ev_mod.ANSWER_EVIDENCE_MIN_WORDS == 3
+
+
+def _answer_evidence_outcome(qid: str, qtype: str, *, ae: float | None,
+                             er: float | None = 0.5,
+                             sr: float = 1.0) -> dict:
+    out = _outcome(qid, er=er, tr=er, eturns=1, epoints=1)
+    out["question_type"] = qtype
+    out["session_recall@k"] = {"5": sr, "10": sr, "20": sr}
+    out["reader_evidence@k"] = {"5": er, "10": er, "20": er}
+    out["reader_surface@k"] = {"5": 0.9, "10": 0.9, "20": 0.9}
+    if ae is not None:
+        out["answer_evidence@k"] = {"5": ae, "10": ae, "20": ae}
+    return out
+
+
+def _answer_evidence_report(outcomes: list[dict]) -> dict:
+    return build_report(
+        outcomes, dataset_id="d", split="s", reader_model="r",
+        judge_model="j", extraction_approach="x", ks=(5, 10, 20), top_k=20,
+        dataset_semantics_audit=_trusted_audit())
+
+
+def test_report_aggregates_answer_evidence_with_na_drop():
+    """#2516: ``retrieval.answer_evidence@k`` is the mean over outcomes that
+    CARRY a value — an outcome without the key (or with None: no gold answer)
+    is dropped, never coerced to 0.0, and the vacuity count rides beside it."""
+    report = _answer_evidence_report([
+        _answer_evidence_outcome("m1", "multi-session", ae=1.0),
+        _answer_evidence_outcome("m2", "multi-session", ae=0.0),
+        _answer_evidence_outcome("m3_abs", "single-session-user", ae=None),
+    ])
+    ret = report["retrieval"]
+    assert ret["answer_evidence@k"]["5"] == 0.5
+    assert ret["answer_evidence_n@k"]["5"] == 2
+    # outcomes with the key entirely absent are dropped too
+    report2 = _answer_evidence_report([
+        _outcome("x1", er=0.5, tr=0.5, eturns=1, epoints=1)])
+    assert report2["retrieval"]["answer_evidence@k"] is None
+    assert report2["retrieval"]["answer_evidence_n@k"] is None
+
+
+def test_report_retrieval_by_category_is_non_abs_and_per_type():
+    """#2516: ``retrieval.retrieval_by_category`` aggregates the retrieval
+    metrics per paper category + ``full_mix`` over non-`_abs` questions only
+    — the type-stratified measurement surface (a head slice is ~100%
+    single-session-user and can never produce the tail rows)."""
+    report = _answer_evidence_report([
+        _answer_evidence_outcome("m1", "multi-session", ae=1.0, er=1.0),
+        _answer_evidence_outcome("m2", "multi-session", ae=0.0, er=0.0),
+        _answer_evidence_outcome("k1", "knowledge-update", ae=1.0, er=1.0),
+        _answer_evidence_outcome("p_abs", "single-session-preference",
+                                 ae=None),
+    ])
+    by_cat = report["retrieval"]["retrieval_by_category"]
+    msr = by_cat["Multi-Session Reasoning"]
+    assert msr["n"] == 2
+    assert msr["evidence_recall@k"] == {"value": 0.5, "n": 2, "n_missing": 0}
+    assert msr["answer_evidence@k"] == {"value": 0.5, "n": 2,
+                                        "n_missing": 0}
+    # the _abs question is EXCLUDED from its type's row and from full_mix
+    assert "Abstention" not in by_cat
+    assert by_cat["full_mix"]["n"] == 3
+    assert by_cat["full_mix"]["answer_evidence@k"]["value"] == \
+        pytest.approx(2 / 3, abs=1e-4)
+    assert by_cat["Knowledge Updates"]["n"] == 1
+    # the official BINARY projection is NOT duplicated here — the report
+    # carries the per-question FRACTIONS; w7_publish owns recall_all@k
+    # (one implementation of the official semantics)
+    assert "recall_all@5" not in by_cat["full_mix"]
+
+
+def test_report_retrieval_by_category_counts_missing_denominators():
+    """#2516: a category whose evidence denominator is PARTLY empty keeps the
+    aggregate over the outcomes that have a value and reports ``n_missing``
+    (with ``n``) beside it — the A2 gap must not be confusable with an ingest
+    collapse, and a wholly-N/A metric stays ABSENT rather than reading
+    0.0."""
+    report = _answer_evidence_report([
+        _answer_evidence_outcome("m1", "multi-session", ae=1.0, er=1.0),
+        _answer_evidence_outcome("m2", "multi-session", ae=None, er=None),
+    ])
+    row = report["retrieval"]["retrieval_by_category"][
+        "Multi-Session Reasoning"]
+    assert row["n"] == 2
+    assert row["evidence_recall@k"] == {"value": 1.0, "n": 1,
+                                        "n_missing": 1}
+    assert row["answer_evidence@k"] == {"value": 1.0, "n": 1,
+                                        "n_missing": 1}
+    # a wholly-N/A metric is absent from the row (never a fabricated 0.0) —
+    # and the row's n still shows the question was in the category
+    report2 = _answer_evidence_report([
+        _answer_evidence_outcome("m1", "multi-session", ae=None, er=None),
+    ])
+    row2 = report2["retrieval"]["retrieval_by_category"][
+        "Multi-Session Reasoning"]
+    assert row2["n"] == 1
+    assert "evidence_recall@k" not in row2
+    assert "answer_evidence@k" not in row2
+    # session_recall@k is always defined (0.0 fallback in the runner) and
+    # stays present — the reader can see the session surface was reached
+    assert row2["session_recall@k"] == {"value": 1.0, "n": 1,
+                                         "n_missing": 0}
+
+
+def test_retrieve_emits_answer_evidence_over_the_assembled_context(tmp_path):
+    """#2516 (C1, amended): the retrieval leg emits ``answer_evidence@k`` per
+    outcome, computed over the SAME assembled context the reader receives.
+
+    Asserted end-to-end against a real (embedded) graph: (i) the key is
+    present at every k with a 1.0/0.0/None value; (ii) a question with no
+    gold answer is N/A at every k; (iii) an answer that IS a verbatim span of
+    the top assembled context item reads 1.0 — the wiring check that the leg
+    sees the reader's actual text (a leg measuring a different string would
+    fail (iii) whenever retrieval does not happen to surface the phrase).
+    """
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = next(x for x in _mini() if x["question_id"] == "mini_ku_004")
+        ingest_haystack(sdk, q)
+        ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20)
+        assert set(ret["answer_evidence@k"]) == {"5", "10", "20"}
+        assert all(v in (0.0, 1.0) for v in ret["answer_evidence@k"].values())
+        # the assembled context is non-empty for this question (precondition
+        # of (iii) — if it were empty the leg would legitimately read 0.0)
+        top = ret["context_points"][0]
+        content = " ".join(str(top.get("content") or "").split())
+        assert content, "fixture precondition: a non-empty top context item"
+        # (iii) a verbatim span of the top assembled item IS the answer
+        q_verbatim = json.loads(json.dumps(q))
+        q_verbatim["answer"] = " ".join(content.split()[:6])
+        ret2 = retrieve_for_question(sdk, q_verbatim, ks=(20,), top_k=20)
+        assert ret2["answer_evidence@k"]["20"] == 1.0
+        # (ii) no gold answer → N/A (None) at every k, never a forced 0.0
+        q_noanswer = json.loads(json.dumps(q))
+        q_noanswer["answer"] = ""
+        ret3 = retrieve_for_question(sdk, q_noanswer, ks=(5, 10, 20),
+                                    top_k=20)
+        assert ret3["answer_evidence@k"] == {"5": None, "10": None,
+                                             "20": None}
+    finally:
+        sdk.close()
+
+
+def test_report_retrieval_by_category_labels_the_population_lane():
+    """#2516 (C1, amended — §3/§4.2 of the #2513 W2C scope cycle): the two
+    lane disclosures must ride the numbers. (i) is structural: a
+    RETRIEVAL-ONLY report ran no reader, so it cannot see a reader-path
+    (class B) failure, and its own block says so — a class-A delta from that
+    lane must never be read as progress. RED mutation: drop the population
+    block, or let a retrieval-only report claim `class_b_measurable` → fail.
+    """
+    outcomes = [_answer_evidence_outcome("m1", "multi-session", ae=1.0)]
+    reader_lane = _answer_evidence_report(outcomes)[
+        "retrieval"]["retrieval_by_category"]["population"]
+    assert reader_lane["reader_ran"] is True
+    assert reader_lane["class_b_measurable"] is True
+    assert "different instrument" in reader_lane["disclosure"]
+
+    retrieval_only = build_report(
+        outcomes, dataset_id="d", split="s", reader_model="r",
+        judge_model="j", extraction_approach="x", ks=(5, 10, 20), top_k=20,
+        dataset_semantics_audit=_trusted_audit(), retrieval_only=True)[
+            "retrieval"]["retrieval_by_category"]["population"]
+    assert retrieval_only["reader_ran"] is False
+    assert retrieval_only["class_b_measurable"] is False
+    assert "INVISIBLE" in retrieval_only["disclosure"]
+    assert "proxy" in retrieval_only["disclosure"]
