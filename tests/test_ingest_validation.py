@@ -456,9 +456,20 @@ class TestCycle25Vocabulary:
 
 class TestDuplicateConnections:
     def test_identical_duplicates_clean_dedup(self, sdk):
-        """§8 routing (A3): two IDENTICAL plain IMPL connections dedup at
-        the direct-edge level — one edge, second reported deduped, no
-        operator node (operator-less per §8)."""
+        """§8 routing (A3) + the endpoint-kind gate (#8499): two IDENTICAL
+        plain IMPL connections between :Points dedup cleanly — and the pair is
+        REIFIED, not operator-less.
+
+        ⛔ Owner ruling 2026-10-13 (#8499; reverses #1061's operator-less
+        Point→Point arm): **a Point↔Point relation is operator-mediated.**
+        An operator-less edge can be neither mitigated nor annotated, so it
+        cannot carry the epistemic weighting a Point's relations claim — the
+        reason they exist at all, and why the direct shape is reserved for
+        ``Object↔Object``. (The old ``rebuild_all`` loss — A10 #1048 — is
+        retired: #8499 landed the ``DirectEdgeCreated`` fold.)
+        Dedup is unaffected: the second identical connection still dedups, now
+        at the operator level (``_find_operator`` exact hit).
+        """
         bundle = _points_pair() | {"connections": [
             {"from": "pA", "to": "pB", "operator": "IMPL"},
             {"from": "pA", "to": "pB", "operator": "IMPL"},
@@ -467,8 +478,13 @@ class TestDuplicateConnections:
         res = sdk.ingest(bundle)
         assert res["created"]["connections"] == 1
         assert res["deduped"]["connections"] == 1
-        assert _edge_count(sdk, "IMPL") == 1
-        assert _operator_count(sdk, "IMPL") == 0
+        # Reified: ONE operator node, whose IMPL edge runs to EACH input.
+        assert _operator_count(sdk, "IMPL") == 1
+        assert _edge_count(sdk, "IMPL") == 2
+        # The reroute is REPORTED, never silent (the caller wrote the direct
+        # spelling and got the operator form).
+        assert any("point_mediated_route" in w for w in res["warnings"]), \
+            res["warnings"]
 
     def test_iml_absent_equals_bidirectional(self, sdk):
         # CYCLE-25 per-op_type canonicalization: IMPL absent ≡ bidirectional

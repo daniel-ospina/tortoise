@@ -1338,8 +1338,12 @@ def _fold_journal(events: list[dict]) -> dict:
 #     graph reports `divergence="content"` for that one field where the same
 #     journal checked against a `rebuild_all` graph is `ok/None`. This is the
 #     SAME class as the deliberately-deferred
-#     `DirectEdgeCreated`/`DirectEdgeRepoint` folds (A10 #1048): a STATED
-#     bound, not a hidden caveat. Closing it means re-implementing the sweep's
+#     `DirectEdgeRepoint` fold in the one-record `apply()` engine (A10 #1048):
+#     a STATED bound, not a hidden caveat. (`DirectEdgeCreated` is no longer in
+#     that class for `rebuild_all` — #8499 landed its pass-2b fold — but the
+#     `apply()` engine still does not fold either type, so the parity bound
+#     below holds for that engine on both.) Closing it means re-implementing
+#     the sweep's
 #     after-creations pass + #4743 state re-fold inside the apply engines —
 #     the larger change this lane declines in favour of one canonical sweep.
 #     The invariant this leg enforces is accept/refuse; the content bound is

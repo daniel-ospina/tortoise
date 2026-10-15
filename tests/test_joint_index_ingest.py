@@ -136,11 +136,17 @@ def test_joint_one_graph_both_writers_share_source(tmp_path, sdk):
 
 def test_joint_sweep_zero_point_mutation(tmp_path, sdk):
     """JOINT-E2E indicator 2: the SWEEP never mutates Points/operators/
-    direct edges — ingest a bundle with points + a direct edge, then run
-    index_directory over a corpus; the point/operator/direct-edge counts
-    are IDENTICAL before and after (the sweep touches only Sources/Events)."""
+    edges — ingest a bundle with points + a connection, then run
+    index_directory over a corpus; the point/operator/edge counts are
+    IDENTICAL before and after (the sweep touches only Sources/Events).
+
+    The bundled connection is a plain IMPL between two Points, which is
+    OPERATOR-MEDIATED (owner ruling 2026-10-13, #8499): the operator route
+    yields 3 Points (p1, p2, the operator) and 2 IMPL edges (Point→operator
+    INPUT plus operator→Point output), not the operator-less 1-edge shape
+    this test asserted before the ruling."""
     c = _corpus(tmp_path)
-    # ingest a bundle with points + a plain IMPL direct edge
+    # ingest a bundle with points + a plain IMPL connection (reified)
     res = sdk.ingest({  # noqa: F841
         "points": [
             {"ref": "p1", "kind": "statement", "content": "A implies B."},
@@ -155,14 +161,15 @@ def test_joint_sweep_zero_point_mutation(tmp_path, sdk):
     edges_before = _count(sdk, "MATCH ()-[r:IMPL|NAND]->() RETURN count(r)")
     ops_before = _count(sdk, "MATCH (o:Point {is_operator:true}) "
                              "RETURN count(o)")
-    assert points_before == 2 and edges_before == 1
+    assert (points_before, edges_before, ops_before) == (3, 2, 1), \
+        "a plain Point↔Point IMPL is operator-mediated (#8499)"
 
     # the sweep over the corpus
     sdk.index_directory(str(c), extract_metadata=False)
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == points_before, \
         "the sweep must not create/mutate Points"
     assert _count(sdk, "MATCH ()-[r:IMPL|NAND]->() RETURN count(r)") == edges_before, \
-        "the sweep must not create/mutate direct edges"
+        "the sweep must not create/mutate edges"
     assert _count(sdk, "MATCH (o:Point {is_operator:true}) RETURN count(o)") \
         == ops_before, "the sweep must not create operators"
 
