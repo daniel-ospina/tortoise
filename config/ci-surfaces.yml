@@ -3010,6 +3010,7 @@ surfaces:
   - test_7951_write_doors.py
   - test_7951_enforce_atomic_write.py
   - test_7951_create_point_outbox.py
+  - test_8686_selfhost_operational_state.py
   # #3094: DUAL-REGISTERED with `core`/`eval`. The empty-means-unset URI-read
   # census (`test_no_empty_default_tortoise_db_uri_reads`) scans `tests/**`,
   # and `tests/_html_links.py` is an EXACT SOURCE_PATTERNS entry of THIS

@@ -25,7 +25,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise.onboarding import state as st  # noqa: E402
+from tortoise.onboarding import state as st
 
 
 class _Res:
