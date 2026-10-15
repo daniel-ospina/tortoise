@@ -15,6 +15,11 @@
 --  (`ensurePendingTable`), because a database established by the runtime alone never
 --  receives the indexes below, and the expiry sweeps (#3647, #8032) depend on them
 --  for cost.)
+--
+--  #4161's `auth_mail_throttle` is declared in `0002_auth_mail_throttle.sql` and
+--  bootstrapped by `ensureThrottleTable` (mail-throttle.ts), the same pairing.
+--  It is not listed here because this file is the #3501 auth-STORES migration;
+--  it is not the ledger of every table the BFF creates.
 
 CREATE TABLE IF NOT EXISTS sessions (
   handle        TEXT PRIMARY KEY,
