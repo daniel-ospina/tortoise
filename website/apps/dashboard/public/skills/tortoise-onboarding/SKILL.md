@@ -66,11 +66,14 @@ resume where the flow left off — onboarding is stateful and idempotent:
   only:** a ChatGPT connector never takes this header and has no key to send —
   if you are ChatGPT, ignore this bullet and the #1701 note beneath the harness
   table applies instead.
-- **Self-hosted:** there is no hosted onboarding REST surface — skip the
-  state read and checkpoint steps. Install the SUPPORTED path first —
+- **Self-hosted:** the daemon serves the SAME registry paths the hosted
+  surface does — `GET /v1/onboarding/state` and `POST /v1/onboarding/seed`
+  (both `Authorization: Bearer $TORTOISE_API_KEY`; the seed takes
+  `org_name` + `person_name`, both required) — so READ the state and resume,
+  never restart. Install the SUPPORTED path first —
   Docker Compose daemon + FalkorDB sidecar (section 3a) — then connect +
   verify. Embedded without Docker is the EVAL-ONLY fallback (section 3a),
-  never a durable setup. W12's self-hosted init owns the onboarding node
+  never a durable setup. The self-hosted init owns the onboarding node
   (`fork='self'` default, no fork card).
 
 Branch on what you find:
