@@ -2431,6 +2431,14 @@ surfaces:
   # every surface, so the fail-loud guard's exception type must run wherever the
   # leaf changes — a named-surface match REPLACES the `core` fallback otherwise.
   - test_7209_write_landing.py
+  # #7405 (audit G8): DUAL-REGISTERED with `sdk` (whose SOURCE_PATTERNS own
+  # `tortoise/sdk.py`). `tortoise/retry.py` matches no SOURCE_PATTERNS, so a
+  # retry.py-only change falls through to the `core` fallback — and this file
+  # pins the RETRY WIRING plus `retry.py`'s own "PARTIALLY WIRED" coverage
+  # claim, so that change must run it or an edited coverage claim could ship
+  # unverified. (The `core` registration is load-bearing, not redundant with
+  # the `sdk` one: without it a retry.py-only diff runs neither.)
+  - test_7405_remaining_writes.py
   - test_retrieval_determinism_2952.py  # #2952: ranking determinism w.r.t. elapsed wall-clock (hermetic, no DB)
   - test_3844_annotation_injection.py  # #3844: reader-evidence annotation prefix cannot be forged by a newline in speaker/session_date OR the validity marker (hermetic, no DB)
   - test_6252_body_fence.py  # #6252: body-side sibling of #3844 — the block BODY is fenced so stored content cannot forge a block-scope line (hermetic, no DB); dual core+sdk because tortoise/retrieval.py is SOURCE_PATTERNS["sdk"]
@@ -3225,6 +3233,16 @@ surfaces:
   # exceptions.py-only diff). Docker-lane leg (a live URI when configured,
   # embedded otherwise).
   - test_7209_write_landing.py
+  # #7405 (audit G8): the REMAINING write surfaces on the bounded write retry
+  # — the capture lane's graph writes (`_write_session_and_turns`'s :Session
+  # MERGE, `_write_capture_turns`'s turn store + stale-turn sweep, and the
+  # capture's follow-up provenance/state stamps) and the `_post_commit` commit
+  # POST. Owns `tortoise/sdk.py` (a SHARED_MODULE, so this file is selected on
+  # any sdk change; DUAL-REGISTERED with `core` above, because the
+  # `tortoise/retry.py` coverage claim this pins selects `core`); the test
+  # drives the REAL capture with the extractor seam mocked (a live URI when
+  # configured, embedded otherwise).
+  - test_7405_remaining_writes.py
   # #4520: DUAL-REGISTERED with `core` and `battery` — the seam covers the
   # SDK's vector writers (`tortoise/sdk.py`, `session_indexer.py`) and the
   # `tools/ask_spotcheck.py` spot-check write, so an sdk-surface change must

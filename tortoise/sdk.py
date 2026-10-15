@@ -2068,10 +2068,23 @@ def _write_capture_turns(
             "emb": turn_embs[i],
         })
 
-    rows = proj.g.query(
-        _TURN_WRITE_CYPHER,
-        params={"turns": turn_rows, "sid": session_id, "now": now,
-                "redactions": redacted_total},
+    # #7405 (audit G8): the batched turn store rides the SAME bounded write
+    # retry as `create_point`'s direct writes. Before this it was a bare
+    # `proj.g.query`, so a rebuild's per-query abort landed AFTER the Session
+    # MERGE had committed and left the session with NO turns — the episodic leg
+    # the capture exists for, missing, with the caller told only that a write
+    # failed. The statement is IDEMPOTENT, which is what makes re-issuing it
+    # safe: every row MERGEs `(t:Point {id: turn.id})` (the id derives from
+    # `session_id`, so a re-issue targets the same node), the CONTAINS edge is
+    # a MERGE, and `status`/`createdAt` use `coalesce` — a re-issued statement
+    # can neither duplicate a turn nor demote or re-stamp a stored one.
+    rows = sdk._graph_write_with_retry(
+        lambda: proj.g.query(
+            _TURN_WRITE_CYPHER,
+            params={"turns": turn_rows, "sid": session_id, "now": now,
+                    "redactions": redacted_total},
+        ),
+        what="capture turn batch write",
     ).result_set
     stored = {r[0]: (r[1], r[2], r[3]) for r in (rows or [])}
 
@@ -2121,10 +2134,20 @@ def _write_capture_turns(
             if _index >= _first_live:
                 stale.append(_tid)
         if stale:
-            proj.g.query(
-                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
-                "WHERE t.id IN $ids DETACH DELETE t",
-                params={"sid": session_id, "ids": stale},
+            # #7405 (audit G8): the stale-turn sweep is a write too. The abort
+            # here used to leave the higher-index turns CONTAINS-wired to the
+            # Session while `s.turn_count` reported the new, shorter length —
+            # the stored count and the CONTAINS walk disagreeing, i.e. turns
+            # the session no longer owns still reachable from it. Idempotent:
+            # the delete is keyed by an EXPLICIT id list read BEFORE it, so a
+            # re-issue carries the same list and a no-op for ids already gone.
+            sdk._graph_write_with_retry(
+                lambda: proj.g.query(
+                    "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+                    "WHERE t.id IN $ids DETACH DELETE t",
+                    params={"sid": session_id, "ids": stale},
+                ),
+                what="capture stale-turn sweep",
             )
 
     # #3947: journal the turn writes so a rebuild can recreate them.
@@ -2372,9 +2395,29 @@ def _write_session_and_turns(
     if model:
         merge_sets.append("s.model=coalesce(s.model, $model)")
         merge_params["model"] = model
-    proj.g.query(
-        f"MERGE (s:Session {{id:$sid}}) SET {', '.join(merge_sets)}",
-        params=merge_params,
+    # #7405 (audit G8): the `:Session` MERGE rides the bounded write retry.
+    # Before this a rebuild's per-query abort raised out of this writer BEFORE
+    # the turn store below, so the capture lost the whole session — row and
+    # turns — and the finding it carried never reached the map.
+    #
+    # Re-issuing is the FIRST application, not a second one: the retry
+    # predicate admits only refusals the engine ABORTED, so the statement did
+    # not land — and the statement is idempotent besides (it MERGEs on `id`,
+    # so it can never mint a second Session; the field list mixes
+    # `coalesce(s.field, $param)` clauses with absolute SETs, and the absolute
+    # ones are safe precisely because the aborted attempt left nothing to
+    # overwrite).
+    #
+    # The probe reads `sdk._proj` (this SDK's live authoritative handle); the
+    # `proj` argument is the caller's projection and every caller in-tree passes
+    # `sdk._get_proj()`, so the two are the same object and the graph-existence
+    # discriminator probes the graph this write targets.
+    sdk._graph_write_with_retry(
+        lambda: proj.g.query(
+            f"MERGE (s:Session {{id:$sid}}) SET {', '.join(merge_sets)}",
+            params=merge_params,
+        ),
+        what="capture :Session MERGE",
     )
     if on_session_merged is not None:
         on_session_merged(session_record)
@@ -7591,13 +7634,20 @@ class TortoiseSDK:
                     # session's single-eventId provenance.
                     source_harness = harness or "unknown"
                     minted_ids = _capture_minted_ids(extracted)
-                    proj.g.query(
-                        "MATCH (n:Point) WHERE n.id IN $ids "
-                        "SET n.eventId=$eid, n.source_session=$sid, "
-                        "    n.source_harness=$harness, n.ingested_at=$ing",
-                        params={"ids": minted_ids,
-                                "eid": event_id, "sid": session_id,
-                                "harness": source_harness, "ing": now},
+                    # #7405 (audit G8): the capture's provenance stamps ride the
+                    # bounded write retry too. Idempotent: the statement SETs
+                    # absolute values on an explicit id list, so a re-issue
+                    # writes the same four fields again.
+                    self._graph_write_with_retry(
+                        lambda: proj.g.query(
+                            "MATCH (n:Point) WHERE n.id IN $ids "
+                            "SET n.eventId=$eid, n.source_session=$sid, "
+                            "    n.source_harness=$harness, n.ingested_at=$ing",
+                            params={"ids": minted_ids,
+                                    "eid": event_id, "sid": session_id,
+                                    "harness": source_harness, "ing": now},
+                        ),
+                        what="capture minted-point provenance stamp",
                     )
                     # #2552 (layer-2 WIRE — the structural leg): reified
                     # operator Points created by THIS capture must enter the
@@ -7633,10 +7683,20 @@ class TortoiseSDK:
                             "    o.source_harness=$harness, "
                             "    o.ingested_at=$ing"
                         ):
-                            proj.g.query(_q, params={
-                                "ids": minted_ids,
-                                "eid": event_id, "sid": session_id,
-                                "harness": source_harness, "ing": now})
+                            # #7405 (audit G8): each label statement is its own
+                            # write and rides the retry. Idempotent: the
+                            # statement carries an ``o.eventId IS NULL`` guard,
+                            # so a re-issue stamps only what a partial attempt
+                            # did not already stamp. ``_q`` is bound as a default
+                            # so the lambda can never close over a LATER loop
+                            # value.
+                            self._graph_write_with_retry(
+                                lambda _q=_q: proj.g.query(_q, params={
+                                    "ids": minted_ids,
+                                    "eid": event_id, "sid": session_id,
+                                    "harness": source_harness, "ing": now}),
+                                what="capture operator-label provenance stamp",
+                            )
                     # #4936: the minted-point join above CANNOT reach an
                     # operator whose endpoint RE-KEYED to a pre-existing
                     # graph node (#4716 Part 1): the payload point resolved
@@ -7662,16 +7722,21 @@ class TortoiseSDK:
                     # test_capture_session_stamps_operator_event_ids).
                     operator_ids = list(meta.get("operator_ids") or [])
                     if operator_ids:
-                        proj.g.query(
-                            "MATCH (o:Point {is_operator:true}) "
-                            "WHERE o.id IN $ids "
-                            "AND o.eventId IS NULL "
-                            "SET o.eventId=$eid, o.source_session=$sid, "
-                            "    o.source_harness=$harness, "
-                            "    o.ingested_at=$ing",
-                            params={"ids": operator_ids,
-                                    "eid": event_id, "sid": session_id,
-                                    "harness": source_harness, "ing": now},
+                        # #7405 (audit G8): same funnel; idempotent by the
+                        # statement's own ``o.eventId IS NULL`` guard.
+                        self._graph_write_with_retry(
+                            lambda: proj.g.query(
+                                "MATCH (o:Point {is_operator:true}) "
+                                "WHERE o.id IN $ids "
+                                "AND o.eventId IS NULL "
+                                "SET o.eventId=$eid, o.source_session=$sid, "
+                                "    o.source_harness=$harness, "
+                                "    o.ingested_at=$ing",
+                                params={"ids": operator_ids,
+                                        "eid": event_id, "sid": session_id,
+                                        "harness": source_harness, "ing": now},
+                            ),
+                            what="capture operator-id provenance stamp",
                         )
                     if retry_failed_capture:
                         # #2335 WI-2b / review (PR #2473): a RETRY heals the
@@ -7694,15 +7759,22 @@ class TortoiseSDK:
                         # (that node already carries its original ingest's
                         # provenance; re-stamping would violate the
                         # single-eventId-per-session rule).
-                        proj.g.query(
-                            "MATCH (s:Session {id:$sid})-[c:CONTAINS]->"
-                            "(n:Point) WHERE n.eventId IS NULL "
-                            "AND coalesce(n.is_episodic, false) <> true "
-                            "SET n.eventId=$eid, n.source_session=$sid, "
-                            "    n.source_harness=$harness, "
-                            "    n.ingested_at=$ing",
-                            params={"sid": session_id, "eid": event_id,
-                                    "harness": source_harness, "ing": now},
+                        # #7405 (audit G8): same funnel; idempotent by its
+                        # ``n.eventId IS NULL`` guard, so a re-issue after an
+                        # abort cannot re-stamp a node a partial attempt
+                        # already touched.
+                        self._graph_write_with_retry(
+                            lambda: proj.g.query(
+                                "MATCH (s:Session {id:$sid})-[c:CONTAINS]->"
+                                "(n:Point) WHERE n.eventId IS NULL "
+                                "AND coalesce(n.is_episodic, false) <> true "
+                                "SET n.eventId=$eid, n.source_session=$sid, "
+                                "    n.source_harness=$harness, "
+                                "    n.ingested_at=$ing",
+                                params={"sid": session_id, "eid": event_id,
+                                        "harness": source_harness, "ing": now},
+                            ),
+                            what="capture retry-heal provenance stamp",
                         )
                 else:
                     # P1 #1529 (D4): create_event returning no id/eventId
@@ -7787,12 +7859,18 @@ class TortoiseSDK:
                           for i in range(len(link_texts))],
                 sdk=self)
             if link_result["attempted"]:
-                proj.g.query(
-                    "MATCH (s:Session {id:$sid}) SET "
-                    "s.entity_links_attempted=$a, s.entity_links_created=$c",
-                    params={"sid": session_id,
-                            "a": link_result["attempted"],
-                            "c": link_result["created"]})
+                # #7405 (audit G8): the counter SET is idempotent (absolute
+                # values for this link pass), so a re-issue after an abort
+                # cannot double-count.
+                self._graph_write_with_retry(
+                    lambda: proj.g.query(
+                        "MATCH (s:Session {id:$sid}) SET "
+                        "s.entity_links_attempted=$a, s.entity_links_created=$c",
+                        params={"sid": session_id,
+                                "a": link_result["attempted"],
+                                "c": link_result["created"]}),
+                    what="capture entity-link counters",
+                )
                 # #3664 review P2: the raw SET above is a LIVE write with no
                 # journal carrier — the first SessionRecorded is emitted
                 # BEFORE the link pass, so its payload cannot carry the
@@ -7876,12 +7954,20 @@ class TortoiseSDK:
             # re-attempting (the TRUE retry silently no-ops). The warning
             # names the residue: capture_ok unset means an unknown prior.
             try:
-                proj.g.query(
-                    "MATCH (s:Session {id:$sid}) "
-                    "SET s.capture_ok=$ok, "
-                    "    s.capture_extractor=$extractor",
-                    params={"sid": session_id, "ok": _capture_ok_record,
-                            "extractor": _capture_extractor_record})
+                # #7405 (audit G8): the attempt-outcome SET is idempotent
+                # (absolute ``capture_ok``/``capture_extractor`` values) and
+                # rides the retry. The outer try/except stays: an exhausted
+                # retry surfaces the original error and is downgraded to the
+                # additive warning below, exactly as before.
+                self._graph_write_with_retry(
+                    lambda: proj.g.query(
+                        "MATCH (s:Session {id:$sid}) "
+                        "SET s.capture_ok=$ok, "
+                        "    s.capture_extractor=$extractor",
+                        params={"sid": session_id, "ok": _capture_ok_record,
+                                "extractor": _capture_extractor_record}),
+                    what="capture attempt-outcome stamp",
+                )
             except Exception as exc:  # pragma: no cover - graph hiccup
                 extraction_warnings.append(
                     f"capture_ok state write failed: {type(exc).__name__}")
@@ -29989,10 +30075,32 @@ def _post_commit(payload: dict, *, base_url=None, api_key=None) -> dict:
     callers merge a returned dict into the response and set `ok=True`, so a
     dict-shaped refusal would read as a successful commit. Their existing
     `except Exception` channel already turns this into a structured `ok=False`.
+
+    #7405 (audit G8): the POST rides the bounded retry primitive on
+    ``retryable_transient`` — the transport-class predicate, NOT
+    ``retryable_aborted_write`` (the write-abort predicate needs a graph-state
+    probe that is meaningless for an HTTP POST). Re-issuing is safe by
+    construction, which is why this predicate is admissible here at all: the
+    body carries a deterministic ``client_commit_id`` (computed below, before
+    the first attempt) and the server serializes on it atomically
+    (``CommitRecordStore.acquire`` — an atomic MERGE on ``client_commit_id``),
+    so a re-POST after a lost reply sees the winner's record instead of
+    double-applying. That is the ``client_commit_id`` replay + server-side
+    dedup this path's robustness already rested on.
+
+    ``marker_armed=False``: ``WriteStageRetriesExhausted`` exists for the eval
+    lane's R2 whole-question marker, not this primitive's contract. Both
+    callers stringify whatever surfaces into ``ok=False, error=…``, so an
+    exhausted retry must surface the ORIGINAL transport exception unwrapped —
+    keeping the reported failure class unchanged. Budget: ``retries=3`` (4
+    attempts worst case) — a refused connection fails fast, a full 120 s
+    response timeout is the slow case, and the bound stays FINITE so a dead
+    endpoint still surfaces rather than hanging forever.
     """
     import os  # noqa: I001 — `requests` is imported mid-block, same as before
     from tortoise.capture_consent import capture_declined_reason
     from tortoise.commit_schema import compute_client_commit_id
+    from tortoise.retry import call_with_predicate, retryable_transient
     declined = capture_declined_reason()
     if declined is not None:
         raise PermissionError(declined)
@@ -30003,8 +30111,15 @@ def _post_commit(payload: dict, *, base_url=None, api_key=None) -> dict:
     base = base_url or os.environ.get("TORTOISE_API_URL", "http://localhost:8000")
     key = api_key or os.environ.get("TORTOISE_API_KEY", "")
     import requests
-    r = requests.post(f"{base.rstrip('/')}/v1/sessions/commit",
-                      headers={"Authorization": f"Bearer {key}"},
-                      json=payload, timeout=120)
-    r.raise_for_status()
-    return r.json()
+
+    def _post() -> dict:
+        r = requests.post(f"{base.rstrip('/')}/v1/sessions/commit",
+                          headers={"Authorization": f"Bearer {key}"},
+                          json=payload, timeout=120)
+        r.raise_for_status()
+        return r.json()
+
+    return call_with_predicate(
+        _post, predicate=retryable_transient, retries=3,
+        what="POST /v1/sessions/commit", base=2.0, cap=8.0,
+        marker_armed=False)
