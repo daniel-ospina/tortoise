@@ -519,6 +519,22 @@ gate in `tests/test_durability_posture.py` fails the build if a
 `log`/`journal`/`jsonl`/`event stream` is bound to `source of truth` — or to
 `is [the] truth` — outside this file.
 
+**The gate's roots are the contract surfaces plus `graph-scripts/` (#4308).**
+The owner's §6 root list (`tortoise/`, the five docs, README) left the two
+runnable `graph-scripts/` scripts outside the scan, and both still asserted the
+JSONL was the source of truth. They are *executable* statements —
+`add_convergence_evidence.py` writes its research claims into the graph — not
+archive records, so the rule binds them: they now carry the reconstruction
+framing, and the directory is a scan root so the gate-visible claim cannot
+return. Because the gate matches a claim SHAPE inside a 40-char window (below),
+the two sentinels are also pinned window-independently
+(`test_graph_scripts_sentinels_carry_no_source_of_truth`) — the pre-fix
+`add_convergence_evidence.py` residual sat outside that window. Archive
+records (`docs/plans/`, `docs/scoping/`, `docs/epics/`) and the test suite's
+session-journal vocabulary stay out of scope — the former are point-in-time
+records, the latter is a real non-durability claim (the file journal **is** the
+source of truth for a test session's created-graph ownership).
+
 **The gate matches a CLAIM SHAPE, not durability claims in general.** It fires on
 a `log`/`journal`/`jsonl`/`event stream` bound to `source of truth` / `is [the]
 truth`; a *mechanism promise* — e.g. a managed store "provides AOF durability" —
@@ -649,10 +665,6 @@ a written claim to the system it describes is **#5063**.
   verified as a WRITE (ledger read-back) and not as a RECOVERY.** `README.md`
   and `docs/quickstart-selfhosted.md` state the AOF-scoped guarantee and link
   this document.
-- **`graph-scripts/`** — `add_convergence_evidence.py` and `baseline_scan.py`
-  still describe the JSONL as the "source of truth" for graph convergence. This
-  document's gate is scoped to the contract surfaces (`tortoise/`, the five
-  docs, README); the archival/operation scripts are a separate, open residual.
 - **#3895** — the logical dump's edge export *was* unfiltered (fixed by #3921, `_DUMP_REVISION = 2`; `tortoise/hosted_backup.py:387` now restricts edges to the exported node set). #3895 stays open for AC-1's remaining evidence: a fresh drill restoring a real production-sized artifact end-to-end. The one restore drill ever attempted (2026-09-17) failed on exactly this (`9687/10000 linked — dump references missing nodes`); the hosted row above is **not drilled to success** until a real archive restores.
 - **#2826 row A2** — the register row recommending the journal be authoritative.
   The #2881 design round (§7) recommends reversing it to store-authoritative.

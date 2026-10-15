@@ -4,6 +4,10 @@
 
 Fires 4 architectural questions, maps trade-offs, tags confidence,
 connects with IMPL (supports) and NAND (contradicts).
+
+Durability framing (#4308): the JSONL is the **reconstruction source**; the
+store is the **durability authority** — see ``docs/durability-posture.md``
+(#2881). The Q3 options below are worded to that authority.
 """
 from __future__ import annotations
 
@@ -51,7 +55,7 @@ def NAND(a, b, content=None):
 # ── Q1: Shared state as episodic implementation vs separate coordination layer ──
 
 print("=== Q1 ===")
-q1_unified   = P("[CONFIDENCE:HIGH] Unified pipeline — shared state IS memory: event log serves as both coordination backbone and agent episodic memory. Single source of truth, replay-enables debugging, simpler operational surface. Evidence: MAN+ESM architecture uses event log for both state reconstruction and agent choreography. Trade-off: coordination events and memory events share same schema — tight coupling, harder to tune independently. See: Kafka as both event bus and message queue pattern.")
+q1_unified   = P("[CONFIDENCE:HIGH] Unified pipeline — shared state IS memory: event log serves as both coordination backbone and agent episodic memory. Single reconstruction source, replay-enables debugging, simpler operational surface. Evidence: MAN+ESM architecture uses event log for both state reconstruction and agent choreography. Trade-off: coordination events and memory events share same schema — tight coupling, harder to tune independently. See: Kafka as both event bus and message queue pattern.")
 q1_separate  = P("[CONFIDENCE:HIGH] Separate layers — coordination events (low-latency, choreography) and knowledge events (enrichment, long-term) have different SLAs, processing patterns, and schemas. Evidence: event-driven architecture best practice is to separate operational planes from reasoning planes. Coordination is irregular/asynchronous; knowledge processing follows pipeline pattern. Mixing creates architectural friction.")
 q1_sla       = P("[CONFIDENCE:MEDIUM] Different SLAs: coordination needs immediate response (saga pattern, distributed transactions); knowledge events tolerate batching and higher latency. Evidence: event maturity models distinguish raw→validated→enriched→curated, which coordination events skip entirely.")
 q1_unified_benefit  = P("[CONFIDENCE:MEDIUM] Unified pipeline benefit: cross-referencing. When coordination events and knowledge events live in the same log, you can ask 'what knowledge was available when this coordination decision was made?' — impossible if they're in separate pipelines. This is the audit/time-travel advantage.")
@@ -74,20 +78,24 @@ IMPL(q2_multi, q2_isolation, "multiple pipelines enable isolation")
 IMPL(q2_single, q2_correlation, "single pipeline simplifies correlation")
 NAND(q2_single, q2_isolation, "single pipeline prevents domain isolation")
 
-# ── Q3: JSONL vs FalkorDB as source of truth ──
+# ── Q3: JSONL as reconstruction source vs FalkorDB as the durable store ──
 
 print("=== Q3 ===")
-q3_jsonl    = P("[CONFIDENCE:HIGH] JSONL as source of truth: append-only file, zero dependencies, grep-able, replay-friendly, git-diffable. Every event is a self-contained JSON line. The current state is a projection (fold). Evidence: Event sourcing canonical pattern — the log is the database. Trade-off: querying requires full replay or external index; compaction is manual; no built-in concurrency control.")
-q3_falkor   = P("[CONFIDENCE:HIGH] FalkorDB as source of truth: graph-native with openCypher queries, indexed traversal, GraphBLAS sparse-matrix engine. Points and operators live as nodes and typed edges. Evidence: FalkorDBLite is embedded (zero-config), same graph portable to server FalkorDB. Trade-off: requires a running database; schema evolution is more constrained; the graph is a snapshot, not a replayable log.")
-q3_hybrid   = P("[CONFIDENCE:HIGH] Hybrid: JSONL is the source of truth; FalkorDB is a derived projection. Already the Tortoise design. Event log is append-only, immutable, replayable. FalkorDB is rebuilt from the log on demand. Evidence: This is the architecture Tortoise committed to (2026-07-07). Trade-off: eventual consistency between log and projection; rebuild cost grows with log size.")
+q3_jsonl    = P("[CONFIDENCE:HIGH] JSONL as reconstruction source: append-only file, zero dependencies, grep-able, replay-friendly, git-diffable. Every event is a self-contained JSON line. The current state is a projection (fold). Evidence: Event sourcing canonical pattern — the log rebuilds a projection under changed fold logic. Trade-off: querying requires full replay or external index; compaction is manual; no built-in concurrency control.")
+q3_falkor   = P("[CONFIDENCE:HIGH] FalkorDB as the durable store: graph-native with openCypher queries, indexed traversal, GraphBLAS sparse-matrix engine. Points and operators live as nodes and typed edges. Evidence: FalkorDBLite is embedded (zero-config), same graph portable to server FalkorDB. Trade-off: requires a running database; schema evolution is more constrained; the store is not a replayable log, so reconstruction under changed fold logic needs the JSONL.")
+q3_hybrid   = P("[CONFIDENCE:HIGH] Hybrid — the JSONL is the reconstruction source; the FalkorDB store is the durability authority. Already the Tortoise design. Event log is append-only, immutable, replayable. FalkorDB is rebuilt from the log on demand. Evidence: This is the architecture Tortoise committed to (2026-07-07); the authority is stated in docs/durability-posture.md (#2881). Trade-off: eventual consistency between log and projection; rebuild cost grows with log size.")
 q3_replay   = P("[CONFIDENCE:HIGH] Replay is the JSONL advantage. You can re-extract with a different model version and append new points without losing the old ones — the log is an immutable ledger. FalkorDB-only stores would require migration scripts. Evidence: Tortoise idempotency design (input-keyed, version-superseded replay). This is the core argument for log-first.")
 q3_query    = P("[CONFIDENCE:MEDIUM] Query is the FalkorDB advantage. graph-native queries (pathfinding, centrality, grounding computation via GraphBLAS) are impossible against raw JSONL without an index. But the projection pattern already solves this: query FalkorDB, trust the log.")
 
-IMPL(q3_hybrid, q3_jsonl, "hybrid preserves JSONL as source of truth")
+IMPL(q3_hybrid, q3_jsonl, "hybrid preserves the JSONL as reconstruction source")
 IMPL(q3_hybrid, q3_falkor, "hybrid uses FalkorDB for query")
 IMPL(q3_jsonl, q3_replay, "JSONL enables replay via append-only immutability")
 IMPL(q3_falkor, q3_query, "FalkorDB enables graph-native queries")
-NAND(q3_jsonl, q3_falkor, "mutual exclusivity as SOT: you pick one canonical store")
+# No NAND here (#4308): under docs/durability-posture.md the JSONL
+# (reconstruction source) and the store (durability authority) are complementary
+# roles, not competing ones — q3_hybrid IMPLs both — so a contradiction edge
+# would write a false conflict into the graph. The rejected "pick one canonical
+# store" framing is the architecture the authority exists to end.
 
 # ── Q4: One Tortoise instance vs per-agent instances ──
 
@@ -107,7 +115,7 @@ IMPL(q4_hybrid_kg, q4_peragent, "hybrid preserves per-agent isolation")
 # ── Cross-question connections ──
 
 print("=== Cross-Q ===")
-# Q3 (JSONL as SOT) supports Q2 (single pipeline easier with file-based log)
+# Q3 (JSONL as reconstruction source) supports Q2 (single pipeline easier with file-based log)
 IMPL(q3_jsonl, q2_single, "JSONL log-first naturally supports single pipeline")
 # Q1 (separate layers) supports Q2 (multiple pipelines map to separate coordination/knowledge)
 IMPL(q1_separate, q2_multi, "separate layers naturally map to multiple pipelines")

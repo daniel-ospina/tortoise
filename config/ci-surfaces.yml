@@ -3027,6 +3027,16 @@ surfaces:
   # environment cannot express the cross-agent 403 (one key) or archived→409
   # (the agent API cannot archive) — those cases live here.
   - test_blog_agent_delete_guard.py
+  # #4311: the CREATE status narrowing, executed against the same Function. The
+  # fix moved the invariant into a type (PostStatus); a type fixes the SHAPE and
+  # says nothing about the behaviour callers depend on, so the draft default,
+  # the refusal of an invalid status, and the published-only rules are driven
+  # here. Same Node harness, same Function, no wrangler/network/DB.
+  - test_blog_post_status_validation.py
+  # #4311: the strict tsc project + CI job that typecheck website/functions/**
+  # (tools/ts/README.md). A gate is worth what its wiring is worth, so the
+  # tsconfig, the pinned toolchain and the workflow job are pinned here too.
+  - test_website_functions_typecheck.py
   - test_dashboard_unknown_address.py
   # #2409: the public contact form. The handler's behaviour — the byte ceiling
   # (including what it SPENDS), the rate limiter, the honeypot, the transport —
@@ -4830,6 +4840,8 @@ durations:
   test_ask_spotcheck_seed_shape.py: 0.3
   test_battery_recall_wiring.py: 0.3
   test_blog_agent_delete_guard.py: 2.5
+  test_blog_post_status_validation.py: 2.5  # #4311: analogue estimate (same Node type-stripping harness as test_blog_agent_delete_guard.py); refresh from the first post-merge junit artifact
+  test_website_functions_typecheck.py: 2.0  # #4311: analogue estimate (measured 1.9s locally — JSON/YAML reads + the executed gate script); refresh from the first post-merge junit artifact
   test_capture_cost_measurement.py: 4.3
   test_capture_entity_attachment_3664.py: 5.9
   test_capture_install.py: 16.6

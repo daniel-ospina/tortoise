@@ -14711,8 +14711,9 @@ class FalkorProjection(
         ALL four factor-extraction call sites. Terminal points are excluded
         UNCONDITIONALLY (#2422): ``_live_only`` returns the terminal-exclusion
         fragment even under the include_draft escape hatch, so drafts are
-        re-included but retracted/superseded/outdated/archived points (and
-        the ``outdated=true`` flag) never feed SVBP factors.
+        re-included but retracted/superseded/outdated/archived/deprecated
+        points (the canonical ``live.TERMINAL_EXCLUDED_STATUSES``, plus the
+        ``outdated=true`` flag) never feed SVBP factors.
         """
         # Query 1: all operator IDs and types (single query, O(1) round-trip).
         # #689/#2422: terminal operators never feed EP factors (retracted /
