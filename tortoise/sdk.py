@@ -4405,6 +4405,17 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
         for key in ("valid_from", "valid_to", "expired_at"):
             if st.get(key):
                 r[key] = st[key]
+        # #2350 (E-prec): the precision block owes every read path the same
+        # 3-state end the primary decoration carries — the embedded fallback
+        # must not relabel an ended-unknown window as still-true.
+        if (st.get("valid_from") or st.get("valid_to")
+                or st.get("valid_to_precision")):
+            if st.get("valid_from_precision"):
+                r["valid_from_precision"] = st["valid_from_precision"]
+            if st.get("valid_to_precision"):
+                r["valid_to_precision"] = st["valid_to_precision"]
+            r["end_state"] = st.get("end_state") or _resolve_end_state(
+                st.get("valid_to"), st.get("valid_to_precision"))
         # #4889: same additive subject field as SearchResult.to_dict.
         if st.get("subject"):
             r["subject"] = st["subject"]
@@ -4724,6 +4735,72 @@ def _refuse_inverted_point_window(g, props: dict, *,
         effective_vf = props.get("validFrom", stored_vf)
         effective_vt = props.get("validTo", stored_vt)
         validate_validity_window(effective_vf, effective_vt)
+
+
+def _resolve_end_state(valid_to: object, valid_to_precision: object) -> str:
+    """#2350: the 3-state end, resolved by validity.py's ONE home."""
+    from tortoise.validity import end_state
+    return end_state(valid_to, valid_to_precision)
+
+
+def _refuse_inconsistent_validity_precision(g, props: dict, *,
+                                            point_id: str | None = None) -> None:
+    """#2350: refuse a validity-precision declaration that contradicts its bound.
+
+    The precision vocabulary's ONE write-boundary guard, mirroring
+    ``_refuse_inverted_point_window``: it resolves the pair a PARTIAL update
+    will actually persist (the caller's key when PRESENT, else the stored
+    value) and delegates the predicate to ``validity.validate_validity_precision``.
+    ``point_id is None`` is a fresh create, where all four values are the
+    caller's.
+
+    TWO consequences a caller will meet, both deliberate fail-closed choices:
+
+    * ``validToPrecision='unknown'`` requires the effective ``validTo`` to be
+      ABSENT — pass ``validTo=None`` alongside it to clear a stored end, since
+      ``SET n += $props`` removes a property whose key is present with a
+      ``None`` value.
+    * moving a window OFF an unknown end (``update_point(id, validTo=…)`` on a
+      point whose stored end is unknown) is refused until the caller states
+      the new precision: leaving the stale ``'unknown'`` marker beside a real
+      date is the fabrication the marker exists to prevent.
+
+    Legacy windows carry no precision property; ``props.get(key, stored)``
+    then yields ``None`` for both sides and the guard is inert, so no
+    pre-existing write changes behaviour.
+    """
+    from tortoise.validity import (
+        FROM_PRECISION_PROP,
+        TO_PRECISION_PROP,
+        validate_validity_precision,
+    )
+    keys = ("validFrom", "validTo", FROM_PRECISION_PROP, TO_PRECISION_PROP)
+    if not any(k in props for k in keys):
+        return
+    if point_id is None:
+        validate_validity_precision(
+            props.get("validFrom"), props.get("validTo"),
+            props.get(FROM_PRECISION_PROP), props.get(TO_PRECISION_PROP),
+        )
+        return
+    rows = g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.validTo, "
+        "n.validFromPrecision, n.validToPrecision",
+        params={"id": point_id},
+    ).result_set
+    if not rows:
+        return
+    # EVERY matching node, not just the first: the writers MATCH the id and
+    # stamp in one query, so a first-row-only read could pass the guard and
+    # still leave an inconsistent declaration on a sibling (the same duplicate
+    # fan-out ``_refuse_inverted_point_window`` loops over).
+    for stored_vf, stored_vt, stored_fp, stored_tp in rows:
+        validate_validity_precision(
+            props.get("validFrom", stored_vf),
+            props.get("validTo", stored_vt),
+            props.get(FROM_PRECISION_PROP, stored_fp),
+            props.get(TO_PRECISION_PROP, stored_tp),
+        )
 
 
 #: Sentinel returned by ``_supersede_window_start_source`` when no READABLE
@@ -6095,6 +6172,9 @@ class TortoiseSDK:
         # guard and the read path's `_covers`) instead of re-implementing it.
         # No `point_id`: a fresh CREATE has no stored opposite bound to merge.
         _refuse_inverted_point_window(self._get_proj().g, props)
+        # #2350 (E-prec): the per-end precision declaration is validated by the
+        # same fresh-create rule (no stored opposite to merge).
+        _refuse_inconsistent_validity_precision(self._get_proj().g, props)
         # #3263: provenance is INFERRED from the write context, never demanded.
         # A write that carries a session context has a derivable Source — the
         # same `session:<id>` ref the capture path wires explicitly (#1350).
@@ -9606,6 +9686,10 @@ class TortoiseSDK:
         # be checked as (None, EARLY) and pass, persisting the inversion. The
         # predicate itself is the ONE HOME, never a second copy.
         _refuse_inverted_point_window(proj.g, props, point_id=id)
+        # #2350 (E-prec): precision is validated against the STORED pair after
+        # the same merge, so a one-sided update cannot leave a marker beside a
+        # bound it contradicts.
+        _refuse_inconsistent_validity_precision(proj.g, props, point_id=id)
         # #5240: `content`'s None boundary is decided ONCE, here, before any
         # consumer reads the key — because the consumers disagreed. The
         # derived-hash line below tested KEY PRESENCE (``"content" in props``)
@@ -10149,7 +10233,8 @@ class TortoiseSDK:
                     f"call retract_point({point_id!r}) instead."
                 ) from None
 
-    def invalidate_point(self, id: str, corrected_by_id: str) -> dict:
+    def invalidate_point(self, id: str, corrected_by_id: str,
+                         *, valid_to_precision: str | None = None) -> dict:
         """Mark a Point outdated, linked to its replacement via CORRECTS edge.
 
         Validation contract (#330/#2498) — all checks run BEFORE any write so
@@ -10180,6 +10265,12 @@ class TortoiseSDK:
         contract let a dead claim's ``expiredAt`` move forward and minted one
         CORRECTS edge per distinct corrector onto a node every read surface
         already excludes.
+
+        E-prec (#2350): ``valid_to_precision='unknown'`` closes the window
+        WITHOUT stamping a fabricated ``validTo=now`` — the closed-unknown
+        state ("this ended, but I cannot date it"). When that marker is given
+        the #5358 inverted-window precondition is skipped: no end is written,
+        so no inversion is possible.
         """
         from datetime import datetime, timezone
         proj = self._get_proj()
@@ -10202,10 +10293,20 @@ class TortoiseSDK:
         self._assert_lifecycle_guard(
             corrected_by_id, method="invalidation", role="corrector")
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+        # #2350 (E-prec): 'unknown' closes the window WITHOUT a fabricated
+        # validTo — the closed-unknown state (utopia's ``valid_to_precision``
+        # pattern). Resolved before the #5358 inversion guard, which only
+        # applies when a ``validTo`` is actually stamped.
+        from .validity import PRECISION_UNKNOWN as _PREC_UNKNOWN
+        from .validity import normalize_precision as _normalize_precision
+        end_precision = _normalize_precision(
+            valid_to_precision, field="valid_to_precision")
+        stamp_valid_to = None if end_precision == _PREC_UNKNOWN else now
         # #5358: refuse an INVERTED predecessor window BEFORE any mutation.
         # The check is shared with the MCP dry-run preview
         # (`_preview_invalidate`) so the writer and its preview cannot drift.
-        self._assert_window_start_not_inverted(id, now)
+        if stamp_valid_to is not None:
+            self._assert_window_start_not_inverted(id, now)
 
         # #2488 (rebuild-parity fix): kwargs-style PointInvalidated emission —
         # validated-emit-then-mutate (mirrors supersede_point's #432 anti-
@@ -10220,14 +10321,18 @@ class TortoiseSDK:
         self._emit_event(
             "PointInvalidated",
             id=id, corrected_by=corrected_by_id,
-            ts=now, valid_to=now, expired_at=now,
+            ts=now, valid_to=stamp_valid_to,
+            valid_to_precision=end_precision, expired_at=now,
         )
 
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.outdated = true, "
-            "n.updatedAt = $now, n.validTo = $now, n.expiredAt = $now, "
+            "n.updatedAt = $now, n.validTo = $valid_to, "
+            "n.validToPrecision = $valid_to_precision, "
+            "n.expiredAt = $now, "
             f"{decay_clause('n')}",
-            params={"id": id, "now": now},
+            params={"id": id, "now": now, "valid_to": stamp_valid_to,
+                    "valid_to_precision": end_precision},
         )
         proj.g.query(
             "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
@@ -10274,7 +10379,8 @@ class TortoiseSDK:
         return self.invalidate_point(old_id, new_id)
 
     def supersede_point(self, old_id: str, new_id: str,
-                        *, valid_from: str | None = None) -> dict:
+                        *, valid_from: str | None = None,
+                        valid_to_precision: str | None = None) -> dict:
         """Atomically replace old Point with new — CORRECTS edge + outdated flag + edge transfer.
 
         E6 (#1538) D2 — bi-temporal validity windows: the supersession ALSO
@@ -10316,6 +10422,16 @@ class TortoiseSDK:
         requires an orderable value and otherwise lands on ``now`` (#5360). A
         numeric-epoch kwarg is deliberately exempt — see
         ``_supersede_window_end``. See docs/ONTOLOGY.md §4.7 (``validTo``).
+
+        E-prec (#2350): ``valid_to_precision`` declares how precisely the
+        predecessor's stamped END is known. ``'unknown'`` is the closed-unknown
+        state — the window ENDED but at a time we cannot pin, so NO ``validTo``
+        is fabricated (the 'half-honest dates are worse than none' rule) and
+        the stored marker is what every read path reports as
+        ``end_state='unknown'``. Otherwise the predecessor's end IS the
+        successor's start, so it inherits the successor's ``validFromPrecision``
+        when the caller does not state one, keeping the contiguous boundary's
+        precision honest on both sides.
 
         Transfers all edges from the old point to the new point:
           - Operator edges (IMPL, NAND, hasPart) with idx, AND their reverse
@@ -10445,7 +10561,8 @@ class TortoiseSDK:
         # in #6140; #3985 fixed the falsey-but-ORDERABLE case (`0`), which the
         # branch above now takes.
         vf_rows = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt",
+            "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt, "
+            "n.validFromPrecision",
             params={"id": new_id},
         ).result_set
         stored_vf = vf_rows[0][0] if vf_rows else None
@@ -10482,6 +10599,23 @@ class TortoiseSDK:
             successor_created_at=(vf_rows[0][1] if vf_rows else None),
             now=now,
         )
+        # #2350 (E-prec): resolve the precision of the predecessor's stamped
+        # END. ``'unknown'`` is the closed-unknown marker: the window ENDED but
+        # carries no datable instant, so NO ``validTo`` is fabricated (the
+        # 'half-honest dates are worse than none' rule). Otherwise the
+        # predecessor's end IS the successor's start, so it inherits the
+        # successor's declared start precision when the caller does not state
+        # one — the precision travels with the contiguous boundary.
+        from .validity import PRECISION_UNKNOWN as _PREC_UNKNOWN
+        from .validity import normalize_precision as _normalize_precision
+        end_precision = _normalize_precision(
+            valid_to_precision, field="valid_to_precision")
+        if end_precision == _PREC_UNKNOWN:
+            stamp_valid_to = None
+        else:
+            if end_precision is None and vf_rows:
+                end_precision = vf_rows[0][2] or None
+            stamp_valid_to = succ_vf
         # #2423 (rebuild-parity fix): kwargs-style emission (id + extra keys)
         # so the FULL payload rides the JSONL line — the previous dict-style
         # emission only reached the :GraphEvent store (payload) while the
@@ -10493,7 +10627,8 @@ class TortoiseSDK:
         self._emit_event(
             "PointSuperseded",
             id=old_id, new_id=new_id,
-            valid_from=succ_vf, valid_to=succ_vf, expired_at=now,
+            valid_from=succ_vf, valid_to=stamp_valid_to,
+            valid_to_precision=end_precision, expired_at=now,
             # #5048: `now` is ALSO the envelope instant, so the replay's
             # `updated_at = _journal_instant(ev)` reads the instant the live
             # SET below writes. Without it the envelope `ts` was a SECOND
@@ -10876,10 +11011,13 @@ class TortoiseSDK:
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.status = 'superseded', "
             "n.outdated = true, n.updatedAt = $now, "
-            "n.validTo = $valid_to, n.expiredAt = $expired_at, "
+            "n.validTo = $valid_to, n.validToPrecision = $valid_to_precision, "
+            "n.expiredAt = $expired_at, "
             f"{decay_clause('n')}",
             params={"id": old_id, "now": now,
-                    "valid_to": succ_vf, "expired_at": now},
+                    "valid_to": stamp_valid_to,
+                    "valid_to_precision": end_precision,
+                    "expired_at": now},
         )
         proj.g.query(
             "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
@@ -21665,6 +21803,24 @@ class TortoiseSDK:
                 or pt.get("validTo") or "",
                 expired_at=point_state.get(pid, {}).get("expired_at")
                 or pt.get("expiredAt") or "",
+                # #2350 (E-prec): the precision block rides the SAME decoration
+                # as the window fields above. ``end_state`` falls back to the
+                # raw props when the batch decoration ran on a graph the
+                # precision fetch could not reach — so a window is never
+                # silently relabelled ``open``.
+                valid_from_precision=(
+                    point_state.get(pid, {}).get("valid_from_precision")
+                    or pt.get("validFromPrecision") or ""),
+                valid_to_precision=(
+                    point_state.get(pid, {}).get("valid_to_precision")
+                    or pt.get("validToPrecision") or ""),
+                end_state=(
+                    point_state.get(pid, {}).get("end_state")
+                    or _resolve_end_state(
+                        point_state.get(pid, {}).get("valid_to")
+                        or pt.get("validTo"),
+                        point_state.get(pid, {}).get("valid_to_precision")
+                        or pt.get("validToPrecision"))),
                 subject=point_state.get(pid, {}).get("subject"),
                 topics=cap_topics,
                 summary=cap_summary,
@@ -22117,8 +22273,26 @@ class TortoiseSDK:
 
         Date comparison reuses ``_created_sort_key``'s mixed-format
         tolerance (ISO strings + numeric epoch both parse).
+
+        Per-end precision + the 3-state end (#2350, E-prec). Every entry that
+        carries a window (``chain``, ``valid_point``, ``candidates``,
+        ``nearest``) also carries ``valid_from_precision``,
+        ``valid_to_precision`` and ``end_state`` (``open`` | ``known`` |
+        ``unknown``). A window whose end is marked un-datable
+        (``validToPrecision == "unknown"``, no ``validTo``) is an ENDED window
+        — but because no instant is attested, ``_covers`` cannot exclude it and
+        the reply would otherwise read exactly like a still-true one, so the
+        top level also carries ``end_state_unknown: true`` and
+        ``indeterminate_end_ids`` whenever a COVERING candidate has an unknown
+        end. Read ``end_state_unknown`` before treating a ``found`` reply as
+        attestation that the claim was true at ``at_date``: it says the window
+        may have ended before then, and this read cannot tell. Legacy windows
+        carry no precision property, so their replies are unchanged
+        (``end_state`` is ``open``/``known`` and no unknown markers are
+        emitted).
         """
         from .search_engine import _created_sort_key
+        from .validity import END_UNKNOWN, window_read_fields
 
         at_date = str(at_date or "").strip()
         if not at_date:
@@ -22136,7 +22310,8 @@ class TortoiseSDK:
             seen.add(cur)
             rows = proj.g.query(
                 "MATCH (p:Point {id:$id}) RETURN p.content, p.validFrom, "
-                "p.validTo, p.createdAt",
+                "p.validTo, p.createdAt, p.validFromPrecision, "
+                "p.validToPrecision",
                 params={"id": cur},
             ).result_set
             if not rows:
@@ -22146,9 +22321,11 @@ class TortoiseSDK:
                             "point_id": point_id,
                             "at_date": at_date, "chain": []}
                 break
-            content, vf, vt, created = rows[0]  # noqa: RUF059
-            chain.append({"id": cur, "content": content,
-                          "valid_from": vf, "valid_to": vt})
+            content, vf, vt, created, vfp, vtp = rows[0]  # noqa: RUF059
+            entry = {"id": cur, "content": content,
+                     "valid_from": vf, "valid_to": vt}
+            entry.update(window_read_fields(vf, vt, vfp, vtp))
+            chain.append(entry)
             older = proj.g.query(
                 "MATCH (p:Point {id:$id})-[:CORRECTS]->(old:Point) "
                 "RETURN old.id ORDER BY old.createdAt LIMIT 1",
@@ -22173,19 +22350,40 @@ class TortoiseSDK:
                 return False
             return True
 
+        def window_entry(e: dict, *, include_content: bool = True) -> dict:
+            """One reply entry carrying the #2350 precision block.
+
+            ``chain`` entries never carried ``content``; the resolved entries
+            (``valid_point``/``candidates``/``nearest``) always did. The
+            precision fields are ADDITIVE on every one of them.
+            """
+            entry = {"id": e["id"], "valid_from": e["valid_from"],
+                     "valid_to": e["valid_to"],
+                     "valid_from_precision": e["valid_from_precision"],
+                     "valid_to_precision": e["valid_to_precision"],
+                     "end_state": e["end_state"]}
+            if include_content:
+                entry["content"] = e["content"]
+            return entry
+
         covering = [e for e in chain if _covers(e["valid_from"], e["valid_to"])]
         out = {
             "point_id": point_id,
             "at_date": at_date,
             "current": {"id": chain[0]["id"], "content": chain[0]["content"]},
-            "chain": [{"id": e["id"], "valid_from": e["valid_from"],
-                        "valid_to": e["valid_to"]} for e in chain],
+            "chain": [window_entry(e, include_content=False) for e in chain],
         }
+        # #2350: a covering window whose END is un-datable cannot be excluded
+        # by `_covers` (no instant to compare), so the reply would read exactly
+        # like a still-true claim. Say so at the top level.
+        indeterminate = [e["id"] for e in covering
+                         if e.get("end_state") == END_UNKNOWN]
+        if indeterminate:
+            out["end_state_unknown"] = True
+            out["indeterminate_end_ids"] = indeterminate
         if len(covering) == 1:
             e = covering[0]
-            out["valid_point"] = {"id": e["id"], "content": e["content"],
-                                   "valid_from": e["valid_from"],
-                                   "valid_to": e["valid_to"]}
+            out["valid_point"] = window_entry(e)
             out["found"] = True
             out["status"] = "found"
             return out
@@ -22200,10 +22398,7 @@ class TortoiseSDK:
             out["ambiguous"] = True
             out["found"] = True
             out["status"] = "ambiguous"
-            out["candidates"] = [{"id": e["id"], "content": e["content"],
-                                   "valid_from": e["valid_from"],
-                                   "valid_to": e["valid_to"]}
-                                  for e in covering]
+            out["candidates"] = [window_entry(e) for e in covering]
             return out
 
         # Honest absence: no window covers. Report the nearest window.
@@ -22249,9 +22444,7 @@ class TortoiseSDK:
                 best = dist
                 nearest = e
         if nearest is not None:
-            out["nearest"] = {"id": nearest["id"],
-                               "valid_from": nearest["valid_from"],
-                               "valid_to": nearest["valid_to"],
+            out["nearest"] = {**window_entry(nearest),
                                "malformed": _inverted(nearest["valid_from"],
                                                       nearest["valid_to"])}
         return out

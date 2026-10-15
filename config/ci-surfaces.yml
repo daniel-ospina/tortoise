@@ -1007,6 +1007,7 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  - test_2350_validity_precision.py
   # #5142: the ONTOLOGY record of the D10 code half — the `format` markers vs
   # `_SOURCE_HANDLED`, the deferred document/corpus-source node collapse, and
   # the document `:Source` scoping. Half its subject is `tortoise/projection/
@@ -4596,6 +4597,7 @@ durations:
   test_session_index_health.py: 1.1
   test_suspension_parity.py: 2.5
   test_2206_confidence_surfaces.py: 6.2
+  test_2350_validity_precision.py: 2.0  # #2350: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default; required for the durations coverage half as well as the surface half (#4348 trap).
   test_ask_regression_llm.py: 0.5
   test_entity_key_expansion.py: 0.8
   test_ep_dirty_persist.py: 1.2

@@ -1932,6 +1932,19 @@ def collect_day_slices(port: WalkerPort, days,
                                     for v in per_day_counts.values())})
 
 
+def _window_precision(valid_from, valid_to, valid_from_precision,
+                      valid_to_precision) -> dict:
+    """#2350 (E-prec): the additive precision block for an assembly row.
+
+    ONE import point so every assembly read path resolves the 3-state end
+    through the same home the search decoration and
+    ``get_historical_knowledge`` use.
+    """
+    from tortoise.validity import window_read_fields
+    return window_read_fields(valid_from, valid_to,
+                              valid_from_precision, valid_to_precision)
+
+
 def docker_walker_port(sdk) -> WalkerPort:
     """Adapter over a live TortoiseSDK: the state read is ONE batched
     Cypher statement (status/supersededBy/supersededAt together — no torn
@@ -1982,7 +1995,8 @@ def docker_walker_port(sdk) -> WalkerPort:
                 "RETURN 'point' AS kind, p.id, p.content, p.when, "
                 "p.createdAt, p.status, p.validFrom, p.validTo, "
                 "p.expiredAt, p.ep_alpha, p.ep_beta, p.quote, "
-                "p.search_keys, p.eventId, p.lme_session_index "
+                "p.search_keys, p.eventId, p.lme_session_index, "
+                "p.validFromPrecision, p.validToPrecision "
                 "ORDER BY p.id LIMIT $cap",
                 params={"oid": oid, "cap": cap}).result_set
             for r in prow:
@@ -1996,7 +2010,9 @@ def docker_walker_port(sdk) -> WalkerPort:
                             "expired_at": r[8], "ep_alpha": r[9],
                             "ep_beta": r[10], "quote": r[11],
                             "search_keys": r[12], "event_id": r[13],
-                            "lme_session_index": r[14]})
+                            "lme_session_index": r[14],
+                            # #2350: the precision block (additive keys).
+                            **_window_precision(r[6], r[7], r[15], r[16])})
             erow = proj.g.query(
                 "MATCH (o:Object {id:$oid})<-[:aboutObject]-(e:Event) "
                 "RETURN 'event' AS kind, e.eventId, e.name, e.startedAt, "
@@ -2043,7 +2059,8 @@ def docker_walker_port(sdk) -> WalkerPort:
                 "RETURN 'point' AS kind, p.id, p.content, p.when, "
                 "p.createdAt, p.status, p.validFrom, p.validTo, "
                 "p.expiredAt, p.ep_alpha, p.ep_beta, p.quote, "
-                "p.search_keys, p.eventId, p.lme_session_index "
+                "p.search_keys, p.eventId, p.lme_session_index, "
+                "p.validFromPrecision, p.validToPrecision "
                 "ORDER BY p.id LIMIT $cap",
                 params={"day": day, "cap": cap}).result_set
             for r in prow:
@@ -2053,7 +2070,8 @@ def docker_walker_port(sdk) -> WalkerPort:
                             "valid_to": r[7], "expired_at": r[8],
                             "ep_alpha": r[9], "ep_beta": r[10],
                             "quote": r[11], "search_keys": r[12],
-                            "event_id": r[13], "lme_session_index": r[14]})
+                            "event_id": r[13], "lme_session_index": r[14],
+                            **_window_precision(r[6], r[7], r[15], r[16])})
             erow = proj.g.query(
                 "MATCH (e:Event) "
                 "WHERE e.startedAt STARTS WITH $day "
@@ -2115,7 +2133,8 @@ def docker_walker_port(sdk) -> WalkerPort:
                 + " RETURN 'point' AS kind, p.id, p.content, p.when, "
                   "p.createdAt, p.status, p.validFrom, p.validTo, "
                   "p.expiredAt, p.ep_alpha, p.ep_beta, p.quote, "
-                  "p.search_keys, p.eventId, p.lme_session_index "
+                  "p.search_keys, p.eventId, p.lme_session_index, "
+                  "p.validFromPrecision, p.validToPrecision "
                   "ORDER BY p.createdAt DESC, p.id "
                   "LIMIT $cap",
                 params=pparams).result_set
@@ -2127,7 +2146,8 @@ def docker_walker_port(sdk) -> WalkerPort:
                             "expired_at": r[8], "ep_alpha": r[9],
                             "ep_beta": r[10], "quote": r[11],
                             "search_keys": r[12], "event_id": r[13],
-                            "lme_session_index": r[14]})
+                            "lme_session_index": r[14],
+                            **_window_precision(r[6], r[7], r[15], r[16])})
         eclauses = []
         eparams: dict = {"cap": cap}
         if lo_s is not None:

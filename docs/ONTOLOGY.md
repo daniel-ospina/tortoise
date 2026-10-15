@@ -33,6 +33,17 @@ doc_status: live
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in the changelog.
 >
+> **Changelog v3.28 (2026-10-15 — issue #2350 — per-end validity precision + the 3-state window end):**
+>
+> **An additive field layer on §4.7's window pair — no existing window is re-stamped and no
+> parallel validity field is minted.** `validFromPrecision` / `validToPrecision` declare how
+> precisely each end is known (`year` | `month` | `day`), and the end-only marker
+> `validToPrecision = 'unknown'` closes a window whose end cannot be dated — the **3-state end**
+> (`open` / `closed-at-known-date` / `closed-unknown`). A legacy bare-ISO window reads as `day`
+> with no migration. The vocabulary, the ONE validator, and the shared read projection live in
+> `tortoise/validity.py`; the marker is surfaced on the search/recall, assembly and
+> `get_historical_knowledge` replies (§4.7, "Per-end precision and the 3-state end").
+>
 > **Changelog v3.27 (2026-10-14 — issue #7818 — the §4.7 coverage boundary, stated and left OPEN):**
 >
 > **A record of an undocumented rule, not a model change** — no field, marker or
@@ -1378,6 +1389,23 @@ window, independent of when Tortoise learned it. Canonical pair:
 >   is decided, a shared boundary instant is a known property of the closed
 >   reading, not a defect to be silently patched reader-by-reader.
 >
+**Per-end precision and the 3-state end (#2350, E-prec).** The window pair
+above carries an **additive** precision layer: `validFromPrecision` /
+`validToPrecision` ∈ {`year`, `month`, `day`}, plus the **end-only** marker
+`validToPrecision = 'unknown'`. The vocabulary and the ONE validator live in
+`tortoise/validity.py`. Precision is metadata about **how precisely the bound is
+known** — the stored bound is unchanged, so `_created_sort_key` orders exactly
+what it always did — and a legacy bare-ISO bound with no precision property
+reads as `day` with **no migration**. The END is **three-valued**: `open`
+(`validTo` absent, no precision — still true), `known` (`validTo` present), and
+`unknown` (`validToPrecision = 'unknown'` with **no** `validTo` — the window
+ended but at a time we cannot pin, so **no date is fabricated**). Every
+window-consuming read path emits the same `valid_from_precision` /
+`valid_to_precision` / `end_state` block through `validity.window_read_fields`,
+and a covering candidate whose end is `unknown` also sets `end_state_unknown` on
+the reply — so an un-datable end is never read as still-true. `unknown` is
+END-only: a window with no datable start is not a window.
+
 > **Point's `when` is not a second valid-time slot.** `when` (§4.1) is the
 > **occurrence-date input** — the payload-level anchor the hosted commit path
 > copies verbatim into `validFrom` on the same node
