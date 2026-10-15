@@ -105,8 +105,18 @@ export const MAIL_THROTTLE_CODE = "over_email_send_rate_limit";
 
 const WINDOW_MS = MAIL_THROTTLE_WINDOW_S * 1000;
 
-/** Rows one trip may reclaim. The prune runs only when the limit trips. */
+/**
+ * Rows one DELETE may reclaim, and how many such statements one request may
+ * spend draining.
+ *
+ * Reclamation runs on the REQUEST path (see its call sites), so it is bounded in
+ * both dimensions: a burst of freshly-created buckets must not each issue a huge
+ * delete, and a backlog must not be drained inside one user-facing request. A
+ * drained window costs one statement (the next batch comes back short); a
+ * backlog drains a bounded slice per request and continues on the next one.
+ */
 const PRUNE_LIMIT = 200;
+const PRUNE_MAX_BATCHES = 25;
 
 /**
  * Has DDL already run in this isolate?
@@ -157,16 +167,23 @@ async function clientKey(request: Request, windowStart: number): Promise<string>
 }
 
 async function pruneExpired(db: D1Database, before: number): Promise<void> {
-  // Bounded by construction (the inner LIMIT), so this can never try to drain
-  // a long-unpruned backlog inside one user-facing request.
-  await db
-    .prepare(
-      "DELETE FROM auth_mail_throttle WHERE bucket IN (" +
-        "SELECT bucket FROM auth_mail_throttle WHERE window_start < ?1 LIMIT " +
-        `${PRUNE_LIMIT})`,
-    )
-    .bind(before)
-    .run();
+  // Bounded by construction: each statement reclaims at most `PRUNE_LIMIT` rows
+  // (the inner LIMIT) and the loop stops as soon as a batch comes back short
+  // (drained) or after `PRUNE_MAX_BATCHES`, so this can never try to drain a
+  // long-unpruned backlog inside one user-facing request.
+  for (let batch = 0; batch < PRUNE_MAX_BATCHES; batch++) {
+    const result = await db
+      .prepare(
+        "DELETE FROM auth_mail_throttle WHERE bucket IN (" +
+          "SELECT bucket FROM auth_mail_throttle WHERE window_start < ?1 LIMIT " +
+          `${PRUNE_LIMIT})`,
+      )
+      .bind(before)
+      .run();
+    // `meta.changes` is D1's affected-row count — the same field `session.ts`
+    // relies on for its CAS. A short batch means there is nothing left.
+    if ((result.meta?.changes ?? 0) < PRUNE_LIMIT) return;
+  }
 }
 
 /**
@@ -185,7 +202,16 @@ export async function mailThrottle(
   scope: "reset" | "resend",
 ): Promise<Response | null> {
   const db = env.SESSIONS;
-  if (!db) return null; // fail open — see the header
+  if (!db) {
+    // Fail open, but LOUDLY. The module header promises the fault is logged:
+    // without this line a deployment missing the binding loses throttling with
+    // no signal anywhere — the class the `ensureColumn` lesson in session.ts
+    // exists to prevent.
+    console.warn(
+      `auth-mail-throttle: no SESSIONS binding, request not throttled (scope=${scope})`,
+    );
+    return null; // fail open — see the header
+  }
 
   try {
     await ensureThrottleTable(db);
@@ -205,9 +231,28 @@ export async function mailThrottle(
       .bind(bucket, windowStart)
       .first<{ hits: number }>();
 
-    if ((row?.hits ?? 0) <= MAIL_THROTTLE_LIMIT) return null;
+    if (!row) {
+      // `.first()` yielded no row for a statement that always RETURNS one.
+      // Treated as "under the limit" (fail open), but LOGGED: silently, this is
+      // indistinguishable from "no caller is over budget", so a permanent
+      // no-op would report nothing anywhere (see the header).
+      console.warn(
+        `auth-mail-throttle: upsert returned no row, request not throttled (scope=${scope})`,
+      );
+      return null;
+    }
 
-    await pruneExpired(db, windowStart - WINDOW_MS);
+    // Reclaim expired rows on the path NORMAL traffic reaches, not only on a
+    // trip. Every (route, caller, window) creates exactly one row at `hits === 1`,
+    // so reclamation gated on a trip would let a deployment where nobody ever
+    // trips grow by one dead row per caller per window for ever — retention has
+    // to be a function of TIME, not of the abuse pattern. The trip also prunes,
+    // so an abuse burst reclaims too.
+    if (row.hits === 1 || row.hits > MAIL_THROTTLE_LIMIT) {
+      await pruneExpired(db, windowStart - WINDOW_MS);
+    }
+
+    if (row.hits <= MAIL_THROTTLE_LIMIT) return null;
 
     const retryAfterS = Math.max(1, Math.ceil((windowStart + WINDOW_MS - now) / 1000));
     const res = json(

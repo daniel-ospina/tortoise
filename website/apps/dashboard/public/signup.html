@@ -907,6 +907,11 @@
     // literal (TDZ: the map evaluates at script load; a `const` referenced
     // before its declaration kills the whole inline script — the #527 class).
     const EMAIL_BUCKET_RATE_LIMIT_COPY = "Signup emails are temporarily exhausted (too many signups right now). Try again in about an hour.";
+    // #4161: the BFF's own, CALLER-scoped mail throttle is not GoTrue's project-
+    // wide email bucket and not a credential failure. Its copy must not name a
+    // flow (a password reset is not a signup), so it is single-sourced here and
+    // used by the reset modal and the resend note alike.
+    const MAIL_RATE_LIMIT_COPY = "Email limit reached — try again in about an hour.";
     const NETWORK_RATE_LIMIT_COPY = "Too many attempts from this network. Please wait about an hour and try again.";
     const AUTH_ERROR_MAP = [
       {
@@ -1843,9 +1848,16 @@
       try {
         const resp = await bffPost("/auth/reset", { email: email });
         if (resp.status === 429) {
-          const err = bffError(resp.data);
-          setLoginRateLimitLockout(err);
-          showModalError(isEmailBucketError(err) ? humanizeAuthError(err) : loginRateLimitMessage());
+          // #4161: this 429 is the BFF's caller-scoped mail throttle. It must
+          // NOT charge the LOGIN lockout: that bucket is for credential
+          // attempts, and applyLoginRateLimitLockout() disables #btn-submit
+          // (sign-in) while it holds — so a recovery request would lock the user
+          // out of signing in for an hour over an email budget that says nothing
+          // about their password. The copy is flow-neutral: "Signup emails are
+          // temporarily exhausted" is false on a password-reset request. The
+          // throttle is enforced server-side for the rest of the window, so a
+          // repeated click is refused without a client lockout to police it.
+          showModalError(MAIL_RATE_LIMIT_COPY);
           return;
         }
         if (resp.status === 400) {
@@ -1951,7 +1963,7 @@
           const err = bffError(resp.data);
           setRateLimitLockout(err);
           document.getElementById("resend-note").textContent = isEmailBucketError(err)
-            ? "Email limit reached — try again in about an hour."
+            ? MAIL_RATE_LIMIT_COPY
             : "Email limit reached — try again in a minute.";
           return;
         }

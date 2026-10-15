@@ -36,6 +36,7 @@ import os
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -90,7 +91,10 @@ class Proc:
 
     def __init__(self, argv, cwd, env=None, log_path: Path | None = None):
         self.log_path = log_path
-        self._fh = open(self.log_path, "wb") if self.log_path else subprocess.DEVNULL
+        # The handle is the child's stdout sink for the whole run, so it outlives
+        # __init__ on purpose and is closed in stop() — a context manager does
+        # not fit the lifecycle.
+        self._fh = open(self.log_path, "wb") if self.log_path else subprocess.DEVNULL  # noqa: SIM115
         self.p = subprocess.Popen(
             argv, cwd=cwd, env=env or os.environ.copy(),
             stdout=self._fh, stderr=subprocess.STDOUT, start_new_session=True,
@@ -198,7 +202,13 @@ def stack(tmp_path_factory):
             pytest.fail(f"pages dev ({label}) failed to start:\n{proc.tail()}")
     time.sleep(2.5)
 
-    yield {"app": APP, "nostore": NOSTORE, "mock": MOCK_URL}
+    yield {
+        "app": APP,
+        "nostore": NOSTORE,
+        "mock": MOCK_URL,
+        "d1_dir": persist / "d1",
+        "nostore_log": logs / "app-nostore.log",
+    }
     for p in (app, nostore, mock):
         p.stop()
 
@@ -240,6 +250,28 @@ def _calls(reset: bool = False) -> list[dict]:
 def _spend(base: str, path: str, ip: str, email: dict) -> list[tuple[int, str]]:
     """Spend the whole budget for `ip`; returns the (status, body) of each call."""
     return [(lambda r: (r[0], r[1]))(_post(base, path, email, ip)) for _ in range(LIMIT)]
+
+
+def _d1_sqlite(persist_dir: Path) -> Path:
+    """The suite's bound D1 sqlite, waiting for Miniflare to materialise it.
+
+    `--d1 SESSIONS` only declares the binding; the file appears on the first D1
+    access. The glob is relative to the value passed to `--persist-to` (this
+    suite passes a private `<tmp>/d1` root, not the dashboard's
+    `<project>/.wrangler/state`, so `bff_test_helpers.d1_sqlite_files` — which
+    prepends `.wrangler/state` — does not match here). Miniflare's own
+    `metadata.sqlite` holds none of the bound schema and is excluded.
+    """
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        files = [
+            p for p in persist_dir.glob("v3/d1/**/*.sqlite")
+            if p.name != "metadata.sqlite"
+        ]
+        if files:
+            return max(files, key=lambda p: p.stat().st_mtime)
+        time.sleep(0.3)
+    raise RuntimeError(f"no D1 sqlite appeared under {persist_dir}")
 
 
 # ---------------------------------------------------------------------------
@@ -300,10 +332,13 @@ def test_a_throttled_request_is_refused_before_the_provider_is_asked(stack):
 def test_the_refusal_is_identical_for_a_known_and_an_unknown_address(stack):
     """The load-bearing property: the ANSWER does not vary by address.
 
-    A limiter keyed on the address would answer a registered address differently
-    from an unregistered one — the same oracle the fold exists to prevent. Both
-    classes are spent to the limit here, so the 200s and the 429s are compared on
-    equal footing rather than one being taken on trust.
+    This is what lets the route answer 429 honestly: keyed on the caller, the
+    refusal is the same for a registered and an unregistered address, so it
+    carries no account signal. (An address-keyed limiter is NOT an oracle — every
+    caller gets `LIMIT` per address — it is simply the wrong key: bypassable by
+    rotating addresses, and able to charge a victim's budget. See the module
+    header.) Both classes are spent to the limit here, so the 200s and the 429s
+    are compared on equal footing rather than one being taken on trust.
     """
     ip_known, ip_unknown = "198.51.100.3", "198.51.100.4"
     known_ok = _spend(APP, "/auth/reset", ip_known, KNOWN)
@@ -435,6 +470,77 @@ def test_without_the_sessions_binding_the_route_degrades_to_no_throttle(stack):
         f"with no store the route must not refuse, got {status} {body}"
     )
     assert len(_calls()) == LIMIT + 1, "every request should have reached GoTrue"
+
+    # ...and the degradation is NOT silent. The module header promises the fault
+    # is logged; without the `console.warn` on the `!db` path a deployment that
+    # lost the binding would silently lose throttling, which is the exact
+    # invisible-breakage class the header cites.
+    nostore_log = stack["nostore_log"].read_text("utf-8", "replace")
+    assert "auth-mail-throttle: no SESSIONS binding" in nostore_log, (
+        "the no-binding fail-open was silent — nothing in the no-store server's "
+        "log records that throttling was lost"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Retention: expired rows are reclaimed by NORMAL traffic, not only on a trip
+# ---------------------------------------------------------------------------
+def test_an_allowed_request_reclaims_expired_rows(stack):
+    """Reclamation must not be gated on the limit tripping (#4161 review).
+
+    Every request mints a row per (route, caller, window), but the only DELETE
+    ran inside the over-budget branch — so a deployment where nobody ever trips
+    grew by one dead row per caller per window for ever (no TTL, no sweep, no
+    cron). An ALLOWED request that CREATES a bucket (`hits === 1`) is the path
+    normal traffic takes, and it must drain the expired rows.
+
+    The stale row is seeded straight into the suite's own D1 (the pattern the
+    other auth suites use), then a fresh caller's under-budget request is made.
+    On the pre-fix code the row survives, because nothing on that path deletes.
+    """
+    persist = stack["d1_dir"]
+    window_ms = 3_600_000
+    window_start = (int(time.time() * 1000) // window_ms) * window_ms
+    stale = window_start - 2 * window_ms
+    stale_bucket = f"stale-prune-test:{stale}"
+
+    # The runtime bootstrap creates the table on the first request, so warm it
+    # (this caller's bucket is fresh, so its own prune finds nothing yet).
+    status, body, _ = _post(APP, "/auth/reset", KNOWN, "198.51.100.20")
+    assert status == 200, f"warm-up request failed: {status} {body}"
+
+    db = _d1_sqlite(persist)
+    con = sqlite3.connect(db, timeout=15)
+    try:
+        con.execute(
+            "INSERT OR REPLACE INTO auth_mail_throttle (bucket, hits, window_start) "
+            "VALUES (?, ?, ?)",
+            (stale_bucket, LIMIT, stale),
+        )
+        con.commit()
+        seeded = con.execute(
+            "SELECT COUNT(*) FROM auth_mail_throttle WHERE bucket = ?", (stale_bucket,)
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert seeded == 1, "the stale row did not land in the store"
+
+    # A FRESH caller, well under the limit: this request creates its bucket
+    # (`hits === 1`) — the normal-traffic path that must reclaim.
+    status, body, _ = _post(APP, "/auth/reset", KNOWN, "198.51.100.21")
+    assert status == 200, f"an under-budget request must be allowed, got {status} {body}"
+
+    con = sqlite3.connect(db, timeout=15)
+    try:
+        remaining = con.execute(
+            "SELECT COUNT(*) FROM auth_mail_throttle WHERE bucket = ?", (stale_bucket,)
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert remaining == 0, (
+        "an allowed request did not reclaim the expired row — reclamation is "
+        "still reachable only from the over-budget branch"
+    )
 
 
 if __name__ == "__main__":
