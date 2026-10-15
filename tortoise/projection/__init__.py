@@ -4092,6 +4092,77 @@ def _value_ok(val, _depth: int = 0) -> bool:
     return _annotator_value_ok(val) or _engine_coerces(val)
 
 
+class _UnstoredValue:
+    """Sentinel: the store keeps NO property for this value (#7951)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return "<unstored>"
+
+
+#: Returned by :func:`_stored_prop_value` for a value no property can hold.
+_UNSTORED = _UnstoredValue()
+
+
+def _stored_prop_value(val):
+    """The value FalkorDB STORES for ``val``, or :data:`_UNSTORED`.
+
+    #7951 §17.1 appends the `PointAdded` record BEFORE the `CREATE`, so the
+    payload can no longer be the post-`CREATE` `get_point` read-back — the
+    APPLIED value. It must state what the `CREATE` is about to write instead,
+    and "what the store holds" is THREE outcomes, not one:
+
+      * a JSON-native value the engine takes verbatim (``str``/``bool``/
+        ``int``/finite ``float``, and arrays of those) — kept as-is;
+      * a value the driver INLINES as ``str(val)`` and the engine parses as a
+        numeric/bool literal — ``Decimal("1.5")`` -> ``1.5``,
+        ``Fraction(5, 1)`` -> ``5``, ``np.int64(7)`` -> ``7``,
+        ``np.bool_(True)`` -> ``True``. The store holds the PARSED literal, so
+        the record must too: the raw object is not JSON-encodable and
+        ``EventLog.append`` passes no ``default=``, so journaling it destroyed
+        the append AND the cache write behind it (#7951 review P1);
+      * a value no property can hold — a null (a Cypher null property is not
+        stored), a map/bytes/set, a non-finite float, a NUL/lone-surrogate
+        string, a null inside an array, or anything else whose ``str()`` is
+        not a literal — for which the store holds NOTHING, so the record must
+        OMIT the key.
+
+    OMIT rather than record ``None``: the historic read-back payload omitted a
+    dropped property, and ``consistency.check_consistency`` reads a journal key
+    the node does not carry as ``uncarried_journal_fields``
+    (``_UNCARRIED_NULL`` / ``_UNCARRIED_NON_PERSISTABLE``) — so recording the
+    value the store REFUSED would manufacture exactly the asymmetry this
+    function exists to avoid (#7951 review, secondary symptom: a nested dict
+    that ``json`` accepts but the engine drops was journalled as a real
+    property the node never had).
+
+    The predicates are the boundary's OWN (``_value_ok`` / ``_engine_coerces``),
+    so a new accept-or-reject rule cannot be taught to the transport gate and
+    missed here.
+    """
+    if val is None:
+        return _UNSTORED
+    if isinstance(val, (list, tuple)):
+        # `_value_ok` already walks every leaf (and refuses a null INSIDE an
+        # array, which the engine rejects); reusing it keeps the array rule in
+        # one home. Every leaf it admits is storable — verbatim or coerced —
+        # so the recursion below cannot produce `_UNSTORED`.
+        if not _value_ok(val):
+            return _UNSTORED
+        return [_stored_prop_value(item) for item in val]
+    if _annotator_value_ok(val):
+        return val
+    if not _engine_coerces(val):
+        return _UNSTORED
+    text = str(val)
+    if text in _LITERAL_BOOLS:
+        return text == "True"
+    if "." in text or "e" in text or "E" in text:
+        return float(text)
+    return int(text)
+
+
 def _writable_at_parse(val, _depth: int = 0) -> bool:
     """False only for what the engine rejects while PARSING a parameter.
 

@@ -106,6 +106,10 @@ from . import file_indexer  # noqa: F401 — binds the classifier/identity modul
 from .projection import FalkorProjection
 # #7951 §17.1: the single-writer scope the live doors open around their fold.
 from .projection import _live_write_scope
+# #7951 review P1: the journal payload is built from the WRITE INTENT, so it
+# must state what the store will HOLD — the transport model lives in the
+# projection package (one home), not in a second copy at this call site.
+from .projection import _stored_prop_value, _UNSTORED
 from .projection.entities import (  # #3998: the declared :Source surface
     _SOURCE_NODE_PROP_NAMES,
     _SOURCE_SERVER_MANAGED_PROPS,
@@ -222,22 +226,36 @@ def _journal_snapshot_from_create_map(
     form therefore fails the write loudly instead of silently mis-journaling a
     record that a replay would then materialise as a different node.
 
-    The only coercion applied is the two Cypher boolean literals. Everything
-    else is the param verbatim: `vecf32($embedding)` is journalled RAW, exactly
-    as the record's `embedding` has always been (the replay re-narrows it,
-    `projection/entities.py::_upsert_point_props`), and `embedding_verbatim`
-    already tells the replay which of the two forms was written.
+    Every value is put through `_stored_prop_value`, so the record states what
+    the store will actually HOLD rather than the caller's raw object
+    (#7951 review P1): a JSON-native value rides verbatim; a driver-coerced
+    number (`Decimal`, `np.int64`, `Fraction`, ...) rides as the literal the
+    engine will parse; and a value the store keeps no property for — a null, a
+    map/bytes/set, a non-finite float, a NUL string, a null inside an array —
+    is OMITTED, exactly as the historic read-back omitted it. A raw
+    non-JSON-encodable prop reaching `json.dumps` used to raise inside
+    `_emit_event`, and the new commit gate then skipped the cache write — one
+    unlucky prop value silently destroyed the whole Point.
+
+    EMBEDDING is not an exception. A `vecf32($embedding)` vector rides RAW —
+    `_stored_prop_value` never narrows one, exactly as the record's `embedding`
+    has always been (the replay re-narrows it,
+    `projection/entities.py::_upsert_point_props`, and `embedding_verbatim`
+    already tells the replay which of the two forms was written). A null or
+    unusable vector is omitted here and re-added as an explicit `None` by the
+    producer's own `setdefault` in `_emit_event` (PRESENCE IS OWNERSHIP,
+    #5004), so the key is still on every snapshot a PointAdded emits.
     """
     out: dict = {}
     for key, expr in create_map.items():
         if expr == "true":
-            out[key] = True
+            val = True
         elif expr == "false":
-            out[key] = False
+            val = False
         elif expr.startswith("$"):
-            out[key] = create_params[expr[1:]]
+            val = create_params[expr[1:]]
         elif expr.startswith("vecf32($") and expr.endswith(")"):
-            out[key] = create_params[expr[len("vecf32($"):-1]]
+            val = create_params[expr[len("vecf32($"):-1]]
         else:
             raise ValueError(
                 "#7951: `_create_map` carries an expression form the journal "
@@ -245,6 +263,9 @@ def _journal_snapshot_from_create_map(
                 "form must be taught here (and its replay clause checked) "
                 "before create_point can journal a complete record."
             )
+        stored = _stored_prop_value(val)
+        if stored is not _UNSTORED:
+            out[key] = stored
     return out
 
 # baseline_source token family (issue #2199 direction, 2026-09-03):

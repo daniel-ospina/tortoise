@@ -116,12 +116,13 @@ its edges), and a test pins that scope.
 |---|---|---|---|
 | T1 | the Point cache write happens before the journal append | spy on `proj.g.query`; assert the `PointAdded` line is present BEFORE any Point `CREATE`/`MERGE` (scoped to Point statements per §3) | **YES** |
 | T2 | a failed append still writes the cache (derived ahead of truth) | monkeypatch the JSONL `log.append` to raise; assert **no Point exists** and `_journal_write_failures` incremented | **YES** |
-| T3a | the payload drops a property the `CREATE` writes | `set(payload) == set(_create_map)` | **YES** |
-| T3b | the payload drifts from the live node (live ≠ replay) | live `properties(n)` == `rebuild_all` properties as full maps **excluding `updatedAt`/`embedding`/the EP-owned `baseline_*` fields** (recorded residual 6: the fold deny-lists the latter), plus the **edge set** as `(type, target, edge-properties)` — non-empty guard on each | **YES** |
+| T3a | the payload drops a property the `CREATE` writes | the payload equals the exact expected map (not just `set(payload) == set(_create_map)`, which a builder iterating `create_map` satisfies structurally — #7951 review) | no (guard — the builder is closed over the known forms) |
+| T3b | the payload drifts from the live node (live ≠ replay) | live `properties(n)` == `rebuild_all` properties as full maps **excluding `updatedAt`/`embedding`/the EP-owned `baseline_*` fields** (recorded residual 6: the fold deny-lists the latter), plus the **edge set** as `(type, target, edge-properties)` — non-empty guard on each. A PARITY guard, not a defect detector: on `origin/main` the payload IS the read-back, so it cannot fail there (#7951 review) | no (guard) |
 | T4 | an unknown `_create_map` expression form is mis-journaled | helper raises on an unknown form | **YES** |
 | T5 | the commit survives a failed cache write | force the `CREATE` to fail once; assert the journal holds the record and a later `rebuild_all` materialises the node | **YES** |
 | T6 | a double append (two `PointAdded` per create) | exactly one line per fresh create (`dedup=False`) — mutation guard | no (guard) |
 | T7 | the pre-fold payload is not the record actually replayed | `rebuild_all` on the journal materialises the point (T5 covers the failure arm; this is the happy arm) | **YES** |
+| T8 | a raw caller prop value destroys the append (non-JSON) or is journalled as a property the store DROPS | a `datetime`/`Decimal`/`bytes`/`set` prop lands the write, appends one encodable record and does not touch `_journal_write_failures`; a nested-dict prop is OMITTED from the record; a driver-coerced number rides as the parsed literal | **YES** |
 
 ## 5. Wiring Check
 
@@ -166,8 +167,14 @@ its edges), and a test pins that scope.
    for this arm no longer claims "nothing was journaled"; it names the orphan event. Fixing the order
    inside `_emit_event` (JSONL before `:GraphEvent`) is a separate unit because `_emit_event`'s graph
    branch must still run when no JSONL is configured. **Filed: #8696.**
-7. **`aboutEntities` stays a node property live** (the `CREATE` writes it) and is dropped by the replay
+8. **`aboutEntities` stays a node property live** (the `CREATE` writes it) and is dropped by the replay
    fold — the same parity class as (6). `create_point`'s return shape is unchanged by this increment.
+9. **The payload states the store's OUTCOME, not the raw caller object** (the #7951 review P1).   `_journal_snapshot_from_create_map` puts every value through `projection._stored_prop_value`, so a
+   JSON-native value rides verbatim, a driver-coerced number rides as the parsed literal, and a value
+   the store keeps no property for is OMITTED. The residual is deliberate: the record states what the
+   `CREATE` will hold, and one class — a number the numeric domain ALTERS (an int outside INT64) — is
+   still refused by the guarded handle on the cache write after a committed append (#5011 reports that
+   divergence; it is not introduced here).
 
 ## 7. Next increments (recorded so the next lane does not re-derive)
 

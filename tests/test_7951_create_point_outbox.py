@@ -31,7 +31,10 @@ The verifier gates for this increment are recorded in
 """
 from __future__ import annotations
 
+import datetime
+import json
 import re
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -200,9 +203,21 @@ def test_the_snapshot_builder_covers_every_create_map_key():
 
     payload = _journal_snapshot_from_create_map(create_map, params)
 
-    assert set(payload) == set(create_map), (
-        "the builder dropped a `_create_map` key — the record would be "
-        f"incomplete: missing={set(create_map) - set(payload)!r}")
+    # An EXACT map, not just the key set: the key set alone cannot fail for a
+    # builder that iterates `create_map` (#7951 review — the previous
+    # `set(payload) == set(create_map)` assertion was structurally vacuous).
+    assert payload == {
+        "id": "p1", "content": "text", "pointKind": "statement",
+        "is_operator": False, "status": "live",
+        "createdAt": "2026-10-14T00:00:00Z",
+        "updatedAt": "2026-10-14T00:00:00Z",
+        "ep_dirty": True, "ep_dirty_at": 7,
+        "ep_alpha": 3.0, "ep_beta": 1.0,
+        "baseline_set": True, "baseline_source": "system-default",
+        "embedding": [0.1, 0.2], "embedding_verbatim": True,
+        "tags": ["a"], "custom": 42,
+    }, "the builder dropped or changed a `_create_map` key"
+
     assert payload["is_operator"] is False
     assert payload["baseline_set"] is True
     assert payload["embedding_verbatim"] is True
@@ -372,3 +387,126 @@ def test_a_fresh_create_appends_exactly_one_record(env):
     sdk.create_point("statement", "one claim", dedup=False)
     assert len(_point_added(events)) == 1, (
         f"a fresh create must append exactly one PointAdded: {_point_added(events)!r}")
+
+
+# ── T8: the record states what the STORE HOLDS, not the raw caller object ──
+#
+# The append is the commit point, so a payload the record cannot encode does
+# not merely lose the record — the new gate SKIPS the cache write, and one
+# unlucky prop value destroys the whole Point (#7951 review P1). And a value
+# `json` accepts but the engine DROPS was journalled as a property the node
+# never had (the review's secondary symptom). The payload is therefore built
+# from the store's own outcome, not from the caller's object.
+
+@pytest.mark.parametrize("propname, value", [
+    ("when", datetime.datetime(2026, 10, 14, 12, 0, 0)),
+    ("amount", Decimal("1.5")),
+    ("blob", b"raw"),
+    ("tags_like", {"a", "b"}),
+])
+def test_a_non_json_encodable_prop_does_not_destroy_the_write(env, propname, value):
+    """A raw caller value must not turn a create into a LOST write.
+
+    PRE-FIX (measured on `origin/main` this test must redden): the payload is
+    the caller's own object, `json.dumps` raises inside `_emit_event`, the
+    `_journal_write_failures` delta trips the new commit gate, and
+    `create_point` raises `WriteNotLandedError` with the Point NEVER written.
+
+    MUTATION: journal the raw param again and this fails on the raise (and on
+    the empty node count).
+    """
+    sdk, events = env
+    proj = sdk._get_proj()
+
+    point = sdk.create_point("statement", "a claim with a hostile prop",
+                             **{propname: value})
+
+    assert point.get("id"), f"create_point returned no id: {point!r}"
+    assert sdk._journal_write_failures == 0, (
+        "the record could not be encoded — the append failed and the whole "
+        "write was lost (#7951 review P1)")
+    pid = point["id"]
+    assert _count(proj, "MATCH (n:Point {id:$id}) RETURN count(n)", id=pid) == 1, (
+        "the Point was not written although nothing about the caller's prop "
+        "should stop it")
+    added = _point_added(events)
+    assert len(added) == 1, (
+        f"exactly one PointAdded must be committed: {added!r}")
+    # The append itself is the proof: the record is JSON-encodable end to end.
+    json.dumps(added[0], ensure_ascii=False)
+
+
+def test_the_record_states_only_what_the_store_will_hold(env):
+    """live(write) == record: the payload must not claim a dropped property.
+
+    `extra={"inner": 1}` is JSON-encodable but FalkorDB DROPS it (`_value_ok`
+    refuses a map), so the live node has no `extra`. PRE-FIX the record carried
+    it anyway — and `check_consistency` named it
+    (`uncarried_journal_fields: ['extra']`), a journal/graph asymmetry no replay
+    could close (#7951 review, secondary symptom).
+
+    MUTATION: journal the raw param and the `payload` assertions fail (the
+    `check_consistency` half still passes, because a carried-but-dropped field
+    is reported, not failed).
+    """
+    from tortoise.consistency import check_consistency
+
+    sdk, events = env
+    pid = sdk.create_point("statement", "a claim with a nested prop",
+                           extra={"k": {"inner": 1}})["id"]
+
+    live = dict(sdk.get_point(pid))
+    payload = _point_added(events)[0]["point"]
+    assert "extra" not in live, (
+        "the engine dropped the map — the live half of this test is vacuous "
+        f"otherwise: {live!r}")
+    assert "extra" not in payload, (
+        "the record claims a property the store refused — a replay would "
+        f"materialise a node live never had: {payload.get('extra')!r}")
+
+    report = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+    assert "extra" not in report["uncarried_journal_fields"], (
+        "the record carries a field the graph does not — the reported "
+        f"asymmetry: {report['uncarried_journal_fields']!r}")
+
+
+def test_a_driver_coerced_number_is_recorded_as_the_store_holds_it(env):
+    """`Decimal("1.5")` is stored as the float literal, so the record says 1.5.
+
+    PRE-FIX the raw `Decimal` reached `json.dumps` and the write was lost.
+
+    MUTATION: journal the raw param and this raises `WriteNotLandedError`
+    before the comparisons.
+    """
+    sdk, events = env
+    pid = sdk.create_point("statement", "a claim with a Decimal",
+                           amount=Decimal("1.5"))["id"]
+
+    live = dict(sdk.get_point(pid))
+    payload = _point_added(events)[0]["point"]
+    assert live["amount"] == 1.5, "the store half of the comparison is vacuous"
+    assert payload["amount"] == 1.5, (
+        f"the record states {payload.get('amount')!r}, the store holds 1.5")
+    assert isinstance(payload["amount"], float), (
+        "the record must carry the parsed literal, not the raw Decimal object")
+
+
+def test_the_snapshot_builder_states_the_stored_form_not_the_raw_param():
+    """The builder is JSON-safe BY CONSTRUCTION — a unit pin on the seam.
+
+    PRE-FIX: `json.dumps(payload)` raised `TypeError: Object of type Decimal
+    is not JSON serializable`, and the dropped key was present.
+
+    MUTATION: return the param verbatim and both halves fail.
+    """
+    payload = _journal_snapshot_from_create_map(
+        {"ok": "$_cp0", "dropped": "$_cp1", "null": "$_cp2",
+         "nested_null": "$_cp3", "amount": "$_cp4"},
+        {"_cp0": [1, 2], "_cp1": {"a": 1}, "_cp2": None,
+         "_cp3": [1, None], "_cp4": Decimal("1.5")},
+    )
+    assert payload == {"ok": [1, 2], "amount": 1.5}, (
+        "a value the store keeps no property for must be OMITTED (a null, a "
+        "map, and a null inside an array are all refused), and a "
+        f"driver-coerced number must ride as the parsed literal: {payload!r}")
+    json.dumps(payload, ensure_ascii=False)
