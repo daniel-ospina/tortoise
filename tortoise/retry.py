@@ -17,6 +17,18 @@ and keeps its own run knobs (``INGEST_WRITE_RETRIES`` etc.) eval-side.
     ``TAGGED`` edges (``_sync_tags``) and the ``extractedFrom`` edge
     (``_link_source``);
   * ``_advance_ep_version``'s ``MERGE (:EpMeta)``;
+  * ``_mark_dirty`` — the ``ep_dirty``/``ep_dirty_at`` persist SET and the
+    terminal ``ep_dirty`` clear SET (both absolute SETs under the statement's
+    own WHERE);
+  * ``delete_point`` — the ``DETACH DELETE`` and the orphan-``:Tag`` GC;
+  * ``promote_point`` — the CAS ``status draft → live`` SET;
+  * ``create_operator`` — the ``CREATE (:Point)`` node, the per-input
+    typed-edge + ``INPUT`` mirror statement, and the never-set-status source
+    promote SET;
+  * ``mitigate_operator`` — the mitigation ``CREATE (:Point)`` and the
+    ``IMPL``/``mitigated_by`` edge pair;
+  * ``create_entity``'s document ``extractedFrom`` leg and
+    ``create_document``'s ``extractedFrom`` leg (both ``_link_source``);
   * the capture lane's graph writes, all in ``tortoise/sdk.py`` — the
     ``:Session`` MERGE (``_write_session_and_turns``), the batched
     ``UNWIND $turns`` turn store and the stale-turn ``DETACH DELETE`` sweep
@@ -32,18 +44,22 @@ and keeps its own run knobs (``INGEST_WRITE_RETRIES`` etc.) eval-side.
     ``client_commit_id`` rides every attempt and the server serializes on it
     atomically (``CommitRecordStore.acquire``).
 
-⛔ NOT covered — ``_mark_dirty``'s own dirty-persist SET (its default path
-reaches the wired ``_advance_ep_version``, but the SET itself is bare),
-``promote_point``, ``merge_points``, ``mitigate_operator``, ``delete_point``,
-the operator/supersede/annotate writers, ``_create_entity``'s fold
-``proj.apply(event)`` (``tortoise/sdk.py:24686``), ``create_entity``'s
-``_link_source`` (``sdk.py:25771``), ``create_document``'s ``_link_source``
-(``sdk.py:28434``), ``_doc_write``'s ``proj.apply`` (``sdk.py:27589``),
-``_apply_and_journal``'s ``proj.apply`` (``sdk.py:5927``), and the remaining
-direct ``proj.g.query`` write sites across ``tortoise/`` are still
-un-retried: a write abort there raises (or is downgraded by the caller's own
-``except``) exactly as before. Those paths' robustness today remains
-idempotent-MERGE + server-side dedup.
+⛔ NOT covered — the ``proj.apply`` FOLDS a live write reaches
+(``_apply_and_journal``, ``_create_entity``, ``_doc_write``): a fold is a
+multi-statement sequence over an open event-type space, so a mid-fold abort
+leaves the earlier statements landed and re-issuing the whole fold is a
+RE-APPLICATION, not a re-issue — ``retryable_aborted_write``'s "the statement
+did not land" guarantee is per-statement and does not extend to the enclosing
+fold. Also unwired: ``supersede_point`` (its statements are individually
+idempotent — ``MERGE`` / DELETE by ``ID(r)`` / ``SET r += $attrs`` — but the
+multi-statement transfer is deliberately left to a separate increment),
+``update_point`` (and therefore ``annotate_operator``, which delegates to it),
+and the remaining direct ``proj.g.query`` write sites across ``tortoise/``.
+``merge_points`` is not a direct graph write at all: it is an ``EventAPI``
+journal emit (``tortoise/api.py``) whose graph effect is the ``proj.apply``
+fold above. A write abort at any of these still raises (or is downgraded by the
+caller's own ``except``) exactly as before; those paths' robustness today
+remains idempotent-MERGE + server-side dedup.
 
 Re-issuing is only safe for a statement whose abort means it DID NOT LAND.
 That is what ``retryable_aborted_write`` proves and what makes it admissible

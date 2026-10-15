@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.27"
+title: "Tortoise — Canonical Ontology v3.28"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-10-14
+updated: 2026-10-15
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.27
+# Tortoise — Canonical Ontology v3.28
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -32,6 +32,10 @@ doc_status: live
 > **⭐ If this document and the code disagree, THIS DOCUMENT IS RIGHT and the code
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in the changelog.
+>
+> **Changelog v3.28 (2026-10-15 — issue #3998 — the absent-raw `:Source` state is recorded in §4.6, with conditions read live):**
+>
+> **A record of a decided rule, not a model change.** `tortoise/projection/entities.py` has written `s.rawState` / `s.rawStateAt` since #3998 (`36d3077fd`) and the §4.6 table had no row for either (measured on `origin/main` `c377fea26`: `rg -c rawState docs/ONTOLOGY.md` → 0). §4.6 now carries the row, and it encodes the owner's ruling of **2026-10-14 (Option A, stated on #3998)**: a **deletion is an act**, recorded durably as a marker **bounded by an expiry policy**; **`offline` / `access_revoked` are conditions, observed live, never stored**; and the marker carries the expiry policy. The row states the **read-time observation contract** (`raw_state.resolve_raw_availability`) and the precedence it enforces — a recorded act wins over any observation, so a probe can never un-delete a memory — so the next lane reads the placement axis and the contract instead of re-deriving them. This closes the S7 residual recorded as **#8474**.
 >
 > **Changelog v3.27 (2026-10-14 — issue #7818 — the §4.7 coverage boundary, stated and left OPEN):**
 >
@@ -1282,6 +1286,7 @@ suppresses operator promotion exactly as a draft Point does.
 | `provenance_spans` | JSON | — | — | ❌ | Window spans derived from the capture path's `provenance_refs` (plan-defined, #909 §4.3 #6; written by the capture path, slice 5+) |
 | `is_episodic` | bool | — | — | ❌ | Quota exemption discriminator — true on the session Source (registered #909 §4.3 #13; planned for the capture path, slice 5+) |
 | `version` | integer | ✅ | — | ✅ | **Monotonic version counter**, 1 at creation, +1 on each content-hash change. The cheap ordinal beside `contentHash`'s identity |
+| `rawState` / `rawStateAt` | string / ISO8601 | — | — | ✅ | **The raw-availability axis** — the *third* value on a source record, after identity (`url`) and version (`contentHash`); `STORAGE-ARCHITECTURE.md` §9.4 ③ places it there, not as a fourth kind of source. `rawState` is **recordable** as `present` (the documented way back) or `deleted` — **a deletion is an ACT**, recorded durably and BOUNDED by `raw_state.RAW_DELETION_MARKER_TTL` (**10 days** — Cassandra's `gc_grace_seconds` default; metadata about the link back to the raw, never a copy of it and never a retention period on user content, R1). `rawStateAt` is the recorded instant the marker's expiry policy is derived from. **`offline` / `access_revoked` are CONDITIONS, observed live and NEVER stored** (#3998 owner ruling, Option A, 2026-10-14): a read derives them through `raw_state.resolve_raw_availability(props, observed=…)`, and a *stored* one is a legacy row that reads fail-closed as `unrecognised`. **Read-time contract:** a recorded act WINS over any observation, so a probe can never un-delete a memory; with no observation the read reports the record it holds and always emits the entry (never an empty result standing in for an unreachable raw); expiry authorises a LATER, JOURNALLED drop of the marker and never resurrects on read. Coverage is `create_source`/`_upsert_source` plus the `SourceCreated` replay; the property is refused on the generic entity surface and via `props` |
 | `topics` | array | — | `dc:subject` | ✅ | Topic list captured from the source |
 | `summary` | string | — | `dc:description` | ✅ | Summary captured from the source |
 | `sessionId` | string | — | — | ✅ | The session this source arrived in |
