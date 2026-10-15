@@ -6,6 +6,13 @@ QUALITY (not latency) per strategy — FTS / vector / structural / TF-IDF —
 and fused RRF, over graded 3-level relevance judgments, with paired 90%
 bootstrap CIs and the pre-registered SHIP/WARN/BLOCK gate.
 
+**The `tfidf` arm is the sparse leg, by construction (#2678).** It pins the
+sklearn TF-IDF scorer (`force_sparse=True`), so it is deterministic and
+embedder-independent. The default scorer resolves a cached bge embedder and
+would silently turn the column into a second semantic arm — near-duplicating
+`vector` in the authoritative docker run. The oracle's `tfidf` proofs and this
+arm now measure the same scorer in every environment.
+
 Design locked in the issue (comment 2026-08-17): 150 queries (100
 synthetic-oracle + 50 authored over the real internal graph domain), metrics
 nDCG@10 (headline) + P@5 + R@10 + MRR, per-strategy AND fused, paired 90%
