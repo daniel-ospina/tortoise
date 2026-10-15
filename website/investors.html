@@ -281,12 +281,23 @@
     }
     .profile p { font-size: 0.9rem; }
     .profile p strong { color: #fff; font-weight: 600; }
+    /* A cell's sentences are short and sit in a narrow column, so they end on a
+       lone word easily: without this the GTM sentences finish on "agents."
+       (61px of a 282px cell) and "capabilities." (113px of 590px). Same
+       re-break as `.bullets li` and `#capability-gaps p`; it changes no line
+       count and no cell height at any width. */
+    .profile p { text-wrap: pretty; }
     /* The `.bullets` base size is 0.95rem, which is right under the 15px body
-       copy but wrong inside this grid: a `.profile` cell's own text is
-       `.profile p` at 0.9rem, so an unscoped list made the Wedge column's
-       proof points render LARGER than the sentence they support and broke the
-       uniformity every other cell in this grid has. Match the cell. */
+       copy but wrong inside this grid: a cell's own text is `.profile p` at
+       0.9rem, so an unscoped list renders larger than the sentences beside it.
+       Match the cell. The Progress cells carry the page's only such lists. */
     .profile .bullets li { font-size: 0.9rem; }
+    /* Three labelled motions in a two-column grid leave the second half of the
+       last row empty — the only unbalanced grid on the page, since Progress
+       below it holds two cells. The third cell spans both columns instead, so
+       the block has no void. Inert at and below 620px, where the grid is one
+       column. */
+    #gtm .profile > div:last-child { grid-column: 1 / -1; }
 
     /* ── Footer ───────────────────────────────────────────────────────── */
     /* `footer.wrap`, NOT a bare `footer`: the element also carries `.wrap`, whose
