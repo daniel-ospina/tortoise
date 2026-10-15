@@ -146,9 +146,16 @@ def _fixture_embedded_key(label: str) -> str:
 
 
 def _backfill_run(mod, proj, labels=None, *, force=False):
-    """Drive the backfill's internal per-graph runner (NULL-only or force)."""
+    """Drive the backfill's internal per-graph runner (NULL-only or force).
+
+    The embedded fixture lane has no width-fixing index, so the store-declared
+    width is ``None`` and the encoder's own width governs (#4280's
+    dimension-agnostic brute-force lane) — stated explicitly, since
+    ``_backfill_graph``'s ``required_dim`` is keyword-only and required.
+    """
     return mod._backfill_graph(
-        proj.db, proj.graph_name, labels or _LABELS, 0, 500, force=force)
+        proj.db, proj.graph_name, labels or _LABELS, 0, 500, force=force,
+        required_dim=None)
 
 
 # ── WHERE-predicate flip (NULL-only vs all-rows) ────────────────────
@@ -563,7 +570,7 @@ def test_force_purges_meeting_embeddings_and_excludes_meetings(proj, monkeypatch
     monkeypatch.setattr("tortoise.embeddings.compute_embedding", fake)
 
     stats = mod._force_reembed_graph(
-        proj.db, proj.graph_name, _LABELS, 0, 500)
+        proj.db, proj.graph_name, _LABELS, 0, 500, required_dim=None)
     assert stats["meeting_purged"] == 2
     # Meetings were never encoded; NULL-kind + non-meeting rows were.
     assert "standup" not in fake.calls and "retro" not in fake.calls
@@ -594,7 +601,8 @@ def test_post_purge_run_vector_query_excludes_meetings(proj, monkeypatch):
     mod = _load_backfill()
     fake = _FakeEmbed()
     monkeypatch.setattr("tortoise.embeddings.compute_embedding", fake)
-    mod._force_reembed_graph(proj.db, proj.graph_name, _LABELS, 0, 500)
+    mod._force_reembed_graph(proj.db, proj.graph_name, _LABELS, 0, 500,
+                             required_dim=None)
 
     search_engine.reset_circuit_breakers()  # test isolation (#249)
     qv = fake("deploy debrief svc-api")
@@ -834,6 +842,24 @@ def test_indexed_store_declines_a_non_384_encoder(proj, monkeypatch):
     stored = _embedding(g, "Point", "id", "p1")
     assert stored is not None
     assert len(stored) == EMBEDDING_DIM - 1
+
+
+def test_backfill_graph_requires_an_explicit_store_width(proj):
+    """#4289 review (P3): the width must be STATED, never implicitly defaulted.
+
+    ``required_dim=None`` means one measured thing — "this store has no
+    width-fixing index" — and must not double as "the caller forgot". A
+    default of ``None`` lets a future caller omit the width and silently write
+    a wrong-width vector into an INDEXED store: the #4289 hole, re-opened.
+    ``required_dim`` is therefore keyword-only and REQUIRED, so the omission
+    is a ``TypeError`` at the call site.
+
+    Pre-fix this fails: the call below returned normally (the default ``None``
+    meant "no guard"), so no ``TypeError`` was raised.
+    """
+    mod = _load_backfill()
+    with pytest.raises(TypeError):
+        mod._backfill_graph(proj.db, proj.graph_name, ["Point"], 0, 500)
 
 
 def test_cli_threads_the_store_width_into_the_sweep(

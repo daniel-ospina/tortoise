@@ -275,13 +275,30 @@ def _required_dim_for_graph(uri: str, graph_name: str, *,
     :func:`_connect_falkordb`): the property is read off the projection's own
     graph, which ``_ensure_vector_index_api`` probes/creates the Point HNSW
     index on. So the width a sweep must obey is the width of the graph it is
-    about to WRITE, not the URI's. This opens a projection bound to
-    ``graph_name`` (``FalkorProjection.from_uri(uri, graph_name=...)``), reads
-    the property, and releases the connection.
+    about to WRITE, not the URI's.
+
+    ⛔ This is a WRITE-SCOPED PROBE, not a read. ``FalkorProjection.from_uri(
+    uri, graph_name=...)`` CONSTRUCTS the projection, and
+    ``FalkorProjection.__init__`` runs ``_ensure_indexes()`` on THAT graph
+    (``tortoise/projection/__init__.py``). Resolving the width for a target
+    therefore issues the schema DDL sweep there and CREATES the Point HNSW
+    vector index when it is missing — which is exactly why the property has a
+    value at all (it is derived from ``_vector_index_api``, set only by that
+    create-index probe), so no per-graph resolution can avoid the DDL. On a
+    graph whose legacy Point FTS migration is still owed, ``_ensure_indexes``
+    can also run the one-time ``search_keys`` data fixup (a stored-property
+    write). This side effect is DELIBERATE: it matches the SDK, which runs
+    the same sweep on any open, and the exchange is that the guard and the
+    write agree on the width. It also means each ``--all-tenants`` iteration
+    pays ``_ensure_indexes`` on its own target graph. A genuinely read-only
+    probe was rejected because deriving the width from ``CALL db.indexes()``
+    here would be a SECOND home for the width rule, which #4280
+    deliberately single-sourced on ``required_embedding_dim``.
 
     ``default_graph`` / ``default_dim`` short-circuit the common single-graph
     run: when the target IS the URI's graph the value already read by
-    :func:`_connect_falkordb` is correct and no second connection is opened.
+    :func:`_connect_falkordb` is correct, so no second connection — and no
+    second ``_ensure_indexes`` — is opened.
     """
     if default_graph is not None and graph_name == default_graph:
         return default_dim
@@ -502,7 +519,7 @@ def _dry_run(db, graph_name: str, labels: list[str], *,
 def _backfill_graph(db, graph_name: str, labels: list[str],
                     limit: int, batch_size: int, *,
                     force: bool = False,
-                    required_dim: int | None = None) -> dict:
+                    required_dim: int | None) -> dict:
     """Backfill one graph.
 
     force=False: NULL-only repair (only ``embedding IS NULL`` rows).
@@ -521,6 +538,11 @@ def _backfill_graph(db, graph_name: str, labels: list[str],
     and nothing is dropped — the index-less brute-force read lane is
     dimension-agnostic by contract (see ``search_engine.run_vector_query``).
     This was the one Point writer with no width guard before #4289.
+
+    ``required_dim`` is keyword-only and REQUIRED (no default): a default of
+    ``None`` would collapse "the store measured as index-less" with "the
+    caller omitted the width", and a future caller that omitted it would
+    silently re-open the #4289 hole on an indexed store (#4289 review, P3).
 
     Returns stats: scanned/updated/skipped counts, per_label updated counts,
     agent_sessions sub-count (Event surface only).
@@ -618,13 +640,15 @@ def _merge_stats(agg: dict, stats: dict) -> dict:
 
 def _force_reembed_graph(db, graph_name: str, labels: list[str],
                          limit: int, batch_size: int, *,
-                         required_dim: int | None = None) -> dict:
+                         required_dim: int | None) -> dict:
     """Force-mode flow for one graph: NULL-only repair → meeting purge →
     all-rows pass (#1349 T12).
 
     ``required_dim`` (#4289) is the width of THIS graph (resolved per target by
     :func:`_required_dim_for_graph`) and is threaded into both passes so
-    neither leg can bypass the store's width guard. Ordering is load-bearing:
+    neither leg can bypass the store's width guard. It is REQUIRED (no
+    default) for the same reason as :func:`_backfill_graph`'s. Ordering is
+    load-bearing:
     the NULL-only repair pass applies the SAME meeting exclusion and runs BEFORE the purge
     leg, so a repair-after-purge can never re-embed just-purged meetings.
     Returns aggregate stats for the completeness marker (per-label re-embedded
