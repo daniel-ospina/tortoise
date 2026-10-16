@@ -5,6 +5,7 @@ Restore: replays backup JSONL into a fresh projection.
 """
 from __future__ import annotations
 
+import contextlib
 import inspect
 import logging
 import os
@@ -141,15 +142,16 @@ def _destination_rollback(events_path: str, db_path: str | None, *,
 
     CONCURRENCY: this protocol assumes exclusive ownership of the destination,
     and since #7935 it IS owned rather than assumed — the only caller is
-    `_destination_exclusive`, which holds the destination STORE's lock for the
-    whole span below (the staging renames, the copy, the replay, and this
-    function's own success-path aside-drop). Two restores into one destination
-    therefore serialise instead of interleaving: a peer that staged the
-    destination aside while another was in flight used to be able to have its
-    committed result `_discard`ed by that peer's rollback (#7935 — no wider lock
-    existed to lean on: the per-RDB construction flock is released when the
-    constructor returns, and the lifetime owner/reaper lock is SHARED, so two
-    restores hold it together).
+    `_destination_exclusive`, which holds the destination STORE's lock AND the
+    destination JOURNAL's lock for the whole span below (the staging renames,
+    the copy, the replay, and this function's own success-path aside-drop). Two
+    restores into one destination therefore serialise instead of interleaving:
+    the store lock covers two restores into the SAME store, and the journal lock
+    (`_journal_lock`) covers two restores that share this journal while naming
+    DIFFERENT stores — the cwd-relative `--events` default makes that reachable.
+    Before #7935 no wider lock existed to lean on: the per-RDB construction
+    flock is released when the constructor returns, and the lifetime owner/reaper
+    lock is SHARED, so two restores hold it together.
 
     What the lock does NOT cover, stated because an embedded store is a
     single-writer store (docs/durability-posture.md): a process that already
@@ -259,12 +261,13 @@ def _destination_lock_key(db_path: str | None) -> str | None:
 
 
 @contextmanager
-def _destination_lock(db_path: str | None):
-    """#7935 — hold the destination STORE's exclusive lock for the block.
+def _destination_lock(db_path: str | None, events_path: str | None = None):
+    """#7935 — hold the destination STORE's and the destination JOURNAL's locks.
 
-    The lock is the store's construction lock (``tortoise/embedded_lifecycle.py``):
-    an exclusive ``flock`` on ``<realpath(db)>.tortoise-construct.lock``, the one
-    every ``RedisMixin.__init__`` for that store takes and releases when the
+    The STORE lock is the store's construction lock
+    (``tortoise/embedded_lifecycle.py``): an exclusive ``flock`` on
+    ``<realpath(db)>.tortoise-construct.lock``, the one every
+    ``RedisMixin.__init__`` for that store takes and releases when the
     constructor returns. Reusing it — rather than a private sidecar — is what
     makes a restore exclude a peer restore AND a peer construction of the same
     store, which is the "exclusive ownership of the destination"
@@ -277,13 +280,73 @@ def _destination_lock(db_path: str | None):
     of self-deadlocking. A lock that cannot be taken at all (a vanished db dir, a
     planted non-regular file) is reported by ``_open_construct_lock`` and leaves
     the in-process ``RLock`` in place, exactly as for a construction.
+
+    The JOURNAL lock (`_journal_lock`) is taken too, because the store lock is
+    keyed on ``db_path`` alone and cannot exclude a peer restoring into a
+    DIFFERENT store that shares this journal. Order is fixed — store first, then
+    journal — in every process, which is what makes holding two locks safe.
     """
-    key = _destination_lock_key(db_path)
+    store_key = _destination_lock_key(db_path)
+    journal_key = _journal_lock_key(events_path)
+    from tortoise.embedded_lifecycle import _construction_lock
+    with contextlib.ExitStack() as stack:
+        if store_key is not None:
+            stack.enter_context(_construction_lock(store_key))
+        # Skip the journal lock when it names the SAME lock file as the store
+        # (an `events_path` equal to `db_path`): taking one file's flock twice
+        # on a second fd self-deadlocks.
+        if journal_key is not None and journal_key != store_key:
+            stack.enter_context(_journal_lock(events_path))
+        yield
+
+
+def _journal_lock_key(events_path: str | None) -> str | None:
+    """#7935 — the canonical path whose sidecar owns ``events_path``, or None.
+
+    ``events_path`` is the destination JOURNAL: a plain append log with no store
+    whose construction lock it could share, so a restore owns it through a
+    private sidecar beside it. ``realpath`` for the same reason the store key
+    uses it — two spellings of one journal must take ONE lock, or the
+    shared-journal variant of #7935 reopens (see `_journal_lock`).
+    """
+    if not events_path:
+        return None
+    return os.path.realpath(str(events_path))
+
+
+@contextmanager
+def _journal_lock(events_path: str | None):
+    """#7935 — hold the destination JOURNAL's exclusive lock for the block.
+
+    The store lock (`_destination_lock_key`) is keyed on ``db_path`` alone, so
+    two restores that SHARE ``events_path`` but name different stores used to
+    take different locks and interleave on the journal. That is reachable
+    without exotic configuration: ``tortoise restore`` defaults ``--events`` to
+    a cwd-relative ``"events.jsonl"``, so two concurrent restores in one cwd
+    into two different stores share one journal. `_destination_rollback` mutates
+    the journal unconditionally — it stages it aside, copies the backup's
+    journal over it, and on a rollback discards whatever is at that path now —
+    so a peer's committed journal could be discarded by a sibling restore that
+    never took its store lock: the #7935 shape on the journal axis.
+
+    The lock is a flock on ``<realpath(events)>.restore.lock``, taken through
+    the same ``_construction_lock`` discipline as the store lock — so it
+    inherits the O_NOFOLLOW / regular-file / announced-wait handling rather than
+    growing a second lock implementation. Ordering is FIXED: the store lock is
+    always taken BEFORE this one (see `_destination_lock`), so two restores
+    cannot deadlock — the only lock a pair contending on different stores shares
+    is this one, and it is the second both take.
+
+    A process that already WRITES the journal (an SDK writer appending to the
+    live ``events.jsonl``) does not take this lock, so it is not excluded — the
+    same single-writer residual the store lock states.
+    """
+    key = _journal_lock_key(events_path)
     if key is None:
         yield
         return
     from tortoise.embedded_lifecycle import _construction_lock
-    with _construction_lock(key):
+    with _construction_lock(key, sidecar=key + ".restore.lock"):
         yield
 
 
@@ -301,20 +364,23 @@ def _destination_exclusive(events_path: str, db_path: str | None, *,
     ``created``, and the sibling's rollback then ``_discard``s whatever is at
     that path, including a result committed there in between (#7935).
 
-    So the span is entered under the destination store's lock
+    So the span is entered under the destination store's lock AND the journal's
     (`_destination_lock`), and ``pre_flight`` — the #7928 non-empty probe — runs
-    INSIDE that lock and BEFORE any staging. The ordering is load-bearing twice
-    over: the verdict must precede the destructive half (#3316/#7928), and it
+    INSIDE those locks and BEFORE any staging. The ordering is load-bearing
+    three ways: the verdict must precede the destructive half (#3316/#7928), it
     must be taken under the SAME lock as the fold below, or a peer's committed
     restore could land between the read and the fold and a snapshot-less restore
-    would fold onto a populated graph without ever taking the refusal.
+    would fold onto a populated graph without ever taking the refusal, and the
+    lock must cover the JOURNAL as well as the store, or a peer restoring into a
+    DIFFERENT store that shares this journal could still commit inside the span
+    (`_journal_lock`).
 
     Not covered (see `_destination_lock`): a live writer that already holds the
-    store open, and a URI destination, which names a server store with no local
-    lock file — the embedded store remains single-writer
-    (docs/durability-posture.md).
+    store open or appends to the journal, and a URI destination, which names a
+    server store with no local lock file — the embedded store remains
+    single-writer (docs/durability-posture.md).
     """
-    with _destination_lock(db_path):
+    with _destination_lock(db_path, events_path):
         if pre_flight is not None:
             pre_flight()
         with _destination_rollback(events_path, db_path, replace_db=replace_db):
@@ -397,15 +463,18 @@ def restore(backup_dir: str, db_path: str,
     exempt: the snapshot is copied OVER the destination, so the replay starts
     from the backup's own DB.
 
-    #7935: the destination is owned for the WHOLE restore — the lock is the
-    destination store's own construction ``flock``, held across the #7928
-    pre-flight, the staging renames, the copy, the replay, and the success-path
-    aside-drop (see `_destination_exclusive`). Two restores into one destination
-    therefore serialise instead of destroying each other's committed result. A
-    process that already holds the store OPEN is not excluded (its construction
-    finished and released that lock): the embedded store stays single-writer
-    (docs/durability-posture.md), and so does a URI destination, which names a
-    server store with no local lock file.
+    #7935: the destination is owned for the WHOLE restore — the locks are the
+    destination store's own construction ``flock`` and a ``<events>.restore.lock``
+    sidecar for the journal, held across the #7928 pre-flight, the staging
+    renames, the copy, the replay, and the success-path aside-drop (see
+    `_destination_exclusive`). Two restores into one destination therefore
+    serialise instead of destroying each other's committed result — including
+    two restores that share one journal while naming different stores. A
+    process that already holds the store OPEN, or already appends to the
+    journal, is not excluded (its construction finished and released that
+    lock): the embedded store stays single-writer (docs/durability-posture.md),
+    and so does a URI destination, which names a server store with no local
+    lock file.
     """
     source = Path(backup_dir)
     if not source.exists():

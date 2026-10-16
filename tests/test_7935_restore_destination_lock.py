@@ -305,3 +305,77 @@ def test_a_peer_restore_cannot_commit_inside_another_restores_span(
         "the destination journal does not hold restore B's committed result")
     assert dest_db.exists(), "restore A's rollback deleted restore B's DB"
     assert _asides(tmp_path) == [], "rollback asides were left behind"
+
+
+# ── the adjacent case: a SHARED journal, two DIFFERENT stores ────────────
+
+
+def test_different_stores_still_serialise_on_a_shared_journal(
+        tmp_path, rdb_snapshot, monkeypatch):
+    """#7935 (review P2): FAILS IF: the destination lock owns the store but not
+    the JOURNAL — two restores that share ``events_path`` while naming
+    DIFFERENT stores take different locks, so B commits inside A's span and A's
+    rollback then discards B's committed journal (pre-fix, measured: the shared
+    ``events.jsonl`` B committed is deleted by A's rollback, because A recorded
+    it as ``created`` when it staged its own copy over it).
+    REACHABLE: ``tortoise restore`` defaults ``--events`` to the cwd-relative
+    ``"events.jsonl"``, so two concurrent restores in one cwd into two stores
+    share one journal with no exotic configuration. A carries the
+    terminalizer-miss journal and parks at the non-folded gate (inside its
+    span); B carries a valid RDB snapshot, so it replaces its OWN store and
+    would otherwise run to completion.
+    """
+    shared = tmp_path / "events.jsonl"        # one journal, as the CLI defaults it
+    store_a = tmp_path / "a" / "tortoise.db"
+    store_b = tmp_path / "b" / "tortoise.db"
+    store_a.parent.mkdir()
+    store_b.parent.mkdir()
+    miss = _backup_dir(tmp_path, _terminalizer_miss(), snapshot=None,
+                       name="src-a")
+    good = _backup_dir(tmp_path, _journal(
+        {"type": "PointAdded", "point": {"id": "b-p1", "content": "kept"}}),
+        snapshot=rdb_snapshot, name="src-b")
+
+    with _restore_parked_in_its_span(str(shared), str(store_a), str(miss),
+                                     monkeypatch) as (_, a_outcome, hold):
+        assert shared.exists(), "A should have copied its journal into place"
+        b_outcome: dict = {}
+        b_done = threading.Event()
+
+        def _run_b() -> None:
+            try:
+                b_outcome["value"] = restore(str(good), db_path=str(store_b),
+                                             events_path=str(shared),
+                                             into_falkor=True)
+            except BaseException as exc:
+                b_outcome["error"] = exc
+            finally:
+                b_done.set()
+
+        b = threading.Thread(target=_run_b, name="restore-b")
+        b.start()
+        try:
+            # THE CONTRACT: A's lock must cover the JOURNAL, not only its own
+            # store, so B cannot commit inside A's span. Captured — not
+            # asserted — so both threads join before the test reports.
+            b_committed_inside_a = b_done.wait(2.0)
+        finally:
+            hold.set()          # let A's rollback run
+            b.join(timeout=120)
+        assert not b.is_alive(), "restore B never finished"
+        assert not b_committed_inside_a, (
+            "restore B (a different store) committed inside restore A's span — "
+            "the destination lock does not own the shared journal (#7935)")
+        assert not isinstance(a_outcome.get("error"), AssertionError), a_outcome
+
+    assert isinstance(a_outcome.get("error"), NonFoldedEventsError), a_outcome
+    assert "error" not in b_outcome, b_outcome
+    assert b_outcome["value"]["status"] == "ok", b_outcome
+    # A's rollback must NOT have discarded the journal B committed to.
+    assert shared.exists(), (
+        "restore A's rollback deleted the shared journal restore B committed "
+        "— different stores take different locks (#7935)")
+    assert "b-p1" in shared.read_text(), (
+        "the shared journal does not hold restore B's committed result")
+    assert store_b.exists(), "restore B's store is missing"
+    assert _asides(tmp_path) == [], "rollback asides were left behind"
