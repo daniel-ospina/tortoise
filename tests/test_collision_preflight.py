@@ -6227,9 +6227,11 @@ class GitRepoDirsUnreadableEntryTests(unittest.TestCase):
                     raise RuntimeError("bug in the probe")
                 return real_exists(self, *args, **kwargs)
 
-            with mock.patch.object(Path, "exists", exploding_exists):
-                with self.assertRaises(RuntimeError):
-                    _tool_module()._git_repo_dirs([str(root)])
+            with (
+                mock.patch.object(Path, "exists", exploding_exists),
+                self.assertRaises(RuntimeError),
+            ):
+                _tool_module()._git_repo_dirs([str(root)])
 
 
 if __name__ == "__main__":
