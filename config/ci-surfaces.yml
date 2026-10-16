@@ -3493,6 +3493,14 @@ surfaces:
   - test_assembly_fixtures.py  # #2165 Task 1: connected-assembly fixture substrate + R16(b) calibration (docker-lane)
   - test_assembly_pure.py  # #2165 Task 2: pure shape classifier + subject extraction (no-DB unit)
   - test_assembly_sdk.py  # #2165 Task 6: ask_lane.run_ask_lane()/run_ask_assembled() connected-assembly branch + byte goldens (docker-lane)
+  # #8057: the assembly modules' module-level availability probe must not
+  # reach the embedder. `sdk` owns it because it guards the probe shape shared
+  # by `test_assembly_sdk.py` / `test_assembly_fixtures.py` (both in this
+  # surface) and `longmem_eval/test_assembly_arm.py` (also under `eval`). The
+  # behavioural leg needs the live FTS lane — it imports each probe module in a
+  # fresh interpreter with recording embedder doubles — and is gated on the
+  # parent's own availability probe, so it skips rather than reds without a URI.
+  - test_8057_probe_embedder_mask.py
   - test_retrieval.py
   - test_3844_annotation_injection.py  # #3844: annotation-prefix newline forging; dual core+sdk because tortoise/retrieval.py is SOURCE_PATTERNS["sdk"] — a core-only entry would never run on a retrieval.py-only change
   - test_6252_body_fence.py  # #6252: BODY-side line-forging fence (retrieval._fence_body); dual core+sdk for the same reason as #3844 above
@@ -4566,6 +4574,12 @@ durations:
   test_recall_gaps_subgraph.py: 3.6
   test_ask_spotcheck_judge.py: 2.0
   test_assembly_sdk.py: 3.6
+  # #8057: measured locally 2026-10-16 on the docker lane (sum of junit
+  # testcase times = 7.04s; 2.2s of it is the first test paying the
+  # `tortoise.embeddings` import, 2.7s the module-level-probe census, the rest
+  # three fresh-interpreter probe imports). Refresh from the first post-merge
+  # CI run that measures it.
+  test_8057_probe_embedder_mask.py: 7.0
   test_epic903_retention.py: 2.1
   test_eval_retrieval_budget.py: 2.0
   test_export_delete.py: 3.2
