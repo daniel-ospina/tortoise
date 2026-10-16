@@ -330,11 +330,14 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
     # `_shared` has no browser surface and is skipped explicitly, not by
     # accident. The glob covers the extensions Supabase accepts, not just `.ts`.
     def pattern_for(const: str) -> re.Pattern[str]:
+        # The optional opening paren accepts a parenthesised literal
+        # (`= ([...] as const)`), which is a literal the sweep must compare rather
+        # than report as absent.
         return re.compile(
-            rf"(?:export\s+)?(?:const|let|var)\s+{const}\s*(?::[^=\n]+)?=\s*\[([^\]]*)\]"
+            rf"(?:export\s+)?(?:const|let|var)\s+{const}\s*(?::[^=\n]+)?=\s*\(?\s*\[([^\]]*)\]"
         )
 
-    def non_literal(const: str) -> re.Pattern[str]:
+    def unreadable_declarations(text: str, const: str) -> list[str]:
         """A declaration of `const` whose right-hand side is not an array literal.
 
         Reading literals alone cannot see a wrapped or imported value, so a file
@@ -342,10 +345,24 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
         literal satisfied the comparison — measured GREEN with a comment copy of
         the reference above a served non-literal. A declaration the sweep cannot
         read is a RED, not a gap.
+
+        Per line, and comment lines are skipped: a commented example is not a
+        declaration, and matching raw text turned `// let ALLOWED_ORIGINS =
+        makeOrigins();` and a JSDoc `@example` into false REDs whose remedy ("make
+        it an array literal") was already satisfied. A parenthesised literal is
+        accepted (`= ([...] as const)`), and so is one broken after `=`.
         """
-        return re.compile(
-            rf"(?:export\s+)?(?:const|let|var)\s+{const}\s*(?::[^=\n]+)?=(?!\s*\[)"
+        pat = re.compile(
+            rf"(?:export\s+)?(?:const|let|var)\s+{const}\s*(?::[^=\n]+)?=(?!\s*\(*\s*\[)"
         )
+        out: list[str] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(("//", "*", "/*")):
+                continue
+            if pat.search(line):
+                out.append(stripped[:80])
+        return out
 
     def values(text: str, pat: re.Pattern[str]) -> list[str]:
         return [" ".join(hit.split()) for hit in pat.findall(text)]
@@ -363,7 +380,7 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
             if f.suffix in {".ts", ".tsx", ".mts", ".cts"}
         ]
         hits = [f for f in files if decl.search(f.read_text())]
-        wrapped = [f for f in files if non_literal("ALLOWED_ORIGINS").search(f.read_text())]
+        wrapped = [f for f in files if unreadable_declarations(f.read_text(), "ALLOWED_ORIGINS")]
         if not hits and not wrapped:
             missing.append(fn_dir.name)
         unreadable.extend(

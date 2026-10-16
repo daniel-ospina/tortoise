@@ -6148,6 +6148,41 @@ def _workflow_files(wf_dir: Path) -> list[Path]:
     return sorted({*wf_dir.glob("*.yml"), *wf_dir.glob("*.yaml")})
 
 
+def _compiled_run_scalar_size(run: str) -> int:
+    """The length GitHub measures for a `run:` scalar: the script PLUS its spans.
+
+    GitHub compiles a `run:` that contains `${{ }}` and applies its 21000-byte cap
+    to the COMPILED scalar, so the expression text is charged ON TOP of the raw
+    script. Measuring the raw scalar alone under-reports: on 2026-10-16 it read
+    `ci.yml`'s `changes` gate as 20944 — "56 bytes under" — while GitHub measured
+    21010 and refused to load the workflow, so the branch ran zero jobs for eight
+    commits (#8734).
+    """
+    spans = re.findall(r"\$\{\{.*?\}\}", run)
+    return len(run.encode("utf-8")) + sum(len(s.encode("utf-8")) for s in spans)
+
+
+def test_compiled_run_scalar_measure_counts_expression_spans():
+    """The #8734 fixture: a scalar GitHub refuses must measure OVER, not under.
+
+    The pin below is worth its green only if its measure reproduces the refusal
+    it exists to prevent. This freezes the incident's exact shape — 20944 raw
+    UTF-8 bytes plus the 66 bytes of `${{ inputs.main_health }}` and
+    `${{ github.event.pull_request.base.sha }}` = 21010 — which GitHub refused
+    even though the raw count read as 56 bytes of HEADROOM. A revert to the
+    raw-only measure reddens here instead of shipping the zero-job outage again.
+    """
+    span_main = "${{ inputs.main_health }}"
+    span_base = "${{ github.event.pull_request.base.sha }}"
+    run = "x" * (20944 - len(span_main) - len(span_base)) + span_main + span_base
+    raw = len(run.encode("utf-8"))
+    compiled = _compiled_run_scalar_size(run)
+    assert raw == 20944, "fixture must reproduce the incident's raw size"
+    assert compiled == 21010, "the compiled measure must charge the expression spans"
+    assert compiled > 21000, "the fixture is a scalar GitHub actually refuses"
+    assert raw <= 21000, "the pre-#8734 raw-only measure called this safe"
+
+
 def test_expression_bearing_run_scalars_stay_under_githubs_21000_byte_cap():
     """#6253: GitHub compiles a `run:` that contains `${{ }}`, capped at 21000 bytes.
 
@@ -6160,6 +6195,13 @@ def test_expression_bearing_run_scalars_stay_under_githubs_21000_byte_cap():
     pin guards exactly the scalars GitHub compiles. actionlint catches expression
     SYNTAX but not this length (#6253), which is why the invariant is pinned here
     — a comment added to a script this size re-arms a silent full-CI outage.
+
+    Because the cap is on the COMPILED scalar, the measure must be the compiled
+    size: the 2026-10-16 incident was `ci.yml`'s `changes` gate at 20944 raw PLUS
+    66 bytes of expression spans = 21010, which a raw-only measure read as 56
+    bytes of headroom while GitHub was refusing the file and the branch ran zero
+    jobs for eight commits (#8734). Expression spans are counted here, so a
+    script cannot hide behind the difference between the two measures.
     """
     limit = 21000
     expr = "${{"
@@ -6173,7 +6215,9 @@ def test_expression_bearing_run_scalars_stay_under_githubs_21000_byte_cap():
                 run = step.get("run")
                 if not isinstance(run, str) or expr not in run:
                     continue
-                size = len(run.encode("utf-8"))
+                # The compiled scalar: the script plus every expression span, as
+                # GitHub assembles it before applying the cap.
+                size = _compiled_run_scalar_size(run)
                 if size > limit:
                     offenders.append((wf.name, job_id, step.get("name", "?"), size))
     assert not offenders, (
