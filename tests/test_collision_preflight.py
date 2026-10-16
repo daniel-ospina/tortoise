@@ -6170,9 +6170,11 @@ class GitRepoDirsUnreadableEntryTests(unittest.TestCase):
     `Path.exists()` propagates `EACCES` (it swallows ENOENT/ENOTDIR/EBADF/ELOOP
     only). A stat-able-but-untraversable sibling — the root-owned `drwx------`
     `/tmp/cmux-blesh-runtime-0` on a cmux cloud cell, where `repo_roots()` is
-    `/tmp` — therefore raised out of the scan and aborted the pre-flight with
-    exit 1 (the COLLISION code), EMPTY stdout and no `VERDICT:` line, so the
-    controller admitted no candidate and the cell's backlog stayed empty.
+    `/tmp` — therefore raised out of the scan and aborted the pre-flight on the
+    `--repo owner/name` slug form: `find_local_clone` exited 1 (the COLLISION
+    code) with EMPTY stdout and no `VERDICT:` line. (The controller's
+    `refresh-candidates.sh` uses `--repo .`, the PATH branch, which never reaches
+    `find_local_clone` — measured, not exposed to this crash.)
 
     Both of the first two tests FAIL against the pre-fix code (the probe raises);
     the third pins the boundary — only `OSError` is swallowed.
