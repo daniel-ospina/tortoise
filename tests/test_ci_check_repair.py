@@ -642,19 +642,28 @@ def test_launchd_entry_point_passes_its_own_directory(tmp_path):
 def test_the_python_guard_refuses_an_old_interpreter_with_exit_2(tmp_path):
     """Exit 2, not 1: 1 is reserved for a repair this credential cannot perform.
 
-    Actually executed when the box has a pre-3.12 `python3` (it does: /usr/bin/python3
-    is 3.9), because a source-level `assert "SystemExit(2)" in src` would pass against
-    a guard that never runs.
+    The guard is EXECUTED, never grepped for: a source-level
+    `assert "SystemExit(2)" in src` would pass against a guard that never runs.
+
+    It is driven hermetically, by running the module under a forced pre-3.12
+    `sys.version_info`, so the assertion holds on ANY host. The previous form
+    ran the box's `/usr/bin/python3` and skipped only when a probe disagreed --
+    but the probe read `sys.version_info[0]`, the MAJOR version, which is `3`
+    for both 3.9 and 3.12, so it never once skipped. On the Linux runner
+    (`/usr/bin/python3` is 3.12) this test therefore executed the tool under a
+    MODERN interpreter, got exit 0, and asserted 2 -- red `python-ci-gate`, and
+    invisible on macOS, where that same probe happened to be right by accident
+    (#8392).
     """
-    old = Path("/usr/bin/python3")
-    if not old.exists():
-        pytest.skip("no /usr/bin/python3 to compare against")
-    probe = subprocess.run([str(old), "-c", "import sys; print(sys.version_info[0])"],
-                           capture_output=True, text=True)
-    if probe.stdout.strip() != "3":
-        pytest.skip("this box's /usr/bin/python3 is already >= 3.12")
     repo = Path(__file__).resolve().parents[1]
-    r = subprocess.run([str(old), str(repo / "tools/ci_check_repair.py"), "--help"],
+    script = repo / "tools/ci_check_repair.py"
+    driver = (
+        "import runpy, sys\n"
+        "sys.version_info = (3, 9, 0, 'final', 0)\n"
+        f"sys.argv = [{str(script)!r}, '--help']\n"
+        f"runpy.run_path({str(script)!r}, run_name='__main__')\n"
+    )
+    r = subprocess.run([sys.executable, "-c", driver],
                        capture_output=True, text=True, timeout=120)
     assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
     assert "requires Python >= 3.12" in r.stderr
