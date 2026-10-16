@@ -371,6 +371,20 @@ def test_investors_forms_bound_the_request_and_expose_their_errors() -> None:
         "a shown error must mark the field invalid"
     assert "emailInput.removeAttribute('aria-invalid')" in raw, \
         "a re-submit must clear the invalid flag"
+    # Only the two address errors are about the address: a server error (403,
+    # 405) or a missing captcha marks a VALID address invalid otherwise, and
+    # `aria-describedby` then reads that message as the field's description.
+    assert raw.count("markInvalid();") == 2, \
+        "only the address-validation sites may mark the field invalid"
+    assert "emailInput.addEventListener('input', clear)" in raw, \
+        "editing the value must clear the invalid claim without a submit"
+    # A 2xx whose body cannot be read resolves the fetch and rejects the body
+    # read; treating that as `{}` announces a subscription that was never
+    # recorded. Only a non-2xx may fall through to an empty object.
+    assert re.search(
+        r"res\.json\(\)\.catch\(function \(e\) \{.*?if \(res\.ok\) \{ throw e; \}.*?return \{\};\s*\}\)",
+        raw, re.S,
+    ), "an unreadable body on a 2xx must not take the success path"
 
     assert "heading.setAttribute('tabindex', '-1')" in raw and "heading.focus()" in raw, \
         "the unlock must move focus into the revealed document"

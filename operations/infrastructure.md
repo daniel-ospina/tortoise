@@ -68,7 +68,7 @@ remain as defense-in-depth).
 - Landing page: `website/index.html`
 - Investor page: `website/investors.html`
 - Edge functions: `supabase/functions/waitlist-subscribe/`,
-  `supabase/functions/deck-view/`
+  `supabase/functions/deck-view/`, `supabase/functions/tenant-provision/`
 - Migrations: `supabase/migrations/0005_waitlist_subscribers.sql`,
   `supabase/migrations/*_deck_views.sql`
 - Waitlist issue: [#373](https://github.com/daniel-ospina/tortoise/issues/373)

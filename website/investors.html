@@ -1088,8 +1088,12 @@
       var turnstilePending = [];
       var turnstileLoading = false;
       // A blocked CDN (ad-blockers do this) or an unreachable one must not make
-      // the forms unusable: the reader cannot correct it, and the gate is
-      // capture rather than access control. Set once, for the whole page.
+      // the GATE unusable: the reader cannot correct it, and the gate is capture
+      // rather than access control. A form whose endpoint DOES verify a token
+      // cannot be rescued this way — with TURNSTILE_SECRET_KEY set, its
+      // submission carries no token and the server refuses it, which is the
+      // honest outcome (the reader's own network is why it is missing). Set
+      // once, for the whole page.
       var turnstileFailed = false;
 
       // The API script is a shared singleton: load it once, then render the
@@ -1140,14 +1144,16 @@
 
         function show(el, text) {
           el.textContent = text; el.classList.add('visible');
-          // A `role="alert"` region announces once; the flag is what makes the
-          // field itself read as invalid if the reader navigates back to it.
-          if (el === err) { emailInput.setAttribute('aria-invalid', 'true'); }
         }
+        function markInvalid() { emailInput.setAttribute('aria-invalid', 'true'); }
         function clear() {
           [msg, err].forEach(function (el) { el.classList.remove('visible'); el.textContent = ''; });
           emailInput.removeAttribute('aria-invalid');
         }
+        // A corrected value must not keep claiming to be invalid: the attribute
+        // says "this value does not conform", which is stale the moment the
+        // reader edits it, and it is only otherwise cleared on the next submit.
+        emailInput.addEventListener('input', clear);
 
         if (useCaptcha) {
           var slot = document.createElement('div');
@@ -1171,11 +1177,13 @@
           var email = emailInput.value.trim();
           if (!email) {
             show(err, 'Please enter your email address.');
+            markInvalid();
             emailInput.focus();
             return;
           }
           if (!emailInput.checkValidity()) {
             show(err, 'Please enter a valid email address.');
+            markInvalid();
             emailInput.focus();
             return;
           }
@@ -1206,11 +1214,19 @@
             body: JSON.stringify(payload),
             // A request that never settles must not strand the reader on a
             // disabled button: the gate's policy is to open when OUR side is
-            // unhealthy, and a hang is that. The abort lands in .catch below,
-            // which opens the gate and shows the list form an error.
+            // unhealthy, and a hang is that. An abort lands in .catch below,
+            // as does a 2xx whose body cannot be read (see the json catch).
             signal: controller ? controller.signal : undefined
           }).then(function (res) {
-            return res.json().catch(function () { return {}; }).then(function (data) {
+            return res.json().catch(function (e) {
+              // A 2xx whose body cannot be read is NOT a success: the record may
+              // or may not exist, and announcing "Thanks" would be a claim we
+              // cannot support — whether the body was cut off, malformed, or the
+              // read was aborted at the deadline. A non-2xx still falls through
+              // to {} so its own message path is unchanged.
+              if (res.ok) { throw e; }
+              return {};
+            }).then(function (data) {
               if (!res.ok) {
                 // The gate's failure policy, by status: a 5xx or a 429 is OUR
                 // failure (the server, our own rate limiter) and must not lock

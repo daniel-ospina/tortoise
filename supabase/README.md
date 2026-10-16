@@ -88,8 +88,8 @@ Responses:
 | Bad origin / method      | 403 / 405                                   |
 
 CORS: allowlist echoes premiselabs.co, tortoise.premiselabs.co,
-premise-labs.pages.dev (+ *.premise-labs.pages.dev previews, localhost:8788),
-with `Vary: Origin`, on every response path.
+app.premiselabs.co, premise-labs.pages.dev (+ *.premise-labs.pages.dev
+previews, localhost:8788), with `Vary: Origin`, on every response path.
 
 Anti-abuse:
 
@@ -193,6 +193,9 @@ gh workflow run deploy-hosted.yml --ref main   # the app flip, after a FAILED co
 6. Resubmit the same email -> "Already subscribed" message, no second email.
 7. Unsubscribe is a mailto (`hello@premiselabs.co`) processed manually —
    the operator removes the row / excludes the address from launch sends.
+8. With a real Turnstile site key set: unlock the gate, then confirm the
+   mailing-list widget renders correctly — on a gated first visit its container
+   (`#stay-in-touch`) is `display: none` while the widget loads.
 
 ### deck-view contract (#8732)
 
@@ -227,8 +230,9 @@ Responses:
 
 CORS: the same allowlist as waitlist-subscribe (`https://premiselabs.co`,
 `https://tortoise.premiselabs.co`, `https://app.premiselabs.co`,
-`https://premise-labs.pages.dev`), on every response path. A refused origin gets
-the default allowlist entry back, never an echo of the caller's origin.
+`https://premise-labs.pages.dev`, `*.premise-labs.pages.dev` previews,
+localhost:8788), on every response path. A refused origin gets the default
+allowlist entry back, never an echo of the caller's origin.
 
 Anti-abuse:
 

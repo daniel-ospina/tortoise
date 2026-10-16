@@ -323,20 +323,37 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
     def arrays(src_text: str) -> str:
         return extract(src_text, "ALLOWED_ORIGINS") + "|" + extract(src_text, "ORIGIN_SUFFIXES")
 
+    # Enumerated by FUNCTION, not by the files that happen to contain the
+    # literal: a sweep keyed on the literal drops a file the moment a refactor
+    # renames the constant, and dropping it is silently safe (the remaining
+    # files still satisfy the floor). Every HTTP-facing function must declare an
+    # allowlist — `_shared` has no browser surface and is skipped explicitly,
+    # not by accident.
+    decl = re.compile(r"(?:export\s+)?(?:const|let|var)\s+ALLOWED_ORIGINS\s*=")
+    declaring: dict[str, str] = {}
+    missing: list[str] = []
+    functions_dir = _REPO_ROOT / "supabase" / "functions"
+    for fn_dir in sorted(p for p in functions_dir.iterdir() if p.is_dir()):
+        if fn_dir.name == "_shared":
+            continue
+        src = "\n".join(f.read_text() for f in sorted(fn_dir.rglob("*.ts")))
+        if decl.search(src):
+            declaring[fn_dir.name] = src
+        else:
+            missing.append(fn_dir.name)
+    assert not missing, (
+        f"these functions declare no ALLOWED_ORIGINS: {missing} — an HTTP-facing "
+        "function needs one; a function with no browser surface needs a "
+        "deliberate skip here, not a silent absence"
+    )
+    assert len(declaring) >= 2, f"allowlist sweep found only {sorted(declaring)}"
     waitlist = (
         _REPO_ROOT / "supabase" / "functions" / "waitlist-subscribe" / "handle.ts"
     ).read_text()
-    declared = sorted(
-        p for p in (_REPO_ROOT / "supabase" / "functions").glob("*/*.ts")
-        if "const ALLOWED_ORIGINS" in p.read_text()
-    )
-    # waitlist-subscribe is the reference, so the enumeration must at least see
-    # it plus one peer — an empty or single-entry sweep would pass vacuously.
-    assert len(declared) >= 2, f"allowlist sweep found only {declared}"
-    for path in declared:
-        assert arrays(path.read_text()) == arrays(waitlist), (
-            f"{path.relative_to(_REPO_ROOT)} ALLOWED_ORIGINS/ORIGIN_SUFFIXES must "
-            "match waitlist-subscribe — change every declaring function together "
+    for name, src in sorted(declaring.items()):
+        assert arrays(src) == arrays(waitlist), (
+            f"{name}'s ALLOWED_ORIGINS/ORIGIN_SUFFIXES must match "
+            "waitlist-subscribe — change every declaring function together "
             "(see the keep-in-sync comment in tenant-provision/index.ts)"
         )
 
