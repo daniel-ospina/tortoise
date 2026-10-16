@@ -603,7 +603,7 @@ _STATUS_ABSENCE = (
     # than a step.
     #
     # Measured against the three design documents before adding: 0 hits at HEAD,
-    # and it fires on both claims this branch removed. NOT widened to the general
+    # and it fires on both claims #8774 removed. NOT widened to the general
     # `not written` form — measured, that shape has 12 corpus lines and only 2 are
     # status claims; the other 10 are design English (*"appended, never written
     # onto the Object"*, *"a claim not worth keeping is not written"*). Precision
@@ -798,7 +798,7 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         # line is already absent from `main`; the guard pins the form, not the diff).
         "*(Stored and interpreted on every path since v3.25 \u2026 see the "
         "Transition state note in the changelog.)*",
-        # The "absence of a producer" arm, on the two claims this branch removed.
+        # The "absence of a producer" arm, on the two claims #8774 removed.
         "| `participatesIn` | Subject \u2192 Event | Subjects involved in an event "
         "(\u26a0\ufe0f spec-only \u2014 no producer yet, tracked in issue #7884) |",
         "`aboutSubject` has no producer here: the ONTOLOGY registers Session as an "
