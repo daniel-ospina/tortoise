@@ -4266,6 +4266,28 @@ def repo_roots(git_bin: str, path: str, timeout: float) -> list[str]:
 
 
 def _git_repo_dirs(roots: list[str]) -> list[str]:
+    """Directories under `roots` that look like local clones.
+
+    BOTH levels are guarded: an unreadable ROOT is skipped, and so is an
+    unreadable ENTRY. `Path.is_dir()`/`Path.exists()` swallow
+    ENOENT/ENOTDIR/EBADF/ELOOP but NOT `EACCES`, so a sibling that is stat-able
+    but not traversable — a root-owned `drwx------` dir under a shared `/tmp`,
+    which exists on a cmux cloud cell (`/tmp/cmux-blesh-runtime-0`) and not on a
+    dev box — raised straight out of the `.git` probe and aborted the whole
+    scan (#8650): on the `--repo owner/name` path that killed
+    `find_local_clone` and exited 1, the COLLISION code, with EMPTY stdout and
+    no `VERDICT:` line, so `refresh-candidates.sh` recorded no verdict and the
+    cell's backlog stayed empty.
+
+    Skipping is lossless, not merely tidy. `EACCES` here means the process lacks
+    SEARCH permission on `entry`, and every consumer of a returned path then
+    runs `git -C <entry>` (`_remote_slug`), which needs the same search
+    permission to `chdir`. An entry this probe cannot read therefore cannot
+    yield a slug, cannot appear in `candidate_slugs`, and cannot be returned by
+    `find_local_clone` — it is never a clone "the surface would have found".
+
+    Only `OSError` is swallowed; a non-OSError failure still propagates.
+    """
     dirs: list[str] = []
     for root in roots:
         try:
@@ -4273,8 +4295,11 @@ def _git_repo_dirs(roots: list[str]) -> list[str]:
         except OSError:
             continue
         for entry in entries:
-            if entry.is_dir() and (entry / ".git").exists():
-                dirs.append(str(entry))
+            try:
+                if entry.is_dir() and (entry / ".git").exists():
+                    dirs.append(str(entry))
+            except OSError:
+                continue
     return dirs
 
 
