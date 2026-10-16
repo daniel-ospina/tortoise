@@ -2003,6 +2003,41 @@ _docker_only = pytest.mark.skipif(
     reason="docker lane unavailable (pure tests unaffected)")
 
 
+@pytest.fixture(autouse=True)
+def _docker_legs_pin_the_embedder_off(request):
+    """#8071: the docker legs must not pay a real BERT encode per row.
+
+    ``_ag.build_base_graph`` WRITES the whole fixture — the Objects, two
+    sessions' Events and ≥12 Points — and the write path embeds every row
+    (``create_event`` → ``encode_for_store`` → ``compute_embedding`` →
+    ``EmbeddingModel.get()``). ``tests/test_assembly_sdk.py`` already pins this
+    off (its ``_no_embedder`` autouse fixture); this module did not, so each
+    docker-only test inherited the lane's ambient HF cache and paid a model
+    load plus an encode per row. MEASURED (idle host, 2026-10-16):
+    ``test_resolver_docker_exact_and_both_halves`` ALONE took **183.8 s**;
+    with this pin the WHOLE module — 229 tests, the 18 docker legs included —
+    ran in **7.6 s**.
+
+    The pin is the suite's SHARED sparse seam — ``force_sparse_tfidf`` (the
+    ``EmbeddingModel.get`` → None patch that degrades ``_encode`` to
+    deterministic TF-IDF), requested BY NAME rather than re-implemented: a
+    second copy of the seam is how two pins drift apart.
+
+    Scope is the docker legs only (``_docker_sdk`` in the requesting test), so
+    the pure tests in this module are untouched. The tests that need the
+    SHIPPED (embedder-live) configuration ask for ``force_embedder_on`` —
+    #3223's deterministic stand-in embedder — and are stepped over here: they
+    write and read vectors with NO model load, so the shipped shape stays
+    covered in every lane. That skip is an EXPLICIT guard, deliberately not an
+    accident of autouse-vs-explicit fixture ordering.
+    """
+    if "_docker_sdk" not in request.fixturenames:
+        return
+    if "force_embedder_on" in request.fixturenames:
+        return
+    request.getfixturevalue("force_sparse_tfidf")
+
+
 @pytest.fixture
 def _docker_sdk(monkeypatch):
     uri = f"{_DOCKER_URI.rstrip('/')}_{uuid.uuid4().hex[:10]}"
@@ -2217,15 +2252,20 @@ def test_resolver_docker_excludes_retracted_object(_docker_sdk,
 
 
 @_docker_only
-def test_resolver_docker_excluded_exact_match_abstains(_docker_sdk):
+def test_resolver_docker_excluded_exact_match_abstains(_docker_sdk,
+                                                       force_embedder_on):
     """#4061 R1 (integration): with ``couch`` retracted, ``the couch`` names an
     excluded Object — the term ABSTAINS instead of resolving the live ``sofa``
     through a weaker leg, and ``_assemble_connected`` does not fire about a
     subject the question never named.
 
-    Deliberately NOT embedder-pinned: the shipped configuration is exactly
-    where the substitution was observed, and the assertion holds under both
-    the sparse and hybrid FTS legs (``sofa`` is the substitute either way).
+    Embedder-live BY REQUEST, not by ambience (#8071): the shipped
+    configuration is where the substitution was observed, so the test asks for
+    ``force_embedder_on`` (#3223's deterministic stand-in) instead of
+    inheriting whatever the lane's HF cache happened to provide — vectors are
+    written and the hybrid legs are live in every lane, at no model-load cost.
+    The assertions never depended on vector VALUES, and hold under the sparse
+    legs too (``sofa`` is the substitute either way).
     """
     _ag.build_base_graph(_docker_sdk)
     proj = _docker_sdk._get_proj()
