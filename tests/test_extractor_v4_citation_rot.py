@@ -594,6 +594,19 @@ _STATUS_ABSENCE = (
         r"|\bnot\s+(?:yet\s+)?(?:run|built|wired|implemented|written)\b[^.\n]{0,40}?#[0-9]{3,5}",
         re.IGNORECASE,
     ),
+    # The "absence of a producer" form: *"no producer yet"*, *"has no producer
+    # here"*, *"spec-only"*. Absence of work is a tracker's business, and this is
+    # how this document set spells it when the missing thing is a writer rather
+    # than a step.
+    #
+    # Measured against the three design documents before adding: 0 hits at HEAD,
+    # and it fires on both claims this branch removed. NOT widened to the general
+    # `not written` form — measured, that shape has 12 corpus lines and only 2 are
+    # status claims; the other 10 are design English (*"appended, never written
+    # onto the Object"*, *"a claim not worth keeping is not written"*). Precision
+    # over coverage: an arm that fires on design prose is a guard that gets
+    # deleted.
+    re.compile(r"\b(?:has\s+)?no producer\b|\bspec-only\b", re.IGNORECASE),
 )
 #: The documents `_STATUS_ABSENCE` governs — the same set as `DESIGN_DOCS`.
 #: `ONTOLOGY.md` was once excluded because the same shape sat there at two lines
@@ -774,6 +787,11 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         "**Implementation status.** Both halves are now implemented.",
         "**\u26a0\ufe0f Draft 1** claimed the index is RAM-mandatory.",
         "\u00a716.2's rule is now also a billing rule (see `#5024` CLOSED).",
+        # The "absence of a producer" arm, on the two claims this branch removed.
+        "| `participatesIn` | Subject \u2192 Event | Subjects involved in an event "
+        "(\u26a0\ufe0f spec-only \u2014 no producer yet, tracked in issue #7884) |",
+        "`aboutSubject` has no producer here: the ONTOLOGY registers Session as an "
+        "`aboutObject` source only.",
     ]
     must_not_flag = [
         "The gate is FAIL-CLOSED at the boundary.",
@@ -783,6 +801,8 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         "Supersession does not rewrite an earlier one.",
         "Everything is done in S6.",
         "`#4999` records the trace mechanism.",
+        # A near-miss for the producer arm: names a producer, claims no absence.
+        '`tortoise/subject_binding.py` is the ONLY confidence-gated `aboutSubject` producer.',
     ]
     # The SCOPE is pinned too. Without this, narrowing `STATUS_ABSENCE_DOCS` back
     # to a subset keeps every test green while silently dropping `ONTOLOGY.md`
