@@ -178,7 +178,7 @@ gh workflow run deploy-hosted.yml --ref main   # the app flip, after a FAILED co
 
 1. Confirm `TURNSTILE_SECRET_KEY` is set (captcha is REQUIRED once set —
    the form blocks submit until a token exists) and `TURNSTILE_SITE_KEY` is
-   populated in `website/index.html`.
+   populated in `website/index.html` and `website/investors.html`.
 2. First `supabase db push`: confirm the project's `supabase_migrations`
    history covers 0001-0004 (`supabase migration list`); if not, baseline
    with `supabase migration repair --status reverted 0001..0004` first so

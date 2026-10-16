@@ -24,7 +24,7 @@ const ORIGIN_SUFFIXES = [".premise-labs.pages.dev"];
 const LOCAL_ORIGINS = ["http://localhost:8788", "http://127.0.0.1:8788"];
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const MAX_BODY_BYTES = 8192; // Turnstile tokens can reach 2048 chars
+const MAX_BODY_BYTES = 8192; // Body-size guard; the real payload is {email, hp, deck}
 // A deck name is written into the row an operator reads, so the client picks
 // from this list rather than naming its own; an unknown value falls back.
 const ALLOWED_DECKS = ["investors"];

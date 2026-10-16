@@ -1069,12 +1069,12 @@
       var LIST_ENDPOINT = 'https://ybetwichurajbfswfeqa.supabase.co/functions/v1/waitlist-subscribe';
       var GATE_KEY = 'tortoise-investors-access';
       // Empty until a Turnstile site key is provisioned (human step, #373).
-      // When set, each form gets its own widget and sends a token with every
-      // submit — the same contract as the landing form (a single-use token,
-      // cleared and re-rendered after each submit), rendered explicitly rather
-      // than implicitly because this page has two forms: `turnstile.reset()`
-      // without an id resets the most recently created widget, so a no-arg
-      // reset here would re-render the wrong one.
+      // Only a form whose endpoint verifies a token sends one: the mailing-list
+      // form posts to `waitlist-subscribe`, which verifies, while the gate posts
+      // to `deck-view`, which verifies nothing and so renders no widget. The
+      // widget is rendered explicitly and its id retained, so a submit resets
+      // the widget this form rendered (a no-arg `turnstile.reset()` targets the
+      // most recently created widget on the page).
       var TURNSTILE_SITE_KEY = '';
       var turnstilePending = [];
       var turnstileLoading = false;
@@ -1083,10 +1083,9 @@
       // capture rather than access control. Set once, for the whole page.
       var turnstileFailed = false;
 
-      // The API script is a shared singleton: load it once, then render every
-      // form's widget as it arrives. On failure the queue is dropped, so a
-      // late-arriving script cannot render a widget the forms no longer wait
-      // for.
+      // The API script is a shared singleton: load it once, then render the
+      // widget for the form that wants one. On failure the queue is dropped, so
+      // a late-arriving script cannot render a widget no form is waiting for.
       function onTurnstileReady(fn) {
         if (turnstileFailed) { return; }
         if (window.turnstile) { fn(); return; }
@@ -1111,17 +1110,23 @@
         document.head.appendChild(script);
       }
 
-      function wire(formId, msgId, errId, endpoint, extra, onOk) {
+      function wire(formId, msgId, errId, endpoint, extra, onOk, captcha) {
         var form = document.getElementById(formId);
         if (!form) return;
+        // Per-form: `waitlist-subscribe` verifies a Turnstile token server-side
+        // when its secret is set, so that form must send one. `deck-view` never
+        // verifies one — asking the reader to solve a challenge the server
+        // discards would be friction with nothing behind it.
+        var useCaptcha = !!captcha && !!TURNSTILE_SITE_KEY;
         var msg = document.getElementById(msgId);
         var err = document.getElementById(errId);
         var emailInput = form.querySelector('input[name="email"]');
         var button = form.querySelector('button[type="submit"]');
         var token = null;
-        // Retained so this form's OWN widget is re-rendered after a submit:
-        // `turnstile.reset()` without an id resets the most recently created
-        // widget, and this page has two forms with a widget each.
+        // The id this form's own render() call returned: `turnstile.reset()`
+        // with no argument targets the most recently created widget on the
+        // page, so the reset names the id rather than relying on this being the
+        // only widget.
         var widgetId = null;
 
         function show(el, text) { el.textContent = text; el.classList.add('visible'); }
@@ -1129,7 +1134,7 @@
           [msg, err].forEach(function (el) { el.classList.remove('visible'); el.textContent = ''; });
         }
 
-        if (TURNSTILE_SITE_KEY) {
+        if (useCaptcha) {
           var slot = document.createElement('div');
           form.appendChild(slot);
           onTurnstileReady(function () {
@@ -1159,7 +1164,7 @@
             emailInput.focus();
             return;
           }
-          if (TURNSTILE_SITE_KEY && !turnstileFailed && !token) {
+          if (useCaptcha && !turnstileFailed && !token) {
             show(err, 'Please complete the verification check first.');
             return;
           }
@@ -1175,7 +1180,7 @@
             hp: form.querySelector('input[name="hp"]').value || ''
           };
           for (var key in extra) { payload[key] = extra[key]; }
-          if (TURNSTILE_SITE_KEY && !turnstileFailed) { payload['cf-turnstile-response'] = token || ''; }
+          if (useCaptcha && !turnstileFailed) { payload['cf-turnstile-response'] = token || ''; }
 
           fetch(endpoint, {
             method: 'POST',
@@ -1207,9 +1212,9 @@
             form.removeAttribute('aria-busy');
             button.disabled = false;
             button.textContent = label;
-            // Turnstile tokens are single-use — clear this form's own widget
+            // Turnstile tokens are single-use — clear the widget this form rendered
             // and re-render it, so a second submit carries a fresh token.
-            if (TURNSTILE_SITE_KEY) {
+            if (useCaptcha) {
               token = null;
               if (widgetId !== null && window.turnstile) {
                 try { window.turnstile.reset(widgetId); } catch (e) { /* widget may be mid-render */ }
@@ -1225,8 +1230,8 @@
         window.scrollTo(0, 0);
       }
 
-      wire('gate-form', 'gate-msg', 'gate-error', VIEW_ENDPOINT, { deck: 'investors' }, unlock);
-      wire('waitlist-form', 'waitlist-msg', 'waitlist-error', LIST_ENDPOINT, { source: 'investors' });
+      wire('gate-form', 'gate-msg', 'gate-error', VIEW_ENDPOINT, { deck: 'investors' }, unlock, false);
+      wire('waitlist-form', 'waitlist-msg', 'waitlist-error', LIST_ENDPOINT, { source: 'investors' }, null, true);
     })();
   </script>
 </body>

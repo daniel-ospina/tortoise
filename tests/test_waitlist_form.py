@@ -107,6 +107,45 @@ def test_index_html_turnstile_site_key_constant() -> None:
     assert "PLACEHOLDER" not in key, "placeholder site key would render a broken widget"
 
 
+def test_investors_turnstile_site_key_constant_and_scope() -> None:
+    """The site key exists on the second page too, and covers the right form.
+
+    `waitlist-subscribe` verifies the token server-side whenever its secret is
+    set, so `/investors`' mailing-list form must send one — and the operator's
+    key step has to name this page, or the form is refused with no token and
+    nothing in the copy says why. The gate posts to `deck-view`, which verifies
+    nothing, so it must NOT render a widget: a challenge the server discards is
+    friction with nothing behind it.
+    """
+    raw = INVESTORS_HTML.read_text(encoding="utf-8")
+    m = re.search(r"TURNSTILE_SITE_KEY\s*=\s*['\"]([^'\"]*)['\"]", raw)
+    assert m, "TURNSTILE_SITE_KEY constant missing"
+    key = m.group(1)
+    assert key == "" or re.fullmatch(r"0x[a-zA-Z0-9_-]{20,40}", key), \
+        f"TURNSTILE_SITE_KEY must be empty or a real sitekey (got {key!r})"
+    assert "PLACEHOLDER" not in key, "placeholder site key would render a broken widget"
+    # The gate's wire() call passes captcha=false; the list's passes true.
+    assert re.search(r"wire\('gate-form'[^;]*,\s*false\s*\)", raw), \
+        "the gate must not render a captcha the deck-view function never verifies"
+    assert re.search(r"wire\('waitlist-form'[^;]*,\s*true\s*\)", raw), \
+        "the mailing-list form must send the token waitlist-subscribe verifies"
+    # The flag must be DERIVED from the per-form argument, not merely passed:
+    # `wire(..., false)` with a flag read from the global would re-render the
+    # gate's widget while both call sites still looked correct.
+    assert "var useCaptcha = !!captcha && !!TURNSTILE_SITE_KEY;" in raw, \
+        "the per-form flag must be derived from the per-form argument"
+    assert re.search(r"if \(TURNSTILE_SITE_KEY", raw) is None, \
+        "a decision site reading the global would render the gate's widget regardless"
+    for site in (
+        "if (useCaptcha) {",
+        "if (useCaptcha && !turnstileFailed && !token) {",
+        "if (useCaptcha && !turnstileFailed) { payload['cf-turnstile-response']",
+    ):
+        assert site in raw, f"the render/guard/payload site must read the derived flag: {site}"
+    assert len(re.findall(r"if \(useCaptcha", raw)) == 4, \
+        "render, pre-submit guard, payload and reset must all read the derived flag"
+
+
 # ── Indicator 1a: config allows anonymous browser POSTs ────────────────────
 
 def test_config_toml_verify_jwt_false() -> None:
@@ -288,17 +327,15 @@ def test_investors_page_posts_to_the_same_endpoint_and_declares_its_source() -> 
 
 
 def test_investors_turnstile_resets_its_own_widget() -> None:
-    """One widget per form, and each form resets only its own.
+    """The reset names the widget this form's own render() call returned.
 
     `turnstile.reset()` with no argument re-renders the most recently created
-    widget. This page has two forms, so a no-arg reset would re-render the
-    OTHER form's widget and leave this one spent: the token is cleared, the
-    widget still shows a completed check, and the next submit is refused
-    client-side with nothing to re-verify — a one-shot form.
+    widget on the page — whichever form that happens to be. Binding the reset to
+    the captured id keeps it pinned to the widget this form rendered.
     """
     raw = INVESTORS_HTML.read_text(encoding="utf-8")
     captured = re.search(r"(\w+)\s*=\s*window\.turnstile\.render\(", raw)
-    assert captured, "each form must retain the id its own render() call returns"
+    assert captured, "the form that renders a widget must retain the id its render() call returns"
     assert f"window.turnstile.reset({captured.group(1)})" in raw, \
         "the reset must name the same widget id the render captured"
     assert "window.turnstile.reset()" not in raw, \
@@ -322,9 +359,12 @@ def test_deck_view_function_and_table_exist() -> None:
     assert "serve" in index and "Deno.env.toObject()" in index, \
         "index.ts must wire env: serve((req) => handle(req, Deno.env.toObject()))"
 
-    mig = MIGRATIONS_DIR / "20261015000001_deck_views.sql"
-    assert mig.exists(), "deck_views migration missing"
-    raw = mig.read_text(encoding="utf-8")
+    # Globbed, not named: the prefix is a timestamp that must be raised whenever a
+    # migration lands on main ahead of this branch (duplicate prefixes abort
+    # `supabase db push`), so pinning a literal filename makes a renumber red.
+    migs = sorted(MIGRATIONS_DIR.glob("*_deck_views.sql"))
+    assert len(migs) == 1, f"expected exactly one deck_views migration, found {migs}"
+    raw = migs[0].read_text(encoding="utf-8")
     assert "CREATE TABLE IF NOT EXISTS public.deck_views" in raw
     assert re.search(r"email\s+text\s+NOT\s+NULL", raw, re.I), "email column required"
     assert "ENABLE ROW LEVEL SECURITY" in raw.upper()

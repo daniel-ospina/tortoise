@@ -113,16 +113,15 @@ stubFetch(() => jsonResponse(201, null));
   assert(res.headers.get("access-control-allow-origin"), "honeypot 200 carries ACAO");
 }
 {
-  // The gate form sends `cf-turnstile-response` once a site key is provisioned
-  // (website/investors.html). A token reaches 2048 chars, so the cap must hold
-  // one: a 400 here would keep a provisioned gate SHUT for every reader.
+  // The handler ignores unknown fields, and the cap is generous enough that an
+  // extra one cannot reject a reader's real submission.
   reset();
   stubFetch(() => jsonResponse(201, null));
   const res = await handle(post({
     email: "token@example.com", deck: "investors", "cf-turnstile-response": "x".repeat(2048),
   }), ENV);
   assert(res.status === 200 && calls.length === 1,
-    "a 2048-char captcha token is accepted, not rejected as oversize");
+    "a body carrying an extra 2048-char field is accepted, not rejected as oversize");
 }
 
 // ── 3. Email validation ───────────────────────────────────────────────────
