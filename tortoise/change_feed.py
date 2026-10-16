@@ -15,12 +15,15 @@ WHAT IT IS NOT
   emitted as an **off-by-default additive response field** (``changes``) on the
   existing ``poll_events`` response — the recorded ``response_fields`` carve-out
   in ``docs/product/mcp-sdk-surface.md`` (no new tool, no new SDK method).
-* It does **not** change what the ``:GraphEvent`` store carries by default. The
+* It does **not** add event TYPES to the ``:GraphEvent`` store by default. The
   store's contract is the *claim-transition* stream (``_GRAPH_EVENT_TYPES``), a
   decision recorded in ``docs/plans/2026-08-08-432-subscriptions-plan.md`` §Task 3
   and pinned by ``tests/test_event_store.py::test_content_edit_emits_nothing``.
-  ``PointRevised`` reaches the store **only** when this feature is switched on,
-  so the default stream stays byte-identical (see ``_emit_event``).
+  ``PointRevised`` reaches the store **only** when this feature is switched on
+  (see ``_emit_event``). ONE payload KEY is an exception, and it is deliberate:
+  the hard-delete ``PointRetracted`` row carries ``deleted: true``
+  UNCONDITIONALLY, because that marker states what the write path did and a
+  reader-gated marker mislabels the deletes of every unswitched writer.
 
 ``before`` IS OBSERVED; A PRECONDITION IS NOT A ``before``
 -------------------------------------------------------
@@ -410,6 +413,15 @@ def aggregate_changes(events: list[dict[str, Any]] | None) -> list[dict[str, Any
                 # reports.
                 delta["precondition"] = copy.deepcopy(precondition)
             delta["after"] = copy.deepcopy(after)
+            # A delta that changes NOTHING is not news. `annotate_operator`
+            # emits `OperatorAnnotated` and then a JSONL-parity `PointRevised`
+            # carrying the same numbers — the same keys, once the annotation
+            # spelling is folded — so without this the feed reported a second
+            # `revised` whose `after` equalled its own `before`. `before` is
+            # observed-only by construction, so this can only suppress a
+            # genuine no-op.
+            if after and all(seen.get(k) == v for k, v in after.items()):
+                continue
             group = grouped.get(subject)
             if group is None:
                 group = {"id": subject, "changes": []}

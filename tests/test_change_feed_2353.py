@@ -24,10 +24,12 @@ WHAT THIS PINS
    `new_content=props.get("content")`), and the fold must not turn that into an
    invented content CLEAR — nor OBSERVE it, which would fabricate the next
    delta's `before`.
-6. **`PointRetracted`'s two producers are told apart** (review P2): the
-   hard-delete emit marks its payload under the switch, so a `delete_point` is
-   reported as `deleted` with no fabricated `status`/`precondition`, while
-   `retract_point` keeps its tombstone delta. `PointPromoted`'s precondition is
+6. **`PointRetracted`'s two producers are told apart** (review P2, then P1): the
+   hard-delete emit marks its payload UNCONDITIONALLY — the marker records what
+   the write path did, so gating it on the READER's switch let an unswitched
+   writer's deletes fold as tombstones. A `delete_point` is reported as
+   `deleted` with no fabricated `status`/`precondition`; `retract_point` keeps
+   its tombstone delta. `PointPromoted`'s precondition is
    the union every producer enforces (`draft` or unset), not the CAS alone.
 7. **No dead enumeration survives** (review P3): the dedupe `after` mapping that
    could never fire (the store payload is the bare `{"id": ...}` those emits
@@ -647,6 +649,52 @@ def test_a_hard_delete_written_unswitched_still_folds_as_a_delete(
         # …now the READER switches the feed on over the same store.
         monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
         assert _kinds(sdk.poll_events()["changes"], p["id"]) == ["created", "deleted"]
+    finally:
+        sdk.close()
+
+
+def test_the_update_promote_door_is_reported_as_a_promotion(
+        monkeypatch, sdk_factory, tmp_path):
+    """`update_point(status='live')` IS a promote door but emits `PointRevised`.
+
+    Pinned end-to-end through the REAL producer rather than a hand-built
+    payload: the fold reads `status` out of the emitted props, so if
+    `update_point` ever stops putting it there every promotion silently reverts
+    to `revised` with no precondition — and the whole suite would stay green (a
+    review P2).
+    """
+    monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
+    sdk = sdk_factory(tmp_path)
+    try:
+        p = sdk.create_point("statement", "drafty", status="draft")
+        sdk.update_point(p["id"], status="live")
+        groups = {g["id"]: g["changes"] for g in sdk.poll_events()["changes"]}
+        promote = [d for d in groups[p["id"]] if d["change"] == "promoted"]
+        assert promote, groups[p["id"]]
+        assert promote[0]["after"] == {"status": "live"}
+        assert promote[0]["precondition"] == {"status": ["draft", None]}
+    finally:
+        sdk.close()
+
+
+def test_one_annotation_call_is_one_delta(monkeypatch, sdk_factory, tmp_path):
+    """`annotate_operator` emits `OperatorAnnotated` AND a JSONL-parity
+    `PointRevised` carrying the same numbers under the same folded keys.
+
+    The second is not a revision. Reporting it made every annotation count as an
+    extra `revised` whose `after` equalled its own `before` (a review P2); a
+    delta that changes nothing is not news.
+    """
+    monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
+    sdk = sdk_factory(tmp_path)
+    try:
+        src = sdk.create_point("statement", "claim")
+        tgt = sdk.create_point("statement", "evidence")
+        op = sdk.create_operator("IMPL", src["id"], [tgt["id"]])
+        sdk.annotate_operator(op["id"], 0.9, 0.8, 0.7, 0.6)
+        kinds = _kinds(sdk.poll_events()["changes"], op["id"])
+        assert kinds.count("annotated") == 1, kinds
+        assert "revised" not in kinds, kinds
     finally:
         sdk.close()
 
