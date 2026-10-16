@@ -2704,6 +2704,19 @@ surfaces:
   # `tortoise/sdk.py` is a SHARED_MODULE -> full matrix, so `core` is the default home.
   - test_3311_multilabel_status_vocab.py
   - test_uri_env_mutations_declared.py
+  # #8066: the served-skill relay ratchet. Its SUBJECT is every
+  # `tests/**/*.py`, so it must be registered on every surface such a file can
+  # select — not merely on the surface its old host file lived under. The
+  # original registration (`onboarding` alone, via tests/test_served_skills.py)
+  # left it asleep on a `core`-owned test diff, the sharp case being
+  # tests/test_ingest_conformance.py — the file #8499 retargeted off the relay.
+  # `core` is the `tests/` fallback; `onboarding` (below) covers the two exact
+  # non-core SOURCE_PATTERNS entries under `tests/` (tests/_html_links.py,
+  # tests/test_embedded_concurrency.py), where a named-surface match REPLACES
+  # `core` in select() (#2938), plus every served SKILL.md change. The file
+  # itself enumerates all in-scope files and reds if either arm is dropped
+  # (test_8066_relay_ratchet_is_registered_on_every_surface_it_covers).
+  - test_8066_served_skill_relay_ratchet.py
   # #4649: the write OR-set (Source by id OR url) — producer, both replay
   # folds and the MCP delete preview, with the rebuild residual pinned to #5048.
   # Same surface as its siblings test_entity_delete_rebuild.py /
@@ -3093,6 +3106,15 @@ surfaces:
   # `core` would not reach a `public/skills/`-only diff (a SOURCE_PATTERNS match
   # replaces the `core` fallback in select()).
   - test_served_skills.py
+  # #8066: DUAL-REGISTERED with `core` (the arm above). The relay ratchet's
+  # subject is every `tests/**/*.py`, which selects `core` EXCEPT for the two
+  # under `tests/` that are exact non-core SOURCE_PATTERNS entries of THIS
+  # surface — tests/_html_links.py and tests/test_embedded_concurrency.py — and
+  # every change to a served SKILL.md under `public/skills/`, which is this
+  # surface's SOURCE_PATTERN. Without this arm the ratchet is asleep on a
+  # served-tree change and on those two test files (the #1349/#2938
+  # silent-drop class); the file's own enumeration test pins the property.
+  - test_8066_served_skill_relay_ratchet.py
   # `test_dashboard_client_paths_resolve.py` is DUAL-REGISTERED (#4446): a change to
   # `website/apps/dashboard/src/` selects THIS surface and not `api`, and that is the
   # half of the invariant a client edit breaks — registering it only under `api` would
@@ -4257,6 +4279,7 @@ durations:
   test_license_surface_consumer.py: 0.3
   test_7818_plan_record_5362.py: 2.0  # #7818/#5362: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. Hermetic (one plan-doc read, no fixture/DB); refresh from the first post-merge run that includes it. Required for the durations half as well as the surface half (#4348 trap): without this row the durations coverage fell to 89.9% and `tools/ci_selection.py --integrity` red, which is how this row was found.
   test_7950_capstone_probe.py: 2.0  # #7950: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. MEASURED this turn: WITHOUT this row the durations coverage fell to 89.9% (760/845 fast files) and `tools/ci_selection.py --integrity` red — the surface entry alone does not cover it, and the file itself is DB-free pure-function work (<0.01s per test; the local session total is conftest/DB setup). Refresh from the first post-merge run that includes it.
+  test_8066_served_skill_relay_ratchet.py: 3.5  # #8066 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 782/869 = 89.99% — the file is in the fast pool, so its absence packs it at the flat 2.0s default and drops coverage under the 90% floor. Locally measured (embedded carve-out lane, 2 tests): call 2.67s (the registration ratchet's 1097 `select()` calls) + 0.80s (the `tests/**` walk, after the necessary-condition fast path cut it from 16.0s); conftest/collection setup is the once-per-leg cost the #3400 method attributes to no file. Refresh from the first post-merge run that includes it.
   test_7405_remaining_writes.py: 2.0  # #7405/#8698: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it — merging origin/main is where the fast pool crossed the DURATION_COVERAGE_MIN floor, which is how this row was found. NO pool figure or percentage is restated here on purpose (each base merge re-stales it; see the #4387 row above). Do NOT drop the row without re-deriving the floor at that head. Refresh from the first post-merge run that includes it.
   test_installer_preserves_foreign_skill_content.py: 0.6
   test_backup_watcher_health.py: 0.2

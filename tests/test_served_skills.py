@@ -20,11 +20,9 @@ is green. The skills are only executable if these reads are.
 """
 from __future__ import annotations
 
-import ast
 import os
 import re
 import sys
-import warnings
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -197,110 +195,15 @@ def test_1652_installer_core_set_unchanged_and_new_skills_are_documented():
             "the next available set in docs/onboarding.md")
 
 
-# ── #8066: a served skill's SUBJECT is the tracked copy, not the relay ─────
+# ── #8066: the served-skill relay ratchet lives in its own static file ─────
 #
-# #8066/#8027: `skills` and `scripts` are tracked symlinks (mode 120000) whose
-# committed blobs are ABSOLUTE paths in one developer's home
-# (`/Users/danielospina/Documents/GitHub/agent-infra/{skills,scripts}`). They
-# dangle everywhere else, so `read skills/commit-workflow/SKILL.md` is ENOENT
-# and `node scripts/check-doc-affiliation.cjs` cannot run.
-#
-# The generalisable defect the issue's comment thread registers is NOT "a
-# symlink is dead" — it is that a gate whose SUBJECT is resolved through that
-# path has NO RESULT on the CI path while its green reads as a pass. The
-# measured instance was `tests/test_ingest_conformance.py`, retargeted off the
-# relay onto the served copy in #8499; the second was
-# `tests/test_website_static.py::test_tortoise_decide_skill_ships_the_workflow`,
-# retargeted by #8066 itself.
-#
-# For a SERVED skill the relay is never the right subject even where it
-# resolves: the product bytes are tracked in THIS repo under `SERVED`, and an
-# agent-infra checkout is an unrelated tree — measured 2026-10-16,
-# `/Users/home/agent-infra/skills` carries `how-to-use-tortoise`,
-# `tortoise-file-finding` and `tortoise-verify-chain` and does NOT carry
-# `tortoise-decide` at all, so the old gate skipped on a live agent-infra too.
-# This ratchet keeps the idiom from returning.
-#
-# It is deliberately NOT a general relay lint. `tests/test_pytest_attribution.py`
-# and `tests/test_merge_throughput.py` read the relay ON PURPOSE: they try
-# `$AGENT_INFRA_PATH` first and ANNOUNCE the skip when the rail is absent
-# (the repo does not own that tree — python-ci.yml is self-contained BY DECISION,
-# fix #555). A blanket rule would red those legitimate designs, which is why
-# this one is scoped to the served names, where the tracked copy exists by
-# construction and the relay can never be correct.
-
-
-def _relay_segments(node: ast.AST) -> list[str]:
-    """The literal path segments of a `/`-chain or a `join`/`Path` argument.
-
-    `ROOT / "skills" / "tortoise-decide" / "SKILL.md"` and
-    `"skills/tortoise-decide/SKILL.md"` both normalise to
-    `["skills", "tortoise-decide", "SKILL.md"]`, so the two spellings the repo
-    actually uses are detected by one rule. A non-literal operand contributes
-    nothing, which is what keeps `REPO / ".github" / "scripts"` out of the way.
-    """
-    segs: list[str] = []
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-        segs = _relay_segments(node.left) + _relay_segments(node.right)
-    elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-        segs = [node.value]
-    elif isinstance(node, ast.Call):
-        callee = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-        if callee in ("Path", "join", "open"):
-            for arg in node.args:
-                segs.extend(_relay_segments(arg))
-    return [p for seg in segs for p in seg.split("/") if p]
-
-
-def _relay_relative_subject(source: str, names: tuple[str, ...]) -> list[str]:
-    """The served names `source` reads as `skills/<name>/…` — the relay idiom."""
-    try:
-        # Several test files carry a literal backslash-backtick in a docstring; the
-        # SyntaxWarning that raises is about the TESTED file, not about this
-        # detector, and printing it once per run would be noise attributed here.
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", SyntaxWarning)
-            tree = ast.parse(source)
-    except SyntaxError:
-        return []
-    found = set()
-    for node in ast.walk(tree):
-        segs = _relay_segments(node)
-        if len(segs) >= 2 and segs[0] == "skills" and segs[1] in names:
-            found.add(segs[1])
-    return sorted(found)
-
-
-def test_8066_no_served_skill_is_a_test_subject_through_the_dead_relay():
-    """#8066: no test under `tests/` resolves a SERVED skill through `skills/`.
-
-    ⛔ The detector is itself asserted on a positive control first: a ratchet
-    that cannot fire is the same vacuity this issue is about — a guard whose
-    subject never resolves reads as green.
-    """
-    names = tuple(_served_skill_dirs())
-    assert names, "no served skills found — the ratchet would be vacuous"
-    control = 'X = ROOT / "skills" / "tortoise-decide" / "SKILL.md"\n'
-    assert _relay_relative_subject(
-        control, names) == ["tortoise-decide"], (
-        "the relay detector does not fire on the measured idiom — it would pass "
-        "vacuously")
-
-    offenders: dict[str, list[str]] = {}
-    for dirpath, _dirnames, filenames in os.walk(os.path.join(REPO_ROOT, "tests")):
-        for filename in filenames:
-            if not filename.endswith(".py"):
-                continue
-            path = os.path.join(dirpath, filename)
-            hit = _relay_relative_subject(_read(path), names)
-            if hit:
-                offenders[os.path.relpath(path, REPO_ROOT)] = hit
-    assert not offenders, (
-        "test(s) resolve a SERVED skill through the machine-local `skills` relay "
-        "(#8066): the link dangles off the machine that committed it, so the gate "
-        "has no result on CI and grades an unrelated checkout where it does "
-        f"resolve. Read the tracked served copy under {os.path.relpath(SERVED, REPO_ROOT)}/ "
-        f"instead: {offenders}")
+# The ratchet's SUBJECT is every `tests/**/*.py`, so it cannot live here: this
+# file is registered under `onboarding` alone, and a `core`-owned test file's
+# diff (the sharp case being `tests/test_ingest_conformance.py`, the very file
+# #8499 retargeted off the relay) does not select `onboarding`. It moved to
+# `tests/test_8066_served_skill_relay_ratchet.py`, registered on `core` AND
+# `onboarding`, and that file pins the registration property by enumerating
+# every in-scope file (the #1349/#2938 silent-drop class).
 
 
 # ── #3513: the renumbered SKILL sections must stay findable BY NUMBER ──────
